@@ -51,8 +51,15 @@ jobs:
       # Never cancel the Windows job because macOS failed. Windows is the one we
       # are actually here to learn from.
       fail-fast: false
+      # macOS is intentionally absent from THIS (private) repo. Private-repo
+      # minutes bill macOS at a 10x multiplier: 85 real minutes consumed 850 of
+      # the 2,000 included allowance in Aug 2026 and exhausted it, which blocked
+      # deploys in unrelated client repos. The public brain-installer repo runs
+      # the full three-OS matrix at no cost, and per the header above a green
+      # macOS run proves nothing about Windows, which is what this suite exists
+      # to learn from.
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest]
         node: ['22', '24']
     steps:
       # Pin third-party actions to reviewed commits. A mutable major tag can
