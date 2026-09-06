@@ -1864,9 +1864,33 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   BANK_IMPORT_PATH,
 ]);
 
+function upgradePauseHolds(env) {
+  return env.VECTOR_DRAIN_MODE === "paused-for-upgrade";
+}
+
 function corpusWritesPaused(env, path, method) {
-  return env.VECTOR_DRAIN_MODE === "paused-for-upgrade" &&
+  return upgradePauseHolds(env) &&
     method === "POST" && PAUSED_CORPUS_MUTATION_PATHS.has(path);
+}
+
+// The MCP connector reaches the corpus through callbacks rather than through
+// the router, so the path-set guard below never sees it. An authorized
+// connector is still a writer, and a pause that a writer can walk through is
+// not a pause: the whole point is that the corpus is frozen while it is being
+// rebuilt. Refuse the mutating callbacks with the same shape the HTTP door
+// uses, and leave think/search alone so a paused brain can still be asked
+// questions.
+const PAUSED_CORPUS_ERROR = "brain corpus writes are paused for a verified upgrade or rollback";
+
+function pausedCorpusRefusal() {
+  return { error: PAUSED_CORPUS_ERROR, code: "corpus_writes_paused", paused: true };
+}
+
+// The deletion preview reports failures as {ok, body}, and a bare refusal
+// would surface as the generic "preview refused" with no reason. Say why, so
+// the connector and the owner can tell a pause from a real refusal.
+function pausedDeletionRefusal() {
+  return { ok: false, body: pausedCorpusRefusal() };
 }
 
 export default {
@@ -2060,15 +2084,21 @@ export default {
         // Writes take the ordinary ingest door rather than a private one, so
         // the credential scanner, the statement budget and every other guard
         // apply to a connector exactly as they do to a folder or a Drive sync.
-        write: async (envelope) => (await handleIngest(env, internalJson("/api/admin/brain/ingest", envelope))).json(),
+        write: async (envelope) => {
+          if (upgradePauseHolds(env)) return pausedCorpusRefusal();
+          return (await handleIngest(env, internalJson("/api/admin/brain/ingest", envelope))).json();
+        },
         diagnose: async () => diagnose(env),
-        previewDeletion: async ({ entitySlug, documentIds }) => createAgentDeletionPreview(env, {
-          entitySlug,
-          documentIds,
-          principalKind: "oauth_connector",
-          principalIdHash: grant.tokenHash,
-          agentProfile: grant.profile,
-        }),
+        previewDeletion: async ({ entitySlug, documentIds }) => {
+          if (upgradePauseHolds(env)) return pausedDeletionRefusal();
+          return createAgentDeletionPreview(env, {
+            entitySlug,
+            documentIds,
+            principalKind: "oauth_connector",
+            principalIdHash: grant.tokenHash,
+            agentProfile: grant.profile,
+          });
+        },
       });
     }
 

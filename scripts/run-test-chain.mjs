@@ -15,6 +15,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
   "node --no-warnings worker/test/plaid-refresh-debt-regression.test.mjs",
+  "node --no-warnings worker/test/mcp-upgrade-pause.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -192,6 +193,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/plaid-sync-custody.test.mjs",
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
   "node --no-warnings worker/test/plaid-refresh-debt-regression.test.mjs",
+  "node --no-warnings worker/test/mcp-upgrade-pause.test.mjs",
 ]);
 
 export function parseTestCommand(command) {
