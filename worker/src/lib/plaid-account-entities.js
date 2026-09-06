@@ -15,6 +15,19 @@ const ACTION_TYPE = "plaid_account_entity_assignment";
 const EVENT_TYPE = "bank_account_entity_assigned";
 const DEFAULT_RECONCILE_MINUTES = 360;
 
+/**
+ * Known refresh debt: work the brain already owes on this connection.
+ *
+ * A future scheduled poll is ordinary and is not debt, but only while it is
+ * still merely pending. Once an attempt has actually failed the row becomes
+ * retryable, and the failure upsert deliberately keeps the earlier reason, so
+ * reason alone cannot clear a failure. Every retryable row is debt.
+ */
+export function reconciliationRefreshPending(state, reason) {
+  if (state === "retryable") return true;
+  return state === "pending" && reason !== "scheduled";
+}
+
 export class PlaidAccountEntityError extends Error {
   constructor(code, message, status = 400) {
     super(message);
@@ -190,7 +203,7 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
               e.display_label AS entity_label,e.legal_name AS entity_legal_name,
               i.institution_label,i.status AS item_status,i.status_detail,i.last_synced_at,
               b.state AS history_state,b.provider_history_state,b.pages_done,
-              b.transactions_seen,b.unread_lines,
+              b.transactions_seen,b.unread_lines,r.state AS reconciliation_state,r.reason AS reconciliation_reason,
               COALESCE(f.label,s.name) AS account_label,COALESCE(f.mask,s.mask) AS account_mask,
               c.coverage_status,c.covered_from,c.covered_to,c.basis_note,c.computed_at
          FROM plaid_account_entity_assignments a
@@ -212,6 +225,8 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
           AND e.superseded_by_id IS NULL AND e.status='active' AND e.relationship='owned'
          LEFT JOIN bank_feed_backfill b
            ON b.tenant_id=a.tenant_id AND b.item_ref=a.item_ref
+         LEFT JOIN plaid_reconciliation r
+           ON r.tenant_id=a.tenant_id AND r.item_ref=a.item_ref
         WHERE a.tenant_id=? ORDER BY i.connected_at,a.account_ref`,
     ).bind(tenantId).all())?.results || [];
   } catch (error) {
@@ -234,7 +249,12 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
   const accounts = rows.map((row) => {
     const assigned = Boolean(row.entity_slug && row.live_entity_slug);
     const sync = freshness(row.last_synced_at, stamp, interval);
-    const historyPartial = row.provider_history_state !== "HISTORICAL_UPDATE_COMPLETE";
+    // Future scheduled polls are ordinary. Explicit debt from a webhook, owner
+    // assignment, active fetch, saved-window resume or a failed attempt is not
+    // proof of current data.
+    const refreshPending = reconciliationRefreshPending(row.reconciliation_state, row.reconciliation_reason);
+    if (refreshPending) { sync.state = "pending"; sync.refresh_pending = true; }
+    const historyPartial = row.history_state !== "complete" || row.provider_history_state !== "HISTORICAL_UPDATE_COMPLETE";
     const coverageState = !assigned
       ? "assignment_required"
       : row.coverage_status || (historyPartial ? "pending" : "missing");
@@ -274,13 +294,14 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
     assignment_required: accounts.filter((account) => account.assignment.state === "assignment_required").length,
     stale: accounts.filter((account) => account.freshness.stale).length,
     history_partial: accounts.filter((account) => account.history.partial).length,
+    refresh_pending: accounts.filter((account) => account.freshness.refresh_pending).length,
     coverage_gaps: accounts.filter((account) => !["complete", "indirect", "not_applicable", "closed"].includes(account.coverage.state)).length,
   };
   const state = summary.assignment_required > 0
     ? "assignment_required"
     : summary.stale > 0
       ? "stale"
-      : (summary.history_partial > 0 || summary.coverage_gaps > 0 ? "partial" : (accounts.length ? "current" : "empty"));
+      : (summary.refresh_pending > 0 || summary.history_partial > 0 || summary.coverage_gaps > 0 ? "partial" : (accounts.length ? "current" : "empty"));
   return {
     provider: "plaid",
     state,

@@ -15,6 +15,15 @@ import {
 
 const encoder = new TextEncoder();
 
+function assertReadyPromotion(receipt) {
+  // Reusing saved pages commits their data, but only another actual provider
+  // read can establish that the delayed snapshot is current.
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.partial, true);
+  assert.equal(receipt.refresh_pending, true);
+  assert.equal(receipt.resumed_promotion, true);
+}
+
 function jsonResponse(value, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -619,7 +628,7 @@ test("Plaid durable runtime closes response-loss, sync, webhook, fallback, and r
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM plaid_sync_stage_transactions").n, 3);
     fixture.control.failOn = null;
     const synced = await syncPlaidItem(fixture.env, "item-sandbox-1", { fetchImpl, now: stamp });
-    assert.equal(synced.ok, true);
+    assertReadyPromotion(synced);
     assert.equal(synced.mutationRestarts, 1);
     assert.equal(synced.resumed_promotion, true);
     assert.equal(fixture.first("SELECT cursor FROM bank_feed_items WHERE item_ref='item-sandbox-1'").cursor, "complete-1");
@@ -902,6 +911,7 @@ test("empty Transactions Sync stays partial through NOT_READY and INITIAL provid
     const notReady = await syncPlaidItem(fixture.env, "item-sandbox-1", { fetchImpl, now: stamp });
     assert.equal(notReady.ok, false);
     assert.equal(notReady.partial, true);
+    assertReadyPromotion(notReady);
     assert.equal(notReady.history_state, "running");
     assert.equal(notReady.provider_history_state, "NOT_READY");
     const notReadyBackfill = fixture.first(
@@ -912,7 +922,7 @@ test("empty Transactions Sync stays partial through NOT_READY and INITIAL provid
     assert.equal(notReadyBackfill.finished_at, null);
     assert.equal(fixture.first(
       "SELECT reason FROM plaid_reconciliation WHERE item_ref='item-sandbox-1'",
-    ).reason, "history_pending");
+    ).reason, "refresh_pending");
     const partialStatus = await plaidFeedStatus(fixture.env);
     assert.equal(partialStatus.connections[0].history.state, "running");
     assert.equal(partialStatus.connections[0].history.provider_history_state, "NOT_READY");
@@ -1103,7 +1113,7 @@ test("scheduled promotion keeps two Plaid accounts in their exact owner-confirme
     fixture.raw("UPDATE fin_entities SET status='active' WHERE entity_slug='operating-company'");
 
     const promoted = await runPlaidFeedSlice(fixture.env, { maxItems: 1, fetchImpl, now: later(18) });
-    assert.equal(promoted.items[0].ok, true);
+    assertReadyPromotion(promoted.items[0]);
     assert.equal(fixture.first("SELECT cursor FROM bank_feed_items").cursor, "multi-entity-complete");
     const assignments = fixture.rows(
       `SELECT f.external_ref,f.entity_slug,t.external_id
@@ -1340,7 +1350,7 @@ test("long and case-sensitive Plaid identities retain four distinct account scop
   try {
     assert.equal((await run()).status, "assignment_required");
     await assignAll();
-    assert.equal((await run()).ok, true);
+    assertReadyPromotion(await run());
     const accounts = fixture.rows("SELECT account_slug,external_ref,entity_slug FROM fin_accounts ORDER BY external_ref");
     assert.equal(accounts.length, 4);
     assert.equal(new Set(accounts.map(row => row.account_slug)).size, 4);
@@ -1362,7 +1372,7 @@ test("legacy ledger mapping survives a stored ready window without moving histor
     fixture.raw("UPDATE plaid_sync_stage_accounts SET account_slug=?", legacy);
     fixture.raw("UPDATE plaid_sync_stage_transactions SET account_slug=?", legacy);
     await assignAll();
-    assert.equal((await run()).ok, true);
+    assertReadyPromotion(await run());
     assert.deepEqual(fixture.rows("SELECT DISTINCT account_slug FROM fin_transactions").map(row => row.account_slug), [legacy]);
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_accounts").n, 1);
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions WHERE txn_uid='existing-legacy-history'").n, 1);
@@ -1411,7 +1421,7 @@ test("Plaid removal and pending replacement never tombstone another feed's exter
     added: [transaction("shared-removed"), transaction("shared-pending", true)],
   });
   try {
-    await run(); await assignAll(); assert.equal((await run()).ok, true);
+    await run(); await assignAll(); assertReadyPromotion(await run());
     seedIdentityLedgerAccount(fixture, { slug: "unrelated-account", external: "other-account", source: "other-feed:item-2" });
     for (const [id, pending] of [["shared-removed", 0], ["shared-pending", 1]]) {
       seedIdentityLedgerTransaction(fixture, { uid: `other:${id}`, external: id, account: "unrelated-account", source: "other-feed:item-2", pending });
@@ -1428,7 +1438,7 @@ test("Plaid incremental and empty windows preserve the historical coverage start
   const { fixture, state, run, assignAll } = await containmentFixture(["coverage-account"]);
   try {
     state.page.added[0].date = "2024-01-02";
-    await run(); await assignAll(); assert.equal((await run()).ok, true);
+    await run(); await assignAll(); assertReadyPromotion(await run());
     state.page = { ...state.page, next_cursor: "later-incremental", added: [{ ...state.page.added[0], transaction_id: "later-transaction", date: "2026-08-29" }] };
     assert.equal((await run()).ok, true);
     assert.equal(fixture.first("SELECT covered_from FROM fin_account_coverage").covered_from, "2024-01-02");
@@ -1444,7 +1454,7 @@ test("Plaid promotes observed nullable balances with exact currency and liabilit
     state.accounts[0] = { ...state.accounts[0], type: "credit", subtype: "credit card", balances: { current: "-12.34", available: null, iso_currency_code: "USD" } };
     state.accounts[1].balances = { current: "125", available: "0", iso_currency_code: "JPY" };
     state.accounts[2].balances = { current: "1.234", available: null, iso_currency_code: "BHD" };
-    await run(); await assignAll(); assert.equal((await run()).ok, true);
+    await run(); await assignAll(); assertReadyPromotion(await run());
     const rows = fixture.rows(`SELECT f.external_ref,f.balance_role,b.current_minor,b.available_minor,b.currency,b.recorded_at
       FROM fin_balance_snapshots b JOIN fin_accounts f ON f.account_slug=b.account_slug AND f.tenant_id=b.tenant_id ORDER BY f.external_ref`).map(row => ({ ...row }));
     assert.deepEqual(rows, [
@@ -1459,7 +1469,7 @@ test("Plaid missing balances stay null and an older same-day observation cannot 
   const { fixture, state, run, assignAll } = await containmentFixture(["observation-account"], { added: [] });
   try {
     state.accounts[0].balances.available = "90.00";
-    await run(); await assignAll(); assert.equal((await run()).ok, true);
+    await run(); await assignAll(); assertReadyPromotion(await run());
     state.now = "2026-08-30T15:00:00.000Z";
     state.accounts[0].balances = { current: null, available: null, iso_currency_code: "USD" };
     state.page.next_cursor = "newer-empty-balances";
@@ -1504,7 +1514,7 @@ test("Plaid preserves the largest safe exact minor amount and accepts insignific
   try {
     state.accounts[0].balances = { current: "90071992547409.91", available: "12.3400", iso_currency_code: "USD" };
     state.page.added[0].amount = "-90071992547409.91";
-    await run(); await assignAll(); assert.equal((await run()).ok, true);
+    await run(); await assignAll(); assertReadyPromotion(await run());
     assert.equal(fixture.first("SELECT current_minor FROM fin_balance_snapshots").current_minor, Number.MAX_SAFE_INTEGER);
     assert.equal(fixture.first("SELECT available_minor FROM fin_balance_snapshots").available_minor, 1234);
     assert.deepEqual({ ...fixture.first("SELECT amount_minor,raw_amount_minor,direction FROM fin_transactions") },
@@ -1547,7 +1557,8 @@ test("Plaid ready-window balances keep their observation time and reject future 
       if (future) fixture.raw("UPDATE plaid_sync_stage_accounts SET provenance_json=json_set(provenance_json,'$.observedAt','2026-09-01T13:00:00.000Z')");
       await assignAll();
       const result = await run();
-      assert.equal(result.ok, !future);
+      if (future) assert.equal(result.ok, false);
+      else assertReadyPromotion(result);
       if (future) {
         assert.equal(result.code, "plaid_balance_observation_invalid");
         assert.equal(fixture.first("SELECT cursor FROM bank_feed_items").cursor, null);
@@ -1602,7 +1613,7 @@ test("Plaid unofficial transaction currency is held without assuming USD", async
 test("Plaid account reassignment cannot silently move balance-only history", async () => {
   const { fixture, run, assignAll } = await containmentFixture(["balance-only-history"], { added: [] });
   try {
-    await run(); await assignAll(); assert.equal((await run()).ok, true);
+    await run(); await assignAll(); assertReadyPromotion(await run());
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 0);
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n, 1);
     const { assignPlaidAccountEntity } = await import("../src/lib/plaid-account-entities.js");
@@ -1620,7 +1631,7 @@ test("Plaid account reassignment cannot silently move balance-only history", asy
 test("Plaid assignment guard also catches a first balance that races the owner preflight", async () => {
   const { fixture, run, assignAll } = await containmentFixture(["balance-race"], { added: [] });
   try {
-    await run(); await assignAll(); assert.equal((await run()).ok, true);
+    await run(); await assignAll(); assertReadyPromotion(await run());
     const snapshot = { ...fixture.first("SELECT * FROM fin_balance_snapshots") };
     fixture.raw("DELETE FROM fin_balance_snapshots");
     const originalDb = fixture.env.DB;

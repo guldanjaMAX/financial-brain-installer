@@ -88,7 +88,7 @@ node --no-warnings --test \
 
 After that focused command is green, integrate the QA commit into the candidate
 and run the repository's complete local release runner. The full runner is the
-gate that proves the hardcoded test chain includes every new `.test.mjs` file.
+gate that proves the explicit ordered test graph includes every new `.test.mjs` file.
 
 ## Still outside proof
 

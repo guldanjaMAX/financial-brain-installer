@@ -13,12 +13,16 @@
 
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -26,6 +30,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2167,15 +2172,124 @@ function resolvePackedNpmCli(environment = process.env) {
   return cli;
 }
 
-function runPackedNpm(cli, args, { cwd, env, timeout = 60_000 }) {
-  return spawnSync(process.execPath, [cli, ...args], {
+const NPM_LOG_MAX_FILES = 4;
+const NPM_LOG_MAX_BYTES = 256 * 1024;
+const NPM_TIMING_STAGES = new Set([
+  "npm", "npm:load", "command:pack", "command:install", "idealTree", "idealTree:init",
+  "idealTree:userRequests", "idealTree:buildDeps", "idealTree:fixDepFlags", "reify",
+  "reify:loadTrees", "reify:diffTrees", "reify:retireShallow", "reify:createSparse",
+  "reify:loadBundles", "reify:unpack", "reify:unretire", "reify:build", "reify:save",
+  "reify:removeTrash", "build", "build:queue", "build:deps", "build:link", "reifyNode",
+]);
+function npmTimingStage(value) {
+  if (NPM_TIMING_STAGES.has(value)) return value;
+  for (const prefix of ["reifyNode:", "idealTree:", "build:link:"]) {
+    if (value.startsWith(prefix)) return prefix.slice(0, -1);
+  }
+  return null;
+}
+
+function npmLogSummary(directory) {
+  const summary = { files: [], refused_files: 0, bounded: false, completed_timings: [], last_logged_stage: null };
+  let names;
+  try { names = readdirSync(directory).sort(); } catch { return { ...summary, unavailable: true }; }
+  summary.bounded = names.length > NPM_LOG_MAX_FILES;
+  for (const name of names.slice(0, NPM_LOG_MAX_FILES)) {
+    // A phase has its own private directory. Never follow links or print raw
+    // npm metadata: it includes argv, configuration paths and package names.
+    try {
+      const path = join(directory, name);
+      const info = lstatSync(path);
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > NPM_LOG_MAX_BYTES) {
+        summary.refused_files++;
+        continue;
+      }
+      let data;
+      const fd = openSync(path, "r");
+      try {
+        const opened = fstatSync(fd);
+        if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== info.dev || opened.ino !== info.ino) {
+          throw new Error("npm_log_identity_changed");
+        }
+        const buffer = Buffer.alloc(NPM_LOG_MAX_BYTES + 1);
+        const length = readSync(fd, buffer, 0, buffer.length, 0);
+        if (length > NPM_LOG_MAX_BYTES) throw new Error("npm_log_grew_beyond_limit");
+        data = buffer.subarray(0, length);
+      } finally { closeSync(fd); }
+      summary.files.push({ bytes: data.length, sha256: createHash("sha256").update(data).digest("hex") });
+      // Final timing JSON may not exist after a forced termination. Parse only
+      // completed/logged debug events; these do not identify the active stage.
+      for (const line of data.toString("utf8").split(/\r?\n/)) {
+        const complete = /^\d+ timing (\S+) Completed in (\d{1,10})ms$/.exec(line);
+        const logged = /^\d+ (?:silly|verbose) (idealTree|reify|build)(?:\s|$)/.exec(line);
+        if (complete) {
+          const stage = npmTimingStage(complete[1]);
+          if (stage) {
+            summary.completed_timings.push({ stage, elapsed_ms: Number(complete[2]) });
+            summary.completed_timings = summary.completed_timings.slice(-8);
+            summary.last_logged_stage = stage;
+          }
+        } else if (logged) summary.last_logged_stage = logged[1];
+      }
+    } catch { summary.refused_files++; }
+  }
+  return summary;
+}
+
+function npmPrefixSummary(prefix, maxEntries = 2048) {
+  const summary = { files: 0, directories: 0, symlinks: 0, bytes: 0, unreadable_entries: 0, bounded: false };
+  const pending = [prefix];
+  let visited = 0;
+  while (pending.length && visited < maxEntries) {
+    const path = pending.pop(); visited++;
+    try {
+      const info = lstatSync(path);
+      if (info.isSymbolicLink()) summary.symlinks++;
+      else if (info.isFile()) { summary.files++; summary.bytes += info.size; }
+      else if (info.isDirectory()) {
+        summary.directories++;
+        const names = readdirSync(path);
+        const capacity = Math.max(0, maxEntries - visited - pending.length);
+        if (names.length > capacity) summary.bounded = true;
+        for (const name of names.slice(0, capacity)) pending.push(join(path, name));
+      }
+    } catch (error) { if (error.code !== "ENOENT") summary.unreadable_entries++; }
+  }
+  summary.bounded ||= pending.length > 0;
+  return summary;
+}
+
+function runPackedNpm(cli, args, { cwd, env, timeout = 60_000, stage, logsDirectory, prefix, diagnosticFixture = false }) {
+  const started = performance.now();
+  if (stage && !["pack", "initial_install", "reinstall"].includes(stage)) throw new Error("npm_diagnostic_stage_refused");
+  if (stage) {
+    const verified = resolvePackedNpmCli({ npm_execpath: cli });
+    const npmVersion = JSON.parse(readFileSync(join(dirname(verified), "..", "package.json"), "utf8")).version;
+    if (!/^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?$/.test(npmVersion)) throw new Error("npm_diagnostic_version_refused");
+    mkdirSync(logsDirectory, { recursive: true, mode: 0o700 });
+    console.log(`PACKED_NPM ${JSON.stringify({ event: "start", stage, test_fixture: diagnosticFixture, node: process.versions.node, npm: npmVersion, platform: process.platform, arch: process.arch, timeout_ms: timeout })}`);
+  }
+  const result = spawnSync(process.execPath, [cli, ...args,
+    ...(stage ? ["--timing", "--logs-dir", logsDirectory, "--logs-max=2"] : []),
+  ], {
     cwd, env, encoding: "utf8", shell: false, timeout, maxBuffer: 16 * 1024 * 1024,
   });
+  if (stage) {
+    const failed = result.status !== 0 || result.error || result.signal;
+    result.diagnostic = { event: "end", stage, test_fixture: diagnosticFixture, elapsed_ms: Math.round(performance.now() - started), timeout_ms: timeout,
+      status: result.status, signal: /^SIG[A-Z]+$/.test(result.signal || "") ? result.signal : null,
+      error: /^[A-Z][A-Z0-9_]{0,63}$/.test(result.error?.code || "") ? result.error.code : null,
+      ...(failed ? { npm_logs: npmLogSummary(logsDirectory), prefix_progress: npmPrefixSummary(prefix) } : {}),
+    };
+    console.log(`PACKED_NPM ${JSON.stringify(result.diagnostic)}`);
+  }
+  return result;
 }
 
 function packedProcessDetail(result) {
-  return `status=${result.status ?? "null"} signal=${result.signal ?? "none"} error=${result.error?.code ?? "none"}\n` +
-    `${result.stderr || ""}${result.stdout || ""}`;
+  // --timing stderr may contain npm's full local log path. Report stable
+  // process fields; the bounded diagnostic above carries safe failure detail.
+  return `status=${result.status ?? "null"} signal=${result.signal ?? "none"} error=${result.error?.code ?? "none"}`;
 }
 
 /* ---- the npm fixture runner is direct, bounded and rejects an unverified locator ---- */
@@ -2205,6 +2319,49 @@ function packedProcessDetail(result) {
     check("a timed-out npm process is reaped before cleanup", timedOut.error?.code === "ETIMEDOUT" && childGone,
       packedProcessDetail(timedOut));
     check("npm failure diagnostics retain timeout, signal and status", /status=null.*signal=\S+.*error=ETIMEDOUT/.test(packedProcessDetail(timedOut)));
+    const logs = join(sandbox, "private-phase-logs");
+    mkdirSync(logs);
+    const sentinel = "private-fixture-path-and-credential-marker";
+    writeFileSync(join(logs, "0-debug.log"), [
+      `0 verbose argv ${sentinel}`,
+      `1 timing reify:loadTrees Completed in 17ms`,
+      `2 timing ${sentinel} Completed in 99ms`,
+      `3 timing reifyNode:${sentinel} Completed in 23ms`,
+      `4 silly reify ${sentinel}`,
+      JSON.stringify({ metadata: { argv: [sentinel] }, unfinishedTimers: { [sentinel]: [1, 2] } }),
+    ].join("\n"));
+    const safeLogs = npmLogSummary(logs);
+    check("npm diagnostics disclose only allowlisted timing stages and aggregate metadata",
+      safeLogs.completed_timings.length === 2 && safeLogs.completed_timings[0].elapsed_ms === 17 &&
+      safeLogs.completed_timings[1].stage === "reifyNode" && safeLogs.last_logged_stage === "reify" &&
+      !JSON.stringify(safeLogs).includes(sentinel) && !Object.hasOwn(safeLogs, "active_stage"), JSON.stringify(safeLogs));
+    writeFileSync(join(logs, "1-oversized.log"), "x".repeat(NPM_LOG_MAX_BYTES + 1));
+    mkdirSync(join(logs, "2-directory"));
+    const shared = join(sandbox, "shared-log-source");
+    writeFileSync(shared, sentinel);
+    linkSync(shared, join(logs, "3-hardlink.log"));
+    writeFileSync(join(logs, "4-outside-file-limit.log"), sentinel);
+    const boundedLogs = npmLogSummary(logs);
+    check("npm diagnostic log collection refuses oversized, directory and multiply linked inputs",
+      boundedLogs.bounded && boundedLogs.refused_files === 3 && boundedLogs.files.length === 1 &&
+      !JSON.stringify(boundedLogs).includes(sentinel), JSON.stringify(boundedLogs));
+    const prefixProgress = npmPrefixSummary(sandbox, 4);
+    check("partial npm-prefix progress is bounded and never prints paths",
+      prefixProgress.bounded && prefixProgress.files + prefixProgress.directories + prefixProgress.symlinks <= 4 &&
+      !JSON.stringify(prefixProgress).includes(sandbox), JSON.stringify(prefixProgress));
+    check("missing npm logs are honestly unavailable", npmLogSummary(join(sandbox, "missing-logs")).unavailable === true);
+    check("captured npm stderr and stdout are absent from public failure details",
+      !packedProcessDetail({ status: 1, stdout: sentinel, stderr: sentinel }).includes(sentinel));
+    writeFileSync(join(npmRoot, "package.json"), JSON.stringify({ name: "npm", version: "1.0.0" }));
+    const diagnosticTimeout = runPackedNpm(verified, ["--wait"], { cwd: sandbox, env: {}, timeout: 250,
+      stage: "initial_install", logsDirectory: logs, prefix: sandbox, diagnosticFixture: true });
+    let diagnosticChildGone = false;
+    try { process.kill(diagnosticTimeout.pid, 0); } catch (error) { diagnosticChildGone = error.code === "ESRCH"; }
+    check("a timed-out npm child retains sanitized diagnostics before strict cleanup",
+      diagnosticTimeout.error?.code === "ETIMEDOUT" && diagnosticChildGone &&
+      diagnosticTimeout.diagnostic.status === null && diagnosticTimeout.diagnostic.test_fixture === true && diagnosticTimeout.diagnostic.timeout_ms === 250 &&
+      diagnosticTimeout.diagnostic.npm_logs.last_logged_stage === "reify" &&
+      !JSON.stringify(diagnosticTimeout.diagnostic).includes(sentinel));
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
     check("the timed-out direct npm fixture leaves no locked sandbox", !existsSync(sandbox));
@@ -2235,6 +2392,7 @@ function packedProcessDetail(result) {
     const cache = join(sandbox, "npm-cache");
     const userConfig = join(sandbox, "empty-user.npmrc");
     const globalConfig = join(sandbox, "empty-global.npmrc");
+    const npmLogs = join(sandbox, "npm-logs");
     writeFileSync(userConfig, "");
     writeFileSync(globalConfig, "");
     const npmEnvironment = { HOME: fakeHome, USERPROFILE: fakeHome, LOCALAPPDATA: fakeLocalAppData, NO_COLOR: "1" };
@@ -2247,7 +2405,7 @@ function packedProcessDetail(result) {
       "--cache", cache, "--userconfig", userConfig, "--globalconfig", globalConfig];
     const pack = runPackedNpm(npmCli, [
       "pack", "--json", ...npmFlags, "--pack-destination", packDirectory,
-    ], { cwd: root, env: npmEnvironment });
+    ], { cwd: root, env: npmEnvironment, stage: "pack", logsDirectory: join(npmLogs, "pack"), prefix });
     let archive = null;
     try { archive = JSON.parse(pack.stdout)?.[0]?.filename || null; } catch { /* fixed check below */ }
     check(
@@ -2257,11 +2415,11 @@ function packedProcessDetail(result) {
     );
 
     if (pack.status === 0 && archive) {
-      const installPacked = () => runPackedNpm(npmCli, [
+      const installPacked = (stage) => runPackedNpm(npmCli, [
           "install", "--global", ...npmFlags,
           "--prefix", prefix, join(packDirectory, archive),
-        ], { cwd: root, env: npmEnvironment });
-      const install = installPacked();
+        ], { cwd: root, env: npmEnvironment, stage, logsDirectory: join(npmLogs, stage), prefix });
+      const install = installPacked("initial_install");
       check(
         "the real package installs into a user-owned prefix without sudo",
         install.status === 0,
@@ -2329,7 +2487,7 @@ function packedProcessDetail(result) {
         );
 
         const reinstall = setupReceipt.status === 0
-          ? installPacked()
+          ? installPacked("reinstall")
           : { status: null, stdout: "", stderr: "setup receipt failed" };
         check(
           "the same packed release reinstalls into the same user prefix",

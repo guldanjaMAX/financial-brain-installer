@@ -14,9 +14,17 @@ for (let n = 17; n <= 22; n++) {
 for (const id of ["UPDATE-023", "UPDATE-024"]) {
   assert.ok(cases.some((c) => c.id === id), "Windows credential and owner scope regressions must retain a release gate");
 }
+for (const id of ["UPDATE-025", "UPDATE-026"]) {
+  assert.ok(cases.some((c) => c.id === id),
+    "bank freshness honesty and verified-package Windows evidence must retain a release gate");
+}
 const findings = new Set(cases.flatMap((c) => c.findings));
 for (const id of [...Array.from({ length: 16 }, (_, i) => `F${i + 1}`), ...Array.from({ length: 6 }, (_, i) => `N${i + 1}`)]) {
   assert.ok(findings.has(id), `original audit finding ${id} must retain an adjudication`);
+}
+for (const id of ["PLAID-READY-WINDOW-FRESHNESS", "PLAID-REFRESH-DEBT-SCHEDULED-RETRYABLE",
+  "WINDOWS-NPM-CHAIN-LENGTH", "WINDOWS-PACKAGE-BARRIER", "WINDOWS-NODE22-INSTALL-TIMEOUT"]) {
+  assert.ok(findings.has(id), `0.4.0 audit finding ${id} must retain an adjudication`);
 }
 const fixture = { id: "UPDATE-999", title: "fixture", acceptance: "fixture proof", scopes: ["upgrade"], status: "open", tests: ["test/fixture.mjs"] };
 assert.throws(() => validateIncidents([], () => true), /empty/);

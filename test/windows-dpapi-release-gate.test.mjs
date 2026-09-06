@@ -110,8 +110,15 @@ test("the bridge refuses a changed, hard-linked, or symlinked helper before read
 test("CI invokes the release gate only on a real Windows runner", () => {
   assert.match(workflow, /node: \['22', '24'\]/);
   assert.match(workflow, /name: Windows DPAPI 25-round release gate/);
-  assert.match(workflow, /if: runner\.os == 'Windows'/);
-  assert.match(workflow, /run: node scripts\/windows-dpapi-release-gate\.mjs/);
+  // The step may carry a continuation guard, but it must still be Windows-only:
+  // this gate is meaningless on any other runner, so assert the condition on the
+  // step itself rather than anywhere in the file.
+  const dpapiStep = workflow.slice(
+    workflow.indexOf("      - name: Windows DPAPI 25-round release gate\n"),
+  ).split("\n      - name: ")[0];
+  assert.match(dpapiStep, /^\s+if: .*runner\.os == 'Windows'/m);
+  assert.doesNotMatch(dpapiStep, /runner\.os != 'Windows'/);
+  assert.match(dpapiStep, /run: node scripts\/windows-dpapi-release-gate\.mjs/);
   const packedInstall = workflow.indexOf('npm install --global --prefix "$prefix"');
   const packedGate = workflow.indexOf('node "$package_root/scripts/windows-dpapi-release-gate.mjs"');
   assert.ok(packedInstall > 0 && packedGate > packedInstall, "the installed tarball must precede the packed DPAPI gate");

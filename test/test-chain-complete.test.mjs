@@ -1,11 +1,10 @@
 /**
  * Every tracked test file is actually in the test chain.
  *
- * WHY THIS EXISTS. `npm test` is a hardcoded `&&` chain of ~116 commands, not a
- * discovery run. That is a deliberate choice (explicit ordering, explicit
- * per-file node flags), and it has one failure mode that is worse than anything
- * it buys: a test file that exists, is committed, and is NOT in the chain is
- * invisible. It can fail for weeks and every run stays green.
+ * WHY THIS EXISTS. `npm test` uses an explicit ordered command graph rather
+ * than discovery. That preserves per-file Node flags and dependency order, but
+ * a test file that exists, is committed, and is NOT in the graph is invisible.
+ * It can fail for weeks and every run stays green.
  *
  * That is not hypothetical. `test/report-html.test.mjs` was tracked, was
  * failing, and was missing from the chain. It was found only because an agent
@@ -16,15 +15,16 @@
  * that it is complete. A new test file now either joins the chain or turns this
  * red on the next run.
  *
- * If you are here because this failed: the fix is to add the named file to
- * `scripts.test` in package.json, in a position that matches what it depends
- * on. Do NOT add it to the ignore list below to make this pass — that is the
- * same defect this file exists to end, with an extra step.
+ * If you are here because this failed: add the named file to TEST_COMMANDS in
+ * scripts/run-test-chain.mjs, in a position that matches what it depends on.
+ * Do NOT add it to the ignore list below to make this pass. That is the same
+ * defect this file exists to end, with an extra step.
  */
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TEST_COMMANDS, parseTestCommand } from "../scripts/run-test-chain.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -46,8 +46,13 @@ const check = (name, ok, detail = "") => {
   if (!ok) fail++;
 };
 
-const chain = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).scripts?.test || "";
-check("package.json defines a test chain", chain.length > 0);
+const packageTest = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).scripts?.test || "";
+check("package.json uses the short test launcher", packageTest === "node scripts/run-test-chain.mjs", packageTest);
+check("the ordered test graph is nonempty", TEST_COMMANDS.length > 0);
+const scheduled = new Set(TEST_COMMANDS.flatMap((command) => {
+  const parsed = parseTestCommand(command);
+  return parsed.kind === "node" ? parsed.args.filter((arg) => !arg.startsWith("--")) : [];
+}));
 
 // Include new candidate tests before commit as well as tracked tests. A dirty
 // candidate must not pass by leaving its new regression outside the chain.
@@ -61,7 +66,7 @@ check("git listed the tracked test files", tracked.length > 0, `found ${tracked.
 // Exact paths prevent one suite from satisfying a different same-name suite.
 const missing = tracked.filter((f) => {
   if (EXEMPT.has(f)) return false;
-  return !chain.includes(f);
+  return !scheduled.has(f);
 });
 
 check(

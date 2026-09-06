@@ -212,6 +212,7 @@ jobs:
           digest-mismatch: error
 
       - name: verify exact shared package bytes
+        id: verify_package
         env:
           ARTIFACT_NAME: ${{ needs.package.outputs.artifact_name }}
           EXPECTED_SHA256: ${{ needs.package.outputs.package_sha256 }}
@@ -286,14 +287,15 @@ jobs:
       # ciphertext, child output, or a credential. This is release evidence, not
       # the supervised client gate.
       - name: Windows DPAPI 25-round release gate
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: node scripts/windows-dpapi-release-gate.mjs
 
       - name: unit and integration suite
-        run: npm test
+        if: ${{ !cancelled() }}
+        run: npm test -- --continue-on-failure
 
-      # Keep incident regressions visible even when the long npm test chain
-      # stops at an earlier failure. This is automated proof, not release clearance.
+      # Keep incident regressions visible even when another independent check
+      # fails. This is automated proof, not release clearance.
       - name: independent incident regressions
         if: ${{ !cancelled() }}
         run: npm run audit:regressions
@@ -302,7 +304,7 @@ jobs:
       # exit may be diagnostic. Require the packaged script to parse, execute,
       # and print its identifying header.
       - name: packaged preflight runs and prints (Windows)
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && steps.verify_package.outcome == 'success' && runner.os == 'Windows' }}
         shell: powershell
         run: |
           $path = Resolve-Path .\.packaged-preflight\package\tools\preflight.ps1
@@ -317,7 +319,7 @@ jobs:
           Write-Host "preflight.ps1 parsed clean"
 
       - name: packaged preflight runs and prints (macOS and Linux)
-        if: runner.os != 'Windows'
+        if: ${{ !cancelled() && steps.verify_package.outcome == 'success' && runner.os != 'Windows' }}
         shell: bash
         run: |
           set +e
@@ -334,6 +336,7 @@ jobs:
       # or a .cmd shim can make it exit 0 having done nothing, which is worse
       # than crashing because every exit-code check passes.
       - name: cli starts and prints usage
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           out=$(node brain.mjs)
@@ -344,6 +347,7 @@ jobs:
       # is expected to report failures here; what is NOT acceptable is a crash,
       # because doctor is the tool whose whole job is diagnosing a bare machine.
       - name: doctor reports rather than crashing
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set +e
@@ -360,6 +364,7 @@ jobs:
       # never exercises, and one of them already shipped once: the installed
       # command ran and did nothing, exit 0.
       - name: packed tarball installs globally and the bin works
+        if: ${{ !cancelled() && steps.verify_package.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -382,6 +387,7 @@ jobs:
       # Mac and Linux and keeps Windows inside the current profile. Exercise
       # that exact shape as well as the traditional global install above.
       - name: packed tarball installs in a user-owned prefix
+        if: ${{ !cancelled() && steps.verify_package.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -398,7 +404,7 @@ jobs:
       # must also come from the exact globally installed tarball, including
       # synthetic admin-key create, read, rotation, and ciphertext inspection.
       - name: packed Windows DPAPI and admin-key release gate
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && steps.verify_package.outcome == 'success' && runner.os == 'Windows' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -411,7 +417,7 @@ jobs:
       # policy. The website therefore uses the .cmd shims explicitly on
       # Windows, and CI must prove that exact beginner path.
       - name: Windows PowerShell user-prefix command works
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && steps.verify_package.outcome == 'success' && runner.os == 'Windows' }}
         env:
           PACKAGE_FILENAME: ${{ needs.package.outputs.artifact_name }}
         shell: pwsh
@@ -431,6 +437,7 @@ jobs:
       # uses an allowlist; this fails loudly if a future edit turns it into a
       # denylist that misses something.
       - name: package contains no private data
+        if: ${{ !cancelled() && steps.verify_package.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail

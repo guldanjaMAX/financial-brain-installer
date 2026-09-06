@@ -113,7 +113,7 @@ jobs:
             echo "::error::package SHA-256 is malformed"
             exit 1
           fi
-          expected_reviewed_sha256="4691e6dbf52f3cea3f6151f9656031bd3510c9003c980bdc4e493da23517a151"
+          expected_reviewed_sha256="ea52eaa5371e550f47d16e952e3338cf3b7afd268d55165822312801a0895233"
           if [[ "$package_sha256" != "$expected_reviewed_sha256" ]]; then
             echo "::error::package bytes differ from the locally reviewed package"
             exit 1

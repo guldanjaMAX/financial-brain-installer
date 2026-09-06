@@ -477,6 +477,7 @@ const expected = [
   "operations/cli-guidance.mjs",
   "scripts/audit-updates.mjs",
   "scripts/reproduce-frozen-vector-fence.mjs",
+  "scripts/run-test-chain.mjs",
   "scripts/test-release-workflow-contract.mjs",
   "scripts/verify-release-assets.mjs",
   "tools/preflight.ps1",

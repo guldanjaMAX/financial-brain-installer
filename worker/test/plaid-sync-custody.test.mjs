@@ -201,10 +201,15 @@ test(`${expiration} takeover resumes the durable prefix; the stale provider retu
     assert.equal(f.first("SELECT owner_token FROM plaid_sync_leases").owner_token, successor);
     nextFinish.resolve();
     const receipt = await bounded(nextRun);
-    assert.equal(receipt.ok, true);
+    assert.equal(receipt.ok, false); assert.equal(receipt.partial, true); assert.equal(receipt.refresh_pending, true);
     assert.equal(receipt.counts.added, 2);
     assert.deepEqual(f.rows("SELECT external_id FROM fin_transactions ORDER BY external_id").map(row => row.external_id), ["correct-last", "prefix"]);
     assert.equal(f.first("SELECT cursor FROM bank_feed_items").cursor, "complete");
+    assert.equal(f.first("SELECT reason FROM plaid_reconciliation").reason, "refresh_pending");
+    const fresh = await syncPlaidItem(f.env, item.itemRef, { now: stamp, fetchImpl: onePageFetch(item) });
+    assert.equal(fresh.ok, true); assert.equal(fresh.refresh_pending, false);
+    assert.equal(f.first("SELECT reason FROM plaid_reconciliation").reason, "scheduled");
+    assert.deepEqual(f.rows("SELECT external_id FROM fin_transactions ORDER BY external_id").map(row => row.external_id), ["correct-last", "prefix"]);
   } finally { firstFinish.resolve(); nextFinish.resolve(); await Promise.allSettled([firstRun, nextRun].filter(Boolean)); f.close(); }
 });
 }
@@ -313,7 +318,10 @@ test("three unassigned Items defer without pretending to sync, so the next slice
     // without waiting for the scheduler delay or fetching the same pages again.
     f.raw("UPDATE plaid_account_entity_assignments SET entity_slug='fixture-entity',assigned_at=? WHERE item_ref=?", stamp, items[0].itemRef);
     const resumed = await syncPlaidItem(f.env, items[0].itemRef, { now: stamp, fetchImpl: async () => assert.fail("ready resume must reuse durable work") });
-    assert.equal(resumed.ok, true); assert.equal(resumed.resumed_promotion, true);
+    assert.equal(resumed.ok, false); assert.equal(resumed.resumed_promotion, true);
+    assert.equal(resumed.partial, true); assert.equal(resumed.refresh_pending, true);
+    assert.deepEqual({ ...f.first("SELECT reason,due_at FROM plaid_reconciliation WHERE item_ref=?", items[0].itemRef) },
+      { reason: "refresh_pending", due_at: stamp });
   } finally { f.close(); }
 });
 
@@ -411,6 +419,12 @@ test("assignment completed after a blocked readiness read keeps its due-now wake
     const next = await runPlaidFeedSlice(f.env, { now: "2026-09-06T00:00:02.000Z",
       fetchImpl: async () => assert.fail("ready window must resume without another provider read"),
     });
-    assert.equal(next.ran, 1); assert.equal(next.items[0].ok, true);
+    assert.equal(next.ran, 1); assert.equal(next.items[0].ok, false);
+    assert.equal(next.items[0].resumed_promotion, true);
+    assert.equal(next.items[0].partial, true); assert.equal(next.items[0].refresh_pending, true);
+    assert.deepEqual({ ...f.first("SELECT reason,due_at FROM plaid_reconciliation WHERE item_ref=?", item.itemRef) },
+      { reason: "refresh_pending", due_at: "2026-09-06T00:00:02.000Z" });
+    const fresh = await runPlaidFeedSlice(f.env, { now: "2026-09-06T00:00:03.000Z", fetchImpl: onePageFetch(item) });
+    assert.equal(fresh.ran, 1); assert.equal(fresh.items[0].ok, true);
   } finally { f.close(); }
 });

@@ -1,6 +1,6 @@
 import { providerJson, ProviderSyncError } from "./provider-sync.js";
 import { assertPlaidConnectionDistinct } from "./plaid-connection-review.js";
-import { PlaidAccountEntityError } from "./plaid-account-entities.js";
+import { PlaidAccountEntityError, reconciliationRefreshPending } from "./plaid-account-entities.js";
 import {
   accountKindFor,
   bankFeedConfig,
@@ -722,7 +722,9 @@ async function syncWindowRow(env, tenantId, itemRef, stamp, lease) {
   const backfill = await env.DB.prepare(
     "SELECT provider_history_state FROM bank_feed_backfill WHERE tenant_id=? AND item_ref=?",
   ).bind(tenantId, itemRef).first();
-  if (row && ["staging", "ready", "retryable"].includes(row.state)) {
+  // A webhook describes provider availability, not the contents of a completed
+  // staged snapshot. Only a later actual fetch may use that newer history hint.
+  if (row && ["staging", "retryable"].includes(row.state)) {
     const merged = mergePlaidHistoryState(
       row.provider_history_state,
       backfill?.provider_history_state,
@@ -798,11 +800,20 @@ function promotionStatements(env, {
   historyState,
   stamp,
   accountMappings,
+  observedAt,
+  resumedSnapshot = false,
 }) {
   const sourceFeed = feedScopeKey(itemRef);
   const interval = Math.min(Math.max(Number(env.BANK_FEED_RECONCILE_MINUTES) || DEFAULT_RECONCILE_MINUTES, 15), 1440);
   const historicalComplete = historyState === PLAID_HISTORY_STATE.HISTORICAL;
   const nextDue = new Date(Date.parse(stamp) + (historicalComplete ? interval : 5) * 60_000).toISOString();
+  // All statements inspect this marker inside the same fenced transaction. A
+  // webhook/assignment arriving after the first provider read must survive;
+  // even a same-millisecond event changes the reason away from sync_fetch.
+  const pendingFor = (tenant, item) => resumedSnapshot ? "1=1" :
+    `COALESCE((SELECT r.reason FROM plaid_reconciliation r WHERE r.tenant_id=${tenant} AND r.item_ref=${item}), '')<>'sync_fetch'`;
+  const pendingItem = pendingFor("?1", "?2");
+  const pendingStage = pendingFor("s.tenant_id", "(SELECT w.item_ref FROM plaid_sync_windows w WHERE w.tenant_id=s.tenant_id AND w.window_ref=s.window_ref)");
   return [
     // Old Workers persisted lossy slugs in ready/staging payloads. Re-resolve
     // from exact Item/account authority before use, without moving ledger rows.
@@ -933,11 +944,12 @@ function promotionStatements(env, {
          (tenant_id,account_slug,coverage_status,covered_from,covered_to,basis_note,
           computed_at,provenance,source_feed,basis_state,recorded_at)
        SELECT s.tenant_id,s.account_slug,
-              CASE WHEN ? THEN 'complete'
+              CASE WHEN ? AND NOT (${pendingStage}) THEN 'complete'
                    WHEN COUNT(t.provider_transaction_id)>0 THEN 'partial' ELSE 'missing' END,
               MIN(t.posted_on),
               CASE WHEN ? THEN substr(?,1,10) ELSE MAX(t.posted_on) END,
-              CASE WHEN ? THEN 'Plaid completed the requested history window.'
+              CASE WHEN ${pendingStage} THEN 'Saved activity is available. Checking for newer bank activity.'
+                   WHEN ? THEN 'Plaid completed the requested history window.'
                    WHEN COUNT(t.provider_transaction_id)>0 THEN 'Plaid history is still arriving.'
                    ELSE 'No dated transaction coverage has promoted yet.' END,
               ?,'feed',?,'confirmed',?
@@ -966,7 +978,7 @@ function promotionStatements(env, {
     ).bind(
       historicalComplete ? 1 : 0,
       historicalComplete ? 1 : 0,
-      stamp,
+      observedAt,
       historicalComplete ? 1 : 0,
       stamp,
       sourceFeed,
@@ -1017,18 +1029,24 @@ function promotionStatements(env, {
         )`,
     ).bind(stamp, tenantId, sourceFeed, tenantId, windowRef),
     env.DB.prepare(
-      `UPDATE bank_feed_items SET cursor=?,cursor_updated_at=?,last_synced_at=?,
-          status='connected',status_detail=?,last_error_at=NULL
-        WHERE tenant_id=? AND item_ref=?`,
-    ).bind(finalCursor, stamp, stamp, historicalComplete
-      ? null
-      : "Plaid is still preparing historical transactions. The available activity is partial.",
-    tenantId, itemRef),
+      `UPDATE bank_feed_items SET cursor=?3,cursor_updated_at=?4,last_synced_at=?5,
+          status='connected',status_detail=CASE
+            WHEN ${pendingItem} THEN 'Saved activity is available. Checking for newer bank activity.'
+            WHEN ?6 THEN NULL
+            ELSE 'Plaid is still preparing historical transactions. The available activity is partial.' END,
+          last_error_at=NULL WHERE tenant_id=?1 AND item_ref=?2`,
+    ).bind(tenantId, itemRef, finalCursor, stamp, observedAt, historicalComplete ? 1 : 0),
     env.DB.prepare(
-      `UPDATE bank_feed_backfill SET state=?,provider_history_state=?,finished_at=?,last_error=NULL
-        WHERE tenant_id=? AND item_ref=?`,
-    ).bind(historicalComplete ? "complete" : "running", historyState,
-      historicalComplete ? stamp : null, tenantId, itemRef),
+      `UPDATE bank_feed_backfill SET
+          state=CASE WHEN ?3 AND NOT (${pendingItem}) THEN 'complete' ELSE 'running' END,
+          provider_history_state=CASE
+            WHEN provider_history_state='HISTORICAL_UPDATE_COMPLETE' OR ?4='HISTORICAL_UPDATE_COMPLETE' THEN 'HISTORICAL_UPDATE_COMPLETE'
+            WHEN provider_history_state='INITIAL_UPDATE_COMPLETE' OR ?4='INITIAL_UPDATE_COMPLETE' THEN 'INITIAL_UPDATE_COMPLETE'
+            WHEN provider_history_state='NOT_READY' OR ?4='NOT_READY' THEN 'NOT_READY'
+            ELSE 'TRANSACTIONS_UPDATE_STATUS_UNKNOWN' END,
+          finished_at=CASE WHEN ?3 AND NOT (${pendingItem}) THEN ?5 ELSE NULL END,last_error=NULL
+        WHERE tenant_id=?1 AND item_ref=?2`,
+    ).bind(tenantId, itemRef, historicalComplete ? 1 : 0, historyState, observedAt),
     env.DB.prepare("DELETE FROM plaid_sync_stage_transactions WHERE tenant_id=? AND window_ref=?")
       .bind(tenantId, windowRef),
     env.DB.prepare("DELETE FROM plaid_sync_stage_accounts WHERE tenant_id=? AND window_ref=?")
@@ -1038,10 +1056,16 @@ function promotionStatements(env, {
     env.DB.prepare(
       `INSERT INTO plaid_reconciliation
          (tenant_id,item_ref,reason,state,due_at,attempts,last_error_code,updated_at)
-       VALUES (?,?,?,'pending',?,0,NULL,?)
-       ON CONFLICT(tenant_id,item_ref) DO UPDATE SET reason=excluded.reason,state='pending',
-         due_at=excluded.due_at,last_error_code=NULL,updated_at=excluded.updated_at`,
-    ).bind(tenantId, itemRef, historicalComplete ? "scheduled" : "history_pending", nextDue, stamp),
+       VALUES (?1,?2,'refresh_pending','pending',?5,0,NULL,?5)
+       ON CONFLICT(tenant_id,item_ref) DO UPDATE SET
+         reason=CASE WHEN ?6 OR plaid_reconciliation.reason<>'sync_fetch' THEN 'refresh_pending' ELSE ?3 END,
+         state='pending',
+         due_at=CASE WHEN ?6 OR plaid_reconciliation.reason<>'sync_fetch' THEN ?5 ELSE ?4 END,
+         last_error_code=NULL,updated_at=?5`,
+    ).bind(tenantId, itemRef, historicalComplete ? "scheduled" : "history_pending", nextDue, stamp, resumedSnapshot ? 1 : 0),
+    // Read the atomic decision, not a later independently changing queue row.
+    env.DB.prepare("SELECT reason,due_at FROM plaid_reconciliation WHERE tenant_id=? AND item_ref=?")
+      .bind(tenantId, itemRef),
   ];
 }
 
@@ -1083,8 +1107,16 @@ async function promotePlaidWindow(env, details, receipt = {}) {
   if (!unmatched || Number(unmatched.n) !== 0) throw accountIdentityError("plaid_transaction_account_unreviewed");
   const readiness = await plaidAccountAssignmentReadiness(env, details);
   if (!readiness.ready) return assignmentBlockedResult(details.itemRef, readiness, receipt);
+  // Window start is a conservative observation bound even for ready rows from
+  // older Workers whose updated_at was overwritten by a later history webhook.
+  const observedAt = balanceObservation(staged[0]?.started_at, details.stamp);
+  let promotion;
   try {
-    await runPlaidSyncBatch(env, details.lease, promotionStatements(env, { ...details, accountMappings }));
+    const result = await runPlaidSyncBatch(env, details.lease, promotionStatements(env, { ...details, accountMappings, observedAt }));
+    promotion = result.at(-1)?.results?.[0];
+    if (!promotion || !["refresh_pending", "scheduled", "history_pending"].includes(promotion.reason)) {
+      throw new Error("The committed bank refresh receipt could not be verified");
+    }
   } catch (error) {
     if (error instanceof PlaidSyncLeaseError) throw error;
     // If authority changed between the read and the transactional guard, report
@@ -1093,7 +1125,7 @@ async function promotePlaidWindow(env, details, receipt = {}) {
     if (!after.ready) return assignmentBlockedResult(details.itemRef, after, receipt);
     throw error;
   }
-  return { ...receipt, promoted: true };
+  return { ...receipt, promoted: true, refresh_pending: promotion.reason === "refresh_pending" };
 }
 
 export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = null, hardDeadlineAt = null } = {}) {
@@ -1157,11 +1189,13 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
         historyState: window.provider_history_state,
         stamp,
         lease,
+        resumedSnapshot: true,
       });
       if (!promoted.promoted) return await deferIncomplete(promoted);
-      const historicalComplete = window.provider_history_state === PLAID_HISTORY_STATE.HISTORICAL;
+      const historicalComplete = window.provider_history_state === PLAID_HISTORY_STATE.HISTORICAL && !promoted.refresh_pending;
       return {
         item_ref: itemRef,
+        refresh_pending: promoted.refresh_pending,
         ok: historicalComplete,
         partial: !historicalComplete,
         status: historicalComplete ? "complete" : "partial",
@@ -1180,6 +1214,16 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
       };
     }
     await renewPlaidSyncLease(env, lease);
+    // Arm only before the FIRST provider read of a fresh window. A durable
+    // prefix belongs to earlier reads, including their notification debt.
+    // Rearming on prefix resume or between pages could swallow that webhook.
+    if (Number(window.next_page_index || 0) === 0) await runPlaidSyncBatch(env, lease, [env.DB.prepare(
+      `INSERT INTO plaid_reconciliation
+         (tenant_id,item_ref,reason,state,due_at,attempts,updated_at)
+       VALUES (?,?,'sync_fetch','pending',?,0,?)
+       ON CONFLICT(tenant_id,item_ref) DO UPDATE SET
+         reason='sync_fetch',state='pending',due_at=excluded.due_at,updated_at=excluded.updated_at`,
+    ).bind(tenantId, itemRef, stamp, stamp)]);
     const accountPayload = await callPlaid(env, "/accounts/get", { access_token: accessToken }, { fetchImpl });
     await renewPlaidSyncLease(env, lease);
     const normalizedAccounts = (Array.isArray(accountPayload.accounts) ? accountPayload.accounts : [])
@@ -1250,12 +1294,13 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
           historyState: receipt.historyState,
           stamp,
           lease,
+          resumedSnapshot: Number(window.next_page_index || 0) > 0,
         }, receipt);
       },
     });
     if (result.promoted !== true) return await deferIncomplete(result);
     const { historyState: providerHistoryState, ...syncResult } = result;
-    const historicalComplete = providerHistoryState === PLAID_HISTORY_STATE.HISTORICAL;
+    const historicalComplete = providerHistoryState === PLAID_HISTORY_STATE.HISTORICAL && !result.refresh_pending;
     return {
       item_ref: itemRef,
       ok: historicalComplete,
@@ -1610,7 +1655,7 @@ export async function plaidFeedStatus(env) {
     `SELECT i.item_ref,i.institution_label,i.environment,i.status,i.status_detail,i.connected_at,
             i.last_synced_at,b.state AS history_state,b.provider_history_state,
             b.pages_done,b.transactions_seen,b.unread_lines,
-            r.state AS reconciliation_state,r.due_at,o.state AS revocation_state,
+            r.state AS reconciliation_state,r.reason AS reconciliation_reason,r.due_at,o.state AS revocation_state,
             o.outcome_state AS revocation_outcome_state,o.attempts AS revocation_attempts
        FROM bank_feed_items i
        LEFT JOIN bank_feed_backfill b ON b.tenant_id=i.tenant_id AND b.item_ref=i.item_ref
@@ -1635,12 +1680,15 @@ export async function plaidFeedStatus(env) {
       history: {
         state: row.history_state || "none",
         provider_history_state: row.provider_history_state || PLAID_HISTORY_STATE.UNKNOWN,
-        partial: row.provider_history_state !== PLAID_HISTORY_STATE.HISTORICAL,
+        partial: row.history_state !== "complete" || row.provider_history_state !== PLAID_HISTORY_STATE.HISTORICAL,
         pages_done: row.pages_done || 0,
         transactions_seen: row.transactions_seen || 0,
         unread_lines: row.unread_lines || 0,
       },
-      reconciliation: { state: row.reconciliation_state || "none", due_at: row.due_at || null },
+      reconciliation: {
+        state: row.reconciliation_state || "none", due_at: row.due_at || null,
+        refresh_pending: reconciliationRefreshPending(row.reconciliation_state, row.reconciliation_reason),
+      },
       revocation: {
         state: row.revocation_state || "none",
         outcome_state: row.revocation_outcome_state || "none",
