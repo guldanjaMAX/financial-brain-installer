@@ -7,9 +7,13 @@
  * has to retype is how a connected brain ends up unconnected.
  */
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { cmdMcpConfig } from "../brain.mjs";
 
-const manifest = new URL("../templates/brain.manifest.json", import.meta.url).pathname;
+// fileURLToPath, never `.pathname`: the pathname of a file URL is percent-encoded
+// and, on Windows, keeps a leading slash before the drive letter ("/D:/a/..."),
+// which resolves against the current drive as "D:\\D:\\a\\..." and never opens.
+const manifest = fileURLToPath(new URL("../templates/brain.manifest.json", import.meta.url));
 
 // --apply routes to the reconciler and reports per assistant.
 let sawArgs = null;

@@ -21,7 +21,8 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { cmdConnectZoom, cmdDisconnectZoom } from "../brain.mjs";
+import { cmdConnectZoom, cmdDisconnectZoom, commandPath } from "../brain.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import * as zoomConnector from "../connectors/zoom.mjs";
 import { handleZoomWebhook } from "../worker/src/lib/zoom.js";
 
@@ -324,8 +325,13 @@ try {
       /refuses every delivery/.test(output));
     check("it names the Zoom-side step it cannot do for the client",
       /marketplace\.zoom\.us/.test(output) && /Remove the Event Subscription/.test(output));
+    // On Windows the CLI deliberately prints a runnable invocation of the actual
+    // executable instead of the bare word "brain", so build the expectation the
+    // same way the product does rather than hardcoding the POSIX spelling. This
+    // stays exact: manifest path, source name and quoting are all still asserted.
     check("and points at forget for the transcripts already loaded",
-      /brain forget .* --source zoom/.test(output));
+      output.includes(renderCliCommands(
+        `brain forget ${commandPath(manifestPath)} --source ${commandPath("zoom")}`)));
     check("the result reports what it removed", result?.removed?.length === 4);
   }
   {

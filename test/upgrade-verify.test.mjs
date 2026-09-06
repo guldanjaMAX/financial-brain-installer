@@ -2415,10 +2415,16 @@ function packedProcessDetail(result) {
     );
 
     if (pack.status === 0 && archive) {
+      // A real `npm install --global --prefix` of the whole 494-file, ~19 MB release.
+      // POSIX finishes in about half a second; the Windows runners take 12-19s on a
+      // good run, and one run was still extracting at 60s with the full payload
+      // already written, no error and no registry retry. Same budget as
+      // test/packed-fresh-setup.test.mjs, which performs this identical install.
       const installPacked = (stage) => runPackedNpm(npmCli, [
           "install", "--global", ...npmFlags,
           "--prefix", prefix, join(packDirectory, archive),
-        ], { cwd: root, env: npmEnvironment, stage, logsDirectory: join(npmLogs, stage), prefix });
+        ], { cwd: root, env: npmEnvironment, stage, logsDirectory: join(npmLogs, stage), prefix,
+             timeout: process.platform === "win32" ? 300_000 : 180_000 });
       const install = installPacked("initial_install");
       check(
         "the real package installs into a user-owned prefix without sudo",
