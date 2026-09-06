@@ -23,7 +23,10 @@ for (const path of ['test/update-audit.test.mjs', 'test/install-page-version.tes
 }
 assert.equal(pkg.scripts['audit:updates'], 'node scripts/audit-updates.mjs --release');
 assert.equal(pkg.scripts['audit:regressions'], 'node scripts/audit-updates.mjs --regressions');
-const ci = read('.github/workflows/ci.yml');
+// Windows checks out workflow YAML with CRLF unless .gitattributes pins it,
+// and the exact-string scans below would silently find nothing. Normalise,
+// the same way update-audit and the release workflow contract already do.
+const ci = read('.github/workflows/ci.yml').replace(/\r\n/g, '\n');
 assert.doesNotMatch(ci, /continue-on-error:\s*true/);
 assert.match(ci, /history-privacy:[\s\S]+npm run privacy:history:remote/);
 assert.match(ci, /package:[\s\S]*?needs: history-privacy/);

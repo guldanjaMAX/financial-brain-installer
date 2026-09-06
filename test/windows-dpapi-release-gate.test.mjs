@@ -8,7 +8,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const gate = readFileSync(new URL("../scripts/windows-dpapi-release-gate.mjs", import.meta.url), "utf8");
-const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+// CRLF on a Windows checkout would break the exact step slice below.
+const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8")
+  .replace(/\r\n/g, "\n");
 const bridgePath = new URL("../operations/windows-dpapi-bridge.mjs", import.meta.url);
 const bridgeFile = fileURLToPath(bridgePath);
 const bridge = readFileSync(bridgePath, "utf8");

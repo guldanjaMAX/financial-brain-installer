@@ -67,7 +67,8 @@ import {
 } from "../connectors/iphone-backup.mjs";
 import { fetchMessagesSince, rowToSessionRow } from "../connectors/imessage.mjs";
 import { MessageSessionizer } from "../ingest/message-session.mjs";
-import { cmdIngestIphoneBackup } from "../brain.mjs";
+import { cmdIngestIphoneBackup, commandPath } from "../brain.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { forget } from "../worker/src/lib/store-d1.js";
 
 let fail = 0, ran = 0;
@@ -898,8 +899,14 @@ let cliDocs = [];
     /take a fresh backup and run this again/i.test(flatOutput), flatOutput.slice(0, 500));
   check("the output names the device and when the backup was taken, so the snapshot has a date",
     /iPhone|iOS 18\.3\.1/.test(output) && /2026-03-03T04:15:00.000Z/.test(output), output.slice(0, 400));
+  // On Windows the CLI deliberately prints a runnable invocation of the actual
+  // executable instead of the bare word "brain", so build the expectation the
+  // same way the product does rather than hardcoding the POSIX spelling. This
+  // stays exact: manifest path, source name and quoting are all still asserted.
   check("the output hands over the exact undo command",
-    output.includes(`brain forget ${manifestPath} --source iphone-backup`), output.slice(-300));
+    output.includes(renderCliCommands(
+      `brain forget ${commandPath(manifestPath)} --source ${commandPath("iphone-backup")}`)),
+    output.slice(-300));
 
   // Idempotency at the command level: the same backup, run again.
   const second = makeBrainFakes({ script: () => "unchanged" });
