@@ -1,0 +1,327 @@
+# Verified Cloudflare recovery
+
+Recovery is complete only when an isolated Brain can be rebuilt from a D1
+export and pass retrieval evaluation. A D1 bookmark or SQL file by itself is
+not that proof because Vectorize is derived state and cannot be restored with
+D1.
+
+## Safety boundary
+
+`operations/verified-recovery.mjs` creates an owner-only plan and state file.
+The files contain only configuration fingerprints, fixed policy, aggregate
+counts, and bounded status codes. They contain no manifest path, account or
+resource identifier, hostname, query, answer, document identity, content, raw
+provider response, or credential.
+
+The source and target manifests must describe the same client, product version,
+and embedding contract. The target D1 database, Vectorize index, Worker, and any
+declared domain must be separate from the source. A provider adapter must then
+prove that the target has zero user tables and zero vectors, with the expected
+Vectorize dimensions and metric, before the first target write is reachable.
+
+Initialize and inspect the control files with:
+
+```bash
+node operations/verified-recovery.mjs init \
+  <source-manifest> <isolated-target-manifest> \
+  <private-plan> <private-state>
+
+node operations/verified-recovery.mjs status <private-plan> <private-state>
+```
+
+Both destinations are created as mode `0600` files and existing files are
+refused. Instance plans and state are ignored by Git.
+
+## Required lifecycle
+
+The reviewed order is fixed:
+
+1. Build a complete restorable D1 SQL stream from the reviewed durable tables
+   and the exact checked-in migrations already applied on the source, then seal
+   it as an authenticated version-1 recovery artifact.
+2. Hash the ciphertext, open it only in the owner-only artifact directory,
+   restore the plaintext stream locally with SQLite safe mode, run database and
+   FTS integrity checks, and record only its schema, aggregate, and exact
+   durable-data fingerprints.
+3. Prove the remote restore target is the reviewed, empty D1 and Vectorize pair.
+4. Open and import the exact verified artifact into that isolated D1 database.
+5. Export the restored durable tables back from D1 and require integrity,
+   schema, aggregate counts, and the exact data SHA-256 to match the source
+   artifact.
+6. Reconcile recovered security state while the target is still paused. Require
+   the target's exact reviewed secret-name set, prove bank wrapping-key custody,
+   keep the live `agent_action_receipts` authority table empty, and rewrap every
+   recoverable legacy bank reference. Any reference that cannot be opened
+   becomes explicit reauthorization state; no unsupported key version or
+   actionable legacy rewrap work may remain.
+7. While the reviewed compatibility Worker is deployed in
+   `paused-for-upgrade` mode, drive the schema-35 `/api/admin/brain/bootstrap`
+   contract until every D1 chunk has one query-visible vector, all durable batch
+   receipts are confirmed, the outbox and submitted counts are zero, and no
+   vector failed. A retry resumes the saved epoch, cursor, and batch history and
+   never calls reindex to reset them. After exact inventory and provider-count
+   proof, deploy only the pre-reviewed immutable active Worker version and prove
+   that exact version and `active` mode before continuing.
+8. Run post-restore health with zero failures and exact `vector_readiness`:
+   `ready=true`, zero pending/submitted work, and equal D1/Vectorize counts.
+9. Run the release evaluation profile with zero critical failures and zero
+   unauthorized retrievals.
+
+Every stage is persisted as `running` before its adapter executes. If the
+process stops after an external write but before the completion receipt, the
+next run retries that same stage. A mutating adapter must reconcile an already
+completed write and return the same evidence. It must never infer that a write
+did not happen from a missing local completion receipt.
+
+The runner also requires both manifests to be reopened and matched to the plan
+before and after every adapter call. A changed resource, runtime setting, or
+manifest file therefore leaves the current stage retryable instead of letting a
+credential or write cross the reviewed boundary.
+
+The durable `.brain-recovery-export.sql.fbrenc` artifact is authenticated
+AES-256-GCM ciphertext. Its independent version-1 key is resolved only from the
+target manifest's `operations.recovery_artifact_key_secret` Keychain locator.
+The key never enters a manifest, plan, state, command line, or artifact. A
+plaintext SQL file exists only inside the owner-only directory while the local
+verifier or Wrangler import callback owns it, and it is removed afterward. Any
+stale plaintext or encryption temporary is a hard stop for manual review. The
+single-file import contract refuses exports above 5 GiB; a reviewed
+split-import procedure is required above that boundary.
+
+## Disposable Cloudflare field gate
+
+`operations/cloudflare-recovery-adapter.mjs` is the reviewed live provider
+adapter. It can exercise the state machine only against an already-provisioned
+disposable target. It cannot create, upload, delete, or destroy a Cloudflare
+resource. Its sole Worker mutation is the exact 100-percent deployment of the
+active immutable version already named in the reviewed target claim, after the
+paused bootstrap has passed exact vector proof. It does not touch Supabase.
+
+A normal full D1 export cannot include an FTS5 virtual table. The adapter never
+drops or changes source FTS. It exports data only from the exact reviewed table
+allowlist, prepends the exact checked-in migrations recorded on the source, and
+recreates the derived FTS index through those migrations and triggers. The
+`vector_outbox` queue is recreated empty instead of copied because Vectorize is
+rebuilt; source verification therefore also requires that queue to be empty.
+Any unknown durable table, migration mismatch, schema mismatch, FTS integrity
+failure, aggregate mismatch, or durable-data hash mismatch stops the run.
+Migration checksums bind the exact reviewed SQL bytes. Schema comparison then
+canonicalizes SQL comments and whitespace because D1 removes non-semantic
+comments from `sqlite_schema` while local SQLite preserves them.
+
+Cloudflare's remote D1 export takes a blocking lock. Run the source export only
+in an approved maintenance window with source ingest and writes paused. The
+`source_export_blocking_approval_fingerprint` is the explicit acknowledgement
+for that exact source. It is not a claim that the adapter can detect traffic.
+
+Before preview, prepare all of these locally and out of band:
+
+- reviewed source and target manifests that produced the private recovery plan;
+- an empty disposable D1 database, zero-count Vectorize index, and two immutable
+  Worker versions in the reviewed Cloudflare account. The paused version must be
+  the sole version deployed at 100 percent before the first field-gate stage;
+- one shared random nonce in the target Worker, D1, and Vectorize names. The
+  Worker name must end in `recovery-gate-<nonce>` and its hostname must be the
+  matching `*.workers.dev` hostname. Production-like names are refused;
+- exact bindings on both Worker versions to the target D1 and Vectorize
+  resources, the reviewed Brain identity and version, and the required
+  `ADMIN_KEY`, `RAG_PROXY_KEY`, and `SESSION_SIGNING_KEY` secrets. The only
+  allowed optional names are `ANTHROPIC_API_KEY`, `BANK_FEED_CLIENT_ID`,
+  `BANK_FEED_SECRET`, `BANK_FEED_WRAPPING_KEY_V2`, `ZOOM_ACCOUNT_ID`,
+  `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, and `ZOOM_WEBHOOK_SECRET_TOKEN`. The
+  two bank provider secrets must appear together, as must all four Zoom secrets.
+  The target must include `BANK_FEED_WRAPPING_KEY_V2`, and its exact secret-name
+  set must equal the source set plus that key when the source does not have it
+  yet. The two target versions' bindings must be identical except that the
+  paused version has
+  exactly `VECTOR_DRAIN_MODE=paused-for-upgrade` and the active version has no
+  `VECTOR_DRAIN_MODE` binding;
+- local-only Google, Gmail, Drive, IMAP, iMessage, WhatsApp, and named-provider
+  OAuth credentials stay outside the Worker secret set and the recovery
+  artifact. Supabase Worker credentials are also excluded because this field
+  gate requires D1 storage;
+- a fresh manual Cloudflare review that the target Worker has no routes and no
+  custom domains. Record the immutable paused version as
+  `paused_worker_version_id`, the immutable active version as
+  `active_worker_version_id`, their identical reviewed script hash as
+  `worker_script_etag`, the empty route lists, and review timestamp in the target manifest's
+  `operations.recovery_field_gate`. The adapter pins and inspects both versions
+  on every target stage, but route inventory is a manually reviewed assertion
+  because Wrangler does not expose it through this adapter;
+- the target manifest's `operations.admin_key_secret` Keychain locator, with
+  the disposable target key already stored there;
+- the source manifest's `operations.admin_key_secret` Keychain locator when the
+  source already has `BANK_FEED_WRAPPING_KEY_V2`, so the adapter can prove that
+  its key fingerprint matches the target before import;
+- the target manifest's `operations.recovery_artifact_key_secret` Keychain
+  locator, containing an independent version-1 32-byte recovery artifact key;
+- an executable Wrangler wrapper in an owner-controlled, non-writable-by-others
+  directory that reads its Cloudflare token from Keychain at execution time;
+- an owner-only directory for the encrypted recovery artifact and a complete
+  private release evaluation golden set.
+
+The decrypted SQL stream never carries live derived-index coordination. The
+adapter exports the reviewed `install_state` row separately from the raw
+provider tables and forces the ephemeral drain lease owner/expiry and projection
+mutation ID/submission time to `NULL`. It also resets the bulk-bootstrap protocol to
+`NULL`, its verified base count to zero, and `outbox_generation` to zero because
+the queue counter and those receipts prove only the source Vectorize index. For
+a nonempty corpus it records `bootstrap_required`, epoch 1, a null cursor, and
+the exact SQL `MAX(chunk_uid)` high-water. The `vector_outbox` and
+`vector_bootstrap_batches` tables remain in the restored schema, but their
+provider-specific rows are excluded from the export and recreated empty.
+`document_source_inventory` is also derived: migration 0034 recreates the table,
+and its backfill and document triggers rebuild its rows. Inventory rows are
+excluded from both the content export and aggregate fingerprint.
+`agent_action_receipts` holds live single-use authority, so its rows are also
+excluded; the restored table must remain empty before and after bank security
+reconciliation.
+The exact verified artifact also anchors a versioned bank security proof in the
+private recovery journal. Each ordered pair of hashes commits the row identity
+and every bank field: the exact original semantic row and its one permitted
+recovery result. Readable references normalize only their randomized wrapping
+bytes inside the Worker and permit only the applicable version-1 to version-2
+transition, never a downgrade. Unreadable legacy references permit only the exact
+reauthorization status, fixed explanation, and timestamp recorded before any
+reconciliation write. Non-bank durable data retains its exact full fingerprint.
+Readbacks bracket proof collection with unchanged full snapshots, so an
+interrupted rewrap or lost response cannot conceal another bank or corpus change.
+The existing authenticated key-proof endpoint returns only bounded hashes and
+positional pagination, never bank identifiers or references.
+
+This proof supports at most 1,000 bank connection rows, including removed rows,
+within the private journal's existing size limit. A larger inventory, missing
+baseline, or changed proof leaves recovery paused and fails closed. Keep the
+verified artifact and journal, and obtain a reviewed recovery plan with an
+adequate proof bound; do not delete rows, edit the journal, or bypass the check.
+After an ordinary interruption within the bound, rerun the same approved recovery
+command with the same journal and pinned keys.
+The artifact advances `session_generation` exactly once, invalidating every
+cookie minted against the source even if the target uses the same signing key.
+Target readback preserves that restored generation so retry fingerprints remain
+stable.
+The normalized row is then hashed together with the remaining durable table
+export, so a retry cannot reuse a recovery artifact poisoned by an
+invocation-local lease, mutation fence, or old provider receipt. Older exact
+migration prefixes remain offline-inspectable, but the live field runner
+requires both source and restored target to match exact schema 35 before any
+current bootstrap operation.
+
+The preview is local only. It reads and fingerprints those files but does not
+invoke Wrangler, read Keychain, or call either Brain:
+
+```bash
+node operations/cloudflare-recovery-adapter.mjs preview \
+  --source-manifest <source-manifest> \
+  --target-manifest <disposable-target-manifest> \
+  --plan <private-plan> \
+  --state <private-state> \
+  --artifact-directory <owner-only-directory> \
+  --wrangler-wrapper <owner-only-keychain-wrapper> \
+  --golden <private-release-golden>
+```
+
+The preview returns six independent approvals:
+
+- `plan_fingerprint` binds the full reviewed recovery policy and both manifests;
+- `target_approval_fingerprint` binds the isolated D1, Vectorize, Worker, and
+  hostname identity;
+- `target_execution_approval_fingerprint` binds both pinned Worker versions plus
+  the manually reviewed empty route and custom-domain claim;
+- `source_export_blocking_approval_fingerprint` binds the source whose D1
+  export will take a blocking lock during the approved maintenance window;
+- `wrapper_approval_fingerprint` binds the exact Keychain-backed wrapper bytes;
+- `golden_approval_fingerprint` is the SHA-256 of the exact private release
+  golden bytes that will judge the restored Brain.
+
+Copy all six values from that preview into the run command:
+
+```bash
+node operations/cloudflare-recovery-adapter.mjs run \
+  --source-manifest <source-manifest> \
+  --target-manifest <disposable-target-manifest> \
+  --plan <private-plan> \
+  --state <private-state> \
+  --artifact-directory <owner-only-directory> \
+  --wrangler-wrapper <owner-only-keychain-wrapper> \
+  --golden <private-release-golden> \
+  --approve-plan <plan-fingerprint> \
+  --approve-disposable-target <target-resource-fingerprint> \
+  --approve-target-execution <target-execution-fingerprint> \
+  --approve-source-export-blocking <source-export-fingerprint> \
+  --approve-wrapper <wrapper-fingerprint> \
+  --approve-golden <golden-fingerprint> \
+  --stop-after-stage restore_d1
+```
+
+`--stop-after-stage` is an optional supervised drill control. Its only accepted
+values are `export_d1`, `restore_d1`, `reconcile_security`, and
+`rebuild_vectorize`. The field gate
+still requires all six approvals and completes all verification leading to the
+named stage. It then persists that stage's completed evidence, releases the
+field-gate lock, reports only the fixed code
+`RECOVERY_FIELD_GATE_INTENTIONAL_INTERRUPTION`, and exits nonzero. Re-run the
+identical approved command to continue. Because the named stage is already in
+the durable completed prefix, the rerun does not execute its external effect or
+stop there again. Omitting the option runs every remaining stage normally.
+
+One disposable target can exercise all four checkpoint boundaries in order:
+
+1. Run with `--stop-after-stage export_d1` and require the intentional nonzero
+   exit. Confirm status now names `verify_export`.
+2. Re-run with `--stop-after-stage restore_d1`. It resumes after the export,
+   completes the verified import, then stops. Confirm status names `verify_d1`.
+3. Re-run with `--stop-after-stage reconcile_security`. It proves the recovered
+   bank wrapping key and clears all legacy bank-reference work before stopping.
+   Confirm status names `rebuild_vectorize`.
+4. Re-run with `--stop-after-stage rebuild_vectorize`. It resumes after the
+   import, completes the vector rebuild, then stops. Confirm status names
+   `verify_health`.
+5. Re-run that exact fourth command. The rebuild is already checkpointed, so the
+   run continues through health and release evaluation without rebuilding it.
+
+Changing only this stop boundary does not authorize another resource or write.
+The same manifests, target execution claim, wrapper, private golden bytes,
+plan, and six approval fingerprints remain mandatory on every invocation. A
+valid but changed golden set is refused before Cloudflare or Keychain access.
+
+The adapter reopens and fingerprints the wrapper, manifests, golden set, and
+artifact directory before and after every stage. Wrangler receives a narrow
+child environment and transient private log directory, and runs from a private
+copy of the exact approved wrapper. Wrangler logging is sanitized and telemetry
+is disabled. Every command explicitly disables experimental provisioning and
+automatic resource creation; executing the exact local wrapper avoids package
+or skill installation paths. Authenticated HTTPS
+requests refuse redirects, contain no private values in URLs, and read the
+target admin key from Keychain only after the target identity is proven.
+Provider diagnostics, credentials, corpus content, and resource names never
+enter the plan, state, or command output. The encrypted recovery artifact is the
+one necessary durable corpus copy and remains mode `0600` in the owner-only
+directory.
+
+Interrupted runs resume from the persisted stage. A retry after import accepts
+only an exact completed target or the original empty target. Any partial or
+ambiguous target stops for review. The vector rebuild resumes from schema-35
+durable bootstrap receipts while the paused version remains deployed. If the
+active-version deployment succeeded but its local response was lost, a retry
+accepts the already-active target only after exact corpus, vector inventory,
+outbox, provider count, immutable version, binding, and active-mode proof. A
+first rebuild attempt that finds the active version is refused. A leftover
+`.brain-recovery-field-gate.lock` is also fail-closed; inspect the prior process
+and private state before removing that lock manually.
+
+Passing deterministic tests is not a production recovery claim. The remaining
+live release gate is to provision the disposable resources out of band, refresh
+the manual no-route/no-custom-domain review and both pinned version claims, pause
+source writes for the approved export window, and complete one full run. That
+run must exercise the four deterministic post-checkpoint stops above,
+followed by independent Cloudflare confirmation that source resources and
+production routes did not change. Disposal of the test resources is a separate
+operator action; this adapter has no destroy command.
+
+Cloudflare documents the current export and import commands in
+[Import and export data](https://developers.cloudflare.com/d1/best-practices/import-export-data/)
+and the complete flags in the
+[D1 Wrangler command reference](https://developers.cloudflare.com/d1/wrangler-commands/).
+Vectorize inspection commands are in the
+[Vectorize Wrangler command reference](https://developers.cloudflare.com/vectorize/reference/wrangler-commands/).
