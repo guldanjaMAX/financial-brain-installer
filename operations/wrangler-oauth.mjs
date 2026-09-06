@@ -23,7 +23,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { posix, win32 } from "node:path";
 
 // Only the explicit legacy TOML compatibility path uses this version. Current
 // per-install encrypted browser profiles use cloudflare-oauth-session.mjs.
@@ -31,6 +31,7 @@ export const WRANGLER_SPEC = "wrangler@4.73.0";
 
 /** Every place wrangler is known to keep its config, newest layout first. */
 export function wranglerConfigCandidates(env = process.env, platform = process.platform) {
+  const { join } = platform === "win32" ? win32 : posix;
   const home = env.HOME || env.USERPROFILE || homedir();
   const rel = join(".wrangler", "config", "default.toml");
   const out = [];

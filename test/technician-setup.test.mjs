@@ -41,11 +41,24 @@ writeFileSync(manifestPath, JSON.stringify({
 
 test.after(() => rmSync(sandbox, { recursive: true, force: true }));
 
-test("local tool readiness proves Claude sign-in, pinned Wrangler, and the interactive Claude doctor", async () => {
+for (const platformName of ["darwin", "win32"]) test(`local tool readiness proves Claude sign-in, pinned Wrangler, and the interactive Claude doctor on ${platformName}`, async () => {
   const calls = [];
-  const skillHome = join(sandbox, "local-tools-home");
+  const skillHome = join(sandbox, `local-tools-home-${platformName}`);
+  const environment = platformName === "win32"
+    ? { USERPROFILE: "C:\\Users\\fixture", PATH: "C:\\Users\\fixture\\.local\\bin", SystemRoot: "C:\\Windows" }
+    : { HOME: skillHome, PATH: "/usr/bin:/bin" };
+  let dpapiProbes = 0;
   const receipt = await cmdLocalTools({
     isTTY: true,
+    platformName,
+    environment,
+    existsImpl: path => path === "C:\\Users\\fixture\\.local\\bin\\claude.exe",
+    dpapiProbe: options => {
+      dpapiProbes++;
+      assert.equal(options.platform, "win32");
+      assert.equal(options.rounds, 25);
+      return { checked: true, passed: true, rounds: 25, cleanup_status: "clean" };
+    },
     runCommand: (command, args, options) => {
       calls.push({ command, args, options });
       // 4.127+ is the floor now: isolated Wrangler auth profiles need it, and
@@ -63,7 +76,9 @@ test("local tool readiness proves Claude sign-in, pinned Wrangler, and the inter
     wrangler: "ready",
     technician_skill: "installed",
     claude_doctor: "passed",
+    ...(platformName === "win32" ? { claude_path: "verified" } : {}),
   });
+  assert.equal(dpapiProbes, platformName === "win32" ? 1 : 0);
   assert.ok(calls.some((call) => call.command === "claude" && call.args.join(" ") === "auth status"));
   assert.ok(calls.some((call) => call.command === "npx" &&
     call.args.join(" ") === `${WRANGLER_PACKAGE} --version`));

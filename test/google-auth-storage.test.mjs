@@ -850,5 +850,85 @@ try {
     fallback === "owner@fixture.example" && gmailFallback.calls.length === 2, JSON.stringify(gmailFallback.calls));
 }
 
+
+/* ---- production bridge uses the shared captured helper, not the retired --source protocol ---- */
+{
+  const sandbox = mkdtempSync(join(tmpdir(), "brain-google-shared-dpapi-"));
+  const path = join(sandbox, "google-tokens.json");
+  const helper = Object.freeze({
+    helper: join(sandbox, "windows-dpapi-helper.exe"),
+    sha256: "f".repeat(64), size: 1234, dev: "12", ino: "34",
+  });
+  const calls = [];
+  const ciphertexts = new Map();
+  const childBuffers = [];
+  let preparations = 0, invocations = 0, serial = 0, dispatchFailed = false;
+  const options = {
+    backend: "file", platform: "win32", path, username: "fixture-user",
+    environment: ambientCredentials,
+    runAcl: () => ({ status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }),
+    prepareWindowsDpapiSession(details) {
+      preparations++;
+      if (!childEnvironmentIsScrubbed(details.environment)) throw new Error("unscrubbed session environment");
+      return helper;
+    },
+    recordWindowsDpapiHelperInvocation() { invocations++; },
+    runDpapiBridge(command, args, details) {
+      const pairs = Object.fromEntries(Array.from({ length: (args.length - 1) / 2 }, (_, index) => [args[index * 2 + 1], args[index * 2 + 2]]));
+      const wanted = ["--helper", "--sha256", "--size", "--dev", "--ino", "--operation", "--length", "--max"];
+      const framed = command === process.execPath && args[0].endsWith("windows-dpapi-bridge.mjs") &&
+        args.length === 17 && Object.keys(pairs).sort().join() === wanted.sort().join() &&
+        pairs["--helper"] === helper.helper && pairs["--sha256"] === helper.sha256 &&
+        pairs["--size"] === String(helper.size) && pairs["--dev"] === helper.dev && pairs["--ino"] === helper.ino &&
+        pairs["--length"] === String(details.input.length) && Number(pairs["--max"]) >= details.input.length;
+      const metadata = [command, ...args, ...Object.entries(details.env).flat()].join("\0");
+      const safe = childEnvironmentIsScrubbed(details.env) &&
+        !metadata.includes(record.google.refresh_token) &&
+        !metadata.includes(Buffer.from(record.google.refresh_token).toString("base64"));
+      calls.push({ framed, safe, operation: pairs["--operation"] });
+      if (!framed || !safe) return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      let stdout;
+      if (pairs["--operation"] === "protect") {
+        stdout = Buffer.from(`shared-helper-ciphertext-${++serial}`);
+        ciphertexts.set(stdout.toString("base64"), Buffer.from(details.input));
+      } else {
+        const plain = ciphertexts.get(details.input.toString("base64"));
+        if (!plain) return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+        stdout = Buffer.from(plain);
+      }
+      const stderr = Buffer.alloc(0);
+      childBuffers.push(stdout, stderr);
+      return { status: 0, stdout, stderr };
+    },
+  };
+  try {
+    let loaded;
+    try { saveTokens(record, options); loaded = loadTokens(options); } catch { dispatchFailed = true; }
+    check("production Google DPAPI dispatch uses the captured shared-helper identity", !dispatchFailed && calls.length === 4 && calls.every(call => call.framed));
+    check("Google shared-helper save/read verifies exact credentials without plaintext storage", !dispatchFailed &&
+      JSON.stringify(loaded) === JSON.stringify(record) &&
+      !readFileSync(path).includes(Buffer.from(record.google.refresh_token)));
+    check("Google shared-helper operations participate in the one-session metrics", !dispatchFailed && preparations === 4 && invocations === 4);
+    check("Google shared-helper children receive no credentials in metadata and returned bytes are wiped", !dispatchFailed &&
+      calls.every(call => call.safe) && childBuffers.every(bytes => bytes.every(byte => byte === 0)));
+
+    let preparationFailure, bridgeCalls = 0;
+    const blockedPath = join(sandbox, "blocked-tokens.json");
+    try {
+      saveTokens(record, {
+        ...options, path: blockedPath,
+        prepareWindowsDpapiSession() { throw new Error(record.google.refresh_token); },
+        runDpapiBridge() { bridgeCalls++; return { status: 0, stdout: Buffer.from("unexpected") }; },
+      });
+    } catch (error) { preparationFailure = error; }
+    check("Google refuses before bridge input or persistence when helper preparation fails", Boolean(preparationFailure) && bridgeCalls === 0 && !existsSync(blockedPath));
+    check("Google helper preparation errors never expose credential-bearing raw errors", Boolean(preparationFailure) &&
+      !String(preparationFailure).includes(record.google.refresh_token));
+  } finally {
+    for (const bytes of ciphertexts.values()) bytes.fill(0);
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
 console.log(fail ? `\n${fail} FAILURES` : `\ngoogle auth storage: all ${ran} tests passed`);
 process.exit(fail ? 1 : 0);

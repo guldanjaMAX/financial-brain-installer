@@ -1,6 +1,6 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, lstatSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -16,7 +16,9 @@ export function validateIncidents(cases, exists = (p) => existsSync(resolve(root
     if (!Array.isArray(item.tests) || !item.tests.length) throw new Error(`${item.id}: no regression command`);
     if (item.testPlatform && !["win32", "darwin", "linux"].includes(item.testPlatform)) throw new Error(`${item.id}: invalid test platform`);
     for (const path of [...item.tests, ...(item.reproductions ?? []), ...(item.evidence ?? [])]) {
-      if (!/^(test|worker\/test|scripts|docs)\/[\w/.-]+$/.test(path) || path.split("/").includes("..") || !exists(path)) {
+      const allowedPath = /^(test|worker\/test|scripts|docs)\/[\w/.-]+$/.test(path) ||
+        /^frontend\/test\/browser\/[\w.-]+\.browser\.mjs$/.test(path);
+      if (!allowedPath || path.split("/").includes("..") || !exists(path)) {
         throw new Error(`${item.id}: missing or unsafe evidence/test path`);
       }
     }
@@ -32,9 +34,25 @@ export function releaseBlockers(cases) {
 // Run independently: a failed auth test must not prevent the recovery tests
 // from running. No shell, no output pipes, no inherited success from a later
 // command. A signal, timeout, or spawn error is a failure too.
+export function verifiedNpmCliPath(candidate) {
+  if (typeof candidate !== "string" || !candidate) return null;
+  try {
+    const cli = realpathSync(candidate);
+    const info = lstatSync(cli);
+    if (!info.isFile() || info.isSymbolicLink() || basename(cli) !== "npm-cli.js") return null;
+    const pkg = JSON.parse(readFileSync(resolve(dirname(cli), "..", "package.json"), "utf8"));
+    return pkg.name === "npm" && /^\d+\.\d+\.\d+(?:[-+].*)?$/.test(String(pkg.version || "")) ? cli : null;
+  } catch { return null; }
+}
+
 export function regressionEnvironment(env = process.env) {
-  const keys = ["PATH", "HOME", "USERPROFILE", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI"];
-  return Object.fromEntries(keys.filter((key) => typeof env[key] === "string").map((key) => [key, env[key]]));
+  const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI"];
+  const clean = Object.fromEntries(keys.filter((key) => typeof env[key] === "string").map((key) => [key, env[key]]));
+  // Packed install tests invoke npm through Node, so a Windows timeout cannot
+  // leave a shell's npm grandchild holding the disposable prefix open.
+  const npmCli = verifiedNpmCliPath(env.npm_execpath);
+  if (npmCli) clean.npm_execpath = npmCli;
+  return clean;
 }
 
 export function runRegressions(cases, run = (path) => spawnSync(process.execPath,

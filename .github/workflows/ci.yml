@@ -264,6 +264,12 @@ jobs:
       - name: owner app tests
         run: npm --prefix frontend test
 
+      - name: install owner browser test runtime
+        run: npm --prefix frontend run test:browser:install
+
+      - name: owner scope browser regressions
+        run: npm --prefix frontend run test:browser
+
       # build-to-worker.mjs must reproduce the reviewed tracked bundle exactly.
       # A dirty diff means the shipped Worker UI is stale even if React tests
       # passed against newer source files.

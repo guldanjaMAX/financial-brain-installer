@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,7 +96,7 @@ for (const platform of ["darwin", "win32"]) {
 }
 
 // Exercise the actual no-network CLI branch, rather than only its formatter.
-const fixtureRoot = mkdtempSync(join(tmpdir(), "brain-guidance-path-"));
+const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-guidance-path-")));
 try {
   const directory = join(fixtureRoot, "Owner's $HOME folder");
   mkdirSync(directory, { mode: 0o700 });
@@ -106,7 +106,9 @@ try {
   Object.assign(env, { HOME: fixtureRoot, USERPROFILE: fixtureRoot, NO_COLOR: "1" });
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../brain.mjs", import.meta.url)), "eval", manifest, "--init"], { cwd: fixtureRoot, env, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  const expected = renderCliCommands(`brain eval ${commandPath(manifest)}`);
+  // The child runs in the canonical fixture root, so its copyable command
+  // must use this exact relative target on every host, with shell metacharacters literal.
+  const expected = renderCliCommands(`brain eval ${commandPath(join("Owner's $HOME folder", "brain.manifest.json"))}`);
   assert.ok(result.stdout.includes(expected), result.stdout);
   assert.ok(!/brain (?:forget|eval) \$\{(?:manifestPath|relative\()/.test(source), "concrete forget and eval paths must pass through commandPath");
 } finally {

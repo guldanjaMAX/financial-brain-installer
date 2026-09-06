@@ -113,7 +113,7 @@ jobs:
             echo "::error::package SHA-256 is malformed"
             exit 1
           fi
-          expected_reviewed_sha256="527ea110112e32743579de53b612c805544b9248503a0451fb9f0e2ed90b042c"
+          expected_reviewed_sha256="4691e6dbf52f3cea3f6151f9656031bd3510c9003c980bdc4e493da23517a151"
           if [[ "$package_sha256" != "$expected_reviewed_sha256" ]]; then
             echo "::error::package bytes differ from the locally reviewed package"
             exit 1
@@ -247,6 +247,12 @@ jobs:
       - name: owner app tests
         run: npm --prefix frontend test
 
+      - name: install owner browser test runtime
+        run: npm --prefix frontend run test:browser:install
+
+      - name: owner scope browser regressions
+        run: npm --prefix frontend run test:browser
+
       # build-to-worker.mjs must reproduce the reviewed tracked bundle exactly.
       # A dirty diff means the shipped Worker UI is stale even if React tests
       # passed against newer source files.
@@ -267,6 +273,7 @@ jobs:
         run: node scripts/windows-dpapi-release-gate.mjs
 
       - name: unit and integration suite
+        if: ${{ !cancelled() }}
         run: npm test
 
       # Keep incident regressions visible even when the long npm test chain

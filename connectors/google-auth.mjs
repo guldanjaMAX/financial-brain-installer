@@ -38,6 +38,9 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import { restrictWindowsFileToCurrentUser } from "../operations/current-user-file.mjs";
+import {
+  prepareWindowsDpapiSession, recordWindowsDpapiHelperInvocation,
+} from "../operations/windows-dpapi-session.mjs";
 
 export const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 export const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -389,7 +392,6 @@ const MAX_TOKEN_STORE_BYTES = 2 * 1024 * 1024;
 const MAX_DPAPI_OUTPUT_BYTES = MAX_TOKEN_STORE_BYTES + 64 * 1024;
 const WINDOWS_DPAPI_HELPER = fileURLToPath(new URL("../operations/windows-dpapi.ps1", import.meta.url));
 const WINDOWS_DPAPI_BRIDGE = fileURLToPath(new URL("../operations/windows-dpapi-bridge.mjs", import.meta.url));
-const WINDOWS_DPAPI_SOURCE = fileURLToPath(new URL("../operations/windows-dpapi.cs", import.meta.url));
 
 function lstatIfPresent(path) {
   try {
@@ -493,20 +495,6 @@ function runWindowsDpapi(input, options, operation) {
     "-Operation", operation,
     "-ExpectedLength", String(input.length),
   ];
-  // Keep the injected direct runner for deterministic tests. Production uses
-  // a fixed Node bridge that compiles a fixed C# helper before reading any
-  // secret, then writes the same bytes through an asynchronous pipe.
-  const runner = options.runPowerShell || spawnSync;
-  const runnerCommand = options.runPowerShell ? command : process.execPath;
-  const runnerArgs = options.runPowerShell
-    ? powerShellArgs
-    : [
-        WINDOWS_DPAPI_BRIDGE,
-        "--source", WINDOWS_DPAPI_SOURCE,
-        "--operation", operation,
-        "--length", String(input.length),
-        "--max", String(MAX_DPAPI_OUTPUT_BYTES),
-      ];
   let result;
   let stdout;
   let stderr;
@@ -514,6 +502,24 @@ function runWindowsDpapi(input, options, operation) {
     ? "Windows could not protect the Google credential record with DPAPI"
     : "Windows could not decrypt the Google credential record with DPAPI for the current user";
   try {
+    // Production shares the process-scoped helper with admin-key operations.
+    // Prepare and capture its identity before the bridge receives token bytes.
+    // The direct PowerShell runner remains an explicit unit-test seam.
+    const session = options.runPowerShell ? null
+      : (options.prepareWindowsDpapiSession ?? prepareWindowsDpapiSession)({ environment: env });
+    const runner = options.runPowerShell ?? options.runDpapiBridge ?? spawnSync;
+    const runnerCommand = options.runPowerShell ? command : process.execPath;
+    const runnerArgs = options.runPowerShell ? powerShellArgs : [
+      WINDOWS_DPAPI_BRIDGE,
+      "--helper", session.helper,
+      "--sha256", session.sha256,
+      "--size", String(session.size),
+      "--dev", session.dev,
+      "--ino", session.ino,
+      "--operation", operation,
+      "--length", String(input.length),
+      "--max", String(MAX_DPAPI_OUTPUT_BYTES),
+    ];
     result = runner(runnerCommand, runnerArgs, {
       encoding: null,
       env,
@@ -529,6 +535,9 @@ function runWindowsDpapi(input, options, operation) {
     if (result?.status !== 0 || result?.error || !stdout.length ||
         stdout.length > MAX_DPAPI_OUTPUT_BYTES) {
       throw new Error(failureMessage);
+    }
+    if (!options.runPowerShell) {
+      (options.recordWindowsDpapiHelperInvocation ?? recordWindowsDpapiHelperInvocation)();
     }
     return Buffer.from(stdout);
   } catch {

@@ -449,5 +449,10 @@ Architecture, testing, the storage design and the retrieval measurement gates ar
 [docs/README-developer.md](docs/README-developer.md).
 
 ```bash
-npm ci --ignore-scripts && npm test
+npm ci --ignore-scripts
+npm ci --prefix frontend --ignore-scripts
+npm --prefix frontend run test:browser:install
+npm test
+npm --prefix frontend test
+npm run audit:regressions
 ```

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api, ownerError, type OwnerUploadCapabilities, type OwnerWriteReceipt,
 } from "../lib/api";
@@ -9,6 +9,21 @@ import { useActionRequests } from "./useActionRequests";
 
 export function OwnerUpload({ onStored }: { onStored?: () => void }) {
   const { scope, activeLabel } = useFinanceScope();
+  // A staged file and its retry identity belong to the entity that selected it.
+  // Remount before another entity can inherit that draft or its file input.
+  return <ScopedOwnerUpload key={scope === null ? "no-scope" : `entity:${scope}`} scope={scope} activeLabel={activeLabel} onStored={onStored} />;
+}
+
+function ScopedOwnerUpload({ scope, activeLabel, onStored }: {
+  scope: string | null;
+  activeLabel: string;
+  onStored?: () => void;
+}) {
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
   const [capabilities, setCapabilities] = useState<OwnerUploadCapabilities | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +75,7 @@ export function OwnerUpload({ onStored }: { onStored?: () => void }) {
       if (validation.supported === false) throw new Error(validation.reason);
       const content = await readOwnerTextFile(file, capabilities);
       const documentId = await logicalDocumentId(scope, file.name);
+      if (!active.current) return;
       const receipt = await api<OwnerWriteReceipt>("/api/owner/uploads", {
         request_id: id,
         entity_slug: scope,
@@ -79,6 +95,9 @@ export function OwnerUpload({ onStored }: { onStored?: () => void }) {
         || receipt.document_id !== documentId || receipt.changed !== changed || !eventMatchesChange || !action) {
         throw new Error("The request completed, but the brain did not return a common-ingestion receipt. This file is not being labeled uploaded.");
       }
+      // An already sent request remains bound to its original entity. Its
+      // receipt cannot publish success or refresh a different entity's page.
+      if (!active.current) return;
       setMessage(receipt.replayed
         ? "The brain confirmed this exact upload request was already processed. No second write or event was created."
         : action === "unchanged"
@@ -90,9 +109,9 @@ export function OwnerUpload({ onStored }: { onStored?: () => void }) {
       setFile(null);
       onStored?.();
     } catch (next) {
-      setError(ownerError(next).message);
+      if (active.current) setError(ownerError(next).message);
     } finally {
-      setBusy(false);
+      if (active.current) setBusy(false);
     }
   }
 

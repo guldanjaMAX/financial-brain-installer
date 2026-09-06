@@ -458,5 +458,34 @@
       "PLAID-OWNER-ACCEPTANCE"
     ],
     "evidence": []
+  },
+  {
+    "id": "UPDATE-023",
+    "title": "Windows Google credential storage uses the current shared encryption helper",
+    "status": "local-only",
+    "scopes": ["fresh", "upgrade", "recovery"],
+    "tests": [
+      "test/google-auth-storage.test.mjs",
+      "test/admin-key-file.test.mjs",
+      "test/windows-dpapi-release-gate.test.mjs"
+    ],
+    "acceptance": "On each supported Windows runtime, run the source and exact installed package gates: 25 DPAPI round trips, one helper compilation, admin-key create/read/rotate and Google credential save/read. Verify captured helper identity, 65 successful invocations, no plaintext or metadata disclosure, and clean normal exit. Then prove sign-in and refresh in the owner field journey. A passing injected PowerShell test cannot stand in for the production bridge.",
+    "findings": ["WINDOWS-GOOGLE-SHARED-DPAPI"],
+    "evidence": []
+  },
+  {
+    "id": "UPDATE-024",
+    "title": "Owner uploads and private access links stay bound to their entity and recipient",
+    "status": "open",
+    "scopes": ["fresh", "upgrade", "recovery"],
+    "tests": [
+      "frontend/test/browser/owner-upload.browser.mjs",
+      "frontend/test/browser/document-access.browser.mjs",
+      "worker/test/document-access.test.mjs",
+      "worker/test/owner-actions.test.mjs"
+    ],
+    "acceptance": "In the actual owner components on Mac and Windows, stage a file under A and switch to B, whole-Brain, and back to A. No file or retry identity may transfer without a fresh selection. Delay file reads, searches and grant responses across scope, recipient and selection changes; stale completions must not repopulate another context, enable an old private-link copy action, clear a new draft, or refresh the wrong entity. Preserve correctly submitted original-entity requests and backend cross-entity refusal. Verify the rebuilt packaged owner page before field acceptance.",
+    "findings": ["OWNER-UPLOAD-SCOPE", "OWNER-ACCESS-STALE-LINK"],
+    "evidence": []
   }
 ]

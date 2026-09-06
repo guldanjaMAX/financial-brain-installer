@@ -27,7 +27,7 @@ import {
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ACCELERATED_BOOTSTRAP_MAX_MS,
@@ -2150,6 +2150,67 @@ const bootstrapCompletion = () => ({
   }
 }
 
+// npm.cmd adds a shell process that can survive spawnSync's timeout on Windows
+// and keep the install prefix or working directory open. Reach the verified npm
+// CLI directly with this Node executable; never fall back to PATH or a shell.
+function resolvePackedNpmCli(environment = process.env) {
+  if (!environment.npm_execpath) throw new Error("npm_cli_unavailable_run_through_npm_script");
+  const cli = realpathSync(environment.npm_execpath);
+  const info = lstatSync(cli);
+  if (!info.isFile() || info.isSymbolicLink() || basename(cli) !== "npm-cli.js") {
+    throw new Error("npm_cli_locator_refused");
+  }
+  const pkg = JSON.parse(readFileSync(join(dirname(cli), "..", "package.json"), "utf8"));
+  if (pkg.name !== "npm" || !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(String(pkg.version || ""))) {
+    throw new Error("npm_cli_package_refused");
+  }
+  return cli;
+}
+
+function runPackedNpm(cli, args, { cwd, env, timeout = 60_000 }) {
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd, env, encoding: "utf8", shell: false, timeout, maxBuffer: 16 * 1024 * 1024,
+  });
+}
+
+function packedProcessDetail(result) {
+  return `status=${result.status ?? "null"} signal=${result.signal ?? "none"} error=${result.error?.code ?? "none"}\n` +
+    `${result.stderr || ""}${result.stdout || ""}`;
+}
+
+/* ---- the npm fixture runner is direct, bounded and rejects an unverified locator ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-npm-runner-")));
+  try {
+    const npmRoot = join(sandbox, "npm with spaces");
+    mkdirSync(join(npmRoot, "bin"), { recursive: true });
+    const cli = join(npmRoot, "bin", "npm-cli.js");
+    writeFileSync(join(npmRoot, "package.json"), JSON.stringify({ name: "npm", version: "1.0.0" }));
+    writeFileSync(cli, 'if(process.argv.includes("--wait")){setInterval(()=>{},1000)}else{console.log(JSON.stringify(process.argv.slice(2)))}');
+    const verified = resolvePackedNpmCli({ npm_execpath: cli });
+    const literalArgs = ["literal argument with spaces", "$HOME", "a&b", "semi;colon"];
+    const direct = runPackedNpm(verified, literalArgs, { cwd: sandbox, env: {} });
+    check("the npm runner preserves literal arguments with no shell or PATH lookup",
+      direct.status === 0 && direct.stdout.trim() === JSON.stringify(literalArgs), packedProcessDetail(direct));
+    let missing = false;
+    try { resolvePackedNpmCli({}); } catch (error) { missing = /npm_cli_unavailable/.test(error.message); }
+    check("the npm runner refuses a missing runtime locator instead of launching npm.cmd", missing);
+    writeFileSync(join(npmRoot, "package.json"), JSON.stringify({ name: "not-npm", version: "1.0.0" }));
+    let invalid = false;
+    try { resolvePackedNpmCli({ npm_execpath: cli }); } catch (error) { invalid = /npm_cli_package_refused/.test(error.message); }
+    check("the npm runner refuses a locator outside the npm package", invalid);
+    const timedOut = runPackedNpm(verified, ["--wait"], { cwd: sandbox, env: {}, timeout: 250 });
+    let childGone = false;
+    try { process.kill(timedOut.pid, 0); } catch (error) { childGone = error.code === "ESRCH"; }
+    check("a timed-out npm process is reaped before cleanup", timedOut.error?.code === "ETIMEDOUT" && childGone,
+      packedProcessDetail(timedOut));
+    check("npm failure diagnostics retain timeout, signal and status", /status=null.*signal=\S+.*error=ETIMEDOUT/.test(packedProcessDetail(timedOut)));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+    check("the timed-out direct npm fixture leaves no locked sandbox", !existsSync(sandbox));
+  }
+}
+
 /* ---- the packed user-prefix launcher rediscovers setup state in a fresh process ---- */
 {
   const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-installed-update-")));
@@ -2170,38 +2231,41 @@ const bootstrapCompletion = () => ({
     mkdirSync(firstDirectory, { recursive: true });
     mkdirSync(reopenedDirectory, { recursive: true });
     mkdirSync(reinstalledDirectory, { recursive: true });
-
-    const pack = spawnSync("npm", [
-      "pack", "--json", "--ignore-scripts", "--pack-destination", packDirectory,
-    ], {
-      cwd: root,
-      encoding: "utf8",
-      shell: process.platform === "win32",
-      timeout: 60_000,
-    });
+    const npmCli = resolvePackedNpmCli();
+    const cache = join(sandbox, "npm-cache");
+    const userConfig = join(sandbox, "empty-user.npmrc");
+    const globalConfig = join(sandbox, "empty-global.npmrc");
+    writeFileSync(userConfig, "");
+    writeFileSync(globalConfig, "");
+    const npmEnvironment = { HOME: fakeHome, USERPROFILE: fakeHome, LOCALAPPDATA: fakeLocalAppData, NO_COLOR: "1" };
+    for (const key of ["PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "ComSpec", "PATHEXT", "TEMP", "TMP", "TMPDIR"]) {
+      if (typeof process.env[key] === "string") npmEnvironment[key] = process.env[key];
+    }
+    // The release bundles every runtime dependency. An empty cache plus offline
+    // install proves this package is self-contained and avoids registry retries.
+    const npmFlags = ["--offline", "--ignore-scripts", "--no-audit", "--no-fund",
+      "--cache", cache, "--userconfig", userConfig, "--globalconfig", globalConfig];
+    const pack = runPackedNpm(npmCli, [
+      "pack", "--json", ...npmFlags, "--pack-destination", packDirectory,
+    ], { cwd: root, env: npmEnvironment });
     let archive = null;
     try { archive = JSON.parse(pack.stdout)?.[0]?.filename || null; } catch { /* fixed check below */ }
     check(
       "the rediscovery acceptance test can build the real release package",
       pack.status === 0 && Boolean(archive),
-      pack.stderr || pack.stdout,
+      packedProcessDetail(pack),
     );
 
     if (pack.status === 0 && archive) {
-      const installPacked = (cwd) => spawnSync("npm", [
-          "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
+      const installPacked = () => runPackedNpm(npmCli, [
+          "install", "--global", ...npmFlags,
           "--prefix", prefix, join(packDirectory, archive),
-        ], {
-          cwd,
-          encoding: "utf8",
-          shell: process.platform === "win32",
-          timeout: 60_000,
-        });
-      const install = installPacked(firstDirectory);
+        ], { cwd: root, env: npmEnvironment });
+      const install = installPacked();
       check(
         "the real package installs into a user-owned prefix without sudo",
         install.status === 0,
-        install.stderr || install.stdout,
+        packedProcessDetail(install),
       );
 
       if (install.status === 0) {
@@ -2265,12 +2329,12 @@ const bootstrapCompletion = () => ({
         );
 
         const reinstall = setupReceipt.status === 0
-          ? installPacked(reopenedDirectory)
+          ? installPacked()
           : { status: null, stdout: "", stderr: "setup receipt failed" };
         check(
           "the same packed release reinstalls into the same user prefix",
           reinstall.status === 0,
-          reinstall.stderr || reinstall.stdout,
+          packedProcessDetail(reinstall),
         );
 
         const afterReinstall = reinstall.status === 0
@@ -2294,6 +2358,7 @@ const bootstrapCompletion = () => ({
     }
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
+    check("the real packed install and reinstall sandbox is completely removed", !existsSync(sandbox));
   }
 }
 

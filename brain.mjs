@@ -31,7 +31,7 @@
 
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, dirname, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -15486,7 +15486,9 @@ export function persistCliPath({
   const written = [];
   const present = [];
   for (const name of [".zshrc", ".bash_profile", ".bashrc"]) {
-    const file = join(home, name);
+    // This branch writes POSIX shell profiles even when its filesystem is
+    // injected by a Windows-hosted test. Windows returned above without writes.
+    const file = posix.join(home, name);
     let current = "";
     try { current = exists(file) ? read(file, "utf8") : ""; } catch { current = ""; }
     if (current.includes(binDir)) { present.push(name); continue; }

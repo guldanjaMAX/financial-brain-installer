@@ -24,6 +24,12 @@ const cfg = (token, expiresAt) =>
 const win = wranglerConfigCandidates({ APPDATA: "C:\\Users\\m\\AppData\\Roaming", USERPROFILE: "C:\\Users\\m" }, "win32");
 assert.ok(win.some((p) => p.includes("xdg.config")), "the Windows XDG layout must be searched");
 assert.ok(win.length >= 3, "Windows needs several candidate locations");
+assert.deepEqual(win, [
+  "C:\\Users\\m\\AppData\\Roaming\\xdg.config\\.wrangler\\config\\default.toml",
+  "C:\\Users\\m\\AppData\\Roaming\\.wrangler\\config\\default.toml",
+  "C:\\Users\\m\\.config\\.wrangler\\config\\default.toml",
+  "C:\\Users\\m\\.wrangler\\config\\default.toml",
+], "declared Windows paths must be correct even when this test runs on POSIX");
 const posix = wranglerConfigCandidates({ HOME: "/Users/m" }, "darwin");
 assert.ok(posix.some((p) => p === "/Users/m/.wrangler/config/default.toml"));
 assert.ok(posix.some((p) => p.includes("/.config/")), "the XDG layout must be searched on POSIX too");

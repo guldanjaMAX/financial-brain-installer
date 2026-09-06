@@ -210,11 +210,16 @@ the full release gate.
 | Evaluation | `npm run test:eval` |
 | Published package privacy | `node test/package-privacy.test.mjs` |
 
-Required offline release checks:
+Required release checks:
 
 ```bash
 npm ci --ignore-scripts
+npm ci --prefix frontend --ignore-scripts
+npm --prefix frontend run test:browser:install
 npm test
+npm --prefix frontend test
+npm --prefix frontend run test:browser
+npm run audit:regressions
 git diff --check
 npm audit --offline
 npm pack --dry-run --json --ignore-scripts
@@ -223,6 +228,10 @@ npm pack --dry-run --json --ignore-scripts
 Run `node --check` on every changed JavaScript module. The full GitHub matrix
 must pass on Windows, macOS, and Linux with Node 22 and 24. That is six jobs.
 Local macOS success does not replace Windows and Linux evidence.
+Install the pinned browser runtime before offline fixture execution. Browser
+tests use synthetic loopback APIs and no owner browser profile. Packed reinstall
+tests run through the verified npm CLI provided by `npm test` or
+`npm run audit:regressions`; do not replace it with a Windows shell wrapper.
 
 There are three separate claims:
 

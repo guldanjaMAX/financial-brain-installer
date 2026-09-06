@@ -11,6 +11,7 @@ import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 const SCENARIO = String(process.env.BRAIN_HEALTH_VERIFY_SCENARIO || "");
 const FIXTURE_ADMIN = "fixture-admin-label";
@@ -288,13 +289,14 @@ if (SCENARIO) {
   const processing = runScenario("health-vector-processing", "health", { adminKey: true });
   check("health cannot green an accepted mutation before query visibility",
     processing.code === 1 && /not query-visible yet.*accepted by Vectorize/is.test(processing.output) &&
-      /brain drain/.test(processing.output) && !/vector index is query-ready/.test(processing.output),
+      processing.output.includes(renderCliCommands("brain drain <manifest>")) && !/vector index is query-ready/.test(processing.output),
     processing.output);
 
   const countMismatch = runScenario("health-vector-count-mismatch", "health", { adminKey: true });
   check("health rejects an empty queue when Vectorize is still missing vectors",
     countMismatch.code === 1 && /Vectorize holds 0 vector\(s\), but D1 requires 10/is.test(countMismatch.output) &&
-      /brain diagnose/.test(countMismatch.output) && /brain reindex/.test(countMismatch.output),
+      countMismatch.output.includes(renderCliCommands("brain diagnose <manifest>")) &&
+      countMismatch.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
     countMismatch.output);
 
   const countExcess = runScenario("health-vector-count-excess", "health", { adminKey: true });

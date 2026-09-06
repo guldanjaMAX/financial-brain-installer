@@ -37,6 +37,11 @@ the deployed owner journey and a separately approved production pilot.
    earlier failure. CI runs this step even if the main suite fails. A missing,
    timed-out or signalled process is a failure; skipped hardware checks remain
    unproven. Never pipe the command being verified into an output filter.
+   Install locked frontend dependencies and the reviewed Playwright Chromium
+   first. Owner browser regressions execute the actual components, with only
+   synthetic loopback APIs, and are part of the independent incident runner.
+   Change entity, recipient and selection while requests are pending; final
+   success alone cannot establish that drafts and private links stayed scoped.
 5. Prove the full lifecycle: bootstrap to actual confirmed batch history, add
    overwrite and delete documents, upgrade, delay provider visibility, interrupt, restart,
    contend for the lease, attempt connector writes during pause, then verify
@@ -128,6 +133,6 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The 0.4.0/schema34 candidate retains UPDATE-001 through UPDATE-016 and every original F/N finding. Earlier 0.3.7 disposable rehearsals do not automatically clear this changed candidate. No incident is promoted here: open and local-only entries block release writes. Current named-profile OAuth uses its reviewed encrypted backend; the explicit legacy TOML helper keeps its separate compatible pin. Preflight detects environment and executable traps but does not read credentials, authorize an account, or prove a current named-profile login.
+The 0.4.0/schema35 candidate retains UPDATE-001 through UPDATE-024 and every original F/N finding. Earlier 0.3.7 disposable rehearsals do not automatically clear this changed candidate. No incident is promoted here: open and local-only entries block release writes. Current named-profile OAuth uses its reviewed encrypted backend; the explicit legacy TOML helper keeps its separate compatible pin. Preflight detects environment and executable traps but does not read credentials, authorize an account, or prove a current named-profile login.
 
 Source and package Windows DPAPI gates, frontend bundle parity, and zero-findings public-history scanning remain mandatory alongside the shared-package matrix. Windows hosted CI does not prove the physical Windows ARM64 owner journey.
