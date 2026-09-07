@@ -2855,11 +2855,26 @@ export const ACCELERATED_BOOTSTRAP_WINDOW = 3;
 const ACCELERATED_BOOTSTRAP_CONCURRENCY = 6;
 const ACCELERATED_BOOTSTRAP_PROTOCOL = "bootstrap-v2";
 // A residue-only re-projection epoch walks only chunks that still hold a queued
-// upsert row instead of the whole corpus. The marker lives in the durable state
-// row so a resumed request, or an older Worker, reads the same answer: an older
-// Worker refuses the unknown protocol rather than walking it as a full corpus.
-export const RESIDUE_REPROJECTION_PROTOCOL = "bootstrap-v2/residue";
-const ACCELERATED_BOOTSTRAP_PROTOCOLS = new Set([ACCELERATED_BOOTSTRAP_PROTOCOL, RESIDUE_REPROJECTION_PROTOCOL]);
+// upsert row instead of the whole corpus. Its marker is
+// install_state.vector_projection_residue_epoch (migration 0036), set to the
+// epoch it opened and cleared when that epoch verifies. It is deliberately NOT
+// the protocol column: every shipped Worker branches on that column, and the
+// legacy branch deletes queued upserts before it refuses, so an interrupted
+// residue epoch re-run from an older kit would have lost the queue. An older
+// Worker never reads the residue column. Meeting an OPEN residue epoch it sees
+// an ordinary v2 walk: it drains the queued rows through its paused drain, then
+// walks the whole range and re-embeds them (wasteful, never lossy; measured
+// against main: every vector present, nothing deleted), and its final receipt
+// fails its own base-count invariant once, after which a re-run completes.
+export const RESIDUE_REPROJECTION_SCHEMA = 36;
+// Residue behaviour applies only while the residue walk is actually OPEN: the
+// column names this epoch and the status is bootstrap_required. Once the walk
+// has ended, every queued row drains the ordinary way, so a later small queue
+// can never be skipped.
+function residueWalkOpen(state) {
+  return state.status === "bootstrap_required" &&
+    Number.isSafeInteger(Number(state.residue_epoch)) && Number(state.residue_epoch) === state.epoch;
+}
 
 async function mapBounded(values, limit, operation) {
   const output = new Array(values.length);
@@ -2893,10 +2908,22 @@ async function bootstrapStateV2(env) {
       !Number.isSafeInteger(baseCount) || baseCount < 0) {
     throw new Error("the accelerated vector bootstrap state is invalid");
   }
+  // The residue column arrives in migration 0036; older fixtures and brains
+  // simply have no residue epoch.
+  let residueEpoch = null;
+  if (Number(state.schema_version) >= RESIDUE_REPROJECTION_SCHEMA) {
+    const residue = await env.DB.prepare(
+      "SELECT vector_projection_residue_epoch AS residue_epoch FROM install_state WHERE id = 1"
+    ).first();
+    residueEpoch = residue?.residue_epoch === null || residue?.residue_epoch === undefined
+      ? null
+      : Number(residue.residue_epoch);
+  }
   return {
     ...state,
     epoch,
     baseCount,
+    residue_epoch: residueEpoch,
     cursor: state.cursor === null || state.cursor === undefined ? "" : String(state.cursor),
     highWater: state.high_water === null || state.high_water === undefined ? "" : String(state.high_water),
   };
@@ -2979,7 +3006,7 @@ async function acceleratedBootstrapReceipt(env, phase, blocked = null) {
     // Present only while a residue-only epoch is open: how many queued chunks
     // this epoch re-embeds instead of the whole corpus. Optional in the CLI's
     // aggregate-only contract so older receipts still validate.
-    ...(state.protocol === RESIDUE_REPROJECTION_PROTOCOL
+    ...(residueWalkOpen(state)
       ? { reprojected_residue: Math.max(0, total - state.baseCount) }
       : {}),
     // Present only on a legacy_drain receipt whose residue re-projection could
@@ -2991,7 +3018,7 @@ async function acceleratedBootstrapReceipt(env, phase, blocked = null) {
 }
 
 async function activateAcceleratedBootstrap(env, state) {
-  if (ACCELERATED_BOOTSTRAP_PROTOCOLS.has(state.protocol)) return state;
+  if (state.protocol === ACCELERATED_BOOTSTRAP_PROTOCOL) return state;
   if (state.protocol !== null && state.protocol !== undefined && state.protocol !== "") {
     throw new Error("the vector bootstrap protocol is not supported by this Worker");
   }
@@ -3022,7 +3049,7 @@ async function queueAcceleratedBootstrapBatch(env, state, now, lease = null) {
   // still holds a queued upsert row, and only those. Rows the paused drain had
   // already submitted keep their receipt and are confirmed by that drain, so
   // they are neither paged nor counted here.
-  const residueOnly = state.protocol === RESIDUE_REPROJECTION_PROTOCOL;
+  const residueOnly = residueWalkOpen(state);
   if (residueOnly && (!lease || typeof lease.ownerToken !== "string" || typeof lease.now !== "function")) {
     throw new Error("the residue re-projection walk requires the drain lease");
   }
@@ -3046,12 +3073,26 @@ async function queueAcceleratedBootstrapBatch(env, state, now, lease = null) {
   if (!Number.isSafeInteger(batchNo) || batchNo < 1) {
     throw new Error("the accelerated bootstrap batch identity is invalid");
   }
+  // One clock read for every fence in this batch: the statements must agree on
+  // whether the lease is live, and a fence on the tag and cursor but not on the
+  // ledger row would let a lost lease commit a phantom queued batch.
+  const fenceNow = residueOnly ? lease.now() : null;
   const statements = [
-    env.DB.prepare(
-      `INSERT INTO vector_bootstrap_batches
-         (epoch,batch_no,start_cursor,end_cursor,row_count,status)
-       VALUES (?1,?2,?3,?4,?5,'queued')`
-    ).bind(state.epoch, batchNo, state.cursor, endCursor, page.length),
+    residueOnly
+      ? env.DB.prepare(
+        `INSERT INTO vector_bootstrap_batches
+           (epoch,batch_no,start_cursor,end_cursor,row_count,status)
+         SELECT ?1,?2,?3,?4,?5,'queued'
+          WHERE EXISTS (SELECT 1 FROM install_state s WHERE s.id=1
+                          AND s.vector_projection_bootstrap_epoch=?1
+                          AND s.vector_drain_lease_owner=?6
+                          AND s.vector_drain_lease_expires_at>?7)`
+      ).bind(state.epoch, batchNo, state.cursor, endCursor, page.length, lease.ownerToken, fenceNow)
+      : env.DB.prepare(
+        `INSERT INTO vector_bootstrap_batches
+           (epoch,batch_no,start_cursor,end_cursor,row_count,status)
+         VALUES (?1,?2,?3,?4,?5,'queued')`
+      ).bind(state.epoch, batchNo, state.cursor, endCursor, page.length),
   ];
   if (!residueOnly) {
     statements.push(env.DB.prepare(
@@ -3079,7 +3120,7 @@ async function queueAcceleratedBootstrapBatch(env, state, now, lease = null) {
                         AND s.vector_projection_bootstrap_epoch=?3
                         AND s.vector_drain_lease_owner=?5
                         AND s.vector_drain_lease_expires_at>?6)`
-    ).bind(state.cursor, endCursor, state.epoch, batchNo, lease.ownerToken, lease.now())
+    ).bind(state.cursor, endCursor, state.epoch, batchNo, lease.ownerToken, fenceNow)
     : env.DB.prepare(
       `UPDATE vector_outbox SET bootstrap_epoch=?3,bootstrap_batch=?4
         WHERE chunk_uid>?1 AND chunk_uid<=?2 AND submitted_mutation_id IS NULL`
@@ -3093,7 +3134,7 @@ async function queueAcceleratedBootstrapBatch(env, state, now, lease = null) {
           AND COALESCE(vector_projection_bootstrap_cursor,'')=?2
           AND vector_drain_lease_owner=?4
           AND vector_drain_lease_expires_at>?5`
-    ).bind(state.epoch, state.cursor, endCursor, lease.ownerToken, lease.now())
+    ).bind(state.epoch, state.cursor, endCursor, lease.ownerToken, fenceNow)
     : env.DB.prepare(
       `UPDATE install_state SET vector_projection_bootstrap_cursor=?3
         WHERE id=1 AND schema_version>=13
@@ -3108,6 +3149,9 @@ async function queueAcceleratedBootstrapBatch(env, state, now, lease = null) {
       drainLeaseChanges(results[0]) !== 1 ||
       drainLeaseChanges(results[tagIndex]) !== page.length ||
       drainLeaseChanges(results[cursorIndex]) !== 1) {
+    if (residueOnly && drainLeaseChanges(results[0]) === 0) {
+      throw new Error("the residue re-projection lost its drain lease before queueing a page; nothing was queued");
+    }
     throw new Error("the accelerated bootstrap batch receipt was ambiguous");
   }
   return true;
@@ -3353,11 +3397,19 @@ export async function installedSchemaVersion(env) {
 // and it keeps the recomputed base count from ever calling such a row projected.
 const RESIDUE_PAGEABLE_SQL = `o.op='upsert' AND o.submitted_mutation_id IS NULL
           AND c.chunk_uid IS NOT NULL AND s.quarantined_at IS NULL`;
+// Rows the residue walk must not run beside: DELETE rows, rows already
+// submitted, orphans. Quarantined upserts are deliberately NOT blockers: the
+// walk pages around them, embeds everything that can be embedded, and once its
+// range is exhausted it closes so the ordinary paused drain names quarantine
+// (and picks up any rows released by vector-retry) exactly as it always has.
 const RESIDUE_BLOCKER_SQL = `FROM vector_outbox o
        LEFT JOIN chunks c ON c.chunk_uid=o.chunk_uid
-       LEFT JOIN vector_outbox_retry_state s
-         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
-      WHERE NOT (${RESIDUE_PAGEABLE_SQL})`;
+      WHERE NOT (o.op='upsert' AND o.submitted_mutation_id IS NULL AND c.chunk_uid IS NOT NULL)`;
+// Every queued upsert for a live chunk, quarantined or not: the rows the base
+// count must treat as unprojected so the receipt reconciles while they wait.
+const RESIDUE_UNPROJECTED_FROM_SQL = `FROM vector_outbox o
+       JOIN chunks c ON c.chunk_uid=o.chunk_uid
+      WHERE o.op='upsert' AND o.submitted_mutation_id IS NULL`;
 const RESIDUE_PAGEABLE_FROM_SQL = `FROM vector_outbox o
        JOIN chunks c ON c.chunk_uid=o.chunk_uid
        LEFT JOIN vector_outbox_retry_state s
@@ -3365,36 +3417,67 @@ const RESIDUE_PAGEABLE_FROM_SQL = `FROM vector_outbox o
       WHERE ${RESIDUE_PAGEABLE_SQL}`;
 
 async function residueBlockerLedger(env) {
-  const row = await env.DB.prepare(
-    `SELECT count(*) AS total,
-            COALESCE(sum(CASE WHEN s.quarantined_at IS NULL THEN 1 ELSE 0 END),0) AS drainable
-       ${RESIDUE_BLOCKER_SQL}`
-  ).first();
+  const row = await env.DB.prepare(`SELECT count(*) AS total ${RESIDUE_BLOCKER_SQL}`).first();
   const total = Number(row?.total);
-  const drainable = Number(row?.drainable);
-  if (![total, drainable].every((value) => Number.isSafeInteger(value) && value >= 0) || drainable > total) {
-    throw new Error("the paused bootstrap residue receipt is invalid");
-  }
-  return { total, drainable };
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error("the paused bootstrap residue receipt is invalid");
+  return { total, drainable: total };
 }
 
-async function residueBlockersAllSubmitted(env) {
+/**
+ * What stands in the way, by priority: quarantine (nothing will drain it), then
+ * the ordering fence (rows submitted whose mutation the index has not processed),
+ * then ordinary cleanup still moving. `scope` is "walk" while a residue walk is
+ * open or about to open (quarantined rows are not in the way of the walk) and
+ * "outbox" for the ordinary paused drain (they are in the way of verification).
+ * The row count is the count of the named cause: the number the remedy acts on.
+ */
+async function residueBlockedCause(env, { scope = "outbox" } = {}) {
   const row = await env.DB.prepare(
-    `SELECT count(*) AS n ${RESIDUE_BLOCKER_SQL}
-        AND o.submitted_mutation_id IS NULL AND s.quarantined_at IS NULL`
+    `SELECT
+       (SELECT count(*) FROM vector_outbox o JOIN chunks c ON c.chunk_uid=o.chunk_uid
+          LEFT JOIN vector_outbox_retry_state s ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+         WHERE o.op='upsert' AND o.submitted_mutation_id IS NULL AND s.quarantined_at IS NOT NULL) AS quarantined,
+       (SELECT count(*) FROM vector_outbox WHERE submitted_mutation_id IS NOT NULL) AS submitted,
+       (SELECT count(*) ${RESIDUE_BLOCKER_SQL}) AS blockers,
+       (SELECT count(*) FROM vector_outbox) AS outbox`
   ).first();
-  const n = Number(row?.n);
-  if (!Number.isSafeInteger(n) || n < 0) throw new Error("the paused bootstrap residue receipt is invalid");
-  return n === 0;
+  const quarantined = Number(row?.quarantined);
+  const submitted = Number(row?.submitted);
+  const blockers = Number(row?.blockers);
+  const outbox = Number(row?.outbox);
+  if (![quarantined, submitted, blockers, outbox].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+    throw new Error("the paused bootstrap residue receipt is invalid");
+  }
+  if (scope === "outbox") {
+    // The ordinary paused drain names only what it can never clear. A fence
+    // here is usually an in-flight confirmation doing its normal work, so it
+    // is not named; the CLI's movement budget still bounds a stranded one.
+    return quarantined > 0 ? { blocked_on: "quarantine", blocked_rows: quarantined } : null;
+  }
+  if (blockers === 0) return null;
+  if (submitted > 0 && submitted === blockers) return { blocked_on: "fence", blocked_rows: submitted };
+  return { blocked_on: "cleanup", blocked_rows: blockers };
+}
+
+/**
+ * Whether this epoch was opened as a residue-only re-projection and has queued
+ * at least one batch. The receipt row outlives the residue column (which the
+ * walk clears when its range is exhausted), so a cleanup pass that follows the
+ * walk can still be reported as "waiting" rather than as a return to legacy
+ * cleanup, which the CLI treats as a regression once bulk work has begun.
+ */
+async function residueEpochBegan(env, state) {
+  if (Number(state.schema_version) < RESIDUE_REPROJECTION_SCHEMA) return false;
+  const row = await env.DB.prepare(
+    `SELECT (EXISTS (SELECT 1 FROM vector_projection_events WHERE kind=?2 AND epoch_after=?1)
+             AND EXISTS (SELECT 1 FROM vector_bootstrap_batches WHERE epoch=?1)) AS began`
+  ).bind(state.epoch, RESIDUE_REPROJECTION_EVENT).first();
+  return Number(row?.began) === 1;
 }
 
 // Below this many queued upserts the paused drain clears them in a handful of
 // confirmations, and re-embedding them by the bulk walk would gain nothing.
 export const RESIDUE_REPROJECTION_MIN_ROWS = 10 * DRAIN_BATCH_SIZE_MAX;
-// vector_projection_events, the durable receipt this path writes, arrives in
-// migration 0036. Older schemas keep the slow path rather than open an epoch
-// whose bookkeeping change nothing records.
-export const RESIDUE_REPROJECTION_SCHEMA = 36;
 export const RESIDUE_REPROJECTION_EVENT = "residue-reprojection";
 
 /**
@@ -3426,22 +3509,26 @@ export async function openResidueReprojection(env, state, options, lease) {
   }
   const ledger = await env.DB.prepare(
     `SELECT (SELECT count(*) ${RESIDUE_PAGEABLE_FROM_SQL}) AS pageable,
+            (SELECT count(*) ${RESIDUE_UNPROJECTED_FROM_SQL}) AS unprojected,
             (SELECT count(*) FROM chunks) AS chunks,
             (SELECT count(*) FROM vector_bootstrap_batches
               WHERE epoch=?1 AND status<>'confirmed') AS unfinished`
   ).bind(state.epoch).first();
   const pageable = Number(ledger?.pageable);
+  const unprojected = Number(ledger?.unprojected);
   const chunks = Number(ledger?.chunks);
   const unfinished = Number(ledger?.unfinished);
-  if (![pageable, chunks, unfinished].every((value) => Number.isSafeInteger(value) && value >= 0) ||
-      pageable > chunks) {
+  if (![pageable, unprojected, chunks, unfinished].every((value) => Number.isSafeInteger(value) && value >= 0) ||
+      pageable > unprojected || unprojected > chunks) {
     throw new Error("the residue re-projection ledger is invalid");
   }
   if (unfinished > 0 || pageable <= RESIDUE_REPROJECTION_MIN_ROWS) return { opened: false, blocked: false };
 
-  let blockers = await residueBlockerLedger(env);
-  if (blockers.total > 0) {
-    if (blockers.drainable > 0) {
+  // Deletes, rows already submitted, and orphans must clear before the open;
+  // quarantined upserts do not block it.
+  let blocked = await residueBlockedCause(env, { scope: "walk" });
+  if (blocked) {
+    if (blocked.blocked_on !== "fence") {
       await drainOutboxWithLease(env, {
         ...options,
         allowPausedBootstrap: true,
@@ -3449,19 +3536,20 @@ export async function openResidueReprojection(env, state, options, lease) {
         maxBatches: 10,
         skipUpserts: true,
       }, lease);
-      blockers = await residueBlockerLedger(env);
+      blocked = await residueBlockedCause(env, { scope: "walk" });
+    } else {
+      // Submitted rows only confirm through the drain's fence check; run it once
+      // so a fence that has opened is noticed now rather than next call.
+      await drainOutboxWithLease(env, {
+        ...options,
+        allowPausedBootstrap: true,
+        disableBootstrapAdvance: true,
+        maxBatches: 1,
+        skipUpserts: true,
+      }, lease);
+      blocked = await residueBlockedCause(env, { scope: "walk" });
     }
-    if (blockers.total > 0) {
-      // Name the cause on the receipt rather than throwing: a thrown error
-      // reaches the operator as an unnamed HTTP 500. Quarantine cannot drain at
-      // all; rows already submitted are waiting on the provider's ordering fence
-      // (the Worker probes a stalled fence on its own after a bounded wait);
-      // anything else is ordinary cleanup still moving.
-      const cause = blockers.drainable === 0
-        ? "quarantine"
-        : (await residueBlockersAllSubmitted(env)) ? "fence" : "cleanup";
-      return { opened: false, blocked: true, cause, rows: blockers.total };
-    }
+    if (blocked) return { opened: false, blocked: true, cause: blocked.blocked_on, rows: blocked.blocked_rows };
   }
   if (state.epoch >= Number.MAX_SAFE_INTEGER) {
     throw new Error("the accelerated vector bootstrap epoch is exhausted");
@@ -3473,11 +3561,12 @@ export async function openResidueReprojection(env, state, options, lease) {
       `UPDATE install_state
           SET vector_projection_status='bootstrap_required',
               vector_projection_bootstrap_epoch=?2,
+              vector_projection_residue_epoch=?2,
               vector_projection_bootstrap_cursor=NULL,
               vector_projection_bootstrap_high_water=(SELECT MAX(o.chunk_uid) ${RESIDUE_PAGEABLE_FROM_SQL}),
               vector_projection_bootstrap_protocol=?3,
               vector_projection_bootstrap_base_count=(SELECT count(*) FROM chunks)-(
-                SELECT count(*) ${RESIDUE_PAGEABLE_FROM_SQL})
+                SELECT count(*) ${RESIDUE_UNPROJECTED_FROM_SQL})
         WHERE id=1 AND schema_version>=?6
           AND vector_projection_status='pending'
           AND vector_projection_bootstrap_epoch=?1
@@ -3485,7 +3574,7 @@ export async function openResidueReprojection(env, state, options, lease) {
           AND vector_drain_lease_expires_at>?5
           AND NOT EXISTS (SELECT 1 FROM vector_bootstrap_batches WHERE epoch=?1 AND status<>'confirmed')
           AND NOT EXISTS (SELECT 1 ${RESIDUE_BLOCKER_SQL})`
-    ).bind(state.epoch, nextEpoch, RESIDUE_REPROJECTION_PROTOCOL, lease.ownerToken, openedAt, RESIDUE_REPROJECTION_SCHEMA),
+    ).bind(state.epoch, nextEpoch, ACCELERATED_BOOTSTRAP_PROTOCOL, lease.ownerToken, openedAt, RESIDUE_REPROJECTION_SCHEMA),
     env.DB.prepare(
       `INSERT INTO vector_projection_events
          (at, kind, epoch_before, epoch_after, base_before, base_after, rows, chunks)
@@ -3495,21 +3584,23 @@ export async function openResidueReprojection(env, state, options, lease) {
               (SELECT count(*) FROM chunks)
          FROM install_state
         WHERE id=1 AND vector_projection_bootstrap_epoch=?4
-          AND vector_projection_bootstrap_protocol=?6`
-    ).bind(openedAt, RESIDUE_REPROJECTION_EVENT, state.epoch, nextEpoch, state.baseCount, RESIDUE_REPROJECTION_PROTOCOL),
+          AND vector_projection_residue_epoch=?4
+          AND vector_drain_lease_owner=?6
+          AND vector_drain_lease_expires_at>?7`
+    ).bind(openedAt, RESIDUE_REPROJECTION_EVENT, state.epoch, nextEpoch, state.baseCount, lease.ownerToken, openedAt),
   ]);
   if (!Array.isArray(results) || results.length !== 2 ||
       drainLeaseChanges(results[0]) !== 1 || drainLeaseChanges(results[1]) !== 1) {
     throw new Error("the residue re-projection could not be opened durably; the projection is unchanged");
   }
-  return { opened: true, blocked: false, rows: pageable, baseBefore: state.baseCount, baseAfter: chunks - pageable };
+  return { opened: true, blocked: false, rows: pageable, baseBefore: state.baseCount, baseAfter: chunks - unprojected };
 }
 
 async function drainPausedBootstrapResidue(env, state, options, lease) {
   // In a residue-only epoch the walk owns every queued upsert row, so this
   // drain only handles what the walk cannot page. Without that split it would
   // clear the walk's own rows a hundred at a time before the first page queued.
-  const residueOnly = state.protocol === RESIDUE_REPROJECTION_PROTOCOL;
+  const residueOnly = residueWalkOpen(state);
   const ledger = await env.DB.prepare(
     `SELECT (SELECT count(*) FROM vector_outbox) AS residue,
             (SELECT count(*) FROM vector_bootstrap_batches
@@ -3567,15 +3658,13 @@ async function drainPausedBootstrapResidue(env, state, options, lease) {
   // work begins; drainOutboxWithLease never sets busy at all, unlike the
   // self-leasing drainOutbox wrapper. It stays only so that switching this call
   // to that wrapper cannot silently report contention as quarantine.
-  if (drained.busy !== true && after.total > 0 && after.drainable === 0) {
-    // Name it on the receipt rather than throwing: a thrown error reaches the
-    // operator as an unnamed HTTP 500, and the CLI already knows how to refuse
-    // quarantine by name with its remedies.
-    return {
-      attempted: true,
-      remaining: after.total,
-      blocked: { blocked_on: "quarantine", blocked_rows: after.total },
-    };
+  if (drained.busy !== true && after.total > 0) {
+    // Name what is in the way on the receipt rather than throwing: a thrown
+    // error reaches the operator as an unnamed HTTP 500, and the CLI knows how
+    // to refuse quarantine by name and to wait on the fence by name. Work this
+    // request already drained is durable, so naming quarantine now loses none.
+    const blocked = await residueBlockedCause(env, { scope: residueOnly ? "walk" : "outbox" });
+    return { attempted: true, remaining: after.total, blocked };
   }
   return { attempted: true, remaining: after.total, blocked: null };
 }
@@ -3633,7 +3722,7 @@ async function rebaseVerifiedAcceleratedBootstrap(env, state) {
 async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
   // Finish at most one schema-12 residue page before establishing the bulk-v2
   // boundary. This handles a 0.1.14 update interrupted after queue or submit.
-  if (!ACCELERATED_BOOTSTRAP_PROTOCOLS.has(state.protocol)) {
+  if (state.protocol !== ACCELERATED_BOOTSTRAP_PROTOCOL) {
     // Queued UPSERT rows are superseded by the bulk projection, which re-embeds
     // every chunk from D1 in provider-sized batches with per-batch receipts.
     // Draining them here instead means one 100-row confirmation at a time:
@@ -3690,7 +3779,14 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
 
   const residue = await drainPausedBootstrapResidue(env, state, options, lease);
   if (residue.attempted) {
-    if (residue.remaining > 0) return acceleratedBootstrapReceipt(env, "legacy_drain", residue.blocked);
+    // Once a residue epoch's bulk work has begun the phase stays "waiting": the
+    // CLI treats a return to legacy_drain after building as a regression. An
+    // ordinary v2 epoch with old batch history keeps legacy_drain, which the
+    // CLI exempts from count reconciliation for exactly this cleanup case.
+    if (residue.remaining > 0) {
+      const waiting = residueWalkOpen(state) || await residueEpochBegan(env, state);
+      return acceleratedBootstrapReceipt(env, waiting ? "waiting" : "legacy_drain", residue.blocked);
+    }
     state = await bootstrapStateV2(env);
   }
 
@@ -3759,6 +3855,10 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
     `SELECT count(*) AS n FROM vector_bootstrap_batches
       WHERE epoch=?1 AND status<>'confirmed'`
   ).bind(state.epoch).first();
+  if (residueWalkOpen(state) && state.cursor === state.highWater && Number(unfinished?.n || 0) === 0) {
+    await closeResidueWalk(env, state, lease);
+    state = await bootstrapStateV2(env);
+  }
   const outbox = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
   if (state.cursor === state.highWater && Number(unfinished?.n || 0) === 0 &&
       Number(outbox?.n || 0) === 0) {
@@ -3772,6 +3872,34 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
     phase = await markProjectionVerifiedIfExact(env, lease) ? "complete" : "waiting";
   }
   return acceleratedBootstrapReceipt(env, phase);
+}
+
+/**
+ * A residue walk whose range is exhausted (every pageable row paged, every
+ * batch confirmed) is an ordinary v2 walk from here on: whatever remains in the
+ * outbox (rows quarantined at the open, rows released since) belongs to the
+ * paused drain, which names quarantine by itself. Clearing the column here,
+ * rather than at verification, is what lets a `vector-retry` release be picked
+ * up: released rows lie below the cursor and would never be paged again.
+ * Fenced like every other write in the walk.
+ */
+async function closeResidueWalk(env, state, lease) {
+  if (!residueWalkOpen(state)) return false;
+  const result = await env.DB.prepare(
+    `UPDATE install_state SET vector_projection_residue_epoch=NULL
+      WHERE id=1 AND schema_version>=?2
+        AND vector_projection_status='bootstrap_required'
+        AND vector_projection_bootstrap_epoch=?1
+        AND vector_projection_residue_epoch=?1
+        AND COALESCE(vector_projection_bootstrap_cursor,'')=COALESCE(vector_projection_bootstrap_high_water,'')
+        AND NOT EXISTS (SELECT 1 FROM vector_bootstrap_batches WHERE epoch=?1 AND status<>'confirmed')
+        AND vector_drain_lease_owner=?3
+        AND vector_drain_lease_expires_at>?4`
+  ).bind(state.epoch, RESIDUE_REPROJECTION_SCHEMA, lease.ownerToken, lease.now()).run();
+  if (drainLeaseChanges(result) !== 1) {
+    throw new Error("the finished residue walk could not be closed; the projection is unchanged");
+  }
+  return true;
 }
 
 export async function acceleratedVectorBootstrap(env, options = {}) {

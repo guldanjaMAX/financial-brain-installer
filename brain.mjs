@@ -3992,8 +3992,16 @@ export function validateAcceleratedBootstrapReceipt(body) {
   if (body.reprojected_residue !== undefined) {
     receipt.reprojected_residue = nonNegativeReceiptCount(body, "reprojected_residue", label);
   }
+  // Newer Workers name the not-yet-visible count `retrying`; carry it so the
+  // runner can read the honest name when both are present.
+  if (body.retrying !== undefined) {
+    receipt.retrying = nonNegativeReceiptCount(body, "retrying", label);
+  }
   // Present only on a cleanup receipt whose bulk re-projection could not open:
   // the cause in the way and how many rows. Names are validated, never echoed.
+  if (body.blocked_rows !== undefined && body.blocked_on === undefined) {
+    die(`${label} did not match the aggregate-only response contract. Nothing was declared complete.`);
+  }
   if (body.blocked_on !== undefined) {
     if (!BOOTSTRAP_BLOCKED_CAUSES.has(body.blocked_on)) {
       die(`${label} did not match the aggregate-only response contract. Nothing was declared complete.`);
@@ -4235,10 +4243,11 @@ export async function runAcceleratedBootstrap({
     if (!response.ok) {
       die(`accelerated bootstrap failed with HTTP ${response.status}. No response content was printed. Re-run \`brain update <manifest>\`; the Worker remains paused.`);
     }
-    const receipt = validateAcceleratedBootstrapReceipt(response.body);
+    const validated = validateAcceleratedBootstrapReceipt(response.body);
     // Older Workers report the not-yet-visible count only as `failed`; newer ones
-    // also name it `retrying`. Read either, the semantics are the same.
-    if (receipt && typeof receipt === "object" && receipt.retrying !== undefined) receipt.failed = Number(receipt.retrying);
+    // also name it `retrying`. Read either, the semantics are the same. The
+    // validated receipt is frozen, so derive rather than assign.
+    const receipt = validated.retrying !== undefined ? { ...validated, failed: Number(validated.retrying) } : validated;
     validateAcceleratedBootstrapProgress(previous, receipt);
     if (lastRemaining !== null && receipt.remaining > lastRemaining) {
       die("the accelerated bootstrap remaining count increased. Re-run `brain update <manifest>`; the Worker remains paused.");
@@ -4274,6 +4283,21 @@ export async function runAcceleratedBootstrap({
       }
       die(`${stalledFor} Re-run \`brain update <manifest>\`; the Worker remains paused.`);
     }
+    // A named cause is decided BEFORE the not-yet-visible wait below: quarantined
+    // rows are counted in `failed`, so a receipt naming quarantine always
+    // carries failed > 0 and would otherwise poll to the movement budget and
+    // then recommend a rebuild instead of the remedy.
+    if (receipt.blocked_on === "quarantine") {
+      die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so this update cannot finish the vector projection.\n` +
+        "      Release them with POST /api/admin/brain/vector-retry {\"confirm\":true} (admin key), then re-run `brain update <manifest>`.\n" +
+        "      If the index rejects them again, the documents they belong to must be forgotten (`brain forget <manifest>`) before the projection can verify.\n" +
+        "      The Worker remains paused.");
+    }
+    if (receipt.blocked_on === "fence" && !announcedFence) {
+      announcedFence = true;
+      info(`waiting on the index's ordering fence for ${receipt.blocked_rows} submitted row(s); the Worker probes a stalled fence on its own, ` +
+        `and the ${Math.round(ACCELERATED_BOOTSTRAP_STALL_MS / 60_000)}-minute movement budget ends this wait if it never opens`);
+    }
     if (receipt.failed > 0) {
       info(`${receipt.failed} vector(s) accepted but not yet visible; waiting for Vectorize (${receipt.confirmed}/${receipt.total} confirmed, ${receipt.submitted} submitted, ${receipt.in_flight_batches} batch(es) in flight)`);
       previous = receipt;
@@ -4298,17 +4322,6 @@ export async function runAcceleratedBootstrap({
     // actual/expected -- and label the ledger count as what it is.
     info(`${receipt.queued + receipt.submitted} vector operation(s) pending; ${receipt.actual_vectors}/${receipt.expected_vectors} vector(s) query-visible`);
     info(`batch ledger: ${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
-    if (receipt.blocked_on === "quarantine") {
-      die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so this update cannot finish the vector projection.\n` +
-        "      Release them with POST /api/admin/brain/vector-retry {\"confirm\":true} (admin key), then re-run `brain update <manifest>`.\n" +
-        "      If the index rejects them again, the documents they belong to must be forgotten (`brain forget <manifest>`) before the projection can verify.\n" +
-        "      The Worker remains paused.");
-    }
-    if (receipt.blocked_on === "fence" && !announcedFence) {
-      announcedFence = true;
-      info(`waiting on the index's ordering fence for ${receipt.blocked_rows} submitted row(s); the Worker probes a stalled fence on its own, ` +
-        `and the ${Math.round(ACCELERATED_BOOTSTRAP_STALL_MS / 60_000)}-minute movement budget ends this wait if it never opens`);
-    }
     if (receipt.reprojected_residue > 0 && !announcedReprojection) {
       announcedReprojection = true;
       info(`residue-only re-projection: ${receipt.reprojected_residue} queued chunk(s) are re-embedded; ` +

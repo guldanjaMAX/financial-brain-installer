@@ -41,22 +41,38 @@ const done = receipt({ phase: "complete", epoch: 6, confirmed: 1213, queued: 0, 
 // A cleanup receipt naming quarantine ends the update at once, by name, with the remedy.
 {
   clock = 0; let i = 0;
-  const blocked = receipt({ phase: "legacy_drain", confirmed: 13, queued: 0, remaining: 1200, blocked_on: "quarantine", blocked_rows: 50 });
+  // Worker-shaped: quarantined rows ARE the `failed` count, the walk has ended
+  // (phase waiting), and `retrying` names the same number.
+  const blocked = receipt({ phase: "waiting", confirmed: 1163, queued: 50, remaining: 50, failed: 50, retrying: 50,
+    actual_vectors: 1163, blocked_on: "quarantine", blocked_rows: 50 });
   await assert.rejects(
     runAcceleratedBootstrap({ ...opts(), request: async () => { i++; return res(blocked); } }),
     /50 quarantined row\(s\)[\s\S]*vector-retry[\s\S]*brain forget/,
-    "quarantine is refused by name with both remedies");
+    "quarantine is refused by name with both remedies, before the not-yet-visible wait");
   assert.equal(i, 1, "refused on the first receipt, no waiting");
 }
 // A cleanup receipt naming the fence waits the movement budget, then dies naming the fence.
+// The fence is announced ONCE on the way, not on every poll.
 {
   clock = 0; let i = 0;
   const blocked = receipt({ phase: "legacy_drain", confirmed: 13, queued: 0, remaining: 1200, blocked_on: "fence", blocked_rows: 1 });
-  await assert.rejects(
-    runAcceleratedBootstrap({ ...opts(), maxDurationMs: 3_600_000, request: async () => { i++; return res(blocked); } }),
-    /ordering fence did not open for 1 submitted row/,
-    "a stranded fence is named as the fence, not as a slow drain");
+  const lines = [];
+  const original = console.log;
+  console.log = (...args) => { lines.push(args.join(" ")); };
+  try {
+    await assert.rejects(
+      runAcceleratedBootstrap({ ...opts(), maxDurationMs: 3_600_000, request: async () => { i++; return res(blocked); } }),
+      /ordering fence did not open for 1 submitted row/,
+      "a stranded fence is named as the fence, not as a slow drain");
+  } finally { console.log = original; }
   assert.ok(clock >= ACCELERATED_BOOTSTRAP_STALL_MS, `time-bounded by the movement budget, clock=${clock}`);
+  const announced = lines.filter((line) => /waiting on the index's ordering fence/.test(line)).length;
+  assert.equal(announced, 1, `fence announced once across ${i} polls, saw ${announced}`);
+}
+// blocked_rows without blocked_on is a contract violation, not a silently ignored number.
+{
+  await assert.rejects(async () => validateAcceleratedBootstrapReceipt(receipt({ blocked_rows: 5 })), /contract/,
+    "blocked_rows alone is refused");
 }
 // An unknown cause is a contract violation.
 {

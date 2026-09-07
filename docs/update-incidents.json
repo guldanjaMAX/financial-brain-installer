@@ -64,7 +64,8 @@
       "N4",
       "N5",
       "N6",
-      "FIELD-RESIDUE-RECEIPT"
+      "FIELD-RESIDUE-RECEIPT",
+      "FIELD-STALE-PENDING-RESIDUE"
     ],
     "evidence": []
   },

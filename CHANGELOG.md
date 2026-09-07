@@ -20,7 +20,10 @@ true, or stop you from getting on with the work.
   row lands in the new `vector_projection_events` table (migration 0036) so the
   change stays visible later. If the backlog cannot be re-projected because rows
   are quarantined or the index's ordering fence has not opened, the update now
-  says which, instead of waiting or failing without a cause.
+  says which, instead of waiting or failing without a cause. One consequence to
+  plan around: the recovery runner requires this version's schema, so recovery
+  is unavailable on a brain until it has taken this update; the refusal says
+  "run brain update first, then recover".
 - Adopting an existing Cloudflare sign-in profile now asks first, and answers
   the question in writing when nobody is at the keyboard. Pass
   `--adopt-cloudflare-profile`, or set `BRAIN_ADOPT_CLOUDFLARE_PROFILE=1`, to

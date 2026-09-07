@@ -20,3 +20,10 @@ CREATE TABLE IF NOT EXISTS vector_projection_events (
 
 CREATE INDEX IF NOT EXISTS idx_vector_projection_events_at
   ON vector_projection_events(at DESC);
+
+-- The epoch of an open residue-only re-projection, or NULL. Kept OUT of the
+-- protocol column on purpose: every shipped Worker branches on that column and
+-- its legacy branch deletes queued upserts before refusing, so a marker there
+-- would turn an interrupted update re-run from an older kit into data loss.
+-- Older Workers never read this column.
+ALTER TABLE install_state ADD COLUMN vector_projection_residue_epoch INTEGER;

@@ -317,6 +317,10 @@ const INSTALL_STATE_NULL_NORMALIZED_COLUMNS = Object.freeze([
   "vector_projection_mutation_id", "vector_projection_submitted_at",
   "vector_projection_bootstrap_cursor",
   "vector_projection_bootstrap_protocol",
+  // An open residue-only walk belongs to the SOURCE index's projection. A
+  // restored brain re-walks its whole corpus into the new index, so the marker
+  // must not survive: with it, the restored walk would page only the outbox.
+  "vector_projection_residue_epoch",
 ]);
 const INSTALL_STATE_ZERO_NORMALIZED_COLUMNS = Object.freeze([
   // Queue generations belong to the target's derived Vectorize projection.
@@ -1005,6 +1009,7 @@ function expectedInstallStateColumns(migrations) {
     ...(latest >= 12 ? INSTALL_STATE_PROJECTION_COLUMNS : []),
     ...(latest >= 13 ? INSTALL_STATE_BOOTSTRAP_V2_COLUMNS : []),
     ...(latest >= 14 ? ["session_generation"] : []),
+    ...(latest >= 36 ? ["vector_projection_residue_epoch"] : []),
   ]);
 }
 
