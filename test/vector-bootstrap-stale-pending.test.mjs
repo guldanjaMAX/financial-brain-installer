@@ -76,6 +76,11 @@ function makeEnv({ visibilityLag = 0 } = {}) {
       processedUpToMutation = pendingMutations.shift().mutationId;
     }
   };
+  // Largest number of rows any ONE statement writes. Production residues are
+  // hundreds of thousands of rows and D1 bounds a single query, so unbounded
+  // work in one statement is a defect no small fixture would otherwise show.
+  const widest = { statement: 0 };
+  const record = (changes) => { widest.statement = Math.max(widest.statement, Number(changes || 0)); return changes; };
   const prepare = (sql) => {
     const shape = (params = []) => ({
       bind: (...next) => shape(next),
@@ -83,7 +88,7 @@ function makeEnv({ visibilityLag = 0 } = {}) {
       first: async () => db.prepare(sql).get(...params) ?? null,
       run: async () => {
         const result = db.prepare(sql).run(...params);
-        return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+        return { success: true, results: [], meta: { changes: record(Number(result.changes || 0)) } };
       },
       _sql: sql,
       _params: params,
@@ -100,7 +105,7 @@ function makeEnv({ visibilityLag = 0 } = {}) {
         try {
           const results = statements.map((statement) => {
             const result = db.prepare(statement._sql).run(...statement._params);
-            return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+            return { success: true, results: [], meta: { changes: record(Number(result.changes || 0)) } };
           });
           db.exec("COMMIT");
           return results;
@@ -116,7 +121,7 @@ function makeEnv({ visibilityLag = 0 } = {}) {
       describe: async () => { observe(); return { vectorCount: visible.size, processedUpToMutation }; },
     },
   };
-  return { env, db, visible };
+  return { env, db, visible, widest };
 }
 
 const addChunk = (db, uid) => {
@@ -308,22 +313,21 @@ const neverRegresses = (phases) => {
   // 1a. THE CROSS-VERSION INVARIANT. An older Worker knows nothing of the
   //     residue column: it sees an ordinary v2 walk and pages the corpus from
   //     the cursor with a plain outbox INSERT, which collides with any queued
-  //     row above it. The open therefore parks the cursor AT the high water and
-  //     tags the whole residue, so an older Worker pages nothing and only
-  //     submits and confirms ledger rows that already exist. Assert that
-  //     invariant on every round: it is what keeps a re-run from a sealed kit
-  //     (an interrupted update, a rollback) from wedging on a UNIQUE collision.
+  //     row above it. The open therefore parks the cursor AT the high water, so
+  //     an older Worker pages nothing and only submits, confirms and drains.
+  //     Assert that on every round, together with the ledger invariant that no
+  //     row is tagged for a page that has no ledger row: it is what keeps a
+  //     re-run from a sealed kit from wedging on a UNIQUE collision.
   // -------------------------------------------------------------------------
   {
     const { env: env2, db: db2, visible: visible2 } = makeEnv();
     seedStaleBrain(db2, visible2, { epoch: 4, stranded: 3000, drainedSince: 10 });
     const invariant = () => db2.prepare(
-      `SELECT (SELECT count(*) FROM vector_outbox o JOIN chunks c ON c.chunk_uid=o.chunk_uid
-                LEFT JOIN vector_outbox_retry_state s ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
-                WHERE o.op='upsert' AND o.submitted_mutation_id IS NULL AND s.quarantined_at IS NULL
-                  AND o.bootstrap_epoch IS NULL) AS untagged,
-              (SELECT count(*) FROM chunks WHERE chunk_uid >
+      `SELECT (SELECT count(*) FROM chunks WHERE chunk_uid >
                  COALESCE((SELECT vector_projection_bootstrap_cursor FROM install_state WHERE id=1), '')) AS pageable_by_old,
+              (SELECT count(*) FROM vector_outbox WHERE bootstrap_epoch IS NOT NULL
+                 AND bootstrap_batch > COALESCE((SELECT MAX(batch_no) FROM vector_bootstrap_batches
+                                                  WHERE epoch=(SELECT vector_projection_bootstrap_epoch FROM install_state WHERE id=1)), 0)) AS tagged_without_ledger,
               vector_projection_residue_epoch AS residue_epoch
          FROM install_state WHERE id=1`
     ).get();
@@ -343,11 +347,11 @@ const neverRegresses = (phases) => {
       const seen = invariant();
       if (seen.residue_epoch !== null) {
         sawOpenWalk = true;
-        worstUntagged = Math.max(worstUntagged, Number(seen.untagged));
+        worstUntagged = Math.max(worstUntagged, Number(seen.tagged_without_ledger));
         worstPageable = Math.max(worstPageable, Number(seen.pageable_by_old));
       }
     }
-    check("through every round of an open walk no pageable row is untagged and an older Worker would page nothing",
+    check("through every round of an open walk an older Worker would page nothing, and no row is tagged without its ledger row",
       sawOpenWalk && worstUntagged === 0 && worstPageable === 0 && receipt2?.complete === true,
       JSON.stringify({ sawOpenWalk, worstUntagged, worstPageable, complete: receipt2?.complete, state: invariant() }));
   }
@@ -403,6 +407,31 @@ const neverRegresses = (phases) => {
     run.receipt?.complete === true && run.embeds === 1200 && Number(after.outbox) === 0 &&
       visible.size === 1213 && after.status === "verified" && Number(after.events) === 1 && neverRegresses(run.phases),
     JSON.stringify({ after, embeds: run.embeds, rounds: run.rounds_used, phases: [...new Set(run.phases)] }));
+}
+
+// ---------------------------------------------------------------------------
+// 1e. SCALE. Production residues are hundreds of thousands of rows and D1
+//     bounds what one query may do, so every request must do bounded work no
+//     matter how large the residue. An earlier draft tagged the whole residue
+//     in one statement: 20,000 rows took 4.7 s on local in-memory SQLite and
+//     the cost was quadratic, which could never fit a real brain.
+// ---------------------------------------------------------------------------
+{
+  const { env, db, visible, widest } = makeEnv();
+  const RESIDUE = 5_000;
+  seedStaleBrain(db, visible, { epoch: 4, stranded: RESIDUE, drainedSince: 10 });
+  const started = performance.now();
+  const run = await runToCompletion(env);
+  const elapsed = performance.now() - started;
+  const after = snapshot(db);
+  const ledger = db.prepare("SELECT count(*) AS pages, MAX(row_count) AS widest_page FROM vector_bootstrap_batches WHERE epoch=5").get();
+  check("a 5,000-row residue converges and every page is one bounded ledger row",
+    run.receipt?.complete === true && after.status === "verified" && run.embeds === RESIDUE &&
+      Number(ledger.pages) === RESIDUE / 1000 && Number(ledger.widest_page) === 1000,
+    JSON.stringify({ ledger, embeds: run.embeds, rounds: run.rounds_used }));
+  check("no single statement writes more than one page, so the work per request is bounded at any residue size",
+    widest.statement <= 1000, `widest single statement wrote ${widest.statement} rows`);
+  console.log(`  [scale] ${RESIDUE} rows: ${run.rounds_used} rounds, ${Math.round(elapsed)} ms, widest statement ${widest.statement} rows`);
 }
 
 // ---------------------------------------------------------------------------
@@ -560,8 +589,9 @@ const neverRegresses = (phases) => {
 {
   const { env, db, visible } = makeEnv();
   seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10 });
-  // The state an open leaves behind: every pageable row tagged with its page,
-  // cursor parked at the high water, the residue column naming the epoch.
+  // The state an open leaves behind: cursor parked at the high water and the
+  // residue column naming the epoch. Rows are tagged a page at a time as the
+  // walk claims them, so nothing is tagged yet.
   db.prepare(
     `UPDATE install_state
         SET vector_projection_status='bootstrap_required',
@@ -573,11 +603,7 @@ const neverRegresses = (phases) => {
             vector_projection_bootstrap_base_count=13
       WHERE id=1`
   ).run();
-  db.prepare(
-    `WITH numbered AS (SELECT chunk_uid, (ROW_NUMBER() OVER (ORDER BY chunk_uid) - 1) / 1000 + 1 AS page FROM vector_outbox WHERE op='upsert')
-     UPDATE vector_outbox SET bootstrap_epoch=5, bootstrap_batch=(SELECT page FROM numbered WHERE numbered.chunk_uid=vector_outbox.chunk_uid)
-      WHERE chunk_uid IN (SELECT chunk_uid FROM numbered)`
-  ).run();
+
   db.prepare(
     `INSERT INTO vector_projection_events (at, kind, epoch_before, epoch_after, base_before, base_after, rows, chunks)
      VALUES (99, 'residue-reprojection', 4, 5, 3, 13, 1200, 1213)`

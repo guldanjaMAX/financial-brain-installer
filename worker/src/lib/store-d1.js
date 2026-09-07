@@ -3108,54 +3108,64 @@ async function queueAcceleratedBootstrapBatch(env, state, now, lease = null) {
 }
 
 /**
- * Residue mode: every pageable row was tagged with its page at the open, so a
- * "queue" is one fenced ledger row for the lowest page that has none. Rows the
- * paused drain had submitted are untagged out of that page first, so submit
- * and confirm see exactly the rows the ledger row counts. The walk cursor never
- * moves: it was parked at the high water so older Workers never page.
+ * Residue mode: claim the next page of the residue, tag exactly those rows, and
+ * write one ledger row for them, in a single fenced transaction.
+ *
+ * Progress is the ledger's last end_cursor, not install_state's cursor, which
+ * stays parked at the high water so an older Worker never pages. Each request
+ * therefore does bounded work (one SELECT of at most RESIDUE_PAGE_SIZE rows,
+ * one tag UPDATE of the same rows, one INSERT) no matter how large the residue.
  */
 async function queueResidueBatch(env, state, lease) {
   if (!lease || typeof lease.ownerToken !== "string" || typeof lease.now !== "function") {
     throw new Error("the residue re-projection walk requires the drain lease");
   }
-  const next = await env.DB.prepare(
-    `SELECT o.bootstrap_batch AS page, count(*) AS n, MAX(o.chunk_uid) AS hi
-       ${RESIDUE_PAGEABLE_FROM_SQL}
-         AND o.bootstrap_epoch=?1
-         AND o.bootstrap_batch > COALESCE((SELECT MAX(batch_no) FROM vector_bootstrap_batches WHERE epoch=?1), 0)
-       GROUP BY o.bootstrap_batch ORDER BY o.bootstrap_batch LIMIT 1`
+  const ledger = await env.DB.prepare(
+    `SELECT COALESCE(MAX(end_cursor),'') AS cursor, COALESCE(MAX(batch_no),0) AS batch_no
+       FROM vector_bootstrap_batches WHERE epoch=?1`
   ).bind(state.epoch).first();
-  if (!next || next.page === null || next.page === undefined) return false;
-  const page = Number(next.page);
-  const rows = Number(next.n);
-  const hi = String(next.hi || "");
-  if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(rows) || rows < 1 ||
-      rows > ACCELERATED_BOOTSTRAP_PAGE_SIZE || !hi) {
-    throw new Error("the residue re-projection page is invalid");
+  const from = String(ledger?.cursor ?? "");
+  const batchNo = Number(ledger?.batch_no) + 1;
+  if (!Number.isSafeInteger(batchNo) || batchNo < 1) {
+    throw new Error("the residue re-projection batch identity is invalid");
   }
+  const { results: page } = await env.DB.prepare(
+    `SELECT o.chunk_uid ${RESIDUE_PAGEABLE_FROM_SQL}
+        AND o.chunk_uid>?1
+      ORDER BY o.chunk_uid LIMIT ?2`
+  ).bind(from, RESIDUE_PAGE_SIZE).all();
+  if (!Array.isArray(page)) throw new Error("the residue re-projection page is invalid");
+  if (!page.length) return false;
+  const to = String(page.at(-1)?.chunk_uid || "");
+  if (!to) throw new Error("the residue re-projection cursor is invalid");
   const fenceNow = lease.now();
+  const fence = `EXISTS (SELECT 1 FROM install_state i WHERE i.id=1
+                          AND i.vector_projection_bootstrap_epoch=?epoch
+                          AND i.vector_projection_residue_epoch=?epoch
+                          AND i.vector_drain_lease_owner=?owner
+                          AND i.vector_drain_lease_expires_at>?at)`;
   const results = await env.DB.batch([
+    // The tag touches neither vector_id, op nor queued_at, so no generation
+    // trigger fires and the queued generation the provider will prove is intact.
     env.DB.prepare(
-      `UPDATE vector_outbox SET bootstrap_epoch=NULL, bootstrap_batch=NULL
-        WHERE bootstrap_epoch=?1 AND bootstrap_batch=?2 AND submitted_mutation_id IS NOT NULL
-          AND EXISTS (SELECT 1 FROM install_state i WHERE i.id=1
-                        AND i.vector_projection_bootstrap_epoch=?1
-                        AND i.vector_projection_residue_epoch=?1
-                        AND i.vector_drain_lease_owner=?3
-                        AND i.vector_drain_lease_expires_at>?4)`
-    ).bind(state.epoch, page, lease.ownerToken, fenceNow),
+      `UPDATE vector_outbox SET bootstrap_epoch=?1,bootstrap_batch=?2
+        WHERE chunk_uid>?3 AND chunk_uid<=?4
+          AND op='upsert' AND submitted_mutation_id IS NULL
+          AND EXISTS (SELECT 1 FROM chunks c WHERE c.chunk_uid=vector_outbox.chunk_uid)
+          AND NOT EXISTS (SELECT 1 FROM vector_outbox_retry_state q
+                           WHERE q.chunk_uid=vector_outbox.chunk_uid AND q.generation=vector_outbox.generation
+                             AND q.quarantined_at IS NOT NULL)
+          AND ${fence.replaceAll("?epoch", "?1").replaceAll("?owner", "?5").replaceAll("?at", "?6")}`
+    ).bind(state.epoch, batchNo, from, to, lease.ownerToken, fenceNow),
     env.DB.prepare(
       `INSERT INTO vector_bootstrap_batches
          (epoch,batch_no,start_cursor,end_cursor,row_count,status)
-       SELECT ?1,?2,COALESCE((SELECT MAX(end_cursor) FROM vector_bootstrap_batches WHERE epoch=?1),''),?3,?4,'queued'
-        WHERE EXISTS (SELECT 1 FROM install_state i WHERE i.id=1
-                        AND i.vector_projection_bootstrap_epoch=?1
-                        AND i.vector_projection_residue_epoch=?1
-                        AND i.vector_drain_lease_owner=?5
-                        AND i.vector_drain_lease_expires_at>?6)`
-    ).bind(state.epoch, page, hi, rows, lease.ownerToken, fenceNow),
+       SELECT ?1,?2,?3,?4,?5,'queued'
+        WHERE ${fence.replaceAll("?epoch", "?1").replaceAll("?owner", "?6").replaceAll("?at", "?7")}`
+    ).bind(state.epoch, batchNo, from, to, page.length, lease.ownerToken, fenceNow),
   ]);
-  if (!Array.isArray(results) || results.length !== 2 || drainLeaseChanges(results[1]) !== 1) {
+  if (!Array.isArray(results) || results.length !== 2 ||
+      drainLeaseChanges(results[0]) !== page.length || drainLeaseChanges(results[1]) !== 1) {
     throw new Error("the residue re-projection lost its drain lease before queueing a page; nothing was queued");
   }
   return true;
@@ -3423,13 +3433,11 @@ const RESIDUE_PAGEABLE_FROM_SQL = `FROM vector_outbox o
        LEFT JOIN vector_outbox_retry_state s
          ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
       WHERE ${RESIDUE_PAGEABLE_SQL}`;
-// Pageable rows numbered into 1,000-row pages in chunk_uid order: the whole
-// residue is tagged at the open, so no untagged row ever sits above a cursor
-// an older Worker might page from.
+// One page of residue per request, tagged when that page is queued. Tagging the
+// whole residue at the open would be unbounded work in one request: measured on
+// local in-memory SQLite, 20,000 rows took 4.7 s and the cost is quadratic, so
+// a production-size residue could never fit inside D1's query limits.
 const RESIDUE_PAGE_SIZE = 1000;
-const RESIDUE_NUMBERED_SQL = `SELECT o.chunk_uid,
-              (ROW_NUMBER() OVER (ORDER BY o.chunk_uid) - 1) / ${RESIDUE_PAGE_SIZE} + 1 AS page
-         ${RESIDUE_PAGEABLE_FROM_SQL}`;
 
 async function residueBlockerLedger(env) {
   const row = await env.DB.prepare(`SELECT count(*) AS total ${RESIDUE_BLOCKER_SQL}`).first();
@@ -3566,10 +3574,12 @@ export async function openResidueReprojection(env, state, options, lease) {
   const openedAt = lease.now();
   const nextEpoch = state.epoch + 1;
   const results = await env.DB.batch([
-    // The cursor is parked AT the high water from the start: an older Worker
-    // that meets this epoch therefore never pages the corpus (its plain outbox
-    // INSERT would collide with the tagged residue) and only submits and
-    // confirms whatever batch rows exist, which is exactly the intended work.
+    // The cursor is parked AT the high water from the start. That single fact is
+    // what makes the epoch safe for an OLDER Worker: its paging loop breaks on
+    // cursor === high_water, so it never runs the plain outbox INSERT that would
+    // collide with the queued residue. It submits and confirms whatever ledger
+    // rows exist and drains the rest, which is exactly the intended work. This
+    // build tracks its own progress by the ledger's last end_cursor instead.
     env.DB.prepare(
       `UPDATE install_state
           SET vector_projection_status='bootstrap_required',
@@ -3588,20 +3598,6 @@ export async function openResidueReprojection(env, state, options, lease) {
           AND NOT EXISTS (SELECT 1 FROM vector_bootstrap_batches WHERE epoch=?1 AND status<>'confirmed')
           AND NOT EXISTS (SELECT 1 ${RESIDUE_BLOCKER_SQL})`
     ).bind(state.epoch, nextEpoch, ACCELERATED_BOOTSTRAP_PROTOCOL, lease.ownerToken, openedAt, RESIDUE_REPROJECTION_SCHEMA),
-    // Tag every pageable row with its page now. The tag touches neither
-    // vector_id, op nor queued_at, so no generation trigger fires.
-    env.DB.prepare(
-      `WITH numbered AS (${RESIDUE_NUMBERED_SQL})
-       UPDATE vector_outbox
-          SET bootstrap_epoch=?1,
-              bootstrap_batch=(SELECT page FROM numbered WHERE numbered.chunk_uid=vector_outbox.chunk_uid)
-        WHERE chunk_uid IN (SELECT chunk_uid FROM numbered)
-          AND EXISTS (SELECT 1 FROM install_state i WHERE i.id=1
-                        AND i.vector_projection_bootstrap_epoch=?1
-                        AND i.vector_projection_residue_epoch=?1
-                        AND i.vector_drain_lease_owner=?2
-                        AND i.vector_drain_lease_expires_at>?3)`
-    ).bind(nextEpoch, lease.ownerToken, openedAt),
     env.DB.prepare(
       `INSERT INTO vector_projection_events
          (at, kind, epoch_before, epoch_after, base_before, base_after, rows, chunks)
@@ -3616,11 +3612,10 @@ export async function openResidueReprojection(env, state, options, lease) {
           AND vector_drain_lease_expires_at>?7`
     ).bind(openedAt, RESIDUE_REPROJECTION_EVENT, state.epoch, nextEpoch, state.baseCount, lease.ownerToken, openedAt),
   ]);
-  if (!Array.isArray(results) || results.length !== 3 ||
-      drainLeaseChanges(results[0]) !== 1 || drainLeaseChanges(results[1]) !== pageable ||
-      drainLeaseChanges(results[2]) !== 1) {
+  if (!Array.isArray(results) || results.length !== 2 ||
+      drainLeaseChanges(results[0]) !== 1 || drainLeaseChanges(results[1]) !== 1) {
     const counts = Array.isArray(results) ? results.map((r) => drainLeaseChanges(r)).join("/") : "none";
-    throw new Error(`the residue re-projection could not be opened durably (state/tag/receipt changes ${counts}, ${pageable} pageable); the projection is unchanged`);
+    throw new Error(`the residue re-projection could not be opened durably (state/receipt changes ${counts}); the projection is unchanged`);
   }
   return { opened: true, blocked: false, rows: pageable, baseBefore: state.baseCount, baseAfter: chunks - unprojected };
 }
@@ -3887,8 +3882,7 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
   if (residueWalkOpen(state) && Number(unfinished?.n || 0) === 0) {
     const left = await env.DB.prepare(
       `SELECT count(*) AS n ${RESIDUE_PAGEABLE_FROM_SQL}
-         AND o.bootstrap_epoch=?1
-         AND o.bootstrap_batch > COALESCE((SELECT MAX(batch_no) FROM vector_bootstrap_batches WHERE epoch=?1), 0)`
+         AND o.chunk_uid > COALESCE((SELECT MAX(end_cursor) FROM vector_bootstrap_batches WHERE epoch=?1), '')`
     ).bind(state.epoch).first();
     if (Number(left?.n || 0) === 0) {
       await closeResidueWalk(env, state, lease);
