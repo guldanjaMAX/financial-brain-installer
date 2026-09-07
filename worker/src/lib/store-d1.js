@@ -3309,8 +3309,19 @@ async function drainPausedBootstrapResidue(env, state, options, lease) {
   }
   // Every drain candidate query excludes quarantined rows, so residue that is
   // entirely quarantined can never be projected by any amount of waiting. Say
-  // so once, loudly, rather than hanging again under a new name. A busy receipt
-  // means another leaseholder ran instead of us and proves nothing either way.
+  // so once, loudly, rather than hanging again under a new name.
+  //
+  // The busy conjunct is a fence, not a live case, and it cannot fire on this
+  // path today. This function runs under the lease acceleratedVectorBootstrap
+  // already acquired, so contention is decided at that single acquisition and
+  // answered with a busy receipt and retry_after_seconds before any residue
+  // work begins; drainOutboxWithLease never sets busy at all, unlike the
+  // self-leasing drainOutbox wrapper. It stays only so that switching this call
+  // to that wrapper cannot silently report contention as quarantine.
+  //
+  // For the same reason, do not propagate drained.busy to the caller: it is
+  // always false here, so a busy field on this receipt, and any handling of it
+  // at the call site, would be dead by construction.
   if (drained.busy !== true && total > 0 && drainable === 0) {
     throw new Error(
       `the vector outbox holds ${total} quarantined row(s) that the paused drain cannot ` +

@@ -67,6 +67,41 @@ The reviewed order is fixed:
 9. Run the release evaluation profile with zero critical failures and zero
    unauthorized retrievals.
 
+## The pause is a precondition of step 7, not a preference
+
+Do not clear `VECTOR_DRAIN_MODE` by hand to give a stalled client their brain
+back before the projection is rebuilt. Reprojection and availability are not
+ordered that way, and they cannot be:
+
+- `POST /api/admin/brain/bootstrap` answers `409` with
+  `{"error":"the accelerated bootstrap requires the verified upgrade pause","paused":false}`
+  whenever `VECTOR_DRAIN_MODE` is anything other than `paused-for-upgrade`.
+  `acceleratedVectorBootstrap` refuses again below the route. Clearing the pause
+  therefore does not unblock recovery; it removes the only endpoint that can
+  finish it, and nothing can proceed until the Worker is paused again.
+- `POST /api/admin/brain/drain` and `POST /api/admin/brain/reindex` are the
+  mirror image: while the Worker is paused they answer `503` with
+  `{"paused":true}`. They are the active-mode projection path and cannot stand
+  in for the paused bootstrap.
+- So there is no mode in which both paths work, and no valid order that
+  unpauses first. Paused, the bootstrap is the only way to project. Active,
+  drain and reindex are the only way. A corpus the code has marked
+  `bootstrap_required` is rebuilt under the pause and nowhere else.
+
+Clearing the pause also buys the client nothing they do not already have. The
+pause is a corpus **write** barrier, not a read barrier: it refuses `POST` on
+ingest, batch ingest, source receipts and expectations, forget, reindex,
+vector-retry, drain, and bank import. Retrieval is untouched. `/api/rag/think`
+and `/api/rag/unified` answer normally while paused, and the MCP connector's
+`think` and `search` are deliberately left open so a paused brain can still be
+asked questions. What the client loses under the pause is the ability to add
+documents, which is exactly what an unverified projection must not accept.
+
+Returning to `active` before the projection is proven is the failure the
+barrier exists to prevent: retrieval would look finished while the semantic
+index was still partial. The active deployment is permitted only after the
+exact completion receipt.
+
 Every stage is persisted as `running` before its adapter executes. If the
 process stops after an external write but before the completion receipt, the
 next run retries that same stage. A mutating adapter must reconcile an already

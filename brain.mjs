@@ -150,6 +150,7 @@ import {
 import {
   CloudflareOAuthSessionError,
   cloudflareOAuthChildEnvironment,
+  cloudflareOAuthProfileName,
   withCloudflareOAuthSession,
 } from "./operations/cloudflare-oauth-session.mjs";
 import {
@@ -2667,17 +2668,21 @@ async function cmdHealth(manifestPath, {
             die(
               `${backlog.pending} vector operation(s) are stalled` +
                 ` (${backlog.upserts} upsert, ${backlog.deletes} delete, ${backlog.submitted} accepted), oldest queued ${oldest} min ago.` + "\n" +
-                "      Older than 30 minutes means the drain cron is not keeping up. Upserts are" + "\n" +
-                "      keyword-only; deletes leave stale vectors competing. Clear it now with:" + "\n" +
-                "      brain drain <manifest>" + "\n" +
-                "      If it returns, inspect the Worker schedule in the Cloudflare dashboard."
+                "      Older than 30 minutes means the scheduled drain is not keeping up. Upserts are" + "\n" +
+                "      keyword-only; deletes leave stale vectors competing." + "\n" +
+                "      Do NOT run `brain drain` to hurry it: that takes the same lease the" + "\n" +
+                "      scheduled drain holds, so the two exclude each other rather than adding up," + "\n" +
+                "      and the manual runner is the slower of the two." + "\n" +
+                "      A large backlog is cleared by `brain update`, which rebuilds in bulk." + "\n" +
+                "      If the count never moves at all, that is a stall rather than a queue:" + "\n" +
+                "      check the Worker schedule in the Cloudflare dashboard and report it."
             );
           }
           die(
             `${backlog.pending} vector operation(s) are not query-visible yet` +
               ` (${backlog.submitted} accepted by Vectorize), oldest queued ${oldest} min ago.` + "\n" +
-              "      Provider acceptance is not completion. Finish and confirm visibility with:" + "\n" +
-              "      brain drain <manifest>"
+              "      Provider acceptance is not completion. This resolves on its own, usually" + "\n" +
+              "      within a couple of minutes; re-run `brain health` rather than forcing it."
           );
         }
         if (!readiness.ready || readiness.actual_vectors !== readiness.expected_vectors) {
@@ -15235,6 +15240,121 @@ export function manifestCloudflareControlBinding(manifestPath) {
   return Object.freeze({ accountId, authProfile });
 }
 
+/**
+ * Record this install's own Cloudflare browser profile on a manifest written
+ * before that field existed.
+ *
+ * `buildSetupManifest` is the only writer of `auth_profile`, and it runs only
+ * for a manifest that does not exist yet. Every install created before the
+ * named-profile field therefore has an account id and no profile, and nothing
+ * in the product ever adds one. `withCloudflareControlCredential` reads that
+ * as "no saved custody" and takes the token lane unconditionally, so on a
+ * client machine with no wrangler `default.toml`, no macOS keychain copy, and
+ * no real TTY (a Windows owner, or any agent-driven session) all three token
+ * sources are empty and the command dies AUTH_REQUIRED. That is a working
+ * Brain that cannot be updated.
+ *
+ * The repair is adoption on update: derive the same profile name a fresh
+ * install would have used, complete and VERIFY the browser sign-in, and only
+ * then write the label. The order matters in both directions. Writing first
+ * would leave a manifest naming a keyring profile that does not exist, which
+ * `doctor`'s wrangler-login check reads as a hard FAIL — a worse error than
+ * the one being fixed. And the write must happen before `pinUpdateManifest`
+ * fingerprints the file, because every later update stage revalidates those
+ * exact bytes.
+ *
+ * Every automation escape is preserved by refusing to act: an explicit token
+ * run, a non-interactive session, and an injected CLOUDFLARE_API_TOKEN all
+ * return null and leave the manifest untouched. So does any failure — this is
+ * an opportunistic repair, never a new way for an update to die.
+ *
+ * Returns the adopted profile name, or null when nothing was written.
+ */
+export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
+  const env = options.env ?? process.env;
+  const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (options.forceToken === true || !interactive || env.CLOUDFLARE_API_TOKEN) return null;
+  if (!manifestPath) return null;
+
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  } catch {
+    // The command's own manifest load reports an unreadable file properly.
+    return null;
+  }
+  const cloudflare = manifest?.infrastructure?.cloudflare;
+  if (!cloudflare || typeof cloudflare !== "object" || Array.isArray(cloudflare)) return null;
+  if (cloudflare.auth_profile) return null;
+  const accountId = String(cloudflare.account_id || "");
+  // The same guard manifestCloudflareControlBinding applies: a profile is only
+  // meaningful bound to an exact account.
+  if (!/^[a-f0-9]{32}$/i.test(accountId)) return null;
+  const boundAccountId = accountId.toLowerCase();
+
+  const askFn = options.askFn ?? ask;
+  const write = options.write ?? ((line) => console.log(line));
+  write("");
+  write("  This Brain was installed before the per-install Cloudflare browser sign-in,");
+  write("  so every command still has to ask for a token. One browser sign-in now records");
+  write("  this install's own named profile and ends that prompt for good.");
+  write("  Nothing is written unless the sign-in reaches this exact account.");
+  write("");
+  const answer = String(await askFn("Sign in to Cloudflare in the browser now? (y/n)", "y")).trim().toLowerCase();
+  if (answer !== "y" && answer !== "yes") {
+    info("continuing without it. This run uses the existing Cloudflare access.");
+    return null;
+  }
+
+  const profile = cloudflareOAuthProfileName(cloudflareOAuthInstallIdentity(manifestPath));
+  const oauthOptions = { ...(options.oauthOptions || {}) };
+  for (const reserved of ["profile", "installIdentity", "expectedAccountId", "reauthorize", "prompt", "action"]) {
+    delete oauthOptions[reserved];
+  }
+  const runner = options.withOAuthSession ?? withCloudflareOAuthSession;
+  let session;
+  try {
+    session = await runner({
+      ...oauthOptions,
+      profile,
+      expectedAccountId: boundAccountId,
+      reauthorize: true,
+      prompt: (request) => promptForCloudflareOAuthAccount(request, { askFn }),
+    });
+  } catch (error) {
+    warn(
+      `the Cloudflare browser sign-in did not complete (${String(error?.message || error)}). ` +
+        "Nothing was changed, and this run continues on the existing access."
+    );
+    return null;
+  }
+  if (session?.profile !== profile || session?.account?.id !== boundAccountId) {
+    warn("the Cloudflare sign-in did not confirm this install's exact account, so nothing was recorded.");
+    return null;
+  }
+
+  // Re-read immediately before writing so this cannot overwrite a manifest
+  // that changed during the ceremony, and cannot invent a second profile for
+  // an install that acquired one in the meantime.
+  try {
+    const current = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    const target = current?.infrastructure?.cloudflare;
+    if (!target || typeof target !== "object" || Array.isArray(target)) return null;
+    if (target.auth_profile) return target.auth_profile === profile ? profile : null;
+    if (String(target.account_id || "").toLowerCase() !== boundAccountId) return null;
+    target.auth_profile = profile;
+    saveManifest(manifestPath, current);
+  } catch (error) {
+    warn(
+      `the Cloudflare sign-in succeeded but this manifest could not be updated (${String(error?.message || error)}). ` +
+        "This run continues; rerun the same command to record it."
+    );
+    return null;
+  }
+  ok("this install now has its own saved Cloudflare browser sign-in");
+  return profile;
+}
+
 function manifestAccountId(manifestPath) {
   return manifestCloudflareControlBinding(manifestPath).accountId;
 }
@@ -15277,13 +15397,24 @@ async function cmdSetupInteractive(manifestPath) {
   const resumed = existsSync(target);
   const manifest = resumed ? loadManifest(target).m : null;
   const accountId = manifest?.infrastructure?.cloudflare?.account_id || null;
-  const authProfile = manifest?.infrastructure?.cloudflare?.auth_profile || null;
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   // The outer legacy Wrangler-session adapter may already hold a token. That
   // keeps older manifests working, but it must not override a fresh or saved
   // install-specific OAuth profile. Only an explicitly injected automation
   // token selects this lane here.
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  // A resumed install with no saved profile is the pre-field manifest shape,
+  // and `resumed && !authProfile` below would pin it to the token lane for the
+  // rest of its life. Offer the one-time browser sign-in that ends that, and
+  // read the result back so this run uses it.
+  let authProfile = manifest?.infrastructure?.cloudflare?.auth_profile || null;
+  if (resumed && !authProfile && !forceToken && !automationToken) {
+    authProfile = await adoptCloudflareAuthProfile(target, {
+      interactive,
+      askFn: ask,
+      forceToken,
+    });
+  }
   const tokenPath = forceToken || (resumed && !authProfile) || automationToken;
   let accountPath = String(flags["cloudflare-account"] || "").trim().toLowerCase() || null;
   if (accountPath && !["create", "existing"].includes(accountPath)) {
@@ -16225,11 +16356,26 @@ export async function cmdUpdate(manifestPath, options = {}) {
         "future updates will work from any folder."
     );
   }
+  const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  // An install written before the named-profile field has no saved custody, so
+  // the credential wrapper below would take the token lane and, on a machine
+  // with no wrangler session, no keychain copy and no real TTY, die
+  // AUTH_REQUIRED. Adopt the profile first.
+  //
+  // BEFORE the pin, never after: pinUpdateManifest fingerprints the raw bytes
+  // and every stage inside the wrapper revalidates them, so a manifest write
+  // after this line would abort the very update it repairs.
+  await (options.adoptCloudflareAuthProfile ?? adoptCloudflareAuthProfile)(installed.path, {
+    interactive,
+    askFn: options.askFn ?? ask,
+    forceToken: options.forceToken === true || automationToken,
+    oauthOptions: options.oauthOptions,
+    ...(options.authProfileAdoption || {}),
+  });
   const pin = pinUpdateManifest(installed.path);
   const binding = manifestCloudflareControlBinding(pin.target);
   const runControl = options.withCloudflareControl ?? withCloudflareControlCredential;
-  const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
   const upgradeResult = await runControl(async () => {
     revalidateUpdateManifest(pin, "update verification");
     await (options.cmdVerify ?? cmdVerify)(pin.target);

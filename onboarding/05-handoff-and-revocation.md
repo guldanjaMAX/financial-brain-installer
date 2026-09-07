@@ -146,7 +146,7 @@ The rest of this section is for removing **all** of it.
 
 In this order:
 
-1. **Delete the search index.** In your own Cloudflare account: `npx wrangler@4 vectorize delete [VECTORIZE_INDEX]` removes the vectors, and Workers and Pages, D1, then delete `[D1_NAME]` removes the text and the keyword index. Both live in your account, so this is yours to do and needs nothing from me.
+1. **Delete the search index.** In your own Cloudflare account: `npx wrangler@4.73.0 vectorize delete [VECTORIZE_INDEX]` removes the vectors, and Workers and Pages, D1, then delete `[D1_NAME]` removes the text and the keyword index. Both live in your account, so this is yours to do and needs nothing from me.
 2. **Delete the database.** Cloudflare dashboard, Workers and Pages, D1, `[D1_NAME]`, Delete. This removes version history and spend records, including its time travel history.
 3. **Delete the file storage.** Cloudflare dashboard, R2, bucket `[R2_BUCKET]`, Delete.
 4. **Delete the brain.** Cloudflare dashboard, Workers and Pages, `[WORKER_NAME]`, Settings, Delete.

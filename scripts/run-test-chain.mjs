@@ -16,6 +16,9 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
   "node --no-warnings worker/test/plaid-refresh-debt-regression.test.mjs",
   "node --no-warnings worker/test/mcp-upgrade-pause.test.mjs",
+  "node --no-warnings worker/test/oauth-consent-query.test.mjs",
+  "node --no-warnings worker/test/reprojection-pause-order.test.mjs",
+  "node --no-warnings test/legacy-manifest-auth-profile.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -194,6 +197,9 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
   "node --no-warnings worker/test/plaid-refresh-debt-regression.test.mjs",
   "node --no-warnings worker/test/mcp-upgrade-pause.test.mjs",
+  "node --no-warnings worker/test/oauth-consent-query.test.mjs",
+  "node --no-warnings worker/test/reprojection-pause-order.test.mjs",
+  "node --no-warnings test/legacy-manifest-auth-profile.test.mjs",
 ]);
 
 export function parseTestCommand(command) {

@@ -758,6 +758,13 @@ report success.**
   acceptance. Recovery exports normalize
   invocation-local lease and projection fields instead of persisting them as
   corpus state.
+  **Superseded in 0.1.15. Do not follow this order.** Schema 13 moved the
+  bootstrap inside the pause and inverted these two steps: the barrier now
+  stays in force until the projection is proven, and active mode is deployed
+  only after the exact completion receipt.
+  `POST /api/admin/brain/bootstrap` answers `409` unless
+  `VECTOR_DRAIN_MODE=paused-for-upgrade`, so deploying active mode first makes
+  the rebuild unreachable. See the 0.1.15 entry above and `docs/RECOVERY.md`.
 - A setup interrupted during its first migration now stops before another D1
   write when database freshness cannot be proven. It prints the verified
   paused-writer update and setup-rerun commands instead of guessing that no
@@ -770,6 +777,10 @@ report success.**
   written after the bookmark cannot be enumerated by reindex, so supervised
   recovery must recreate/rebind a clean Vectorize index and all metadata
   indexes before reindex, drain, health, and test can return the Brain to use.
+  **Read the reindex and drain steps as active-mode work.** Both answer `503`
+  while the Worker is paused, so a rolled-back Brain reaches them only through
+  the paused bootstrap that `brain update` drives, never by clearing the pause
+  by hand.
 
 After updating, run `brain health <manifest>` and `brain test <manifest>`. Both
 must report the semantic index query-ready with zero pending/submitted vector

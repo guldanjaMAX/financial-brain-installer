@@ -2372,6 +2372,24 @@ export default {
         });
         return jsonResponse(r);
       }
+      /**
+       * Rebuild the whole projection. PAUSED ONLY, and that is not negotiable.
+       *
+       * This is the exact inverse of drain and reindex above, which the pause
+       * refuses with 503. So the two projection paths are mutually exclusive:
+       * paused, this endpoint is the only one that can move vectors; active,
+       * drain and reindex are. There is no mode in which both work and no
+       * order that unpauses first.
+       *
+       * That matters because clearing the pause is the obvious move when a
+       * client is stalled mid-rebuild and the operator wants to hand their
+       * brain back. It does the opposite of what it looks like. It cannot
+       * restore reading, which never stopped (the pause is a corpus-write
+       * barrier; think and search answer throughout), and it makes the one
+       * endpoint that can finish the rebuild answer 409 until the Worker is
+       * paused again. Docs that state the other order are wrong, and
+       * worker/test/reprojection-pause-order.test.mjs pins this one.
+       */
       if (path === "/api/admin/brain/bootstrap" && request.method === "POST") {
         if (backendOf(env) !== D1) {
           return jsonResponse({ error: "bootstrap applies to the d1 backend only" }, 400);

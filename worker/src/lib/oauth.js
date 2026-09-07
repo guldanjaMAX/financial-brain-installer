@@ -72,8 +72,29 @@ function validRedirectUri(value) {
   return (url.protocol === "https:" || (url.protocol === "http:" && loopback)) && !url.username && !url.hash;
 }
 
+/**
+ * HTML escaping, for text and quoted attributes ONLY. It turns "&" into
+ * "&amp;", which is exactly right for something a human reads and exactly
+ * wrong for anything a script later parses.
+ */
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/**
+ * A complete JS string literal for an inline <script>, quotes included.
+ *
+ * A <script> element is HTML raw text: the parser does not decode entities
+ * inside it, it only looks for "</script". So HTML-escaping a value bound for
+ * a script both fails to protect it (the escaped text reaches the interpreter
+ * verbatim) and corrupts it (&amp; is not the "&" that separates query
+ * parameters). JSON.stringify does the quoting and the JS escaping; < > and &
+ * then go to \u form so the HTML tokenizer can never see a closing tag or a
+ * comment opener, while the runtime value stays byte-for-byte the input.
+ * U+2028/U+2029 are line terminators to JS but not to JSON, so they go too.
+ */
+export const jsLiteral = (value) => JSON.stringify(String(value ?? ""))
+  .replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+  .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 
 /* ------------------------------------------------------------- discovery */
 
@@ -205,7 +226,20 @@ export async function handleAuthorizePage(env, url) {
   const brain = esc(owner
     ? (/s$/i.test(owner) ? `${owner}' brain` : `${owner}'s brain`)
     : (env.BRAIN_NAME || "your brain"));
-  const query = esc(url.search.slice(1));
+  // The consent script hands this straight back to the decision endpoint and
+  // reads redirect_uri and state out of it, so it must survive as a parseable
+  // query string. Rebuild it from the parameters validated above rather than
+  // reflecting the inbound URL: the script then carries nothing this handler
+  // has not already checked.
+  const query = new URLSearchParams({
+    client_id: client.client_id,
+    redirect_uri: params.redirect_uri,
+    response_type: "code",
+    scope: params.scope,
+    code_challenge: params.code_challenge,
+    code_challenge_method: "S256",
+    ...(params.state ? { state: params.state } : {}),
+  }).toString();
   const page = `<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Connect ${name} to ${brain}</title>
@@ -239,7 +273,7 @@ export async function handleAuthorizePage(env, url) {
 <script>
 (() => {
   "use strict";
-  const q = "${query}";
+  const q = ${jsLiteral(query)};
   const b64uToBytes = (s) => Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/") + "=".repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
   const bytesToB64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");
   const api = (path, payload) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Brain-App": "1" }, body: JSON.stringify(payload || {}) })

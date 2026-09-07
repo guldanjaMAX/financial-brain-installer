@@ -316,6 +316,16 @@ epoch. Continue through `brain update` so the deploy, D1 state, and projection
 cursor stay coordinated. Existing retrieval remains available while source and
 corpus writes are paused.
 
+**Do not clear the pause to give the brain back sooner.** It is the most
+tempting move on a long run and it is the one that stops recovery. The rebuild
+endpoint refuses outright unless the brain is paused, so unpausing does not
+speed anything up; it removes the only way to finish, and nothing moves again
+until the brain is paused back. It also gives the owner nothing they do not
+already have, because the pause blocks adding documents, not asking questions:
+search and answers keep working the whole time. The one thing that is genuinely
+unavailable is loading new material, and that is the thing a half-built index
+must not accept.
+
 After update succeeds, require both checks:
 
 ```
@@ -560,8 +570,13 @@ node brain.mjs rollback <manifest> <bookmark> --yes
 
 The Worker remains paused after restore. Reindex alone cannot enumerate vectors
 written after the D1 bookmark. Under supervised recovery, create and bind a
-clean Vectorize index, recreate every metadata index, then run reindex, drain,
-health, and test to exact readiness before returning active mode.
+clean Vectorize index and recreate every metadata index, then run
+`brain update <manifest>` against the restored brain. That is what rebuilds the
+projection: it re-establishes the pause, migrates, runs the bootstrap to its
+exact receipt, and returns active mode only after that receipt passes. Reindex,
+drain, health, and test come after active mode is back, not before it. Reindex
+and drain are refused while the brain is paused, so running them first only
+produces a refusal.
 
 **Restoring is destructive and irreversible.** Everything written since that snapshot is lost. It is deliberately not automatic, because doing it unattended against your only copy trades a broken update for possible data loss. Prefer fixing forward. Use the snapshot when fixing forward is not available, and do not return the brain to use until the supervised rebuild completes.
 

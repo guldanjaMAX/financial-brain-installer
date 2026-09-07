@@ -11,7 +11,8 @@
     "tests": [
       "test/wrangler-oauth.test.mjs",
       "test/preflight-posix.test.mjs",
-      "test/cloudflare-oauth-session.test.mjs"
+      "test/cloudflare-oauth-session.test.mjs",
+      "test/legacy-manifest-auth-profile.test.mjs"
     ],
     "acceptance": "Clean macOS login, refresh and encrypted-session diagnosis without a legacy session or XDG workaround.",
     "findings": [
@@ -77,9 +78,10 @@
     "tests": [
       "test/upgrade-repair.test.mjs",
       "worker/test/worker.test.mjs",
-      "worker/test/agent-authority-deletion.test.mjs"
+      "worker/test/agent-authority-deletion.test.mjs",
+      "worker/test/reprojection-pause-order.test.mjs"
     ],
-    "acceptance": "Prove a bounded, documented recovery journey for a large paused corpus; do not unpause manually or promise active background bootstrap before it exists.",
+    "acceptance": "Prove a bounded, documented recovery journey for a large paused corpus; do not unpause manually or promise active background bootstrap before it exists. Every operator-facing description of the update and recovery order must match the endpoints: bootstrap answers 409 unless VECTOR_DRAIN_MODE=paused-for-upgrade, and drain and reindex answer 503 while that pause holds, so no documented order may unpause before it reprojects.",
     "findings": [
       "F3",
       "F16"
@@ -164,7 +166,8 @@
       "worker/test/owner-auth.test.mjs",
       "worker/test/owner-actions.test.mjs",
       "worker/test/connector.test.mjs",
-      "worker/test/agent-authority-deletion.test.mjs"
+      "worker/test/agent-authority-deletion.test.mjs",
+      "worker/test/oauth-consent-query.test.mjs"
     ],
     "acceptance": "Physical owner ceremony plus concurrent consume, failed retry, final-owner guard, both consent actions and session revocation.",
     "findings": [

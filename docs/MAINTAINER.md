@@ -318,11 +318,20 @@ brain sources <manifest>
 
 `brain update` obtains a D1 restore bookmark before mutation. For the D1 vector
 writer protocol it deploys and verifies paused mode, waits one lease window,
-applies pending migrations, deploys and verifies active mode, reconciles only
-known obsolete provider secrets, runs exact-version health and the full
-acceptance suite, commits version state to D1, reads it back, and only then
-advances the local manifest. A failed update does not report or record the new
-version as live.
+applies pending migrations, drives the accelerated legacy vector bootstrap to
+its exact completion receipt while the pause still holds, and only then deploys
+and verifies active mode, reconciles only known obsolete provider secrets, runs
+exact-version health and the full acceptance suite, commits version state to
+D1, reads it back, and finally advances the local manifest. A failed update
+does not report or record the new version as live.
+
+That order is a hard requirement of the endpoints, not a preference.
+`POST /api/admin/brain/bootstrap` answers `409` unless
+`VECTOR_DRAIN_MODE=paused-for-upgrade`, and `POST /api/admin/brain/drain` and
+`POST /api/admin/brain/reindex` answer `503` while that pause holds. There is
+no mode in which both work. Never clear the pause by hand to give a stalled
+client their brain back sooner: retrieval already answers while paused, and
+clearing it removes the only endpoint that can finish the rebuild.
 
 After a successful update, require zero failed health checks and exact vector
 readiness, not merely an empty queue. Run the install's private release evaluation for any release that
@@ -354,9 +363,17 @@ bookmark, and it does not restore Vectorize. After reviewing the exact target:
 
 ```bash
 brain rollback <manifest> <bookmark> --yes
-# Worker intentionally remains paused here.
-# Recreate and rebind a clean Vectorize index plus every metadata index under
-# the supervised recovery procedure before continuing.
+# Worker intentionally remains paused here, and it stays paused until the
+# projection has been rebuilt and proven. Recreate and rebind a clean Vectorize
+# index plus every metadata index under the supervised recovery procedure first.
+#
+# `brain update` is what rebuilds the projection: it re-establishes the verified
+# pause, forward-migrates, drives the accelerated bootstrap to its exact
+# completion receipt, and only then deploys active mode.
+brain update <manifest>
+#
+# Active mode is back, so reindex and drain are now reachable at all. Run them
+# before this point and they answer 503, because the pause refuses them.
 brain reindex <manifest> --yes
 brain drain <manifest>
 brain health <manifest>
@@ -370,7 +387,10 @@ That direct reindex repairs missing/current vectors only. If the restored D1
 bookmark predates Vectorize writes, provider-only IDs can remain and reindex
 cannot enumerate them. Recreate and rebind the exact Vectorize index under the
 reviewed recovery procedure, recreate all metadata indexes, then reindex and
-require exact count/readiness before returning the Brain to use.
+require exact count/readiness before returning the Brain to use. Reindex and
+drain are active-mode operations; they answer `503` while the Worker is paused,
+so a paused Brain must reach its verified active deployment before either of
+them is reachable at all.
 
 Rollback first deploys and verifies the same complete write barrier, waits one
 old-invocation window, restores D1, then clears any restored lease/mutation
@@ -381,6 +401,16 @@ before schema 12 also fails closed with the Worker paused; forward-migrate the
 restored schema as part of the supervised recovery, then recreate/rebind a
 clean Vectorize index before reindexing. Forward migration and reindex alone do
 not remove provider-only vectors written after the restored bookmark.
+
+Rollback leaves the corpus marked `bootstrap_required`, and that state is
+rebuilt under the pause, never around it. Run `brain update` against the
+restored Brain: it re-establishes the verified pause, migrates, drives the
+accelerated bootstrap to its exact receipt, and deploys active mode only after
+that receipt passes. It does not refuse a Brain that is already on this
+release, so it is the supported path after a rollback as well as after a
+version change. Do not clear `VECTOR_DRAIN_MODE` first to reach reindex and
+drain sooner; that only makes the bootstrap answer `409` and leaves the
+projection where it stalled.
 
 A bookmark rollback is not disaster-recovery proof. Full recovery means an
 isolated D1 export and restore, FTS recreation, a visibility-confirmed Vectorize

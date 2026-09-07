@@ -15,7 +15,18 @@ assert.deepEqual(called.args, [WRANGLER_SPEC, 'whoami']);
 assert.equal(called.env.CLOUDFLARE_API_TOKEN, undefined);
 assert.equal(called.env.UNRELATED_DESKTOP_VALUE, undefined);
 const root = fileURLToPath(new URL('../', import.meta.url));
-const files = ['brain.mjs', 'doctor.mjs', ...readdirSync(join(root, 'operations')).filter((x) => x.endsWith('.mjs')).map((x) => `operations/${x}`)];
+// Guides are executable too: a client runs what the guide says. An unpinned
+// `npx wrangler@4 login` in onboarding is how an install ends up on a wrangler
+// that writes an encrypted session the installer cannot read, which is the
+// documented cause of a real field failure. CHANGELOG.md is deliberately out of
+// scope: its entries record what past releases said and must not be rewritten.
+const guideDirs = ['onboarding', 'docs'];
+const guides = guideDirs.flatMap((dir) => {
+  try {
+    return readdirSync(join(root, dir)).filter((x) => x.endsWith('.md')).map((x) => `${dir}/${x}`);
+  } catch { return []; }
+});
+const files = ['brain.mjs', 'doctor.mjs', ...readdirSync(join(root, 'operations')).filter((x) => x.endsWith('.mjs')).map((x) => `operations/${x}`), ...guides];
 for (const path of files) {
   const source = readFileSync(join(root, path), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((line) => !/^\s*\/\//.test(line)).join('\n');
   assert.ok(!/wrangler@4(?![.\d])/.test(source), `${path} has an unpinned Wrangler operation or advice`);

@@ -289,8 +289,19 @@ if (SCENARIO) {
   const processing = runScenario("health-vector-processing", "health", { adminKey: true });
   check("health cannot green an accepted mutation before query visibility",
     processing.code === 1 && /not query-visible yet.*accepted by Vectorize/is.test(processing.output) &&
-      processing.output.includes(renderCliCommands("brain drain <manifest>")) && !/vector index is query-ready/.test(processing.output),
+      !/vector index is query-ready/.test(processing.output),
     processing.output);
+
+  // A manual drain takes the same lease the scheduled drain holds, so the two
+  // exclude each other rather than adding up, and the manual runner is slower.
+  // Health used to hand a stalled operator that exact command. Assert it never
+  // INSTRUCTS one again, and that a stall says so plainly, rather than merely
+  // never naming the command.
+  check("health never instructs a manual drain, and warns against it when stalled",
+    !/(Clear it now with|Finish and confirm visibility with|Re-run `brain drain)/i
+        .test(stalled.output + processing.output) &&
+      /Do NOT run `brain drain`/.test(stalled.output),
+    stalled.output + processing.output);
 
   const countMismatch = runScenario("health-vector-count-mismatch", "health", { adminKey: true });
   check("health rejects an empty queue when Vectorize is still missing vectors",

@@ -33,7 +33,7 @@ brain tools
 ```
 
 The automated part proves the Claude version, `claude auth status`, and
-`npx wrangler@4 --version` in a credential-scrubbed child environment. In a real
+`npx wrangler@4.73.0 --version` in a credential-scrubbed child environment. In a real
 terminal it also opens `claude doctor`, which owns an interactive terminal UI
 and therefore cannot be truthfully replaced by a headless fixture.
 
@@ -101,7 +101,7 @@ For a temporary compatibility test of an older account, the account owner can
 instead run:
 
 ```bash
-npx wrangler@4 login
+npx wrangler@4.73.0 login
 ```
 
 They approve in their own browser. Provision uses that local OAuth session only
