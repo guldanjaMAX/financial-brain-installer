@@ -3890,8 +3890,8 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
     }
   }
   const outbox = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
-  if (state.cursor === state.highWater && Number(unfinished?.n || 0) === 0 &&
-      Number(outbox?.n || 0) === 0) {
+  if ((state.status === "pending" || state.cursor === state.highWater) &&
+      Number(unfinished?.n || 0) === 0 && Number(outbox?.n || 0) === 0) {
     await env.DB.prepare(
       `UPDATE install_state SET vector_projection_status='pending'
         WHERE id=1 AND schema_version>=13
@@ -3925,7 +3925,14 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
 async function closeResidueWalk(env, state, lease) {
   if (!residueWalkOpen(state)) return false;
   const result = await env.DB.prepare(
-    `UPDATE install_state SET vector_projection_residue_epoch=NULL
+    // Also leave the projection PENDING, the ordinary state for a finished
+    // walk. The cursor stays parked at the high water, so a state left at
+    // bootstrap_required would look like an ordinary walk that has nothing to
+    // do: rows released later (by vector-retry) could then only drain a hundred
+    // at a time, with no way to open a fresh residue epoch for them. Pending is
+    // also what markProjectionVerifiedIfExact needs to take its exact cut.
+    `UPDATE install_state SET vector_projection_residue_epoch=NULL,
+            vector_projection_status='pending'
       WHERE id=1 AND schema_version>=?2
         AND vector_projection_status='bootstrap_required'
         AND vector_projection_bootstrap_epoch=?1

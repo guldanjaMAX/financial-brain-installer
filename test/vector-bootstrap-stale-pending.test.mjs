@@ -435,6 +435,83 @@ const neverRegresses = (phases) => {
 }
 
 // ---------------------------------------------------------------------------
+// 1f. THE PARKED CURSOR MUST NOT STRAND ANY LATER WALK. The open parks
+//     install_state's cursor at the high water for the life of the epoch, so
+//     three later paths get checked here: a big release after the walk closed
+//     must be able to open a FRESH residue epoch (not crawl at a hundred rows
+//     per confirmation); an ordinary bootstrap after a reset must walk the
+//     whole corpus; and a truncated ledger must restart the walk rather than
+//     skip a range.
+// ---------------------------------------------------------------------------
+{
+  // A big residue, half of it quarantined. The walk projects what it can, the
+  // update refuses by name, then vector-retry releases 600 rows.
+  const { env, db, visible } = makeEnv();
+  // 1,500 pageable and 1,500 quarantined: both sides are above the threshold,
+  // so the first walk opens and the release can open a second one.
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 3000, drainedSince: 10, quarantined: 1500 });
+  await runToCompletion(env, 12);
+  const closed = snapshot(db);
+  check("after a walk closes with quarantined rows left the projection is pending, not stuck mid-walk",
+    closed.status === "pending" && closed.residue_epoch === null && Number(closed.outbox) === 1500 &&
+      Number(closed.events) === 1,
+    JSON.stringify(closed));
+  db.prepare("DELETE FROM vector_outbox_retry_state WHERE quarantined_at IS NOT NULL").run();
+  db.prepare("UPDATE vector_outbox SET attempts=0, last_error=NULL").run();
+  const released = await runToCompletion(env, 20);
+  const after = snapshot(db);
+  const epochs = db.prepare("SELECT count(DISTINCT epoch) AS n FROM vector_bootstrap_batches").get();
+  check("releasing 1,500 rows opens a FRESH residue epoch and converges at bulk speed, not a hundred at a time",
+    released.receipt?.complete === true && after.status === "verified" && Number(after.outbox) === 0 &&
+      visible.size === 3013 && Number(after.events) === 2 && Number(epochs.n) === 2 && released.rounds_used <= 6,
+    JSON.stringify({ after, events: after.events, epochs: epochs.n, rounds: released.rounds_used }));
+}
+{
+  // An ordinary bootstrap after the projection is reset: the reset clears the
+  // cursor, so a parked cursor from a past residue epoch strands nothing.
+  const { env, db, visible } = makeEnv();
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10 });
+  await runToCompletion(env);
+  visible.clear();
+  db.prepare(
+    `UPDATE install_state SET vector_projection_status='bootstrap_required',
+            vector_projection_bootstrap_epoch=vector_projection_bootstrap_epoch+1,
+            vector_projection_bootstrap_cursor=NULL,
+            vector_projection_bootstrap_high_water=(SELECT MAX(chunk_uid) FROM chunks),
+            vector_projection_bootstrap_base_count=0 WHERE id=1`
+  ).run();
+  db.prepare("DELETE FROM vector_bootstrap_batches").run();
+  const rebuilt = await runToCompletion(env);
+  const after = snapshot(db);
+  check("a later ordinary bootstrap walks the WHOLE corpus: the parked cursor is not inherited",
+    rebuilt.receipt?.complete === true && rebuilt.embeds === 1213 && visible.size === 1213 && after.status === "verified",
+    JSON.stringify({ embeds: rebuilt.embeds, visible: visible.size, after }));
+}
+{
+  // The ledger is the walk's progress. If it is lost mid-walk (a restore that
+  // replays install_state without the batch rows), the walk must restart from
+  // the beginning of the residue and still converge: upserts are idempotent,
+  // so re-walking a range is waste, never a skip.
+  const { env, db, visible } = makeEnv();
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 2500, drainedSince: 10 });
+  await runToCompletion(env, 1);
+  const mid = db.prepare("SELECT count(*) AS pages, MAX(end_cursor) AS cursor FROM vector_bootstrap_batches").get();
+  db.prepare("DELETE FROM vector_bootstrap_batches").run();
+  db.prepare("UPDATE vector_outbox SET bootstrap_epoch=NULL, bootstrap_batch=NULL").run();
+  const resumed = await runToCompletion(env, 30);
+  const after = snapshot(db);
+  // Rows already accepted by the index still carry their submission receipt, so
+  // they confirm through the ordinary path; rows that had not been submitted are
+  // pageable again and the walk re-claims them from the start of the residue.
+  // Either way no range can be skipped, because a row leaves the outbox only on
+  // proof, and re-walking one is waste rather than loss.
+  check("a lost ledger cannot skip a range: every chunk still reaches the index and the projection verifies",
+    Number(mid.pages) > 0 && resumed.receipt?.complete === true && after.status === "verified" &&
+      Number(after.outbox) === 0 && visible.size === 2513,
+    JSON.stringify({ mid, after, visible: visible.size }));
+}
+
+// ---------------------------------------------------------------------------
 // 2. Threshold boundary: exactly the ceiling keeps the slow path, one more opens.
 // ---------------------------------------------------------------------------
 {
