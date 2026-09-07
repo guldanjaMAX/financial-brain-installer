@@ -108,12 +108,19 @@ assert.equal(readWranglerOAuthToken({ ...base, readFileSync: () => 'refresh_toke
 // would authenticate as the wrong identity, which is how an operator
 // provisions into their own account instead of the client's.
 let sawEnv = null;
+let sawOpts = null;
 refreshWranglerSession({
   env: { CLOUDFLARE_API_TOKEN: "operator-token", CLOUDFLARE_API_KEY: "k", HOME: "/h" },
-  run: (_c, _a, opts) => { sawEnv = opts.env; return { status: 0 }; },
+  run: (_c, _a, opts) => { sawEnv = opts.env; sawOpts = opts; return { status: 0 }; },
 });
 assert.equal(sawEnv.CLOUDFLARE_API_TOKEN, undefined, "the refresh child must not inherit CLOUDFLARE_API_TOKEN");
 assert.equal(sawEnv.CLOUDFLARE_API_KEY, undefined, "nor a global API key");
+
+// Nor the caller's directory: wrangler writes .wrangler/cache under its own
+// working directory, so a refresh started from an unwritable place fails for a
+// reason that has nothing to do with the credential.
+assert.equal(typeof sawOpts.cwd, "string", "the refresh child needs an explicit working directory");
+assert.notEqual(sawOpts.cwd, process.cwd(), "the refresh child must not inherit the caller's directory");
 
 console.log("wrangler browser sign-in: config discovery, expiry refresh, quiet absence, and identity isolation");
 

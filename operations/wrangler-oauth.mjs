@@ -22,7 +22,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { posix, win32 } from "node:path";
 
 // Only the explicit legacy TOML compatibility path uses this version. Current
@@ -88,7 +88,12 @@ export function refreshWranglerSession(options = {}) {
   const keys = ["PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME",
     "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"];
   const env = Object.fromEntries(keys.filter((key) => typeof source[key] === "string").map((key) => [key, source[key]]));
+  // Wrangler writes `.wrangler/cache` under its own working directory. A child
+  // that inherits the caller's directory fails outright from an unwritable one
+  // (a Windows shell starts in `C:\Windows\system32`), and the credential is
+  // then reported missing for a reason that has nothing to do with it.
   const result = run("npx", [WRANGLER_SPEC, "whoami"], {
+    cwd: options.cwd ?? tmpdir(),
     encoding: "utf8",
     timeout: options.timeoutMs ?? 120_000,
     env,
