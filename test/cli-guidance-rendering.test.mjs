@@ -11,7 +11,7 @@ import {
   renderDiagnosis,
   renderLoadReport,
 } from "../brain.mjs";
-import { printGuidance } from "../operations/cli-guidance.mjs";
+import { printGuidance, resetCliPrefixCache } from "../operations/cli-guidance.mjs";
 import { renderReportHtml } from "../report-html.mjs";
 import {
   renderTechnicianPlan,
@@ -22,10 +22,15 @@ import {
   supportRecovery,
 } from "../support-recovery.mjs";
 
+// PATH and existsSync are pinned, not inherited. Every expectation built on
+// this fixture is the ABSOLUTE form, and a developer machine that happened to
+// carry a `brain.cmd` would otherwise flip it to the short one under them.
 const windows = {
   platform: "win32",
   nodePath: "C:\\Program Files\\nodejs\\node.exe",
   scriptPath: "C:\\Users\\client\\AppData\\Local\\FinancialBrain\\node_modules\\brain-installer\\brain.mjs",
+  env: { PATH: "" },
+  existsSync: () => false,
 };
 const prefix = brainCliPrefix(windows);
 const productRoot = new URL("../", import.meta.url);
@@ -342,14 +347,41 @@ assert.match(source, /say\(`    \$\{mark\}  \$\{r\.name\}/, "brain test must ren
 assert.match(source, /const log = \(line\) => emit\(renderCliCommands\(line\)\);/, "renderLoadReport must render every line: the per-source `fix:` text names real commands");
 assert.match(source, /c\.dim\(renderCliCommands\(f\.detail, renderOptions\)\)/, "diagnose details must render, not only diagnose actions");
 
-/** Run something with the process reporting Windows, then put it back. */
+/**
+ * Run something with the process reporting Windows, then put it back.
+ *
+ * PATH is blanked for the duration, and the shim cache is cleared on the way in
+ * and on the way out. Both matter: the renderers exercised below reach
+ * `brainCliPrefix()` through their own DEFAULT arguments, so without this they
+ * would read whatever PATH this host happens to have, and a developer machine
+ * carrying an unrelated `brain.cmd` would silently swap the expected absolute
+ * form for the short one. Blank PATH means no directory is ever probed, so the
+ * absolute form is exercised on every host.
+ */
 function underWindows(run) {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
+  const path = { PATH: process.env.PATH, Path: process.env.Path };
   Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-  try { return run(); } finally { Object.defineProperty(process, "platform", original); }
+  process.env.PATH = "";
+  delete process.env.Path;
+  resetCliPrefixCache();
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, "platform", original);
+    if (path.PATH === undefined) delete process.env.PATH; else process.env.PATH = path.PATH;
+    if (path.Path === undefined) delete process.env.Path; else process.env.Path = path.Path;
+    resetCliPrefixCache();
+  }
 }
-const hostPrefix = underWindows(() => brainCliPrefix());
+const hostPrefix = underWindows(() => brainCliPrefix({ env: { PATH: "" }, existsSync: () => false }));
 assert.notEqual(hostPrefix, "brain", "the platform seam did not take effect");
+assert.ok(hostPrefix.startsWith("& "), `the host guard must exercise the absolute form, got: ${hostPrefix}`);
+assert.equal(
+  hostPrefix,
+  underWindows(() => brainCliPrefix()),
+  "the injected guard and the default path this suite actually drives must agree",
+);
 
 // renderLoadReport, driven through its real default path rather than an
 // injected renderer, with the fix strings the connectors actually produce.
@@ -642,13 +674,37 @@ console.log(`CLI expectation rule: ${expectationSites} output expectations acros
  *   & 'C:\Program Files\nodejs\node.exe' 'C:\Users\<name>\...\brain.mjs' drain
  * on a screen the runbook itself says may be shared, so each of the four also
  * published the owner's Windows username. npm writes a `brain.cmd` shim into
- * the install prefix, one level above node_modules, and `brain.cmd drain` runs
- * exactly the same code. The absolute invocation is the fallback for a machine
- * with no shim, not the default for every machine.
+ * the install prefix, one level above node_modules, and that shim runs exactly
+ * the same code.
+ *
+ * The short form is only safe when it is also CORRECT, and correctness is a
+ * property of PATH, not of the filesystem. A --prefix install is routinely NOT
+ * on PATH while a stale copy of the package IS: run A's operator ran 0.3.5
+ * against a brain installed at 0.4.0 for exactly that reason. Printing the bare
+ * word there would hand the reader a command that runs the OTHER install
+ * against a client's brain, which is strictly worse than a long correct one.
+ *
+ * So the rule below is the shell's own rule: walk PATH in order, take the FIRST
+ * shim, and use the short form only when that shim belongs to this install.
+ * Everything else falls back to the absolute invocation.
  */
 const shimPrefix = "C:\\Users\\client\\AppData\\Local\\FinancialBrain";
-const inPrefix = { ...windows, env: {}, existsSync: (candidate) => candidate === `${shimPrefix}\\brain.cmd` };
-assert.equal(brainCliPrefix(inPrefix), "brain.cmd", "a shim in the install prefix must render as the short form");
+const absolute = "& 'C:\\Program Files\\nodejs\\node.exe' " +
+  "'C:\\Users\\client\\AppData\\Local\\FinancialBrain\\node_modules\\brain-installer\\brain.mjs'";
+const shimAt = (...directories) => {
+  const wanted = new Set(directories.map((d) => `${d}\\brain.cmd`));
+  return (candidate) => wanted.has(candidate);
+};
+
+// (a) The shim of THIS install is the first one PATH finds: the bare word runs
+// the code the reader is being told to run, so it is safe to print.
+resetCliPrefixCache();
+const inPrefix = {
+  ...windows,
+  env: { PATH: `C:\\Windows\\system32;${shimPrefix};C:\\Windows` },
+  existsSync: shimAt(shimPrefix),
+};
+assert.equal(brainCliPrefix(inPrefix), "brain.cmd", "this install's shim, first on PATH, must render as the short form");
 assert.equal(renderCliCommands("brain drain <manifest>", inPrefix), "brain.cmd drain <manifest>");
 
 // The whole point of the short form: nothing about the owner reaches the screen.
@@ -661,29 +717,84 @@ assert.ok(!shortForm.includes(shimPrefix), `the short form still carries the ins
 assert.doesNotMatch(shortForm, bareCommand, "the short form must not read as a bare command");
 assert.equal(renderCliCommands(shortForm, inPrefix), shortForm, "a second render of the short form is inert");
 
-// A shim anywhere on PATH is equally typeable, whichever way PATH is spelled.
+// Whichever way PATH is spelled in the environment block.
 for (const key of ["PATH", "Path"]) {
-  const onPath = {
-    ...windows,
-    env: { [key]: `C:\\Windows\\system32;"C:\\tools\\brain\\";C:\\Windows` },
-    existsSync: (candidate) => candidate === "C:\\tools\\brain\\brain.cmd",
-  };
-  assert.equal(brainCliPrefix(onPath), "brain.cmd", `a shim on %${key}% must render as the short form`);
+  resetCliPrefixCache();
+  const spelled = { ...windows, env: { [key]: `C:\\Windows;"${shimPrefix}\\"` }, existsSync: shimAt(shimPrefix) };
+  assert.equal(brainCliPrefix(spelled), "brain.cmd", `this install's shim on %${key}% must render as the short form`);
 }
 
-// No shim resolvable anywhere: the absolute invocation is still the fallback,
-// because an unrunnable short command is worse than a long runnable one.
-const noShim = { ...windows, env: {}, existsSync: () => false };
+// (b) THE REGRESSION. The shim exists in the install prefix, but an older copy
+// of the package sits earlier on PATH. `brain.cmd` would resolve to that other
+// install, so the reader must be given the invocation that cannot be mistaken.
+resetCliPrefixCache();
+const stalePrefix = "C:\\Users\\client\\AppData\\Roaming\\npm";
+const shadowed = {
+  ...windows,
+  env: { PATH: `${stalePrefix};${shimPrefix}` },
+  existsSync: shimAt(stalePrefix, shimPrefix),
+};
 assert.equal(
-  brainCliPrefix(noShim),
-  "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\Users\\client\\AppData\\Local\\FinancialBrain\\node_modules\\brain-installer\\brain.mjs'",
-  "without a shim the reader must still get something they can run",
+  brainCliPrefix(shadowed),
+  absolute,
+  "a DIFFERENT install's shim earlier on PATH must force the absolute form: `brain.cmd` would run that one",
 );
-assert.equal(renderCliCommands("brain drain <manifest>", noShim), `${brainCliPrefix(noShim)} drain <manifest>`);
+assert.equal(
+  renderCliCommands("brain drain <manifest>", shadowed),
+  `${absolute} drain <manifest>`,
+  "the shadowed case must not print a command that runs another install against this brain",
+);
+
+// (c) The shim exists in the install prefix, but the prefix is not on PATH at
+// all — the documented default layout for a --prefix install. There is no
+// `brain.cmd` for the reader's shell to find, so the bare word is unrunnable.
+resetCliPrefixCache();
+const prefixOffPath = {
+  ...windows,
+  env: { PATH: "C:\\Windows\\system32;C:\\Windows" },
+  existsSync: shimAt(shimPrefix),
+};
+assert.equal(
+  brainCliPrefix(prefixOffPath),
+  absolute,
+  "an install prefix that is not on PATH must render the absolute form, however real its shim is",
+);
+// An empty PATH is the same case with nothing to walk.
+resetCliPrefixCache();
+assert.equal(brainCliPrefix({ ...windows, env: {}, existsSync: shimAt(shimPrefix) }), absolute);
+
+// (d) No shim resolvable anywhere: the absolute invocation is still the
+// fallback, because an unrunnable short command is worse than a long runnable
+// one.
+resetCliPrefixCache();
+const noShim = { ...windows, env: { PATH: `C:\\Windows\\system32;${shimPrefix}` }, existsSync: () => false };
+assert.equal(brainCliPrefix(noShim), absolute, "without a shim the reader must still get something they can run");
+assert.equal(renderCliCommands("brain drain <manifest>", noShim), `${absolute} drain <manifest>`);
+
+// (e) The resolution is memoised. This sits behind every ok/info/warn/say line
+// the product prints, and the shim-less box is the expensive one: one probe per
+// PATH entry, per printed line, on a machine that will never have a shim.
+resetCliPrefixCache();
+let probes = 0;
+const counted = {
+  ...windows,
+  env: { PATH: "C:\\a;C:\\b;C:\\c;C:\\d;C:\\e" },
+  existsSync: (candidate) => { probes++; return false; },
+};
+assert.equal(brainCliPrefix(counted), absolute);
+const afterFirst = probes;
+assert.ok(afterFirst > 0, "the first resolution must actually probe PATH");
+renderCliCommands("Run brain drain <manifest>, then brain health <manifest>.", counted);
+assert.equal(brainCliPrefix(counted), absolute);
+assert.equal(probes, afterFirst, `repeated renders re-probed the filesystem: ${probes - afterFirst} extra calls`);
+// The cache is keyed, not blind: a different PATH must be resolved afresh.
+const movedOntoPath = { ...counted, env: { PATH: `C:\\a;${shimPrefix}` }, existsSync: shimAt(shimPrefix) };
+assert.equal(brainCliPrefix(movedOntoPath), "brain.cmd", "a different PATH must not read a stale answer");
+resetCliPrefixCache();
 
 // posix is unchanged, shim or no shim: `brain` is already the short form there.
 assert.equal(brainCliPrefix({ ...inPrefix, platform: "darwin" }), "brain");
 assert.equal(renderCliCommands("brain drain <manifest>", { ...inPrefix, platform: "darwin" }), "brain drain <manifest>");
 assert.equal(brainCliPrefix({ ...noShim, platform: "linux" }), "brain");
 
-console.log("CLI guidance rendering: Windows commands prefer the brain.cmd shim over the owner's profile path");
+console.log("CLI guidance rendering: the Windows short form is printed only when PATH resolves it to THIS install");
