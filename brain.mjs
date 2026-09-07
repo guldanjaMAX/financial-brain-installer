@@ -4182,7 +4182,16 @@ export async function runAcceleratedBootstrap({
     previous = receipt;
     lastRemaining = receipt.remaining;
     onProgress(receipt);
-    info(`${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
+    // `confirmed` counts bootstrap BATCH LEDGER rows. Once the fence probe opens
+    // the drain, the rest of the work flows through the ordinary outbox path,
+    // which writes nothing to that ledger: run A watched "1001/13869 confirmed;
+    // 12868 remain" stand still for 46 minutes and then jump to 13869/13869 in
+    // one step, while the outbox fell from 3,968 pending to 68. Lead with the
+    // numbers that actually move -- the outbox depth the receipt already carries
+    // as queued + submitted, and the provider count it already carries as
+    // actual/expected -- and label the ledger count as what it is.
+    info(`${receipt.queued + receipt.submitted} vector operation(s) pending; ${receipt.actual_vectors}/${receipt.expected_vectors} vector(s) query-visible`);
+    info(`batch ledger: ${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
     if (receipt.complete) {
       return validateAcceleratedBootstrapCompletion(Object.freeze({
         epoch: receipt.epoch,
