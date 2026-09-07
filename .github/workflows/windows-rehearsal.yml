@@ -183,6 +183,38 @@ jobs:
           # cache off also removes a cache-poisoning input from release CI.
           package-manager-cache: false
 
+      # UPDATE-026: the runtime must be asserted before anything installs, so a
+      # green lane cannot silently mean "ran somewhere else". x64 is the only
+      # Windows runtime 0.4.0 claims; ARM64 is deferred and unproven.
+      - name: assert the Windows runtime before install
+        shell: bash
+        env:
+          EXPECTED_NODE_MAJOR: ${{ matrix.node }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const expected = process.env.EXPECTED_NODE_MAJOR;
+            const runnerArch = process.env.RUNNER_ARCH;
+            const actual = {
+              runner_arch: runnerArch,
+              platform: process.platform,
+              arch: process.arch,
+              node_major: process.versions.node.split(".")[0],
+              node: process.versions.node,
+            };
+            console.log("RUNTIME " + JSON.stringify(actual));
+            const problems = [];
+            if (runnerArch !== "X64") problems.push(`runner arch ${runnerArch}, expected X64`);
+            if (process.platform !== "win32") problems.push(`platform ${process.platform}, expected win32`);
+            if (process.arch !== "x64") problems.push(`node arch ${process.arch}, expected x64`);
+            if (actual.node_major !== expected) problems.push(`node major ${actual.node_major}, expected ${expected}`);
+            if (problems.length) {
+              console.error("this lane is not the runtime it claims to be: " + problems.join("; "));
+              process.exit(1);
+            }
+          '
+
       # v8 understands the raw, unarchived artifact emitted by upload-artifact
       # v7. Resolve the producer's immutable artifact ID, then independently hash
       # the downloaded .tgz before any install command can touch it.
@@ -465,6 +497,38 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+
+      # UPDATE-026: the runtime must be asserted before anything installs, so a
+      # green lane cannot silently mean "ran somewhere else". x64 is the only
+      # Windows runtime 0.4.0 claims; ARM64 is deferred and unproven.
+      - name: assert the Windows runtime before install
+        shell: bash
+        env:
+          EXPECTED_NODE_MAJOR: '22'
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const expected = process.env.EXPECTED_NODE_MAJOR;
+            const runnerArch = process.env.RUNNER_ARCH;
+            const actual = {
+              runner_arch: runnerArch,
+              platform: process.platform,
+              arch: process.arch,
+              node_major: process.versions.node.split(".")[0],
+              node: process.versions.node,
+            };
+            console.log("RUNTIME " + JSON.stringify(actual));
+            const problems = [];
+            if (runnerArch !== "X64") problems.push(`runner arch ${runnerArch}, expected X64`);
+            if (process.platform !== "win32") problems.push(`platform ${process.platform}, expected win32`);
+            if (process.arch !== "x64") problems.push(`node arch ${process.arch}, expected x64`);
+            if (actual.node_major !== expected) problems.push(`node major ${actual.node_major}, expected ${expected}`);
+            if (problems.length) {
+              console.error("this lane is not the runtime it claims to be: " + problems.join("; "));
+              process.exit(1);
+            }
+          '
 
       # v8 understands the raw, unarchived artifact emitted by upload-artifact
       # v7. Resolve the producer's immutable artifact ID, then independently hash

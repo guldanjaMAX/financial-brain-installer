@@ -2259,7 +2259,18 @@ function npmPrefixSummary(prefix, maxEntries = 2048) {
   return summary;
 }
 
-function runPackedNpm(cli, args, { cwd, env, timeout = 60_000, stage, logsDirectory, prefix, diagnosticFixture = false }) {
+// The reviewed install budget is 60s. The Windows lanes were later given a
+// larger hard ceiling because a real run stalled at reify:createSparse with 490
+// of 495 files and 18.9 MB already written, which is ongoing progress rather
+// than a hang. That relaxation is only honest if a run that would have failed
+// under the reviewed budget still says so out loud, so a creeping regression
+// cannot be silently absorbed by the larger ceiling. A slow install is reported,
+// not failed: failing the release on a slow hosted runner trades a real signal
+// for a flaky gate.
+const REVIEWED_INSTALL_BASELINE_MS = 60_000;
+
+function runPackedNpm(cli, args, { cwd, env, timeout = 60_000, stage, logsDirectory, prefix, diagnosticFixture = false,
+  reviewedBaselineMs = REVIEWED_INSTALL_BASELINE_MS }) {
   const started = performance.now();
   if (stage && !["pack", "initial_install", "reinstall"].includes(stage)) throw new Error("npm_diagnostic_stage_refused");
   if (stage) {
@@ -2276,12 +2287,23 @@ function runPackedNpm(cli, args, { cwd, env, timeout = 60_000, stage, logsDirect
   });
   if (stage) {
     const failed = result.status !== 0 || result.error || result.signal;
-    result.diagnostic = { event: "end", stage, test_fixture: diagnosticFixture, elapsed_ms: Math.round(performance.now() - started), timeout_ms: timeout,
+    const elapsed = Math.round(performance.now() - started);
+    // Only an install carries the reviewed budget; pack is a different unit of work.
+    const overBaseline = !failed && stage !== "pack" && elapsed > reviewedBaselineMs;
+    result.diagnostic = { event: "end", stage, test_fixture: diagnosticFixture, elapsed_ms: elapsed, timeout_ms: timeout,
       status: result.status, signal: /^SIG[A-Z]+$/.test(result.signal || "") ? result.signal : null,
       error: /^[A-Z][A-Z0-9_]{0,63}$/.test(result.error?.code || "") ? result.error.code : null,
-      ...(failed ? { npm_logs: npmLogSummary(logsDirectory), prefix_progress: npmPrefixSummary(prefix) } : {}),
+      ...(overBaseline ? { exceeded_reviewed_baseline_ms: reviewedBaselineMs } : {}),
+      // The same bounded, sanitized evidence a failure gets, so the slow stage is
+      // identifiable without rerunning and without printing paths or argv.
+      ...(failed || overBaseline ? { npm_logs: npmLogSummary(logsDirectory), prefix_progress: npmPrefixSummary(prefix) } : {}),
     };
     console.log(`PACKED_NPM ${JSON.stringify(result.diagnostic)}`);
+    if (overBaseline) {
+      console.log(`PACKED_NPM_SLOW ${JSON.stringify({ stage, test_fixture: diagnosticFixture, elapsed_ms: elapsed,
+        reviewed_baseline_ms: reviewedBaselineMs, timeout_ms: timeout,
+        note: "passed the larger ceiling but would have failed the reviewed budget" })}`);
+    }
   }
   return result;
 }
@@ -2362,6 +2384,26 @@ function packedProcessDetail(result) {
       diagnosticTimeout.diagnostic.status === null && diagnosticTimeout.diagnostic.test_fixture === true && diagnosticTimeout.diagnostic.timeout_ms === 250 &&
       diagnosticTimeout.diagnostic.npm_logs.last_logged_stage === "reify" &&
       !JSON.stringify(diagnosticTimeout.diagnostic).includes(sentinel));
+    // A run that succeeds under the larger Windows ceiling but exceeds the
+    // reviewed 60s budget must still say so, or the relaxation hides a
+    // regression. The fixture sleeps past a deliberately tiny baseline.
+    writeFileSync(cli, 'if(process.argv.includes("--wait")){setInterval(()=>{},1000)}'
+      + 'else if(process.argv.includes("--slow")){const t=Date.now();while(Date.now()-t<80){}}'
+      + 'else{console.log(JSON.stringify(process.argv.slice(2)))}');
+    const slow = runPackedNpm(resolvePackedNpmCli({ npm_execpath: cli }), ["--slow"], {
+      cwd: sandbox, env: {}, timeout: 30_000, stage: "initial_install", logsDirectory: logs,
+      prefix: sandbox, diagnosticFixture: true, reviewedBaselineMs: 50 });
+    check("an install that beats the ceiling but exceeds the reviewed budget is still recorded",
+      slow.status === 0 && slow.diagnostic.exceeded_reviewed_baseline_ms === 50 &&
+      slow.diagnostic.elapsed_ms > 50 && slow.diagnostic.npm_logs.last_logged_stage === "reify" &&
+      slow.diagnostic.prefix_progress.files >= 0 &&
+      !JSON.stringify(slow.diagnostic).includes(sentinel), JSON.stringify(slow.diagnostic?.exceeded_reviewed_baseline_ms));
+    const withinBudget = runPackedNpm(resolvePackedNpmCli({ npm_execpath: cli }), ["--slow"], {
+      cwd: sandbox, env: {}, timeout: 30_000, stage: "initial_install", logsDirectory: logs,
+      prefix: sandbox, diagnosticFixture: true, reviewedBaselineMs: 30_000 });
+    check("an install inside the reviewed budget carries no slow record and stays quiet",
+      withinBudget.status === 0 && !Object.hasOwn(withinBudget.diagnostic, "exceeded_reviewed_baseline_ms") &&
+      !Object.hasOwn(withinBudget.diagnostic, "npm_logs"), JSON.stringify(withinBudget.diagnostic));
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
     check("the timed-out direct npm fixture leaves no locked sandbox", !existsSync(sandbox));

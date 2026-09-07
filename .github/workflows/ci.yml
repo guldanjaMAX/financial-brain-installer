@@ -200,6 +200,44 @@ jobs:
           # cache off also removes a cache-poisoning input from release CI.
           package-manager-cache: false
 
+      # UPDATE-026: assert the runtime before anything installs, so a green lane
+      # cannot silently mean "ran somewhere else". x64 is the only architecture
+      # 0.4.0 claims on any OS; ARM64 is deferred and unproven.
+      - name: assert the runtime before install
+        shell: bash
+        env:
+          EXPECTED_NODE_MAJOR: ${{ matrix.node }}
+          EXPECTED_OS: ${{ matrix.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const expectedMajor = process.env.EXPECTED_NODE_MAJOR;
+            const expectedOs = process.env.EXPECTED_OS;
+            const runnerArch = process.env.RUNNER_ARCH;
+            const platformFor = { "windows-latest": "win32", "macos-latest": "darwin", "ubuntu-latest": "linux" };
+            const expectedPlatform = platformFor[expectedOs];
+            const actual = {
+              runner_arch: runnerArch,
+              os: expectedOs,
+              platform: process.platform,
+              arch: process.arch,
+              node_major: process.versions.node.split(".")[0],
+              node: process.versions.node,
+            };
+            console.log("RUNTIME " + JSON.stringify(actual));
+            const problems = [];
+            if (!expectedPlatform) problems.push(`unmapped runner image ${expectedOs}`);
+            else if (process.platform !== expectedPlatform) problems.push(`platform ${process.platform}, expected ${expectedPlatform}`);
+            if (runnerArch !== "X64") problems.push(`runner arch ${runnerArch}, expected X64`);
+            if (process.arch !== "x64") problems.push(`node arch ${process.arch}, expected x64`);
+            if (actual.node_major !== expectedMajor) problems.push(`node major ${actual.node_major}, expected ${expectedMajor}`);
+            if (problems.length) {
+              console.error("this lane is not the runtime it claims to be: " + problems.join("; "));
+              process.exit(1);
+            }
+          '
+
       # v8 understands the raw, unarchived artifact emitted by upload-artifact
       # v7. Resolve the producer's immutable artifact ID, then independently hash
       # the downloaded .tgz before any install command can touch it.
