@@ -43,6 +43,8 @@ export function wranglerConfigCandidates(env = process.env, platform = process.p
     if (env.LOCALAPPDATA) out.push(join(env.LOCALAPPDATA, rel));
   }
   if (env.XDG_CONFIG_HOME) out.push(join(env.XDG_CONFIG_HOME, rel));
+  // macOS wrangler writes here, not to ~/.config, so it must be searched before it.
+  if (platform === "darwin") out.push(join(home, "Library", "Preferences", rel));
   out.push(join(home, ".config", rel));
   out.push(join(home, rel));
   return out;
