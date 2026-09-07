@@ -228,7 +228,7 @@ function ingestExitCli(scenario) {
   // safe next step is `brain update` in an interactive terminal; the
   // shell-history guard below is unchanged.
   check("and it gives a safe next step instead of a shell-history command",
-    (/brain update <manifest>/.test(r.out) && /interactive terminal/i.test(r.out) &&
+    (r.out.includes(shown("brain update <manifest>")) && /interactive terminal/i.test(r.out) &&
       /hidden token entry/i.test(r.out)) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(r.out), r.out.slice(0, 400));
   // A session with no TTY cannot answer a browser prompt, so the copy has to
