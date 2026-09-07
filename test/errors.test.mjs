@@ -222,9 +222,17 @@ function ingestExitCli(scenario) {
   const r = cli(["verify", join(HERE, "..", "templates", "brain.manifest.json")]);
   const events = journalEvents(r.journal);
   check("a missing token is an explained failure", r.code === 1 && /CLOUDFLARE_API_TOKEN/.test(r.out), r.out.slice(0, 160));
+  // This used to require `brain setup` to be NAMED as the first way out. Over a
+  // brain that is paused mid-upgrade that is the one instruction that must never
+  // be followed, and a missing credential says nothing about which lifecycle
+  // step is correct. The safe next step is signing in and re-running the SAME
+  // command; the shell-history guard below is unchanged.
   check("and it gives a safe next step instead of a shell-history command",
-    (r.out.includes(shown("brain setup")) && r.out.includes(shown("brain update")) && /hidden token entry/i.test(r.out)) &&
+    (/sign in to cloudflare/i.test(r.out) && /re-run the same command/i.test(r.out) &&
+      /hidden token entry/i.test(r.out)) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(r.out), r.out.slice(0, 400));
+  check("and it never offers setup as the way out of a missing credential",
+    !r.out.includes(shown("brain setup")) && !/brain setup/.test(r.out), r.out.slice(0, 400));
   // Fatal is anticipated, so it must NOT be dressed up as an installer bug.
   check("an anticipated failure is not reported as a bug", !/This is a bug in the installer/.test(r.out));
   check("anticipated auth failures create one private typed note and send no raw credential guidance",

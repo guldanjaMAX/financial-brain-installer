@@ -832,8 +832,10 @@ function throwOriginalCloudflareControlActionError(error) {
 function throwCloudflareTokenFailure() {
   const failure = new Fatal(
     "Cloudflare access is not available, and this terminal cannot prompt securely for recovery access.\n" +
-      "      Run `brain setup <manifest>` or `brain update <manifest>` in an interactive terminal. " +
+      "      Sign in to Cloudflare in an interactive terminal, then re-run the same command you just ran. " +
       "The normal path reuses the saved browser sign-in; if needed, it can offer recovery-only hidden token entry.\n" +
+      "      Do not substitute a different lifecycle command: this failure says nothing about which step is\n" +
+      "      correct, and a brain paused mid-upgrade is finished only by `brain update`.\n" +
       "      Automation may inject CLOUDFLARE_API_TOKEN through an approved secret manager without putting it in a command.",
   );
   failure.code = "AUTH_REQUIRED";
@@ -975,7 +977,7 @@ function token() {
       "no Cloudflare credential is available.\n" +
         "      Easiest: sign in through the browser, which needs no token at all:\n" +
         `        npx ${WRANGLER_SPEC} login\n` +
-        "      Or run `brain setup` or `brain update` in a real terminal for hidden token entry.\n" +
+        "      Or re-run the same command in a real terminal, which can offer hidden token entry.\n" +
         "      Low-level automation must inject CLOUDFLARE_API_TOKEN through an approved secret\n" +
         "      manager; never paste it\n" +
         "      into a shell command. It is deliberately not read from the manifest."
@@ -2037,9 +2039,11 @@ export async function cmdDeploy(manifestPath, options = {}) {
           `could not set the drain cron: ${message.slice(0, 120)}\n` +
             "  The Worker code was uploaded, but a D1 install without this required schedule\n" +
             "  accumulates text that is keyword-searchable and NOT semantically searchable.\n" +
-            "  Fix Worker schedule access, then run `brain setup` or `brain update` again in an\n" +
-            "  interactive terminal; those read your stored credential, and every completed step\n" +
-            "  is skipped. (`brain deploy` alone needs CLOUDFLARE_API_TOKEN in the environment.)"
+            "  Fix Worker schedule access, then run the SAME command again in an interactive\n" +
+            "  terminal; it reads your stored credential, and every completed step is skipped.\n" +
+            "  Do not switch to setup here: this deploy also runs inside `brain update`, where the\n" +
+            "  writer is paused and only update can finish it. (`brain deploy` alone needs\n" +
+            "  CLOUDFLARE_API_TOKEN in the environment.)"
         );
       }
     }
@@ -12525,6 +12529,14 @@ export async function prepareSetupAdminKey(manifestPath, manifest, options = {})
  * finished brain from an unfinished one before deciding.
  */
 export async function probeExistingWorkerHealth(manifestPath, options = {}) {
+  const body = await readLiveWorkerHealthBody(manifestPath, options);
+  if (!body) return null;
+  if (body.vector_writer_protocol !== "lease-v1" || body.vector_drain_mode !== "active") return null;
+  return { version: String(body.version || ""), acceptingDocuments: body.accepting_documents === true };
+}
+
+/** The live /health body of the Worker this manifest names, or null on any doubt. */
+async function readLiveWorkerHealthBody(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const domain = m.brain?.domain;
   if (!domain) return null;
@@ -12534,11 +12546,25 @@ export async function probeExistingWorkerHealth(manifestPath, options = {}) {
     if (!res?.ok) return null;
     const body = JSON.parse(await res.text());
     if (body?.ok !== true) return null;
-    if (body.vector_writer_protocol !== "lease-v1" || body.vector_drain_mode !== "active") return null;
-    return { version: String(body.version || ""), acceptingDocuments: body.accepting_documents === true };
+    return body;
   } catch {
     return null;
   }
+}
+
+/**
+ * The live vector drain mode, or null when it cannot be read.
+ *
+ * probeExistingWorkerHealth answers only "is this a FINISHED brain", and
+ * returns null for a paused one exactly as it does for an unreachable one.
+ * Setup read that null as "an older Worker needing the compatibility cutover"
+ * and paused a brain that was ALREADY paused by a half-finished update. This
+ * is how setup tells those two nulls apart before it decides.
+ */
+export async function probeExistingWorkerDrainMode(manifestPath, options = {}) {
+  const body = await readLiveWorkerHealthBody(manifestPath, options);
+  const mode = body?.vector_drain_mode;
+  return typeof mode === "string" && mode ? mode : null;
 }
 
 export async function setupWorkerScriptExists(manifestPath, options = {}) {
@@ -12830,6 +12856,24 @@ export async function cmdSetup(manifestPath, options = {}) {
       }
       ok(`this brain is already installed and live on ${PRODUCT_VERSION}; no cutover, migration or deploy needed`);
     } else if (workerAlreadyExisted && usesD1) {
+      // The probe above returns null for an unreachable Worker AND for one that
+      // is paused for an upgrade. Only the first is a cutover candidate. A
+      // brain left paused by a half-finished update must be finished by
+      // `brain update`; re-running the cutover here pauses it again and leaves
+      // it off documents, which is how a working client brain was lost once.
+      const probeDrainMode = options.probeExistingWorkerDrainMode ?? probeExistingWorkerDrainMode;
+      const liveDrainMode = await runPinnedSetupStage(
+        "setup paused-brain check",
+        (pinnedPath) => probeDrainMode(pinnedPath),
+      );
+      if (liveDrainMode === "paused-for-upgrade") {
+        die(
+          "this brain is paused for an upgrade, so it is not accepting documents. Nothing was changed.\n" +
+            `      Run \`brain update ${shownTarget}\` to finish that upgrade and return the writer to active.\n` +
+            "      Do not run setup and do not run drain against a paused brain: setup would pause it again,\n" +
+            "      and drain cannot write while the writer is paused.",
+        );
+      }
       // A resumed setup can encounter a Worker deployed by an older package.
       // Quiesce it with the same compatibility protocol as `brain update`
       // before any new lease columns are applied.

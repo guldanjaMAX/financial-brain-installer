@@ -27,6 +27,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
   "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
   "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
+  "node --no-warnings test/setup-paused-brain-guard.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -70,6 +71,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
   "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
   "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
+  "node --no-warnings test/setup-paused-brain-guard.test.mjs",
   "node test/supabase-import.test.mjs",
   "node test/message-session.test.mjs",
   "node --no-warnings test/imessage-capture.test.mjs",
