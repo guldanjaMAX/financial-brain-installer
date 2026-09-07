@@ -97,6 +97,26 @@ assert.throws(
   /400-round safety limit.*9 vector operation/s
 );
 
+/* An empty outbox is not a populated index (field run A: 13,869 chunks, zero
+ * vectors, and a green "query-ready (0 confirmed)"). */
+assert.throws(
+  () => assertDrainComplete({ remaining: 0, rounds: 1, expectedVectors: 13869, actualVectors: 0 }),
+  /Vectorize holds 0 vector\(s\) while D1 requires 13869.*EMPTY, not ready/s
+);
+assert.throws(
+  () => assertDrainComplete({ remaining: 0, rounds: 1, expectedVectors: 10, actualVectors: 4 }),
+  /Vectorize holds 4 vector\(s\), but D1 requires 10/s
+);
+assert.deepEqual(
+  assertDrainComplete({ remaining: 0, rounds: 2, expectedVectors: 7, actualVectors: 7 }),
+  { remaining: 0, rounds: 2 }
+);
+/* A corpus that requires nothing is legitimately ready at zero. */
+assert.deepEqual(
+  assertDrainComplete({ remaining: 0, rounds: 1, expectedVectors: 0, actualVectors: 0 }),
+  { remaining: 0, rounds: 1 }
+);
+
 /* Preview and confirmation are separate contracts, including source identity. */
 const preview = {
   chunks: 12,

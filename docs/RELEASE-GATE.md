@@ -201,7 +201,7 @@ well formed, permitted `deferral` on its own row in the registry:
 
 ```json
 "deferral": {
-  "version": "0.4.0",
+  "version": "0.4.1",
   "blocked_on": "physical_hardware_unavailable",
   "reason": "prose: why the acceptance cannot be satisfied for THIS version",
   "unproven": "prose: what ships without field proof as a direct result"

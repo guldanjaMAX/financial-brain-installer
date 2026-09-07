@@ -783,6 +783,8 @@ export function cloudflareOAuthFailureMessage(error) {
       "Cloudflare sign-in could not use this computer's protected credential store. Close other setup windows, confirm macOS Keychain or Windows Credential Manager is available, and rerun the same command.",
     CLOUDFLARE_OAUTH_REAUTH_REQUIRED:
       "Cloudflare browser sign-in did not finish for this Brain. Leave the terminal open, complete the Cloudflare page in the same computer, and rerun the same command.",
+    CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE:
+      "Cloudflare browser sign-in completed, but this computer would not let Wrangler save the result where the command was run. Nothing was changed. Rerun the same command from a writable directory, such as your home folder.",
     CLOUDFLARE_OAUTH_SCOPE_MISSING:
       "Cloudflare sign-in completed, but the approved access could not reach every required Workers, D1, Vectorize, and Workers AI surface. Review the selected account and rerun the sign-in.",
     CLOUDFLARE_ACCOUNT_NONE:
@@ -832,8 +834,12 @@ function throwOriginalCloudflareControlActionError(error) {
 function throwCloudflareTokenFailure() {
   const failure = new Fatal(
     "Cloudflare access is not available, and this terminal cannot prompt securely for recovery access.\n" +
-      "      Run `brain setup <manifest>` or `brain update <manifest>` in an interactive terminal. " +
-      "The normal path reuses the saved browser sign-in; if needed, it can offer recovery-only hidden token entry.\n" +
+      "      Run `brain update <manifest>` in an interactive terminal. It reuses the saved browser sign-in,\n" +
+      "      and if that is gone it can offer recovery-only hidden token entry.\n" +
+      "      Not setup: a brain paused mid-upgrade is finished only by `brain update`, and rerunning the\n" +
+      "      install over one pauses it again and leaves it refusing documents.\n" +
+      "      A non-interactive session may pass `--adopt-cloudflare-profile` (or set\n" +
+      "      BRAIN_ADOPT_CLOUDFLARE_PROFILE=1) once the owner has approved the browser sign-in it adopts.\n" +
       "      Automation may inject CLOUDFLARE_API_TOKEN through an approved secret manager without putting it in a command.",
   );
   failure.code = "AUTH_REQUIRED";
@@ -895,6 +901,12 @@ export async function withCloudflareControlCredential(action, options = {}) {
   const oauthSessionOptions = { ...(options.oauthOptions || {}) };
   for (const reserved of ["profile", "installIdentity", "expectedAccountId", "reauthorize", "prompt", "action"]) {
     delete oauthSessionOptions[reserved];
+  }
+  // Wrangler writes its cache under the child's working directory, so the
+  // child is aimed at this install's own directory rather than wherever the
+  // owner happened to run the command from.
+  if (!oauthSessionOptions.workingDirectory && options.manifestPath) {
+    oauthSessionOptions.workingDirectory = dirname(resolve(String(options.manifestPath)));
   }
   const runOAuth = async (reauthorize) => oauthRunner({
     ...oauthSessionOptions,
@@ -975,7 +987,7 @@ function token() {
       "no Cloudflare credential is available.\n" +
         "      Easiest: sign in through the browser, which needs no token at all:\n" +
         `        npx ${WRANGLER_SPEC} login\n` +
-        "      Or run `brain setup` or `brain update` in a real terminal for hidden token entry.\n" +
+        "      Or re-run the same command in a real terminal, which can offer hidden token entry.\n" +
         "      Low-level automation must inject CLOUDFLARE_API_TOKEN through an approved secret\n" +
         "      manager; never paste it\n" +
         "      into a shell command. It is deliberately not read from the manifest."
@@ -2037,9 +2049,11 @@ export async function cmdDeploy(manifestPath, options = {}) {
           `could not set the drain cron: ${message.slice(0, 120)}\n` +
             "  The Worker code was uploaded, but a D1 install without this required schedule\n" +
             "  accumulates text that is keyword-searchable and NOT semantically searchable.\n" +
-            "  Fix Worker schedule access, then run `brain setup` or `brain update` again in an\n" +
-            "  interactive terminal; those read your stored credential, and every completed step\n" +
-            "  is skipped. (`brain deploy` alone needs CLOUDFLARE_API_TOKEN in the environment.)"
+            "  Fix Worker schedule access, then run the SAME command again in an interactive\n" +
+            "  terminal; it reads your stored credential, and every completed step is skipped.\n" +
+            "  Do not switch to setup here: this deploy also runs inside `brain update`, where the\n" +
+            "  writer is paused and only update can finish it. (`brain deploy` alone needs\n" +
+            "  CLOUDFLARE_API_TOKEN in the environment.)"
         );
       }
     }
@@ -3115,10 +3129,18 @@ export async function cmdMigrate(manifestPath, options = {}) {
   // historical name, but it is passed only after setup/update has deployed the
   // whole-corpus write barrier and waited out older invocations. It is
   // intentionally not a CLI flag.
+  //
+  // `vectorDrainQuiesced` now carries what the probe actually READ, so it is
+  // false whenever quiescence could not be verified. The authorization to
+  // migrate is `vectorDrainPauseCompleted`: setup/update set it once the
+  // paused deployment and the full grace are behind them. Unverified is loud,
+  // not fatal, because a transport blip must not block every update.
   const writerQuiescenceMigrations = new Set([10, 11, 12, 13, 33]);
+  const cutoverAuthorized = options.vectorDrainQuiesced === true ||
+    options.vectorDrainPauseCompleted === true;
   if ((m.infrastructure?.cloudflare?.storage || "d1") === "d1" &&
       pending.some((migration) => writerQuiescenceMigrations.has(migration.version)) &&
-      options.vectorDrainQuiesced !== true) {
+      !cutoverAuthorized) {
     let installTable;
     try {
       installTable = await queryDatabase(
@@ -3724,6 +3746,25 @@ export const VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS = 20 * 60 * 1000;
 export const VECTOR_DRAIN_CUTOVER_POLL_MS = 15_000;
 
 /**
+ * A probe error is a transport failure far more often than a schema failure.
+ * Field run A lost the whole check to one UND_ERR_CONNECT_TIMEOUT, so the
+ * probe is retried across the remaining window instead of abandoned on the
+ * first blip. Bounded, because a brain whose database stays unreadable for
+ * minutes is not going to become readable by being asked four hundred times.
+ */
+export const VECTOR_DRAIN_CUTOVER_PROBE_RETRY_MS = 30_000;
+export const VECTOR_DRAIN_CUTOVER_PROBE_ERROR_LIMIT = 6;
+
+/**
+ * The probe failure IS the evidence, so it has to reach the transcript intact.
+ * A 120-character cut landed mid-word on exactly the errors that matter.
+ */
+function describeCutoverProbeFailure(error) {
+  const text = String(error?.message ?? error ?? "").trim() || "unknown error";
+  return text.length > 240 ? `${text.slice(0, 240)}...` : text;
+}
+
+/**
  * Wait until no older writer can still be touching the vector index.
  *
  * Without a probe this is the full fixed grace: a brain from before the drain
@@ -3738,6 +3779,10 @@ export const VECTOR_DRAIN_CUTOVER_POLL_MS = 15_000;
  * are required, because a single reading can land between a release and the
  * next acquire. The probe never shortens the grace below what it proves: a
  * probe error, or a brain that stays busy, falls back to the full fixed wait.
+ * A probe error is retried across the remaining window before that fallback,
+ * because one connect timeout is not evidence about writers. When the wait
+ * ends without a quiet reading the result says so in the transcript and in
+ * `proven`, and every caller carries that value forward instead of assuming.
  * On an idle brain this turns a twenty-minute pause during which the brain
  * refuses documents into about thirty seconds. Measured 2026-09-02: a live
  * update sat the entire twenty minutes with the lease free and zero rows
@@ -3747,15 +3792,32 @@ export async function waitForVectorDrainCutover(waiter, {
   nextStep = "database migration",
   probe = null,
   pollMs = VECTOR_DRAIN_CUTOVER_POLL_MS,
+  probeRetryMs = VECTOR_DRAIN_CUTOVER_PROBE_RETRY_MS,
+  probeErrorLimit = VECTOR_DRAIN_CUTOVER_PROBE_ERROR_LIMIT,
   now = Date.now,
 } = {}) {
   const minutes = Math.ceil(VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS / 60_000);
+  // Never the ordinary success line. An elapsed pause is a spent budget, not a
+  // proof, and run A showed that reading one as the other is invisible.
+  const unverified = (waitedMs, reason, why, detail = null) => {
+    warn(`quiescence NOT verified before ${nextStep}: ${why}`);
+    warn(`the ${minutes}-minute safety pause elapsed, but nothing proved older writers had stopped.`);
+    return { waitedMs, proven: false, reason, detail };
+  };
   if (typeof probe !== "function") {
     info(`safety pause: waiting ${minutes} minutes for older database writers to finish`);
     info(`Keep this window open. The Worker is safely paused, but ${nextStep} has not started yet.`);
     await waiter(VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS);
+    // The legacy contract: a pre-lease brain cannot be asked, so the full
+    // elapsed grace is the only proof available and the pause did complete.
+    // It is still not a reading, so `proven` stays false for the caller.
     ok(`safety pause complete; starting ${nextStep}`);
-    return { waitedMs: VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS, proven: false };
+    return {
+      waitedMs: VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS,
+      proven: false,
+      reason: "no-probe",
+      detail: null,
+    };
   }
   info(`safety pause: checking that older database writers have finished (up to ${minutes} minutes)`);
   info(`Keep this window open. The Worker is safely paused, but ${nextStep} has not started yet.`);
@@ -3763,32 +3825,63 @@ export async function waitForVectorDrainCutover(waiter, {
   const deadline = startedAt + VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS;
   let quietReadings = 0;
   let waitedMs = 0;
+  let probeErrors = 0;
+  let lastProbeFailure = null;
   while (true) {
     let reading;
+    let failed = false;
     try {
       reading = await probe();
+      probeErrors = 0;
     } catch (error) {
+      failed = true;
+      probeErrors += 1;
+      lastProbeFailure = describeCutoverProbeFailure(error);
+      quietReadings = 0;
+      info(`could not read the writer state (attempt ${probeErrors} of ${probeErrorLimit}): ${lastProbeFailure}`);
+    }
+    if (failed && probeErrors >= probeErrorLimit) {
       const remaining = Math.max(0, deadline - now());
-      info(`could not read the writer state (${String(error?.message || error).slice(0, 120)}); waiting the full pause instead`);
-      await waiter(remaining);
-      ok(`safety pause complete; starting ${nextStep}`);
-      return { waitedMs: waitedMs + remaining, proven: false };
+      if (remaining > 0) {
+        info(`the writer state stayed unreadable; serving the rest of the ${minutes}-minute pause`);
+        await waiter(remaining);
+        waitedMs += remaining;
+      }
+      return unverified(
+        waitedMs,
+        "probe-unreadable",
+        `the writer state could not be read ${probeErrors} times in a row (last error: ${lastProbeFailure})`,
+        lastProbeFailure,
+      );
     }
-    const quiet = reading && reading.leaseFree === true && Number(reading.inFlight || 0) === 0;
-    quietReadings = quiet ? quietReadings + 1 : 0;
-    if (quietReadings >= 2) {
-      ok(`older database writers have finished; starting ${nextStep}`);
-      return { waitedMs, proven: true };
-    }
-    if (!quiet) {
-      info(`an older writer is still active (${Number(reading?.inFlight || 0)} accepted batch(es) awaiting confirmation); checking again`);
+    if (!failed) {
+      const quiet = reading && reading.leaseFree === true && Number(reading.inFlight || 0) === 0;
+      quietReadings = quiet ? quietReadings + 1 : 0;
+      if (quietReadings >= 2) {
+        ok(`older database writers have finished; starting ${nextStep}`);
+        return { waitedMs, proven: true, reason: "verified-quiet", detail: null };
+      }
+      if (!quiet) {
+        info(`an older writer is still active (${Number(reading?.inFlight || 0)} accepted batch(es) awaiting confirmation); checking again`);
+      }
     }
     const remaining = deadline - now();
     if (remaining <= 0) {
-      ok(`safety pause complete; starting ${nextStep}`);
-      return { waitedMs, proven: false };
+      if (failed) {
+        return unverified(
+          waitedMs,
+          "probe-unreadable",
+          `the writer state could not be read (last error: ${lastProbeFailure})`,
+          lastProbeFailure,
+        );
+      }
+      return unverified(
+        waitedMs,
+        "writers-active",
+        `an older writer was still active at the end of the ${minutes}-minute pause`,
+      );
     }
-    const step = Math.min(pollMs, remaining);
+    const step = Math.min(failed ? probeRetryMs : pollMs, remaining);
     await waiter(step);
     waitedMs += step;
   }
@@ -4174,7 +4267,16 @@ export async function runAcceleratedBootstrap({
     previous = receipt;
     lastRemaining = receipt.remaining;
     onProgress(receipt);
-    info(`${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
+    // `confirmed` counts bootstrap BATCH LEDGER rows. Once the fence probe opens
+    // the drain, the rest of the work flows through the ordinary outbox path,
+    // which writes nothing to that ledger: run A watched "1001/13869 confirmed;
+    // 12868 remain" stand still for 46 minutes and then jump to 13869/13869 in
+    // one step, while the outbox fell from 3,968 pending to 68. Lead with the
+    // numbers that actually move -- the outbox depth the receipt already carries
+    // as queued + submitted, and the provider count it already carries as
+    // actual/expected -- and label the ledger count as what it is.
+    info(`${receipt.queued + receipt.submitted} vector operation(s) pending; ${receipt.actual_vectors}/${receipt.expected_vectors} vector(s) query-visible`);
+    info(`batch ledger: ${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
     if (receipt.complete) {
       return validateAcceleratedBootstrapCompletion(Object.freeze({
         epoch: receipt.epoch,
@@ -4434,7 +4536,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
         // keep the fixed wait. The probe reads only, and any read failure
         // falls back to the full wait inside waitForVectorDrainCutover.
         const leaseAware = Number(before?.schema_version || 0) >= 11;
-        await runStage("vector-drain quiescence", () =>
+        const cutover = await runStage("vector-drain quiescence", () =>
           waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
             probe: leaseAware ? async () => {
               const r = await queryDatabase(accountId, dbId,
@@ -4453,8 +4555,13 @@ export async function cmdUpgrade(manifestPath, options = {}) {
               };
             } : null,
           }));
+        if (cutover?.proven !== true) {
+          warn(`the safety pause elapsed but quiescence was NOT verified (${cutover?.reason || "unknown"}).`);
+          warn("continuing to the migration with an unverified writer state; if it fails, treat an unconfirmed vector batch as the first suspect.");
+        }
         await runStage("migration", () => migrate(executionPin.target, {
-          vectorDrainQuiesced: true,
+          vectorDrainQuiesced: cutover?.proven === true,
+          vectorDrainPauseCompleted: true,
         }));
         // Schema 0013 turns the legacy one-page-at-a-time bootstrap into an
         // authenticated aggregate-only bulk protocol. Keep the Worker paused
@@ -4629,9 +4736,13 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
       reachOnly: true,
     });
     revalidateUpdateManifest(pin, "rollback paused vector-drain health verification");
-    await waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
+    const rollbackCutover = await waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
       nextStep: "the D1 restore",
     });
+    if (rollbackCutover?.proven !== true) {
+      warn(`the safety pause elapsed but quiescence was NOT verified (${rollbackCutover?.reason || "unknown"}).`);
+      warn("continuing to the D1 restore with an unverified writer state; a mutation started before the restore can land after it with no surviving receipt.");
+    }
     revalidateUpdateManifest(pin, "rollback vector-drain quiescence");
   }
   await callCloudflare(`/accounts/${acct.id}/d1/database/${dbId}/time_travel/restore?bookmark=${encodeURIComponent(bookmark)}`, {
@@ -12525,6 +12636,29 @@ export async function prepareSetupAdminKey(manifestPath, manifest, options = {})
  * finished brain from an unfinished one before deciding.
  */
 export async function probeExistingWorkerHealth(manifestPath, options = {}) {
+  const body = await readLiveWorkerHealthBody(manifestPath, options);
+  if (!body) return null;
+  // `ok` is the brain's verdict on ITSELF, and it belongs to this question
+  // alone. A paused Worker answers 200 with ok:false on purpose, so while that
+  // check lived in the shared body reader every caller inherited it and a
+  // paused brain looked unreachable. That is exactly how the drain probe below
+  // saw null and setup ran the cutover on an already-paused install.
+  if (body.ok !== true) return null;
+  if (body.vector_writer_protocol !== "lease-v1" || body.vector_drain_mode !== "active") return null;
+  return { version: String(body.version || ""), acceptingDocuments: body.accepting_documents === true };
+}
+
+/**
+ * The live /health body of the Worker this manifest names, or null when there
+ * is no body to read: no saved domain, no answer, a non-2xx, or unparseable
+ * JSON.
+ *
+ * "Readable" is the ONLY question here. What the body says about the brain's
+ * own health is each caller's to judge, because the two callers want opposite
+ * things from a paused brain: one must reject it, the other exists to identify
+ * it.
+ */
+async function readLiveWorkerHealthBody(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const domain = m.brain?.domain;
   if (!domain) return null;
@@ -12533,12 +12667,30 @@ export async function probeExistingWorkerHealth(manifestPath, options = {}) {
     const res = await fetchHealth(`https://${domain}/health`, {}, { timeoutMs: 15_000, what: "the health check" });
     if (!res?.ok) return null;
     const body = JSON.parse(await res.text());
-    if (body?.ok !== true) return null;
-    if (body.vector_writer_protocol !== "lease-v1" || body.vector_drain_mode !== "active") return null;
-    return { version: String(body.version || ""), acceptingDocuments: body.accepting_documents === true };
+    return body && typeof body === "object" ? body : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The live vector drain mode, or null when it cannot be read.
+ *
+ * probeExistingWorkerHealth answers only "is this a FINISHED brain", and
+ * returns null for a paused one exactly as it does for an unreachable one.
+ * Setup read that null as "an older Worker needing the compatibility cutover"
+ * and paused a brain that was ALREADY paused by a half-finished update. This
+ * is how setup tells those two nulls apart before it decides.
+ *
+ * A paused Worker reports ok:false, so this must read the body BEFORE any
+ * self-assessment gate. The first version of this probe sat behind that gate
+ * and returned null for every paused brain, which left the guard it feeds
+ * unable to fire on the one install it was written for.
+ */
+export async function probeExistingWorkerDrainMode(manifestPath, options = {}) {
+  const body = await readLiveWorkerHealthBody(manifestPath, options);
+  const mode = body?.vector_drain_mode;
+  return typeof mode === "string" && mode ? mode : null;
 }
 
 export async function setupWorkerScriptExists(manifestPath, options = {}) {
@@ -12679,7 +12831,11 @@ async function cmdInit(manifestPath, options = {}) {
 
 export async function cmdSetup(manifestPath, options = {}) {
   const flags = options.flags ?? parseFlags(process.argv.slice(3));
-  assertKnownFlags(flags, ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token"], "brain setup");
+  assertKnownFlags(
+    flags,
+    ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token", "adopt-cloudflare-profile"],
+    "brain setup",
+  );
   const accountPath = String(options.cloudflareAccountPath ?? flags["cloudflare-account"] ?? "").trim().toLowerCase();
   if (accountPath && !["create", "existing"].includes(accountPath)) {
     die("--cloudflare-account accepts create or existing");
@@ -12830,6 +12986,24 @@ export async function cmdSetup(manifestPath, options = {}) {
       }
       ok(`this brain is already installed and live on ${PRODUCT_VERSION}; no cutover, migration or deploy needed`);
     } else if (workerAlreadyExisted && usesD1) {
+      // The probe above returns null for an unreachable Worker AND for one that
+      // is paused for an upgrade. Only the first is a cutover candidate. A
+      // brain left paused by a half-finished update must be finished by
+      // `brain update`; re-running the cutover here pauses it again and leaves
+      // it off documents, which is how a working client brain was lost once.
+      const probeDrainMode = options.probeExistingWorkerDrainMode ?? probeExistingWorkerDrainMode;
+      const liveDrainMode = await runPinnedSetupStage(
+        "setup paused-brain check",
+        (pinnedPath) => probeDrainMode(pinnedPath),
+      );
+      if (liveDrainMode === "paused-for-upgrade") {
+        die(
+          "this brain is paused for an upgrade, so it is not accepting documents. Nothing was changed.\n" +
+            `      Run \`brain update ${shownTarget}\` to finish that upgrade and return the writer to active.\n` +
+            "      Do not run setup and do not run drain against a paused brain: setup would pause it again,\n" +
+            "      and drain cannot write while the writer is paused.",
+        );
+      }
       // A resumed setup can encounter a Worker deployed by an older package.
       // Quiesce it with the same compatibility protocol as `brain update`
       // before any new lease columns are applied.
@@ -12857,13 +13031,20 @@ export async function cmdSetup(manifestPath, options = {}) {
         );
         const waitForVectorDrainQuiescence = options.waitForVectorDrainQuiescence ??
           ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
-        await runPinnedSetupStage(
+        const setupCutover = await runPinnedSetupStage(
           "setup vector-drain quiescence",
           () => waitForVectorDrainCutover(waitForVectorDrainQuiescence),
         );
+        if (setupCutover?.proven !== true) {
+          warn(`the safety pause elapsed but quiescence was NOT verified (${setupCutover?.reason || "unknown"}).`);
+          warn("continuing to the migration with an unverified writer state; if it fails, treat an unconfirmed vector batch as the first suspect.");
+        }
         await runPinnedSetupStage(
           "setup migration",
-          (pinnedPath) => migrateSetup(pinnedPath, { vectorDrainQuiesced: true }),
+          (pinnedPath) => migrateSetup(pinnedPath, {
+            vectorDrainQuiesced: setupCutover?.proven === true,
+            vectorDrainPauseCompleted: true,
+          }),
         );
         await runPinnedSetupStage(
           "setup active vector-drain deployment",
@@ -14684,13 +14865,43 @@ export function validateDrainReceipt(body) {
   return { drained, submitted, waiting, remaining, vector_ready: body.vector_ready };
 }
 
-/** Refuse a green exit when the bounded drain loop ends with work outstanding. */
-export function assertDrainComplete({ remaining, rounds, maxRounds = 400 }) {
+/**
+ * Refuse a green exit when the bounded drain loop ends with work outstanding.
+ *
+ * An empty queue is not a populated index. Field run A drained a 13,869-chunk
+ * corpus, found nothing left to do, and printed "query-ready (0 confirmed)":
+ * the outbox was empty and the readiness counts were never consulted, so an
+ * empty index passed as complete. Readiness is a statement about the vectors
+ * D1 requires, so it is decided here on those two numbers rather than on queue
+ * depth alone. A corpus that requires zero vectors may still be ready at zero.
+ */
+export function assertDrainComplete({
+  remaining,
+  rounds,
+  maxRounds = 400,
+  expectedVectors = null,
+  actualVectors = null,
+} = {}) {
   if (remaining !== 0) {
     die(
       `the drain reached its ${maxRounds}-round safety limit with ${remaining} vector operation(s) still queued.\n` +
         "      Completed chunks are safe, but the vector index is still incomplete. Re-run `brain drain` to continue."
     );
+  }
+  if (Number.isSafeInteger(expectedVectors) && Number.isSafeInteger(actualVectors) && expectedVectors > 0) {
+    if (actualVectors === 0) {
+      die(
+        `the outbox is empty, but Vectorize holds 0 vector(s) while D1 requires ${expectedVectors}.\n` +
+          "      The vector index is EMPTY, not ready: semantic search would return nothing.\n" +
+          "      brain diagnose <manifest>\n" +
+          "      brain reindex <manifest> --yes"
+      );
+    }
+    if (actualVectors !== expectedVectors) {
+      die(vectorCountMismatchFailure(expectedVectors, actualVectors, {
+        prefix: "the outbox is empty, but ",
+      }));
+    }
   }
   return { remaining, rounds };
 }
@@ -14789,6 +15000,8 @@ async function cmdDrain(manifestPath, options = {}) {
   let submitted = 0;
   let remaining = null;
   let rounds = 0;
+  let expectedVectors = null;
+  let actualVectors = null;
   const maxRounds = 400;
   for (let round = 1; round <= maxRounds; round++) {
     if (now() >= deadline) break;
@@ -14865,6 +15078,10 @@ async function cmdDrain(manifestPath, options = {}) {
       die(`drain failed (${res.status}): ${detail}`);
     }
     const receipt = validateDrainReceipt(body);
+    // Readiness is proven by the vector counts, not by an empty queue, so carry
+    // the latest pair out of the loop for the completion assertion below.
+    expectedVectors = Number.isSafeInteger(body?.expected_vectors) ? body.expected_vectors : null;
+    actualVectors = Number.isSafeInteger(body?.actual_vectors) ? body.actual_vectors : null;
     drained += receipt.drained;
     submitted += receipt.submitted;
     remaining = receipt.remaining;
@@ -14892,7 +15109,7 @@ async function cmdDrain(manifestPath, options = {}) {
         "      Completed chunks are safe. Re-run `brain drain` to resume from the durable queue.",
     );
   }
-  assertDrainComplete({ remaining, rounds, maxRounds });
+  assertDrainComplete({ remaining, rounds, maxRounds, expectedVectors, actualVectors });
   ok(`vector index is query-ready (${drained} confirmed)`);
   return { drained, submitted, remaining };
 }
@@ -15278,6 +15495,45 @@ export function manifestCloudflareControlBinding(manifestPath) {
   return Object.freeze({ accountId, authProfile });
 }
 
+/** The one environment variable that stands in for `--adopt-cloudflare-profile`. */
+const CLOUDFLARE_ADOPTION_CONSENT_ENV = "BRAIN_ADOPT_CLOUDFLARE_PROFILE";
+
+/**
+ * Did the owner explicitly approve a browser sign-in for a session that has no
+ * terminal to ask in?
+ *
+ * The TTY gate below exists so an unattended job can never silently start a
+ * browser credential ceremony. That is worth keeping, so this is the explicit
+ * way past it rather than a loosening of it: `--adopt-cloudflare-profile` on
+ * the command, or BRAIN_ADOPT_CLOUDFLARE_PROFILE=1 in the environment for a
+ * wrapper that cannot add a flag. Consent only decides whether the ceremony
+ * may begin; it never overrides the token escapes.
+ */
+export function cloudflareAdoptionConsent(flags = {}, env = process.env) {
+  const flagged = flags?.["adopt-cloudflare-profile"];
+  if (flagged !== undefined && flagged !== false) return true;
+  const raw = String(env?.[CLOUDFLARE_ADOPTION_CONSENT_ENV] ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+/**
+ * The manifest `brain update` was actually pointed at.
+ *
+ * `update` has no `--manifest` flag, so its target is positional — and
+ * parseFlags gives a bare switch the next word as its value. That makes
+ * `brain update --adopt-cloudflare-profile ./brain.manifest.json` parse as the
+ * switch holding the path, leaving argv[3] as the switch itself. Resolving
+ * that as a filename would fail; ignoring it would silently fall through to
+ * discovery and update a DIFFERENT Brain on a machine that hosts more than
+ * one. Recover the path from wherever it landed instead.
+ */
+export function updateCommandTarget(positional, flags = {}) {
+  if (typeof positional === "string" && positional && !positional.startsWith("--")) return positional;
+  const swallowed = flags?.["adopt-cloudflare-profile"];
+  if (typeof swallowed === "string" && swallowed && !swallowed.startsWith("--")) return swallowed;
+  return undefined;
+}
+
 /**
  * Record this install's own Cloudflare browser profile on a manifest written
  * before that field existed.
@@ -15302,16 +15558,28 @@ export function manifestCloudflareControlBinding(manifestPath) {
  * exact bytes.
  *
  * Every automation escape is preserved by refusing to act: an explicit token
- * run, a non-interactive session, and an injected CLOUDFLARE_API_TOKEN all
- * return null and leave the manifest untouched. So does any failure — this is
- * an opportunistic repair, never a new way for an update to die.
+ * run and an injected CLOUDFLARE_API_TOKEN return null and leave the manifest
+ * untouched, whatever else was asked for. So does any failure — this is an
+ * opportunistic repair, never a new way for an update to die.
+ *
+ * A session with no terminal refuses too, unless the owner said otherwise.
+ * That gate shipped as an unconditional refusal, which read as "automation
+ * must not start a browser ceremony" but landed as "an agent-driven install
+ * can never be repaired": a coding agent has no TTY, so every agent-driven
+ * update on a pre-profile install skipped adoption and died AUTH_REQUIRED in
+ * 174 ms without pausing or migrating (field run A). `adoptConsent` — from
+ * `--adopt-cloudflare-profile` or BRAIN_ADOPT_CLOUDFLARE_PROFILE=1 — is the
+ * owner saying the ceremony is wanted. With it, the y/n prompt is replaced by
+ * an instruction the owner can act on, because there is nobody to answer it.
  *
  * Returns the adopted profile name, or null when nothing was written.
  */
 export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
   const env = options.env ?? process.env;
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  if (options.forceToken === true || !interactive || env.CLOUDFLARE_API_TOKEN) return null;
+  const adoptConsent = options.adoptConsent ?? cloudflareAdoptionConsent({}, env);
+  if (options.forceToken === true || env.CLOUDFLARE_API_TOKEN) return null;
+  if (!interactive && adoptConsent !== true) return null;
   if (!manifestPath) return null;
 
   let manifest;
@@ -15338,10 +15606,23 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
   write("  this install's own named profile and ends that prompt for good.");
   write("  Nothing is written unless the sign-in reaches this exact account.");
   write("");
-  const answer = String(await askFn("Sign in to Cloudflare in the browser now? (y/n)", "y")).trim().toLowerCase();
-  if (answer !== "y" && answer !== "yes") {
-    info("continuing without it. This run uses the existing Cloudflare access.");
-    return null;
+  if (interactive) {
+    const answer = String(await askFn("Sign in to Cloudflare in the browser now? (y/n)", "y")).trim().toLowerCase();
+    if (answer !== "y" && answer !== "yes") {
+      info("continuing without it. This run uses the existing Cloudflare access.");
+      return null;
+    }
+  } else {
+    // Consent already answered the question a prompt would have asked, and
+    // there is no terminal to ask it in. The owner still has to complete the
+    // sign-in in a browser, so say so before the wait rather than after it.
+    // Wrangler mints the URL itself and prints it on this same output, so the
+    // instruction names where the URL appears rather than inventing one.
+    write("  Approved for this run by --adopt-cloudflare-profile, and this session has no");
+    write("  terminal, so nothing here will ask y/n. Cloudflare should open in your browser.");
+    write("  If it does not, open the sign-in URL printed below on this same machine.");
+    write("  The sign-in waits up to 10 minutes, then this run continues either way.");
+    write("");
   }
 
   const profile = cloudflareOAuthProfileName(cloudflareOAuthInstallIdentity(manifestPath));
@@ -15349,6 +15630,7 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
   for (const reserved of ["profile", "installIdentity", "expectedAccountId", "reauthorize", "prompt", "action"]) {
     delete oauthOptions[reserved];
   }
+  if (!oauthOptions.workingDirectory) oauthOptions.workingDirectory = dirname(resolve(manifestPath));
   const runner = options.withOAuthSession ?? withCloudflareOAuthSession;
   let session;
   try {
@@ -15360,6 +15642,16 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
       prompt: (request) => promptForCloudflareOAuthAccount(request, { askFn }),
     });
   } catch (error) {
+    // A sign-in that finished at Cloudflare and then could not be written down
+    // is a different problem from one the owner never finished, and only one of
+    // them is fixed by moving to a writable directory.
+    if (error?.code === "CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE") {
+      warn(
+        `the Cloudflare sign-in completed, but its result could not be saved (${String(error?.message || error)}). ` +
+          "Nothing was changed. Rerun the same command from a writable directory, such as your home folder."
+      );
+      return null;
+    }
     warn(
       `the Cloudflare browser sign-in did not complete (${String(error?.message || error)}). ` +
         "Nothing was changed, and this run continues on the existing access."
@@ -15381,6 +15673,10 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
     if (target.auth_profile) return target.auth_profile === profile ? profile : null;
     if (String(target.account_id || "").toLowerCase() !== boundAccountId) return null;
     target.auth_profile = profile;
+    // The receipt says how the ceremony was approved, because "the owner typed
+    // y" and "a flag stood in for the owner" are different claims about the
+    // same profile, and only the manifest survives to be read later.
+    if (!interactive) target.auth_profile_consent = "non-interactive";
     saveManifest(manifestPath, current);
   } catch (error) {
     warn(
@@ -15426,7 +15722,11 @@ export async function prepareCloudflareAccountCeremony(options = {}) {
 
 async function cmdSetupInteractive(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
-  assertKnownFlags(flags, ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token"], "brain setup");
+  assertKnownFlags(
+    flags,
+    ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token", "adopt-cloudflare-profile"],
+    "brain setup",
+  );
   const target = setupManifestTarget(manifestPath, flags);
   const forceToken = flags["cloudflare-token"] === true;
   if (flags["cloudflare-token"] && flags["cloudflare-token"] !== true) {
@@ -15449,6 +15749,7 @@ async function cmdSetupInteractive(manifestPath) {
   if (resumed && !authProfile && !forceToken && !automationToken) {
     authProfile = await adoptCloudflareAuthProfile(target, {
       interactive,
+      adoptConsent: cloudflareAdoptionConsent(flags),
       askFn: ask,
       forceToken,
     });
@@ -16406,6 +16707,9 @@ export async function cmdUpdate(manifestPath, options = {}) {
   // after this line would abort the very update it repairs.
   await (options.adoptCloudflareAuthProfile ?? adoptCloudflareAuthProfile)(installed.path, {
     interactive,
+    // Passed through as given, not coerced: leaving it undefined is what lets
+    // adoption still read BRAIN_ADOPT_CLOUDFLARE_PROFILE for itself.
+    adoptConsent: options.adoptConsent,
     askFn: options.askFn ?? ask,
     forceToken: options.forceToken === true || automationToken,
     oauthOptions: options.oauthOptions,
@@ -17654,7 +17958,12 @@ const commands = {
   invite: cmdInvite,
   devices: cmdDevices,
   token: cmdToken,
-  update: cmdUpdate,
+  update: (path) => {
+    const flags = parseFlags(process.argv.slice(3));
+    return cmdUpdate(updateCommandTarget(path, flags), {
+      adoptConsent: cloudflareAdoptionConsent(flags),
+    });
+  },
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
   schedule: cmdSchedule,
@@ -17753,6 +18062,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
 
   operate
     brain update     [manifest]            one safe update: snapshot, test, verify
+    brain update     [manifest] --adopt-cloudflare-profile  approve the one-time Cloudflare
+                                           browser sign-in from a session with no terminal
+                                           (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
     brain whatsnew   [manifest]            what changed in this version, and are you on it
     brain status     <manifest>            versions, pending migrations, upgrade history
     brain sources    <manifest>            named ingest sources, counts, last ingest

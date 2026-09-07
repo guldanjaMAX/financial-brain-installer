@@ -34,6 +34,32 @@ const posix = wranglerConfigCandidates({ HOME: "/Users/m" }, "darwin");
 assert.ok(posix.some((p) => p === "/Users/m/.wrangler/config/default.toml"));
 assert.ok(posix.some((p) => p.includes("/.config/")), "the XDG layout must be searched on POSIX too");
 
+// macOS wrangler writes to ~/Library/Preferences, not ~/.config. Omitting it
+// means a client who has just completed a browser sign-in is told AUTH_REQUIRED
+// and sent back to log in again, which is exactly what run B hit. The
+// XDG_CONFIG_HOME="$HOME/Library/Preferences" workaround only worked because
+// an explicit XDG value is checked first.
+const mac = wranglerConfigCandidates({ HOME: "/Users/m" }, "darwin");
+const macPrefs = mac.indexOf("/Users/m/Library/Preferences/.wrangler/config/default.toml");
+assert.ok(macPrefs >= 0, "macOS must search ~/Library/Preferences, where wrangler actually writes");
+assert.ok(
+  macPrefs < mac.indexOf("/Users/m/.config/.wrangler/config/default.toml"),
+  "on macOS the Library/Preferences layout is the likelier one and must be searched before ~/.config",
+);
+
+// An explicit XDG_CONFIG_HOME is an override the operator typed, so it still wins.
+assert.equal(
+  wranglerConfigCandidates({ HOME: "/Users/m", XDG_CONFIG_HOME: "/x" }, "darwin")[0],
+  "/x/.wrangler/config/default.toml",
+  "an explicit XDG_CONFIG_HOME must outrank the macOS default location",
+);
+
+// Linux ordering is untouched: there is no such directory there.
+assert.ok(
+  !wranglerConfigCandidates({ HOME: "/home/m" }, "linux").some((p) => p.includes("Library/Preferences")),
+  "the macOS location must not leak into the Linux candidate list",
+);
+
 // The first existing candidate wins, in order.
 assert.equal(
   findWranglerConfig({ env: { HOME: "/h" }, platform: "darwin", existsSync: (p) => p === "/h/.wrangler/config/default.toml" }),
@@ -82,12 +108,19 @@ assert.equal(readWranglerOAuthToken({ ...base, readFileSync: () => 'refresh_toke
 // would authenticate as the wrong identity, which is how an operator
 // provisions into their own account instead of the client's.
 let sawEnv = null;
+let sawOpts = null;
 refreshWranglerSession({
   env: { CLOUDFLARE_API_TOKEN: "operator-token", CLOUDFLARE_API_KEY: "k", HOME: "/h" },
-  run: (_c, _a, opts) => { sawEnv = opts.env; return { status: 0 }; },
+  run: (_c, _a, opts) => { sawEnv = opts.env; sawOpts = opts; return { status: 0 }; },
 });
 assert.equal(sawEnv.CLOUDFLARE_API_TOKEN, undefined, "the refresh child must not inherit CLOUDFLARE_API_TOKEN");
 assert.equal(sawEnv.CLOUDFLARE_API_KEY, undefined, "nor a global API key");
+
+// Nor the caller's directory: wrangler writes .wrangler/cache under its own
+// working directory, so a refresh started from an unwritable place fails for a
+// reason that has nothing to do with the credential.
+assert.equal(typeof sawOpts.cwd, "string", "the refresh child needs an explicit working directory");
+assert.notEqual(sawOpts.cwd, process.cwd(), "the refresh child must not inherit the caller's directory");
 
 console.log("wrangler browser sign-in: config discovery, expiry refresh, quiet absence, and identity isolation");
 

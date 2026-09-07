@@ -82,7 +82,7 @@ export const CF_TOKEN_REJECTED_REMEDY =
   "  Check it was copied whole, with no leading or trailing spaces, and that it\n" +
   "  has not expired or been deleted: dash.cloudflare.com > My Profile > API Tokens.\n" +
   `  Scopes: ${CF_TOKEN_SCOPES.join(", ")}.\n` +
-  "  Then run `brain setup` or `brain update` in an interactive terminal; it asks for the token without echo.";
+  "  Then re-run the command you were running, in an interactive terminal; it asks for the token without echo.";
 
 /** Does this failure mean the credential was refused, rather than the tool misbehaving? */
 export function isCredentialRejection(error) {
@@ -463,7 +463,7 @@ export async function checkVectorizeApi(accountId, cloudflareToken = process.env
       "Vectorize",
       WARN,
       "not checked: Cloudflare token is missing",
-      "Run `brain setup` or `brain update` in an interactive terminal for hidden token entry. " +
+      "Run `brain update <manifest>` in an interactive terminal for hidden token entry. " +
         "Low-level automation must inject it through an approved secret manager, never a pasted shell command.",
     );
   }
@@ -847,7 +847,7 @@ export async function checkCfToken(cloudflareToken = process.env.CLOUDFLARE_API_
       `  Scopes: ${CF_TOKEN_SCOPES.join(", ")}.
 ` +
       "  Set \'Expires on\' to tomorrow. Nothing here needs to outlive the install.\n" +
-      "  Then run `brain setup` or `brain update` in an interactive terminal; it asks for the token without echo.\n" +
+      "  Then re-run the command you were running, in an interactive terminal; it asks for the token without echo.\n" +
       "  Low-level automation must inject it through an approved secret manager, never a pasted shell command.\n" +
       CF_PLAN_NOTE
   );
@@ -1012,7 +1012,7 @@ export async function checkWorkersPaidPlan(
   const name = "Workers plan";
   if (!cloudflareToken) {
     return check(name, WARN, "not checked: Cloudflare token is missing",
-      "Run `brain setup` or `brain update` in an interactive terminal for hidden token entry.\n" + CF_PLAN_NOTE);
+      "Run `brain update <manifest>` in an interactive terminal for hidden token entry.\n" + CF_PLAN_NOTE);
   }
   if (!accountId) {
     return check(name, WARN, "not checked: Cloudflare account id is not known yet",

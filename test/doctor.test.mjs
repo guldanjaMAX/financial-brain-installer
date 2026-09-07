@@ -395,8 +395,13 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   delete process.env.CLOUDFLARE_API_TOKEN;
   const v = await checkVectorizeApi("0000");
   check("a missing token skips the API probe with a useful warning", v.status === WARN && /token is missing/.test(v.detail), JSON.stringify(v));
+  // This required `brain setup` to be named ahead of `brain update`. Doctor is
+  // what an operator runs against a brain that is ALREADY stuck, and it cannot
+  // tell a half-finished upgrade from a fresh install; over a paused brain,
+  // setup reruns the cutover and pauses it again. Hidden entry is still the
+  // point, but update is the command that can safely offer it.
   check("the missing-token remedy uses hidden entry rather than shell history",
-    /brain setup.*brain update.*hidden token entry/is.test(v.fix) &&
+    /brain update.*hidden token entry/is.test(v.fix) && !/brain setup/.test(v.fix) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(v.fix), v.fix);
   const tokenCheck = await checkCfToken();
   check("doctor's required-token fix never prints a pasteable token command",

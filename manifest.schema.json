@@ -80,6 +80,12 @@
               "pattern": "^financial-brain-[a-f0-9]{24}$",
               "description": "Non-secret local Wrangler OAuth profile used for this install's Cloudflare control-plane ceremony. The credential itself remains in Wrangler's OS-keyring-backed encrypted store and is never written to this manifest."
             },
+            "auth_profile_consent": {
+              "enum": [
+                "non-interactive"
+              ],
+              "description": "Present only when auth_profile was adopted from a session with no terminal, approved by --adopt-cloudflare-profile or BRAIN_ADOPT_CLOUDFLARE_PROFILE=1 rather than by an owner answering a prompt. Absent means the owner answered the prompt directly."
+            },
             "storage": {
               "enum": [
                 "d1",

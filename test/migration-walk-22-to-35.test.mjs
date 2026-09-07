@@ -478,7 +478,7 @@ if (errors.length === 0) {
          client_slug = excluded.client_slug,
          schema_version = excluded.schema_version,
          gate_version = excluded.gate_version`
-    ).run("lvc", "0.4.0", 35, 0, new Date().toISOString(), "stable");
+    ).run("fixture-brain", "0.4.0", 35, 0, new Date().toISOString(), "stable");
     return null;
   }, "threw");
   check("cmdMigrate's install_state upsert runs against the upgraded schema", upsertError === null, String(upsertError));

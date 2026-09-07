@@ -14,6 +14,8 @@
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { accessSync, constants as fsConstants, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = "wrangler@4.127.1";
 export const CLOUDFLARE_OAUTH_CALLBACK_HOST = "localhost";
@@ -169,6 +171,52 @@ export function cloudflareOAuthChildEnvironment({
   return clean;
 }
 
+/**
+ * Report why a directory cannot receive a Wrangler cache write, or null when
+ * it can. The code is returned rather than the error so nothing about the
+ * caller's filesystem is carried further than the classification needs.
+ */
+function directoryWriteFailure(path, { statImpl = statSync, accessImpl = accessSync } = {}) {
+  if (typeof path !== "string" || !path) return "ENOENT";
+  try {
+    if (!statImpl(path).isDirectory()) return "ENOTDIR";
+    accessImpl(path, fsConstants.W_OK);
+    return null;
+  } catch (error) {
+    return String(error?.code || "EACCES");
+  }
+}
+
+/**
+ * The directory the Wrangler child runs in.
+ *
+ * Wrangler writes `.wrangler/cache` under its own working directory during the
+ * browser callback ceremony. A child that inherits the caller's directory
+ * therefore discards a sign-in that COMPLETED at Cloudflare whenever the owner
+ * happens to be standing somewhere unwritable, which on Windows is the default
+ * shell location `C:\Windows\system32`. The child is given a directory that
+ * belongs to this install instead, and `process.cwd()` is never inherited: the
+ * last resort is the OS temporary directory, which is writable by definition
+ * for the account running the install.
+ */
+export function cloudflareOAuthWorkingDirectory({
+  workingDirectory = null,
+  tmpDirectory = null,
+  statImpl = statSync,
+  accessImpl = accessSync,
+} = {}) {
+  const fallback = typeof tmpDirectory === "string" && tmpDirectory ? tmpDirectory : tmpdir();
+  const candidates = [];
+  if (typeof workingDirectory === "string" && workingDirectory) candidates.push(workingDirectory);
+  candidates.push(fallback);
+  for (const candidate of candidates) {
+    if (!directoryWriteFailure(candidate, { statImpl, accessImpl })) return candidate;
+  }
+  // Nothing is writable. Still refuse the caller's directory: the failure is
+  // then classified against this exact path and named to the owner.
+  return fallback;
+}
+
 function quoteWindowsArgument(value) {
   const text = String(value);
   return /[\s"^&|<>()]/.test(text) ? `"${text.replaceAll('"', '\\"')}"` : text;
@@ -182,6 +230,10 @@ function runWrangler(args, {
   timeoutMs,
   stdio,
   maxBuffer,
+  workingDirectory = null,
+  tmpDirectory = null,
+  statImpl = statSync,
+  accessImpl = accessSync,
 } = {}) {
   const run = processRunner ?? ((command, argv, options) => spawnSync(command, argv, options));
   const useShell = platformName === "win32";
@@ -189,6 +241,7 @@ function runWrangler(args, {
   const argv = useShell ? exactArgs.map(quoteWindowsArgument) : exactArgs;
   try {
     return run("npx", argv, {
+      cwd: cloudflareOAuthWorkingDirectory({ workingDirectory, tmpDirectory, statImpl, accessImpl }),
       encoding: null,
       env: cloudflareOAuthChildEnvironment({ environment, accountId }),
       maxBuffer,
@@ -261,6 +314,18 @@ export function createCloudflareOAuthProfile({ installIdentity = null, profile =
   });
   if (!processSucceeded(result)) {
     wipeProcessOutput(result);
+    // Distinguish the two failures the owner cannot tell apart from outside:
+    // a browser step that was genuinely abandoned, and a completed sign-in
+    // whose credential Wrangler could not write down.
+    const attempted = cloudflareOAuthWorkingDirectory(options);
+    const writeFailure = directoryWriteFailure(attempted, options);
+    if (writeFailure) {
+      throw oauthError(
+        "CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE",
+        "authorize",
+        `the Cloudflare browser sign-in completed, but Wrangler could not save its result into ${attempted} (${writeFailure})`,
+      );
+    }
     throw oauthError(
       "CLOUDFLARE_OAUTH_REAUTH_REQUIRED",
       "authorize",
