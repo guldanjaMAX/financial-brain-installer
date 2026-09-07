@@ -92,7 +92,7 @@ Write-Host ""
 
 Write-Host "RELEASE"
 try {
-  $rel = Invoke-RestMethod -TimeoutSec 15 "https://api.github.com/repos/guldanjaMAX/brain-installer/releases/latest"
+  $rel = Invoke-RestMethod -TimeoutSec 15 "https://api.github.com/repos/guldanjaMAX/financial-brain-installer/releases/latest"
   Ok "current release is $($rel.tag_name)"
 } catch { Warn "could not read the current release" }
 Write-Host ""

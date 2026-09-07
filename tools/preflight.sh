@@ -72,7 +72,7 @@ done
 echo
 
 echo "RELEASE"
-LATEST=$(curl -s -m 15 https://api.github.com/repos/guldanjaMAX/brain-installer/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+LATEST=$(curl -s -m 15 https://api.github.com/repos/guldanjaMAX/financial-brain-installer/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
 [ -n "$LATEST" ] && ok "current release is $LATEST" || warn "could not read the current release"
 if [ "$N" -ge 1 ] && command -v npm >/dev/null 2>&1; then
   INST=$(npm ls -g --depth=0 2>/dev/null | sed -n 's/.*brain-installer@\([0-9.]*\).*/\1/p' | head -1)

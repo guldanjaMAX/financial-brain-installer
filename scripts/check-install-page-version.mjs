@@ -7,10 +7,10 @@ export const ENDPOINTS = Object.freeze({
   manifest: 'https://financialbrain.ai/update/manifest.json',
   updateGuide: 'https://financialbrain.ai/update/agent.md',
   installGuide: 'https://financialbrain.ai/install/agent.md',
-  latest: 'https://api.github.com/repos/guldanjaMAX/brain-installer/releases/latest',
+  latest: 'https://api.github.com/repos/guldanjaMAX/financial-brain-installer/releases/latest',
 });
 const UPDATE_URL = 'https://financialbrain.ai/update';
-const RELEASE_BASE = 'https://github.com/guldanjaMAX/brain-installer/releases/download';
+const RELEASE_BASE = 'https://github.com/guldanjaMAX/financial-brain-installer/releases/download';
 const versionPattern = /^\d+\.\d+\.\d+$/;
 const digestPattern = /^[0-9a-f]{64}$/;
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };

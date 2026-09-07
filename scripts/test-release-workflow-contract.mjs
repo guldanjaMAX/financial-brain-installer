@@ -157,7 +157,8 @@ assert.match(release.slice(publishCommandIndex), /installed_status=\$\?/);
 assert.doesNotMatch(release.slice(publishCommandIndex), /bin\/brain"\s*\|/);
 
 const replaceDraft = release.slice(release.lastIndexOf("existing_release=", createIndex), createIndex);
-assert.match(replaceDraft, /releases\/tags\/\$RELEASE_TAG/);
+assert.match(replaceDraft, /gh api "repos\/\$GITHUB_REPOSITORY\/releases" --paginate/);
+assert.match(replaceDraft, /select\(\.tag_name == env\.RELEASE_LOOKUP_TAG\)/);
 assert.match(replaceDraft, /existing_state.*== "draft"/s);
 assert.match(replaceDraft, /existing_owner.*!= "owned"/s);
 assert.match(replaceDraft, /published release already exists/);
@@ -165,7 +166,9 @@ assert.match(replaceDraft, /gh api --method DELETE "repos\/\$GITHUB_REPOSITORY\/
 assert.match(release.slice(0, draftVerifyIndex), /release_marker="brain-release-run:\$\{GITHUB_RUN_ID\}:\$\{GITHUB_RUN_ATTEMPT\}"/);
 assert.match(release.slice(0, draftVerifyIndex), /--notes "<!-- \$release_marker -->"/);
 const createdIdentity = release.slice(createIndex, draftVerifyIndex);
-assert.match(createdIdentity, /releases\/tags\/\$RELEASE_TAG/);
+assert.match(createdIdentity, /gh api "repos\/\$GITHUB_REPOSITORY\/releases" --paginate/);
+assert.match(createdIdentity, /select\(\.tag_name == env\.RELEASE_LOOKUP_TAG\)/);
+assert.match(createdIdentity, /expected exactly one release for the tag/);
 assert.match(createdIdentity, /value\.draft !== true/);
 assert.match(createdIdentity, /Number\.isSafeInteger\(value\.id\)/);
 assert.match(createdIdentity, /created release does not carry this run marker/);
@@ -258,3 +261,13 @@ try {
 }
 
 console.log("release workflow contract: one exact package across CI and release, tag-preserving draft recovery, immutable publication");
+
+// The REST get-release-by-tag endpoint returns PUBLISHED releases only, so it 404s
+// on the draft this workflow creates: the job died there and a retry left an orphan
+// draft behind while creating a second one. Listing returns drafts to a token with
+// push access. Forbid the broken lookup outright rather than trusting a comment.
+assert.doesNotMatch(
+  release,
+  /releases\/tags\//,
+  "release.yml must not resolve a release by tag: that endpoint cannot see a draft",
+);

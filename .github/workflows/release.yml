@@ -168,15 +168,27 @@ jobs:
           set -euo pipefail
           existing_release="$RUNNER_TEMP/existing-release.json"
           existing_error="$RUNNER_TEMP/existing-release.err"
+          # The by-tag REST endpoint returns PUBLISHED releases only, so it 404s on
+          # the draft this workflow creates. Listing returns drafts to a token with
+          # push access, which is the only lookup that can see our own draft.
+          export RELEASE_LOOKUP_TAG="$RELEASE_TAG"
           set +e
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.tag_name == env.RELEASE_LOOKUP_TAG)' \
             > "$existing_release" 2> "$existing_error"
           existing_status=$?
           set -e
-          if [[ $existing_status -eq 0 ]]; then
+          if [[ $existing_status -ne 0 ]]; then
+            cat "$existing_error" >&2
+            echo "::error::could not determine whether a release already exists for $RELEASE_TAG"
+            exit 1
+          fi
+          if [[ -s "$existing_release" ]]; then
             existing_record="$(node -e '
               const fs = require("node:fs");
-              const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter((line) => line.trim());
+              if (lines.length !== 1) throw new Error(`expected exactly one release for the tag, found ${lines.length}`);
+              const value = JSON.parse(lines[0]);
               if (value.tag_name !== process.argv[2]) throw new Error("existing release tag does not match the requested tag");
               if (!Number.isSafeInteger(value.id)) throw new Error("existing release did not report a numeric id");
               const state = value.draft === true ? "draft" : value.draft === false ? "published" : null;
@@ -196,12 +208,8 @@ jobs:
               echo "::error::a published release already exists for $RELEASE_TAG"
               exit 1
             fi
-          elif grep -q "HTTP 404" "$existing_error"; then
-            : # No release exists for this exact tag. Keep the tag and continue.
           else
-            cat "$existing_error" >&2
-            echo "::error::could not determine whether a release already exists for $RELEASE_TAG"
-            exit 1
+            : # No release exists for this exact tag. Keep the tag and continue.
           fi
 
           # The marker is part of the release-creation API call, before gh makes
@@ -225,10 +233,17 @@ jobs:
           # otherwise select a different draft if another writer replaced this
           # one after its assets were verified.
           created_release="$RUNNER_TEMP/created-release.json"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$created_release"
+          # The by-tag REST endpoint returns PUBLISHED releases only, so it 404s on
+          # the draft this workflow creates. Listing returns drafts to a token with
+          # push access, which is the only lookup that can see our own draft.
+          export RELEASE_LOOKUP_TAG="$RELEASE_TAG"
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.tag_name == env.RELEASE_LOOKUP_TAG)' > "$created_release"
           created_id="$(node -e '
             const fs = require("node:fs");
-            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter((line) => line.trim());
+            if (lines.length !== 1) throw new Error(`expected exactly one release for the tag, found ${lines.length}`);
+            const value = JSON.parse(lines[0]);
             const expectedMarker = `<!-- ${process.argv[3]} -->`;
             if (value.tag_name !== process.argv[2]) throw new Error("created release tag does not match the requested tag");
             if (value.draft !== true) throw new Error("created release is not a draft");
@@ -377,24 +392,31 @@ jobs:
 
           cleanup_release="$RUNNER_TEMP/cleanup-release.json"
           cleanup_error="$RUNNER_TEMP/cleanup-release.err"
+          # The by-tag REST endpoint returns PUBLISHED releases only, so it 404s on
+          # the draft this workflow creates. Listing returns drafts to a token with
+          # push access, which is the only lookup that can see our own draft.
+          export RELEASE_LOOKUP_TAG="$cleanup_tag"
           set +e
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$cleanup_tag" \
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.tag_name == env.RELEASE_LOOKUP_TAG)' \
             > "$cleanup_release" 2> "$cleanup_error"
           cleanup_status=$?
           set -e
           if [[ $cleanup_status -ne 0 ]]; then
-            if grep -q "HTTP 404" "$cleanup_error"; then
-              echo "no draft remains for $cleanup_tag"
-              exit 0
-            fi
             cat "$cleanup_error" >&2
             echo "::error::could not inspect the failed run's release for safe cleanup"
             exit 1
           fi
+          if [[ ! -s "$cleanup_release" ]]; then
+            echo "no draft remains for $cleanup_tag"
+            exit 0
+          fi
 
           cleanup_record="$(node -e '
             const fs = require("node:fs");
-            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter((line) => line.trim());
+            if (lines.length !== 1) throw new Error(`expected exactly one release for the tag, found ${lines.length}`);
+            const value = JSON.parse(lines[0]);
             if (value.tag_name !== process.argv[2]) throw new Error("cleanup release tag does not match the event tag");
             if (!Number.isSafeInteger(value.id)) throw new Error("cleanup release did not report a numeric id");
             const state = value.draft === true ? "draft" : value.draft === false ? "published" : null;
