@@ -14692,13 +14692,43 @@ export function validateDrainReceipt(body) {
   return { drained, submitted, waiting, remaining, vector_ready: body.vector_ready };
 }
 
-/** Refuse a green exit when the bounded drain loop ends with work outstanding. */
-export function assertDrainComplete({ remaining, rounds, maxRounds = 400 }) {
+/**
+ * Refuse a green exit when the bounded drain loop ends with work outstanding.
+ *
+ * An empty queue is not a populated index. Field run A drained a 13,869-chunk
+ * corpus, found nothing left to do, and printed "query-ready (0 confirmed)":
+ * the outbox was empty and the readiness counts were never consulted, so an
+ * empty index passed as complete. Readiness is a statement about the vectors
+ * D1 requires, so it is decided here on those two numbers rather than on queue
+ * depth alone. A corpus that requires zero vectors may still be ready at zero.
+ */
+export function assertDrainComplete({
+  remaining,
+  rounds,
+  maxRounds = 400,
+  expectedVectors = null,
+  actualVectors = null,
+} = {}) {
   if (remaining !== 0) {
     die(
       `the drain reached its ${maxRounds}-round safety limit with ${remaining} vector operation(s) still queued.\n` +
         "      Completed chunks are safe, but the vector index is still incomplete. Re-run `brain drain` to continue."
     );
+  }
+  if (Number.isSafeInteger(expectedVectors) && Number.isSafeInteger(actualVectors) && expectedVectors > 0) {
+    if (actualVectors === 0) {
+      die(
+        `the outbox is empty, but Vectorize holds 0 vector(s) while D1 requires ${expectedVectors}.\n` +
+          "      The vector index is EMPTY, not ready: semantic search would return nothing.\n" +
+          "      brain diagnose <manifest>\n" +
+          "      brain reindex <manifest> --yes"
+      );
+    }
+    if (actualVectors !== expectedVectors) {
+      die(vectorCountMismatchFailure(expectedVectors, actualVectors, {
+        prefix: "the outbox is empty, but ",
+      }));
+    }
   }
   return { remaining, rounds };
 }
@@ -14797,6 +14827,8 @@ async function cmdDrain(manifestPath, options = {}) {
   let submitted = 0;
   let remaining = null;
   let rounds = 0;
+  let expectedVectors = null;
+  let actualVectors = null;
   const maxRounds = 400;
   for (let round = 1; round <= maxRounds; round++) {
     if (now() >= deadline) break;
@@ -14873,6 +14905,10 @@ async function cmdDrain(manifestPath, options = {}) {
       die(`drain failed (${res.status}): ${detail}`);
     }
     const receipt = validateDrainReceipt(body);
+    // Readiness is proven by the vector counts, not by an empty queue, so carry
+    // the latest pair out of the loop for the completion assertion below.
+    expectedVectors = Number.isSafeInteger(body?.expected_vectors) ? body.expected_vectors : null;
+    actualVectors = Number.isSafeInteger(body?.actual_vectors) ? body.actual_vectors : null;
     drained += receipt.drained;
     submitted += receipt.submitted;
     remaining = receipt.remaining;
@@ -14900,7 +14936,7 @@ async function cmdDrain(manifestPath, options = {}) {
         "      Completed chunks are safe. Re-run `brain drain` to resume from the durable queue.",
     );
   }
-  assertDrainComplete({ remaining, rounds, maxRounds });
+  assertDrainComplete({ remaining, rounds, maxRounds, expectedVectors, actualVectors });
   ok(`vector index is query-ready (${drained} confirmed)`);
   return { drained, submitted, remaining };
 }

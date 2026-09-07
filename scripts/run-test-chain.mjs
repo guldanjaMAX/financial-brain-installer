@@ -114,6 +114,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/mcp-rotation.test.mjs",
   "node test/health-verify-exit.test.mjs",
   "node test/drain-exit.test.mjs",
+  "node test/drain-query-ready-gate.test.mjs",
   "node test/report-html.test.mjs",
   "node test/report-deploy-exit.test.mjs",
   "node test/errors.test.mjs",
