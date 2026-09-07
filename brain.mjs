@@ -248,6 +248,18 @@ const ok = (s) => console.log(`${c.green("ok")}    ${renderCliCommands(s)}`);
 const info = (s) => console.log(`${c.dim("·")}     ${renderCliCommands(s)}`);
 const warn = (s) => console.log(`${c.yellow("warn")}  ${renderCliCommands(s)}`);
 /**
+ * Human output with no status word in front of it, still rendered.
+ *
+ * `ok`, `info` and `warn` render commands into the form a Windows owner can
+ * actually run. A bare `console.log` does not, so guidance printed without a
+ * status word used to leave here unrendered, on the same screen as a rendered
+ * sibling: the owner read one runnable command and one bare `brain ...` that is
+ * not on their PATH. Use `say`/`sayErr` for any human line. Raw console output
+ * is reserved for structured text that must stay byte-stable, such as JSON.
+ */
+const say = (s) => console.log(renderCliCommands(s));
+const sayErr = (s) => console.error(renderCliCommands(s));
+/**
  * Fatal error.
  *
  * `die` THROWS rather than calling process.exit, because commands call each
@@ -3278,7 +3290,7 @@ export async function cmdCheck(manifestPath, options = {}) {
   ]);
   const report = renderReport(gathered, { subject, zoneReadiness });
   console.log("");
-  console.log(report.text);
+  say(report.text);
 
   const conflicts = report.assessed.filter((item) => item.conflict);
   const resultBase = {
@@ -4858,7 +4870,7 @@ export async function cmdTest(manifestPath, options = {}) {
           : r.status === "warn"
             ? c.yellow("warn")
             : c.dim("skip");
-    console.log(`    ${mark}  ${r.name}${r.detail ? c.dim("  — " + r.detail) : ""}`);
+    say(`    ${mark}  ${r.name}${r.detail ? c.dim("  — " + r.detail) : ""}`);
   }
 
   const { pass, fail, warn: w, skip } = out.counts;
@@ -5011,7 +5023,7 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
       Object.entries(env).map(([key, value]) => `    -e ${shellQuote(`${key}=${value}`)} \\\n`).join("") +
       `    -- ${shellQuote(command)} ${args.map(shellQuote).join(" ")}\n`
   );
-  console.log(
+  say(
     "  If this name already exists, run brain setup to reconcile it safely. Do not use\n" +
       "  a config-display command on an older entry because it may print the retired key.\n"
   );
@@ -8862,7 +8874,13 @@ const LOAD_STATUS_LABEL = {
  * my brain and what is not". A skipped source and a loaded one must never sit
  * on adjacent lines distinguished only by a word in the middle of them.
  */
-export function renderLoadReport(entries, { dryRun, totals, log = console.log }) {
+export function renderLoadReport(entries, { dryRun, totals, log: emit = console.log }) {
+  // Every line of this report renders commands for the platform the owner is
+  // on. The per-source `fix:` strings come from the connectors and the
+  // `retry just this one:` lines are the only recovery instruction a partial
+  // or failed load ever gives, so a bare `brain ...` here is unrunnable
+  // guidance at the exact moment it is needed.
+  const log = (line) => emit(renderCliCommands(line));
   const loaded = entries.filter((e) => e.status === "loaded" || e.status === "partial");
   const skipped = entries.filter((e) => e.status === "skipped");
   const unavailable = entries.filter((e) => e.status === "unavailable");
@@ -12185,7 +12203,7 @@ export async function cmdDoctor(manifestPath, options = {}) {
     } catch { /* doctor must work without a valid manifest */ }
   }
 
-  console.log(`\n  ${c.bold("brain doctor")}${accountId ? c.dim(`  account ${accountId}`) : ""}\n`);
+  say(`\n  ${c.bold("brain doctor")}${accountId ? c.dim(`  account ${accountId}`) : ""}\n`);
   info("checking your machine. The Cloudflare checks download a tool on first run,");
   info("so the first time can take a couple of minutes. Each line appears as it finishes.\n");
 
@@ -13024,7 +13042,7 @@ export async function cmdSetup(manifestPath, options = {}) {
   const outstanding = await countBacklog(target).catch(() => 0);
   console.log(`\n  ${c.green(c.bold("Your brain is live."))}\n`);
   if (outstanding > 0) {
-    console.log(
+    say(
       `  ${c.yellow("Keyword search works now.")} ${outstanding} chunk(s) are still embedding, so\n` +
         `  meaning-based search is incomplete until they finish. Run:\n    brain drain ${shownTarget}\n`
     );
@@ -13838,7 +13856,7 @@ function crash(err) {
       console.error(`  Run \`npx ${WRANGLER_SPEC} login\`, then re-run the same command; it resumes where it stopped.`);
       console.error("\n  Anything created before the refusal is still there and is reused on the re-run.");
     } else {
-      console.error("  " + CF_TOKEN_REJECTED_REMEDY.split("\n").join("\n  "));
+      sayErr("  " + CF_TOKEN_REJECTED_REMEDY.split("\n").join("\n  "));
       console.error("\n  Nothing was created or half-written. Re-run once the token is right.");
     }
     printSupportReceipt(supportEventId, (line) => console.error(line));
@@ -14223,20 +14241,28 @@ export function renderDiagnosis(r, renderOptions = {}) {
     console.log(`\n  ${c.bold(label)}`);
     for (const f of fs) {
       console.log(`    ${MARK[f.severity] || "  "}  ${f.title}`);
-      if (f.detail) console.log(`         ${c.dim(f.detail)}`);
+      if (f.detail) console.log(`         ${c.dim(renderCliCommands(f.detail, renderOptions))}`);
       for (const sm of (f.samples || []).slice(0, 5)) console.log(`           ${c.dim("- " + String(sm).slice(0, 96))}`);
       if (f.action) console.log(`         ${c.bold("do:")} ${renderCliCommands(f.action, renderOptions)}`);
     }
   }
 
   const s = r.summary || {};
+  // The verdict lines honour the caller's render options too. `ok` and `warn`
+  // render with THIS machine's defaults, which is correct in production and
+  // blind under test: a caller asking for Windows output got a Windows-rendered
+  // finding and a host-rendered verdict in the same block, and no assertion
+  // could see the difference. Rendering is idempotent, so the outer helper's
+  // second pass finds nothing left to substitute.
+  const okVerdict = (line) => ok(renderCliCommands(line, renderOptions));
+  const warnVerdict = (line) => warn(renderCliCommands(line, renderOptions));
   console.log("");
   if (r.verdict === "healthy") {
-    ok("nothing is missing, nothing is stored wrong, and nothing is being wasted.");
+    okVerdict("nothing is missing, nothing is stored wrong, and nothing is being wasted.");
   } else if (r.verdict === "usable_with_gaps") {
-    warn(`the brain works, with ${s.warn} thing(s) worth fixing. Nothing here makes an answer wrong.`);
+    warnVerdict(`the brain works, with ${s.warn} thing(s) worth fixing. Nothing here makes an answer wrong.`);
   } else {
-    warn(
+    warnVerdict(
       `${s.crit} problem(s) that WILL make answers wrong or incomplete, and ${s.warn} worth fixing.` + "\n" +
         "        Each one above says what to do. None of them would show up in `brain health`."
     );
@@ -14928,8 +14954,8 @@ async function cmdSupport() {
   console.log("  Fresh or concurrent files may remain until a later safe cleanup.");
   console.log("  Links and special files are refused and require manual review.");
   console.log("  The installer has not uploaded or sent these notes.");
-  console.log("  Review exact shareable bytes: brain support --preview");
-  console.log("  Export for a private support issue: brain support --export <file>\n");
+  say("  Review exact shareable bytes: brain support --preview");
+  say("  Export for a private support issue: brain support --export <file>\n");
 }
 
 /**
@@ -15981,7 +16007,7 @@ async function cmdGrant(manifestPath) {
   const grant = await response.json();
   ok(`access granted to ${grant.display_name}: ${grant.capabilities.join(", ")}`);
   console.log(`\n  ${grant.token}\n`);
-  console.log(
+  say(
     "  This token is shown once. Share it over a channel you trust. If it is lost,\n" +
     `  create a replacement and revoke this one with: brain grants ${displayPath(manifestPath)} --revoke ${grant.grant_id}\n`,
   );
@@ -16240,7 +16266,7 @@ async function cmdDevices(manifestPath) {
     const used = device.last_used_at ? `last used ${new Date(device.last_used_at).toISOString().slice(0, 10)}` : "never used";
     console.log(`  ${device.nickname || "unnamed device"}  ·  ${used}  ·  id ${String(device.credential_id).slice(0, 16)}…`);
   }
-  console.log("\n  Revoke one with: brain devices <manifest> --revoke <full credential id>\n");
+  say("\n  Revoke one with: brain devices <manifest> --revoke <full credential id>\n");
   return { devices };
 }
 

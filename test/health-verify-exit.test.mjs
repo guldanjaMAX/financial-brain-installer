@@ -297,10 +297,14 @@ if (SCENARIO) {
   // Health used to hand a stalled operator that exact command. Assert it never
   // INSTRUCTS one again, and that a stall says so plainly, rather than merely
   // never naming the command.
+  // The warning names a command, and on Windows the CLI renders that command as a
+  // runnable invocation rather than the bare word. Build the expectation through
+  // the product's own renderer, or this assertion passes on macOS and fails on the
+  // one platform the warning exists for.
   check("health never instructs a manual drain, and warns against it when stalled",
     !/(Clear it now with|Finish and confirm visibility with|Re-run `brain drain)/i
         .test(stalled.output + processing.output) &&
-      /Do NOT run `brain drain`/.test(stalled.output),
+      stalled.output.includes(renderCliCommands("Do NOT run `brain drain`")),
     stalled.output + processing.output);
 
   const countMismatch = runScenario("health-vector-count-mismatch", "health", { adminKey: true });

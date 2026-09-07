@@ -21,6 +21,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { renderCliCommands } from "./cli-guidance.mjs";
 
 export const CLAUDE_TECHNICIAN_SKILL_NAME = "financial-brain-technician";
 export const CLAUDE_TECHNICIAN_SKILL_MARKER =
@@ -55,12 +56,17 @@ function ensureOwnedDirectory(path) {
   chmodSync(path, 0o700);
 }
 
-function reviewedSkillContent(sourcePath = PACKAGED_SKILL_PATH) {
+function reviewedSkillContent(sourcePath = PACKAGED_SKILL_PATH, options = {}) {
   const content = readFileSync(sourcePath, "utf8");
   if (!content.includes(CLAUDE_TECHNICIAN_SKILL_MARKER) || content.length > 64 * 1024) {
     throw new Error("the packaged Financial Brain Claude skill did not pass its identity check");
   }
-  return content;
+  // The owner's own assistant reads this file and then runs what it names, in
+  // the owner's shell. Rendering at install time is the only point that knows
+  // which machine it landed on. It runs after the identity check so the marker
+  // is checked against the packaged bytes, and it is idempotent, so the
+  // unchanged-content comparison below stays stable across runs.
+  return renderCliCommands(content, options);
 }
 
 /**

@@ -21,6 +21,10 @@ for availability.
   preserve their place. Repeated connections pause for review instead of
   guessing which history belongs together. The deployed Plaid acceptance test
   and a controlled real-account pilot are still required before invitations.
+- Windows x64 is the only Windows runtime this version claims. Windows ARM64 has
+  no packaged launch, credential store, browser sign-in, interrupted-update or
+  clean-exit proof behind it, because that proof needs a physical ARM64 machine
+  and hosted x64 CI cannot stand in for one.
 
 - `brain check <manifest>` now gives the owner one read-only review of changing
   facts and access-zone readiness. Conflicting returned values show the source

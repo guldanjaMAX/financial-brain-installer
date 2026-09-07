@@ -40,6 +40,7 @@
 
 import { Acceptance } from "./acceptance.mjs";
 import { fetchBrainWithAdminKey } from "./components/brain-http.mjs";
+import { renderCliCommands } from "./operations/cli-guidance.mjs";
 
 /* ------------------------------------------------------------- escaping */
 
@@ -1003,7 +1004,7 @@ ${renderChecks(acceptance, acceptanceError)}
 
 <footer>
 ${versionBits.length ? `<p>${versionBits.join(" ")}</p>` : ""}
-<p><b>You can run this yourself, at any time.</b> It is one command against your own infrastructure: <span class="cmd">brain test &lt;manifest&gt; --report</span>. Nothing in this report was collected by us and no copy of your material leaves the accounts you own.</p>
+<p><b>You can run this yourself, at any time.</b> It is one command against your own infrastructure: <span class="cmd">${escapeHtml(renderCliCommands("brain test <manifest> --report"))}</span>. Nothing in this report was collected by us and no copy of your material leaves the accounts you own.</p>
 <p>This file is self contained. It has no links, no fonts and no code to load, so it will open in any browser, on any machine, with no internet connection, for as long as you keep it.</p>
 </footer>
 </main>

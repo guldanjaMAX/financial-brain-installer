@@ -67,11 +67,20 @@ the deployed owner journey and a separately approved production pilot.
    incident to `verified`. Include tested commit, package SHA-256, platform,
    architecture, source/target versions, fixture shape, actual commands and exit
    codes, interruption point, before/after counts and retrieval result. Reopen
-   affected incidents when code or dependencies change. The validator checks
-   presence and disposition; the reviewer must verify the evidence itself.
+   affected incidents when code or dependencies change. The validator now checks
+   four mechanical properties of that file and no more: it lives under `docs/`,
+   it is not one of the documents that define the gate (RELEASE-GATE.md,
+   UPDATE-AUDIT.md, PLAID-RELEASE-GATE.md, MAINTAINER.md, update-incidents.json,
+   docs/decisions/), it names the incident it closes, and it carries a tested
+   package SHA-256. A test path is never evidence. The reviewer must still
+   verify the evidence itself; passing those four checks proves nothing.
+   Every `verified` row is printed by the audit with the document it rests on,
+   so a closure is as visible in the receipt as a deferral.
 9. Run `npm run audit:updates`. Release publication runs this again on the
    exact tagged checkout, before any release write. Every incident must be
-   verified. Full CI, immutable artifacts and owner field gates still apply.
+   verified or carry a current written deferral for the exact version in
+   `package.json`; see [release gate section 11](RELEASE-GATE.md). Full CI,
+   immutable artifacts and owner field gates still apply.
    Verify publication controls before publishing, then verify the immutable
    published tag and asset bytes before URL promotion. A completed publication
    cannot be a prerequisite for the gate that authorizes that publication.
@@ -80,8 +89,27 @@ the deployed owner journey and a separately approved production pilot.
 
 - `open`: a defect, unresolved report or missing recovery/hardware proof.
 - `local-only`: candidate code has regression coverage; field acceptance is
-  incomplete. This still blocks public release.
-- `verified`: reviewed evidence meets the incident's acceptance criteria.
+  incomplete. This blocks public release unless the row carries a current
+  deferral for the version being cut.
+- `verified`: reviewed evidence meets the incident's acceptance criteria, in a
+  sanitized document under `docs/` that names the incident and records the
+  tested package digest. It is the other route past the gate and it is printed
+  in the receipt exactly like a deferral, under "CLOSED on reviewed evidence".
+
+A fourth thing exists and is not a status. A `deferral` object on an incident
+row scopes that incident out of ONE named release, and only when the acceptance
+cannot yet be satisfied at all: `blocked_on` is a closed enum covering physical
+hardware that does not exist and live third-party accounts that cannot be
+created. It never rewrites a status, never means verified, expires the moment
+`package.json` moves, and is printed in full by the audit and in the release
+note's "This release does NOT cover" block. UPDATE-010, UPDATE-014 and
+UPDATE-026 cannot be deferred at all: their acceptance is a property of the
+release mechanism, so waiving one waives the meaning of every other verdict.
+Their acceptance text is digest-pinned in `test/update-audit.test.mjs`, because
+the protection binds to an ID and an ID whose text has been hollowed out
+protects nothing. Opening an incident whose acceptance is about the release
+mechanism rather than about a feature? Add its ID to `UNDEFERRABLE_INCIDENTS`
+in the same change; the set does not grow by itself.
 
 Deleting a row, broadening an exception, increasing a timeout, or pointing to
 unrelated passing CI is not closure. Keep an old report's conclusion separate
@@ -133,6 +161,6 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The 0.4.0/schema35 candidate retains UPDATE-001 through UPDATE-024 and every original F/N finding, and adds UPDATE-025 (bank freshness must never report a failed or unfetched refresh as current) and UPDATE-026 (Windows release evidence must come from a verified package on a proven runtime). Both are open and therefore block release writes. Earlier 0.3.7 disposable rehearsals do not automatically clear this changed candidate. No incident is promoted here: open and local-only entries block release writes. Current named-profile OAuth uses its reviewed encrypted backend; the explicit legacy TOML helper keeps its separate compatible pin. Preflight detects environment and executable traps but does not read credentials, authorize an account, or prove a current named-profile login.
+The 0.4.0/schema35 candidate retains UPDATE-001 through UPDATE-024 and every original F/N finding, and adds UPDATE-025 (bank freshness must never report a failed or unfetched refresh as current) and UPDATE-026 (Windows release evidence must come from a verified package on a proven runtime). Both are open and therefore block release writes. Earlier 0.3.7 disposable rehearsals do not automatically clear this changed candidate. No incident is promoted here: no entry is `verified`, and 24 of the 26 block release writes. Exactly two carry a written 0.4.0 deferral, because 0.4.0 changes neither the capability nor the platform they cover: UPDATE-012 needs a physical Windows ARM64 host that does not exist and 0.4.0 does not claim that runtime, and UPDATE-022 needs live institutions and an approved production pilot, which holds only while general bank invitations stay closed. Everything this candidate touches, including all of UPDATE-017 through UPDATE-021 and UPDATE-025, still blocks. Current named-profile OAuth uses its reviewed encrypted backend; the explicit legacy TOML helper keeps its separate compatible pin. Preflight detects environment and executable traps but does not read credentials, authorize an account, or prove a current named-profile login.
 
 Source and package Windows DPAPI gates, frontend bundle parity, and zero-findings public-history scanning remain mandatory alongside the shared-package matrix. Windows hosted CI does not prove the physical Windows ARM64 owner journey.

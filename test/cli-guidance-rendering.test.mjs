@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,10 @@ import {
   commandPath,
   renderCliCommands,
   renderDiagnosis,
+  renderLoadReport,
 } from "../brain.mjs";
+import { printGuidance } from "../operations/cli-guidance.mjs";
+import { renderReportHtml } from "../report-html.mjs";
 import {
   renderTechnicianPlan,
   technicianPlan,
@@ -25,7 +28,26 @@ const windows = {
   scriptPath: "C:\\Users\\client\\AppData\\Local\\FinancialBrain\\node_modules\\brain-installer\\brain.mjs",
 };
 const prefix = brainCliPrefix(windows);
-const bareCommand = /\bbrain\s+(?:setup|doctor|update|drain|support|technician|eval|grants|forget|mcp-config|tools)\b/;
+const productRoot = new URL("../", import.meta.url);
+
+/*
+ * The command vocabulary is READ FROM THE RENDERER, never written out here.
+ *
+ * This used to be a hand-written list of eleven subcommands against a renderer
+ * that knows forty. `zone`, `devices`, `load`, `connect`, `sources`, `grant`,
+ * `check`, `secrets`, `reindex` and twenty others were therefore unpoliced
+ * everywhere in this suite: a bare `brain devices <manifest> --revoke ...`
+ * could not fail any assertion in this file, and did not. Deriving the list
+ * means the checks below can never cover less than the renderer claims to.
+ */
+const guidanceSource = readFileSync(new URL("operations/cli-guidance.mjs", productRoot), "utf8");
+const alternation = guidanceSource.match(/const COMMAND = \/\\bbrain\(\?=\\s\+\(\?:([^)]+)\)\\b\)\//)?.[1];
+assert.ok(alternation, "operations/cli-guidance.mjs no longer exposes a readable command alternation");
+const SUBCOMMANDS = alternation.split("|");
+const bareCommand = new RegExp(String.raw`\bbrain\s+(?:${alternation})\b`);
+for (const covered of ["setup", "doctor", "update", "drain", "support", "technician", "eval", "grants", "forget", "mcp-config", "tools"]) {
+  assert.ok(SUBCOMMANDS.includes(covered), `the renderer stopped covering \`brain ${covered}\``);
+}
 
 const supportText = renderCliCommands(
   renderSupportRecovery(supportRecovery("HEALTH_CHECK_FAILED")),
@@ -114,3 +136,331 @@ try {
 } finally {
   rmSync(fixtureRoot, { recursive: true, force: true });
 }
+
+/* ==================================================== the dispatch contract */
+/*
+ * Every command the CLI can actually run must be a command the renderer knows.
+ *
+ * A subcommand missing from the alternation is invisible twice over: the
+ * renderer walks past it, and so does every assertion in this file, so its
+ * guidance ships bare on Windows with nothing to catch it. `reconcile` is the
+ * standing example. Five user-facing strings name it and it is in neither the
+ * alternation nor the dispatch table, so today it is unreachable dead code.
+ * The day someone wires it up, this fails instead of shipping five bare
+ * commands the same afternoon.
+ */
+const dispatchBlock = source.match(/\nconst commands = \{\n([\s\S]*?)\n\};\n/);
+assert.ok(dispatchBlock, "brain.mjs no longer exposes a readable command dispatch table");
+const dispatched = [...dispatchBlock[1].matchAll(/^ {2}(?:"([^"]+)"|([A-Za-z][\w-]*)):/gm)].map((m) => m[1] ?? m[2]);
+assert.ok(dispatched.length >= 39, `only ${dispatched.length} dispatch entries parsed from brain.mjs`);
+for (const command of dispatched) {
+  assert.ok(
+    SUBCOMMANDS.includes(command),
+    `\`brain ${command}\` is dispatchable but missing from the alternation in operations/cli-guidance.mjs, so its guidance ships bare on Windows`,
+  );
+}
+
+/* ============================================ no unrendered emission, ever */
+/*
+ * Everything above is an allowlist: it proves the handful of renderers someone
+ * remembered to name here are correct. Every defect this section was written
+ * after was somewhere else - a raw console.log sitting beside a rendered
+ * sibling, in cmdSupport, cmdGrant, cmdDevices, cmdMcpConfig, cmdCheck,
+ * cmdTest, the setup completion screen and the crash remedy. An allowlist
+ * cannot find those. This is the inverse: walk every emission the product
+ * makes and fail on any that hands the reader an instruction they cannot run.
+ *
+ * Directories skipped, each with the reason it is not a CLI surface:
+ * node_modules is not ours; frontend runs in a browser; evidence holds
+ * captured artifacts; test fixtures carry bare commands deliberately; and
+ * worker/ runs in Cloudflare, where its strings reach a terminal only through
+ * the CLI printers pinned below.
+ */
+const SKIP_DIRECTORIES = new Set(["node_modules", ".git", "frontend", "evidence", "test", "worker"]);
+const EMITTERS = /\bconsole\.(?:log|error|warn|info)\s*\(|\bprocess\.(?:stdout|stderr)\.write\s*\(/g;
+const RENDERED = /renderCliCommands|brainCliPrefix|renderCopyableCommand/;
+
+/** Blank comments in place, so a commented-out example is never read as code. */
+function blankComments(src) {
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") { out += " "; i++; }
+      continue;
+    }
+    if (ch === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      const stop = end === -1 ? src.length : end + 2;
+      while (i < stop) { out += src[i] === "\n" ? "\n" : " "; i++; }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      let nesting = 0;
+      out += ch;
+      i++;
+      while (i < src.length) {
+        if (src[i] === "\\") { out += src.slice(i, i + 2); i += 2; continue; }
+        if (quote === "`" && src[i] === "$" && src[i + 1] === "{") { nesting++; out += "${"; i += 2; continue; }
+        if (quote === "`" && nesting > 0 && src[i] === "}") { nesting--; out += "}"; i++; continue; }
+        if (src[i] === quote && nesting === 0) { out += quote; i++; break; }
+        out += src[i];
+        i++;
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * The whole argument expression of the call whose "(" sits at openIndex.
+ *
+ * Template-expression aware on purpose. A naive scanner treats the backtick in
+ * `${c.bold(`...`)}` as a closing quote, runs past the end of the call, and
+ * reports the wrong emitter - which is how a leak hides in plain sight.
+ */
+function callArgument(src, openIndex) {
+  let i = openIndex;
+  let depth = 0;
+  const stack = [];
+  while (i < src.length) {
+    const ch = src[i];
+    const top = stack[stack.length - 1];
+    if (top === "'" || top === '"') {
+      if (ch === "\\") { i += 2; continue; }
+      if (ch === top) stack.pop();
+      i++;
+      continue;
+    }
+    if (top === "`") {
+      if (ch === "\\") { i += 2; continue; }
+      if (ch === "$" && src[i + 1] === "{") { stack.push("${"); i += 2; continue; }
+      if (ch === "`") stack.pop();
+      i++;
+      continue;
+    }
+    if (top === "${") {
+      if (ch === "}") { stack.pop(); i++; continue; }
+      if (ch === "'" || ch === '"' || ch === "`") { stack.push(ch); i++; continue; }
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") { stack.push(ch); i++; continue; }
+    if (ch === "(") depth++;
+    else if (ch === ")") { depth--; if (depth === 0) return src.slice(openIndex + 1, i); }
+    i++;
+  }
+  return null;
+}
+
+/** Emission sites in one module that carry a command and never render it. */
+function unrenderedEmissions(moduleSource, label = "<source>") {
+  const code = blankComments(moduleSource);
+  const found = [];
+  let parsed = 0;
+  for (const match of code.matchAll(EMITTERS)) {
+    const argument = callArgument(code, match.index + match[0].length - 1);
+    if (argument === null) continue;
+    parsed++;
+    if (!bareCommand.test(argument) || RENDERED.test(argument)) continue;
+    found.push(`${label}:${code.slice(0, match.index).split("\n").length}  ${argument.replace(/\s+/g, " ").slice(0, 140)}`);
+  }
+  return { found, parsed };
+}
+
+// The detector is checked against known answers first. A sweep that silently
+// stopped seeing anything would otherwise report a clean tree forever, which is
+// a worse failure than the defect it is looking for.
+assert.equal(unrenderedEmissions('console.log("Run brain doctor <manifest> next.");').found.length, 1, "the sweep must see a bare command");
+assert.equal(unrenderedEmissions('console.log(renderCliCommands("Run brain doctor <manifest> next."));').found.length, 0, "the sweep must accept a rendered command");
+assert.equal(unrenderedEmissions('// console.log("Run brain doctor <manifest> next.");').found.length, 0, "the sweep must ignore commented-out code");
+assert.equal(unrenderedEmissions('console.log("The brain is live and the brain has answers.");').found.length, 0, "the sweep must not read prose as an instruction");
+assert.equal(unrenderedEmissions('console.log(`${c.bold(`x`)}`); console.log("Run brain doctor now.");').found.length, 1, "the sweep must survive a nested template literal");
+
+const productDirectory = fileURLToPath(productRoot);
+const moduleFiles = [];
+(function walk(directory) {
+  for (const entry of readdirSync(directory)) {
+    if (SKIP_DIRECTORIES.has(entry)) continue;
+    const full = join(directory, entry);
+    if (statSync(full).isDirectory()) walk(full);
+    else if (/\.m?js$/.test(full)) moduleFiles.push(full);
+  }
+})(productDirectory);
+assert.ok(moduleFiles.length > 50, `only ${moduleFiles.length} product modules were walked`);
+
+const leaks = [];
+let emissionSites = 0;
+for (const file of moduleFiles) {
+  const swept = unrenderedEmissions(readFileSync(file, "utf8"), file.slice(productDirectory.length));
+  emissionSites += swept.parsed;
+  leaks.push(...swept.found);
+}
+assert.ok(emissionSites > 300, `only ${emissionSites} emission sites were parsed; the sweep has gone blind`);
+assert.deepEqual(
+  leaks,
+  [],
+  `these emissions hand a Windows reader a command that is not on their PATH.\nRoute each through say/sayErr/ok/info/warn, or printGuidance in operations/, rather than console directly:\n${leaks.join("\n")}`,
+);
+
+/* ============================ what a literal scan structurally cannot see */
+/*
+ * The emitters themselves are the floor everything else stands on.
+ *
+ * The sweep reads the ARGUMENT of a console call. If `say` quietly stopped
+ * rendering, every one of its call sites would still look clean, because the
+ * command text lives in the caller and the argument is just `s`. Nothing else
+ * in this file would notice either.
+ */
+for (const emitter of ["ok", "info", "warn", "say", "sayErr"]) {
+  const definition = source.match(new RegExp(`^const ${emitter} = \\(s\\) => [^\\n]*$`, "m"));
+  assert.ok(definition, `brain.mjs no longer defines the \`${emitter}\` emitter`);
+  assert.match(definition[0], /renderCliCommands\(s\)/, `the \`${emitter}\` emitter stopped rendering; the sweep cannot see this, because its call sites keep the command text`);
+}
+
+// A constant from doctor.mjs, so no scan of brain.mjs string literals sees it.
+// It is the sentence that tells the owner how to re-enter a rejected token,
+// which the code's own comment calls the most common install-day mistake.
+assert.match(source, /sayErr\("  " \+ CF_TOKEN_REJECTED_REMEDY/, "the rejected-token remedy names `brain setup` and `brain update`, so it must render");
+
+/*
+ * The printers that carry their command text in from somewhere else - the
+ * connectors, acceptance.mjs, operations/check-run.mjs and the Worker - so no
+ * scan of this repository's string literals can see what they emit. Each is
+ * pinned at its own site, the same way doctor `fix` and diagnose `action` are.
+ */
+assert.match(source, /\n  say\(report\.text\);\n/, "brain check must render the report it prints: operations/check-run.mjs puts `brain zone` in it");
+assert.match(source, /say\(`    \$\{mark\}  \$\{r\.name\}/, "brain test must render acceptance details: acceptance.mjs and the Worker put commands in them");
+assert.match(source, /const log = \(line\) => emit\(renderCliCommands\(line\)\);/, "renderLoadReport must render every line: the per-source `fix:` text names real commands");
+assert.match(source, /c\.dim\(renderCliCommands\(f\.detail, renderOptions\)\)/, "diagnose details must render, not only diagnose actions");
+
+/** Run something with the process reporting Windows, then put it back. */
+function underWindows(run) {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  try { return run(); } finally { Object.defineProperty(process, "platform", original); }
+}
+const hostPrefix = underWindows(() => brainCliPrefix());
+assert.notEqual(hostPrefix, "brain", "the platform seam did not take effect");
+
+// renderLoadReport, driven through its real default path rather than an
+// injected renderer, with the fix strings the connectors actually produce.
+const loadLines = [];
+underWindows(() => renderLoadReport([
+  { key: "google-drive", label: "Google Drive", status: "skipped", reason: "not connected yet",
+    fix: "brain connect google --scopes drive,gmail,calendar" },
+  { key: "imessage", label: "iMessage", status: "unavailable", reason: "not available on this platform",
+    fix: "load the history from an unencrypted iPhone backup instead: brain ingest <manifest> --from iphone-backup" },
+  { key: "notes", label: "Notes", status: "partial", summary: "12 documents", elapsed_ms: 900, legs: [1, 2], legFailures: [1] },
+  { key: "mail", label: "Mail", status: "failed", reason: "the mailbox refused the connection",
+    fix: "brain connect imap <manifest>" },
+], { dryRun: false, totals: { line: "12 documents in the brain" }, log: (line) => loadLines.push(line) }));
+const loadText = loadLines.join("\n");
+assert.ok(loadText.includes(hostPrefix), "renderLoadReport did not render any command for Windows");
+assert.doesNotMatch(loadText, bareCommand, `renderLoadReport left a bare command:\n${loadText}`);
+
+// renderDiagnosis carrying BOTH fields. The fixture above sets only `action`,
+// which is why the sibling `detail` line leaked for as long as it did.
+const diagnosisLines = [];
+const realLog = console.log;
+try {
+  console.log = (...parts) => diagnosisLines.push(parts.join(" "));
+  renderDiagnosis({
+    totals: { documents: 3, chunks: 4, sources: 1 },
+    findings: [{
+      area: "integrity",
+      severity: "crit",
+      title: "Documents with no owning source",
+      detail: "They exist in the brain but no source owns them, so `brain forget` cannot remove them.",
+      action: "Run brain sources C:\\fixture\\brain.manifest.json to review the registered sources.",
+    }],
+    summary: { crit: 1, warn: 0 },
+    verdict: "critical",
+  }, windows);
+} finally {
+  console.log = realLog;
+}
+const diagnosisText = diagnosisLines.join("\n");
+assert.match(diagnosisText, new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+assert.doesNotMatch(diagnosisText, bareCommand, `renderDiagnosis left a bare command:\n${diagnosisText}`);
+
+/* ============================ the artifacts that outlive the terminal */
+// The report the client keeps names the one command that makes its promise of
+// self-service true, and nothing renders an HTML file after this function.
+const reportHtml = underWindows(() => renderReportHtml({}));
+assert.doesNotMatch(reportHtml, bareCommand, "the HTML report offers the client a command they cannot run");
+assert.match(reportHtml, /<span class="cmd">&amp; /, "the HTML report command is neither rendered nor escaped");
+
+// The technician skill is copied onto the machine byte for byte and then read
+// by the owner's own assistant, which runs what it names in the owner's shell.
+const skillSource = readFileSync(new URL("skills/financial-brain-technician/SKILL.md", productRoot), "utf8");
+/*
+ * Detection here is deliberately INDEPENDENT of the alternation.
+ *
+ * Deriving both sides from the renderer makes this vacuous: drop a token and
+ * the check stops looking for it, so it passes by going blind. Instead, read
+ * what the skill tells the assistant to type - backtick-quoted and fenced
+ * command lines - and require each one to be a token the renderer knows.
+ * `brain --version` is the live example: it is named here, it is a real
+ * invocation, and it was outside the alternation.
+ */
+const skillCommands = new Set([
+  ...[...skillSource.matchAll(/`brain ((?:--)?[a-z][a-z-]*)/g)].map((m) => m[1]),
+  ...[...skillSource.matchAll(/^\s*brain ((?:--)?[a-z][a-z-]*)/gm)].map((m) => m[1]),
+]);
+assert.ok(skillCommands.size >= 5, `only ${skillCommands.size} commands were read out of the technician skill`);
+for (const command of skillCommands) {
+  assert.ok(
+    SUBCOMMANDS.includes(command),
+    `the technician skill tells the owner's assistant to run \`brain ${command}\`, which the renderer does not know, so it reaches a Windows owner bare`,
+  );
+}
+assert.doesNotMatch(renderCliCommands(skillSource, windows), bareCommand, "the installed technician skill still carries a bare command");
+const skillCopier = readFileSync(new URL("operations/claude-skill.mjs", productRoot), "utf8");
+assert.match(skillCopier, /return renderCliCommands\(content, options\);/, "the installed technician skill must be rendered for the machine it lands on");
+
+// MCP tool failures surface inside the AI tool, not a terminal, and the
+// runtime's remedies name `brain secrets` and `brain mcp-config`.
+const mcpServer = readFileSync(new URL("components/brain-mcp.mjs", productRoot), "utf8");
+assert.match(mcpServer, /text: renderCliCommands\(`brain error in \$\{params\?\.name\}/, "MCP tool errors must render the commands they name");
+
+// One emitter for the scheduler daemons, instead of a seventh private copy
+// that quietly drops the renderer the way the previous six did.
+assert.match(guidanceSource, /export function printGuidance\(/, "operations/cli-guidance.mjs must expose the shared scheduler emitter");
+const guidanceLines = [];
+printGuidance("Review the exact safe record with: brain support --preview", { write: (line) => guidanceLines.push(line), ...windows });
+assert.doesNotMatch(guidanceLines.join("\n"), bareCommand, "printGuidance did not render");
+for (const scheduler of ["folder", "drive", "imessage", "whatsapp-drain", "curated-sync", "provider"]) {
+  const text = readFileSync(new URL(`operations/${scheduler}-scheduler.mjs`, productRoot), "utf8");
+  assert.match(text, /printGuidance\(/, `operations/${scheduler}-scheduler.mjs still prints support guidance without the renderer`);
+}
+
+/* ======================================= the whole thing, actually running */
+// One live run of the real binary, because every assertion above reads source
+// or calls an exported function. This is the path a stuck owner takes: `brain
+// support` is what a failing command tells them to run next.
+const supportRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-guidance-support-")));
+try {
+  const preload = join(supportRoot, "windows.mjs");
+  writeFileSync(preload, 'Object.defineProperty(process, "platform", { value: "win32", configurable: true });\n', { mode: 0o600 });
+  const env = Object.fromEntries(["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"].filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
+  Object.assign(env, { HOME: supportRoot, USERPROFILE: supportRoot, NO_COLOR: "1" });
+  const run = spawnSync(
+    process.execPath,
+    ["--import", preload, fileURLToPath(new URL("brain.mjs", productRoot)), "support"],
+    { cwd: supportRoot, env, encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const printed = `${run.stdout}${run.stderr}`;
+  assert.match(printed, /Review exact shareable bytes/, printed);
+  assert.doesNotMatch(printed, bareCommand, `a live \`brain support\` run left a bare command:\n${printed}`);
+} finally {
+  rmSync(supportRoot, { recursive: true, force: true });
+}
+
+console.log(`CLI guidance sweep: ${emissionSites} emission sites across ${moduleFiles.length} modules, none bare on Windows`);

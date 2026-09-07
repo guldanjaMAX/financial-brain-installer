@@ -383,6 +383,7 @@ const expected = [
   "docs/decisions/001-cloudflare-native-standard.md",
   "docs/decisions/002-paused-bootstrap-acceleration.md",
   "docs/decisions/003-staged-source-onboarding.md",
+  "docs/decisions/004-version-scoped-release-scope.md",
   "docs/decisions/README.md",
   "doctor.mjs",
   "eval/brain-client.mjs",

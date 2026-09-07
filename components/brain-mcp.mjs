@@ -31,6 +31,9 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readAdminKeyFromKeychain } from "../operations/admin-key-persistence.mjs";
+// Tool failures reach the owner inside their AI tool, not a terminal, and the
+// runtime's remedies name real commands. Rendering here covers every tool.
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import {
   createBrainCredentialResolver,
   fetchWithBrainCredential,
@@ -531,7 +534,7 @@ async function handle(msg) {
       return ok(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
     } catch (err) {
       return ok(id, {
-        content: [{ type: "text", text: `brain error in ${params?.name}: ${err.message}` }],
+        content: [{ type: "text", text: renderCliCommands(`brain error in ${params?.name}: ${err.message}`) }],
         isError: true,
       });
     }

@@ -24,6 +24,7 @@
 
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { printGuidance } from "./cli-guidance.mjs";
 import {
   buildSchedulerPlan,
   installScheduler,
@@ -121,7 +122,7 @@ function recordImessageSchedulerFailure(error, { action = "run" } = {}) {
 function printSupportReceipt(eventId) {
   if (!eventId) return;
   console.error(`Private issue note ${eventId} was saved locally. The installer did not upload or send this issue note.`);
-  console.error("Review the exact safe record with: brain support --preview");
+  printGuidance("Review the exact safe record with: brain support --preview");
 }
 
 async function main(argv = process.argv.slice(2)) {

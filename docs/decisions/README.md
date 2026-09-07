@@ -11,3 +11,4 @@ code it governs.
 - [001: Standardize new Brain installs on Cloudflare](001-cloudflare-native-standard.md)
 - [002: Accelerate exact legacy projection bootstrap only behind the paused barrier](002-paused-bootstrap-acceleration.md)
 - [003: Make source onboarding useful before historical backfill completes](003-staged-source-onboarding.md)
+- [004: Scope the incident release gate to the version being cut](004-version-scoped-release-scope.md)

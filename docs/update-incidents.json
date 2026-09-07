@@ -260,7 +260,13 @@
       "FIELD-ARM64"
     ],
     "evidence": [],
-    "testPlatform": "win32"
+    "testPlatform": "win32",
+    "deferral": {
+      "version": "0.4.0",
+      "blocked_on": "physical_hardware_unavailable",
+      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can ever close it. No ARM64 machine exists on the bench, and 0.4.0 does not claim Windows ARM64 as a supported runtime.",
+      "unproven": "Windows ARM64 owners get no packaged-launch, DPAPI, browser login, interrupted-update or clean-exit proof in 0.4.0. The release note must name Windows x64 as the only claimed Windows runtime."
+    }
   },
   {
     "id": "UPDATE-013",
@@ -460,7 +466,13 @@
     "findings": [
       "PLAID-OWNER-ACCEPTANCE"
     ],
-    "evidence": []
+    "evidence": [],
+    "deferral": {
+      "version": "0.4.0",
+      "blocked_on": "live_third_party_account_required",
+      "reason": "The acceptance requires two real institutions and four real accounts spanning one person and two owned businesses, plus a separately approved production pilot, and its own text excludes API-only Sandbox receipts and CI. Those live accounts and that approval do not exist for this cut. The deferral holds only while general bank invitations stay closed, which is what the Plaid release gate means by held.",
+      "unproven": "No owner may be invited to connect a bank in 0.4.0. General bank invitations stay closed, and the deployed owner journey, webhook delivery, reauthorization and production pilot remain unproven."
+    }
   },
   {
     "id": "UPDATE-023",

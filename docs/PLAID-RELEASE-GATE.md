@@ -6,6 +6,16 @@ release requirements as UPDATE-017 through UPDATE-022 in
 [`update-incidents.json`](update-incidents.json). `npm run audit:updates`
 must remain held until reviewed evidence closes them.
 
+"Held" here means the bank invitations are held, not that the tag is. UPDATE-022
+is the owner journey against a deployed candidate with real institutions and a
+separately approved production pilot, so it may carry a written version-scoped
+deferral under [release gate section 11](RELEASE-GATE.md) only while invitations
+stay closed, and that deferral's `unproven` text must say so. UPDATE-017 through
+UPDATE-021 and UPDATE-025 are code gates on this repository and are deferrable
+only when a release changes none of that code. Any release that touches the
+Plaid protocol, ledger, custody, connection review or freshness paths is held by
+them outright.
+
 ## What the product must establish
 
 1. Deploy the exact packaged version and named Plaid environment to an approved

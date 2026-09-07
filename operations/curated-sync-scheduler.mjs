@@ -30,6 +30,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { printGuidance } from "./cli-guidance.mjs";
 
 import { recordSupportEvent } from "../support-journal.mjs";
 import {
@@ -689,7 +690,7 @@ export function recordCuratedSchedulerResult(result, options = {}) {
 function printSupportReceipt(eventId) {
   if (!eventId) return;
   console.error(`Private issue note ${eventId} was saved locally. Nothing was uploaded or sent.`);
-  console.error("Review the exact safe record with: brain support --preview");
+  printGuidance("Review the exact safe record with: brain support --preview");
 }
 
 export function parseCuratedSchedulerCliArguments(argv) {

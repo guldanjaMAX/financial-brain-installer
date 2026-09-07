@@ -9,6 +9,7 @@
 
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { printGuidance } from "./cli-guidance.mjs";
 import { recordSupportEvent } from "../support-journal.mjs";
 import {
   buildSchedulerPlan,
@@ -204,7 +205,7 @@ if (IS_MAIN) {
       console.error("The previous schedule and source cursor remain available for review.");
     }
     console.error(`Issue code: ${receipt.errorCode}`);
-    console.error(`What to try next: brain support --explain ${receipt.errorCode}`);
+    printGuidance(`What to try next: brain support --explain ${receipt.errorCode}`);
     if (receipt.eventId) {
       console.error(`Private issue note ${receipt.eventId} was saved locally. The installer did not upload or send it.`);
     }

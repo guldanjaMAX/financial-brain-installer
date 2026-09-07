@@ -45,6 +45,10 @@ reports its conclusion without its evidence. On 2026-09-03 the queued delete
 row silently failed to be created, so the serial delete path was not exercised;
 the receipt said so, and the release notes did not claim delete coverage.
 
+`node scripts/audit-updates.mjs --release` prints the mechanical form of this
+rule as a "This release does NOT cover" block, one line per deferred incident.
+Paste it into the release note. Section 11 says how an incident gets there.
+
 ## 5. Fresh installs, the way a new client does one
 
 Browser sign-in, no token, a clean prefix, `--no-connect`. Mac on every
@@ -166,3 +170,148 @@ only thing that caught it was fetching the live document and looking.
 So: after any repoint, fetch every served guide and assert the version in the
 document, then follow its download link and hash what comes back against the
 tested tarball. Trust the artifact, never the script's report of itself.
+
+## 11. The incident gate is scoped to the version being cut
+
+**This section is a narrowing of the gate, and it should be read as one.**
+Until now `audit-updates.mjs --release` held a release until every incident in
+`docs/update-incidents.json` reached `verified`. That is a smaller gate now, and
+the reason is worth stating plainly rather than dressing up.
+
+### Why an unsatisfiable gate was itself the risk
+
+The registry holds 26 incidents. Their acceptance texts demand real field
+evidence, correctly: UPDATE-012 says hosted x64 CI is insufficient and requires
+a physical Windows ARM64 machine, UPDATE-022 requires two real institutions and
+a separately approved production pilot, UPDATE-011 requires a disposable restore
+rehearsal. Requiring every incident ever opened to be field-verified before ANY
+release cannot be satisfied by any release, ever. It is not a high bar, it is a
+closed door with a sign on it.
+
+A gate that can never go green is a gate people learn to walk around, and that
+is exactly what happened. v0.3.6 was published 69 seconds before its own CI
+reported failure, and a partner audit then found 22 defects. The gate did not
+stop that release. It taught somebody that gates are the sort of thing you get
+past. That is a worse outcome than a smaller gate that is actually obeyed.
+
+### The rule
+
+An incident blocks a release unless it is `verified` OR it carries a current,
+well formed, permitted `deferral` on its own row in the registry:
+
+```json
+"deferral": {
+  "version": "0.4.0",
+  "blocked_on": "physical_hardware_unavailable",
+  "reason": "prose: why the acceptance cannot be satisfied for THIS version",
+  "unproven": "prose: what ships without field proof as a direct result"
+}
+```
+
+A deferral never changes a status. `open` and `local-only` keep their meanings,
+and the word `verified` never appears next to a deferred incident.
+
+Six properties hold, and each is pinned by an assertion in
+`test/update-audit.test.mjs`:
+
+1. **Scope expires.** `deferral.version` must equal `package.json` `version`
+   exactly. Bumping 0.4.0 to 0.4.1 invalidates every deferral in the file at
+   once and the audit goes red until each is re-declared. That friction is the
+   mechanism, not a side effect: re-declaring is a diff in which every deferred
+   line changes, which is the review you want at the moment a new version is
+   cut. `release.yml` already pins the tag to `package.json`, so the chain is
+   deferral, package version, tag, tested commit. A deferral cannot outlive the
+   artifact it excused.
+2. **Every deferral carries a written reason.** `reason` and `unproven` are
+   required prose past a real minimum length, so "hardware" and "later" do not
+   pass. `blocked_on` is a closed enum naming why the evidence CANNOT YET EXIST:
+   `physical_hardware_unavailable`, `live_third_party_account_required`. There
+   is deliberately no value meaning "no time", "low risk", "CI is flaky" or "it
+   is scheduled". A deferral that fits none of these is not a deferral, it is an
+   unfinished gate. Adding a value is a reviewed code and test change.
+3. **Deferrals stay visible, and so does every closure.** Deferrals print in
+   full in every mode, with their real status, under a heading that says NOT
+   verified, and again in the "This release does NOT cover" block that goes in
+   the release note. `verified` rows print too, under "CLOSED on reviewed
+   evidence", each naming the document it rests on. Every incident lands in
+   exactly one of held, deferred or closed, and `releaseAdjudication` returns
+   all three so the guarantee is tested rather than left to the print loop. A
+   row that stops blocking can never do it silently, whichever route it took.
+4. **A stale deferral fails, it is not ignored.** This mirrors
+   `evaluateStrictRelease` in `scripts/scan-git-history-privacy.mjs`, which
+   fails on stale credential dispositions for exactly this reason. Because the
+   deferral lives on the incident it excuses, it cannot name an id that does not
+   exist. What remains fatal: a deferral naming a version nobody is cutting, a
+   deferral left behind on an incident that has since been verified, an unknown
+   key inside the object (a mistyped `versoin` must not degrade into "no
+   expiry"), a malformed shape, and a deferral on an undeferrable incident.
+5. **The safe direction is the default.** An incident with no deferral blocks. A
+   valid deferral with no version supplied blocks. An older copy of the script
+   that predates this change ignores the unknown key entirely and blocks, so a
+   registry from the future can never unblock an older gate.
+6. **Three incidents are undeferrable, and their acceptance text is pinned.** UPDATE-010 governs what gets published,
+   UPDATE-026 governs whether the published bytes are the tested bytes, and
+   UPDATE-014 governs whether a brain reports its executable, package, manifest,
+   Worker and D1 versions honestly. Their acceptance is a property of the
+   release mechanism, not of a feature. Deferring one does not defer evidence
+   about the product, it defers the ability to trust any other deferral, any
+   receipt, and any claim about which bytes are running. Sections 3, 7 and 10
+   all rest on them. A gate waivable by the process it governs is not a gate.
+   The protection binds to an ID, so `test/update-audit.test.mjs` also pins a
+   digest of what each of those three IDs actually says. Hollowing out an
+   acceptance text while keeping its number would leave the set nominally
+   intact and mean nothing; changing a digest is the reviewed moment to ask
+   whether the set still holds.
+
+### The other way past the gate, and why it needed the same treatment
+
+`verified` is the second route, and it used to be the cheaper and quieter one:
+one word plus any existing path under `test/`, `scripts/` or `docs/`. Both of
+these exited 0 with all 26 incidents closed, including the three that may never
+be deferred:
+
+```json
+"evidence": ["test/update-audit.test.mjs"]    a local test, in a gate whose own
+                                              receipt ends "Local tests are not
+                                              field recovery proof"
+"evidence": ["docs/update-incidents.json"]    the registry citing itself
+```
+
+Making deferral written, scoped, expiring and published while leaving that
+beside it would have been worse than useless: a maintainer under pressure picks
+whichever exit is cheaper, and the cheap one left no trace in the receipt. So
+`verified` now carries three mechanical rules, each of them enforcing what
+`docs/UPDATE-AUDIT.md` step 8 already required in prose. Evidence must be a
+document under `docs/`, never a test. It may not be one of the documents that
+define the gate (this file, `UPDATE-AUDIT.md`, `PLAID-RELEASE-GATE.md`,
+`MAINTAINER.md`, `update-incidents.json`, `docs/decisions/`), because a document
+that says what must be proven cannot be the record of having proven it. And the
+document must name the incident it closes and carry a tested package SHA-256,
+so a file that was never about this incident cannot close it.
+
+Adding an incident whose acceptance is about the release mechanism rather than
+about a feature? Add its ID to `UNDEFERRABLE_INCIDENTS` in the same change. The
+set does not grow by itself, and a new process incident is deferrable until
+someone puts it there.
+
+### What this does not defend against
+
+A maintainer with commit rights who writes a plausible but false reason and
+merges it, or who writes a fabricated evidence document that satisfies every
+mechanical rule. Nothing in a repository stops either. The reviewer still has to
+read the evidence; the rules above only stop a pointer at a file that was never
+about the incident at all. What the rule removes is every
+version of the abuse that is quiet, ambiguous, accidental or permanent: it
+converts an unattributed filter change into a written, version-scoped,
+published claim that expires on the next version bump. Do not describe it as
+more than that.
+
+### Attribution comes from git, not from a field
+
+There is deliberately no `approved_by` in the shape. `update-incidents.json` is
+tracked and packaged, `test/package-privacy.test.mjs` scans it for private
+identity, and UPDATE-026's own acceptance says the all-ref history privacy gate
+must not be waived. A human name in a deferral would fail the release on the
+privacy gate. The commit, its author and its review are the record, and they
+cannot be typed in by the person seeking the exemption. The same applies to the
+prose: no person, client, account id or domain belongs in a `reason`.
