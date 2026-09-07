@@ -12679,7 +12679,11 @@ async function cmdInit(manifestPath, options = {}) {
 
 export async function cmdSetup(manifestPath, options = {}) {
   const flags = options.flags ?? parseFlags(process.argv.slice(3));
-  assertKnownFlags(flags, ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token"], "brain setup");
+  assertKnownFlags(
+    flags,
+    ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token", "adopt-cloudflare-profile"],
+    "brain setup",
+  );
   const accountPath = String(options.cloudflareAccountPath ?? flags["cloudflare-account"] ?? "").trim().toLowerCase();
   if (accountPath && !["create", "existing"].includes(accountPath)) {
     die("--cloudflare-account accepts create or existing");
@@ -15278,6 +15282,45 @@ export function manifestCloudflareControlBinding(manifestPath) {
   return Object.freeze({ accountId, authProfile });
 }
 
+/** The one environment variable that stands in for `--adopt-cloudflare-profile`. */
+const CLOUDFLARE_ADOPTION_CONSENT_ENV = "BRAIN_ADOPT_CLOUDFLARE_PROFILE";
+
+/**
+ * Did the owner explicitly approve a browser sign-in for a session that has no
+ * terminal to ask in?
+ *
+ * The TTY gate below exists so an unattended job can never silently start a
+ * browser credential ceremony. That is worth keeping, so this is the explicit
+ * way past it rather than a loosening of it: `--adopt-cloudflare-profile` on
+ * the command, or BRAIN_ADOPT_CLOUDFLARE_PROFILE=1 in the environment for a
+ * wrapper that cannot add a flag. Consent only decides whether the ceremony
+ * may begin; it never overrides the token escapes.
+ */
+export function cloudflareAdoptionConsent(flags = {}, env = process.env) {
+  const flagged = flags?.["adopt-cloudflare-profile"];
+  if (flagged !== undefined && flagged !== false) return true;
+  const raw = String(env?.[CLOUDFLARE_ADOPTION_CONSENT_ENV] ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+/**
+ * The manifest `brain update` was actually pointed at.
+ *
+ * `update` has no `--manifest` flag, so its target is positional — and
+ * parseFlags gives a bare switch the next word as its value. That makes
+ * `brain update --adopt-cloudflare-profile ./brain.manifest.json` parse as the
+ * switch holding the path, leaving argv[3] as the switch itself. Resolving
+ * that as a filename would fail; ignoring it would silently fall through to
+ * discovery and update a DIFFERENT Brain on a machine that hosts more than
+ * one. Recover the path from wherever it landed instead.
+ */
+export function updateCommandTarget(positional, flags = {}) {
+  if (typeof positional === "string" && positional && !positional.startsWith("--")) return positional;
+  const swallowed = flags?.["adopt-cloudflare-profile"];
+  if (typeof swallowed === "string" && swallowed && !swallowed.startsWith("--")) return swallowed;
+  return undefined;
+}
+
 /**
  * Record this install's own Cloudflare browser profile on a manifest written
  * before that field existed.
@@ -15302,16 +15345,28 @@ export function manifestCloudflareControlBinding(manifestPath) {
  * exact bytes.
  *
  * Every automation escape is preserved by refusing to act: an explicit token
- * run, a non-interactive session, and an injected CLOUDFLARE_API_TOKEN all
- * return null and leave the manifest untouched. So does any failure — this is
- * an opportunistic repair, never a new way for an update to die.
+ * run and an injected CLOUDFLARE_API_TOKEN return null and leave the manifest
+ * untouched, whatever else was asked for. So does any failure — this is an
+ * opportunistic repair, never a new way for an update to die.
+ *
+ * A session with no terminal refuses too, unless the owner said otherwise.
+ * That gate shipped as an unconditional refusal, which read as "automation
+ * must not start a browser ceremony" but landed as "an agent-driven install
+ * can never be repaired": a coding agent has no TTY, so every agent-driven
+ * update on a pre-profile install skipped adoption and died AUTH_REQUIRED in
+ * 174 ms without pausing or migrating (field run A). `adoptConsent` — from
+ * `--adopt-cloudflare-profile` or BRAIN_ADOPT_CLOUDFLARE_PROFILE=1 — is the
+ * owner saying the ceremony is wanted. With it, the y/n prompt is replaced by
+ * an instruction the owner can act on, because there is nobody to answer it.
  *
  * Returns the adopted profile name, or null when nothing was written.
  */
 export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
   const env = options.env ?? process.env;
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  if (options.forceToken === true || !interactive || env.CLOUDFLARE_API_TOKEN) return null;
+  const adoptConsent = options.adoptConsent ?? cloudflareAdoptionConsent({}, env);
+  if (options.forceToken === true || env.CLOUDFLARE_API_TOKEN) return null;
+  if (!interactive && adoptConsent !== true) return null;
   if (!manifestPath) return null;
 
   let manifest;
@@ -15338,10 +15393,23 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
   write("  this install's own named profile and ends that prompt for good.");
   write("  Nothing is written unless the sign-in reaches this exact account.");
   write("");
-  const answer = String(await askFn("Sign in to Cloudflare in the browser now? (y/n)", "y")).trim().toLowerCase();
-  if (answer !== "y" && answer !== "yes") {
-    info("continuing without it. This run uses the existing Cloudflare access.");
-    return null;
+  if (interactive) {
+    const answer = String(await askFn("Sign in to Cloudflare in the browser now? (y/n)", "y")).trim().toLowerCase();
+    if (answer !== "y" && answer !== "yes") {
+      info("continuing without it. This run uses the existing Cloudflare access.");
+      return null;
+    }
+  } else {
+    // Consent already answered the question a prompt would have asked, and
+    // there is no terminal to ask it in. The owner still has to complete the
+    // sign-in in a browser, so say so before the wait rather than after it.
+    // Wrangler mints the URL itself and prints it on this same output, so the
+    // instruction names where the URL appears rather than inventing one.
+    write("  Approved for this run by --adopt-cloudflare-profile, and this session has no");
+    write("  terminal, so nothing here will ask y/n. Cloudflare should open in your browser.");
+    write("  If it does not, open the sign-in URL printed below on this same machine.");
+    write("  The sign-in waits up to 10 minutes, then this run continues either way.");
+    write("");
   }
 
   const profile = cloudflareOAuthProfileName(cloudflareOAuthInstallIdentity(manifestPath));
@@ -15381,6 +15449,10 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
     if (target.auth_profile) return target.auth_profile === profile ? profile : null;
     if (String(target.account_id || "").toLowerCase() !== boundAccountId) return null;
     target.auth_profile = profile;
+    // The receipt says how the ceremony was approved, because "the owner typed
+    // y" and "a flag stood in for the owner" are different claims about the
+    // same profile, and only the manifest survives to be read later.
+    if (!interactive) target.auth_profile_consent = "non-interactive";
     saveManifest(manifestPath, current);
   } catch (error) {
     warn(
@@ -15426,7 +15498,11 @@ export async function prepareCloudflareAccountCeremony(options = {}) {
 
 async function cmdSetupInteractive(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
-  assertKnownFlags(flags, ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token"], "brain setup");
+  assertKnownFlags(
+    flags,
+    ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token", "adopt-cloudflare-profile"],
+    "brain setup",
+  );
   const target = setupManifestTarget(manifestPath, flags);
   const forceToken = flags["cloudflare-token"] === true;
   if (flags["cloudflare-token"] && flags["cloudflare-token"] !== true) {
@@ -15449,6 +15525,7 @@ async function cmdSetupInteractive(manifestPath) {
   if (resumed && !authProfile && !forceToken && !automationToken) {
     authProfile = await adoptCloudflareAuthProfile(target, {
       interactive,
+      adoptConsent: cloudflareAdoptionConsent(flags),
       askFn: ask,
       forceToken,
     });
@@ -16406,6 +16483,9 @@ export async function cmdUpdate(manifestPath, options = {}) {
   // after this line would abort the very update it repairs.
   await (options.adoptCloudflareAuthProfile ?? adoptCloudflareAuthProfile)(installed.path, {
     interactive,
+    // Passed through as given, not coerced: leaving it undefined is what lets
+    // adoption still read BRAIN_ADOPT_CLOUDFLARE_PROFILE for itself.
+    adoptConsent: options.adoptConsent,
     askFn: options.askFn ?? ask,
     forceToken: options.forceToken === true || automationToken,
     oauthOptions: options.oauthOptions,
@@ -17654,7 +17734,12 @@ const commands = {
   invite: cmdInvite,
   devices: cmdDevices,
   token: cmdToken,
-  update: cmdUpdate,
+  update: (path) => {
+    const flags = parseFlags(process.argv.slice(3));
+    return cmdUpdate(updateCommandTarget(path, flags), {
+      adoptConsent: cloudflareAdoptionConsent(flags),
+    });
+  },
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
   schedule: cmdSchedule,
@@ -17753,6 +17838,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
 
   operate
     brain update     [manifest]            one safe update: snapshot, test, verify
+    brain update     [manifest] --adopt-cloudflare-profile  approve the one-time Cloudflare
+                                           browser sign-in from a session with no terminal
+                                           (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
     brain whatsnew   [manifest]            what changed in this version, and are you on it
     brain status     <manifest>            versions, pending migrations, upgrade history
     brain sources    <manifest>            named ingest sources, counts, last ingest
