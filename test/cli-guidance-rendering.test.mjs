@@ -633,3 +633,57 @@ assert.deepEqual(
 
 console.log(`CLI guidance sweep: ${emissionSites} emission sites across ${moduleFiles.length} modules, none bare on Windows`);
 console.log(`CLI expectation rule: ${expectationSites} output expectations across ${testFiles.length} test modules, none hardcoded to posix`);
+
+/* ============================ the short form a worried reader can retype */
+/*
+ * Rendering is not finished when the command is merely executable.
+ *
+ * One field health failure printed four copies of
+ *   & 'C:\Program Files\nodejs\node.exe' 'C:\Users\<name>\...\brain.mjs' drain
+ * on a screen the runbook itself says may be shared, so each of the four also
+ * published the owner's Windows username. npm writes a `brain.cmd` shim into
+ * the install prefix, one level above node_modules, and `brain.cmd drain` runs
+ * exactly the same code. The absolute invocation is the fallback for a machine
+ * with no shim, not the default for every machine.
+ */
+const shimPrefix = "C:\\Users\\client\\AppData\\Local\\FinancialBrain";
+const inPrefix = { ...windows, env: {}, existsSync: (candidate) => candidate === `${shimPrefix}\\brain.cmd` };
+assert.equal(brainCliPrefix(inPrefix), "brain.cmd", "a shim in the install prefix must render as the short form");
+assert.equal(renderCliCommands("brain drain <manifest>", inPrefix), "brain.cmd drain <manifest>");
+
+// The whole point of the short form: nothing about the owner reaches the screen.
+const shortForm = renderCliCommands("Run brain drain <manifest>, then brain health <manifest>.", inPrefix);
+assert.equal(shortForm, "Run brain.cmd drain <manifest>, then brain.cmd health <manifest>.");
+assert.ok(!shortForm.includes("Users"), `the short form still carries a user-profile path:\n${shortForm}`);
+assert.ok(!shortForm.includes(shimPrefix), `the short form still carries the install prefix:\n${shortForm}`);
+// It must also not read as unrendered, or the sweep above would flag every
+// Windows line the product prints once this lands.
+assert.doesNotMatch(shortForm, bareCommand, "the short form must not read as a bare command");
+assert.equal(renderCliCommands(shortForm, inPrefix), shortForm, "a second render of the short form is inert");
+
+// A shim anywhere on PATH is equally typeable, whichever way PATH is spelled.
+for (const key of ["PATH", "Path"]) {
+  const onPath = {
+    ...windows,
+    env: { [key]: `C:\\Windows\\system32;"C:\\tools\\brain\\";C:\\Windows` },
+    existsSync: (candidate) => candidate === "C:\\tools\\brain\\brain.cmd",
+  };
+  assert.equal(brainCliPrefix(onPath), "brain.cmd", `a shim on %${key}% must render as the short form`);
+}
+
+// No shim resolvable anywhere: the absolute invocation is still the fallback,
+// because an unrunnable short command is worse than a long runnable one.
+const noShim = { ...windows, env: {}, existsSync: () => false };
+assert.equal(
+  brainCliPrefix(noShim),
+  "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\Users\\client\\AppData\\Local\\FinancialBrain\\node_modules\\brain-installer\\brain.mjs'",
+  "without a shim the reader must still get something they can run",
+);
+assert.equal(renderCliCommands("brain drain <manifest>", noShim), `${brainCliPrefix(noShim)} drain <manifest>`);
+
+// posix is unchanged, shim or no shim: `brain` is already the short form there.
+assert.equal(brainCliPrefix({ ...inPrefix, platform: "darwin" }), "brain");
+assert.equal(renderCliCommands("brain drain <manifest>", { ...inPrefix, platform: "darwin" }), "brain drain <manifest>");
+assert.equal(brainCliPrefix({ ...noShim, platform: "linux" }), "brain");
+
+console.log("CLI guidance rendering: Windows commands prefer the brain.cmd shim over the owner's profile path");
