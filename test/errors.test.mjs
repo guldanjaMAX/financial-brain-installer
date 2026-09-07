@@ -224,13 +224,20 @@ function ingestExitCli(scenario) {
   check("a missing token is an explained failure", r.code === 1 && /CLOUDFLARE_API_TOKEN/.test(r.out), r.out.slice(0, 160));
   // This used to require `brain setup` to be NAMED as the first way out. Over a
   // brain that is paused mid-upgrade that is the one instruction that must never
-  // be followed, and a missing credential says nothing about which lifecycle
-  // step is correct. The safe next step is signing in and re-running the SAME
-  // command; the shell-history guard below is unchanged.
+  // be followed: setup reruns the compatibility cutover and pauses it again. The
+  // safe next step is `brain update` in an interactive terminal; the
+  // shell-history guard below is unchanged.
   check("and it gives a safe next step instead of a shell-history command",
-    (/sign in to cloudflare/i.test(r.out) && /re-run the same command/i.test(r.out) &&
+    (/brain update <manifest>/.test(r.out) && /interactive terminal/i.test(r.out) &&
       /hidden token entry/i.test(r.out)) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(r.out), r.out.slice(0, 400));
+  // A session with no TTY cannot answer a browser prompt, so the copy has to
+  // name the switch that carries the owner's approval explicitly. Without it the
+  // only remaining reading of this failure is "paste a token", which is the one
+  // thing every other line here is written to prevent.
+  check("and it names the explicit consent switch a non-interactive session needs",
+    /--adopt-cloudflare-profile/.test(r.out) &&
+      /BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(r.out) && /approv/i.test(r.out), r.out.slice(0, 600));
   check("and it never offers setup as the way out of a missing credential",
     !r.out.includes(shown("brain setup")) && !/brain setup/.test(r.out), r.out.slice(0, 400));
   // Fatal is anticipated, so it must NOT be dressed up as an installer bug.

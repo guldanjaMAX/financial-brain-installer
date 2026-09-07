@@ -832,10 +832,12 @@ function throwOriginalCloudflareControlActionError(error) {
 function throwCloudflareTokenFailure() {
   const failure = new Fatal(
     "Cloudflare access is not available, and this terminal cannot prompt securely for recovery access.\n" +
-      "      Sign in to Cloudflare in an interactive terminal, then re-run the same command you just ran. " +
-      "The normal path reuses the saved browser sign-in; if needed, it can offer recovery-only hidden token entry.\n" +
-      "      Do not substitute a different lifecycle command: this failure says nothing about which step is\n" +
-      "      correct, and a brain paused mid-upgrade is finished only by `brain update`.\n" +
+      "      Run `brain update <manifest>` in an interactive terminal. It reuses the saved browser sign-in,\n" +
+      "      and if that is gone it can offer recovery-only hidden token entry.\n" +
+      "      Not setup: a brain paused mid-upgrade is finished only by `brain update`, and rerunning the\n" +
+      "      install over one pauses it again and leaves it refusing documents.\n" +
+      "      A non-interactive session may pass `--adopt-cloudflare-profile` (or set\n" +
+      "      BRAIN_ADOPT_CLOUDFLARE_PROFILE=1) once the owner has approved the browser sign-in it adopts.\n" +
       "      Automation may inject CLOUDFLARE_API_TOKEN through an approved secret manager without putting it in a command.",
   );
   failure.code = "AUTH_REQUIRED";
@@ -12531,11 +12533,26 @@ export async function prepareSetupAdminKey(manifestPath, manifest, options = {})
 export async function probeExistingWorkerHealth(manifestPath, options = {}) {
   const body = await readLiveWorkerHealthBody(manifestPath, options);
   if (!body) return null;
+  // `ok` is the brain's verdict on ITSELF, and it belongs to this question
+  // alone. A paused Worker answers 200 with ok:false on purpose, so while that
+  // check lived in the shared body reader every caller inherited it and a
+  // paused brain looked unreachable. That is exactly how the drain probe below
+  // saw null and setup ran the cutover on an already-paused install.
+  if (body.ok !== true) return null;
   if (body.vector_writer_protocol !== "lease-v1" || body.vector_drain_mode !== "active") return null;
   return { version: String(body.version || ""), acceptingDocuments: body.accepting_documents === true };
 }
 
-/** The live /health body of the Worker this manifest names, or null on any doubt. */
+/**
+ * The live /health body of the Worker this manifest names, or null when there
+ * is no body to read: no saved domain, no answer, a non-2xx, or unparseable
+ * JSON.
+ *
+ * "Readable" is the ONLY question here. What the body says about the brain's
+ * own health is each caller's to judge, because the two callers want opposite
+ * things from a paused brain: one must reject it, the other exists to identify
+ * it.
+ */
 async function readLiveWorkerHealthBody(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const domain = m.brain?.domain;
@@ -12545,8 +12562,7 @@ async function readLiveWorkerHealthBody(manifestPath, options = {}) {
     const res = await fetchHealth(`https://${domain}/health`, {}, { timeoutMs: 15_000, what: "the health check" });
     if (!res?.ok) return null;
     const body = JSON.parse(await res.text());
-    if (body?.ok !== true) return null;
-    return body;
+    return body && typeof body === "object" ? body : null;
   } catch {
     return null;
   }
@@ -12560,6 +12576,11 @@ async function readLiveWorkerHealthBody(manifestPath, options = {}) {
  * Setup read that null as "an older Worker needing the compatibility cutover"
  * and paused a brain that was ALREADY paused by a half-finished update. This
  * is how setup tells those two nulls apart before it decides.
+ *
+ * A paused Worker reports ok:false, so this must read the body BEFORE any
+ * self-assessment gate. The first version of this probe sat behind that gate
+ * and returned null for every paused brain, which left the guard it feeds
+ * unable to fire on the one install it was written for.
  */
 export async function probeExistingWorkerDrainMode(manifestPath, options = {}) {
   const body = await readLiveWorkerHealthBody(manifestPath, options);
