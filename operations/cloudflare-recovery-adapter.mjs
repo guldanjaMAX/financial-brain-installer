@@ -234,6 +234,7 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "quickbooks_oauth_intents",
   "document_source_inventory",
   "plaid_sync_leases",
+  "vector_projection_events",
 ]);
 
 /**
@@ -336,7 +337,7 @@ const INSTALL_STATE_ZERO_NORMALIZED_COLUMNS = Object.freeze([
 // the point: a recovery drill against an unreviewed schema could omit a
 // durable table silently. Never raise this without reviewing each migration's
 // tables and recovery behavior.
-const RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION = 35;
+const RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION = 36;
 
 function quoteIdentifier(value) {
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(value)) {
@@ -445,6 +446,7 @@ const SCHEMA_34_TABLES = Object.freeze([
 const SCHEMA_35_TABLES = Object.freeze([
   "plaid_sync_leases",
 ]);
+const SCHEMA_36_TABLES = Object.freeze(["vector_projection_events"]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -464,7 +466,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_19_TABLES, ...SCHEMA_21_TABLES, ...SCHEMA_22_TABLES, ...SCHEMA_23_TABLES,
      ...SCHEMA_24_TABLES, ...SCHEMA_25_TABLES, ...SCHEMA_26_TABLES, ...SCHEMA_27_TABLES,
      ...SCHEMA_28_TABLES, ...SCHEMA_30_TABLES, ...SCHEMA_31_TABLES,
-     ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES].includes(table)
+     ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
+     ...SCHEMA_36_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1262,7 +1265,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 31 || !SCHEMA_31_TABLES.includes(table)) &&
     (latest >= 32 || !SCHEMA_32_TABLES.includes(table)) &&
     (latest >= 34 || !SCHEMA_34_TABLES.includes(table)) &&
-    (latest >= 35 || !SCHEMA_35_TABLES.includes(table)));
+    (latest >= 35 || !SCHEMA_35_TABLES.includes(table)) &&
+    (latest >= 36 || !SCHEMA_36_TABLES.includes(table)));
 }
 
 function assertExpectedTables(rows, migrations) {
@@ -2136,7 +2140,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
   ) {
     const migrations = await remoteMigrationContract(binding);
     if (migrations.at(-1)?.version !== RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION) {
-      // The current Worker requires the exact schema-35 generation, lease,
+      // The current Worker requires the exact schema-36 generation, lease,
       // async-visibility, and durable bulk-bootstrap protocol. A historical
       // exact-prefix artifact remains
       // inspectable offline, but the field runner has no implicit live-upgrade

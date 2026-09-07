@@ -3948,7 +3948,8 @@ const BOOTSTRAP_COMPLETION_FIELDS = Object.freeze([
 
 // Workers from 0.3.4 also report the not-yet-visible count as `retrying`;
 // older Workers do not. Either shape is the same aggregate-only contract.
-const OPTIONAL_RECEIPT_FIELDS = new Set(["retrying"]);
+const OPTIONAL_RECEIPT_FIELDS = new Set(["retrying", "reprojected_residue", "blocked_on", "blocked_rows"]);
+const BOOTSTRAP_BLOCKED_CAUSES = new Set(["quarantine", "fence", "cleanup"]);
 
 function exactAggregateReceiptFields(body, expected, label) {
   const actual = Object.keys(body).filter((field) => !(OPTIONAL_RECEIPT_FIELDS.has(field) && expected.includes("failed"))).sort();
@@ -3986,6 +3987,20 @@ export function validateAcceleratedBootstrapReceipt(body) {
     expected_vectors: nonNegativeReceiptCount(body, "expected_vectors", label),
     actual_vectors: nonNegativeReceiptCount(body, "actual_vectors", label),
   };
+  // Present only while a residue-only re-projection epoch is open: the number
+  // of queued chunks that epoch re-embeds instead of the whole corpus.
+  if (body.reprojected_residue !== undefined) {
+    receipt.reprojected_residue = nonNegativeReceiptCount(body, "reprojected_residue", label);
+  }
+  // Present only on a cleanup receipt whose bulk re-projection could not open:
+  // the cause in the way and how many rows. Names are validated, never echoed.
+  if (body.blocked_on !== undefined) {
+    if (!BOOTSTRAP_BLOCKED_CAUSES.has(body.blocked_on)) {
+      die(`${label} did not match the aggregate-only response contract. Nothing was declared complete.`);
+    }
+    receipt.blocked_on = body.blocked_on;
+    receipt.blocked_rows = body.blocked_rows === undefined ? 0 : nonNegativeReceiptCount(body, "blocked_rows", label);
+  }
   if (typeof receipt.complete !== "boolean" || typeof receipt.vector_ready !== "boolean") {
     die(`${label} did not include boolean completion and readiness proofs. Nothing was declared complete.`);
   }
@@ -4130,6 +4145,8 @@ export async function runAcceleratedBootstrap({
   let lastRemaining = null;
   let rounds = 0;
   let lastMovementAt = null;
+  let announcedReprojection = false;
+  let announcedFence = false;
 
   for (let round = 1; round <= roundLimit; round++) {
     const roundNow = Number(now());
@@ -4246,6 +4263,10 @@ export async function runAcceleratedBootstrap({
       // count, and no number of re-runs changes the provider. The receipt already
       // carries both numbers, so name the real cause and give a remedy that can
       // work, rather than sending the operator round a loop with all-zero counters.
+      if (receipt.blocked_on === "fence") {
+        die(`${stalledFor}\n      The index's ordering fence did not open for ${receipt.blocked_rows} submitted row(s). This is the fence, not a slow drain:\n` +
+          "      the pending mutation has not been processed by the index. Re-run `brain update <manifest>` once it has; the Worker remains paused.");
+      }
       if (Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
           receipt.actual_vectors !== receipt.expected_vectors) {
         die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors)}\n` +
@@ -4277,6 +4298,22 @@ export async function runAcceleratedBootstrap({
     // actual/expected -- and label the ledger count as what it is.
     info(`${receipt.queued + receipt.submitted} vector operation(s) pending; ${receipt.actual_vectors}/${receipt.expected_vectors} vector(s) query-visible`);
     info(`batch ledger: ${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
+    if (receipt.blocked_on === "quarantine") {
+      die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so the bulk re-projection cannot open.\n` +
+        "      Release them with POST /api/admin/brain/vector-retry {\"confirm\":true} (admin key), then re-run `brain update <manifest>`.\n" +
+        "      If the index rejects them again, the documents they belong to must be forgotten (`brain forget <manifest>`) before the projection can verify.\n" +
+        "      The Worker remains paused.");
+    }
+    if (receipt.blocked_on === "fence" && !announcedFence) {
+      announcedFence = true;
+      info(`waiting on the index's ordering fence for ${receipt.blocked_rows} submitted row(s); the Worker probes a stalled fence on its own, ` +
+        `and the ${Math.round(ACCELERATED_BOOTSTRAP_STALL_MS / 60_000)}-minute movement budget ends this wait if it never opens`);
+    }
+    if (receipt.reprojected_residue > 0 && !announcedReprojection) {
+      announcedReprojection = true;
+      info(`residue-only re-projection: ${receipt.reprojected_residue} queued chunk(s) are re-embedded; ` +
+        `the other ${receipt.total - receipt.reprojected_residue} stay projected as they are`);
+    }
     if (receipt.complete) {
       return validateAcceleratedBootstrapCompletion(Object.freeze({
         epoch: receipt.epoch,
