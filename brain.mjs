@@ -783,6 +783,8 @@ export function cloudflareOAuthFailureMessage(error) {
       "Cloudflare sign-in could not use this computer's protected credential store. Close other setup windows, confirm macOS Keychain or Windows Credential Manager is available, and rerun the same command.",
     CLOUDFLARE_OAUTH_REAUTH_REQUIRED:
       "Cloudflare browser sign-in did not finish for this Brain. Leave the terminal open, complete the Cloudflare page in the same computer, and rerun the same command.",
+    CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE:
+      "Cloudflare browser sign-in completed, but this computer would not let Wrangler save the result where the command was run. Nothing was changed. Rerun the same command from a writable directory, such as your home folder.",
     CLOUDFLARE_OAUTH_SCOPE_MISSING:
       "Cloudflare sign-in completed, but the approved access could not reach every required Workers, D1, Vectorize, and Workers AI surface. Review the selected account and rerun the sign-in.",
     CLOUDFLARE_ACCOUNT_NONE:
@@ -895,6 +897,12 @@ export async function withCloudflareControlCredential(action, options = {}) {
   const oauthSessionOptions = { ...(options.oauthOptions || {}) };
   for (const reserved of ["profile", "installIdentity", "expectedAccountId", "reauthorize", "prompt", "action"]) {
     delete oauthSessionOptions[reserved];
+  }
+  // Wrangler writes its cache under the child's working directory, so the
+  // child is aimed at this install's own directory rather than wherever the
+  // owner happened to run the command from.
+  if (!oauthSessionOptions.workingDirectory && options.manifestPath) {
+    oauthSessionOptions.workingDirectory = dirname(resolve(String(options.manifestPath)));
   }
   const runOAuth = async (reauthorize) => oauthRunner({
     ...oauthSessionOptions,
@@ -15349,6 +15357,7 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
   for (const reserved of ["profile", "installIdentity", "expectedAccountId", "reauthorize", "prompt", "action"]) {
     delete oauthOptions[reserved];
   }
+  if (!oauthOptions.workingDirectory) oauthOptions.workingDirectory = dirname(resolve(manifestPath));
   const runner = options.withOAuthSession ?? withCloudflareOAuthSession;
   let session;
   try {
@@ -15360,6 +15369,16 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
       prompt: (request) => promptForCloudflareOAuthAccount(request, { askFn }),
     });
   } catch (error) {
+    // A sign-in that finished at Cloudflare and then could not be written down
+    // is a different problem from one the owner never finished, and only one of
+    // them is fixed by moving to a writable directory.
+    if (error?.code === "CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE") {
+      warn(
+        `the Cloudflare sign-in completed, but its result could not be saved (${String(error?.message || error)}). ` +
+          "Nothing was changed. Rerun the same command from a writable directory, such as your home folder."
+      );
+      return null;
+    }
     warn(
       `the Cloudflare browser sign-in did not complete (${String(error?.message || error)}). ` +
         "Nothing was changed, and this run continues on the existing access."

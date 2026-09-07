@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import {
+  adoptCloudflareAuthProfile,
   cloudflareOAuthInstallIdentity,
   cmdConnect,
   cmdDoctor,
@@ -1117,4 +1118,156 @@ test("manifest-path identity is canonical, bounded, and does not disclose a long
   assert.ok(identity.length < 100);
   assert.equal(identity.includes("segment-1"), false);
   assert.equal(identity, cloudflareOAuthInstallIdentity(longPath));
+});
+
+/*
+ * D8. Wrangler writes `.wrangler/cache` under the child's own working
+ * directory during the browser callback ceremony. A child that inherits the
+ * caller's directory therefore throws away a sign-in that COMPLETED at
+ * Cloudflare whenever the owner happens to be standing in an unwritable
+ * directory, and the operator is told the sign-in did not complete.
+ */
+test("the Wrangler sign-in child runs in this install's directory, never the caller's", () => {
+  const installDir = mkdtempSync(resolve(tmpdir(), "fb-oauth-cwd-"));
+  try {
+    const runner = processRecorder();
+    createCloudflareOAuthProfile({
+      installIdentity: INSTALL_ID,
+      workingDirectory: installDir,
+      processRunner: runner,
+      platformName: "darwin",
+      environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+    });
+    assert.equal(runner.calls.length, 2);
+    for (const call of runner.calls) {
+      assert.equal(call.options.cwd, installDir);
+      assert.notEqual(call.options.cwd, process.cwd());
+    }
+  } finally {
+    rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("with no install directory the sign-in child still refuses to inherit the caller's directory", () => {
+  const runner = processRecorder();
+  createCloudflareOAuthProfile({
+    installIdentity: INSTALL_ID,
+    processRunner: runner,
+    platformName: "darwin",
+    environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+  });
+  for (const call of runner.calls) {
+    assert.equal(typeof call.options.cwd, "string");
+    assert.notEqual(call.options.cwd, process.cwd());
+  }
+});
+
+test("a sign-in whose result cannot be written names the directory instead of blaming the browser", () => {
+  const unwritable = resolve("/fixture/unwritable-install-dir");
+  const denied = () => {
+    const error = new Error("permission denied");
+    error.code = "EACCES";
+    throw error;
+  };
+  let thrown = null;
+  try {
+    createCloudflareOAuthProfile({
+      installIdentity: INSTALL_ID,
+      workingDirectory: unwritable,
+      tmpDirectory: unwritable,
+      statImpl: () => ({ isDirectory: () => true }),
+      accessImpl: denied,
+      processRunner: processRecorder(({ args }) => args.includes("create")
+        ? { status: 1, signal: null, error: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }
+        : okProcessResult()),
+      platformName: "win32",
+      environment: { Path: "C:\\fixture", USERPROFILE: "C:\\fixture\\home" },
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown instanceof CloudflareOAuthSessionError, String(thrown));
+  assert.equal(thrown.code, "CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE");
+  assert.match(thrown.message, /completed/i);
+  assert.ok(thrown.message.includes(unwritable), thrown.message);
+  assert.equal(/did not complete/i.test(thrown.message), false, thrown.message);
+});
+
+test("a genuine unfinished browser step keeps the sign-in-did-not-complete wording", () => {
+  assert.throws(
+    () => createCloudflareOAuthProfile({
+      installIdentity: INSTALL_ID,
+      statImpl: () => ({ isDirectory: () => true }),
+      accessImpl: () => undefined,
+      processRunner: processRecorder(({ args }) => args.includes("create")
+        ? { status: 1, signal: null, error: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }
+        : okProcessResult()),
+      platformName: "darwin",
+      environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+    }),
+    (error) => error instanceof CloudflareOAuthSessionError &&
+      error.code === "CLOUDFLARE_OAUTH_REAUTH_REQUIRED" &&
+      /did not complete/i.test(error.message),
+  );
+});
+
+test("adoption tells the owner the sign-in completed but could not be saved", async () => {
+  const sandbox = mkdtempSync(resolve(tmpdir(), "fb-oauth-adopt-"));
+  const priorLog = console.log;
+  const priorTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  try {
+    const manifestPath = resolve(sandbox, "brain.manifest.json");
+    const legacy = {
+      brain: { worker_name: "fixture-brain" },
+      infrastructure: { cloudflare: { account_id: ACCOUNT_A } },
+    };
+    const bytes = JSON.stringify(legacy, null, 2) + "\n";
+
+    const run = async (thrown) => {
+      writeFileSync(manifestPath, bytes);
+      const lines = [];
+      console.log = (line) => lines.push(String(line));
+      let seenWorkingDirectory;
+      try {
+        const outcome = await adoptCloudflareAuthProfile(manifestPath, {
+          interactive: true,
+          env: {},
+          askFn: async () => "y",
+          withOAuthSession: async (request) => {
+            seenWorkingDirectory = request.workingDirectory;
+            throw thrown;
+          },
+        });
+        assert.equal(outcome, null);
+      } finally {
+        console.log = priorLog;
+      }
+      assert.equal(readFileSync(manifestPath, "utf8"), bytes);
+      return { text: lines.join("\n"), seenWorkingDirectory };
+    };
+
+    const unwritable = new CloudflareOAuthSessionError(
+      "CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE",
+      "authorize",
+      `the Cloudflare browser sign-in completed, but Wrangler could not save its result into ${sandbox} (EACCES)`,
+    );
+    const saveFailure = await run(unwritable);
+    assert.equal(saveFailure.seenWorkingDirectory, sandbox, "the child is aimed at the install directory");
+    assert.match(saveFailure.text, /completed/i);
+    assert.ok(saveFailure.text.includes(sandbox), saveFailure.text);
+    assert.match(saveFailure.text, /writable directory/i);
+    assert.equal(/sign-in did not complete/i.test(saveFailure.text), false, saveFailure.text);
+
+    const genuine = await run(new CloudflareOAuthSessionError(
+      "CLOUDFLARE_OAUTH_REAUTH_REQUIRED",
+      "authorize",
+      "Cloudflare browser authorization did not complete for this install profile",
+    ));
+    assert.match(genuine.text, /did not complete/i);
+    assert.equal(/writable directory/i.test(genuine.text), false, genuine.text);
+  } finally {
+    console.log = priorLog;
+    if (priorTty) Object.defineProperty(process.stdin, "isTTY", priorTty);
+    rmSync(sandbox, { recursive: true, force: true });
+  }
 });
