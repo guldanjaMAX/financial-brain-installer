@@ -71,24 +71,47 @@ try {
 /* ----------------------------------------------------------------- files */
 
 // The migrations a shipped brain actually has, read from the TAG.
-function shippedMigrations() {
-  const paths = execFileSync(
-    "git", ["ls-tree", "-r", "--name-only", FIELD_TAG, "migrations/d1/"],
-    { cwd: REPO, encoding: "utf8" },
-  ).trim().split("\n").filter(Boolean).sort();
-  return paths.map((path) => {
-    const sql = execFileSync("git", ["show", `${FIELD_TAG}:${path}`], {
-      cwd: REPO, encoding: "utf8", maxBuffer: 32 * 1024 * 1024,
-    });
-    const base = path.split("/").pop();
+// Prefer the v0.2.0 TAG, because an in-place edit to a shipped file must not be
+// able to make this rehearsal describe a database no client owns. CI checkouts
+// are shallow and the CI-only repository carries no tags at all, so when the tag
+// cannot be resolved this falls back to the working tree and pins it with the
+// digest of the tag's own bytes. The guarantee survives either way: an edited
+// shipped migration fails here, with or without git.
+const SHIPPED_MIGRATIONS_DIGEST = "cd9010998d14097137500dabb8516f1d8901ae5c1d82dbfefa37b28f7fe51ecb";
+function shippedMigrationFiles(repoRoot, migrationsDir) {
+  const fromTag = (() => {
+    try {
+      const listing = execFileSync("git", ["ls-tree", "-r", "--name-only", "refs/tags/v0.2.0", "migrations/d1/"],
+        { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+        .trim().split("\n").filter(Boolean).sort();
+      if (!listing.length) return null;
+      return listing.map((path) => ({ path, sql: execFileSync("git", ["show", `refs/tags/v0.2.0:${path}`],
+        { cwd: repoRoot, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }) }));
+    } catch { return null; }
+  })();
+  const files = fromTag ?? readdirSync(migrationsDir)
+    .filter((f) => /^\d+_.*\.sql$/.test(f))
+    .sort()
+    .filter((f) => Number.parseInt(f.split("_")[0], 10) <= 22)
+    .map((f) => ({ path: `migrations/d1/${f}`, sql: readFileSync(join(migrationsDir, f), "utf8") }));
+  const digest = createHash("sha256");
+  for (const file of files) { digest.update(file.path); digest.update("\0"); digest.update(file.sql); }
+  const actual = digest.digest("hex");
+  if (actual !== SHIPPED_MIGRATIONS_DIGEST) {
+    throw new Error(`the 22 shipped migrations are not the published bytes (${actual} != ${SHIPPED_MIGRATIONS_DIGEST}); ` +
+      `source=${fromTag ? "v0.2.0 tag" : "working tree"}`);
+  }
+  return files.map(({ path, sql }) => {
+    const name = path.split("/").pop().replace(/\.sql$/, "");
     return {
-      version: Number.parseInt(base.split("_")[0], 10),
-      name: base.replace(/\.sql$/, ""),
+      version: Number.parseInt(name.split("_")[0], 10),
+      name,
       sql,
       checksum: createHash("sha256").update(sql).digest("hex").slice(0, 16),
     };
   });
 }
+function shippedMigrations() { return shippedMigrationFiles(REPO, MIG_DIR); }
 
 function headMigrations() {
   return readdirSync(MIG_DIR)
@@ -461,8 +484,12 @@ function evaluate(db, baseline) {
   const nulls = probe(
     () => db.prepare("SELECT count(*) AS n FROM bank_feed_backfill WHERE provider_history_state IS NULL").get()?.n,
     null);
+  // `nulls` falls back to null when the probe throws, which is exactly what
+  // happens if 0029 never ran and the column is absent. Number(null) === 0, so
+  // the obvious form of this assertion passes when the migration does nothing.
+  // Require a real count.
   add("and the pre-existing backfill row carries that default, not NULL",
-    Number(nulls) === 0, JSON.stringify({ nulls }));
+    nulls !== null && nulls !== undefined && Number(nulls) === 0, JSON.stringify({ nulls }));
 
   // --- 0035 ---------------------------------------------------------------
   const cursorHistory = probe(

@@ -89,7 +89,10 @@ assert.doesNotMatch(output.join("\n"), bareCommand);
 
 // These assertions bind the pure renderer checks above to the actual human
 // output branches. Structured JSON deliberately stays byte-stable.
-const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+// Normalised, so a CRLF checkout cannot make the "\n"-anchored structural
+// assertions below silently match nothing and report a table as missing.
+// .gitattributes also pins this file to LF; this is the belt to that brace.
+const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 assert.match(source, /: renderCliCommands\(renderSupportRecovery\(recovery\)\)\)/);
 assert.match(source, /else console\.log\(renderCliCommands\(renderTechnicianPlan\(plan\)\)\)/);
 assert.match(source, /if \(flags\.json\) console\.log\(JSON\.stringify\(plan, null, 2\)\)/);

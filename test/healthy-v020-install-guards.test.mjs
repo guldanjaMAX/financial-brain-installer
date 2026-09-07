@@ -22,6 +22,7 @@
  *    architecture, because none of it ships a native binary.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,11 +61,17 @@ const quiet = async (task) => {
 
 /** The published v0.2.0 template, filled in the way a completed install fills it. */
 function v020InstalledManifest() {
-  const template = JSON.parse(
-    execFileSync("git", ["show", "v0.2.0:templates/brain.manifest.json"], {
-      cwd: ROOT, encoding: "utf8", maxBuffer: 8 * 1024 * 1024,
-    })
-  );
+  // The published v0.2.0 template, kept as a fixture rather than read from the
+  // tag: CI checkouts are shallow and the CI-only repository carries no tags at
+  // all. The working tree cannot stand in for it, because today's template has
+  // the auth_profile field this test exists to prove was absent. The digest is
+  // the tag's own bytes, so an edited fixture fails here.
+  const fixture = readFileSync(new URL("./fixtures/v0.2.0-brain.manifest.json", import.meta.url));
+  const digest = createHash("sha256").update(fixture).digest("hex");
+  if (digest !== "78f6244d7bb0307898d4b5c43a8f97c6eaddba11297abf60cbf40bcd4dcb3ea4") {
+    throw new Error(`the v0.2.0 manifest fixture is not the published bytes (${digest})`);
+  }
+  const template = JSON.parse(fixture.toString("utf8"));
   template.client = { slug: "riverbend", display_name: "Riverbend Studio, Inc", primary_contact: "", timezone: "America/Chicago" };
   template.brain = { version: "0.2.0", domain: "riverbend-brain.owner-subdomain.workers.dev", worker_name: "riverbend-brain" };
   const cf = template.infrastructure.cloudflare;
