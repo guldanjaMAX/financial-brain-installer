@@ -3551,23 +3551,29 @@ export async function openResidueReprojection(env, state, options, lease) {
   if (unfinished > 0 || pageable <= RESIDUE_REPROJECTION_MIN_ROWS) return { opened: false, blocked: false };
   // TERMINATION. A closed walk leaves the projection pending, which is also the
   // condition that opens one, so a walk that confirms nothing must not be able
-  // to reopen itself: rows that fail submission return to the queue below the
-  // ledger cursor, the walk closes with them still queued, and without this the
-  // brain would burn an epoch and a receipt row per attempt. One unproductive
-  // epoch is allowed (its rows may simply have needed the retry); a second is
-  // refused, and the ordinary paused drain takes over and names the cause.
-  const previous = await env.DB.prepare(
-    `SELECT (SELECT count(*) FROM vector_projection_events
-              WHERE kind=?2 AND epoch_after=?1) AS was_residue,
-            (SELECT COALESCE(sum(row_count),0) FROM vector_bootstrap_batches
-              WHERE epoch=?1 AND status='confirmed') AS confirmed`
-  ).bind(state.epoch, RESIDUE_REPROJECTION_EVENT).first();
-  const wasResidue = Number(previous?.was_residue);
-  const confirmedRows = Number(previous?.confirmed);
-  if (![wasResidue, confirmedRows].every((value) => Number.isSafeInteger(value) && value >= 0)) {
-    throw new Error("the residue re-projection ledger is invalid");
+  // to reopen itself: rows that return to the queue below the ledger cursor let
+  // the walk close with them still queued, and without this the brain would
+  // burn an epoch per attempt. The fact that THIS epoch was a residue epoch
+  // lives in install_state (the column outlives the walk and is only replaced
+  // when a new epoch opens), so a lost or truncated receipt row cannot defeat
+  // the guard; the receipt row stays a receipt.
+  //
+  // The bound is on the UNPRODUCTIVE case, not the barely-productive one: an
+  // epoch that confirms a single row may open another. That terminates rather
+  // than looping, and treating slow progress as failure would refuse the very
+  // brains this path exists for.
+  if (state.residue_epoch !== null && state.residue_epoch !== undefined &&
+      Number(state.residue_epoch) === state.epoch) {
+    const previous = await env.DB.prepare(
+      `SELECT COALESCE(sum(row_count),0) AS confirmed FROM vector_bootstrap_batches
+        WHERE epoch=?1 AND status='confirmed'`
+    ).bind(state.epoch).first();
+    const confirmedRows = Number(previous?.confirmed);
+    if (!Number.isSafeInteger(confirmedRows) || confirmedRows < 0) {
+      throw new Error("the residue re-projection ledger is invalid");
+    }
+    if (confirmedRows === 0) return { opened: false, blocked: false };
   }
-  if (wasResidue > 0 && confirmedRows === 0) return { opened: false, blocked: false };
 
   // Unquarantined deletes and rows already submitted must clear before the
   // open; quarantined rows and orphans never block it. Cleanup that is still
@@ -3944,14 +3950,22 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
 async function closeResidueWalk(env, state, lease) {
   if (!residueWalkOpen(state)) return false;
   const result = await env.DB.prepare(
-    // Also leave the projection PENDING, the ordinary state for a finished
-    // walk. The cursor stays parked at the high water, so a state left at
-    // bootstrap_required would look like an ordinary walk that has nothing to
-    // do: rows released later (by vector-retry) could then only drain a hundred
-    // at a time, with no way to open a fresh residue epoch for them. Pending is
-    // also what markProjectionVerifiedIfExact needs to take its exact cut.
-    `UPDATE install_state SET vector_projection_residue_epoch=NULL,
-            vector_projection_status='pending'
+    // Leave the projection PENDING, the ordinary state for a finished walk, and
+    // KEEP the column naming the epoch. Three things depend on that pairing:
+    //
+    // 1. Openness is status + column, so pending alone ends the walk and the
+    //    ordinary drain takes whatever is left.
+    // 2. The cursor stays parked at the high water, so a state left at
+    //    bootstrap_required would look like an ordinary walk with nothing to do,
+    //    and rows released later by vector-retry could only drain a hundred at a
+    //    time. Pending is also what markProjectionVerifiedIfExact needs for its
+    //    exact cut, and (non-obvious, now load-bearing) pending is NOT
+    //    bootstrap_required, so resetVectorProjectionBootstrap can still fire on
+    //    a later full rebuild; its WHERE excludes bootstrap_required entirely.
+    // 3. The column is the durable record that THIS epoch was a residue epoch,
+    //    which is what the anti-reopen guard reads. Keeping it in install_state
+    //    means the guard cannot be defeated by a lost or truncated receipt row.
+    `UPDATE install_state SET vector_projection_status='pending'
       WHERE id=1 AND schema_version>=?2
         AND vector_projection_status='bootstrap_required'
         AND vector_projection_bootstrap_epoch=?1

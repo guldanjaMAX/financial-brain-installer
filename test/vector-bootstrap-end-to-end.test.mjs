@@ -175,7 +175,7 @@ function drive(env, { maxDurationMs = 3_600_000, contract = 2 } = {}) {
   check("quarantine: 1,150 embedded, then refused by name with the count and both remedies, before the movement budget",
     run.error !== null && /50 quarantined row\(s\)/.test(String(run.error?.message)) && /vector-retry/.test(String(run.error?.message)) &&
       /brain forget/.test(String(run.error?.message)) && !/reindex/.test(String(run.error?.message)) &&
-      run.embeds() === 1150 && Number(after.outbox) === 50 && after.residue_epoch === null,
+      run.embeds() === 1150 && Number(after.outbox) === 50 && after.status === "pending",
     JSON.stringify({ error: String(run.error?.message).slice(0, 200), embeds: run.embeds(), after }));
   // The remedy the refusal names, then the same update again.
   db.prepare("DELETE FROM vector_outbox_retry_state WHERE quarantined_at IS NOT NULL").run();

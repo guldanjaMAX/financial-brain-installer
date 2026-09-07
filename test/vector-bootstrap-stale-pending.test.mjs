@@ -300,8 +300,12 @@ const neverRegresses = (phases) => {
         Number(ev[0].base_before) === 3 && Number(ev[0].base_after) === 13 &&
         Number(ev[0].rows) === 1200 && Number(ev[0].chunks) === 1213 && Number(ev[0].at) > 0;
     })(), JSON.stringify(events(db)));
-  check("the epoch advanced twice (open, then the verifying rebase), the protocol column never changed, residue column clear",
-    Number(after.epoch) === 6 && after.protocol === "bootstrap-v2" && after.residue_epoch === null, JSON.stringify(after));
+  // The column keeps naming the epoch that WAS the residue epoch (it is the
+  // durable fact the anti-reopen guard reads); what ends the walk is the status.
+  check("the epoch advanced twice (open, then the verifying rebase) and no residue walk is open at the end",
+    Number(after.epoch) === 6 && after.protocol === "bootstrap-v2" &&
+      Number(after.residue_epoch) !== Number(after.epoch) && after.status === "verified",
+    JSON.stringify(after));
   check("receipts name the residue-only re-projection while the epoch is open, not once it has verified",
     run.first?.reprojected_residue === 1200 && run.receipt?.reprojected_residue === undefined,
     JSON.stringify({ first: run.first?.reprojected_residue, last: run.receipt?.reprojected_residue }));
@@ -453,8 +457,7 @@ const neverRegresses = (phases) => {
   await runToCompletion(env, 12);
   const closed = snapshot(db);
   check("after a walk closes with quarantined rows left the projection is pending, not stuck mid-walk",
-    closed.status === "pending" && closed.residue_epoch === null && Number(closed.outbox) === 1500 &&
-      Number(closed.events) === 1,
+    closed.status === "pending" && Number(closed.outbox) === 1500 && Number(closed.events) === 1,
     JSON.stringify(closed));
   db.prepare("DELETE FROM vector_outbox_retry_state WHERE quarantined_at IS NOT NULL").run();
   db.prepare("UPDATE vector_outbox SET attempts=0, last_error=NULL").run();
@@ -520,6 +523,8 @@ const neverRegresses = (phases) => {
 {
   const { env, db, visible } = makeEnv();
   seedStaleBrain(db, visible, { epoch: 4, stranded: 1500, drainedSince: 10 });
+  // The durable fact lives in install_state: this epoch WAS a residue epoch.
+  db.prepare("UPDATE install_state SET vector_projection_residue_epoch=vector_projection_bootstrap_epoch WHERE id=1").run();
   db.prepare(
     `INSERT INTO vector_projection_events (at, kind, epoch_before, epoch_after, base_before, base_after, rows, chunks)
      VALUES (10, 'residue-reprojection', 3, 4, 3, 13, 1500, 1513)`
@@ -533,6 +538,21 @@ const neverRegresses = (phases) => {
   check("and the rows are not abandoned: the ordinary paused drain takes them",
     Number(after.outbox) < 1500 && run.phases.every((p) => p === "legacy_drain" || p === "waiting"),
     JSON.stringify({ outbox: after.outbox, phases: [...new Set(run.phases)] }));
+}
+
+{
+  // The same, with the receipt row GONE (a lost write, a truncated table, a
+  // restore that replayed install_state without it). The guard must still hold,
+  // which is why the productivity fact lives in install_state, not in that row.
+  const { env, db, visible } = makeEnv();
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 1500, drainedSince: 10 });
+  db.prepare("UPDATE install_state SET vector_projection_residue_epoch=vector_projection_bootstrap_epoch WHERE id=1").run();
+  const before = snapshot(db);
+  await runToCompletion(env, 3);
+  const after = snapshot(db);
+  check("with no receipt row at all an unproductive residue epoch still cannot reopen",
+    Number(after.epoch) === Number(before.epoch) && Number(after.events) === 0 && Number(before.events) === 0,
+    JSON.stringify({ before, after }));
 }
 
 // ---------------------------------------------------------------------------
@@ -628,7 +648,7 @@ const neverRegresses = (phases) => {
     JSON.stringify({ embeds: run.embeds, visible: visible.size, phases: [...new Set(run.phases)] }));
   check("then the update ends by name: quarantine, 50 rows, phase waiting, walk exhausted and closed",
     run.receipt?.complete === false && run.receipt?.phase === "waiting" && run.receipt?.blocked_on === "quarantine" &&
-      run.receipt?.blocked_rows === 50 && Number(mid.outbox) === 50 && mid.residue_epoch === null,
+      run.receipt?.blocked_rows === 50 && Number(mid.outbox) === 50 && mid.status === "pending",
     JSON.stringify({ receipt: run.receipt, mid }));
   // The remedy the refusal names: release the quarantined rows, re-run.
   db.prepare("DELETE FROM vector_outbox_retry_state WHERE quarantined_at IS NOT NULL").run();
