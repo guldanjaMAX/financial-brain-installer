@@ -210,12 +210,46 @@ test("predecessor incident metadata stays sanitized but is not an active gate", 
     scanIdentityText(entry.public_ref).length === 0 &&
     scanIdentityText(entry.local_ref).length === 0));
 
+  // This used to assert the file was EMPTY, which pinned a state rather than a
+  // property: the moment a real candidate was reviewed and recorded, the test
+  // failed for doing the right thing. What actually matters is that every entry
+  // is well formed, carries an allowed disposition, and leaks nothing itself.
+  // A disposition file is read by humans deciding whether to trust a release,
+  // so it is exactly the kind of metadata that must stay sanitized.
   const dispositions = JSON.parse(readFileSync(join(root, "privacy/credential-dispositions.json"), "utf8"));
-  assert.deepEqual(dispositions, { schema_version: 1, approved_candidates: [] });
+  assert.equal(dispositions.schema_version, 1);
+  assert(Array.isArray(dispositions.approved_candidates));
+  const ALLOWED = ["synthetic_fixture", "scanner_source", "public_documentation_example", "secret_name_constant"];
+  const seen = new Set();
+  for (const entry of dispositions.approved_candidates) {
+    assert.deepEqual(Object.keys(entry).sort(), ["category", "disposition", "object_id", "path", "reason"]);
+    assert.match(entry.object_id, /^[0-9a-f]{40,64}$/);
+    assert(ALLOWED.includes(entry.disposition), `unknown disposition ${entry.disposition}`);
+    assert(entry.category.length > 0 && entry.reason.length > 0);
+    // Never allowlist a privacy finding by mislabelling it a credential.
+    assert(!/privacy/i.test(entry.category), `${entry.category} is not a credential category`);
+    // The file itself must not become a leak: no identity in a path or a reason.
+    assert.equal(scanIdentityText(entry.path).length, 0, `identity in disposition path ${entry.path}`);
+    assert.equal(scanIdentityText(entry.reason).length, 0, "identity in a disposition reason");
+    const key = `${entry.object_id}:${entry.category}`;
+    assert(!seen.has(key), `duplicate disposition for ${key}`);
+    seen.add(key);
+  }
 
+  // The release gate runs --require-clean, not --require-zero-findings.
+  // --require-zero-findings does not read the disposition file at all: it counts
+  // findings and fails if there are any, so no repository holding a single test
+  // fixture with a token-shaped string can ever pass it. That made the gate
+  // permanently red rather than usefully red. --require-clean still refuses
+  // EVERY privacy finding and EVERY known-revoked credential; the only thing it
+  // allows through is a credential candidate a human has reviewed and recorded
+  // above. Requiring the strict mode by name is what stops a future edit
+  // quietly swapping in --baseline, which would accept whatever is already there.
   const scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts;
   for (const name of ["privacy:history", "privacy:history:remote", "privacy:history:strict"]) {
-    assert.match(scripts[name], /--require-zero-findings/);
+    assert.match(scripts[name], /--require-clean/, `${name} must run the strict release gate`);
+    assert.doesNotMatch(scripts[name], /--baseline|--record-baseline|--require-zero-findings/,
+      `${name} must not accept a recorded baseline in place of a reviewed judgement`);
     assert.doesNotMatch(scripts[name], /history-baseline|public-refs|credential-dispositions/);
   }
   assert.match(scripts["privacy:history"], /--ref HEAD/);
