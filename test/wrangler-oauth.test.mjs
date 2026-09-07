@@ -34,6 +34,32 @@ const posix = wranglerConfigCandidates({ HOME: "/Users/m" }, "darwin");
 assert.ok(posix.some((p) => p === "/Users/m/.wrangler/config/default.toml"));
 assert.ok(posix.some((p) => p.includes("/.config/")), "the XDG layout must be searched on POSIX too");
 
+// macOS wrangler writes to ~/Library/Preferences, not ~/.config. Omitting it
+// means a client who has just completed a browser sign-in is told AUTH_REQUIRED
+// and sent back to log in again, which is exactly what run B hit. The
+// XDG_CONFIG_HOME="$HOME/Library/Preferences" workaround only worked because
+// an explicit XDG value is checked first.
+const mac = wranglerConfigCandidates({ HOME: "/Users/m" }, "darwin");
+const macPrefs = mac.indexOf("/Users/m/Library/Preferences/.wrangler/config/default.toml");
+assert.ok(macPrefs >= 0, "macOS must search ~/Library/Preferences, where wrangler actually writes");
+assert.ok(
+  macPrefs < mac.indexOf("/Users/m/.config/.wrangler/config/default.toml"),
+  "on macOS the Library/Preferences layout is the likelier one and must be searched before ~/.config",
+);
+
+// An explicit XDG_CONFIG_HOME is an override the operator typed, so it still wins.
+assert.equal(
+  wranglerConfigCandidates({ HOME: "/Users/m", XDG_CONFIG_HOME: "/x" }, "darwin")[0],
+  "/x/.wrangler/config/default.toml",
+  "an explicit XDG_CONFIG_HOME must outrank the macOS default location",
+);
+
+// Linux ordering is untouched: there is no such directory there.
+assert.ok(
+  !wranglerConfigCandidates({ HOME: "/home/m" }, "linux").some((p) => p.includes("Library/Preferences")),
+  "the macOS location must not leak into the Linux candidate list",
+);
+
 // The first existing candidate wins, in order.
 assert.equal(
   findWranglerConfig({ env: { HOME: "/h" }, platform: "darwin", existsSync: (p) => p === "/h/.wrangler/config/default.toml" }),
