@@ -89,4 +89,73 @@ const opts = (maxDurationMs = 600_000) => ({ now: () => clock, sleep: async (ms)
   assert.ok(i >= 60 && i <= 64, `stopped on the time budget, saw ${i} requests`);
 }
 
-console.log("bootstrap: a retrying vector is waited for, a quiet rebuild with work in flight is waited for, a frozen one still stops the update");
+// Run A, a 13,869-chunk brain. `brain update` printed
+// "1001/13869 legacy vector(s) confirmed; 12868 remain" on every poll for 46
+// minutes and then jumped to 13869/13869 in one step, while the database went
+// 3,968 pending operations down to 68. `confirmed` counts bootstrap BATCH
+// LEDGER rows; once the fence probe opens the drain the remaining work flows
+// through the ordinary outbox path, which writes nothing to that ledger. So
+// the headline was pinned to a number that cannot move while the only numbers
+// that were moving went unprinted, and an operator told to keep the window
+// open concludes it hung. The headline must carry the quantity that moves.
+{
+  clock = 0;
+  const drain = (o) => receipt({
+    phase: "legacy_drain", total: 13869, confirmed: 1001, remaining: 12868,
+    expected_vectors: 13869, ...o,
+  });
+  // queued + submitted is the outbox depth: exactly the `pending` the health
+  // path reads off vector_readiness, and what the database showed falling.
+  const seq = [
+    drain({ queued: 3968, submitted: 0, actual_vectors: 9901 }),
+    drain({ queued: 2500, submitted: 100, actual_vectors: 11269 }),
+    drain({ queued: 1300, submitted: 100, actual_vectors: 12469 }),
+    drain({ queued: 68, submitted: 0, actual_vectors: 13801 }),
+    receipt({
+      phase: "complete", total: 13869, confirmed: 13869, remaining: 0, complete: true,
+      vector_ready: true, expected_vectors: 13869, actual_vectors: 13869,
+    }),
+  ];
+  let i = 0;
+  const priorLog = console.log;
+  const printed = [];
+  console.log = (...args) => printed.push(args.join(" ").replace(/\u001b\[[0-9;]*m/g, "").trim());
+  let out = null;
+  try {
+    out = await runAcceleratedBootstrap({
+      ...opts(3_600_000),
+      request: async () => res(seq[Math.min(i++, seq.length - 1)]),
+    });
+  } finally { console.log = priorLog; }
+  assert.equal(out.complete, true, "the legacy drain completes");
+  assert.equal(i, seq.length, `polled every receipt, saw ${i}`);
+
+  const pendingLines = printed.filter((line) => /vector operation\(s\) pending/.test(line));
+  assert.deepEqual(
+    pendingLines.map((line) => Number(line.match(/(\d+) vector operation\(s\) pending/)[1])),
+    [3968, 2600, 1400, 68, 0],
+    "every poll must print the pending count that is actually falling",
+  );
+  assert.deepEqual(
+    pendingLines.map((line) => line.match(/(\d+)\/(\d+) vector\(s\) query-visible/).slice(1, 3).map(Number)),
+    [[9901, 13869], [11269, 13869], [12469, 13869], [13801, 13869], [13869, 13869]],
+    "and the actual/expected provider pair it already holds",
+  );
+  assert.ok(
+    new Set(pendingLines).size === pendingLines.length,
+    "no two polls may print the same headline while work is moving",
+  );
+
+  const ledgerLines = printed.filter((line) => /legacy vector\(s\) confirmed/.test(line));
+  assert.equal(ledgerLines.length, seq.length, "the ledger count is still reported, once per poll");
+  assert.ok(
+    ledgerLines.every((line) => /batch ledger: \d+\/\d+ legacy vector\(s\) confirmed/.test(line)),
+    `the ledger count must be labelled as the batch ledger, saw ${JSON.stringify(ledgerLines.slice(0, 2))}`,
+  );
+  assert.ok(
+    !pendingLines.some((line) => /legacy vector\(s\) confirmed/.test(line)),
+    "the frozen ledger count must not be the headline",
+  );
+}
+
+console.log("bootstrap: a retrying vector is waited for, a quiet rebuild with work in flight is waited for, a frozen one still stops the update, and a legacy drain reports the count that moves");
