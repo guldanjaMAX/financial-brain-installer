@@ -14,6 +14,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
+  "node --no-warnings test/vector-bootstrap-stale-pending.test.mjs",
   "node --no-warnings worker/test/plaid-refresh-debt-regression.test.mjs",
   "node --no-warnings worker/test/mcp-upgrade-pause.test.mjs",
   "node --no-warnings worker/test/oauth-consent-query.test.mjs",
@@ -220,6 +221,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/owner-entity-create.test.mjs",
   "node --no-warnings worker/test/plaid-sync-custody.test.mjs",
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
+  "node --no-warnings test/vector-bootstrap-stale-pending.test.mjs",
   "node --no-warnings worker/test/plaid-refresh-debt-regression.test.mjs",
   "node --no-warnings worker/test/mcp-upgrade-pause.test.mjs",
   "node --no-warnings worker/test/oauth-consent-query.test.mjs",

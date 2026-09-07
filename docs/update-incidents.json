@@ -54,7 +54,8 @@
       "test/vector-bootstrap-paused-strand.test.mjs",
       "test/bootstrap-retrying.test.mjs",
       "test/vector-delete-outbox.test.mjs",
-      "test/vector-bootstrap-history.test.mjs"
+      "test/vector-bootstrap-history.test.mjs",
+      "test/vector-bootstrap-stale-pending.test.mjs"
     ],
     "acceptance": "Complete a real bootstrap, add, overwrite and delete corpus rows, interrupt and resume with historical batch rows and delayed provider visibility; pass every intermediate Worker receipt through the actual CLI validators, including deletion alone and deletion to an empty corpus, then verify exact reconciliation.",
     "findings": [

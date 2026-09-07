@@ -3271,6 +3271,48 @@ export async function installedSchemaVersion(env) {
  * confirmAcceleratedBootstrapBatch, whose exact per-batch receipts a general
  * drain would invalidate by deleting rows they still count.
  */
+// One paused drain call clears at most this many outbox rows. A stale pending
+// residue above it is re-walked at bulk speed instead of drained at 100 per
+// provider confirmation. See the caller for the live incident this encodes.
+export const PAUSED_RESIDUE_DRAIN_CEILING = 10 * DRAIN_BATCH_SIZE_MAX;
+
+async function supersedeStalePendingResidue(env, state, options, lease) {
+  if (state.status !== "pending") return { reset: false, deletesRemaining: 0 };
+  const ledger = await env.DB.prepare(
+    `SELECT (SELECT count(*) FROM vector_outbox WHERE op='upsert') AS upserts,
+            (SELECT count(*) FROM chunks) AS chunks,
+            (SELECT COALESCE(sum(row_count),0) FROM vector_bootstrap_batches
+              WHERE epoch=?1 AND status='confirmed') AS confirmed`
+  ).bind(state.epoch).first();
+  const upserts = Number(ledger?.upserts);
+  const chunks = Number(ledger?.chunks);
+  const confirmed = Number(ledger?.confirmed);
+  if (![upserts, chunks, confirmed].every((v) => Number.isSafeInteger(v) && v >= 0)) {
+    throw new Error("the stale pending projection receipt is invalid");
+  }
+  // Stale means the durable history cannot account for the corpus. A healthy
+  // 'pending' is written only when the outbox is empty and the walk reached its
+  // high water, so any of these three being true means chunks arrived after.
+  const stale = state.baseCount + confirmed < chunks;
+  if (!stale || upserts <= PAUSED_RESIDUE_DRAIN_CEILING) return { reset: false, deletesRemaining: 0 };
+
+  const superseded = await env.DB.prepare("DELETE FROM vector_outbox WHERE op='upsert'").run();
+  if (drainLeaseChanges(superseded) !== upserts) {
+    throw new Error("the stale pending residue changed while it was being superseded");
+  }
+  await resetVectorProjectionBootstrap(env);
+  const deletes = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+  let deletesRemaining = Number(deletes?.n || 0);
+  if (deletesRemaining > 0) {
+    await drainOutboxWithLease(env, {
+      ...options, allowPausedBootstrap: true, disableBootstrapAdvance: true, maxBatches: 10,
+    }, lease);
+    const after = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+    deletesRemaining = Number(after?.n || 0);
+  }
+  return { reset: true, superseded: upserts, deletesRemaining };
+}
+
 async function drainPausedBootstrapResidue(env, state, options, lease) {
   const ledger = await env.DB.prepare(
     `SELECT (SELECT count(*) FROM vector_outbox) AS residue,
@@ -3425,6 +3467,27 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
       ).bind(ACCELERATED_BOOTSTRAP_PROTOCOL).run();
       return acceleratedBootstrapReceipt(env, "legacy_drain");
     }
+  }
+
+  // A PENDING projection whose queued upserts outnumber what one paused drain
+  // call can clear is not converging; it is taking the slow path by mistake.
+  //
+  // Observed live 2026-09-07 on a 1,455,889-chunk brain: status 'pending',
+  // base_count frozen at 926,323 from an earlier epoch, zero batches in the
+  // current epoch, 340,197 upserts queued by ordinary ingest since. Draining
+  // that residue 100 rows per provider confirmation is about four days, and the
+  // CLI's safety deadline killed the update long before, leaving the brain
+  // paused and mute. The LEGACY branch above already knows the answer: queued
+  // upserts are superseded by the bulk walk, which re-embeds every chunk from
+  // D1, so drop them and walk. This applies the same judgment to bootstrap-v2.
+  //
+  // Small residue keeps the existing drain: re-walking a million chunks to
+  // project one stranded row would be the opposite mistake. DELETE rows are
+  // never superseded; nothing else will send them, so they drain first.
+  const supersede = await supersedeStalePendingResidue(env, state, options, lease);
+  if (supersede.reset) {
+    state = await bootstrapStateV2(env);
+    if (supersede.deletesRemaining > 0) return acceleratedBootstrapReceipt(env, "legacy_drain");
   }
 
   const residue = await drainPausedBootstrapResidue(env, state, options, lease);
