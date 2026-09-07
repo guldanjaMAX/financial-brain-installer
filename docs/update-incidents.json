@@ -205,7 +205,7 @@
   {
     "id": "UPDATE-010",
     "title": "Exact package publication only after every gate",
-    "status": "local-only",
+    "status": "verified",
     "scopes": [
       "fresh",
       "upgrade",
@@ -221,7 +221,10 @@
     "findings": [
       "F6"
     ],
-    "evidence": []
+    "evidence": [
+      "docs/release-evidence/UPDATE-010-exact-package-publication-2026-09-07.md",
+      "docs/release-evidence/v0.4.0-field-findings-2026-09-07.md"
+    ]
   },
   {
     "id": "UPDATE-011",
@@ -291,7 +294,7 @@
   {
     "id": "UPDATE-014",
     "title": "Honest health, version and retrieval handoff",
-    "status": "local-only",
+    "status": "verified",
     "scopes": [
       "fresh",
       "upgrade",
@@ -310,7 +313,10 @@
       "HISTORY-FALSE-READY",
       "FIELD-CREDENTIAL-CONTRACT"
     ],
-    "evidence": []
+    "evidence": [
+      "docs/release-evidence/UPDATE-014-honest-health-version-retrieval-2026-09-07.md",
+      "docs/release-evidence/v0.4.0-field-findings-2026-09-07.md"
+    ]
   },
   {
     "id": "UPDATE-015",
@@ -540,7 +546,7 @@
   {
     "id": "UPDATE-026",
     "title": "Windows release evidence comes from a verified package on a proven runtime",
-    "status": "open",
+    "status": "verified",
     "scopes": [
       "fresh",
       "upgrade"
@@ -557,6 +563,9 @@
       "WINDOWS-PACKAGE-BARRIER",
       "WINDOWS-NODE22-INSTALL-TIMEOUT"
     ],
-    "evidence": []
+    "evidence": [
+      "docs/release-evidence/UPDATE-026-windows-verified-package-proven-runtime-2026-09-07.md",
+      "docs/release-evidence/v0.4.0-field-findings-2026-09-07.md"
+    ]
   }
 ]
