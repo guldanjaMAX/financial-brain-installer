@@ -66,7 +66,11 @@ function v020InstalledManifest() {
   // all. The working tree cannot stand in for it, because today's template has
   // the auth_profile field this test exists to prove was absent. The digest is
   // the tag's own bytes, so an edited fixture fails here.
-  const fixture = readFileSync(new URL("./fixtures/v0.2.0-brain.manifest.json", import.meta.url));
+  // Normalised before hashing: .gitattributes pins this to LF, but a checkout
+  // that ignored that must not be able to report the published bytes as wrong.
+  const fixture = Buffer.from(
+    readFileSync(new URL("./fixtures/v0.2.0-brain.manifest.json", import.meta.url), "utf8").replace(/\r\n/g, "\n"),
+    "utf8");
   const digest = createHash("sha256").update(fixture).digest("hex");
   if (digest !== "78f6244d7bb0307898d4b5c43a8f97c6eaddba11297abf60cbf40bcd4dcb3ea4") {
     throw new Error(`the v0.2.0 manifest fixture is not the published bytes (${digest})`);

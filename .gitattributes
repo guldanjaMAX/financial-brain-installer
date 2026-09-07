@@ -31,3 +31,8 @@ worker/src/lib/bank-export.js text eol=lf
 # tests report the product has lost a table it still has. Pin it, the way the
 # hashed files above are pinned, so every checkout sees the same bytes.
 brain.mjs text eol=lf
+
+# This fixture is compared by SHA-256 against the bytes published at the v0.2.0
+# tag. A CRLF checkout changes the digest without changing a character of
+# JSON, so the test then reports the published bytes as wrong.
+test/fixtures/v0.2.0-brain.manifest.json text eol=lf
