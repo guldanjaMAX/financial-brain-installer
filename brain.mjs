@@ -4299,7 +4299,7 @@ export async function runAcceleratedBootstrap({
     info(`${receipt.queued + receipt.submitted} vector operation(s) pending; ${receipt.actual_vectors}/${receipt.expected_vectors} vector(s) query-visible`);
     info(`batch ledger: ${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
     if (receipt.blocked_on === "quarantine") {
-      die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so the bulk re-projection cannot open.\n` +
+      die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so this update cannot finish the vector projection.\n` +
         "      Release them with POST /api/admin/brain/vector-retry {\"confirm\":true} (admin key), then re-run `brain update <manifest>`.\n" +
         "      If the index rejects them again, the documents they belong to must be forgotten (`brain forget <manifest>`) before the projection can verify.\n" +
         "      The Worker remains paused.");

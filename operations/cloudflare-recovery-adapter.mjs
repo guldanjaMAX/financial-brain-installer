@@ -491,19 +491,20 @@ const AGGREGATE_SQL = `SELECT ${AGGREGATE_FIELDS.map(
 ).join(",")}`;
 
 export class CloudflareRecoveryAdapterError extends Error {
-  constructor(code) {
-    super(code);
+  constructor(code, detail = null) {
+    super(detail ? `${code}: ${detail}` : code);
     this.name = "CloudflareRecoveryAdapterError";
     this.code = code;
+    this.detail = detail;
   }
 }
 
-function recoveryError(code) {
-  return new CloudflareRecoveryAdapterError(code);
+function recoveryError(code, detail = null) {
+  return new CloudflareRecoveryAdapterError(code, detail);
 }
 
-function refuse(code) {
-  throw recoveryError(code);
+function refuse(code, detail = null) {
+  throw recoveryError(code, detail);
 }
 
 function normalizeStopAfterStage(value) {
@@ -2145,7 +2146,12 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
       // exact-prefix artifact remains
       // inspectable offline, but the field runner has no implicit live-upgrade
       // authority and therefore stops before export, restore, or provider I/O.
-      refuse(code);
+      // Say what to do: every brain that has not run `brain update` on this
+      // build lands here, and the operator sheet is "update first, then recover".
+      refuse(code,
+        `this brain's schema is at ${migrations.at(-1)?.version ?? "an unknown version"} and this recovery runner ` +
+        `requires ${RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION}. Run \`brain update <manifest>\` on it first, then recover. ` +
+        "The runner never upgrades a brain implicitly.");
     }
     return migrations;
   }

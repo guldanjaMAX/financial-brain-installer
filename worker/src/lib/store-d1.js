@@ -3388,14 +3388,6 @@ async function residueBlockersAllSubmitted(env) {
   return n === 0;
 }
 
-function quarantinedResidueError(total) {
-  return new Error(
-    `the vector outbox holds ${total} quarantined row(s) that the paused drain cannot ` +
-    "project, so the projection can never reach its verified cut. Release them with " +
-    "POST /api/admin/brain/vector-retry {\"confirm\":true}, then re-run `brain update <manifest>`.",
-  );
-}
-
 // Below this many queued upserts the paused drain clears them in a handful of
 // confirmations, and re-embedding them by the bulk walk would gain nothing.
 export const RESIDUE_REPROJECTION_MIN_ROWS = 10 * DRAIN_BATCH_SIZE_MAX;
@@ -3576,9 +3568,16 @@ async function drainPausedBootstrapResidue(env, state, options, lease) {
   // self-leasing drainOutbox wrapper. It stays only so that switching this call
   // to that wrapper cannot silently report contention as quarantine.
   if (drained.busy !== true && after.total > 0 && after.drainable === 0) {
-    throw quarantinedResidueError(after.total);
+    // Name it on the receipt rather than throwing: a thrown error reaches the
+    // operator as an unnamed HTTP 500, and the CLI already knows how to refuse
+    // quarantine by name with its remedies.
+    return {
+      attempted: true,
+      remaining: after.total,
+      blocked: { blocked_on: "quarantine", blocked_rows: after.total },
+    };
   }
-  return { attempted: true, remaining: after.total };
+  return { attempted: true, remaining: after.total, blocked: null };
 }
 
 async function rebaseVerifiedAcceleratedBootstrap(env, state) {
@@ -3691,7 +3690,7 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
 
   const residue = await drainPausedBootstrapResidue(env, state, options, lease);
   if (residue.attempted) {
-    if (residue.remaining > 0) return acceleratedBootstrapReceipt(env, "legacy_drain");
+    if (residue.remaining > 0) return acceleratedBootstrapReceipt(env, "legacy_drain", residue.blocked);
     state = await bootstrapStateV2(env);
   }
 

@@ -218,9 +218,12 @@ const snapshot = (db) => db.prepare(
   } catch (caught) {
     error = caught;
   }
+  // The cause travels on the receipt, not as a thrown error: a thrown error
+  // reaches the operator only as an unnamed HTTP 500, while the CLI refuses a
+  // receipt naming quarantine at once, with the row count and both remedies.
   check("a quarantined residue row ends the update with a named cause, not a silent wait",
-    error !== null && /quarantin/i.test(String(error?.message || "")) &&
-      /vector outbox/i.test(String(error?.message || "")),
+    error === null && receipt?.phase === "legacy_drain" && receipt?.blocked_on === "quarantine" &&
+      receipt?.blocked_rows === 1 && receipt?.complete === false,
     JSON.stringify({ message: error?.message ?? null, receipt }));
   check("and nothing about that failure was destructive",
     Number(snapshot(db).outbox) === 1 && snapshot(db).status === "pending",
