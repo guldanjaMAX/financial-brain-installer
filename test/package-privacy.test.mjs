@@ -801,6 +801,12 @@ if (packageProbeDirectory) try {
       "financial-brain-technician",
       "SKILL.md",
     );
+    // The installer renders the skill's `brain ...` lines for the machine it
+    // landed on, so on Windows the installed bytes are deliberately not the
+    // packed bytes. Build the expectation through the PACKED renderer, the same
+    // module the packed installer uses, so this compares the whole file on
+    // every platform instead of asserting the macOS spelling.
+    const skillRendererPath = join(packageProbeDirectory, "package", "operations", "cli-guidance.mjs");
     const importProbe = extracted.status === 0
       ? spawnSync(process.execPath, [
           "--input-type=module",
@@ -828,11 +834,12 @@ if (packageProbeDirectory) try {
             "const {tmpdir}=await import('node:os')",
             "const {join}=await import('node:path')",
             "const skill=await import(pathToFileURL(process.env.PACK_SKILL_MODULE).href)",
+            "const {renderCliCommands}=await import(pathToFileURL(process.env.PACK_SKILL_RENDERER).href)",
             "const home=mkdtempSync(join(tmpdir(),'brain-packed-skill-'))",
             "try{",
             "const first=skill.installTechnicianSkillEverywhere({home})",
             "if(first.length!==2||first.some((x)=>x.status!=='installed'))throw new Error('packed skill did not install for both assistants')",
-            "const source=readFileSync(process.env.PACK_SKILL_SOURCE,'utf8')",
+            "const source=renderCliCommands(readFileSync(process.env.PACK_SKILL_SOURCE,'utf8'))",
             "for(const path of skill.technicianSkillPaths({home}))if(readFileSync(path,'utf8')!==source)throw new Error('installed skill differs from packed source')",
             "const second=skill.installTechnicianSkillEverywhere({home})",
             "if(second.some((x)=>x.status!=='verified'||x.changed!==false))throw new Error('packed skill reinstall was not idempotent')",
@@ -846,6 +853,7 @@ if (packageProbeDirectory) try {
             ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
             PACK_SKILL_MODULE: skillModulePath,
             PACK_SKILL_SOURCE: skillSourcePath,
+            PACK_SKILL_RENDERER: skillRendererPath,
           },
           timeout: 60_000,
         })

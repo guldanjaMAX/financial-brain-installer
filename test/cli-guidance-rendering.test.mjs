@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   brainCliPrefix,
   commandPath,
@@ -448,11 +448,18 @@ const supportRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-guidance-supp
 try {
   const preload = join(supportRoot, "windows.mjs");
   writeFileSync(preload, 'Object.defineProperty(process, "platform", { value: "win32", configurable: true });\n', { mode: 0o600 });
+  // Node resolves --import as a module SPECIFIER, not as a path. A POSIX
+  // absolute path happens to resolve; the same file on Windows is spelled
+  // `C:\...`, which parses as the URL scheme `c:` and the child never starts
+  // (ERR_UNSUPPORTED_ESM_URL_SCHEME), so this whole live run failed on the one
+  // platform it exists to cover. A file URL is the portable spelling, the same
+  // way test/eval-init-privacy.test.mjs already passes its isolation hook.
+  const preloadSpecifier = pathToFileURL(preload).href;
   const env = Object.fromEntries(["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"].filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
   Object.assign(env, { HOME: supportRoot, USERPROFILE: supportRoot, NO_COLOR: "1" });
   const run = spawnSync(
     process.execPath,
-    ["--import", preload, fileURLToPath(new URL("brain.mjs", productRoot)), "support"],
+    ["--import", preloadSpecifier, fileURLToPath(new URL("brain.mjs", productRoot)), "support"],
     { cwd: supportRoot, env, encoding: "utf8" },
   );
   assert.equal(run.status, 0, run.stderr);
@@ -463,4 +470,163 @@ try {
   rmSync(supportRoot, { recursive: true, force: true });
 }
 
+/* ==================== the same defect, seen from the test side instead */
+/*
+ * The sweep above walks product code and deliberately skips `test/`, because a
+ * fixture carrying a bare command is normal. But a TEST may also assert on the
+ * macOS spelling of a command the product renders per platform, and that
+ * assertion cannot fail here: on posix `renderCliCommands` is the identity
+ * function, so a full green local run says nothing about it. It fails only on a
+ * Windows runner, twenty-five minutes later.
+ *
+ * That happened five times in one night. The discriminator between a bug and a
+ * legitimate fixture is narrow and specific: a bare command inside a literal
+ * that is being compared against CAPTURED TERMINAL OUTPUT. A broad scan of every
+ * assertion flags ~113 legitimate fixtures and is useless; this rule measured
+ * zero false positives on the real tree.
+ *
+ * Deliberately NOT flagged, because these must stay byte-stable:
+ *   - test descriptions and check() labels
+ *   - assertions on pre-render structured fields (err.message, f.action, remedy)
+ *   - fixture inputs, which are supposed to carry the bare form
+ */
+const OUTPUT_IDENT = String.raw`[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*`;
+// An identifier is "output-like" only if some segment names captured process
+// output. `manifest.text` is not output; `run.stdout` and `printed` are.
+const OUTPUT_SEGMENT = /(?:^|\.)(?:output|stdout|stderr|printed|combined|logs?|terminal|rendered|text|body)$/i;
+// Both forms are anchored on their OPEN PAREN, so callArgument can balance from
+// it. Anchoring the assert form on its comma instead silently yields nothing,
+// which is the failure mode this rule exists to prevent, so it is covered by a
+// known answer below.
+const METHOD_ON_OUTPUT = new RegExp(
+  String.raw`(${OUTPUT_IDENT})\s*\.\s*(?:includes|match|indexOf|search|startsWith|endsWith|contains)\s*\(`, "g");
+const ASSERT_CALL = /assert\s*\.\s*(?:match|doesNotMatch|equal|strictEqual|notEqual|deepEqual|ok)\s*\(/g;
+
+// Split a balanced argument list at its first top-level comma.
+function firstArgument(list) {
+  let depth = 0, quote = null;
+  for (let i = 0; i < list.length; i++) {
+    const ch = list[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; continue; }
+    if (ch === "/" && list[i + 1] !== "/" && list[i + 1] !== "*") {
+      // A regex literal: skip to its unescaped closing slash.
+      let j = i + 1;
+      for (; j < list.length; j++) {
+        if (list[j] === "\\") { j++; continue; }
+        if (list[j] === "[") { while (j < list.length && list[j] !== "]") { if (list[j] === "\\") j++; j++; } continue; }
+        if (list[j] === "/") break;
+      }
+      i = j; continue;
+    }
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth--;
+    else if (ch === "," && depth === 0) return { head: list.slice(0, i), rest: list.slice(i + 1) };
+  }
+  return { head: list, rest: "" };
+}
+
+function hardcodedOutputExpectations(moduleSource, label = "<source>") {
+  const code = blankComments(moduleSource);
+  const found = [];
+  let parsed = 0;
+  const record = (index, expectation) => {
+    parsed++;
+    if (!bareCommand.test(expectation) || RENDERED.test(expectation)) return;
+    found.push(`${label}:${code.slice(0, index).split("\n").length}  ${expectation.replace(/\s+/g, " ").slice(0, 140)}`);
+  };
+  for (const match of code.matchAll(METHOD_ON_OUTPUT)) {
+    if (!OUTPUT_SEGMENT.test(match[1])) continue;
+    const argument = callArgument(code, match.index + match[0].length - 1);
+    if (argument !== null) record(match.index, argument);
+  }
+  for (const match of code.matchAll(ASSERT_CALL)) {
+    const list = callArgument(code, match.index + match[0].length - 1);
+    if (list === null) continue;
+    const { head, rest } = firstArgument(list);
+    if (!OUTPUT_SEGMENT.test(head.trim()) || !rest.trim()) continue;
+    // The message argument of an assert is prose about the failure, not the
+    // expectation, so only the second argument is judged.
+    record(match.index, firstArgument(rest).head);
+  }
+  return { found, parsed };
+}
+
+/* KNOWN-ANSWER FIXTURES BEGIN */
+// Known answers first, same discipline as the sweep above: a rule that silently
+// stopped matching would report a clean tree forever.
+const t = (src) => hardcodedOutputExpectations(src).found.length;
+// True positives, both in the exact spelling the real defects had before repair.
+assert.equal(t('assert.ok(stalled.output.includes("Do NOT run `brain drain` while paused"));'), 1,
+  "the rule must see a bare command asserted against captured output");
+assert.equal(t('assert.match(printed, /brain forget <manifest> --yes/);'), 1,
+  "the rule must see a bare command in a regex asserted against output");
+assert.equal(t('const printed = `${run.stdout}`; assert.ok(printed.includes("run brain doctor now"));'), 1,
+  "the rule must see a bare command through a combined-output identifier");
+// True negatives, every one of which must stay bare.
+assert.equal(t('assert.ok(output.includes(renderCliCommands("brain drain")));'), 0,
+  "the rule must accept an expectation built through the renderer");
+assert.equal(t('check("scheduled run invokes brain ingest manifest --from drive", ok);'), 0,
+  "the rule must not read a test description as an expectation");
+assert.equal(t('assert.equal(err.message, "brain doctor <manifest> failed");'), 0,
+  "the rule must not flag a pre-render structured field");
+assert.equal(t('const fixture = "run brain doctor <manifest>"; writeFileSync(p, fixture);'), 0,
+  "the rule must not flag a fixture input");
+assert.equal(t('// assert.ok(output.includes("brain drain"));'), 0,
+  "the rule must ignore commented-out code");
+assert.equal(t('assert.ok(manifest.text.includes("brain"));'), 0,
+  "the rule must not read prose without a subcommand as an instruction");
+/* KNOWN-ANSWER FIXTURES END */
+
+const testDirectories = [join(productDirectory, "test"), join(productDirectory, "worker", "test")];
+const testFiles = [];
+for (const directory of testDirectories) {
+  (function walk(dir) {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (/\.m?js$/.test(full)) testFiles.push(full);
+    }
+  })(directory);
+}
+assert.ok(testFiles.length > 100, `only ${testFiles.length} test modules were walked`);
+
+// This file's own known-answer cases are test code held inside string literals,
+// so the rule correctly sees them. They are fenced and blanked, and the fence is
+// asserted to exist exactly once so the exemption cannot quietly widen to cover
+// a real defect written below it.
+const FENCE = /\/\* KNOWN-ANSWER FIXTURES BEGIN \*\/[\s\S]*?\/\* KNOWN-ANSWER FIXTURES END \*\//g;
+function withoutKnownAnswerFixtures(text, file) {
+  if (!file.endsWith("cli-guidance-rendering.test.mjs")) return text;
+  const fences = text.match(FENCE) || [];
+  assert.equal(fences.length, 1, "the known-answer fixture fence must appear exactly once");
+  return text.replace(FENCE, (block) => block.replace(/[^\n]/g, " "));
+}
+
+const hardcoded = [];
+let expectationSites = 0;
+for (const file of testFiles) {
+  const swept = hardcodedOutputExpectations(
+    withoutKnownAnswerFixtures(readFileSync(file, "utf8"), file),
+    file.slice(productDirectory.length),
+  );
+  expectationSites += swept.parsed;
+  hardcoded.push(...swept.found);
+}
+// Measured at 161 on the real tree. The floor is set below that with room for
+// tests to come and go, but high enough that a rule which stopped matching
+// cannot pass as a clean sweep.
+assert.ok(expectationSites > 120, `only ${expectationSites} output expectations were parsed; the rule has gone blind`);
+assert.deepEqual(
+  hardcoded,
+  [],
+  `these tests assert the macOS spelling of a command the product renders per platform.\n` +
+  `They pass here and fail only on Windows CI. Build the expectation through renderCliCommands(...) instead:\n${hardcoded.join("\n")}`,
+);
+
 console.log(`CLI guidance sweep: ${emissionSites} emission sites across ${moduleFiles.length} modules, none bare on Windows`);
+console.log(`CLI expectation rule: ${expectationSites} output expectations across ${testFiles.length} test modules, none hardcoded to posix`);

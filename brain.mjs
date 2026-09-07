@@ -4146,7 +4146,19 @@ export async function runAcceleratedBootstrap({
     if (lastMovementAt === null || bootstrapReceiptMoved(previous, receipt)) lastMovementAt = observedAt;
     const quietMs = observedAt - lastMovementAt;
     if (quietMs >= ACCELERATED_BOOTSTRAP_STALL_MS) {
-      die(`the accelerated bootstrap has not moved for ${Math.round(quietMs / 60_000)} minutes (${receipt.confirmed}/${receipt.total} confirmed, ${receipt.failed} unconfirmed, ${receipt.submitted} submitted, ${receipt.in_flight_batches} batch(es) in flight). Re-run \`brain update <manifest>\`; the Worker remains paused.`);
+      const counters = `${receipt.confirmed}/${receipt.total} confirmed, ${receipt.failed} unconfirmed, ${receipt.submitted} submitted, ${receipt.in_flight_batches} batch(es) in flight`;
+      const stalledFor = `the accelerated bootstrap has not moved for ${Math.round(quietMs / 60_000)} minutes (${counters}).`;
+      // A count mismatch is the one stall a re-run can never clear: the exact cut
+      // that ends the bootstrap compares D1's chunks against the provider's vector
+      // count, and no number of re-runs changes the provider. The receipt already
+      // carries both numbers, so name the real cause and give a remedy that can
+      // work, rather than sending the operator round a loop with all-zero counters.
+      if (Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
+          receipt.actual_vectors !== receipt.expected_vectors) {
+        die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors)}\n` +
+          "      Re-running the update cannot change this. The Worker remains paused.");
+      }
+      die(`${stalledFor} Re-run \`brain update <manifest>\`; the Worker remains paused.`);
     }
     if (receipt.failed > 0) {
       info(`${receipt.failed} vector(s) accepted but not yet visible; waiting for Vectorize (${receipt.confirmed}/${receipt.total} confirmed, ${receipt.submitted} submitted, ${receipt.in_flight_batches} batch(es) in flight)`);

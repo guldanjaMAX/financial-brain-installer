@@ -43,7 +43,20 @@ import {
   describeLoadResult,
   formatLoadElapsed,
 } from "../brain.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { ingestionOutcome } from "../ingest/outcome.mjs";
+
+/*
+ * The load report renders every `brain ...` command for the platform the owner
+ * is actually on: identity on macOS and Linux, and on Windows the runnable
+ * `& 'C:\...\node.exe' '...\brain.mjs' load` form. An expectation spelled in
+ * the bare macOS form therefore asserts nothing about Windows, where the
+ * report is exactly the artefact an operator has to read. Build the expected
+ * command through the same renderer instead, and escape it so it can still be
+ * anchored to the line it has to appear on.
+ */
+const escapeRegExp = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const shownCommand = (command) => escapeRegExp(renderCliCommands(command));
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => {
@@ -254,7 +267,7 @@ try {
       /Dropbox[\s\S]*scripted provider proof; real account acceptance remains a field gate/.test(run.text),
       run.text.slice(0, 900));
     check("Zoom says the sweep pulls nothing while maintenance covers only bounded recent history",
-      /Zoom.*brain load has nothing to pull/.test(skippedBlock) &&
+      new RegExp(`Zoom.*${shownCommand("brain load has nothing to pull")}`).test(skippedBlock) &&
       /initial 30 days, then a 2-day overlap/.test(skippedBlock) &&
       /not a complete historical backfill/.test(skippedBlock),
       skippedBlock);
@@ -341,14 +354,14 @@ try {
     check("a source with no loader in this build is unavailable instead of vanishing from the sweep",
       /unavailable_api.*has no loader for it/.test(unavailableBlock), unavailableBlock);
     check("Zoom is skipped as a push connector, not reported as loaded work",
-      /Zoom.*brain load has nothing to pull/.test(skippedBlock) &&
+      new RegExp(`Zoom.*${shownCommand("brain load has nothing to pull")}`).test(skippedBlock) &&
       /initial 30 days, then a 2-day overlap/.test(skippedBlock) &&
       /not a complete historical backfill/.test(skippedBlock), skippedBlock);
     check("a manifest _comment key is not treated as a source",
       !/_comment/.test(sweep.text));
 
     check("the unavailable list carries the fix for the disconnected source",
-      /brain connect whatsapp/.test(unavailableBlock), unavailableBlock);
+      new RegExp(shownCommand("brain connect whatsapp")).test(unavailableBlock), unavailableBlock);
 
     check("the totals match what actually happened",
       /totals: 4 loaded, 2 skipped, 2 unavailable, 1 failed, of 9 declared/.test(sweep.text),

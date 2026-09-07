@@ -24,6 +24,7 @@ import {
   escapeHtml,
   redactSecrets,
 } from "../report-html.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 let failures = 0;
 const check = (name, cond, detail = "") => {
@@ -473,7 +474,11 @@ check("coverage names sources in the client's words",
 check("partly embedded corpora are explained",
   has(cleanReport, "still being processed"));
 check("the custody promise is stated", has(cleanReport, "no copy of your material leaves the accounts you own"));
-check("re-running it is spelled out", has(cleanReport, "brain test &lt;manifest&gt; --report"));
+// The command is rendered for the host platform (a bare `brain` on POSIX, a
+// full node invocation on Windows) and then HTML-escaped, so build the
+// expectation the same way rather than hardcoding the POSIX spelling.
+check("re-running it is spelled out",
+  has(cleanReport, escapeHtml(renderCliCommands("brain test <manifest> --report"))));
 check("tier headings explain why the tier matters", has(cleanReport, "answering without a key"));
 
 /* ------------------------- 8. the real Acceptance shape, offline */

@@ -19,6 +19,14 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/oauth-consent-query.test.mjs",
   "node --no-warnings worker/test/reprojection-pause-order.test.mjs",
   "node --no-warnings test/legacy-manifest-auth-profile.test.mjs",
+  // Client upgrade rehearsals, added after the launcher freeze. Every shipped
+  // release through v0.3.6 ships 22 migrations and this release ships 35, so
+  // 0023..0035 have never run on a real client brain until these.
+  "node --no-warnings test/migration-walk-22-to-35.test.mjs",
+  "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
+  "node --no-warnings test/healthy-v020-install-guards.test.mjs",
+  "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
+  "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -54,6 +62,14 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/d1-batch-ingest.test.mjs",
   "node --no-warnings test/vector-delete-outbox.test.mjs",
   "node --no-warnings test/vector-bootstrap-paused-strand.test.mjs",
+  // Client upgrade rehearsals. Every shipped release through v0.3.6 carries 22
+  // migrations and this release carries 35, so 0023..0035 have never run on a
+  // real client brain. These walk a populated schema-22 database forward.
+  "node --no-warnings test/migration-walk-22-to-35.test.mjs",
+  "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
+  "node --no-warnings test/healthy-v020-install-guards.test.mjs",
+  "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
+  "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
   "node test/supabase-import.test.mjs",
   "node test/message-session.test.mjs",
   "node --no-warnings test/imessage-capture.test.mjs",

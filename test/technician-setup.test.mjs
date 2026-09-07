@@ -20,6 +20,15 @@ import {
   CLAUDE_TECHNICIAN_SKILL_MARKER,
   installClaudeTechnicianSkill,
 } from "../operations/claude-skill.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
+
+// The installer renders every `brain <subcommand>` in the packaged skill for the
+// machine it lands on: identity on macOS and Linux, a runnable invocation of the
+// real executable on Windows. Build the expectations through the same renderer
+// so each one keeps asserting the exact command, on either platform, instead of
+// asserting the POSIX spelling that only one of them produces.
+const escapeForRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const renderedCommand = (text) => escapeForRegExp(renderCliCommands(text));
 
 const sandbox = mkdtempSync(join(tmpdir(), "brain-technician-test-"));
 const manifestPath = join(sandbox, "brain.manifest.json");
@@ -93,12 +102,13 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(content, new RegExp(CLAUDE_TECHNICIAN_SKILL_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(content, /\/financial-brain-technician/);
   assert.match(content, /In Codex,\s+use `\$financial-brain-technician`/);
-  assert.match(content, /brain technician/);
+  assert.ok(content.includes(renderCliCommands("brain technician")),
+    "the installed skill must name the technician entrypoint");
   const updateRouteStart = content.indexOf("## Route an update request first");
   const setupRouteStart = content.indexOf("## Start here");
   const releaseManifest = content.indexOf("https://financialbrain.ai/update/manifest.json");
   const agentPlaybook = content.indexOf("https://financialbrain.ai/update/agent.md");
-  const updateEntrypoint = content.indexOf("brain update [manifest]");
+  const updateEntrypoint = content.indexOf(renderCliCommands("brain update [manifest]"));
   assert.ok(updateRouteStart > 0, "installed skill must route explicit Brain update requests");
   assert.ok(setupRouteStart > updateRouteStart, "update routing must run before the setup-oriented plan");
   assert.ok(releaseManifest > updateRouteStart && releaseManifest < agentPlaybook,
@@ -108,7 +118,8 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   const updateRoute = content.slice(updateRouteStart, setupRouteStart);
   assert.match(updateRoute, /stop without a\s+change/i);
   assert.match(updateRoute, /nothing for the owner to collect/i);
-  assert.match(updateRoute, /brain technician.*no update step/is);
+  assert.match(updateRoute,
+    new RegExp(`${renderedCommand("brain technician")}.*no update step`, "is"));
   assert.match(updateRoute, /preserve.*saved update checkpoint/is);
   assert.match(updateRoute, /documented package-pinned browser-login command/);
   assert.match(updateRoute, /preserving any account or isolated-profile options/);
@@ -125,7 +136,8 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(content, /unchanged counts alone are\s+inconclusive/i);
   assert.doesNotMatch(content, /next release clears/i);
   assert.match(content, /set up, install, update, check, test a connector, complete a passkey step, or hand off/i);
-  assert.match(content, /existing-Brain checkup, start with `brain doctor <manifest>`/i);
+  assert.match(content, new RegExp(
+    `existing-Brain checkup, start with \`${renderedCommand("brain doctor <manifest>")}\``, "i"));
   assert.match(content, /for every non-update route, finish with the preflight/i);
   assert.doesNotMatch(content, /CLOUDFLARE_API_TOKEN|ADMIN_KEY|client_secret|app_password/);
   if (process.platform === "win32") assert.equal(statSync(first.path).isFile(), true);
