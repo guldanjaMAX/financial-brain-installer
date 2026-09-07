@@ -216,7 +216,14 @@ jobs:
             const expectedOs = process.env.EXPECTED_OS;
             const runnerArch = process.env.RUNNER_ARCH;
             const platformFor = { "windows-latest": "win32", "macos-latest": "darwin", "ubuntu-latest": "linux" };
+            // macos-latest is Apple Silicon, which is also what clients run on a
+            // Mac, so arm64 is the CORRECT architecture there and asserting x64
+            // would reject the very runtime we support. Windows stays x64 only:
+            // UPDATE-012 defers Windows ARM64 as unproven and 0.4.0 does not
+            // claim it, so a Windows lane on ARM64 would be a real problem.
+            const archFor = { "windows-latest": "X64", "macos-latest": "ARM64", "ubuntu-latest": "X64" };
             const expectedPlatform = platformFor[expectedOs];
+            const expectedArch = archFor[expectedOs];
             const actual = {
               runner_arch: runnerArch,
               os: expectedOs,
@@ -229,8 +236,8 @@ jobs:
             const problems = [];
             if (!expectedPlatform) problems.push(`unmapped runner image ${expectedOs}`);
             else if (process.platform !== expectedPlatform) problems.push(`platform ${process.platform}, expected ${expectedPlatform}`);
-            if (runnerArch !== "X64") problems.push(`runner arch ${runnerArch}, expected X64`);
-            if (process.arch !== "x64") problems.push(`node arch ${process.arch}, expected x64`);
+            if (runnerArch !== expectedArch) problems.push(`runner arch ${runnerArch}, expected ${expectedArch}`);
+            if (process.arch !== expectedArch.toLowerCase()) problems.push(`node arch ${process.arch}, expected ${expectedArch.toLowerCase()}`);
             if (actual.node_major !== expectedMajor) problems.push(`node major ${actual.node_major}, expected ${expectedMajor}`);
             if (problems.length) {
               console.error("this lane is not the runtime it claims to be: " + problems.join("; "));
