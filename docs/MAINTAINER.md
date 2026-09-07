@@ -245,7 +245,7 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.0/schema35 candidate remains held. A tag requests the release
+The current 0.4.1/schema35 candidate remains held. A tag requests the release
 workflow; it never bypasses CI, unresolved incidents, owner acceptance, or the
 repository's immutable-release setting. Do not create or publish releases by
 hand to work around a failed workflow.

@@ -4,6 +4,37 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.1
+
+Candidate only. This version has not been released.
+
+Field fixes on top of the 0.4.0 candidate. Nothing here changes what your brain
+holds; each item removes a way the tools could tell you something that was not
+true, or stop you from getting on with the work.
+
+- Adopting an existing Cloudflare sign-in profile now asks first, and answers
+  the question in writing when nobody is at the keyboard. Pass
+  `--adopt-cloudflare-profile`, or set `BRAIN_ADOPT_CLOUDFLARE_PROFILE=1`, to
+  say yes ahead of time; without it, an unattended run stops instead of quietly
+  using an account you did not choose.
+- The safety pause before an update now reports an unverified quiescence
+  instead of printing success it did not earn, and the migration is no longer
+  told the drain had settled when it had not.
+- `brain setup` refuses to run against a brain that is paused for an upgrade,
+  and neither the AUTH_REQUIRED message nor `brain doctor` sends you to `setup`
+  any more. Running it there was the one move that could lose the pause.
+- Update progress shows the readiness numbers that are actually moving, and the
+  batch-ledger count is labelled so it is no longer mistaken for the work left.
+- Query-ready is refused on a brain that holds documents but has no vectors, so
+  a corpus that cannot answer anything is never reported as ready.
+- Windows commands print the short `brain.cmd` form only when the first shim on
+  PATH belongs to this install. Anything else prints the full path, so a stale
+  copy of the package cannot be aimed at your brain by accident.
+- On macOS, an existing Cloudflare sign-in stored under `Library/Preferences`
+  is now found instead of prompting you to sign in again.
+- The Cloudflare sign-in step no longer inherits a working directory it cannot
+  write to, which used to fail the browser hand-off for no visible reason.
+
 ## 0.4.0
 
 Candidate only. This version has not been released.
