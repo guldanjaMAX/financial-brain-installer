@@ -265,7 +265,7 @@
     "evidence": [],
     "testPlatform": "win32",
     "deferral": {
-      "version": "0.4.0",
+      "version": "0.4.1",
       "blocked_on": "physical_hardware_unavailable",
       "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can ever close it. No ARM64 machine exists on the bench, and 0.4.0 does not claim Windows ARM64 as a supported runtime.",
       "unproven": "Windows ARM64 owners get no packaged-launch, DPAPI, browser login, interrupted-update or clean-exit proof in 0.4.0. The release note must name Windows x64 as the only claimed Windows runtime."
@@ -375,7 +375,13 @@
     "findings": [
       "PLAID-CONFIG"
     ],
-    "evidence": []
+    "evidence": [],
+    "deferral": {
+      "version": "0.4.1",
+      "blocked_on": "live_third_party_account_required",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed.",
+      "unproven": "Plaid configuration survives install, deploy and update is unproven against a real Worker with a real Item; only the packaged CLI's configuration read-back is exercised."
+    }
   },
   {
     "id": "UPDATE-018",
@@ -394,7 +400,13 @@
     "findings": [
       "PLAID-ACCOUNT-SCOPE"
     ],
-    "evidence": []
+    "evidence": [],
+    "deferral": {
+      "version": "0.4.1",
+      "blocked_on": "live_third_party_account_required",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed.",
+      "unproven": "Long and case-sensitive account identities, unknown-account refusal, and cross-Item removal isolation are unproven through real D1 routes with real Plaid data."
+    }
   },
   {
     "id": "UPDATE-019",
@@ -413,7 +425,13 @@
     "findings": [
       "PLAID-COMPLETENESS"
     ],
-    "evidence": []
+    "evidence": [],
+    "deferral": {
+      "version": "0.4.1",
+      "blocked_on": "live_third_party_account_required",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed.",
+      "unproven": "Cursor safety on malformed or repeated pages, partial-history handling, and exact decimal promotion are unproven against a live provider."
+    }
   },
   {
     "id": "UPDATE-020",
@@ -432,7 +450,13 @@
     "findings": [
       "PLAID-DUPLICATE-CONNECTION"
     ],
-    "evidence": []
+    "evidence": [],
+    "deferral": {
+      "version": "0.4.1",
+      "blocked_on": "live_third_party_account_required",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed.",
+      "unproven": "Same-session replay, concurrent sessions, existing-Item reauthorization and ambiguous same-bank accounts are unproven against a live provider."
+    }
   },
   {
     "id": "UPDATE-021",
@@ -452,7 +476,13 @@
     "findings": [
       "PLAID-SYNC-CUSTODY"
     ],
-    "evidence": []
+    "evidence": [],
+    "deferral": {
+      "version": "0.4.1",
+      "blocked_on": "live_third_party_account_required",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed.",
+      "unproven": "Scheduler fairness across four or more Items and overlapping cron and manual slices are unproven against live Items."
+    }
   },
   {
     "id": "UPDATE-022",
@@ -474,7 +504,7 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.0",
+      "version": "0.4.1",
       "blocked_on": "live_third_party_account_required",
       "reason": "The acceptance requires two real institutions and four real accounts spanning one person and two owned businesses, plus a separately approved production pilot, and its own text excludes API-only Sandbox receipts and CI. Those live accounts and that approval do not exist for this cut. The deferral holds only while general bank invitations stay closed, which is what the Plaid release gate means by held.",
       "unproven": "No owner may be invited to connect a bank in 0.4.0. General bank invitations stay closed, and the deployed owner journey, webhook delivery, reauthorization and production pilot remain unproven."
@@ -541,7 +571,13 @@
       "PLAID-READY-WINDOW-FRESHNESS",
       "PLAID-REFRESH-DEBT-SCHEDULED-RETRYABLE"
     ],
-    "evidence": []
+    "evidence": [],
+    "deferral": {
+      "version": "0.4.1",
+      "blocked_on": "live_third_party_account_required",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed.",
+      "unproven": "That an owner is never told current while a refresh is owed is unproven with a real Item and real webhook history."
+    }
   },
   {
     "id": "UPDATE-026",
