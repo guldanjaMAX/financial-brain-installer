@@ -100,14 +100,14 @@ const RECOVERY_ZOOM_SECRET_NAMES = Object.freeze([
   "ZOOM_CLIENT_SECRET",
   "ZOOM_WEBHOOK_SECRET_TOKEN",
 ]);
-const RECOVERY_BANK_WRAPPING_SECRET = "BANK_FEED_WRAPPING_KEY_V2";
+const RECOVERY_BANK_WRAPPING_SECRET_NAME = "BANK_FEED_WRAPPING_KEY_V2";
 // Exact Worker-side secrets written by D1-compatible installer/connect flows.
 // Supabase is intentionally absent because this adapter requires STORAGE=d1;
 // the remaining connectors keep credentials in local owner custody.
 const RECOVERY_OPTIONAL_SECRET_NAMES = Object.freeze([
   "ANTHROPIC_API_KEY",
   ...RECOVERY_BANK_PROVIDER_SECRET_NAMES,
-  RECOVERY_BANK_WRAPPING_SECRET,
+  RECOVERY_BANK_WRAPPING_SECRET_NAME,
   ...RECOVERY_ZOOM_SECRET_NAMES,
 ]);
 const RECOVERY_COMPLETE_OPTIONAL_SECRET_GROUPS = Object.freeze([
@@ -2008,7 +2008,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     if (RECOVERY_REQUIRED_SECRET_NAMES.some((name) => !secretNames.includes(name)) ||
         secretNames.some((name) => !allowedSecrets.has(name)) ||
         incompleteOptionalGroup ||
-        (role === "target" && !secretNames.includes(RECOVERY_BANK_WRAPPING_SECRET))) {
+        (role === "target" && !secretNames.includes(RECOVERY_BANK_WRAPPING_SECRET_NAME))) {
       refuse("RECOVERY_WORKER_BINDINGS_INVALID");
     }
     if (role === "target") {
@@ -2359,14 +2359,14 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     const target = await assertExactCloudflareResources(pins.binding.target, "target", targetMode);
     const expectedTarget = [...new Set([
       ...source.secretNames,
-      RECOVERY_BANK_WRAPPING_SECRET,
+      RECOVERY_BANK_WRAPPING_SECRET_NAME,
     ])].sort();
     if (canonical(target.secretNames) !== canonical(expectedTarget)) {
       refuse("RECOVERY_WORKER_SECRET_RECONCILIATION_REQUIRED");
     }
     const targetProof = await withTargetKey((key) => bankKeyProof(pins.binding.target, key));
     if (!targetProof.configured) refuse("RECOVERY_BANK_KEY_PROOF_INVALID");
-    if (source.secretNames.includes(RECOVERY_BANK_WRAPPING_SECRET)) {
+    if (source.secretNames.includes(RECOVERY_BANK_WRAPPING_SECRET_NAME)) {
       const sourceProof = await withSourceKey((key) => bankKeyProof(pins.binding.source, key));
       if (!sourceProof.configured || sourceProof.keyFingerprint !== targetProof.keyFingerprint) {
         refuse("RECOVERY_BANK_KEY_MISMATCH");

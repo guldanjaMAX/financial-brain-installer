@@ -13,9 +13,9 @@
   "scripts": {
     "rehearse:hiccups": "node scripts/customer-hiccup-lab.mjs",
     "rehearse:onboarding": "node scripts/onboarding-sandbox.mjs",
-    "privacy:history": "node scripts/scan-git-history-privacy.mjs --ref HEAD --require-zero-findings",
-    "privacy:history:remote": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-zero-findings",
-    "privacy:history:strict": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-zero-findings",
+    "privacy:history": "node scripts/scan-git-history-privacy.mjs --ref HEAD --require-clean",
+    "privacy:history:remote": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
+    "privacy:history:strict": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "test": "node scripts/run-test-chain.mjs",
     "test:eval": "node --test eval/brain-client.test.mjs eval/corpus-contract.test.mjs eval/golden-20.test.mjs eval/profile.test.mjs eval/run.test.mjs eval/scorer.test.mjs",
     "audit:updates": "node scripts/audit-updates.mjs --release",

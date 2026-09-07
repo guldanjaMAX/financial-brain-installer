@@ -469,7 +469,15 @@ export function evaluateStrictRelease(report, dispositions) {
   if (!dispositions || dispositions.schema_version !== 1 || !Array.isArray(dispositions.approved_candidates)) {
     throw new Error("credential disposition file has an unsupported schema");
   }
-  const allowedDispositions = new Set(["synthetic_fixture", "scanner_source", "public_documentation_example"]);
+  // Every value here means "a human read this object and it is not a credential".
+  // `secret_name_constant` is the narrowest of them: the matched VALUE is the
+  // NAME of a secret binding, not a secret. The env_assignment rule requires a
+  // 16-character key-shaped value, and a binding name like
+  // BANK_FEED_WRAPPING_KEY_V2 satisfies that while carrying nothing. Adding a
+  // word for it is honest; labelling product source a synthetic fixture is not.
+  const allowedDispositions = new Set([
+    "synthetic_fixture", "scanner_source", "public_documentation_example", "secret_name_constant",
+  ]);
   const approved = new Set();
   for (const entry of dispositions.approved_candidates) {
     if (!entry || !/^[0-9a-f]{40,64}$/.test(entry.object_id) ||
