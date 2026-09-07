@@ -334,7 +334,7 @@ for (const emitter of ["ok", "info", "warn", "say", "sayErr"]) {
 // A constant from doctor.mjs, so no scan of brain.mjs string literals sees it.
 // It is the sentence that tells the owner how to re-enter a rejected token,
 // which the code's own comment calls the most common install-day mistake.
-assert.match(source, /sayErr\("  " \+ CF_TOKEN_REJECTED_REMEDY/, "the rejected-token remedy names `brain setup` and `brain update`, so it must render");
+assert.match(source, /sayErr\("  " \+ CF_TOKEN_REJECTED_REMEDY/, "the rejected-token remedy names `brain update` and an interactive terminal, so it must render");
 
 /*
  * The printers that carry their command text in from somewhere else - the
