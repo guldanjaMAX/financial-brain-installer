@@ -293,7 +293,7 @@ for (const migration of PENDING) {
     break;   // cmdMigrate has no catch: the first failure aborts the upgrade
   }
 }
-check("all 13 pending migrations apply to a populated schema-22 brain",
+check("all 14 pending migrations apply to a populated schema-22 brain",
   errors.length === 0 && applied.length === PENDING.length,
   errors.join(" | ") || `applied ${applied.length}`);
 

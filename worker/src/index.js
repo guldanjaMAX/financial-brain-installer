@@ -1856,7 +1856,9 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   "/api/admin/brain/source-expectation",
   "/api/admin/brain/forget",
   "/api/admin/brain/reindex",
-  "/api/admin/brain/vector-retry",
+  // vector-retry stays available while paused: it only clears quarantine
+  // marks and attempt counters in D1 (no corpus write, no provider call), and
+  // the quarantine refusal a paused update prints names it as the remedy.
   "/api/admin/brain/drain",
   // The ledger is not the corpus, but a paused upgrade means a migration is in
   // flight, and financial rows written against a half-migrated schema are the
@@ -2403,6 +2405,9 @@ export default {
         const r = await acceleratedVectorBootstrap(env, {
           embed: (text) => embedText(env, text),
           embedBatch: (texts) => embedTexts(env, texts),
+          // Receipt contract: a CLI that understands the named-cause fields
+          // says so; an older kit gets the exact field set it validates.
+          contract: Number(request.headers.get("x-bootstrap-contract")) || 1,
         });
         if (r.busy) {
           // The CLI treats 409 as a separate exact contract. Do not mix the

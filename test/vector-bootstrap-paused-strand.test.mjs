@@ -165,6 +165,9 @@ const snapshot = (db) => db.prepare(
 
   let clock = 100_000;
   const options = {
+    // Receipt contract 2: this harness reads the named blocked_on/blocked_rows
+    // fields, which a Worker sends only to a CLI that declares it understands them.
+    contract: 2,
     now: () => (clock += 60_000),
     embed: async () => [0.1],
     embedBatch: async (texts) => texts.map(() => [0.1]),
@@ -207,6 +210,9 @@ const snapshot = (db) => db.prepare(
 
   let clock = 100_000;
   const options = {
+    // Receipt contract 2: this harness reads the named blocked_on/blocked_rows
+    // fields, which a Worker sends only to a CLI that declares it understands them.
+    contract: 2,
     now: () => (clock += 60_000),
     embed: async () => [0.1],
     embedBatch: async (texts) => texts.map(() => [0.1]),

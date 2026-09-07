@@ -41,9 +41,10 @@ const done = receipt({ phase: "complete", epoch: 6, confirmed: 1213, queued: 0, 
 // A cleanup receipt naming quarantine ends the update at once, by name, with the remedy.
 {
   clock = 0; let i = 0;
-  // Worker-shaped: quarantined rows ARE the `failed` count, the walk has ended
-  // (phase waiting), and `retrying` names the same number.
-  const blocked = receipt({ phase: "waiting", confirmed: 1163, queued: 50, remaining: 50, failed: 50, retrying: 50,
+  // Worker-shaped: quarantined rows ARE the `failed` count and are excluded from
+  // `retrying` (store-d1 counts retrying only for unquarantined attempts); the
+  // walk has ended (phase waiting).
+  const blocked = receipt({ phase: "waiting", confirmed: 1163, queued: 50, remaining: 50, failed: 50, retrying: 0,
     actual_vectors: 1163, blocked_on: "quarantine", blocked_rows: 50 });
   await assert.rejects(
     runAcceleratedBootstrap({ ...opts(), request: async () => { i++; return res(blocked); } }),

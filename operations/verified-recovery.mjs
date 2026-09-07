@@ -717,6 +717,10 @@ function markStageFailed(state, options = {}) {
       stage: state.current_stage,
       code: `RECOVERY_${state.current_stage.toUpperCase()}_FAILED`,
       at: timestamp,
+      // The adapter's own code and sentence, when it gave one, so the operator
+      // reads "run brain update first, then recover" rather than a stage code.
+      ...(options.cause ? { cause: options.cause } : {}),
+      ...(options.detail ? { detail: options.detail } : {}),
     },
     updated_at: timestamp,
   });
@@ -791,12 +795,18 @@ export async function runVerifiedRecovery(planInput, stateInput, adapters, optio
       await options.revalidateManifests(plan.plan_fingerprint);
       state = markStageComplete(state, evidence, plan, { now: clock() });
       await persist(state);
-    } catch {
-      state = validateVerifiedRecoveryState(markStageFailed(state, { now: clock() }), plan);
+    } catch (error) {
+      state = validateVerifiedRecoveryState(markStageFailed(state, {
+        now: clock(),
+        cause: typeof error?.code === "string" ? error.code : null,
+        detail: typeof error?.detail === "string" ? error.detail : null,
+      }), plan);
       await persist(state);
       return Object.freeze({
         ok: false,
         errorCode: state.failure.code,
+        cause: state.failure.cause ?? null,
+        detail: state.failure.detail ?? null,
         state,
       });
     }

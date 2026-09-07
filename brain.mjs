@@ -4065,7 +4065,12 @@ export function validateAcceleratedBootstrapProgress(previous, current) {
   if (!previous) return current;
   const verifiedRebase = current.complete === true &&
     current.epoch === previous.epoch + 1 && current.total === previous.total;
-  if ((!verifiedRebase && current.epoch !== previous.epoch) || current.total !== previous.total) {
+  // A residue-only re-projection opens a fresh epoch, and it may open on any
+  // round once its pre-open cleanup has finished. The receipt names it.
+  const residueOpened = current.reprojected_residue !== undefined &&
+    current.epoch === previous.epoch + 1 && current.total === previous.total &&
+    previous.phase === "legacy_drain";
+  if ((!verifiedRebase && !residueOpened && current.epoch !== previous.epoch) || current.total !== previous.total) {
     die("the accelerated bootstrap changed its durable epoch or total during one update. Re-run `brain update <manifest>`; the Worker remains paused.");
   }
   if (current.confirmed < previous.confirmed || current.remaining > previous.remaining) {
@@ -4155,6 +4160,7 @@ export async function runAcceleratedBootstrap({
   let lastMovementAt = null;
   let announcedReprojection = false;
   let announcedFence = false;
+  let announcedCleanup = false;
 
   for (let round = 1; round <= roundLimit; round++) {
     const roundNow = Number(now());
@@ -4276,6 +4282,10 @@ export async function runAcceleratedBootstrap({
         die(`${stalledFor}\n      The index's ordering fence did not open for ${receipt.blocked_rows} submitted row(s). This is the fence, not a slow drain:\n` +
           "      the pending mutation has not been processed by the index. Re-run `brain update <manifest>` once it has; the Worker remains paused.");
       }
+      if (receipt.blocked_on === "cleanup" || receipt.reprojected_residue !== undefined) {
+        die(`${stalledFor}\n      Queued rows are still waiting on the paused drain or the bulk re-projection; this is not a missing-vector fault,\n` +
+          "      so do not reindex. Re-run `brain update <manifest>` to resume from durable state; the Worker remains paused.");
+      }
       if (Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
           receipt.actual_vectors !== receipt.expected_vectors) {
         die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors)}\n` +
@@ -4297,6 +4307,15 @@ export async function runAcceleratedBootstrap({
       announcedFence = true;
       info(`waiting on the index's ordering fence for ${receipt.blocked_rows} submitted row(s); the Worker probes a stalled fence on its own, ` +
         `and the ${Math.round(ACCELERATED_BOOTSTRAP_STALL_MS / 60_000)}-minute movement budget ends this wait if it never opens`);
+    }
+    if (receipt.blocked_on === "cleanup" && !announcedCleanup) {
+      announcedCleanup = true;
+      info(`${receipt.blocked_rows} outbox row(s) of cleanup are draining before the bulk re-projection can open`);
+    }
+    if (receipt.reprojected_residue > 0 && !announcedReprojection) {
+      announcedReprojection = true;
+      info(`residue-only re-projection: ${receipt.reprojected_residue} queued chunk(s) are re-embedded; ` +
+        `the other ${receipt.total - receipt.reprojected_residue} stay projected as they are`);
     }
     if (receipt.failed > 0) {
       info(`${receipt.failed} vector(s) accepted but not yet visible; waiting for Vectorize (${receipt.confirmed}/${receipt.total} confirmed, ${receipt.submitted} submitted, ${receipt.in_flight_batches} batch(es) in flight)`);
@@ -4322,11 +4341,6 @@ export async function runAcceleratedBootstrap({
     // actual/expected -- and label the ledger count as what it is.
     info(`${receipt.queued + receipt.submitted} vector operation(s) pending; ${receipt.actual_vectors}/${receipt.expected_vectors} vector(s) query-visible`);
     info(`batch ledger: ${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
-    if (receipt.reprojected_residue > 0 && !announcedReprojection) {
-      announcedReprojection = true;
-      info(`residue-only re-projection: ${receipt.reprojected_residue} queued chunk(s) are re-embedded; ` +
-        `the other ${receipt.total - receipt.reprojected_residue} stay projected as they are`);
-    }
     if (receipt.complete) {
       return validateAcceleratedBootstrapCompletion(Object.freeze({
         epoch: receipt.epoch,
@@ -4376,7 +4390,10 @@ export async function cmdAcceleratedBootstrap(manifestPath, options = {}) {
     request: ({ timeoutMs }) => callHttp(`${base}/api/admin/brain/bootstrap`, {
       method: "POST",
       redirect: "error",
-      headers: { "X-Admin-Key": adminKey },
+      // Receipt contract 2: this CLI understands reprojected_residue and the
+      // named blocked_on/blocked_rows fields; a Worker answers an older kit in
+      // the exact field set that kit validates.
+      headers: { "X-Admin-Key": adminKey, "X-Bootstrap-Contract": "2" },
     }, {
       timeoutMs,
       what: "the accelerated legacy vector bootstrap",
@@ -4817,6 +4834,7 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
         throw new Error("restored schema predates the supervised vector protocol");
       }
       const hasBulkBootstrap = restoredSchemaVersion >= 13;
+      const hasResidueColumn = restoredSchemaVersion >= 36;
       await queryDatabase(
         acct.id,
         dbId,
@@ -4831,7 +4849,8 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
                 vector_projection_mutation_id = NULL,
                 vector_projection_submitted_at = NULL${hasBulkBootstrap ? `,
                 vector_projection_bootstrap_protocol = NULL,
-                vector_projection_bootstrap_base_count = 0` : ""}
+                vector_projection_bootstrap_base_count = 0` : ""}${hasResidueColumn ? `,
+                vector_projection_residue_epoch = NULL` : ""}
           WHERE id = 1 AND schema_version >= 12`,
       );
       if (hasBulkBootstrap) {

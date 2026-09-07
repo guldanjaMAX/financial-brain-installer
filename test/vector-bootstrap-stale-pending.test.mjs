@@ -57,19 +57,22 @@ function makeEnv({ visibilityLag = 0 } = {}) {
   let mutationSequence = 0;
   let processedUpToMutation = null;
   // Delayed visibility: an accepted mutation becomes "processed" only after
-  // `visibilityLag` further provider reads, so confirmation has to wait and
-  // retry the way it does against the real index. Lag 0 is synchronous.
+  // `visibilityLag` further REQUESTS (the runner calls env.__tick() before each
+  // bootstrap call), so confirmation in the accepting request always waits and
+  // the next request has to pick it up, the way the real index behaves. Reads
+  // never advance the watermark. Lag 0 is synchronous.
   const pendingMutations = [];
   const accept = (apply) => {
     const mutationId = `fixture-mutation-${++mutationSequence}`;
     apply();
     if (visibilityLag === 0) processedUpToMutation = mutationId;
-    else pendingMutations.push({ mutationId, readsLeft: visibilityLag });
+    else pendingMutations.push({ mutationId, ticksLeft: visibilityLag });
     return { mutationId };
   };
-  const observe = () => {
-    for (const pending of pendingMutations) pending.readsLeft -= 1;
-    while (pendingMutations.length && pendingMutations[0].readsLeft <= 0) {
+  const observe = () => {};
+  const tick = () => {
+    for (const pending of pendingMutations) pending.ticksLeft -= 1;
+    while (pendingMutations.length && pendingMutations[0].ticksLeft <= 0) {
       processedUpToMutation = pendingMutations.shift().mutationId;
     }
   };
@@ -89,6 +92,7 @@ function makeEnv({ visibilityLag = 0 } = {}) {
   };
   const env = {
     VECTOR_DRAIN_MODE: "paused-for-upgrade",
+    __tick: tick,
     DB: {
       prepare,
       batch: async (statements) => {
@@ -225,6 +229,7 @@ const runToCompletion = async (env, rounds = 400, { now = null } = {}) => {
   let clock = 100_000;
   let embeds = 0;
   const options = {
+    contract: 2,
     now: now ?? (() => (clock += 60_000)),
     embed: async () => { embeds++; return [0.1]; },
     embedBatch: async (texts) => { embeds += texts.length; return texts.map(() => [0.1]); },
@@ -234,6 +239,7 @@ const runToCompletion = async (env, rounds = 400, { now = null } = {}) => {
   let first = null;
   let used = 0;
   for (let round = 0; round < rounds && !receipt?.complete; round++) {
+    env.__tick?.();
     receipt = await acceleratedVectorBootstrap(env, options);
     if (!first) first = receipt;
     phases.push(receipt.phase);
@@ -273,12 +279,11 @@ const neverRegresses = (phases) => {
     run.embeds === 1200, `embeds=${run.embeds} (corpus 1213)`);
   check("every chunk is visible and nothing extra is",
     stranded.every((uid) => visible.has(uid)) && visible.size === 1213, `visible=${visible.size}`);
-  // Completion is reached in the request that verifies; the rebase that resets
-  // base_count to the corpus runs on the NEXT call, exactly as after a full
-  // walk. Until then base + confirmed(epoch) == chunks. The residue marker,
-  // however, is cleared in the verifying request itself.
-  check("outbox empty, base count is the chunks that had no queued row, counts exact",
-    Number(after.outbox) === 0 && Number(after.base) === 13 &&
+  // A residue epoch rebases in the request that verifies, not on the next call:
+  // its base count cannot certify rows the ordinary drain projected after the
+  // walk closed. So the terminal state is the whole corpus as the base.
+  check("outbox empty, base count rebased to the whole corpus, counts exact",
+    Number(after.outbox) === 0 && Number(after.base) === 1213 &&
       run.receipt.confirmed === 1213 && run.receipt.total === 1213 && run.receipt.remaining === 0 &&
       run.receipt.actual_vectors === 1213 && run.receipt.expected_vectors === 1213,
     JSON.stringify({ after, receipt: run.receipt }));
@@ -290,14 +295,62 @@ const neverRegresses = (phases) => {
         Number(ev[0].base_before) === 3 && Number(ev[0].base_after) === 13 &&
         Number(ev[0].rows) === 1200 && Number(ev[0].chunks) === 1213 && Number(ev[0].at) > 0;
     })(), JSON.stringify(events(db)));
-  check("the epoch advanced exactly once, the protocol column never changed, and the residue column is clear",
-    Number(after.epoch) === 5 && after.protocol === "bootstrap-v2" && after.residue_epoch === null, JSON.stringify(after));
+  check("the epoch advanced twice (open, then the verifying rebase), the protocol column never changed, residue column clear",
+    Number(after.epoch) === 6 && after.protocol === "bootstrap-v2" && after.residue_epoch === null, JSON.stringify(after));
   check("receipts name the residue-only re-projection while the epoch is open, not once it has verified",
     run.first?.reprojected_residue === 1200 && run.receipt?.reprojected_residue === undefined,
     JSON.stringify({ first: run.first?.reprojected_residue, last: run.receipt?.reprojected_residue }));
   check("the phase never falls back to cleanup after bulk work began", neverRegresses(run.phases), run.phases.join(","));
   check("latency: bulk walk finishes within a handful of rounds where the drain needed dozens",
     run.rounds_used <= 5, `rounds_used=${run.rounds_used}`);
+
+  // -------------------------------------------------------------------------
+  // 1a. THE CROSS-VERSION INVARIANT. An older Worker knows nothing of the
+  //     residue column: it sees an ordinary v2 walk and pages the corpus from
+  //     the cursor with a plain outbox INSERT, which collides with any queued
+  //     row above it. The open therefore parks the cursor AT the high water and
+  //     tags the whole residue, so an older Worker pages nothing and only
+  //     submits and confirms ledger rows that already exist. Assert that
+  //     invariant on every round: it is what keeps a re-run from a sealed kit
+  //     (an interrupted update, a rollback) from wedging on a UNIQUE collision.
+  // -------------------------------------------------------------------------
+  {
+    const { env: env2, db: db2, visible: visible2 } = makeEnv();
+    seedStaleBrain(db2, visible2, { epoch: 4, stranded: 3000, drainedSince: 10 });
+    const invariant = () => db2.prepare(
+      `SELECT (SELECT count(*) FROM vector_outbox o JOIN chunks c ON c.chunk_uid=o.chunk_uid
+                LEFT JOIN vector_outbox_retry_state s ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+                WHERE o.op='upsert' AND o.submitted_mutation_id IS NULL AND s.quarantined_at IS NULL
+                  AND o.bootstrap_epoch IS NULL) AS untagged,
+              (SELECT count(*) FROM chunks WHERE chunk_uid >
+                 COALESCE((SELECT vector_projection_bootstrap_cursor FROM install_state WHERE id=1), '')) AS pageable_by_old,
+              vector_projection_residue_epoch AS residue_epoch
+         FROM install_state WHERE id=1`
+    ).get();
+    let worstUntagged = 0;
+    let worstPageable = 0;
+    let sawOpenWalk = false;
+    let receipt2 = null;
+    let clock2 = 100_000;
+    for (let round = 0; round < 8 && !receipt2?.complete; round++) {
+      env2.__tick?.();
+      receipt2 = await acceleratedVectorBootstrap(env2, {
+        contract: 2,
+        now: () => (clock2 += 60_000),
+        embed: async () => [0.1],
+        embedBatch: async (texts) => texts.map(() => [0.1]),
+      });
+      const seen = invariant();
+      if (seen.residue_epoch !== null) {
+        sawOpenWalk = true;
+        worstUntagged = Math.max(worstUntagged, Number(seen.untagged));
+        worstPageable = Math.max(worstPageable, Number(seen.pageable_by_old));
+      }
+    }
+    check("through every round of an open walk no pageable row is untagged and an older Worker would page nothing",
+      sawOpenWalk && worstUntagged === 0 && worstPageable === 0 && receipt2?.complete === true,
+      JSON.stringify({ sawOpenWalk, worstUntagged, worstPageable, complete: receipt2?.complete, state: invariant() }));
+  }
 
   // -------------------------------------------------------------------------
   // 1b. The SECOND update. The brain keeps ingesting (40 rows, below the
@@ -507,16 +560,23 @@ const neverRegresses = (phases) => {
 {
   const { env, db, visible } = makeEnv();
   seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10 });
+  // The state an open leaves behind: every pageable row tagged with its page,
+  // cursor parked at the high water, the residue column naming the epoch.
   db.prepare(
     `UPDATE install_state
         SET vector_projection_status='bootstrap_required',
             vector_projection_bootstrap_epoch=5,
-            vector_projection_bootstrap_cursor=NULL,
+            vector_projection_bootstrap_cursor=(SELECT MAX(chunk_uid) FROM vector_outbox WHERE op='upsert'),
             vector_projection_bootstrap_high_water=(SELECT MAX(chunk_uid) FROM vector_outbox WHERE op='upsert'),
             vector_projection_bootstrap_protocol='bootstrap-v2',
             vector_projection_residue_epoch=5,
             vector_projection_bootstrap_base_count=13
       WHERE id=1`
+  ).run();
+  db.prepare(
+    `WITH numbered AS (SELECT chunk_uid, (ROW_NUMBER() OVER (ORDER BY chunk_uid) - 1) / 1000 + 1 AS page FROM vector_outbox WHERE op='upsert')
+     UPDATE vector_outbox SET bootstrap_epoch=5, bootstrap_batch=(SELECT page FROM numbered WHERE numbered.chunk_uid=vector_outbox.chunk_uid)
+      WHERE chunk_uid IN (SELECT chunk_uid FROM numbered)`
   ).run();
   db.prepare(
     `INSERT INTO vector_projection_events (at, kind, epoch_before, epoch_after, base_before, base_after, rows, chunks)
@@ -631,13 +691,13 @@ const neverRegresses = (phases) => {
   const { forgotten } = seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10, deletes: 2500 });
   const run = await runToCompletion(env);
   const after = snapshot(db);
-  // One bounded pass drains part of the cleanup (deletes are submitted in one
-  // iteration and confirmed in the next), so the exact remainder depends on the
-  // drain's pacing; what must hold is the cause, progress, and the bound.
-  check("a 2,500-row cleanup is reported as cleanup with the rows still to drain after the first bounded pass",
-    run.first?.phase === "legacy_drain" && run.first?.blocked_on === "cleanup" &&
-      run.first?.blocked_rows > 0 && run.first?.blocked_rows < 2500,
-    JSON.stringify({ blocked_on: run.first?.blocked_on, blocked_rows: run.first?.blocked_rows, queued: run.first?.queued }));
+  // Cleanup that is still moving carries NO named cause: the drain is doing its
+  // ordinary work and the CLI must not be told anything is in the way. Only a
+  // cause nothing can clear (quarantine, a stranded fence) is named.
+  check("a 2,500-row cleanup drains in the ordinary phase with no named cause",
+    run.first?.phase === "legacy_drain" && run.first?.blocked_on === undefined &&
+      run.first?.blocked_rows === undefined,
+    JSON.stringify({ phase: run.first?.phase, blocked_on: run.first?.blocked_on, queued: run.first?.queued }));
   check("then the deletes finish, the residue epoch opens, and it converges with no ghost vector",
     run.receipt?.complete === true && forgotten.every((uid) => !visible.has(uid)) && visible.size === 1213 &&
       Number(after.events) === 1 && neverRegresses(run.phases) && Number(after.outbox) === 0,

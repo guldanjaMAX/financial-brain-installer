@@ -839,6 +839,10 @@ function providerHarness({
         assert.match(sql, /\(SELECT MAX\(chunk_uid\) FROM chunks\) AS "vector_projection_bootstrap_high_water"/);
         assert.match(sql, /NULL AS "vector_projection_bootstrap_protocol"/);
         assert.match(sql, /0 AS "vector_projection_bootstrap_base_count"/);
+        // An open residue-only re-projection belongs to the SOURCE index. A
+        // restored brain re-walks its whole corpus into a new index, so the
+        // marker must be NULL in the artifact, not the source's value.
+        assert.match(sql, /NULL AS "vector_projection_residue_epoch"/);
         if (isSource) {
           assert.match(sql, /session_generation BETWEEN 1 AND 9007199254740990/);
         } else {

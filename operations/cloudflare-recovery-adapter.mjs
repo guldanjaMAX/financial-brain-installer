@@ -3128,12 +3128,19 @@ async function main(argv = process.argv.slice(2)) {
       : await runCloudflareRecoveryFieldGate(parsed);
     const output = parsed.command === "run" ? result.status : result;
     console.log(JSON.stringify(output, null, 2));
+    if (result?.ok === false) {
+      const failure = result.status?.failure ?? result.state?.failure ?? null;
+      const cause = failure?.cause ? ` (${failure.cause})` : "";
+      console.error(`Cloudflare recovery field gate stopped: ${result.errorCode ?? failure?.code ?? "RECOVERY_FAILED"}${cause}`);
+      if (failure?.detail) console.error(`  ${failure.detail}`);
+    }
     return result?.ok === false ? 1 : 0;
   } catch (error) {
     const code = error instanceof CloudflareRecoveryAdapterError
       ? error.code
       : "RECOVERY_FIELD_GATE_PREFLIGHT_FAILED";
     console.error(`Cloudflare recovery field gate stopped: ${code}`);
+    if (error instanceof CloudflareRecoveryAdapterError && error.detail) console.error(`  ${error.detail}`);
     return 1;
   }
 }
