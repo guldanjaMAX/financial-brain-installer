@@ -512,6 +512,30 @@ const neverRegresses = (phases) => {
 }
 
 // ---------------------------------------------------------------------------
+// 1g. TERMINATION. A closed walk leaves the projection pending, which is also
+//     what opens one, so a walk that confirms nothing must not reopen itself
+//     forever. Simulate the shape: the epoch is marked as a residue epoch that
+//     confirmed no rows, with a residue still queued above the threshold.
+// ---------------------------------------------------------------------------
+{
+  const { env, db, visible } = makeEnv();
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 1500, drainedSince: 10 });
+  db.prepare(
+    `INSERT INTO vector_projection_events (at, kind, epoch_before, epoch_after, base_before, base_after, rows, chunks)
+     VALUES (10, 'residue-reprojection', 3, 4, 3, 13, 1500, 1513)`
+  ).run();
+  const before = snapshot(db);
+  const run = await runToCompletion(env, 3);
+  const after = snapshot(db);
+  check("an epoch that opened as a residue walk and confirmed nothing does not reopen another",
+    Number(after.epoch) === Number(before.epoch) && Number(after.events) === 1,
+    JSON.stringify({ before, after }));
+  check("and the rows are not abandoned: the ordinary paused drain takes them",
+    Number(after.outbox) < 1500 && run.phases.every((p) => p === "legacy_drain" || p === "waiting"),
+    JSON.stringify({ outbox: after.outbox, phases: [...new Set(run.phases)] }));
+}
+
+// ---------------------------------------------------------------------------
 // 2. Threshold boundary: exactly the ceiling keeps the slow path, one more opens.
 // ---------------------------------------------------------------------------
 {

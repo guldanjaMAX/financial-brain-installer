@@ -3549,6 +3549,25 @@ export async function openResidueReprojection(env, state, options, lease) {
     throw new Error("the residue re-projection ledger is invalid");
   }
   if (unfinished > 0 || pageable <= RESIDUE_REPROJECTION_MIN_ROWS) return { opened: false, blocked: false };
+  // TERMINATION. A closed walk leaves the projection pending, which is also the
+  // condition that opens one, so a walk that confirms nothing must not be able
+  // to reopen itself: rows that fail submission return to the queue below the
+  // ledger cursor, the walk closes with them still queued, and without this the
+  // brain would burn an epoch and a receipt row per attempt. One unproductive
+  // epoch is allowed (its rows may simply have needed the retry); a second is
+  // refused, and the ordinary paused drain takes over and names the cause.
+  const previous = await env.DB.prepare(
+    `SELECT (SELECT count(*) FROM vector_projection_events
+              WHERE kind=?2 AND epoch_after=?1) AS was_residue,
+            (SELECT COALESCE(sum(row_count),0) FROM vector_bootstrap_batches
+              WHERE epoch=?1 AND status='confirmed') AS confirmed`
+  ).bind(state.epoch, RESIDUE_REPROJECTION_EVENT).first();
+  const wasResidue = Number(previous?.was_residue);
+  const confirmedRows = Number(previous?.confirmed);
+  if (![wasResidue, confirmedRows].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+    throw new Error("the residue re-projection ledger is invalid");
+  }
+  if (wasResidue > 0 && confirmedRows === 0) return { opened: false, blocked: false };
 
   // Unquarantined deletes and rows already submitted must clear before the
   // open; quarantined rows and orphans never block it. Cleanup that is still
