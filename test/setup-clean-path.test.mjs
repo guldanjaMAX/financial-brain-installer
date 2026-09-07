@@ -170,7 +170,11 @@ try {
     cmdProvision: async () => { resumedEvents.push("provision"); },
     cmdMigrate: async (path, options) => {
       assert.equal(path, resumedPinnedPath);
-      resumedEvents.push(`migrate:${options?.vectorDrainQuiesced === true}`);
+      // A resumed setup waits the fixed grace with no probe, so quiescence is
+      // never READ. It must not be claimed either: run A migrated 100
+      // accepted-but-unconfirmed batches under a hardcoded `true` here.
+      assert.equal(options?.vectorDrainQuiesced, false);
+      resumedEvents.push(`migrate:${options?.vectorDrainPauseCompleted === true}`);
     },
     cmdDeploy: async (path, options = {}) => {
       assert.equal(path, resumedPinnedPath);
@@ -490,7 +494,10 @@ try {
     cmdVerify: async () => { partialEvents.push("verify"); },
     cmdProvision: async () => { partialEvents.push("provision"); },
     cmdMigrate: async (path, options) => {
-      partialEvents.push(`migrate:${options?.vectorDrainQuiesced === true}`);
+      // Same contract as the resumed run above: the completed cutover is the
+      // authorization, the unread quiescence is never claimed as verified.
+      assert.equal(options?.vectorDrainQuiesced, false);
+      partialEvents.push(`migrate:${options?.vectorDrainPauseCompleted === true}`);
       return runPartialMigration(path, options);
     },
     cmdDeploy: async (_path, options) => {

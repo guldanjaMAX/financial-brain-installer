@@ -396,15 +396,16 @@ check("a writer that finishes mid-pause releases the cutover early instead of se
   JSON.stringify(settledCutover));
 
 /*
- * The silent fallback. If the probe SQL were ever illegal on the schema in the
- * field, nothing reports it: the loop swallows the error and serves the full
- * fixed grace, which looks exactly like a busy brain. Pin the behaviour so the
- * cost of getting that SQL wrong is visible in the suite rather than in a
- * client's twenty-minute outage.
+ * The fallback. If the probe SQL were ever illegal on the schema in the field,
+ * the loop retries it across the window, then serves the full fixed grace and
+ * reports that quiescence was NOT verified. Pin the cost of getting that SQL
+ * wrong here rather than in a client's twenty-minute outage, and pin that the
+ * outcome is distinguishable from a proven-quiet one.
  */
 const blindCutover = await cutover(publishedReleaseDatabase(), { probeThrows: true });
-check("a probe that cannot read the schema falls back to the full grace with no distinct signal",
-  blindCutover.proven === false && blindCutover.waitedMs >= VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS,
+check("a probe that cannot read the schema falls back to the full grace and says it proved nothing",
+  blindCutover.proven === false && blindCutover.reason === "probe-unreadable" &&
+    blindCutover.waitedMs >= VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS,
   JSON.stringify(blindCutover));
 
 idleDb.close();

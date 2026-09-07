@@ -791,8 +791,14 @@ const bootstrapCompletion = () => ({
         privateExecutionPath = path;
         privateExecutionDirectory = dirname(path);
         events.push("migrate");
-        check("only the verified cutover authorizes live writer migrations",
-          options?.vectorDrainQuiesced === true, JSON.stringify(options));
+        // The paused-writer cutover authorizes the migration; the probe result
+        // is reported separately and honestly. This fixture is a pre-lease
+        // brain with no probe, so quiescence is NOT verifiable and must not be
+        // claimed (run A migrated 100 unconfirmed batches under such a claim).
+        check("only the cutover protocol authorizes live writer migrations",
+          options?.vectorDrainPauseCompleted === true, JSON.stringify(options));
+        check("an unverifiable quiescence is never reported to migrate as verified",
+          options?.vectorDrainQuiesced === false, JSON.stringify(options));
         check("a Keychain-backed execution copy is outside the synced manifest parent",
           dirname(path) !== sandbox && !path.startsWith(`${sandbox}/`), path);
         if (process.platform !== "win32") {
@@ -1086,7 +1092,12 @@ const bootstrapCompletion = () => ({
         },
         waitForVectorDrainQuiescence: async () => { events.push("wait"); },
         cmdMigrate: async (_path, options) => {
-          events.push(`migrate-${options?.vectorDrainQuiesced === true}`);
+          // The ordering assertions below name the AUTHORIZATION, which is the
+          // completed cutover. The separately-carried probe result must stay
+          // false on this pre-lease fixture rather than be assumed.
+          check("the migration never receives an unearned quiescence claim",
+            options?.vectorDrainQuiesced === false, JSON.stringify(options));
+          events.push(`migrate-${options?.vectorDrainPauseCompleted === true}`);
           if (failureStage === "migration") throw new Error("synthetic migration failure");
         },
         cmdBootstrap: async (_path, options) => {

@@ -3123,10 +3123,18 @@ export async function cmdMigrate(manifestPath, options = {}) {
   // historical name, but it is passed only after setup/update has deployed the
   // whole-corpus write barrier and waited out older invocations. It is
   // intentionally not a CLI flag.
+  //
+  // `vectorDrainQuiesced` now carries what the probe actually READ, so it is
+  // false whenever quiescence could not be verified. The authorization to
+  // migrate is `vectorDrainPauseCompleted`: setup/update set it once the
+  // paused deployment and the full grace are behind them. Unverified is loud,
+  // not fatal, because a transport blip must not block every update.
   const writerQuiescenceMigrations = new Set([10, 11, 12, 13, 33]);
+  const cutoverAuthorized = options.vectorDrainQuiesced === true ||
+    options.vectorDrainPauseCompleted === true;
   if ((m.infrastructure?.cloudflare?.storage || "d1") === "d1" &&
       pending.some((migration) => writerQuiescenceMigrations.has(migration.version)) &&
-      options.vectorDrainQuiesced !== true) {
+      !cutoverAuthorized) {
     let installTable;
     try {
       installTable = await queryDatabase(
@@ -3732,6 +3740,25 @@ export const VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS = 20 * 60 * 1000;
 export const VECTOR_DRAIN_CUTOVER_POLL_MS = 15_000;
 
 /**
+ * A probe error is a transport failure far more often than a schema failure.
+ * Field run A lost the whole check to one UND_ERR_CONNECT_TIMEOUT, so the
+ * probe is retried across the remaining window instead of abandoned on the
+ * first blip. Bounded, because a brain whose database stays unreadable for
+ * minutes is not going to become readable by being asked four hundred times.
+ */
+export const VECTOR_DRAIN_CUTOVER_PROBE_RETRY_MS = 30_000;
+export const VECTOR_DRAIN_CUTOVER_PROBE_ERROR_LIMIT = 6;
+
+/**
+ * The probe failure IS the evidence, so it has to reach the transcript intact.
+ * A 120-character cut landed mid-word on exactly the errors that matter.
+ */
+function describeCutoverProbeFailure(error) {
+  const text = String(error?.message ?? error ?? "").trim() || "unknown error";
+  return text.length > 240 ? `${text.slice(0, 240)}...` : text;
+}
+
+/**
  * Wait until no older writer can still be touching the vector index.
  *
  * Without a probe this is the full fixed grace: a brain from before the drain
@@ -3746,6 +3773,10 @@ export const VECTOR_DRAIN_CUTOVER_POLL_MS = 15_000;
  * are required, because a single reading can land between a release and the
  * next acquire. The probe never shortens the grace below what it proves: a
  * probe error, or a brain that stays busy, falls back to the full fixed wait.
+ * A probe error is retried across the remaining window before that fallback,
+ * because one connect timeout is not evidence about writers. When the wait
+ * ends without a quiet reading the result says so in the transcript and in
+ * `proven`, and every caller carries that value forward instead of assuming.
  * On an idle brain this turns a twenty-minute pause during which the brain
  * refuses documents into about thirty seconds. Measured 2026-09-02: a live
  * update sat the entire twenty minutes with the lease free and zero rows
@@ -3755,15 +3786,32 @@ export async function waitForVectorDrainCutover(waiter, {
   nextStep = "database migration",
   probe = null,
   pollMs = VECTOR_DRAIN_CUTOVER_POLL_MS,
+  probeRetryMs = VECTOR_DRAIN_CUTOVER_PROBE_RETRY_MS,
+  probeErrorLimit = VECTOR_DRAIN_CUTOVER_PROBE_ERROR_LIMIT,
   now = Date.now,
 } = {}) {
   const minutes = Math.ceil(VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS / 60_000);
+  // Never the ordinary success line. An elapsed pause is a spent budget, not a
+  // proof, and run A showed that reading one as the other is invisible.
+  const unverified = (waitedMs, reason, why, detail = null) => {
+    warn(`quiescence NOT verified before ${nextStep}: ${why}`);
+    warn(`the ${minutes}-minute safety pause elapsed, but nothing proved older writers had stopped.`);
+    return { waitedMs, proven: false, reason, detail };
+  };
   if (typeof probe !== "function") {
     info(`safety pause: waiting ${minutes} minutes for older database writers to finish`);
     info(`Keep this window open. The Worker is safely paused, but ${nextStep} has not started yet.`);
     await waiter(VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS);
+    // The legacy contract: a pre-lease brain cannot be asked, so the full
+    // elapsed grace is the only proof available and the pause did complete.
+    // It is still not a reading, so `proven` stays false for the caller.
     ok(`safety pause complete; starting ${nextStep}`);
-    return { waitedMs: VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS, proven: false };
+    return {
+      waitedMs: VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS,
+      proven: false,
+      reason: "no-probe",
+      detail: null,
+    };
   }
   info(`safety pause: checking that older database writers have finished (up to ${minutes} minutes)`);
   info(`Keep this window open. The Worker is safely paused, but ${nextStep} has not started yet.`);
@@ -3771,32 +3819,63 @@ export async function waitForVectorDrainCutover(waiter, {
   const deadline = startedAt + VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS;
   let quietReadings = 0;
   let waitedMs = 0;
+  let probeErrors = 0;
+  let lastProbeFailure = null;
   while (true) {
     let reading;
+    let failed = false;
     try {
       reading = await probe();
+      probeErrors = 0;
     } catch (error) {
+      failed = true;
+      probeErrors += 1;
+      lastProbeFailure = describeCutoverProbeFailure(error);
+      quietReadings = 0;
+      info(`could not read the writer state (attempt ${probeErrors} of ${probeErrorLimit}): ${lastProbeFailure}`);
+    }
+    if (failed && probeErrors >= probeErrorLimit) {
       const remaining = Math.max(0, deadline - now());
-      info(`could not read the writer state (${String(error?.message || error).slice(0, 120)}); waiting the full pause instead`);
-      await waiter(remaining);
-      ok(`safety pause complete; starting ${nextStep}`);
-      return { waitedMs: waitedMs + remaining, proven: false };
+      if (remaining > 0) {
+        info(`the writer state stayed unreadable; serving the rest of the ${minutes}-minute pause`);
+        await waiter(remaining);
+        waitedMs += remaining;
+      }
+      return unverified(
+        waitedMs,
+        "probe-unreadable",
+        `the writer state could not be read ${probeErrors} times in a row (last error: ${lastProbeFailure})`,
+        lastProbeFailure,
+      );
     }
-    const quiet = reading && reading.leaseFree === true && Number(reading.inFlight || 0) === 0;
-    quietReadings = quiet ? quietReadings + 1 : 0;
-    if (quietReadings >= 2) {
-      ok(`older database writers have finished; starting ${nextStep}`);
-      return { waitedMs, proven: true };
-    }
-    if (!quiet) {
-      info(`an older writer is still active (${Number(reading?.inFlight || 0)} accepted batch(es) awaiting confirmation); checking again`);
+    if (!failed) {
+      const quiet = reading && reading.leaseFree === true && Number(reading.inFlight || 0) === 0;
+      quietReadings = quiet ? quietReadings + 1 : 0;
+      if (quietReadings >= 2) {
+        ok(`older database writers have finished; starting ${nextStep}`);
+        return { waitedMs, proven: true, reason: "verified-quiet", detail: null };
+      }
+      if (!quiet) {
+        info(`an older writer is still active (${Number(reading?.inFlight || 0)} accepted batch(es) awaiting confirmation); checking again`);
+      }
     }
     const remaining = deadline - now();
     if (remaining <= 0) {
-      ok(`safety pause complete; starting ${nextStep}`);
-      return { waitedMs, proven: false };
+      if (failed) {
+        return unverified(
+          waitedMs,
+          "probe-unreadable",
+          `the writer state could not be read (last error: ${lastProbeFailure})`,
+          lastProbeFailure,
+        );
+      }
+      return unverified(
+        waitedMs,
+        "writers-active",
+        `an older writer was still active at the end of the ${minutes}-minute pause`,
+      );
     }
-    const step = Math.min(pollMs, remaining);
+    const step = Math.min(failed ? probeRetryMs : pollMs, remaining);
     await waiter(step);
     waitedMs += step;
   }
@@ -4451,7 +4530,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
         // keep the fixed wait. The probe reads only, and any read failure
         // falls back to the full wait inside waitForVectorDrainCutover.
         const leaseAware = Number(before?.schema_version || 0) >= 11;
-        await runStage("vector-drain quiescence", () =>
+        const cutover = await runStage("vector-drain quiescence", () =>
           waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
             probe: leaseAware ? async () => {
               const r = await queryDatabase(accountId, dbId,
@@ -4470,8 +4549,13 @@ export async function cmdUpgrade(manifestPath, options = {}) {
               };
             } : null,
           }));
+        if (cutover?.proven !== true) {
+          warn(`the safety pause elapsed but quiescence was NOT verified (${cutover?.reason || "unknown"}).`);
+          warn("continuing to the migration with an unverified writer state; if it fails, treat an unconfirmed vector batch as the first suspect.");
+        }
         await runStage("migration", () => migrate(executionPin.target, {
-          vectorDrainQuiesced: true,
+          vectorDrainQuiesced: cutover?.proven === true,
+          vectorDrainPauseCompleted: true,
         }));
         // Schema 0013 turns the legacy one-page-at-a-time bootstrap into an
         // authenticated aggregate-only bulk protocol. Keep the Worker paused
@@ -4646,9 +4730,13 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
       reachOnly: true,
     });
     revalidateUpdateManifest(pin, "rollback paused vector-drain health verification");
-    await waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
+    const rollbackCutover = await waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
       nextStep: "the D1 restore",
     });
+    if (rollbackCutover?.proven !== true) {
+      warn(`the safety pause elapsed but quiescence was NOT verified (${rollbackCutover?.reason || "unknown"}).`);
+      warn("continuing to the D1 restore with an unverified writer state; a mutation started before the restore can land after it with no surviving receipt.");
+    }
     revalidateUpdateManifest(pin, "rollback vector-drain quiescence");
   }
   await callCloudflare(`/accounts/${acct.id}/d1/database/${dbId}/time_travel/restore?bookmark=${encodeURIComponent(bookmark)}`, {
@@ -12874,13 +12962,20 @@ export async function cmdSetup(manifestPath, options = {}) {
         );
         const waitForVectorDrainQuiescence = options.waitForVectorDrainQuiescence ??
           ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
-        await runPinnedSetupStage(
+        const setupCutover = await runPinnedSetupStage(
           "setup vector-drain quiescence",
           () => waitForVectorDrainCutover(waitForVectorDrainQuiescence),
         );
+        if (setupCutover?.proven !== true) {
+          warn(`the safety pause elapsed but quiescence was NOT verified (${setupCutover?.reason || "unknown"}).`);
+          warn("continuing to the migration with an unverified writer state; if it fails, treat an unconfirmed vector batch as the first suspect.");
+        }
         await runPinnedSetupStage(
           "setup migration",
-          (pinnedPath) => migrateSetup(pinnedPath, { vectorDrainQuiesced: true }),
+          (pinnedPath) => migrateSetup(pinnedPath, {
+            vectorDrainQuiesced: setupCutover?.proven === true,
+            vectorDrainPauseCompleted: true,
+          }),
         );
         await runPinnedSetupStage(
           "setup active vector-drain deployment",

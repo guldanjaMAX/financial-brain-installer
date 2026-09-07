@@ -27,6 +27,9 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
   "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
   "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
+  // Field run A: the cutover printed its success line after a probe error and
+  // told the migration the drain was quiesced anyway.
+  "node --no-warnings test/vector-drain-cutover-unverified.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -92,6 +95,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/schema-ahead-guard.test.mjs",
   "node test/teardown-guards.test.mjs",
   "node test/upgrade-verify.test.mjs",
+  "node --no-warnings test/vector-drain-cutover-unverified.test.mjs",
   "node test/upgrade-repair.test.mjs",
   "node test/checksum-reconciliation.test.mjs",
   "node --test test/unknown-flags.test.mjs",
