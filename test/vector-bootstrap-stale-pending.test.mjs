@@ -221,6 +221,7 @@ const snapshot = (db) => db.prepare(
           vector_projection_bootstrap_epoch AS epoch,
           vector_projection_bootstrap_protocol AS protocol,
           vector_projection_residue_epoch AS residue_epoch,
+          vector_projection_bootstrap_cursor AS cursor,
           (SELECT count(*) FROM chunks) AS chunks,
           (SELECT count(*) FROM vector_outbox) AS outbox,
           (SELECT count(*) FROM vector_bootstrap_batches) AS batches,
@@ -553,6 +554,40 @@ const neverRegresses = (phases) => {
   check("with no receipt row at all an unproductive residue epoch still cannot reopen",
     Number(after.epoch) === Number(before.epoch) && Number(after.events) === 0 && Number(before.events) === 0,
     JSON.stringify({ before, after }));
+}
+
+{
+  // THE CONJUNCTION INVARIANT, through the real reset. The column stays set
+  // after a close, so a full rebuild must not read it as an open residue walk:
+  // if it did, the walk would page the OUTBOX and silently omit every chunk
+  // with no queued row. resetVectorProjectionBootstrap advances the epoch in
+  // the same statement, so the stale column cannot match.
+  const { env, db, visible } = makeEnv();
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10 });
+  await runToCompletion(env);
+  const closed = snapshot(db);
+  check("after a completed residue walk the column still names its epoch, and that epoch is past",
+    Number(closed.residue_epoch) === 5 && Number(closed.epoch) === 6 && closed.status === "verified",
+    JSON.stringify(closed));
+
+  // A full rebuild: a new provider index, nothing projected, no outbox at all.
+  visible.clear();
+  const reset = await storeD1.resetVectorProjectionBootstrap(env);
+  const afterReset = snapshot(db);
+  check("the reset advances the epoch past the stale column, so no residue walk can be open",
+    afterReset.status === "bootstrap_required" && Number(afterReset.epoch) > Number(afterReset.residue_epoch) &&
+      afterReset.cursor === null && Number(afterReset.outbox) === 0,
+    JSON.stringify({ reset: reset ?? null, afterReset }));
+
+  const rebuilt = await runToCompletion(env);
+  const after = snapshot(db);
+  const unqueued = db.prepare(
+    "SELECT count(*) AS n FROM chunks WHERE chunk_uid NOT IN (SELECT chunk_uid FROM vector_outbox)"
+  ).get();
+  check("the rebuild pages the CORPUS: every chunk is projected, including the 1,213 with no queued row",
+    rebuilt.receipt?.complete === true && rebuilt.embeds === 1213 && visible.size === 1213 &&
+      Number(unqueued.n) === 1213 && after.status === "verified",
+    JSON.stringify({ embeds: rebuilt.embeds, visible: visible.size, unqueued: unqueued.n, after }));
 }
 
 // ---------------------------------------------------------------------------

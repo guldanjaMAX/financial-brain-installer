@@ -2857,8 +2857,23 @@ const ACCELERATED_BOOTSTRAP_PROTOCOL = "bootstrap-v2";
 // A residue-only re-projection epoch walks only chunks that still hold a queued
 // upsert row instead of the whole corpus. Its marker is
 // install_state.vector_projection_residue_epoch (migration 0036), set to the
-// epoch it opened and cleared when that epoch verifies. It is deliberately NOT
-// the protocol column: every shipped Worker branches on that column, and the
+// epoch it opened and left in place afterwards as the durable record that that
+// epoch WAS a residue epoch (the anti-reopen guard reads it).
+//
+// THE INVARIANT THE DESIGN RESTS ON. Openness is a CONJUNCTION: the column
+// equals vector_projection_bootstrap_epoch AND the status is
+// bootstrap_required. That pair must never coincide by accident, because a
+// brain that wrongly reads as an open residue walk would page its OUTBOX
+// instead of its corpus, silently omitting every chunk with no queued row and
+// never verifying. It holds because only two paths write bootstrap_required
+// onto an existing brain: resetVectorProjectionBootstrap, which advances the
+// epoch in the same statement so a stale column cannot match, and the open
+// itself, which sets the column, the epoch and the status together in one
+// fenced batch. (cmdMigrate's install_state upsert also names that status, but
+// only in its INSERT arm; its ON CONFLICT clause updates just the slug and the
+// schema and gate versions, so it cannot move an existing brain's epoch.)
+//
+// It is deliberately NOT the protocol column: every shipped Worker branches on that column, and the
 // legacy branch deletes queued upserts before it refuses, so an interrupted
 // residue epoch re-run from an older kit would have lost the queue. An older
 // Worker never reads the residue column. Meeting an OPEN residue epoch it sees
