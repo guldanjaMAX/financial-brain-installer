@@ -643,7 +643,7 @@
   {
     "id": "UPDATE-032",
     "title": "Adoption on a name match let a second install take the first brain",
-    "status": "open",
+    "status": "verified",
     "scopes": [
       "fresh"
     ],
@@ -651,10 +651,11 @@
       "test/adoption-requires-prior-ownership.test.mjs"
     ],
     "acceptance": "Two installs into one provider account must never resolve to the same brain, and adoption of an existing database or vector index must require that the manifest already recorded owning it rather than that a name or a client slug happens to match. Prove on a deployed account that a second install from a fresh manifest is refused by name for both the database and the vector index, that it creates and adopts nothing, and that the manifest which provisioned those resources can still re-run and adopt them. The failure this closes was observed end to end on 2026-09-08: two independent manifests both resolved to one brain, the second reported adopting it and reusing its durable admin key, and from the second manifest the first install's corpus was listable.",
-    "findings": [
-      "FIELD-DEFAULT-SLUG-ADOPTION"
-    ],
-    "evidence": []
+    "findings": "Proved on a deployed provider account on 2026-09-08 against commit 8393c20 packaged as brain-installer-0.4.2.tgz. A second install from a fresh manifest was refused on the database, created nothing, and left the account inventory unchanged. Claiming the database by hand, which is the repair the refusal names, then hit a second refusal on the vector index, so each resource is guarded on its own record of ownership rather than on one gate. The owning manifest re-ran and adopted both, query-ready. Ownership is now written to the manifest as each resource is created, before the roughly nine-minute metadata-index wait, so an interrupted install no longer strands its own owner.",
+    "evidence": [
+      "docs/release-evidence/FIELD-DEFAULT-SLUG-ADOPTION-2026-09-08.md",
+      "docs/release-evidence/UPDATE-032-adoption-requires-prior-ownership-2026-09-08.md"
+    ]
   },
   {
     "id": "UPDATE-033",
