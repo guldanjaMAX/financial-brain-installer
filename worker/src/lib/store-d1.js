@@ -2949,18 +2949,34 @@ async function acceleratedBootstrapReceipt(env, phase, blocked = null, options =
   const state = await bootstrapStateV2(env);
   const [counts, queue, batches, readiness] = await Promise.all([
     env.DB.prepare("SELECT count(*) AS n FROM chunks").first(),
+    // `remaining` (below) is a CHUNK count: total chunks minus the base plus
+    // confirmed batches, and the base/confirmed math treats every live-chunk
+    // upsert row as "pending" regardless of quarantine (RESIDUE_UNPROJECTED_
+    // FROM_SQL does not filter on it), so a quarantined upsert is already
+    // correctly reflected in `remaining` and belongs in `queued` too. A DELETE
+    // row or an ORPHAN upsert (chunk already gone) is neither, and outside
+    // legacy_drain phase that now matters: residue mode never blocks the walk
+    // on such a row (it is surfaced instead via blocked_on/blocked_rows), so
+    // one left in the outbox while phase is waiting/building would otherwise
+    // inflate queued+submitted past remaining and the CLI's own reconcile
+    // check would die with no name and no remedy. During legacy_drain the
+    // opposite is deliberate: a zero-chunk corpus can still have many deletes
+    // to drain, and the CLI exempts that phase from the check for exactly
+    // that reason, so this exclusion must not apply there.
     env.DB.prepare(
       `SELECT count(*) AS n,
-              sum(CASE WHEN o.submitted_mutation_id IS NULL THEN 1 ELSE 0 END) AS queued,
-              sum(CASE WHEN o.submitted_mutation_id IS NOT NULL THEN 1 ELSE 0 END) AS submitted,
-              sum(CASE WHEN o.op='upsert' AND EXISTS (
-                SELECT 1 FROM chunks c WHERE c.chunk_uid=o.chunk_uid
-              ) THEN 1 ELSE 0 END) AS pending_upserts,
+              sum(CASE WHEN o.submitted_mutation_id IS NULL AND (?1=0 OR (o.op='upsert' AND c.chunk_uid IS NOT NULL))
+                      THEN 1 ELSE 0 END) AS queued,
+              sum(CASE WHEN o.submitted_mutation_id IS NOT NULL AND (?1=0 OR (o.op='upsert' AND c.chunk_uid IS NOT NULL))
+                      THEN 1 ELSE 0 END) AS submitted,
+              sum(CASE WHEN o.op='upsert' AND c.chunk_uid IS NOT NULL THEN 1 ELSE 0 END) AS pending_upserts,
               sum(CASE WHEN s.quarantined_at IS NOT NULL THEN 1 ELSE 0 END) AS failed,
               sum(CASE WHEN s.quarantined_at IS NULL AND COALESCE(s.attempts,o.attempts,0)>0 THEN 1 ELSE 0 END) AS retrying
-         FROM vector_outbox o LEFT JOIN vector_outbox_retry_state s
+         FROM vector_outbox o
+         LEFT JOIN chunks c ON c.chunk_uid=o.chunk_uid
+         LEFT JOIN vector_outbox_retry_state s
            ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation`
-    ).first(),
+    ).bind(phase === "legacy_drain" ? 0 : 1).first(),
     env.DB.prepare(
       `SELECT COALESCE(sum(CASE WHEN status='confirmed' THEN row_count ELSE 0 END),0) AS confirmed,
               sum(CASE WHEN status IN ('queued','submitted') THEN 1 ELSE 0 END) AS in_flight
@@ -3153,34 +3169,50 @@ async function queueResidueBatch(env, state, lease) {
   if (!page.length) return false;
   const to = String(page.at(-1)?.chunk_uid || "");
   if (!to) throw new Error("the residue re-projection cursor is invalid");
+  const uids = page.map((row) => row.chunk_uid);
+  const uidsJson = JSON.stringify(uids);
+  if (new TextEncoder().encode(uidsJson).length > 1_800_000) {
+    throw new Error("the residue re-projection page identity is too large");
+  }
   const fenceNow = lease.now();
   const fence = `EXISTS (SELECT 1 FROM install_state i WHERE i.id=1
                           AND i.vector_projection_bootstrap_epoch=?epoch
                           AND i.vector_projection_residue_epoch=?epoch
                           AND i.vector_drain_lease_owner=?owner
                           AND i.vector_drain_lease_expires_at>?at)`;
+  // vector-retry is deliberately NOT fenced by the drain lease (it must be
+  // runnable while a paused update is looping, since that is the remedy the
+  // update's own quarantine refusal names), so it can release a row between
+  // this page's SELECT above and this batch committing below. Binding the tag
+  // UPDATE to the exact chunk_uid set this page selected (not a range) caps
+  // what it can ever match to those rows, and deriving row_count from what the
+  // tag ACTUALLY matched (read back in the same transaction, not the
+  // pre-batch page.length) means the two numbers the confirm path relies on
+  // can never disagree, however that race resolves.
   const results = await env.DB.batch([
     // The tag touches neither vector_id, op nor queued_at, so no generation
     // trigger fires and the queued generation the provider will prove is intact.
     env.DB.prepare(
       `UPDATE vector_outbox SET bootstrap_epoch=?1,bootstrap_batch=?2
-        WHERE chunk_uid>?3 AND chunk_uid<=?4
+        WHERE chunk_uid IN (SELECT value FROM json_each(?3))
           AND op='upsert' AND submitted_mutation_id IS NULL
           AND EXISTS (SELECT 1 FROM chunks c WHERE c.chunk_uid=vector_outbox.chunk_uid)
           AND NOT EXISTS (SELECT 1 FROM vector_outbox_retry_state q
                            WHERE q.chunk_uid=vector_outbox.chunk_uid AND q.generation=vector_outbox.generation
                              AND q.quarantined_at IS NOT NULL)
-          AND ${fence.replaceAll("?epoch", "?1").replaceAll("?owner", "?5").replaceAll("?at", "?6")}`
-    ).bind(state.epoch, batchNo, from, to, lease.ownerToken, fenceNow),
+          AND ${fence.replaceAll("?epoch", "?1").replaceAll("?owner", "?4").replaceAll("?at", "?5")}`
+    ).bind(state.epoch, batchNo, uidsJson, lease.ownerToken, fenceNow),
     env.DB.prepare(
       `INSERT INTO vector_bootstrap_batches
          (epoch,batch_no,start_cursor,end_cursor,row_count,status)
-       SELECT ?1,?2,?3,?4,?5,'queued'
-        WHERE ${fence.replaceAll("?epoch", "?1").replaceAll("?owner", "?6").replaceAll("?at", "?7")}`
-    ).bind(state.epoch, batchNo, from, to, page.length, lease.ownerToken, fenceNow),
+       SELECT ?1,?2,?3,?4,
+              (SELECT count(*) FROM vector_outbox WHERE bootstrap_epoch=?1 AND bootstrap_batch=?2),
+              'queued'
+        WHERE ${fence.replaceAll("?epoch", "?1").replaceAll("?owner", "?5").replaceAll("?at", "?6")}
+          AND (SELECT count(*) FROM vector_outbox WHERE bootstrap_epoch=?1 AND bootstrap_batch=?2) > 0`
+    ).bind(state.epoch, batchNo, from, to, lease.ownerToken, fenceNow),
   ]);
-  if (!Array.isArray(results) || results.length !== 2 ||
-      drainLeaseChanges(results[0]) !== page.length || drainLeaseChanges(results[1]) !== 1) {
+  if (!Array.isArray(results) || results.length !== 2 || drainLeaseChanges(results[1]) !== 1) {
     throw new Error("the residue re-projection lost its drain lease before queueing a page; nothing was queued");
   }
   return true;
@@ -3490,8 +3522,15 @@ async function residueBlockedCause(env, { scope = "outbox" } = {}) {
     throw new Error("the paused bootstrap residue receipt is invalid");
   }
   if (scope === "walk") {
-    if (blockers > 0 && submitted === blockers) return { blocked_on: "fence", blocked_rows: submitted };
-    return null;
+    // Every blocked open must carry a cause: the CLI's stall handler already
+    // knows how to answer "cleanup" (informational, no reindex) and "fence"
+    // (time-bounded, names the fence); returning null here left a stuck,
+    // never-quarantined delete unnamed, which fell through to the generic
+    // vector-count-mismatch text and recommended `brain reindex --yes` for a
+    // fault reindex cannot see or fix.
+    if (blockers === 0) return null;
+    if (submitted === blockers) return { blocked_on: "fence", blocked_rows: submitted };
+    return { blocked_on: "cleanup", blocked_rows: blockers };
   }
   const drainable = Math.max(0, outbox - quarantined - orphans - submitted);
   if (outbox === 0 || drainable > 0) return null;
@@ -3620,6 +3659,13 @@ export async function openResidueReprojection(env, state, options, lease) {
     // collide with the queued residue. It submits and confirms whatever ledger
     // rows exist and drains the rest, which is exactly the intended work. This
     // build tracks its own progress by the ledger's last end_cursor instead.
+    //
+    // "high water" here is the RESIDUE's own maximum pageable chunk_uid, not
+    // the corpus's global maximum: chunk_uid order does not track ingest order,
+    // so an already-projected chunk (no outbox row) can legitimately sort above
+    // it. That is harmless -- the protection this design relies on is the
+    // EQUALITY cursor === high_water, both set from the same subquery in this
+    // one statement, not "nothing in the corpus sorts above the cursor".
     env.DB.prepare(
       `UPDATE install_state
           SET vector_projection_status='bootstrap_required',
@@ -3768,10 +3814,21 @@ async function rebaseVerifiedAcceleratedBootstrap(env, state) {
              WHERE epoch=?1 AND status<>'confirmed'
           )`,
     ).bind(state.epoch, ACCELERATED_BOOTSTRAP_PROTOCOL).run()
+    // Zero batches means this epoch never even queued a page: a lease lost
+    // between an open and its first page, or a residue epoch abandoned before
+    // any work began. The batches>0 branch above advances the epoch, which
+    // naturally breaks the residue_epoch===epoch conjunction the termination
+    // guard reads. This branch does not advance the epoch (nothing happened,
+    // no reason to burn one), so it must clear the column itself, or a residue
+    // epoch that never got a fair try would be read forever afterward as "one
+    // unproductive attempt already spent" and openResidueReprojection would
+    // refuse every future residue on this brain, silently reverting it to the
+    // ~100-rows-per-confirmation drain. Harmless when already NULL.
     : await env.DB.prepare(
       `UPDATE install_state
           SET vector_projection_bootstrap_protocol=?2,
-              vector_projection_bootstrap_base_count=(SELECT count(*) FROM chunks)
+              vector_projection_bootstrap_base_count=(SELECT count(*) FROM chunks),
+              vector_projection_residue_epoch=NULL
         WHERE id=1 AND schema_version>=13
           AND vector_projection_status='verified'
           AND vector_projection_bootstrap_epoch=?1

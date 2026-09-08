@@ -187,6 +187,32 @@ function drive(env, { maxDurationMs = 3_600_000, contract = 2 } = {}) {
     JSON.stringify({ error: String(released.error?.message), done }));
 }
 
+// 3b. ROOT 1 REGRESSION: one permanently-quarantined DELETE row beside a large
+//     pageable residue. Before the fix, `queued` counted it (op-agnostic) while
+//     `remaining` (a chunk count) never did, so queued+submitted > remaining on
+//     the very first non-cleanup receipt and the CLI died on its own reconcile
+//     check with no name and no remedy -- worse than main, which refuses by
+//     name instead. The residue open never blocks on a quarantined row of any
+//     op, so this state is exactly what the open lets through.
+{
+  const { env, db, visible } = makeEnv();
+  const { stranded } = seedStaleBrain(db, visible, { epoch: 4, stranded: 3000, drainedSince: 10 });
+  visible.set("drive:poison#0", { id: "drive:poison#0", values: [0.1], metadata: {} });
+  db.prepare("INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at) VALUES ('drive:poison#0','drive:poison#0','delete',2100)").run();
+  db.prepare(`INSERT INTO vector_outbox_retry_state (chunk_uid, generation, attempts, next_attempt_at, last_attempt_at, quarantined_at, failure_code)
+              SELECT chunk_uid, generation, 9, 0, 1900, 1950, 'fixture_poison' FROM vector_outbox WHERE chunk_uid='drive:poison#0'`).run();
+  const run = await drive(env);
+  const after = snapshot(db);
+  check("a stray quarantined delete beside a 3,000-row residue does not die on an unnamed reconcile mismatch",
+    !(run.error && /counts did not reconcile/.test(String(run.error?.message))),
+    JSON.stringify({ error: String(run.error?.message).slice(0, 200) }));
+  check("the residue is still fully embedded and the poisoned delete is refused BY NAME with the remedy",
+    run.embeds() === 3000 && stranded.every((uid) => visible.has(uid)) &&
+      run.error !== null && /1 quarantined row\(s\)/.test(String(run.error?.message)) &&
+      /vector-retry/.test(String(run.error?.message)) && after.status === "pending",
+    JSON.stringify({ embeds: run.embeds(), error: String(run.error?.message).slice(0, 220), after }));
+}
+
 // 4. Delayed provider visibility through the real CLI: completes, no false stall.
 {
   const { env, db, visible } = makeEnv({ visibilityLag: 1 });

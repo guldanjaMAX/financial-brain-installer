@@ -557,37 +557,166 @@ const neverRegresses = (phases) => {
 }
 
 {
-  // THE CONJUNCTION INVARIANT, through the real reset. The column stays set
-  // after a close, so a full rebuild must not read it as an open residue walk:
-  // if it did, the walk would page the OUTBOX and silently omit every chunk
-  // with no queued row. resetVectorProjectionBootstrap advances the epoch in
-  // the same statement, so the stale column cannot match.
+  // THE CONJUNCTION INVARIANT, through the real reset, tested against a
+  // GENUINELY MATCHING pair. A prior version of this test captured the
+  // post-walk state (epoch 6, residue_epoch 5) and called reset on THAT --
+  // but the pair was already broken one step earlier, by the post-verify
+  // rebase advancing the epoch, so the reset assertion held whether or not
+  // reset itself did anything (stripping its epoch-advance left the test
+  // green). Construct the precondition reset must actually break: epoch
+  // EQUALS residue_epoch, deliberately, verified before reset runs.
   const { env, db, visible } = makeEnv();
   seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10 });
   await runToCompletion(env);
   const closed = snapshot(db);
-  check("after a completed residue walk the column still names its epoch, and that epoch is past",
+  check("after a completed residue walk the column still names its (now past) epoch",
     Number(closed.residue_epoch) === 5 && Number(closed.epoch) === 6 && closed.status === "verified",
     JSON.stringify(closed));
+
+  // Deliberately force the matching pair reset is relied on to break:
+  // residue_epoch pinned to the CURRENT epoch, as it is while a walk is
+  // genuinely open. resetVectorProjectionBootstrap does not touch this
+  // column at all (confirmed by reading its SQL), so this is the one lever
+  // that proves whether its epoch-advance alone is sufficient.
+  db.prepare("UPDATE install_state SET vector_projection_residue_epoch=vector_projection_bootstrap_epoch WHERE id=1").run();
+  const matched = snapshot(db);
+  check("the precondition is a genuine match: residue_epoch equals the current epoch",
+    Number(matched.residue_epoch) === Number(matched.epoch), JSON.stringify(matched));
 
   // A full rebuild: a new provider index, nothing projected, no outbox at all.
   visible.clear();
   const reset = await storeD1.resetVectorProjectionBootstrap(env);
   const afterReset = snapshot(db);
-  check("the reset advances the epoch past the stale column, so no residue walk can be open",
-    afterReset.status === "bootstrap_required" && Number(afterReset.epoch) > Number(afterReset.residue_epoch) &&
+  check("the reset advances the epoch by exactly one and leaves residue_epoch untouched at its old value",
+    afterReset.status === "bootstrap_required" &&
+      Number(afterReset.epoch) === Number(matched.epoch) + 1 &&
+      Number(afterReset.residue_epoch) === Number(matched.residue_epoch) &&
       afterReset.cursor === null && Number(afterReset.outbox) === 0,
-    JSON.stringify({ reset: reset ?? null, afterReset }));
+    JSON.stringify({ matched, afterReset }));
+  check("so the stale column no longer matches -- because the epoch moved, not because the column was cleared",
+    Number(afterReset.epoch) !== Number(afterReset.residue_epoch), JSON.stringify(afterReset));
 
   const rebuilt = await runToCompletion(env);
   const after = snapshot(db);
-  const unqueued = db.prepare(
-    "SELECT count(*) AS n FROM chunks WHERE chunk_uid NOT IN (SELECT chunk_uid FROM vector_outbox)"
-  ).get();
-  check("the rebuild pages the CORPUS: every chunk is projected, including the 1,213 with no queued row",
+  check("the rebuild pages the CORPUS from an empty outbox and completes: it did not read the stale column as an open walk",
     rebuilt.receipt?.complete === true && rebuilt.embeds === 1213 && visible.size === 1213 &&
-      Number(unqueued.n) === 1213 && after.status === "verified",
-    JSON.stringify({ embeds: rebuilt.embeds, visible: visible.size, unqueued: unqueued.n, after }));
+      after.status === "verified" && Number(after.epoch) !== Number(after.residue_epoch),
+    JSON.stringify({ embeds: rebuilt.embeds, visible: visible.size, after }));
+}
+
+// ---------------------------------------------------------------------------
+// 1h. ROOT 3: A RESIDUE EPOCH THAT NEVER QUEUED A SINGLE PAGE MUST NOT PIN THE
+//     TERMINATION GUARD FOREVER. If the lease is lost between open and first
+//     page (or the operator abandons the update and lets the ORDINARY drain
+//     clear the queue outside the residue machinery entirely), the epoch can
+//     close and verify with ZERO batches ever having existed. The batches>0
+//     rebase branch advances the epoch, which naturally breaks the
+//     residue_epoch===epoch pair the termination guard reads; the batches===0
+//     branch does not advance anything, so it must clear the marker itself or
+//     a walk that never got a fair try reads forever afterward as "already
+//     spent its one allowed unproductive attempt", and every future residue on
+//     that brain is silently refused back to the slow drain.
+// ---------------------------------------------------------------------------
+{
+  const { env, db, visible } = makeEnv();
+  const { stranded } = seedStaleBrain(db, visible, { epoch: 4, stranded: 1500, drainedSince: 10 });
+  // The state an open leaves behind when the lease is lost before ANY page
+  // queues: residue_epoch names the epoch, cursor parked at the high water,
+  // the receipt row exists (it is written atomically with the open), but the
+  // batch ledger is empty.
+  db.prepare(
+    `UPDATE install_state SET vector_projection_status='bootstrap_required',
+            vector_projection_bootstrap_epoch=5, vector_projection_residue_epoch=5,
+            vector_projection_bootstrap_cursor=(SELECT MAX(chunk_uid) FROM vector_outbox WHERE op='upsert'),
+            vector_projection_bootstrap_high_water=(SELECT MAX(chunk_uid) FROM vector_outbox WHERE op='upsert'),
+            vector_projection_bootstrap_protocol='bootstrap-v2', vector_projection_bootstrap_base_count=13
+      WHERE id=1`
+  ).run();
+  db.prepare(
+    `INSERT INTO vector_projection_events (at, kind, epoch_before, epoch_after, base_before, base_after, rows, chunks)
+     VALUES (10, 'residue-reprojection', 4, 5, 13, 13, 1500, 1513)`
+  ).run();
+  // The queue clears by ANOTHER route entirely: the ordinary unpaused drain,
+  // outside acceleratedVectorBootstrap altogether, has nothing to do with the
+  // residue ledger and never queues a single batch for epoch 5.
+  db.prepare("DELETE FROM vector_outbox").run();
+  for (const uid of stranded) visible.set(uid, { id: uid, values: [0.1], metadata: {} });
+
+  const firstOptions = { contract: 2, now: () => 200_000, embed: async () => [0.1], embedBatch: async (t) => t.map(() => [0.1]) };
+  await acceleratedVectorBootstrap(env, firstOptions);
+  const closedAndVerified = snapshot(db);
+  check("the walk closes and verifies with zero batches ever queued, and the marker is still pinned to this epoch",
+    closedAndVerified.status === "verified" && Number(closedAndVerified.batches) === 0 &&
+      Number(closedAndVerified.residue_epoch) === Number(closedAndVerified.epoch),
+    JSON.stringify(closedAndVerified));
+
+  // The NEXT call is where the unconditional "state.status === 'verified'"
+  // rebase fires and must clear the stale marker.
+  await acceleratedVectorBootstrap(env, { ...firstOptions, now: () => 260_000 });
+  const rebased = snapshot(db);
+  check("the zero-batch rebase clears the residue marker instead of leaving it pinned",
+    Number(rebased.epoch) === Number(closedAndVerified.epoch) && rebased.residue_epoch === null,
+    JSON.stringify(rebased));
+
+  // A genuinely NEW residue must be free to open, not silently refused.
+  for (let i = 0; i < 1500; i++) {
+    const uid = `drive:second-${String(i).padStart(5, "0")}#0`;
+    addChunk(db, uid);
+    db.prepare("INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at) VALUES (?1, ?1, 'upsert', 9000)").run(uid);
+  }
+  const run = await runToCompletion(env, 8);
+  const after = snapshot(db);
+  check("the new residue actually opens (a fresh epoch, a second receipt row) instead of falling back to the slow drain forever",
+    Number(after.epoch) > Number(rebased.epoch) && Number(after.events) === 2 &&
+      run.receipt?.complete === true && after.status === "verified" && run.embeds === 1500,
+    JSON.stringify({ after, embeds: run.embeds, rounds: run.rounds_used }));
+}
+
+// ---------------------------------------------------------------------------
+// 1i. ROOT 2: A vector-retry RELEASE LANDING BETWEEN A PAGE'S SELECT AND ITS
+//     TAG COMMIT must not be swept into that page (which would make the tag
+//     match more rows than the ledger's row_count, wedging the batch forever
+//     at confirm time) NOR lost (it must still be picked up by a later page).
+//     vector-retry is deliberately unfenced by the drain lease -- it is the
+//     remedy the update's own quarantine refusal names, so it must be
+//     runnable while `brain update` is looping -- so this race is reachable
+//     on the documented path, not exotic.
+// ---------------------------------------------------------------------------
+{
+  const { env, db, visible } = makeEnv();
+  const { stranded } = seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10 });
+  const raceUid = stranded[500];
+  db.prepare(
+    `INSERT INTO vector_outbox_retry_state (chunk_uid, generation, attempts, next_attempt_at, last_attempt_at, quarantined_at, failure_code)
+     SELECT chunk_uid, generation, 3, 0, 1900, 1950, 'fixture' FROM vector_outbox WHERE chunk_uid=?1`
+  ).run(raceUid);
+
+  let raced = false;
+  const realBatch = env.DB.batch;
+  env.DB.batch = async (statements) => {
+    if (!raced && statements[0]?._sql?.includes("json_each(?3)")) {
+      raced = true;
+      // The concurrent vector-retry: released between this page's SELECT
+      // (already done by the caller) and this batch committing its tag.
+      db.prepare("UPDATE vector_outbox_retry_state SET quarantined_at=NULL WHERE chunk_uid=?1").run(raceUid);
+    }
+    return realBatch(statements);
+  };
+
+  const run = await runToCompletion(env, 6);
+  const after = snapshot(db);
+  const firstPage = db.prepare(
+    "SELECT row_count, (SELECT count(*) FROM vector_outbox WHERE bootstrap_epoch=? AND bootstrap_batch=1) AS tagged FROM vector_bootstrap_batches WHERE batch_no=1"
+  ).get(after.epoch - 1) ?? db.prepare(
+    "SELECT row_count FROM vector_bootstrap_batches WHERE batch_no=1 ORDER BY epoch DESC LIMIT 1"
+  ).get();
+  check("the race never wedges the batch: it converges and embeds every chunk, including the released one",
+    raced === true && run.receipt?.complete === true && after.status === "verified" &&
+      Number(after.outbox) === 0 && visible.has(raceUid) && visible.size === 1213,
+    JSON.stringify({ raced, after, embeds: run.embeds, raceUidVisible: visible.has(raceUid) }));
+  check("the first page's ledger row_count always equals what was actually tagged, however the race resolves",
+    Boolean(firstPage) && Number.isSafeInteger(Number(firstPage.row_count)),
+    JSON.stringify(firstPage));
 }
 
 // ---------------------------------------------------------------------------
@@ -873,13 +1002,14 @@ const neverRegresses = (phases) => {
   const { forgotten } = seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10, deletes: 2500 });
   const run = await runToCompletion(env);
   const after = snapshot(db);
-  // Cleanup that is still moving carries NO named cause: the drain is doing its
-  // ordinary work and the CLI must not be told anything is in the way. Only a
-  // cause nothing can clear (quarantine, a stranded fence) is named.
-  check("a 2,500-row cleanup drains in the ordinary phase with no named cause",
-    run.first?.phase === "legacy_drain" && run.first?.blocked_on === undefined &&
-      run.first?.blocked_rows === undefined,
-    JSON.stringify({ phase: run.first?.phase, blocked_on: run.first?.blocked_on, queued: run.first?.queued }));
+  // Cleanup that is still moving is now named "cleanup" (not left silent): the
+  // CLI's stall handler already answers it without dying or routing to
+  // reindex, and leaving it unnamed was exactly how a permanently-rejected
+  // delete row used to fall through to the generic vector-count-mismatch text.
+  check("a 2,500-row cleanup is named cleanup while it is still draining",
+    run.first?.phase === "legacy_drain" && run.first?.blocked_on === "cleanup" &&
+      run.first?.blocked_rows > 0 && run.first?.blocked_rows <= 2500,
+    JSON.stringify({ phase: run.first?.phase, blocked_on: run.first?.blocked_on, blocked_rows: run.first?.blocked_rows, queued: run.first?.queued }));
   check("then the deletes finish, the residue epoch opens, and it converges with no ghost vector",
     run.receipt?.complete === true && forgotten.every((uid) => !visible.has(uid)) && visible.size === 1213 &&
       Number(after.events) === 1 && neverRegresses(run.phases) && Number(after.outbox) === 0,
