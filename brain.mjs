@@ -1700,6 +1700,12 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
         );
         if (!r.ok) die(`wrangler could not create the Vectorize index: ${r.out.slice(-400)}`);
         ok(`Vectorize "${idxName}" created via wrangler (768-dim, cosine)`);
+        // Same reason as the API branch above, and this is the branch that
+        // matters more: wrangler is the ordinary browser sign-in lane, the API
+        // token is the recovery-only one. Persisting ownership only on the API
+        // path left the dead end open on the path almost every owner takes.
+        cfg.vectorize_index = idxName;
+        saveManifest(path, m);
       }
 
       // Metadata indexes must be ACTIVE before any vector is written; they do

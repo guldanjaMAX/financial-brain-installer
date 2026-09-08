@@ -4,6 +4,23 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.3
+
+Candidate only. This version has not been released.
+
+One defect, found by an adversarial review of 0.4.2 rather than by running it.
+Nothing here changes what your brain holds.
+
+- An install interrupted while Cloudflare was still activating the search index
+  could refuse to resume, and say your own index was not yours. 0.4.2 recorded
+  the index in your manifest the moment it was created, which is what makes a
+  retry provable, but it did that on only one of the two ways an index gets
+  created. The other one is the ordinary path: signing in through the browser.
+  The recovery path, using a scoped token, was the one that was covered. So the
+  protection existed on the path few people take and was missing on the path
+  almost everyone takes. Both record it now, and a test fails if a third way is
+  ever added without recording it.
+
 ## 0.4.2
 
 Candidate only. This version has not been released.
