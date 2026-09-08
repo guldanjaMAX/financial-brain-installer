@@ -563,35 +563,35 @@ export function readHiddenInput({
   insecure = "this terminal cannot prompt securely. Rerun from an interactive terminal.",
   accepts = (byte) => byte >= 0x21 && byte <= 0x7e,
   finalize = (bytes) => Buffer.from(bytes),
+  windowsRefusal = null,
 } = {}) {
   if (!input?.isTTY || !output?.isTTY || typeof input.setRawMode !== "function") {
     return Promise.reject(new Error(insecure));
   }
-  // Windows refuses this prompt outright, and that is deliberate.
+  // Windows console echo, and why this is not a blanket refusal.
   //
-  // On 2026-09-08 a client entered a live Cloudflare API token at this prompt on
-  // Windows PowerShell 5.1 and the console echoed it in full, on a shared
-  // screen. The token was revoked. Every check below passed while it happened:
-  // the stream is a TTY, setRawMode exists, and the call to enable raw mode
-  // returns without throwing. The console simply keeps echoing anyway, so the
-  // process cannot tell that its own masking did nothing.
+  // On 2026-09-08 a live Cloudflare API token was echoed in full at this prompt
+  // on Windows PowerShell 5.1, on a shared screen, and was revoked. Every check
+  // above passed while it happened: the stream is a TTY, setRawMode exists, and
+  // enabling raw mode returns without throwing. The console keeps echoing and
+  // the process cannot tell.
   //
-  // A secret prompt that cannot prove it masked is worse than no prompt, because
-  // the person typing believes it is hidden. There is no reliable in-process
-  // probe for this, so the honest response is to refuse on the platform where it
-  // was observed and name a route that does mask.
-  if ((process.platform === "win32") && !process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK) {
-    return Promise.reject(new Error(
-      `this terminal cannot be trusted to hide ${noun} entry.\n` +
-      "  Windows PowerShell echoed a live credential at this prompt on 2026-09-08, and\n" +
-      "  the process cannot detect when that happens, so it will not ask here.\n" +
-      "  A browser sign-in needs no token at all and is the ordinary path.\n" +
-      "  If this install can only use a token, read it in with PowerShell's own masked\n" +
-      "  prompt, Read-Host -AsSecureString, and hand it to this command through the\n" +
-      "  environment rather than typing it here. Close that window when you are done.\n" +
-      "  Automation may inject it through an approved secret manager."
-    ));
+  // The first fix refused every hidden prompt on Windows. That was wrong, and
+  // the Windows suite caught it: this helper is shared, so it also took away
+  // mailbox app-password entry, which has no environment alternative. Refusing
+  // there does not protect a Windows owner, it removes their only path.
+  //
+  // So the refusal belongs to the caller that HAS a safe alternative, passed in
+  // as windowsRefusal. Every other secret warns before it asks, which at least
+  // means nobody types a credential believing it is hidden when it may not be.
+  if (process.platform === "win32" && !process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK) {
+    if (windowsRefusal) return Promise.reject(new Error(windowsRefusal));
+    warn(
+      `Windows consoles have been seen to echo ${noun} entry despite being asked not to.\n` +
+      "  If anyone can see this screen, stop sharing before you type."
+    );
   }
+
   return new Promise((resolveSecret, rejectSecret) => {
     const bytes = Buffer.alloc(maxBytes);
     let length = 0;
@@ -668,6 +668,17 @@ export function readHiddenCloudflareToken({ input = process.stdin, output = proc
     input,
     output,
     noun: "Cloudflare token",
+    // This caller has a masked alternative, so on Windows it refuses instead of
+    // asking. A mailbox password has no such alternative and only warns.
+    windowsRefusal:
+      "this terminal cannot be trusted to hide Cloudflare token entry.\n" +
+      "  Windows PowerShell echoed a live credential at this prompt on 2026-09-08, and\n" +
+      "  the process cannot detect when that happens, so it will not ask here.\n" +
+      "  A browser sign-in needs no token at all and is the ordinary path.\n" +
+      "  If this install can only use a token, read it in with PowerShell's own masked\n" +
+      "  prompt, Read-Host -AsSecureString, and hand it to this command through the\n" +
+      "  environment rather than typing it here. Close that window when you are done.\n" +
+      "  Automation may inject it through an approved secret manager.",
     insecure:
       "no Cloudflare credential is available and this terminal cannot prompt securely.\n" +
       "  The simplest fix is a browser sign-in, which needs no token at all:\n" +
