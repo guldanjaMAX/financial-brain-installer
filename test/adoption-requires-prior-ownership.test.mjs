@@ -28,8 +28,16 @@ test("a second install with the same default slug is refused, not adopted", asyn
   await assert.rejects(
     () => assertAdoptable(ACCT, DB, "shared-name", "my-brain", brainDb("my-brain"), null),
     (error) => {
-      assert.match(String(error.message), /this manifest has never owned it/);
-      assert.match(String(error.message), /two installs\s+that accept the same default would match each other/);
+      const text = String(error.message);
+      assert.match(text, /this manifest has never owned it/);
+      assert.match(text, /two installs\s+that accept the same default would match each other/);
+      // A legitimate owner rebuilding a lost manifest must be told the one line
+      // that recovers, using the value the message already prints. `brain init`
+      // deletes exactly this field, so the documented recovery lands here, and
+      // the only other advice on offer would abandon a brain full of documents.
+      assert.match(text, /IF THIS BRAIN IS YOURS/);
+      assert.match(text, new RegExp(`d1_database_id: "${DB.uuid}"`));
+      assert.match(text, /would abandon this brain with your documents in it/);
       return true;
     },
     "a matching default slug must not be treated as proof of ownership",
