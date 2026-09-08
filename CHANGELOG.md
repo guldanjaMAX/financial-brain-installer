@@ -4,6 +4,40 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.4
+
+Candidate only. This version has not been released.
+
+Everything here came from two real installs rather than from reading the code,
+and one of them cost a client four days.
+
+- A brain whose search index was incomplete could get stuck in a state it could
+  never leave, and every attempt to fix it looked identical and told you
+  nothing. The rebuild only ever started from one particular internal state, and
+  the only way to reach that state ran through a command a paused brain refuses,
+  while the rebuild itself requires the pause. There was no order you could run
+  things in. One client sat there for 97 hours across four attempts on two
+  releases. A brain in that position now starts its own rebuild.
+
+- The check you run before updating said GO on exactly that brain. It compared
+  how many vectors the index holds against how many the database expects, and
+  those two numbers cannot tell "the work exists and is stuck" apart from "the
+  work was never created". It now reads a third number, how much is queued, and
+  stops rather than sending you into an install that cannot help.
+
+- SECURITY: the hidden prompt for a provider token did not hide it on Windows
+  PowerShell. A live credential was echoed in full on a shared screen on
+  2026-09-08 and had to be revoked. Every check the code makes passed while it
+  happened, because the console accepts the instruction to stop echoing and
+  keeps echoing anyway. The prompt now refuses on Windows and tells you how to
+  hand the token over without typing it where it can be seen, and on every
+  platform it refuses unless it can confirm the terminal actually masked.
+
+- Health reported the version recorded when the worker was last configured
+  rather than the version of the code answering you. On one brain those
+  disagreed by two releases for months and nothing could have shown it. The
+  worker now carries its own version and says so when the two disagree.
+
 ## 0.4.3
 
 Candidate only. This version has not been released.

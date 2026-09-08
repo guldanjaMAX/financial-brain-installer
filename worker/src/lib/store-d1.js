@@ -2010,6 +2010,25 @@ const qAll = async (env, sql, ...bind) => {
  * Every finding carries an action. A diagnostic that reports a number without
  * saying what to do about it has only relocated the problem.
  */
+/**
+ * Never prescribe an action the state that produced the message forbids.
+ *
+ * A paused brain refuses reindex and drain with 503, and the pause only lifts
+ * when the update completes. Advising either from inside that state is a closed
+ * loop: the operator reads a remedy, runs it, is refused, and has learned
+ * nothing. Four separate messages did this, and one client followed them across
+ * four update attempts over 97 hours.
+ *
+ * The rule is simple. If the brain is paused, say so and name what can actually
+ * be done from here.
+ */
+function remedyForState(env, remedy) {
+  if (env?.VECTOR_DRAIN_MODE !== "paused-for-upgrade") return remedy;
+  return "This brain is paused for an upgrade, so reindex and drain both return 503 " +
+    "until it finishes. Complete or resume the update first; the pause lifts with it. " +
+    "Once it is running again, the remedy is: " + remedy;
+}
+
 export async function diagnose(env, {
   sampleLimit = 10,
   duplicateChunkScanLimit = 100_000,
@@ -2201,9 +2220,9 @@ export async function diagnose(env, {
       detail: `D1 says ${totals.chunks} chunk(s) with ${pendingUpserts} upsert(s) and ${pendingDeletes} delete(s) queued, so ${expected} current chunk(s) should be embedded. Vectorize holds ${vectors}. ` + (missing
         ? "Vectors are MISSING: those chunks still answer keyword queries and are invisible to meaning-based search, which reads as poor retrieval rather than as a fault."
         : "There are MORE vectors than chunks: deleted documents likely left theirs behind, and they still compete for retrieval slots."),
-      action: missing
+      action: remedyForState(env, missing
         ? "Run `brain reindex <manifest> --yes`. It rebuilds the index from D1 and needs no source files."
-        : "Reindex cannot enumerate unknown provider-only IDs. Use a reviewed recovery to recreate and rebind this brain's Vectorize index with all metadata indexes, then run `brain reindex <manifest> --yes` and verify exact readiness." });
+        : "Reindex cannot enumerate unknown provider-only IDs. Use a reviewed recovery to recreate and rebind this brain's Vectorize index with all metadata indexes, then run `brain reindex <manifest> --yes` and verify exact readiness.") });
   });
 
   await safe("backlog", async () => {
@@ -2251,9 +2270,9 @@ export async function diagnose(env, {
         (needsAttention
           ? "The age of this backlog needs attention; this snapshot alone cannot prove the scheduled drain has stopped."
           : "The queue and exact vector visibility still need to converge."),
-      action: active || arriving
+      action: remedyForState(env, active || arriving
         ? "Let the active work finish, then check again or run `brain drain <manifest>`."
-        : "Run `brain drain <manifest>` and check the next receipt. If the backlog stops progressing, check this Worker's scheduled trigger." });
+        : "Run `brain drain <manifest>` and check the next receipt. If the backlog stops progressing, check this Worker's scheduled trigger.") });
   });
 
   await safe("quarantined", async () => {
@@ -2270,7 +2289,7 @@ export async function diagnose(env, {
       title: `${n} vector operation(s) failed and were set aside`,
       detail: "Upsert failures stay invisible to meaning search; delete failures leave stale vectors consuming candidates. Both remain queued for repair.",
       samples: rows.map((r) => `${r.chunk_uid}: ${String(r.last_error || "").slice(0, 90)}`),
-      action: "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain drain <manifest>`." });
+      action: remedyForState(env, "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain drain <manifest>`.") });
   });
 
   await safe("vector_retries", async () => {
@@ -2288,7 +2307,7 @@ export async function diagnose(env, {
     add({ id: "vector_retries", area: "integrity", severity: "info", count: n,
       title: `${n} vector operation(s) are awaiting another attempt`,
       detail: `${delayed} are waiting for their recorded retry delay; ${n - delayed} have no remaining recorded delay. Exact vector visibility is still pending, and a previous attempt alone does not mean the operation needs repair.`,
-      action: "Let the scheduled drain retry eligible work, then check the next receipt or run `brain drain <manifest>`. If progress stops, inspect the next drain result." });
+      action: remedyForState(env, "Let the scheduled drain retry eligible work, then check the next receipt or run `brain drain <manifest>`. If progress stops, inspect the next drain result.") });
   });
 
   await safe("orphan_chunks", async () => {
@@ -2297,7 +2316,7 @@ export async function diagnose(env, {
     if (n) add({ id: "orphan_chunks", area: "integrity", severity: "crit", count: n,
       title: `${n} chunk(s) belong to no document`,
       detail: "They can still be retrieved and cited, but the document behind the citation is gone.",
-      action: "Report this, it should not happen. `brain reindex <manifest> --yes` will not clear it on its own." });
+      action: remedyForState(env, "Report this, it should not happen. `brain reindex <manifest> --yes` will not clear it on its own.") });
   });
 
   await safe("blank_chunks", async () => {
@@ -3437,6 +3456,71 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
     await markProjectionVerifiedIfExact(env, lease);
     state = await bootstrapStateV2(env);
   }
+  // A projection that is SHORT with nothing queued has to be rebuilt, and until
+  // 0.4.4 there was no way for it to say so. `pending` means "not proven exact".
+  // markProjectionVerifiedIfExact leaves it pending when the counts disagree,
+  // and the two tests below then fall through to a well-formed receipt of zeros
+  // with HTTP 200. Nothing else ever moves the status, so the run repeats that
+  // receipt until its deadline and the next run does the same.
+  //
+  // Observed on a client brain 2026-09-08: 62,439 vectors against 1,151,274
+  // chunks, outbox empty, epoch 0, base_count 0, high_water NULL, four update
+  // attempts across two releases producing byte-identical output over 97 hours.
+  // The only writer of `bootstrap_required` is reachable from `reindex`, which
+  // the pause refuses, and the bootstrap requires the pause, so no supported
+  // sequence of commands could reach it. It was closed, not flaky.
+  //
+  // Requiring an empty outbox is what makes this safe: queued work is somebody
+  // else's in flight, and resetting under it would abandon rows the provider
+  // may still confirm. With nothing queued there is nothing to lose, and the
+  // reset is the only thing that sets the high-water mark the sweep needs.
+  // Still `pending` AFTER markProjectionVerifiedIfExact means the counts did not
+  // agree; that call is the only thing that promotes an exact projection.
+  if (state.status === "pending") {
+    const queued = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+    const chunked = Number((await env.DB.prepare("SELECT count(*) AS n FROM chunks").first())?.n || 0);
+    // SHORT only. An index holding MORE vectors than the database has chunks is
+    // a different fault, and one this release cannot clear: the completion check
+    // compares the two counts for exact equality with no tolerance, so a rebuild
+    // can never satisfy it however long it runs. That case must keep its
+    // existing behaviour and its own message rather than being sent into a
+    // rebuild that cannot end.
+    let projected = null;
+    try {
+      const description = await env.VECTORIZE.describe();
+      const count = Number(description?.vectorCount ?? description?.vectorsCount ?? description?.count);
+      if (Number.isSafeInteger(count) && count >= 0) projected = count;
+    } catch { /* unreadable provider count is not proof of a short projection */ }
+    // NEVER BOOTSTRAPPED, not merely short.
+    //
+    // A finished rebuild lands right back here: the completion block below sets
+    // the status to 'pending' and calls markProjectionVerifiedIfExact, which
+    // returns false while the provider's aggregate count is still catching up
+    // with mutations it has already accepted. Three seconds later the CLI polls
+    // again, and without this guard the reset would fire on a projection that
+    // had just finished, discard it, and start over. The run would then abort
+    // on the CLI's epoch-change guard with the Worker left paused, so the fix
+    // would have prevented the very rebuild it exists to enable.
+    //
+    // Batch history is the discriminator. A brain that has never activated has
+    // none, which is the shape the stuck client showed: epoch 0, base_count 0,
+    // high_water NULL, no batches, across four attempts on two releases. A
+    // brain that has just rebuilt has confirmed batches for this epoch.
+    //
+    // Deliberately conservative: a brain that bootstrapped once and later goes
+    // short will not self-heal here. `brain reindex` remains the path for that,
+    // and refusing to guess is better than restarting a corpus rebuild on a
+    // provider count that may simply be behind.
+    const history = await env.DB.prepare(
+      "SELECT count(*) AS n FROM vector_bootstrap_batches WHERE epoch=?1"
+    ).bind(state.epoch).first();
+    const neverBootstrapped = Number(history?.n || 0) === 0;
+    if (neverBootstrapped && Number(queued?.n || 0) === 0 && chunked > 0 &&
+        projected !== null && projected < chunked) {
+      await resetVectorProjectionBootstrap(env);
+      state = await bootstrapStateV2(env);
+    }
+  }
   if (state.status === "verified") {
     state = await rebaseVerifiedAcceleratedBootstrap(env, state);
     return acceleratedBootstrapReceipt(env, "waiting");
@@ -3775,18 +3859,18 @@ export async function vectorReadiness(env) {
         : submitted > 0
           ? "accepted_mutation_needs_confirmation"
           : "vector_work_queued";
-      action = "Run `brain drain <manifest>`; it confirms provider visibility without re-embedding accepted rows.";
+      action = remedyForState(env, "Run `brain drain <manifest>`; it confirms provider visibility without re-embedding accepted rows.");
     } else if (!mutationProcessed) {
       reason = "accepted_mutation_processing";
-      action = "Wait for Vectorize processing, then run `brain drain <manifest>` again.";
+      action = remedyForState(env, "Wait for Vectorize processing, then run `brain drain <manifest>` again.");
     } else if (!countsMatch) {
       reason = "vector_count_mismatch";
-      action = vectorCount < expected
+      action = remedyForState(env, vectorCount < expected
         ? "Run `brain diagnose <manifest>`, then `brain reindex <manifest> --yes` to rebuild missing vectors."
-        : "Vectorize has provider-only vectors that reindex cannot enumerate. Use a reviewed recovery to recreate/rebind the index and metadata indexes, then reindex and verify exact readiness.";
+        : "Vectorize has provider-only vectors that reindex cannot enumerate. Use a reviewed recovery to recreate/rebind the index and metadata indexes, then reindex and verify exact readiness.");
     } else {
       reason = "projection_unverified";
-      action = "Run `brain drain <manifest>` to finish the exact vector verification receipt.";
+      action = remedyForState(env, "Run `brain drain <manifest>` to finish the exact vector verification receipt.");
     }
   }
   return {

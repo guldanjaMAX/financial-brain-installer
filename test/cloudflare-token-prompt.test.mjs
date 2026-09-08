@@ -1,5 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+
+// These tests are about TERMINAL handling: echo suppression, backspace, Ctrl-C
+// and mode restoration. Since 0.4.4 the Cloudflare token prompt additionally
+// refuses on Windows, because a console there echoed a live credential and the
+// process cannot detect it. That platform policy is covered by
+// test/hidden-entry-fails-closed.test.mjs. Opt out of it here so the terminal
+// contract is exercised on every runner, including the Windows lane, rather
+// than silently skipped on the platform that most needs it checked.
+process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK = "1";
 import { PassThrough } from "node:stream";
 
 import {

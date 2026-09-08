@@ -265,9 +265,9 @@
     "evidence": [],
     "testPlatform": "win32",
     "deferral": {
-      "version": "0.4.3",
+      "version": "0.4.4",
       "blocked_on": "physical_hardware_unavailable",
-      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can ever close it. No ARM64 machine exists on the bench, and 0.4.0 does not claim Windows ARM64 as a supported runtime. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged.",
+      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can ever close it. No ARM64 machine exists on the bench, and 0.4.0 does not claim Windows ARM64 as a supported runtime. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on.",
       "unproven": "Windows ARM64 owners get no packaged-launch, DPAPI, browser login, interrupted-update or clean-exit proof in 0.4.0. The release note must name Windows x64 as the only claimed Windows runtime."
     }
   },
@@ -377,9 +377,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.3",
+      "version": "0.4.4",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on.",
       "unproven": "Plaid configuration survives install, deploy and update is unproven against a real Worker with a real Item; only the packaged CLI's configuration read-back is exercised."
     }
   },
@@ -402,9 +402,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.3",
+      "version": "0.4.4",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on.",
       "unproven": "Long and case-sensitive account identities, unknown-account refusal, and cross-Item removal isolation are unproven through real D1 routes with real Plaid data."
     }
   },
@@ -427,9 +427,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.3",
+      "version": "0.4.4",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on.",
       "unproven": "Cursor safety on malformed or repeated pages, partial-history handling, and exact decimal promotion are unproven against a live provider."
     }
   },
@@ -452,9 +452,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.3",
+      "version": "0.4.4",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on.",
       "unproven": "Same-session replay, concurrent sessions, existing-Item reauthorization and ambiguous same-bank accounts are unproven against a live provider."
     }
   },
@@ -478,9 +478,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.3",
+      "version": "0.4.4",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on.",
       "unproven": "Scheduler fairness across four or more Items and overlapping cron and manual slices are unproven against live Items."
     }
   },
@@ -504,9 +504,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.3",
+      "version": "0.4.4",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires two real institutions and four real accounts spanning one person and two owned businesses, plus a separately approved production pilot, and its own text excludes API-only Sandbox receipts and CI. Those live accounts and that approval do not exist for this cut. The deferral holds only while general bank invitations stay closed, which is what the Plaid release gate means by held. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged.",
+      "reason": "The acceptance requires two real institutions and four real accounts spanning one person and two owned businesses, plus a separately approved production pilot, and its own text excludes API-only Sandbox receipts and CI. Those live accounts and that approval do not exist for this cut. The deferral holds only while general bank invitations stay closed, which is what the Plaid release gate means by held. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on.",
       "unproven": "No owner may be invited to connect a bank in 0.4.0. General bank invitations stay closed, and the deployed owner journey, webhook delivery, reauthorization and production pilot remain unproven."
     }
   },
@@ -573,9 +573,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.3",
+      "version": "0.4.4",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on.",
       "unproven": "That an owner is never told current while a refresh is owed is unproven with a real Item and real webhook history."
     }
   },
@@ -687,5 +687,78 @@
     ],
     "acceptance": "Every branch that brings a Vectorize index under a manifest's control must write that ownership to the manifest before the metadata-index wait, because the adoption guard added in 0.4.2 refuses an index the manifest has never named and that wait runs for minutes across several properties. Prove on a deployed account, on the BROWSER sign-in path rather than the scoped-token path, that an install interrupted during the wait can be re-run by its own manifest and adopts its own index. The field proof for UPDATE-032 used a scoped token, so it exercised the API branch and never touched the wrangler branch, which is the ordinary path. That is why this survived into a shipped kit.",
     "findings": "Found 2026-09-08 by adversarial review of the shipped 0.4.2 kit, not by running it. brain.mjs recorded cfg.vectorize_index and saved the manifest in the adopt branch and the API-create branch, and not in the wrangler-create branch. Wrangler is the ordinary browser sign-in lane; the scoped API token is documented as recovery-only. Fixed by recording ownership in that branch too. The regression anchors on the three creation and adoption OUTCOMES rather than on the writes that already exist, because a check over existing writes cannot see a branch that never writes at all; verified to fail on the unfixed source and pass on the fix."
+  },
+  {
+    "id": "UPDATE-035",
+    "title": "A short projection with nothing queued could never start its own rebuild",
+    "status": "local-only",
+    "scopes": [
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "worker/test/pending-short-projection-activates.test.mjs",
+      "test/adoption-requires-prior-ownership.test.mjs"
+    ],
+    "acceptance": "A brain whose vector projection is short, whose outbox is empty and whose status is 'pending' must reach 'bootstrap_required' and rebuild itself. Prove on a deployed brain that an update on such a brain begins queueing within the first polls rather than returning a static receipt of zeros. Before 0.4.4 markProjectionVerifiedIfExact left the status 'pending' whenever the counts disagreed, and the two tests after it fell through to a well-formed HTTP 200 receipt of zeros, so nothing ever moved the status. The only writer of 'bootstrap_required' was reachable through reindex, which a paused brain refuses, while the bootstrap itself requires the pause, so no supported sequence of commands could reach it.",
+    "findings": "Observed on a client brain 2026-09-08: 62,439 vectors against 1,151,274 chunks, outbox empty, epoch 0, base_count 0, high_water NULL, four update attempts across two releases producing byte-identical output over 97 hours. Fixed by resetting the projection when the status is still 'pending' after the exactness check, the outbox is empty and chunks exist. An empty outbox is what makes it safe: queued rows may still be confirmed by the provider and must not be abandoned."
+  },
+  {
+    "id": "UPDATE-036",
+    "title": "The pre-update gate sent an unrecoverable brain into an install that could not help it",
+    "status": "local-only",
+    "scopes": [
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "worker/test/pending-short-projection-activates.test.mjs"
+    ],
+    "acceptance": "The gate must separate a projection whose work exists and is stuck from one whose work was never created, because the remedy differs and the two look identical on the counts it reads. Prove the runbook asks for the queued count and stops on zero queued against a large shortfall. On 2026-09-08 the gate read GO on a brain in exactly that position and the operator installed over it.",
+    "findings": "The gate compared actual against expected vectors and treated 'less than expected and identical between readings' as a stranded fence, which is one of two opposite situations with that signature. The queued count is the discriminator: a large queue that is not moving means an update can clear it; zero queued against a large shortfall means the bootstrap has to create the work. Runbook updated in the website repository."
+  },
+  {
+    "id": "UPDATE-037",
+    "title": "SECURITY: the hidden token prompt echoed a live credential on Windows PowerShell",
+    "status": "local-only",
+    "scopes": [
+      "fresh",
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "test/hidden-entry-fails-closed.test.mjs"
+    ],
+    "acceptance": "A prompt that cannot prove it masked must refuse rather than ask. Prove on a physical Windows host, on both PowerShell 5.1 and PowerShell 7, that no credential is echoed and that the refusal names a route which does mask. A live Cloudflare API token was echoed in full at this prompt on Windows PowerShell 5.1 on 2026-09-08, on a shared screen, and was revoked. Every guard passed while it happened: the stream was a TTY, setRawMode existed, and enabling raw mode returned without throwing.",
+    "findings": "The console accepts the instruction to stop echoing and keeps echoing, which the process cannot detect. Fixed by refusing on win32 unless BRAIN_ALLOW_WINDOWS_ECHO_RISK is set, naming the Read-Host -AsSecureString route in the refusal, and on every platform verifying input.isRaw after setRawMode rather than trusting that the call returned."
+  },
+  {
+    "id": "UPDATE-038",
+    "title": "Health reported the configured version rather than the deployed code's",
+    "status": "local-only",
+    "scopes": [
+      "fresh",
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "test/current-version.test.mjs"
+    ],
+    "acceptance": "Health must report the version of the code answering the request. Prove on a deployed brain that health reports the worker's own version and flags a disagreement with the deploy-time variable. One brain reported a version two releases ahead of its deployed worker for months and nothing could have revealed it.",
+    "findings": "Health read env.BRAIN_VERSION, a plain-text variable written at deploy time, which can outlive the code it described because deploy metadata carries keep_bindings. The worker now ships WORKER_VERSION in its own source, health reports that, and reports configured_version with version_mismatch when the variable disagrees. The constant is pinned to the package version by test/current-version.test.mjs."
+  },
+  {
+    "id": "UPDATE-039",
+    "title": "Messages prescribed actions the state that produced them refuses",
+    "status": "local-only",
+    "scopes": [
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "worker/test/remedy-never-names-a-refused-action.test.mjs"
+    ],
+    "acceptance": "No message may name a command that the state producing the message refuses. A paused brain refuses reindex and drain with 503 and the pause lifts only when the update completes, so advising either from inside that state is a closed loop. Prove on a paused brain that diagnose and the readiness messages name the pause and a reachable next step rather than a refused command.",
+    "findings": "Ten remedies across diagnose and the vector readiness paths advised reindex or drain unconditionally. A client followed that advice across four update attempts over 97 hours on 2026-09-08, was refused each time, and learned nothing from it. All ten now route through remedyForState(env, ...), which names the pause first. The regression anchors on the commands rather than on the current call sites, so a NEW message that advises one without the wrapper fails in CI rather than in a client's terminal; written by hand it found six sites beyond the four identified by inspection."
   }
 ]
