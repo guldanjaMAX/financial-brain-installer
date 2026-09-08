@@ -13,7 +13,7 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This checkout is the unreleased 0.4.2 candidate. The versioned commands below
+This checkout is the unreleased 0.4.3 candidate. The versioned commands below
 describe its intended release; they are not an available customer update.
 Check the guided page for the current release status before installing.
 
@@ -24,7 +24,7 @@ asset and installs into a folder owned by your user account, so it needs no Git,
 Mac or Linux:
 
 ```bash
-npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.2/brain-installer-0.4.2.tgz"
+npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.3/brain-installer-0.4.3.tgz"
 # Optional: makes the shorter `brain` examples work in this Terminal window.
 export PATH="$HOME/.financial-brain/bin:$PATH"
 ```
@@ -32,7 +32,7 @@ export PATH="$HOME/.financial-brain/bin:$PATH"
 Windows PowerShell:
 
 ```powershell
-npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.2/brain-installer-0.4.2.tgz"
+npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.3/brain-installer-0.4.3.tgz"
 # Optional: makes the shorter `brain` examples work in this PowerShell window.
 $env:Path = "$env:LOCALAPPDATA\FinancialBrain;$env:Path"
 ```
