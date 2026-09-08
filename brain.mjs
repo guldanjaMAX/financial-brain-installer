@@ -1505,10 +1505,16 @@ export async function assertAdoptable(acctId, db, dbName, slug, query = d1Query,
     die(
       `D1 "${dbName}" (${db.uuid}) is already a brain, and this manifest has never owned it.` + "\n" +
         "  Refusing to adopt it. A matching name is not proof that it is yours: two installs" + "\n" +
-        "  that accept the same default would match each other exactly here." + "\n" +
-        "  If it IS yours, re-run with the manifest that provisioned it, which records its id." + "\n" +
-        "  If it is not, set client.slug and infrastructure.cloudflare.d1_database_name to" + "\n" +
-        "  values this account does not already use."
+        "  that accept the same default would match each other exactly here.\n" +
+        "\n" +
+        "  IF THIS BRAIN IS YOURS, and you are rebuilding a lost manifest, say so by hand.\n" +
+        "  Put this exact line in the manifest, then run the same command again:\n" +
+        `      infrastructure.cloudflare.d1_database_id: "${db.uuid}"\n` +
+        "  That is a claim of ownership, which is why the installer will not make it for you.\n" +
+        "\n" +
+        "  IF IT IS NOT YOURS, do not point a new install at it. Set client.slug and\n" +
+        "  infrastructure.cloudflare.d1_database_name to values this account does not use.\n" +
+        "  Renaming while it IS yours would abandon this brain with your documents in it."
     );
   }
 }
@@ -1543,6 +1549,14 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
     ok(`D1 "${dbName}" created (${db.uuid})`);
   }
   cfg.d1_database_id = db.uuid;
+  // Persist ownership the moment it is true, not at the end of provisioning.
+  // Adoption now requires this id, and everything between here and the save at
+  // the end of this function can die: seven of those exits are in the Vectorize
+  // section alone. Recording the id only in memory would turn an install that
+  // creates the database and then trips on the index into a dead end, because
+  // the retry would find a database it could not prove was its own. The fact is
+  // durable here so the retry can prove it.
+  saveManifest(path, m);
 
   // R2, optional. A failure here is not fatal: the brain runs without it.
   // Same predicate verify uses, so the two can never disagree again.
@@ -1641,12 +1655,20 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
             `Vectorize index "${idxName}" already exists, and this manifest did not name it.` + "\n" +
               "  Refusing to adopt it. The name was derived from the client slug, so another" + "\n" +
               "  install that accepted the same default would land on this exact index and the" + "\n" +
-              "  two would share one vector store." + "\n" +
-              "  If it IS yours, re-run with the manifest that provisioned it, which records the" + "\n" +
-              "  name. If it is not, set client.slug and infrastructure.cloudflare.vectorize_index" + "\n" +
-              "  to values this account does not already use."
+              "  two would share one vector store.\n" +
+              "\n" +
+              "  IF THIS INDEX IS YOURS, and you are rebuilding a lost manifest, say so by hand.\n" +
+              "  Put this exact line in the manifest, then run the same command again:\n" +
+              `      infrastructure.cloudflare.vectorize_index: "${idxName}"\n` +
+              "  That is a claim of ownership, which is why the installer will not make it for you.\n" +
+              "\n" +
+              "  IF IT IS NOT YOURS, set client.slug and infrastructure.cloudflare.vectorize_index\n" +
+              "  to values this account does not use. Renaming while it IS yours would leave this\n" +
+              "  index behind holding your vectors."
           );
         }
+        cfg.vectorize_index = idxName;
+        saveManifest(path, m);
         ok(`Vectorize "${idxName}" already exists and this manifest names it, adopting it`);
       } else if (viaApi) {
         await cf(`/accounts/${acct.id}/vectorize/v2/indexes`, {
@@ -1658,6 +1680,16 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
           },
         });
         ok(`Vectorize "${idxName}" created (768-dim, cosine)`);
+        // Persist ownership the instant the index exists, BEFORE the metadata
+        // index wait below. That loop is deliberately patient, up to a hundred
+        // polls per property, and any exit inside it used to leave the index
+        // created in the account and unnamed in the manifest. Adoption now
+        // requires the manifest to name it, so a retry after that would find an
+        // index it could not prove was its own and refuse, permanently, on the
+        // standard install path where setup deletes this key. The name is
+        // durable here so the retry can prove it.
+        cfg.vectorize_index = idxName;
+        saveManifest(path, m);
       } else {
         // 768 and cosine are the output shape of @cf/baai/bge-base-en-v1.5, the
         // model the worker embeds with. Any other values reject every vector or

@@ -1,5 +1,8 @@
 # FIELD-DEFAULT-SLUG-ADOPTION: a second install adopts the first brain
 
+**Tracked as UPDATE-032.** This file records the defect as observed. The fix and
+its proof are in `UPDATE-032-adoption-requires-prior-ownership-2026-09-08.md`.
+
 **Observed:** 2026-09-08, on a disposable provider account, running the published
 macOS runbook against `brain-installer-0.4.1.tgz`, sha256
 `a62cabaf7d50cdda2bd1048fda9865c1fa481b263374d81733e3521923fe5c62`, from the
