@@ -4,6 +4,34 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.2
+
+Candidate only. This version has not been released.
+
+Three defects found by running the product rather than by reading it: two on a
+supervised client install, one by installing twice on a bench and reading what
+the second run said. Nothing here changes what your brain holds.
+
+- Anyone who learned a brain's address could write to its database without a
+  credential. The limits for those routes had been written and were never
+  connected, so four of six route classes had no quota at all and one of them
+  inserts a row on any anonymous request. That is metered writes on the owner's
+  own paid account, driven by a stranger. Connected now, with a test that fails
+  if a limit is ever defined again without being wired.
+- A second install into the same account could take over the first one's brain.
+  The check that exists to prevent it compared the client name, and two installs
+  that both accepted the default matched each other, so the second adopted the
+  first brain, its documents and its durable admin key. Adoption now requires
+  that the manifest already recorded owning the resource, which a genuine re-run
+  has and a fresh install cannot invent. The vector index had the same hole and
+  no ownership check at all; it now requires the manifest to have named it.
+- One message blamed a Cloudflare account setting for a missing credential. The
+  account subdomain read swallowed every failure and reported the only cause it
+  knew, so an owner went to the dashboard to change a setting that was already
+  correct, then pasted an API token at a prompt to get past it, which is exactly
+  what the swallowed message warns against. Three causes now produce three
+  messages, and a credential failure keeps its own words.
+
 ## 0.4.1
 
 Candidate only. This version has not been released.
