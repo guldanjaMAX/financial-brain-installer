@@ -16,7 +16,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const source = readFileSync(fileURLToPath(new URL("../src/lib/store-d1.js", import.meta.url)), "utf8");
+// Normalise line endings: Windows checks out CRLF, and an anchor written with
+// \n silently fails to match there, so this regression would pass by not running
+// on the one platform whose behaviour this release changed most.
+const source = readFileSync(fileURLToPath(new URL("../src/lib/store-d1.js", import.meta.url)), "utf8")
+  .replace(/\r\n/g, "\n");
 
 // Anchor on the ordering, because the defect was an ordering problem: the
 // fall-through returned before anything could promote the status.
@@ -63,5 +67,18 @@ assert.match(
     "this release cannot clear, and must not be sent into a rebuild that can never end"
 );
 
+// The blocker an adversarial review caught before this merged. A FINISHED
+// rebuild returns to 'pending' and its provider count lags for a moment. Without
+// a batch-history guard the reset fires three seconds later, discards the
+// completed rebuild, and the run aborts on the CLI's epoch-change guard with the
+// Worker left paused. The fix would have prevented the rebuild it enables.
+assert.match(
+  between,
+  /FROM vector_bootstrap_batches/,
+  "the reset must require that this brain has NEVER bootstrapped, or it will fire " +
+    "on a rebuild that just finished while the provider count is still catching up"
+);
+
 console.log("PASS  a pending short projection with an empty outbox can reach bootstrap_required");
+console.log("PASS  and a brain that has already bootstrapped is never reset out from under itself");
 console.log("PASS  and an excess projection is left to its own message rather than rebuilt");

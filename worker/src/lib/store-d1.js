@@ -3472,7 +3472,32 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
       const count = Number(description?.vectorCount ?? description?.vectorsCount ?? description?.count);
       if (Number.isSafeInteger(count) && count >= 0) projected = count;
     } catch { /* unreadable provider count is not proof of a short projection */ }
-    if (Number(queued?.n || 0) === 0 && chunked > 0 && projected !== null && projected < chunked) {
+    // NEVER BOOTSTRAPPED, not merely short.
+    //
+    // A finished rebuild lands right back here: the completion block below sets
+    // the status to 'pending' and calls markProjectionVerifiedIfExact, which
+    // returns false while the provider's aggregate count is still catching up
+    // with mutations it has already accepted. Three seconds later the CLI polls
+    // again, and without this guard the reset would fire on a projection that
+    // had just finished, discard it, and start over. The run would then abort
+    // on the CLI's epoch-change guard with the Worker left paused, so the fix
+    // would have prevented the very rebuild it exists to enable.
+    //
+    // Batch history is the discriminator. A brain that has never activated has
+    // none, which is the shape the stuck client showed: epoch 0, base_count 0,
+    // high_water NULL, no batches, across four attempts on two releases. A
+    // brain that has just rebuilt has confirmed batches for this epoch.
+    //
+    // Deliberately conservative: a brain that bootstrapped once and later goes
+    // short will not self-heal here. `brain reindex` remains the path for that,
+    // and refusing to guess is better than restarting a corpus rebuild on a
+    // provider count that may simply be behind.
+    const history = await env.DB.prepare(
+      "SELECT count(*) AS n FROM vector_bootstrap_batches WHERE epoch=?1"
+    ).bind(state.epoch).first();
+    const neverBootstrapped = Number(history?.n || 0) === 0;
+    if (neverBootstrapped && Number(queued?.n || 0) === 0 && chunked > 0 &&
+        projected !== null && projected < chunked) {
       await resetVectorProjectionBootstrap(env);
       state = await bootstrapStateV2(env);
     }
