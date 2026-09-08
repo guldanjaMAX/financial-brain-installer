@@ -603,5 +603,23 @@
       "docs/release-evidence/UPDATE-026-windows-verified-package-proven-runtime-2026-09-07.md",
       "docs/release-evidence/v0.4.0-field-findings-2026-09-07.md"
     ]
+  },
+  {
+    "id": "UPDATE-029",
+    "title": "Public rate-limit policies defined but never wired to their routes",
+    "status": "open",
+    "scopes": [
+      "fresh",
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "worker/test/public-guard-coverage.test.mjs"
+    ],
+    "acceptance": "Every route class the public request guard defines a policy for must call the guard before its handler runs, and each guarded handler must read the request the guard returns rather than the original, whose body the guard has already bounded. Prove on a deployed brain that an anonymous request to each public class is refused once its policy limit is exceeded, and that a refusal is returned rather than a durable write. The owner-facing consequence this closes is that an anonymous caller who learns a brain's hostname could drive unmetered writes into the owner's own paid database.",
+    "findings": [
+      "FIELD-PUBLIC-GUARD-UNWIRED"
+    ],
+    "evidence": []
   }
 ]

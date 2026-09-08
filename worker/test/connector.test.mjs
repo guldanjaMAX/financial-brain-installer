@@ -26,6 +26,10 @@ function connectorDb() {
       const statement = {
         bind(...args) { bound = args; return statement; },
         async first() {
+          // The public request guard now covers the connector ceremony routes,
+          // and its quota statement lands here. A stub that answers null reads
+          // as "denied", so an unmodelled table would refuse the first call.
+          if (/INSERT INTO public_request_quotas/.test(sql)) return { request_count: 1 };
           if (/FROM oauth_clients/.test(sql)) return tables.clients.get(bound[0]) || null;
           if (/FROM oauth_codes/.test(sql)) return tables.codes.get(bound[0]) || null;
           if (/FROM oauth_tokens/.test(sql)) return tables.tokens.get(bound[0]) || null;
