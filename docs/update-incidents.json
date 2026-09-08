@@ -746,5 +746,19 @@
     ],
     "acceptance": "Health must report the version of the code answering the request. Prove on a deployed brain that health reports the worker's own version and flags a disagreement with the deploy-time variable. One brain reported a version two releases ahead of its deployed worker for months and nothing could have revealed it.",
     "findings": "Health read env.BRAIN_VERSION, a plain-text variable written at deploy time, which can outlive the code it described because deploy metadata carries keep_bindings. The worker now ships WORKER_VERSION in its own source, health reports that, and reports configured_version with version_mismatch when the variable disagrees. The constant is pinned to the package version by test/current-version.test.mjs."
+  },
+  {
+    "id": "UPDATE-039",
+    "title": "Messages prescribed actions the state that produced them refuses",
+    "status": "local-only",
+    "scopes": [
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "worker/test/remedy-never-names-a-refused-action.test.mjs"
+    ],
+    "acceptance": "No message may name a command that the state producing the message refuses. A paused brain refuses reindex and drain with 503 and the pause lifts only when the update completes, so advising either from inside that state is a closed loop. Prove on a paused brain that diagnose and the readiness messages name the pause and a reachable next step rather than a refused command.",
+    "findings": "Ten remedies across diagnose and the vector readiness paths advised reindex or drain unconditionally. A client followed that advice across four update attempts over 97 hours on 2026-09-08, was refused each time, and learned nothing from it. All ten now route through remedyForState(env, ...), which names the pause first. The regression anchors on the commands rather than on the current call sites, so a NEW message that advises one without the wrapper fails in CI rather than in a client's terminal; written by hand it found six sites beyond the four identified by inspection."
   }
 ]

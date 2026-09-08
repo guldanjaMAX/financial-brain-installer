@@ -922,6 +922,29 @@ export async function withCloudflareControlCredential(action, options = {}) {
   // A saved profile is authoritative for that Brain. An unrelated ambient
   // token must not silently replace it. Fresh interactive setup is OAuth-first.
   if (forceToken || (!freshOAuth && !authProfile)) {
+    // Say WHY this is asking for a token, when the reason is simply that the
+    // manifest predates the browser sign-in lane.
+    //
+    // auth_profile is written when a manifest is first created, so every install
+    // made before that lane existed has none, and lands here forever without
+    // ever being told the ordinary path is available to it. A client on
+    // 2026-09-08 minted and pasted tokens across four update attempts believing
+    // that was simply how this works. It is not; his manifest was just older
+    // than the feature.
+    //
+    // This does not adopt anything. Adoption changes which credential a brain
+    // uses and stays behind an explicit consent flag, which is correct. It only
+    // stops the token lane from looking like the only lane.
+    if (!forceToken && !authProfile && !cloudflareTokenAvailable()) {
+      info(
+        "this manifest records no browser sign-in for this Brain, so it is using the token lane.\n" +
+        "  That is the recovery path, not the ordinary one. If this computer can sign in\n" +
+        "  through a browser, `--adopt-cloudflare-profile` records one for this Brain and\n" +
+        "  later commands stop asking for a token. Some machines cannot: Wrangler is not\n" +
+        "  always able to enable encrypted credential storage, and the token lane stays\n" +
+        "  correct there."
+      );
+    }
     try {
       return await runToken();
     } catch (error) {
