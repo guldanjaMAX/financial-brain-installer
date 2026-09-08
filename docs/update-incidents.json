@@ -621,5 +621,23 @@
       "FIELD-PUBLIC-GUARD-UNWIRED"
     ],
     "evidence": []
+  },
+  {
+    "id": "UPDATE-031",
+    "title": "The workers.dev subdomain read blamed an account setting for a credential failure",
+    "status": "open",
+    "scopes": [
+      "fresh",
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "test/subdomain-read-names-its-cause.test.mjs"
+    ],
+    "acceptance": "Reading the account subdomain must report which of three things went wrong: no credential was available for that call, the read was attempted and refused, or the read succeeded and the subdomain really is unset. A credential failure must reach the operator with its own text intact, including its warning against pasting a token into a shell, and must never be relabelled as a missing account setting. Prove on a deployed install driven by a browser session, with no API token in the environment, that the failing path names the credential rather than the subdomain, and that an operator following the message is never led to change a setting that is already correct.",
+    "findings": [
+      "FIELD-SUBDOMAIN-CAUSE-MISREPORTED"
+    ],
+    "evidence": []
   }
 ]

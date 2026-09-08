@@ -1722,11 +1722,41 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
   if (m.brain?.domain) return m.brain.domain;
   const readSubdomain = options.readSubdomain ??
     (() => cf(`/accounts/${acct.id}/workers/subdomain`));
-  const sub = await readSubdomain().catch(() => null);
+  // Three different things can go wrong here and they used to print one
+  // sentence. `.catch(() => null)` swallowed every failure, including the
+  // credential error whose own text warns against pasting a token into a
+  // shell, and then blamed an account setting instead. A field install lost
+  // most of an evening to it: the subdomain was set the whole time, the owner
+  // went to the dashboard and correctly changed nothing, and eventually pasted
+  // a raw API token at a prompt to get past a message that was not true.
+  //
+  // This call authenticates with an API token while the deploy around it can be
+  // running on a browser session, so "no credential for THIS call" is an
+  // ordinary outcome on the path the runbook recommends, not an exotic one.
+  let sub = null;
+  let readFailure = null;
+  try {
+    sub = await readSubdomain();
+  } catch (error) {
+    readFailure = error;
+  }
+  if (readFailure) {
+    // A credential failure already says the right thing, including how to sign
+    // in without a token. Re-raise it rather than replacing it with a guess.
+    if (readFailure instanceof Fatal) throw readFailure;
+    const detail = String(readFailure?.message || readFailure || "").split("\n")[0].slice(0, 200);
+    die(
+      "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
+        `  Cloudflare did not answer that read: ${detail}\n` +
+        "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
+        "  call is using and its scope before changing anything in the dashboard."
+    );
+  }
   const label = typeof sub?.subdomain === "string" ? sub.subdomain.trim() : "";
   if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)) {
     die(
       "the workers.dev route is enabled, but Cloudflare did not return a usable account subdomain.\n" +
+        "  The read succeeded and carried no usable name, so the subdomain really is unset.\n" +
         "  The Worker is deployed, but its token-free URL cannot be saved. Rerun deploy after\n" +
         "  the Workers subdomain is visible in Cloudflare."
     );
