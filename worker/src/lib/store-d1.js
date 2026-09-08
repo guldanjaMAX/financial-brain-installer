@@ -3437,6 +3437,46 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
     await markProjectionVerifiedIfExact(env, lease);
     state = await bootstrapStateV2(env);
   }
+  // A projection that is SHORT with nothing queued has to be rebuilt, and until
+  // 0.4.4 there was no way for it to say so. `pending` means "not proven exact".
+  // markProjectionVerifiedIfExact leaves it pending when the counts disagree,
+  // and the two tests below then fall through to a well-formed receipt of zeros
+  // with HTTP 200. Nothing else ever moves the status, so the run repeats that
+  // receipt until its deadline and the next run does the same.
+  //
+  // Observed on a client brain 2026-09-08: 62,439 vectors against 1,151,274
+  // chunks, outbox empty, epoch 0, base_count 0, high_water NULL, four update
+  // attempts across two releases producing byte-identical output over 97 hours.
+  // The only writer of `bootstrap_required` is reachable from `reindex`, which
+  // the pause refuses, and the bootstrap requires the pause, so no supported
+  // sequence of commands could reach it. It was closed, not flaky.
+  //
+  // Requiring an empty outbox is what makes this safe: queued work is somebody
+  // else's in flight, and resetting under it would abandon rows the provider
+  // may still confirm. With nothing queued there is nothing to lose, and the
+  // reset is the only thing that sets the high-water mark the sweep needs.
+  // Still `pending` AFTER markProjectionVerifiedIfExact means the counts did not
+  // agree; that call is the only thing that promotes an exact projection.
+  if (state.status === "pending") {
+    const queued = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+    const chunked = Number((await env.DB.prepare("SELECT count(*) AS n FROM chunks").first())?.n || 0);
+    // SHORT only. An index holding MORE vectors than the database has chunks is
+    // a different fault, and one this release cannot clear: the completion check
+    // compares the two counts for exact equality with no tolerance, so a rebuild
+    // can never satisfy it however long it runs. That case must keep its
+    // existing behaviour and its own message rather than being sent into a
+    // rebuild that cannot end.
+    let projected = null;
+    try {
+      const description = await env.VECTORIZE.describe();
+      const count = Number(description?.vectorCount ?? description?.vectorsCount ?? description?.count);
+      if (Number.isSafeInteger(count) && count >= 0) projected = count;
+    } catch { /* unreadable provider count is not proof of a short projection */ }
+    if (Number(queued?.n || 0) === 0 && chunked > 0 && projected !== null && projected < chunked) {
+      await resetVectorProjectionBootstrap(env);
+      state = await bootstrapStateV2(env);
+    }
+  }
   if (state.status === "verified") {
     state = await rebaseVerifiedAcceleratedBootstrap(env, state);
     return acceleratedBootstrapReceipt(env, "waiting");

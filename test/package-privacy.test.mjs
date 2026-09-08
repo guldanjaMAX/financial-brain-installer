@@ -484,6 +484,7 @@ const expected = [
   "tools/preflight.ps1",
   "tools/preflight.sh",
   "worker/src/lib/vector-fence-probe.js",
+  "worker/src/lib/version.js",
   // Release-line scripts, now shipped because scripts/ is in package files.
   "scripts/check-install-page-version.mjs",
   "scripts/customer-hiccup-lab.mjs",

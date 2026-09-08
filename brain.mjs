@@ -567,6 +567,31 @@ export function readHiddenInput({
   if (!input?.isTTY || !output?.isTTY || typeof input.setRawMode !== "function") {
     return Promise.reject(new Error(insecure));
   }
+  // Windows refuses this prompt outright, and that is deliberate.
+  //
+  // On 2026-09-08 a client entered a live Cloudflare API token at this prompt on
+  // Windows PowerShell 5.1 and the console echoed it in full, on a shared
+  // screen. The token was revoked. Every check below passed while it happened:
+  // the stream is a TTY, setRawMode exists, and the call to enable raw mode
+  // returns without throwing. The console simply keeps echoing anyway, so the
+  // process cannot tell that its own masking did nothing.
+  //
+  // A secret prompt that cannot prove it masked is worse than no prompt, because
+  // the person typing believes it is hidden. There is no reliable in-process
+  // probe for this, so the honest response is to refuse on the platform where it
+  // was observed and name a route that does mask.
+  if ((process.platform === "win32") && !process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK) {
+    return Promise.reject(new Error(
+      `this terminal cannot be trusted to hide ${noun} entry.\n` +
+      "  Windows PowerShell echoed a live credential at this prompt on 2026-09-08, and\n" +
+      "  the process cannot detect when that happens, so it will not ask here.\n" +
+      "  A browser sign-in needs no token at all and is the ordinary path.\n" +
+      "  If this install can only use a token, read it in with PowerShell's own masked\n" +
+      "  prompt, Read-Host -AsSecureString, and hand it to this command through the\n" +
+      "  environment rather than typing it here. Close that window when you are done.\n" +
+      "  Automation may inject it through an approved secret manager."
+    ));
+  }
   return new Promise((resolveSecret, rejectSecret) => {
     const bytes = Buffer.alloc(maxBytes);
     let length = 0;
@@ -622,6 +647,13 @@ export function readHiddenInput({
     input.once("error", onError);
     try {
       input.setRawMode(true);
+      // Trust the flag the runtime reports back, not the fact that the call
+      // returned. A console that accepts setRawMode and keeps echoing is the
+      // failure this whole guard exists for.
+      if (input.isRaw !== true) {
+        finish(new Error(`this terminal did not disable echo for ${noun} entry`));
+        return;
+      }
       input.resume();
     } catch {
       finish(new Error(`this terminal could not disable echo for ${noun} entry`));

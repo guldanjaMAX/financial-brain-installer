@@ -2237,8 +2237,13 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
     VECTORIZE: { upsert: forbid, deleteByIds: forbid },
   };
   const health = await (await worker.fetch(new Request("https://b.example/health"), env, {})).json();
+  // Even paused, health reports the version of the code answering rather than
+  // the deploy-time variable. During an upgrade that is exactly when you need to
+  // know which code is actually deployed, and a variable can outlive the code it
+  // described.
   check("paused compatibility health proves the leased writer protocol and mode",
-    health.version === "fixture-version" && health.vector_writer_protocol === "lease-v1" &&
+    health.version === "0.4.4" && health.configured_version === "fixture-version" &&
+      health.version_mismatch === true && health.vector_writer_protocol === "lease-v1" &&
       health.vector_drain_mode === "paused-for-upgrade", JSON.stringify(health));
 
   // Whether a published update may touch a brain is decided by its schema

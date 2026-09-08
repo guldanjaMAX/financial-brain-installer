@@ -19,6 +19,7 @@
  * entire users/sessions stack, which is the single largest simplification.
  */
 
+import { WORKER_VERSION } from "./lib/version.js";
 import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLLM } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { handleBankFeed, bankFeedEnabled } from "./lib/bank-feed.js";
@@ -1931,7 +1932,13 @@ export default {
           }
           : { accepting_documents: true }),
         brain: env.BRAIN_NAME || "brain",
-        version: env.BRAIN_VERSION || "0.1.0",
+        // The code's own version is authoritative. The deploy-time variable is
+        // reported only when it disagrees, because a silent disagreement is how
+        // a two-release drift hid for months on a client brain.
+        version: WORKER_VERSION,
+        ...(env.BRAIN_VERSION && env.BRAIN_VERSION !== WORKER_VERSION
+          ? { configured_version: env.BRAIN_VERSION, version_mismatch: true }
+          : {}),
         ...(schemaVersion === null ? {} : { schema_version: schemaVersion }),
         vector_writer_protocol: "lease-v1",
         vector_drain_mode: paused ? "paused-for-upgrade" : "active",

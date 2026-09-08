@@ -928,6 +928,13 @@ function providerHarness({
       }, {});
       assert.equal(healthResponse.status, 200);
       const health = await healthResponse.json();
+      // Since 0.4.4 the Worker reports the version compiled into its own source
+      // rather than the deploy-time variable, so a variable cannot outlive the
+      // code it described. The version is therefore uninjectable here: restate
+      // it, and drop the drift fields, to the body a real 0.1.12 Worker serves.
+      delete health.configured_version;
+      delete health.version_mismatch;
+      health.version = "0.1.12";
       return response(healthTransform({
         ...health,
         vector_drain_mode: healthModeOverride ?? health.vector_drain_mode,
