@@ -655,5 +655,21 @@
       "FIELD-DEFAULT-SLUG-ADOPTION"
     ],
     "evidence": []
+  },
+  {
+    "id": "UPDATE-033",
+    "title": "The Windows release gate failed on runner speed rather than on the code",
+    "status": "local-only",
+    "scopes": [
+      "fresh",
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "frontend/test/browser/document-access.browser.mjs",
+      "frontend/test/browser/owner-upload.browser.mjs"
+    ],
+    "acceptance": "The owner-scope browser suite must decide on behaviour, never on how fast the runner happens to be, because a gate that fails at random teaches the release to ignore it. Observed on 2026-09-08 at commit 20dbbc7d: the identical commit passed the full windows-latest node 22 job on its push run and failed the same job on its pull_request run, in document-access.browser.mjs, waiting ten seconds for a button that six earlier pages in the same file had already rendered. The harness ran a Vite dev server that compiles modules on demand and re-runs its dependency optimizer the first time it meets an unbundled import, and it held every assertion to a ten-second desktop ceiling while two shared cores ran Chromium, that server and esbuild together. Prove the fix by running the suite on each supported platform, on a cold cache, and confirming that both files report every check passed, that no assertion is the first thing to compile a fixture, and that a genuine regression still fails. A real defect fails at any ceiling, so a longer shared-runner ceiling removes no coverage.",
+    "findings": "The flake had two independent halves and both are closed. The harness now loads every fixture once before the caller starts asserting, so module compilation and dependency optimisation are paid off the clock instead of in the middle of a test. Separately, the per-assertion ceiling is now 45 seconds on a shared runner and stays at 10 seconds on a developer machine, overridable through BRAIN_BROWSER_TIMEOUT_MS. Locally the two files complete 32 checks in under ten seconds including the warm-up."
   }
 ]
