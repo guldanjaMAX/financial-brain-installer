@@ -1441,7 +1441,23 @@ export function chooseDbName(cfg, slug) {
  * reads a warning the damage is done: migrate writes into it, and the
  * client_slug upsert relabels another client's brain as this one.
  */
-export async function assertAdoptable(acctId, db, dbName, slug, query = d1Query) {
+export async function assertAdoptable(acctId, db, dbName, slug, query = d1Query, knownDbId = null) {
+  // Adoption requires that THIS manifest already owned this database.
+  //
+  // The comment above the caller has always said a name match is not proof of
+  // ownership, and the check below was nevertheless a name match: it compared
+  // the recorded client slug against the incoming one. Two installs that both
+  // took the same default slug therefore matched each other and were waved
+  // through. Observed end to end on 2026-09-08: two independent manifests
+  // resolved to one brain, the second reported adopting it and reusing its
+  // durable admin key, and from the second manifest the first install's corpus
+  // was listable.
+  //
+  // A slug is a label either party may hold by accident. The database id in the
+  // manifest is not: provision writes it after creating or adopting, so a
+  // genuine re-run carries it and a fresh manifest cannot. That is the only
+  // discriminator here that a second party cannot arrive at by default.
+  const alreadyOurs = Boolean(knownDbId) && String(knownDbId) === String(db.uuid);
   let names;
   try {
     const res = await query(
@@ -1480,6 +1496,21 @@ export async function assertAdoptable(acctId, db, dbName, slug, query = d1Query)
         "  Set infrastructure.cloudflare.d1_database_name to a name this account does not use."
     );
   }
+
+  // The slug matched, or there was none to compare. That is not enough. Unless
+  // this manifest already recorded this exact database, we are looking at a
+  // brain some other install created, and taking it would hand this operator
+  // that install's corpus and its durable admin key.
+  if (!alreadyOurs) {
+    die(
+      `D1 "${dbName}" (${db.uuid}) is already a brain, and this manifest has never owned it.` + "\n" +
+        "  Refusing to adopt it. A matching name is not proof that it is yours: two installs" + "\n" +
+        "  that accept the same default would match each other exactly here." + "\n" +
+        "  If it IS yours, re-run with the manifest that provisioned it, which records its id." + "\n" +
+        "  If it is not, set client.slug and infrastructure.cloudflare.d1_database_name to" + "\n" +
+        "  values this account does not already use."
+    );
+  }
 }
 
 async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
@@ -1502,7 +1533,7 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
   const existing = await cf(`/accounts/${acct.id}/d1/database`);
   let db = (existing || []).find((d) => d.name === dbName);
   if (db) {
-    await assertAdoptable(acct.id, db, dbName, slug);
+    await assertAdoptable(acct.id, db, dbName, slug, d1Query, cfg.d1_database_id);
     ok(`D1 "${dbName}" already exists (${db.uuid}), adopting it`);
   } else {
     db = await cf(`/accounts/${acct.id}/d1/database`, {
@@ -1595,7 +1626,28 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
         if (metric && metric !== "cosine") {
           die(`Vectorize index "${idxName}" uses metric "${metric}", not cosine. Ranking would be wrong, not broken, so this refuses rather than adopts.`);
         }
-        ok(`Vectorize "${idxName}" already exists, adopting it`);
+        // Dimensions and metric say the index is COMPATIBLE, not that it is
+        // ours. This adopted on a name match alone, which is the same defect
+        // the placeholder comment above describes, arriving through a real
+        // name instead of a placeholder one. A defaulted name is exactly the
+        // colliding case: two installs that never named an index compute the
+        // same one and the second would take the first's vector store.
+        //
+        // An explicitly configured name is a deliberate choice, and provision
+        // writes the name back after it succeeds, so a genuine re-run arrives
+        // here with it set. A first run from a fresh manifest cannot.
+        if (!configuredIndex) {
+          die(
+            `Vectorize index "${idxName}" already exists, and this manifest did not name it.` + "\n" +
+              "  Refusing to adopt it. The name was derived from the client slug, so another" + "\n" +
+              "  install that accepted the same default would land on this exact index and the" + "\n" +
+              "  two would share one vector store." + "\n" +
+              "  If it IS yours, re-run with the manifest that provisioned it, which records the" + "\n" +
+              "  name. If it is not, set client.slug and infrastructure.cloudflare.vectorize_index" + "\n" +
+              "  to values this account does not already use."
+          );
+        }
+        ok(`Vectorize "${idxName}" already exists and this manifest names it, adopting it`);
       } else if (viaApi) {
         await cf(`/accounts/${acct.id}/vectorize/v2/indexes`, {
           method: "POST",
