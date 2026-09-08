@@ -567,8 +567,20 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   check("an EMPTY database is adoptable (a normal provision re-run)",
     (await throws(() => assertAdoptable("a", db, "n", "rivera", q([])))) === null);
 
-  check("OUR OWN brain is adoptable",
-    (await throws(() => assertAdoptable("a", db, "n", "rivera", q(["install_state", "chunks"], "rivera")))) === null);
+  // This case used to pass the slug alone and call the result "our own". That
+  // was the defect: a slug is a label either party can hold by accident, and on
+  // 2026-09-08 two installs that both took the same default matched here and the
+  // second adopted the first's brain, its corpus and its durable admin key.
+  // Ownership is the database id the manifest recorded at provision time.
+  check("OUR OWN brain is adoptable, proved by the recorded database id",
+    (await throws(() => assertAdoptable("a", db, "n", "rivera", q(["install_state", "chunks"], "rivera"), db.uuid))) === null);
+
+  const sameSlugStranger = await throws(
+    () => assertAdoptable("a", db, "n", "rivera", q(["install_state", "chunks"], "rivera")));
+  check("a brain whose slug merely MATCHES is refused when this manifest never owned it",
+    sameSlugStranger !== null, "it was adopted on a slug match");
+  check("and the refusal says the manifest never owned it",
+    /never owned it/.test(sameSlugStranger || ""), sameSlugStranger);
 
   // the reporter's actual case: a production D1 that merely shares the name.
   const stranger = await throws(() => assertAdoptable("a", db, "brain", "rivera", q(["ledger", "accounts", "postings"])));
@@ -577,7 +589,7 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   check("and says nothing was changed", /Nothing has been changed/.test(stranger || ""), stranger);
 
   // Worse than co-tenancy: migrate's client_slug upsert would relabel their install.
-  const other = await throws(() => assertAdoptable("a", db, "n", "rivera", q(["install_state"], "someone-else")));
+  const other = await throws(() => assertAdoptable("a", db, "n", "rivera", q(["install_state"], "someone-else"), db.uuid));
   check("ANOTHER CLIENT's brain is refused", other !== null, "it was adopted");
   check("and the refusal names the real owner", /someone-else/.test(other || ""), other);
 

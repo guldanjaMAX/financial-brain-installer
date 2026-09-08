@@ -639,5 +639,21 @@
       "FIELD-SUBDOMAIN-CAUSE-MISREPORTED"
     ],
     "evidence": []
+  },
+  {
+    "id": "UPDATE-032",
+    "title": "Adoption on a name match let a second install take the first brain",
+    "status": "open",
+    "scopes": [
+      "fresh"
+    ],
+    "tests": [
+      "test/adoption-requires-prior-ownership.test.mjs"
+    ],
+    "acceptance": "Two installs into one provider account must never resolve to the same brain, and adoption of an existing database or vector index must require that the manifest already recorded owning it rather than that a name or a client slug happens to match. Prove on a deployed account that a second install from a fresh manifest is refused by name for both the database and the vector index, that it creates and adopts nothing, and that the manifest which provisioned those resources can still re-run and adopt them. The failure this closes was observed end to end on 2026-09-08: two independent manifests both resolved to one brain, the second reported adopting it and reusing its durable admin key, and from the second manifest the first install's corpus was listable.",
+    "findings": [
+      "FIELD-DEFAULT-SLUG-ADOPTION"
+    ],
+    "evidence": []
   }
 ]
