@@ -1,0 +1,88 @@
+# Tier 1 of docs/INSTALL-TEST-SOP.md, which described this workflow for two
+# weeks while the file did not exist.
+#
+# Everything else in CI tests the repo against itself. This is the only job that
+# reads the PUBLISHED install contract at financialbrain.ai and does what a
+# client's agent is told to do with it. That distinction is not academic: every
+# defect that reached a client in the week of 2026-09-08 reached them through
+# the published surface, and repo-only checks were green the whole time.
+#
+# The rule this exists to enforce, from the SOP: nothing weird gets discovered
+# on the day of an install.
+name: install-matrix
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "41 14 * * *"   # 07:41 Phoenix, after install-page-drift
+
+permissions:
+  contents: read
+
+jobs:
+  public-contract-install:
+    name: ${{ matrix.os }} follows the published install contract
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest    # Apple silicon, the path most clients are on
+            guide: macos
+          - os: macos-13        # Intel, older Macs
+            guide: macos
+          - os: ubuntu-latest   # the cheapest canary
+            guide: macos
+          - os: windows-latest  # the PowerShell and npm.cmd path
+            guide: windows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      # A fresh runner is the point. If a brain or a prior install were present
+      # the run would prove nothing about a client's first install.
+      - name: prove this machine has no brain
+        shell: bash
+        run: |
+          if [ -e "$HOME/.brain" ]; then echo "::error::runner is not fresh"; exit 1; fi
+          command -v brain >/dev/null && { echo "::error::a brain CLI is already on PATH"; exit 1; }
+          echo "no brain, no CLI: this is a first install"
+
+      - name: follow the published contract end to end
+        shell: bash
+        run: node scripts/install-from-public-contract.mjs "${RUNNER_TEMP}/install-run" --guide ${{ matrix.guide }}
+
+      # The SOP asks for the transcript and the timing, not just a green tick.
+      - name: keep the transcript
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-contract-${{ matrix.os }}
+          path: ${{ runner.temp }}/install-run/*.md
+          if-no-files-found: ignore
+          retention-days: 14
+
+# NOT YET HERE: the provisioning half.
+#
+# The valuable second job creates one Worker, one D1 database and one Vectorize
+# index on the disposable test account, ingests the package's own public
+# CHANGELOG.md, asks one answerable and one unanswerable question to exercise
+# the refusal contract, and tears everything down. It is deliberately absent
+# rather than present-and-skipped, because a job that green-ticks without
+# provisioning anything is precisely the failure this file exists to end: the
+# SOP described three tiers and ran one for two weeks.
+#
+# It needs three repository secrets that do not exist yet:
+#   BRAIN_TEST_CF_TOKEN        the scoped test-account token (4 install permissions)
+#   BRAIN_TEST_CF_ACCOUNT      the disposable test account id
+#   BRAIN_TEARDOWN_PROTECTED   the live-resource lock; teardown REFUSES when unset,
+#                              and the test account hosts a live preview brain
+#
+# Add those, then the job lands with them, tested, in one change.

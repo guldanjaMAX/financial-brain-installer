@@ -153,8 +153,20 @@ try {
   };
   const asProbeResponse = ({ status, body }) => ({ ok: status >= 200 && status < 300, status, text: async () => body });
 
-  const liveBody = await workerHealth({ BRAIN_NAME: "riverbend", BRAIN_VERSION: "0.2.0" });
-  const parsed = JSON.parse(liveBody.body);
+  // The SHAPE still comes from the real Worker module, which is the point of
+  // this section. The version cannot: since 0.4.4 the Worker reports the version
+  // compiled into its own source rather than a deploy-time variable, precisely
+  // so a variable cannot outlive the code it described. That makes the version
+  // uninjectable here, so it is restated to what a real v0.2.0 Worker serves,
+  // which is its own BRAIN_VERSION. Everything the probe and the setup guard
+  // actually read is still the live body.
+  const served = await workerHealth({ BRAIN_NAME: "riverbend", BRAIN_VERSION: "0.2.0" });
+  const asOldWorker = JSON.parse(served.body);
+  delete asOldWorker.configured_version;
+  delete asOldWorker.version_mismatch;
+  asOldWorker.version = "0.2.0";
+  const liveBody = { status: served.status, body: JSON.stringify(asOldWorker) };
+  const parsed = asOldWorker;
   check("a v0.2.0 Worker really does advertise the lease protocol and an active drain",
     parsed.vector_writer_protocol === "lease-v1" && parsed.vector_drain_mode === "active" &&
     parsed.accepting_documents === true && parsed.version === "0.2.0",

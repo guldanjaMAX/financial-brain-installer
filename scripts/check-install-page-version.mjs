@@ -67,7 +67,13 @@ export function validateDoorways({ manifest, updateGuide, installGuide }) {
     digestPattern.test(install.ARTIFACT_SHA256) && /^[1-9]\d*$/.test(install.ARTIFACT_BYTES) &&
     Number.isSafeInteger(Number(install.ARTIFACT_BYTES)) && Number(install.ARTIFACT_BYTES) <= 100 * 1024 * 1024,
   'invalid supervised candidate receipt');
-  const expected = `${setup.href}/financial-brain-v${install.CANDIDATE_VERSION}-${setup.pathname.slice(1)}-windows-field-test-${install.ARTIFACT_SHA256.slice(0, 16)}.zip`;
+  // The artifact must still be derivable from the setup page, the version and
+  // the digest, so it can never be swapped for a moving target like
+  // /releases/latest. What changed on 2026-09-08 is the human-readable part of
+  // the name: the kit no longer embeds the setup page's own path or a single
+  // platform, because one sealed kit carries Windows and macOS and clients other
+  // than the person the page was named for now install from it.
+  const expected = `${setup.href}/financial-brain-v${install.CANDIDATE_VERSION}-field-kit-${install.ARTIFACT_SHA256.slice(0, 16)}.zip`;
   requireValue(install.ARTIFACT_URL === expected, 'supervised candidate URL and receipt disagree');
   return { state: manifest.release_state, publicRelease: manifest.release, supervisedCandidate: install.CANDIDATE_VERSION };
 }

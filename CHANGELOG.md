@@ -4,6 +4,109 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.5
+
+Candidate only. This version has not been released.
+
+Two defects, both found by a client running the product on his own folders in
+one sitting, and one of them had already cost him a duplicated corpus. Nothing
+here changes what your brain holds.
+
+- **One shortcut in your folder no longer refuses every document.** A symbolic
+  link or a Windows junction anywhere under the folder you are loading stopped
+  the entire run, so a corpus that loaded fine before returned nothing and
+  nothing on disk had changed. One client's 3,119 documents were refused by a
+  single link. The link itself is still not followed, because what sits behind
+  it was never examined and must never be read as evidence that those documents
+  are gone. It is now skipped on its own, everything under it is protected from
+  removal, and the rest of your documents load.
+
+- **Loading a folder by path uses the name your brain already gave it.**
+  `brain ingest --path` ignored the source name recorded in your manifest and
+  filed everything under a generic one, so the same documents could land twice
+  under two names and both copies would answer. The declared name is used now,
+  the run prints which source it is filing into before it sends anything, and a
+  path that contradicts the manifest stops instead of guessing.
+
+## 0.4.4
+
+Candidate only. This version has not been released.
+
+Everything here came from two real installs rather than from reading the code,
+and one of them cost a client four days.
+
+- A brain whose search index was incomplete could get stuck in a state it could
+  never leave, and every attempt to fix it looked identical and told you
+  nothing. The rebuild only ever started from one particular internal state, and
+  the only way to reach that state ran through a command a paused brain refuses,
+  while the rebuild itself requires the pause. There was no order you could run
+  things in. One client sat there for 97 hours across four attempts on two
+  releases. A brain in that position now starts its own rebuild.
+
+- The check you run before updating said GO on exactly that brain. It compared
+  how many vectors the index holds against how many the database expects, and
+  those two numbers cannot tell "the work exists and is stuck" apart from "the
+  work was never created". It now reads a third number, how much is queued, and
+  stops rather than sending you into an install that cannot help.
+
+- SECURITY: the hidden prompt for a provider token did not hide it on Windows
+  PowerShell. A live credential was echoed in full on a shared screen on
+  2026-09-08 and had to be revoked. Every check the code makes passed while it
+  happened, because the console accepts the instruction to stop echoing and
+  keeps echoing anyway. The prompt now refuses on Windows and tells you how to
+  hand the token over without typing it where it can be seen, and on every
+  platform it refuses unless it can confirm the terminal actually masked.
+
+- Health reported the version recorded when the worker was last configured
+  rather than the version of the code answering you. On one brain those
+  disagreed by two releases for months and nothing could have shown it. The
+  worker now carries its own version and says so when the two disagree.
+
+## 0.4.3
+
+Candidate only. This version has not been released.
+
+One defect, found by an adversarial review of 0.4.2 rather than by running it.
+Nothing here changes what your brain holds.
+
+- An install interrupted while Cloudflare was still activating the search index
+  could refuse to resume, and say your own index was not yours. 0.4.2 recorded
+  the index in your manifest the moment it was created, which is what makes a
+  retry provable, but it did that on only one of the two ways an index gets
+  created. The other one is the ordinary path: signing in through the browser.
+  The recovery path, using a scoped token, was the one that was covered. So the
+  protection existed on the path few people take and was missing on the path
+  almost everyone takes. Both record it now, and a test fails if a third way is
+  ever added without recording it.
+
+## 0.4.2
+
+Candidate only. This version has not been released.
+
+Three defects found by running the product rather than by reading it: two on a
+supervised client install, one by installing twice on a bench and reading what
+the second run said. Nothing here changes what your brain holds.
+
+- Anyone who learned a brain's address could write to its database without a
+  credential. The limits for those routes had been written and were never
+  connected, so four of six route classes had no quota at all and one of them
+  inserts a row on any anonymous request. That is metered writes on the owner's
+  own paid account, driven by a stranger. Connected now, with a test that fails
+  if a limit is ever defined again without being wired.
+- A second install into the same account could take over the first one's brain.
+  The check that exists to prevent it compared the client name, and two installs
+  that both accepted the default matched each other, so the second adopted the
+  first brain, its documents and its durable admin key. Adoption now requires
+  that the manifest already recorded owning the resource, which a genuine re-run
+  has and a fresh install cannot invent. The vector index had the same hole and
+  no ownership check at all; it now requires the manifest to have named it.
+- One message blamed a Cloudflare account setting for a missing credential. The
+  account subdomain read swallowed every failure and reported the only cause it
+  knew, so an owner went to the dashboard to change a setting that was already
+  correct, then pasted an API token at a prompt to get past it, which is exactly
+  what the swallowed message warns against. Three causes now produce three
+  messages, and a credential failure keeps its own words.
+
 ## 0.4.1
 
 Candidate only. This version has not been released.

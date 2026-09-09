@@ -201,7 +201,7 @@ well formed, permitted `deferral` on its own row in the registry:
 
 ```json
 "deferral": {
-  "version": "0.4.1",
+  "version": "0.4.2",
   "blocked_on": "physical_hardware_unavailable",
   "reason": "prose: why the acceptance cannot be satisfied for THIS version",
   "unproven": "prose: what ships without field proof as a direct result"
@@ -215,7 +215,7 @@ Six properties hold, and each is pinned by an assertion in
 `test/update-audit.test.mjs`:
 
 1. **Scope expires.** `deferral.version` must equal `package.json` `version`
-   exactly. Bumping 0.4.0 to 0.4.1 invalidates every deferral in the file at
+   exactly. Bumping 0.4.0 to 0.4.2 invalidates every deferral in the file at
    once and the audit goes red until each is re-declared. That friction is the
    mechanism, not a side effect: re-declaring is a diff in which every deferred
    line changes, which is the review you want at the moment a new version is

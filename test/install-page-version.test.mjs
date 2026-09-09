@@ -10,7 +10,7 @@ STATUS: supervised field-test candidate
 TARGET: physical Windows 10 or newer
 OWNER_PRESENT: required
 SETUP_PAGE: https://financialbrain.ai/operator
-ARTIFACT_URL: https://financialbrain.ai/operator/financial-brain-v9.8.6-operator-windows-field-test-${sha.slice(0, 16)}.zip
+ARTIFACT_URL: https://financialbrain.ai/operator/financial-brain-v9.8.6-field-kit-${sha.slice(0, 16)}.zip
 ARTIFACT_BYTES: ${bytes.length}
 ARTIFACT_SHA256: ${sha}
 CANDIDATE_VERSION: 9.8.6

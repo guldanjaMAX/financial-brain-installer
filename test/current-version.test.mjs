@@ -18,6 +18,12 @@ assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable seman
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
 assert.equal(packageLock.packages?.[""]?.version, version, "package-lock root package version drifted");
 assert.equal(manifestTemplate.brain?.version, version, "manifest template version drifted");
+
+// The worker carries its own version so health cannot report a number the
+// deployed code does not have. That constant is only trustworthy while it
+// matches the package, so it is pinned here with everything else.
+const workerVersion = read("worker/src/lib/version.js").match(/WORKER_VERSION = "([^"]+)"/)?.[1];
+assert.equal(workerVersion, version, "worker source version drifted from the package");
 assert.match(changelog, new RegExp(`^## ${version.replaceAll(".", "\\.")}$`, "m"), "changelog has no current-version heading");
 
 const releaseLinks = [...readme.matchAll(

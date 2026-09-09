@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import worker from "../src/index.js";
+import { WORKER_VERSION } from "../src/lib/version.js";
 
 /* A paused brain refuses ingest on eight write paths. Reporting ok:true through
    that is what turned one client's failed update into eight days of silence: they
@@ -49,7 +50,19 @@ const health = async (env) => {
 
 for (const env of [{ ...base }, { ...base, VECTOR_DRAIN_MODE: "paused-for-upgrade" }]) {
   const { body } = await health(env);
-  assert.equal(body.version, "0.1.18", "cmdHealth matches on version");
+  // Health reports the version of the CODE answering, not the deploy-time
+  // variable. The variable can outlive the code it described, and on one brain
+  // it did so by two releases for months while every probe looked healthy. The
+  // two callers that match on this field, setup's already-live refusal and
+  // verifyRollbackHealth's expectVersion, both compare against the package
+  // version, so reporting the code's own version is what makes them mean
+  // anything.
+  // Compared against the source constant, not a literal. A literal here has to be
+  // hand-edited every release, which is the same drift class UPDATE-038 exists for,
+  // and current-version.test.mjs already pins WORKER_VERSION to package.json.
+  assert.equal(body.version, WORKER_VERSION, "health reports the worker's own version");
+  assert.equal(body.configured_version, "0.1.18", "a disagreeing deploy-time variable is surfaced");
+  assert.equal(body.version_mismatch, true, "and the disagreement is named rather than hidden");
   assert.equal(body.vector_writer_protocol, "lease-v1", "cmdHealth matches on protocol");
   assert.ok(body.vector_drain_mode, "cmdHealth matches on drain mode");
 }

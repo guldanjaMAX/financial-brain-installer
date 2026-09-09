@@ -1,6 +1,7 @@
 import worker from "../src/index.js";
 import { filterSql, unsupportedFilters } from "../src/lib/store-d1.js";
 import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
+import { WORKER_VERSION } from "../src/lib/version.js";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + d)); if (!c) fail++; };
@@ -2237,8 +2238,13 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
     VECTORIZE: { upsert: forbid, deleteByIds: forbid },
   };
   const health = await (await worker.fetch(new Request("https://b.example/health"), env, {})).json();
+  // Even paused, health reports the version of the code answering rather than
+  // the deploy-time variable. During an upgrade that is exactly when you need to
+  // know which code is actually deployed, and a variable can outlive the code it
+  // described.
   check("paused compatibility health proves the leased writer protocol and mode",
-    health.version === "fixture-version" && health.vector_writer_protocol === "lease-v1" &&
+    health.version === WORKER_VERSION && health.configured_version === "fixture-version" &&
+      health.version_mismatch === true && health.vector_writer_protocol === "lease-v1" &&
       health.vector_drain_mode === "paused-for-upgrade", JSON.stringify(health));
 
   // Whether a published update may touch a brain is decided by its schema

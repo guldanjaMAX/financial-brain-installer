@@ -484,11 +484,18 @@ const expected = [
   "tools/preflight.ps1",
   "tools/preflight.sh",
   "worker/src/lib/vector-fence-probe.js",
+  "worker/src/lib/version.js",
   // Release-line scripts, now shipped because scripts/ is in package files.
   "scripts/check-install-page-version.mjs",
   "scripts/customer-hiccup-lab.mjs",
   "scripts/onboarding-sandbox.mjs",
   "scripts/teardown-test-brain.mjs",
+  // Tier 1 of the install SOP. Reads only public financialbrain.ai URLs and
+  // writes only into a caller-supplied temp dir. Reviewed for private identity
+  // and live credentials before allowlisting: it names no account, no resource,
+  // and no token, and it takes every value it checks from the published
+  // contract rather than carrying one.
+  "scripts/install-from-public-contract.mjs",
   // Ported from the field line 2026-09-03. Reviewed for private identity and
   // live credentials before allowlisting; both scans clean.
   "CHANGELOG.md",

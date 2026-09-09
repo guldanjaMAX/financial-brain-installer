@@ -563,10 +563,35 @@ export function readHiddenInput({
   insecure = "this terminal cannot prompt securely. Rerun from an interactive terminal.",
   accepts = (byte) => byte >= 0x21 && byte <= 0x7e,
   finalize = (bytes) => Buffer.from(bytes),
+  windowsRefusal = null,
 } = {}) {
   if (!input?.isTTY || !output?.isTTY || typeof input.setRawMode !== "function") {
     return Promise.reject(new Error(insecure));
   }
+  // Windows console echo, and why this is not a blanket refusal.
+  //
+  // On 2026-09-08 a live Cloudflare API token was echoed in full at this prompt
+  // on Windows PowerShell 5.1, on a shared screen, and was revoked. Every check
+  // above passed while it happened: the stream is a TTY, setRawMode exists, and
+  // enabling raw mode returns without throwing. The console keeps echoing and
+  // the process cannot tell.
+  //
+  // The first fix refused every hidden prompt on Windows. That was wrong, and
+  // the Windows suite caught it: this helper is shared, so it also took away
+  // mailbox app-password entry, which has no environment alternative. Refusing
+  // there does not protect a Windows owner, it removes their only path.
+  //
+  // So the refusal belongs to the caller that HAS a safe alternative, passed in
+  // as windowsRefusal. Every other secret warns before it asks, which at least
+  // means nobody types a credential believing it is hidden when it may not be.
+  if (process.platform === "win32" && !process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK) {
+    if (windowsRefusal) return Promise.reject(new Error(windowsRefusal));
+    warn(
+      `Windows consoles have been seen to echo ${noun} entry despite being asked not to.\n` +
+      "  If anyone can see this screen, stop sharing before you type."
+    );
+  }
+
   return new Promise((resolveSecret, rejectSecret) => {
     const bytes = Buffer.alloc(maxBytes);
     let length = 0;
@@ -622,6 +647,13 @@ export function readHiddenInput({
     input.once("error", onError);
     try {
       input.setRawMode(true);
+      // Trust the flag the runtime reports back, not the fact that the call
+      // returned. A console that accepts setRawMode and keeps echoing is the
+      // failure this whole guard exists for.
+      if (input.isRaw !== true) {
+        finish(new Error(`this terminal did not disable echo for ${noun} entry`));
+        return;
+      }
       input.resume();
     } catch {
       finish(new Error(`this terminal could not disable echo for ${noun} entry`));
@@ -636,6 +668,17 @@ export function readHiddenCloudflareToken({ input = process.stdin, output = proc
     input,
     output,
     noun: "Cloudflare token",
+    // This caller has a masked alternative, so on Windows it refuses instead of
+    // asking. A mailbox password has no such alternative and only warns.
+    windowsRefusal:
+      "this terminal cannot be trusted to hide Cloudflare token entry.\n" +
+      "  Windows PowerShell echoed a live credential at this prompt on 2026-09-08, and\n" +
+      "  the process cannot detect when that happens, so it will not ask here.\n" +
+      "  A browser sign-in needs no token at all and is the ordinary path.\n" +
+      "  If this install can only use a token, read it in with PowerShell's own masked\n" +
+      "  prompt, Read-Host -AsSecureString, and hand it to this command through the\n" +
+      "  environment rather than typing it here. Close that window when you are done.\n" +
+      "  Automation may inject it through an approved secret manager.",
     insecure:
       "no Cloudflare credential is available and this terminal cannot prompt securely.\n" +
       "  The simplest fix is a browser sign-in, which needs no token at all:\n" +
@@ -879,6 +922,29 @@ export async function withCloudflareControlCredential(action, options = {}) {
   // A saved profile is authoritative for that Brain. An unrelated ambient
   // token must not silently replace it. Fresh interactive setup is OAuth-first.
   if (forceToken || (!freshOAuth && !authProfile)) {
+    // Say WHY this is asking for a token, when the reason is simply that the
+    // manifest predates the browser sign-in lane.
+    //
+    // auth_profile is written when a manifest is first created, so every install
+    // made before that lane existed has none, and lands here forever without
+    // ever being told the ordinary path is available to it. A client on
+    // 2026-09-08 minted and pasted tokens across four update attempts believing
+    // that was simply how this works. It is not; his manifest was just older
+    // than the feature.
+    //
+    // This does not adopt anything. Adoption changes which credential a brain
+    // uses and stays behind an explicit consent flag, which is correct. It only
+    // stops the token lane from looking like the only lane.
+    if (!forceToken && !authProfile && !cloudflareTokenAvailable()) {
+      info(
+        "this manifest records no browser sign-in for this Brain, so it is using the token lane.\n" +
+        "  That is the recovery path, not the ordinary one. If this computer can sign in\n" +
+        "  through a browser, `--adopt-cloudflare-profile` records one for this Brain and\n" +
+        "  later commands stop asking for a token. Some machines cannot: Wrangler is not\n" +
+        "  always able to enable encrypted credential storage, and the token lane stays\n" +
+        "  correct there."
+      );
+    }
     try {
       return await runToken();
     } catch (error) {
@@ -1441,7 +1507,23 @@ export function chooseDbName(cfg, slug) {
  * reads a warning the damage is done: migrate writes into it, and the
  * client_slug upsert relabels another client's brain as this one.
  */
-export async function assertAdoptable(acctId, db, dbName, slug, query = d1Query) {
+export async function assertAdoptable(acctId, db, dbName, slug, query = d1Query, knownDbId = null) {
+  // Adoption requires that THIS manifest already owned this database.
+  //
+  // The comment above the caller has always said a name match is not proof of
+  // ownership, and the check below was nevertheless a name match: it compared
+  // the recorded client slug against the incoming one. Two installs that both
+  // took the same default slug therefore matched each other and were waved
+  // through. Observed end to end on 2026-09-08: two independent manifests
+  // resolved to one brain, the second reported adopting it and reusing its
+  // durable admin key, and from the second manifest the first install's corpus
+  // was listable.
+  //
+  // A slug is a label either party may hold by accident. The database id in the
+  // manifest is not: provision writes it after creating or adopting, so a
+  // genuine re-run carries it and a fresh manifest cannot. That is the only
+  // discriminator here that a second party cannot arrive at by default.
+  const alreadyOurs = Boolean(knownDbId) && String(knownDbId) === String(db.uuid);
   let names;
   try {
     const res = await query(
@@ -1480,6 +1562,27 @@ export async function assertAdoptable(acctId, db, dbName, slug, query = d1Query)
         "  Set infrastructure.cloudflare.d1_database_name to a name this account does not use."
     );
   }
+
+  // The slug matched, or there was none to compare. That is not enough. Unless
+  // this manifest already recorded this exact database, we are looking at a
+  // brain some other install created, and taking it would hand this operator
+  // that install's corpus and its durable admin key.
+  if (!alreadyOurs) {
+    die(
+      `D1 "${dbName}" (${db.uuid}) is already a brain, and this manifest has never owned it.` + "\n" +
+        "  Refusing to adopt it. A matching name is not proof that it is yours: two installs" + "\n" +
+        "  that accept the same default would match each other exactly here.\n" +
+        "\n" +
+        "  IF THIS BRAIN IS YOURS, and you are rebuilding a lost manifest, say so by hand.\n" +
+        "  Put this exact line in the manifest, then run the same command again:\n" +
+        `      infrastructure.cloudflare.d1_database_id: "${db.uuid}"\n` +
+        "  That is a claim of ownership, which is why the installer will not make it for you.\n" +
+        "\n" +
+        "  IF IT IS NOT YOURS, do not point a new install at it. Set client.slug and\n" +
+        "  infrastructure.cloudflare.d1_database_name to values this account does not use.\n" +
+        "  Renaming while it IS yours would abandon this brain with your documents in it."
+    );
+  }
 }
 
 async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
@@ -1502,7 +1605,7 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
   const existing = await cf(`/accounts/${acct.id}/d1/database`);
   let db = (existing || []).find((d) => d.name === dbName);
   if (db) {
-    await assertAdoptable(acct.id, db, dbName, slug);
+    await assertAdoptable(acct.id, db, dbName, slug, d1Query, cfg.d1_database_id);
     ok(`D1 "${dbName}" already exists (${db.uuid}), adopting it`);
   } else {
     db = await cf(`/accounts/${acct.id}/d1/database`, {
@@ -1512,6 +1615,14 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
     ok(`D1 "${dbName}" created (${db.uuid})`);
   }
   cfg.d1_database_id = db.uuid;
+  // Persist ownership the moment it is true, not at the end of provisioning.
+  // Adoption now requires this id, and everything between here and the save at
+  // the end of this function can die: seven of those exits are in the Vectorize
+  // section alone. Recording the id only in memory would turn an install that
+  // creates the database and then trips on the index into a dead end, because
+  // the retry would find a database it could not prove was its own. The fact is
+  // durable here so the retry can prove it.
+  saveManifest(path, m);
 
   // R2, optional. A failure here is not fatal: the brain runs without it.
   // Same predicate verify uses, so the two can never disagree again.
@@ -1595,7 +1706,36 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
         if (metric && metric !== "cosine") {
           die(`Vectorize index "${idxName}" uses metric "${metric}", not cosine. Ranking would be wrong, not broken, so this refuses rather than adopts.`);
         }
-        ok(`Vectorize "${idxName}" already exists, adopting it`);
+        // Dimensions and metric say the index is COMPATIBLE, not that it is
+        // ours. This adopted on a name match alone, which is the same defect
+        // the placeholder comment above describes, arriving through a real
+        // name instead of a placeholder one. A defaulted name is exactly the
+        // colliding case: two installs that never named an index compute the
+        // same one and the second would take the first's vector store.
+        //
+        // An explicitly configured name is a deliberate choice, and provision
+        // writes the name back after it succeeds, so a genuine re-run arrives
+        // here with it set. A first run from a fresh manifest cannot.
+        if (!configuredIndex) {
+          die(
+            `Vectorize index "${idxName}" already exists, and this manifest did not name it.` + "\n" +
+              "  Refusing to adopt it. The name was derived from the client slug, so another" + "\n" +
+              "  install that accepted the same default would land on this exact index and the" + "\n" +
+              "  two would share one vector store.\n" +
+              "\n" +
+              "  IF THIS INDEX IS YOURS, and you are rebuilding a lost manifest, say so by hand.\n" +
+              "  Put this exact line in the manifest, then run the same command again:\n" +
+              `      infrastructure.cloudflare.vectorize_index: "${idxName}"\n` +
+              "  That is a claim of ownership, which is why the installer will not make it for you.\n" +
+              "\n" +
+              "  IF IT IS NOT YOURS, set client.slug and infrastructure.cloudflare.vectorize_index\n" +
+              "  to values this account does not use. Renaming while it IS yours would leave this\n" +
+              "  index behind holding your vectors."
+          );
+        }
+        cfg.vectorize_index = idxName;
+        saveManifest(path, m);
+        ok(`Vectorize "${idxName}" already exists and this manifest names it, adopting it`);
       } else if (viaApi) {
         await cf(`/accounts/${acct.id}/vectorize/v2/indexes`, {
           method: "POST",
@@ -1606,6 +1746,16 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
           },
         });
         ok(`Vectorize "${idxName}" created (768-dim, cosine)`);
+        // Persist ownership the instant the index exists, BEFORE the metadata
+        // index wait below. That loop is deliberately patient, up to a hundred
+        // polls per property, and any exit inside it used to leave the index
+        // created in the account and unnamed in the manifest. Adoption now
+        // requires the manifest to name it, so a retry after that would find an
+        // index it could not prove was its own and refuse, permanently, on the
+        // standard install path where setup deletes this key. The name is
+        // durable here so the retry can prove it.
+        cfg.vectorize_index = idxName;
+        saveManifest(path, m);
       } else {
         // 768 and cosine are the output shape of @cf/baai/bge-base-en-v1.5, the
         // model the worker embeds with. Any other values reject every vector or
@@ -1616,6 +1766,12 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
         );
         if (!r.ok) die(`wrangler could not create the Vectorize index: ${r.out.slice(-400)}`);
         ok(`Vectorize "${idxName}" created via wrangler (768-dim, cosine)`);
+        // Same reason as the API branch above, and this is the branch that
+        // matters more: wrangler is the ordinary browser sign-in lane, the API
+        // token is the recovery-only one. Persisting ownership only on the API
+        // path left the dead end open on the path almost every owner takes.
+        cfg.vectorize_index = idxName;
+        saveManifest(path, m);
       }
 
       // Metadata indexes must be ACTIVE before any vector is written; they do
@@ -1722,11 +1878,41 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
   if (m.brain?.domain) return m.brain.domain;
   const readSubdomain = options.readSubdomain ??
     (() => cf(`/accounts/${acct.id}/workers/subdomain`));
-  const sub = await readSubdomain().catch(() => null);
+  // Three different things can go wrong here and they used to print one
+  // sentence. `.catch(() => null)` swallowed every failure, including the
+  // credential error whose own text warns against pasting a token into a
+  // shell, and then blamed an account setting instead. A field install lost
+  // most of an evening to it: the subdomain was set the whole time, the owner
+  // went to the dashboard and correctly changed nothing, and eventually pasted
+  // a raw API token at a prompt to get past a message that was not true.
+  //
+  // This call authenticates with an API token while the deploy around it can be
+  // running on a browser session, so "no credential for THIS call" is an
+  // ordinary outcome on the path the runbook recommends, not an exotic one.
+  let sub = null;
+  let readFailure = null;
+  try {
+    sub = await readSubdomain();
+  } catch (error) {
+    readFailure = error;
+  }
+  if (readFailure) {
+    // A credential failure already says the right thing, including how to sign
+    // in without a token. Re-raise it rather than replacing it with a guess.
+    if (readFailure instanceof Fatal) throw readFailure;
+    const detail = String(readFailure?.message || readFailure || "").split("\n")[0].slice(0, 200);
+    die(
+      "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
+        `  Cloudflare did not answer that read: ${detail}\n` +
+        "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
+        "  call is using and its scope before changing anything in the dashboard."
+    );
+  }
   const label = typeof sub?.subdomain === "string" ? sub.subdomain.trim() : "";
   if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)) {
     die(
       "the workers.dev route is enabled, but Cloudflare did not return a usable account subdomain.\n" +
+        "  The read succeeded and carried no usable name, so the subdomain really is unset.\n" +
         "  The Worker is deployed, but its token-free URL cannot be saved. Rerun deploy after\n" +
         "  the Workers subdomain is visible in Cloudflare."
     );
@@ -6463,7 +6649,7 @@ async function purgeDocuments(base, adminKey, name) {
       if (queued > 0) {
         warnings.push(
           `${num(queued)} physical vector deletion(s) remain queued. The documents are unreachable, ` +
-          `but run \`brain drain <manifest>\` to reclaim the vector slots.`
+          `and the scheduled drain reclaims their vector slots on its own.`
         );
       }
       if (body?.vector_error) warnings.push(`vector cleanup reported: ${String(body.vector_error).slice(0, 180)}`);
@@ -6750,7 +6936,9 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   if (!root) {
     die(
       "brain ingest needs --path <folder>.\n" +
-        "  Optional: --source <name> (default \"upload\"), --limit <n>, --dry-run,\n" +
+        "  Optional: --source <name>, --limit <n>, --dry-run,\n" +
+        "            (source defaults to the one this manifest declares for the folder,\n" +
+        "             or \"upload\" when it declares none),\n" +
         "            --reset to ignore previous progress and re-send everything."
     );
   }
@@ -6758,7 +6946,45 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   const { walk, prepare, batchStream, splitOversized, loadState, saveState, removedSinceLastRun } = await ingestLib();
 
   const sourceExplicit = typeof flags.source === "string" && flags.source.trim() !== "";
-  const sourceName = assertSourceName(flags.source === true ? null : flags.source || "upload");
+  // A manifest that names a source for this folder is the answer, not "upload".
+  //
+  // `brain load` reads corpora.upload.folders[].source. This command did not,
+  // so the SAME manifest and the SAME folder filed under two different source
+  // names depending on which command was run. On 2026-09-08 that indexed a
+  // 2,249-document corpus a second time under "upload" alongside the 1,537
+  // already filed under the declared name, both live and queryable, so
+  // retrieval would return one document twice under two provenance names.
+  //
+  // The declaration wins when no --source is given. An explicit --source that
+  // contradicts it stops rather than guessing, because someone doing that on
+  // purpose can say so and someone doing it by accident is about to duplicate a
+  // corpus.
+  const declaredSource = declaredUploadSourceFor(m, root);
+  if (sourceExplicit && declaredSource && flags.source.trim() !== declaredSource) {
+    die(
+      `this manifest files "${root}" under source "${declaredSource}", but --source says ` +
+        `"${flags.source.trim()}".\n` +
+        "  Loading it under a second name indexes the same documents twice, once under each,\n" +
+        "  and both stay live and queryable. Nothing was sent.\n" +
+        `  Drop --source to use the declared name, or pass --source "${declaredSource}" to confirm it.`
+    );
+  }
+  const sourceName = assertSourceName(
+    flags.source === true ? null : flags.source || declaredSource || "upload"
+  );
+  // Say where these documents are going BEFORE sending them, not after.
+  //
+  // This sentence already existed, buried inside the branch that only runs when
+  // the content sniffer recognises a WhatsApp or mbox export. Ingest a folder of
+  // PDFs and the run never told you which source they landed in, even though the
+  // value was computed here. One line, printed at the top, is what would have
+  // caught a duplicated corpus before it was sent rather than after.
+  info(
+    `filing into source "${sourceName}"` +
+    (declaredSource && !sourceExplicit ? " (declared for this folder in the manifest)"
+      : sourceExplicit ? " (from --source)"
+      : " (the default; the manifest declares none for this folder, and --source names it)")
+  );
   // What the content sniffer recognised, so the run can say so at the end.
   const messageExportsSeen = new Set();
   // A dry run sends nothing, so it must not demand credentials it will never
@@ -6786,6 +7012,25 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   const scannerPolicyChanged = state.credential_scanner_fingerprint !== scannerFingerprint;
   const alreadyDone = Object.keys(state.done).length;
   if (alreadyDone && !flags.reset) info(`resuming: ${alreadyDone} file(s) already loaded`);
+
+  // A changed credential scanner means every document indexed under the old one
+  // has to be read again, which is correct. Saying so is the part that was
+  // missing. A state file written before 0.4.0 carries no fingerprint at all, so
+  // the comparison is `undefined !== <hash>` and EVERY document is re-sent.
+  //
+  // On 2026-09-09 a client upgrading 0.3.5 to 0.4.1 found this only because her
+  // agent ran a dry run first: 11,217 documents to send, 0 unchanged, on a brain
+  // already carrying a 164,000 chunk backlog. A watched folder would have acted
+  // on it unattended and roughly doubled the queue. The re-check is not the
+  // defect; discovering it by accident is.
+  if (scannerPolicyChanged && previouslyKnownKeys.size && !flags.reset) {
+    warn(
+      `the credential scanner changed, so all ${previouslyKnownKeys.size} document(s) already loaded from this source will be read and sent again.\n` +
+      "      This run will report them as sent rather than unchanged, and that is expected.\n" +
+      "      If a schedule or watched folder loads this source unattended, pause it until one full run finishes,\n" +
+      "      because until then every run re-sends everything."
+    );
+  }
 
 
   // OCR, and what it will cost, decided ONCE per run and stated out loud
@@ -6871,6 +7116,23 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     if (raw !== normalized) candidateLocalKeys.add(raw);
   }
   addLocalPathAliases(candidateLocalKeys, walkSkips, "path");
+  // A skipped link stands in for a whole subtree, so exact-path protection is
+  // not enough: every key that was previously indexed UNDER it must be shielded
+  // too, or the first run after a junction appears would read those children as
+  // deleted. This is the invariant the walk used to protect by refusing
+  // outright; protecting it here is what lets the send proceed.
+  const subtreeSkipPrefixes = walkSkips
+    .filter((skip) => skip?.subtree && skip?.path)
+    .map((skip) => String(skip.path).split(sep).join("/").replace(/\/+$/, ""))
+    .filter(Boolean);
+  if (subtreeSkipPrefixes.length) {
+    for (const key of previouslyKnownKeys) {
+      const normalized = String(key).split(sep).join("/");
+      if (subtreeSkipPrefixes.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`))) {
+        candidateLocalKeys.add(key);
+      }
+    }
+  }
   const protectedLocalSkipKeys = candidateLocalKeys;
   // Files this source loaded before and can no longer find.
   //
@@ -7285,7 +7547,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     // went, and leaves the split to the person who knows who is in it.
     const found = [...messageExportsSeen].sort().join(", ");
     info(`recognised and loaded as conversations: ${found}`);
-    info(`  filed under source "${sourceName}"${sourceExplicit ? "" : " (the default; --source names it)"}`);
+    info(`  filed under source "${sourceName}"`);
     warn(
       "a message export usually spans more than one sensitivity zone, so one source\n" +
       "  name may be the wrong unit for it. Splitting the export, or ingesting it under\n" +
@@ -8581,6 +8843,37 @@ const PROVIDER_LOAD_PROOF_NOTE =
   "this connector has scripted provider proof; real account acceptance remains a field gate";
 
 /** The folders a manifest declares for the local-upload corpus, normalized. */
+/**
+ * The source name this manifest declares for a folder, if it declares one.
+ *
+ * `brain load` has always honoured corpora.upload.folders[].source. `brain
+ * ingest --path` defaulted to "upload" and never looked, which is how one
+ * manifest filed one folder under two names.
+ */
+export function declaredUploadSourceFor(manifest, folderPath) {
+  const target = String(folderPath || "").trim();
+  if (!target) return null;
+  let folders;
+  try {
+    folders = uploadFoldersOf(manifest?.corpora?.upload);
+  } catch {
+    return null;
+  }
+  const same = (a, b) => {
+    const norm = (v) => String(v || "").trim().replace(/[\\/]+$/, "").replace(/\\/g, "/");
+    const left = norm(a); const right = norm(b);
+    if (!left || !right) return false;
+    // Windows paths are case-insensitive; POSIX ones are not.
+    return process.platform === "win32"
+      ? left.toLowerCase() === right.toLowerCase()
+      : left === right;
+  };
+  for (const folder of folders) {
+    if (folder?.source && same(folder.path, target)) return String(folder.source);
+  }
+  return null;
+}
+
 export function uploadFoldersOf(corpus) {
   const declared = corpus?.folders ?? corpus?.paths ?? (corpus?.path ? [corpus.path] : []);
   if (!Array.isArray(declared)) {

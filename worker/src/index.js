@@ -19,6 +19,7 @@
  * entire users/sessions stack, which is the single largest simplification.
  */
 
+import { WORKER_VERSION } from "./lib/version.js";
 import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLLM } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { handleBankFeed, bankFeedEnabled } from "./lib/bank-feed.js";
@@ -1933,7 +1934,13 @@ export default {
           }
           : { accepting_documents: true }),
         brain: env.BRAIN_NAME || "brain",
-        version: env.BRAIN_VERSION || "0.1.0",
+        // The code's own version is authoritative. The deploy-time variable is
+        // reported only when it disagrees, because a silent disagreement is how
+        // a two-release drift hid for months on a client brain.
+        version: WORKER_VERSION,
+        ...(env.BRAIN_VERSION && env.BRAIN_VERSION !== WORKER_VERSION
+          ? { configured_version: env.BRAIN_VERSION, version_mismatch: true }
+          : {}),
         ...(schemaVersion === null ? {} : { schema_version: schemaVersion }),
         vector_writer_protocol: "lease-v1",
         vector_drain_mode: paused ? "paused-for-upgrade" : "active",
@@ -1952,7 +1959,13 @@ export default {
     // previewed as a 401 instead of an image.
     if (path === "/app" || path.startsWith("/auth/") || path.startsWith("/api/app/") ||
         path.startsWith("/brand/") || path.startsWith("/app/assets/")) {
-      const response = await handleOwnerAuth(env, request, url, path);
+      // /auth/* takes unauthenticated writes (WebAuthn challenge rows), so it
+      // carries a public policy in the guard's table. The guard is a no-op for
+      // every other path in this branch, and it hands back the request whose
+      // body it bounded, which is the one the handler must read.
+      const guarded = await guardPublicRequest(env, request, url, path);
+      if (guarded.response) return privateNoStore(guarded.response);
+      const response = await handleOwnerAuth(env, guarded.request, url, path);
       // /auth/ carries WebAuthn challenges and the session cookie itself. A
       // cached challenge is a replayable one, so it is no-store alongside the
       // app's API rather than treated as an ordinary page.
@@ -2057,10 +2070,32 @@ export default {
     // bearer token those ceremonies earn — exactly the read-only class.
     if (path === "/.well-known/oauth-authorization-server") return handleOAuthMetadata(url);
     if (path === "/.well-known/oauth-protected-resource") return handleProtectedResourceMetadata(url);
-    if (path === "/oauth/register" && request.method === "POST") return handleRegister(env, request);
-    if (path === "/oauth/authorize" && request.method === "GET") return handleAuthorizePage(env, url);
-    if (path === "/oauth/authorize/decision" && request.method === "POST") return handleAuthorizeDecision(env, request, url);
-    if (path === "/oauth/token" && request.method === "POST") return handleToken(env, request);
+    // Each of these four is reachable by anyone who learns the hostname and
+    // writes to the owner's own D1 without a credential: register inserts an
+    // oauth_clients row, authorize and token write and consume auth state. The
+    // guard's policy table has always carried limits for them; nothing called
+    // it. An unguarded register is metered writes on the owner's paid account,
+    // driven by a stranger, so treat a missing guard call here as a defect.
+    if (path === "/oauth/register" && request.method === "POST") {
+      const guarded = await guardPublicRequest(env, request, url, path);
+      if (guarded.response) return guarded.response;
+      return handleRegister(env, guarded.request);
+    }
+    if (path === "/oauth/authorize" && request.method === "GET") {
+      const guarded = await guardPublicRequest(env, request, url, path);
+      if (guarded.response) return guarded.response;
+      return handleAuthorizePage(env, url);
+    }
+    if (path === "/oauth/authorize/decision" && request.method === "POST") {
+      const guarded = await guardPublicRequest(env, request, url, path);
+      if (guarded.response) return guarded.response;
+      return handleAuthorizeDecision(env, guarded.request, url);
+    }
+    if (path === "/oauth/token" && request.method === "POST") {
+      const guarded = await guardPublicRequest(env, request, url, path);
+      if (guarded.response) return guarded.response;
+      return handleToken(env, guarded.request);
+    }
     if (path === "/mcp") {
       const grant = await validateConnectorToken(request, env);
       if (!grant) {
