@@ -205,6 +205,20 @@ for (const [label, body, expectedStage, detailPattern] of [
 {
   const diagnostic = answerUnavailableDiagnostic({
     results: [{ n: 1 }],
+    evidence_gate: {
+      supported: false,
+      complete: false,
+      error: "verifier failed with private-payload-canary",
+    },
+  });
+  check("an older Worker's raw verifier error is replaced with reviewed public copy",
+    /evidence verifier was unavailable/i.test(diagnostic.detail) &&
+      !/private-payload-canary/i.test(diagnostic.detail), JSON.stringify(diagnostic));
+}
+
+{
+  const diagnostic = answerUnavailableDiagnostic({
+    results: [{ n: 1 }],
     answer_error: "provider failed with private-payload-canary",
   });
   check("an older Worker's raw model error is replaced with reviewed public copy",

@@ -104,7 +104,10 @@ export function answerUnavailableDiagnostic(payload) {
   if (evidenceGate?.error) {
     return {
       stage: "answer_verification",
-      detail: diagnosticText(evidenceGate.error, "the evidence verifier was unavailable"),
+      // Modern Workers emit a fixed public token here, but an acceptance
+      // runner can be newer than the Worker it probes. Never carry an older
+      // raw verifier/provider error into the local report.
+      detail: "the evidence verifier was unavailable; no answer was accepted",
     };
   }
 
