@@ -33,8 +33,8 @@ that stops the waiting. Nothing here changes what your brain holds.
 
 - **A test that receives no written answer now names the stage that stopped.**
   It distinguishes retrieval, incomplete source coverage, answer generation,
-  and evidence verification, then keeps the specific safe reason returned by
-  the Brain. It no longer leaves the person running the test with "unknown."
+  and evidence verification, then keeps only a reviewed safe explanation. It
+  no longer leaves the person running the test with "unknown."
 
 ## 0.4.5
 
