@@ -115,7 +115,12 @@ ok("the macOS guide pins the same commit as the public contract");
 // The install itself, into a prefix that is thrown away with the runner.
 const prefix = join(workdir, "prefix");
 mkdirSync(prefix, { recursive: true });
-execFileSync("npm", ["install", "--prefix", prefix, "--no-audit", "--no-fund", tgzPath],
+// npm on Windows is npm.cmd. execFileSync does not apply PATHEXT, so the bare
+// name is ENOENT there and nowhere else: this passed on three runners and failed
+// only on the one the client actually uses. Exactly the Windows-only class this
+// job exists to catch, found on its first real run, in the job itself.
+const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+execFileSync(npmCmd, ["install", "--prefix", prefix, "--no-audit", "--no-fund", tgzPath],
   { stdio: "inherit", env: { ...process.env, npm_config_yes: "true" } });
 ok("the packaged archive installs into a clean prefix");
 
