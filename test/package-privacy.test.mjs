@@ -495,6 +495,7 @@ const expected = [
   // and live credentials before allowlisting: it names no account, no resource,
   // and no token, and it takes every value it checks from the published
   // contract rather than carrying one.
+  "operations/npm-cli-runtime.mjs",
   "scripts/install-from-public-contract.mjs",
   // Ported from the field line 2026-09-03. Reviewed for private identity and
   // live credentials before allowlisting; both scans clean.

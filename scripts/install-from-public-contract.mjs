@@ -24,6 +24,11 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import {
+  buildNpmCliInvocation,
+  buildWindowsBatchInvocation,
+  resolveNpmCliPath,
+} from "../operations/npm-cli-runtime.mjs";
 
 const workdir = resolve(process.argv[2] || "./install-contract-run");
 const guideArg = process.argv.includes("--guide")
@@ -115,17 +120,31 @@ ok("the macOS guide pins the same commit as the public contract");
 // The install itself, into a prefix that is thrown away with the runner.
 const prefix = join(workdir, "prefix");
 mkdirSync(prefix, { recursive: true });
-// npm on Windows is npm.cmd. execFileSync does not apply PATHEXT, so the bare
-// name is ENOENT there and nowhere else: this passed on three runners and failed
-// only on the one the client actually uses. Exactly the Windows-only class this
-// job exists to catch, found on its first real run, in the job itself.
-const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-execFileSync(npmCmd, ["install", "--prefix", prefix, "--no-audit", "--no-fund", tgzPath],
-  { stdio: "inherit", env: { ...process.env, npm_config_yes: "true" } });
+// A Windows npm executable is npm.cmd, and Node cannot launch a batch file with
+// execFileSync. Reach the validated JavaScript entry through this Node runtime
+// on every platform instead. No shell parses the prefix or archive path.
+const npmCli = resolveNpmCliPath();
+const npmInstall = buildNpmCliInvocation(npmCli,
+  ["install", "--prefix", prefix, "--no-audit", "--no-fund", tgzPath]);
+execFileSync(npmInstall.command, npmInstall.args,
+  { stdio: "inherit", shell: npmInstall.shell, env: { ...process.env, npm_config_yes: "true" } });
 ok("the packaged archive installs into a clean prefix");
 
 const bin = join(prefix, "node_modules", ".bin", process.platform === "win32" ? "brain.cmd" : "brain");
-const readback = execFileSync(bin, ["--version"], { encoding: "utf8" }).trim();
+const runBrain = (args, options) => {
+  if (process.platform !== "win32") return execFileSync(bin, args, options);
+  const command = buildWindowsBatchInvocation(
+    process.env.ComSpec || process.env.COMSPEC || "C:\\Windows\\System32\\cmd.exe",
+    bin,
+    args,
+  );
+  return execFileSync(command.command, command.args, {
+    ...options,
+    shell: command.shell,
+    windowsVerbatimArguments: command.windowsVerbatimArguments,
+  });
+};
+const readback = runBrain(["--version"], { encoding: "utf8" }).trim();
 if (readback !== version) die(`the installed CLI reports ${readback}, the contract declares ${version}`);
 ok(`the installed CLI reports ${readback}, matching the contract`);
 
@@ -136,7 +155,7 @@ ok(`the installed CLI reports ${readback}, matching the contract`);
 // contract ci.yml's "doctor reports rather than crashing" step enforces.
 let doctorOut = "";
 try {
-  doctorOut = execFileSync(bin, ["doctor"], { encoding: "utf8", stdio: "pipe" });
+  doctorOut = runBrain(["doctor"], { encoding: "utf8", stdio: "pipe" });
 } catch (e) {
   doctorOut = `${e.stdout || ""}${e.stderr || ""}`;
 }
