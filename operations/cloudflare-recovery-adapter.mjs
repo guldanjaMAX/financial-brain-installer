@@ -234,6 +234,7 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "quickbooks_oauth_intents",
   "document_source_inventory",
   "plaid_sync_leases",
+  "vector_projection_events",
 ]);
 
 /**
@@ -316,6 +317,10 @@ const INSTALL_STATE_NULL_NORMALIZED_COLUMNS = Object.freeze([
   "vector_projection_mutation_id", "vector_projection_submitted_at",
   "vector_projection_bootstrap_cursor",
   "vector_projection_bootstrap_protocol",
+  // An open residue-only walk belongs to the SOURCE index's projection. A
+  // restored brain re-walks its whole corpus into the new index, so the marker
+  // must not survive: with it, the restored walk would page only the outbox.
+  "vector_projection_residue_epoch",
 ]);
 const INSTALL_STATE_ZERO_NORMALIZED_COLUMNS = Object.freeze([
   // Queue generations belong to the target's derived Vectorize projection.
@@ -336,7 +341,7 @@ const INSTALL_STATE_ZERO_NORMALIZED_COLUMNS = Object.freeze([
 // the point: a recovery drill against an unreviewed schema could omit a
 // durable table silently. Never raise this without reviewing each migration's
 // tables and recovery behavior.
-const RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION = 35;
+const RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION = 36;
 
 function quoteIdentifier(value) {
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(value)) {
@@ -445,6 +450,7 @@ const SCHEMA_34_TABLES = Object.freeze([
 const SCHEMA_35_TABLES = Object.freeze([
   "plaid_sync_leases",
 ]);
+const SCHEMA_36_TABLES = Object.freeze(["vector_projection_events"]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -464,7 +470,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_19_TABLES, ...SCHEMA_21_TABLES, ...SCHEMA_22_TABLES, ...SCHEMA_23_TABLES,
      ...SCHEMA_24_TABLES, ...SCHEMA_25_TABLES, ...SCHEMA_26_TABLES, ...SCHEMA_27_TABLES,
      ...SCHEMA_28_TABLES, ...SCHEMA_30_TABLES, ...SCHEMA_31_TABLES,
-     ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES].includes(table)
+     ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
+     ...SCHEMA_36_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -488,19 +495,20 @@ const AGGREGATE_SQL = `SELECT ${AGGREGATE_FIELDS.map(
 ).join(",")}`;
 
 export class CloudflareRecoveryAdapterError extends Error {
-  constructor(code) {
-    super(code);
+  constructor(code, detail = null) {
+    super(detail ? `${code}: ${detail}` : code);
     this.name = "CloudflareRecoveryAdapterError";
     this.code = code;
+    this.detail = detail;
   }
 }
 
-function recoveryError(code) {
-  return new CloudflareRecoveryAdapterError(code);
+function recoveryError(code, detail = null) {
+  return new CloudflareRecoveryAdapterError(code, detail);
 }
 
-function refuse(code) {
-  throw recoveryError(code);
+function refuse(code, detail = null) {
+  throw recoveryError(code, detail);
 }
 
 function normalizeStopAfterStage(value) {
@@ -1001,6 +1009,7 @@ function expectedInstallStateColumns(migrations) {
     ...(latest >= 12 ? INSTALL_STATE_PROJECTION_COLUMNS : []),
     ...(latest >= 13 ? INSTALL_STATE_BOOTSTRAP_V2_COLUMNS : []),
     ...(latest >= 14 ? ["session_generation"] : []),
+    ...(latest >= 36 ? ["vector_projection_residue_epoch"] : []),
   ]);
 }
 
@@ -1262,7 +1271,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 31 || !SCHEMA_31_TABLES.includes(table)) &&
     (latest >= 32 || !SCHEMA_32_TABLES.includes(table)) &&
     (latest >= 34 || !SCHEMA_34_TABLES.includes(table)) &&
-    (latest >= 35 || !SCHEMA_35_TABLES.includes(table)));
+    (latest >= 35 || !SCHEMA_35_TABLES.includes(table)) &&
+    (latest >= 36 || !SCHEMA_36_TABLES.includes(table)));
 }
 
 function assertExpectedTables(rows, migrations) {
@@ -2136,12 +2146,17 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
   ) {
     const migrations = await remoteMigrationContract(binding);
     if (migrations.at(-1)?.version !== RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION) {
-      // The current Worker requires the exact schema-35 generation, lease,
+      // The current Worker requires the exact schema-36 generation, lease,
       // async-visibility, and durable bulk-bootstrap protocol. A historical
       // exact-prefix artifact remains
       // inspectable offline, but the field runner has no implicit live-upgrade
       // authority and therefore stops before export, restore, or provider I/O.
-      refuse(code);
+      // Say what to do: every brain that has not run `brain update` on this
+      // build lands here, and the operator sheet is "update first, then recover".
+      refuse(code,
+        `this brain's schema is at ${migrations.at(-1)?.version ?? "an unknown version"} and this recovery runner ` +
+        `requires ${RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION}. Run \`brain update <manifest>\` on it first, then recover. ` +
+        "The runner never upgrades a brain implicitly.");
     }
     return migrations;
   }
@@ -3113,12 +3128,19 @@ async function main(argv = process.argv.slice(2)) {
       : await runCloudflareRecoveryFieldGate(parsed);
     const output = parsed.command === "run" ? result.status : result;
     console.log(JSON.stringify(output, null, 2));
+    if (result?.ok === false) {
+      const failure = result.status?.failure ?? result.state?.failure ?? null;
+      const cause = failure?.cause ? ` (${failure.cause})` : "";
+      console.error(`Cloudflare recovery field gate stopped: ${result.errorCode ?? failure?.code ?? "RECOVERY_FAILED"}${cause}`);
+      if (failure?.detail) console.error(`  ${failure.detail}`);
+    }
     return result?.ok === false ? 1 : 0;
   } catch (error) {
     const code = error instanceof CloudflareRecoveryAdapterError
       ? error.code
       : "RECOVERY_FIELD_GATE_PREFLIGHT_FAILED";
     console.error(`Cloudflare recovery field gate stopped: ${code}`);
+    if (error instanceof CloudflareRecoveryAdapterError && error.detail) console.error(`  ${error.detail}`);
     return 1;
   }
 }

@@ -498,6 +498,79 @@ try {
     "restore_d1", "verify_d1", "reconcile_security", "rebuild_vectorize", "verify_health", "verify_eval",
   ]);
 
+  // ROOT 4 REGRESSION. An adapter failure carrying an operator-facing detail
+  // sentence (the shape CloudflareRecoveryAdapterError produces since the
+  // detail was added) used to make markStageFailed's failure record REJECT
+  // its own exact-key validation, so runVerifiedRecovery threw instead of
+  // returning, the operator saw only a generic preflight code with neither
+  // the real cause nor the detail, and nothing was persisted -- leaving the
+  // durable state file claiming an in-flight recovery that had already
+  // stopped. It must instead return normally, name the real cause and
+  // detail, and land the failed status durably.
+  {
+    const detailedError = Object.assign(
+      new Error("RECOVERY_TARGET_UPGRADE_REQUIRED"),
+      {
+        code: "RECOVERY_TARGET_UPGRADE_REQUIRED",
+        detail: "this brain's schema is at 35 and this recovery runner requires 36. " +
+          "Run `brain update <manifest>` on it first, then recover. " +
+          "The runner never upgrades a brain implicitly.",
+      },
+    );
+    const detailedCalls = [];
+    let threw = null;
+    let detailedResult = null;
+    try {
+      detailedResult = await runVerifiedRecovery(
+        initialized.plan,
+        initialState,
+        goodAdapters(detailedCalls, { export_d1: detailedError }),
+        {
+          clock: clock(Date.parse("2026-08-25T15:00:00.000Z")),
+          revalidateManifests: async () => true,
+        },
+      );
+    } catch (error) {
+      threw = error;
+    }
+    assert.equal(threw, null, `runVerifiedRecovery must return, not throw, on a detailed adapter failure: ${threw?.message}`);
+    assert.equal(detailedResult.ok, false);
+    assert.equal(detailedResult.errorCode, "RECOVERY_EXPORT_D1_FAILED");
+    assert.equal(detailedResult.cause, "RECOVERY_TARGET_UPGRADE_REQUIRED");
+    assert.match(detailedResult.detail, /run `brain update <manifest>` on it first, then recover/i);
+    assert.equal(detailedResult.state.status, "failed");
+    assert.equal(detailedResult.state.stage_status, "failed");
+    assert.equal(detailedResult.state.current_stage, "export_d1");
+    assert.equal(detailedResult.state.failure.cause, "RECOVERY_TARGET_UPGRADE_REQUIRED");
+    assert.match(detailedResult.state.failure.detail, /run `brain update <manifest>` on it first, then recover/i);
+    // The state must validate on its own terms too: a second consumer reading
+    // the persisted file back must not choke on it either.
+    const revalidated = validateVerifiedRecoveryState(detailedResult.state, initialized.plan);
+    assert.equal(revalidated.status, "failed");
+    console.log("PASS  a detailed adapter failure returns normally, carries cause and detail, and validates");
+  }
+  // The same failure with NO detail (an ordinary Error, or an adapter error
+  // whose code/detail are absent) must still validate: cause/detail are
+  // always present as null, never omitted.
+  {
+    const bareError = new Error("boring failure");
+    const bareResult = await runVerifiedRecovery(
+      initialized.plan,
+      initialState,
+      goodAdapters([], { export_d1: bareError }),
+      {
+        clock: clock(Date.parse("2026-08-25T15:30:00.000Z")),
+        revalidateManifests: async () => true,
+      },
+    );
+    assert.equal(bareResult.ok, false);
+    assert.equal(bareResult.cause, null);
+    assert.equal(bareResult.detail, null);
+    assert.equal(bareResult.state.failure.cause, null);
+    assert.equal(bareResult.state.failure.detail, null);
+    console.log("PASS  an ordinary failure with no adapter code/detail still validates, both fields null");
+  }
+
   let restoreCalls = 0;
   const dirtyTargetAdapters = goodAdapters([], {
     prove_target_clean: { user_table_count: 1 },

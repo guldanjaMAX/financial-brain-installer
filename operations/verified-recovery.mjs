@@ -73,7 +73,7 @@ const STATE_KEYS = new Set([
   "stage_status", "attempt", "completed", "failure", "created_at", "updated_at",
 ]);
 const COMPLETED_KEYS = new Set(["id", "completed_at", "evidence"]);
-const FAILURE_KEYS = new Set(["stage", "code", "at"]);
+const FAILURE_KEYS = new Set(["stage", "code", "at", "cause", "detail"]);
 
 function fail(message) {
   throw new Error(message);
@@ -683,7 +683,9 @@ export function validateVerifiedRecoveryState(input, planInput) {
     }
     if (status === "failed") {
       if (!exactKeys(input.failure, FAILURE_KEYS) || input.failure.stage !== next ||
-          input.failure.code !== `RECOVERY_${next.toUpperCase()}_FAILED`) {
+          input.failure.code !== `RECOVERY_${next.toUpperCase()}_FAILED` ||
+          (input.failure.cause !== null && typeof input.failure.cause !== "string") ||
+          (input.failure.detail !== null && typeof input.failure.detail !== "string")) {
         fail("verified recovery failure record is invalid");
       }
       isoTimestamp(input.failure.at, "verified recovery failure time");
@@ -717,6 +719,18 @@ function markStageFailed(state, options = {}) {
       stage: state.current_stage,
       code: `RECOVERY_${state.current_stage.toUpperCase()}_FAILED`,
       at: timestamp,
+      // The adapter's own code and sentence, when it gave one, so the operator
+      // reads "run brain update first, then recover" rather than a stage code.
+      // Always present (as null when absent), never conditionally spread: the
+      // exact-key validator above requires the same key set on every failure
+      // record, and a conditional spread here previously made a failure record
+      // WITH cause/detail reject its own validation, so runVerifiedRecovery
+      // threw instead of returning, the operator saw a generic preflight code
+      // with neither the real cause nor the detail sentence, and nothing was
+      // persisted -- leaving the durable state file claiming an in-flight
+      // recovery that had, in fact, already stopped.
+      cause: options.cause ?? null,
+      detail: options.detail ?? null,
     },
     updated_at: timestamp,
   });
@@ -791,12 +805,18 @@ export async function runVerifiedRecovery(planInput, stateInput, adapters, optio
       await options.revalidateManifests(plan.plan_fingerprint);
       state = markStageComplete(state, evidence, plan, { now: clock() });
       await persist(state);
-    } catch {
-      state = validateVerifiedRecoveryState(markStageFailed(state, { now: clock() }), plan);
+    } catch (error) {
+      state = validateVerifiedRecoveryState(markStageFailed(state, {
+        now: clock(),
+        cause: typeof error?.code === "string" ? error.code : null,
+        detail: typeof error?.detail === "string" ? error.detail : null,
+      }), plan);
       await persist(state);
       return Object.freeze({
         ok: false,
         errorCode: state.failure.code,
+        cause: state.failure.cause ?? null,
+        detail: state.failure.detail ?? null,
         state,
       });
     }

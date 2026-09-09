@@ -174,6 +174,7 @@ const installStateColumns = Object.freeze([
   ["vector_projection_bootstrap_protocol", "TEXT"],
   ["vector_projection_bootstrap_base_count", "INTEGER"],
   ["session_generation", "INTEGER"],
+  ["vector_projection_residue_epoch", "INTEGER"],
 ]);
 const fixtureInstallState = Object.freeze({
   id: 1,
@@ -201,10 +202,11 @@ const fixtureInstallState = Object.freeze({
   // Live owner-session coordination; recovery advances this generation once so
   // every cookie minted against the source is invalid on the restored Brain.
   session_generation: 4,
+  vector_projection_residue_epoch: null,
 });
 const normalizedInstallStateSql =
   `INSERT INTO "install_state" (${installStateColumns.map(([name]) => `"${name}"`).join(",")}) VALUES (` +
-  `1,'fixture-brain','0.1.12',13,4,'2026-08-25T12:00:00.000Z',NULL,'stable',NULL,0,NULL,NULL,NULL,NULL,'bootstrap_required',1,NULL,'fixture:chunk#0004',NULL,0,5);\n`;
+  `1,'fixture-brain','0.1.12',13,4,'2026-08-25T12:00:00.000Z',NULL,'stable',NULL,0,NULL,NULL,NULL,NULL,'bootstrap_required',1,NULL,'fixture:chunk#0004',NULL,0,5,NULL);\n`;
 const schemaRows = Object.freeze([
   ...RECOVERY_DURABLE_TABLES.map((name) => ({
     type: "table",
@@ -837,6 +839,10 @@ function providerHarness({
         assert.match(sql, /\(SELECT MAX\(chunk_uid\) FROM chunks\) AS "vector_projection_bootstrap_high_water"/);
         assert.match(sql, /NULL AS "vector_projection_bootstrap_protocol"/);
         assert.match(sql, /0 AS "vector_projection_bootstrap_base_count"/);
+        // An open residue-only re-projection belongs to the SOURCE index. A
+        // restored brain re-walks its whole corpus into a new index, so the
+        // marker must be NULL in the artifact, not the source's value.
+        assert.match(sql, /NULL AS "vector_projection_residue_epoch"/);
         if (isSource) {
           assert.match(sql, /session_generation BETWEEN 1 AND 9007199254740990/);
         } else {

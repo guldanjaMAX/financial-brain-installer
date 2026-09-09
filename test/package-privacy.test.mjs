@@ -528,6 +528,7 @@ const expected = [
   "migrations/d1/0033_zone_inheritance.sql",
   "migrations/d1/0034_document_source_inventory.sql",
   "migrations/d1/0035_plaid_sync_custody.sql",
+  "migrations/d1/0036_vector_projection_events.sql",
   "operations/bank-access-wrapping-key.mjs",
   "operations/bootstrap-status.mjs",
   "operations/cloudflare-account-bootstrap.mjs",

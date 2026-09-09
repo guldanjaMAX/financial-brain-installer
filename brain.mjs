@@ -4134,7 +4134,8 @@ const BOOTSTRAP_COMPLETION_FIELDS = Object.freeze([
 
 // Workers from 0.3.4 also report the not-yet-visible count as `retrying`;
 // older Workers do not. Either shape is the same aggregate-only contract.
-const OPTIONAL_RECEIPT_FIELDS = new Set(["retrying"]);
+const OPTIONAL_RECEIPT_FIELDS = new Set(["retrying", "reprojected_residue", "blocked_on", "blocked_rows"]);
+const BOOTSTRAP_BLOCKED_CAUSES = new Set(["quarantine", "fence", "cleanup"]);
 
 function exactAggregateReceiptFields(body, expected, label) {
   const actual = Object.keys(body).filter((field) => !(OPTIONAL_RECEIPT_FIELDS.has(field) && expected.includes("failed"))).sort();
@@ -4172,6 +4173,28 @@ export function validateAcceleratedBootstrapReceipt(body) {
     expected_vectors: nonNegativeReceiptCount(body, "expected_vectors", label),
     actual_vectors: nonNegativeReceiptCount(body, "actual_vectors", label),
   };
+  // Present only while a residue-only re-projection epoch is open: the number
+  // of queued chunks that epoch re-embeds instead of the whole corpus.
+  if (body.reprojected_residue !== undefined) {
+    receipt.reprojected_residue = nonNegativeReceiptCount(body, "reprojected_residue", label);
+  }
+  // Newer Workers name the not-yet-visible count `retrying`; carry it so the
+  // runner can read the honest name when both are present.
+  if (body.retrying !== undefined) {
+    receipt.retrying = nonNegativeReceiptCount(body, "retrying", label);
+  }
+  // Present only on a cleanup receipt whose bulk re-projection could not open:
+  // the cause in the way and how many rows. Names are validated, never echoed.
+  if (body.blocked_rows !== undefined && body.blocked_on === undefined) {
+    die(`${label} did not match the aggregate-only response contract. Nothing was declared complete.`);
+  }
+  if (body.blocked_on !== undefined) {
+    if (!BOOTSTRAP_BLOCKED_CAUSES.has(body.blocked_on)) {
+      die(`${label} did not match the aggregate-only response contract. Nothing was declared complete.`);
+    }
+    receipt.blocked_on = body.blocked_on;
+    receipt.blocked_rows = body.blocked_rows === undefined ? 0 : nonNegativeReceiptCount(body, "blocked_rows", label);
+  }
   if (typeof receipt.complete !== "boolean" || typeof receipt.vector_ready !== "boolean") {
     die(`${label} did not include boolean completion and readiness proofs. Nothing was declared complete.`);
   }
@@ -4228,7 +4251,22 @@ export function validateAcceleratedBootstrapProgress(previous, current) {
   if (!previous) return current;
   const verifiedRebase = current.complete === true &&
     current.epoch === previous.epoch + 1 && current.total === previous.total;
-  if ((!verifiedRebase && current.epoch !== previous.epoch) || current.total !== previous.total) {
+  // A residue-only re-projection opens a fresh epoch, and it may open on any
+  // round once its pre-open cleanup has finished. The receipt names it.
+  // The predecessor is NOT always `legacy_drain`. A second residue epoch inside
+  // one run opens after a walk that already closed, so its previous receipt is
+  // `building` or `waiting`. That is reachable on the documented path: the
+  // quarantine refusal tells the operator to run `vector-retry`, which this
+  // release deliberately permits while paused, and releasing rows below the
+  // ledger cursor is exactly what opens a second epoch. Requiring `legacy_drain`
+  // killed the update for the whole duration of the walk, which on a 165k-row
+  // residue is hours. The receipt already proves this is a residue open by
+  // carrying `reprojected_residue` with epoch+1 and an unchanged total; the
+  // phase adds nothing to that proof, so it only has to exclude `complete`.
+  const residueOpened = current.reprojected_residue !== undefined &&
+    current.epoch === previous.epoch + 1 && current.total === previous.total &&
+    previous.phase !== "complete";
+  if ((!verifiedRebase && !residueOpened && current.epoch !== previous.epoch) || current.total !== previous.total) {
     die("the accelerated bootstrap changed its durable epoch or total during one update. Re-run `brain update <manifest>`; the Worker remains paused.");
   }
   if (current.confirmed < previous.confirmed || current.remaining > previous.remaining) {
@@ -4316,6 +4354,9 @@ export async function runAcceleratedBootstrap({
   let lastRemaining = null;
   let rounds = 0;
   let lastMovementAt = null;
+  let announcedReprojection = false;
+  let announcedFence = false;
+  let announcedCleanup = false;
 
   for (let round = 1; round <= roundLimit; round++) {
     const roundNow = Number(now());
@@ -4404,10 +4445,11 @@ export async function runAcceleratedBootstrap({
     if (!response.ok) {
       die(`accelerated bootstrap failed with HTTP ${response.status}. No response content was printed. Re-run \`brain update <manifest>\`; the Worker remains paused.`);
     }
-    const receipt = validateAcceleratedBootstrapReceipt(response.body);
+    const validated = validateAcceleratedBootstrapReceipt(response.body);
     // Older Workers report the not-yet-visible count only as `failed`; newer ones
-    // also name it `retrying`. Read either, the semantics are the same.
-    if (receipt && typeof receipt === "object" && receipt.retrying !== undefined) receipt.failed = Number(receipt.retrying);
+    // also name it `retrying`. Read either, the semantics are the same. The
+    // validated receipt is frozen, so derive rather than assign.
+    const receipt = validated.retrying !== undefined ? { ...validated, failed: Number(validated.retrying) } : validated;
     validateAcceleratedBootstrapProgress(previous, receipt);
     if (lastRemaining !== null && receipt.remaining > lastRemaining) {
       die("the accelerated bootstrap remaining count increased. Re-run `brain update <manifest>`; the Worker remains paused.");
@@ -4432,12 +4474,71 @@ export async function runAcceleratedBootstrap({
       // count, and no number of re-runs changes the provider. The receipt already
       // carries both numbers, so name the real cause and give a remedy that can
       // work, rather than sending the operator round a loop with all-zero counters.
+      if (receipt.blocked_on === "fence") {
+        die(`${stalledFor}\n      The index's ordering fence did not open for ${receipt.blocked_rows} submitted row(s). This is the fence, not a slow drain:\n` +
+          "      the pending mutation has not been processed by the index. Re-run `brain update <manifest>` once it has; the Worker remains paused.");
+      }
+      if (receipt.blocked_on === "cleanup" || receipt.reprojected_residue !== undefined) {
+        die(`${stalledFor}\n      Queued rows are still waiting on the paused drain or the bulk re-projection; this is not a missing-vector fault,\n` +
+          "      so do not reindex. Re-run `brain update <manifest>` to resume from durable state; the Worker remains paused.");
+      }
+      // A residue walk that FINISHED and still leaves the provider short lands
+      // here, and the generic remedy below names `brain reindex --yes`. With no
+      // --source that queues nothing, arms a whole-corpus rebuild, and bills the
+      // owner for every chunk again: 1.15M embeddings on the largest brain this
+      // path exists to rescue. The escape above cannot catch it, because it reads
+      // `reprojected_residue` on the CURRENT receipt and closeResidueWalk returns
+      // the status to `pending`, so the Worker stops emitting that field at
+      // exactly the moment this stall becomes possible. `announcedReprojection`
+      // is the sticky fact that a walk ran during THIS run, and it survives the
+      // close. Suppressing the message instead would be worse than the bad
+      // advice: a re-run does another full poll budget, embeds nothing, and dies
+      // the same way. So this terminates too, with a remedy that is bounded.
+      const missingAfterResidue = announcedReprojection &&
+        Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
+        receipt.actual_vectors < receipt.expected_vectors;
+      if (missingAfterResidue) {
+        const short = receipt.expected_vectors - receipt.actual_vectors;
+        die(`${stalledFor}\n` +
+          `      The bulk re-projection finished. Vectorize holds ${receipt.actual_vectors} vector(s) and D1 requires ${receipt.expected_vectors}.\n` +
+          `      Those ${short} vector(s) were not in the queue this walk re-embedded, so re-running the update cannot add them.\n` +
+          "      Do NOT run `brain reindex <manifest> --yes`. Without --source it queues nothing, arms a rebuild of the\n" +
+          "      WHOLE corpus, and every chunk is embedded again on your own account.\n" +
+          "      Find which source is short, then rebuild only that one:\n" +
+          "      brain diagnose <manifest>\n" +
+          "      brain reindex <manifest> --source <name> --yes\n" +
+          "      The Worker remains paused.");
+      }
       if (Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
           receipt.actual_vectors !== receipt.expected_vectors) {
         die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors)}\n` +
           "      Re-running the update cannot change this. The Worker remains paused.");
       }
       die(`${stalledFor} Re-run \`brain update <manifest>\`; the Worker remains paused.`);
+    }
+    // A named cause is decided BEFORE the not-yet-visible wait below: quarantined
+    // rows are counted in `failed`, so a receipt naming quarantine always
+    // carries failed > 0 and would otherwise poll to the movement budget and
+    // then recommend a rebuild instead of the remedy.
+    if (receipt.blocked_on === "quarantine") {
+      die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so this update cannot finish the vector projection.\n` +
+        "      Release them with POST /api/admin/brain/vector-retry {\"confirm\":true} (admin key), then re-run `brain update <manifest>`.\n" +
+        "      If the index rejects them again, the documents they belong to must be forgotten (`brain forget <manifest>`) before the projection can verify.\n" +
+        "      The Worker remains paused.");
+    }
+    if (receipt.blocked_on === "fence" && !announcedFence) {
+      announcedFence = true;
+      info(`waiting on the index's ordering fence for ${receipt.blocked_rows} submitted row(s); the Worker probes a stalled fence on its own, ` +
+        `and the ${Math.round(ACCELERATED_BOOTSTRAP_STALL_MS / 60_000)}-minute movement budget ends this wait if it never opens`);
+    }
+    if (receipt.blocked_on === "cleanup" && !announcedCleanup) {
+      announcedCleanup = true;
+      info(`${receipt.blocked_rows} outbox row(s) of cleanup are draining before the bulk re-projection can open`);
+    }
+    if (receipt.reprojected_residue > 0 && !announcedReprojection) {
+      announcedReprojection = true;
+      info(`residue-only re-projection: ${receipt.reprojected_residue} queued chunk(s) are re-embedded; ` +
+        `the other ${receipt.total - receipt.reprojected_residue} stay projected as they are`);
     }
     if (receipt.failed > 0) {
       info(`${receipt.failed} vector(s) accepted but not yet visible; waiting for Vectorize (${receipt.confirmed}/${receipt.total} confirmed, ${receipt.submitted} submitted, ${receipt.in_flight_batches} batch(es) in flight)`);
@@ -4512,7 +4613,10 @@ export async function cmdAcceleratedBootstrap(manifestPath, options = {}) {
     request: ({ timeoutMs }) => callHttp(`${base}/api/admin/brain/bootstrap`, {
       method: "POST",
       redirect: "error",
-      headers: { "X-Admin-Key": adminKey },
+      // Receipt contract 2: this CLI understands reprojected_residue and the
+      // named blocked_on/blocked_rows fields; a Worker answers an older kit in
+      // the exact field set that kit validates.
+      headers: { "X-Admin-Key": adminKey, "X-Bootstrap-Contract": "2" },
     }, {
       timeoutMs,
       what: "the accelerated legacy vector bootstrap",
@@ -4953,6 +5057,7 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
         throw new Error("restored schema predates the supervised vector protocol");
       }
       const hasBulkBootstrap = restoredSchemaVersion >= 13;
+      const hasResidueColumn = restoredSchemaVersion >= 36;
       await queryDatabase(
         acct.id,
         dbId,
@@ -4967,7 +5072,8 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
                 vector_projection_mutation_id = NULL,
                 vector_projection_submitted_at = NULL${hasBulkBootstrap ? `,
                 vector_projection_bootstrap_protocol = NULL,
-                vector_projection_bootstrap_base_count = 0` : ""}
+                vector_projection_bootstrap_base_count = 0` : ""}${hasResidueColumn ? `,
+                vector_projection_residue_epoch = NULL` : ""}
           WHERE id = 1 AND schema_version >= 12`,
       );
       if (hasBulkBootstrap) {

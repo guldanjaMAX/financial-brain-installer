@@ -115,6 +115,18 @@ Field fixes on top of the 0.4.0 candidate. Nothing here changes what your brain
 holds; each item removes a way the tools could tell you something that was not
 true, or stop you from getting on with the work.
 
+- An update that finds a large backlog of queued chunks (a brain that kept
+  ingesting after its last bootstrap) now re-projects only that backlog at bulk
+  speed instead of waiting on the slow drain, which on a large brain was days.
+  Nothing is deleted and nothing already projected is touched. The update prints
+  `residue-only re-projection: N queued chunk(s) are re-embedded`, and a receipt
+  row lands in the new `vector_projection_events` table (migration 0036) so the
+  change stays visible later. If the backlog cannot be re-projected because rows
+  are quarantined or the index's ordering fence has not opened, the update now
+  says which, instead of waiting or failing without a cause. One consequence to
+  plan around: the recovery runner requires this version's schema, so recovery
+  is unavailable on a brain until it has taken this update; the refusal says
+  "run brain update first, then recover".
 - Adopting an existing Cloudflare sign-in profile now asks first, and answers
   the question in writing when nobody is at the keyboard. Pass
   `--adopt-cloudflare-profile`, or set `BRAIN_ADOPT_CLOUDFLARE_PROFILE=1`, to
