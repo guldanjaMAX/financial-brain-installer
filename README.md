@@ -182,6 +182,13 @@ corpus/source write, not only vector drain. A failed update keeps the bookmark
 and tells you the safe rerun path. It never restores automatically because
 restoring would discard newer writes.
 
+The fifteen-minute no-movement check counts only continuously observed waiting.
+If the computer sleeps during the rebuild, waking it resumes the durable work
+instead of treating the sleep interval as proof that the index stalled. The
+separate six-hour wall-clock safety limit still bounds the phase. If that limit
+ends the command, rerun the same update; the Worker remains safely paused until
+the exact projection proof succeeds.
+
 ---
 
 ## Load your documents

@@ -6,6 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { runAcceleratedBootstrap, validateAcceleratedBootstrapReceipt, ACCELERATED_BOOTSTRAP_STALL_MS } from "../brain.mjs";
+import { createContinuousObservationClock } from "../operations/continuous-observation-clock.mjs";
 
 const receipt = (o) => ({
   protocol: "bootstrap-v2", phase: "building", epoch: 5, total: 1213, confirmed: 13, queued: 1200,
@@ -16,6 +17,20 @@ const res = (body) => ({ status: 200, ok: true, text: async () => JSON.stringify
 let clock = 0;
 const opts = () => ({ now: () => clock, sleep: async (ms) => { clock += ms; }, maxDurationMs: 600_000 });
 const done = receipt({ phase: "complete", epoch: 6, confirmed: 1213, queued: 0, remaining: 0, complete: true, vector_ready: true, actual_vectors: 1213 });
+
+// A wall-clock jump beyond an interval's declared observation bound is not
+// counted as continuously observed elapsed time. Ordinary bounded intervals
+// on either side still count.
+{
+  let wall = 100;
+  const observed = createContinuousObservationClock({ now: () => wall, startedAt: wall, maximumGapMs: 10_000 });
+  wall += 5_000;
+  assert.deepEqual(observed.checkpoint(), { observedElapsedMs: 5_000, excludedGapCount: 0 });
+  wall += 60_000;
+  assert.deepEqual(observed.checkpoint(), { observedElapsedMs: 5_000, excludedGapCount: 1 });
+  wall += 4_000;
+  assert.deepEqual(observed.checkpoint(), { observedElapsedMs: 9_000, excludedGapCount: 1 });
+}
 
 {
   const seq = [receipt({ reprojected_residue: 1200 }), receipt({ reprojected_residue: 1200, confirmed: 1013, queued: 200, remaining: 200 }), done];
@@ -29,6 +44,84 @@ const done = receipt({ phase: "complete", epoch: 6, confirmed: 1213, queued: 0, 
   let i = 0;
   const out = await runAcceleratedBootstrap({ ...opts(), request: async () => res(seq[Math.min(i++, seq.length - 1)]) });
   assert.equal(out.complete, true, "receipts without the optional field still complete");
+}
+// Closing a laptop during the ordinary poll timer used to spend the entire
+// 15-minute no-movement budget in one jump. The first identical receipt after
+// wake must remain inside the budget, then fresh progress can complete.
+{
+  clock = 0;
+  const blocked = receipt({ phase: "legacy_drain", confirmed: 13, queued: 0, remaining: 1200,
+    blocked_on: "fence", blocked_rows: 1 });
+  const moved = receipt({ phase: "legacy_drain", confirmed: 14, queued: 0, remaining: 1199,
+    actual_vectors: 14, blocked_on: "fence", blocked_rows: 1 });
+  const seq = [blocked, blocked, moved, done];
+  let i = 0;
+  let slept = false;
+  const out = await runAcceleratedBootstrap({
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+      if (!slept) {
+        slept = true;
+        clock += ACCELERATED_BOOTSTRAP_STALL_MS + 60_000;
+      }
+    },
+    maxDurationMs: 3 * 60 * 60_000,
+    request: async () => res(seq[Math.min(i++, seq.length - 1)]),
+  });
+  assert.equal(out.complete, true, "a suspend-sized timer gap does not falsely declare the paused bootstrap stalled");
+  assert.equal(i, 4, "the first identical post-wake receipt was accepted and fresh progress completed");
+}
+// The raw six-hour boundary remains authoritative even though an unobserved
+// suspend gap is excluded from the shorter movement budget.
+{
+  clock = 0;
+  const blocked = receipt({ phase: "legacy_drain", confirmed: 13, queued: 0, remaining: 1200,
+    blocked_on: "fence", blocked_rows: 1 });
+  let slept = false;
+  await assert.rejects(
+    runAcceleratedBootstrap({
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+        if (!slept) {
+          slept = true;
+          clock += 7 * 60 * 60_000;
+        }
+      },
+      request: async () => res(blocked),
+    }),
+    /6-hour wall-clock safety limit[\s\S]*Worker remains paused/,
+    "a suspend that crosses the outer wall-clock boundary still fails closed",
+  );
+}
+// Fresh aggregate movement resets the continuously observed quiet budget.
+{
+  clock = 0;
+  const blocked = receipt({ phase: "legacy_drain", confirmed: 13, queued: 0, remaining: 1200,
+    blocked_on: "fence", blocked_rows: 1 });
+  const moved = receipt({ phase: "legacy_drain", confirmed: 14, queued: 0, remaining: 1199,
+    actual_vectors: 14, blocked_on: "fence", blocked_rows: 1 });
+  let i = 0;
+  const original = console.log;
+  console.log = () => {};
+  try {
+    const out = await runAcceleratedBootstrap({
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      maxDurationMs: 3 * 60 * 60_000,
+      request: async () => {
+        i += 1;
+        if (i <= 300) return res(blocked);
+        if (i <= 600) return res(moved);
+        return res(done);
+      },
+    });
+    assert.equal(out.complete, true, "fresh movement resets the observed no-progress budget");
+    assert.equal(i, 601);
+  } finally {
+    console.log = original;
+  }
 }
 {
   const v = validateAcceleratedBootstrapReceipt(receipt({ reprojected_residue: 1200 }));

@@ -531,6 +531,9 @@ const expected = [
   "migrations/d1/0036_vector_projection_events.sql",
   "operations/bank-access-wrapping-key.mjs",
   "operations/bootstrap-status.mjs",
+  // Generic local timing helper. It receives only numeric timestamps and
+  // counters, and has no filesystem, credential, network, or instance inputs.
+  "operations/continuous-observation-clock.mjs",
   "operations/cloudflare-account-bootstrap.mjs",
   "operations/cloudflare-oauth-session.mjs",
   "operations/command-display.mjs",

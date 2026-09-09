@@ -136,6 +136,7 @@ import {
   buildBootstrapStatus,
   writeBootstrapStatusFile,
 } from "./operations/bootstrap-status.mjs";
+import { createContinuousObservationClock } from "./operations/continuous-observation-clock.mjs";
 import {
   loadStoredCloudflareToken,
   storeCloudflareToken,
@@ -4099,6 +4100,12 @@ export function bootstrapReceiptMoved(previous, current) {
 const ACCELERATED_BOOTSTRAP_RETRY_WAIT_MS = 15_000;
 const ACCELERATED_BOOTSTRAP_POLL_MS = 3_000;
 const ACCELERATED_BOOTSTRAP_REQUEST_MAX_MS = 180_000;
+// A request has its own three-minute abort boundary. One additional minute is
+// enough for the local pin checks and response parsing around it. A larger
+// unobserved wall-clock jump is not evidence of an awake remote stall, which
+// matters when a laptop sleeps while the update is inside its paused window.
+const ACCELERATED_BOOTSTRAP_OBSERVATION_GAP_MS = ACCELERATED_BOOTSTRAP_REQUEST_MAX_MS + 60_000;
+const ACCELERATED_BOOTSTRAP_TIMER_GRACE_MS = 60_000;
 const BOOTSTRAP_PHASES = new Set(["legacy_drain", "building", "waiting", "complete"]);
 const BOOTSTRAP_RECEIPT_FIELDS = Object.freeze([
   "protocol",
@@ -4350,6 +4357,21 @@ export async function runAcceleratedBootstrap({
     throw new TypeError("the accelerated bootstrap clock is invalid");
   }
   const deadline = startedAt + duration;
+  const observationClock = createContinuousObservationClock({
+    now,
+    startedAt,
+    maximumGapMs: ACCELERATED_BOOTSTRAP_OBSERVATION_GAP_MS,
+  });
+  const observedNow = (maximumGapMs = ACCELERATED_BOOTSTRAP_OBSERVATION_GAP_MS) =>
+    observationClock.checkpoint(maximumGapMs).observedElapsedMs;
+  const observedSleep = async (milliseconds) => {
+    observedNow();
+    await sleep(milliseconds);
+    // setTimeout jitter is ordinary awake time. A jump beyond the requested
+    // wait plus this generous allowance cannot prove continuous observation,
+    // so it does not consume the movement budget.
+    observedNow(Math.max(1, milliseconds + ACCELERATED_BOOTSTRAP_TIMER_GRACE_MS));
+  };
   let previous = null;
   let lastRemaining = null;
   let rounds = 0;
@@ -4361,6 +4383,7 @@ export async function runAcceleratedBootstrap({
   for (let round = 1; round <= roundLimit; round++) {
     const roundNow = Number(now());
     if (!Number.isFinite(roundNow) || roundNow < startedAt || roundNow >= deadline) break;
+    observedNow();
     rounds = round;
     const response = await retryTransient(async (attempt) => {
       const attemptNow = Number(now());
@@ -4369,6 +4392,7 @@ export async function runAcceleratedBootstrap({
         error.retryable = false;
         throw error;
       }
+      observedNow();
       await beforeRequest({ round, attempt });
       let primaryError = null;
       try {
@@ -4422,7 +4446,7 @@ export async function runAcceleratedBootstrap({
       delayMs: 2_000,
       maxDelayMs: 60_000,
       shouldRetry: (error) => error?.retryable === true,
-      sleep,
+      sleep: observedSleep,
       onRetry: () => info("the accelerated bootstrap request was interrupted; retrying durable progress"),
     });
 
@@ -4439,7 +4463,7 @@ export async function runAcceleratedBootstrap({
       );
       if (delayMs <= 0) break;
       info(`accelerated bootstrap is held by another bounded request; ${busy.remaining} aggregate row(s) remain`);
-      await sleep(delayMs);
+      await observedSleep(delayMs);
       continue;
     }
     if (!response.ok) {
@@ -4463,7 +4487,7 @@ export async function runAcceleratedBootstrap({
     // within the existing deadline; give up only when it stops moving.
     // Movement is any aggregate changing; a receipt identical to the last one
     // for ACCELERATED_BOOTSTRAP_STALL_MS is the only thing that ends the wait.
-    const observedAt = Number(now());
+    const observedAt = observedNow();
     if (lastMovementAt === null || bootstrapReceiptMoved(previous, receipt)) lastMovementAt = observedAt;
     const quietMs = observedAt - lastMovementAt;
     if (quietMs >= ACCELERATED_BOOTSTRAP_STALL_MS) {
@@ -4548,7 +4572,7 @@ export async function runAcceleratedBootstrap({
       const remainingMs = Math.max(0, deadline - Number(now()));
       const delayMs = Math.min(ACCELERATED_BOOTSTRAP_RETRY_WAIT_MS, remainingMs);
       if (delayMs <= 0) break;
-      await sleep(delayMs);
+      await observedSleep(delayMs);
       continue;
     }
     previous = receipt;
@@ -4581,7 +4605,7 @@ export async function runAcceleratedBootstrap({
         Math.max(0, deadline - Number(now())),
       );
       if (delayMs <= 0) break;
-      await sleep(delayMs);
+      await observedSleep(delayMs);
     }
   }
 

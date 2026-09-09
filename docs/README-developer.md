@@ -111,6 +111,13 @@ bypass those gates. Neither path restores D1 automatically because that would
 discard writes made after the bookmark. Direct `brain migrate` refuses a live
 D1 install when the pending writer-protocol migrations require this cutover.
 
+The accelerated bootstrap keeps two separate time boundaries. Its six-hour
+wall-clock deadline remains a hard stop. Its fifteen-minute no-movement budget
+counts only intervals the updater could continuously observe, so a laptop sleep
+or another unobserved local pause cannot by itself stand in for proof that the
+remote projection stalled. Any stop still leaves writes paused and resumes only
+through the same verified update path.
+
 Always `--dry-run` first. It walks, extracts and judges every file without
 sending anything, and prints what would be skipped and why. On a real corpus
 that list is the useful part: it is where you find out that 12,000 PDFs are not
