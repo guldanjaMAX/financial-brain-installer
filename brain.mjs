@@ -6907,6 +6907,25 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   const alreadyDone = Object.keys(state.done).length;
   if (alreadyDone && !flags.reset) info(`resuming: ${alreadyDone} file(s) already loaded`);
 
+  // A changed credential scanner means every document indexed under the old one
+  // has to be read again, which is correct. Saying so is the part that was
+  // missing. A state file written before 0.4.0 carries no fingerprint at all, so
+  // the comparison is `undefined !== <hash>` and EVERY document is re-sent.
+  //
+  // On 2026-09-09 a client upgrading 0.3.5 to 0.4.1 found this only because her
+  // agent ran a dry run first: 11,217 documents to send, 0 unchanged, on a brain
+  // already carrying a 164,000 chunk backlog. A watched folder would have acted
+  // on it unattended and roughly doubled the queue. The re-check is not the
+  // defect; discovering it by accident is.
+  if (scannerPolicyChanged && previouslyKnownKeys.size && !flags.reset) {
+    warn(
+      `the credential scanner changed, so all ${previouslyKnownKeys.size} document(s) already loaded from this source will be read and sent again.\n` +
+      "      This run will report them as sent rather than unchanged, and that is expected.\n" +
+      "      If a schedule or watched folder loads this source unattended, pause it until one full run finishes,\n" +
+      "      because until then every run re-sends everything."
+    );
+  }
+
 
   // OCR, and what it will cost, decided ONCE per run and stated out loud
   // before the first page is sent. The estimate lands while the owner can

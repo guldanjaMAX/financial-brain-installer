@@ -788,5 +788,19 @@
     ],
     "acceptance": "The same manifest and the same folder must file under the same source whichever command runs. Prove that --path on a declared folder uses the declared source, that an explicit contradicting --source stops rather than guessing, and that the run states the source before anything is sent.",
     "findings": "brain load read corpora.upload.folders[].source; brain ingest --path defaulted to 'upload' and never looked. On 2026-09-08 that indexed a 2,249-document corpus a second time alongside the 1,537 already filed under the declared name, both live and queryable, so retrieval would return one document twice under two provenance names. The warning that would have caught it existed but printed only inside the branch that runs when the content sniffer recognises a WhatsApp or mbox export. Same class as the bank_feed note: a manifest field declared, validated, then not consulted by the path people actually run."
+  },
+  {
+    "id": "UPDATE-042",
+    "title": "Upgrading from 0.3.x silently marks the entire corpus for re-send",
+    "status": "local-only",
+    "scopes": [
+      "upgrade"
+    ],
+    "tests": [
+      "test/upgrade-resend-is-announced.test.mjs"
+    ],
+    "acceptance": "An owner upgrading from a version with no credential-scanner fingerprint must be told, before their next ingest, that every previously indexed document will be re-sent, and told to pause any watched folder until one full sweep completes. Prove the warning fires on a state file written without a fingerprint, and that it does not fire on a 0.4.x to 0.4.x upgrade where GATE_VERSION is unchanged.",
+    "findings": "credentialScannerFingerprint did not exist at v0.3.5, so a state file written by 0.3.x carries no credential_scanner_fingerprint and scannerPolicyChanged is `undefined !== <hash>`, always true. Every 'this document is unchanged, skip it' branch is guarded on it (brain.mjs around 7046 and 7098), so every document is re-prepared and re-sent. Reported by a client on 2026-09-09: a dry run after upgrading 0.3.5 to 0.4.1 showed 11,217 documents to send and 0 unchanged, on a brain already carrying a 164,000 chunk backlog. Her agent unloaded the watched-folder LaunchAgent to stop the sync roughly doubling the queue, which is the only reason it was caught. Rechecking after a scanner change is correct behaviour; shipping it with no warning is not. GATE_VERSION in worker/src/lib/secret-scan.js has been 5 since v0.4.0, so 0.4.x to 0.4.x does not re-trigger it, but the fingerprint commits only after a complete sweep, so anyone who has not finished one is still in the re-send state.",
+    "evidence": []
   }
 ]
