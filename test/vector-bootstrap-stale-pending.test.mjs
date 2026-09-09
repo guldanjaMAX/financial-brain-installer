@@ -531,14 +531,51 @@ const neverRegresses = (phases) => {
      VALUES (10, 'residue-reprojection', 3, 4, 3, 13, 1500, 1513)`
   ).run();
   const before = snapshot(db);
+  await runToCompletion(env, 3);
+  const after = snapshot(db);
+  // CORRECTED. This previously asserted that the epoch may NOT reopen, which
+  // read "confirmed nothing" off a SUM with no batch rows behind it. An epoch
+  // with zero batch rows never ran at all: the lease was lost before the first
+  // page. Refusing it is what strands a brain on the ~100-per-confirmation
+  // drain forever, with no message, and this file's own zero-batch rebase
+  // clears the column for precisely that reason. An older Worker crossing the
+  // same state performs no such clear, so the strand was reachable and durable.
+  check("a residue epoch with no batch rows never ran, so a later update may open one",
+    Number(after.epoch) > Number(before.epoch) && Number(after.events) > Number(before.events),
+    JSON.stringify({ before, after }));
+  check("and it rescues the brain instead of slow-draining it",
+    after.status === "verified" && Number(after.outbox) === 0,
+    JSON.stringify({ status: after.status, outbox: after.outbox }));
+}
+
+{
+  // The bound that must SURVIVE the correction above: an epoch that genuinely
+  // RAN and confirmed nothing is a spent attempt and may not reopen, or an
+  // unproductive walk would reopen itself forever. Batch rows are the evidence
+  // that it ran; a row exists only once it matched at least one chunk.
+  const { env, db, visible } = makeEnv();
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 1500, drainedSince: 10 });
+  db.prepare("UPDATE install_state SET vector_projection_residue_epoch=vector_projection_bootstrap_epoch WHERE id=1").run();
+  db.prepare(
+    `INSERT INTO vector_projection_events (at, kind, epoch_before, epoch_after, base_before, base_after, rows, chunks)
+     VALUES (10, 'residue-reprojection', 3, 4, 3, 13, 1500, 1513)`
+  ).run();
+  // It ran: a batch row exists, which the walk writes only once it has matched
+  // at least one chunk. It confirmed nothing: the row is not 'confirmed', and
+  // the table's own status/timestamp conjunction keeps that shape honest.
+  db.prepare(
+    `INSERT INTO vector_bootstrap_batches (epoch, batch_no, start_cursor, end_cursor, row_count, status)
+     VALUES (4, 1, 'drive:a#0', 'drive:b#0', 500, 'queued')`
+  ).run();
+  const before = snapshot(db);
   const run = await runToCompletion(env, 3);
   const after = snapshot(db);
-  check("an epoch that opened as a residue walk and confirmed nothing does not reopen another",
-    Number(after.epoch) === Number(before.epoch) && Number(after.events) === 1,
+  check("an epoch that RAN and confirmed nothing is spent and does not reopen",
+    Number(after.epoch) === Number(before.epoch),
     JSON.stringify({ before, after }));
-  check("and the rows are not abandoned: the ordinary paused drain takes them",
-    Number(after.outbox) < 1500 && run.phases.every((p) => p === "legacy_drain" || p === "waiting"),
-    JSON.stringify({ outbox: after.outbox, phases: [...new Set(run.phases)] }));
+  check("and those rows are not abandoned: the ordinary paused drain takes them",
+    run.phases.every((p) => p === "legacy_drain" || p === "waiting"),
+    JSON.stringify({ phases: [...new Set(run.phases)] }));
 }
 
 {
@@ -551,8 +588,10 @@ const neverRegresses = (phases) => {
   const before = snapshot(db);
   await runToCompletion(env, 3);
   const after = snapshot(db);
-  check("with no receipt row at all an unproductive residue epoch still cannot reopen",
-    Number(after.epoch) === Number(before.epoch) && Number(after.events) === 0 && Number(before.events) === 0,
+  // CORRECTED with the case above: no receipt row AND no batch rows is an epoch
+  // that never ran, so it is rescuable rather than spent.
+  check("with neither a receipt row nor a batch row the epoch never ran, so it may open one",
+    Number(after.epoch) > Number(before.epoch) && Number(before.events) === 0,
     JSON.stringify({ before, after }));
 }
 

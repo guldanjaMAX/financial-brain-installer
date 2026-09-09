@@ -3619,14 +3619,32 @@ export async function openResidueReprojection(env, state, options, lease) {
   if (state.residue_epoch !== null && state.residue_epoch !== undefined &&
       Number(state.residue_epoch) === state.epoch) {
     const previous = await env.DB.prepare(
-      `SELECT COALESCE(sum(row_count),0) AS confirmed FROM vector_bootstrap_batches
-        WHERE epoch=?1 AND status='confirmed'`
+      `SELECT COALESCE(sum(row_count),0) AS confirmed,
+              COALESCE(count(*),0)        AS batches
+         FROM vector_bootstrap_batches WHERE epoch=?1 AND status='confirmed'`
     ).bind(state.epoch).first();
     const confirmedRows = Number(previous?.confirmed);
-    if (!Number.isSafeInteger(confirmedRows) || confirmedRows < 0) {
+    const batches = Number(previous?.batches);
+    if (!Number.isSafeInteger(confirmedRows) || confirmedRows < 0 ||
+        !Number.isSafeInteger(batches) || batches < 0) {
       throw new Error("the residue re-projection ledger is invalid");
     }
-    if (confirmedRows === 0) return { opened: false, blocked: false };
+    // Refuse only an epoch that ACTUALLY RAN and confirmed nothing. An epoch
+    // with no batch rows at all never began: the lease was lost before the
+    // first page. Treating that as a spent attempt is what strands a brain on
+    // the slow drain permanently, and this file already knows it — the
+    // zero-batch rebase clears vector_projection_residue_epoch for exactly
+    // this reason, saying a refusal here "would refuse every future residue on
+    // this brain, silently reverting it to the ~100-rows-per-confirmation
+    // drain". An OLDER Worker crossing an open residue epoch performs no such
+    // clear, so it leaves residue_epoch === epoch with zero batches forever,
+    // and every later update on this brain silently takes the slow path with
+    // no message. The guard and the clear contradicted each other; only the new
+    // Worker's clear was hiding it.
+    //
+    // This cannot spin: the open is gated on `pageable > RESIDUE_REPROJECTION_MIN_ROWS`
+    // above, so an epoch with nothing left to page never opens in the first place.
+    if (batches > 0 && confirmedRows === 0) return { opened: false, blocked: false };
   }
 
   // Unquarantined deletes and rows already submitted must clear before the

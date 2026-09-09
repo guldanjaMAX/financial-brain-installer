@@ -109,7 +109,7 @@ const snapshot = (db) => db.prepare(`SELECT vector_projection_status AS status, 
  * the CLI's deadlines, the Worker's lease fences and the provider's visibility
  * lag all move together, as they do in production.
  */
-function drive(env, { maxDurationMs = 3_600_000, contract = 2 } = {}) {
+function drive(env, { maxDurationMs = 3_600_000, contract = 2, onPoll = null } = {}) {
   let clock = 100_000;
   let embeds = 0;
   const lines = [];
@@ -125,6 +125,10 @@ function drive(env, { maxDurationMs = 3_600_000, contract = 2 } = {}) {
   const request = async () => {
     polls++;
     env.__tick?.();
+    // What an operator does in another terminal mid-run. vector-retry is
+    // permitted while paused as of this release, and the quarantine refusal
+    // tells them to run it, so releasing rows mid-walk is a documented path.
+    await onPoll?.(polls);
     const receipt = await acceleratedVectorBootstrap(env, workerOptions);
     if (receipt.busy) {
       return { status: 409, ok: false, text: async () => JSON.stringify({ protocol: receipt.protocol, busy: true, remaining: receipt.remaining, retry_after_seconds: receipt.retry_after_seconds }) };
@@ -234,6 +238,80 @@ function drive(env, { maxDurationMs = 3_600_000, contract = 2 } = {}) {
     run.error === null && run.result?.complete === true && visible.size === 1213 &&
       !run.lines.some((l) => /residue-only re-projection/.test(l)),
     JSON.stringify({ error: String(run.error?.message), lines: run.lines.filter((l) => /residue/.test(l)) }));
+}
+
+
+// ---------------------------------------------------------------------------
+// The two seams the 2026-09-09 review found, both of which lived PAST the join
+// this file already makes. Neither had any coverage: reverting either fix broke
+// nothing, which is how they reached a merge-ready PR with 19/19 green.
+// ---------------------------------------------------------------------------
+
+// A. A finished residue walk that leaves the provider short must never send the
+//    owner to `brain reindex --yes`. With no --source that command queues
+//    nothing, arms a rebuild of the WHOLE corpus, and bills every chunk again on
+//    the owner's own account: 1.15M embeddings on the largest brain this path
+//    exists to rescue. The escape that was supposed to prevent it reads
+//    `reprojected_residue` on the CURRENT receipt, and closeResidueWalk returns
+//    the status to `pending`, so the Worker stops emitting that field at exactly
+//    the moment this stall becomes possible.
+{
+  const { env, db, visible } = makeEnv();
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10 });
+  // A deficit the walk cannot close: vectors the provider has lost for chunks
+  // that are NOT queued, so no amount of re-running adds them back.
+  const projected = [...visible.keys()].slice(0, 5);
+  for (const id of projected) visible.delete(id);
+  const run = await drive(env, { maxDurationMs: 45 * 60_000 });
+  const said = run.lines.join("\n");
+  const stalled = /has not moved for/.test(said) || run.error;
+  const text = said + (run.error ? `\n${run.error.message}` : "");
+  // Assert on the ADVICE, not on the substring: the corrected message names the
+  // dangerous command in order to warn against it, so a bare substring test
+  // fails on correct code. The advisory framing is what must be gone.
+  check("a finished residue walk with a surviving deficit never advises the whole-corpus rebuild",
+    !/Diagnose and rebuild the missing projection/.test(text) &&
+      !/\n\s*brain reindex <manifest> --yes/.test(text),
+    text.slice(-600));
+  if (stalled && /Vectorize holds/.test(text)) {
+    check("and when it does stall it names a bounded, per-source remedy instead",
+      /--source <name>/.test(text) && /brain diagnose/.test(text),
+      text.slice(-600));
+  }
+}
+
+// B. A SECOND residue epoch inside one run opens after a walk that already
+//    closed, so its predecessor receipt is `building` or `waiting`, never
+//    `legacy_drain`. Requiring `legacy_drain` killed the update for the whole
+//    duration of the walk, which on a 165k-row residue is hours. Reached on the
+//    documented path: the quarantine refusal tells the operator to run
+//    vector-retry, which this release permits while paused, and releasing rows
+//    that sit BELOW the ledger cursor is exactly what opens a second epoch.
+{
+  const { env, db, visible } = makeEnv();
+  seedStaleBrain(db, visible, { epoch: 4, stranded: 3000, drainedSince: 10, quarantined: 1500 });
+  let released = false;
+  const run = await drive(env, {
+    maxDurationMs: 45 * 60_000,
+    onPoll: () => {
+      // Release the quarantine the moment the first residue walk has closed:
+      // that is when an operator, having been told to, runs vector-retry.
+      if (released) return;
+      const s = snapshot(db);
+      if (Number(s.events) >= 1 && s.status === "pending") {
+        db.prepare("DELETE FROM vector_outbox_retry_state WHERE quarantined_at IS NOT NULL").run();
+        released = true;
+      }
+    },
+  });
+  const text = run.lines.join("\n") + (run.error ? `\n${run.error.message}` : "");
+  const after = snapshot(db);
+  check("releasing quarantine mid-walk opens a second residue epoch",
+    released && Number(after.events) >= 2,
+    JSON.stringify({ released, after }));
+  check("and a residue open whose predecessor is not legacy_drain does not kill the update",
+    !/changed its durable epoch or total during one update/.test(text),
+    text.slice(-500));
 }
 
 console.log(`\n${ran - fail}/${ran} checks passed`);
