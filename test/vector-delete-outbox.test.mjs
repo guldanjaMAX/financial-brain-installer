@@ -961,14 +961,27 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     `SELECT vector_drain_lease_owner owner, vector_drain_lease_expires_at expires
      FROM install_state WHERE id = 1`
   ).get();
-  check("the documented worst-case batch statement bound includes hashed-id remaps",
-    drainBatchQueryUpperBound(100) === 212);
+  // Was 212 (a 2-per-row bound) until 2026-09-09. That pin encoded the comment's
+  // claim that "confirmation needs only one CAS statement per row", which is
+  // true of the confirmed arm and false of the retrying one: a row that misses
+  // visibility costs three (clear-receipt CAS + the two scheduleVectorFailures
+  // pushes). A measured all-miss batch of 100 spends 308 statements against the
+  // 212 that were reserved, so the old bound under-reserved by 96 on the very
+  // path a stalled fence makes ordinary. 312 = 12 + 3*100 covers it; the
+  // measurement itself lives in test/drain-throughput.test.mjs so this stays a
+  // pin rather than the proof.
+  check("the documented worst-case batch statement bound covers the CONFIRM path, not just submission",
+    drainBatchQueryUpperBound(100) === 312);
+  // An honest bound reserves more per batch, so a 100-row request now fits two
+  // batches per invocation where it used to claim four. Four batches of a
+  // partially-missing confirm could have spent past Cloudflare's hard 1,000,
+  // which is the unrecorded-mutation hazard this reservation exists to prevent.
   check("a ten-batch request stops before the internal D1 query budget",
-    drained.drained === 200 && drained.remaining === 400 &&
-      // 421 before the drain proved the retry-state schema and swept its
+    drained.drained === 100 && drained.remaining === 500 &&
+      // 212 before the drain proved the retry-state schema and swept its
       // orphans; those are the two statements DRAIN_RETRY_STATE_QUERIES
       // reserves, so the pin moves with them rather than being loosened.
-      submitted === 423 && submitted < DRAIN_D1_QUERY_BUDGET,
+      submitted === 214 && submitted < DRAIN_D1_QUERY_BUDGET,
     JSON.stringify({ drained, submitted, budget: DRAIN_D1_QUERY_BUDGET }));
   check("query-budget exhaustion never strands the exclusive drain lease",
     leaseState.owner === null && leaseState.expires === null,

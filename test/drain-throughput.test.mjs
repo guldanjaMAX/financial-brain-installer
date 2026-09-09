@@ -6,7 +6,7 @@
 // gets somebody else's vector. That is silent and permanent, so it is the thing
 // most heavily tested here.
 
-import { drainOutbox } from "../worker/src/lib/store-d1.js";
+import { drainOutbox, drainBatchQueryUpperBound, DRAIN_D1_QUERY_BUDGET } from "../worker/src/lib/store-d1.js";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 200))); if (!c) fail++; };
@@ -111,6 +111,103 @@ const rows = (n) => Array.from({ length: n }, (_, i) => ({
   const up = []; let single = 0;
   const r = await drainOutbox(mkEnv(rows(3), up), { embed: async () => { single++; return [0.1]; } });
   check("a caller that passes no embedBatch still works", r.submitted === 3 && single === 3, `single=${single}`);
+}
+
+
+/* ------------------------------------------------------------------ *
+ * The reserved query budget must cover the path that actually costs
+ * the most, which is CONFIRMATION, not submission.
+ *
+ * drainBatchQueryUpperBound's comment says "Confirmation needs only one
+ * CAS statement per row." That is true only of the confirmed arm. The
+ * retrying arm is three: the clear-receipt UPDATE, plus the two
+ * statements scheduleVectorFailures pushes per row (retry-state upsert
+ * and the outbox attempts bump). A mass visibility_mismatch is the
+ * ordinary shape of a stalled fence, not an exotic one, so the bound is
+ * measured against a batch where every row misses.
+ *
+ * Cloudflare counts each statement inside DB.batch() toward the 1,000
+ * query invocation limit, so an under-reserved bound can let a Vectorize
+ * mutation land and then fail to record its durable receipt.
+ * ------------------------------------------------------------------ */
+{
+  const BASE_RESERVED = 8; // acquire+release+verify(3)+depth+retry-state(2)
+  let queries = 0;
+  const countingEnv = (submittedRows, pendingRows) => {
+    const mk = (q, b = []) => ({
+      _q: q, _b: b,
+      bind: (...nb) => mk(q, nb),
+      all: async () => {
+        queries++;
+        if (/submitted_mutation_id IS NOT NULL/.test(q)) return { results: submittedRows.slice(0, b[0]) };
+        if (/o\.op = 'delete'/.test(q)) return { results: [] };
+        if (/o\.op = 'upsert'/.test(q)) return { results: pendingRows.slice(0, b[1]) };
+        return { results: [] };
+      },
+      first: async () => {
+        queries++;
+        if (/vector_projection_mutation_id AS mutation_id/.test(q)) return { mutation_id: "M1", submitted_at: 1 };
+        return { n: submittedRows.length + pendingRows.length };
+      },
+      run: async () => { queries++; return { meta: { changes: 1 } }; },
+    });
+    return {
+      DB: {
+        prepare: (q) => mk(q),
+        // Every statement in a batch is billed individually.
+        batch: async (s) => { queries += s.length; return s.map(() => ({ meta: { changes: 1 } })); },
+      },
+      VECTORIZE: {
+        upsert: async () => ({ mutationId: "M2" }),
+        deleteByIds: async () => ({ mutationId: "M3" }),
+        getByIds: async () => [],           // nothing is query-visible: every row retries
+        describe: async () => ({ processedUpToMutation: "M1",
+          processedUpToDatetime: new Date().toISOString(), vectorCount: 0 }),
+      },
+    };
+  };
+
+  // Discover the shipped ceiling by observation rather than importing a
+  // private const, so this test keeps measuring the real batch after the
+  // constant is retuned. The counting env honours the LIMIT bind, so what
+  // comes back is the drain's actual per-batch appetite.
+  const probeRows = Array.from({ length: 4000 }, (_, i) => ({
+    chunk_uid: `p${i}#0`, text: `t${i}`, source: "s", doc_uid: `p${i}`,
+    generation: 1, attempts: 0, failure_code: null, queued_at: i,
+  }));
+  let maxBatch = 0;
+  await drainOutbox({
+    ...countingEnv([], probeRows),
+    VECTORIZE: {
+      upsert: async (v) => { maxBatch = Math.max(maxBatch, v.length); return { mutationId: "M2" }; },
+      deleteByIds: async () => ({ mutationId: "M3" }),
+      getByIds: async () => [],
+      describe: async () => ({ processedUpToMutation: "M1",
+        processedUpToDatetime: new Date().toISOString(), vectorCount: 0 }),
+    },
+  }, { embed: async () => [0.1], embedBatch: async (t) => t.map(() => [0.1]), embedGroup: 50, maxBatches: 10 });
+  check("the drain still accepts a full batch of work, and never a silent no-op",
+    maxBatch > 0, `submitted ${maxBatch} vectors from a 4000-row queue`);
+
+  const submittedRows = Array.from({ length: maxBatch }, (_, i) => ({
+    chunk_uid: `s${i}#0`, vector_id: `s${i}#0`, op: "upsert", queued_at: i,
+    generation: 1, submitted_mutation_id: "M1", submitted_at: 1, attempts: 0,
+  }));
+  queries = 0;
+  await drainOutbox(countingEnv(submittedRows, []), {
+    embed: async () => [0.1], embedBatch: async (t) => t.map(() => [0.1]), embedGroup: 50, maxBatches: 10,
+  });
+  const reserved = BASE_RESERVED + drainBatchQueryUpperBound(maxBatch);
+  check("a batch where every row misses visibility stays inside its reserved budget",
+    queries <= reserved,
+    `spent ${queries} D1 statements, reserved ${reserved} (batch ${maxBatch})`);
+
+  check("and the reserved budget itself fits the invocation budget, so the drain is never silently a no-op",
+    BASE_RESERVED + drainBatchQueryUpperBound(maxBatch) <= DRAIN_D1_QUERY_BUDGET,
+    `reserved ${reserved} vs budget ${DRAIN_D1_QUERY_BUDGET}`);
+
+  check("the worst confirmation also fits Cloudflare's hard 1,000-query invocation limit",
+    queries <= 1000, `spent ${queries}`);
 }
 
 console.log(`\ndrain throughput: ${ran - fail}/${ran} passed`);

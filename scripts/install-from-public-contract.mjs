@@ -22,7 +22,7 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const workdir = resolve(process.argv[2] || "./install-contract-run");
@@ -120,11 +120,45 @@ mkdirSync(prefix, { recursive: true });
 // only on the one the client actually uses. Exactly the Windows-only class this
 // job exists to catch, found on its first real run, in the job itself.
 const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-execFileSync(npmCmd, ["install", "--prefix", prefix, "--no-audit", "--no-fund", tgzPath],
+// The GUIDE's form, not a convenient one. `npm install --prefix` is a LOCAL
+// install and lands the command under <prefix>/node_modules/.bin; the guide
+// tells the client `--global --prefix`, which lands it at <prefix>/bin and is
+// the directory their PATH has to contain. Installing the other way here tests
+// a layout no client ever produces.
+execFileSync(npmCmd, ["install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
+  "--prefix", prefix, tgzPath],
   { stdio: "inherit", env: { ...process.env, npm_config_yes: "true" } });
-ok("the packaged archive installs into a clean prefix");
+ok("the packaged archive installs the way the guide tells a client to");
 
-const bin = join(prefix, "node_modules", ".bin", process.platform === "win32" ? "brain.cmd" : "brain");
+// The trap that cost two people about two hours each, and it is a string
+// comparison rather than a provisioning step. The guide says install with
+// `--prefix <somewhere>`, but npm's own configured prefix is usually elsewhere,
+// so `brain` is not on PATH afterwards and the reader gets `command not found`
+// with a correct install sitting on disk.
+//
+// This does NOT install into the prefix the guide names: on a real operator's
+// Mac that path holds their live CLI.
+const guideName = GUIDE.includes("macos") ? "MACOS-FIELD-TEST.md" : "WINDOWS-FIELD-TEST.md";
+const guideText = readFileSync(join(root, guideName), "utf8");
+const declaredPrefix = guideText.match(/--prefix\s+"?([^"\s`]+)"?/)?.[1];
+if (!declaredPrefix) die(`${guideName} names no install prefix, so a reader cannot follow it`);
+ok(`the guide installs with --prefix ${declaredPrefix}`);
+
+const layoutBin = process.platform === "win32" ? prefix : join(prefix, "bin");
+const binName = process.platform === "win32" ? "brain.cmd" : "brain";
+if (!existsSync(join(layoutBin, binName))) {
+  die(`npm did not put ${binName} where a --global --prefix install implies (${layoutBin})`);
+}
+ok("npm puts the command where the guide's install form implies");
+
+const reconcilesPath = /\bPATH\b/.test(guideText) ||
+  new RegExp(`${declaredPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\/](bin[\\/])?brain`).test(guideText);
+if (!reconcilesPath) {
+  die(`${guideName} names an install prefix but never reconciles it with PATH, so following it verbatim ends in \`command not found\``);
+}
+ok("the guide reconciles that prefix with PATH, so the reader can actually run it");
+
+const bin = join(layoutBin, binName);
 const readback = execFileSync(bin, ["--version"], { encoding: "utf8" }).trim();
 if (readback !== version) die(`the installed CLI reports ${readback}, the contract declares ${version}`);
 ok(`the installed CLI reports ${readback}, matching the contract`);
