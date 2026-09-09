@@ -13,4 +13,4 @@
  * A constant in the source cannot drift from the source. Health reports this,
  * and says so when the deploy-time variable disagrees.
  */
-export const WORKER_VERSION = "0.4.4";
+export const WORKER_VERSION = "0.4.5";
