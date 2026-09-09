@@ -274,8 +274,9 @@ function drive(env, { maxDurationMs = 3_600_000, contract = 2, onPoll = null } =
       !/\n\s*brain reindex <manifest> --yes/.test(text),
     text.slice(-600));
   if (stalled && /Vectorize holds/.test(text)) {
-    check("and when it does stall it names a bounded, per-source remedy instead",
-      /--source <name>/.test(text) && /brain diagnose/.test(text),
+    check("and when it stalls, it keeps the pause and names only read-only diagnosis plus reviewed repair",
+      /Keep the Worker paused/.test(text) && /brain diagnose <manifest>/.test(text) &&
+        /reviewed repair/.test(text) && !/brain reindex <manifest> --source/.test(text),
       text.slice(-600));
   }
 }

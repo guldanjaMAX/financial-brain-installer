@@ -8,6 +8,28 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { remedyForState } from "../src/lib/store-d1.js";
+
+const activeRemedy = "Run `brain reindex <manifest> --yes`.";
+assert.equal(
+  remedyForState({ VECTOR_DRAIN_MODE: "active" }, activeRemedy),
+  activeRemedy,
+  "active brains must retain their ordinary recovery command"
+);
+
+const pausedRemedy = remedyForState({ VECTOR_DRAIN_MODE: "paused-for-upgrade" }, activeRemedy);
+assert.match(pausedRemedy, /paused for an upgrade.*brain update <manifest>/s);
+assert.match(pausedRemedy, /only supported projection writer while this barrier holds/s);
+assert.doesNotMatch(
+  pausedRemedy,
+  /Run `brain reindex <manifest>/,
+  "paused behavior must not forward the active-only remedy"
+);
+assert.doesNotMatch(
+  pausedRemedy,
+  /Once it is running again, the remedy is/,
+  "a paused finding must be re-diagnosed after update instead of prescribing a future command now"
+);
 
 const source = readFileSync(fileURLToPath(new URL("../src/lib/store-d1.js", import.meta.url)), "utf8")
   .replace(/\r\n/g, "\n");
@@ -40,7 +62,7 @@ assert.deepEqual(
 
 assert.match(
   source,
-  /function remedyForState\(env, remedy\)/,
+  /export function remedyForState\(env, remedy\)/,
   "the state-aware remedy wrapper must exist"
 );
 assert.match(

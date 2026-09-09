@@ -2675,8 +2675,27 @@ export function healthProbeVerdict({
  * be rebuilt from D1. Excess provider-only rows cannot: their ids no longer
  * exist in D1, so a reindex has nothing it can enumerate and delete.
  */
-function vectorCountMismatchFailure(expected, actual, { prefix = "" } = {}) {
+export function vectorCountMismatchFailure(expected, actual, {
+  prefix = "",
+  pausedForUpgrade = false,
+  updateStalled = false,
+} = {}) {
   const header = `${prefix}Vectorize holds ${actual} vector(s), but D1 requires ${expected}.`;
+  if (pausedForUpgrade) {
+    const direction = actual < expected
+      ? "Semantic search is missing vectors that D1 still requires."
+      : actual > expected
+        ? "Vectorize contains provider-only excess vectors that D1 cannot enumerate or remove; reviewed recovery must recreate and rebind a clean index."
+        : "The count receipt contradicts its mismatch reason.";
+    const next = updateStalled
+      ? "      This mismatch already stopped the paused bootstrap. Keep the Worker paused, save the read-only diagnosis, and report this update failure for reviewed repair before retrying."
+      : "      Run `brain update <manifest>` to resume its durable bootstrap. If the same mismatch returns without progress, keep the Worker paused and report that update failure for reviewed repair.";
+    return header + "\n" +
+      `      ${direction}` + "\n" +
+      "      Reindex and drain are refused while this Brain is paused for an update. Do not clear the pause or try either command by hand." + "\n" +
+      "      Read-only evidence is still available: `brain diagnose <manifest>`" + "\n" +
+      next;
+  }
   if (actual < expected) {
     return header + "\n" +
       "      Semantic search is missing vectors. Diagnose and rebuild the missing projection:" + "\n" +
@@ -2779,6 +2798,10 @@ async function cmdHealth(manifestPath, {
   if (!res.ok) die(`/health returned ${res.status} after ${healthAttempts} attempts: ${body.slice(0, 200)}`);
   ok(`/health ${res.status} ${body.slice(0, 160)}`);
   if (reachOnly) return;
+
+  let healthReceipt = null;
+  try { healthReceipt = JSON.parse(body); } catch { /* authenticated proof below remains authoritative */ }
+  const pausedForUpgrade = healthReceipt?.vector_drain_mode === "paused-for-upgrade";
 
   const key = resolveAdminKey(manifestPath, { ignoreEnvironment: durableAdminKeyOnly });
   if (!key) {
@@ -2902,7 +2925,14 @@ async function cmdHealth(manifestPath, {
             die(vectorCountMismatchFailure(
               readiness.expected_vectors,
               readiness.actual_vectors,
+              { pausedForUpgrade },
             ));
+          }
+          if (pausedForUpgrade) {
+            die(
+              "Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update." + "\n" +
+                "      Reindex and drain are refused in this state. Run `brain update <manifest>` to resume the durable paused bootstrap."
+            );
           }
           die(
             "Vectorize has accepted work that is not query-visible yet." + "\n" +
@@ -4493,7 +4523,9 @@ export async function runAcceleratedBootstrap({
       // is the sticky fact that a walk ran during THIS run, and it survives the
       // close. Suppressing the message instead would be worse than the bad
       // advice: a re-run does another full poll budget, embeds nothing, and dies
-      // the same way. So this terminates too, with a remedy that is bounded.
+      // the same way. Reindex is not a bounded escape here, even with --source,
+      // because the verified update pause refuses every reindex request. Stop
+      // with the read-only evidence and keep the barrier intact for review.
       const missingAfterResidue = announcedReprojection &&
         Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
         receipt.actual_vectors < receipt.expected_vectors;
@@ -4502,17 +4534,15 @@ export async function runAcceleratedBootstrap({
         die(`${stalledFor}\n` +
           `      The bulk re-projection finished. Vectorize holds ${receipt.actual_vectors} vector(s) and D1 requires ${receipt.expected_vectors}.\n` +
           `      Those ${short} vector(s) were not in the queue this walk re-embedded, so re-running the update cannot add them.\n` +
-          "      Do NOT run `brain reindex <manifest> --yes`. Without --source it queues nothing, arms a rebuild of the\n" +
-          "      WHOLE corpus, and every chunk is embedded again on your own account.\n" +
-          "      Find which source is short, then rebuild only that one:\n" +
-          "      brain diagnose <manifest>\n" +
-          "      brain reindex <manifest> --source <name> --yes\n" +
-          "      The Worker remains paused.");
+          "      Whole-corpus reindex would repay for every chunk, and source-scoped reindex is also refused while this pause holds.\n" +
+          "      Keep the Worker paused. Run `brain diagnose <manifest>` for read-only evidence and report this update failure for reviewed repair.");
       }
       if (Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
           receipt.actual_vectors !== receipt.expected_vectors) {
-        die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors)}\n` +
-          "      Re-running the update cannot change this. The Worker remains paused.");
+        die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors, {
+          pausedForUpgrade: true,
+          updateStalled: true,
+        })}`);
       }
       die(`${stalledFor} Re-run \`brain update <manifest>\`; the Worker remains paused.`);
     }
@@ -4947,7 +4977,8 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           `      D1 recovery bookmark: ${bookmark}\n` +
           "      Do not restore it as the first response. A D1 restore discards newer writes and\n" +
           "      does not restore Vectorize. A restore requires reviewed clean-index recreation/rebind\n" +
-          "      before reindex because provider-only excess vectors cannot be enumerated from D1.\n" +
+          "      and a supervised projection rebuild; ordinary reindex and drain remain unavailable\n" +
+          "      until the verified update path returns the Worker to active mode.\n" +
           "      Safe default: fix the reported issue and run brain update again." +
           (corpusPausedByThisRun
             ? "\n\n" +
@@ -4982,7 +5013,7 @@ function rollbackLocalPreflight(manifestPath, bookmarkArg) {
 function printRollbackPreview({ bookmark, databaseId }) {
   warn("rollback preview only: nothing was changed.");
   warn("a D1 restore is DESTRUCTIVE: everything written after this bookmark would be lost.");
-  warn("this restores D1 only. It does not restore Vectorize; provider-only excess vectors can require supervised index recreation before reindex.");
+  warn("this restores D1 only. It does not restore Vectorize; provider-only excess vectors require supervised clean-index recovery, then `brain update <manifest>` rebuilds and proves the projection before active-only reindex or drain.");
   info(`database ${databaseId}, bookmark ${bookmark}`);
   info("After reviewing this recovery, re-run the same command with --yes to perform it.");
   return { confirmed: false, restored: false, databaseId, bookmark };
@@ -5133,7 +5164,8 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
         "D1 was restored, but the semantic projection could not be marked unverified.\n" +
           "      The compatibility Worker remains paused; do not return this brain to use.\n" +
           "      Run `brain update` to forward-migrate the restored schema. Then use supervised recovery\n" +
-          "      to recreate/rebind a clean Vectorize index and every metadata index before reindex, drain, health, and test.",
+          "      to recreate/rebind and rebuild a clean Vectorize index. Ordinary reindex and drain stay\n" +
+          "      refused until that verified update path returns the Worker to active mode.",
       );
     }
     // D1 time travel cannot enumerate Vectorize ids written after the bookmark.
@@ -5152,7 +5184,7 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
   } else {
     warn("D1 was restored, but its upgrade-history marker could not be updated. Record this recovery manually.");
   }
-  warn("the Worker remains paused. Recreate/rebind a clean Vectorize index with every metadata index under supervised recovery, then reindex, drain, health-check, and test before active use.");
+  warn("the Worker remains paused. Recreate/rebind a clean Vectorize index with every metadata index under supervised recovery, then run `brain update <manifest>` to rebuild, prove exact readiness, and return to active mode. Reindex and drain remain refused until active.");
   return {
     confirmed: true,
     restored: true,
@@ -12412,7 +12444,7 @@ export async function cmdDoctorRepair(manifestPath, options = {}) {
     if (!confirmed) {
       warn("rollback preview only: nothing was changed.");
       info(`Re-run with --yes to restore D1 to bookmark ${bookmark}, captured just before this migration.`);
-      info("This restores D1 only; Vectorize needs supervised recreation before reindex, same as `brain rollback`.");
+      info("This restores D1 only; Vectorize needs supervised clean-index recovery followed by `brain update <manifest>`. Reindex and drain remain refused until that update returns active mode.");
       return { paused: true, previewed: "rollback", bookmark };
     }
     return runRollback(manifestPath, bookmark, { confirmed: true });

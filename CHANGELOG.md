@@ -26,10 +26,12 @@ that stops the waiting. Nothing here changes what your brain holds.
   released stuck work while the rebuild was running, which is what the product
   tells you to do, the update treated its own progress as a fault and quit.
 
-- **When a rebuild finishes and some vectors are still missing, the advice is
-  now safe.** It used to point at a command that rebuilds the entire corpus and
-  bills you for every piece again. It now names what is missing and points at
-  the one source that needs it.
+- **When a paused rebuild still finds an index mismatch, the advice is now
+  runnable.** It used to point at reindex even though a paused Brain refuses
+  every reindex request. It now keeps the safety pause in place, directs the
+  update to resume its durable work, and asks for reviewed repair when the same
+  mismatch stops that update again. Once the Brain is active, the ordinary
+  reindex recovery remains available.
 
 ## 0.4.5
 

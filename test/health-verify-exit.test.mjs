@@ -38,6 +38,16 @@ if (SCENARIO) {
     const url = requestUrl(input);
 
     if (url.hostname === "fixture.invalid" && url.pathname === "/health") {
+      if (SCENARIO === "health-paused-vector-count-mismatch") {
+        return json({
+          ok: false,
+          status: "paused-for-upgrade",
+          accepting_documents: false,
+          version: "0.1.9",
+          vector_writer_protocol: "lease-v1",
+          vector_drain_mode: "paused-for-upgrade",
+        });
+      }
       return json({ ok: true, version: "0.1.9" });
     }
     if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/documents") {
@@ -111,7 +121,7 @@ if (SCENARIO) {
           },
         });
       }
-      if (SCENARIO === "health-vector-count-mismatch") {
+      if (["health-vector-count-mismatch", "health-paused-vector-count-mismatch"].includes(SCENARIO)) {
         return json({
           backend: "d1",
           rows: [],
@@ -313,6 +323,14 @@ if (SCENARIO) {
       countMismatch.output.includes(renderCliCommands("brain diagnose <manifest>")) &&
       countMismatch.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
     countMismatch.output);
+
+  const pausedCountMismatch = runScenario("health-paused-vector-count-mismatch", "health", { adminKey: true });
+  check("health sends a paused count mismatch back through update, not the refused reindex endpoint",
+    pausedCountMismatch.code === 1 &&
+      /paused.*Reindex and drain are refused/is.test(pausedCountMismatch.output) &&
+      pausedCountMismatch.output.includes(renderCliCommands("brain update <manifest>")) &&
+      !pausedCountMismatch.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
+    pausedCountMismatch.output);
 
   const countExcess = runScenario("health-vector-count-excess", "health", { adminKey: true });
   check("health does not claim reindex alone can remove provider-only excess vectors",

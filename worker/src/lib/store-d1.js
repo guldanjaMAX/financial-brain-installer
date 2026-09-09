@@ -2032,11 +2032,13 @@ const qAll = async (env, sql, ...bind) => {
  * The rule is simple. If the brain is paused, say so and name what can actually
  * be done from here.
  */
-function remedyForState(env, remedy) {
+export function remedyForState(env, remedy) {
   if (env?.VECTOR_DRAIN_MODE !== "paused-for-upgrade") return remedy;
   return "This brain is paused for an upgrade, so reindex and drain both return 503 " +
-    "until it finishes. Complete or resume the update first; the pause lifts with it. " +
-    "Once it is running again, the remedy is: " + remedy;
+    "until it finishes. Run `brain update <manifest>` to resume the durable paused work; " +
+    "it is the only supported projection writer while this barrier holds. If the update " +
+    "reports this same finding again without progress, keep the brain paused and report " +
+    "that update failure for reviewed repair. Do not clear the pause or run reindex or drain by hand.";
 }
 
 export async function diagnose(env, {

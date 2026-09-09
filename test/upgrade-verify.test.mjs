@@ -1486,10 +1486,11 @@ const bootstrapCompletion = () => ({
     }
     const rendered = output.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
     check(
-      "direct rollback preview requires supervised clean-index recovery before reindex",
+      "direct rollback preview routes clean-index recovery through update before active-only commands",
       preview?.confirmed === false && preview?.restored === false &&
         /nothing was changed/i.test(rendered) && /D1 restore is DESTRUCTIVE/i.test(rendered) &&
-        /does not restore Vectorize/i.test(rendered) && /supervised index recreation before reindex/i.test(rendered) &&
+        /does not restore Vectorize/i.test(rendered) && /supervised clean-index recovery/i.test(rendered) &&
+        /brain update <manifest>/i.test(rendered) && /active-only reindex or drain/i.test(rendered) &&
         /--yes/.test(rendered),
       rendered,
     );

@@ -13,7 +13,12 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { diagnose, drainOutbox, acquireDrainLease } from "../worker/src/lib/store-d1.js";
+import {
+  acquireDrainLease,
+  diagnose,
+  drainOutbox,
+  vectorReadiness,
+} from "../worker/src/lib/store-d1.js";
 
 import { makeEnv as makeDrainEnv, seed as seedDrain, embed as embedDrain } from "./fixtures/vector-fence-env.mjs";
 
@@ -23,7 +28,7 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
 const MIG = fileURLToPath(new URL("../migrations/d1/", import.meta.url));
 
 // A D1-shaped facade over real SQLite, so diagnose() runs unmodified.
-function makeEnv({ vectorCount = null } = {}) {
+function makeEnv({ vectorCount = null, drainMode = null } = {}) {
   const db = new DatabaseSync(":memory:");
   for (const f of readdirSync(MIG).filter((f) => f.endsWith(".sql")).sort()) {
     db.exec(readFileSync(join(MIG, f), "utf-8"));
@@ -48,6 +53,7 @@ function makeEnv({ vectorCount = null } = {}) {
     },
   };
   if (vectorCount !== null) env.VECTORIZE = { describe: async () => ({ vectorCount }) };
+  if (drainMode !== null) env.VECTOR_DRAIN_MODE = drainMode;
   return env;
 }
 
@@ -109,6 +115,28 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("and it says the missing ones are invisible to meaning search", /invisible to meaning/i.test(f?.detail || ""), f?.detail);
   check("and it names the command that repairs it", /brain reindex/.test(f?.action || ""), f?.action);
   check("the overall verdict is problems", r.verdict === "problems", r.verdict);
+}
+
+/* ---- the same defect has different recovery while an update owns the pause ---- */
+{
+  const env = makeEnv({ vectorCount: 0, drainMode: "paused-for-upgrade" });
+  source(env._db, "documents");
+  for (let i = 0; i < 10; i++) { doc(env._db, `paused-d${i}`); chunk(env._db, `paused-d${i}#0`, `paused-d${i}`); }
+
+  const finding = find(await diagnose(env), "store_agreement");
+  check("paused diagnose names update as the only supported projection writer",
+    /paused for an upgrade.*brain update <manifest>.*only supported projection writer/is.test(finding?.action || ""),
+    finding?.action);
+  check("paused diagnose does not forward the active-only whole-corpus reindex remedy",
+    !/Run `brain reindex <manifest>/.test(finding?.action || ""), finding?.action);
+
+  env._db.prepare("UPDATE install_state SET schema_version=36").run();
+  const readiness = await vectorReadiness(env);
+  check("paused readiness applies the same recovery contract",
+    readiness.reason === "vector_count_mismatch" &&
+      /brain update <manifest>/.test(readiness.action || "") &&
+      !/Run `brain reindex <manifest>/.test(readiness.action || ""),
+    JSON.stringify(readiness));
 }
 
 /* ---- vectors left behind by deletions ---- */
