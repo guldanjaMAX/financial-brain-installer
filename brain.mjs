@@ -2799,10 +2799,6 @@ async function cmdHealth(manifestPath, {
   ok(`/health ${res.status} ${body.slice(0, 160)}`);
   if (reachOnly) return;
 
-  let healthReceipt = null;
-  try { healthReceipt = JSON.parse(body); } catch { /* authenticated proof below remains authoritative */ }
-  const pausedForUpgrade = healthReceipt?.vector_drain_mode === "paused-for-upgrade";
-
   const key = resolveAdminKey(manifestPath, { ignoreEnvironment: durableAdminKeyOnly });
   if (!key) {
     die(
@@ -2865,6 +2861,19 @@ async function cmdHealth(manifestPath, {
       // part of health, not an implementation detail. A 200 with an error or
       // malformed backlog is a failed health check, never proof of zero work.
       if (actualBackend === "d1") {
+        // Bind mode and readiness to this one authenticated Worker response.
+        // A separate /health request may hit another generation while a deploy
+        // is propagating, which must never turn a paused readiness failure into
+        // active-only reindex or drain advice.
+        const vectorDrainMode = inventory.vector_drain_mode;
+        if (!["active", "paused-for-upgrade"].includes(vectorDrainMode)) {
+          die(
+            "the documents endpoint could not prove its vector writer mode." + "\n" +
+              "      No reindex or drain recovery is safe from an unbound readiness receipt. " +
+              "Run `brain update <manifest>` to restore one verified Worker generation."
+          );
+        }
+        const pausedForUpgrade = vectorDrainMode === "paused-for-upgrade";
         const backlog = inventory.vector_backlog;
         const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
         if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
@@ -4813,12 +4822,11 @@ export async function cmdUpgrade(manifestPath, options = {}) {
 
     info(`upgrading ${fromVersion} -> ${toVersion}`);
     let stage = "migration";
-    // True between the paused deployment and the active one. If the run dies in
-    // that window the install stays paused, which is correct (a partially
-    // migrated corpus must not meet live writers) but invisible: seven write
-    // paths including ingest return 503 and nothing says so. One field install
-    // sat like that for eight days and silently accepted no documents.
-    let corpusPausedByThisRun = false;
+    // True from verified paused deployment until active mode is itself verified.
+    // Uploading the active Worker is not enough: during propagation the paused
+    // generation can still answer. If the run dies in that window the install
+    // may stay paused, which is correct but must be explicit to the operator.
+    let corpusPauseMayStillBeServing = false;
     const runStage = async (name, action) => {
       stage = name;
       const context = await assertStageContext(name);
@@ -4844,7 +4852,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           persistDomain: false,
           pauseVectorDrainForUpgrade: true,
         }));
-        corpusPausedByThisRun = true;
+        corpusPauseMayStillBeServing = true;
         await runStage("paused vector-drain health verification", () =>
           verifyHealth(executionPin.target, {
             expectVersion: toVersion,
@@ -4904,7 +4912,6 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           persistDomain: false,
           pauseVectorDrainForUpgrade: false,
         }));
-        corpusPausedByThisRun = false;
         // Cloudflare can keep routing this client to the paused compatibility
         // deployment for a few seconds after the active upload succeeds. Prove
         // the exact active mode is serving before the first corpus mutation;
@@ -4915,6 +4922,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             expectDrainMode: "active",
             reachOnly: true,
           }));
+        corpusPauseMayStillBeServing = false;
       } else {
         await runStage("migration", () => migrate(executionPin.target));
         await runStage("deployment", () => deploy(executionPin.target, { persistDomain: false }));
@@ -4972,15 +4980,23 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       await runStage("verified history commit", () => logRun("verified", null, { required: true }));
     } catch (error) {
       await logRun("failed", `stage:${stage}`);
+      const projectionRecovery = usesD1VectorOutbox
+        ? corpusPauseMayStillBeServing
+          ? "      A D1 restore does not restore Vectorize. Reviewed restore recovery must recreate/rebind\n" +
+            "      a clean index and rebuild it through the verified update path. Reindex and drain are\n" +
+            "      refused while the paused generation may still be serving.\n"
+          : "      A D1 restore does not restore Vectorize. If restore is reviewed and approved, its\n" +
+            "      semantic projection must also be rebuilt and verified before active use. This failure\n" +
+            "      does not claim that reindex or drain are blocked by an update pause.\n"
+        : "      This install does not use the D1 Vectorize outbox cutover, so no paused reindex or drain\n" +
+          "      restriction is being claimed for this failure. Review this backend's restore impact.\n";
       die(
         `update stopped during ${stage}: ${error.message}\n` +
           `      D1 recovery bookmark: ${bookmark}\n` +
-          "      Do not restore it as the first response. A D1 restore discards newer writes and\n" +
-          "      does not restore Vectorize. A restore requires reviewed clean-index recreation/rebind\n" +
-          "      and a supervised projection rebuild; ordinary reindex and drain remain unavailable\n" +
-          "      until the verified update path returns the Worker to active mode.\n" +
+          "      Do not restore it as the first response. A D1 restore discards newer writes.\n" +
+          projectionRecovery +
           "      Safe default: fix the reported issue and run brain update again." +
-          (corpusPausedByThisRun
+          (corpusPauseMayStillBeServing
             ? "\n\n" +
               "      THIS BRAIN CANNOT ACCEPT DOCUMENTS RIGHT NOW.\n" +
               "      The update paused its corpus writes before changing the schema and did not\n" +

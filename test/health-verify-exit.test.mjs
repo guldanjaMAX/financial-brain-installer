@@ -18,6 +18,17 @@ const FIXTURE_ADMIN = "fixture-admin-label";
 const FIXTURE_TOKEN = "fixture-cloudflare-label";
 
 function json(body, status = 200) {
+  if (body && typeof body === "object" && String(body.backend || "").toLowerCase() === "d1" &&
+      SCENARIO !== "health-documents-mode-missing" &&
+      !Object.prototype.hasOwnProperty.call(body, "vector_drain_mode")) {
+    body = {
+      ...body,
+      vector_drain_mode: [
+        "health-paused-vector-count-mismatch",
+        "health-mixed-generation-vector-count-mismatch",
+      ].includes(SCENARIO) ? "paused-for-upgrade" : "active",
+    };
+  }
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
@@ -121,7 +132,12 @@ if (SCENARIO) {
           },
         });
       }
-      if (["health-vector-count-mismatch", "health-paused-vector-count-mismatch"].includes(SCENARIO)) {
+      if ([
+        "health-vector-count-mismatch",
+        "health-paused-vector-count-mismatch",
+        "health-mixed-generation-vector-count-mismatch",
+        "health-documents-mode-missing",
+      ].includes(SCENARIO)) {
         return json({
           backend: "d1",
           rows: [],
@@ -331,6 +347,21 @@ if (SCENARIO) {
       pausedCountMismatch.output.includes(renderCliCommands("brain update <manifest>")) &&
       !pausedCountMismatch.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
     pausedCountMismatch.output);
+
+  const mixedGeneration = runScenario("health-mixed-generation-vector-count-mismatch", "health", { adminKey: true });
+  check("health follows the paused mode bound to readiness even when public health answered active",
+    mixedGeneration.code === 1 &&
+      /Reindex and drain are refused.*paused/is.test(mixedGeneration.output) &&
+      mixedGeneration.output.includes(renderCliCommands("brain update <manifest>")) &&
+      !mixedGeneration.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
+    mixedGeneration.output);
+
+  const unboundMode = runScenario("health-documents-mode-missing", "health", { adminKey: true });
+  check("health refuses recovery commands when readiness carries no same-generation writer mode",
+    unboundMode.code === 1 && /could not prove its vector writer mode/i.test(unboundMode.output) &&
+      unboundMode.output.includes(renderCliCommands("brain update <manifest>")) &&
+      !unboundMode.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
+    unboundMode.output);
 
   const countExcess = runScenario("health-vector-count-excess", "health", { adminKey: true });
   check("health does not claim reindex alone can remove provider-only excess vectors",

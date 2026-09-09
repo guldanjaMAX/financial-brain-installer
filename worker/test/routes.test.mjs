@@ -1402,6 +1402,8 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   const documentsResponse = await call(env, "/api/admin/brain/documents");
   const b = await documentsResponse.json();
   check("documents names the backend", b.backend === "d1", JSON.stringify(b));
+  check("documents binds active writer mode to the same receipt as readiness",
+    b.vector_drain_mode === "active", JSON.stringify(b));
   check("documents separates source files from stored split parts",
     b.rows[0]?.documents === 2 && b.rows[0]?.logical_documents === 2 && b.rows[0]?.stored_documents === 3, JSON.stringify(b.rows[0]));
   check("and reports vector backlog", b.vector_backlog && "pending" in b.vector_backlog, JSON.stringify(b.vector_backlog));
@@ -1412,6 +1414,13 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   check("private aggregate inventory responses cannot be cached",
     /no-store/.test(documentsResponse.headers.get("cache-control") || ""),
     documentsResponse.headers.get("cache-control") || "missing");
+
+  const pausedDocuments = await call({ ...env, VECTOR_DRAIN_MODE: "paused-for-upgrade" }, "/api/admin/brain/documents");
+  const pausedBody = await pausedDocuments.json();
+  check("paused documents bind the refusal mode to their own readiness receipt",
+    pausedDocuments.status === 200 && pausedBody.vector_drain_mode === "paused-for-upgrade" &&
+      pausedBody.vector_readiness && typeof pausedBody.vector_readiness.ready === "boolean",
+    JSON.stringify(pausedBody));
 
   const failedDocuments = await call({
     STORAGE: "d1", ADMIN_KEY: "k",

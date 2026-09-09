@@ -446,6 +446,13 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("quarantine repair uses its explicit preview and confirmation, not a whole index rebuild",
     /vector-retry/.test(f?.action || "") && /preview|confirm/.test(f?.action || "") && !/reindex/.test(f?.action || ""), f?.action);
   check("a quarantined row is excluded from ordinary retry totals", !find(await diagnose(env), "vector_retries"));
+  env.VECTOR_DRAIN_MODE = "paused-for-upgrade";
+  const paused = find(await diagnose(env), "quarantined");
+  check("paused quarantine keeps the explicitly allowed vector-retry recovery",
+    /vector-retry/.test(paused?.action || "") && /brain update <manifest>/.test(paused?.action || ""),
+    paused?.action);
+  check("paused quarantine never falls through to refused drain or reindex",
+    !/brain drain <manifest>|brain reindex <manifest>/.test(paused?.action || ""), paused?.action);
 }
 
 /* ---- it must degrade rather than explode ---- */

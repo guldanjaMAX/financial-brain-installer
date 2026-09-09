@@ -2032,11 +2032,14 @@ const qAll = async (env, sql, ...bind) => {
  * The rule is simple. If the brain is paused, say so and name what can actually
  * be done from here.
  */
-export function remedyForState(env, remedy) {
+export function remedyForState(env, remedy, { pausedRemedy = null } = {}) {
   if (env?.VECTOR_DRAIN_MODE !== "paused-for-upgrade") return remedy;
+  const recovery = typeof pausedRemedy === "string" && pausedRemedy
+    ? pausedRemedy
+    : "Run `brain update <manifest>` to resume the durable paused work.";
   return "This brain is paused for an upgrade, so reindex and drain both return 503 " +
-    "until it finishes. Run `brain update <manifest>` to resume the durable paused work; " +
-    "it is the only supported projection writer while this barrier holds. If the update " +
+    `until it finishes. ${recovery} The update ` +
+    "is the only supported projection writer while this barrier holds. If the update " +
     "reports this same finding again without progress, keep the brain paused and report " +
     "that update failure for reviewed repair. Do not clear the pause or run reindex or drain by hand.";
 }
@@ -2301,7 +2304,9 @@ export async function diagnose(env, {
       title: `${n} vector operation(s) failed and were set aside`,
       detail: "Upsert failures stay invisible to meaning search; delete failures leave stale vectors consuming candidates. Both remain queued for repair.",
       samples: rows.map((r) => `${r.chunk_uid}: ${String(r.last_error || "").slice(0, 90)}`),
-      action: remedyForState(env, "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain drain <manifest>`.") });
+      action: remedyForState(env,
+        "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain drain <manifest>`.",
+        { pausedRemedy: "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain update <manifest>` to resume the paused bootstrap." }) });
   });
 
   await safe("vector_retries", async () => {

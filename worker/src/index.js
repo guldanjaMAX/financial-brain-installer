@@ -1820,7 +1820,16 @@ async function handleSourceFamilies(env, request) {
 
 async function handleDocuments(env) {
   const { rows } = await storeFor(env).stats(env);
-  const out = { backend: backendOf(env), rows: rows || [] };
+  // Keep the writer mode on the same authenticated response as readiness.
+  // /health is a separate request and a rolling deployment can legitimately
+  // route the two probes to different Worker generations. Recovery advice must
+  // follow the generation that produced the readiness receipt, not whichever
+  // generation happened to answer the earlier public probe.
+  const out = {
+    backend: backendOf(env),
+    rows: rows || [],
+    vector_drain_mode: upgradePauseHolds(env) ? "paused-for-upgrade" : "active",
+  };
   if (backendOf(env) === D1) {
     // How far the vector index trails the text. A brain whose outbox is not
     // draining still answers keyword queries, which is exactly why the number

@@ -31,6 +31,15 @@ assert.doesNotMatch(
   "a paused finding must be re-diagnosed after update instead of prescribing a future command now"
 );
 
+const pausedQuarantineRemedy = remedyForState(
+  { VECTOR_DRAIN_MODE: "paused-for-upgrade" },
+  "Use vector-retry, then run `brain drain <manifest>`.",
+  { pausedRemedy: "Use the operator vector-retry preview and confirmation, then run `brain update <manifest>`." },
+);
+assert.match(pausedQuarantineRemedy, /vector-retry.*brain update <manifest>/s);
+assert.doesNotMatch(pausedQuarantineRemedy, /brain drain <manifest>/);
+assert.doesNotMatch(pausedQuarantineRemedy, /brain reindex <manifest>/);
+
 const source = readFileSync(fileURLToPath(new URL("../src/lib/store-d1.js", import.meta.url)), "utf8")
   .replace(/\r\n/g, "\n");
 
@@ -62,7 +71,7 @@ assert.deepEqual(
 
 assert.match(
   source,
-  /export function remedyForState\(env, remedy\)/,
+  /export function remedyForState\(env, remedy, \{ pausedRemedy = null \} = \{\}\)/,
   "the state-aware remedy wrapper must exist"
 );
 assert.match(
