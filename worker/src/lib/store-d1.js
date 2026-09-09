@@ -1033,7 +1033,11 @@ const DRAIN_LEASE_RELEASE_QUERIES = 1;
 const DRAIN_PROJECTION_VERIFY_QUERIES = 3;
 const DRAIN_INITIAL_DEPTH_QUERIES = 1;
 const DRAIN_RETRY_STATE_QUERIES = 2;
-const DRAIN_BATCH_SIZE_MAX = 100;
+// Raised from 100 on 2026-09-09. The drain is fence-paced: one confirmation
+// latency advances at most one batch, so rows-per-batch is the only lever that
+// does not touch ordering. 250 is bounded by the CONFIRM path below, not by
+// Vectorize (which takes 1,000-vector mutations on the accelerated path).
+const DRAIN_BATCH_SIZE_MAX = 250;
 export const VECTOR_RETRY_MAX_ATTEMPTS = 5;
 const VECTOR_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
 
@@ -1116,11 +1120,15 @@ async function scheduleVectorFailures(env, rows, {
   return { scheduled: rows.length - quarantined, quarantined };
 }
 
-// One two-phase slice either submits or confirms. The largest path is an upsert
-// submission: queue/fence/delete/upsert reads plus the durable fence, final
-// depth, one submission receipt per row, and one legacy hashed-id remap per row.
-// Confirmation needs only one CAS statement per row. Reserving this bound before
-// provider work keeps the lease release inside the invocation budget.
+// One two-phase slice either submits or confirms. Submission costs two
+// statements per row (the hashed-id remap, then the submission receipt).
+// CONFIRMATION is the expensive one and sets this bound: a row that misses
+// visibility costs THREE, the clear-receipt CAS plus the two scheduleVectorFailures
+// pushes per row. A mass visibility_mismatch is the ordinary shape of a stalled
+// fence, so the bound is 3 per row, not 2. Under-reserving here let a batch spend
+// 308 statements against 212 reserved, which is how a Vectorize mutation can land
+// and then fail to record its durable receipt inside D1's 1,000-query invocation
+// limit. test/drain-throughput.test.mjs measures this and fails if it drifts.
 export function drainBatchQueryUpperBound(batchSize = DRAIN_BATCH_SIZE_MAX) {
   const bounded = Number.isInteger(batchSize)
     ? Math.min(DRAIN_BATCH_SIZE_MAX, Math.max(1, batchSize))
@@ -1129,7 +1137,7 @@ export function drainBatchQueryUpperBound(batchSize = DRAIN_BATCH_SIZE_MAX) {
   // provider mutation in this slice. Five more cover the bounded legacy
   // bootstrap status/page/transaction/depth path when a confirmation empties
   // the current page.
-  return 12 + (2 * bounded);
+  return 12 + (3 * bounded);
 }
 
 const drainLeaseChanges = (result) => Number(
@@ -1837,9 +1845,17 @@ async function drainOutboxWithLease(env, options, lease) {
   let reservedQueries = DRAIN_LEASE_ACQUIRE_QUERIES + DRAIN_LEASE_RELEASE_QUERIES +
     DRAIN_PROJECTION_VERIFY_QUERIES + DRAIN_INITIAL_DEPTH_QUERIES +
     DRAIN_RETRY_STATE_QUERIES;
-  const batchQueryUpperBound = drainBatchQueryUpperBound(batchSize);
   for (let batch = 0; batch < maxBatches; batch++) {
     if (now() - startedAt >= maxInvocationMs) break;
+    // Reserve against the work actually queued, not the ceiling, and then cap
+    // the slice to exactly what was reserved. A full-size batch reserves enough
+    // that only one fits per invocation, which is correct for a large backlog
+    // but would stop a five-row install drain from confirming in the same call
+    // it submitted. Binding the LIMIT to the reserved number is what makes the
+    // smaller reservation safe: concurrent ingest can grow the queue between
+    // the count and the select, but the batch still cannot exceed its receipts.
+    const batchRows = Math.max(1, Math.min(batchSize, Number(result.remaining) || batchSize));
+    const batchQueryUpperBound = drainBatchQueryUpperBound(batchRows);
     // Never begin provider work unless every possible D1 receipt/remap for
     // that batch fits alongside the already-reserved lease release. This
     // prevents a Vectorize write from landing only to hit D1's invocation
@@ -1848,7 +1864,7 @@ async function drainOutboxWithLease(env, options, lease) {
     reservedQueries += batchQueryUpperBound;
     const part = await drainOutboxBatch(env, {
       ...options,
-      batchSize,
+      batchSize: batchRows,
       lease: { ownerToken: lease.ownerToken, now },
     });
     result.drained += Number(part.drained || 0);
