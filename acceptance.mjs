@@ -70,8 +70,19 @@ export function answerUnavailableDiagnostic(payload) {
     };
   }
 
-  const results = Array.isArray(payload.results) ? payload.results : [];
-  const gaps = Array.isArray(payload.gaps) ? payload.gaps : [];
+  const owns = (field) => Object.prototype.hasOwnProperty.call(payload, field);
+  if (payload.mode !== "think" || !owns("answer") ||
+      !(payload.answer === null || typeof payload.answer === "string") ||
+      !Array.isArray(payload.results) || !Array.isArray(payload.gaps) ||
+      !Array.isArray(payload.citations)) {
+    return {
+      stage: "response_contract",
+      detail: "the Worker returned an incomplete or incompatible answer response",
+    };
+  }
+
+  const results = payload.results;
+  const gaps = payload.gaps;
   const evidenceGate = payload.evidence_gate && typeof payload.evidence_gate === "object" &&
     !Array.isArray(payload.evidence_gate)
     ? payload.evidence_gate
@@ -120,12 +131,11 @@ export function answerUnavailableDiagnostic(payload) {
   if (evidenceGate && (evidenceGate.supported === false || evidenceGate.complete === false)) {
     return {
       stage: "answer_verification",
-      detail: diagnosticText(
-        evidenceGate.reason,
-        evidenceGate.supported === false
-          ? "the generated draft was not supported by its cited evidence"
-          : "the generated draft did not cover the complete question",
-      ),
+      // The verifier reason is model-generated from the private question,
+      // draft, and citations. It is diagnostic evidence, not public copy.
+      detail: evidenceGate.supported === false
+        ? "the generated draft was not accepted because its cited evidence did not support it"
+        : "the generated draft was not accepted because it did not cover the complete question",
     };
   }
 
@@ -139,7 +149,7 @@ export function answerUnavailableDiagnostic(payload) {
   if (payload.model) {
     return {
       stage: "answer_model",
-      detail: `model ${diagnosticText(payload.model, "unknown")} returned no answer text from ${results.length} candidate result(s)`,
+      detail: `the configured answer model returned no answer text from ${results.length} candidate result(s)`,
     };
   }
 
@@ -613,20 +623,25 @@ export class Acceptance {
         );
       }
     } else {
-      // Degradation is a pass for the endpoint and a warning for the install.
+      // A complete null-answer response proves the endpoint degraded rather
+      // than crashed. A malformed 200 proves neither and must fail closed.
       const diagnostic = answerUnavailableDiagnostic(think.json);
-      this.record(
-        t,
-        "think degrades cleanly",
-        PASS,
-        `no answer; stage ${diagnostic.stage}: ${diagnostic.detail}`
-      );
-      this.record(
-        t,
-        `answer unavailable at ${diagnostic.stage}`,
-        WARN,
-        diagnostic.detail
-      );
+      if (diagnostic.stage === "response_contract") {
+        this.record(t, "think response contract", FAIL, diagnostic.detail);
+      } else {
+        this.record(
+          t,
+          "think degrades cleanly",
+          PASS,
+          `no answer; stage ${diagnostic.stage}: ${diagnostic.detail}`
+        );
+        this.record(
+          t,
+          `answer unavailable at ${diagnostic.stage}`,
+          WARN,
+          diagnostic.detail
+        );
+      }
     }
     this.record(
       t,

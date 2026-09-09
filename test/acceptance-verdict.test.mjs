@@ -142,6 +142,15 @@ for (const [label, manifest] of [
 
 /* ------------------------------------- 5. null-answer stage diagnostics */
 
+const validNullAnswer = (overrides = {}) => ({
+  mode: "think",
+  answer: null,
+  citations: [],
+  results: [],
+  gaps: [],
+  ...overrides,
+});
+
 for (const [label, body, expectedStage, detailPattern] of [
   [
     "a retrieval outage",
@@ -157,9 +166,9 @@ for (const [label, body, expectedStage, detailPattern] of [
   ],
   [
     "an evidence refusal",
-    { results: [{ n: 1 }], model: "@cf/example", evidence_gate: { supported: false, complete: false, reason: "different company" } },
+    { results: [{ n: 1 }], model: "@cf/example", evidence_gate: { supported: false, complete: false, reason: "private-payload-canary\nfrom the draft" } },
     "answer_verification",
-    /different company/i,
+    /not accepted because its cited evidence did not support it/i,
   ],
   [
     "a sanitized model error",
@@ -186,41 +195,42 @@ for (const [label, body, expectedStage, detailPattern] of [
     /neither a model nor an answer error/i,
   ],
 ]) {
-  const diagnostic = answerUnavailableDiagnostic(body);
+  const diagnostic = answerUnavailableDiagnostic(validNullAnswer(body));
   check(`${label} names ${expectedStage}`, diagnostic.stage === expectedStage, JSON.stringify(diagnostic));
   check(`${label} carries an actionable reason`, detailPattern.test(diagnostic.detail), JSON.stringify(diagnostic));
   check(`${label} never falls back to unknown`, !/reason:\s*unknown|no answer produced/i.test(diagnostic.detail), JSON.stringify(diagnostic));
+  check(`${label} exposes no private verifier text`, !/private-payload-canary/i.test(diagnostic.detail), JSON.stringify(diagnostic));
 }
 
 {
-  const diagnostic = answerUnavailableDiagnostic({
+  const diagnostic = answerUnavailableDiagnostic(validNullAnswer({
     results: [{ n: 1 }],
     answer_error: "The evidence check could not verify support, so no answer was shown. Try again in a moment.",
     evidence_gate: { supported: false, complete: false, error: "verification unavailable" },
-  });
+  }));
   check("the Worker's verification-failure shape names answer verification, not the answer model",
     diagnostic.stage === "answer_verification", JSON.stringify(diagnostic));
 }
 
 {
-  const diagnostic = answerUnavailableDiagnostic({
+  const diagnostic = answerUnavailableDiagnostic(validNullAnswer({
     results: [{ n: 1 }],
     evidence_gate: {
       supported: false,
       complete: false,
       error: "verifier failed with private-payload-canary",
     },
-  });
+  }));
   check("an older Worker's raw verifier error is replaced with reviewed public copy",
     /evidence verifier was unavailable/i.test(diagnostic.detail) &&
       !/private-payload-canary/i.test(diagnostic.detail), JSON.stringify(diagnostic));
 }
 
 {
-  const diagnostic = answerUnavailableDiagnostic({
+  const diagnostic = answerUnavailableDiagnostic(validNullAnswer({
     results: [{ n: 1 }],
     answer_error: "provider failed with private-payload-canary",
-  });
+  }));
   check("an older Worker's raw model error is replaced with reviewed public copy",
     /Answer generation is unavailable right now/i.test(diagnostic.detail) &&
       !/private-payload-canary/i.test(diagnostic.detail), JSON.stringify(diagnostic));
@@ -234,7 +244,9 @@ for (const [label, body, expectedStage, detailPattern] of [
         ok: true,
         status: 200,
         json: {
+          mode: "think",
           answer: null,
+          citations: [],
           status: "coverage_incomplete",
           notice: "One source is still loading.",
           gaps: [{ type: "coverage_stale" }],
@@ -249,6 +261,23 @@ for (const [label, body, expectedStage, detailPattern] of [
     /still loading/i.test(warning?.detail || ""), JSON.stringify(warning));
   check("the old unknown diagnostic is gone from the acceptance result",
     !suite.results.some((result) => /reason:\s*unknown|no answer produced/i.test(`${result.name} ${result.detail}`)),
+    JSON.stringify(suite.results));
+}
+
+{
+  const malformed = { results: [], gaps: [] };
+  const diagnostic = answerUnavailableDiagnostic(malformed);
+  check("a malformed 200 answer response is a response-contract failure",
+    diagnostic.stage === "response_contract", JSON.stringify(diagnostic));
+
+  const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
+  suite.post = async (path) => path === "/api/rag/unified"
+    ? { ok: true, status: 200, json: { results: [{ title: "candidate" }] } }
+    : { ok: true, status: 200, json: malformed };
+  await suite.tierRetrieval(["What changed?"]);
+  check("a malformed 200 cannot pass as a clean degradation",
+    suite.results.some((result) => result.status === "fail" && result.name === "think response contract") &&
+      !suite.results.some((result) => result.status === "pass" && result.name === "think degrades cleanly"),
     JSON.stringify(suite.results));
 }
 
