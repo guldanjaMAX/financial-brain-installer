@@ -34,6 +34,7 @@
  */
 
 import { fetchBrainWithAdminKey } from "./components/brain-http.mjs";
+import { safeAnswerErrorText } from "./worker/src/lib/answer-render.js";
 
 const PASS = "pass";
 const FAIL = "fail";
@@ -43,6 +44,107 @@ const SKIP = "skip";
 const CREDENTIAL_GATE_ERROR = "refused: content carries live credential(s)";
 const CREDENTIAL_GATE_DETAIL =
   "Rotate them, strip them from the source, then re-ingest. Nothing was written.";
+
+const diagnosticText = (value, fallback) => {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, 240) : fallback;
+};
+
+/**
+ * Name the exact stage that left `/api/rag/think` without an answer.
+ *
+ * A null answer is not one condition. It can mean retrieval was unavailable,
+ * declared source coverage is still incomplete, the evidence verifier refused
+ * an unsupported draft, or the answer model itself returned nothing. Those
+ * states require different next actions, and collapsing them into "unknown"
+ * made a live acceptance warning impossible to investigate.
+ *
+ * Only bounded, already-public response fields enter the detail. Provider
+ * errors are sanitized by the Worker before this function sees them.
+ */
+export function answerUnavailableDiagnostic(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {
+      stage: "response_contract",
+      detail: "the Worker returned no structured answer response",
+    };
+  }
+
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  const gaps = Array.isArray(payload.gaps) ? payload.gaps : [];
+  const evidenceGate = payload.evidence_gate && typeof payload.evidence_gate === "object" &&
+    !Array.isArray(payload.evidence_gate)
+    ? payload.evidence_gate
+    : null;
+
+  if (payload.status === "search_unavailable" ||
+      (results.length === 0 && payload.degraded)) {
+    return {
+      stage: "retrieval",
+      detail: diagnosticText(
+        payload.notice,
+        `search was incomplete${payload.degraded ? ` (${String(payload.degraded).slice(0, 40)})` : ""}`,
+      ),
+    };
+  }
+
+  const coverageGap = gaps.find((gap) =>
+    gap && typeof gap === "object" && ["coverage_stale", "coverage_unavailable"].includes(gap.type)
+  );
+  if (payload.status === "coverage_incomplete" || coverageGap) {
+    return {
+      stage: "source_coverage",
+      detail: diagnosticText(
+        payload.notice || coverageGap?.detail,
+        "one or more declared sources are not yet proven complete",
+      ),
+    };
+  }
+
+  if (evidenceGate?.error) {
+    return {
+      stage: "answer_verification",
+      detail: diagnosticText(evidenceGate.error, "the evidence verifier was unavailable"),
+    };
+  }
+
+  if (payload.answer_error) {
+    return {
+      stage: "answer_model",
+      detail: safeAnswerErrorText(payload.answer_error),
+    };
+  }
+  if (evidenceGate && (evidenceGate.supported === false || evidenceGate.complete === false)) {
+    return {
+      stage: "answer_verification",
+      detail: diagnosticText(
+        evidenceGate.reason,
+        evidenceGate.supported === false
+          ? "the generated draft was not supported by its cited evidence"
+          : "the generated draft did not cover the complete question",
+      ),
+    };
+  }
+
+  if (results.length === 0) {
+    return {
+      stage: "retrieval",
+      detail: "search completed but returned no candidate evidence for the probe",
+    };
+  }
+
+  if (payload.model) {
+    return {
+      stage: "answer_model",
+      detail: `model ${diagnosticText(payload.model, "unknown")} returned no answer text from ${results.length} candidate result(s)`,
+    };
+  }
+
+  return {
+    stage: "answer_model_dispatch",
+    detail: `${results.length} candidate result(s) were present, but the Worker reported neither a model nor an answer error`,
+  };
+}
 
 /**
  * Accept only the credential scanner's production refusal contract.
@@ -509,17 +611,18 @@ export class Acceptance {
       }
     } else {
       // Degradation is a pass for the endpoint and a warning for the install.
+      const diagnostic = answerUnavailableDiagnostic(think.json);
       this.record(
         t,
         "think degrades cleanly",
         PASS,
-        `no answer, reason: ${think.json?.answer_error || "unknown"}`
+        `no answer; stage ${diagnostic.stage}: ${diagnostic.detail}`
       );
       this.record(
         t,
-        "answer generation configured",
+        `answer unavailable at ${diagnostic.stage}`,
         WARN,
-        think.json?.answer_error || "no answer produced"
+        diagnostic.detail
       );
     }
     this.record(

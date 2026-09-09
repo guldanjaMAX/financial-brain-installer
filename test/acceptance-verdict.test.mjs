@@ -16,7 +16,7 @@
 // And brain setup must warn while there is still time to fix it, via
 // emptyProbeQuestionsWarning.
 
-import { Acceptance, acceptanceVerdict } from "../acceptance.mjs";
+import { Acceptance, acceptanceVerdict, answerUnavailableDiagnostic } from "../acceptance.mjs";
 import { computeVerdict } from "../report-html.mjs";
 import { emptyProbeQuestionsWarning } from "../brain.mjs";
 
@@ -138,6 +138,104 @@ for (const [label, manifest] of [
     (lines || []).some((l) => /testing\.probe_questions/.test(l)), JSON.stringify(lines));
   check(`${label} says what stays untested without it`,
     (lines || []).some((l) => /retrieval|acceptance/i.test(l)), JSON.stringify(lines));
+}
+
+/* ------------------------------------- 5. null-answer stage diagnostics */
+
+for (const [label, body, expectedStage, detailPattern] of [
+  [
+    "a retrieval outage",
+    { status: "search_unavailable", degraded: "vector", notice: "The vector index is still building.", results: [] },
+    "retrieval",
+    /vector index is still building/i,
+  ],
+  [
+    "incomplete source coverage",
+    { status: "coverage_incomplete", notice: "One source is still loading.", results: [{ n: 1 }] },
+    "source_coverage",
+    /still loading/i,
+  ],
+  [
+    "an evidence refusal",
+    { results: [{ n: 1 }], model: "@cf/example", evidence_gate: { supported: false, complete: false, reason: "different company" } },
+    "answer_verification",
+    /different company/i,
+  ],
+  [
+    "a sanitized model error",
+    { results: [{ n: 1 }], answer_error: "Answer generation is unavailable right now. Try again in a moment." },
+    "answer_model",
+    /unavailable right now/i,
+  ],
+  [
+    "an empty model response",
+    { results: [{ n: 1 }], model: "claude-example" },
+    "answer_model",
+    /returned no answer text/i,
+  ],
+  [
+    "a completed search with no evidence",
+    { results: [], gaps: [{ type: "no_results" }] },
+    "retrieval",
+    /no candidate evidence/i,
+  ],
+  [
+    "an impossible dispatch state",
+    { results: [{ n: 1 }] },
+    "answer_model_dispatch",
+    /neither a model nor an answer error/i,
+  ],
+]) {
+  const diagnostic = answerUnavailableDiagnostic(body);
+  check(`${label} names ${expectedStage}`, diagnostic.stage === expectedStage, JSON.stringify(diagnostic));
+  check(`${label} carries an actionable reason`, detailPattern.test(diagnostic.detail), JSON.stringify(diagnostic));
+  check(`${label} never falls back to unknown`, !/reason:\s*unknown|no answer produced/i.test(diagnostic.detail), JSON.stringify(diagnostic));
+}
+
+{
+  const diagnostic = answerUnavailableDiagnostic({
+    results: [{ n: 1 }],
+    answer_error: "The evidence check could not verify support, so no answer was shown. Try again in a moment.",
+    evidence_gate: { supported: false, complete: false, error: "verification unavailable" },
+  });
+  check("the Worker's verification-failure shape names answer verification, not the answer model",
+    diagnostic.stage === "answer_verification", JSON.stringify(diagnostic));
+}
+
+{
+  const diagnostic = answerUnavailableDiagnostic({
+    results: [{ n: 1 }],
+    answer_error: "provider failed with private-payload-canary",
+  });
+  check("an older Worker's raw model error is replaced with reviewed public copy",
+    /Answer generation is unavailable right now/i.test(diagnostic.detail) &&
+      !/private-payload-canary/i.test(diagnostic.detail), JSON.stringify(diagnostic));
+}
+
+{
+  const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
+  suite.post = async (path) => path === "/api/rag/unified"
+    ? { ok: true, status: 200, json: { results: [{ title: "candidate" }] } }
+    : {
+        ok: true,
+        status: 200,
+        json: {
+          answer: null,
+          status: "coverage_incomplete",
+          notice: "One source is still loading.",
+          gaps: [{ type: "coverage_stale" }],
+          results: [{ title: "candidate" }],
+        },
+      };
+  await suite.tierRetrieval(["What changed?"]);
+  const warning = suite.results.find((result) => result.status === "warn" && /answer unavailable/.test(result.name));
+  check("the acceptance result names the stage in its visible check name",
+    warning?.name === "answer unavailable at source_coverage", JSON.stringify(suite.results));
+  check("the acceptance result retains the stage-specific reason",
+    /still loading/i.test(warning?.detail || ""), JSON.stringify(warning));
+  check("the old unknown diagnostic is gone from the acceptance result",
+    !suite.results.some((result) => /reason:\s*unknown|no answer produced/i.test(`${result.name} ${result.detail}`)),
+    JSON.stringify(suite.results));
 }
 
 console.log(`\nacceptance verdict: ${ran - fail}/${ran} passed`);
