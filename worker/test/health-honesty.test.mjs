@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import worker from "../src/index.js";
+import { WORKER_VERSION } from "../src/lib/version.js";
 
 /* A paused brain refuses ingest on eight write paths. Reporting ok:true through
    that is what turned one client's failed update into eight days of silence: they
@@ -56,7 +57,10 @@ for (const env of [{ ...base }, { ...base, VECTOR_DRAIN_MODE: "paused-for-upgrad
   // verifyRollbackHealth's expectVersion, both compare against the package
   // version, so reporting the code's own version is what makes them mean
   // anything.
-  assert.equal(body.version, "0.4.4", "health reports the worker's own version");
+  // Compared against the source constant, not a literal. A literal here has to be
+  // hand-edited every release, which is the same drift class UPDATE-038 exists for,
+  // and current-version.test.mjs already pins WORKER_VERSION to package.json.
+  assert.equal(body.version, WORKER_VERSION, "health reports the worker's own version");
   assert.equal(body.configured_version, "0.1.18", "a disagreeing deploy-time variable is surfaced");
   assert.equal(body.version_mismatch, true, "and the disagreement is named rather than hidden");
   assert.equal(body.vector_writer_protocol, "lease-v1", "cmdHealth matches on protocol");

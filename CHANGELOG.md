@@ -4,6 +4,30 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.5
+
+Candidate only. This version has not been released.
+
+Two defects, both found by a client running the product on his own folders in
+one sitting, and one of them had already cost him a duplicated corpus. Nothing
+here changes what your brain holds.
+
+- **One shortcut in your folder no longer refuses every document.** A symbolic
+  link or a Windows junction anywhere under the folder you are loading stopped
+  the entire run, so a corpus that loaded fine before returned nothing and
+  nothing on disk had changed. One client's 3,119 documents were refused by a
+  single link. The link itself is still not followed, because what sits behind
+  it was never examined and must never be read as evidence that those documents
+  are gone. It is now skipped on its own, everything under it is protected from
+  removal, and the rest of your documents load.
+
+- **Loading a folder by path uses the name your brain already gave it.**
+  `brain ingest --path` ignored the source name recorded in your manifest and
+  filed everything under a generic one, so the same documents could land twice
+  under two names and both copies would answer. The declared name is used now,
+  the run prints which source it is filing into before it sends anything, and a
+  path that contradicts the manifest stops instead of guessing.
+
 ## 0.4.4
 
 Candidate only. This version has not been released.

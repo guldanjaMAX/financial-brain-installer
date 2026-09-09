@@ -1,6 +1,7 @@
 import worker from "../src/index.js";
 import { filterSql, unsupportedFilters } from "../src/lib/store-d1.js";
 import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
+import { WORKER_VERSION } from "../src/lib/version.js";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + d)); if (!c) fail++; };
@@ -2242,7 +2243,7 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
   // know which code is actually deployed, and a variable can outlive the code it
   // described.
   check("paused compatibility health proves the leased writer protocol and mode",
-    health.version === "0.4.4" && health.configured_version === "fixture-version" &&
+    health.version === WORKER_VERSION && health.configured_version === "fixture-version" &&
       health.version_mismatch === true && health.vector_writer_protocol === "lease-v1" &&
       health.vector_drain_mode === "paused-for-upgrade", JSON.stringify(health));
 
