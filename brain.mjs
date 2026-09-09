@@ -4100,12 +4100,6 @@ export function bootstrapReceiptMoved(previous, current) {
 const ACCELERATED_BOOTSTRAP_RETRY_WAIT_MS = 15_000;
 const ACCELERATED_BOOTSTRAP_POLL_MS = 3_000;
 const ACCELERATED_BOOTSTRAP_REQUEST_MAX_MS = 180_000;
-// A request has its own three-minute abort boundary. One additional minute is
-// enough for the local pin checks and response parsing around it. A larger
-// unobserved wall-clock jump is not evidence of an awake remote stall, which
-// matters when a laptop sleeps while the update is inside its paused window.
-const ACCELERATED_BOOTSTRAP_OBSERVATION_GAP_MS = ACCELERATED_BOOTSTRAP_REQUEST_MAX_MS + 60_000;
-const ACCELERATED_BOOTSTRAP_TIMER_GRACE_MS = 60_000;
 const BOOTSTRAP_PHASES = new Set(["legacy_drain", "building", "waiting", "complete"]);
 const BOOTSTRAP_RECEIPT_FIELDS = Object.freeze([
   "protocol",
@@ -4357,43 +4351,55 @@ export async function runAcceleratedBootstrap({
     throw new TypeError("the accelerated bootstrap clock is invalid");
   }
   const deadline = startedAt + duration;
+  let lastRemaining = null;
+  const wallBoundary = `${Math.ceil(duration / 3_600_000)}-hour wall-clock safety limit`;
+  const stopAtWallBoundary = () => die(
+    `the accelerated bootstrap reached its ${wallBoundary} with ${lastRemaining ?? "an unknown number of"} aggregate row(s) remaining.\n` +
+      "      Completed batches are durable. Re-run `brain update <manifest>` to resume; the Worker remains paused.",
+  );
+  const assertWithinWallBoundary = () => {
+    const wallTime = Number(now());
+    if (!Number.isFinite(wallTime) || wallTime < startedAt) {
+      throw new TypeError("the accelerated bootstrap clock is invalid");
+    }
+    if (wallTime >= deadline) stopAtWallBoundary();
+    return wallTime;
+  };
   const observationClock = createContinuousObservationClock({
     now,
     startedAt,
-    maximumGapMs: ACCELERATED_BOOTSTRAP_OBSERVATION_GAP_MS,
   });
-  const observedNow = (maximumGapMs = ACCELERATED_BOOTSTRAP_OBSERVATION_GAP_MS) =>
-    observationClock.checkpoint(maximumGapMs).observedElapsedMs;
+  const observedNow = () => observationClock.checkpoint().observedElapsedMs;
   const observedSleep = async (milliseconds) => {
     observedNow();
     await sleep(milliseconds);
-    // setTimeout jitter is ordinary awake time. A jump beyond the requested
-    // wait plus this generous allowance cannot prove continuous observation,
-    // so it does not consume the movement budget.
-    observedNow(Math.max(1, milliseconds + ACCELERATED_BOOTSTRAP_TIMER_GRACE_MS));
+    assertWithinWallBoundary();
+    observedNow();
   };
   let previous = null;
-  let lastRemaining = null;
   let rounds = 0;
   let lastMovementAt = null;
+  let receiptObservationInterrupted = false;
   let announcedReprojection = false;
   let announcedFence = false;
   let announcedCleanup = false;
 
+  try {
   for (let round = 1; round <= roundLimit; round++) {
-    const roundNow = Number(now());
-    if (!Number.isFinite(roundNow) || roundNow < startedAt || roundNow >= deadline) break;
+    assertWithinWallBoundary();
     observedNow();
     rounds = round;
     const response = await retryTransient(async (attempt) => {
-      const attemptNow = Number(now());
-      if (!Number.isFinite(attemptNow) || attemptNow < startedAt || attemptNow >= deadline) {
-        const error = new Error("the accelerated bootstrap safety deadline was reached");
-        error.retryable = false;
-        throw error;
-      }
+      const attemptNow = assertWithinWallBoundary();
       observedNow();
-      await beforeRequest({ round, attempt });
+      let beforeError = null;
+      try {
+        await beforeRequest({ round, attempt });
+      } catch (error) {
+        beforeError = error;
+      }
+      assertWithinWallBoundary();
+      if (beforeError) throw beforeError;
       let primaryError = null;
       try {
         const result = await request({
@@ -4404,6 +4410,7 @@ export async function runAcceleratedBootstrap({
             deadline - attemptNow,
           )),
         });
+        assertWithinWallBoundary();
         if (!result || typeof result.status !== "number" ||
             typeof result.ok !== "boolean" || typeof result.text !== "function") {
           throw new Error("the accelerated bootstrap returned an invalid HTTP response");
@@ -4416,6 +4423,7 @@ export async function runAcceleratedBootstrap({
           error.retryable = true;
           throw error;
         }
+        assertWithinWallBoundary();
         if (result.status !== 409 && isRetryableHttpStatus(result.status)) {
           const error = new Error("the accelerated bootstrap received a retryable HTTP response");
           error.retryable = true;
@@ -4428,14 +4436,20 @@ export async function runAcceleratedBootstrap({
         primaryError = error;
         throw error;
       } finally {
+        let pinError = null;
         try {
           await afterRequest({ round, attempt });
-        } catch (pinError) {
-          // A post-attempt pin failure is authoritative after a received
-          // receipt. If the transport itself failed, preserve that retryable
-          // error; the next preflight repeats the pin check before any POST.
-          if (!primaryError) throw pinError;
+        } catch (error) {
+          pinError = error;
         }
+        // The raw wall boundary is authoritative even when the request or pin
+        // check also failed. It must be checked after the awaited postflight,
+        // before a response from an expired run can be accepted.
+        assertWithinWallBoundary();
+        // A post-attempt pin failure is authoritative after a received
+        // receipt. If the transport itself failed, preserve that retryable
+        // error; the next preflight repeats the pin check before any POST.
+        if (pinError && !primaryError) throw pinError;
       }
     }, {
       // A poll that embeds a provider-sized batch can meet a 503 or a timeout
@@ -4447,16 +4461,26 @@ export async function runAcceleratedBootstrap({
       maxDelayMs: 60_000,
       shouldRetry: (error) => error?.retryable === true,
       sleep: observedSleep,
-      onRetry: () => info("the accelerated bootstrap request was interrupted; retrying durable progress"),
+      onRetry: () => {
+        // No aggregate receipt was observed. Do not reinterpret this transport
+        // gap as proof that the last receipt itself remained unchanged.
+        receiptObservationInterrupted = true;
+        info("the accelerated bootstrap request was interrupted; retrying durable progress");
+      },
     });
+    assertWithinWallBoundary();
 
     if (response.status === 409) {
       const busy = validateAcceleratedBootstrapBusyReceipt(response.body);
       if (lastRemaining !== null && busy.remaining > lastRemaining) {
         die("the accelerated bootstrap busy receipt moved progress backward. Re-run `brain update <manifest>`; the Worker remains paused.");
       }
+      // A busy receipt proves that another bounded request owns this work, but
+      // it does not observe the full aggregate state. Restart the unchanged-
+      // receipt budget when this runner next receives a comparable receipt.
+      receiptObservationInterrupted = true;
       lastRemaining = busy.remaining;
-      const remainingMs = Math.max(0, deadline - Number(now()));
+      const remainingMs = Math.max(0, deadline - assertWithinWallBoundary());
       const delayMs = Math.min(
         busy.retryAfterSeconds * 1_000,
         remainingMs,
@@ -4488,7 +4512,10 @@ export async function runAcceleratedBootstrap({
     // Movement is any aggregate changing; a receipt identical to the last one
     // for ACCELERATED_BOOTSTRAP_STALL_MS is the only thing that ends the wait.
     const observedAt = observedNow();
-    if (lastMovementAt === null || bootstrapReceiptMoved(previous, receipt)) lastMovementAt = observedAt;
+    if (lastMovementAt === null || receiptObservationInterrupted || bootstrapReceiptMoved(previous, receipt)) {
+      lastMovementAt = observedAt;
+    }
+    receiptObservationInterrupted = false;
     const quietMs = observedAt - lastMovementAt;
     if (quietMs >= ACCELERATED_BOOTSTRAP_STALL_MS) {
       const counters = `${receipt.confirmed}/${receipt.total} confirmed, ${receipt.failed} unconfirmed, ${receipt.submitted} submitted, ${receipt.in_flight_batches} batch(es) in flight`;
@@ -4569,7 +4596,7 @@ export async function runAcceleratedBootstrap({
       previous = receipt;
       lastRemaining = receipt.remaining;
       onProgress(receipt);
-      const remainingMs = Math.max(0, deadline - Number(now()));
+      const remainingMs = Math.max(0, deadline - assertWithinWallBoundary());
       const delayMs = Math.min(ACCELERATED_BOOTSTRAP_RETRY_WAIT_MS, remainingMs);
       if (delayMs <= 0) break;
       await observedSleep(delayMs);
@@ -4589,6 +4616,7 @@ export async function runAcceleratedBootstrap({
     info(`${receipt.queued + receipt.submitted} vector operation(s) pending; ${receipt.actual_vectors}/${receipt.expected_vectors} vector(s) query-visible`);
     info(`batch ledger: ${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
     if (receipt.complete) {
+      assertWithinWallBoundary();
       return validateAcceleratedBootstrapCompletion(Object.freeze({
         epoch: receipt.epoch,
         total: receipt.total,
@@ -4602,20 +4630,21 @@ export async function runAcceleratedBootstrap({
     if (receipt.phase === "waiting" || receipt.phase === "legacy_drain") {
       const delayMs = Math.min(
         ACCELERATED_BOOTSTRAP_POLL_MS,
-        Math.max(0, deadline - Number(now())),
+        Math.max(0, deadline - assertWithinWallBoundary()),
       );
       if (delayMs <= 0) break;
       await observedSleep(delayMs);
     }
   }
 
-  const boundary = Number(now()) >= deadline
-    ? `${Math.ceil(duration / 3_600_000)}-hour wall-clock safety limit`
-    : `${roundLimit}-round safety limit`;
+  assertWithinWallBoundary();
   die(
-    `the accelerated bootstrap reached its ${boundary} with ${lastRemaining ?? "an unknown number of"} aggregate row(s) remaining.\n` +
+    `the accelerated bootstrap reached its ${roundLimit}-round safety limit with ${lastRemaining ?? "an unknown number of"} aggregate row(s) remaining.\n` +
       "      Completed batches are durable. Re-run `brain update <manifest>` to resume; the Worker remains paused.",
   );
+  } finally {
+    observationClock.stop();
+  }
 }
 
 /** Run the aggregate-only bootstrap endpoint through the manifest's durable admin key. */

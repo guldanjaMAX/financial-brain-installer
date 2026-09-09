@@ -118,6 +118,13 @@ or another unobserved local pause cannot by itself stand in for proof that the
 remote projection stalled. Any stop still leaves writes paused and resumes only
 through the same verified update path.
 
+The observation budget uses a short, unreferenced event-loop heartbeat rather
+than trusting the requested length of a poll or ownership-backoff timer. A
+transport retry or aggregate-only 409 busy receipt also breaks the sequence of
+comparable receipts; the fifteen-minute semantic window restarts only when the
+next full receipt arrives. The raw deadline is rechecked after every awaited
+pin hook, request, response body, retry wait, and postflight before completion.
+
 Always `--dry-run` first. It walks, extracts and judges every file without
 sending anything, and prints what would be skipped and why. On a real corpus
 that list is the useful part: it is where you find out that 12,000 PDFs are not
