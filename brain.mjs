@@ -6543,7 +6543,7 @@ async function purgeDocuments(base, adminKey, name) {
       if (queued > 0) {
         warnings.push(
           `${num(queued)} physical vector deletion(s) remain queued. The documents are unreachable, ` +
-          `but run \`brain drain <manifest>\` to reclaim the vector slots.`
+          `and the scheduled drain reclaims their vector slots on its own.`
         );
       }
       if (body?.vector_error) warnings.push(`vector cleanup reported: ${String(body.vector_error).slice(0, 180)}`);
@@ -6830,7 +6830,9 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   if (!root) {
     die(
       "brain ingest needs --path <folder>.\n" +
-        "  Optional: --source <name> (default \"upload\"), --limit <n>, --dry-run,\n" +
+        "  Optional: --source <name>, --limit <n>, --dry-run,\n" +
+        "            (source defaults to the one this manifest declares for the folder,\n" +
+        "             or \"upload\" when it declares none),\n" +
         "            --reset to ignore previous progress and re-send everything."
     );
   }
@@ -6838,7 +6840,45 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   const { walk, prepare, batchStream, splitOversized, loadState, saveState, removedSinceLastRun } = await ingestLib();
 
   const sourceExplicit = typeof flags.source === "string" && flags.source.trim() !== "";
-  const sourceName = assertSourceName(flags.source === true ? null : flags.source || "upload");
+  // A manifest that names a source for this folder is the answer, not "upload".
+  //
+  // `brain load` reads corpora.upload.folders[].source. This command did not,
+  // so the SAME manifest and the SAME folder filed under two different source
+  // names depending on which command was run. On 2026-09-08 that indexed a
+  // 2,249-document corpus a second time under "upload" alongside the 1,537
+  // already filed under the declared name, both live and queryable, so
+  // retrieval would return one document twice under two provenance names.
+  //
+  // The declaration wins when no --source is given. An explicit --source that
+  // contradicts it stops rather than guessing, because someone doing that on
+  // purpose can say so and someone doing it by accident is about to duplicate a
+  // corpus.
+  const declaredSource = declaredUploadSourceFor(m, root);
+  if (sourceExplicit && declaredSource && flags.source.trim() !== declaredSource) {
+    die(
+      `this manifest files "${root}" under source "${declaredSource}", but --source says ` +
+        `"${flags.source.trim()}".\n` +
+        "  Loading it under a second name indexes the same documents twice, once under each,\n" +
+        "  and both stay live and queryable. Nothing was sent.\n" +
+        `  Drop --source to use the declared name, or pass --source "${declaredSource}" to confirm it.`
+    );
+  }
+  const sourceName = assertSourceName(
+    flags.source === true ? null : flags.source || declaredSource || "upload"
+  );
+  // Say where these documents are going BEFORE sending them, not after.
+  //
+  // This sentence already existed, buried inside the branch that only runs when
+  // the content sniffer recognises a WhatsApp or mbox export. Ingest a folder of
+  // PDFs and the run never told you which source they landed in, even though the
+  // value was computed here. One line, printed at the top, is what would have
+  // caught a duplicated corpus before it was sent rather than after.
+  info(
+    `filing into source "${sourceName}"` +
+    (declaredSource && !sourceExplicit ? " (declared for this folder in the manifest)"
+      : sourceExplicit ? " (from --source)"
+      : " (the default; the manifest declares none for this folder, and --source names it)")
+  );
   // What the content sniffer recognised, so the run can say so at the end.
   const messageExportsSeen = new Set();
   // A dry run sends nothing, so it must not demand credentials it will never
@@ -6951,6 +6991,23 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     if (raw !== normalized) candidateLocalKeys.add(raw);
   }
   addLocalPathAliases(candidateLocalKeys, walkSkips, "path");
+  // A skipped link stands in for a whole subtree, so exact-path protection is
+  // not enough: every key that was previously indexed UNDER it must be shielded
+  // too, or the first run after a junction appears would read those children as
+  // deleted. This is the invariant the walk used to protect by refusing
+  // outright; protecting it here is what lets the send proceed.
+  const subtreeSkipPrefixes = walkSkips
+    .filter((skip) => skip?.subtree && skip?.path)
+    .map((skip) => String(skip.path).split(sep).join("/").replace(/\/+$/, ""))
+    .filter(Boolean);
+  if (subtreeSkipPrefixes.length) {
+    for (const key of previouslyKnownKeys) {
+      const normalized = String(key).split(sep).join("/");
+      if (subtreeSkipPrefixes.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`))) {
+        candidateLocalKeys.add(key);
+      }
+    }
+  }
   const protectedLocalSkipKeys = candidateLocalKeys;
   // Files this source loaded before and can no longer find.
   //
@@ -7365,7 +7422,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     // went, and leaves the split to the person who knows who is in it.
     const found = [...messageExportsSeen].sort().join(", ");
     info(`recognised and loaded as conversations: ${found}`);
-    info(`  filed under source "${sourceName}"${sourceExplicit ? "" : " (the default; --source names it)"}`);
+    info(`  filed under source "${sourceName}"`);
     warn(
       "a message export usually spans more than one sensitivity zone, so one source\n" +
       "  name may be the wrong unit for it. Splitting the export, or ingesting it under\n" +
@@ -8661,6 +8718,37 @@ const PROVIDER_LOAD_PROOF_NOTE =
   "this connector has scripted provider proof; real account acceptance remains a field gate";
 
 /** The folders a manifest declares for the local-upload corpus, normalized. */
+/**
+ * The source name this manifest declares for a folder, if it declares one.
+ *
+ * `brain load` has always honoured corpora.upload.folders[].source. `brain
+ * ingest --path` defaulted to "upload" and never looked, which is how one
+ * manifest filed one folder under two names.
+ */
+export function declaredUploadSourceFor(manifest, folderPath) {
+  const target = String(folderPath || "").trim();
+  if (!target) return null;
+  let folders;
+  try {
+    folders = uploadFoldersOf(manifest?.corpora?.upload);
+  } catch {
+    return null;
+  }
+  const same = (a, b) => {
+    const norm = (v) => String(v || "").trim().replace(/[\\/]+$/, "").replace(/\\/g, "/");
+    const left = norm(a); const right = norm(b);
+    if (!left || !right) return false;
+    // Windows paths are case-insensitive; POSIX ones are not.
+    return process.platform === "win32"
+      ? left.toLowerCase() === right.toLowerCase()
+      : left === right;
+  };
+  for (const folder of folders) {
+    if (folder?.source && same(folder.path, target)) return String(folder.source);
+  }
+  return null;
+}
+
 export function uploadFoldersOf(corpus) {
   const declared = corpus?.folders ?? corpus?.paths ?? (corpus?.path ? [corpus.path] : []);
   if (!Array.isArray(declared)) {

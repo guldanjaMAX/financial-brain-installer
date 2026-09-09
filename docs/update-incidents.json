@@ -760,5 +760,33 @@
     ],
     "acceptance": "No message may name a command that the state producing the message refuses. A paused brain refuses reindex and drain with 503 and the pause lifts only when the update completes, so advising either from inside that state is a closed loop. Prove on a paused brain that diagnose and the readiness messages name the pause and a reachable next step rather than a refused command.",
     "findings": "Ten remedies across diagnose and the vector readiness paths advised reindex or drain unconditionally. A client followed that advice across four update attempts over 97 hours on 2026-09-08, was refused each time, and learned nothing from it. All ten now route through remedyForState(env, ...), which names the pause first. The regression anchors on the commands rather than on the current call sites, so a NEW message that advises one without the wrapper fails in CI rather than in a client's terminal; written by hand it found six sites beyond the four identified by inspection."
+  },
+  {
+    "id": "UPDATE-040",
+    "title": "One symbolic link anywhere under the corpus root refused every document",
+    "status": "local-only",
+    "scopes": [
+      "fresh",
+      "upgrade"
+    ],
+    "tests": [
+      "test/ingest-link-and-declared-source.test.mjs"
+    ],
+    "acceptance": "An ingest must refuse the link, not the corpus. Prove on a tree containing a junction that the documents beside it are still sent, that the link is still skipped and reported, and that no previously indexed key under the link is counted as removed. Observed 2026-09-08: the same tree sent 3,119 documents on 0.3.5 and returned INGEST_FAILED on 0.4.0 with nothing on disk changed.",
+    "findings": "ingest/run.mjs set complete=false on any symbolic link, and brain.mjs refuses the whole run when the walk is incomplete. The symlink test runs before the directory test, so node_modules is silently skipped as a real directory and fatal as a junction; pnpm builds node_modules entirely out of links. The safety property is real but belongs to the removal path: a link stands in for a subtree whose children were never enumerated. Fixed by marking link skips as subtree skips and shielding every previously known key under that prefix from removal, which keeps the invariant exactly while letting the send proceed. The CLI also blamed a permission error that does not exist and never named the offending path."
+  },
+  {
+    "id": "UPDATE-041",
+    "title": "brain ingest --path ignored the manifest's declared source and duplicated a corpus",
+    "status": "local-only",
+    "scopes": [
+      "fresh",
+      "upgrade"
+    ],
+    "tests": [
+      "test/ingest-link-and-declared-source.test.mjs"
+    ],
+    "acceptance": "The same manifest and the same folder must file under the same source whichever command runs. Prove that --path on a declared folder uses the declared source, that an explicit contradicting --source stops rather than guessing, and that the run states the source before anything is sent.",
+    "findings": "brain load read corpora.upload.folders[].source; brain ingest --path defaulted to 'upload' and never looked. On 2026-09-08 that indexed a 2,249-document corpus a second time alongside the 1,537 already filed under the declared name, both live and queryable, so retrieval would return one document twice under two provenance names. The warning that would have caught it existed but printed only inside the branch that runs when the content sniffer recognises a WhatsApp or mbox export. Same class as the bank_feed note: a manifest field declared, validated, then not consulted by the path people actually run."
   }
 ]
