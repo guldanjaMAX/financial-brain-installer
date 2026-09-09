@@ -1,17 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions, regressionEnvironment,
   verifiedNpmCliPath, assertUndeferrableRegistered, assertEvidenceDocuments, UNDEFERRABLE_INCIDENTS,
   DEFERRAL_CAUSES } from "../scripts/audit-updates.mjs";
-import {
-  buildNpmCliInvocation,
-  buildWindowsBatchInvocation,
-  resolveNpmCliPath,
-} from "../operations/npm-cli-runtime.mjs";
 
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
@@ -191,45 +185,9 @@ const npmFixture = mkdtempSync(join(tmpdir(), "brain-audit-npm-"));
 try {
   mkdirSync(join(npmFixture, "bin"));
   const cli = join(npmFixture, "bin", "npm-cli.js");
-  writeFileSync(cli, "console.log(JSON.stringify(process.argv.slice(2)));\n");
+  writeFileSync(cli, "// fixture only; never executed\n");
   writeFileSync(join(npmFixture, "package.json"), JSON.stringify({ name: "npm", version: "11.0.0" }));
   assert.equal(verifiedNpmCliPath(cli), realpathSync(cli));
-  assert.equal(resolveNpmCliPath({ environment: { npm_execpath: cli }, nodeExecutable: process.execPath }), realpathSync(cli));
-  const literalArgs = ["install", "path with spaces", "$HOME", "a&b", "semi;colon"];
-  const direct = buildNpmCliInvocation(cli, literalArgs);
-  assert.equal(direct.command, process.execPath);
-  assert.equal(direct.shell, false);
-  assert.deepEqual(JSON.parse(execFileSync(direct.command, direct.args, { encoding: "utf8" })), literalArgs);
-  assert.throws(() => buildNpmCliInvocation(join(npmFixture, "missing.js"), []), /npm_cli_locator_refused/);
-
-  const posixRuntime = join(npmFixture, "posix-runtime");
-  const posixCli = join(posixRuntime, "lib", "node_modules", "npm", "bin", "npm-cli.js");
-  mkdirSync(join(posixRuntime, "bin"), { recursive: true });
-  mkdirSync(join(posixRuntime, "lib", "node_modules", "npm", "bin"), { recursive: true });
-  writeFileSync(posixCli, "// fixture\n");
-  writeFileSync(join(posixRuntime, "lib", "node_modules", "npm", "package.json"), JSON.stringify({ name: "npm", version: "11.0.0" }));
-  assert.equal(resolveNpmCliPath({ environment: {}, nodeExecutable: join(posixRuntime, "bin", "node") }), realpathSync(posixCli));
-
-  const windowsRuntimeRoot = join(npmFixture, "windows-runtime");
-  const windowsCli = join(windowsRuntimeRoot, "node_modules", "npm", "bin", "npm-cli.js");
-  mkdirSync(join(windowsRuntimeRoot, "node_modules", "npm", "bin"), { recursive: true });
-  writeFileSync(windowsCli, "// fixture\n");
-  writeFileSync(join(windowsRuntimeRoot, "node_modules", "npm", "package.json"), JSON.stringify({ name: "npm", version: "11.0.0" }));
-  assert.equal(resolveNpmCliPath({ environment: {}, nodeExecutable: join(windowsRuntimeRoot, "node.exe") }), realpathSync(windowsCli));
-  assert.throws(() => resolveNpmCliPath({ environment: {}, nodeExecutable: join(npmFixture, "missing", "node.exe") }), /npm_cli_unavailable/);
-
-  const batch = buildWindowsBatchInvocation(
-    "C:\\Windows\\System32\\cmd.exe",
-    "C:\\Runner Temp\\brain.cmd",
-    ["--version"],
-  );
-  assert.equal(batch.command, "C:\\Windows\\System32\\cmd.exe");
-  assert.equal(batch.shell, false);
-  assert.equal(batch.windowsVerbatimArguments, true);
-  assert.deepEqual(batch.args, ['/d /s /c ""C:\\Runner Temp\\brain.cmd" --version"']);
-  assert.throws(() => buildWindowsBatchInvocation(batch.command, "C:\\bad\"path\\brain.cmd", []), /wrapper_path_refused/);
-  assert.throws(() => buildWindowsBatchInvocation(batch.command, "C:\\bad%path\\brain.cmd", []), /wrapper_path_refused/);
-  assert.throws(() => buildWindowsBatchInvocation(batch.command, "C:\\brain.cmd", ["doctor & whoami"]), /arguments_refused/);
   assert.deepEqual(regressionEnvironment({ npm_execpath: cli, NPM_TOKEN: "fixture" }), { npm_execpath: realpathSync(cli) });
   assert.equal(verifiedNpmCliPath(join(npmFixture, "missing.js")), null);
   assert.equal(verifiedNpmCliPath(join(npmFixture, "bin")), null);

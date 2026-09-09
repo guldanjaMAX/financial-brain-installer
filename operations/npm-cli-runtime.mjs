@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, basename, dirname, resolve, win32 } from "node:path";
+import { isAbsolute, basename, dirname, relative, resolve, sep, posix, win32 } from "node:path";
 
 const isPortableAbsolute = (path) => isAbsolute(path) || win32.isAbsolute(path);
 
@@ -20,30 +20,74 @@ export function verifiedNpmCliPath(candidate) {
   }
 }
 
+function nodeRuntimeLayout(nodeExecutable, platform) {
+  if (typeof nodeExecutable !== "string" || !isAbsolute(nodeExecutable)) {
+    throw new Error("node_executable_must_be_absolute");
+  }
+  const nodeDirectories = [];
+  for (const candidate of [nodeExecutable, (() => {
+    try { return realpathSync(nodeExecutable); } catch { return null; }
+  })()]) {
+    if (!candidate) continue;
+    const directory = dirname(candidate);
+    if (!nodeDirectories.includes(directory)) nodeDirectories.push(directory);
+  }
+  const trustedRoots = [];
+  for (const directory of nodeDirectories) {
+    // Official Windows distributions keep npm under the directory containing
+    // node.exe. POSIX distributions keep it below the install root whose bin/
+    // directory contains node. Never widen a Windows root to its parent (for
+    // example from C:\\Program Files\\nodejs to all of C:\\Program Files).
+    const root = platform === "win32" ? directory : dirname(directory);
+    if (!trustedRoots.includes(root)) trustedRoots.push(root);
+  }
+  const candidates = [];
+  for (const directory of nodeDirectories) {
+    const candidate = platform === "win32"
+      ? resolve(directory, "node_modules", "npm", "bin", "npm-cli.js")
+      : resolve(directory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  }
+  return { candidates, trustedRoots };
+}
+
+function isInsideRoot(path, root) {
+  const fromRoot = relative(root, path);
+  return fromRoot === "" || (
+    fromRoot !== ".." &&
+    !fromRoot.startsWith(`..${sep}`) &&
+    !isAbsolute(fromRoot)
+  );
+}
+
+export function nodeRuntimeNpmCliPaths(
+  nodeExecutable = process.execPath,
+  platform = process.platform,
+) {
+  return Object.freeze([...nodeRuntimeLayout(nodeExecutable, platform).candidates]);
+}
+
 /**
  * Find npm's JavaScript entry without executing npm, npm.cmd, a shell, or a
  * PATH lookup. npm lifecycle scripts declare npm_execpath. Official Node
  * distributions place npm beside node on Windows and under ../lib on POSIX.
  */
-export function resolveNpmCliPath({ environment = process.env, nodeExecutable = process.execPath } = {}) {
-  if (typeof nodeExecutable !== "string" || !isAbsolute(nodeExecutable)) {
-    throw new Error("node_executable_must_be_absolute");
-  }
-
-  const nodeDirectories = new Set([dirname(nodeExecutable)]);
-  try { nodeDirectories.add(dirname(realpathSync(nodeExecutable))); } catch {}
-  const candidates = [environment?.npm_execpath];
-  for (const directory of nodeDirectories) {
-    candidates.push(
-      resolve(directory, "node_modules", "npm", "bin", "npm-cli.js"),
-      resolve(directory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-    );
-  }
-
-  for (const candidate of new Set(candidates.filter(Boolean))) {
+export function resolveNpmCliPath({
+  environment = process.env,
+  nodeExecutable = process.execPath,
+  platform = process.platform,
+} = {}) {
+  const layout = nodeRuntimeLayout(nodeExecutable, platform);
+  // The Node distribution's own npm wins over every ambient locator.
+  for (const candidate of layout.candidates) {
     const cli = verifiedNpmCliPath(candidate);
     if (cli) return cli;
   }
+
+  // npm lifecycle scripts expose their own JavaScript entry. It is accepted
+  // only when its real path remains inside this Node runtime's install tree.
+  const fallback = verifiedNpmCliPath(environment?.npm_execpath);
+  if (fallback && layout.trustedRoots.some((root) => isInsideRoot(fallback, root))) return fallback;
   throw new Error("npm_cli_unavailable_for_node_runtime");
 }
 
@@ -64,6 +108,65 @@ export function buildNpmCliInvocation(cli, args, { nodeExecutable = process.exec
   });
 }
 
+const CONTRACT_CHILD_ENV = Object.freeze({
+  PATH: Object.freeze(["PATH", "Path"]),
+  HOME: Object.freeze(["HOME"]),
+  USERPROFILE: Object.freeze(["USERPROFILE"]),
+  USERNAME: Object.freeze(["USERNAME"]),
+  USERDOMAIN: Object.freeze(["USERDOMAIN"]),
+  HOMEDRIVE: Object.freeze(["HOMEDRIVE"]),
+  HOMEPATH: Object.freeze(["HOMEPATH"]),
+  SYSTEMROOT: Object.freeze(["SystemRoot", "SYSTEMROOT"]),
+  WINDIR: Object.freeze(["WINDIR"]),
+  COMSPEC: Object.freeze(["ComSpec", "COMSPEC"]),
+  PATHEXT: Object.freeze(["PATHEXT"]),
+  TEMP: Object.freeze(["TEMP"]),
+  TMP: Object.freeze(["TMP"]),
+  TMPDIR: Object.freeze(["TMPDIR"]),
+  APPDATA: Object.freeze(["APPDATA"]),
+  LOCALAPPDATA: Object.freeze(["LOCALAPPDATA"]),
+  LANG: Object.freeze(["LANG"]),
+  LANGUAGE: Object.freeze(["LANGUAGE"]),
+  LC_ALL: Object.freeze(["LC_ALL"]),
+  CI: Object.freeze(["CI"]),
+});
+
+export function publicContractChildEnvironment(source = process.env) {
+  const clean = {};
+  for (const [canonical, aliases] of Object.entries(CONTRACT_CHILD_ENV)) {
+    const alias = aliases.find((name) => typeof source?.[name] === "string" && source[name]);
+    if (alias) clean[canonical] = source[alias];
+  }
+  return Object.freeze(clean);
+}
+
+export function npmInstallEnvironment(source = process.env, platform = process.platform) {
+  const clean = { ...publicContractChildEnvironment(source) };
+  clean.npm_config_yes = "true";
+  // This public-contract install needs no registry access. Do not let a user or
+  // runner npmrc inject credentials or alter the reviewed local archive install.
+  clean.NPM_CONFIG_USERCONFIG = platform === "win32" ? "NUL" : "/dev/null";
+  return Object.freeze(clean);
+}
+
+export function publicInstallArguments(prefix, archive) {
+  if (typeof prefix !== "string" || !isPortableAbsolute(prefix) ||
+      typeof archive !== "string" || !isPortableAbsolute(archive)) {
+    throw new Error("public_install_paths_must_be_absolute");
+  }
+  return Object.freeze([
+    "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
+    "--prefix", prefix, archive,
+  ]);
+}
+
+export function installedBrainPath(prefix, platform = process.platform) {
+  if (typeof prefix !== "string" || !isPortableAbsolute(prefix)) {
+    throw new Error("public_install_prefix_must_be_absolute");
+  }
+  return platform === "win32" ? win32.join(prefix, "brain.cmd") : posix.join(prefix, "bin", "brain");
+}
+
 /**
  * A generated .cmd shim is itself a batch program, so Windows must enter it
  * through cmd.exe. Restrict the wrapper path and arguments before constructing
@@ -79,7 +182,8 @@ export function buildWindowsBatchInvocation(comspec, wrapper, args = []) {
       win32.extname(wrapper).toLowerCase() !== ".cmd" || /["%\^!&|<>\r\n]/.test(wrapper)) {
     throw new Error("windows_wrapper_path_refused");
   }
-  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || !/^--?[a-z0-9-]+$/i.test(arg))) {
+  if (!Array.isArray(args) || args.some((arg) =>
+    typeof arg !== "string" || !/^(?:--?)?[a-z0-9][a-z0-9-]*$/i.test(arg))) {
     throw new Error("windows_batch_arguments_refused");
   }
   const commandLine = [`"${wrapper}"`, ...args].join(" ");

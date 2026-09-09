@@ -13,6 +13,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/install-contract-runtime.test.mjs",
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
   "node --no-warnings test/vector-bootstrap-stale-pending.test.mjs",
   "node --no-warnings test/bootstrap-receipt-reprojection.test.mjs",
@@ -49,6 +50,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
   "node test/test-chain-runner.test.mjs",
+  "node --test test/install-contract-runtime.test.mjs",
   "node --no-warnings test/provenance-sweep.test.mjs",
   "node test/current-version.test.mjs",
   "node test/brain-http.test.mjs",

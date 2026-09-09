@@ -27,6 +27,10 @@ import { join, resolve } from "node:path";
 import {
   buildNpmCliInvocation,
   buildWindowsBatchInvocation,
+  installedBrainPath,
+  npmInstallEnvironment,
+  publicInstallArguments,
+  publicContractChildEnvironment,
   resolveNpmCliPath,
 } from "../operations/npm-cli-runtime.mjs";
 
@@ -72,7 +76,11 @@ ok("the published ZIP is the sha256 the contract states");
 mkdirSync(workdir, { recursive: true });
 const zipPath = join(workdir, "kit.zip");
 writeFileSync(zipPath, zip);
-execFileSync("unzip", ["-q", "-o", zipPath, "-d", workdir], { stdio: "inherit" });
+const childEnvironment = publicContractChildEnvironment();
+execFileSync("unzip", ["-q", "-o", zipPath, "-d", workdir], {
+  stdio: "inherit",
+  env: childEnvironment,
+});
 const root = join(workdir, readdirSync(workdir).find((n) => statSync(join(workdir, n)).isDirectory()));
 ok(`extracted to ${root.replace(workdir, "<workdir>")}`);
 
@@ -124,22 +132,22 @@ mkdirSync(prefix, { recursive: true });
 // execFileSync. Reach the validated JavaScript entry through this Node runtime
 // on every platform instead. No shell parses the prefix or archive path.
 const npmCli = resolveNpmCliPath();
-const npmInstall = buildNpmCliInvocation(npmCli,
-  ["install", "--prefix", prefix, "--no-audit", "--no-fund", tgzPath]);
+const npmInstall = buildNpmCliInvocation(npmCli, publicInstallArguments(prefix, tgzPath));
 execFileSync(npmInstall.command, npmInstall.args,
-  { stdio: "inherit", shell: npmInstall.shell, env: { ...process.env, npm_config_yes: "true" } });
+  { cwd: workdir, stdio: "inherit", shell: npmInstall.shell, env: npmInstallEnvironment() });
 ok("the packaged archive installs into a clean prefix");
 
-const bin = join(prefix, "node_modules", ".bin", process.platform === "win32" ? "brain.cmd" : "brain");
+const bin = installedBrainPath(prefix);
 const runBrain = (args, options) => {
-  if (process.platform !== "win32") return execFileSync(bin, args, options);
+  if (process.platform !== "win32") return execFileSync(bin, args, { ...options, env: childEnvironment });
   const command = buildWindowsBatchInvocation(
-    process.env.ComSpec || process.env.COMSPEC || "C:\\Windows\\System32\\cmd.exe",
+    childEnvironment.COMSPEC || "C:\\Windows\\System32\\cmd.exe",
     bin,
     args,
   );
   return execFileSync(command.command, command.args, {
     ...options,
+    env: childEnvironment,
     shell: command.shell,
     windowsVerbatimArguments: command.windowsVerbatimArguments,
   });
