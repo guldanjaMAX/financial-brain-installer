@@ -430,11 +430,26 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
       const full = join(dir, e.name);
       const rel = relative(root, full);
       if (e.isSymbolicLink()) {
-        skipped.push({ path: rel, reason: "symbolic links and junctions are not ingested" });
-        // A link can stand in for one prior file or an entire prior subtree.
-        // Treating the walk as complete could therefore turn a refused link
-        // into deletion evidence for children that were never enumerated.
-        complete = false;
+        // A link can stand in for one prior file or an entire prior subtree, so
+        // its children were never enumerated and must never become deletion
+        // evidence. That is a constraint on the REMOVAL path, and until 0.4.5 it
+        // was enforced by failing the whole walk, which refused the send too.
+        //
+        // The cost of that was total. One junction anywhere under the corpus
+        // root refused every document, not the link: on 2026-09-08 the same tree
+        // sent 3,119 documents on 0.3.5 and INGEST_FAILED on 0.4.0, with nothing
+        // on disk changed. The symlink test runs before the directory test, so
+        // node_modules is silently skipped as a real folder and fatal as a
+        // junction, and pnpm builds node_modules entirely out of links.
+        //
+        // Marked as a subtree skip instead. The caller shields every previously
+        // known key under this path from removal, which keeps the invariant
+        // exactly, and the documents that WERE enumerated can still be sent.
+        skipped.push({
+          path: rel,
+          reason: "symbolic links and junctions are not ingested",
+          subtree: true,
+        });
         continue;
       }
       if (e.isDirectory()) {
