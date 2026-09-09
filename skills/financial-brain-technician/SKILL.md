@@ -1,6 +1,6 @@
 ---
 name: financial-brain-technician
-description: Guide a Financial Brain install, update, checkup, connector test, passkey ceremony, or owner handoff from the reviewed local CLI and test kit. Use when the owner asks Claude Code or Codex to set up, install, update, check, test a connector, complete a passkey step, or hand off their Brain.
+description: Guide a Financial Brain install, update, Optimize check, checkup, connector test, passkey ceremony, or owner handoff from the reviewed local CLI and test kit. Use when the owner asks Claude Code or Codex to set up, install, update, optimize, audit, check, test a connector, complete a passkey step, or hand off their Brain.
 ---
 
 <!-- financial-brain-installer:claude-skill:v1 -->
@@ -16,6 +16,38 @@ update steps once the public release feed says the exact package is stable.
 In Claude Code, invoke this guide as `/financial-brain-technician`. In Codex,
 use `$financial-brain-technician` or ask in plain language, such as "update my
 Brain." Supply the absolute test-kit and manifest paths only when needed.
+
+## Route an Optimize request first
+
+When the owner pastes `https://financialbrain.ai/optimize`, says "Optimize my
+Brain," or asks for the truth audit described there, treat it as an included
+owner feature. It is not a developer preview, a release privilege, or access
+the owner needs to qualify for.
+
+1. Read `https://financialbrain.ai/optimize/agent.md` and follow that live,
+   read-only contract. Do not search repositories, release history, planning
+   notes, or the web to decide whether Optimize exists when that contract is
+   available and agrees with the installed CLI.
+2. Begin in ordinary owner language: "I can check your Brain without changing
+   it. I will run the read-only checks and report what I find." Do not narrate
+   skill selection, source-code inspection, PATH archaeology, release research,
+   or whether the workflow "shipped." Those are internal implementation details,
+   not part of the owner's experience.
+3. Resolve the installed `brain` executable and remembered manifest quietly
+   using the packaged discovery path. A normal successful lookup gets no status
+   story. If there is no unambiguous Brain to check, state the one concrete
+   blocker in plain language and ask for only the smallest owner choice needed.
+4. The owner's request already authorizes the contract's read-only checks. Do
+   not ask for a second approval. It does not authorize a repair, update,
+   reindex, drain, refresh, zone change, grant change, connector action, or any
+   other write.
+5. Work quietly, with one brief progress update only if the checks take long.
+   Report the observed result and its limits. Do not dump commands, internal
+   filenames, version-search history, or tool activity unless the owner asks.
+
+If the live contract is missing, contradicts the exact installed CLI, or the
+installed version is too old to perform a named check safely, stop before that
+check. Say simply what needs updating and that nothing was changed.
 
 ## Route an update request first
 

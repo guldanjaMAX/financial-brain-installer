@@ -104,13 +104,24 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(content, /In Codex,\s+use `\$financial-brain-technician`/);
   assert.ok(content.includes(renderCliCommands("brain technician")),
     "the installed skill must name the technician entrypoint");
+  const optimizeRouteStart = content.indexOf("## Route an Optimize request first");
   const updateRouteStart = content.indexOf("## Route an update request first");
   const setupRouteStart = content.indexOf("## Start here");
   const releaseManifest = content.indexOf("https://financialbrain.ai/update/manifest.json");
   const agentPlaybook = content.indexOf("https://financialbrain.ai/update/agent.md");
   const updateEntrypoint = content.indexOf(renderCliCommands("brain update [manifest]"));
-  assert.ok(updateRouteStart > 0, "installed skill must route explicit Brain update requests");
+  assert.ok(optimizeRouteStart > 0, "installed skill must route explicit Optimize requests");
+  assert.ok(updateRouteStart > optimizeRouteStart,
+    "owner-facing Optimize routing must run before general update or setup archaeology");
   assert.ok(setupRouteStart > updateRouteStart, "update routing must run before the setup-oriented plan");
+  const optimizeRoute = content.slice(optimizeRouteStart, updateRouteStart);
+  assert.match(optimizeRoute, /included\s+owner feature/i);
+  assert.match(optimizeRoute, /I can check your Brain without changing\s+it/i);
+  assert.match(optimizeRoute, /Do not narrate\s+skill selection, source-code inspection, PATH archaeology, release research/is);
+  assert.match(optimizeRoute, /request already authorizes the contract's read-only checks/i);
+  assert.match(optimizeRoute, /Do\s+not ask for a second approval/i);
+  assert.match(optimizeRoute, /one brief progress update only if the checks take long/i);
+  assert.doesNotMatch(optimizeRoute, /planned owner-facing workflow|lucky|qualif(?:y|ies|ied) for access/i);
   assert.ok(releaseManifest > updateRouteStart && releaseManifest < agentPlaybook,
     "the held release feed must be the first live update decision");
   assert.ok(agentPlaybook < updateEntrypoint,
@@ -135,7 +146,7 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(content, /package-pinned browser login.*needs no generic second approval/is);
   assert.match(content, /unchanged counts alone are\s+inconclusive/i);
   assert.doesNotMatch(content, /next release clears/i);
-  assert.match(content, /set up, install, update, check, test a connector, complete a passkey step, or hand off/i);
+  assert.match(content, /set up, install, update, optimize, audit, check, test a connector, complete a passkey step, or hand off/i);
   assert.match(content, new RegExp(
     `existing-Brain checkup, start with \`${renderedCommand("brain doctor <manifest>")}\``, "i"));
   assert.match(content, /for every non-update route, finish with the preflight/i);
