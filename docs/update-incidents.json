@@ -268,9 +268,9 @@
     "evidence": [],
     "testPlatform": "win32",
     "deferral": {
-      "version": "0.4.5",
+      "version": "0.4.6",
       "blocked_on": "physical_hardware_unavailable",
-      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can ever close it. No ARM64 machine exists on the bench, and 0.4.0 does not claim Windows ARM64 as a supported runtime. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on.",
+      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can ever close it. No ARM64 machine exists on the bench, and 0.4.0 does not claim Windows ARM64 as a supported runtime. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
       "unproven": "Windows ARM64 owners get no packaged-launch, DPAPI, browser login, interrupted-update or clean-exit proof in 0.4.0. The release note must name Windows x64 as the only claimed Windows runtime."
     }
   },
@@ -380,9 +380,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.5",
+      "version": "0.4.6",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
       "unproven": "Plaid configuration survives install, deploy and update is unproven against a real Worker with a real Item; only the packaged CLI's configuration read-back is exercised."
     }
   },
@@ -405,9 +405,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.5",
+      "version": "0.4.6",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
       "unproven": "Long and case-sensitive account identities, unknown-account refusal, and cross-Item removal isolation are unproven through real D1 routes with real Plaid data."
     }
   },
@@ -430,9 +430,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.5",
+      "version": "0.4.6",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
       "unproven": "Cursor safety on malformed or repeated pages, partial-history handling, and exact decimal promotion are unproven against a live provider."
     }
   },
@@ -455,9 +455,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.5",
+      "version": "0.4.6",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
       "unproven": "Same-session replay, concurrent sessions, existing-Item reauthorization and ambiguous same-bank accounts are unproven against a live provider."
     }
   },
@@ -481,9 +481,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.5",
+      "version": "0.4.6",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
       "unproven": "Scheduler fairness across four or more Items and overlapping cron and manual slices are unproven against live Items."
     }
   },
@@ -507,9 +507,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.5",
+      "version": "0.4.6",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires two real institutions and four real accounts spanning one person and two owned businesses, plus a separately approved production pilot, and its own text excludes API-only Sandbox receipts and CI. Those live accounts and that approval do not exist for this cut. The deferral holds only while general bank invitations stay closed, which is what the Plaid release gate means by held. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on.",
+      "reason": "The acceptance requires two real institutions and four real accounts spanning one person and two owned businesses, plus a separately approved production pilot, and its own text excludes API-only Sandbox receipts and CI. Those live accounts and that approval do not exist for this cut. The deferral holds only while general bank invitations stay closed, which is what the Plaid release gate means by held. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
       "unproven": "No owner may be invited to connect a bank in 0.4.0. General bank invitations stay closed, and the deployed owner journey, webhook delivery, reauthorization and production pilot remain unproven."
     }
   },
@@ -576,9 +576,9 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.5",
+      "version": "0.4.6",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on.",
+      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
       "unproven": "That an owner is never told current while a refresh is owed is unproven with a real Item and real webhook history."
     }
   },

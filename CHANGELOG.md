@@ -4,6 +4,33 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.6
+
+Candidate only. This version has not been released.
+
+For a brain whose search index fell behind and stayed behind, this is the one
+that stops the waiting. Nothing here changes what your brain holds.
+
+- **A large backlog is rebuilt in hours instead of days.** When your index is
+  incomplete and the queue of waiting work is large, the update now re-embeds
+  that queue in one bulk pass rather than draining it a hundred rows at a time.
+  On a corpus of about 400,000 pieces that is roughly an hour and a half instead
+  of a week. Only the waiting queue is re-embedded, never your whole corpus, so
+  nothing you already paid to index is paid for twice.
+
+- **A rebuild that was interrupted before it started can be started again.**
+  Previously an attempt that never actually ran still counted as spent, and the
+  brain quietly went back to the slow path for good, with nothing said.
+
+- **The update no longer stops itself part way through a long rebuild.** If you
+  released stuck work while the rebuild was running, which is what the product
+  tells you to do, the update treated its own progress as a fault and quit.
+
+- **When a rebuild finishes and some vectors are still missing, the advice is
+  now safe.** It used to point at a command that rebuilds the entire corpus and
+  bills you for every piece again. It now names what is missing and points at
+  the one source that needs it.
+
 ## 0.4.5
 
 Candidate only. This version has not been released.
