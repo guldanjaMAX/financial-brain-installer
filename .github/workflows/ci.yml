@@ -311,9 +311,11 @@ jobs:
         run: npm --prefix frontend test
 
       - name: install owner browser test runtime
+        if: ${{ !cancelled() }}
         run: npm --prefix frontend run test:browser:install
 
       - name: owner scope browser regressions
+        if: ${{ !cancelled() }}
         run: npm --prefix frontend run test:browser
 
       # build-to-worker.mjs must reproduce the reviewed tracked bundle exactly.
