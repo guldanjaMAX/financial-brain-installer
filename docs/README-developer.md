@@ -288,13 +288,29 @@ node brain.mjs mcp-config ./acme.manifest.json
 ```
 
 The generated registration carries only the URL, display name, executable path,
-and absolute manifest locator. The MCP process reads the current admin key from
-the manifest's validated durable Keychain or protected-file backend at runtime.
+absolute manifest locator, and the nonsecret `owner-assistant` profile. That
+local profile can read, add or correct owner notes, and run a basic connection
+check. Each accepted write lands in the registered, non-refreshable
+`owner-notes` source with a visible local or remote MCP provenance label. It is
+treated as recollection, not current authoritative source evidence. The source
+stays outside named grants until the owner assigns it a zone; the owner and an
+explicitly approved Brain connector can still use it. The profile cannot delete
+records or change access. The MCP process
+reads the current admin key from the manifest's validated durable Keychain or
+protected-file backend at runtime.
+
+Do not disable the AI client's normal approval prompt for `brain_remember`.
+The tool is advertised as data-changing but non-destructive: it creates a durable
+record without deleting or replacing another one. Tool copy limits it to a
+direct owner request, but copy is not authorization enforcement; the owner must
+retain the final click.
+
 `brain setup` reconciles installer-owned Claude Code and Codex registrations and
-accepts them only after an exact local readback. It never relies on a name-only
-listing or prints a stored legacy credential. Claude Desktop remains a manual
-config update; replace its entry with the locator-only JSON from `mcp-config`
-and restart it after a rotation.
+accepts them only after an exact local readback plus an MCP tool-list check that
+proves `brain_remember` is present. It never relies on a name-only listing or
+prints a stored legacy credential. Claude Desktop remains a manual config
+update; replace its entry with the locator-only JSON from `mcp-config` and
+restart it after a rotation.
 
 ---
 

@@ -11,6 +11,17 @@ Candidate only. This version has not been released.
 For a brain whose search index fell behind and stayed behind, this is the one
 that stops the waiting. Nothing here changes what your brain holds.
 
+- **Your own Claude Code or Codex can now add and correct information in your
+  Brain.** Setup previously connected the local tool without selecting its
+  profile, so it silently defaulted to read-only. Local installs now use Owner
+  assistant access and verify that the remember tool is really present. An
+  ordinary update also upgrades an existing installer-managed connection, but
+  never adds a missing one or changes a disabled or custom-profile connection.
+  It can read, remember, correct, and check the connection. It cannot delete
+  records or change who has access. New notes live in a registered Owner notes
+  source, show whether they came from the local owner assistant or an approved
+  remote connector, and remain recollections rather than current-source proof.
+
 - **A large backlog is rebuilt in hours instead of days.** When your index is
   incomplete and the queue of waiting work is large, the update now re-embeds
   that queue in one bulk pass rather than draining it a hundred rows at a time.

@@ -46,6 +46,11 @@ import { sourceReceiptOwnerMessage } from "./source-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { probeStalledVectorFence } from "./vector-fence-probe.js";
+import { publicOwnerNoteProvenance } from "./owner-note-contract.js";
+import {
+  currentMemorySql, legacySchemaMayReadWithoutMemorySupersessions,
+  memorySupersessionIntegrityFailure,
+} from "./memory-supersession.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
@@ -77,6 +82,7 @@ const HISTORICAL_SOURCE_LABELS = Object.freeze({
   plaid: "Plaid",
   upload: "uploaded file",
   "iphone-backup": "iPhone backup",
+  "owner-notes": "conversational owner notes",
 });
 
 function historicalSourceLabel(kind) {
@@ -473,7 +479,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const f = filterSql(filters, "c", 3);
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "c", "d", sc.nextParam);
-  const sql = `
+  const sql = (memoryClause) => `
     SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
            COALESCE(src.kind, 'unregistered') AS source_kind,
            c.title, c.document_date,
@@ -489,13 +495,21 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
     JOIN chunks c ON c.id = chunks_fts.rowid
     JOIN documents d ON d.doc_uid = c.doc_uid
     LEFT JOIN sources src ON src.name = d.source
-    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}
+    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${memoryClause}
     ORDER BY bm25(chunks_fts)
     LIMIT ?2`;
 
-  const { results } = await env.DB.prepare(sql).bind(
+  const run = (memoryClause) => env.DB.prepare(sql(memoryClause)).bind(
     terms, limit, ...f.params, ...sc.params, ...a.params,
   ).all();
+  let response;
+  try {
+    response = await run(currentMemorySql("d"));
+  } catch (error) {
+    if (!await legacySchemaMayReadWithoutMemorySupersessions(env, error)) throw error;
+    response = await run("");
+  }
+  const { results } = response;
   return results || [];
 }
 
@@ -558,7 +572,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
     const placeholders = batch.map((_, i) => "?" + (i + 1)).join(",");
     const f = filterSql(filters, "c", batch.length + 1);
     const sc = scopeSql(scope, "d", f.nextParam);
-    const { results: hydrated } = await env.DB.prepare(
+    const sql = (memoryClause) =>
       `SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
               COALESCE(src.kind, 'unregistered') AS source_kind,
               c.title, c.document_date,
@@ -571,10 +585,18 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
                    THEN json_extract(d.meta, '$.start') END AS occurred_at
        FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        LEFT JOIN sources src ON src.name = d.source
-       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}`
-    )
+       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${memoryClause}`;
+    const run = (memoryClause) => env.DB.prepare(sql(memoryClause))
       .bind(...batch, ...f.params, ...sc.params)
       .all();
+    let response;
+    try {
+      response = await run(currentMemorySql("d"));
+    } catch (error) {
+      if (!await legacySchemaMayReadWithoutMemorySupersessions(env, error)) throw error;
+      response = await run("");
+    }
+    const { results: hydrated } = response;
     results.push(...(hydrated || []));
   }
 
@@ -596,11 +618,15 @@ export async function search(env, {
   const pool = RETRIEVAL_CANDIDATE_DEPTH;
   const fusionK = Math.min(Math.max(Number(rrfK) || RRF_K, 1), 1e3);
 
-  const [kw, vec, projection] = await Promise.all([
-    searchKeyword(env, query, { limit: pool, filters, access, scope }).catch(() => []),
+  const settleModality = (promise) => promise.then(
+    (results) => ({ results, error: null }),
+    (error) => ({ results: [], error }),
+  );
+  const [keywordAttempt, vectorAttempt, projection] = await Promise.all([
+    settleModality(searchKeyword(env, query, { limit: pool, filters, access, scope })),
     embedding && access?.kind !== "grant" && scopeIsUnrestricted(scope)
-      ? searchVector(env, embedding, { limit: pool, filters, scope }).catch(() => [])
-      : Promise.resolve([]),
+      ? settleModality(searchVector(env, embedding, { limit: pool, filters, scope }))
+      : Promise.resolve({ results: [], error: null }),
     // Vectorize may return some old/current candidates while a newer accepted
     // changeset is still processing. Non-empty semantic results therefore do
     // not prove the complete D1 corpus is query-visible. Reuse the exact
@@ -610,6 +636,14 @@ export async function search(env, {
       ? vectorReadiness(env).catch(() => ({ ready: false }))
       : Promise.resolve(null),
   ]);
+  // Ordinary FTS or Vectorize failures remain independent degraded modalities.
+  // The correction ledger is shared authority for both, so losing it on schema
+  // 37 must stop the whole read instead of becoming a clean empty result.
+  const integrityFailure = [keywordAttempt.error, vectorAttempt.error]
+    .find((error) => memorySupersessionIntegrityFailure(error));
+  if (integrityFailure) throw integrityFailure;
+  const kw = keywordAttempt.results;
+  const vec = vectorAttempt.results;
 
   // Both empty is a real answer (nothing matched). Only ONE empty when both
   // were attempted means a subsystem is down, and a caller that cannot tell
@@ -773,7 +807,15 @@ export async function search(env, {
       _authority_document_head: _internalLegacyAuthorityDocumentHead,
       ...publicRow
     } = row;
-    documents.push({ ...publicRow, authority });
+    const writeProvenance = publicOwnerNoteProvenance(
+      row.source,
+      row.authority_meta ?? row._authority_meta,
+    );
+    documents.push({
+      ...publicRow,
+      authority,
+      ...(writeProvenance ? { write_provenance: writeProvenance } : {}),
+    });
   }
 
   return {

@@ -149,6 +149,17 @@ item before generating the key. Windows stores only DPAPI CurrentUser
 ciphertext; Linux uses an owner-only adjacent file. An existing legacy Mac
 `.brain-admin-key` remains authoritative instead of being silently moved.
 
+The local Claude Code and Codex connection uses **Owner assistant** access. It
+can answer from the Brain, add or correct durable information when the owner
+asks, and check that the connection is working. It cannot delete records or
+change who has access. Setup verifies that the write tool is actually present,
+so a silently read-only owner connection is a failed setup, not a success.
+Keep the AI client's normal approval prompt enabled. Every `brain_remember`
+write is advertised as a data-changing action so a compatible client can give
+the owner the final click.
+The owner remains the administrator of their Brain. Deletion and access
+changes stay in explicit owner controls instead of becoming silent chat tools.
+
 If a first setup is interrupted after D1 commits only part of a migration, the
 next setup does not guess that the database is unused. It stops before another
 write and prints two exact commands: run `brain update <manifest>` to establish

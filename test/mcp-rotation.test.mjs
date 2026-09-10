@@ -27,6 +27,7 @@ import {
   createBrainCredentialResolver,
   fetchWithBrainCredential,
 } from "../components/brain-mcp-runtime.mjs";
+import { LOCAL_OWNER_AGENT_PROFILE } from "../worker/src/lib/agent-authority.js";
 import {
   adminKeyPersistencePlan,
   persistAdminKeyDurably,
@@ -167,8 +168,11 @@ function fakeAgentCli({
   failClaudeAdds = false,
   mismatchClaudeAdds = false,
   failCodexAdd = false,
+  failCodexGet = false,
   mismatchCodexAdd = false,
   prepareCodexConfig = true,
+  mutateClaudeOutsideTarget = false,
+  mutateCodexOutsideTarget = false,
 } = {}) {
   let codex = codexInitial;
   const codexConfigPath = join(
@@ -220,6 +224,11 @@ function fakeAgentCli({
           entry = { ...entry, env: { ...entry.env, BRAIN_URL: "https://wrong.invalid" } };
         }
         writeClaudeEntry(claudeConfigPath, name, entry);
+        if (mutateClaudeOutsideTarget) {
+          const changed = readClaudeConfig(claudeConfigPath);
+          changed.concurrent_owner_setting = "preserve-me";
+          writeFileSync(claudeConfigPath, `${JSON.stringify(changed, null, 2)}\n`, { mode: 0o600 });
+        }
         return result(true, "added\n");
       }
     }
@@ -227,6 +236,7 @@ function fakeAgentCli({
     if (command === "codex") {
       const action = args[1];
       if (action === "get") {
+        if (failCodexGet) return result(false, "", "fixture readback failure\n");
         if (!codex) return result(false, "", "No MCP server named fixture-brain found.\n");
         if (args.includes("--json")) {
           return result(true, JSON.stringify(codex), "fixture warning on stderr\n");
@@ -248,6 +258,13 @@ function fakeAgentCli({
           : desired.env;
         codex = codexEntry({ name: args[2], ...desired }, env);
         writeCodexEntry(codexConfigPath, codex);
+        if (mutateCodexOutsideTarget) {
+          writeFileSync(
+            codexConfigPath,
+            `${readFileSync(codexConfigPath, "utf8")}\n[unrelated]\nowner_setting = "preserve-me"\n`,
+            { mode: 0o600 },
+          );
+        }
         return result(true, "added\n");
       }
     }
@@ -287,7 +304,33 @@ try {
   });
   assert.equal(descriptor.command, process.execPath);
   assert.equal(descriptor.env.BRAIN_MANIFEST, resolve(manifestPath));
-  assert.deepEqual(Object.keys(descriptor.env).sort(), ["BRAIN_MANIFEST", "BRAIN_NAME", "BRAIN_URL"]);
+  assert.equal(descriptor.env.BRAIN_AGENT_PROFILE, LOCAL_OWNER_AGENT_PROFILE);
+  assert.deepEqual(Object.keys(descriptor.env).sort(), [
+    "BRAIN_AGENT_PROFILE", "BRAIN_MANIFEST", "BRAIN_NAME", "BRAIN_URL",
+  ]);
+  const oldLocatorEnv = { ...descriptor.env };
+  delete oldLocatorEnv.BRAIN_AGENT_PROFILE;
+  const oldLocatorEntry = {
+    type: "stdio",
+    command: descriptor.command,
+    args: [...descriptor.args],
+    env: oldLocatorEnv,
+  };
+  assert.equal(mcpRegistrationIsExact(oldLocatorEntry, descriptor), false);
+  assert.equal(mcpRegistrationIsInstallerOwned(oldLocatorEntry, descriptor), true,
+    "the exact prior locator-only registration is safely upgraded to Owner assistant");
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...oldLocatorEntry,
+    env: { ...oldLocatorEnv, BRAIN_AGENT_PROFILE: "structured-contributor" },
+  }, descriptor), false, "an explicitly selected non-owner profile is preserved as a collision");
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...oldLocatorEntry,
+    env: { ...oldLocatorEnv, EXTRA_SETTING: "unexpected" },
+  }, descriptor), false, "an old-looking registration with any extra environment setting is not claimed");
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...codexEntry(descriptor),
+    enabled: false,
+  }, descriptor), false, "a disabled registration is never claimed for replacement");
   assert.equal(mcpRegistrationIsInstallerOwned({
     ...legacyEntry(descriptor),
     command: "node",
@@ -316,7 +359,53 @@ try {
       CLOUDFLARE_API_TOKEN: "deployment-secret",
       OPENAI_API_KEY: "openai-fixture-secret",
     },
-  }), true, "the exact descriptor completes an offline MCP initialize handshake");
+  }), true, "the exact descriptor initializes and advertises owner read, remember, and health tools");
+  let lifecycleMethods = [];
+  const orderIndependentRuntime = verifyMcpRuntime(descriptor, {
+    spawn(_command, _args, options) {
+      lifecycleMethods = String(options.input || "")
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line).method);
+      return {
+        status: 0,
+        stdout: [
+          JSON.stringify({
+            jsonrpc: "2.0", id: 1,
+            result: { serverInfo: { name: descriptor.env.BRAIN_NAME, version: "fixture" } },
+          }),
+          JSON.stringify({
+            jsonrpc: "2.0", id: 2,
+            result: { tools: [
+              { name: "brain_health" },
+              { name: "brain_remember" },
+              { name: "brain_search" },
+              { name: "brain_think" },
+            ] },
+          }),
+        ].join("\n") + "\n",
+        stderr: "",
+      };
+    },
+  });
+  assert.deepEqual(lifecycleMethods, ["initialize", "notifications/initialized", "tools/list"]);
+  assert.equal(orderIndependentRuntime, true, "tool verification compares an exact set, not server order");
+  assert.equal(verifyMcpRuntime(descriptor, {
+    spawn: () => ({
+      status: 0,
+      stdout: [
+        JSON.stringify({
+          jsonrpc: "2.0", id: 1,
+          result: { serverInfo: { name: descriptor.env.BRAIN_NAME, version: "fixture" } },
+        }),
+        JSON.stringify({
+          jsonrpc: "2.0", id: 2,
+          result: { tools: [{ name: "brain_think" }, { name: "brain_search" }] },
+        }),
+      ].join("\n") + "\n",
+      stderr: "",
+    }),
+  }), false, "setup cannot certify an Owner assistant that silently lost brain_remember");
 
   /* Runtime locator wins over a stale legacy value and refreshes on rejection. */
   const runtimeEnvironment = {
@@ -448,6 +537,9 @@ try {
   /* Generated manual config is locator-only and prints no key value or field. */
   const manual = await captureOutput(() => cmdMcpConfig(manifestPath));
   assert.match(manual.output, /BRAIN_MANIFEST/);
+  assert.match(manual.output, /BRAIN_AGENT_PROFILE/);
+  assert.match(manual.output, /owner-assistant/);
+  assert.match(manual.output, /can read, add or correct/i);
   assert.match(manual.output, /Claude Desktop remains a manual config update/i);
   assert.doesNotMatch(manual.output, /BRAIN_KEY|ADMIN_KEY/);
   for (const secret of [currentKey, replacementKey, retiredKey]) {
@@ -738,6 +830,29 @@ try {
     "colliding registrations are never mutated",
   );
 
+  const updateCollisionCli = fakeAgentCli({
+    environment: childEnvironment,
+    claudeConfigPath,
+    codexInitial: unrelatedCodex,
+  });
+  const updateCollisions = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: childEnvironment,
+    claudeConfigPath,
+    runCommand: updateCollisionCli.runCommand,
+    existingOnly: true,
+    ownerAssistantMigrationOnly: true,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(updateCollisions.value.failures.sort(), ["Claude Code", "Codex"]);
+  assert.deepEqual(readClaudeConfig(claudeConfigPath).mcpServers[descriptor.name], unrelatedClaude);
+  assert.deepEqual(updateCollisionCli.codex, unrelatedCodex);
+  assert.equal(
+    updateCollisionCli.calls.some((call) => ["add", "add-json", "remove"].includes(call.args[1])),
+    false,
+    "update refuses an arbitrary same-name registration instead of claiming or widening it",
+  );
+
   /* Existing-only reconciliation never adds an unchosen agent registration. */
   writeClaudeEntry(claudeConfigPath, descriptor.name, null);
   const absentCli = fakeAgentCli({
@@ -750,12 +865,372 @@ try {
     claudeConfigPath,
     runCommand: absentCli.runCommand,
     existingOnly: true,
+    ownerAssistantMigrationOnly: true,
     adminKeyPersistencePlan() {
       throw new Error("durable preflight must not run when no chosen registration exists");
     },
   }));
   assert.deepEqual(absent.value.failures, []);
+  assert.deepEqual(absent.value.preserved, []);
   assert.equal(absentCli.calls.some((call) => ["add", "add-json", "remove"].includes(call.args[1])), false);
+
+  /* Secret rotation preserves locator profiles and disabled registrations exactly. */
+  const preserveHome = join(sandbox, "rotation profile preservation");
+  mkdirSync(preserveHome, { recursive: true, mode: 0o700 });
+  const preserveEnvironment = {
+    ...childEnvironment,
+    HOME: preserveHome,
+    CODEX_HOME: join(preserveHome, ".codex"),
+  };
+  const preserveClaudePath = join(preserveHome, ".claude.json");
+  const codexConfigPath = join(preserveEnvironment.CODEX_HOME, "config.toml");
+  writeClaudeEntry(preserveClaudePath, descriptor.name, oldLocatorEntry);
+  const disabledCodex = { ...codexEntry(descriptor), enabled: false };
+  const preserveCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInitial: disabledCodex,
+  });
+  let preservePreflightRan = false;
+  const preservedRotation = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: preserveCli.runCommand,
+    existingOnly: true,
+    rotationOnly: true,
+    adminKeyPersistencePlan() {
+      preservePreflightRan = true;
+      throw new Error("locator-only registrations need no credential reconciliation");
+    },
+    verifyMcpRuntime() {
+      throw new Error("locator-only registrations need no runtime rewrite check");
+    },
+  }));
+  assert.deepEqual(preservedRotation.value.failures, []);
+  assert.deepEqual(preservedRotation.value.wired, []);
+  assert.deepEqual(preservedRotation.value.skipped.sort(), ["Claude Code", "Codex"]);
+  assert.equal(preservePreflightRan, false, "rotation skips locator-only registrations before key or URL preflight");
+  assert.deepEqual(readClaudeConfig(preserveClaudePath).mcpServers[descriptor.name], oldLocatorEntry,
+    "rotation does not widen an unprofiled locator registration");
+  assert.deepEqual(preserveCli.codex, disabledCodex,
+    "rotation does not re-enable a disabled registration");
+  assert.equal(
+    preserveCli.calls.some((call) => ["add", "add-json", "remove"].includes(call.args[1])),
+    false,
+    "rotation makes no agent-config mutation when no literal key needs removal",
+  );
+
+  /* Ordinary update upgrades only a chosen, exact historical locator. */
+  const updateMigrationCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInitial: disabledCodex,
+  });
+  const disabledCodexRawBeforeUpdate = readFileSync(codexConfigPath);
+  let updateRuntimeProfile = null;
+  const updateMigration = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: updateMigrationCli.runCommand,
+    existingOnly: true,
+    ownerAssistantMigrationOnly: true,
+    verifyMcpRuntime(candidate) {
+      updateRuntimeProfile = candidate.env.BRAIN_AGENT_PROFILE;
+      return true;
+    },
+  }));
+  assert.deepEqual(updateMigration.value.failures, []);
+  assert.deepEqual(updateMigration.value.wired, ["Claude Code"]);
+  assert.deepEqual(updateMigration.value.preserved, ["Codex"]);
+  assert.equal(updateRuntimeProfile, LOCAL_OWNER_AGENT_PROFILE);
+  assert.equal(
+    mcpRegistrationIsExact(
+      readClaudeConfig(preserveClaudePath).mcpServers[descriptor.name],
+      descriptor,
+    ),
+    true,
+    "update upgrades the exact unprofiled installer locator and verifies Owner assistant",
+  );
+  assert.deepEqual(updateMigrationCli.codex, disabledCodex,
+    "update never re-enables a disabled Codex registration");
+  assert.deepEqual(readFileSync(codexConfigPath), disabledCodexRawBeforeUpdate,
+    "update preserves the exact bytes and disabled state of a disabled Codex registration");
+  assert.equal(
+    updateMigrationCli.calls.some((call) =>
+      call.command === "codex" && ["add", "remove"].includes(call.args[1])),
+    false,
+    "update issues no mutation command for a disabled Codex registration",
+  );
+  assert.match(updateMigration.output, /existing.*upgraded and verified with Owner assistant access/i);
+
+  /* A failed automatic migration puts the exact prior safe locator back. */
+  writeClaudeEntry(preserveClaudePath, descriptor.name, oldLocatorEntry);
+  const failedUpdateClaudeRaw = readFileSync(preserveClaudePath);
+  const failedUpdateClaudeCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInstalled: false,
+    failClaudeAdds: true,
+  });
+  const failedUpdateClaude = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: failedUpdateClaudeCli.runCommand,
+    existingOnly: true,
+    ownerAssistantMigrationOnly: true,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(failedUpdateClaude.value.failures, ["Claude Code"]);
+  assert.deepEqual(readFileSync(preserveClaudePath), failedUpdateClaudeRaw,
+    "failed Claude update migration restores the exact prior locator bytes");
+  assert.deepEqual(readClaudeConfig(preserveClaudePath).mcpServers[descriptor.name], oldLocatorEntry);
+
+  writeClaudeEntry(preserveClaudePath, descriptor.name, oldLocatorEntry);
+  const malformedUpdateClaudeRaw = readFileSync(preserveClaudePath);
+  const malformedUpdateClaudeCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInstalled: false,
+    mismatchClaudeAdds: true,
+  });
+  const malformedUpdateClaude = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: malformedUpdateClaudeCli.runCommand,
+    existingOnly: true,
+    ownerAssistantMigrationOnly: true,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(malformedUpdateClaude.value.failures, ["Claude Code"]);
+  assert.deepEqual(readFileSync(preserveClaudePath), malformedUpdateClaudeRaw,
+    "malformed Claude update readback restores the exact prior locator bytes");
+
+  writeClaudeEntry(preserveClaudePath, descriptor.name, oldLocatorEntry);
+  const concurrentClaudeCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInstalled: false,
+    mismatchClaudeAdds: true,
+    mutateClaudeOutsideTarget: true,
+  });
+  const concurrentClaude = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: concurrentClaudeCli.runCommand,
+    existingOnly: true,
+    ownerAssistantMigrationOnly: true,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(concurrentClaude.value.failures, ["Claude Code"]);
+  assert.equal(readClaudeConfig(preserveClaudePath).concurrent_owner_setting, "preserve-me",
+    "rollback refuses to overwrite a concurrent non-target Claude change");
+
+  writeClaudeEntry(preserveClaudePath, descriptor.name, oldLocatorEntry);
+  const explicitClaudeLocatorRaw = readFileSync(preserveClaudePath);
+  const explicitFailedClaudeCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInstalled: false,
+    failClaudeAdds: true,
+  });
+  const explicitFailedClaude = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: explicitFailedClaudeCli.runCommand,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(explicitFailedClaude.value.failures, ["Claude Code"]);
+  assert.deepEqual(readFileSync(preserveClaudePath), explicitClaudeLocatorRaw,
+    "explicit apply restores the exact prior safe Claude locator when re-add fails");
+
+  const priorCodexLocator = codexEntry(descriptor, oldLocatorEnv);
+  for (const [label, cliOptions] of [
+    ["failed add", { failCodexAdd: true }],
+    ["malformed readback", { mismatchCodexAdd: true }],
+    ["failed visible verification", { failCodexGet: true }],
+  ]) {
+    writeClaudeEntry(preserveClaudePath, descriptor.name, null);
+    const failingCodexCli = fakeAgentCli({
+      environment: preserveEnvironment,
+      claudeConfigPath: preserveClaudePath,
+      claudeInstalled: false,
+      codexInitial: priorCodexLocator,
+      ...cliOptions,
+    });
+    const priorCodexRaw = readFileSync(codexConfigPath);
+    const failedCodexMigration = await captureOutput(() => wireAgents(manifest, manifestPath, {
+      baseUrl: descriptor.env.BRAIN_URL,
+      environment: preserveEnvironment,
+      runCommand: failingCodexCli.runCommand,
+      existingOnly: true,
+      ownerAssistantMigrationOnly: true,
+      verifyMcpRuntime: () => true,
+    }));
+    assert.deepEqual(failedCodexMigration.value.failures, ["Codex"], label);
+    assert.deepEqual(readFileSync(codexConfigPath), priorCodexRaw,
+      `${label} preserves the exact prior Codex locator bytes`);
+  }
+
+  const concurrentCodexCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    claudeInstalled: false,
+    codexInitial: priorCodexLocator,
+    mismatchCodexAdd: true,
+    mutateCodexOutsideTarget: true,
+  });
+  const concurrentCodex = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    runCommand: concurrentCodexCli.runCommand,
+    existingOnly: true,
+    ownerAssistantMigrationOnly: true,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(concurrentCodex.value.failures, ["Codex"]);
+  assert.match(readFileSync(codexConfigPath, "utf8"), /owner_setting = "preserve-me"/,
+    "rollback refuses to overwrite a concurrent non-target Codex change");
+
+  const explicitFailedCodexCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    claudeInstalled: false,
+    codexInitial: priorCodexLocator,
+    mismatchCodexAdd: true,
+  });
+  const explicitCodexLocatorRaw = readFileSync(codexConfigPath);
+  const explicitFailedCodex = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    runCommand: explicitFailedCodexCli.runCommand,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(explicitFailedCodex.value.failures, ["Codex"]);
+  assert.deepEqual(readFileSync(codexConfigPath), explicitCodexLocatorRaw,
+    "explicit apply restores the exact prior safe Codex locator after malformed readback");
+
+  /* A retired literal is still never reconstructed by automatic migration. */
+  writeClaudeEntry(preserveClaudePath, descriptor.name, legacyEntry(descriptor));
+  const failedLiteralUpdateCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInstalled: false,
+    failClaudeAdds: true,
+  });
+  const failedLiteralUpdate = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: failedLiteralUpdateCli.runCommand,
+    existingOnly: true,
+    ownerAssistantMigrationOnly: true,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(failedLiteralUpdate.value.failures, ["Claude Code"]);
+  assert.equal(readClaudeConfig(preserveClaudePath).mcpServers[descriptor.name], undefined,
+    "automatic migration never restores a retired literal-key registration");
+  assert.equal(readFileSync(preserveClaudePath, "utf8").includes(retiredKey), false);
+
+  const customClaude = {
+    ...oldLocatorEntry,
+    env: { ...oldLocatorEnv, BRAIN_AGENT_PROFILE: "structured-contributor" },
+  };
+  writeClaudeEntry(preserveClaudePath, descriptor.name, customClaude);
+  const customProfileCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInitial: disabledCodex,
+  });
+  let customPreflightRan = false;
+  const customProfileMigration = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: customProfileCli.runCommand,
+    existingOnly: true,
+    ownerAssistantMigrationOnly: true,
+    adminKeyPersistencePlan() {
+      customPreflightRan = true;
+      throw new Error("preserved authority choices need no key preflight");
+    },
+    verifyMcpRuntime() {
+      throw new Error("preserved authority choices need no runtime migration");
+    },
+  }));
+  assert.deepEqual(customProfileMigration.value.failures, []);
+  assert.deepEqual(customProfileMigration.value.wired, []);
+  assert.deepEqual(customProfileMigration.value.preserved.sort(), ["Claude Code", "Codex"]);
+  assert.equal(customPreflightRan, false);
+  assert.deepEqual(readClaudeConfig(preserveClaudePath).mcpServers[descriptor.name], customClaude,
+    "update preserves an explicitly selected Claude access profile byte-for-byte");
+  assert.deepEqual(customProfileCli.codex, disabledCodex,
+    "update preserves a disabled Codex entry byte-for-byte beside a custom profile");
+  assert.equal(
+    customProfileCli.calls.some((call) => ["add", "add-json", "remove"].includes(call.args[1])),
+    false,
+    "preserved authority choices cause no agent-config mutation",
+  );
+
+  /* An explicit setup/apply reconciliation may upgrade the exact prior locator. */
+  writeClaudeEntry(preserveClaudePath, descriptor.name, oldLocatorEntry);
+  const explicitUpgradeCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInstalled: false,
+  });
+  const explicitUpgrade = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: explicitUpgradeCli.runCommand,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(explicitUpgrade.value.failures, []);
+  assert.equal(
+    mcpRegistrationIsExact(
+      readClaudeConfig(preserveClaudePath).mcpServers[descriptor.name],
+      descriptor,
+    ),
+    true,
+    "explicit reconciliation upgrades the exact historical locator to Owner assistant",
+  );
+
+  /* Literal-key cleanup keeps the historical unprofiled registration read-only. */
+  writeClaudeEntry(preserveClaudePath, descriptor.name, legacyEntry(descriptor));
+  const literalRotationCli = fakeAgentCli({
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    codexInstalled: false,
+  });
+  let literalRotationProfile = "not-checked";
+  const literalRotation = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: preserveEnvironment,
+    claudeConfigPath: preserveClaudePath,
+    runCommand: literalRotationCli.runCommand,
+    existingOnly: true,
+    rotationOnly: true,
+    verifyMcpRuntime(candidate) {
+      literalRotationProfile = candidate.env.BRAIN_AGENT_PROFILE;
+      return true;
+    },
+  }));
+  const readOnlyDescriptor = { ...descriptor, env: oldLocatorEnv };
+  assert.deepEqual(literalRotation.value.failures, []);
+  assert.equal(literalRotationProfile, undefined, "rotation runtime uses the existing unprofiled authority");
+  assert.equal(
+    mcpRegistrationIsExact(
+      readClaudeConfig(preserveClaudePath).mcpServers[descriptor.name],
+      readOnlyDescriptor,
+    ),
+    true,
+    "literal-key migration adds only the durable locator and does not grant write access",
+  );
+  assert.match(literalRotation.output, /without changing its access profile/i);
 
   /* Windows-style USERPROFILE never falls back to the process owner's config. */
   const profileHome = join(sandbox, "windows user profile");
@@ -812,6 +1287,7 @@ try {
     }));
     assert.equal(reconciliationCalls.length, 1);
     assert.equal(reconciliationCalls[0].existingOnly, true);
+    assert.equal(reconciliationCalls[0].rotationOnly, true);
     assert.equal(rotated.output.includes(replacementKey), false);
     assert.match(rotated.output, /Claude Desktop.*locator-only/is);
   } finally {

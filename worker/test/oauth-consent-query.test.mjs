@@ -173,6 +173,19 @@ test("Approve completes end to end using only what the page gave the browser", a
   }
 });
 
+test("a remote connector cannot request the local Owner assistant profile", async () => {
+  const fixture = await createProductFixture();
+  try {
+    const { html } = await consentPage(fixture, { scope: "owner-assistant" });
+    assert.match(html, /requesting the Librarian profile/,
+      "a local machine profile must fail closed before the remote consent page renders");
+    assert.doesNotMatch(html, /requesting the Owner assistant profile/);
+    assert.equal(new URLSearchParams(consentQuery(html)).get("scope"), "librarian");
+  } finally {
+    fixture.close();
+  }
+});
+
 test("nothing reflected into the consent page can escape its markup or its script", async () => {
   const fixture = await createProductFixture();
   try {

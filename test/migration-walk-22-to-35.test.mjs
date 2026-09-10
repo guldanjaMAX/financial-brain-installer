@@ -1,8 +1,8 @@
-// The migration walk a real client brain has to survive: schema 22 -> 35.
+// The migration walk a real client brain has to survive: schema 22 -> 37.
 //
 // Every release published through v0.3.6 ships exactly 22 migrations, so every
 // brain in the field (Lindsay's healthy v0.2.0 install, the paused client's 0.2.3 -> 0.3.5
-// one) is at schema 22 with a POPULATED database. Migrations 0023..0036 have
+// one) is at schema 22 with a POPULATED database. Migrations 0023..0037 have
 // never been applied to a real client brain, and test/migrations.test.mjs only
 // parses the SQL text; nothing here or anywhere else applies them to rows that
 // already exist.
@@ -271,7 +271,7 @@ const snapshot = (db) => ({
 console.log("\n--- baseline: a shipped v0.2.0 brain builds and is at schema 22 ---");
 const db = await buildShippedBrain();
 check("v0.2.0 ships exactly 22 migrations", SHIPPED.length === 22, `got ${SHIPPED.length}`);
-check("today's tree has 0023..0036 pending", PENDING.length === 14 && PENDING.at(-1).version === 36,
+check("today's tree has 0023..0037 pending", PENDING.length === 15 && PENDING.at(-1).version === 37,
   `${PENDING.length} pending, last ${PENDING.at(-1)?.version}`);
 check("baseline schema_migrations is contiguous 1..22",
   db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().every((r, i) => r.version === i + 1));
@@ -281,7 +281,7 @@ check("baseline FTS index actually holds every chunk (MATCH, not COUNT(*))",
   before.ftsIndexed === before.chunks && before.chunks > 0, `${before.ftsIndexed} indexed vs ${before.chunks} chunks`);
 check("baseline FTS passes FTS5's own integrity-check", ftsIntegrityOk(db));
 
-console.log("\n--- the walk: apply 0023..0036 to that populated brain ---");
+console.log("\n--- the walk: apply 0023..0037 to that populated brain ---");
 const applied = [];
 const errors = [];
 for (const migration of PENDING) {
@@ -293,7 +293,7 @@ for (const migration of PENDING) {
     break;   // cmdMigrate has no catch: the first failure aborts the upgrade
   }
 }
-check("all 14 pending migrations apply to a populated schema-22 brain",
+check("all 15 pending migrations apply to a populated schema-22 brain",
   errors.length === 0 && applied.length === PENDING.length,
   errors.join(" | ") || `applied ${applied.length}`);
 
@@ -433,7 +433,7 @@ if (errors.length === 0) {
   // silently reduced to a no-op fails here rather than passing unnoticed. This
   // is what makes 0023/0024/0025/0027/0030/0031/0032 load-bearing: they add
   // nothing to pre-existing rows, so nothing else in this file would notice.
-  console.log("\n--- every declared object of 0023..0036 exists after the walk ---");
+  console.log("\n--- every declared object of 0023..0037 exists after the walk ---");
   const objectsPresent = new Set(
     db.prepare("SELECT name FROM sqlite_master WHERE name IS NOT NULL").all().map((r) => r.name));
   for (const migration of PENDING) {
@@ -478,12 +478,12 @@ if (errors.length === 0) {
          client_slug = excluded.client_slug,
          schema_version = excluded.schema_version,
          gate_version = excluded.gate_version`
-    ).run("fixture-brain", "0.4.0", 36, 0, new Date().toISOString(), "stable");
+    ).run("fixture-brain", "0.4.0", 37, 0, new Date().toISOString(), "stable");
     return null;
   }, "threw");
   check("cmdMigrate's install_state upsert runs against the upgraded schema", upsertError === null, String(upsertError));
   const state = probe(() => db.prepare("SELECT * FROM install_state WHERE id=1").get(), {});
-  check("migrate records schema_version 36", state?.schema_version === 36, JSON.stringify(state?.schema_version));
+  check("migrate records schema_version 37", state?.schema_version === 37, JSON.stringify(state?.schema_version));
   check("migrate does NOT advance product_version (only a verified upgrade does)",
     state?.product_version === "0.2.0", JSON.stringify(state?.product_version));
   check("migrate does NOT clobber an in-progress vector projection bootstrap",
@@ -492,8 +492,8 @@ if (errors.length === 0) {
 
   console.log("\n--- schema_migrations after the walk ---");
   const versions = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => r.version);
-  check("schema_migrations is contiguous 1..36 after the upgrade",
-    versions.length === 36 && versions.every((v, i) => v === i + 1), JSON.stringify(versions));
+  check("schema_migrations is contiguous 1..37 after the upgrade",
+    versions.length === 37 && versions.every((v, i) => v === i + 1), JSON.stringify(versions));
 }
 
 /* --------------------------------------- restart resume, per the runner's own promise */
@@ -595,7 +595,7 @@ console.log("\n--- 0033's DROP/CREATE window: the hazard the writer barrier exis
 console.log("\n--- restart safety: killed and resumed at EVERY statement boundary ---");
 // D1's REST endpoint commits each statement on its own and schema_migrations is
 // written only after the last one, so a process killed mid-file re-runs the
-// WHOLE file on the next `brain migrate`. Every statement in 0023..0036 must
+// WHOLE file on the next `brain migrate`. Every statement in 0023..0037 must
 // therefore be idempotent against its own partial application - at every
 // possible kill point, not just a convenient one.
 for (const target of PENDING) {

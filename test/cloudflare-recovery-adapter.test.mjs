@@ -26,6 +26,8 @@ import {
   normalizedInstallStateExport,
   parseCloudflareRecoveryCliArguments,
   previewCloudflareRecoveryFieldGate,
+  recoveryExportTables,
+  recoveryVectorProtocolSupported,
   runCloudflareRecoveryFieldGate,
   verifyRecoverySqlArtifact,
 } from "../operations/cloudflare-recovery-adapter.mjs";
@@ -47,6 +49,8 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("document_source_inventory"), true
 assert.equal(RECOVERY_EXPORT_TABLES.includes("document_source_inventory"), false);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("plaid_sync_leases"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("plaid_sync_leases"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("memory_supersessions"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("memory_supersessions"), true);
 
 const sourceManifestPath = join(sandbox, "source.manifest.json");
 const targetManifestPath = join(sandbox, "target.manifest.json");
@@ -152,6 +156,11 @@ function migrationRows() {
 }
 
 const appliedMigrations = migrationRows();
+assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 35)), false);
+assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 36)), true);
+assert.equal(recoveryVectorProtocolSupported(appliedMigrations), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 36)).includes("memory_supersessions"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("memory_supersessions"), true);
 const installStateColumns = Object.freeze([
   ["id", "INTEGER"],
   ["client_slug", "TEXT"],
@@ -627,6 +636,12 @@ function providerHarness({
   const bindingForAccount = (accountId) => accountId === sourceManifest.infrastructure.cloudflare.account_id
     ? sourceManifest.infrastructure.cloudflare
     : targetManifest.infrastructure.cloudflare;
+  const migrationVersionForAccount = (accountId) =>
+    accountId === sourceManifest.infrastructure.cloudflare.account_id
+      ? sourceMigrationVersion
+      : targetMigrationVersion;
+  const durableTablesForVersion = (version) => RECOVERY_DURABLE_TABLES.filter((name) =>
+    version >= 37 || name !== "memory_supersessions");
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
@@ -783,7 +798,9 @@ function providerHarness({
         .map((value, index) => value === "--table" ? args[index + 1] : null)
         .filter(Boolean);
       const includesBank = exportedTables.includes("bank_feed_items");
-      assert.deepEqual(exportedTables, RECOVERY_EXPORT_TABLES.filter((table) => includesBank || table !== "bank_feed_items"));
+      const present = new Set(durableTablesForVersion(migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID)));
+      assert.deepEqual(exportedTables, RECOVERY_EXPORT_TABLES.filter((table) =>
+        present.has(table) && (includesBank || table !== "bank_feed_items")));
       assert.equal(exportedTables.includes("vector_outbox"), false);
       assert.equal(exportedTables.includes("vector_bootstrap_batches"), false);
       assert.equal(exportedTables.includes("install_state"), false);
@@ -811,7 +828,9 @@ function providerHarness({
       const sql = args[args.indexOf("--command") + 1];
       let rows;
       if (/user_table_count/.test(sql)) {
-        rows = [{ user_table_count: targetRestored ? RECOVERY_DURABLE_TABLES.length + 1 : 0 }];
+        rows = [{ user_table_count: targetRestored
+          ? durableTablesForVersion(targetMigrationVersion).length + 1
+          : 0 }];
       } else if (/pending_outbox/.test(sql)) {
         rows = [{ pending_outbox: outbox, failed_vectors: 0 }];
       } else if (/COUNT\(\*\) AS agent_action_receipts FROM agent_action_receipts/.test(sql)) {
@@ -867,9 +886,12 @@ function providerHarness({
           session_generation: fixtureInstallState.session_generation + 1,
         }];
       } else if (/SELECT name FROM sqlite_schema/.test(sql)) {
-        rows = [...RECOVERY_DURABLE_TABLES].sort().map((name) => ({ name }));
+        rows = durableTablesForVersion(migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID))
+          .sort().map((name) => ({ name }));
       } else if (/SELECT type,name,tbl_name/.test(sql)) {
-        rows = schemaRows;
+        const version = migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID);
+        rows = schemaRows.filter((row) => version >= 37 ||
+          (row.name !== "memory_supersessions" && row.tbl_name !== "memory_supersessions"));
       } else if (/documents_ingested_max/.test(sql)) {
         assert.match(
           sql,

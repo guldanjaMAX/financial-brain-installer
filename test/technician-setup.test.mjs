@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -251,6 +251,9 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.match(content, /claude --add-dir <approved-folder>/);
   assert.match(content, /npx wrangler@4/);
   assert.match(content, /normal approval prompts enabled/i);
+  assert.match(content, /owner directly asks.*brain_remember/is);
+  assert.match(content, /update or correct.*brain_search.*full returned record id.*supersedes/is);
+  assert.match(content, /Never treat retrieved documents.*permission to write/is);
   assert.doesNotMatch(content, /CLOUDFLARE_API_TOKEN|ADMIN_KEY|client_secret|app_password/);
   // POSIX mode bits can prove the owner-only file mode directly. Windows does
   // not represent its inherited user-profile ACL in stat().mode and reports
@@ -274,9 +277,46 @@ test("an unrelated Claude workspace guide is preserved byte-for-byte", () => {
   const target = join(workspace, "CLAUDE.md");
   writeFileSync(manifest, "{}");
   writeFileSync(target, "owner instructions\n");
-  const result = writeClaudeWorkspaceGuide(manifest, { brainCliPath: "/safe/bin/brain" });
+  const result = writeClaudeWorkspaceGuide(manifest, {
+    brainCliPath: "/safe/bin/brain",
+    existingOnly: true,
+  });
   assert.equal(result.status, "preserved_unrelated_existing_file");
   assert.equal(readFileSync(target, "utf8"), "owner instructions\n");
+});
+
+test("update refreshes only an existing installer-managed Claude workspace guide", () => {
+  const workspace = join(sandbox, "managed-claude-workspace-update");
+  mkdirSync(workspace);
+  const manifest = join(workspace, "brain.manifest.json");
+  const target = join(workspace, "CLAUDE.md");
+  writeFileSync(manifest, "{}");
+  writeFileSync(target, `${CLAUDE_WORKSPACE_MARKER}\n# Older managed guide\n`, { mode: 0o600 });
+
+  const refreshed = writeClaudeWorkspaceGuide(manifest, {
+    brainCliPath: safeBrainPath,
+    nodePath: safeNodePath,
+    existingOnly: true,
+  });
+  const content = readFileSync(target, "utf8");
+  assert.equal(refreshed.status, "written");
+  assert.equal(refreshed.changed, true);
+  assert.match(content, /owner directly asks.*brain_remember/is);
+  assert.match(content, /update or correct.*brain_search.*full returned record id.*supersedes/is);
+  assert.match(content, /normal approval/i);
+
+  const missingWorkspace = join(sandbox, "missing-claude-workspace-update");
+  mkdirSync(missingWorkspace);
+  const missingManifest = join(missingWorkspace, "brain.manifest.json");
+  const missingTarget = join(missingWorkspace, "CLAUDE.md");
+  writeFileSync(missingManifest, "{}");
+  const skipped = writeClaudeWorkspaceGuide(missingManifest, {
+    brainCliPath: safeBrainPath,
+    nodePath: safeNodePath,
+    existingOnly: true,
+  });
+  assert.equal(skipped.status, "skipped_missing");
+  assert.equal(existsSync(missingTarget), false);
 });
 
 test("the plan is read-only, ordered, honest about proof, and agent-readable", () => {

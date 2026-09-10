@@ -29,7 +29,7 @@
  * manifest, logged, or passed as a command-line argument where `ps` could read it.
  */
 
-import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -193,6 +193,10 @@ import {
   absenceUnproven, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
   unavailableNotice,
 } from "./worker/src/lib/retrieval-status.js";
+import {
+  LOCAL_OWNER_AGENT_PROFILE,
+  profileHas,
+} from "./worker/src/lib/agent-authority.js";
 import { readWranglerOAuthToken, refreshWranglerSession, WRANGLER_SPEC } from "./operations/wrangler-oauth.mjs";
 import {
   adminKeyPersistencePlan,
@@ -2614,9 +2618,11 @@ export async function cmdSecrets(manifestPath, options = {}) {
         info("the declared Keychain item is authoritative; no adjacent .brain-admin-key copy was written");
       }
 
-      // Standalone rotation updates only registrations the owner already chose.
-      // Setup performs the full add path later. Imported unit tests stay inert
-      // unless they inject this seam, so fixtures can never touch real configs.
+      // Standalone rotation only removes retired literal keys from registrations
+      // the owner already chose. Locator-only registrations keep their current
+      // profile and enabled state exactly. Setup performs the explicit add or
+      // profile-upgrade path. Imported unit tests stay inert unless they inject
+      // this seam, so fixtures can never touch real configs.
       const reconcile = Object.hasOwn(options, "reconcileExistingAgents")
         ? options.reconcileExistingAgents
         : (IS_MAIN ? wireAgents : null);
@@ -2627,6 +2633,7 @@ export async function cmdSecrets(manifestPath, options = {}) {
             ...(options.agentOptions || {}),
             account: acct,
             existingOnly: true,
+            rotationOnly: true,
           });
         } catch {
           reconciliation = { wired: [], failures: ["agent-reconciliation"] };
@@ -5586,10 +5593,11 @@ export async function cmdTest(manifestPath, options = {}) {
  * terminal, is the highest perceived-value second in the whole engagement.
  * Before that it is a system they were shown; after it, it is a thing they own.
  *
- * The config contains only a URL, display name, executable path, and absolute
- * manifest locator. brain-mcp reads the current key from the same validated
- * durable storage as every installer command, so rotation never requires a
- * credential in terminal output, shell history, argv, or an MCP config file.
+ * The config contains only a URL, display name, executable path, absolute
+ * manifest locator, and nonsecret local agent profile. brain-mcp reads the
+ * current key from the same validated durable storage as every installer
+ * command, so rotation never requires a credential in terminal output, shell
+ * history, argv, or an MCP config file.
  */
 export function mcpRegistrationDescriptor(manifest, manifestPath, {
   baseUrl,
@@ -5624,6 +5632,7 @@ export function mcpRegistrationDescriptor(manifest, manifestPath, {
       BRAIN_URL: base,
       BRAIN_NAME: name,
       BRAIN_MANIFEST: absoluteManifest,
+      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
     }),
   });
 }
@@ -5643,12 +5652,17 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   // already installed or an assistant that arrived afterwards.
   if (flags.apply) {
     const result = await (options.wireAgents ?? wireAgents)(m, manifestPath, options.wireOptions || {});
-    if (result.wired.length) ok(`connected: ${result.wired.join(", ")}`);
+    if (result.wired.length) {
+      ok(`connected with Owner assistant access: ${result.wired.join(", ")}`);
+      say("      It can read, add or correct information, and check the connection. It cannot delete records or change access.");
+    }
     for (const name of result.skipped) info(`${name}: nothing to do`);
     if (result.failures.length) {
       die(
         `could not connect: ${result.failures.join(", ")}.\n` +
-        "      Nothing was left half-written. Run `brain mcp-config <manifest>` without --apply\n" +
+        "      The connection was not reported ready. A prior locator-only connection was preserved\n" +
+        "      whenever that could be verified safely; a retired literal-key entry is never restored.\n" +
+        "      Run `brain mcp-config <manifest>` without --apply\n" +
         "      to see the exact commands and run them yourself."
       );
     }
@@ -5698,6 +5712,12 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
 
   console.log(`\n${c.bold(`Connect ${owner}'s brain to your AI tools`)}\n`);
   console.log(`Your brain lives at ${c.bold(base)}\n`);
+  console.log(
+    "These local connections use Owner assistant access. They can read, add or correct\n" +
+      "information from your conversation, and check the connection. They cannot delete\n" +
+      "records or change who has access. You remain the administrator; those higher-risk\n" +
+      "changes stay in explicit owner controls.\n"
+  );
 
   console.log(`${c.bold("Claude Code")}: run this once, then it works in every folder:\n`);
   console.log(
@@ -5747,8 +5767,10 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
       "  Claude: Settings -> Connectors -> Add custom connector -> paste the URL.\n" +
       "  ChatGPT: Settings -> Connectors (or Apps & Connectors) -> Create -> paste the URL.\n" +
       "  Either way the browser opens this brain's own approval page; the owner\n" +
-      "  approves with their passkey. Connectors are read-only and die with\n" +
-      "  Sign out everywhere.\n"
+      "  approves with their passkey. Remote connectors start as Librarian, which is\n" +
+      "  read-only. A connector gets write access only by explicitly requesting the\n" +
+      "  Structured contributor profile and showing that permission for approval.\n" +
+      "  Every connector is revoked by Sign out everywhere.\n"
   );
 
   console.log(
@@ -14114,12 +14136,28 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
   const envKeys = Object.keys(actual?.env || {}).sort();
   const safeTransition = transitionName === "BRAIN_KEY" ||
     (transitionName && /^x+$/.test(actual.env[transitionName] || ""));
-  const manifestOwned = sameManifest && (
-    sameStringMap(actual.env, desired.env) ||
-    (safeTransition && sameStringMap(actual.env, {
+  const { BRAIN_AGENT_PROFILE: _desiredProfile, ...oldLocatorEnv } = desired.env;
+  // v0.4.6 installer-owned registrations carried this exact locator map but
+  // no profile. Accept only that one-field historical shape as migratable.
+  // A deliberately selected profile, any extra environment value, or any
+  // other missing field remains an unrelated registration and is preserved.
+  const oldLocatorOwned = !Object.hasOwn(actual?.env || {}, "BRAIN_AGENT_PROFILE") &&
+    sameStringMap(actual.env, oldLocatorEnv);
+  const transitionOwned = safeTransition && (
+    sameStringMap(actual.env, {
       ...desired.env,
       [transitionName]: actual.env[transitionName],
-    }))
+    }) ||
+    (!Object.hasOwn(actual?.env || {}, "BRAIN_AGENT_PROFILE") &&
+      sameStringMap(actual.env, {
+        ...oldLocatorEnv,
+        [transitionName]: actual.env[transitionName],
+      }))
+  );
+  const manifestOwned = sameManifest && (
+    sameStringMap(actual.env, desired.env) ||
+    oldLocatorOwned ||
+    transitionOwned
   );
   const exactLegacyTarget = transitionName &&
     !Object.hasOwn(actual?.env || {}, "BRAIN_MANIFEST") &&
@@ -14131,6 +14169,7 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
   const installerNode = actual?.command === "node" || samePath(actual?.command, desired.command);
   return Boolean(actual) &&
     actual.name === desired.name &&
+    actual.enabled !== false &&
     actual.type === "stdio" &&
     installerNode &&
     actual.args.length === 1 &&
@@ -14140,25 +14179,30 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
     actual.cwd === null &&
     actual.env.BRAIN_NAME === desired.name &&
     actual.env.BRAIN_URL === desired.env.BRAIN_URL &&
-    (manifestOwned || exactLegacyTarget);
+    Boolean(manifestOwned || exactLegacyTarget);
 }
 
 /**
- * Launch the exact locator-only descriptor and complete one offline MCP
- * initialize exchange. This catches a missing Node executable, import failure,
- * broken server syntax, or incompatible stdio framing before setup says wired.
+ * Launch the exact locator-only descriptor and complete an offline MCP
+ * initialize plus tool-list exchange. This catches a missing Node executable,
+ * import failure, broken server syntax, incompatible stdio framing, or a
+ * profile that silently lost its promised tools before setup says wired.
  */
 export function verifyMcpRuntime(desired, options = {}) {
   if (!desired || desired.type !== "stdio" || !isAbsolute(desired.command) ||
       !Array.isArray(desired.args) || !desired.args.length) return false;
   const spawn = options.spawn ?? spawnSync;
   const environment = localToolEnvironment(options.environment ?? process.env, desired.env);
-  const request = JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "brain-installer", version: PRODUCT_VERSION } },
-  }) + "\n";
+  const request = [
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "brain-installer", version: PRODUCT_VERSION } },
+    },
+    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n";
   let result;
   try {
     result = spawn(desired.command, desired.args, {
@@ -14177,9 +14221,22 @@ export function verifyMcpRuntime(desired, options = {}) {
   if (result?.error || result?.status !== 0) return false;
   try {
     const replies = String(result.stdout || "").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    const reply = replies.find((value) => value?.id === 1);
-    return reply?.jsonrpc === "2.0" && reply?.result?.serverInfo?.name === desired.env.BRAIN_NAME &&
-      typeof reply.result.serverInfo.version === "string";
+    const initialized = replies.find((value) => value?.id === 1);
+    const listed = replies.find((value) => value?.id === 2);
+    const expectedTools = ["brain_think", "brain_search"];
+    const profile = desired.env.BRAIN_AGENT_PROFILE;
+    if (profileHas(profile, "curated:write")) expectedTools.push("brain_remember");
+    if (profileHas(profile, "diagnostics:read")) expectedTools.push("brain_health");
+    const actualTools = Array.isArray(listed?.result?.tools)
+      ? listed.result.tools.map((tool) => tool?.name)
+      : [];
+    const actualToolSet = new Set(actualTools);
+    return initialized?.jsonrpc === "2.0" &&
+      initialized?.result?.serverInfo?.name === desired.env.BRAIN_NAME &&
+      typeof initialized.result.serverInfo.version === "string" &&
+      actualTools.length === expectedTools.length &&
+      actualToolSet.size === expectedTools.length &&
+      expectedTools.every((name) => actualToolSet.has(name));
   } catch {
     return false;
   }
@@ -14391,6 +14448,208 @@ function claudeAddArgs(desired, { json = false } = {}) {
   return args;
 }
 
+/**
+ * Capture one local assistant config without creating a second on-disk copy.
+ * A safe locator migration may use this in-memory snapshot to put an
+ * exact, previously working locator back if the assistant CLI cannot complete
+ * and verify its rewrite.
+ */
+function captureAgentConfigFile(path, { allowAbsent = false } = {}) {
+  let before;
+  try {
+    before = lstatSync(path);
+  } catch (error) {
+    if (allowAbsent && error?.code === "ENOENT") {
+      return Object.freeze({ path, exists: false, bytes: null, stat: null });
+    }
+    throw error;
+  }
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
+      before.size > 16 * 1024 * 1024 ||
+      (typeof process.getuid === "function" && before.uid !== process.getuid())) {
+    throw new Error("unsafe local assistant configuration");
+  }
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
+  const fd = openSync(path, flags);
+  try {
+    const opened = fstatSync(fd);
+    if (!sameOpenedFile(before, opened)) {
+      throw new Error("local assistant configuration changed while it was read");
+    }
+    const bytes = readFileSync(fd);
+    if (bytes.length !== opened.size) {
+      throw new Error("local assistant configuration changed while it was read");
+    }
+    return Object.freeze({ path, exists: true, bytes, stat: opened });
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, canonicalJsonValue(value[key])]),
+  );
+}
+
+function claudeConfigOutsideTarget(bytes, name) {
+  if (bytes === null) return JSON.stringify({});
+  const source = bytes.toString("utf8");
+  if (!Buffer.from(source, "utf8").equals(bytes)) {
+    throw new Error("Claude configuration is not valid UTF-8");
+  }
+  const parsed = JSON.parse(source);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("invalid Claude configuration");
+  }
+  const copy = structuredClone(parsed);
+  if (copy.mcpServers !== undefined) {
+    if (!copy.mcpServers || typeof copy.mcpServers !== "object" || Array.isArray(copy.mcpServers)) {
+      throw new Error("invalid Claude MCP configuration");
+    }
+    delete copy.mcpServers[name];
+    if (!Object.keys(copy.mcpServers).length) delete copy.mcpServers;
+  }
+  return JSON.stringify(canonicalJsonValue(copy));
+}
+
+function codexConfigOutsideTarget(bytes, name) {
+  if (bytes === null) return "";
+  const source = bytes.toString("utf8");
+  if (!Buffer.from(source, "utf8").equals(bytes)) {
+    throw new Error("Codex configuration is not valid UTF-8");
+  }
+  const targets = new Set([`mcp_servers.${name}`, `mcp_servers.${name}.env`]);
+  let insideTarget = false;
+  const kept = [];
+  for (const segment of source.match(/[^\r\n]*(?:\r\n|\n|\r|$)/g) || []) {
+    if (!segment) continue;
+    const line = segment.replace(/[\r\n]+$/, "");
+    const header = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
+    if (header) insideTarget = targets.has(header[1]);
+    if (!insideTarget) kept.push(segment);
+  }
+  return kept.join("");
+}
+
+function configOutsideTarget(snapshot, bytes) {
+  if (snapshot.format === "claude-json") {
+    return claudeConfigOutsideTarget(bytes, snapshot.name);
+  }
+  if (snapshot.format === "codex-toml") {
+    return codexConfigOutsideTarget(bytes, snapshot.name);
+  }
+  throw new Error("unknown local assistant configuration format");
+}
+
+function sameCapturedConfigState(left, right) {
+  if (!left || !right || left.exists !== right.exists) return false;
+  if (!left.exists) return true;
+  return sameOpenedFile(left.stat, right.stat) && left.bytes.equals(right.bytes);
+}
+
+/**
+ * Restore exact prior bytes only when every non-target setting still matches
+ * the pre-run snapshot. The replacement is written and flushed beside the
+ * config, then renamed atomically after one final current-state check.
+ */
+function restoreAgentConfigFile(snapshot, current) {
+  if (!snapshot?.exists || !Buffer.isBuffer(snapshot.bytes) || !current) return false;
+  try {
+    if (configOutsideTarget(snapshot, current.bytes) !== snapshot.outsideTarget) return false;
+  } catch {
+    return false;
+  }
+  if (current.exists && current.bytes.equals(snapshot.bytes) &&
+      (current.stat.mode & 0o7777) === (snapshot.stat.mode & 0o7777)) {
+    return true;
+  }
+
+  const mode = snapshot.stat.mode & 0o7777;
+  const temporary = `${snapshot.path}.${process.pid}.${randomBytes(12).toString("hex")}.rollback`;
+  let fd = null;
+  let created = false;
+  try {
+    fd = openSync(
+      temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW || 0),
+      mode,
+    );
+    created = true;
+    if (writeSync(fd, snapshot.bytes, 0, snapshot.bytes.length, 0) !== snapshot.bytes.length) {
+      throw new Error("short local assistant configuration rollback write");
+    }
+    fchmodSync(fd, mode);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+
+    const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+    if (!sameCapturedConfigState(current, confirmed) ||
+        configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
+      throw new Error("local assistant configuration changed before rollback");
+    }
+    renameSync(temporary, snapshot.path);
+    created = false;
+  } catch {
+    if (fd !== null) closeSync(fd);
+    if (created) {
+      try { unlinkSync(temporary); } catch { /* no rollback temporary remains */ }
+    }
+    return false;
+  }
+
+  try {
+    const restored = captureAgentConfigFile(snapshot.path);
+    return restored.bytes.equals(snapshot.bytes) &&
+      (restored.stat.mode & 0o7777) === mode;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Only the exact locator-only registration shipped before Owner assistant is
+ * eligible for rollback during setup, explicit apply, or automatic update. A
+ * historical literal-key registration is never snapshotted or reconstructed.
+ */
+function safeLocatorMigrationSnapshot(before, desired, options, format) {
+  if (options.rotationOnly || !before?.entry || !before?.path) return null;
+  const actual = normalizedRegistration(before.entry, desired.name);
+  const { BRAIN_AGENT_PROFILE: _profile, ...oldLocatorEnv } = desired.env;
+  if (!actual || actual.enabled === false ||
+      Object.hasOwn(actual.env, "BRAIN_AGENT_PROFILE") ||
+      !sameStringMap(actual.env, oldLocatorEnv) ||
+      CLAUDE_LEGACY_KEY_NAMES.some((key) => Object.hasOwn(actual.env, key)) ||
+      !mcpRegistrationIsInstallerOwned(before.entry, desired)) {
+    return null;
+  }
+  const file = captureAgentConfigFile(before.path);
+  return Object.freeze({
+    ...file,
+    format,
+    name: desired.name,
+    outsideTarget: format === "claude-json"
+      ? claudeConfigOutsideTarget(file.bytes, desired.name)
+      : codexConfigOutsideTarget(file.bytes, desired.name),
+  });
+}
+
+function failedAgentReconciliation(reason, snapshot) {
+  if (!snapshot) return { status: "failed", reason };
+  let current = null;
+  try {
+    current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+  } catch {
+    return { status: "failed", reason, previousPreserved: false };
+  }
+  const previousPreserved = restoreAgentConfigFile(snapshot, current);
+  return { status: "failed", reason, previousPreserved };
+}
+
 function reconcileClaudeRegistration(desired, options) {
   const runner = options.runCommand;
   const before = readClaudeRegistration(desired, options);
@@ -14400,49 +14659,60 @@ function reconcileClaudeRegistration(desired, options) {
     return { status: "failed", reason: "name-collision" };
   }
 
-  if (before.entry) {
-    neutralizeClaudeLegacyKey(desired, before);
-    runAgentCli(runner, options.environment, "claude", [
-      "mcp", "remove", "--scope", "user", desired.name,
-    ]);
-    const removed = readClaudeRegistration(desired, options);
-    if (removed.entry) return { status: "failed", reason: "remove-failed" };
-  }
+  const rollbackSnapshot = safeLocatorMigrationSnapshot(
+    before,
+    desired,
+    options,
+    "claude-json",
+  );
 
-  runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired));
-  let after = readClaudeRegistration(desired, options);
-  if (mcpRegistrationIsExact(after.entry, desired)) {
-    return { status: before.entry ? "updated" : "added" };
-  }
+  try {
+    if (before.entry) {
+      neutralizeClaudeLegacyKey(desired, before);
+      runAgentCli(runner, options.environment, "claude", [
+        "mcp", "remove", "--scope", "user", desired.name,
+      ]);
+      const removed = readClaudeRegistration(desired, options);
+      if (removed.entry) return failedAgentReconciliation("remove-failed", rollbackSnapshot);
+    }
 
-  // A second secret-free CLI path recovers from a version-specific add parser
-  // failure. Never reconstruct a removed legacy entry containing a literal key.
-  if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
-    runAgentCli(runner, options.environment, "claude", [
-      "mcp", "remove", "--scope", "user", desired.name,
-    ]);
-    after = readClaudeRegistration(desired, options);
-  }
-  if (!after.entry) {
-    runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired, { json: true }));
-    after = readClaudeRegistration(desired, options);
+    runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired));
+    let after = readClaudeRegistration(desired, options);
     if (mcpRegistrationIsExact(after.entry, desired)) {
       return { status: before.entry ? "updated" : "added" };
     }
-  }
 
-  // If a partial installer-owned entry was created, remove only that entry.
-  // An unrelated concurrent replacement is preserved untouched.
-  if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
-    runAgentCli(runner, options.environment, "claude", [
-      "mcp", "remove", "--scope", "user", desired.name,
-    ]);
+    // A second secret-free CLI path recovers from a version-specific add parser
+    // failure. Never reconstruct a removed legacy entry containing a literal key.
+    if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
+      runAgentCli(runner, options.environment, "claude", [
+        "mcp", "remove", "--scope", "user", desired.name,
+      ]);
+      after = readClaudeRegistration(desired, options);
+    }
+    if (!after.entry) {
+      runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired, { json: true }));
+      after = readClaudeRegistration(desired, options);
+      if (mcpRegistrationIsExact(after.entry, desired)) {
+        return { status: before.entry ? "updated" : "added" };
+      }
+    }
+
+    // If a partial installer-owned entry was created, remove only that entry.
+    // An unrelated concurrent replacement is preserved untouched.
+    if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
+      runAgentCli(runner, options.environment, "claude", [
+        "mcp", "remove", "--scope", "user", desired.name,
+      ]);
+    }
+    const final = readClaudeRegistration(desired, options);
+    return failedAgentReconciliation(
+      final.entry ? "verification-mismatch" : "registration-absent",
+      rollbackSnapshot,
+    );
+  } catch {
+    return failedAgentReconciliation("unsafe-config", rollbackSnapshot);
   }
-  const final = readClaudeRegistration(desired, options);
-  return {
-    status: "failed",
-    reason: final.entry ? "verification-mismatch" : "registration-absent",
-  };
 }
 
 function verifyCodexRegistrationRedacted(desired, options) {
@@ -14573,35 +14843,73 @@ function reconcileCodexRegistration(desired, options) {
     return { status: "failed", reason: "name-collision" };
   }
 
-  runAgentCli(options.runCommand, options.environment, "codex", codexAddArgs(desired));
-  const localAfter = readCodexRegistration(desired, options);
-  if (!mcpRegistrationIsExact(localAfter.entry, desired)) {
-    return { status: "failed", reason: "verification-mismatch" };
+  const rollbackSnapshot = safeLocatorMigrationSnapshot(
+    before,
+    desired,
+    options,
+    "codex-toml",
+  );
+
+  try {
+    runAgentCli(options.runCommand, options.environment, "codex", codexAddArgs(desired));
+    const localAfter = readCodexRegistration(desired, options);
+    if (!mcpRegistrationIsExact(localAfter.entry, desired)) {
+      return failedAgentReconciliation("verification-mismatch", rollbackSnapshot);
+    }
+    // The human readback redacts env values. Exact values come from a second
+    // strict read of Codex's source-of-truth config, so no legacy key can enter a
+    // child stdout pipe and no name-only output can make this pass.
+    const visible = verifyCodexRegistrationRedacted(desired, options);
+    const after = readCodexRegistration(desired, options);
+    if (visible && mcpRegistrationIsExact(after.entry, desired)) {
+      return { status: before.entry ? "updated" : "added" };
+    }
+    return failedAgentReconciliation("verification-mismatch", rollbackSnapshot);
+  } catch {
+    return failedAgentReconciliation("unsafe-config", rollbackSnapshot);
   }
-  // The human readback redacts env values. Exact values come from a second
-  // strict read of Codex's source-of-truth config, so no legacy key can enter a
-  // child stdout pipe and no name-only output can make this pass.
-  const visible = verifyCodexRegistrationRedacted(desired, options);
-  const after = readCodexRegistration(desired, options);
-  if (visible && mcpRegistrationIsExact(after.entry, desired)) {
-    return { status: before.entry ? "updated" : "added" };
+}
+
+/** A key rotation only needs to replace historical literal-key registrations. */
+function registrationNeedsCredentialMigration(entry, name) {
+  const actual = normalizedRegistration(entry, name);
+  return Boolean(actual) &&
+    actual.enabled !== false &&
+    CLAUDE_LEGACY_KEY_NAMES.some((key) => Object.hasOwn(actual.env, key));
+}
+
+/** Keep the registration's current authority while removing its retired key. */
+function rotationDescriptorForRegistration(desired, entry) {
+  const actual = normalizedRegistration(entry, desired.name);
+  const env = { ...desired.env };
+  if (Object.hasOwn(actual?.env || {}, "BRAIN_AGENT_PROFILE")) {
+    env.BRAIN_AGENT_PROFILE = actual.env.BRAIN_AGENT_PROFILE;
+  } else {
+    delete env.BRAIN_AGENT_PROFILE;
   }
-  return { status: "failed", reason: "verification-mismatch" };
+  return Object.freeze({
+    ...desired,
+    env: Object.freeze(env),
+  });
 }
 
 /**
  * Register or reconcile the brain with installed CLI agents.
  *
- * Every success is an exact readback of command, args, and the three nonsecret
+ * Every success is an exact readback of command, args, and the four nonsecret
  * environment values. No name-only or add-exit-code shortcut is accepted.
  */
 export async function wireAgents(m, manifestPath, options = {}) {
   const environment = options.environment ?? process.env;
   const runner = options.runCommand ?? run;
   const existingOnly = options.existingOnly === true;
+  const rotationOnly = existingOnly && options.rotationOnly === true;
+  const ownerAssistantMigrationOnly = existingOnly &&
+    options.ownerAssistantMigrationOnly === true;
   const failures = [];
   const wired = [];
   const skipped = [];
+  const preserved = [];
   const name = m?.client?.slug || "brain";
   const claudeInstalled = runAgentCli(runner, environment, "claude", ["--version"]).ok;
   const codexPresent = codexClientIsPresent(environment, options);
@@ -14618,22 +14926,39 @@ export async function wireAgents(m, manifestPath, options = {}) {
     info("Codex is not installed, skipping");
     skipped.push("Codex");
   }
-  if (!claudeInstalled && !codexInstalled) return { wired, failures, skipped };
+  if (!claudeInstalled && !codexInstalled) return { wired, failures, skipped, preserved };
 
   // A standalone rotation must not need another network lookup when the owner
   // has not chosen either registration. Inspect only local state first, and
   // resolve the URL/key only when there is an existing target to reconcile.
+  let claudeExisting = null;
+  let codexExisting = null;
+  let reconcileClaude = claudeInstalled;
+  let reconcileCodex = codexInstalled;
   if (existingOnly) {
-    let anyExisting = false;
+    let anyTarget = false;
     if (claudeInstalled) {
       try {
         const current = readClaudeRegistration({ name }, {
           environment,
           claudeConfigPath: options.claudeConfigPath,
         });
-        anyExisting ||= Boolean(current.entry);
-        if (!current.entry) skipped.push("Claude Code");
+        claudeExisting = current.entry;
+        const actual = normalizedRegistration(current.entry, name);
+        const preserveForOwnerMigration = ownerAssistantMigrationOnly && Boolean(actual) && (
+          actual.enabled === false ||
+          (Object.hasOwn(actual.env, "BRAIN_AGENT_PROFILE") &&
+            actual.env.BRAIN_AGENT_PROFILE !== LOCAL_OWNER_AGENT_PROFILE)
+        );
+        reconcileClaude = Boolean(current.entry) && !preserveForOwnerMigration &&
+          (!rotationOnly || registrationNeedsCredentialMigration(current.entry, name));
+        anyTarget ||= reconcileClaude;
+        if (!reconcileClaude) {
+          skipped.push("Claude Code");
+          if (preserveForOwnerMigration) preserved.push("Claude Code");
+        }
       } catch {
+        reconcileClaude = false;
         failures.push("Claude Code");
       }
     }
@@ -14643,13 +14968,26 @@ export async function wireAgents(m, manifestPath, options = {}) {
           environment,
           codexConfigPath: options.codexConfigPath,
         });
-        anyExisting ||= Boolean(current.entry);
-        if (!current.entry) skipped.push("Codex");
+        codexExisting = current.entry;
+        const actual = normalizedRegistration(current.entry, name);
+        const preserveForOwnerMigration = ownerAssistantMigrationOnly && Boolean(actual) && (
+          actual.enabled === false ||
+          (Object.hasOwn(actual.env, "BRAIN_AGENT_PROFILE") &&
+            actual.env.BRAIN_AGENT_PROFILE !== LOCAL_OWNER_AGENT_PROFILE)
+        );
+        reconcileCodex = Boolean(current.entry) && !preserveForOwnerMigration &&
+          (!rotationOnly || registrationNeedsCredentialMigration(current.entry, name));
+        anyTarget ||= reconcileCodex;
+        if (!reconcileCodex) {
+          skipped.push("Codex");
+          if (preserveForOwnerMigration) preserved.push("Codex");
+        }
       } catch {
+        reconcileCodex = false;
         failures.push("Codex");
       }
     }
-    if (failures.length || !anyExisting) return { wired, failures, skipped };
+    if (failures.length || !anyTarget) return { wired, failures, skipped, preserved };
   }
 
   let base = options.baseUrl || null;
@@ -14659,7 +14997,7 @@ export async function wireAgents(m, manifestPath, options = {}) {
   }
   if (!base) {
     warn("could not determine the brain URL, so AI tool registrations were not changed");
-    return { wired, failures: ["url"], skipped: [] };
+    return { wired, failures: ["url"], skipped: [], preserved };
   }
 
   try {
@@ -14675,7 +15013,7 @@ export async function wireAgents(m, manifestPath, options = {}) {
     if (!readDurable(plan, persistenceOptions)) throw new Error("missing durable key");
   } catch {
     warn("the durable admin key could not be verified, so AI tool registrations were not changed");
-    return { wired, failures: ["durable-key"], skipped: [] };
+    return { wired, failures: ["durable-key"], skipped: [], preserved };
   }
 
   const desired = mcpRegistrationDescriptor(m, manifestPath, {
@@ -14683,29 +15021,51 @@ export async function wireAgents(m, manifestPath, options = {}) {
     serverPath: options.serverPath,
     nodePath: options.nodePath,
   });
+  const claudeDesired = rotationOnly
+    ? rotationDescriptorForRegistration(desired, claudeExisting)
+    : desired;
+  const codexDesired = rotationOnly
+    ? rotationDescriptorForRegistration(desired, codexExisting)
+    : desired;
   const verifyRuntime = options.verifyMcpRuntime ?? verifyMcpRuntime;
-  if (!verifyRuntime(desired, { environment, ...(options.runtimeOptions || {}) })) {
-    warn(
-      "the MCP server did not complete its local initialize handshake, so no AI tool registration was changed"
-    );
-    return { wired, failures: ["MCP runtime"], skipped };
+  const runtimeDescriptors = [
+    ...(reconcileClaude ? [claudeDesired] : []),
+    ...(reconcileCodex ? [codexDesired] : []),
+  ];
+  const verifiedRuntimeShapes = new Set();
+  for (const runtimeDescriptor of runtimeDescriptors) {
+    const runtimeShape = JSON.stringify(runtimeDescriptor.env);
+    if (verifiedRuntimeShapes.has(runtimeShape)) continue;
+    verifiedRuntimeShapes.add(runtimeShape);
+    if (!verifyRuntime(runtimeDescriptor, { environment, ...(options.runtimeOptions || {}) })) {
+      warn(
+        "the MCP server did not complete its local initialize handshake, so no AI tool registration was changed"
+      );
+      return { wired, failures: ["MCP runtime"], skipped, preserved };
+    }
   }
   const reconcileOptions = {
     environment,
     existingOnly,
+    rotationOnly,
+    ownerAssistantMigrationOnly,
     runCommand: runner,
     claudeConfigPath: options.claudeConfigPath,
     codexConfigPath: options.codexConfigPath,
   };
-  if (claudeInstalled) {
+  if (reconcileClaude) {
     let result;
     try {
-      result = reconcileClaudeRegistration(desired, reconcileOptions);
+      result = reconcileClaudeRegistration(claudeDesired, reconcileOptions);
     } catch {
       result = { status: "failed", reason: "unsafe-config" };
     }
     if (["verified", "updated", "added"].includes(result.status)) {
-      ok(`Claude Code: "${desired.name}" registered with a durable credential locator`);
+      ok(rotationOnly
+        ? `Claude Code: "${desired.name}" registration updated without changing its access profile`
+        : ownerAssistantMigrationOnly
+          ? `Claude Code: existing "${desired.name}" registration upgraded and verified with Owner assistant access`
+          : `Claude Code: "${desired.name}" registered with Owner assistant access`);
       wired.push("Claude Code");
     } else if (result.status === "skipped") {
       skipped.push("Claude Code");
@@ -14718,10 +15078,14 @@ export async function wireAgents(m, manifestPath, options = {}) {
     }
   }
 
-  if (codexInstalled) {
-    const result = reconcileCodexRegistration(desired, reconcileOptions);
+  if (reconcileCodex) {
+    const result = reconcileCodexRegistration(codexDesired, reconcileOptions);
     if (["verified", "updated", "added"].includes(result.status)) {
-      ok(`Codex: "${desired.name}" registered with a durable credential locator`);
+      ok(rotationOnly
+        ? `Codex: "${desired.name}" registration updated without changing its access profile`
+        : ownerAssistantMigrationOnly
+          ? `Codex: existing "${desired.name}" registration upgraded and verified with Owner assistant access`
+          : `Codex: "${desired.name}" registered with Owner assistant access`);
       wired.push("Codex");
     } else if (result.status === "skipped") {
       skipped.push("Codex");
@@ -14734,7 +15098,7 @@ export async function wireAgents(m, manifestPath, options = {}) {
     }
   }
 
-  return { wired, failures, skipped };
+  return { wired, failures, skipped, preserved };
 }
 
 
@@ -17815,6 +18179,131 @@ const UPDATE_SKILL_REFRESH_WARNING =
   "Keep using https://financialbrain.ai/update/agent.md in this session. " +
   "Do not rerun brain update for this local guide warning.";
 
+const UPDATE_AGENT_REFRESH_WARNING =
+  "The Brain software update is verified, but an existing local AI connection could not be upgraded and verified safely. " +
+  "It was not reported as ready. Run `brain mcp-config <manifest> --apply` to repair that connection. " +
+  "The update did not add a missing connection or change a disabled or custom access profile.";
+
+function safelyReportUpdateResult(reporter, message) {
+  try {
+    reporter(message);
+  } catch {
+    // A terminal reporter cannot change the truth of the completed update.
+    try { warn(message); } catch { /* best-effort terminal reporting */ }
+  }
+}
+
+/**
+ * Upgrade only local registrations this installer can prove it already owns.
+ * Missing registrations are not added, and explicit authority choices are
+ * preserved. wireAgents performs the runtime handshake and exact readback.
+ */
+export async function refreshOwnerAssistantConnectionsAfterUpdate(
+  manifest,
+  manifestPath,
+  options = {},
+) {
+  const reconcile = options.reconcileExistingOwnerAgents ?? wireAgents;
+  const reportOk = options.reportOk ?? ok;
+  const reportInfo = options.reportInfo ?? info;
+  const reportWarning = options.reportWarning ?? warn;
+  let result;
+  try {
+    result = await reconcile(manifest, manifestPath, {
+      ...(options.agentOptions || {}),
+      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      existingOnly: true,
+      rotationOnly: false,
+      ownerAssistantMigrationOnly: true,
+    });
+  } catch {
+    result = { wired: [], skipped: [], preserved: [], failures: ["agent-reconciliation"] };
+  }
+
+  const wired = Array.isArray(result) ? result : (result?.wired || []);
+  const skipped = Array.isArray(result) ? [] : (result?.skipped || []);
+  const preserved = Array.isArray(result) ? [] : (result?.preserved || []);
+  const failures = Array.isArray(result) ? [] : (result?.failures || []);
+
+  if (wired.length) {
+    safelyReportUpdateResult(
+      reportOk,
+      `${wired.join(" and ")} can now use Owner assistant access for this Brain, and the connection was verified`,
+    );
+    safelyReportUpdateResult(
+      reportInfo,
+      "Owner assistant can read, add or correct information, and check the connection. " +
+        "Keep normal per-call approvals enabled in Claude Code or Codex before each durable write. " +
+        "It cannot delete records or change access. The owner remains the administrator.",
+    );
+  }
+  if (preserved.length) {
+    const preservedSubject = preserved.join(" and ");
+    safelyReportUpdateResult(
+      reportInfo,
+      `${preservedSubject} ${preserved.length === 1 ? "has" : "have"} a disabled connection or an explicit custom access profile, so update left ${preserved.length === 1 ? "it" : "them"} exactly as chosen.`,
+    );
+  }
+  if (!wired.length && !failures.length) {
+    safelyReportUpdateResult(
+      reportInfo,
+      "No existing installer-managed Claude Code or Codex connection needed an Owner assistant upgrade. " +
+        "Update did not add a missing connection.",
+    );
+  } else if (skipped.length > preserved.length) {
+    safelyReportUpdateResult(
+      reportInfo,
+      "Update did not add any missing Claude Code or Codex connection. It only changes a connection the installer already owns.",
+    );
+  }
+  if (failures.length) safelyReportUpdateResult(reportWarning, UPDATE_AGENT_REFRESH_WARNING);
+
+  return {
+    status: failures.length ? (wired.length ? "partial" : "warning") : "ready",
+    wired,
+    skipped,
+    preserved,
+    failures,
+  };
+}
+
+/** Refresh a marker-owned CLAUDE.md, but never create or claim one on update. */
+export function refreshClaudeWorkspaceGuideAfterUpdate(manifestPath, options = {}) {
+  const writeGuide = options.writeClaudeWorkspaceGuide ?? writeClaudeWorkspaceGuide;
+  const reportOk = options.reportOk ?? ok;
+  const reportInfo = options.reportInfo ?? info;
+  const reportWarning = options.reportWarning ?? warn;
+  let result;
+  try {
+    result = writeGuide(manifestPath, {
+      brainCliPath: options.brainCliPath || fileURLToPath(import.meta.url),
+      nodePath: options.nodePath || process.execPath,
+      existingOnly: true,
+    });
+  } catch {
+    safelyReportUpdateResult(
+      reportWarning,
+      "The Brain software update is verified, but its existing managed CLAUDE.md could not be refreshed safely. " +
+        "No unrelated CLAUDE.md was replaced. The Brain and AI connection do not need to be updated again.",
+    );
+    return { status: "warning" };
+  }
+
+  if (result?.status === "written") {
+    safelyReportUpdateResult(
+      reportOk,
+      "existing Financial Brain CLAUDE.md refreshed with the Owner assistant write and approval guidance",
+    );
+  } else if (result?.status === "preserved_unrelated_existing_file" ||
+      result?.status === "preserved_unsafe_existing_file") {
+    safelyReportUpdateResult(
+      reportInfo,
+      "The existing CLAUDE.md is not a safely managed Financial Brain guide, so update left it unchanged.",
+    );
+  }
+  return result;
+}
+
 function updateSkillAgentLabel(root) {
   if (root === ".claude") return "Claude Code";
   if (root === ".codex") return "Codex";
@@ -17913,6 +18402,17 @@ export async function cmdUpdate(manifestPath, options = {}) {
   const pin = pinUpdateManifest(installed.path);
   const binding = manifestCloudflareControlBinding(pin.target);
   const runControl = options.withCloudflareControl ?? withCloudflareControlCredential;
+  const reconcileOwnerAgents = Object.hasOwn(options, "reconcileExistingOwnerAgents")
+    ? options.reconcileExistingOwnerAgents
+    : (IS_MAIN ? wireAgents : null);
+  const updateWorkspaceGuide = Object.hasOwn(options, "writeClaudeWorkspaceGuideAfterUpdate")
+    ? options.writeClaudeWorkspaceGuideAfterUpdate
+    : (IS_MAIN ? writeClaudeWorkspaceGuide : null);
+  const resolveUpdateAgentBaseUrl = options.resolveUpdateAgentBaseUrl ?? resolveBaseUrl;
+  let updatedManifest = null;
+  let updatedBaseUrl = null;
+  let ownerAgentPreparationFailed = false;
+  let ownerAgentRefreshResult = null;
   const upgradeResult = await runControl(async () => {
     revalidateUpdateManifest(pin, "update verification");
     await (options.cmdVerify ?? cmdVerify)(pin.target);
@@ -17935,6 +18435,17 @@ export async function cmdUpdate(manifestPath, options = {}) {
         );
       }
     }
+    if (reconcileOwnerAgents) {
+      try {
+        updatedManifest = loadManifest(pin.target).m;
+        updatedBaseUrl = await resolveUpdateAgentBaseUrl(
+          updatedManifest,
+          binding.accountId ? { id: binding.accountId } : null,
+        );
+      } catch {
+        ownerAgentPreparationFailed = true;
+      }
+    }
     return upgradeResult;
   }, {
     ...options,
@@ -17947,6 +18458,34 @@ export async function cmdUpdate(manifestPath, options = {}) {
     interactive,
     askFn: options.askFn ?? ask,
   });
+
+  if (reconcileOwnerAgents) {
+    if (ownerAgentPreparationFailed || !updatedManifest || !updatedBaseUrl) {
+      safelyReportUpdateResult(options.reportAgentRefreshWarning ?? warn, UPDATE_AGENT_REFRESH_WARNING);
+    } else {
+      ownerAgentRefreshResult = await refreshOwnerAssistantConnectionsAfterUpdate(updatedManifest, pin.target, {
+        reconcileExistingOwnerAgents: reconcileOwnerAgents,
+        agentOptions: options.updateAgentOptions,
+        baseUrl: updatedBaseUrl,
+        reportOk: options.reportAgentRefreshOk,
+        reportInfo: options.reportAgentRefreshInfo,
+        reportWarning: options.reportAgentRefreshWarning,
+      });
+    }
+  }
+
+  // Write-capable guidance is refreshed only after this exact Claude Code
+  // registration has passed runtime, tool-list, and config readback proof.
+  if (updateWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Claude Code")) {
+    refreshClaudeWorkspaceGuideAfterUpdate(pin.target, {
+      writeClaudeWorkspaceGuide: updateWorkspaceGuide,
+      brainCliPath: options.brainCliPath,
+      nodePath: options.nodePath,
+      reportOk: options.reportWorkspaceGuideRefreshOk,
+      reportInfo: options.reportWorkspaceGuideRefreshInfo,
+      reportWarning: options.reportWorkspaceGuideRefreshWarning,
+    });
+  }
 
   try {
     cloudflareTokenSession.run(CLOUDFLARE_CREDENTIAL_SUPPRESSED, () =>

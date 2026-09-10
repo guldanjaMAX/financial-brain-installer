@@ -531,6 +531,7 @@ const expected = [
   "migrations/d1/0034_document_source_inventory.sql",
   "migrations/d1/0035_plaid_sync_custody.sql",
   "migrations/d1/0036_vector_projection_events.sql",
+  "migrations/d1/0037_memory_supersessions.sql",
   "operations/bank-access-wrapping-key.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
@@ -631,7 +632,10 @@ const expected = [
   "worker/src/lib/fin-upload.js",
   "worker/src/lib/grants.js",
   "worker/src/lib/mcp-endpoint.js",
+  "worker/src/lib/memory-supersession.js",
   "worker/src/lib/oauth.js",
+  "worker/src/lib/owner-note-contract.js",
+  "worker/src/lib/owner-notes.js",
   "worker/src/lib/remember-contract.js",
   "worker/src/lib/ocr.js",
   "worker/src/lib/owner-auth.js",
