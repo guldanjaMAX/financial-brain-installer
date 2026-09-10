@@ -58,7 +58,9 @@ import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
 } from "./lib/evidence-authority.js";
-import { taxEvidenceScope, taxQuestionScope } from "./lib/tax-evidence-scope.js";
+import {
+  taxEvidenceScope, taxQuestionScope, taxQuestionScopeAssessment,
+} from "./lib/tax-evidence-scope.js";
 import {
   attachEvidenceLineage, evidenceLineageFor, evidenceLineageRootIds,
   evidenceLineageValidationError,
@@ -626,6 +628,10 @@ const TAX_DOCUMENT_INVENTORY_GAP = Object.freeze({
   type: "tax_document_inventory_unverified",
   detail: "Document-level coverage for the requested tax entity, year, and form could not be verified completely. Do not treat a missing answer as proof that the filing is absent or omits it.",
 });
+const TAX_QUESTION_SCOPE_UNRESOLVED_GAP = Object.freeze({
+  type: "tax_question_scope_unresolved",
+  detail: "This tax question did not resolve to one exact entity, tax year, and form. No nearby filing can be used until that scope is explicit.",
+});
 const TAX_EVIDENCE_UNREADABLE_NOTICE = "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete.";
 const TAX_DOCUMENT_INVENTORY_NOTICE = "The requested tax filing could not be checked against the complete document inventory. This is not proof that the filing is absent or omits the answer. Finish document extraction or use an exact business scope before treating the result as complete.";
 
@@ -674,6 +680,25 @@ async function handleThink(
   const scope = await applyBusinessScope(env, url);
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
+  const taxQuestion = taxQuestionScopeAssessment(q);
+  if (taxQuestion.applicable && !taxQuestion.resolved) {
+    return jsonResponse({
+      mode: "think",
+      entity_scope: entityScope,
+      status: COVERAGE_INCOMPLETE,
+      notice: "Name one exact entity, tax year, and form before using Brain records for this tax question. No nearby filing was treated as an answer.",
+      answer: null,
+      citations: [],
+      results: [],
+      gaps: [TAX_QUESTION_SCOPE_UNRESOLVED_GAP],
+      evidence_gate: {
+        supported: false,
+        complete: false,
+        evidence: [],
+        reason: "tax question scope is unresolved",
+      },
+    });
+  }
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit")) || 8, 1), 20);
 
   const {

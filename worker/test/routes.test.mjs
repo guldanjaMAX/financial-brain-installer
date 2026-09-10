@@ -1026,6 +1026,86 @@ const call = (env, path) => {
     JSON.stringify({ notice: body.notice, gaps: body.gaps }));
 }
 
+/* The owner's ordinary wording used to drop the tax guard entirely because the
+   entity appears before "report on its" rather than immediately before the
+   year. Keep the exact customer phrasing and a zero-chunk expected return so a
+   nearby entity's K-1 can never become the answer. */
+{
+  const brightwoodK1 = {
+    ...ROW,
+    chunk_uid: "drive:brightwood-k1#0",
+    doc_uid: "drive:brightwood-k1",
+    source_id: "brightwood-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Brightwood Holdings 2023 Schedule K-1",
+    client: "Brightwood Holdings",
+    authority_document_head: "Brightwood Holdings. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a positive amount.",
+  };
+  const ocotilloZeroChunk = {
+    doc_uid: "drive:ocotillo-password-protected-1065",
+    source_id: "ocotillo-password-protected-1065",
+    source: "drive",
+    source_kind: "upload",
+    title: "Ocotillo Desert 2023 tax return Form 1065",
+    authority_meta: JSON.stringify({ taxpayer_name: "Ocotillo Desert", tax_year: 2023 }),
+    text_source: "native",
+    text_reliable: true,
+  };
+  const { env } = mkEnv([brightwoodK1], {
+    vectorIds: [brightwoodK1.chunk_uid],
+    unchunkedRows: [ocotilloZeroChunk],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line and year match" }, usage: {} }
+            : { response: "Ocotillo Desert reported a positive ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const ownerQuestion = "What ordinary business income did Ocotillo Desert report on its 2023 Form 1065?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(ownerQuestion)}`)).json();
+  check("the owner's exact tax wording activates the entity-year-form guard",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false,
+    JSON.stringify(body));
+  check("an unreadable Ocotillo 1065 blocks Brightwood's K-1 from answering",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify({ gaps: body.gaps, gate: body.evidence_gate }));
+}
+
+/* A return fact request with year and form but no exact entity is tax intent,
+   not permission to search nearby filings. Refuse before retrieval or either
+   answer model so parser uncertainty cannot become a cross-entity answer. */
+{
+  let aiCalls = 0;
+  const { env } = mkEnv([], {
+    extra: {
+      AI: {
+        run: async () => {
+          aiCalls++;
+          throw new Error("an unresolved tax scope must stop before any model call");
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income was reported on the 2023 Form 1065?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("a partial tax scope refuses before retrieval or answer generation",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.results.length === 0 && aiCalls === 0,
+    JSON.stringify({ body, aiCalls }));
+  check("a partial tax scope explains the exact missing boundary",
+    body.gaps.some((gap) => gap.type === "tax_question_scope_unresolved") &&
+      /exact entity, tax year, and form/i.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
 /* Even correctly scoped OCR is not a trustworthy tax-number source. This
    isolates that branch from the cross-entity guard above, with both model
    passes again made deliberately overconfident. */

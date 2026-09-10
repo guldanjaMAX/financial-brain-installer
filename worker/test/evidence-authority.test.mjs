@@ -23,7 +23,9 @@ import {
 import { hasExplicitCurrentIntent, queryEntityAnchors } from "../src/lib/query-intent.js";
 import { SEARCH_UNAVAILABLE } from "../src/lib/retrieval-status.js";
 import { search, unchunkedTaxDocumentCandidates } from "../src/lib/store-d1.js";
-import { taxQuestionScope } from "../src/lib/tax-evidence-scope.js";
+import {
+  taxQuestionScope, taxQuestionScopeAssessment,
+} from "../src/lib/tax-evidence-scope.js";
 
 const ownerRow = ({
   day = "2026-09-01",
@@ -319,6 +321,11 @@ test("the tax scope parser activates only for one exact named year and form", ()
     taxQuestionScope("What ordinary business income did example orchard llc's 2023 Form 1065 report?"),
     { form: "1065", year: "2023", entity: ["example", "orchard", "llc"] },
   );
+  assert.deepEqual(
+    taxQuestionScope("What ordinary business income did Ocotillo Desert report on its 2023 Form 1065?"),
+    { form: "1065", year: "2023", entity: ["ocotillo", "desert"] },
+    "ordinary subject-verb-preposition wording keeps the exact tax scope",
+  );
   for (const [label, canonical] of [
     ["Form 1040-X", "1040-x"],
     ["Form 1120-S", "1120-s"],
@@ -368,13 +375,34 @@ test("the tax scope parser activates only for one exact named year and form", ()
   );
   for (const question of [
     "What 2023 Form 1065 amount was reported?",
-    "Who 2023 Form 1065?",
-    "Which 2023 Form 1065?",
-    "How 2023 Form 1065?",
     "What did 2023 Form 1065 report for Example Orchard LLC?",
+    "What income was on the 2022 and 2023 Form 1065 returns?",
+    "What income did the 2023 partnership return report?",
+    "What income did the 2023 1065 tax return report?",
   ]) {
     assert.equal(taxQuestionScope(question), null,
       `question words or a postfix entity cannot become the named entity: ${question}`);
+    assert.deepEqual(
+      taxQuestionScopeAssessment(question),
+      { applicable: true, resolved: false, scope: null },
+      `partial tax intent fails closed instead of dropping its guard: ${question}`,
+    );
+  }
+  assert.deepEqual(
+    taxQuestionScopeAssessment("How much did Example Orchard LLC pay in 2023 for Form 1065 preparation?"),
+    { applicable: false, resolved: false, scope: null },
+    "tax preparation fees remain outside return-evidence scope",
+  );
+  for (const question of [
+    "What is Form 1065?",
+    "How do I file Form 1065?",
+    "Who prepared the 2023 Form 1065?",
+  ]) {
+    assert.deepEqual(
+      taxQuestionScopeAssessment(question),
+      { applicable: false, resolved: false, scope: null },
+      `general or service questions stay outside the return-fact guard: ${question}`,
+    );
   }
 });
 

@@ -145,6 +145,18 @@ function queryEntity(question, yearIndex) {
     .trim();
   if (!prefix) return [];
 
+  // Natural owner wording often places the requested field before the entity:
+  // "What ordinary business income did Ocotillo Desert report on its 2023
+  // Form 1065?" Capture only the grammatical subject before a bounded return
+  // verb and the possessive/prepositional bridge into the year.
+  const reportingSubject = /\b(?:did|does)\s+(.{1,120}?)\s+(?:report|show|list|state|record)\b.{0,100}\b(?:on|in)\s+(?:its|the)\s*$/i
+    .exec(prefix)?.[1] || null;
+  if (reportingSubject) return conservativeEntityWords(reportingSubject);
+
+  const prepositionalSubject = /\b(?:for|of|from)\s+(.{1,120}?)(?:,?\s+(?:its|the))\s*$/i
+    .exec(prefix)?.[1] || null;
+  if (prepositionalSubject) return conservativeEntityWords(prepositionalSubject);
+
   // This covers the ordinary owner phrasing: "what ... did Example Entity
   // 2023 Form 1065 report?" It also accepts lower-case names because the
   // grammar, rather than capitalization, identifies the subject slot.
@@ -164,8 +176,7 @@ function queryEntity(question, yearIndex) {
   return properName ? conservativeEntityWords(properName) : [];
 }
 
-/** Parse only an unambiguous named-entity, tax-year, exact-form question. */
-export function taxQuestionScope(question = "") {
+function parseTaxQuestionScope(question = "") {
   const text = String(question || "");
   if (NON_RETURN_CONTEXT.test(text)) return null;
 
@@ -184,6 +195,34 @@ export function taxQuestionScope(question = "") {
   const entity = queryEntity(text, yearMatch.index);
   if (!entity.length) return null;
   return Object.freeze({ form: formMatch.form, year: yearMatch[0], entity });
+}
+
+/** Parse only an unambiguous named-entity, tax-year, exact-form question. */
+export function taxQuestionScope(question = "") {
+  return parseTaxQuestionScope(question);
+}
+
+/**
+ * Keep tax intent separate from exact scope resolution. A partial tax request
+ * must fail closed rather than silently dropping the entity/year/form guard.
+ */
+export function taxQuestionScopeAssessment(question = "") {
+  const text = String(question || "");
+  if (NON_RETURN_CONTEXT.test(text)) {
+    return Object.freeze({ applicable: false, resolved: false, scope: null });
+  }
+  const scope = parseTaxQuestionScope(text);
+  if (scope) return Object.freeze({ applicable: true, resolved: true, scope });
+  const formIntent = QUESTION_FORM_PATTERNS.some(([, pattern]) => pattern.test(text));
+  const bareFormIntent = /\b(?:1040(?:-x)?|1065|1120(?:-s|-h)?|1099-(?:int|nec|misc|div|k|r|b|s)|941|940)\b/i.test(text);
+  const taxContext = /\b(?:tax|return|filing|irs|schedule|form|partnership|corporate)\b/i.test(text);
+  const returnIntent = /\b(?:tax\s+(?:return|filing)|income\s+tax\s+return|partnership\s+return|corporate\s+return)\b/i.test(text);
+  const returnFactIntent = /\b(?:amount|balance|basis|credit|deduction|distribution|expense|income|liabilit(?:y|ies)|line\s+\d+|loss|ordinary\s+business|refund|report(?:ed|s|ing)?|revenue|show(?:ed|n|s|ing)?|state(?:d|s|ing)?|tax(?:es)?\s+(?:due|withheld)|wages?)\b/i.test(text);
+  return Object.freeze({
+    applicable: returnFactIntent && (formIntent || (bareFormIntent && taxContext) || returnIntent),
+    resolved: false,
+    scope: null,
+  });
 }
 
 function projectedDocumentHead(row) {
