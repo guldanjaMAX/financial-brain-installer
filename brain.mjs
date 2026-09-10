@@ -32,7 +32,7 @@
 
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
+import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -5824,6 +5824,42 @@ function localConfigFingerprint(snapshot) {
   return hash.digest("hex");
 }
 
+function sameConfigDirectory(left, right) {
+  return Boolean(left && right) && left.isDirectory() && right.isDirectory() &&
+    !left.isSymbolicLink() && !right.isSymbolicLink() &&
+    left.dev === right.dev && left.ino === right.ino && left.uid === right.uid &&
+    left.gid === right.gid && left.mode === right.mode;
+}
+
+function captureAgentConfigDirectory(path, { allowAbsent = false } = {}) {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink() ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+      throw new Error("unsafe local assistant configuration directory");
+    }
+    return Object.freeze({ path, exists: true, stat, parentPath: null, parentStat: null });
+  } catch (error) {
+    if (!allowAbsent || error?.code !== "ENOENT") throw error;
+    const parentPath = dirname(path);
+    const parentStat = lstatSync(parentPath);
+    if (!parentStat.isDirectory() || parentStat.isSymbolicLink() ||
+        (typeof process.getuid === "function" && parentStat.uid !== process.getuid())) {
+      throw new Error("unsafe parent for local assistant configuration directory");
+    }
+    return Object.freeze({ path, exists: false, stat: null, parentPath, parentStat });
+  }
+}
+
+function localConfigDirectoryFingerprint(snapshot) {
+  const hash = createHash("sha256")
+    .update(snapshot.path)
+    .update(snapshot.exists ? "\0present\0" : "\0absent\0");
+  const stat = snapshot.exists ? snapshot.stat : snapshot.parentStat;
+  hash.update(`${stat.dev}:${stat.ino}:${stat.uid}:${stat.gid}:${stat.mode}`);
+  return hash.digest("hex");
+}
+
 function localSkillRepairItem(observations) {
   const destinations = observations.map((item) => ({
     path: item.path,
@@ -5862,24 +5898,66 @@ function localSkillRepairItem(observations) {
     rollback: "Each changed skill file is read back exactly. If this scope fails, completed writes are restored to their previewed bytes or removed when they were newly created.",
     verification: "Read the complete installed file and require an exact match to this release's reviewed technician skill.",
     state_fingerprint: observations.map((item) =>
-      `${item.root}:${item.path}:${item.status}:${item.state_fingerprint}`).join("\n"),
+      `${item.root}:${item.path}:${item.status}:${item.state_fingerprint}:${item.desired_fingerprint}`).join("\n"),
     observations,
   };
 }
 
+/**
+ * Optimize preview must not execute an assistant merely to discover it. Some
+ * clients write caches and lock files even for `--version`, so presence is
+ * established only from an already configured home or executable metadata.
+ */
+function commandIsPresentOnPath(command, environment = process.env, options = {}) {
+  const platformName = options.platformName ?? process.platform;
+  const pathValue = String(environment?.PATH || environment?.Path || "");
+  const separator = platformName === "win32" ? ";" : delimiter;
+  const extensions = platformName === "win32"
+    ? String(environment?.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+        .split(";").filter(Boolean).map((value) => value.toLowerCase())
+    : [""];
+  for (const rawDirectory of pathValue.split(separator)) {
+    const directory = rawDirectory.trim().replace(/^"|"$/g, "");
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = resolve(directory, platformName === "win32" ? `${command}${extension}` : command);
+      try {
+        const stat = (options.statImpl ?? statSync)(candidate);
+        if (stat.isFile() && (platformName === "win32" || (stat.mode & 0o111) !== 0)) return true;
+      } catch { /* keep looking without opening or executing the client */ }
+    }
+  }
+  return false;
+}
+
+function localAssistantClientIsPresent(scope, environment, options = {}) {
+  const configPath = scope === "codex-mcp"
+    ? codexUserConfigPath(environment, options.codexConfigPath)
+    : claudeUserConfigPath(environment, options.claudeConfigPath);
+  let configured = false;
+  try {
+    const stat = (options.lstatImpl ?? lstatSync)(configPath);
+    configured = stat.isFile() && !stat.isSymbolicLink() &&
+      (typeof process.getuid !== "function" || stat.uid === process.getuid());
+  } catch { /* a missing exact config is not presence */ }
+  return configured || commandIsPresentOnPath(
+    scope === "codex-mcp" ? "codex" : "claude",
+    environment,
+    options,
+  );
+}
+
 function localMcpRepairItem(scope, desired, options = {}) {
   const isClaude = scope === "claude-code-mcp";
-  const command = isClaude ? "claude" : "codex";
   const label = isClaude ? "Claude Code" : "Codex";
   const setting = isClaude ? `mcpServers.${desired.name}` : `mcp_servers.${desired.name}`;
-  const runner = options.runCommand ?? run;
-  const installed = options.installed?.[scope] ??
-    runAgentCli(runner, options.environment ?? process.env, command, ["--version"]).ok;
   const configOptions = {
     environment: options.environment ?? process.env,
     claudeConfigPath: options.claudeConfigPath,
     codexConfigPath: options.codexConfigPath,
   };
+  const installed = options.installed?.[scope] ??
+    localAssistantClientIsPresent(scope, configOptions.environment, options);
   const destination = isClaude
     ? claudeUserConfigPath(configOptions.environment, configOptions.claudeConfigPath)
     : codexUserConfigPath(configOptions.environment, configOptions.codexConfigPath);
@@ -5898,11 +5976,13 @@ function localMcpRepairItem(scope, desired, options = {}) {
 
   let before;
   let snapshot;
+  let directorySnapshot;
   try {
     before = isClaude
       ? readClaudeRegistration(desired, configOptions)
       : readCodexRegistration(desired, configOptions);
     snapshot = captureAgentConfigFile(before.path, { allowAbsent: true });
+    directorySnapshot = captureAgentConfigDirectory(dirname(before.path), { allowAbsent: true });
   } catch {
     return {
       scope,
@@ -5916,7 +5996,7 @@ function localMcpRepairItem(scope, desired, options = {}) {
     };
   }
 
-  const stateFingerprint = localConfigFingerprint(snapshot);
+  const stateFingerprint = `${localConfigFingerprint(snapshot)}:${localConfigDirectoryFingerprint(directorySnapshot)}`;
   const actual = normalizedRegistration(before.entry, desired.name);
   if (actual?.enabled === false) {
     return {
@@ -5975,12 +6055,20 @@ function localMcpRepairItem(scope, desired, options = {}) {
   }
 
   const action = before.entry ? "update installer-owned entry" : "add Owner assistant entry";
+  const directoryChange = directorySnapshot.exists ? [] : [{
+    path: directorySnapshot.path,
+    action: "create private assistant config directory",
+  }];
+  const destinations = [
+    ...directoryChange,
+    { path: before.path, setting, action },
+  ];
   return {
     scope,
     status: "repairable",
     detail: `${label}'s entry is ${before.entry ? "an older installer-owned locator" : "missing"}. Only this named setting would change.`,
-    destinations: [{ path: before.path, setting, action }],
-    write_set: [{ path: before.path, setting, action }],
+    destinations,
+    write_set: destinations,
     rollback: "The reconciler snapshots a safe prior locator or absence, changes only this named entry, and restores it if exact readback fails.",
     verification: "Require the exact locator, owner-assistant profile, protocol initialization, and exactly brain_think, brain_search, brain_remember, and brain_health.",
     state_fingerprint: stateFingerprint,
@@ -6031,36 +6119,140 @@ function captureMcpBundleRollback(scope, desired, options = {}) {
     isClaude ? "claude-json" : "codex-toml",
   );
   if (!snapshot) throw new Error(`${scope} could not be snapshotted safely`);
-  return Object.freeze({ scope, desired, configOptions, snapshot });
+  const directorySnapshot = captureAgentConfigDirectory(dirname(snapshot.path), { allowAbsent: true });
+  return { scope, desired, configOptions, snapshot, directorySnapshot, createdDirectoryStat: null };
 }
 
 function rollbackMcpBundleRepair(prepared) {
   const { scope, desired, configOptions, snapshot } = prepared;
   const isClaude = scope === "claude-code-mcp";
   let current;
+  let configRestored = false;
   try {
     current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
-    if (sameCapturedConfigState(snapshot, current)) return true;
-    const registration = isClaude
-      ? readClaudeRegistration(desired, configOptions)
-      : readCodexRegistration(desired, configOptions);
-    const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
-    if (!sameCapturedConfigState(current, confirmed) ||
-        !mcpRegistrationIsExact(registration.entry, desired)) {
-      return false;
+    if (sameCapturedConfigState(snapshot, current)) {
+      configRestored = true;
+    } else {
+      const registration = isClaude
+        ? readClaudeRegistration(desired, configOptions)
+        : readCodexRegistration(desired, configOptions);
+      const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+      if (!sameCapturedConfigState(current, confirmed) ||
+          !mcpRegistrationIsExact(registration.entry, desired)) {
+        return false;
+      }
+      configRestored = restoreAgentConfigFile(snapshot, confirmed);
     }
-    return restoreAgentConfigFile(snapshot, confirmed);
   } catch {
     return false;
   }
+  return configRestored;
+}
+
+function rollbackMcpBundleRepairDirectory(prepared) {
+  const { directorySnapshot } = prepared;
+  if (directorySnapshot.exists) {
+    try {
+      const currentDirectory = lstatSync(directorySnapshot.path);
+      return sameConfigDirectory(directorySnapshot.stat, currentDirectory);
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const currentDirectory = lstatSync(directorySnapshot.path);
+    if (!prepared.createdDirectoryStat ||
+        !sameConfigDirectory(prepared.createdDirectoryStat, currentDirectory) ||
+        readdirSync(directorySnapshot.path).length !== 0) {
+      return false;
+    }
+    const currentParent = lstatSync(directorySnapshot.parentPath);
+    if (!sameConfigDirectory(directorySnapshot.parentStat, currentParent)) return false;
+    rmdirSync(directorySnapshot.path);
+    return !existsSync(directorySnapshot.path);
+  } catch (error) {
+    return error?.code === "ENOENT";
+  }
+}
+
+function removeEmptyApprovedSkillDirectories(prepared, skillSnapshots) {
+  if (prepared.directorySnapshot.exists || !prepared.createdDirectoryStat) return true;
+  const root = prepared.directorySnapshot.path;
+  try {
+    if (!sameConfigDirectory(prepared.createdDirectoryStat, lstatSync(root))) return false;
+  } catch {
+    return false;
+  }
+  const candidates = new Set();
+  for (const snapshot of skillSnapshots || []) {
+    if (snapshot.exists) continue;
+    let candidate = dirname(snapshot.path);
+    const child = relative(root, candidate);
+    if (!child || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) continue;
+    while (candidate !== root) {
+      candidates.add(candidate);
+      candidate = dirname(candidate);
+    }
+  }
+  const deepestFirst = [...candidates].sort((left, right) => right.length - left.length);
+  for (const path of deepestFirst) {
+    try {
+      const stat = lstatSync(path);
+      if (!stat.isDirectory() || stat.isSymbolicLink() ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+          readdirSync(path).length !== 0) {
+        return false;
+      }
+      rmdirSync(path);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return false;
+    }
+  }
+  return true;
 }
 
 function mcpBundleRollbackIsCurrent(prepared) {
   try {
     const current = captureAgentConfigFile(prepared.snapshot.path, { allowAbsent: true });
-    return sameCapturedConfigState(prepared.snapshot, current);
+    if (!sameCapturedConfigState(prepared.snapshot, current)) return false;
+    if (prepared.directorySnapshot.exists) {
+      return sameConfigDirectory(
+        prepared.directorySnapshot.stat,
+        lstatSync(prepared.directorySnapshot.path),
+      );
+    }
+    if (prepared.createdDirectoryStat) {
+      return sameConfigDirectory(
+        prepared.createdDirectoryStat,
+        lstatSync(prepared.directorySnapshot.path),
+      );
+    }
+    if (existsSync(prepared.directorySnapshot.path)) return false;
+    return sameConfigDirectory(
+      prepared.directorySnapshot.parentStat,
+      lstatSync(prepared.directorySnapshot.parentPath),
+    );
   } catch {
     return false;
+  }
+}
+
+function createPreparedMcpConfigDirectory(prepared) {
+  const { directorySnapshot } = prepared;
+  if (directorySnapshot.exists || prepared.createdDirectoryStat) return;
+  if (existsSync(directorySnapshot.path) || !sameConfigDirectory(
+    directorySnapshot.parentStat,
+    lstatSync(directorySnapshot.parentPath),
+  )) {
+    throw new Error(`${prepared.scope} config directory changed before its approved creation`);
+  }
+  mkdirSync(directorySnapshot.path, { mode: 0o700 });
+  const created = lstatSync(directorySnapshot.path);
+  prepared.createdDirectoryStat = created;
+  if (!created.isDirectory() || created.isSymbolicLink() ||
+      (created.mode & 0o777) !== 0o700 ||
+      (typeof process.getuid === "function" && created.uid !== process.getuid())) {
+    throw new Error(`${prepared.scope} private config directory was not created safely`);
   }
 }
 
@@ -6096,14 +6288,26 @@ function captureLocalAssistantRepairTransaction(context, options = {}) {
 
 /** Roll back every selected destination in reverse order without short-circuiting. */
 function rollbackLocalAssistantRepairTransaction(prepared, options = {}) {
-  const failed = [];
+  const failed = new Set();
   for (const item of [...prepared].reverse()) {
     const restored = item.scope === "technician-skill"
       ? rollbackTechnicianSkillRepairSnapshot(item.snapshots, options.skillOptions || {})
       : rollbackMcpBundleRepair(item);
-    if (!restored) failed.push(item.scope);
+    if (!restored) failed.add(item.scope);
   }
-  return Object.freeze({ restored: failed.length === 0, failed: Object.freeze(failed) });
+  // Config directories are approved writes too, but they may contain a skill
+  // file from an earlier selected scope. Restore every file first, then remove
+  // only an exact, transaction-created directory that is now empty.
+  const skillSnapshots = prepared.find((item) => item.scope === "technician-skill")?.snapshots || [];
+  for (const item of [...prepared].reverse()) {
+    if (item.scope !== "technician-skill" &&
+        (!removeEmptyApprovedSkillDirectories(item, skillSnapshots) ||
+          !rollbackMcpBundleRepairDirectory(item))) {
+      failed.add(item.scope);
+    }
+  }
+  const failedScopes = [...failed];
+  return Object.freeze({ restored: failedScopes.length === 0, failed: Object.freeze(failedScopes) });
 }
 
 async function localAssistantRepairContext(manifestPath, selectedScopes, options = {}) {
@@ -6138,6 +6342,7 @@ async function localAssistantRepairContext(manifestPath, selectedScopes, options
     manifestFingerprint,
     selectedScopes,
     items,
+    desiredDescriptor: selectedScopes.some((scope) => scope.endsWith("-mcp")) ? desired : null,
   });
   return { plan, items, manifest: m, manifestFingerprint, desired, absoluteManifest };
 }
@@ -6192,6 +6397,12 @@ export async function cmdAssistantRepair(manifestPath, options = {}) {
   const preparedByScope = new Map(transaction.map((item) => [item.scope, item]));
   const results = [];
   try {
+    // Create every approved missing config directory only after the complete
+    // write set is snapshotted. This lets a skill and Codex share a fresh
+    // `.codex` root without either scope creating an undeclared path.
+    for (const prepared of transaction) {
+      if (prepared.scope !== "technician-skill") createPreparedMcpConfigDirectory(prepared);
+    }
     for (const item of context.items) {
       if (!item.write_set.length) {
         results.push({ scope: item.scope, status: item.status, changed: false });
@@ -6225,18 +6436,31 @@ export async function cmdAssistantRepair(manifestPath, options = {}) {
         continue;
       }
 
-      const connect = options.wireAgents ?? wireAgents;
-      const result = await connect(context.manifest, context.absoluteManifest, {
-        ...(options.mcpOptions || {}),
-        targets: [item.scope],
-      });
-      if (result.failures?.length || !result.wired?.length) {
-        throw new Error(`${item.scope} did not repair and was not reported ready`);
+      const mcpOptions = options.mcpOptions || {};
+      if (!localAssistantDurableKeyIsReady(
+        context.absoluteManifest,
+        context.manifest,
+        mcpOptions,
+      )) {
+        throw new Error(`${item.scope} could not verify the durable owner key`);
       }
+      // Broad setup deliberately reconciles through each vendor CLI. This
+      // narrow approved transaction does not: current Claude and Codex clients
+      // can create caches and backup files even for version, add, and readback
+      // calls. An atomic edit of the one previewed source-of-truth file keeps
+      // the complete write set knowable before the first write and rollback exact.
+      const writeRegistration = mcpOptions.writeLocalMcpRegistration ??
+        (({ prepared: target, desired }) => writeLocalMcpRegistration(target, desired));
+      await writeRegistration({
+        scope: item.scope,
+        prepared,
+        desired: context.desired,
+        writeDefault: writeLocalMcpRegistration,
+      });
       const after = (options.inspectMcpRepair ?? localMcpRepairItem)(
         item.scope,
         context.desired,
-        options.mcpOptions || {},
+        mcpOptions,
       );
       if (after.status !== "ready") {
         throw new Error(`${item.scope} changed but did not pass exact Owner assistant readback`);
@@ -15147,6 +15371,133 @@ function safeLocatorMigrationSnapshot(before, desired, options, format) {
       ? claudeConfigOutsideTarget(file.bytes, desired.name)
       : codexConfigOutsideTarget(file.bytes, desired.name),
   });
+}
+
+function exactMcpRegistration(desired) {
+  return {
+    type: "stdio",
+    command: desired.command,
+    args: [...desired.args],
+    env: { ...desired.env },
+  };
+}
+
+function claudeConfigWithExactRegistration(snapshot, desired) {
+  const parsed = snapshot.exists ? JSON.parse(snapshot.bytes.toString("utf8")) : {};
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+      (parsed.mcpServers !== undefined &&
+        (!parsed.mcpServers || typeof parsed.mcpServers !== "object" || Array.isArray(parsed.mcpServers)))) {
+    throw new Error("invalid Claude configuration");
+  }
+  return Buffer.from(`${JSON.stringify({
+    ...parsed,
+    mcpServers: {
+      ...(parsed.mcpServers || {}),
+      [desired.name]: exactMcpRegistration(desired),
+    },
+  }, null, 2)}\n`, "utf8");
+}
+
+function codexConfigWithExactRegistration(snapshot, desired) {
+  let source = codexConfigOutsideTarget(snapshot.bytes, desired.name);
+  if (source && !/[\r\n]$/.test(source)) source += "\n";
+  if (source && !/(?:\r?\n){2}$/.test(source)) source += "\n";
+  const env = Object.entries(desired.env)
+    .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`)
+    .join("");
+  return Buffer.from(
+    `${source}[mcp_servers.${desired.name}]\n` +
+      `command = ${JSON.stringify(desired.command)}\n` +
+      `args = ${JSON.stringify(desired.args)}\n\n` +
+      `[mcp_servers.${desired.name}.env]\n${env}`,
+    "utf8",
+  );
+}
+
+/** Replace one already previewed assistant config and no other filesystem path. */
+function atomicReplaceAgentConfig(prepared, bytes) {
+  const { snapshot, directorySnapshot } = prepared || {};
+  if (!snapshot || !directorySnapshot || !Buffer.isBuffer(bytes) || bytes.length > 16 * 1024 * 1024) {
+    throw new Error("invalid local assistant configuration write");
+  }
+  if (configOutsideTarget(snapshot, bytes) !== snapshot.outsideTarget) {
+    throw new Error("candidate local assistant configuration changes an unapproved setting");
+  }
+  const parent = dirname(snapshot.path);
+  if (!directorySnapshot.exists) {
+    if (!prepared.createdDirectoryStat || !sameConfigDirectory(
+      prepared.createdDirectoryStat,
+      lstatSync(parent),
+    )) {
+      throw new Error("local assistant configuration directory changed before its approved creation");
+    }
+  } else {
+    const parentStat = lstatSync(parent);
+    if (!sameConfigDirectory(directorySnapshot.stat, parentStat)) {
+      throw new Error("unsafe local assistant configuration directory");
+    }
+  }
+  const mode = snapshot.exists ? snapshot.stat.mode & 0o7777 : 0o600;
+  const temporary = join(parent, `.${basename(snapshot.path)}.${process.pid}.${randomBytes(12).toString("hex")}.write`);
+  let fd = null;
+  let created = false;
+  try {
+    fd = openSync(
+      temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW || 0),
+      mode,
+    );
+    created = true;
+    if (writeSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) {
+      throw new Error("short local assistant configuration write");
+    }
+    fchmodSync(fd, mode);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+
+    const current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+    if (!sameCapturedConfigState(snapshot, current)) {
+      throw new Error("local assistant configuration changed before its approved write");
+    }
+    renameSync(temporary, snapshot.path);
+    created = false;
+    const after = captureAgentConfigFile(snapshot.path);
+    if (!after.bytes.equals(bytes) || (after.stat.mode & 0o7777) !== mode) {
+      throw new Error("local assistant configuration did not pass exact readback");
+    }
+    return after;
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (created) {
+      try { unlinkSync(temporary); } catch { /* no temporary is intentionally retained */ }
+    }
+  }
+}
+
+function writeLocalMcpRegistration(prepared, desired) {
+  const bytes = prepared.scope === "claude-code-mcp"
+    ? claudeConfigWithExactRegistration(prepared.snapshot, desired)
+    : codexConfigWithExactRegistration(prepared.snapshot, desired);
+  return atomicReplaceAgentConfig(prepared, bytes);
+}
+
+function localAssistantDurableKeyIsReady(manifestPath, manifest, options = {}) {
+  try {
+    const environment = options.environment ?? process.env;
+    const persistenceOptions = {
+      platform: options.platform ?? process.platform,
+      username: options.username ?? environment.USERNAME ?? environment.USER,
+      environment,
+      ...(options.persistenceOptions || {}),
+    };
+    const makePlan = options.adminKeyPersistencePlan ?? adminKeyPersistencePlan;
+    const readDurable = options.readAdminKeyDurably ?? readAdminKeyDurably;
+    return Boolean(readDurable(makePlan(manifestPath, manifest, persistenceOptions), persistenceOptions));
+  } catch {
+    return false;
+  }
 }
 
 function failedAgentReconciliation(reason, snapshot) {

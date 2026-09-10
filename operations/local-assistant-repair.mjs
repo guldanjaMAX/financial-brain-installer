@@ -49,6 +49,7 @@ export function localAssistantRepairPlan({
   manifestFingerprint,
   selectedScopes,
   items,
+  desiredDescriptor = null,
 }) {
   if (!Array.isArray(selectedScopes) || !selectedScopes.length) {
     throw new TypeError("a local repair preview needs at least one selected scope");
@@ -56,15 +57,42 @@ export function localAssistantRepairPlan({
   if (!Array.isArray(items) || items.length !== selectedScopes.length) {
     throw new TypeError("each selected local repair scope needs one inspected item");
   }
+  const selectedMcp = selectedScopes.some((scope) => scope.endsWith("-mcp"));
+  let approvalDescriptor = null;
+  if (selectedMcp && desiredDescriptor) {
+    const allowedEnv = ["BRAIN_AGENT_PROFILE", "BRAIN_MANIFEST", "BRAIN_NAME", "BRAIN_URL"];
+    const env = desiredDescriptor.env;
+    if (desiredDescriptor.type !== "stdio" || typeof desiredDescriptor.name !== "string" ||
+        typeof desiredDescriptor.command !== "string" || !Array.isArray(desiredDescriptor.args) ||
+        !env || typeof env !== "object" || Array.isArray(env) ||
+        Object.keys(env).sort().join("\0") !== [...allowedEnv].sort().join("\0") ||
+        [...desiredDescriptor.args, ...Object.values(env)].some((value) => typeof value !== "string")) {
+      throw new TypeError("the local MCP repair needs one exact secret-free descriptor");
+    }
+    approvalDescriptor = {
+      name: desiredDescriptor.name,
+      type: desiredDescriptor.type,
+      command: desiredDescriptor.command,
+      args: [...desiredDescriptor.args],
+      env: Object.fromEntries(allowedEnv.map((name) => [name, env[name]])),
+    };
+  } else if (selectedMcp) {
+    // A blocked missing-domain preview has no descriptor and cannot be applied.
+    if (items.some((item) => item.scope.endsWith("-mcp") && item.status !== "blocked")) {
+      throw new TypeError("a repairable local MCP plan cannot omit its desired descriptor");
+    }
+  }
   const internal = {
-    schema_version: 1,
+    schema_version: 2,
     product_version: String(productVersion || ""),
     manifest_fingerprint: String(manifestFingerprint || ""),
     selected_scopes: [...selectedScopes],
+    desired_descriptor: approvalDescriptor,
     items: items.map((item) => ({
       scope: item.scope,
       state_fingerprint: item.state_fingerprint,
       status: item.status,
+      destinations: item.destinations,
       write_set: item.write_set,
     })),
   };
@@ -74,7 +102,7 @@ export function localAssistantRepairPlan({
   const blocked = items.filter((item) => item.status === "blocked");
   const writes = items.flatMap((item) => item.write_set || []);
   return Object.freeze({
-    schema_version: 1,
+    schema_version: 2,
     operation: "local-assistant-repair",
     mode: "preview",
     read_only: true,

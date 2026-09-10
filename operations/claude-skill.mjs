@@ -84,6 +84,7 @@ function sameFile(left, right) {
 function inspectedSkill(root, options = {}) {
   const path = technicianSkillPathFor(root, options);
   const desired = reviewedSkillContent(options.sourcePath);
+  const desiredFingerprint = createHash("sha256").update(desired, "utf8").digest("hex");
   let before;
   try {
     before = lstatSync(path);
@@ -95,6 +96,7 @@ function inspectedSkill(root, options = {}) {
         status: "missing",
         will_change: true,
         state_fingerprint: "absent",
+        desired_fingerprint: desiredFingerprint,
       });
     }
     return Object.freeze({
@@ -103,6 +105,7 @@ function inspectedSkill(root, options = {}) {
       status: "unsafe",
       will_change: false,
       state_fingerprint: "unreadable",
+      desired_fingerprint: desiredFingerprint,
     });
   }
 
@@ -115,6 +118,7 @@ function inspectedSkill(root, options = {}) {
       status: "unsafe",
       will_change: false,
       state_fingerprint: `unsafe:${before.dev}:${before.ino}:${before.mode}:${before.size}:${before.nlink}`,
+      desired_fingerprint: desiredFingerprint,
     });
   }
 
@@ -142,6 +146,7 @@ function inspectedSkill(root, options = {}) {
       status,
       will_change: status === "installer_owned_outdated",
       state_fingerprint: stateFingerprint,
+      desired_fingerprint: desiredFingerprint,
     });
   } catch {
     return Object.freeze({
@@ -150,6 +155,7 @@ function inspectedSkill(root, options = {}) {
       status: "unsafe",
       will_change: false,
       state_fingerprint: `unsafe:${before.dev}:${before.ino}:${before.mode}:${before.size}:${before.nlink}`,
+      desired_fingerprint: desiredFingerprint,
     });
   } finally {
     if (fd !== undefined) closeSync(fd);
