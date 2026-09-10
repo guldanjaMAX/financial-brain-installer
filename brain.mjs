@@ -129,7 +129,20 @@ import {
   withSourceIngestLock,
 } from "./operations/source-ingest-lock.mjs";
 import { writeClaudeWorkspaceGuide } from "./operations/claude-workspace.mjs";
-import { installTechnicianSkillEverywhere } from "./operations/claude-skill.mjs";
+import {
+  captureTechnicianSkillRepairSnapshot,
+  inspectTechnicianSkillEverywhere,
+  installTechnicianSkillEverywhere,
+  repairTechnicianSkillEverywhere,
+  rollbackTechnicianSkillRepairSnapshot,
+  technicianSkillRepairSnapshotIsCurrent,
+} from "./operations/claude-skill.mjs";
+import {
+  LOCAL_ASSISTANT_REPAIR_SCOPES,
+  localAssistantRepairPlan,
+  parseLocalAssistantRepairScopes,
+  renderLocalAssistantRepairPlan,
+} from "./operations/local-assistant-repair.mjs";
 import {
   bootstrapManifestObservation,
   bootstrapStatusFilePath,
@@ -5526,6 +5539,472 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
 
 }
 
+/* ------------------------------------------------ assistant-repair */
+
+function localConfigFingerprint(snapshot) {
+  const hash = createHash("sha256")
+    .update(snapshot.path)
+    .update(snapshot.exists ? "\0present\0" : "\0absent\0");
+  if (snapshot.exists) {
+    hash.update(snapshot.bytes);
+    hash.update(`\0${snapshot.stat.dev}:${snapshot.stat.ino}:${snapshot.stat.uid}:${snapshot.stat.gid}:${snapshot.stat.mode}:${snapshot.stat.size}`);
+  }
+  return hash.digest("hex");
+}
+
+function localSkillRepairItem(observations) {
+  const destinations = observations.map((item) => ({
+    path: item.path,
+    action: item.status === "missing"
+      ? "install reviewed skill"
+      : item.status === "installer_owned_outdated"
+        ? "update installer-owned skill"
+        : item.status === "current"
+          ? "already current"
+          : item.status === "custom"
+            ? "preserve customized skill"
+            : "blocked unsafe destination",
+  }));
+  const writeSet = destinations.filter((_, index) => observations[index].will_change);
+  const unsafe = observations.some((item) => item.status === "unsafe");
+  const custom = observations.some((item) => item.status === "custom");
+  const status = unsafe
+    ? "blocked"
+    : writeSet.length
+      ? "repairable"
+      : custom
+        ? "preserved"
+        : "ready";
+  return {
+    scope: "technician-skill",
+    status,
+    detail: unsafe
+      ? "A skill destination is not a safe regular owner file. It will not be changed."
+      : writeSet.length
+        ? `${writeSet.length} missing or installer-owned skill destination(s) would receive this release's reviewed guide.`
+        : custom
+          ? "Customized skill content is intentionally preserved. No skill file would change."
+          : "Both reviewed skill copies already match this release exactly.",
+    destinations,
+    write_set: writeSet,
+    rollback: "Each changed skill file is read back exactly. If this scope fails, completed writes are restored to their previewed bytes or removed when they were newly created.",
+    verification: "Read the complete installed file and require an exact match to this release's reviewed technician skill.",
+    state_fingerprint: observations.map((item) =>
+      `${item.root}:${item.path}:${item.status}:${item.state_fingerprint}`).join("\n"),
+    observations,
+  };
+}
+
+function localMcpRepairItem(scope, desired, options = {}) {
+  const isClaude = scope === "claude-code-mcp";
+  const command = isClaude ? "claude" : "codex";
+  const label = isClaude ? "Claude Code" : "Codex";
+  const setting = isClaude ? `mcpServers.${desired.name}` : `mcp_servers.${desired.name}`;
+  const runner = options.runCommand ?? run;
+  const installed = options.installed?.[scope] ??
+    runAgentCli(runner, options.environment ?? process.env, command, ["--version"]).ok;
+  const configOptions = {
+    environment: options.environment ?? process.env,
+    claudeConfigPath: options.claudeConfigPath,
+    codexConfigPath: options.codexConfigPath,
+  };
+  const destination = isClaude
+    ? claudeUserConfigPath(configOptions.environment, configOptions.claudeConfigPath)
+    : codexUserConfigPath(configOptions.environment, configOptions.codexConfigPath);
+  if (!installed) {
+    return {
+      scope,
+      status: "not_installed",
+      detail: `${label} is not installed on this computer, so its connection stays outside the write set.`,
+      destinations: [{ path: destination, setting, action: "not applicable" }],
+      write_set: [],
+      rollback: "No configuration is opened or changed when this assistant is not installed.",
+      verification: `Install ${label} first, then run a new read-only preview if the owner wants this connection.`,
+      state_fingerprint: "assistant-not-installed",
+    };
+  }
+
+  let before;
+  let snapshot;
+  try {
+    before = isClaude
+      ? readClaudeRegistration(desired, configOptions)
+      : readCodexRegistration(desired, configOptions);
+    snapshot = captureAgentConfigFile(before.path, { allowAbsent: true });
+  } catch {
+    return {
+      scope,
+      status: "blocked",
+      detail: `${label}'s local configuration could not be inspected safely. It will not be changed.`,
+      destinations: [{ path: destination, setting, action: "blocked unsafe configuration" }],
+      write_set: [],
+      rollback: "No write is attempted when the existing configuration cannot be read safely.",
+      verification: "Resolve the local configuration safety issue, then generate a new preview.",
+      state_fingerprint: "unsafe-configuration",
+    };
+  }
+
+  const stateFingerprint = localConfigFingerprint(snapshot);
+  const actual = normalizedRegistration(before.entry, desired.name);
+  if (actual?.enabled === false) {
+    return {
+      scope,
+      status: "preserved",
+      detail: `${label}'s connection is disabled. This narrow repair preserves that choice.`,
+      destinations: [{ path: before.path, setting, action: "preserve disabled entry" }],
+      write_set: [],
+      rollback: "No write is made to a disabled entry.",
+      verification: "The disabled entry remains byte-for-byte outside this repair's write set.",
+      state_fingerprint: stateFingerprint,
+    };
+  }
+  if (before.entry && !mcpRegistrationIsExact(before.entry, desired) &&
+      !mcpRegistrationIsInstallerOwned(before.entry, desired)) {
+    return {
+      scope,
+      status: "preserved",
+      detail: `${label}'s connection is customized or belongs to something else. It will not be replaced.`,
+      destinations: [{ path: before.path, setting, action: "preserve customized entry" }],
+      write_set: [],
+      rollback: "No write is made to a customized or unrelated entry.",
+      verification: "The customized entry remains byte-for-byte outside this repair's write set.",
+      state_fingerprint: stateFingerprint,
+    };
+  }
+
+  const runtimeReady = (options.verifyRuntime ?? options.verifyMcpRuntime ?? verifyMcpRuntime)(desired, {
+    environment: configOptions.environment,
+    ...(options.runtimeOptions || {}),
+  });
+  if (!runtimeReady) {
+    return {
+      scope,
+      status: "blocked",
+      detail: `The packaged Owner assistant runtime did not initialize with exactly brain_think, brain_search, brain_remember, and brain_health. No ${label} setting will change.`,
+      destinations: [{ path: before.path, setting, action: "blocked runtime mismatch" }],
+      write_set: [],
+      rollback: "No write is attempted unless the packaged runtime passes first.",
+      verification: "Require protocol initialization and the exact four-tool Owner assistant list before a new preview can be approved.",
+      state_fingerprint: stateFingerprint,
+    };
+  }
+
+  if (before.entry && mcpRegistrationIsExact(before.entry, desired)) {
+    return {
+      scope,
+      status: "ready",
+      detail: `${label}'s Owner assistant entry and packaged four-tool runtime are already exact.`,
+      destinations: [{ path: before.path, setting, action: "already current" }],
+      write_set: [],
+      rollback: "No write is needed.",
+      verification: "The exact locator, owner-assistant profile, protocol initialization, and four-tool list passed.",
+      state_fingerprint: stateFingerprint,
+    };
+  }
+
+  const action = before.entry ? "update installer-owned entry" : "add Owner assistant entry";
+  return {
+    scope,
+    status: "repairable",
+    detail: `${label}'s entry is ${before.entry ? "an older installer-owned locator" : "missing"}. Only this named setting would change.`,
+    destinations: [{ path: before.path, setting, action }],
+    write_set: [{ path: before.path, setting, action }],
+    rollback: "The reconciler snapshots a safe prior locator or absence, changes only this named entry, and restores it if exact readback fails.",
+    verification: "Require the exact locator, owner-assistant profile, protocol initialization, and exactly brain_think, brain_search, brain_remember, and brain_health.",
+    state_fingerprint: stateFingerprint,
+  };
+}
+
+function blockedMcpRepairItem(scope, manifest, options = {}) {
+  const isClaude = scope === "claude-code-mcp";
+  const environment = options.environment ?? process.env;
+  const path = isClaude
+    ? claudeUserConfigPath(environment, options.claudeConfigPath)
+    : codexUserConfigPath(environment, options.codexConfigPath);
+  const name = manifest?.client?.slug || "brain";
+  return {
+    scope,
+    status: "blocked",
+    detail: "The manifest has no permanent brain.domain, so a secret-free exact connection cannot be previewed. No setting will change.",
+    destinations: [{
+      path,
+      setting: isClaude ? `mcpServers.${name}` : `mcp_servers.${name}`,
+      action: "blocked missing permanent Brain URL",
+    }],
+    write_set: [],
+    rollback: "No write is attempted without an exact preview.",
+    verification: "Add or recover the permanent Brain hostname through its separately reviewed path, then create a new preview.",
+    state_fingerprint: "missing-permanent-brain-url",
+  };
+}
+
+function captureMcpBundleRollback(scope, desired, options = {}) {
+  const isClaude = scope === "claude-code-mcp";
+  const configOptions = {
+    environment: options.environment ?? process.env,
+    claudeConfigPath: options.claudeConfigPath,
+    codexConfigPath: options.codexConfigPath,
+  };
+  const before = isClaude
+    ? readClaudeRegistration(desired, configOptions)
+    : readCodexRegistration(desired, configOptions);
+  if (before.entry && (!mcpRegistrationIsInstallerOwned(before.entry, desired) ||
+      mcpRegistrationIsExact(before.entry, desired))) {
+    throw new Error(`${scope} no longer matches its previewed repairable state`);
+  }
+  const snapshot = safeLocatorMigrationSnapshot(
+    before,
+    desired,
+    { ...configOptions, rotationOnly: false },
+    isClaude ? "claude-json" : "codex-toml",
+  );
+  if (!snapshot) throw new Error(`${scope} could not be snapshotted safely`);
+  return Object.freeze({ scope, desired, configOptions, snapshot });
+}
+
+function rollbackMcpBundleRepair(prepared) {
+  const { scope, desired, configOptions, snapshot } = prepared;
+  const isClaude = scope === "claude-code-mcp";
+  let current;
+  try {
+    current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+    if (sameCapturedConfigState(snapshot, current)) return true;
+    const registration = isClaude
+      ? readClaudeRegistration(desired, configOptions)
+      : readCodexRegistration(desired, configOptions);
+    const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+    if (!sameCapturedConfigState(current, confirmed) ||
+        !mcpRegistrationIsExact(registration.entry, desired)) {
+      return false;
+    }
+    return restoreAgentConfigFile(snapshot, confirmed);
+  } catch {
+    return false;
+  }
+}
+
+function mcpBundleRollbackIsCurrent(prepared) {
+  try {
+    const current = captureAgentConfigFile(prepared.snapshot.path, { allowAbsent: true });
+    return sameCapturedConfigState(prepared.snapshot, current);
+  } catch {
+    return false;
+  }
+}
+
+function localAssistantRepairTransactionItemIsCurrent(prepared) {
+  return prepared.scope === "technician-skill"
+    ? technicianSkillRepairSnapshotIsCurrent(prepared.snapshots)
+    : mcpBundleRollbackIsCurrent(prepared);
+}
+
+/** Snapshot the entire selected write set before any part of the bundle changes. */
+function captureLocalAssistantRepairTransaction(context, options = {}) {
+  const prepared = [];
+  for (const item of context.items) {
+    if (!item.write_set.length) continue;
+    if (item.scope === "technician-skill") {
+      prepared.push(Object.freeze({
+        scope: item.scope,
+        snapshots: captureTechnicianSkillRepairSnapshot(item.observations),
+      }));
+    } else {
+      prepared.push(captureMcpBundleRollback(
+        item.scope,
+        context.desired,
+        options.mcpOptions || {},
+      ));
+    }
+  }
+  if (prepared.some((item) => !localAssistantRepairTransactionItemIsCurrent(item))) {
+    throw new Error("a selected destination changed while the complete write set was being snapshotted");
+  }
+  return Object.freeze(prepared);
+}
+
+/** Roll back every selected destination in reverse order without short-circuiting. */
+function rollbackLocalAssistantRepairTransaction(prepared, options = {}) {
+  const failed = [];
+  for (const item of [...prepared].reverse()) {
+    const restored = item.scope === "technician-skill"
+      ? rollbackTechnicianSkillRepairSnapshot(item.snapshots, options.skillOptions || {})
+      : rollbackMcpBundleRepair(item);
+    if (!restored) failed.push(item.scope);
+  }
+  return Object.freeze({ restored: failed.length === 0, failed: Object.freeze(failed) });
+}
+
+async function localAssistantRepairContext(manifestPath, selectedScopes, options = {}) {
+  const { m } = loadManifest(manifestPath);
+  const absoluteManifest = resolve(manifestPath);
+  const manifestFingerprint = createHash("sha256")
+    .update(readFileSync(absoluteManifest))
+    .digest("hex");
+  let desired = null;
+  if (m.brain?.domain) {
+    desired = mcpRegistrationDescriptor(m, absoluteManifest, {
+      baseUrl: `https://${m.brain.domain}`,
+      serverPath: options.mcpOptions?.serverPath,
+      nodePath: options.mcpOptions?.nodePath,
+    });
+  }
+  const items = [];
+  for (const scope of selectedScopes) {
+    if (scope === "technician-skill") {
+      const observations = (options.inspectTechnicianSkills ?? inspectTechnicianSkillEverywhere)(
+        options.skillOptions || {},
+      );
+      items.push(localSkillRepairItem(observations));
+    } else if (!desired) {
+      items.push(blockedMcpRepairItem(scope, m, options.mcpOptions));
+    } else {
+      items.push((options.inspectMcpRepair ?? localMcpRepairItem)(scope, desired, options.mcpOptions || {}));
+    }
+  }
+  const plan = localAssistantRepairPlan({
+    productVersion: PRODUCT_VERSION,
+    manifestFingerprint,
+    selectedScopes,
+    items,
+  });
+  return { plan, items, manifest: m, manifestFingerprint, desired, absoluteManifest };
+}
+
+/** Build the same state-bound read-only plan the public command displays. */
+export async function buildLocalAssistantRepairPlan(manifestPath, selectedScopes, options = {}) {
+  return (await localAssistantRepairContext(manifestPath, selectedScopes, options)).plan;
+}
+
+export async function cmdAssistantRepair(manifestPath, options = {}) {
+  const flags = options.flags ?? parseFlags(process.argv.slice(3));
+  assertKnownFlags(flags, ["manifest", "only", "apply", "approve", "json"], "brain assistant-repair");
+  let selectedScopes;
+  try {
+    selectedScopes = parseLocalAssistantRepairScopes(flags.only);
+  } catch (error) {
+    die(String(error?.message || error));
+  }
+  const context = await localAssistantRepairContext(manifestPath, selectedScopes, options);
+  const { plan } = context;
+  if (!flags.apply) {
+    if (flags.approve) die("--approve is used only with --apply after the matching read-only preview");
+    if (flags.json) console.log(JSON.stringify(plan, null, 2));
+    else {
+      const shownManifest = commandPath(displayPath(manifestPath));
+      console.log(renderCliCommands(
+        renderLocalAssistantRepairPlan(plan).replace("<manifest>", shownManifest),
+      ));
+    }
+    return plan;
+  }
+  if (flags.json) die("--json is a read-only preview option and cannot be combined with --apply");
+  if (typeof flags.approve !== "string" || flags.approve !== plan.plan_id) {
+    die(
+      "the local repair plan is missing, stale, or different from the approved preview. Nothing changed.\n" +
+      "      Run the same command without --apply and review its new exact write set.",
+    );
+  }
+  if (!plan.can_apply) {
+    die("the approved local repair contains a blocked destination. Nothing changed.");
+  }
+
+  let transaction;
+  try {
+    transaction = captureLocalAssistantRepairTransaction(context, options);
+  } catch (error) {
+    die(
+      `the approved local repair could not snapshot its complete write set safely: ${String(error?.message || error)}\n` +
+      "      Nothing changed. Create and review a new preview before retrying.",
+    );
+  }
+  const preparedByScope = new Map(transaction.map((item) => [item.scope, item]));
+  const results = [];
+  try {
+    for (const item of context.items) {
+      if (!item.write_set.length) {
+        results.push({ scope: item.scope, status: item.status, changed: false });
+        continue;
+      }
+      const currentManifestFingerprint = createHash("sha256")
+        .update(readFileSync(context.absoluteManifest))
+        .digest("hex");
+      if (currentManifestFingerprint !== context.manifestFingerprint) {
+        throw new Error("the manifest changed after the approved plan was recomputed");
+      }
+      const prepared = preparedByScope.get(item.scope);
+      if (!prepared || !localAssistantRepairTransactionItemIsCurrent(prepared)) {
+        throw new Error(`${item.scope} changed after the bundle snapshot and before its write`);
+      }
+      if (item.scope === "technician-skill") {
+        const repair = options.repairTechnicianSkills ?? repairTechnicianSkillEverywhere;
+        const receipt = repair({
+          ...(options.skillOptions || {}),
+          observations: item.observations,
+          snapshots: prepared.snapshots,
+        });
+        const after = (options.inspectTechnicianSkills ?? inspectTechnicianSkillEverywhere)(
+          options.skillOptions || {},
+        );
+        const expectedPaths = new Set(item.write_set.map((entry) => entry.path));
+        if (after.some((entry) => expectedPaths.has(entry.path) && entry.status !== "current")) {
+          throw new Error("the technician skill repair did not pass exact readback");
+        }
+        results.push({ scope: item.scope, status: "repaired", changed: true, receipt });
+        continue;
+      }
+
+      const connect = options.wireAgents ?? wireAgents;
+      const result = await connect(context.manifest, context.absoluteManifest, {
+        ...(options.mcpOptions || {}),
+        targets: [item.scope],
+      });
+      if (result.failures?.length || !result.wired?.length) {
+        throw new Error(`${item.scope} did not repair and was not reported ready`);
+      }
+      const after = (options.inspectMcpRepair ?? localMcpRepairItem)(
+        item.scope,
+        context.desired,
+        options.mcpOptions || {},
+      );
+      if (after.status !== "ready") {
+        throw new Error(`${item.scope} changed but did not pass exact Owner assistant readback`);
+      }
+      const currentConfig = captureAgentConfigFile(prepared.snapshot.path, { allowAbsent: true });
+      if (!currentConfig.exists ||
+          configOutsideTarget(prepared.snapshot, currentConfig.bytes) !== prepared.snapshot.outsideTarget) {
+        throw new Error(`${item.scope} changed configuration outside its previewed setting`);
+      }
+      results.push({ scope: item.scope, status: "repaired", changed: true });
+    }
+  } catch (error) {
+    const rollback = rollbackLocalAssistantRepairTransaction(transaction, options);
+    if (!rollback.restored) {
+      die(
+        `the approved local repair stopped: ${String(error?.message || error)}.\n` +
+        `      Automatic bundle rollback could not safely restore: ${rollback.failed.join(", ")}.\n` +
+        "      Stop before retrying and inspect the exact previewed destinations. No Brain or cloud state was changed.",
+      );
+    }
+    die(
+      `the approved local repair stopped: ${String(error?.message || error)}.\n` +
+      "      Every write destination in this approved bundle was restored to its previewed bytes or absence. Nothing remains partially applied.",
+    );
+  }
+
+  ok("the approved local assistant repair finished and every changed item passed exact readback");
+  say("      No Brain records, sources, providers, access, zones, passkeys, devices, cloud resources, or CLI executable changed.");
+  return Object.freeze({
+    operation: "local-assistant-repair",
+    plan_id: plan.plan_id,
+    results: Object.freeze(results.map((result) => Object.freeze(result))),
+    boundaries: plan.boundaries,
+  });
+}
+
+async function cmdAssistantRepairInteractive(manifestPath) {
+  return cmdAssistantRepair(manifestPath, { flags: parseFlags(process.argv.slice(3)) });
+}
+
 /* ----------------------------------------------------------- sources */
 
 /**
@@ -5575,6 +6054,7 @@ export const VALUE_FLAGS = new Set([
   "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
   "corpus-contract", "approve-removals", "only", "skip",
+  "approve",
   "can", "zones", "exclude-zones", "until", "as", "subject",
   // brain import bank. `--file` with no value must die saying so rather than
   // being read as a boolean and then reported as "needs --file".
@@ -14211,12 +14691,27 @@ function sameCapturedConfigState(left, right) {
  * config, then renamed atomically after one final current-state check.
  */
 function restoreAgentConfigFile(snapshot, current) {
-  if (!snapshot?.exists || !Buffer.isBuffer(snapshot.bytes) || !current) return false;
+  if (!snapshot || !current) return false;
   try {
     if (configOutsideTarget(snapshot, current.bytes) !== snapshot.outsideTarget) return false;
   } catch {
     return false;
   }
+  if (!snapshot.exists) {
+    if (!current.exists) return true;
+    try {
+      const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+      if (!sameCapturedConfigState(current, confirmed) ||
+          configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
+        return false;
+      }
+      unlinkSync(snapshot.path);
+      return !captureAgentConfigFile(snapshot.path, { allowAbsent: true }).exists;
+    } catch {
+      return false;
+    }
+  }
+  if (!Buffer.isBuffer(snapshot.bytes)) return false;
   if (current.exists && current.bytes.equals(snapshot.bytes) &&
       (current.stat.mode & 0o7777) === (snapshot.stat.mode & 0o7777)) {
     return true;
@@ -14267,12 +14762,23 @@ function restoreAgentConfigFile(snapshot, current) {
 }
 
 /**
- * Only the exact locator-only registration shipped before Owner assistant is
- * eligible for rollback during setup, explicit apply, or automatic update. A
- * historical literal-key registration is never snapshotted or reconstructed.
+ * A missing entry and the exact locator-only registration shipped before Owner
+ * assistant are eligible for rollback. A historical literal-key registration
+ * is never snapshotted or reconstructed.
  */
 function safeLocatorMigrationSnapshot(before, desired, options, format) {
-  if (options.rotationOnly || !before?.entry || !before?.path) return null;
+  if (options.rotationOnly || !before?.path) return null;
+  if (!before.entry) {
+    const file = captureAgentConfigFile(before.path, { allowAbsent: true });
+    return Object.freeze({
+      ...file,
+      format,
+      name: desired.name,
+      outsideTarget: format === "claude-json"
+        ? claudeConfigOutsideTarget(file.bytes, desired.name)
+        : codexConfigOutsideTarget(file.bytes, desired.name),
+    });
+  }
   const actual = normalizedRegistration(before.entry, desired.name);
   const { BRAIN_AGENT_PROFILE: _profile, ...oldLocatorEnv } = desired.env;
   if (!actual || actual.enabled === false ||
@@ -14548,23 +15054,33 @@ export async function wireAgents(m, manifestPath, options = {}) {
   const rotationOnly = existingOnly && options.rotationOnly === true;
   const ownerAssistantMigrationOnly = existingOnly &&
     options.ownerAssistantMigrationOnly === true;
+  const requestedTargets = options.targets ?? ["claude-code-mcp", "codex-mcp"];
+  if (!Array.isArray(requestedTargets) || !requestedTargets.length ||
+      requestedTargets.some((target) => !["claude-code-mcp", "codex-mcp"].includes(target)) ||
+      new Set(requestedTargets).size !== requestedTargets.length) {
+    throw new TypeError("MCP targets must be a unique nonempty selection of claude-code-mcp and codex-mcp");
+  }
+  const claudeSelected = requestedTargets.includes("claude-code-mcp");
+  const codexSelected = requestedTargets.includes("codex-mcp");
   const failures = [];
   const wired = [];
   const skipped = [];
   const preserved = [];
   const name = m?.client?.slug || "brain";
-  const claudeInstalled = runAgentCli(runner, environment, "claude", ["--version"]).ok;
-  const codexInstalled = runAgentCli(runner, environment, "codex", ["--version"]).ok;
+  const claudeInstalled = claudeSelected && runAgentCli(runner, environment, "claude", ["--version"]).ok;
+  const codexInstalled = codexSelected && runAgentCli(runner, environment, "codex", ["--version"]).ok;
 
-  if (!claudeInstalled) {
+  if (claudeSelected && !claudeInstalled) {
     info("Claude Code is not installed, skipping");
     skipped.push("Claude Code");
   }
-  if (!codexInstalled) {
+  if (codexSelected && !codexInstalled) {
     info("Codex is not installed, skipping");
     skipped.push("Codex");
   }
-  if (!claudeInstalled && !codexInstalled) return { wired, failures, skipped, preserved };
+  if ((!claudeSelected || !claudeInstalled) && (!codexSelected || !codexInstalled)) {
+    return { wired, failures, skipped, preserved };
+  }
 
   // A standalone rotation must not need another network lookup when the owner
   // has not chosen either registration. Inspect only local state first, and
@@ -18876,6 +19392,7 @@ const commands = {
   health: cmdHealth,
   test: cmdTest,
   "mcp-config": cmdMcpConfig,
+  "assistant-repair": cmdAssistantRepairInteractive,
   migrate: (path) => withManifestCloudflareControl(path, () => cmdMigrate(path)),
   ingest: cmdIngest,
   import: cmdImport,
@@ -18990,6 +19507,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain mcp-config <manifest>            config to connect the client's AI tools
     brain mcp-config <manifest> --apply    connect them for real: registers the brain with
                                            Claude Code and Codex, whichever are installed
+    brain assistant-repair <manifest> --only <scopes>  read-only exact local skill/MCP repair preview
+    brain assistant-repair <manifest> --only <scopes> --apply --approve <plan-id>
+                                           apply one approved state-bound bundle; scopes are
+                                           technician-skill,claude-code-mcp,codex-mcp
     brain schedule   <manifest> --install  install unattended Drive refresh on macOS
     brain schedule   <manifest> --install --folder  install unattended refresh of the watched
                                            local folder declared in corpora.local_folder (macOS)

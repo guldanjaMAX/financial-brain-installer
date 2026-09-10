@@ -42,6 +42,7 @@ export const SUPPORT_RETENTION_GRACE_MS = 10 * 60 * 1000;
 
 export const SUPPORT_COMMANDS = Object.freeze([
   "ask",
+  "assistant-repair",
   "auth",
   "connect",
   "diagnose",

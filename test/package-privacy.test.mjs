@@ -464,6 +464,7 @@ const expected = [
   "operations/wrangler-oauth.mjs",
   "operations/claude-workspace.mjs",
   "operations/claude-skill.mjs",
+  "operations/local-assistant-repair.mjs",
   "operations/cloudflare-token-store.mjs",
   // Generic brain check modules. Reviewed 2026-09-05: categories and fixtures
   // are synthetic, with no client identity or credential material.
