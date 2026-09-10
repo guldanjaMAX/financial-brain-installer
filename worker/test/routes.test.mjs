@@ -22,6 +22,7 @@ function mkEnv(rows, {
   readinessRow = null,
   sourceRows = [],
   unchunkedRows = [],
+  ownedEntity = null,
   extra = {},
 } = {}) {
   const seen = { sql: [], binds: [], vectorQueries: [] };
@@ -50,6 +51,7 @@ function mkEnv(rows, {
             return { results: rows };
           },
           first: async () => {
+            if (/FROM fin_entities/.test(sql)) return ownedEntity;
             if (/INSERT INTO sources[\s\S]*RETURNING lower\(trim\(kind\)\) AS kind/.test(sql)) {
               const existing = sourceRows.find((row) => row.name === bound[0]);
               const requested = bound[1] || bound[2];
@@ -1081,6 +1083,31 @@ const zeroChunkExpectedReturn = {
       !JSON.stringify(body).includes(zeroChunkExpectedReturn.source_id) &&
       !JSON.stringify(body).includes(zeroChunkExpectedReturn.title),
     JSON.stringify(body));
+}
+
+{
+  const { env, seen } = mkEnv([], {
+    unchunkedRows: [zeroChunkExpectedReturn],
+    ownedEntity: {
+      entity_slug: "example-orchard-llc",
+      legal_name: "Example Orchard LLC",
+      display_label: "Example Orchard LLC",
+      status: "active",
+      relationship: "owned",
+    },
+  });
+  const body = await (await call(
+    env,
+    `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}&entity_slug=example-orchard-llc`,
+  )).json();
+  const inventorySql = seen.sql.find((sql) => /unchunked-tax-document-candidates/.test(sql)) || "";
+  check("an exact business scope still finds a legacy expected return with no entity_slug",
+    body.answer === null && body.citations.length === 0 &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("the zero-chunk recovery probe does not depend on the modern entity projection",
+    inventorySql.length > 0 && !/d\.entity_slug\s*=/.test(inventorySql),
+    inventorySql);
 }
 
 {

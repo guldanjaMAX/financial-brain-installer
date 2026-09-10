@@ -600,15 +600,18 @@ async function taxDocumentCoverageForRead(env, {
   const requested = taxQuestionScope(question);
   if (!requested) return { applicable: false, unreadable: false, complete: true };
 
-  const explicitEntitySlug = filters.entity_slug || access?.entitySlug || null;
+  // Do not narrow this legacy recovery probe by the modern entity_slug column.
+  // Older encrypted rows can predate that projection even when the request has
+  // an exact business scope. The bounded lookup still repeats every source,
+  // date, zone, and exact-grant boundary, and taxEvidenceScope checks the
+  // private title/metadata tuple before it can produce an aggregate gap.
+  const documentFilters = { ...filters };
+  delete documentFilters.entity_slug;
   try {
     const lookup = await storeFor(env).taxDocumentCandidates(env, {
-      // Only a validated request/grant scope is an indexed authority. A name
-      // inferred from prose is not silently promoted to entity_slug; the D1
-      // fallback instead checks a bounded page of every zero-chunk row.
-      entitySlug: explicitEntitySlug,
+      entitySlug: null,
       limit: 20,
-      filters,
+      filters: documentFilters,
       access,
       scope,
     });
