@@ -687,7 +687,7 @@ jobs:
           Write-Host "TRAP 5 DETECTED, exit 1 as required"
           exit 0
 
-      - name: "control: an elevated automation host is stopped for exactly that reason"
+      - name: "control: the elevated CI machine is stopped for exactly that reason"
         shell: powershell
         run: |
           $raw = & powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1
