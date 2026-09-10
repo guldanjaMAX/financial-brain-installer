@@ -332,6 +332,49 @@ for (const [label, malformed] of [
       gaps: [],
     },
   ],
+  [
+    "an appended claim after the canonical refusal",
+    {
+      mode: "think",
+      answer: "The documents do not answer the question. The invented total is $9,999.",
+      citations: [],
+      results: [{ title: "candidate" }],
+      gaps: [],
+    },
+  ],
+  [
+    "a placeholder result and citation",
+    {
+      mode: "think",
+      answer: "Invented answer [1]",
+      citations: [{ n: 1 }],
+      results: [null],
+      gaps: [],
+    },
+  ],
+  [
+    "answer text beside a top-level error",
+    {
+      mode: "think",
+      answer: "Invented answer [1]",
+      error: "private-payload-canary",
+      citations: [{ n: 1, title: "Candidate", source: "drive" }],
+      results: [{ title: "Candidate", source: "drive", chunk_uid: "drive:1#0" }],
+      gaps: [],
+      evidence_gate: { supported: true, complete: true },
+    },
+  ],
+  [
+    "an incomplete evidence gate without the partial-answer receipt",
+    {
+      mode: "think",
+      answer: "Invented answer [1]",
+      citations: [{ n: 1, title: "Candidate", source: "drive" }],
+      results: [{ title: "Candidate", source: "drive", chunk_uid: "drive:1#0" }],
+      gaps: [],
+      evidence_gate: { supported: true, complete: false },
+    },
+  ],
 ]) {
   const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
   suite.post = async (path) => path === "/api/rag/unified"
@@ -351,9 +394,10 @@ for (const [label, malformed] of [
   const valid = {
     mode: "think",
     answer: "The agreement ends in June [1].",
-    citations: [{ n: 1, title: "Agreement" }],
-    results: [{ title: "Agreement" }],
+    citations: [{ n: 1, title: "Agreement", source: "drive" }],
+    results: [{ title: "Agreement", source: "drive", chunk_uid: "drive:agreement#0" }],
     gaps: [],
+    evidence_gate: { supported: true, complete: true },
   };
   const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
   suite.post = async (path) => path === "/api/rag/unified"

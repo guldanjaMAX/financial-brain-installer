@@ -50,8 +50,10 @@ const diagnosticText = (value, fallback) => {
   return text ? text.slice(0, 240) : fallback;
 };
 
-const answerIsRefusal = (answer) =>
-  /^the documents do not answer\b/i.test(String(answer || "").trim());
+const CANONICAL_REFUSAL = "The documents do not answer the question.";
+const answerIsRefusal = (answer) => String(answer || "").trim() === CANONICAL_REFUSAL;
+const responseObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const nonemptyResponseText = (value) => typeof value === "string" && value.trim().length > 0;
 
 /**
  * Refuse a 200-shaped answer whose fields contradict each other.
@@ -77,12 +79,9 @@ export function answerResponseContractDiagnostic(payload) {
   const answer = typeof payload.answer === "string" ? payload.answer.trim() : "";
   if (!answer) return null;
 
-  const evidenceGate = payload.evidence_gate && typeof payload.evidence_gate === "object" &&
-    !Array.isArray(payload.evidence_gate)
-    ? payload.evidence_gate
-    : null;
+  const evidenceGate = responseObject(payload.evidence_gate) ? payload.evidence_gate : null;
   if (["search_unavailable", "coverage_incomplete"].includes(payload.status) ||
-      payload.answer_error || evidenceGate?.error) {
+      payload.error || payload.answer_error || evidenceGate?.error) {
     return "the Worker returned answer text alongside an unavailable or error state";
   }
 
@@ -92,13 +91,26 @@ export function answerResponseContractDiagnostic(payload) {
   }
 
   const markers = [...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
-  const citationNumbers = payload.citations.map((citation) => citation?.n);
-  if (!markers.length || !citationNumbers.length ||
-      citationNumbers.some((n) => !Number.isInteger(n) || n < 1 || n > payload.results.length) ||
-      markers.some((n) => !citationNumbers.includes(n))) {
+  const cited = new Map();
+  for (const citation of payload.citations) {
+    if (!responseObject(citation) || !Number.isInteger(citation.n) ||
+        citation.n < 1 || citation.n > payload.results.length ||
+        !nonemptyResponseText(citation.title) || !nonemptyResponseText(citation.source)) {
+      return "the Worker's factual answer and citation evidence did not agree";
+    }
+    const result = payload.results[citation.n - 1];
+    if (!responseObject(result) || !nonemptyResponseText(result.title) ||
+        !nonemptyResponseText(result.source) || !nonemptyResponseText(result.chunk_uid)) {
+      return "the Worker returned a citation without a real candidate result";
+    }
+    cited.set(citation.n, citation);
+  }
+  if (!markers.length || !cited.size || markers.some((n) => !cited.has(n))) {
     return "the Worker's factual answer and citation evidence did not agree";
   }
-  if (evidenceGate && evidenceGate.supported === false) {
+  if (!evidenceGate || evidenceGate.supported !== true ||
+      !(evidenceGate.complete === true ||
+        (evidenceGate.complete === false && evidenceGate.partial === true))) {
     return "the Worker returned a factual answer its evidence gate did not support";
   }
   return null;
