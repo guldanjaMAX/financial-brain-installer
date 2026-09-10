@@ -157,7 +157,12 @@ export function renderSweep(assessed = []) {
             : d.text_reliable === false
               ? "; text may be incomplete"
               : "";
-        out.push(`      - [${t.tier}] ${d.title || d.uri || d.source || "untitled"}${date}${extraction}; source ${provenance}`);
+        const lineage = d.lineage?.derived === true
+          ? "; derived evidence, not independent of its recorded sources"
+          : d.lineage?.status !== "known"
+            ? "; derivation family unknown, no independent-confirmation credit"
+            : "";
+        out.push(`      - [${t.tier}] ${d.title || d.uri || d.source || "untitled"}${date}${extraction}${lineage}; source ${provenance}`);
       }
       if (g.docs.length > 3) out.push(`      - and ${g.docs.length - 3} more`);
     }

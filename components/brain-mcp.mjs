@@ -157,6 +157,9 @@ const OVERGENERALISED =
 const VOLATILE =
   /(\$[\d,]+|\b\d[\d,._]*\s*(%|users?|customers?|clients?|leads?|per month|\/mo|per day|\/day)\b)/i;
 const DATE_ANCHOR = /\bas of\b|\b\d{4}-\d{2}-\d{2}\b/i;
+const MAX_DERIVED_FROM = 16;
+const MAX_DERIVED_FROM_CHARS = 512;
+const DERIVED_FROM_CONTROL = /[\u0000-\u001f\u007f]/;
 
 const slugify = (s) =>
   String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) ||
@@ -183,6 +186,17 @@ function validateLesson(input) {
     errors.push(
       'confidence is "verified" but no verification was given. Say how you know. If you cannot, the honest value is "inferred".'
     );
+
+  const derivedFrom = input?.derived_from === undefined
+    ? []
+    : Array.isArray(input.derived_from)
+      ? [...new Set(input.derived_from.map((value) => typeof value === "string" ? value.trim() : value))]
+      : null;
+  if (!derivedFrom || derivedFrom.length > MAX_DERIVED_FROM || derivedFrom.some((id) =>
+    typeof id !== "string" || !id || id.length > MAX_DERIVED_FROM_CHARS ||
+    DERIVED_FROM_CONTROL.test(id) || !id.includes(":"))) {
+    errors.push(`derived_from must contain at most ${MAX_DERIVED_FROM} document ids exactly as search returned them`);
+  }
 
   if (errors.length) return { ok: false, errors, warnings, value: null };
 
@@ -217,12 +231,22 @@ function validateLesson(input) {
       volatile,
       supersedes: input?.supersedes ? String(input.supersedes).trim() : null,
       tags: Array.isArray(input?.tags) ? input.tags.map(String).filter(Boolean) : [],
+      derived_from: derivedFrom || [],
     },
   };
 }
 
 function renderLesson(v) {
-  const lines = [`# ${v.title}`, "", v.body, "", "---", `Confidence: ${v.confidence}`];
+  const lines = [
+    `# ${v.title}`,
+    "",
+    "Evidence-Lineage: agent-derived",
+    "",
+    v.body,
+    "",
+    "---",
+    `Confidence: ${v.confidence}`,
+  ];
   if (v.claimed_confidence)
     lines.push(`Claimed confidence: ${v.claimed_confidence} (downgraded at write time)`);
   if (v.verification) lines.push(`Verification: ${v.verification}`);
@@ -279,6 +303,10 @@ const ALL_TOOLS = [
         confidence: { type: "string", enum: ["verified", "inferred", "unverified"] },
         verification: { type: "string", description: 'Required when confidence is "verified".' },
         supersedes: { type: "string", description: "source_id of the record this corrects." },
+        derived_from: {
+          type: "array", items: { type: "string" },
+          description: "Document ids returned by brain_search that this lesson derives from. Leave empty when it came only from the owner's new statement.",
+        },
         tags: { type: "array", items: { type: "string" } },
         slug: { type: "string" },
       },
@@ -352,6 +380,7 @@ async function runTool(name, args = {}) {
           date_reliable: r.date_reliable === true,
           text_source: r.text_source || "native",
           text_reliable: r.text_reliable !== false,
+          lineage: r.lineage ?? null,
           snippet: String(r.snippet ?? "").slice(0, 700),
         }));
       }
@@ -413,6 +442,7 @@ async function runTool(name, args = {}) {
             : undefined,
         gaps: d.gaps ?? [],
         results: rows.map((r) => ({
+          id: r.doc_uid ?? `${r.source || "doc"}:${r.source_id ?? r.ref ?? r.ref_key ?? ""}`,
           source: r.source,
           source_kind: r.source_kind ?? null,
           ref: r.ref ?? r.ref_key ?? r.source_id ?? null,
@@ -425,6 +455,7 @@ async function runTool(name, args = {}) {
           date_reliable: r.date_reliable === true,
           text_source: r.text_source || "native",
           text_reliable: r.text_reliable !== false,
+          lineage: r.lineage ?? null,
           snippet: String(r.snippet ?? "").slice(0, 900),
         })),
         ...(unavailable
@@ -465,7 +496,13 @@ case "brain_remember": {
           occurred_at: new Date().toISOString(),
           metadata: {
             category: "lesson",
+            written_by: "connector",
             confidence: L.confidence,
+            evidence_lineage: {
+              version: 1,
+              kind: "agent_derived",
+              root_ids: L.derived_from,
+            },
             ...(L.claimed_confidence ? { claimed_confidence: L.claimed_confidence } : {}),
             ...(L.verification ? { verification: L.verification } : {}),
             ...(L.volatile ? { volatile: true, as_of: today() } : {}),
@@ -507,7 +544,7 @@ Relay the gaps array from brain_think whenever it affects confidence. A cited an
 Anchor consultation to the artifact, not the moment: whatever you write before acting should name what came back, including anything that argues against the approach you are taking.
 
 ${profileHas(PROFILE, "curated:write")
-  ? "Call brain_remember when a session produces a durable lesson. That is how this record improves instead of merely aging."
+  ? "Call brain_remember when a session produces a durable lesson. When the lesson came from Brain documents, pass every supporting brain_search document id in derived_from so the lesson cannot later masquerade as independent confirmation."
   : "This connection is read-only. It cannot add, change, or remove records."}
 
 The active agent profile is ${profileDescription(PROFILE).label}. No local MCP profile can execute a deletion.`;
