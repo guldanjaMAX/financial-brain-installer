@@ -8,10 +8,12 @@
  *   POST /api/rag/think                 cited answer + explicit gaps
  *   POST /api/admin/brain/ingest        write path, credential-gated
  *   POST /api/admin/brain/ocr           one scanned page, read in this account
+ *   POST /api/admin/brain/sources       owner-only read-only source inventory
  *   POST /api/admin/brain/source-families read-only private inventory paging
  *   GET  /api/admin/brain/documents     per-source counts and freshness
  *
- * Everything except /health requires X-Admin-Key.
+ * Everything except /health requires a route-specific credential. The source
+ * inventory accepts either the full admin key or the owner's passkey session.
  *
  * WHAT WAS DELIBERATELY LEFT OUT of v1: the CRM, pipeline, email tracking,
  * meeting filing, GHL sync, Stripe webhooks, OAuth sessions, and the knowledge
@@ -93,6 +95,9 @@ import {
   beginOwnerNoteWrite, completeOwnerNoteWrite, failOwnerNoteWrite, OwnerNoteLifecycleError,
 } from "./lib/owner-notes.js";
 import { OWNER_NOTES_ROUTE, OWNER_NOTES_SOURCE } from "./lib/owner-note-contract.js";
+import {
+  handleSourceInventoryApi, SOURCE_INVENTORY_PATH,
+} from "./lib/source-inventory-api.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -2448,6 +2453,15 @@ export default {
     // operator can see what the client sees without a screen share.
     if (path.startsWith(FIN_PATH_PREFIX)) {
       return handleFinApi(env, request, url, path);
+    }
+
+    // Optimize needs exact source rows but should never need Cloudflare's
+    // account control plane. This narrow handler positively requires the owner
+    // session or full admin key, rejects scoped grants, and performs D1 reads
+    // only. It sits before the general admin gate because owner sessions are a
+    // first-class credential for this one private read.
+    if (path === SOURCE_INVENTORY_PATH) {
+      return handleSourceInventoryApi(env, request);
     }
 
     // Destructive corpus execution is deliberately separate from ordinary

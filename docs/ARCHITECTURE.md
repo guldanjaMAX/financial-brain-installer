@@ -447,6 +447,18 @@ request origin. This is a shared transport invariant because Node preserves
 custom headers across a cross-origin redirect even though it strips the standard
 `Authorization` header.
 
+The owner-only source inventory is a narrow data-plane exception to the general
+admin route gate. `POST /api/admin/brain/sources` accepts the full admin key or
+an unscoped owner passkey session, rejects scoped grants, and reads D1 directly.
+It never asks for Cloudflare account authority. Default mode returns a complete
+or explicitly paged source receipt with masked configuration, physical/logical
+storage, readability, freshness, extraction, and lineage evidence. Recovery
+mode returns bounded opaque record identities and exact provenance/OCR reason
+codes for planning only. Both modes are private, stable-snapshot contracts and
+fail on observed corpus drift. Neither can write, OCR, reingest, infer an entity
+or period, expose a raw locator, or alter the existing MCP tool set. `/zones`
+keeps its existing aggregate semantics and authorization boundary.
+
 Google OAuth uses Keychain by default on macOS and a protected file under
 `~/.brain/` on other supported paths. Scheduler logs and locks also live under
 the private per-user `.brain` directory. These files are runtime evidence, not

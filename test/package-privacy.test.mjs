@@ -581,6 +581,9 @@ const expected = [
   "worker/src/lib/reliability-alerts.js",
   "worker/src/lib/source-receipt.js",
   "worker/src/lib/source-coverage.js",
+  // Owner-only D1 source inventory. Reviewed for raw locator, credential,
+  // entity/year inference, and package identity disclosure before allowlisting.
+  "worker/src/lib/source-inventory-api.js",
   "worker/src/lib/support-access.js",
   "worker/src/lib/tax-qbo-reconciliation.js",
   "worker/src/lib/update-status.js",
