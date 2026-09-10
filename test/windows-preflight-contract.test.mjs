@@ -34,6 +34,8 @@ test("elevated Windows CI proves the production refusal without bypassing it", (
     assert.match(workflow, /STOP\.\*running as Administrator/);
     assert.match(workflow, /expected only the Administrator STOP/);
     assert.match(workflow, /the Administrator STOP must exit 1/);
+    assert.match(workflow, /packaged preflight must refuse the elevated hosted runner/);
+    assert.match(workflow, /the packaged Administrator STOP must exit 1/);
     assert.doesNotMatch(workflow, /SKIP_(?:ADMIN|MACHINE)|ALLOW_(?:ADMIN|ELEVATED)/);
   }
 });

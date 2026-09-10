@@ -97,7 +97,7 @@ assert.match(traps, /needs: package/);
 assert.match(traps, /artifact-ids: \$\{\{ needs.package.outputs.artifact_id \}\}/);
 assert.match(traps, /\.packaged-preflight\\package\\tools\\preflight.ps1/);
 assert.doesNotMatch(traps, /-File \.\\tools\\preflight.ps1/);
-const release = read('.github/workflows/release.yml');
+const release = read('.github/workflows/release.yml').replace(/\r\n/g, '\n');
 const installMatrix = read('.github/workflows/install-matrix.yml').replace(/\r\n/g, '\n');
 assert.ok(release.indexOf('node scripts/audit-updates.mjs --release') < release.indexOf('gh release create'));
 assert.doesNotMatch(release, /continue-on-error: true|if: always\(\)/);

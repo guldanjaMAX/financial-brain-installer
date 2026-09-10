@@ -345,9 +345,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: npm run audit:regressions
 
-      # A runner may legitimately have no Wrangler session or manifest, so the
-      # exit may be diagnostic. Require the packaged script to parse, execute,
-      # and print its identifying header.
+      # GitHub-hosted Windows runners are elevated. Require the packaged
+      # production script to parse, execute, and refuse that unsafe context for
+      # exactly the reason a customer would see. This is not a preflight bypass.
       - name: packaged preflight runs and prints (Windows)
         if: ${{ !cancelled() && steps.verify_package.outcome == 'success' && runner.os == 'Windows' }}
         shell: powershell
@@ -358,10 +358,13 @@ jobs:
           Write-Host $out
           Write-Host "preflight exit: $code"
           if ($out -notmatch 'Financial Brain preflight') { throw 'packaged preflight did not run' }
+          if ($out -notmatch 'STOP.*running as Administrator') { throw 'packaged preflight must refuse the elevated hosted runner' }
+          if ($code -ne 1) { throw "the packaged Administrator STOP must exit 1, got $code" }
           $e=$null; $t=$null
           [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$t, [ref]$e) | Out-Null
           if ($e.Count -gt 0) { $e | ForEach-Object { Write-Host $_ }; exit 1 }
           Write-Host "preflight.ps1 parsed clean"
+          exit 0
 
       - name: packaged preflight runs and prints (macOS and Linux)
         if: ${{ !cancelled() && steps.verify_package.outcome == 'success' && runner.os != 'Windows' }}
