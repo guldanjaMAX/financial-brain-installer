@@ -21,6 +21,7 @@ function mkEnv(rows, {
   outboxRow = null,
   readinessRow = null,
   sourceRows = [],
+  sourceRegistrationEventThrows = false,
   extra = {},
 } = {}) {
   const seen = { sql: [], binds: [], vectorQueries: [] };
@@ -32,7 +33,9 @@ function mkEnv(rows, {
         seen.sql.push(sql);
         let bound = [];
         return {
-          bind(...b) { bound = b; seen.binds.push(b); return this; },
+          _sql: sql,
+          _args: [],
+          bind(...b) { bound = b; this._args = b; seen.binds.push(b); return this; },
           all: async () => {
             if (/SELECT s\.name, s\.kind, s\.zone, s\.status/.test(sql) && /FROM sources s/.test(sql)) {
               return { results: sourceRows };
@@ -46,6 +49,14 @@ function mkEnv(rows, {
             return { results: rows };
           },
           first: async () => {
+            if (/ON CONFLICT\(name\) DO NOTHING[\s\S]*RETURNING name, lower\(trim\(kind\)\) AS kind/.test(sql)) {
+              const existing = sourceRows.find((row) => row.name === bound[0]);
+              return existing ? null : { name: bound[0], kind: bound[1] };
+            }
+            if (/SELECT lower\(trim\(kind\)\) AS kind FROM sources WHERE name=\?1/.test(sql)) {
+              const existing = sourceRows.find((row) => row.name === bound[0]);
+              return existing ? { kind: existing.kind } : null;
+            }
             if (/INSERT INTO sources[\s\S]*RETURNING lower\(trim\(kind\)\) AS kind/.test(sql)) {
               const existing = sourceRows.find((row) => row.name === bound[0]);
               const requested = bound[1] || bound[2];
@@ -79,7 +90,37 @@ function mkEnv(rows, {
           run: async () => ({}),
         };
       },
-      batch: async () => {},
+      batch: async (statements) => {
+        const registrationBatch = Array.isArray(statements) && statements.length === 3 &&
+          /INSERT INTO sources[\s\S]*ON CONFLICT\(name\) DO NOTHING/.test(statements[0]?._sql || "") &&
+          /source_events[\s\S]*'registered'[\s\S]*changes\(\)=1/.test(statements[1]?._sql || "");
+        if (!registrationBatch) return undefined;
+
+        // Model D1 batch atomicity: stage the source insertion, then either
+        // commit both writes or leave the original registry untouched when the
+        // event statement fails.
+        const [source, kind, createdAt] = statements[0]._args;
+        const prior = sourceRows.find((row) => row.name === source) || null;
+        const sourceChanges = prior ? 0 : 1;
+        const stagedRows = sourceRows.map((row) => ({ ...row }));
+        if (!prior) stagedRows.push({ name: source, kind, created_at: createdAt, zone: null });
+        if (sourceRegistrationEventThrows && sourceChanges === 1) {
+          throw new Error("synthetic registered-event write failure");
+        }
+        sourceRows.splice(0, sourceRows.length, ...stagedRows);
+        const eventChanges = sourceChanges;
+        return [
+          { meta: { changes: sourceChanges } },
+          { meta: { changes: eventChanges } },
+          {
+            meta: { changes: 0 },
+            results: [{
+              kind: String((prior || stagedRows.find((row) => row.name === source)).kind).trim().toLowerCase(),
+              registry_event_recorded: eventChanges,
+            }],
+          },
+        ];
+      },
     },
     VECTORIZE: {
       query: async (_embedding, options) => {
@@ -1028,7 +1069,7 @@ const call = (env, path) => {
 
 /* ---- one source name cannot be relabelled as another connector kind ---- */
 {
-  const sourceRows = [{ name: "client-mail", kind: "gmail", zone: null }];
+  const sourceRows = [{ name: "client-mail", kind: " GMAIL ", zone: null }];
   const { env, seen } = mkEnv([], { sourceRows });
   const conflict = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
     method: "POST",
@@ -1054,7 +1095,7 @@ const call = (env, path) => {
   check("an omitted kind preserves the source's existing connector identity",
     preserved.status === 200 && preservedBody.kind === "gmail" &&
       !/kind\s*=\s*excluded\.kind/.test(expectationUpdate) &&
-      /WHERE sources\.kind=excluded\.kind/.test(expectationSql || ""),
+      /WHERE lower\(trim\(sources\.kind\)\)=excluded\.kind/.test(expectationSql || ""),
     JSON.stringify({ status: preserved.status, body: preservedBody, sql: expectationSql }));
 }
 
@@ -1151,9 +1192,83 @@ const call = (env, path) => {
     response.status === 200 && runBind?.[5] === 0, JSON.stringify(runBind));
 }
 
-/* ---- source schedules configure freshness without pretending an ingest ran ---- */
+/* ---- manual source registration stays behind the Worker write barrier ---- */
 {
   const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-notes", kind: "upload" }),
+  }), env, {});
+  const body = await response.json();
+  check("manual source registration goes through the authenticated Worker write barrier",
+    response.status === 200 && body.source === "client-notes" && body.kind === "upload" &&
+      body.registered === true && body.registry_event_recorded === true &&
+      typeof body.operation_id === "string" && body.operation_id.length > 0 &&
+      seen.sql.some((sql) => /source_events[\s\S]*'registered'[\s\S]*changes\(\)=1/.test(sql)),
+    JSON.stringify({ body, sql: seen.sql }));
+}
+{
+  const sourceRows = [];
+  const { env } = mkEnv([], { sourceRows, sourceRegistrationEventThrows: true });
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-notes", kind: "upload" }),
+  }), env, {});
+  check("a registration event failure leaves no committed source row",
+    response.status === 500 && sourceRows.length === 0,
+    JSON.stringify({ status: response.status, sourceRows }));
+}
+{
+  const { env } = mkEnv([], { sourceRows: [{ name: "client-mail", kind: "gmail", zone: null }] });
+  const same = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-mail", kind: "gmail" }),
+  }), env, {});
+  const sameBody = await same.json();
+  check("re-registering the same source identity is an exact no-op receipt",
+    same.status === 200 && sameBody.registered === false && sameBody.kind === "gmail",
+    JSON.stringify(sameBody));
+
+  const conflict = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-mail", kind: "upload" }),
+  }), env, {});
+  const conflictBody = await conflict.json();
+  check("manual registration cannot relabel an existing source connector kind",
+    conflict.status === 409 && conflictBody.code === "source_kind_conflict", JSON.stringify(conflictBody));
+}
+{
+  const invalidBodies = [
+    { source: "Drive %", kind: "drive" },
+    { source: "drive", kind: "unsupported" },
+    { source: "drive", kind: "drive", extra: true },
+  ];
+  const statuses = [];
+  for (const body of invalidBodies) {
+    const { env } = mkEnv([]);
+    statuses.push((await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }), env, {})).status);
+  }
+  const wrongBackend = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "drive", kind: "drive" }),
+  }), { ...mkEnv([]).env, STORAGE: "supabase" }, {});
+  check("invalid or non-D1 source registrations fail closed",
+    statuses.every((status) => status === 400) && wrongBackend.status === 400,
+    JSON.stringify({ statuses, wrongBackend: wrongBackend.status }));
+}
+
+/* ---- source schedules configure freshness without pretending an ingest ran ---- */
+{
+  const { env, seen } = mkEnv([], { sourceRows: [{ name: "drive", kind: "drive", zone: null }] });
   const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
     method: "POST",
     headers: { "X-Admin-Key": "k", "content-type": "application/json" },
@@ -1173,6 +1288,19 @@ const call = (env, path) => {
     seen.sql.some((sql) => /source_events[\s\S]*'schedule'/.test(sql)) &&
       seen.binds.some((binds) => binds.includes("expected_refresh_seconds=86400")),
     JSON.stringify({ sql: seen.sql, binds: seen.binds }));
+}
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "typo-source", expected_refresh_seconds: 86_400 }),
+  }), env, {});
+  const body = await response.json();
+  check("an omitted-kind freshness update cannot create a guessed source identity",
+    response.status === 404 && body.code === "source_not_registered" &&
+      !seen.sql.some((sql) => /INSERT INTO sources|INSERT INTO source_events/.test(sql)),
+    JSON.stringify({ body, sql: seen.sql }));
 }
 {
   const { env, seen } = mkEnv([]);
@@ -1430,7 +1558,11 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   }]);
   const documentsResponse = await call(env, "/api/admin/brain/documents");
   const b = await documentsResponse.json();
+  check("documents binds the Worker version to the authenticated readiness receipt",
+    b.version === WORKER_VERSION, JSON.stringify(b));
   check("documents names the backend", b.backend === "d1", JSON.stringify(b));
+  check("documents binds active writer mode to the same receipt as readiness",
+    b.vector_drain_mode === "active", JSON.stringify(b));
   check("documents separates source files from stored split parts",
     b.rows[0]?.documents === 2 && b.rows[0]?.logical_documents === 2 && b.rows[0]?.stored_documents === 3, JSON.stringify(b.rows[0]));
   check("and reports vector backlog", b.vector_backlog && "pending" in b.vector_backlog, JSON.stringify(b.vector_backlog));
@@ -1441,6 +1573,14 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   check("private aggregate inventory responses cannot be cached",
     /no-store/.test(documentsResponse.headers.get("cache-control") || ""),
     documentsResponse.headers.get("cache-control") || "missing");
+
+  const pausedDocuments = await call({ ...env, VECTOR_DRAIN_MODE: "paused-for-upgrade" }, "/api/admin/brain/documents");
+  const pausedBody = await pausedDocuments.json();
+  check("paused documents bind the refusal mode to their own readiness receipt",
+    pausedDocuments.status === 200 && pausedBody.version === WORKER_VERSION &&
+      pausedBody.vector_drain_mode === "paused-for-upgrade" &&
+      pausedBody.vector_readiness && typeof pausedBody.vector_readiness.ready === "boolean",
+    JSON.stringify(pausedBody));
 
   const failedDocuments = await call({
     STORAGE: "d1", ADMIN_KEY: "k",
@@ -2159,9 +2299,15 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
 
 /* ================= forget ================= */
 
-function mkForgetEnv({ vectorThrows = false } = {}) {
+function mkForgetEnv({
+  vectorThrows = false,
+  registered = true,
+  registryProof = true,
+  documentIds = ["meeting:1", "meeting:2"],
+} = {}) {
   const sql = [];
   const deleted = [];
+  const state = { registered, eventRecorded: false };
   const env = {
     STORAGE: "d1", ADMIN_KEY: "k",
     VECTORIZE: {
@@ -2173,46 +2319,105 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
       prepare(q) {
         return {
           bind: (...b) => ({
+            _sql: q,
+            _args: b,
             all: async () => ({
               results: /FROM documents WHERE source/.test(q)
-                ? [{ doc_uid: "meeting:1" }, { doc_uid: "meeting:2" }]
+                ? documentIds.map((doc_uid) => ({ doc_uid }))
                 : /FROM chunks WHERE doc_uid/.test(q)
-                  ? [{ chunk_uid: "meeting:1#0" }, { chunk_uid: "meeting:1#1" }, { chunk_uid: "meeting:2#0" }]
+                  ? b.flatMap((docUid) => docUid === "meeting:1"
+                    ? [{ chunk_uid: "meeting:1#0" }, { chunk_uid: "meeting:1#1" }]
+                    : [{ chunk_uid: `${docUid}#0` }])
                   : /FROM vector_outbox/.test(q)
                     ? b.map((chunkUid, index) => ({
                       chunk_uid: chunkUid, vector_id: chunkUid, generation: index + 1,
                     }))
                   : [],
             }),
-            first: async () => null,
+            first: async () => /SELECT name FROM sources WHERE name=\?1/.test(q) && state.registered
+              ? { name: b[0] }
+              : null,
             run: async () => { sql.push(q); return {}; },
           }),
         };
       },
-      batch: async (stmts) => { sql.push("BATCH:" + stmts.length); },
+      batch: async (stmts) => {
+        sql.push("BATCH:" + stmts.length, ...stmts.map((statement) => statement?._sql || ""));
+        const registryFinalization = stmts.some((statement) =>
+          /source_events[\s\S]*'forget'/.test(statement?._sql || ""));
+        if (!registryFinalization) return stmts.map(() => ({ meta: { changes: 1 } }));
+        const changes = state.registered && registryProof ? 1 : 0;
+        if (changes === 1) {
+          state.eventRecorded = true;
+          state.registered = false;
+        }
+        return stmts.map(() => ({ meta: { changes } }));
+      },
     },
   };
-  return { env, sql, deleted };
+  return { env, sql, deleted, state };
 }
 
 {
   const { env, deleted, sql } = mkForgetEnv();
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
   // Irreversible, so it must be asked for explicitly rather than by default.
-  check("forget DRY RUNS unless confirmed", b.dry_run === true, JSON.stringify(b));
+  check("forget DRY RUNS unless confirmed",
+    b.dry_run === true && b.source === "meeting" &&
+      b.would_unregister_source === true && b.source_unregistered === false,
+    JSON.stringify(b));
   check("and reports what it would remove", b.documents === 2 && b.chunks === 3, JSON.stringify(b));
   check("without deleting any vectors", deleted.length === 0);
   check("or touching the database", !sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
 }
 {
-  const { env, deleted, sql } = mkForgetEnv();
+  const { env, deleted, sql, state } = mkForgetEnv();
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true })).json();
-  check("confirm actually deletes", b.dry_run === false && b.documents === 2, JSON.stringify(b));
+  check("confirm actually deletes",
+    b.dry_run === false && b.documents === 2 && b.source === "meeting" &&
+      b.source_unregistered === true && b.registry_event_recorded === true &&
+      typeof b.operation_id === "string" && b.operation_id.length > 0,
+    JSON.stringify(b));
   check("physical vector cleanup is queued for the one leased writer",
     deleted.length === 0 && b.vectors === 0 && b.vector_cleanup_queued === 3,
     JSON.stringify({ body: b, deleted }));
   check("and D1 rows go first, so a crash leaves it unreachable rather than half-visible",
     sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
+  check("whole-source forget records its audit event and unregisters inside the guarded Worker",
+    state.registered === false && state.eventRecorded === true &&
+      sql.some((q) => /source_events[\s\S]*'forget'[\s\S]*NOT EXISTS[\s\S]*FROM documents WHERE source=\?1/.test(q)) &&
+      sql.some((q) => /DELETE FROM sources[\s\S]*NOT EXISTS[\s\S]*FROM documents WHERE source=\?1/.test(q)),
+    JSON.stringify(sql));
+}
+{
+  const { env, state } = mkForgetEnv({ documentIds: [] });
+  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const body = await response.json();
+  check("an empty registered source is still unregistered by the guarded source forget",
+    response.status === 200 && body.documents === 0 && body.source_unregistered === true &&
+      state.registered === false,
+    JSON.stringify(body));
+}
+{
+  const { env, sql } = mkForgetEnv({ registered: false });
+  const response = await post(env, "/api/admin/brain/forget", { source: "typo", confirm: true });
+  const body = await response.json();
+  check("a source typo is refused before any forget mutation",
+    response.status === 404 && body.code === "source_not_registered" &&
+      !sql.some((q) => /BATCH/.test(q)),
+    JSON.stringify({ body, sql }));
+}
+{
+  // Models an ingest that committed after forget enumerated its targets but
+  // before the final registry transaction. Both guarded statements affect zero
+  // rows, so the live source remains addressable and no audit event is forged.
+  const { env, state } = mkForgetEnv({ registryProof: false });
+  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const body = await response.json();
+  check("a concurrent ingest keeps the source registered and prevents a false forget receipt",
+    response.status === 500 && state.registered === true && state.eventRecorded === false &&
+      !body.source_unregistered && !body.registry_event_recorded,
+    JSON.stringify(body));
 }
 {
   const { env } = mkForgetEnv();
@@ -2310,6 +2515,8 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
     ["/api/admin/brain/ingest/batch", { documents: [] }],
     ["/api/admin/brain/source-receipt", { source: "drive", status: "ready" }],
     ["/api/admin/brain/source-expectation", { source: "drive", expected_interval_hours: 24 }],
+    ["/api/admin/brain/source-register", { source: "drive", kind: "drive" }],
+    ["/api/admin/brain/zones", { source: "drive", zone: "private" }],
     ["/api/admin/brain/forget", { source: "drive", confirm: true }],
     ["/api/admin/brain/reindex", { confirm: true }],
   ];
@@ -3110,6 +3317,25 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
   check("and the refusal carries no findings, samples or titles",
     !("findings" in diagBody) && !("samples" in diagBody),
     JSON.stringify(diagBody).slice(0, 160));
+}
+
+{
+  const env = {
+    STORAGE: "d1",
+    ADMIN_KEY: "k",
+    DB: { prepare() { throw new Error("D1_ERROR: exceeded CPU time limit"); } },
+  };
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/diagnose", {
+    method: "GET", headers: { "X-Admin-Key": "k" },
+  }), env, { waitUntil() {} });
+  const body = await response.json();
+  check("an unobservable diagnosis is a non-success machine receipt",
+    response.status === 503 && body.complete === false && body.verdict === "incomplete" &&
+      body.totals?.documents === null && body.summary?.unavailable === 19,
+    JSON.stringify(body).slice(0, 260));
+  check("an unobservable diagnosis never invents upgrade guidance",
+    !/brain upgrade|schema older/i.test(JSON.stringify(body)),
+    JSON.stringify(body).slice(0, 260));
 }
 
 console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);

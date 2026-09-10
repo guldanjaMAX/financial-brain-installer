@@ -39,12 +39,14 @@ import {
   ACCELERATED_BOOTSTRAP_MAX_ROUNDS,
   cloudflareTokenAvailable,
   cmdAcceleratedBootstrap,
+  cmdHealth,
   cmdRollback,
   cmdRollbackInteractive,
   cmdUpdate,
   cmdUpgrade as cmdUpgradeWithRealQuiescence,
   commitManifestVersion,
   compareSemver,
+  documentsReceiptVerdict,
   healthProbeVerdict,
   runAcceleratedBootstrap,
   validateAcceleratedBootstrapBusyReceipt,
@@ -98,14 +100,17 @@ let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 200))); if (!c) fail++; };
 
 const V = (o) => healthProbeVerdict(o);
-const body = (v) => JSON.stringify({ ok: true, brain: "x", version: v });
+const D = (o) => documentsReceiptVerdict(o);
 const cutoverBody = (v, mode, protocol = "lease-v1") => JSON.stringify({
-  ok: true,
+  ok: mode === "active",
+  status: mode === "active" ? "ok" : "paused-for-upgrade",
+  accepting_documents: mode === "active",
   brain: "x",
   version: v,
   vector_writer_protocol: protocol,
   vector_drain_mode: mode,
 });
+const body = (v) => cutoverBody(v, "active");
 
 /* ---- the mandatory writer grace cannot look like a hung installer ---- */
 {
@@ -267,6 +272,132 @@ const bootstrapCompletion = () => ({
   check("the rolling-upgrade grace is never shorter than one supported writer lease",
     VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS >= DRAIN_LEASE_TTL_MS,
     `${VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS} < ${DRAIN_LEASE_TTL_MS}`);
+
+  const publicActive = V({
+    ok: true,
+    body: cutoverBody(RUNNING_VERSION, "active"),
+    expectVersion: RUNNING_VERSION,
+    expectDrainMode: "active",
+    attempt: 1,
+    attempts: 6,
+  });
+  const pausedDocuments = {
+    version: RUNNING_VERSION,
+    vector_drain_mode: "paused-for-upgrade",
+  };
+  check("the explicit expected-paused cutover still accepts one exact paused generation",
+    V({
+      ok: true,
+      body: cutoverBody(RUNNING_VERSION, "paused-for-upgrade"),
+      expectVersion: RUNNING_VERSION,
+      expectDrainMode: "paused-for-upgrade",
+      attempt: 1,
+      attempts: 6,
+    }) === "accept" &&
+      D({
+        inventory: pausedDocuments,
+        expectVersion: RUNNING_VERSION,
+        expectDrainMode: "paused-for-upgrade",
+        attempt: 1,
+        attempts: 15,
+      }) === "accept");
+  check("an active public probe cannot splice with a paused authenticated readiness generation",
+    publicActive === "accept" &&
+      D({ inventory: pausedDocuments, expectVersion: RUNNING_VERSION, expectDrainMode: "active", attempt: 1, attempts: 15 }) === "retry" &&
+      D({ inventory: pausedDocuments, expectVersion: RUNNING_VERSION, expectDrainMode: "active", attempt: 15, attempts: 15 }) === "fail");
+  check("authenticated readiness is accepted only when its own version and mode match",
+    D({
+      inventory: { version: RUNNING_VERSION, vector_drain_mode: "active" },
+      expectVersion: RUNNING_VERSION,
+      expectDrainMode: "active",
+      attempt: 1,
+      attempts: 15,
+    }) === "accept" &&
+      D({
+        inventory: { version: "0.0.0-fixture-old", vector_drain_mode: "active" },
+        expectVersion: RUNNING_VERSION,
+        expectDrainMode: "active",
+        attempt: 15,
+        attempts: 15,
+      }) === "fail");
+  check("an authenticated receipt with no explicit binding expectation fails closed",
+    D({
+      inventory: { version: RUNNING_VERSION, vector_drain_mode: "active" },
+      expectVersion: null,
+      expectDrainMode: null,
+      attempt: 1,
+      attempts: 1,
+    }) === "fail");
+}
+
+/* ---- expected paused reach-only retries one stale authenticated edge ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-paused-edge-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      client: { slug: "fixture" },
+      brain: { domain: "fixture.invalid", worker_name: "fixture" },
+      infrastructure: { cloudflare: { storage: "d1" } },
+    }));
+    let documentCalls = 0;
+    const waits = [];
+    await cmdHealth(manifestPath, {
+      expectVersion: RUNNING_VERSION,
+      expectDrainMode: "paused-for-upgrade",
+      reachOnly: true,
+      resolveKey: () => "fixture-admin-label",
+      wait: async (milliseconds) => { waits.push(milliseconds); },
+      request: async (url) => {
+        const path = new URL(url).pathname;
+        if (path === "/health") {
+          return new Response(cutoverBody(RUNNING_VERSION, "paused-for-upgrade"), { status: 200 });
+        }
+        if (path !== "/api/admin/brain/documents") throw new Error(`unexpected request ${path}`);
+        documentCalls++;
+        const inventory = documentCalls === 1
+          ? { backend: "d1", rows: [], vector_drain_mode: "paused-for-upgrade" }
+          : { backend: "d1", rows: [], version: RUNNING_VERSION, vector_drain_mode: "paused-for-upgrade" };
+        return new Response(JSON.stringify(inventory), { status: 200 });
+      },
+    });
+    check("expected-paused reachOnly retries a stale versionless documents edge, then accepts one exact generation",
+      documentCalls === 2 && waits.join(",") === "4000", JSON.stringify({ documentCalls, waits }));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- ordinary health never waits on an unnamed deployment expectation ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-ordinary-malformed-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      client: { slug: "fixture" },
+      brain: { domain: "fixture.invalid", worker_name: "fixture" },
+      infrastructure: { cloudflare: { storage: "d1" } },
+    }));
+    let requestCalls = 0;
+    const waits = [];
+    let error = null;
+    try {
+      await cmdHealth(manifestPath, {
+        resolveKey: () => "fixture-admin-label",
+        wait: async (milliseconds) => { waits.push(milliseconds); },
+        request: async () => {
+          requestCalls++;
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+      });
+    } catch (caught) { error = caught; }
+    check("ordinary malformed public health fails on one snapshot without an empty propagation wait",
+      requestCalls === 1 && waits.length === 0 &&
+        /did not return one exact Worker version and writer state/i.test(error?.message || ""),
+      JSON.stringify({ requestCalls, waits, error: error?.message }));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
 }
 
 /* ---- schema-13 bootstrap receipts are aggregate-only and exact ---- */
@@ -719,8 +850,16 @@ const bootstrapCompletion = () => ({
 {
   check("the expected version is accepted immediately",
     V({ ok: true, body: body("0.1.2"), expectVersion: "0.1.2", attempt: 1, attempts: 6 }) === "accept");
-  check("a plain health check with no expectation still accepts any 200",
+  check("a plain health check accepts only an exact active Worker receipt",
     V({ ok: true, body: body("0.1.1"), expectVersion: null, attempt: 1, attempts: 6 }) === "accept");
+  check("a plain 200 without exact writer state fails closed",
+    V({
+      ok: true,
+      body: JSON.stringify({ ok: true, version: "0.1.1" }),
+      expectVersion: null,
+      attempt: 6,
+      attempts: 6,
+    }) === "fail");
 }
 
 /* ---- a body that cannot be parsed must not be read as success ---- */
@@ -976,6 +1115,33 @@ const bootstrapCompletion = () => ({
     check("non-D1 upgrade skips the compatibility pause and grace",
       events.join(",") === "state,bookmark,migrate,deploy,reconcile,health,test,version,readback,manifest,log",
       events.join(","));
+
+    const failedManifestPath = join(sandbox, "failed-non-d1.manifest.json");
+    const failedValue = manifestFixture();
+    failedValue.infrastructure.cloudflare.storage = "supabase";
+    writeFileSync(failedManifestPath, JSON.stringify(failedValue));
+    let nonD1Error = null;
+    try {
+      await cmdUpgrade(failedManifestPath, {
+        resolveAccount: async () => ({ id: "fixture-account" }),
+        d1Query: async (_account, _database, sql) => {
+          if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
+          if (/SELECT \* FROM install_state/i.test(sql)) {
+            return { results: [{ client_slug: "fixture", product_version: "0.1.9" }] };
+          }
+          return { results: [] };
+        },
+        cf: async () => ({ bookmark: "failed-non-d1-bookmark" }),
+        cmdMigrate: async () => { throw new Error("synthetic non-D1 migration failure"); },
+        cmdDeploy: async () => { throw new Error("non-D1 failure must stop before deploy"); },
+      });
+    } catch (error) { nonD1Error = error; }
+    check("non-D1 failure guidance claims no paused reindex or drain restriction",
+      /does not use the D1 Vectorize outbox cutover/i.test(nonD1Error?.message || "") &&
+        /no paused reindex or drain\s+restriction is being claimed/i.test(nonD1Error?.message || "") &&
+        !/CANNOT ACCEPT DOCUMENTS|reindex and drain are\s+refused|remain unavailable/i.test(
+          nonD1Error?.message || ""),
+      nonD1Error?.message);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
@@ -1079,6 +1245,9 @@ const bootstrapCompletion = () => ({
         cmdDeploy: async (_path, options) => {
           const mode = options.pauseVectorDrainForUpgrade ? "paused" : "active";
           events.push(`deploy-${mode}`);
+          if (failureStage === "paused-deploy" && mode === "paused") {
+            throw new Error("synthetic pause upload refusal");
+          }
           if (failureStage === "active-deploy" && mode === "active") {
             throw new Error("synthetic final upload ambiguity");
           }
@@ -1129,6 +1298,14 @@ const bootstrapCompletion = () => ({
     return { events, error, versionWrites, manifestWrites, manifestVersion };
   };
 
+  const prePauseFailure = await runFailure("paused-deploy");
+  check("a failure before paused deployment succeeds does not claim refused recovery commands",
+    prePauseFailure.events.join(",") === "deploy-paused" &&
+      !/CANNOT ACCEPT DOCUMENTS/i.test(prePauseFailure.error?.message || "") &&
+      !/reindex and drain are\s+refused|remain unavailable/i.test(prePauseFailure.error?.message || "") &&
+      /does not claim that reindex or drain are blocked/i.test(prePauseFailure.error?.message || ""),
+    prePauseFailure.error?.message);
+
   const migrationFailure = await runFailure("migration");
   check("migration failure leaves the compatibility Worker paused and versions uncommitted",
     migrationFailure.events.join(",") === "deploy-paused,health-paused-reach,wait,migrate-true" &&
@@ -1148,6 +1325,10 @@ const bootstrapCompletion = () => ({
       /do not clear VECTOR_DRAIN_MODE by hand/i.test(migrationFailure.error?.message || "") &&
       /brain health/i.test(migrationFailure.error?.message || ""),
     migrationFailure.error?.message);
+  check("paused-window recovery names only the restriction that is actually serving",
+    /Reindex and drain are\s+refused while the paused generation may still be serving/i.test(
+      migrationFailure.error?.message || ""),
+    migrationFailure.error?.message);
 
   const deployFailure = await runFailure("active-deploy");
   check("an ambiguous final upload stops before health, acceptance, and version commits",
@@ -1157,6 +1338,8 @@ const bootstrapCompletion = () => ({
       /active-deploy-bookmark/.test(deployFailure.error?.message || "") &&
       /active vector-drain deployment/.test(deployFailure.error?.message || ""),
     JSON.stringify({ ...deployFailure, error: deployFailure.error?.message }));
+  check("an ambiguous active upload retains the possibly-paused warning",
+    pausedWarning.test(deployFailure.error?.message || ""), deployFailure.error?.message);
 
   const bootstrapPinDrift = await runFailure("bootstrap-pin-drift");
   check("manifest drift after receipt bytes arrive prevents the active deployment",
@@ -1188,10 +1371,16 @@ const bootstrapCompletion = () => ({
       /active vector-drain health verification/.test(activeHealthFailure.error?.message || "") &&
       /active-health-bookmark/.test(activeHealthFailure.error?.message || ""),
     JSON.stringify({ ...activeHealthFailure, error: activeHealthFailure.error?.message }));
+  check("active-mode propagation failure still warns that the paused generation may be serving",
+    pausedWarning.test(activeHealthFailure.error?.message || "") &&
+      /paused generation may still be serving/i.test(activeHealthFailure.error?.message || ""),
+    activeHealthFailure.error?.message);
 
   const convergenceFailure = await runFailure("convergence");
   check("a failure after writes resume does NOT claim the brain is paused",
-    !/CANNOT ACCEPT DOCUMENTS/i.test(convergenceFailure.error?.message || ""),
+    !/CANNOT ACCEPT DOCUMENTS/i.test(convergenceFailure.error?.message || "") &&
+      !/reindex and drain are\s+refused|remain unavailable/i.test(convergenceFailure.error?.message || "") &&
+      /does not claim that reindex or drain are blocked/i.test(convergenceFailure.error?.message || ""),
     convergenceFailure.error?.message);
   check("an incomplete projection bootstrap blocks health, acceptance, and every version commit",
     convergenceFailure.events.join(",") ===
@@ -1486,10 +1675,12 @@ const bootstrapCompletion = () => ({
     }
     const rendered = output.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
     check(
-      "direct rollback preview requires supervised clean-index recovery before reindex",
+      "direct rollback preview routes clean-index recovery through update before active-only commands",
       preview?.confirmed === false && preview?.restored === false &&
         /nothing was changed/i.test(rendered) && /D1 restore is DESTRUCTIVE/i.test(rendered) &&
-        /does not restore Vectorize/i.test(rendered) && /supervised index recreation before reindex/i.test(rendered) &&
+        /does not restore Vectorize/i.test(rendered) && /supervised clean-index recovery/i.test(rendered) &&
+        rendered.includes(`${expectedBrainCliPrefix} update <manifest>`) &&
+        /active-only reindex or drain/i.test(rendered) &&
         /--yes/.test(rendered),
       rendered,
     );

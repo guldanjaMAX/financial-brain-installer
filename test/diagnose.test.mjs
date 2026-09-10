@@ -13,7 +13,13 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { diagnose, drainOutbox, acquireDrainLease } from "../worker/src/lib/store-d1.js";
+import {
+  acquireDrainLease,
+  diagnose,
+  drainOutbox,
+  vectorReadiness,
+} from "../worker/src/lib/store-d1.js";
+import { diagnosisReceiptVerdict, renderDiagnosis } from "../brain.mjs";
 
 import { makeEnv as makeDrainEnv, seed as seedDrain, embed as embedDrain } from "./fixtures/vector-fence-env.mjs";
 
@@ -23,7 +29,7 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
 const MIG = fileURLToPath(new URL("../migrations/d1/", import.meta.url));
 
 // A D1-shaped facade over real SQLite, so diagnose() runs unmodified.
-function makeEnv({ vectorCount = null } = {}) {
+function makeEnv({ vectorCount = null, drainMode = null } = {}) {
   const db = new DatabaseSync(":memory:");
   for (const f of readdirSync(MIG).filter((f) => f.endsWith(".sql")).sort()) {
     db.exec(readFileSync(join(MIG, f), "utf-8"));
@@ -48,6 +54,7 @@ function makeEnv({ vectorCount = null } = {}) {
     },
   };
   if (vectorCount !== null) env.VECTORIZE = { describe: async () => ({ vectorCount }) };
+  if (drainMode !== null) env.VECTOR_DRAIN_MODE = drainMode;
   return env;
 }
 
@@ -109,6 +116,28 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("and it says the missing ones are invisible to meaning search", /invisible to meaning/i.test(f?.detail || ""), f?.detail);
   check("and it names the command that repairs it", /brain reindex/.test(f?.action || ""), f?.action);
   check("the overall verdict is problems", r.verdict === "problems", r.verdict);
+}
+
+/* ---- the same defect has different recovery while an update owns the pause ---- */
+{
+  const env = makeEnv({ vectorCount: 0, drainMode: "paused-for-upgrade" });
+  source(env._db, "documents");
+  for (let i = 0; i < 10; i++) { doc(env._db, `paused-d${i}`); chunk(env._db, `paused-d${i}#0`, `paused-d${i}`); }
+
+  const finding = find(await diagnose(env), "store_agreement");
+  check("paused diagnose names update as the only supported projection writer",
+    /paused for an upgrade.*brain update <manifest>.*only supported projection writer/is.test(finding?.action || ""),
+    finding?.action);
+  check("paused diagnose does not forward the active-only whole-corpus reindex remedy",
+    !/Run `brain reindex <manifest>/.test(finding?.action || ""), finding?.action);
+
+  env._db.prepare("UPDATE install_state SET schema_version=36").run();
+  const readiness = await vectorReadiness(env);
+  check("paused readiness applies the same recovery contract",
+    readiness.reason === "vector_count_mismatch" &&
+      /brain update <manifest>/.test(readiness.action || "") &&
+      !/Run `brain reindex <manifest>/.test(readiness.action || ""),
+    JSON.stringify(readiness));
 }
 
 /* ---- vectors left behind by deletions ---- */
@@ -193,6 +222,43 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
     f?.severity === "warn" && f.count === 1, JSON.stringify(f));
   check("the mismatch finding states that document-source authorization still holds",
     /does not widen access/.test(f?.detail || "") && /Reingest/.test(f?.action || ""), JSON.stringify(f));
+}
+
+/* ---- every corpus-changing remedy respects the verified update pause ---- */
+{
+  const env = makeEnv({ drainMode: "paused-for-upgrade" });
+  source(env._db, "documents", "books");
+  source(env._db, "archive");
+  doc(env._db, "blank");
+  chunk(env._db, "blank#0", "blank", "");
+  env._db.prepare("UPDATE documents SET zone = NULL WHERE doc_uid = 'blank'").run();
+  env._db.prepare("UPDATE chunks SET source = 'archive', zone = 'books' WHERE chunk_uid = 'blank#0'").run();
+  doc(env._db, "empty-unregistered", { source: "mystery", title: "Empty fixture" });
+  doc(env._db, "dominant-sheet", { title: "Dominant fixture.xlsx" });
+  for (let i = 0; i < 50; i++) {
+    chunk(env._db, `dominant-sheet#${i}`, "dominant-sheet", `duplicate-fixture-${i % 12}`, i);
+  }
+
+  const report = await diagnose(env);
+  const ids = [
+    "empty_documents",
+    "unregistered_source",
+    "empty_source",
+    "zone_assignment",
+    "zone_projection",
+    "chunk_document_source_mismatch",
+    "blank_chunks",
+    "chunk_outliers",
+    "duplicate_chunks",
+  ];
+  const findings = ids.map((id) => find(report, id));
+  check("the paused fixture exercises every diagnostic that would otherwise prescribe a corpus write",
+    findings.every(Boolean), JSON.stringify((report.findings || []).map((finding) => finding.id)));
+  check("paused diagnostics replace every refused write remedy with the supported update path",
+    findings.every((finding) =>
+      /paused for an upgrade.*brain update <manifest>.*only supported projection writer/is.test(finding?.action || "") &&
+      !/(Register it:|Run its ingest|Rerun `brain zone|Re-?ingest the|turn it on .*re-ingest|assign each intended source)/i.test(finding?.action || "")),
+    JSON.stringify(findings.map((finding) => ({ id: finding?.id, action: finding?.action }))));
 }
 
 /* ---- chunks whose document is gone ---- */
@@ -418,6 +484,13 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("quarantine repair uses its explicit preview and confirmation, not a whole index rebuild",
     /vector-retry/.test(f?.action || "") && /preview|confirm/.test(f?.action || "") && !/reindex/.test(f?.action || ""), f?.action);
   check("a quarantined row is excluded from ordinary retry totals", !find(await diagnose(env), "vector_retries"));
+  env.VECTOR_DRAIN_MODE = "paused-for-upgrade";
+  const paused = find(await diagnose(env), "quarantined");
+  check("paused quarantine keeps the explicitly allowed vector-retry recovery",
+    /vector-retry/.test(paused?.action || "") && /brain update <manifest>/.test(paused?.action || ""),
+    paused?.action);
+  check("paused quarantine never falls through to refused drain, reindex, or forget",
+    !/brain drain <manifest>|brain reindex <manifest>|brain forget <manifest>/.test(paused?.action || ""), paused?.action);
 }
 
 /* ---- it must degrade rather than explode ---- */
@@ -430,6 +503,43 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("no Vectorize binding does not throw", threw === null, `threw: ${threw}`);
   check("and it says the comparison could not be made rather than passing it",
     find(r, "store_agreement")?.severity === "info", JSON.stringify(find(r, "store_agreement")));
+}
+
+/* ---- total D1 observability failure can never masquerade as an empty brain ---- */
+{
+  const env = {
+    DB: {
+      prepare() {
+        throw new Error("D1_ERROR: exceeded CPU time limit");
+      },
+    },
+  };
+  const report = await diagnose(env);
+  check("an all-check database failure returns an incomplete diagnostic contract",
+    report.complete === false && report.verdict === "incomplete" &&
+      report.unavailable_checks.length === 19 && report.summary.unavailable === 19,
+    JSON.stringify(report));
+  check("unobservable totals stay unknown instead of being invented as zero",
+    report.totals.documents === null && report.totals.chunks === null && report.totals.sources === null,
+    JSON.stringify(report.totals));
+  check("a failed check does not guess that an upgrade is the repair",
+    !/brain upgrade|schema older/i.test(JSON.stringify(report)), JSON.stringify(report.findings));
+  check("the CLI receipt gate refuses an incomplete diagnostic",
+    diagnosisReceiptVerdict(report).ok === false, JSON.stringify(diagnosisReceiptVerdict(report)));
+
+  const lines = [];
+  const originalLog = console.log;
+  try {
+    console.log = (...parts) => lines.push(parts.join(" "));
+    renderDiagnosis(report);
+  } finally {
+    console.log = originalLog;
+  }
+  const rendered = lines.join("\n");
+  check("an incomplete diagnosis renders unknown counts and no false-green assurance",
+    /unknown\s+documents/.test(rendered) && /diagnosis is incomplete/i.test(rendered) &&
+      !/the brain works|nothing is missing|nothing here makes an answer wrong/i.test(rendered),
+    rendered);
 }
 
 console.log(`\ndiagnose: ${ran - fail}/${ran} passed`);

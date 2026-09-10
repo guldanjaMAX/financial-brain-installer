@@ -165,6 +165,28 @@ function ownerAccessZone(source) {
     : { state: "unassigned", label: null };
 }
 
+const exactNonnegativeCount = (value) =>
+  Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * A diagnose object is not proof merely because the call returned an object.
+ * In particular, diagnose deliberately returns `complete:false` with null
+ * totals when D1 could not run its checks. Projecting that report would turn
+ * "unknown" back into the customer-visible zero counts this status endpoint
+ * exists to prevent.
+ */
+function completeDiagnoseProjection(report) {
+  return report?.complete === true &&
+    Array.isArray(report.findings) &&
+    Array.isArray(report.unavailable_checks) &&
+    report.unavailable_checks.length === 0 &&
+    ["documents", "chunks", "sources"].every((key) =>
+      exactNonnegativeCount(report.totals?.[key])) &&
+    ["crit", "warn", "info", "ok", "unavailable"].every((key) =>
+      exactNonnegativeCount(report.summary?.[key])) &&
+    report.summary.unavailable === 0;
+}
+
 export async function ownerSystemStatus(env, deps) {
   const unavailable = [];
   const out = {};
@@ -185,13 +207,13 @@ export async function ownerSystemStatus(env, deps) {
   out.drain_mode = health?.vector_drain_mode ?? null;
   if (!health) unavailable.push("health");
 
-  if (diag) {
-    out.documents = Number(diag.totals?.documents ?? 0);
-    out.chunks = Number(diag.totals?.chunks ?? 0);
+  if (completeDiagnoseProjection(diag)) {
+    out.documents = diag.totals.documents;
+    out.chunks = diag.totals.chunks;
     out.problem_counts = {
-      crit: Number(diag.summary?.crit || 0),
-      warn: Number(diag.summary?.warn || 0),
-      info: Number(diag.summary?.info || 0),
+      crit: diag.summary.crit,
+      warn: diag.summary.warn,
+      info: diag.summary.info,
     };
     out.problems = (diag.findings || [])
       .filter((f) => f.severity === "crit" || f.severity === "warn")

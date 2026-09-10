@@ -131,6 +131,13 @@ import {
 import { writeClaudeWorkspaceGuide } from "./operations/claude-workspace.mjs";
 import { installTechnicianSkillEverywhere } from "./operations/claude-skill.mjs";
 import {
+  isHtmlDocumentBody,
+  requestZoneAssignmentWithRetry,
+  zoneAssignmentExhaustedMessage,
+  zoneAssignmentRecoveredNotice,
+  zoneAssignmentRetryNotice,
+} from "./operations/zone-assignment-retry.mjs";
+import {
   bootstrapManifestObservation,
   bootstrapStatusFilePath,
   buildBootstrapStatus,
@@ -197,6 +204,7 @@ import {
   discoverInstalledManifest,
   rememberInstalledManifest,
 } from "./operations/installed-manifest.mjs";
+import { readUpdateStatus } from "./worker/src/lib/update-status.js";
 import { evaluateProfileCoverage, formatProfileFailures } from "./eval/profile.mjs";
 import {
   corpusContractReadiness,
@@ -2657,17 +2665,47 @@ export function healthProbeVerdict({
   attempts = 6,
 }) {
   if (ok) {
-    if (!expectVersion && !expectDrainMode) return "accept";
     let parsed = null;
     try { parsed = JSON.parse(body); } catch { /* not JSON */ }
+    const mode = parsed?.vector_drain_mode;
+    const paused = mode === "paused-for-upgrade";
+    const stateMatches = mode === "active"
+      ? parsed?.ok === true && parsed?.status === "ok" && parsed?.accepting_documents === true
+      : paused
+        ? parsed?.ok === false && parsed?.status === "paused-for-upgrade" &&
+          parsed?.accepting_documents === false
+        : false;
+    const receiptIsExact = parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      typeof parsed.version === "string" && Boolean(parsed.version.trim()) &&
+      parsed.vector_writer_protocol === "lease-v1" && stateMatches;
     const versionMatches = !expectVersion || parsed?.version === expectVersion;
-    const drainModeMatches = !expectDrainMode || (
-      parsed?.vector_writer_protocol === "lease-v1" &&
-      parsed?.vector_drain_mode === expectDrainMode
-    );
-    if (versionMatches && drainModeMatches) return "accept";
+    const drainModeMatches = !expectDrainMode || mode === expectDrainMode;
+    if (receiptIsExact && versionMatches && drainModeMatches) return "accept";
     return attempt < attempts ? "retry" : "fail";
   }
+  return attempt < attempts ? "retry" : "fail";
+}
+
+/**
+ * Bind authenticated readiness to the Worker generation and writer mode that
+ * produced it. A rolling deploy may send /health and /documents to different
+ * generations, so the public receipt alone cannot authorize readiness or the
+ * recovery advice derived from it.
+ *
+ * Returns "accept" | "retry" | "fail".
+ */
+export function documentsReceiptVerdict({
+  inventory,
+  expectVersion = null,
+  expectDrainMode = null,
+  attempt = 1,
+  attempts = 15,
+}) {
+  const versionMatches = typeof expectVersion === "string" && Boolean(expectVersion.trim()) &&
+    inventory?.version === expectVersion;
+  const drainModeMatches = ["active", "paused-for-upgrade"].includes(expectDrainMode) &&
+    inventory?.vector_drain_mode === expectDrainMode;
+  if (versionMatches && drainModeMatches) return "accept";
   return attempt < attempts ? "retry" : "fail";
 }
 
@@ -2676,8 +2714,27 @@ export function healthProbeVerdict({
  * be rebuilt from D1. Excess provider-only rows cannot: their ids no longer
  * exist in D1, so a reindex has nothing it can enumerate and delete.
  */
-function vectorCountMismatchFailure(expected, actual, { prefix = "" } = {}) {
+export function vectorCountMismatchFailure(expected, actual, {
+  prefix = "",
+  pausedForUpgrade = false,
+  updateStalled = false,
+} = {}) {
   const header = `${prefix}Vectorize holds ${actual} vector(s), but D1 requires ${expected}.`;
+  if (pausedForUpgrade) {
+    const direction = actual < expected
+      ? "Semantic search is missing vectors that D1 still requires."
+      : actual > expected
+        ? "Vectorize contains provider-only excess vectors that D1 cannot enumerate or remove; reviewed recovery must recreate and rebind a clean index."
+        : "The count receipt contradicts its mismatch reason.";
+    const next = updateStalled
+      ? "      This mismatch already stopped the paused bootstrap. Keep the Worker paused, save the read-only diagnosis, and report this update failure for reviewed repair before retrying."
+      : "      Run `brain update <manifest>` to resume its durable bootstrap. If the same mismatch returns without progress, keep the Worker paused and report that update failure for reviewed repair.";
+    return header + "\n" +
+      `      ${direction}` + "\n" +
+      "      Reindex and drain are refused while this Brain is paused for an update. Do not clear the pause or try either command by hand." + "\n" +
+      "      Read-only evidence is still available: `brain diagnose <manifest>`" + "\n" +
+      next;
+  }
   if (actual < expected) {
     return header + "\n" +
       "      Semantic search is missing vectors. Diagnose and rebuild the missing projection:" + "\n" +
@@ -2694,11 +2751,14 @@ function vectorCountMismatchFailure(expected, actual, { prefix = "" } = {}) {
     "      The count receipt contradicts its mismatch reason. Run `brain diagnose <manifest>` and keep this brain out of service.";
 }
 
-async function cmdHealth(manifestPath, {
+export async function cmdHealth(manifestPath, {
   expectVersion = null,
   expectDrainMode = null,
   durableAdminKeyOnly = false,
   reachOnly = false,
+  request = http,
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  resolveKey = resolveAdminKey,
 } = {}) {
   const { m } = loadManifest(manifestPath);
   // Cloudflare is OPTIONAL here, deliberately. This command talks to the worker
@@ -2727,9 +2787,9 @@ async function cmdHealth(manifestPath, {
   // conclusion to hand someone mid-deploy. Same lag class as secret
   // propagation, and as a deleted worker still answering 200.
   let res, body;
-  const healthAttempts = 6;
+  const healthAttempts = expectVersion || expectDrainMode ? 6 : 1;
   for (let i = 1; i <= healthAttempts; i++) {
-    res = await http(`${base}/health?cb=${i}`, {}, { timeoutMs: 20_000, what: "the health check" });
+    res = await request(`${base}/health?cb=${i}`, {}, { timeoutMs: 20_000, what: "the health check" });
     body = await res.text();
     // A 200 is NOT proof the new build is live. Cloudflare keeps serving the
     // PREVIOUS worker for a few seconds after a deploy, so breaking on the first
@@ -2760,7 +2820,7 @@ async function cmdHealth(manifestPath, {
           expectDrainMode ? `vector drain mode ${expectDrainMode}` : null,
         ].filter(Boolean).join(" and ");
         info(`/health is still answering ${live || "an unknown version"}/${liveDrainMode || "unknown drain mode"}, waiting for ${expectation}`);
-        await new Promise((r) => setTimeout(r, 5000));
+        await wait(5000);
         continue;
       }
       die(
@@ -2772,16 +2832,37 @@ async function cmdHealth(manifestPath, {
     }
     if (verdict === "retry" && (res.status === 404 || res.status >= 500)) {
       info(`${res.status} on attempt ${i}/${healthAttempts}, waiting for the route to propagate`);
-      await new Promise((r) => setTimeout(r, 5000));
+      await wait(5000);
       continue;
     }
     break;
   }
   if (!res.ok) die(`/health returned ${res.status} after ${healthAttempts} attempts: ${body.slice(0, 200)}`);
-  ok(`/health ${res.status} ${body.slice(0, 160)}`);
-  if (reachOnly) return;
+  let healthReceipt = null;
+  try { healthReceipt = JSON.parse(body); } catch { /* validated below */ }
+  const healthMode = healthReceipt?.vector_drain_mode;
+  const healthPaused = healthMode === "paused-for-upgrade";
+  const healthStateMatches = healthMode === "active"
+    ? healthReceipt?.ok === true && healthReceipt?.status === "ok" &&
+      healthReceipt?.accepting_documents === true
+    : healthPaused
+      ? healthReceipt?.ok === false && healthReceipt?.status === "paused-for-upgrade" &&
+        healthReceipt?.accepting_documents === false
+      : false;
+  if (!healthReceipt || typeof healthReceipt !== "object" || Array.isArray(healthReceipt) ||
+      typeof healthReceipt.version !== "string" || !healthReceipt.version.trim() ||
+      healthReceipt.vector_writer_protocol !== "lease-v1" || !healthStateMatches) {
+    die(
+      "the public health endpoint did not return one exact Worker version and writer state." + "\n" +
+        "      Health cannot combine that response with authenticated readiness evidence."
+    );
+  }
+  info(`public /health ${res.status}; exact version and writer state received, binding it to authenticated inventory`);
+  // Public reachability is not readiness evidence on its own. Bind even a
+  // reach-only probe to the authenticated receipt so two rolling Worker
+  // generations can never be combined into one green result.
 
-  const key = resolveAdminKey(manifestPath, { ignoreEnvironment: durableAdminKeyOnly });
+  const key = resolveKey(manifestPath, { ignoreEnvironment: durableAdminKeyOnly });
   if (!key) {
     die(
       "no admin key is available, so health cannot prove the authenticated documents endpoint." + "\n" +
@@ -2798,7 +2879,7 @@ async function cmdHealth(manifestPath, {
   // Cloudflare up to roughly a minute before calling the value wrong.
   const attempts = 15;
   for (let i = 1; i <= attempts; i++) {
-    const docs = await http(`${base}/api/admin/brain/documents`, {
+    const docs = await request(`${base}/api/admin/brain/documents`, {
       headers: { "X-Admin-Key": key },
     });
     const dbody = await docs.text();
@@ -2817,7 +2898,59 @@ async function cmdHealth(manifestPath, {
           !Array.isArray(inventory.rows)) {
         die(
           `documents endpoint ${docs.status} returned an invalid inventory, so authenticated access was not proven.` + "\n" +
-            "      Re-run `brain health`; if this repeats, the deployed Worker and installer do not match."
+          "      Re-run `brain health`; if this repeats, the deployed Worker and installer do not match."
+        );
+      }
+      const boundVersion = expectVersion || healthReceipt.version;
+      const boundDrainMode = expectDrainMode || healthMode;
+      // Explicit update/setup checks are deploy waiters: the public endpoint
+      // can reach the new Worker one request before this authenticated route.
+      // Ordinary health remains a one-snapshot fail-closed check.
+      const receiptAttempts = (expectVersion || expectDrainMode) ? attempts : 1;
+      const missingVersion = typeof inventory.version !== "string" || !inventory.version.trim();
+      const missingMode = !["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode);
+      if ((missingVersion || missingMode) && i < receiptAttempts) {
+        info(
+          `the authenticated documents receipt cannot yet prove its ${missingVersion ? "Worker version" : "vector writer mode"}; ` +
+            "waiting for the expected Worker generation"
+        );
+        await wait(4000);
+        continue;
+      }
+      if (missingVersion) {
+        die(
+          "the authenticated documents endpoint could not prove its Worker version." + "\n" +
+            "      Health cannot bind this readiness receipt to one deployed Worker generation."
+        );
+      }
+      if (missingMode) {
+        die(
+          "the authenticated documents endpoint could not prove its vector writer mode." + "\n" +
+            "      No readiness or recovery advice is safe from an unbound receipt."
+        );
+      }
+      const receiptVerdict = documentsReceiptVerdict({
+        inventory,
+        expectVersion: boundVersion,
+        expectDrainMode: boundDrainMode,
+        attempt: i,
+        attempts: receiptAttempts,
+      });
+      if (receiptVerdict === "retry") {
+        const expectation = [
+          `version ${boundVersion}`,
+          `vector drain mode ${boundDrainMode}`,
+        ].filter(Boolean).join(" and ");
+        info(`the authenticated documents receipt has not reached ${expectation}; waiting for one Worker generation`);
+        await wait(4000);
+        continue;
+      }
+      if (receiptVerdict === "fail") {
+        die(
+          `the authenticated documents receipt did not match the public Worker's version and writer mode` +
+            `${receiptAttempts > 1 ? ` after ${receiptAttempts} attempts` : ""}.` + "\n" +
+            "      /health and /documents may be serving different Worker generations. Health cannot" + "\n" +
+            "      combine their state, so no readiness or recovery advice was accepted. Keep any update pause in place and retry this verification."
         );
       }
       const actualBackend = inventory.backend.trim().toLowerCase();
@@ -2833,16 +2966,32 @@ async function cmdHealth(manifestPath, {
       if (actualBackend !== expectedBackend) {
         die(
           "the authenticated documents endpoint is serving a different storage backend than this manifest." + "\n" +
-            "      Health cannot pass because this URL may point at an old or misbound brain."
+          "      Health cannot pass because this URL may point at an old or misbound brain."
         );
       }
+      const expectedPausedReachability = reachOnly && expectDrainMode === "paused-for-upgrade";
+      if (healthPaused && !expectedPausedReachability) {
+        die(
+          "this Brain is paused for an update and cannot accept documents." + "\n" +
+            "      Its read-only corpus remains available, but ordinary health cannot pass until" + "\n" +
+            "      `brain update <manifest>` finishes and the writer is active."
+        );
+      }
+      ok(`/health and authenticated inventory agree on ${boundVersion}/${boundDrainMode}`);
       ok(`documents endpoint ${docs.status}; authenticated inventory confirmed`);
+      if (reachOnly) return;
 
       // D1 and Vectorize cannot share a transaction. Both systems can be up
       // while semantic search is behind or stale, so the operation backlog is
       // part of health, not an implementation detail. A 200 with an error or
       // malformed backlog is a failed health check, never proof of zero work.
       if (actualBackend === "d1") {
+        // Bind mode and readiness to this one authenticated Worker response.
+        // A separate /health request may hit another generation while a deploy
+        // is propagating, which must never turn a paused readiness failure into
+        // active-only reindex or drain advice.
+        const vectorDrainMode = inventory.vector_drain_mode;
+        const pausedForUpgrade = vectorDrainMode === "paused-for-upgrade";
         const backlog = inventory.vector_backlog;
         const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
         if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
@@ -2879,16 +3028,19 @@ async function cmdHealth(manifestPath, {
           const oldest = Math.max(0, Math.floor((Date.now() - queuedAt) / 60000));
           if (oldest > 30) {
             die(
-              `${backlog.pending} vector operation(s) are stalled` +
+              `${backlog.pending} vector operation(s) are still processing` +
                 ` (${backlog.upserts} upsert, ${backlog.deletes} delete, ${backlog.submitted} accepted), oldest queued ${oldest} min ago.` + "\n" +
-                "      Older than 30 minutes means the scheduled drain is not keeping up. Upserts are" + "\n" +
-                "      keyword-only; deletes leave stale vectors competing." + "\n" +
+                "      Age alone does not prove a stall. This one snapshot cannot tell whether the" + "\n" +
+                "      queue is moving. If the pending count is falling between checks, indexing is" + "\n" +
+                "      working; leave the scheduled drain running and check again later." + "\n" +
+                "      Upserts remain keyword-only and deletes can leave stale vectors competing until it finishes." + "\n" +
                 "      Do NOT run `brain drain` to hurry it: that takes the same lease the" + "\n" +
                 "      scheduled drain holds, so the two exclude each other rather than adding up," + "\n" +
                 "      and the manual runner is the slower of the two." + "\n" +
-                "      A large backlog is cleared by `brain update`, which rebuilds in bulk." + "\n" +
-                "      If the count never moves at all, that is a stall rather than a queue:" + "\n" +
-                "      check the Worker schedule in the Cloudflare dashboard and report it."
+                "      Do not start `brain update` merely to accelerate a healthy active-mode queue;" + "\n" +
+                "      an update is a version migration that pauses corpus writes." + "\n" +
+                "      Only if repeated checks show no count movement should you inspect the Worker" + "\n" +
+                "      schedule in the Cloudflare dashboard and report the unchanged receipts."
             );
           }
           die(
@@ -2903,7 +3055,14 @@ async function cmdHealth(manifestPath, {
             die(vectorCountMismatchFailure(
               readiness.expected_vectors,
               readiness.actual_vectors,
+              { pausedForUpgrade },
             ));
+          }
+          if (pausedForUpgrade) {
+            die(
+              "Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update." + "\n" +
+                "      Reindex and drain are refused in this state. Run `brain update <manifest>` to resume the durable paused bootstrap."
+            );
           }
           die(
             "Vectorize has accepted work that is not query-visible yet." + "\n" +
@@ -2916,7 +3075,7 @@ async function cmdHealth(manifestPath, {
     }
     if (docs.status === 401 && i < attempts) {
       info(`401 on attempt ${i}/${attempts}, waiting for secret propagation`);
-      await new Promise((r) => setTimeout(r, 4000));
+      await wait(4000);
       continue;
     }
     if (docs.status === 401) {
@@ -4544,7 +4703,9 @@ export async function runAcceleratedBootstrap({
       // is the sticky fact that a walk ran during THIS run, and it survives the
       // close. Suppressing the message instead would be worse than the bad
       // advice: a re-run does another full poll budget, embeds nothing, and dies
-      // the same way. So this terminates too, with a remedy that is bounded.
+      // the same way. Reindex is not a bounded escape here, even with --source,
+      // because the verified update pause refuses every reindex request. Stop
+      // with the read-only evidence and keep the barrier intact for review.
       const missingAfterResidue = announcedReprojection &&
         Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
         receipt.actual_vectors < receipt.expected_vectors;
@@ -4553,17 +4714,15 @@ export async function runAcceleratedBootstrap({
         die(`${stalledFor}\n` +
           `      The bulk re-projection finished. Vectorize holds ${receipt.actual_vectors} vector(s) and D1 requires ${receipt.expected_vectors}.\n` +
           `      Those ${short} vector(s) were not in the queue this walk re-embedded, so re-running the update cannot add them.\n` +
-          "      Do NOT run `brain reindex <manifest> --yes`. Without --source it queues nothing, arms a rebuild of the\n" +
-          "      WHOLE corpus, and every chunk is embedded again on your own account.\n" +
-          "      Find which source is short, then rebuild only that one:\n" +
-          "      brain diagnose <manifest>\n" +
-          "      brain reindex <manifest> --source <name> --yes\n" +
-          "      The Worker remains paused.");
+          "      Whole-corpus reindex would repay for every chunk, and source-scoped reindex is also refused while this pause holds.\n" +
+          "      Keep the Worker paused. Run `brain diagnose <manifest>` for read-only evidence and report this update failure for reviewed repair.");
       }
       if (Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
           receipt.actual_vectors !== receipt.expected_vectors) {
-        die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors)}\n` +
-          "      Re-running the update cannot change this. The Worker remains paused.");
+        die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors, {
+          pausedForUpgrade: true,
+          updateStalled: true,
+        })}`);
       }
       die(`${stalledFor} Re-run \`brain update <manifest>\`; the Worker remains paused.`);
     }
@@ -4573,8 +4732,9 @@ export async function runAcceleratedBootstrap({
     // then recommend a rebuild instead of the remedy.
     if (receipt.blocked_on === "quarantine") {
       die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so this update cannot finish the vector projection.\n` +
-        "      Release them with POST /api/admin/brain/vector-retry {\"confirm\":true} (admin key), then re-run `brain update <manifest>`.\n" +
-        "      If the index rejects them again, the documents they belong to must be forgotten (`brain forget <manifest>`) before the projection can verify.\n" +
+        "      First ask the technician to preview POST /api/admin/brain/vector-retry {\"confirm\":false}. This read-only receipt names how many rows would be released.\n" +
+        "      Only after the owner reviews that count should the technician repeat the request with {\"confirm\":true}, then re-run `brain update <manifest>`.\n" +
+        "      If the index rejects them again, keep the Worker paused and report this update failure for reviewed repair.\n" +
         "      The Worker remains paused.");
     }
     if (receipt.blocked_on === "fence" && !announcedFence) {
@@ -4836,12 +4996,11 @@ export async function cmdUpgrade(manifestPath, options = {}) {
 
     info(`upgrading ${fromVersion} -> ${toVersion}`);
     let stage = "migration";
-    // True between the paused deployment and the active one. If the run dies in
-    // that window the install stays paused, which is correct (a partially
-    // migrated corpus must not meet live writers) but invisible: seven write
-    // paths including ingest return 503 and nothing says so. One field install
-    // sat like that for eight days and silently accepted no documents.
-    let corpusPausedByThisRun = false;
+    // True from verified paused deployment until active mode is itself verified.
+    // Uploading the active Worker is not enough: during propagation the paused
+    // generation can still answer. If the run dies in that window the install
+    // may stay paused, which is correct but must be explicit to the operator.
+    let corpusPauseMayStillBeServing = false;
     const runStage = async (name, action) => {
       stage = name;
       const context = await assertStageContext(name);
@@ -4867,7 +5026,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           persistDomain: false,
           pauseVectorDrainForUpgrade: true,
         }));
-        corpusPausedByThisRun = true;
+        corpusPauseMayStillBeServing = true;
         await runStage("paused vector-drain health verification", () =>
           verifyHealth(executionPin.target, {
             expectVersion: toVersion,
@@ -4927,7 +5086,6 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           persistDomain: false,
           pauseVectorDrainForUpgrade: false,
         }));
-        corpusPausedByThisRun = false;
         // Cloudflare can keep routing this client to the paused compatibility
         // deployment for a few seconds after the active upload succeeds. Prove
         // the exact active mode is serving before the first corpus mutation;
@@ -4938,6 +5096,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             expectDrainMode: "active",
             reachOnly: true,
           }));
+        corpusPauseMayStillBeServing = false;
       } else {
         await runStage("migration", () => migrate(executionPin.target));
         await runStage("deployment", () => deploy(executionPin.target, { persistDomain: false }));
@@ -4995,14 +5154,23 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       await runStage("verified history commit", () => logRun("verified", null, { required: true }));
     } catch (error) {
       await logRun("failed", `stage:${stage}`);
+      const projectionRecovery = usesD1VectorOutbox
+        ? corpusPauseMayStillBeServing
+          ? "      A D1 restore does not restore Vectorize. Reviewed restore recovery must recreate/rebind\n" +
+            "      a clean index and rebuild it through the verified update path. Reindex and drain are\n" +
+            "      refused while the paused generation may still be serving.\n"
+          : "      A D1 restore does not restore Vectorize. If restore is reviewed and approved, its\n" +
+            "      semantic projection must also be rebuilt and verified before active use. This failure\n" +
+            "      does not claim that reindex or drain are blocked by an update pause.\n"
+        : "      This install does not use the D1 Vectorize outbox cutover, so no paused reindex or drain\n" +
+          "      restriction is being claimed for this failure. Review this backend's restore impact.\n";
       die(
         `update stopped during ${stage}: ${error.message}\n` +
           `      D1 recovery bookmark: ${bookmark}\n` +
-          "      Do not restore it as the first response. A D1 restore discards newer writes and\n" +
-          "      does not restore Vectorize. A restore requires reviewed clean-index recreation/rebind\n" +
-          "      before reindex because provider-only excess vectors cannot be enumerated from D1.\n" +
+          "      Do not restore it as the first response. A D1 restore discards newer writes.\n" +
+          projectionRecovery +
           "      Safe default: fix the reported issue and run brain update again." +
-          (corpusPausedByThisRun
+          (corpusPauseMayStillBeServing
             ? "\n\n" +
               "      THIS BRAIN CANNOT ACCEPT DOCUMENTS RIGHT NOW.\n" +
               "      The update paused its corpus writes before changing the schema and did not\n" +
@@ -5035,7 +5203,7 @@ function rollbackLocalPreflight(manifestPath, bookmarkArg) {
 function printRollbackPreview({ bookmark, databaseId }) {
   warn("rollback preview only: nothing was changed.");
   warn("a D1 restore is DESTRUCTIVE: everything written after this bookmark would be lost.");
-  warn("this restores D1 only. It does not restore Vectorize; provider-only excess vectors can require supervised index recreation before reindex.");
+  warn("this restores D1 only. It does not restore Vectorize; provider-only excess vectors require supervised clean-index recovery, then `brain update <manifest>` rebuilds and proves the projection before active-only reindex or drain.");
   info(`database ${databaseId}, bookmark ${bookmark}`);
   info("After reviewing this recovery, re-run the same command with --yes to perform it.");
   return { confirmed: false, restored: false, databaseId, bookmark };
@@ -5186,7 +5354,8 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
         "D1 was restored, but the semantic projection could not be marked unverified.\n" +
           "      The compatibility Worker remains paused; do not return this brain to use.\n" +
           "      Run `brain update` to forward-migrate the restored schema. Then use supervised recovery\n" +
-          "      to recreate/rebind a clean Vectorize index and every metadata index before reindex, drain, health, and test.",
+          "      to recreate/rebind and rebuild a clean Vectorize index. Ordinary reindex and drain stay\n" +
+          "      refused until that verified update path returns the Worker to active mode.",
       );
     }
     // D1 time travel cannot enumerate Vectorize ids written after the bookmark.
@@ -5205,7 +5374,7 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
   } else {
     warn("D1 was restored, but its upgrade-history marker could not be updated. Record this recovery manually.");
   }
-  warn("the Worker remains paused. Recreate/rebind a clean Vectorize index with every metadata index under supervised recovery, then reindex, drain, health-check, and test before active use.");
+  warn("the Worker remains paused. Recreate/rebind a clean Vectorize index with every metadata index under supervised recovery, then run `brain update <manifest>` to rebuild, prove exact readiness, and return to active mode. Reindex and drain remain refused until active.");
   return {
     confirmed: true,
     restored: true,
@@ -6507,6 +6676,15 @@ async function cmdSources(manifestPath) {
   if (!dbId) die("no d1_database_id in the manifest. Run `brain provision` first.");
 
   const flags = parseFlags(process.argv.slice(4));
+  const base = await resolveBase(m, acct);
+  const adminKey = resolveAdminKey(manifestPath);
+  const sourceRegistryWrite = Boolean(flags.add) || flags.refresh !== undefined;
+  if (sourceRegistryWrite && !adminKey) {
+    die(
+      "no durable admin key was found, so the source registry cannot be changed through its paused-write guard." + "\n" +
+        "      Repair it with `brain setup <manifest>` or `brain secrets <manifest>`."
+    );
+  }
 
   // Registering by hand exists because the connectors are still being written.
   // When an ingest driver lands it registers its own source on first run and
@@ -6517,20 +6695,11 @@ async function cmdSources(manifestPath) {
       (flags.kind !== true && flags.kind) ||
       Object.keys(m.corpora || {}).find((k) => k.replace(/_/g, "-") === name) ||
       "upload";
-    const now = new Date().toISOString();
-    const res = await d1Query(
-      acct.id,
-      dbId,
-      "INSERT INTO sources (name, kind, status, created_at) VALUES (?,?,'pending',?) ON CONFLICT(name) DO NOTHING",
-      [name, String(kind), now]
-    );
-    if (res?.meta?.changes) {
-      await d1Query(
-        acct.id,
-        dbId,
-        "INSERT INTO source_events (source_name, event, at, detail) VALUES (?,'registered',?,?)",
-        [name, now, `kind=${kind}`]
-      );
+    const registration = await postSourceRegistration(base, adminKey, {
+      source: name,
+      kind: String(kind),
+    });
+    if (registration.registered) {
       ok(`registered source "${name}" (kind ${kind})`);
     } else {
       info(`source "${name}" is already registered, leaving it alone`);
@@ -6551,13 +6720,15 @@ async function cmdSources(manifestPath) {
           "  reported as stale, which is the right default for a one-off folder load."
       );
     }
-    await d1Query(acct.id, dbId, "UPDATE sources SET expected_refresh_seconds = ? WHERE name = ?", [SECONDS[spec], name]);
+    await postSourceExpectation(base, adminKey, {
+      source: name,
+      expected_refresh_seconds: SECONDS[spec],
+    });
     if (SECONDS[spec] === null) ok(`"${name}" will no longer be reported as stale`);
     else ok(`"${name}" is expected to refresh ${spec}; it will be reported stale past 1.5x that`);
   }
 
   const rows = await readSources(acct.id, dbId);
-  const base = await resolveBase(m, acct);
   const live = await liveSourceCounts(base, resolveAdminKey(manifestPath));
 
   if (!rows.length) {
@@ -6649,55 +6820,56 @@ async function purgeDocuments(base, adminKey, name) {
       "the worker could not be addressed (no URL or no ADMIN_KEY), so the store was edited directly"
     );
   } else {
-    const res = await http(`${base}/api/admin/brain/forget`, {
+    const requestWorkerForget = (confirm) => http(`${base}/api/admin/brain/forget`, {
       method: "POST",
       headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-      // confirm:true is REQUIRED. The route dry-runs by default, so omitting it
-      // returns a perfectly well-formed receipt having deleted nothing, which is
-      // exactly the "reported success, removed nothing" failure this function
-      // spends fifty lines guarding against everywhere else.
-      body: JSON.stringify({ source: name, confirm: true }),
-    }).catch((e) => ({ ok: false, status: 0, netError: e.message }));
+      body: JSON.stringify({ source: name, confirm }),
+    });
 
-    if (res.ok) {
-      // A 200 is NOT proof of removal. Cloudflare Access interstitials, SSO
-      // login pages and misrouted requests all answer 200 with HTML, and the
-      // previous version parsed that into {} and reported a successful purge.
-      // Only a well-formed receipt naming how many rows went counts as done.
+    // Prove the deployed Worker owns BOTH halves before authorizing either one.
+    // An older route can remove documents but cannot unregister the source
+    // behind the pause barrier. Discovering that after confirm:true would leave
+    // a half-finished destructive operation, so the read-only preview is the
+    // compatibility handshake.
+    const preview = await requestWorkerForget(false)
+      .catch((e) => ({ ok: false, status: 0, netError: e.message }));
+    if (preview.ok) {
+      const rawPreview = await preview.text().catch(() => "");
+      let previewBody = null;
+      try { previewBody = JSON.parse(rawPreview); } catch { /* validated below */ }
+      try {
+        validateSourceForgetPreview(previewBody, name);
+      } catch (error) {
+        die(
+          `the worker's read-only forget preview did not prove guarded registry cleanup: ${error.message}\n` +
+            "      Nothing was removed. Update the Worker, then rerun the same `brain forget` command."
+        );
+      }
+
+      const res = await requestWorkerForget(true)
+        .catch((e) => ({ ok: false, status: 0, netError: e.message }));
+      if (!res.ok) {
+        const detail = typeof res.text === "function" ? await res.text().catch(() => "") : "";
+        die(
+          `the guarded worker forget returned ${res.status || "a network error"}: ${String(detail || res.netError || "").slice(0, 200)}\n` +
+            "      The source remains registered unless an exact finalization receipt says otherwise."
+        );
+      }
+      // A 200 is not proof of removal. Access interstitials and misrouted
+      // requests can answer 200 with HTML, so require the exact document and
+      // registry receipt from the same guarded route.
       const raw = await res.text().catch(() => "");
       let body = null;
+      try { body = JSON.parse(raw); } catch { /* validated below */ }
       try {
-        body = JSON.parse(raw);
-      } catch {
-        /* handled below */
-      }
-      // The D1 route reports `documents`; the older Supabase-era route reported
-      // `removed`. Accept either, but never invent one.
-      const removed =
-        body && typeof body.documents === "number"
-          ? body.documents
-          : body && typeof body.removed === "number"
-            ? body.removed
-            : null;
-      // A route that dry-ran deleted nothing, whatever else it said.
-      if (body && body.dry_run === true) {
+        validateSourceForgetReceipt(body, name);
+      } catch (error) {
         die(
-          "the worker ran a DRY RUN and removed nothing. This build of brain.mjs is older than\n" +
-            "      the worker it is talking to. Update the installer, then rerun the same\n" +
-            "      `brain forget` command. The raw credential-header workaround is intentionally disabled."
+          `the worker returned 200 but not an exact source-forget receipt: ${error.message}\n` +
+            "      Do not treat the source name as free. Run `brain sources` before retrying."
         );
       }
-      if (removed === null) {
-        const looksLikeHtml = /^\s*</.test(raw);
-        die(
-          `the worker returned 200 but not a removal receipt, so nothing is confirmed removed.\n` +
-            (looksLikeHtml
-              ? "      The response is HTML, which usually means an Access or SSO interstitial\n" +
-                "      answered instead of the worker. Check that the route is not behind Access.\n"
-              : `      Expected JSON with a numeric "removed". Got: ${raw.slice(0, 120)}\n`) +
-            "      The source has been left registered so it can be removed once this is fixed."
-        );
-      }
+      const removed = Number(body.documents);
       const queued = Number(body?.vector_cleanup_queued || 0);
       if (queued > 0) {
         warnings.push(
@@ -6706,23 +6878,21 @@ async function purgeDocuments(base, adminKey, name) {
         );
       }
       if (body?.vector_error) warnings.push(`vector cleanup reported: ${String(body.vector_error).slice(0, 180)}`);
-      return { channel: "worker route", removed, warnings };
+      return { channel: "worker route", removed, sourceUnregistered: true, warnings };
     }
-    // 404/405 means this worker has no such route, which is expected on an
-    // older install and is the one case worth falling through on. Anything
-    // else is a real failure and must not be downgraded into a weaker path:
-    // a 500 from the worker says the removal was attempted and went wrong,
-    // and retrying it through a different door is how you delete twice.
-    if (res.status && res.status !== 404 && res.status !== 405) {
-      const detail = await res.text().catch(() => "");
+    // 404/405 means this worker has no forget route and no mutation was
+    // attempted. Any other preview failure is a real boundary failure and must
+    // not be downgraded into a second write path.
+    if (preview.status && preview.status !== 404 && preview.status !== 405) {
+      const detail = typeof preview.text === "function" ? await preview.text().catch(() => "") : "";
       die(
-        `the worker's forget route returned ${res.status}: ${String(detail).slice(0, 200)}\n` +
+        `the worker's forget preview returned ${preview.status}: ${String(detail).slice(0, 200)}\n` +
           "      Nothing was removed."
       );
     }
     warnings.push(
-      res.netError
-        ? `the worker at ${base} could not be reached (${res.netError}), so the store was edited directly`
+      preview.netError
+        ? `the worker at ${base} could not be reached (${preview.netError}), so the store was edited directly`
         : "this worker has no /api/admin/brain/forget route, so the store was edited directly"
     );
   }
@@ -6799,7 +6969,7 @@ async function purgeDocuments(base, adminKey, name) {
     );
   }
 
-  return { channel: "direct store access", removed: before, warnings };
+  return { channel: "direct store access", removed: before, sourceUnregistered: false, warnings };
 }
 
 async function cmdForget(manifestPath) {
@@ -6908,17 +7078,13 @@ async function cmdForget(manifestPath) {
     );
   }
 
-  // The event is written BEFORE the registry row is deleted, so a failure
-  // between the two leaves the source visible and retryable rather than
-  // silently gone. Same reason upgrade_runs records the failures.
-  await d1Query(
-    acct.id,
-    dbId,
-    "INSERT INTO source_events (source_name, event, at, documents, detail) VALUES (?,'forget',?,?,?)",
-    [name, new Date().toISOString(), removed, `channel=${out.channel}`]
-  ).catch(() => {});
-
-  await d1Query(acct.id, dbId, "DELETE FROM sources WHERE name = ?", [name]);
+  if (out.sourceUnregistered !== true) {
+    die(
+      `the documents were removed via ${out.channel}, but that path cannot finalize the source registry\n` +
+        "      behind the Worker's pause barrier. The registry row was deliberately retained.\n" +
+        "      Update the Worker, verify `brain health`, then rerun this exact source forget."
+    );
+  }
   ok(`registry row for "${name}" removed, the name is free to reuse`);
 
   for (const wmsg of out.warnings) warn(wmsg);
@@ -7657,11 +7823,10 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
 }
 
 /** A destructive response is trusted only when it proves it is the forget API. */
-export function validateForgetReceipt(body) {
+function validateForgetBody(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new Error("the forget response is not a JSON object");
   }
-  if (body.dry_run !== false) throw new Error("the forget response did not confirm a real deletion");
   for (const field of ["documents", "chunks", "vectors"]) {
     if (!Number.isFinite(Number(body[field])) || Number(body[field]) < 0) {
       throw new Error(`the forget response has no valid ${field} count`);
@@ -7676,6 +7841,35 @@ export function validateForgetReceipt(body) {
   }
   if (Number(body.documents) !== body.targets.length) {
     throw new Error("the forget response document count does not match its acknowledged targets");
+  }
+  return body;
+}
+
+export function validateForgetReceipt(body) {
+  validateForgetBody(body);
+  if (body.dry_run !== false) throw new Error("the forget response did not confirm a real deletion");
+  return body;
+}
+
+/** A whole-source preview must prove that confirmation includes registry cleanup. */
+export function validateSourceForgetPreview(body, source) {
+  validateForgetBody(body);
+  if (body.dry_run !== true) throw new Error("the source forget preview is not a dry run");
+  if (body.source !== source) throw new Error("the source forget preview names a different source");
+  if (body.would_unregister_source !== true || body.source_unregistered !== false ||
+      body.registry_event_recorded !== false) {
+    throw new Error("the source forget preview does not include guarded registry cleanup");
+  }
+  return body;
+}
+
+/** A whole-source receipt binds document removal to the exact registry finalization. */
+export function validateSourceForgetReceipt(body, source) {
+  validateForgetReceipt(body);
+  if (body.source !== source) throw new Error("the source forget receipt names a different source");
+  if (body.source_unregistered !== true || body.registry_event_recorded !== true ||
+      typeof body.operation_id !== "string" || !body.operation_id.trim()) {
+    throw new Error("the source forget receipt does not prove guarded registry cleanup");
   }
   return body;
 }
@@ -7985,17 +8179,53 @@ export async function postSourceReceipt(base, adminKey, receipt, request = http,
   return body;
 }
 
+/** Register one source through the installed Worker's paused-write barrier. */
+export async function postSourceRegistration(base, adminKey, {
+  source,
+  kind,
+}, request = http) {
+  const normalizedSource = assertSourceName(source);
+  const normalizedKind = String(kind || "").trim().toLowerCase();
+  if (!normalizedKind) die("source registration needs a connector kind.");
+  const res = await request(`${base}/api/admin/brain/source-register`, {
+    method: "POST",
+    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ source: normalizedSource, kind: normalizedKind }),
+  }, { timeoutMs: 30_000, what: "the source registration" });
+  const raw = await res.text();
+  let body = null;
+  try { body = JSON.parse(raw); } catch { /* checked below */ }
+  const exactNewRegistration = body?.registered !== true ||
+    (body?.registry_event_recorded === true &&
+      typeof body?.operation_id === "string" && body.operation_id.length > 0);
+  if (!res.ok || !body || body.source !== normalizedSource ||
+      body.kind !== normalizedKind || typeof body.registered !== "boolean" ||
+      !exactNewRegistration) {
+    throw new Error(
+      `source registration was not accepted (${res.status}): ${body?.error || raw.slice(0, 160) || "invalid response"}`
+    );
+  }
+  return body;
+}
+
 /** Set or clear the freshness expectation owned by an installed scheduler. */
 export async function postSourceExpectation(base, adminKey, {
   source,
-  kind = "drive",
+  kind = null,
   expected_refresh_seconds,
 }, request = http) {
   const normalizedSource = assertSourceName(source);
+  const normalizedKind = typeof kind === "string" && kind.trim()
+    ? kind.trim().toLowerCase()
+    : null;
   const res = await request(`${base}/api/admin/brain/source-expectation`, {
     method: "POST",
     headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-    body: JSON.stringify({ source: normalizedSource, kind, expected_refresh_seconds }),
+    body: JSON.stringify({
+      source: normalizedSource,
+      ...(normalizedKind ? { kind: normalizedKind } : {}),
+      expected_refresh_seconds,
+    }),
   }, { timeoutMs: 30_000, what: "the source freshness expectation" });
   const raw = await res.text();
   let body = null;
@@ -12465,7 +12695,7 @@ export async function cmdDoctorRepair(manifestPath, options = {}) {
     if (!confirmed) {
       warn("rollback preview only: nothing was changed.");
       info(`Re-run with --yes to restore D1 to bookmark ${bookmark}, captured just before this migration.`);
-      info("This restores D1 only; Vectorize needs supervised recreation before reindex, same as `brain rollback`.");
+      info("This restores D1 only; Vectorize needs supervised clean-index recovery followed by `brain update <manifest>`. Reindex and drain remain refused until that update returns active mode.");
       return { paused: true, previewed: "rollback", bookmark };
     }
     return runRollback(manifestPath, bookmark, { confirmed: true });
@@ -14551,7 +14781,7 @@ export function summariseResponseBody(raw) {
     const message = parsed?.error || parsed?.message || parsed?.errors?.[0]?.message;
     return message ? String(message).slice(0, 200) : text.slice(0, 200);
   } catch { /* not JSON: fall through */ }
-  if (/^\s*<(?:!doctype|html|head|body)\b/i.test(text)) {
+  if (isHtmlDocumentBody(text)) {
     return "the reply was a web page, not this brain. That usually means the address " +
       "is not serving the worker yet, or a proxy answered instead of it";
   }
@@ -14733,23 +14963,67 @@ export async function requestIngestBatch({
  * they are running against what is installed, because "am I on the new one" is
  * the first question an upgrade raises.
  */
-async function cmdWhatsnew(manifestPath) {
+export async function cmdWhatsnew(manifestPath, {
+  readStatus = readUpdateStatus,
+  discoverManifest = discoverInstalledManifest,
+  installedManifestOptions = {},
+} = {}) {
   console.log("");
   let installed = null;
-  if (manifestPath && existsSync(manifestPath)) {
+  let resolvedManifestPath = null;
+  try {
+    resolvedManifestPath = discoverManifest(manifestPath, installedManifestOptions)?.path || null;
+  } catch { /* the changelog is worth showing regardless */ }
+  if (resolvedManifestPath && existsSync(resolvedManifestPath)) {
     try {
-      const { m } = loadManifest(manifestPath);
+      const { m } = loadManifest(resolvedManifestPath);
       installed = m.brain?.version || null;
     } catch { /* the changelog is worth showing regardless */ }
   }
-  if (installed && installed !== PRODUCT_VERSION) {
-    warn(
-      `this brain is recorded at ${installed}, and you have ${PRODUCT_VERSION} installed.\n` +
-        `        Bring it up to date with: brain upgrade ${relative(process.cwd(), manifestPath)}`
-    );
+  if (installed) {
+    let release;
+    try {
+      release = await readStatus({ installedVersion: installed });
+    } catch {
+      release = { status: "unavailable" };
+    }
+    if (installed !== PRODUCT_VERSION) {
+      info(
+        `this brain records ${installed}; this local CLI package is ${PRODUCT_VERSION}. ` +
+          "That local mismatch does not prove a public update is approved."
+      );
+    }
+    if (release?.status === "up_to_date" && release.latest_version === installed) {
+      ok(`the public stable release channel confirms this brain is current at ${installed}`);
+    } else if (release?.status === "update_available" &&
+        typeof release.latest_version === "string") {
+      warn(
+        `a reviewed stable update from ${installed} to ${release.latest_version} is available.\n` +
+          "        Review https://financialbrain.ai/update before approving any change."
+      );
+    } else if (release?.status === "ahead") {
+      warn(
+        `this brain records ${installed}, which is ahead of the public stable release channel.\n` +
+          "        It cannot be called up to date from public release evidence. Review https://financialbrain.ai/update."
+      );
+    } else if (release?.status === "release_held" || release?.status === "release_candidate") {
+      warn(
+        `this brain records ${installed}, but the public release channel is ${release.status === "release_held" ? "held" : "candidate-only"}.\n` +
+          "        No update is currently approved, and this command cannot claim the brain is current.\n" +
+          "        Review https://financialbrain.ai/update for the current gate."
+      );
+    } else {
+      warn(
+        `this brain records ${installed}, but the public release status could not be verified.\n` +
+          "        Unavailable is not current. Review https://financialbrain.ai/update and retry later."
+      );
+    }
     console.log("");
-  } else if (installed) {
-    ok(`up to date, running ${PRODUCT_VERSION}`);
+  } else {
+    warn(
+      "no installed Brain manifest could be read, so public release status could not be compared.\n" +
+        "        Run brain whatsnew <full path to brain.manifest.json> to check this Brain."
+    );
     console.log("");
   }
 
@@ -14867,10 +15141,13 @@ async function reportBacklog(manifestPath) {
  */
 /** Render a diagnosis for a human. Exported so it can be exercised without a network. */
 export function renderDiagnosis(r, renderOptions = {}) {
+  const diagnosticCount = (value) => Number.isSafeInteger(value) && value >= 0
+    ? num(value).padStart(9)
+    : "  unknown";
   console.log(`\n  ${c.bold("what is in the brain")}`);
-  console.log(`    ${num(r.totals.documents).padStart(9)}  documents`);
-  console.log(`    ${num(r.totals.chunks).padStart(9)}  chunks`);
-  console.log(`    ${num(r.totals.sources).padStart(9)}  sources`);
+  console.log(`    ${diagnosticCount(r?.totals?.documents)}  documents`);
+  console.log(`    ${diagnosticCount(r?.totals?.chunks)}  chunks`);
+  console.log(`    ${diagnosticCount(r?.totals?.sources)}  sources`);
 
   const AREAS = [
     ["coverage", "is anything missing"],
@@ -14902,10 +15179,15 @@ export function renderDiagnosis(r, renderOptions = {}) {
   const okVerdict = (line) => ok(renderCliCommands(line, renderOptions));
   const warnVerdict = (line) => warn(renderCliCommands(line, renderOptions));
   console.log("");
-  if (r.verdict === "healthy") {
-    okVerdict("nothing is missing, nothing is stored wrong, and nothing is being wasted.");
+  if (r.verdict === "incomplete" || r.complete !== true) {
+    warnVerdict(
+      `diagnosis is incomplete: ${Number(s.unavailable || r?.unavailable_checks?.length || 0)} check(s) could not run.` + "\n" +
+        "        Unknown counts are not zero, and this result does not prove readiness or a repair cause."
+    );
+  } else if (r.verdict === "healthy") {
+    okVerdict("all diagnostic checks completed without a detected issue.");
   } else if (r.verdict === "usable_with_gaps") {
-    warnVerdict(`the brain works, with ${s.warn} thing(s) worth fixing. Nothing here makes an answer wrong.`);
+    warnVerdict(`${s.warn} diagnosed gap(s) may make answers incomplete or less reliable.`);
   } else {
     warnVerdict(
       `${s.crit} problem(s) that WILL make answers wrong or incomplete, and ${s.warn} worth fixing.` + "\n" +
@@ -14913,6 +15195,29 @@ export function renderDiagnosis(r, renderOptions = {}) {
     );
   }
   return r;
+}
+
+/** Accept only a complete, count-bearing diagnostic receipt as trustworthy. */
+export function diagnosisReceiptVerdict(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) {
+    return { ok: false, reason: "the diagnostic response is not a JSON object" };
+  }
+  if (r.complete !== true || r.verdict === "incomplete" ||
+      (Array.isArray(r.unavailable_checks) && r.unavailable_checks.length > 0)) {
+    return { ok: false, reason: "one or more diagnostic checks could not run" };
+  }
+  if (!Array.isArray(r.findings) || !r.summary || typeof r.summary !== "object") {
+    return { ok: false, reason: "the diagnostic response is missing its findings or summary" };
+  }
+  for (const field of ["documents", "chunks", "sources"]) {
+    if (!Number.isSafeInteger(r?.totals?.[field]) || r.totals[field] < 0) {
+      return { ok: false, reason: `the diagnostic response has no trustworthy ${field} count` };
+    }
+  }
+  if (!["healthy", "usable_with_gaps", "problems"].includes(r.verdict)) {
+    return { ok: false, reason: "the diagnostic response has an unknown verdict" };
+  }
+  return { ok: true, reason: null };
 }
 
 /**
@@ -15216,8 +15521,16 @@ async function cmdDiagnose(manifestPath) {
 
   const res = await http(`${base}/api/admin/brain/diagnose`, { headers: { "X-Admin-Key": adminKey } },
     { timeoutMs: 120_000, what: "the diagnostic" });
-  if (!res.ok) die(`diagnose failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
-  const r = await res.json();
+  const raw = await res.text();
+  let r = null;
+  try { r = JSON.parse(raw); } catch { /* handled below */ }
+  const receipt = diagnosisReceiptVerdict(r);
+  if (!receipt.ok && r?.verdict === "incomplete") {
+    renderDiagnosis(r);
+    die(`diagnose could not establish a trustworthy result: ${receipt.reason}.`);
+  }
+  if (!res.ok) die(`diagnose failed (${res.status}): ${raw.slice(0, 200)}`);
+  if (!receipt.ok) die(`diagnose returned HTTP success without a trustworthy receipt: ${receipt.reason}.`);
 
   renderDiagnosis(r);
   return r;
@@ -16830,15 +17143,32 @@ async function cmdZone(manifestPath) {
   if (!adminKey) die("no durable admin key was found. Run `brain setup <manifest>` first.");
   const source = typeof flags.source === "string" ? flags.source.trim() : "";
   const zone = typeof flags.zone === "string" ? flags.zone.trim() : "";
-  const response = await http(`${base}/api/admin/brain/zones`, {
-    method: source || zone ? "POST" : "GET",
+  const isAssignment = Boolean(source || zone);
+  const makeRequest = () => http(`${base}/api/admin/brain/zones`, {
+    method: isAssignment ? "POST" : "GET",
     headers: {
       "X-Admin-Key": adminKey,
-      ...(source || zone ? { "Content-Type": "application/json" } : {}),
+      ...(isAssignment ? { "Content-Type": "application/json" } : {}),
     },
-    ...(source || zone ? { body: JSON.stringify({ source, zone }) } : {}),
+    ...(isAssignment ? { body: JSON.stringify({ source, zone }) } : {}),
   }, { timeoutMs: 60_000, what: "the zone assignment" });
-  if (!response.ok) die(`zone command failed (${response.status}): ${summariseResponseBody(await response.text())}`);
+  const requestResult = await requestZoneAssignmentWithRetry(makeRequest, {
+    source,
+    zone,
+    onRetry: (notice) => warn(zoneAssignmentRetryNotice({ source, zone, ...notice })),
+  });
+  const { response } = requestResult;
+  if (!response.ok) {
+    const raw = requestResult.raw === null ? await response.text() : requestResult.raw;
+    const detail = summariseResponseBody(raw);
+    if (requestResult.exhausted) {
+      die(zoneAssignmentExhaustedMessage({ source, zone, status: response.status, detail }));
+    }
+    die(`zone command failed (${response.status}): ${detail}`);
+  }
+  if (requestResult.recovered) {
+    ok(zoneAssignmentRecoveredNotice({ source, zone, retries: requestResult.retries }));
+  }
   const result = await response.json();
   if (result.zones) {
     if (!result.zones.length) info("Nothing is loaded yet, so there are no zones.");

@@ -47,6 +47,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   // told the migration the drain was quiesced anyway.
   "node --no-warnings test/vector-drain-cutover-unverified.test.mjs",
   "node --no-warnings test/setup-paused-brain-guard.test.mjs",
+  "node --no-warnings test/zone-assignment-retry.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -254,6 +255,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/reprojection-pause-order.test.mjs",
   "node --no-warnings test/legacy-manifest-auth-profile.test.mjs",
   "node --no-warnings test/adopt-cloudflare-profile-consent.test.mjs",
+  "node --no-warnings test/zone-assignment-retry.test.mjs",
 ]);
 
 export function parseTestCommand(command) {
