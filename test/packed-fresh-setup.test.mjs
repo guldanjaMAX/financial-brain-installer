@@ -105,6 +105,8 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
 
     const privateHome = join(sandbox, "home");
     mkdirSync(privateHome, { recursive: true });
+    mkdirSync(join(privateHome, "AppData", "Roaming"), { recursive: true });
+    mkdirSync(join(privateHome, "AppData", "Local"), { recursive: true });
     const baseEnvironment = minimalEnvironment({
       HOME: privateHome,
       USERPROFILE: privateHome,
@@ -237,6 +239,32 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
     const accountId = "a".repeat(32);
     const preload = join(sandbox, "offline-cloudflare.mjs");
     writeFileSync(preload, `
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+
+// GitHub's Windows image runs the fixture account with Administrator group
+// membership. This preload is test-only and answers only the installer's exact
+// read-only elevation probe, so the packed setup exercises the normal-user
+// branch without adding a production bypass or weakening the gate.
+const originalSpawnSync = childProcess.spawnSync;
+childProcess.spawnSync = (command, args = [], options = {}) => {
+  const joined = args.map(String).join(" ");
+  if (process.platform === "win32" && /powershell(?:\\.exe)?$/i.test(String(command)) &&
+      joined.includes("BRAIN_STANDARD_USER") && joined.includes("BRAIN_ELEVATED")) {
+    return {
+      pid: 0,
+      output: [null, "BRAIN_STANDARD_USER", ""],
+      stdout: "BRAIN_STANDARD_USER",
+      stderr: "",
+      status: 0,
+      signal: null,
+      error: undefined,
+    };
+  }
+  return originalSpawnSync(command, args, options);
+};
+syncBuiltinESMExports();
+
 const accountId = ${JSON.stringify(accountId)};
 const payload = (result, status = 200, success = true, errors = []) =>
   new Response(JSON.stringify({ success, result, errors }), {
