@@ -16,6 +16,7 @@ import {
 import { hasExplicitCurrentIntent, queryEntityAnchors } from "../src/lib/query-intent.js";
 import { SEARCH_UNAVAILABLE } from "../src/lib/retrieval-status.js";
 import { search } from "../src/lib/store-d1.js";
+import { taxQuestionScope } from "../src/lib/tax-evidence-scope.js";
 
 const ownerRow = ({
   day = "2026-09-01",
@@ -148,6 +149,155 @@ test("financial authority is claim-specific and cannot establish a relationship"
     assert.equal(relationshipRole.eligible, false);
     assert.equal(relationshipRole.authoritative, false);
   }
+});
+
+test("a named tax form claim requires the same entity, tax year, and form", () => {
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const base = {
+    source: "drive",
+    source_kind: "upload",
+    text_source: "native",
+    text_reliable: true,
+  };
+  const wrongEntityAndForm = authorityFor({
+    ...base,
+    title: "Example Timber Partners 2023 Schedule K-1",
+    client: "Example Timber Partners",
+    text: "Schedule K-1 (Form 1065), ordinary business income (loss).",
+  }, { query: question });
+  assert.equal(wrongEntityAndForm.tier, "T1", "the legacy title heuristic still recognizes a K-1 record type");
+  assert.equal(wrongEntityAndForm.eligible, false,
+    "recognizing a record type must not grant it authority over another entity's return");
+  assert.equal(wrongEntityAndForm.authoritative, false);
+  assert.equal(wrongEntityAndForm.tax_scope?.entity_matched, false);
+  assert.equal(wrongEntityAndForm.tax_scope?.form_matched, false,
+    "a Schedule K-1 is not the partnership's Form 1065 return even when its header mentions Form 1065");
+
+  const wrongEntity = authorityFor({
+    ...base,
+    title: "Example Timber Partners 2023 tax return Form 1065",
+    text: "Example Timber Partners, Form 1065, tax year 2023.",
+  }, { query: question });
+  assert.equal(wrongEntity.eligible, false);
+  assert.equal(wrongEntity.tax_scope?.entity_matched, false);
+  assert.equal(wrongEntity.tax_scope?.year_matched, true);
+  assert.equal(wrongEntity.tax_scope?.form_matched, true);
+
+  const wrongLegalEntity = authorityFor({
+    ...base,
+    title: "Example Orchard LP 2023 tax return Form 1065",
+    text: "Example Orchard LP, Form 1065, tax year 2023.",
+  }, { query: question });
+  assert.equal(wrongLegalEntity.eligible, false,
+    "a shared name stem must not conflate entities with different legal suffixes");
+  assert.equal(wrongLegalEntity.tax_scope?.entity_matched, false);
+
+  const wrongForm = authorityFor({
+    ...base,
+    title: "Example Orchard LLC 2023 Schedule K-1",
+    text: "Example Orchard LLC, Schedule K-1 (Form 1065), tax year 2023.",
+  }, { query: question });
+  assert.equal(wrongForm.eligible, false);
+  assert.equal(wrongForm.tax_scope?.entity_matched, true);
+  assert.equal(wrongForm.tax_scope?.year_matched, true);
+  assert.equal(wrongForm.tax_scope?.form_matched, false);
+
+  const contradictoryStoredScope = authorityFor({
+    ...base,
+    entity_slug: "example-timber-partners",
+    title: "Example Orchard LLC 2023 tax return Form 1065",
+    text: "Example Orchard LLC, Form 1065, tax year 2023.",
+  }, { query: question });
+  assert.equal(contradictoryStoredScope.eligible, false,
+    "the exact D1 entity scope must win over a suggestive title or excerpt");
+  assert.equal(contradictoryStoredScope.tax_scope?.entity_matched, false);
+
+  const contradictorySlugAndHeader = authorityFor({
+    ...base,
+    entity_slug: "example-orchard-llc",
+    title: "Example Orchard LLC 2023 tax return Form 1065",
+    authority_document_head: "Taxpayer: Example Timber Partners. 2023 Form 1065 partnership return.",
+    text: "Example Orchard LLC, Form 1065, tax year 2023.",
+  }, { query: question });
+  assert.equal(contradictorySlugAndHeader.eligible, false,
+    "a correct-looking structured entity scope must not override a different native taxpayer header");
+  assert.equal(contradictorySlugAndHeader.tax_scope?.entity_matched, false);
+
+  const expandedStructuredEntity = authorityFor({
+    ...base,
+    entity_slug: "example-orchard-llc-holdings",
+    title: "Example Orchard LLC 2023 tax return Form 1065",
+    authority_document_head: "Example Orchard LLC. 2023 Form 1065 partnership return.",
+    text: "Example Orchard LLC, Form 1065, tax year 2023.",
+  }, { query: question });
+  assert.equal(expandedStructuredEntity.eligible, false,
+    "a requested name cannot match only a prefix of a different structured legal entity");
+  assert.equal(expandedStructuredEntity.tax_scope?.entity_matched, false);
+
+  const misleadingFilename = authorityFor({
+    ...base,
+    title: "Example Orchard LLC 2023 tax return Form 1065",
+    authority_document_head: "Example Timber Partners. 2023 Form 1065 partnership return.",
+    text: "Example Orchard LLC, Form 1065, tax year 2023.",
+  }, { query: question });
+  assert.equal(misleadingFilename.eligible, false,
+    "a matching filename must not override a different taxpayer in the projected native header");
+  assert.equal(misleadingFilename.tax_scope?.entity_matched, false);
+
+  const misleadingTaxFilename = authorityFor({
+    ...base,
+    title: "Example Orchard LLC 2023 tax return Form 1065",
+    authority_document_head: "Example Orchard LLC. 2022 Form 1120-S corporate return.",
+    text: "Example Orchard LLC, Form 1065, tax year 2023.",
+  }, { query: question });
+  assert.equal(misleadingTaxFilename.eligible, false,
+    "a matching filename must not override a different year and form in the projected native header");
+  assert.equal(misleadingTaxFilename.tax_scope?.entity_matched, true);
+  assert.equal(misleadingTaxFilename.tax_scope?.year_matched, false);
+  assert.equal(misleadingTaxFilename.tax_scope?.form_matched, false);
+  assert.equal(misleadingTaxFilename.tax_scope?.title_candidate_matched, true,
+    "the weaker title signal remains available only to block false absence for unreadable files");
+
+  const contradictoryMetadataYear = authorityFor({
+    ...base,
+    title: "Example Orchard LLC 2023 tax return Form 1065",
+    authority_meta: JSON.stringify({ tax_year: 2023 }),
+    authority_document_head: "Example Orchard LLC. Tax year 2022 Form 1065 partnership return.",
+    text: "Example Orchard LLC, Form 1065, tax year 2023.",
+  }, { query: question });
+  assert.equal(contradictoryMetadataYear.eligible, false,
+    "a matching structured tax year must not override a different year in the native header");
+  assert.equal(contradictoryMetadataYear.tax_scope?.entity_matched, true);
+  assert.equal(contradictoryMetadataYear.tax_scope?.year_matched, false);
+
+  const wrongYear = authorityFor({
+    ...base,
+    title: "Example Orchard LLC 2022 Form 1065",
+    text: "Example Orchard LLC, Form 1065, tax year 2022.",
+  }, { query: question });
+  assert.equal(wrongYear.eligible, false);
+  assert.equal(wrongYear.tax_scope?.entity_matched, true);
+  assert.equal(wrongYear.tax_scope?.year_matched, false);
+  assert.equal(wrongYear.tax_scope?.form_matched, true);
+
+  const exactReturn = authorityFor({
+    ...base,
+    title: "Example Orchard LLC 2023 tax return Form 1065",
+    authority_document_head: "Example Orchard LLC. Form 1065, tax year 2023.",
+    text: "Example Orchard LLC, Form 1065, tax year 2023. Ordinary business income is zero.",
+  }, { query: question });
+  assert.equal(exactReturn.eligible, true);
+  assert.equal(exactReturn.authoritative, true);
+  assert.equal(exactReturn.tax_scope?.matched, true);
+});
+
+test("the tax scope parser activates only for one exact named year and form", () => {
+  assert.deepEqual(
+    taxQuestionScope("What ordinary business income did example orchard llc's 2023 Form 1065 report?"),
+    { form: "1065", year: "2023", entity: ["example", "orchard", "llc"] },
+  );
+  assert.equal(taxQuestionScope("What did Example Orchard pay on invoice 1065 in 2023?"), null);
+  assert.equal(taxQuestionScope("Compare Example Orchard's 2022 and 2023 Form 1065 returns."), null);
 });
 
 test("connector kind, not a customer-chosen source name, controls authority", () => {

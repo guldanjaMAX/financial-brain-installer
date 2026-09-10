@@ -840,6 +840,118 @@ const call = (env, path) => {
   check("the partial approval identifies the citation mismatch", /every citation/.test(body.evidence_gate?.reason || ""), JSON.stringify(body.evidence_gate));
 }
 
+/* A nearest-neighbor tax hit can carry the right line label and tax year while
+   belonging to a different entity and a different filing. The expected return
+   is present but unreadable, which mirrors the dangerous case where retrieval
+   substitutes a nearby K-1 for an encrypted return. The verifier is
+   deliberately made overconfident here: the deterministic route guard must
+   still refuse the answer. */
+{
+  const wrongK1 = {
+    ...ROW,
+    chunk_uid: "drive:other-entity-k1#0",
+    doc_uid: "drive:other-entity-k1",
+    source_id: "other-entity-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    client: "Example Timber Partners",
+    authority_document_head: "Example Timber Partners. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income (loss) was a negative amount.",
+  };
+  const unreadableReturn = {
+    ...ROW,
+    chunk_uid: "drive:expected-return#0",
+    doc_uid: "drive:expected-return",
+    source_id: "expected-return",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Orchard LLC 2023 Form 1065",
+    client: "Example Orchard LLC",
+    authority_document_head: "Encrypted document. No native tax-return text was extracted.",
+    text: "Encrypted document. No readable tax-return text was extracted.",
+    text_source: "ocr_partial",
+    text_reliable: false,
+  };
+  const { env } = mkEnv([wrongK1, unreadableReturn], {
+    vectorIds: [wrongK1.chunk_uid, unreadableReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label and year match" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("the reproduction includes the expected but unreadable Form 1065",
+    body.results.some((row) => row.title === unreadableReturn.title && row.text_reliable === false),
+    JSON.stringify(body.results));
+  check("a different entity's K-1 cannot answer a named entity's Form 1065 question",
+    body.answer === null &&
+      body.status === "coverage_incomplete" &&
+      body.citations.length === 0 &&
+      body.evidence_gate?.supported === false,
+    JSON.stringify(body));
+  check("the tax refusal identifies the deterministic entity-year-form boundary",
+    /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body.evidence_gate));
+  check("the unreadable expected return blocks a categorical absence claim",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /could not be read reliably/.test(body.notice || "") &&
+      !/documents do not answer/i.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* Even correctly scoped OCR is not a trustworthy tax-number source. This
+   isolates that branch from the cross-entity guard above, with both model
+   passes again made deliberately overconfident. */
+{
+  const unreadableExactReturn = {
+    ...ROW,
+    chunk_uid: "drive:unreliable-exact-return#0",
+    doc_uid: "drive:unreliable-exact-return",
+    source_id: "unreliable-exact-return",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Orchard LLC 2023 Form 1065",
+    client: "Example Orchard LLC",
+    authority_document_head: "Example Orchard LLC. 2023 Form 1065.",
+    text: "OCR produced an uncertain ordinary business income amount.",
+    text_source: "ocr_partial",
+    text_reliable: false,
+  };
+  const { env } = mkEnv([unreadableExactReturn], {
+    vectorIds: [unreadableExactReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the OCR line appears to match" }, usage: {} }
+            : { response: "Example Orchard LLC reported an ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("an overconfident verifier cannot approve tax figures from unreliable OCR",
+    body.answer === null &&
+      body.status === "coverage_incomplete" &&
+      body.evidence_gate?.supported === false &&
+      /not read from a reliable native text layer/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body));
+  check("unreliable exact tax evidence remains a gap rather than becoming absence",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /Unlock the file or provide a readable copy/.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
 /* ---- every material part must be answered or explicitly called unknown ---- */
 {
   const { env } = mkEnv([ROW], {
