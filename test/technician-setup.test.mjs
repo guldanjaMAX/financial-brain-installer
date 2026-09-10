@@ -8,6 +8,7 @@ import { WRANGLER_PACKAGE } from "../doctor.mjs";
 
 import {
   TECHNICIAN_RUN_STEPS,
+  renderTechnicianPlan,
   runTechnicianStep,
   technicianChildEnvironment,
   technicianPlan,
@@ -104,13 +105,55 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(content, /In Codex,\s+use `\$financial-brain-technician`/);
   assert.ok(content.includes(renderCliCommands("brain technician")),
     "the installed skill must name the technician entrypoint");
+  const optimizeRouteStart = content.indexOf("## Route an Optimize request first");
   const updateRouteStart = content.indexOf("## Route an update request first");
+  const conciergeRouteStart = content.indexOf("## Offer Claude Code concierge browser help");
+  const passkeyRouteStart = content.indexOf("## Explain every passkey ceremony before it starts");
   const setupRouteStart = content.indexOf("## Start here");
   const releaseManifest = content.indexOf("https://financialbrain.ai/update/manifest.json");
   const agentPlaybook = content.indexOf("https://financialbrain.ai/update/agent.md");
   const updateEntrypoint = content.indexOf(renderCliCommands("brain update [manifest]"));
-  assert.ok(updateRouteStart > 0, "installed skill must route explicit Brain update requests");
-  assert.ok(setupRouteStart > updateRouteStart, "update routing must run before the setup-oriented plan");
+  assert.ok(optimizeRouteStart > 0, "installed skill must route explicit Optimize requests");
+  assert.ok(updateRouteStart > optimizeRouteStart,
+    "owner-facing Optimize routing must run before general update or setup archaeology");
+  assert.ok(conciergeRouteStart > updateRouteStart,
+    "Claude Code browser assistance must follow update routing");
+  assert.ok(passkeyRouteStart > conciergeRouteStart,
+    "passkey context must follow browser assistance and precede the setup-oriented plan");
+  assert.ok(setupRouteStart > passkeyRouteStart, "passkey routing must run before the setup-oriented plan");
+  const optimizeRoute = content.slice(optimizeRouteStart, updateRouteStart);
+  assert.match(optimizeRoute, /included\s+owner feature/i);
+  assert.match(optimizeRoute, /I can check your Brain without changing\s+it/i);
+  assert.match(optimizeRoute, /Do not narrate\s+skill selection, source-code inspection, PATH archaeology, release research/is);
+  assert.match(optimizeRoute, /request already authorizes the contract's read-only checks/i);
+  assert.match(optimizeRoute, /Do\s+not ask for a second approval/i);
+  assert.match(optimizeRoute, /one brief progress update only if the checks take long/i);
+  assert.match(optimizeRoute, /Optimize complete\. I made no changes to your\s+Brain, data, settings, access, or indexes/i);
+  assert.match(optimizeRoute, /private local support note.*nothing was uploaded/is);
+  assert.match(optimizeRoute, /checked this computer's Brain skill and MCP\s+connection but installed nothing/i);
+  assert.match(optimizeRoute, /at most three short sections/i);
+  assert.match(optimizeRoute, /Do not print the numbered fifteen-check table/i);
+  assert.match(optimizeRoute, /duplicate-document count is an efficiency finding/i);
+  assert.match(optimizeRoute, /missing connector receipt does not mean.*stored corpus is absent/is);
+  assert.match(optimizeRoute, /Unzoned sources with no grants are sharing-readiness\s+work, not evidence that somebody currently has access/i);
+  assert.match(optimizeRoute, /Leave passkeys\s+and enrolled devices out of Optimize/i);
+  assert.match(optimizeRoute,
+    new RegExp("Do not run `" + renderedCommand("brain devices") + "`", "i"));
+  assert.match(optimizeRoute,
+    new RegExp("Do not run `" + renderedCommand("brain tools") + "` during Optimize", "i"));
+  assert.match(optimizeRoute,
+    new RegExp("do not run `" + renderedCommand("brain mcp-config --apply") + "`", "i"));
+  assert.match(optimizeRoute, /especially after a move to a new computer/i);
+  assert.match(optimizeRoute, /Do not run a Golden evaluation, create a canned refusal exercise/i);
+  assert.match(optimizeRoute, /Do not ask a\s+known-answer content question for MCP proof/i);
+  assert.match(optimizeRoute, /protocol\s+initialization, connection status, and expected tool discovery/i);
+  assert.match(optimizeRoute, /zoning\s+applies to the whole source/i);
+  assert.match(optimizeRoute, /Only if the owner\s+explicitly approves that mapping/i);
+  assert.match(optimizeRoute, /repeat its bounded projection pass/i);
+  assert.match(optimizeRoute, /what improved, regressed, or stayed\s+unproven/i);
+  assert.match(optimizeRoute, /estimate the affected scope, likely cost, expected answer impact/i);
+  assert.match(optimizeRoute, /Prioritize findings by likely answer impact, not raw\s+count/i);
+  assert.doesNotMatch(optimizeRoute, /planned owner-facing workflow|lucky|qualif(?:y|ies|ied) for access/i);
   assert.ok(releaseManifest > updateRouteStart && releaseManifest < agentPlaybook,
     "the held release feed must be the first live update decision");
   assert.ok(agentPlaybook < updateEntrypoint,
@@ -132,10 +175,37 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(updateRoute, /failed mandatory proof means the\s+update is incomplete/is);
   assert.doesNotMatch(updateRoute, /preflight\.(?:sh|ps1)/i,
     "an update must not route through a separate preflight script");
+  const conciergeRoute = content.slice(conciergeRouteStart, passkeyRouteStart);
+  assert.match(conciergeRoute, /Claude Code is the primary install surface/i);
+  assert.match(conciergeRoute, /handle the technical navigation and forms/i);
+  assert.match(conciergeRoute, /Fresh Cloudflare setup.*browser sign-in.*needs no API\s+token/is);
+  assert.match(conciergeRoute, /Stop on the final review screen/i);
+  assert.match(conciergeRoute, /owner checks the summary, chooses \*\*Create Token\*\*/i);
+  assert.match(conciergeRoute, /Do not resume browser observation until.*secret is no longer visible/is);
+  assert.match(conciergeRoute,
+    new RegExp("`" + renderedCommand("brain tools") + "` installs or updates the reviewed technician skill", "i"));
+  assert.match(conciergeRoute,
+    new RegExp("Fresh `" + renderedCommand("brain setup") + "` normally\\s+adds or updates this Brain's MCP entry", "i"));
+  assert.match(conciergeRoute, /run setup\s+with `--no-connect`/i);
+  const passkeyRoute = content.slice(passkeyRouteStart, setupRouteStart);
+  assert.match(passkeyRoute, /how the owner signs in.*private app/is);
+  assert.match(passkeyRoute, /expires fifteen minutes.*works once/is);
+  assert.match(passkeyRoute, /Nothing prompts merely because the page opened/i);
+  assert.match(passkeyRoute, /Only the owner's click on \*\*Create my owner passkey\*\*/i);
+  assert.match(passkeyRoute, /Face ID, Touch ID, a\s+fingerprint, a security key, or the device PIN/i);
+  assert.match(passkeyRoute, /Biometric data never goes to Financial Brain/i);
+  assert.match(passkeyRoute, /private passkey stays with\s+the device or the owner's chosen passkey provider/i);
+  assert.match(passkeyRoute, /Are you ready to create the one-time owner\s+link in your own terminal\?/i);
+  assert.match(passkeyRoute,
+    new RegExp("Never execute or capture `" + renderedCommand("brain invite") + "` in the agent\\s+session", "i"));
+  assert.match(passkeyRoute, /Do not click the web control/i);
+  assert.match(passkeyRoute, /Canceling before a\s+passkey is successfully verified does not consume the link/i);
+  assert.match(passkeyRoute, /Creating an invite is not proof of\s+enrollment, and enrollment is not proof of sign-in/i);
+  assert.doesNotMatch(passkeyRoute, /works (?:on|automatically on) every device/i);
   assert.match(content, /package-pinned browser login.*needs no generic second approval/is);
   assert.match(content, /unchanged counts alone are\s+inconclusive/i);
   assert.doesNotMatch(content, /next release clears/i);
-  assert.match(content, /set up, install, update, check, test a connector, complete a passkey step, or hand off/i);
+  assert.match(content, /set up, install, update, optimize, audit, check, test a connector, complete a passkey step, or hand off/i);
   assert.match(content, new RegExp(
     `existing-Brain checkup, start with \`${renderedCommand("brain doctor <manifest>")}\``, "i"));
   assert.match(content, /for every non-update route, finish with the preflight/i);
@@ -205,6 +275,7 @@ test("an unrelated Claude workspace guide is preserved byte-for-byte", () => {
 test("the plan is read-only, ordered, honest about proof, and agent-readable", () => {
   const missing = join(sandbox, "not-created.json");
   const plan = technicianPlan(missing);
+  assert.equal(plan.schema_version, 4);
   assert.equal(plan.mode, "read_only_plan");
   assert.equal(plan.proof_level, "workflow_only");
   assert.deepEqual(plan.steps.map((step) => step.id), TECHNICIAN_RUN_STEPS);
@@ -212,6 +283,37 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.equal(plan.steps[1].state, "ready_after_local_tools");
   assert.match(plan.warning, /Live proof arrives/i);
   assert.match(JSON.stringify(plan), /hidden terminal prompts/i);
+  assert.equal(plan.assistance.primary_surface, "claude_code");
+  assert.deepEqual(plan.assistance.modes, ["browser_help", "one_action_at_a_time"]);
+  assert.equal(plan.assistance.browser_help.use_when_available, true);
+  assert.equal(plan.assistance.browser_help.resume_only_after_secret_is_hidden, true);
+  assert.match(plan.assistance.browser_help.fresh_cloudflare_access, /no API token/i);
+  assert.match(plan.assistance.local_configuration.tools_writes.join("\n"), /technician skill/i);
+  assert.match(plan.assistance.local_configuration.setup_writes.join("\n"), /MCP entry/i);
+  assert.match(plan.assistance.local_configuration.mcp_opt_out, /--no-connect.*preview.*--apply/i);
+  assert.equal(plan.assistance.local_configuration.literal_brain_credential_written_to_ai_config, false);
+  assert.match(plan.rules.join("\n"), /offer browser help once/i);
+  assert.match(plan.rules.join("\n"), /token creation as recovery only/i);
+  const cloudflare = plan.steps.find((step) => step.id === "cloudflare");
+  assert.equal(cloudflare.owner_only_command, undefined);
+  assert.equal(cloudflare.agent_after_owner_approval.execution_boundary, "claude_after_explicit_owner_approval");
+  assert.equal(cloudflare.agent_after_owner_approval.requires_owner_approval, true);
+  assert.equal(cloudflare.agent_after_owner_approval.mutates_external_state, true);
+  assert.equal(cloudflare.agent_after_owner_approval.accepts_cloudflare_token, false);
+  const cloudflareArgs = cloudflare.agent_after_owner_approval.args.join(" ");
+  for (const flag of [
+    "--browser-sign-in", "--name", "--slug", "--cloudflare-account",
+    "--cloudflare-account-id", "--workers-paid-confirmed",
+  ]) assert.match(cloudflareArgs, new RegExp(flag));
+  assert.doesNotMatch(cloudflareArgs, /cloudflare-token/i);
+  assert.match(renderTechnicianPlan(plan), /Claude runs after your approval/i);
+  const passkey = plan.steps.find((step) => step.id === "passkey");
+  assert.equal(passkey.owner_only_command.execution_boundary, "owner_direct_terminal");
+  assert.equal(passkey.owner_only_command.reveals_one_time_link, true);
+  assert.equal(passkey.owner_only_command.agent_must_not_execute, true);
+  assert.equal(passkey.owner_only_command.requires_pre_ceremony_explanation, true);
+  assert.equal(passkey.owner_only_command.browser_prompt_requires_owner_click, true);
+  assert.match(plan.rules.join("\n"), /never runs or captures brain invite/i);
   assert.doesNotMatch(JSON.stringify(plan), /client_secret|app_password|api_token/i);
 });
 
@@ -226,8 +328,173 @@ test("the first technician step verifies local tools before any manifest or acco
     spawn: (node, args, options) => { call = { node, args, options }; return { status: 0 }; },
   });
   assert.deepEqual(receipt, { step: "tools", completed: true, commands_run: 1 });
-  assert.deepEqual(call.args, [fixtureScriptPath, "tools"]);
+  assert.deepEqual(call.args, [fixtureScriptPath, "tools", "--require-doctor"]);
   assert.equal(call.options.env.CLOUDFLARE_API_TOKEN, undefined);
+});
+
+test("the Cloudflare technician step forwards the complete owner-reviewed browser ceremony", async () => {
+  const freshManifest = join(sandbox, "fresh-cloudflare.json");
+  const flags = {
+    "browser-sign-in": true,
+    name: "Example Owner Brain",
+    slug: "example-owner-brain",
+    "cloudflare-account": "existing",
+    "cloudflare-account-id": "a".repeat(32),
+    "workers-paid-confirmed": true,
+  };
+  let call;
+  const receipt = await runTechnicianStep({
+    step: "cloudflare",
+    manifestPath: freshManifest,
+    flags,
+    scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath,
+    baseEnv: { PATH: "/safe/bin", CLOUDFLARE_API_TOKEN: "must-not-cross" },
+    spawn: (node, args, options) => { call = { node, args, options }; return { status: 0 }; },
+  });
+  assert.deepEqual(receipt, { step: "cloudflare", completed: true, commands_run: 1 });
+  assert.deepEqual(call.args, [
+    fixtureScriptPath, "setup", resolve(freshManifest),
+    "--browser-sign-in",
+    "--name", "Example Owner Brain",
+    "--slug", "example-owner-brain",
+    "--cloudflare-account", "existing",
+    "--cloudflare-account-id", "a".repeat(32),
+    "--workers-paid-confirmed",
+  ]);
+  assert.equal(call.options.env.CLOUDFLARE_API_TOKEN, undefined);
+});
+
+test("the Cloudflare technician step refuses incomplete context before spawning", async () => {
+  const complete = {
+    "browser-sign-in": true,
+    name: "Example Owner Brain",
+    slug: "example-owner-brain",
+    "cloudflare-account": "existing",
+    "cloudflare-account-id": "a".repeat(32),
+    "workers-paid-confirmed": true,
+  };
+  const invalid = [
+    { ...complete, "browser-sign-in": false },
+    { ...complete, name: "" },
+    { ...complete, slug: "Unsafe Slug" },
+    { ...complete, "cloudflare-account": "guess" },
+    { ...complete, "cloudflare-account-id": "short" },
+    { ...complete, "workers-paid-confirmed": false },
+    { ...complete, "no-connect": "yes" },
+  ];
+  for (const flags of invalid) {
+    let calls = 0;
+    await assert.rejects(runTechnicianStep({
+      step: "cloudflare",
+      manifestPath: join(sandbox, "fresh-cloudflare-invalid.json"),
+      flags,
+      scriptPath: fixtureScriptPath,
+      nodePath: fixtureNodePath,
+      spawn: () => { calls++; return { status: 0 }; },
+    }));
+    assert.equal(calls, 0);
+  }
+});
+
+test("the Cloudflare technician step forwards an approved no-connect switch", async () => {
+  let call;
+  await runTechnicianStep({
+    step: "cloudflare",
+    manifestPath: join(sandbox, "fresh-cloudflare-no-connect.json"),
+    flags: {
+      "browser-sign-in": true,
+      name: "Example Owner Brain",
+      slug: "example-owner-brain",
+      "cloudflare-account": "create",
+      "cloudflare-account-id": "b".repeat(32),
+      "workers-paid-confirmed": true,
+      "no-connect": true,
+    },
+    scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath,
+    spawn: (_node, args) => { call = args; return { status: 0 }; },
+  });
+  assert.deepEqual(call.slice(-2), ["--workers-paid-confirmed", "--no-connect"]);
+});
+
+test("an existing install record never advertises or launches fresh Cloudflare setup", async () => {
+  const plan = technicianPlan(manifestPath);
+  const cloudflare = plan.steps.find((step) => step.id === "cloudflare");
+  assert.equal(cloudflare.state, "represented_by_install_record");
+  assert.equal(cloudflare.command, null);
+  assert.equal(cloudflare.agent_after_owner_approval, undefined);
+  assert.equal(cloudflare.owner_only_command, undefined);
+  assert.match(cloudflare.existing_install_guidance, /tools and MCP.*doctor.*update/i);
+  assert.doesNotMatch(renderTechnicianPlan(plan), /--browser-sign-in/i);
+
+  let calls = 0;
+  await assert.rejects(runTechnicianStep({
+    step: "cloudflare",
+    manifestPath,
+    flags: {
+      "browser-sign-in": true,
+      name: "Example Owner Brain",
+      slug: "example-owner-brain",
+      "cloudflare-account": "existing",
+      "cloudflare-account-id": "a".repeat(32),
+      "workers-paid-confirmed": true,
+    },
+    scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath,
+    spawn: () => { calls++; return { status: 0 }; },
+  }), /already has an install record/i);
+  assert.equal(calls, 0);
+});
+
+test("the technician tools contract cannot complete without the interactive Claude doctor", async () => {
+  await assert.rejects(
+    cmdLocalTools({
+      isTTY: false,
+      requireDoctor: true,
+      platformName: "darwin",
+      environment: { HOME: join(sandbox, "strict-tools-home"), PATH: "/usr/bin:/bin" },
+      runCommand: (command, args) => {
+        if (command === "npx") return { ok: true, out: "wrangler 4.127.1" };
+        if (args[0] === "--version") return { ok: true, out: "2.1.63 (Claude Code)" };
+        if (args.join(" ") === "auth status") return { ok: true, out: "signed in" };
+        return { ok: false, out: "unexpected fixture command" };
+      },
+      installClaudeSkill: () => ({ status: "verified", path: "/safe/skill" }),
+      persistCliPath: () => ({ action: "skipped", reason: "fixture" }),
+    }),
+    /not complete.*interactive terminal/is,
+  );
+});
+
+test("Windows connector steps stop before every secret prompt and child launch", async () => {
+  for (const step of ["google", "zoom", "imap"]) {
+    let promptCalls = 0;
+    let childCalls = 0;
+    await assert.rejects(
+      runTechnicianStep({
+        step,
+        manifestPath,
+        scriptPath: fixtureScriptPath,
+        nodePath: fixtureNodePath,
+        platformName: "win32",
+        readHidden: async () => {
+          promptCalls++;
+          return Buffer.from("must-not-be-read");
+        },
+        spawn: () => {
+          childCalls++;
+          return { status: 0 };
+        },
+      }),
+      (error) => error.code === "windows_secure_input_unavailable" &&
+        /does not include a verified Windows secret-entry bridge/i.test(error.message) &&
+        /stops before asking.*launching the connector/i.test(error.message) &&
+        /persistent environment variable/i.test(error.message),
+    );
+    assert.equal(promptCalls, 0, `${step} must not ask for a secret on Windows`);
+    assert.equal(childCalls, 0, `${step} must not launch its connector on Windows`);
+  }
 });
 
 test("the smoke step runs only the injected deployed proof contract", async () => {
@@ -290,6 +557,7 @@ test("Google credentials cross only the child environment, never argv, and input
   const calls = [];
   const receipt = await runTechnicianStep({
     step: "google",
+    platformName: "darwin",
     manifestPath,
     flags: {},
     scriptPath: fixtureScriptPath,
@@ -324,6 +592,7 @@ test("Zoom collects the exact S2S values, strips ambient secrets, and zeroes eve
   let call;
   await runTechnicianStep({
     step: "zoom",
+    platformName: "darwin",
     manifestPath,
     scriptPath: fixtureScriptPath,
     nodePath: fixtureNodePath,
@@ -351,6 +620,7 @@ test("IMAP passes only non-secret routing values and leaves app-password prompti
   let call;
   await runTechnicianStep({
     step: "imap",
+    platformName: "darwin",
     manifestPath,
     flags: { host: "imap.example.test", user: "owner@example.test", port: "993", source: "owner-mail" },
     scriptPath: fixtureScriptPath,
@@ -403,11 +673,7 @@ test("verification is ordered and stops at the first failed proof", async () => 
   assert.deepEqual(commands, ["doctor", "health"]);
 });
 
-// Codex reads the same skill format from ~/.codex/skills, so one reviewed file
-// serves both assistants. Installing only Claude Code leaves the guide missing
-// in whichever tool the owner actually opens, which looks like the product
-// simply does not have one.
-test("the technician skill installs for both Claude Code and Codex, idempotently", async () => {
+test("the technician skill defaults to Claude and includes Codex only when already present", async () => {
   const { installTechnicianSkillEverywhere, technicianSkillPaths, AGENT_SKILL_ROOTS } =
     await import("../operations/claude-skill.mjs");
   const { mkdtempSync, existsSync, readFileSync, writeFileSync, realpathSync } = await import("node:fs");
@@ -418,7 +684,12 @@ test("the technician skill installs for both Claude Code and Codex, idempotently
   // refuses to write a skill through one.
   const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "fb-agents-")));
 
-  assert.deepEqual([...AGENT_SKILL_ROOTS], [".claude", ".codex"]);
+  assert.deepEqual([...AGENT_SKILL_ROOTS], [".claude"]);
+  const claudeOnly = installTechnicianSkillEverywhere({ home });
+  assert.deepEqual(claudeOnly.map((result) => result.root), [".claude"]);
+  assert.equal(existsSync(join(home, ".codex")), false, "Claude-only setup must not create a Codex config tree");
+
+  mkdirSync(join(home, ".codex"));
   const paths = technicianSkillPaths({ home });
   assert.equal(paths.length, 2);
   assert.ok(paths.some((p) => p.includes(join(".claude", "skills"))));
@@ -426,7 +697,8 @@ test("the technician skill installs for both Claude Code and Codex, idempotently
 
   const first = installTechnicianSkillEverywhere({ home });
   assert.equal(first.length, 2);
-  for (const r of first) assert.equal(r.status, "installed", `${r.root}: ${r.error || ""}`);
+  assert.equal(first[0].status, "verified");
+  assert.equal(first[1].status, "installed");
   for (const p of paths) assert.ok(existsSync(p), `${p} must exist`);
   assert.equal(
     readFileSync(paths[0], "utf8"),

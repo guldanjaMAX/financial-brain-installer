@@ -24,7 +24,8 @@
  *
  * The last section is the message an operator meets FIRST in that state. When
  * Cloudflare access cannot be established, the AUTH_REQUIRED failure must name
- * `brain update` and the explicit non-interactive consent switch, never setup.
+ * `brain update` and the explicit non-interactive consent flag, never setup or
+ * a persistent customer environment-variable workaround.
  */
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -256,9 +257,9 @@ try {
   check("AUTH_REQUIRED names `brain update <manifest>` from an interactive terminal",
     /brain update <manifest>/.test(authMessage) && /interactive terminal/i.test(authMessage),
     authMessage);
-  check("and it names the explicit consent switch a non-interactive session needs",
+  check("and it names only the explicit consent flag a non-interactive session needs",
     /--adopt-cloudflare-profile/.test(authMessage) &&
-      /BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(authMessage),
+      !/BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(authMessage),
     authMessage);
   check("and that consent is described as the owner's, not something to assume",
     /approv/i.test(authMessage), authMessage);

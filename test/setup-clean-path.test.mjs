@@ -78,12 +78,14 @@ try {
   const events = [];
   const key = `fixture-${"k".repeat(40)}`;
   const prompt = async (question, fallback) => {
-    if (/what is this brain for/i.test(question)) return "Clean Brain";
-    if (/short name/i.test(question)) return "clean-brain";
+    if (/what is this brain for|short name/i.test(question)) {
+      throw new Error("the complete Claude setup context must not ask for the Brain identity");
+    }
     if (/folder to load/i.test(question)) return "";
     return fallback || "";
   };
   await cmdSetup(target, {
+    flags: { name: "Clean Brain", slug: "clean-brain" },
     setupWorkerScriptExists: async () => false,
     ask: prompt,
     doctorRunAll: async (options) => {

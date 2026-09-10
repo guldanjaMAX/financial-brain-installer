@@ -732,8 +732,8 @@
     "tests": [
       "test/hidden-entry-fails-closed.test.mjs"
     ],
-    "acceptance": "A prompt that cannot prove it masked must refuse rather than ask. Prove on a physical Windows host, on both PowerShell 5.1 and PowerShell 7, that no credential is echoed and that the refusal names a route which does mask. A live Cloudflare API token was echoed in full at this prompt on Windows PowerShell 5.1 on 2026-09-08, on a shared screen, and was revoked. Every guard passed while it happened: the stream was a TTY, setRawMode existed, and enabling raw mode returned without throwing.",
-    "findings": "The console accepts the instruction to stop echoing and keeps echoing, which the process cannot detect. Fixed by refusing on win32 unless BRAIN_ALLOW_WINDOWS_ECHO_RISK is set, naming the Read-Host -AsSecureString route in the refusal, and on every platform verifying input.isRaw after setRawMode rather than trusting that the call returned."
+    "acceptance": "A prompt that cannot prove it masked must refuse rather than ask. Prove on a physical Windows host, on both PowerShell 5.1 and PowerShell 7, that no credential is echoed and that the refusal names a supported route which needs no secret entry. A live Cloudflare API token was echoed in full at this prompt on Windows PowerShell 5.1 on 2026-09-08, on a shared screen, and was revoked. Every guard passed while it happened: the stream was a TTY, setRawMode existed, and enabling raw mode returned without throwing.",
+    "findings": "The console accepts the instruction to stop echoing and keeps echoing, which the process cannot detect. The Cloudflare token caller now refuses on Windows and directs fresh setup to browser sign-in, which needs no API token. The Claude technician stops Google, Zoom, and IMAP before any Windows secret prompt or connector launch. This release ships no PowerShell secret-entry bridge. On every platform the shared prompt also verifies input.isRaw after setRawMode rather than trusting that the call returned. Physical PowerShell 5.1 and 7 proof remains open."
   },
   {
     "id": "UPDATE-038",
