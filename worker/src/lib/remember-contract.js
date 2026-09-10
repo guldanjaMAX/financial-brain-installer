@@ -41,6 +41,10 @@ export const REMEMBER_LIMITS = Object.freeze({
   tags: 20,
   tag: 80,
 });
+export const REMEMBER_BATCH_LIMITS = Object.freeze({
+  records: 10,
+  totalBodyChars: 80_000,
+});
 export const REMEMBER_FIELDS = Object.freeze([
   "title", "body", "confidence", "verification", "supersedes", "tags", "derived_from",
 ]);
@@ -53,6 +57,67 @@ const DATE_ANCHOR = /\bas of\b|\b\d{4}-\d{2}-\d{2}\b/i;
 const MAX_DERIVED_FROM = 16;
 const MAX_DERIVED_FROM_CHARS = 512;
 const DERIVED_FROM_CONTROL = /[\u0000-\u001f\u007f]/;
+
+export function rememberInputSchema() {
+  const recordProperties = {
+    title: {
+      type: "string", minLength: 1, maxLength: REMEMBER_LIMITS.title,
+      description: "One line stating what should be remembered, not just the topic.",
+    },
+    body: {
+      type: "string", minLength: REMEMBER_LIMITS.bodyMin, maxLength: REMEMBER_LIMITS.bodyMax,
+      description: "The information and any important conditions.",
+    },
+    confidence: {
+      type: "string", enum: CONFIDENCE,
+      description: "verified = you can say how you know. inferred = reasoned. unverified = reported.",
+    },
+    verification: {
+      type: "string", minLength: 1, maxLength: REMEMBER_LIMITS.verification,
+      description: 'Required when confidence is "verified". How you know.',
+    },
+    supersedes: {
+      type: "string", minLength: 1, maxLength: REMEMBER_LIMITS.supersedes,
+      description: "Exact source:source_id value returned by search for the current memory this corrects.",
+    },
+    tags: {
+      type: "array", maxItems: REMEMBER_LIMITS.tags,
+      items: { type: "string", minLength: 1, maxLength: REMEMBER_LIMITS.tag },
+    },
+    derived_from: {
+      type: "array", maxItems: 16,
+      items: { type: "string", minLength: 1, maxLength: 512 },
+      description: "Document ids returned by search that this lesson derives from. Leave empty when it came only from the owner's new statement.",
+    },
+  };
+  const recordSchema = {
+    type: "object",
+    properties: recordProperties,
+    required: ["title", "body", "confidence"],
+    additionalProperties: false,
+  };
+  return {
+    type: "object",
+    description:
+      "Pass one record with title, body, and confidence, or pass records for one owner-approved conversation batch. Never mix the two forms.",
+    properties: {
+      ...recordProperties,
+      records: {
+        type: "array",
+        minItems: 1,
+        maxItems: REMEMBER_BATCH_LIMITS.records,
+        items: recordSchema,
+        description:
+          `Up to ${REMEMBER_BATCH_LIMITS.records} self-contained durable records from the current conversation. The owner approves the exact complete set once.`,
+      },
+    },
+    anyOf: [
+      { required: ["title", "body", "confidence"] },
+      { required: ["records"] },
+    ],
+    additionalProperties: false,
+  };
+}
 
 const slugify = (s) =>
   String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) ||
@@ -235,6 +300,86 @@ export async function validateLesson(input, identityContext = {}) {
     ? `lesson/${slug}-correction-${digest}`
     : `lesson/${slug}-${digest}`;
   return { ok: true, errors, warnings, value };
+}
+
+/**
+ * Validate every item before the first write. A malformed later record must not
+ * leave the owner with a surprise partial batch. Storage failures can still be
+ * partial, so callers return exact confirmed receipts and stop immediately.
+ */
+export async function validateRememberRequest(input, identityContext = {}) {
+  const isObject = input && typeof input === "object" && !Array.isArray(input);
+  const hasRecords = isObject && Object.hasOwn(input, "records");
+  const hasSingleFields = isObject && REMEMBER_FIELDS.some((field) => Object.hasOwn(input, field));
+  if (hasRecords && hasSingleFields) {
+    return {
+      ok: false,
+      batch: true,
+      errors: ["use either one record or records, never both in the same approved write"],
+      records: [],
+    };
+  }
+  if (!hasRecords) {
+    const checked = await validateLesson(input, identityContext);
+    return {
+      ok: checked.ok,
+      batch: false,
+      errors: checked.errors,
+      records: checked.ok
+        ? [{ index: 0, value: checked.value, warnings: checked.warnings }]
+        : [],
+    };
+  }
+
+  const unknown = Object.keys(input).filter((key) => key !== "records");
+  if (unknown.length) {
+    return {
+      ok: false,
+      batch: true,
+      errors: [`batch form accepts only records; unexpected fields: ${unknown.join(", ")}`],
+      records: [],
+    };
+  }
+  if (!Array.isArray(input.records) || input.records.length < 1 ||
+      input.records.length > REMEMBER_BATCH_LIMITS.records) {
+    return {
+      ok: false,
+      batch: true,
+      errors: [`records must contain 1 to ${REMEMBER_BATCH_LIMITS.records} items`],
+      records: [],
+    };
+  }
+  const totalBodyChars = input.records.reduce(
+    (total, record) => total + (typeof record?.body === "string" ? record.body.length : 0),
+    0,
+  );
+  if (totalBodyChars > REMEMBER_BATCH_LIMITS.totalBodyChars) {
+    return {
+      ok: false,
+      batch: true,
+      errors: [
+        `records contain ${totalBodyChars} body characters; the per-call limit is ${REMEMBER_BATCH_LIMITS.totalBodyChars}`,
+      ],
+      records: [],
+    };
+  }
+
+  const checked = await Promise.all(
+    input.records.map((record) => validateLesson(record, identityContext)),
+  );
+  const errors = checked.flatMap((record, index) =>
+    record.errors.map((error) => `record ${index + 1}: ${error}`));
+  if (errors.length) return { ok: false, batch: true, errors, records: [] };
+  return {
+    ok: true,
+    batch: true,
+    errors: [],
+    records: checked.map((record, index) => ({
+      index,
+      value: record.value,
+      warnings: record.warnings,
+    })),
+  };
 }
 
 /**
