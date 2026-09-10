@@ -400,6 +400,7 @@ test("Plaid refuses before hidden entry unless environment, URLs, and Production
   const common = {
     step: "plaid",
     manifestPath,
+    platformName: "linux",
     scriptPath: fixtureScriptPath,
     nodePath: fixtureNodePath,
     readHidden: async () => { hiddenReads++; return Buffer.from("must-not-be-read"); },
@@ -460,6 +461,7 @@ test("Plaid local refusal runs before Cloudflare control or a hidden prompt", as
       "confirm-production-access": true,
       "confirm-single-setup-machine": true,
     }, {
+      platformName: "linux",
       isTTY: true,
       scriptPath: fixtureScriptPath,
       nodePath: fixtureNodePath,
@@ -507,6 +509,7 @@ test("Plaid requires explicit native configuration and a direct owner terminal b
   };
   const common = {
     step: "plaid",
+    platformName: "linux",
     scriptPath: fixtureScriptPath,
     nodePath: fixtureNodePath,
     readHidden: async () => { hiddenReads++; return Buffer.from("must-not-be-read"); },
@@ -612,6 +615,7 @@ test("Plaid explains the ceremony, accepts values only through hidden prompts, a
   const receipt = await runTechnicianStep({
     step: "plaid",
     manifestPath,
+    platformName: "linux",
     isTTY: true,
     flags: {
       "confirm-environment": "production",
@@ -675,6 +679,7 @@ test("Plaid wipes the first hidden value when the second prompt is interrupted",
     runTechnicianStep({
       step: "plaid",
       manifestPath,
+      platformName: "linux",
       isTTY: true,
       flags: {
         "confirm-environment": "production",
