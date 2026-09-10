@@ -181,6 +181,26 @@ the owner the final click.
 The owner remains the administrator of their Brain. Deletion and access
 changes stay in explicit owner controls instead of becoming silent chat tools.
 
+### Repair a missing local assistant handoff
+
+An Optimize audit stays read-only, including on a new computer. After the
+report, the owner may select only the missing or stale local pieces they want
+repaired. Preview them first:
+
+```bash
+brain assistant-repair ./brain.manifest.json --only technician-skill,claude-code-mcp,codex-mcp
+```
+
+The preview names every exact file or setting that would change, preserves
+custom and disabled entries, and prints one state-bound plan ID. After the owner
+approves that complete write set, run the exact apply command shown in the
+preview. One approval covers the selected bundle. The command snapshots every
+write destination before its first write, reads back each item exactly, and restores
+the entire selected write set in reverse order if any item fails. The command
+cannot replace the CLI and cannot change Brain records, sources, providers,
+access, zones, passkeys, devices, or cloud resources. A CLI install or update
+remains a separate release-controlled action.
+
 If a first setup is interrupted after D1 commits only part of a migration, the
 next setup does not guess that the database is unused. It stops before another
 write and prints two exact commands: run `brain update <manifest>` to establish

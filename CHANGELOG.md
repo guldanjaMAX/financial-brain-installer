@@ -37,6 +37,16 @@ that stops the waiting. Nothing here changes what your brain holds.
   source, show whether they came from the local owner assistant or an approved
   remote connector, and remain recollections rather than current-source proof.
 
+- **Optimize can offer one precise local repair after its read-only report.**
+  A new computer can be missing the technician guide, the Claude Code
+  connection, the Codex connection, or any combination. The new preview lists
+  only the pieces you select and the exact files or settings they would change.
+  One approval can apply that bundle. Customized and disabled entries stay
+  untouched, every write destination is snapshotted before the first write, and a
+  failure anywhere restores the full bundle to its previewed state. It cannot
+  replace the Brain CLI or change anything in your Brain, Cloudflare account,
+  sources, access, zones, passkeys, or devices.
+
 - **A large backlog is rebuilt in hours instead of days.** When your index is
   incomplete and the queue of waiting work is large, the update now re-embeds
   that queue in one bulk pass rather than draining it a hundred rows at a time.
