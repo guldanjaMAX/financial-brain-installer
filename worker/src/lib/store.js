@@ -484,6 +484,18 @@ const d1Backend = {
     };
   },
 
+  async taxDocumentCandidates(env, {
+    entitySlug = null, limit = 20, filters = {}, access = null, scope = null,
+  } = {}) {
+    return d1.unchunkedTaxDocumentCandidates(env, {
+      entitySlug,
+      limit,
+      filters,
+      access,
+      scope,
+    });
+  },
+
   async ingest(env, envelope, { deferFinalize = false, prepared = null } = {}) {
     // A prepared state is accepted only for the same in-memory envelope object.
     // That keeps this internal optimization from becoming a way to pair one
@@ -902,6 +914,13 @@ const supabaseBackend = {
       })),
       degraded: null, degraded_reason: null, ignored_filters: [],
     };
+  },
+
+  async taxDocumentCandidates() {
+    // The rollback adapter has no document-level inventory contract. Returning
+    // unknown prevents it from turning a missing chunk result into proof that
+    // an exact tax filing is absent.
+    return { results: [], complete: false, unavailable: true };
   },
 
   async ingest(env, envelope) {

@@ -513,6 +513,58 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   return results || [];
 }
 
+/**
+ * Find document rows that cannot participate in chunk search at all.
+ *
+ * An exact structured entity boundary uses the entity index. An ordinary owner
+ * question has no such boundary, so it inspects a bounded page of all
+ * zero-chunk rows and returns an explicit truncation state. That fallback is
+ * necessary for older encrypted files whose rows have neither entity_slug nor
+ * today's empty-content hash. The caller treats truncation as unknown coverage,
+ * so this lookup can never license a false corpus-absence claim. Every ordinary
+ * retrieval boundary is repeated here because even aggregate gap reporting
+ * must not reveal that a document exists outside the principal's grant or
+ * zones.
+ */
+export async function unchunkedTaxDocumentCandidates(env, {
+  entitySlug = null,
+  limit = 20,
+  filters = {},
+  access = null,
+  scope = null,
+} = {}) {
+  const boundedLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
+  const pageLimit = boundedLimit + 1;
+
+  const entityBound = Boolean(entitySlug);
+  const f = filterSql(filters, "d", entityBound ? 3 : 2);
+  const sc = scopeSql(scope, "d", f.nextParam);
+  const a = documentAccessSql(access, "d", "d", sc.nextParam);
+  const selectorSql = entityBound ? "AND d.entity_slug = ?1" : "";
+  const limitParameter = entityBound ? "?2" : "?1";
+  const binds = entityBound ? [entitySlug, pageLimit] : [pageLimit];
+  const { results } = await env.DB.prepare(
+    `/* unchunked-tax-document-candidates */
+     SELECT d.doc_uid, d.source, COALESCE(src.kind, 'unregistered') AS source_kind,
+            d.source_id, d.title, d.uri, d.document_date, d.date_source, d.date_reliable,
+            d.entity_slug, d.client, d.category, d.top_folder, d.platform,
+            d.text_source, d.text_reliable, d.meta AS authority_meta
+       FROM documents d
+       LEFT JOIN sources src ON src.name = d.source
+      WHERE d.deleted_at IS NULL
+        ${selectorSql}
+        AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_uid = d.doc_uid)
+        ${f.clause}${sc.clause}${a.clause}
+      ORDER BY d.ingested_at DESC
+      LIMIT ${limitParameter}`
+  ).bind(...binds, ...f.params, ...sc.params, ...a.params).all();
+  const page = results || [];
+  return {
+    results: page.slice(0, boundedLimit).map((row) => ({ ...row, has_chunks: false })),
+    complete: page.length <= boundedLimit,
+  };
+}
+
 /** Vector search over Vectorize, hydrated and filtered in D1. */
 export async function searchVector(env, embedding, { limit, filters = {}, scope = null } = {}) {
   const topK = Math.min(limit, VECTOR_TOPK_MAX);
