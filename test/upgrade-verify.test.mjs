@@ -45,6 +45,7 @@ import {
   cmdUpgrade as cmdUpgradeWithRealQuiescence,
   commitManifestVersion,
   compareSemver,
+  documentsReceiptVerdict,
   healthProbeVerdict,
   runAcceleratedBootstrap,
   validateAcceleratedBootstrapBusyReceipt,
@@ -98,6 +99,7 @@ let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 200))); if (!c) fail++; };
 
 const V = (o) => healthProbeVerdict(o);
+const D = (o) => documentsReceiptVerdict(o);
 const body = (v) => JSON.stringify({ ok: true, brain: "x", version: v });
 const cutoverBody = (v, mode, protocol = "lease-v1") => JSON.stringify({
   ok: true,
@@ -267,6 +269,38 @@ const bootstrapCompletion = () => ({
   check("the rolling-upgrade grace is never shorter than one supported writer lease",
     VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS >= DRAIN_LEASE_TTL_MS,
     `${VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS} < ${DRAIN_LEASE_TTL_MS}`);
+
+  const publicActive = V({
+    ok: true,
+    body: cutoverBody(RUNNING_VERSION, "active"),
+    expectVersion: RUNNING_VERSION,
+    expectDrainMode: "active",
+    attempt: 1,
+    attempts: 6,
+  });
+  const pausedDocuments = {
+    version: RUNNING_VERSION,
+    vector_drain_mode: "paused-for-upgrade",
+  };
+  check("an active public probe cannot splice with a paused authenticated readiness generation",
+    publicActive === "accept" &&
+      D({ inventory: pausedDocuments, expectVersion: RUNNING_VERSION, expectDrainMode: "active", attempt: 1, attempts: 15 }) === "retry" &&
+      D({ inventory: pausedDocuments, expectVersion: RUNNING_VERSION, expectDrainMode: "active", attempt: 15, attempts: 15 }) === "fail");
+  check("authenticated readiness is accepted only when its own version and mode match",
+    D({
+      inventory: { version: RUNNING_VERSION, vector_drain_mode: "active" },
+      expectVersion: RUNNING_VERSION,
+      expectDrainMode: "active",
+      attempt: 1,
+      attempts: 15,
+    }) === "accept" &&
+      D({
+        inventory: { version: "0.0.0-fixture-old", vector_drain_mode: "active" },
+        expectVersion: RUNNING_VERSION,
+        expectDrainMode: "active",
+        attempt: 15,
+        attempts: 15,
+      }) === "fail");
 }
 
 /* ---- schema-13 bootstrap receipts are aggregate-only and exact ---- */

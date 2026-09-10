@@ -18,6 +18,11 @@ const FIXTURE_ADMIN = "fixture-admin-label";
 const FIXTURE_TOKEN = "fixture-cloudflare-label";
 
 function json(body, status = 200) {
+  if (body && typeof body === "object" && body.backend &&
+      SCENARIO !== "health-documents-version-missing" &&
+      !Object.prototype.hasOwnProperty.call(body, "version")) {
+    body = { ...body, version: "0.1.9" };
+  }
   if (body && typeof body === "object" && String(body.backend || "").toLowerCase() === "d1" &&
       SCENARIO !== "health-documents-mode-missing" &&
       !Object.prototype.hasOwnProperty.call(body, "vector_drain_mode")) {
@@ -294,6 +299,12 @@ if (SCENARIO) {
   check("health still succeeds after authenticated documents are proven",
     healthy.code === 0 && /documents endpoint 200/.test(healthy.output) &&
       /vector index is query-ready/.test(healthy.output), healthy.output);
+
+  const versionlessDocuments = runScenario("health-documents-version-missing", "health", { adminKey: true });
+  check("health rejects authenticated readiness that carries no Worker version",
+    versionlessDocuments.code === 1 && /could not prove its Worker version/i.test(versionlessDocuments.output) &&
+      !/vector index is query-ready/.test(versionlessDocuments.output),
+    versionlessDocuments.output);
 
   for (const scenario of ["health-backlog-error", "health-backlog-missing", "health-backlog-malformed"]) {
     const invalidBacklog = runScenario(scenario, "health", { adminKey: true });

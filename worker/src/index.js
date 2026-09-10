@@ -1826,6 +1826,7 @@ async function handleDocuments(env) {
   // follow the generation that produced the readiness receipt, not whichever
   // generation happened to answer the earlier public probe.
   const out = {
+    version: WORKER_VERSION,
     backend: backendOf(env),
     rows: rows || [],
     vector_drain_mode: upgradePauseHolds(env) ? "paused-for-upgrade" : "active",

@@ -451,8 +451,8 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("paused quarantine keeps the explicitly allowed vector-retry recovery",
     /vector-retry/.test(paused?.action || "") && /brain update <manifest>/.test(paused?.action || ""),
     paused?.action);
-  check("paused quarantine never falls through to refused drain or reindex",
-    !/brain drain <manifest>|brain reindex <manifest>/.test(paused?.action || ""), paused?.action);
+  check("paused quarantine never falls through to refused drain, reindex, or forget",
+    !/brain drain <manifest>|brain reindex <manifest>|brain forget <manifest>/.test(paused?.action || ""), paused?.action);
 }
 
 /* ---- it must degrade rather than explode ---- */

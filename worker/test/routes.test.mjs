@@ -1401,6 +1401,8 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   }]);
   const documentsResponse = await call(env, "/api/admin/brain/documents");
   const b = await documentsResponse.json();
+  check("documents binds the Worker version to the authenticated readiness receipt",
+    b.version === WORKER_VERSION, JSON.stringify(b));
   check("documents names the backend", b.backend === "d1", JSON.stringify(b));
   check("documents binds active writer mode to the same receipt as readiness",
     b.vector_drain_mode === "active", JSON.stringify(b));
@@ -1418,7 +1420,8 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   const pausedDocuments = await call({ ...env, VECTOR_DRAIN_MODE: "paused-for-upgrade" }, "/api/admin/brain/documents");
   const pausedBody = await pausedDocuments.json();
   check("paused documents bind the refusal mode to their own readiness receipt",
-    pausedDocuments.status === 200 && pausedBody.vector_drain_mode === "paused-for-upgrade" &&
+    pausedDocuments.status === 200 && pausedBody.version === WORKER_VERSION &&
+      pausedBody.vector_drain_mode === "paused-for-upgrade" &&
       pausedBody.vector_readiness && typeof pausedBody.vector_readiness.ready === "boolean",
     JSON.stringify(pausedBody));
 

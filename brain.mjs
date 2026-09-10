@@ -2671,6 +2671,28 @@ export function healthProbeVerdict({
 }
 
 /**
+ * Bind authenticated readiness to the Worker generation and writer mode that
+ * produced it. A rolling deploy may send /health and /documents to different
+ * generations, so the public receipt alone cannot authorize readiness or the
+ * recovery advice derived from it.
+ *
+ * Returns "accept" | "retry" | "fail".
+ */
+export function documentsReceiptVerdict({
+  inventory,
+  expectVersion = null,
+  expectDrainMode = null,
+  attempt = 1,
+  attempts = 15,
+}) {
+  if (!expectVersion && !expectDrainMode) return "accept";
+  const versionMatches = !expectVersion || inventory?.version === expectVersion;
+  const drainModeMatches = !expectDrainMode || inventory?.vector_drain_mode === expectDrainMode;
+  if (versionMatches && drainModeMatches) return "accept";
+  return attempt < attempts ? "retry" : "fail";
+}
+
+/**
  * Give count mismatches a direction-aware recovery. Missing provider rows can
  * be rebuilt from D1. Excess provider-only rows cannot: their ids no longer
  * exist in D1, so a reindex has nothing it can enumerate and delete.
@@ -2797,7 +2819,10 @@ async function cmdHealth(manifestPath, {
   }
   if (!res.ok) die(`/health returned ${res.status} after ${healthAttempts} attempts: ${body.slice(0, 200)}`);
   ok(`/health ${res.status} ${body.slice(0, 160)}`);
-  if (reachOnly) return;
+  // An expected version or writer mode is a generation claim, not merely a
+  // reachability claim. Prove it again on the authenticated receipt even when
+  // the caller does not yet need backlog/readiness validation.
+  if (reachOnly && !expectVersion && !expectDrainMode) return;
 
   const key = resolveAdminKey(manifestPath, { ignoreEnvironment: durableAdminKeyOnly });
   if (!key) {
@@ -2838,6 +2863,35 @@ async function cmdHealth(manifestPath, {
             "      Re-run `brain health`; if this repeats, the deployed Worker and installer do not match."
         );
       }
+      const receiptVerdict = documentsReceiptVerdict({
+        inventory,
+        expectVersion,
+        expectDrainMode,
+        attempt: i,
+        attempts,
+      });
+      if (receiptVerdict === "retry") {
+        const expectation = [
+          expectVersion ? `version ${expectVersion}` : null,
+          expectDrainMode ? `vector drain mode ${expectDrainMode}` : null,
+        ].filter(Boolean).join(" and ");
+        info(`the authenticated documents receipt has not reached ${expectation}; waiting for one Worker generation`);
+        await new Promise((r) => setTimeout(r, 4000));
+        continue;
+      }
+      if (receiptVerdict === "fail") {
+        die(
+          `the authenticated documents receipt did not reach the deployed Worker after ${attempts} attempts.` + "\n" +
+            "      /health and /documents may be serving different Worker generations. Health cannot" + "\n" +
+            "      combine their state, so no readiness or recovery advice was accepted. Keep any update pause in place and retry this verification."
+        );
+      }
+      if (typeof inventory.version !== "string" || !inventory.version.trim()) {
+        die(
+          "the authenticated documents endpoint could not prove its Worker version." + "\n" +
+            "      Health cannot bind this readiness receipt to one deployed Worker generation."
+        );
+      }
       const actualBackend = inventory.backend.trim().toLowerCase();
       if (!["d1", "supabase"].includes(actualBackend)) {
         die(
@@ -2855,6 +2909,7 @@ async function cmdHealth(manifestPath, {
         );
       }
       ok(`documents endpoint ${docs.status}; authenticated inventory confirmed`);
+      if (reachOnly) return;
 
       // D1 and Vectorize cannot share a transaction. Both systems can be up
       // while semantic search is behind or stale, so the operation backlog is
@@ -4562,7 +4617,7 @@ export async function runAcceleratedBootstrap({
     if (receipt.blocked_on === "quarantine") {
       die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so this update cannot finish the vector projection.\n` +
         "      Release them with POST /api/admin/brain/vector-retry {\"confirm\":true} (admin key), then re-run `brain update <manifest>`.\n" +
-        "      If the index rejects them again, the documents they belong to must be forgotten (`brain forget <manifest>`) before the projection can verify.\n" +
+        "      If the index rejects them again, keep the Worker paused and report this update failure for reviewed repair.\n" +
         "      The Worker remains paused.");
     }
     if (receipt.blocked_on === "fence" && !announcedFence) {

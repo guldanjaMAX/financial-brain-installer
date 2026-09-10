@@ -2023,8 +2023,8 @@ const qAll = async (env, sql, ...bind) => {
 /**
  * Never prescribe an action the state that produced the message forbids.
  *
- * A paused brain refuses reindex and drain with 503, and the pause only lifts
- * when the update completes. Advising either from inside that state is a closed
+ * A paused brain refuses reindex, drain, and forget with 503, and the pause only
+ * lifts when the update completes. Advising one from inside that state is a closed
  * loop: the operator reads a remedy, runs it, is refused, and has learned
  * nothing. Four separate messages did this, and one client followed them across
  * four update attempts over 97 hours.
@@ -2037,11 +2037,11 @@ export function remedyForState(env, remedy, { pausedRemedy = null } = {}) {
   const recovery = typeof pausedRemedy === "string" && pausedRemedy
     ? pausedRemedy
     : "Run `brain update <manifest>` to resume the durable paused work.";
-  return "This brain is paused for an upgrade, so reindex and drain both return 503 " +
+  return "This brain is paused for an upgrade, so reindex, drain, and forget all return 503 " +
     `until it finishes. ${recovery} The update ` +
     "is the only supported projection writer while this barrier holds. If the update " +
     "reports this same finding again without progress, keep the brain paused and report " +
-    "that update failure for reviewed repair. Do not clear the pause or run reindex or drain by hand.";
+    "that update failure for reviewed repair. Do not clear the pause or run reindex, drain, or forget by hand.";
 }
 
 export async function diagnose(env, {
