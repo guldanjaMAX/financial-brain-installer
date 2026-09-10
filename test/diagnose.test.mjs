@@ -19,6 +19,7 @@ import {
   drainOutbox,
   vectorReadiness,
 } from "../worker/src/lib/store-d1.js";
+import { diagnosisReceiptVerdict, renderDiagnosis } from "../brain.mjs";
 
 import { makeEnv as makeDrainEnv, seed as seedDrain, embed as embedDrain } from "./fixtures/vector-fence-env.mjs";
 
@@ -221,6 +222,43 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
     f?.severity === "warn" && f.count === 1, JSON.stringify(f));
   check("the mismatch finding states that document-source authorization still holds",
     /does not widen access/.test(f?.detail || "") && /Reingest/.test(f?.action || ""), JSON.stringify(f));
+}
+
+/* ---- every corpus-changing remedy respects the verified update pause ---- */
+{
+  const env = makeEnv({ drainMode: "paused-for-upgrade" });
+  source(env._db, "documents", "books");
+  source(env._db, "archive");
+  doc(env._db, "blank");
+  chunk(env._db, "blank#0", "blank", "");
+  env._db.prepare("UPDATE documents SET zone = NULL WHERE doc_uid = 'blank'").run();
+  env._db.prepare("UPDATE chunks SET source = 'archive', zone = 'books' WHERE chunk_uid = 'blank#0'").run();
+  doc(env._db, "empty-unregistered", { source: "mystery", title: "Empty fixture" });
+  doc(env._db, "dominant-sheet", { title: "Dominant fixture.xlsx" });
+  for (let i = 0; i < 50; i++) {
+    chunk(env._db, `dominant-sheet#${i}`, "dominant-sheet", `duplicate-fixture-${i % 12}`, i);
+  }
+
+  const report = await diagnose(env);
+  const ids = [
+    "empty_documents",
+    "unregistered_source",
+    "empty_source",
+    "zone_assignment",
+    "zone_projection",
+    "chunk_document_source_mismatch",
+    "blank_chunks",
+    "chunk_outliers",
+    "duplicate_chunks",
+  ];
+  const findings = ids.map((id) => find(report, id));
+  check("the paused fixture exercises every diagnostic that would otherwise prescribe a corpus write",
+    findings.every(Boolean), JSON.stringify((report.findings || []).map((finding) => finding.id)));
+  check("paused diagnostics replace every refused write remedy with the supported update path",
+    findings.every((finding) =>
+      /paused for an upgrade.*brain update <manifest>.*only supported projection writer/is.test(finding?.action || "") &&
+      !/(Register it:|Run its ingest|Rerun `brain zone|Re-?ingest the|turn it on .*re-ingest|assign each intended source)/i.test(finding?.action || "")),
+    JSON.stringify(findings.map((finding) => ({ id: finding?.id, action: finding?.action }))));
 }
 
 /* ---- chunks whose document is gone ---- */
@@ -465,6 +503,43 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("no Vectorize binding does not throw", threw === null, `threw: ${threw}`);
   check("and it says the comparison could not be made rather than passing it",
     find(r, "store_agreement")?.severity === "info", JSON.stringify(find(r, "store_agreement")));
+}
+
+/* ---- total D1 observability failure can never masquerade as an empty brain ---- */
+{
+  const env = {
+    DB: {
+      prepare() {
+        throw new Error("D1_ERROR: exceeded CPU time limit");
+      },
+    },
+  };
+  const report = await diagnose(env);
+  check("an all-check database failure returns an incomplete diagnostic contract",
+    report.complete === false && report.verdict === "incomplete" &&
+      report.unavailable_checks.length === 19 && report.summary.unavailable === 19,
+    JSON.stringify(report));
+  check("unobservable totals stay unknown instead of being invented as zero",
+    report.totals.documents === null && report.totals.chunks === null && report.totals.sources === null,
+    JSON.stringify(report.totals));
+  check("a failed check does not guess that an upgrade is the repair",
+    !/brain upgrade|schema older/i.test(JSON.stringify(report)), JSON.stringify(report.findings));
+  check("the CLI receipt gate refuses an incomplete diagnostic",
+    diagnosisReceiptVerdict(report).ok === false, JSON.stringify(diagnosisReceiptVerdict(report)));
+
+  const lines = [];
+  const originalLog = console.log;
+  try {
+    console.log = (...parts) => lines.push(parts.join(" "));
+    renderDiagnosis(report);
+  } finally {
+    console.log = originalLog;
+  }
+  const rendered = lines.join("\n");
+  check("an incomplete diagnosis renders unknown counts and no false-green assurance",
+    /unknown\s+documents/.test(rendered) && /diagnosis is incomplete/i.test(rendered) &&
+      !/the brain works|nothing is missing|nothing here makes an answer wrong/i.test(rendered),
+    rendered);
 }
 
 console.log(`\ndiagnose: ${ran - fail}/${ran} passed`);

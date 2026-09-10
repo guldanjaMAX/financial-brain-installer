@@ -23,12 +23,13 @@ function json(body, status = 200) {
       !Object.prototype.hasOwnProperty.call(body, "version")) {
     body = { ...body, version: "0.1.9" };
   }
-  if (body && typeof body === "object" && String(body.backend || "").toLowerCase() === "d1" &&
+  if (body && typeof body === "object" && body.backend &&
       SCENARIO !== "health-documents-mode-missing" &&
       !Object.prototype.hasOwnProperty.call(body, "vector_drain_mode")) {
     body = {
       ...body,
       vector_drain_mode: [
+        "health-paused-ready",
         "health-paused-vector-count-mismatch",
         "health-mixed-generation-vector-count-mismatch",
       ].includes(SCENARIO) ? "paused-for-upgrade" : "active",
@@ -54,7 +55,7 @@ if (SCENARIO) {
     const url = requestUrl(input);
 
     if (url.hostname === "fixture.invalid" && url.pathname === "/health") {
-      if (SCENARIO === "health-paused-vector-count-mismatch") {
+      if (["health-paused-ready", "health-paused-vector-count-mismatch"].includes(SCENARIO)) {
         return json({
           ok: false,
           status: "paused-for-upgrade",
@@ -64,7 +65,17 @@ if (SCENARIO) {
           vector_drain_mode: "paused-for-upgrade",
         });
       }
-      return json({ ok: true, version: "0.1.9" });
+      if (SCENARIO === "health-public-incomplete") {
+        return json({ ok: true, version: "0.1.9" });
+      }
+      return json({
+        ok: true,
+        status: "ok",
+        accepting_documents: true,
+        version: "0.1.9",
+        vector_writer_protocol: "lease-v1",
+        vector_drain_mode: "active",
+      });
     }
     if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/documents") {
       if (new Headers(options.headers).get("X-Admin-Key") !== FIXTURE_ADMIN) {
@@ -103,20 +114,20 @@ if (SCENARIO) {
           },
         });
       }
-      if (SCENARIO === "health-backlog-stalled") {
+      if (SCENARIO === "health-backlog-old") {
         return json({
           backend: "d1",
           rows: [],
           vector_backlog: {
-            pending: 1,
-            upserts: 1,
+            pending: 10_240,
+            upserts: 10_240,
             deletes: 0,
             submitted: 0,
-            oldest_queued_at: Date.now() - 31 * 60 * 1000,
+            oldest_queued_at: Date.now() - 181 * 60 * 1000,
           },
           vector_readiness: {
             ready: false, reason: "vector_work_queued",
-            expected_vectors: 1, actual_vectors: 0, pending: 1, submitted: 0,
+            expected_vectors: 10_240, actual_vectors: 0, pending: 10_240, submitted: 0,
           },
         });
       }
@@ -161,6 +172,19 @@ if (SCENARIO) {
           vector_readiness: {
             ready: false, reason: "vector_count_mismatch",
             expected_vectors: 10, actual_vectors: 13, pending: 0, submitted: 0,
+          },
+        });
+      }
+      if (SCENARIO === "health-mixed-generation-ready") {
+        return json({
+          backend: "d1",
+          version: "0.1.8",
+          vector_drain_mode: "active",
+          rows: [],
+          vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 },
+          vector_readiness: {
+            ready: true, reason: null,
+            expected_vectors: 0, actual_vectors: 0, pending: 0, submitted: 0,
           },
         });
       }
@@ -300,6 +324,11 @@ if (SCENARIO) {
     healthy.code === 0 && /documents endpoint 200/.test(healthy.output) &&
       /vector index is query-ready/.test(healthy.output), healthy.output);
 
+  const incompletePublic = runScenario("health-public-incomplete", "health", { adminKey: true });
+  check("health rejects a 200 public response that cannot prove an exact Worker state",
+    incompletePublic.code === 1 && /did not return one exact Worker version and writer state/i.test(incompletePublic.output) &&
+      !/documents endpoint 200/.test(incompletePublic.output), incompletePublic.output);
+
   const versionlessDocuments = runScenario("health-documents-version-missing", "health", { adminKey: true });
   check("health rejects authenticated readiness that carries no Worker version",
     versionlessDocuments.code === 1 && /could not prove its Worker version/i.test(versionlessDocuments.output) &&
@@ -318,10 +347,16 @@ if (SCENARIO) {
     missingOldest.code === 1 && /without a valid oldest timestamp/is.test(missingOldest.output),
     missingOldest.output);
 
-  const stalled = runScenario("health-backlog-stalled", "health", { adminKey: true });
-  check("health exits nonzero when the vector queue is older than the allowed drain window",
-    stalled.code === 1 && /vector operation\(s\) are stalled.*oldest queued/is.test(stalled.output) &&
-      !/vector index is caught up/.test(stalled.output), stalled.output);
+  const oldQueue = runScenario("health-backlog-old", "health", { adminKey: true });
+  check("an old active queue stays non-green without being called stalled from one snapshot",
+    oldQueue.code === 1 && /10240 vector operation\(s\) are still processing.*oldest queued/is.test(oldQueue.output) &&
+      /Age alone does not prove a stall.*one snapshot cannot tell/is.test(oldQueue.output) &&
+      !/vector operation\(s\) are stalled/i.test(oldQueue.output) &&
+      !/vector index is caught up/.test(oldQueue.output), oldQueue.output);
+  check("a falling pending count is explicitly working, not a reason to start an update",
+    /pending count is falling between checks, indexing is.*working/is.test(oldQueue.output) &&
+      /Do not start .*brain update.*healthy active-mode queue/is.test(oldQueue.output),
+    oldQueue.output);
 
   const processing = runScenario("health-vector-processing", "health", { adminKey: true });
   check("health cannot green an accepted mutation before query visibility",
@@ -331,18 +366,18 @@ if (SCENARIO) {
 
   // A manual drain takes the same lease the scheduled drain holds, so the two
   // exclude each other rather than adding up, and the manual runner is slower.
-  // Health used to hand a stalled operator that exact command. Assert it never
-  // INSTRUCTS one again, and that a stall says so plainly, rather than merely
+  // Health used to hand an old-queue operator that exact command. Assert it never
+  // INSTRUCTS one again, and that the snapshot says what it cannot prove, rather than merely
   // never naming the command.
   // The warning names a command, and on Windows the CLI renders that command as a
   // runnable invocation rather than the bare word. Build the expectation through
   // the product's own renderer, or this assertion passes on macOS and fails on the
   // one platform the warning exists for.
-  check("health never instructs a manual drain, and warns against it when stalled",
+  check("health never instructs a manual drain, and warns against it for an old queue",
     !/(Clear it now with|Finish and confirm visibility with|Re-run `brain drain)/i
-        .test(stalled.output + processing.output) &&
-      stalled.output.includes(renderCliCommands("Do NOT run `brain drain`")),
-    stalled.output + processing.output);
+        .test(oldQueue.output + processing.output) &&
+      oldQueue.output.includes(renderCliCommands("Do NOT run `brain drain`")),
+    oldQueue.output + processing.output);
 
   const countMismatch = runScenario("health-vector-count-mismatch", "health", { adminKey: true });
   check("health rejects an empty queue when Vectorize is still missing vectors",
@@ -352,26 +387,36 @@ if (SCENARIO) {
     countMismatch.output);
 
   const pausedCountMismatch = runScenario("health-paused-vector-count-mismatch", "health", { adminKey: true });
-  check("health sends a paused count mismatch back through update, not the refused reindex endpoint",
+  check("ordinary health cannot pass a same-generation paused brain",
     pausedCountMismatch.code === 1 &&
-      /paused.*Reindex and drain are refused/is.test(pausedCountMismatch.output) &&
+      /paused for an update.*ordinary health cannot pass/is.test(pausedCountMismatch.output) &&
       pausedCountMismatch.output.includes(renderCliCommands("brain update <manifest>")) &&
       !pausedCountMismatch.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
     pausedCountMismatch.output);
 
+  const pausedReady = runScenario("health-paused-ready", "health", { adminKey: true });
+  check("a query-ready receipt cannot turn a paused brain green",
+    pausedReady.code === 1 && /paused for an update.*ordinary health cannot pass/is.test(pausedReady.output) &&
+      !/vector index is query-ready/.test(pausedReady.output), pausedReady.output);
+
   const mixedGeneration = runScenario("health-mixed-generation-vector-count-mismatch", "health", { adminKey: true });
-  check("health follows the paused mode bound to readiness even when public health answered active",
+  check("health refuses to splice an active public receipt with paused authenticated readiness",
     mixedGeneration.code === 1 &&
-      /Reindex and drain are refused.*paused/is.test(mixedGeneration.output) &&
-      mixedGeneration.output.includes(renderCliCommands("brain update <manifest>")) &&
-      !mixedGeneration.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
+      /did not match the public Worker's version and writer mode/is.test(mixedGeneration.output) &&
+      !mixedGeneration.output.includes(renderCliCommands("brain reindex <manifest> --yes")) &&
+      !mixedGeneration.output.includes(renderCliCommands("brain drain <manifest>")),
     mixedGeneration.output);
+
+  const mixedReady = runScenario("health-mixed-generation-ready", "health", { adminKey: true });
+  check("two individually healthy generations cannot produce a false-green readiness result",
+    mixedReady.code === 1 && /did not match the public Worker's version and writer mode/is.test(mixedReady.output) &&
+      !/vector index is query-ready/.test(mixedReady.output), mixedReady.output);
 
   const unboundMode = runScenario("health-documents-mode-missing", "health", { adminKey: true });
   check("health refuses recovery commands when readiness carries no same-generation writer mode",
     unboundMode.code === 1 && /could not prove its vector writer mode/i.test(unboundMode.output) &&
-      unboundMode.output.includes(renderCliCommands("brain update <manifest>")) &&
-      !unboundMode.output.includes(renderCliCommands("brain reindex <manifest> --yes")),
+      !unboundMode.output.includes(renderCliCommands("brain reindex <manifest> --yes")) &&
+      !unboundMode.output.includes(renderCliCommands("brain drain <manifest>")),
     unboundMode.output);
 
   const countExcess = runScenario("health-vector-count-excess", "health", { adminKey: true });

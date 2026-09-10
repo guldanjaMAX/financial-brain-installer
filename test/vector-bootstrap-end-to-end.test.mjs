@@ -176,12 +176,18 @@ function drive(env, { maxDurationMs = 3_600_000, contract = 2, onPoll = null } =
   seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10, quarantined: 50 });
   const run = await drive(env);
   const after = snapshot(db);
+  const quarantineMessage = String(run.error?.message || "");
   check("quarantine: 1,150 embedded, then refused with the allowed retry and reviewed-repair path before the movement budget",
-    run.error !== null && /50 quarantined row\(s\)/.test(String(run.error?.message)) && /vector-retry/.test(String(run.error?.message)) &&
-      /reviewed repair/.test(String(run.error?.message)) && !/brain forget/.test(String(run.error?.message)) &&
-      !/reindex/.test(String(run.error?.message)) &&
+    run.error !== null && /50 quarantined row\(s\)/.test(quarantineMessage) && /vector-retry/.test(quarantineMessage) &&
+      /reviewed repair/.test(quarantineMessage) && !/brain forget/.test(quarantineMessage) &&
+      !/reindex/.test(quarantineMessage) &&
       run.embeds() === 1150 && Number(after.outbox) === 50 && after.status === "pending",
     JSON.stringify({ error: String(run.error?.message).slice(0, 200), embeds: run.embeds(), after }));
+  check("quarantine guidance makes the read-only preview precede owner-reviewed confirmation",
+    quarantineMessage.indexOf('{"confirm":false}') >= 0 &&
+      quarantineMessage.indexOf('{"confirm":true}') > quarantineMessage.indexOf('{"confirm":false}') &&
+      /read-only receipt[\s\S]*owner reviews that count/.test(quarantineMessage),
+    quarantineMessage);
   // The remedy the refusal names, then the same update again.
   db.prepare("DELETE FROM vector_outbox_retry_state WHERE quarantined_at IS NOT NULL").run();
   db.prepare("UPDATE vector_outbox SET attempts=0, last_error=NULL").run();

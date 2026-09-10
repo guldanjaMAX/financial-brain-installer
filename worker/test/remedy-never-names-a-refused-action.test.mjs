@@ -53,6 +53,8 @@ const REFUSED_WHILE_PAUSED = [
   /brain reindex <manifest>/g,
   /brain drain <manifest>/g,
   /brain forget <manifest>/g,
+  /brain sources <manifest> --add/g,
+  /brain zone <manifest>/g,
 ];
 
 const offenders = [];
@@ -99,7 +101,7 @@ assert.match(
 );
 assert.match(
   source,
-  /paused for an upgrade, so reindex, drain, and forget all return 503/,
+  /paused for an upgrade, so corpus mutations including ingest, source registration,[\s\S]*zone assignment, reindex, drain, and forget all return 503/,
   "and it must name the refusal the operator would otherwise walk into"
 );
 

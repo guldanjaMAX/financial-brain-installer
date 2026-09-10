@@ -316,6 +316,9 @@ brain forget ./brain.manifest.json --source documents
 ```
 
 Shows you exactly what would be removed. Nothing goes until you add `--yes`.
+The preview also proves that the deployed Worker can remove the source registry
+row and record the audit event behind the same write barrier. If it cannot,
+the CLI refuses before authorizing document deletion.
 
 ---
 

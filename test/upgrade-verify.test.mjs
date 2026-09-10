@@ -39,6 +39,7 @@ import {
   ACCELERATED_BOOTSTRAP_MAX_ROUNDS,
   cloudflareTokenAvailable,
   cmdAcceleratedBootstrap,
+  cmdHealth,
   cmdRollback,
   cmdRollbackInteractive,
   cmdUpdate,
@@ -100,14 +101,16 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
 
 const V = (o) => healthProbeVerdict(o);
 const D = (o) => documentsReceiptVerdict(o);
-const body = (v) => JSON.stringify({ ok: true, brain: "x", version: v });
 const cutoverBody = (v, mode, protocol = "lease-v1") => JSON.stringify({
-  ok: true,
+  ok: mode === "active",
+  status: mode === "active" ? "ok" : "paused-for-upgrade",
+  accepting_documents: mode === "active",
   brain: "x",
   version: v,
   vector_writer_protocol: protocol,
   vector_drain_mode: mode,
 });
+const body = (v) => cutoverBody(v, "active");
 
 /* ---- the mandatory writer grace cannot look like a hung installer ---- */
 {
@@ -282,6 +285,22 @@ const bootstrapCompletion = () => ({
     version: RUNNING_VERSION,
     vector_drain_mode: "paused-for-upgrade",
   };
+  check("the explicit expected-paused cutover still accepts one exact paused generation",
+    V({
+      ok: true,
+      body: cutoverBody(RUNNING_VERSION, "paused-for-upgrade"),
+      expectVersion: RUNNING_VERSION,
+      expectDrainMode: "paused-for-upgrade",
+      attempt: 1,
+      attempts: 6,
+    }) === "accept" &&
+      D({
+        inventory: pausedDocuments,
+        expectVersion: RUNNING_VERSION,
+        expectDrainMode: "paused-for-upgrade",
+        attempt: 1,
+        attempts: 15,
+      }) === "accept");
   check("an active public probe cannot splice with a paused authenticated readiness generation",
     publicActive === "accept" &&
       D({ inventory: pausedDocuments, expectVersion: RUNNING_VERSION, expectDrainMode: "active", attempt: 1, attempts: 15 }) === "retry" &&
@@ -301,6 +320,84 @@ const bootstrapCompletion = () => ({
         attempt: 15,
         attempts: 15,
       }) === "fail");
+  check("an authenticated receipt with no explicit binding expectation fails closed",
+    D({
+      inventory: { version: RUNNING_VERSION, vector_drain_mode: "active" },
+      expectVersion: null,
+      expectDrainMode: null,
+      attempt: 1,
+      attempts: 1,
+    }) === "fail");
+}
+
+/* ---- expected paused reach-only retries one stale authenticated edge ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-paused-edge-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      client: { slug: "fixture" },
+      brain: { domain: "fixture.invalid", worker_name: "fixture" },
+      infrastructure: { cloudflare: { storage: "d1" } },
+    }));
+    let documentCalls = 0;
+    const waits = [];
+    await cmdHealth(manifestPath, {
+      expectVersion: RUNNING_VERSION,
+      expectDrainMode: "paused-for-upgrade",
+      reachOnly: true,
+      resolveKey: () => "fixture-admin-label",
+      wait: async (milliseconds) => { waits.push(milliseconds); },
+      request: async (url) => {
+        const path = new URL(url).pathname;
+        if (path === "/health") {
+          return new Response(cutoverBody(RUNNING_VERSION, "paused-for-upgrade"), { status: 200 });
+        }
+        if (path !== "/api/admin/brain/documents") throw new Error(`unexpected request ${path}`);
+        documentCalls++;
+        const inventory = documentCalls === 1
+          ? { backend: "d1", rows: [], vector_drain_mode: "paused-for-upgrade" }
+          : { backend: "d1", rows: [], version: RUNNING_VERSION, vector_drain_mode: "paused-for-upgrade" };
+        return new Response(JSON.stringify(inventory), { status: 200 });
+      },
+    });
+    check("expected-paused reachOnly retries a stale versionless documents edge, then accepts one exact generation",
+      documentCalls === 2 && waits.join(",") === "4000", JSON.stringify({ documentCalls, waits }));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- ordinary health never waits on an unnamed deployment expectation ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-ordinary-malformed-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      client: { slug: "fixture" },
+      brain: { domain: "fixture.invalid", worker_name: "fixture" },
+      infrastructure: { cloudflare: { storage: "d1" } },
+    }));
+    let requestCalls = 0;
+    const waits = [];
+    let error = null;
+    try {
+      await cmdHealth(manifestPath, {
+        resolveKey: () => "fixture-admin-label",
+        wait: async (milliseconds) => { waits.push(milliseconds); },
+        request: async () => {
+          requestCalls++;
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+      });
+    } catch (caught) { error = caught; }
+    check("ordinary malformed public health fails on one snapshot without an empty propagation wait",
+      requestCalls === 1 && waits.length === 0 &&
+        /did not return one exact Worker version and writer state/i.test(error?.message || ""),
+      JSON.stringify({ requestCalls, waits, error: error?.message }));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
 }
 
 /* ---- schema-13 bootstrap receipts are aggregate-only and exact ---- */
@@ -753,8 +850,16 @@ const bootstrapCompletion = () => ({
 {
   check("the expected version is accepted immediately",
     V({ ok: true, body: body("0.1.2"), expectVersion: "0.1.2", attempt: 1, attempts: 6 }) === "accept");
-  check("a plain health check with no expectation still accepts any 200",
+  check("a plain health check accepts only an exact active Worker receipt",
     V({ ok: true, body: body("0.1.1"), expectVersion: null, attempt: 1, attempts: 6 }) === "accept");
+  check("a plain 200 without exact writer state fails closed",
+    V({
+      ok: true,
+      body: JSON.stringify({ ok: true, version: "0.1.1" }),
+      expectVersion: null,
+      attempt: 6,
+      attempts: 6,
+    }) === "fail");
 }
 
 /* ---- a body that cannot be parsed must not be read as success ---- */

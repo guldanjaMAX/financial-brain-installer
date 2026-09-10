@@ -1715,16 +1715,32 @@ async function handleSourceExpectation(env, request) {
   }
 
   let kind;
-  try {
-    ({ kind } = await resolveSourceKind(env, { source, requestedKind, defaultKind }));
-  } catch (error) {
-    if (isSourceKindConflict(error)) {
-      return jsonResponse({
-        error: "source is already registered with a different connector kind",
-        code: "source_kind_conflict",
-      }, 409);
+  if (!kindWasProvided) {
+    // An operator changing freshness without a connector kind is updating an
+    // existing source, never creating a guessed Drive identity. This keeps a
+    // typo from turning into a pending source that falsely implies coverage.
+    const existing = await env.DB.prepare(
+      "SELECT lower(trim(kind)) AS kind FROM sources WHERE name=?1"
+    ).bind(source).first();
+    kind = String(existing?.kind || "").trim().toLowerCase();
+    if (!kind) {
+      return jsonResponse({ error: "source is not registered", code: "source_not_registered" }, 404);
     }
-    throw error;
+    if (!SOURCE_KINDS.has(kind)) {
+      return jsonResponse({ error: "registered source has an unsupported connector kind" }, 409);
+    }
+  } else {
+    try {
+      ({ kind } = await resolveSourceKind(env, { source, requestedKind, defaultKind }));
+    } catch (error) {
+      if (isSourceKindConflict(error)) {
+        return jsonResponse({
+          error: "source is already registered with a different connector kind",
+          code: "source_kind_conflict",
+        }, 409);
+      }
+      throw error;
+    }
   }
 
   const at = new Date().toISOString();
@@ -1737,7 +1753,7 @@ async function handleSourceExpectation(env, request) {
        VALUES (?1,?2,'pending',?3,?4)
        ON CONFLICT(name) DO UPDATE SET
          expected_refresh_seconds=excluded.expected_refresh_seconds
-       WHERE sources.kind=excluded.kind`
+       WHERE lower(trim(sources.kind))=excluded.kind`
     ).bind(source, kind, at, expected),
     env.DB.prepare(
       "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'schedule',?2,?3)"
@@ -1745,6 +1761,90 @@ async function handleSourceExpectation(env, request) {
   ]);
 
   return jsonResponse({ source, kind, expected_refresh_seconds: expected });
+}
+
+/** Register one source through the same paused-write barrier as every ingest. */
+async function handleSourceRegistration(env, request) {
+  if (backendOf(env) !== D1) {
+    return jsonResponse({ error: "source registration applies to the d1 backend only" }, 400);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "invalid JSON body" }, 400);
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      Object.keys(body).some((field) => !["source", "kind"].includes(field))) {
+    return jsonResponse({ error: "source registration needs only source and kind" }, 400);
+  }
+  const source = String(body.source || "").trim().toLowerCase();
+  const kind = String(body.kind || "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(source)) {
+    return jsonResponse({ error: "source must contain only lowercase letters, numbers, underscores or hyphens" }, 400);
+  }
+  if (!SOURCE_KINDS.has(kind)) {
+    return jsonResponse({ error: "unsupported source kind" }, 400);
+  }
+
+  const at = new Date().toISOString();
+  const operationId = crypto.randomUUID();
+  const eventDetail = `worker-register:${operationId};kind=${kind}`;
+  // D1 batches are transactional. The event is conditional on the immediately
+  // preceding insert changing exactly one row, so a same-kind retry is a clean
+  // no-op and an event failure rolls the source row back with it. The final
+  // read stays in the same transaction and binds the receipt to this operation.
+  const receipts = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO sources (name, kind, status, created_at)
+       VALUES (?1,?2,'pending',?3)
+       ON CONFLICT(name) DO NOTHING`
+    ).bind(source, kind, at),
+    env.DB.prepare(
+      `INSERT INTO source_events (source_name,event,at,detail)
+       SELECT ?1,'registered',?2,?3 WHERE changes()=1`
+    ).bind(source, at, eventDetail),
+    env.DB.prepare(
+      `SELECT lower(trim(s.kind)) AS kind,
+              EXISTS (
+                SELECT 1 FROM source_events e
+                 WHERE e.source_name=s.name AND e.event='registered' AND e.detail=?2
+              ) AS registry_event_recorded
+         FROM sources s WHERE s.name=?1`
+    ).bind(source, eventDetail),
+  ]);
+  const exactChange = (receipt, expected) =>
+    Number.isSafeInteger(receipt?.meta?.changes) && receipt.meta.changes === expected;
+  const registrationRows = receipts?.[2]?.results;
+  const registration = Array.isArray(registrationRows) && registrationRows.length === 1
+    ? registrationRows[0]
+    : null;
+  const registrationKind = typeof registration?.kind === "string"
+    ? registration.kind
+    : null;
+  const inserted = exactChange(receipts?.[0], 1) && exactChange(receipts?.[1], 1) &&
+    registrationKind === kind && registration?.registry_event_recorded === 1;
+  const existing = exactChange(receipts?.[0], 0) && exactChange(receipts?.[1], 0) &&
+    registrationKind !== null && registration?.registry_event_recorded === 0;
+  if (!Array.isArray(receipts) || receipts.length !== 3 || (!inserted && !existing)) {
+    return jsonResponse({ error: "source registration did not produce an exact receipt" }, 500);
+  }
+  if (inserted) {
+    return jsonResponse({
+      source,
+      kind,
+      registered: true,
+      registry_event_recorded: true,
+      operation_id: operationId,
+    });
+  }
+  if (registrationKind !== kind) {
+    return jsonResponse({
+      error: "source is already registered with a different connector kind",
+      code: "source_kind_conflict",
+    }, 409);
+  }
+  return jsonResponse({ source, kind: registrationKind, registered: false });
 }
 
 const SOURCE_FAMILY_DEFAULT_LIMIT = 500;
@@ -1851,6 +1951,48 @@ async function handleDocuments(env) {
   return jsonResponse(out);
 }
 
+/**
+ * Finish a whole-source forget inside the authenticated Worker boundary.
+ *
+ * The document deletion happens first so a failed finalization leaves the
+ * source registered and retryable. The event and registry delete then share
+ * one D1 batch, and both exact write counts are required before the Worker can
+ * claim that the source name is free again.
+ */
+async function finalizeForgottenSource(env, source, documents) {
+  const at = new Date().toISOString();
+  const operationId = crypto.randomUUID();
+  const receipts = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO source_events (source_name,event,at,documents,detail)
+       SELECT name,'forget',?2,?3,?4 FROM sources
+        WHERE name=?1
+          AND NOT EXISTS (
+            SELECT 1 FROM documents WHERE source=?1 AND deleted_at IS NULL
+          )`
+    ).bind(source, at, documents, `worker-forget:${operationId}`),
+    env.DB.prepare(
+      `DELETE FROM sources
+        WHERE name=?1
+          AND NOT EXISTS (
+            SELECT 1 FROM documents WHERE source=?1 AND deleted_at IS NULL
+          )`
+    ).bind(source),
+  ]);
+  const exactWrite = (receipt) =>
+    Number.isSafeInteger(receipt?.meta?.changes) && receipt.meta.changes === 1;
+  if (!Array.isArray(receipts) || receipts.length !== 2 ||
+      !exactWrite(receipts[0]) || !exactWrite(receipts[1])) {
+    throw new Error("source forget could not prove its registry event and deletion");
+  }
+  return {
+    source,
+    source_unregistered: true,
+    registry_event_recorded: true,
+    operation_id: operationId,
+  };
+}
+
 /* -------------------------------------------------------------- router */
 
 // The compatibility Worker is a whole-corpus write barrier, not merely a
@@ -1865,11 +2007,15 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   "/api/admin/brain/ingest/batch",
   "/api/admin/brain/source-receipt",
   "/api/admin/brain/source-expectation",
+  "/api/admin/brain/source-register",
+  "/api/admin/brain/zones",
   "/api/admin/brain/forget",
   "/api/admin/brain/reindex",
-  // vector-retry stays available while paused: it only clears quarantine
-  // marks and attempt counters in D1 (no corpus write, no provider call), and
-  // the quarantine refusal a paused update prints names it as the remedy.
+  // vector-retry stays available while paused. Its confirmed form deletes the
+  // selected retry-state rows, including their stored failure and backoff
+  // evidence, and resets matching outbox attempts/errors. It does not write the
+  // corpus or call the vector provider. The quarantine refusal a paused update
+  // prints names this reviewed action as the remedy.
   "/api/admin/brain/drain",
   // The ledger is not the corpus, but a paused upgrade means a migration is in
   // flight, and financial rows written against a half-migrated schema are the
@@ -2290,6 +2436,9 @@ export default {
       if (path === "/api/admin/brain/source-expectation" && request.method === "POST") {
         return await handleSourceExpectation(env, request);
       }
+      if (path === "/api/admin/brain/source-register" && request.method === "POST") {
+        return await handleSourceRegistration(env, request);
+      }
       if (path === "/api/admin/brain/source-families" && request.method === "POST") {
         return await handleSourceFamilies(env, request);
       }
@@ -2335,7 +2484,8 @@ export default {
             error: "diagnose reports on the whole corpus, including zones you cannot read. Ask the owner to run it.",
           }, 403);
         }
-        return jsonResponse(await diagnose(env));
+        const report = await diagnose(env);
+        return jsonResponse(report, report.complete === true ? 200 : 503);
       }
       if (path === "/api/admin/brain/freshness" && request.method === "GET") {
         if (backendOf(env) !== D1) return jsonResponse({ error: "freshness applies to the d1 backend only" }, 400);
@@ -2372,6 +2522,9 @@ export default {
         if (!docUids.length && !families.length && !source) {
           return jsonResponse({ error: "pass doc_uids: [...], families: [...], or source: \"name\"" }, 400);
         }
+        if (source && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(source)) {
+          return jsonResponse({ error: "source must contain only lowercase letters, numbers, underscores or hyphens" }, 400);
+        }
         if (!scopeIsUnrestricted(scope)) {
           // A source-scoped grant can safely delete one complete source after
           // the registry proves that source is in scope. Document and family
@@ -2390,6 +2543,9 @@ export default {
             }, 403);
           }
         }
+        if (source && docUids.length) {
+          return jsonResponse({ error: "source must be used alone" }, 400);
+        }
         // Destructive and irreversible, so it must be asked for explicitly.
         const confirm = body?.confirm === true;
         if (families.length) {
@@ -2402,8 +2558,27 @@ export default {
             return jsonResponse({ error: error.message }, 400);
           }
         }
+        if (source) {
+          const registered = await env.DB.prepare(
+            "SELECT name FROM sources WHERE name=?1"
+          ).bind(source).first();
+          if (registered?.name !== source) {
+            return jsonResponse({ error: "source is not registered", code: "source_not_registered" }, 404);
+          }
+        }
         const r = await forget(env, { docUids, source, dryRun: !confirm });
-        return jsonResponse(r);
+        if (!source) return jsonResponse(r);
+        if (!confirm) {
+          return jsonResponse({
+            ...r,
+            source,
+            would_unregister_source: true,
+            source_unregistered: false,
+            registry_event_recorded: false,
+          });
+        }
+        const registry = await finalizeForgottenSource(env, source, r.documents);
+        return jsonResponse({ ...r, ...registry });
       }
 
       // Force a drain. The cron normally does this, but when the cron is wedged
