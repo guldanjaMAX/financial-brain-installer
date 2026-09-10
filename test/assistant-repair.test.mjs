@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import {
   buildLocalAssistantRepairPlan,
   cmdAssistantRepair,
+  mcpRegistrationDescriptor,
   wireAgents,
 } from "../brain.mjs";
 import {
@@ -72,6 +73,19 @@ function pathInventory(root) {
   };
   visit(root);
   return entries;
+}
+
+function writePriorInstallerRuntime(parent) {
+  const packageRoot = join(parent, ".financial-brain", "lib", "node_modules", "brain-installer");
+  const runtime = join(packageRoot, "components", "brain-mcp.mjs");
+  mkdirSync(dirname(runtime), { recursive: true, mode: 0o700 });
+  writeFileSync(runtime, "// reviewed v0.4.0 runtime fixture\n", { mode: 0o600 });
+  writeFileSync(
+    join(packageRoot, "package.json"),
+    `${JSON.stringify({ name: "brain-installer", version: "0.4.0" })}\n`,
+    { mode: 0o600 },
+  );
+  return runtime;
 }
 
 try {
@@ -526,12 +540,32 @@ try {
   const thirdFailureHome = join(sandbox, "bundle-third-failure");
   const thirdFailure = transactionalOptions(thirdFailureHome, "codex-mcp");
   mkdirSync(dirname(thirdFailure.claudePath), { recursive: true });
-  const thirdClaudeBefore = "{\n  \"ownerSetting\": { \"keep\": true }\n}\n";
+  const priorRuntime = writePriorInstallerRuntime(join(sandbox, "prior-runtime-install"));
+  const desiredForTransaction = mcpRegistrationDescriptor(manifest, manifestPath, {
+    baseUrl: "https://fixture.invalid",
+  });
+  const { BRAIN_AGENT_PROFILE: _profile, ...priorLocatorEnv } = desiredForTransaction.env;
+  const thirdClaudeBefore = `${JSON.stringify({
+    ownerSetting: { keep: true },
+    mcpServers: {
+      [desiredForTransaction.name]: {
+        type: "stdio",
+        command: desiredForTransaction.command,
+        args: [priorRuntime],
+        env: priorLocatorEnv,
+      },
+    },
+  }, null, 2)}\n`;
   writeFileSync(thirdFailure.claudePath, thirdClaudeBefore, { mode: 0o600 });
   const thirdPlan = await buildLocalAssistantRepairPlan(
     manifestPath,
     ["technician-skill", "claude-code-mcp", "codex-mcp"],
     thirdFailure,
+  );
+  assert.equal(
+    thirdPlan.items.find((item) => item.scope === "claude-code-mcp")?.status,
+    "repairable",
+    "the state-bound preview recognizes the exact same-Brain v0.4.0 runtime locator",
   );
   await assert.rejects(
     cmdAssistantRepair(manifestPath, {

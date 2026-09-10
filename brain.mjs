@@ -14813,6 +14813,83 @@ function normalizedRegistration(entry, name = null) {
   };
 }
 
+const PRIOR_INSTALLER_MCP_VERSIONS = new Set([
+  "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5",
+]);
+
+function priorInstallerPackageRoot(runtimePath) {
+  if (typeof runtimePath !== "string" || !isAbsolute(runtimePath) ||
+      basename(runtimePath) !== "brain-mcp.mjs" || basename(dirname(runtimePath)) !== "components") {
+    return null;
+  }
+  const packageRoot = dirname(dirname(resolve(runtimePath)));
+  const nodeModules = dirname(packageRoot);
+  if (basename(packageRoot) !== "brain-installer" || basename(nodeModules) !== "node_modules") {
+    return null;
+  }
+  const container = dirname(nodeModules);
+  const prefix = basename(container).toLowerCase() === "lib" ? dirname(container) : container;
+  if (![".financial-brain", "financialbrain"].includes(basename(prefix).toLowerCase())) {
+    return null;
+  }
+  return packageRoot;
+}
+
+function recognizedPriorInstallerRuntime(runtimePath) {
+  const packageRoot = priorInstallerPackageRoot(runtimePath);
+  if (!packageRoot) return false;
+  try {
+    const packageRootStat = lstatSync(packageRoot);
+    const runtimeStat = lstatSync(runtimePath);
+    const canonicalRuntime = resolve(realpathSync(runtimePath));
+    if (!packageRootStat.isDirectory() || packageRootStat.isSymbolicLink() ||
+        !runtimeStat.isFile() || runtimeStat.isSymbolicLink() || runtimeStat.nlink !== 1 ||
+        runtimeStat.size > 16 * 1024 * 1024 ||
+        (typeof process.getuid === "function" &&
+          (packageRootStat.uid !== process.getuid() || runtimeStat.uid !== process.getuid())) ||
+        !priorInstallerPackageRoot(canonicalRuntime)) {
+      return false;
+    }
+    const packagePath = join(packageRoot, "package.json");
+    const before = lstatSync(packagePath);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 64 * 1024 ||
+        (typeof process.getuid === "function" && before.uid !== process.getuid())) {
+      return false;
+    }
+    const fd = openSync(packagePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    try {
+      const opened = fstatSync(fd);
+      if (!sameOpenedFile(before, opened)) return false;
+      const bytes = readFileSync(fd);
+      if (bytes.length !== opened.size) return false;
+      const pkg = JSON.parse(bytes.toString("utf8"));
+      return pkg?.name === "brain-installer" && PRIOR_INSTALLER_MCP_VERSIONS.has(pkg.version);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+function recognizedInstallerNodeCommand(command, desiredCommand, priorRuntime) {
+  if (command === "node") return true;
+  const samePath = (left, right) => {
+    const a = resolve(left);
+    const b = resolve(right);
+    return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+  };
+  if (typeof command !== "string" || !command || !isAbsolute(command)) return false;
+  if (samePath(command, desiredCommand)) return true;
+  if (!priorRuntime || !["node", "node.exe"].includes(basename(command).toLowerCase())) return false;
+  try {
+    const stat = statSync(command);
+    return stat.isFile() && (process.platform === "win32" || (stat.mode & 0o111) !== 0);
+  } catch {
+    return false;
+  }
+}
+
 export function mcpRegistrationIsExact(entry, desired) {
   const actual = normalizedRegistration(entry, desired.name);
   return Boolean(actual) &&
@@ -14846,8 +14923,8 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
   const safeTransition = transitionName === "BRAIN_KEY" ||
     (transitionName && /^x+$/.test(actual.env[transitionName] || ""));
   const { BRAIN_AGENT_PROFILE: _desiredProfile, ...oldLocatorEnv } = desired.env;
-  // v0.4.6 installer-owned registrations carried this exact locator map but
-  // no profile. Accept only that one-field historical shape as migratable.
+  // Earlier v0.4 installer-owned registrations carried this exact locator map
+  // but no profile. Accept only that one-field historical shape as migratable.
   // A deliberately selected profile, any extra environment value, or any
   // other missing field remains an unrelated registration and is preserved.
   const oldLocatorOwned = !Object.hasOwn(actual?.env || {}, "BRAIN_AGENT_PROFILE") &&
@@ -14875,7 +14952,16 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
     actual?.env?.BRAIN_URL === desired.env.BRAIN_URL &&
     actual?.env?.BRAIN_NAME === desired.name &&
     (transitionName === "BRAIN_KEY" || /^x+$/.test(actual.env[transitionName] || ""));
-  const installerNode = actual?.command === "node" || samePath(actual?.command, desired.command);
+  const currentRuntime = actual?.args?.length === 1 && samePath(actual.args[0], desired.args[0]);
+  const priorRuntimeIdentity = !transitionName && sameManifest &&
+    (sameStringMap(actual?.env, desired.env) || oldLocatorOwned);
+  const priorRuntime = actual?.args?.length === 1 && !currentRuntime && priorRuntimeIdentity &&
+    recognizedPriorInstallerRuntime(actual.args[0]);
+  const installerNode = recognizedInstallerNodeCommand(
+    actual?.command,
+    desired.command,
+    priorRuntime,
+  );
   return Boolean(actual) &&
     actual.name === desired.name &&
     actual.enabled !== false &&
@@ -14883,7 +14969,7 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
     installerNode &&
     actual.args.length === 1 &&
     basename(String(actual.args[0])) === "brain-mcp.mjs" &&
-    samePath(actual.args[0], desired.args[0]) &&
+    (currentRuntime || priorRuntime) &&
     actual.envVars.length === 0 &&
     actual.cwd === null &&
     actual.env.BRAIN_NAME === desired.name &&
@@ -15355,9 +15441,10 @@ function safeLocatorMigrationSnapshot(before, desired, options, format) {
   }
   const actual = normalizedRegistration(before.entry, desired.name);
   const { BRAIN_AGENT_PROFILE: _profile, ...oldLocatorEnv } = desired.env;
+  const safeLocatorEnv = sameStringMap(actual?.env, desired.env) ||
+    sameStringMap(actual?.env, oldLocatorEnv);
   if (!actual || actual.enabled === false ||
-      Object.hasOwn(actual.env, "BRAIN_AGENT_PROFILE") ||
-      !sameStringMap(actual.env, oldLocatorEnv) ||
+      !safeLocatorEnv ||
       CLAUDE_LEGACY_KEY_NAMES.some((key) => Object.hasOwn(actual.env, key)) ||
       !mcpRegistrationIsInstallerOwned(before.entry, desired)) {
     return null;

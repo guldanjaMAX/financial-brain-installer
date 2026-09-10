@@ -69,6 +69,19 @@ function writeManifest(directory, value = fixtureManifest()) {
   return path;
 }
 
+function writePriorInstallerRuntime(parent, version = "0.4.0", prefix = ".financial-brain") {
+  const packageRoot = join(parent, prefix, "lib", "node_modules", "brain-installer");
+  const runtime = join(packageRoot, "components", "brain-mcp.mjs");
+  mkdirSync(dirname(runtime), { recursive: true, mode: 0o700 });
+  writeFileSync(runtime, "// reviewed prior installer runtime fixture\n", { mode: 0o600 });
+  writeFileSync(
+    join(packageRoot, "package.json"),
+    `${JSON.stringify({ name: "brain-installer", version })}\n`,
+    { mode: 0o600 },
+  );
+  return runtime;
+}
+
 function persistFixtureKey(manifestPath, manifest, value) {
   const plan = adminKeyPersistencePlan(manifestPath, manifest, nativeFileOptions);
   persistAdminKeyDurably(plan, value, nativeFileOptions);
@@ -319,6 +332,43 @@ try {
   assert.equal(mcpRegistrationIsExact(oldLocatorEntry, descriptor), false);
   assert.equal(mcpRegistrationIsInstallerOwned(oldLocatorEntry, descriptor), true,
     "the exact prior locator-only registration is safely upgraded to Owner assistant");
+  const priorRuntime = writePriorInstallerRuntime(sandbox);
+  const priorInstallerEntry = { ...oldLocatorEntry, args: [priorRuntime] };
+  assert.equal(mcpRegistrationIsInstallerOwned(priorInstallerEntry, descriptor), true,
+    "the same Brain can migrate from the exact published prior installer root and version");
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...priorInstallerEntry,
+    args: [priorRuntime, "custom-argument"],
+  }, descriptor), false, "a prior runtime with custom arguments is preserved");
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...priorInstallerEntry,
+    env: { ...oldLocatorEnv, EXTRA_SETTING: "custom" },
+  }, descriptor), false, "a prior runtime with unknown environment is preserved");
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...priorInstallerEntry,
+    env: { ...oldLocatorEnv, BRAIN_KEY: "synthetic-legacy-value" },
+  }, descriptor), false, "prior-runtime migration never claims an entry with a literal key");
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...priorInstallerEntry,
+    enabled: false,
+  }, descriptor), false, "a disabled prior-runtime entry is preserved");
+  const unsupportedPriorRuntime = writePriorInstallerRuntime(
+    join(sandbox, "unsupported-version"),
+    "0.4.99",
+  );
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...oldLocatorEntry,
+    args: [unsupportedPriorRuntime],
+  }, descriptor), false, "an unrecognized installer version cannot authorize replacement");
+  const customRootRuntime = writePriorInstallerRuntime(
+    join(sandbox, "custom-root"),
+    "0.4.0",
+    "custom-prefix",
+  );
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...oldLocatorEntry,
+    args: [customRootRuntime],
+  }, descriptor), false, "a lookalike package outside a published installer prefix is preserved");
   assert.equal(mcpRegistrationIsInstallerOwned({
     ...oldLocatorEntry,
     env: { ...oldLocatorEnv, BRAIN_AGENT_PROFILE: "structured-contributor" },
@@ -593,6 +643,68 @@ try {
     AWS_SECRET_ACCESS_KEY: "aws-fixture-secret",
     OPENAI_API_KEY: "openai-fixture-secret",
   };
+
+  /* The public apply command recognizes the package and same-Brain tuple from
+     the v0.4.0 private prefix, then migrates both assistants exactly. */
+  const priorHome = join(sandbox, "prior-runtime apply home");
+  mkdirSync(priorHome, { recursive: true, mode: 0o700 });
+  const priorClaudeConfig = join(priorHome, ".claude.json");
+  writeClaudeEntry(priorClaudeConfig, descriptor.name, priorInstallerEntry);
+  const priorEnvironment = {
+    ...childEnvironment,
+    HOME: priorHome,
+    ...(process.platform === "win32" ? { USERPROFILE: priorHome } : {}),
+  };
+  const priorCli = fakeAgentCli({
+    environment: priorEnvironment,
+    claudeConfigPath: priorClaudeConfig,
+    codexInitial: codexEntry({ ...descriptor, args: [priorRuntime] }, oldLocatorEnv),
+  });
+  const priorApply = await captureOutput(() => cmdMcpConfig(manifestPath, {
+    flags: { apply: true },
+    wireOptions: {
+      baseUrl: descriptor.env.BRAIN_URL,
+      environment: priorEnvironment,
+      claudeConfigPath: priorClaudeConfig,
+      runCommand: priorCli.runCommand,
+      verifyMcpRuntime: () => true,
+    },
+  }));
+  assert.deepEqual(priorApply.value.failures, []);
+  assert.deepEqual(priorApply.value.wired.sort(), ["Claude Code", "Codex"]);
+  assert.equal(
+    mcpRegistrationIsExact(readClaudeConfig(priorClaudeConfig).mcpServers[descriptor.name], descriptor),
+    true,
+  );
+  assert.equal(mcpRegistrationIsExact(priorCli.codex, descriptor), true);
+  assert.match(priorApply.output, /connected with Owner assistant access/i);
+
+  const priorFailureHome = join(sandbox, "prior-runtime rollback home");
+  mkdirSync(priorFailureHome, { recursive: true, mode: 0o700 });
+  const priorFailureConfig = join(priorFailureHome, ".claude.json");
+  writeClaudeEntry(priorFailureConfig, descriptor.name, priorInstallerEntry);
+  const priorFailureBefore = readFileSync(priorFailureConfig);
+  const priorFailureEnvironment = {
+    ...childEnvironment,
+    HOME: priorFailureHome,
+    ...(process.platform === "win32" ? { USERPROFILE: priorFailureHome } : {}),
+  };
+  const priorFailureCli = fakeAgentCli({
+    environment: priorFailureEnvironment,
+    claudeConfigPath: priorFailureConfig,
+    codexInstalled: false,
+    failClaudeAdds: true,
+  });
+  const priorFailure = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: priorFailureEnvironment,
+    claudeConfigPath: priorFailureConfig,
+    runCommand: priorFailureCli.runCommand,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(priorFailure.value.failures, ["Claude Code"]);
+  assert.deepEqual(readFileSync(priorFailureConfig), priorFailureBefore,
+    "a failed prior-runtime migration restores the exact locator-only entry");
 
   /* A Codex binary on PATH is not consent to create Codex's private config. */
   const claudeOnlyHome = join(sandbox, "claude-only agent home");
