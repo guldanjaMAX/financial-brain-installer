@@ -45,15 +45,11 @@ const CREDENTIAL_GATE_ERROR = "refused: content carries live credential(s)";
 const CREDENTIAL_GATE_DETAIL =
   "Rotate them, strip them from the source, then re-ingest. Nothing was written.";
 
-const diagnosticText = (value, fallback) => {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  return text ? text.slice(0, 240) : fallback;
-};
-
 const CANONICAL_REFUSAL = "The documents do not answer the question.";
 const answerIsRefusal = (answer) => String(answer || "").trim() === CANONICAL_REFUSAL;
 const responseObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 const nonemptyResponseText = (value) => typeof value === "string" && value.trim().length > 0;
+const ANSWER_UNAVAILABLE_STATUSES = new Set(["search_unavailable", "coverage_incomplete"]);
 
 /**
  * Refuse a 200-shaped answer whose fields contradict each other.
@@ -76,42 +72,90 @@ export function answerResponseContractDiagnostic(payload) {
     return "the Worker returned an incomplete or incompatible answer response";
   }
 
-  const answer = typeof payload.answer === "string" ? payload.answer.trim() : "";
-  if (!answer) return null;
-
+  const hasTopLevelError = owns("error") && payload.error !== undefined && payload.error !== null;
+  const hasStatus = owns("status") && payload.status !== undefined && payload.status !== null;
+  if (hasTopLevelError || (hasStatus && !ANSWER_UNAVAILABLE_STATUSES.has(payload.status))) {
+    return "the Worker returned an incompatible answer error or status";
+  }
+  if (owns("evidence_gate") && payload.evidence_gate !== undefined &&
+      payload.evidence_gate !== null && !responseObject(payload.evidence_gate)) {
+    return "the Worker returned an incomplete or incompatible evidence gate";
+  }
   const evidenceGate = responseObject(payload.evidence_gate) ? payload.evidence_gate : null;
-  if (["search_unavailable", "coverage_incomplete"].includes(payload.status) ||
-      payload.error || payload.answer_error || evidenceGate?.error) {
+
+  if (payload.answer === null) {
+    if (payload.citations.length > 0) {
+      return "the Worker returned citations without an answer";
+    }
+    if (evidenceGate?.supported === true) {
+      return "the Worker withheld answer text despite a supported evidence gate";
+    }
+    if (owns("answer_error") && payload.answer_error !== undefined &&
+        payload.answer_error !== null && !nonemptyResponseText(payload.answer_error)) {
+      return "the Worker returned an incomplete or incompatible answer error";
+    }
+    return null;
+  }
+
+  const answer = payload.answer.trim();
+  if (!answer) return "the Worker returned empty answer text instead of null";
+
+  if (ANSWER_UNAVAILABLE_STATUSES.has(payload.status) ||
+      owns("answer_error") || evidenceGate?.error) {
     return "the Worker returned answer text alongside an unavailable or error state";
   }
 
-  if (answerIsRefusal(answer)) return null;
+  if (answerIsRefusal(answer)) {
+    if (payload.citations.length > 0 || !evidenceGate ||
+        evidenceGate.supported !== false || !Array.isArray(evidenceGate.evidence)) {
+      return "the Worker's refusal contradicted its citation or evidence receipt";
+    }
+    return null;
+  }
   if (payload.results.length === 0) {
     return "the Worker returned a factual answer without candidate evidence";
   }
 
-  const markers = [...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
+  const markers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
   const cited = new Map();
   for (const citation of payload.citations) {
     if (!responseObject(citation) || !Number.isInteger(citation.n) ||
         citation.n < 1 || citation.n > payload.results.length ||
-        !nonemptyResponseText(citation.title) || !nonemptyResponseText(citation.source)) {
+        !nonemptyResponseText(citation.title) || !nonemptyResponseText(citation.source) ||
+        cited.has(citation.n)) {
       return "the Worker's factual answer and citation evidence did not agree";
     }
     const result = payload.results[citation.n - 1];
-    if (!responseObject(result) || !nonemptyResponseText(result.title) ||
-        !nonemptyResponseText(result.source) || !nonemptyResponseText(result.chunk_uid)) {
+    if (!responseObject(result) || !nonemptyResponseText(result.chunk_uid)) {
       return "the Worker returned a citation without a real candidate result";
+    }
+    const resultTitle = String(result.title || "untitled").slice(0, 140);
+    const resultSource = String(result.source || "?");
+    if (citation.title !== resultTitle || citation.source !== resultSource) {
+      return "the Worker's citation did not identify its numbered candidate result";
     }
     cited.set(citation.n, citation);
   }
-  if (!markers.length || !cited.size || markers.some((n) => !cited.has(n))) {
+  if (!markers.size || !cited.size || markers.size !== cited.size ||
+      [...markers].some((n) => !cited.has(n))) {
     return "the Worker's factual answer and citation evidence did not agree";
   }
   if (!evidenceGate || evidenceGate.supported !== true ||
+      !Array.isArray(evidenceGate.evidence) ||
       !(evidenceGate.complete === true ||
-        (evidenceGate.complete === false && evidenceGate.partial === true))) {
+        (evidenceGate.complete === false && evidenceGate.partial === true)) ||
+      (evidenceGate.complete === true && evidenceGate.partial === true)) {
     return "the Worker returned a factual answer its evidence gate did not support";
+  }
+  const approved = new Set();
+  for (const number of evidenceGate.evidence) {
+    if (!Number.isInteger(number) || approved.has(number)) {
+      return "the Worker's factual answer carried an invalid evidence receipt";
+    }
+    approved.add(number);
+  }
+  if (approved.size !== cited.size || [...approved].some((n) => !cited.has(n))) {
+    return "the Worker's factual answer and evidence receipt did not agree";
   }
   return null;
 }
@@ -148,10 +192,7 @@ export function answerUnavailableDiagnostic(payload) {
       (results.length === 0 && payload.degraded)) {
     return {
       stage: "retrieval",
-      detail: diagnosticText(
-        payload.notice,
-        `search was incomplete${payload.degraded ? ` (${String(payload.degraded).slice(0, 40)})` : ""}`,
-      ),
+      detail: "search was incomplete, so no absence claim was accepted",
     };
   }
 
@@ -161,10 +202,7 @@ export function answerUnavailableDiagnostic(payload) {
   if (payload.status === "coverage_incomplete" || coverageGap) {
     return {
       stage: "source_coverage",
-      detail: diagnosticText(
-        payload.notice || coverageGap?.detail,
-        "one or more declared sources are not yet proven complete",
-      ),
+      detail: "one or more declared sources are not yet proven complete",
     };
   }
 

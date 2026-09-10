@@ -156,13 +156,13 @@ for (const [label, body, expectedStage, detailPattern] of [
     "a retrieval outage",
     { status: "search_unavailable", degraded: "vector", notice: "The vector index is still building.", results: [] },
     "retrieval",
-    /vector index is still building/i,
+    /search was incomplete/i,
   ],
   [
     "incomplete source coverage",
     { status: "coverage_incomplete", notice: "One source is still loading.", results: [{ n: 1 }] },
     "source_coverage",
-    /still loading/i,
+    /not yet proven complete/i,
   ],
   [
     "an evidence refusal",
@@ -258,7 +258,7 @@ for (const [label, body, expectedStage, detailPattern] of [
   check("the acceptance result names the stage in its visible check name",
     warning?.name === "answer unavailable at source_coverage", JSON.stringify(suite.results));
   check("the acceptance result retains the stage-specific reason",
-    /still loading/i.test(warning?.detail || ""), JSON.stringify(warning));
+    /not yet proven complete/i.test(warning?.detail || ""), JSON.stringify(warning));
   check("the old unknown diagnostic is gone from the acceptance result",
     !suite.results.some((result) => /reason:\s*unknown|no answer produced/i.test(`${result.name} ${result.detail}`)),
     JSON.stringify(suite.results));
@@ -300,87 +300,118 @@ for (const [label, body, expectedStage, detailPattern] of [
     JSON.stringify(suite.results));
 }
 
-for (const [label, malformed] of [
-  [
-    "a citation marker absent from the citation receipt",
-    {
-      mode: "think",
-      answer: "Invented answer [2]",
-      citations: [{ n: 1 }],
-      results: [{ title: "candidate" }],
-      gaps: [],
-    },
-  ],
-  [
-    "answer text beside a model error",
-    {
-      mode: "think",
-      answer: "Invented answer [1]",
-      answer_error: "private-payload-canary",
-      citations: [{ n: 1 }],
-      results: [{ title: "candidate" }],
-      gaps: [],
-    },
-  ],
-  [
-    "a factual claim that merely contains refusal-like words",
-    {
-      mode: "think",
-      answer: "There is no information missing, so the invented total is $9,999.",
-      citations: [],
-      results: [{ title: "candidate" }],
-      gaps: [],
-    },
-  ],
-  [
-    "an appended claim after the canonical refusal",
-    {
-      mode: "think",
-      answer: "The documents do not answer the question. The invented total is $9,999.",
-      citations: [],
-      results: [{ title: "candidate" }],
-      gaps: [],
-    },
-  ],
-  [
-    "a placeholder result and citation",
-    {
-      mode: "think",
-      answer: "Invented answer [1]",
-      citations: [{ n: 1 }],
-      results: [null],
-      gaps: [],
-    },
-  ],
-  [
-    "answer text beside a top-level error",
-    {
-      mode: "think",
-      answer: "Invented answer [1]",
-      error: "private-payload-canary",
-      citations: [{ n: 1, title: "Candidate", source: "drive" }],
-      results: [{ title: "Candidate", source: "drive", chunk_uid: "drive:1#0" }],
-      gaps: [],
-      evidence_gate: { supported: true, complete: true },
-    },
-  ],
-  [
-    "an incomplete evidence gate without the partial-answer receipt",
-    {
-      mode: "think",
-      answer: "Invented answer [1]",
-      citations: [{ n: 1, title: "Candidate", source: "drive" }],
-      results: [{ title: "Candidate", source: "drive", chunk_uid: "drive:1#0" }],
-      gaps: [],
-      evidence_gate: { supported: true, complete: false },
-    },
-  ],
-]) {
+const validFactualAnswer = {
+  mode: "think",
+  answer: "The agreement ends in June [1].",
+  citations: [{ n: 1, title: "Agreement", source: "drive" }],
+  results: [{ title: "Agreement", source: "drive", chunk_uid: "drive:agreement#0" }],
+  gaps: [],
+  evidence_gate: { supported: true, complete: true, evidence: [1] },
+};
+
+const validRefusal = {
+  mode: "think",
+  answer: "The documents do not answer the question.",
+  citations: [],
+  results: [{ title: "Candidate", source: "drive", chunk_uid: "drive:candidate#0" }],
+  gaps: [],
+  evidence_gate: {
+    supported: false, complete: false, evidence: [], reason: "answer model found no direct support",
+  },
+};
+
+async function suiteForThink(response) {
   const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
   suite.post = async (path) => path === "/api/rag/unified"
     ? { ok: true, status: 200, json: { results: [{ title: "candidate" }] } }
-    : { ok: true, status: 200, json: malformed };
+    : { ok: true, status: 200, json: response };
   await suite.tierRetrieval(["What changed?"]);
+  return suite;
+}
+
+for (const [label, malformed] of [
+  ["a citation marker absent from the citation receipt", {
+    ...validFactualAnswer, answer: "The agreement ends in June [2].",
+  }],
+  ["answer text beside a model error", {
+    ...validFactualAnswer, answer_error: "private-payload-canary",
+  }],
+  ["an appended claim after the canonical refusal", {
+    ...validFactualAnswer,
+    answer: "The documents do not answer the question. The invented total is $9,999.",
+  }],
+  ["a placeholder result and citation", {
+    ...validFactualAnswer, results: [null],
+  }],
+  ["answer text beside a top-level error", {
+    ...validFactualAnswer, error: "private-payload-canary",
+  }],
+  ["an incomplete evidence gate without the partial-answer receipt", {
+    ...validFactualAnswer,
+    evidence_gate: { supported: true, complete: false, evidence: [1] },
+  }],
+  ["a factual answer with no verifier evidence receipt", {
+    ...validFactualAnswer,
+    evidence_gate: { supported: true, complete: true },
+  }],
+  ["a citation title that disagrees with its numbered result", {
+    ...validFactualAnswer,
+    citations: [{ n: 1, title: "Different document", source: "drive" }],
+  }],
+  ["a citation source that disagrees with its numbered result", {
+    ...validFactualAnswer,
+    citations: [{ n: 1, title: "Agreement", source: "gmail" }],
+  }],
+  ["a duplicate citation receipt", {
+    ...validFactualAnswer,
+    citations: [
+      { n: 1, title: "Agreement", source: "drive" },
+      { n: 1, title: "Agreement", source: "drive" },
+    ],
+  }],
+  ["an extra citation the answer never used", {
+    ...validFactualAnswer,
+    citations: [
+      { n: 1, title: "Agreement", source: "drive" },
+      { n: 2, title: "Extra", source: "gmail" },
+    ],
+    results: [
+      ...validFactualAnswer.results,
+      { title: "Extra", source: "gmail", chunk_uid: "gmail:extra#0" },
+    ],
+    evidence_gate: { supported: true, complete: true, evidence: [1, 2] },
+  }],
+  ["a duplicate number in the verifier evidence receipt", {
+    ...validFactualAnswer,
+    evidence_gate: { supported: true, complete: true, evidence: [1, 1] },
+  }],
+  ["a canonical refusal claiming supported evidence", {
+    ...validRefusal,
+    evidence_gate: { supported: true, complete: true, evidence: [] },
+  }],
+  ["a canonical refusal carrying a citation", {
+    ...validRefusal,
+    citations: [{ n: 1, title: "Candidate", source: "drive" }],
+  }],
+  ["a null answer carrying a top-level error", {
+    ...validNullAnswer(), error: "private-payload-canary",
+  }],
+  ["a null answer carrying an unknown status", {
+    ...validNullAnswer(), status: "future_private_failure",
+  }],
+  ["a null answer carrying a citation", {
+    ...validNullAnswer(),
+    citations: [{ n: 1, title: "Candidate", source: "drive" }],
+    results: [{ title: "Candidate", source: "drive", chunk_uid: "drive:candidate#0" }],
+  }],
+  ["a null answer claiming supported evidence", {
+    ...validNullAnswer(), evidence_gate: { supported: true, complete: true, evidence: [] },
+  }],
+  ["empty answer text in place of null", {
+    ...validNullAnswer(), answer: "   ",
+  }],
+]) {
+  const suite = await suiteForThink(malformed);
   const contractFailure = suite.results.find((result) =>
     result.status === "fail" && result.name === "think response contract"
   );
@@ -390,24 +421,44 @@ for (const [label, malformed] of [
     !/private-payload-canary/i.test(contractFailure?.detail || ""), JSON.stringify(contractFailure));
 }
 
-{
-  const valid = {
-    mode: "think",
-    answer: "The agreement ends in June [1].",
-    citations: [{ n: 1, title: "Agreement", source: "drive" }],
-    results: [{ title: "Agreement", source: "drive", chunk_uid: "drive:agreement#0" }],
-    gaps: [],
-    evidence_gate: { supported: true, complete: true },
-  };
-  const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
-  suite.post = async (path) => path === "/api/rag/unified"
-    ? { ok: true, status: 200, json: { results: [{ title: "candidate" }] } }
-    : { ok: true, status: 200, json: valid };
-  await suite.tierRetrieval(["When does it end?"]);
-  check("a consistent cited answer still passes the answer contract",
-    suite.results.some((result) => result.status === "pass" && result.name === "think returns an answer") &&
-      !suite.results.some((result) => result.name === "think response contract"),
+for (const [label, valid] of [
+  ["a consistent cited answer", validFactualAnswer],
+  ["a supported partial answer", {
+    ...validFactualAnswer,
+    answer: "The records establish the first part [1].\n\nNot covered by the documents: the deadline.",
+    evidence_gate: { supported: true, complete: false, partial: true, evidence: [1] },
+  }],
+  ["an exact evidence refusal", validRefusal],
+  ["a null no-results response", validNullAnswer()],
+  ["a cited answer over an untitled document", {
+    ...validFactualAnswer,
+    citations: [{ n: 1, title: "untitled", source: "drive" }],
+    results: [{ title: null, source: "drive", chunk_uid: "drive:untitled#0" }],
+  }],
+  ["a factual claim containing refusal-like words", {
+    ...validFactualAnswer,
+    answer: "There is no information missing from the signed agreement [1].",
+  }],
+]) {
+  const suite = await suiteForThink(valid);
+  check(`${label} still passes the answer contract`,
+    !suite.results.some((result) => result.name === "think response contract"),
     JSON.stringify(suite.results));
+}
+
+for (const [label, response, expectedStage] of [
+  ["a private retrieval notice", validNullAnswer({
+    status: "search_unavailable", degraded: "vector", notice: "private-payload-canary",
+  }), "retrieval"],
+  ["a private source-coverage detail", validNullAnswer({
+    status: "coverage_incomplete",
+    gaps: [{ type: "coverage_stale", detail: "private-payload-canary" }],
+  }), "source_coverage"],
+]) {
+  const diagnostic = answerUnavailableDiagnostic(response);
+  check(`${label} keeps a fixed public ${expectedStage} diagnostic`,
+    diagnostic.stage === expectedStage && !/private-payload-canary/i.test(diagnostic.detail),
+    JSON.stringify(diagnostic));
 }
 
 console.log(`\nacceptance verdict: ${ran - fail}/${ran} passed`);
