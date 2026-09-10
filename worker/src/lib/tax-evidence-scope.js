@@ -8,24 +8,50 @@
  * the same three facts on the document before the record is answer-eligible.
  */
 
+// Variants precede their base forms. Every base has an explicit suffix guard,
+// so 1040-X cannot become 1040 and one 1099 subtype cannot stand in for
+// another. Question patterns require the word "Form" for bare numeric forms;
+// common names such as W-2, 1099-INT, and Schedule K-1 remain natural to ask.
 const QUESTION_FORM_PATTERNS = Object.freeze([
-  ["schedule_k1", /\b(?:schedule\s+)?k[\s-]?1\b/i],
-  ["1120s", /\bform\s+1120[\s-]?s\b/i],
-  ["1120", /\bform\s+1120\b/i],
-  ["1065", /\bform\s+1065\b/i],
-  ["1040", /\bform\s+1040\b/i],
-  ["1099", /\b(?:form\s+)?1099(?:[\s-]?[a-z]+)?\b/i],
-  ["w2", /\b(?:form\s+)?w[\s-]?2\b/i],
+  ["schedule-k-1", /\b(?:schedule\s+)?k[\s-]?1\b(?!-[a-z0-9])/i],
+  ["1099-misc", /\b(?:form\s+)?1099[\s-]*misc\b(?!-[a-z0-9])/i],
+  ["1099-int", /\b(?:form\s+)?1099[\s-]*int\b(?!-[a-z0-9])/i],
+  ["1099-nec", /\b(?:form\s+)?1099[\s-]*nec\b(?!-[a-z0-9])/i],
+  ["1099-div", /\b(?:form\s+)?1099[\s-]*div\b(?!-[a-z0-9])/i],
+  ["1040-x", /\bform\s+1040[\s-]*x\b(?!-[a-z0-9])/i],
+  ["1120-s", /\bform\s+1120[\s-]*s\b(?!-[a-z0-9])/i],
+  ["1120-h", /\bform\s+1120[\s-]*h\b(?!-[a-z0-9])/i],
+  ["1099-k", /\b(?:form\s+)?1099[\s-]*k\b(?!-[a-z0-9])/i],
+  ["1099-r", /\b(?:form\s+)?1099[\s-]*r\b(?!-[a-z0-9])/i],
+  ["1099-b", /\b(?:form\s+)?1099[\s-]*b\b(?!-[a-z0-9])/i],
+  ["1099-s", /\b(?:form\s+)?1099[\s-]*s\b(?!-[a-z0-9])/i],
+  ["w-2", /\b(?:form\s+)?w[\s-]?2\b(?!-[a-z0-9])/i],
+  ["1040", /\bform\s+1040\b(?!\s*-\s*[a-z0-9])(?!\s+x\b)/i],
+  ["1065", /\bform\s+1065\b(?!\s*-\s*[a-z0-9])/i],
+  ["1120", /\bform\s+1120\b(?!\s*-\s*[a-z0-9])(?!\s+[sh]\b)/i],
+  ["941", /\bform\s+941\b(?!\s*-\s*[a-z0-9])/i],
+  ["940", /\bform\s+940\b(?!\s*-\s*[a-z0-9])/i],
 ]);
 
 const DOCUMENT_FORM_PATTERNS = Object.freeze([
-  ["schedule_k1", /\b(?:schedule\s+)?k[\s-]?1\b/i],
-  ["1120s", /\b(?:form\s+)?1120[\s-]?s\b/i],
-  ["1120", /\b(?:form\s+)?1120\b/i],
-  ["1065", /\b(?:form\s+)?1065\b/i],
-  ["1040", /\b(?:form\s+)?1040\b/i],
-  ["1099", /\b(?:form\s+)?1099(?:[\s-]?[a-z]+)?\b/i],
-  ["w2", /\b(?:form\s+)?w[\s-]?2\b/i],
+  ["schedule-k-1", /\b(?:schedule\s+)?k[\s-]?1\b(?!-[a-z0-9])/i],
+  ["1099-misc", /\b(?:form\s+)?1099[\s-]*misc\b(?!-[a-z0-9])/i],
+  ["1099-int", /\b(?:form\s+)?1099[\s-]*int\b(?!-[a-z0-9])/i],
+  ["1099-nec", /\b(?:form\s+)?1099[\s-]*nec\b(?!-[a-z0-9])/i],
+  ["1099-div", /\b(?:form\s+)?1099[\s-]*div\b(?!-[a-z0-9])/i],
+  ["1040-x", /\b(?:form\s+)?1040[\s-]*x\b(?!-[a-z0-9])/i],
+  ["1120-s", /\b(?:form\s+)?1120[\s-]*s\b(?!-[a-z0-9])/i],
+  ["1120-h", /\b(?:form\s+)?1120[\s-]*h\b(?!-[a-z0-9])/i],
+  ["1099-k", /\b(?:form\s+)?1099[\s-]*k\b(?!-[a-z0-9])/i],
+  ["1099-r", /\b(?:form\s+)?1099[\s-]*r\b(?!-[a-z0-9])/i],
+  ["1099-b", /\b(?:form\s+)?1099[\s-]*b\b(?!-[a-z0-9])/i],
+  ["1099-s", /\b(?:form\s+)?1099[\s-]*s\b(?!-[a-z0-9])/i],
+  ["w-2", /\b(?:form\s+)?w[\s-]?2\b(?!-[a-z0-9])/i],
+  ["1040", /\b(?:form\s+)?1040\b(?!\s*-\s*[a-z0-9])(?!\s+x\b)/i],
+  ["1065", /\b(?:form\s+)?1065\b(?!\s*-\s*[a-z0-9])/i],
+  ["1120", /\b(?:form\s+)?1120\b(?!\s*-\s*[a-z0-9])(?!\s+[sh]\b)/i],
+  ["941", /\b(?:form\s+)?941\b(?!\s*-\s*[a-z0-9])/i],
+  ["940", /\b(?:form\s+)?940\b(?!\s*-\s*[a-z0-9])/i],
 ]);
 
 const jsonObject = (value) => {
@@ -60,12 +86,57 @@ const containsPhrase = (surface, phraseWords) => {
   return normalized.includes(` ${phraseWords.join(" ")} `);
 };
 
-function detectedForm(value, patterns) {
+function detectedFormMatch(value, patterns) {
   const text = String(value || "");
-  for (const [form, pattern] of patterns) {
-    if (pattern.test(text)) return form;
+  let detected = null;
+  for (let priority = 0; priority < patterns.length; priority++) {
+    const [form, pattern] = patterns[priority];
+    const match = pattern.exec(text);
+    if (match && (!detected || match.index < detected.index ||
+      (match.index === detected.index && priority < detected.priority))) {
+      detected = { form, index: match.index, length: match[0].length, priority };
+    }
   }
-  return null;
+  return detected;
+}
+
+const detectedForm = (value, patterns) => detectedFormMatch(value, patterns)?.form || null;
+
+function exactQuestionFormMatch(value) {
+  const text = String(value || "");
+  const matches = [];
+  for (const [form, pattern] of QUESTION_FORM_PATTERNS) {
+    const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+    for (const match of text.matchAll(new RegExp(pattern.source, flags))) {
+      matches.push({ form, index: match.index, length: match[0].length });
+    }
+  }
+  if (new Set(matches.map((match) => match.form)).size !== 1) return null;
+  return matches;
+}
+
+const ENTITY_PARSE_STOPWORDS = new Set([
+  "a", "about", "accountant", "an", "at", "charge", "charged", "charges", "cost", "costs",
+  "could", "did", "do", "does", "fee", "fees", "file", "filed", "filing", "for", "from", "he",
+  "her", "hers", "his", "how", "in", "invoice", "is", "it", "its", "many", "much", "my", "of",
+  "on", "our", "paid", "pay", "pays", "preparation", "prepare", "prepared", "receive", "received",
+  "receives", "report", "reported", "reports", "return", "returns", "she", "should", "spend", "spent",
+  "the", "their", "theirs", "they", "to", "us", "was", "we", "were", "what", "when", "where",
+  "which", "who", "whom", "whose", "why", "will", "with", "would", "you", "your", "yours",
+]);
+const GENERIC_ENTITY_WORDS = new Set([
+  "business", "co", "company", "corp", "corporation", "entity", "inc", "llc", "lp", "llp",
+  "partnership", "taxpayer",
+]);
+const NON_RETURN_CONTEXT = /\b(?:accountant|charg(?:e|ed|es|ing)|costs?|fees?|invoice|paid|pay|pays|prepar(?:ation|e|ed|er|es|ing)|spend|spent)\b/i;
+
+function conservativeEntityWords(value) {
+  const withoutLeadingArticle = String(value || "").trim().replace(/^the\s+/i, "");
+  const candidate = entityWords(withoutLeadingArticle);
+  if (candidate.length < 1 || candidate.length > 8) return [];
+  if (candidate.some((word) => ENTITY_PARSE_STOPWORDS.has(word))) return [];
+  if (candidate.every((word) => GENERIC_ENTITY_WORDS.has(word))) return [];
+  return candidate;
 }
 
 function queryEntity(question, yearIndex) {
@@ -79,36 +150,40 @@ function queryEntity(question, yearIndex) {
   // grammar, rather than capitalization, identifies the subject slot.
   const grammatical = /\b(?:did|does|for|of|from)\s+(.{1,120}?)\s*$/i.exec(prefix)?.[1] || null;
   if (grammatical) {
-    const candidate = entityWords(grammatical);
-    if (candidate.length >= 1 && candidate.length <= 8) return candidate;
+    // If a grammatical subject slot is present but contains predicate words,
+    // stop. Falling through to a capitalized substring would turn a tax-prep
+    // invoice question into a tax-return question.
+    return conservativeEntityWords(grammatical);
   }
 
   // Fallback for "What is Example Entity's 2023 Form 1065 ...". Choose the
   // last proper-name-shaped phrase before the year so question words cannot
   // become the entity.
-  const properNames = [...prefix.matchAll(
-    /\b[A-Z][A-Za-z0-9&.'’\-]*(?:\s+[A-Z][A-Za-z0-9&.'’\-]*){0,7}\b/g,
-  )];
-  for (let index = properNames.length - 1; index >= 0; index--) {
-    const candidate = entityWords(properNames[index][0]);
-    if (candidate.length >= 1 && candidate.length <= 8) return candidate;
-  }
-  return [];
+  const properName = /(?:^|[^A-Za-z0-9&.'’\-])([A-Z][A-Za-z0-9&.'’\-]*(?:\s+[A-Z][A-Za-z0-9&.'’\-]*){0,7})$/
+    .exec(prefix)?.[1] || null;
+  return properName ? conservativeEntityWords(properName) : [];
 }
 
 /** Parse only an unambiguous named-entity, tax-year, exact-form question. */
 export function taxQuestionScope(question = "") {
   const text = String(question || "");
-  const form = detectedForm(text, QUESTION_FORM_PATTERNS);
-  if (!form) return null;
+  if (NON_RETURN_CONTEXT.test(text)) return null;
 
   const years = [...text.matchAll(/\b(?:19|20)\d{2}\b/g)];
-  const distinctYears = [...new Set(years.map((match) => match[0]))];
-  if (distinctYears.length !== 1) return null;
-  const yearMatch = years.find((match) => match[0] === distinctYears[0]);
+  if (years.length !== 1) return null;
+  const yearMatch = years[0];
+  const formMatches = exactQuestionFormMatch(text);
+  if (!formMatches) return null;
+  // This narrow contract covers `Entity's 2023 Form 1065` and its direct
+  // non-possessive equivalent. A form mentioned elsewhere in a sentence, such
+  // as the object of a preparation invoice, is left to the general verifier.
+  const yearEnd = yearMatch.index + yearMatch[0].length;
+  const formMatch = formMatches.find((match) =>
+    match.index >= yearEnd && /^\s*$/.test(text.slice(yearEnd, match.index)));
+  if (!formMatch) return null;
   const entity = queryEntity(text, yearMatch.index);
   if (!entity.length) return null;
-  return Object.freeze({ form, year: distinctYears[0], entity });
+  return Object.freeze({ form: formMatch.form, year: yearMatch[0], entity });
 }
 
 function projectedDocumentHead(row) {
@@ -132,6 +207,29 @@ function projectedDocumentHead(row) {
   return { present, value };
 }
 
+function nativeHeaderMatchesEntity(value, requestedEntity) {
+  const text = String(value || "");
+  if (!text.trim()) return false;
+
+  // Prefer explicit primary-filer labels. Stop at punctuation so a secondary
+  // party named later in the same extracted line cannot satisfy the taxpayer
+  // field merely by appearing somewhere in the first chunk.
+  const labeled = [...text.matchAll(
+    /(?:^|\n)\s*(?:taxpayer(?:\s+name)?|filer(?:\s+name)?|partnership\s+name|corporation\s+name|employer\s+name|name\s+of\s+(?:taxpayer|partnership|corporation|organization))\s*[:#-]\s*([^\n.;]{1,200})/gi,
+  )].map((match) => entityWords(match[1]));
+  if (labeled.length) {
+    return labeled.some((candidate) => candidate.join(" ") === requestedEntity.join(" "));
+  }
+
+  // Some native extracts begin directly with the legal name. Accept only the
+  // first clause before the tax year/form, never an arbitrary later mention.
+  const firstLine = text.split(/\r?\n/).find((line) => line.trim()) || "";
+  const firstClause = firstLine.split(/[.;|]/, 1)[0];
+  const boundary = /\b(?:19|20)\d{2}\b|\bform\b/i.exec(firstClause);
+  const leadingIdentity = boundary ? firstClause.slice(0, boundary.index) : firstClause;
+  return entityWords(leadingIdentity).join(" ") === requestedEntity.join(" ");
+}
+
 function documentIdentityEvidence(row, metadata) {
   const authoritative = [];
   if (row?.entity_slug) authoritative.push({ value: row.entity_slug, exact: true });
@@ -141,7 +239,7 @@ function documentIdentityEvidence(row, metadata) {
     if (metadata?.[key]) authoritative.push({ value: metadata[key], exact: true });
   }
   const head = projectedDocumentHead(row);
-  if (head.present) authoritative.push({ value: head.value || "", exact: false });
+  if (head.present) authoritative.push({ value: head.value || "", exact: false, nativeHeader: true });
 
   // Structured scope narrows identity, but it cannot overrule a contradictory
   // native header. Every available authoritative signal must agree. Filename
@@ -186,7 +284,7 @@ export function taxEvidenceScope(row = {}, question = "") {
 
   const identityMatches = ({ value, exact }) => exact
     ? entityWords(value).join(" ") === requested.entity.join(" ")
-    : containsPhrase(value, requested.entity);
+    : nativeHeaderMatchesEntity(value, requested.entity);
   const entityMatched = identity.requireAll
     ? identity.surfaces.every(identityMatches)
     : identity.surfaces.some(identityMatches);

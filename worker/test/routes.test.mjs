@@ -21,6 +21,7 @@ function mkEnv(rows, {
   outboxRow = null,
   readinessRow = null,
   sourceRows = [],
+  unchunkedRows = [],
   extra = {},
 } = {}) {
   const seen = { sql: [], binds: [], vectorQueries: [] };
@@ -34,6 +35,9 @@ function mkEnv(rows, {
         return {
           bind(...b) { bound = b; seen.binds.push(b); return this; },
           all: async () => {
+            if (/unchunked-tax-document-candidates/.test(sql)) {
+              return { results: unchunkedRows };
+            }
             if (/SELECT s\.name, s\.kind, s\.zone, s\.status/.test(sql) && /FROM sources s/.test(sql)) {
               return { results: sourceRows };
             }
@@ -993,6 +997,158 @@ const call = (env, path) => {
     body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
       /Unlock the file or provide a readable copy/.test(body.notice || ""),
     JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* A password-protected file can leave a durable documents row but no chunks at
+   all. It therefore cannot be returned by keyword or vector search. The
+   document inventory probe must still find an exact title/metadata candidate,
+   without depending on modern entity_slug or content-hash conventions and
+   without turning that private candidate into a result or citation. */
+const zeroChunkTaxQuestion = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+const zeroChunkExpectedReturn = {
+  doc_uid: "drive:legacy-password-protected-return",
+  source_id: "legacy-password-protected-return",
+  source: "drive",
+  source_kind: "upload",
+  title: "Example Orchard LLC 2023 tax return Form 1065",
+  authority_meta: JSON.stringify({
+    taxpayer_name: "Example Orchard LLC",
+    tax_year: 2023,
+  }),
+  text_source: "native",
+  text_reliable: true,
+  // Deliberately no entity_slug, content_hash, chunk_uid, text, or snippet.
+};
+
+{
+  const borrowedK1 = {
+    ...ROW,
+    chunk_uid: "drive:borrowed-k1#0",
+    doc_uid: "drive:borrowed-k1",
+    source_id: "borrowed-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    authority_document_head: "Example Timber Partners. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a negative amount.",
+  };
+  const { env, seen } = mkEnv([borrowedK1], {
+    vectorIds: [borrowedK1.chunk_uid],
+    unchunkedRows: [zeroChunkExpectedReturn],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label matches" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a zero-chunk expected return blocks an overconfident borrowed K-1 answer",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("the zero-chunk probe is bounded and reads no chunk text",
+    seen.sql.some((sql) => /unchunked-tax-document-candidates/.test(sql) &&
+      /NOT EXISTS \(SELECT 1 FROM chunks c/.test(sql) && /LIMIT \?1/.test(sql)),
+    JSON.stringify(seen.sql));
+  check("the document-only candidate never becomes a public result, citation, or identity receipt",
+    !JSON.stringify(body).includes(zeroChunkExpectedReturn.doc_uid) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.source_id) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.title),
+    JSON.stringify(body));
+}
+
+{
+  const { env } = mkEnv([], { unchunkedRows: [zeroChunkExpectedReturn] });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a zero-chunk exact filing blocks a clean absence when search returns nothing",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.confidence === undefined && body.results.length === 0 &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /could not be read reliably/.test(body.notice || ""),
+    JSON.stringify(body));
+  check("the zero-result response does not disclose the candidate title or durable identity",
+    !JSON.stringify(body).includes(zeroChunkExpectedReturn.doc_uid) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.source_id) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.title),
+    JSON.stringify(body));
+}
+
+{
+  const unrelatedUnchunked = Array.from({ length: 21 }, (_, index) => ({
+    ...zeroChunkExpectedReturn,
+    doc_uid: `drive:unrelated-zero-${index}`,
+    source_id: `unrelated-zero-${index}`,
+    title: `Unrelated encrypted archive ${index}`,
+    authority_meta: "{}",
+  }));
+  const { env } = mkEnv([], { unchunkedRows: unrelatedUnchunked });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a truncated zero-chunk inventory fails closed without inventing an exact match",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified") &&
+      !body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("truncation details remain aggregate and do not leak candidate identities",
+    !JSON.stringify(body).includes("unrelated-zero-") &&
+      !JSON.stringify(body).includes("Unrelated encrypted archive"),
+    JSON.stringify(body));
+}
+
+{
+  const legacyNeighbor = [{
+    ref_key: "legacy-other-entity-k1",
+    source: "drive",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    snippet: "Schedule K-1 (Form 1065). Ordinary business income was a negative amount.",
+    ts: null,
+    rrf_score: 1,
+  }];
+  const originalFetch = globalThis.fetch;
+  let body;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify(legacyNeighbor), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    const { env } = mkEnv([], {
+      extra: {
+        STORAGE: "supabase",
+        SUPABASE_URL: "https://supabase.example.invalid",
+        SUPABASE_SERVICE_ROLE_KEY: "synthetic-service-role",
+        AI: {
+          run: async (model, input) => {
+            if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+            return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+              ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label matches" }, usage: {} }
+              : { response: "Example Orchard LLC reported a negative amount [1].", usage: {} };
+          },
+        },
+      },
+    });
+    body = await (await call(
+      env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+    )).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("the legacy rollback adapter cannot bypass an exact tax scope by omitting authority metadata",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false &&
+      /tax evidence does not match/.test(body.evidence_gate?.reason || "") &&
+      body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified"),
+    JSON.stringify(body));
 }
 
 /* ---- every material part must be answered or explicitly called unknown ---- */

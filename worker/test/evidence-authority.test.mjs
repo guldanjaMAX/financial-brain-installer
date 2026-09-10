@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 
 import worker from "../src/index.js";
 import { computeAnswerConfidence } from "../src/lib/confidence.js";
@@ -15,7 +16,7 @@ import {
 } from "../src/lib/evidence-authority.js";
 import { hasExplicitCurrentIntent, queryEntityAnchors } from "../src/lib/query-intent.js";
 import { SEARCH_UNAVAILABLE } from "../src/lib/retrieval-status.js";
-import { search } from "../src/lib/store-d1.js";
+import { search, unchunkedTaxDocumentCandidates } from "../src/lib/store-d1.js";
 import { taxQuestionScope } from "../src/lib/tax-evidence-scope.js";
 
 const ownerRow = ({
@@ -223,6 +224,16 @@ test("a named tax form claim requires the same entity, tax year, and form", () =
     "a correct-looking structured entity scope must not override a different native taxpayer header");
   assert.equal(contradictorySlugAndHeader.tax_scope?.entity_matched, false);
 
+  const secondaryPartyMention = authorityFor({
+    ...base,
+    title: "Example Orchard LLC 2023 tax return Form 1065",
+    authority_document_head: "Taxpayer: Example Timber Partners. Partner: Example Orchard LLC. 2023 Form 1065.",
+    text: "Example Orchard LLC appears as a partner.",
+  }, { query: question });
+  assert.equal(secondaryPartyMention.eligible, false,
+    "mentioning the requested entity as a secondary party cannot make it the return's taxpayer");
+  assert.equal(secondaryPartyMention.tax_scope?.entity_matched, false);
+
   const expandedStructuredEntity = authorityFor({
     ...base,
     entity_slug: "example-orchard-llc-holdings",
@@ -296,8 +307,236 @@ test("the tax scope parser activates only for one exact named year and form", ()
     taxQuestionScope("What ordinary business income did example orchard llc's 2023 Form 1065 report?"),
     { form: "1065", year: "2023", entity: ["example", "orchard", "llc"] },
   );
-  assert.equal(taxQuestionScope("What did Example Orchard pay on invoice 1065 in 2023?"), null);
+  for (const [label, canonical] of [
+    ["Form 1040-X", "1040-x"],
+    ["Form 1120-S", "1120-s"],
+    ["Form 1120-H", "1120-h"],
+    ["Form 1099-INT", "1099-int"],
+    ["Form 1099-NEC", "1099-nec"],
+    ["Form 1099-MISC", "1099-misc"],
+    ["Form 1099-DIV", "1099-div"],
+    ["Form 1099-K", "1099-k"],
+    ["Form 1099-R", "1099-r"],
+    ["Form 1099-B", "1099-b"],
+    ["Form 1099-S", "1099-s"],
+    ["Form 941", "941"],
+    ["Form 940", "940"],
+    ["W-2", "w-2"],
+    ["Schedule K-1", "schedule-k-1"],
+    ["Form 1040", "1040"],
+    ["Form 1065", "1065"],
+    ["Form 1120", "1120"],
+  ]) {
+    assert.equal(
+      taxQuestionScope(`What did Example Orchard LLC's 2023 ${label} report?`)?.form,
+      canonical,
+      label,
+    );
+  }
+
+  assert.equal(taxQuestionScope("What did Example Orchard LLC's 2023 1065 report?"), null,
+    "a bare number is not an exact supported form token");
+  assert.equal(taxQuestionScope("What did Example Orchard LLC's 2023 partnership return report?"), null,
+    "a generic return type is outside the deterministic guard");
   assert.equal(taxQuestionScope("Compare Example Orchard's 2022 and 2023 Form 1065 returns."), null);
+  assert.equal(
+    taxQuestionScope("How much did Example Orchard LLC pay in 2023 for Form 1065 preparation?"),
+    null,
+    "a preparation invoice must not turn predicate words into a taxpayer identity",
+  );
+  assert.equal(
+    taxQuestionScope("How much did Example Orchard LLC's 2023 Form 1065 preparation cost?"),
+    null,
+    "even adjacent entity-year-form wording remains outside the guard in service-fee context",
+  );
+  assert.equal(
+    taxQuestionScope("What did Example Orchard LLC's 2023 Form 1099-INT and Form 1099-NEC report?"),
+    null,
+    "two supported form types cannot activate one exact-form guard",
+  );
+  for (const question of [
+    "What 2023 Form 1065 amount was reported?",
+    "Who 2023 Form 1065?",
+    "Which 2023 Form 1065?",
+    "How 2023 Form 1065?",
+    "What did 2023 Form 1065 report for Example Orchard LLC?",
+  ]) {
+    assert.equal(taxQuestionScope(question), null,
+      `question words or a postfix entity cannot become the named entity: ${question}`);
+  }
+});
+
+test("tax form variants are exact canonical tokens, not base-form or subtype aliases", () => {
+  const base = {
+    source: "drive",
+    source_kind: "upload",
+    text_source: "native",
+    text_reliable: true,
+  };
+  const scopedAuthority = (questionForm, documentForm) => authorityFor({
+    ...base,
+    title: `Example Orchard LLC 2023 ${documentForm}`,
+    authority_document_head: `Taxpayer: Example Orchard LLC. 2023 ${documentForm}.`,
+    text: `Taxpayer: Example Orchard LLC. 2023 ${documentForm}.`,
+  }, {
+    query: `What amount did Example Orchard LLC's 2023 ${questionForm} report?`,
+  });
+
+  for (const [questionForm, documentForm] of [
+    ["Form 1040-X", "Form 1040"],
+    ["Form 1120-S", "Form 1120"],
+    ["Form 1120-H", "Form 1120"],
+  ]) {
+    const authority = scopedAuthority(questionForm, documentForm);
+    assert.equal(authority.eligible, false, `${questionForm} must not match ${documentForm}`);
+    assert.equal(authority.tax_scope?.form_matched, false);
+  }
+
+  const subtypes = ["INT", "NEC", "MISC", "DIV", "K", "R", "B", "S"];
+  for (let index = 0; index < subtypes.length; index++) {
+    const requested = `Form 1099-${subtypes[index]}`;
+    const different = `Form 1099-${subtypes[(index + 1) % subtypes.length]}`;
+    const authority = scopedAuthority(requested, different);
+    assert.equal(authority.eligible, false, `${requested} must not match ${different}`);
+    assert.equal(authority.tax_scope?.form_matched, false);
+  }
+
+  const exact = scopedAuthority("Form 1099-INT", "Form 1099-INT");
+  assert.equal(exact.eligible, true);
+  assert.equal(exact.tax_scope?.form_matched, true);
+  assert.equal(exact.tax_scope?.requested_form, "1099-int");
+
+  const laterSubtypeMention = authorityFor({
+    ...base,
+    title: "Example Orchard LLC 2023 Form 1099-NEC",
+    authority_document_head: "Taxpayer: Example Orchard LLC. 2023 Form 1099-NEC. See Form 1099-INT instructions for comparison.",
+    text: "The primary filing is Form 1099-NEC.",
+  }, {
+    query: "What amount did Example Orchard LLC's 2023 Form 1099-INT report?",
+  });
+  assert.equal(laterSubtypeMention.eligible, false,
+    "a later reference to the requested subtype cannot override the primary form token");
+  assert.equal(laterSubtypeMention.tax_scope?.form_matched, false);
+});
+
+test("the bounded D1 zero-chunk lookup covers legacy rows and repeats privacy scope", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  try {
+    sqlite.exec(`
+      CREATE TABLE sources (name TEXT PRIMARY KEY, kind TEXT, zone TEXT);
+      CREATE TABLE documents (
+        doc_uid TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
+        title TEXT, uri TEXT, document_date INTEGER, date_source TEXT, date_reliable INTEGER,
+        entity_slug TEXT, client TEXT, category TEXT, top_folder TEXT, platform TEXT,
+        text_source TEXT, text_reliable INTEGER, meta TEXT, ingested_at INTEGER NOT NULL,
+        content_hash TEXT, deleted_at INTEGER
+      );
+      CREATE INDEX idx_documents_entity_slug ON documents(entity_slug);
+      CREATE INDEX idx_documents_ingested_at ON documents(ingested_at DESC);
+      CREATE TABLE chunks (doc_uid TEXT NOT NULL);
+      CREATE INDEX idx_chunks_doc ON chunks(doc_uid);
+      CREATE TABLE document_access_documents (
+        grant_id TEXT, document_id TEXT, entity_slug TEXT, revoked_at INTEGER
+      );
+    `);
+    const insertDocument = sqlite.prepare(`
+      INSERT INTO documents
+        (doc_uid,source,source_id,title,entity_slug,meta,text_source,text_reliable,
+         ingested_at,content_hash,deleted_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,NULL)
+    `);
+    sqlite.prepare("INSERT INTO sources(name,kind,zone) VALUES (?,?,?)")
+      .run("drive-books", "upload", "books");
+    sqlite.prepare("INSERT INTO sources(name,kind,zone) VALUES (?,?,?)")
+      .run("drive-medical", "upload", "medical");
+    insertDocument.run(
+      "legacy-zero", "drive-books", "legacy-zero", "Example Orchard LLC 2023 Form 1065",
+      null, JSON.stringify({ taxpayer_name: "Example Orchard LLC", tax_year: 2023 }),
+      "native", 1, 1, "legacy-nonempty-hash",
+    );
+    insertDocument.run(
+      "chunked", "drive-books", "chunked", "Example Orchard LLC 2023 Form 1065",
+      null, "{}", "native", 1, 2, "different-hash",
+    );
+    sqlite.prepare("INSERT INTO chunks(doc_uid) VALUES (?)").run("chunked");
+
+    const preparedSql = [];
+    const env = {
+      DB: {
+        prepare(sql) {
+          preparedSql.push(sql);
+          const statement = sqlite.prepare(sql);
+          let binds = [];
+          return {
+            bind(...values) { binds = values; return this; },
+            async all() { return { results: statement.all(...binds) }; },
+          };
+        },
+      },
+    };
+    const legacy = await unchunkedTaxDocumentCandidates(env, {
+      limit: 20, filters: {}, scope: { all: true },
+    });
+    assert.equal(legacy.complete, true);
+    assert.deepEqual(legacy.results.map((row) => row.doc_uid), ["legacy-zero"]);
+    assert.equal(legacy.results[0].entity_slug, null,
+      "the fallback must not depend on a modern entity mapping");
+    assert.equal(legacy.results[0].content_hash, undefined,
+      "the fallback neither selects nor depends on a current empty-content hash");
+    const lookupSql = preparedSql.find((sql) => /unchunked-tax-document-candidates/.test(sql));
+    const plan = sqlite.prepare(`EXPLAIN QUERY PLAN ${lookupSql}`).all(21)
+      .map((row) => String(row.detail || "")).join("\n");
+    assert.match(plan, /idx_documents_ingested_at/,
+      "the bounded fallback walks the ingest-order index instead of materializing an unbounded sort");
+    assert.match(plan, /idx_chunks_doc/,
+      "the zero-chunk anti-join must use the document-key chunk index");
+
+    for (const [uid, source] of [
+      ["scoped-books-zero", "drive-books"],
+      ["scoped-medical-zero", "drive-medical"],
+    ]) {
+      insertDocument.run(
+        uid, source, uid, "Example Orchard LLC 2023 Form 1065", "example-orchard-llc",
+        "{}", "native", 1, 10, `${uid}-hash`,
+      );
+    }
+    const zoned = await unchunkedTaxDocumentCandidates(env, {
+      entitySlug: "example-orchard-llc",
+      limit: 20,
+      filters: {},
+      scope: { all: false, zones: ["books"], exclude: [] },
+    });
+    assert.deepEqual(zoned.results.map((row) => row.doc_uid), ["scoped-books-zero"],
+      "a title candidate outside the principal's zone must be invisible");
+
+    sqlite.prepare(
+      "INSERT INTO document_access_documents(grant_id,document_id,entity_slug,revoked_at) VALUES (?,?,?,NULL)",
+    ).run("grant-books", "scoped-books-zero", "example-orchard-llc");
+    const granted = await unchunkedTaxDocumentCandidates(env, {
+      entitySlug: "example-orchard-llc",
+      limit: 20,
+      filters: {},
+      access: { kind: "grant", grantId: "grant-books", entitySlug: "example-orchard-llc" },
+      scope: { all: true },
+    });
+    assert.deepEqual(granted.results.map((row) => row.doc_uid), ["scoped-books-zero"],
+      "a document-only candidate outside the exact grant must be invisible");
+
+    for (let index = 0; index < 21; index++) {
+      insertDocument.run(
+        `overflow-${index}`, "drive-books", `overflow-${index}`, `Archive ${index}`,
+        null, "{}", "native", 1, 100 + index, `overflow-hash-${index}`,
+      );
+    }
+    const truncated = await unchunkedTaxDocumentCandidates(env, {
+      limit: 20, filters: {}, scope: { all: true },
+    });
+    assert.equal(truncated.results.length, 20);
+    assert.equal(truncated.complete, false,
+      "the lookahead row must turn a truncated inventory into unknown coverage");
+  } finally {
+    sqlite.close();
+  }
 });
 
 test("connector kind, not a customer-chosen source name, controls authority", () => {

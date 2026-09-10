@@ -58,6 +58,7 @@ import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
 } from "./lib/evidence-authority.js";
+import { taxEvidenceScope, taxQuestionScope } from "./lib/tax-evidence-scope.js";
 import {
   COVERAGE_INCOMPLETE, coverageIncompleteNotice, emptyRetrievalDisclosure,
 } from "./lib/retrieval-status.js";
@@ -582,6 +583,48 @@ async function coverageForRead(env, { access, scope, requestedSource = null }) {
   return coverageGapReport(env, { allowedSources });
 }
 
+const TAX_EVIDENCE_UNREADABLE_GAP = Object.freeze({
+  type: "tax_evidence_unreadable",
+  detail: "A record matching the requested tax entity, year, and form was found, but its text was not obtained from a reliable native text layer. Do not treat a missing answer as proof that the filing omits it.",
+});
+const TAX_DOCUMENT_INVENTORY_GAP = Object.freeze({
+  type: "tax_document_inventory_unverified",
+  detail: "Document-level coverage for the requested tax entity, year, and form could not be verified completely. Do not treat a missing answer as proof that the filing is absent or omits it.",
+});
+const TAX_EVIDENCE_UNREADABLE_NOTICE = "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete.";
+const TAX_DOCUMENT_INVENTORY_NOTICE = "The requested tax filing could not be checked against the complete document inventory. This is not proof that the filing is absent or omits the answer. Finish document extraction or use an exact business scope before treating the result as complete.";
+
+async function taxDocumentCoverageForRead(env, {
+  question, filters, access, scope,
+}) {
+  const requested = taxQuestionScope(question);
+  if (!requested) return { applicable: false, unreadable: false, complete: true };
+
+  const explicitEntitySlug = filters.entity_slug || access?.entitySlug || null;
+  try {
+    const lookup = await storeFor(env).taxDocumentCandidates(env, {
+      // Only a validated request/grant scope is an indexed authority. A name
+      // inferred from prose is not silently promoted to entity_slug; the D1
+      // fallback instead checks a bounded page of every zero-chunk row.
+      entitySlug: explicitEntitySlug,
+      limit: 20,
+      filters,
+      access,
+      scope,
+    });
+    const unreadable = (lookup.results || []).some((row) => {
+      const receipt = taxEvidenceScope(row, question);
+      return receipt?.matched === true || receipt?.title_candidate_matched === true;
+    });
+    const complete = lookup?.complete === true;
+    return { applicable: true, unreadable, complete, unavailable: lookup?.unavailable === true };
+  } catch {
+    // D1/provider errors can contain bound private values. Keep them out of the
+    // response and turn lookup failure into a conservative aggregate gap.
+    return { applicable: true, unreadable: false, complete: false, unavailable: true };
+  }
+}
+
 async function handleThink(
   env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner",
 ) {
@@ -599,17 +642,31 @@ async function handleThink(
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
   } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind });
   const results = Array.isArray(matches) ? matches : [];
-  const coverage = await coverageForRead(env, {
-    access,
-    scope: grantScope,
-    requestedSource: filtersFrom(url).source || null,
-  });
+  const requestedFilters = filtersFrom(url);
+  const [coverage, taxDocumentCoverage] = await Promise.all([
+    coverageForRead(env, {
+      access,
+      scope: grantScope,
+      requestedSource: requestedFilters.source || null,
+    }),
+    taxDocumentCoverageForRead(env, {
+      question: q,
+      filters: requestedFilters,
+      access,
+      scope: grantScope,
+    }),
+  ]);
   const sourceCoverageGaps = coverage.unavailable
     ? [{
         type: "coverage_unavailable",
         detail: "Source coverage could not be checked. A missing result cannot be treated as proof that the available records contain no answer.",
       }]
     : coverage.gaps;
+  let documentTaxGap = taxDocumentCoverage.unreadable
+    ? TAX_EVIDENCE_UNREADABLE_GAP
+    : taxDocumentCoverage.applicable && !taxDocumentCoverage.complete
+      ? TAX_DOCUMENT_INVENTORY_GAP
+      : null;
 
   if (results.length === 0) {
     // Zero results has two causes that look identical from here, and only one
@@ -618,12 +675,14 @@ async function handleThink(
     // knows nothing about the corpus, so its gap must forbid the absence claim
     // rather than issue it. See worker/src/lib/retrieval-status.js.
     const disclosure = emptyRetrievalDisclosure(degraded);
-    const gaps = disclosure.unavailable
+    let gaps = disclosure.unavailable
       ? [...sourceCoverageGaps, ...disclosure.gaps]
       : sourceCoverageGaps.length
         ? sourceCoverageGaps
         : disclosure.gaps;
-    const coverageIncomplete = !disclosure.unavailable && sourceCoverageGaps.length > 0;
+    if (documentTaxGap) gaps = [documentTaxGap, ...gaps];
+    const coverageIncomplete = !disclosure.unavailable &&
+      (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap));
     return jsonResponse({
       mode: "think",
       entity_scope: entityScope,
@@ -642,7 +701,11 @@ async function handleThink(
       notice: disclosure.unavailable
         ? disclosure.notice
         : coverageIncomplete
-          ? coverageIncompleteNotice(coverage.unavailable)
+          ? taxDocumentCoverage.unreadable
+            ? TAX_EVIDENCE_UNREADABLE_NOTICE
+            : documentTaxGap
+              ? TAX_DOCUMENT_INVENTORY_NOTICE
+              : coverageIncompleteNotice(coverage.unavailable)
           : undefined,
       answer: null,
       citations: [],
@@ -704,18 +767,14 @@ async function handleThink(
     ref: r.ref_key || r.drive_file_id || null,
     snippet: (r.snippet || "").replace(/\s+/g, " ").slice(0, 900),
   }));
-  const unreadableRequestedTaxEvidence = docs.some((doc) =>
+  const unreadableRequestedTaxEvidence = taxDocumentCoverage.unreadable || docs.some((doc) =>
     doc.authority?.tax_scope?.applicable === true &&
     (doc.authority.tax_scope.matched === true ||
       doc.authority.tax_scope.title_candidate_matched === true) &&
     (doc.text_source !== "native" || doc.text_reliable !== true)
   );
-  if (unreadableRequestedTaxEvidence) {
-    gaps.unshift({
-      type: "tax_evidence_unreadable",
-      detail: "A record matching the requested tax entity, year, and form was found, but its text was not obtained from a reliable native text layer. Do not treat a missing answer as proof that the filing omits it.",
-    });
-  }
+  if (unreadableRequestedTaxEvidence) documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
+  if (documentTaxGap) gaps.unshift(documentTaxGap);
 
   const renderDocs = (items) => items
     .map((d) => {
@@ -927,8 +986,8 @@ async function handleThink(
           }
           const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
           const allowedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
-          const mismatchedTaxEvidence = allowedDocs.some((doc) =>
-            doc.authority?.tax_scope?.applicable === true && doc.authority.tax_scope.matched !== true
+          const mismatchedTaxEvidence = taxDocumentCoverage.applicable && allowedDocs.some((doc) =>
+            doc.authority?.tax_scope?.matched !== true
           );
           if (evidenceGate.supported && mismatchedTaxEvidence) {
             evidenceGate.supported = false;
@@ -1089,9 +1148,9 @@ async function handleThink(
     : null;
   const sourceCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
     sourceCoverageGaps.length > 0;
-  const unreadableTaxBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
-    unreadableRequestedTaxEvidence;
-  const incompleteCoverageBlocksAbsence = sourceCoverageBlocksAbsence || unreadableTaxBlocksAbsence;
+  const taxDocumentCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
+    Boolean(documentTaxGap);
+  const incompleteCoverageBlocksAbsence = sourceCoverageBlocksAbsence || taxDocumentCoverageBlocksAbsence;
   const confidence = answerError || refusalSearchDisclosure || incompleteCoverageBlocksAbsence
     ? undefined
     : answer === unsupportedAnswer || !approvedDocs.length
@@ -1111,8 +1170,10 @@ async function handleThink(
     retrieval_scope: retrievalScope,
     access: accessSummary,
     status: refusalSearchDisclosure?.status || (incompleteCoverageBlocksAbsence ? COVERAGE_INCOMPLETE : undefined),
-    notice: refusalSearchDisclosure?.notice || (unreadableTaxBlocksAbsence
-      ? "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete."
+    notice: refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence && unreadableRequestedTaxEvidence
+      ? TAX_EVIDENCE_UNREADABLE_NOTICE
+      : taxDocumentCoverageBlocksAbsence
+        ? TAX_DOCUMENT_INVENTORY_NOTICE
       : sourceCoverageBlocksAbsence
         ? coverageIncompleteNotice(coverage.unavailable, results.length > 0)
         : undefined),
