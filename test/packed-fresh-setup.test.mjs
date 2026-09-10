@@ -107,12 +107,40 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
     mkdirSync(privateHome, { recursive: true });
     mkdirSync(join(privateHome, "AppData", "Roaming"), { recursive: true });
     mkdirSync(join(privateHome, "AppData", "Local"), { recursive: true });
+    const standardUserPreload = join(sandbox, "standard-user-preflight.mjs");
+    writeFileSync(standardUserPreload, `
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+
+// Hosted Windows runners belong to the Administrator group. Answer only the
+// installer's exact read-only elevation probe so this packaged fixture proves
+// the supported normal-user path without adding a production bypass.
+const originalSpawnSync = childProcess.spawnSync;
+childProcess.spawnSync = (command, args = [], options = {}) => {
+  const joined = args.map(String).join(" ");
+  if (process.platform === "win32" && /powershell(?:\\.exe)?$/i.test(String(command)) &&
+      joined.includes("BRAIN_STANDARD_USER") && joined.includes("BRAIN_ELEVATED")) {
+    return {
+      pid: 0,
+      output: [null, "BRAIN_STANDARD_USER", ""],
+      stdout: "BRAIN_STANDARD_USER",
+      stderr: "",
+      status: 0,
+      signal: null,
+      error: undefined,
+    };
+  }
+  return originalSpawnSync(command, args, options);
+};
+syncBuiltinESMExports();
+`, "utf8");
     const baseEnvironment = minimalEnvironment({
       HOME: privateHome,
       USERPROFILE: privateHome,
       APPDATA: join(privateHome, "AppData", "Roaming"),
       LOCALAPPDATA: join(privateHome, "AppData", "Local"),
       NO_COLOR: "1",
+      NODE_OPTIONS: `--import=${pathToFileURL(standardUserPreload).href}`,
     });
     const manifestPath = join(sandbox, "new-brain", "brain.manifest.json");
 

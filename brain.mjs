@@ -6248,8 +6248,11 @@ function createPreparedMcpConfigDirectory(prepared, transaction = []) {
   mkdirSync(directorySnapshot.path, { mode: 0o700 });
   const created = lstatSync(directorySnapshot.path);
   prepared.createdDirectoryStat = created;
+  // Windows inherits the owner's profile ACL and does not expose POSIX 0700
+  // semantics through stat.mode. The type, no-link, identity, and parent
+  // checks remain mandatory there; POSIX keeps the exact mode requirement.
   if (!created.isDirectory() || created.isSymbolicLink() ||
-      (created.mode & 0o777) !== 0o700 ||
+      (process.platform !== "win32" && (created.mode & 0o777) !== 0o700) ||
       (typeof process.getuid === "function" && created.uid !== process.getuid())) {
     throw new Error(`${prepared.scope} private config directory was not created safely`);
   }
@@ -15920,7 +15923,10 @@ function atomicReplaceAgentConfig(prepared, bytes) {
     renameSync(temporary, snapshot.path);
     created = false;
     const after = captureAgentConfigFile(snapshot.path);
-    if (!after.bytes.equals(bytes) || (after.stat.mode & 0o7777) !== mode) {
+    // As with the containing directory, Windows relies on the verified owner
+    // profile ACL. POSIX must still read back the exact approved file mode.
+    if (!after.bytes.equals(bytes) ||
+        (process.platform !== "win32" && (after.stat.mode & 0o7777) !== mode)) {
       throw new Error("local assistant configuration did not pass exact readback");
     }
     return after;

@@ -640,6 +640,7 @@ test("the technician tools contract cannot complete without the interactive Clau
       requireDoctor: true,
       platformName: "darwin",
       environment: { HOME: join(sandbox, "strict-tools-home"), PATH: "/usr/bin:/bin" },
+      getEffectiveUserId: () => 501,
       runCommand: (command, args) => {
         if (command === "npx") return { ok: true, out: "wrangler 4.127.1" };
         if (args[0] === "--version") return { ok: true, out: "2.1.63 (Claude Code)" };

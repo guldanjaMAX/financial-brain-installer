@@ -35,6 +35,15 @@ export const CLAUDE_TECHNICIAN_SKILL_MARKER =
   "<!-- financial-brain-installer:claude-skill:v1 -->";
 const LOCAL_ASSISTANT_REPAIR_SKILL_ROOTS = Object.freeze([".claude", ".codex"]);
 
+// POSIX permission bits are not an ACL proof on Windows. Node reports the
+// writable attribute through mode bits there, while access is inherited from
+// the owner's profile ACL. Keep exact 0700/0600 enforcement on POSIX and use
+// the already verified regular-file/directory, no-link, owner-home chain on
+// Windows instead of making every legitimate Windows repair impossible.
+function permissionModeIsPrivate(stat, expected) {
+  return process.platform === "win32" || (stat.mode & 0o7777) === expected;
+}
+
 const PACKAGED_SKILL_PATH = fileURLToPath(new URL(
   `../skills/${CLAUDE_TECHNICIAN_SKILL_NAME}/SKILL.md`,
   import.meta.url,
@@ -476,7 +485,7 @@ export function technicianSkillRepairMatchesApproved(prepared) {
     try {
       const stat = lstatSync(snapshot.path);
       return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 &&
-        (stat.mode & 0o7777) === 0o600 &&
+        permissionModeIsPrivate(stat, 0o600) &&
         readFileSync(snapshot.path, "utf8") === snapshot.desired;
     } catch {
       return false;
@@ -501,7 +510,7 @@ function createTechnicianSkillRepairDirectories(prepared) {
     if (existsSync(snapshot.path)) throw new Error("a technician skill directory appeared before its approved creation");
     mkdirSync(snapshot.path, { mode: 0o700 });
     const created = safeOwnedDirectory(snapshot.path);
-    if ((created.mode & 0o777) !== 0o700) {
+    if (!permissionModeIsPrivate(created, 0o700)) {
       throw new Error("a technician skill directory was not created privately");
     }
     snapshot.created = created;
@@ -564,7 +573,8 @@ export function repairTechnicianSkillEverywhere(options = {}) {
       try {
         const stat = lstatSync(snapshot.path);
         exact = stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 &&
-          (stat.mode & 0o7777) === 0o600 && readFileSync(snapshot.path, "utf8") === snapshot.desired;
+          permissionModeIsPrivate(stat, 0o600) &&
+          readFileSync(snapshot.path, "utf8") === snapshot.desired;
       } catch { /* exact stays false */ }
       if (!exact) {
         throw new Error(`${snapshot.root} technician skill did not pass exact readback`);
