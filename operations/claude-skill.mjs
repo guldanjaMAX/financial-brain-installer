@@ -70,14 +70,19 @@ function reviewedSkillContent(sourcePath = PACKAGED_SKILL_PATH, options = {}) {
 }
 
 /**
- * Every local assistant that reads this skill format.
- *
- * Codex and Claude Code use the identical layout, `<root>/skills/<name>/SKILL.md`
- * with the same frontmatter, so one reviewed file serves both. Installing only
- * one of them means the guide is missing in whichever tool the owner actually
- * opens, and that is not predictable from here.
+ * Claude Code is the current install surface. Codex can read the same skill
+ * format, but an install should not create a second assistant's private config
+ * tree when that assistant is not already present.
  */
-export const AGENT_SKILL_ROOTS = Object.freeze([".claude", ".codex"]);
+export const AGENT_SKILL_ROOTS = Object.freeze([".claude"]);
+
+export function detectedAgentSkillRoots(options = {}) {
+  if (Array.isArray(options.agentRoots)) return [...options.agentRoots];
+  const home = ownerHome(options);
+  const roots = [...AGENT_SKILL_ROOTS];
+  if ((options.existsImpl ?? existsSync)(join(home, ".codex"))) roots.push(".codex");
+  return roots;
+}
 
 export function claudeTechnicianSkillPath(options = {}) {
   return technicianSkillPathFor(options.agentRoot ?? ".claude", options);
@@ -89,7 +94,7 @@ export function technicianSkillPathFor(root, options = {}) {
 
 /** Where the skill goes for every assistant, in install order. */
 export function technicianSkillPaths(options = {}) {
-  return (options.agentRoots ?? AGENT_SKILL_ROOTS).map((root) => technicianSkillPathFor(root, options));
+  return detectedAgentSkillRoots(options).map((root) => technicianSkillPathFor(root, options));
 }
 
 /**
@@ -97,7 +102,7 @@ export function technicianSkillPaths(options = {}) {
  * so each is attempted and the results are reported together.
  */
 export function installTechnicianSkillEverywhere(options = {}) {
-  const roots = options.agentRoots ?? AGENT_SKILL_ROOTS;
+  const roots = detectedAgentSkillRoots(options);
   const results = [];
   for (const root of roots) {
     try {

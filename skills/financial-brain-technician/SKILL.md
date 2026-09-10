@@ -29,7 +29,9 @@ the owner needs to qualify for.
    notes, or the web to decide whether Optimize exists when that contract is
    available and agrees with the installed CLI.
 2. Begin in ordinary owner language: "I can check your Brain without changing
-   it. I will run the read-only checks and report what I find." Do not narrate
+   its data, settings, access, or indexes. I will run the read-only checks and
+   report what I find. If a CLI check fails, it may save a private support note
+   on this computer so the problem can be explained later." Do not narrate
    skill selection, source-code inspection, PATH archaeology, release research,
    or whether the workflow "shipped." Those are internal implementation details,
    not part of the owner's experience.
@@ -44,6 +46,73 @@ the owner needs to qualify for.
 5. Work quietly, with one brief progress update only if the checks take long.
    Report the observed result and its limits. Do not dump commands, internal
    filenames, version-search history, or tool activity unless the owner asks.
+
+The default owner report begins, "Optimize complete. I made no changes to your
+Brain, data, settings, access, or indexes." If a CLI check failed, add that it
+may have saved a private local support note and that nothing was uploaded.
+Immediately add, "Optimize checked this computer's Brain skill and MCP
+connection but installed nothing and changed no settings." Say whether each is
+ready, missing, stale, or unproven. Keep the rest to at most three short sections:
+**Working**, **Needs attention**, and **Need from you**. Lead with
+what the Brain can currently be trusted to do.
+Do not print the numbered fifteen-check table unless the owner asks for the
+check details. Separate these findings instead of collapsing them into a wall
+of failures:
+
+- answer correctness;
+- completeness and source freshness;
+- storage or indexing efficiency;
+- readiness to share access; and
+- release administration, which stays out of the owner report unless it
+  requires an owner action.
+
+A duplicate-document count is an efficiency finding unless the checks prove it
+changed an answer. A missing connector receipt does not mean that connector's
+stored corpus is absent. Keep stored-data presence separate from receipt and
+freshness bookkeeping. Prioritize findings by likely answer impact, not raw
+count.
+
+Use the records and metadata already present. Compare provenance, effective and
+modified dates, source receipts with stored counts, extraction gaps, conflicting
+values, superseded evidence, duplicate document families, and whose voice each
+claim represents. Resolve every ambiguity that those records can resolve. Ask
+at most one small, specific owner question, and only when a material ambiguity
+remains after that evidence review.
+
+Do not run a Golden evaluation, create a canned refusal exercise, or require the
+owner to prepare test questions. Those remain optional, separate testing tools,
+never Optimize prerequisites. Do check whether THIS computer has the reviewed
+Financial Brain technician skill and whether its existing Claude Code MCP entry
+matches the read-only output of `brain mcp-config <manifest>`. Verify the MCP
+runtime through exact executable and argument comparison plus protocol
+initialization, connection status, and expected tool discovery. Do not ask a
+known-answer content question for MCP proof. Do not run `brain tools` during Optimize
+because it writes the technician skill and local setup files, and do not run `brain mcp-config --apply`.
+
+Make zoning a normal Optimize checkpoint. Run read-only `brain zone <manifest>`
+and `brain grants <manifest>`, list every unzoned source, explain that zoning
+applies to the whole source, and propose the safest exact source-to-zone mapping.
+Unzoned sources with no grants are sharing-readiness
+work, not evidence that somebody currently has access. Do not apply a mapping during the audit. After
+the report, show the exact mapping and affected counts. Only if the owner
+explicitly approves that mapping, run `brain zone --source ... --zone ...` one
+source at a time, repeat its bounded projection pass when the receipt says work
+remains, then verify zones and grants again.
+
+If a prior Optimize report is available, say what improved, regressed, or stayed
+unproven. If none is available, call this the first baseline without creating a
+new file during the audit. Before suggesting OCR, reingest, reindex, or another
+paid operation, estimate the affected scope, likely cost, expected answer impact,
+and proof of success. Do not run it without separate approval.
+
+Never include held candidate versions or other internal release-channel details.
+Leave passkeys and enrolled devices out of Optimize for now.
+Do not run `brain devices`, ask the owner to identify a device, or send them into the owner access
+area during this audit. Passkey proof belongs in the guided install and
+onboarding ceremony. A missing skill or MCP entry is a local-computer setup gap,
+especially after a move to a new computer. Name it, then offer to repair it only
+after the report and a separate explanation and approval. Offer the detailed
+check results at the end instead of making them the default experience.
 
 If the live contract is missing, contradicts the exact installed CLI, or the
 installed version is too old to perform a named check safely, stop before that
@@ -104,13 +173,133 @@ other homework.
    source that still needs attention. Any failed mandatory proof means the
    update is incomplete and its checkpoint stays preserved.
 
+## Offer Claude Code concierge browser help
+
+Claude Code is the primary install surface. At the start of an install,
+onboarding, connector, or credential walkthrough, inspect the tools already
+available in that Claude session. Do not install a browser extension, MCP
+server, or computer-control tool without the owner's approval. If browser or
+computer control is available, offer this once:
+
+> I can handle the technical navigation and forms while you stay in control of
+> your accounts. I will pause only when you need to sign in, approve access,
+> confirm billing, create a passkey, or handle something private. Before each
+> pause, I will explain what you are about to see and why.
+
+If the owner chooses browser help, use it by default for ordinary navigation
+and non-secret fields. Do not make them find dashboard menus, transcribe long
+identifiers, choose technical permission scopes, edit JSON, or copy redirect
+and webhook addresses the verified CLI can provide exactly. If browser control
+is unavailable, open the exact page and give one clear action at a time.
+
+For every browser-assisted account ceremony:
+
+1. Open only the exact official URL printed by the verified CLI or named by the
+   reviewed live runbook. Confirm the hostname before entering anything.
+2. Fill safe fields such as app names, reviewed permission scopes, one-account
+   restrictions, short expirations, redirect addresses, and webhook addresses.
+3. Before sign-in or a final approval, stop and give a ten-second handoff: why
+   the page is open, the exact account or hostname, what the owner should
+   review, and the single control they should choose if it looks right.
+4. The owner personally handles passwords, 2FA, CAPTCHA, billing acceptance,
+   final OAuth consent, passkey controls, and operating-system prompts. Never
+   imitate or bypass those actions.
+5. Never read, copy, type, photograph, log, or retain a password, API token,
+   client secret, app password, recovery code, authentication code, private
+   passkey link, or passkey response. Do not resume browser observation until
+   the owner says the secret is no longer visible.
+6. After control returns, verify the non-secret result and continue. Translate
+   any failure into ordinary language, say whether anything changed, and
+   resume the same safe step rather than starting over.
+
+Fresh Cloudflare setup uses the Brain CLI's browser sign-in and needs no API
+token. Let the CLI open the page, use browser control for ordinary navigation,
+then hand over for Cloudflare sign-in, 2FA, account confirmation, and the final
+approval. The CLI verifies the resulting access before creating anything.
+
+Two local setup commands also write non-secret files, and must be described
+before approval. `brain tools` installs or updates the reviewed technician skill
+for installed Claude Code and Codex clients, records local bootstrap status, and
+may add the Brain CLI folder to the user's PATH. Fresh `brain setup` normally
+adds or updates this Brain's MCP entry in installed AI tools and may create a new
+owner-workspace `CLAUDE.md`; it does not put a literal Brain credential in those
+files. If the owner does not approve the AI-tool configuration change, run setup
+with `--no-connect`. Later, show the exact read-only `brain mcp-config <manifest>`
+preview and wait for separate approval before `--apply`.
+
+A Cloudflare API token is a recovery path for an older or incompatible saved
+sign-in, not the normal install. If the reviewed CLI truly requires recovery,
+inspect the selected manifest first. A D1-only Brain needs the four reviewed
+permissions. Add Workers R2 Storage Edit only when that manifest configures an
+R2 bucket. Claude may fill the token name, the applicable permissions, the
+one-account restriction, and a short expiration. Stop on the final review screen. The
+owner checks the summary, chooses **Create Token**, privately moves the value
+into the CLI's approved owner-only input, and dismisses the secret page before
+Claude resumes browser control. On Windows, customer token recovery is not
+available from this release because the ordinary hidden prompt cannot prove
+that echo is disabled. Use browser sign-in. Do not place a customer token in a
+command or persistent environment variable.
+
+This is a handoff, not an exam. Keep the owner oriented and encouraged, give
+one decision at a time, and quietly handle every safe technical detail the
+tools can handle.
+
+## Explain every passkey ceremony before it starts
+
+A passkey request is a security ceremony, not a generic operating-system
+popup. Before handing over the owner-only invite command, opening its page, or
+triggering a device prompt, pause and explain all of this in ordinary language:
+
+- The owner passkey is how the owner signs in to the Brain's private app
+  without creating a Brain password or using the installer's admin key.
+- The one-time enrollment link expires fifteen minutes after it is created and
+  works once. It stays in the owner's directly controlled terminal and device,
+  never in chat, screenshots, recordings, logs, or a result file.
+- Nothing prompts merely because the page opened. The page first explains the
+  step. Only the owner's click on **Create my owner passkey** may open the
+  device's normal passkey window.
+- Depending on the device, that window may ask for Face ID, Touch ID, a
+  fingerprint, a security key, or the device PIN. The physical check proves
+  that the owner controls the device; the agent never performs or observes it.
+- Biometric data never goes to Financial Brain. The private passkey stays with
+  the device or the owner's chosen passkey provider. The Brain stores only the
+  public verification data needed to recognize it, and the passkey does not
+  grant access to other device files.
+- A passkey may sync to other devices through the owner's passkey provider.
+  Do not promise that it lives on only one device or works automatically on
+  every device.
+- If the page address or system prompt looks wrong, cancel. Canceling before a
+  passkey is successfully verified does not consume the link, so the owner can
+  retry while its fifteen-minute window remains open.
+
+Then ask one deliberate question: "Are you ready to create the one-time owner
+link in your own terminal?" The explicit answer authorizes only that
+single-use link step. Never execute or capture `brain invite` in the agent
+session because its standard output contains the private link. Give the exact
+command to the owner for a directly controlled terminal. Once the owner opens
+the link, say what clicking the labeled button will cause, then hand the
+physical gesture to them and wait. Do not click the web control or describe the
+agent as performing Face ID, Touch ID, a fingerprint, or a device PIN.
+
+After the owner says the ceremony completed, verify the enrollment with
+`brain devices <manifest>`. Report each device with a distinct nickname and
+last-used date. If two entries have the same label, do not ask the owner to
+guess between them; obtain enough non-secret device detail to make the choice
+answerable before suggesting a revocation. Creating an invite is not proof of
+enrollment, and enrollment is not proof of sign-in. Complete the reviewed
+sign-out and sign-in check before calling the passkey proven.
+
 ## Start here
 
 For a fresh install, checkup, connector, passkey, or handoff request, continue
 below. The update route above replaces this setup-oriented sequence.
 
-1. Ask which of those jobs the owner wants. Ask for the absolute
-   `brain.manifest.json` path, creating no file yet when this is fresh.
+1. Ask which of those jobs the owner wants. Quietly inspect the reviewed default
+   manifest location and the package's local bootstrap status. If exactly one
+   existing manifest is identified, use it without asking the owner to find a
+   path. If this is a fresh install with none, use the reviewed default path and
+   create no file during discovery. Ask about a path only when multiple real
+   manifests remain ambiguous or the owner already named a different one.
 2. Run `brain --version` and the packaged read-only preflight. Use the full
    installed command path from the install page if `brain` is not on PATH.
    Stop on any preflight `STOP` line.
@@ -126,7 +315,16 @@ below. The update route above replaces this setup-oriented sequence.
 
 5. Explain the next incomplete step in ordinary language. Before running its
    `--run` command, state what will change and ask the owner to approve that
-   exact action.
+   exact action. The tools step is not read-only: disclose its technician-skill,
+   bootstrap-status, and PATH writes. The normal Cloudflare setup step also
+   registers the Brain with installed AI tools and may create a new workspace
+   guide. Offer `--no-connect` when the owner wants those local config files left
+   alone. For Cloudflare, review the non-secret name, short name, new-or-existing
+   account choice, exact account ID, and Workers Paid status with the owner.
+   Then run the plan's complete **Claude runs after your approval** command
+   without dropping any confirmation flag. Never add or forward a Cloudflare
+   token. The owner still performs sign-in, 2FA, billing acceptance, and final
+   consent in the browser.
 
 ## Credential boundary
 

@@ -200,13 +200,35 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
     assert.ok(plan.steps.filter((step) => ["plaid", "google", "quickbooks", "zoom", "imap"].includes(step.id))
       .every((step) => step.command === null));
     assert.equal(plan.steps.find((step) => step.id === "smoke").state, "waiting_for_install_record");
-    assert.deepEqual(plan.steps.find((step) => step.id === "cloudflare").owner_only_command, {
+    assert.deepEqual(plan.steps.find((step) => step.id === "cloudflare").agent_after_owner_approval, {
       command: bootstrapStatus.cli.command,
-      args: [...bootstrapStatus.cli.args, "technician", manifestPath, "--run", "cloudflare"],
-      execution_boundary: "owner_direct_terminal",
+      args: [
+        ...bootstrapStatus.cli.args,
+        "technician", manifestPath, "--run", "cloudflare",
+        "--browser-sign-in",
+        "--name", "<person-or-company>",
+        "--slug", "<short-name>",
+        "--cloudflare-account", "<create-or-existing>",
+        "--cloudflare-account-id", "<32-character-account-id>",
+        "--workers-paid-confirmed",
+      ],
+      execution_boundary: "claude_after_explicit_owner_approval",
       mutates_external_state: true,
-      must_run_in_direct_owner_terminal: true,
-      reveals_one_time_link: false,
+      requires_owner_approval: true,
+      reviewed_non_secret_context: [
+        "person or company name",
+        "short Brain name",
+        "new or existing Cloudflare account",
+        "exact Cloudflare account id",
+        "Workers Paid is active on that account",
+      ],
+      owner_keeps_control_of: [
+        "sign-in",
+        "2FA and CAPTCHA",
+        "billing acceptance",
+        "final consent",
+      ],
+      accepts_cloudflare_token: false,
     });
     assert.deepEqual(plan.steps.find((step) => step.id === "passkey").owner_only_command.args,
       [...bootstrapStatus.cli.args, "invite", manifestPath]);

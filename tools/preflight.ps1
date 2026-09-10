@@ -8,8 +8,37 @@ Write-Host "Financial Brain preflight  -  $(Get-Date -Format 'yyyy-MM-dd HH:mm')
 Write-Host ""
 
 Write-Host "MACHINE"
+$osVersion = [System.Environment]::OSVersion.Version
 Write-Host ("  os              " + [System.Environment]::OSVersion.VersionString)
+if ($osVersion.Major -lt 10) {
+  Stop_ "Windows $osVersion is too old; Financial Brain needs Windows 10 or newer"
+} else { Ok "Windows 10 or newer" }
 Write-Host ("  powershell      " + $PSVersionTable.PSVersion)
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($isAdministrator) {
+  Stop_ "this PowerShell window is running as Administrator. Close it and open a normal PowerShell window for the owner's Windows account"
+} else { Ok "running as the current user, not Administrator" }
+
+if (-not $env:LOCALAPPDATA) {
+  Stop_ "LOCALAPPDATA is missing, so the per-user install drive cannot be checked"
+} else {
+  try {
+    $localRoot = [System.IO.Path]::GetPathRoot($env:LOCALAPPDATA)
+    $localDrive = New-Object -TypeName System.IO.DriveInfo -ArgumentList $localRoot
+    if (-not $localDrive.IsReady) {
+      Stop_ "the LOCALAPPDATA drive $localRoot is not ready"
+    } else {
+      $freeGiB = [Math]::Round($localDrive.AvailableFreeSpace / 1GB, 1)
+      if ($localDrive.AvailableFreeSpace -lt 2GB) {
+        Stop_ "the LOCALAPPDATA drive has $freeGiB GiB free; Financial Brain needs at least 2 GiB before download"
+      } else { Ok "LOCALAPPDATA drive has $freeGiB GiB free (2 GiB required)" }
+    }
+  } catch {
+    Stop_ "the LOCALAPPDATA drive could not be checked: $($_.Exception.Message)"
+  }
+}
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
   $nv = (& node -v); Write-Host "  node            $nv ($($node.Source))"

@@ -260,11 +260,14 @@ export async function handleAuthorizePage(env, url) {
 
     <button id="approve"
       class="mt-7 w-full rounded-xl bg-accent px-5 py-3.5 text-white font-semibold disabled:opacity-55 transition-opacity">
-      Approve with Face ID
+      Approve access
     </button>
     <button id="deny" class="mt-2 w-full rounded-xl px-5 py-3 text-ink-soft">Cancel</button>
     <p class="mt-4 text-[13px] text-ink-soft leading-relaxed">
-      Approving uses your passkey. Revoke it any time from Settings, or end every
+      If you need to sign in, approving will open your device's normal passkey
+      window. Answer that system prompt yourself. Your biometric data and device
+      PIN stay on your device; this brain verifies only the signed passkey
+      challenge. Revoke this connection any time from Settings, or end every
       connection at once with Sign out everywhere.
     </p>
     <p id="err" class="mt-4 text-[14px] text-red-700" hidden></p>

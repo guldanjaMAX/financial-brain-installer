@@ -168,13 +168,14 @@ function fakeAgentCli({
   mismatchClaudeAdds = false,
   failCodexAdd = false,
   mismatchCodexAdd = false,
+  prepareCodexConfig = true,
 } = {}) {
   let codex = codexInitial;
   const codexConfigPath = join(
     environment.CODEX_HOME || join(environment.HOME || environment.USERPROFILE, ".codex"),
     "config.toml",
   );
-  writeCodexEntry(codexConfigPath, codex);
+  if (prepareCodexConfig) writeCodexEntry(codexConfigPath, codex);
   const calls = [];
   const safeEnvironment = agentCliEnvironment(environment);
   const result = (ok, stdout = "", stderr = "") => ({
@@ -500,6 +501,63 @@ try {
     AWS_SECRET_ACCESS_KEY: "aws-fixture-secret",
     OPENAI_API_KEY: "openai-fixture-secret",
   };
+
+  /* A Codex binary on PATH is not consent to create Codex's private config. */
+  const claudeOnlyHome = join(sandbox, "claude-only agent home");
+  mkdirSync(claudeOnlyHome, { recursive: true, mode: 0o700 });
+  const claudeOnlyConfig = join(claudeOnlyHome, ".claude.json");
+  writeFileSync(claudeOnlyConfig, "{}\n", { mode: 0o600 });
+  const claudeOnlyEnvironment = {
+    ...childEnvironment,
+    HOME: claudeOnlyHome,
+    ...(process.platform === "win32" ? { USERPROFILE: claudeOnlyHome } : {}),
+  };
+  const claudeOnlyCli = fakeAgentCli({
+    environment: claudeOnlyEnvironment,
+    claudeConfigPath: claudeOnlyConfig,
+    codexInstalled: true,
+    prepareCodexConfig: false,
+  });
+  const claudeOnlyWiring = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: claudeOnlyEnvironment,
+    claudeConfigPath: claudeOnlyConfig,
+    runCommand: claudeOnlyCli.runCommand,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.deepEqual(claudeOnlyWiring.value.wired, ["Claude Code"]);
+  assert.ok(claudeOnlyWiring.value.skipped.includes("Codex"));
+  assert.equal(claudeOnlyCli.calls.some((call) => call.command === "codex"), false);
+  assert.equal(existsSync(join(claudeOnlyHome, ".codex")), false);
+
+  /* A non-directory Codex root is also never followed or changed. */
+  const unsafeCodexHome = join(sandbox, "unsafe codex agent home");
+  mkdirSync(unsafeCodexHome, { recursive: true, mode: 0o700 });
+  const unsafeClaudeConfig = join(unsafeCodexHome, ".claude.json");
+  writeFileSync(unsafeClaudeConfig, "{}\n", { mode: 0o600 });
+  writeFileSync(join(unsafeCodexHome, ".codex"), "not a directory\n", { mode: 0o600 });
+  const unsafeCodexEnvironment = {
+    ...childEnvironment,
+    HOME: unsafeCodexHome,
+    ...(process.platform === "win32" ? { USERPROFILE: unsafeCodexHome } : {}),
+  };
+  const unsafeCodexCli = fakeAgentCli({
+    environment: unsafeCodexEnvironment,
+    claudeConfigPath: unsafeClaudeConfig,
+    codexInstalled: true,
+    prepareCodexConfig: false,
+  });
+  const unsafeCodexWiring = await captureOutput(() => wireAgents(manifest, manifestPath, {
+    baseUrl: descriptor.env.BRAIN_URL,
+    environment: unsafeCodexEnvironment,
+    claudeConfigPath: unsafeClaudeConfig,
+    runCommand: unsafeCodexCli.runCommand,
+    verifyMcpRuntime: () => true,
+  }));
+  assert.ok(unsafeCodexWiring.value.skipped.includes("Codex"));
+  assert.equal(unsafeCodexCli.calls.some((call) => call.command === "codex"), false);
+  assert.equal(readFileSync(join(unsafeCodexHome, ".codex"), "utf8"), "not a directory\n");
+
   const brokenRuntimeCli = fakeAgentCli({
     environment: childEnvironment,
     claudeConfigPath,

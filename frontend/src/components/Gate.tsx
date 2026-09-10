@@ -16,6 +16,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
   const [error, setError] = useState<string | null>(null);
   const enrolling = Boolean(inviteCode);
   const possessive = owner ? (/s$/i.test(owner) ? `${owner}'` : `${owner}'s`) : "Your";
+  const hostname = typeof location === "undefined" ? "this Brain's address" : location.hostname;
   // First name in the greeting: a client opening this is being welcomed, not
   // addressed formally, and "Dana, your brain is ready" reads like a person
   // wrote it where "Dana Okonkwo's brain is ready" reads like a database did.
@@ -35,7 +36,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
     } catch (e) {
       // Surface the real reason. "Something went wrong" on a security screen
       // is how someone decides the product is broken rather than that they
-      // cancelled a Face ID prompt.
+      // cancelled their device's passkey prompt.
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
@@ -55,8 +56,8 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
           </h1>
           <p className="text-ink-soft mt-3 leading-relaxed">
             {enrolling
-              ? "Everything you have written, decided and been told, in one place that belongs to you. Ask it anything and it answers with its sources."
-              : "Sign in to ask your brain a question."}
+              ? "Create the owner passkey you will use to open this Brain without making a Brain password or handling the installer's admin key."
+              : "Sign in to ask your Brain a question. Your device will open its normal passkey window only after you choose the button below."}
           </p>
 
           {notice && (
@@ -66,18 +67,26 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
           )}
 
           {enrolling && (
-            <ul className="mt-6 space-y-2.5">
-              {[
-                "One tap sets up your face or fingerprint as the key",
-                "No password to create, remember, or lose",
-                "It lives in your own account. Nobody else can read it",
-              ].map((line) => (
-                <li key={line} className="flex gap-2.5 text-[15px]">
-                  <span className="text-accent font-bold leading-6">✓</span>
-                  <span className="leading-6">{line}</span>
-                </li>
-              ))}
-            </ul>
+            <div className="mt-6 rounded-xl border border-line bg-paper px-4 py-4 text-[14px] leading-relaxed">
+              <p className="font-semibold text-ink">What will happen</p>
+              <ol className="mt-2 list-decimal space-y-2 pl-5 text-ink-soft">
+                <li>Nothing opens until you choose <strong className="text-ink">Create my owner passkey</strong>.</li>
+                <li>Your device will show its normal passkey window. It may ask for Face ID, Touch ID, a fingerprint, a security key, or your device PIN.</li>
+                <li>Check that this page is at <strong className="text-ink">{hostname}</strong>, then complete the device step yourself. If anything looks wrong, cancel.</li>
+              </ol>
+              <p className="mt-3 text-ink-soft">
+                Your biometric data and device PIN never go to Financial Brain. The private passkey stays
+                with your device or passkey provider. This Brain stores only the public verification data
+                needed to recognize it, and cannot use the passkey to read other files on your device.
+              </p>
+            </div>
+          )}
+
+          {!enrolling && (
+            <p className="mt-5 text-[14px] leading-relaxed text-ink-soft">
+              Check that this page is at <strong className="text-ink">{hostname}</strong>, then answer the
+              system prompt yourself. Financial Brain does not receive your biometric data or device PIN.
+            </p>
           )}
 
           {passkeysSupported() ? (
@@ -87,7 +96,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
               className="mt-7 w-full rounded-xl bg-accent px-5 py-3.5 text-white font-semibold
                          disabled:opacity-55 transition-opacity"
             >
-              {busy ? "Waiting for your device…" : enrolling ? "Set up with Face ID" : "Sign in"}
+              {busy ? "Waiting for your device…" : enrolling ? "Create my owner passkey" : "Continue to my passkey"}
             </button>
           ) : (
             <p className="mt-7 text-sm text-ink-soft">
@@ -98,7 +107,9 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
 
           {enrolling && (
             <p className="mt-3 text-[13px] text-ink-soft">
-              Takes about ten seconds. Works on every device you own.
+              This private link expires 15 minutes after it was created and works once. Canceling the
+              device prompt does not use it, so you can retry before it expires. Your passkey may sync
+              through your chosen passkey provider, but availability on every device is not guaranteed.
             </p>
           )}
           {error && <p className="mt-4 text-[14px] text-red-700">{error}</p>}

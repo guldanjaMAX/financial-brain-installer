@@ -92,6 +92,14 @@ test("the consent page hands its script a parseable query, not HTML-escaped text
     const { registered, html } = await consentPage(fixture, { state: "st&ate=1" });
     const q = consentQuery(html);
 
+    assert.match(html, />\s*Approve access\s*</,
+      "the approval control must use platform-neutral language");
+    assert.match(html, /If you need to sign in, approving will open your device's normal passkey\s+window/i,
+      "the owner must be told what may open before choosing approval");
+    assert.match(html, /Answer that system prompt yourself/i);
+    assert.match(html, /biometric data and device\s+PIN stay on your device/i);
+    assert.doesNotMatch(html, /Approve with Face ID/i);
+
     assert.ok(!/&(?:amp|lt|gt|quot|#39);/.test(q),
       `the script's query must not carry HTML entities: ${q}`);
 
