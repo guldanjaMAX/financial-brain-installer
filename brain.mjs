@@ -143,6 +143,7 @@ import {
   installTechnicianSkillEverywhere,
   repairTechnicianSkillEverywhere,
   rollbackTechnicianSkillRepairSnapshot,
+  technicianSkillRepairMatchesApproved,
   technicianSkillRepairSnapshotIsCurrent,
 } from "./operations/claude-skill.mjs";
 import {
@@ -5861,19 +5862,37 @@ function localConfigDirectoryFingerprint(snapshot) {
 }
 
 function localSkillRepairItem(observations) {
-  const destinations = observations.map((item) => ({
-    path: item.path,
-    action: item.status === "missing"
-      ? "install reviewed skill"
-      : item.status === "installer_owned_outdated"
-        ? "update installer-owned skill"
-        : item.status === "current"
-          ? "already current"
-          : item.status === "custom"
-            ? "preserve customized skill"
-            : "blocked unsafe destination",
-  }));
-  const writeSet = destinations.filter((_, index) => observations[index].will_change);
+  const destinations = [];
+  const writeSet = [];
+  const named = new Set();
+  for (const item of observations) {
+    if (item.will_change) {
+      for (const directory of item.directories || []) {
+        if (directory.exists || named.has(directory.path)) continue;
+        const change = {
+          path: directory.path,
+          action: "create private technician skill directory",
+        };
+        destinations.push(change);
+        writeSet.push(change);
+        named.add(directory.path);
+      }
+    }
+    const file = {
+      path: item.path,
+      action: item.status === "missing"
+        ? "install reviewed skill"
+        : item.status === "installer_owned_outdated"
+          ? "update installer-owned skill"
+          : item.status === "current"
+            ? "already current"
+            : item.status === "custom"
+              ? "preserve customized skill"
+              : "blocked unsafe destination",
+    };
+    destinations.push(file);
+    if (item.will_change) writeSet.push(file);
+  }
   const unsafe = observations.some((item) => item.status === "unsafe");
   const custom = observations.some((item) => item.status === "custom");
   const status = unsafe
@@ -5889,7 +5908,7 @@ function localSkillRepairItem(observations) {
     detail: unsafe
       ? "A skill destination is not a safe regular owner file. It will not be changed."
       : writeSet.length
-        ? `${writeSet.length} missing or installer-owned skill destination(s) would receive this release's reviewed guide.`
+        ? `${writeSet.length} approved local path change(s) would install this release's reviewed guide.`
         : custom
           ? "Customized skill content is intentionally preserved. No skill file would change."
           : "Both reviewed skill copies already match this release exactly.",
@@ -6098,7 +6117,7 @@ function blockedMcpRepairItem(scope, manifest, options = {}) {
   };
 }
 
-function captureMcpBundleRollback(scope, desired, options = {}) {
+function captureMcpBundleRollback(scope, desired, options = {}, expectedStateFingerprint = null) {
   const isClaude = scope === "claude-code-mcp";
   const configOptions = {
     environment: options.environment ?? process.env,
@@ -6120,6 +6139,10 @@ function captureMcpBundleRollback(scope, desired, options = {}) {
   );
   if (!snapshot) throw new Error(`${scope} could not be snapshotted safely`);
   const directorySnapshot = captureAgentConfigDirectory(dirname(snapshot.path), { allowAbsent: true });
+  const stateFingerprint = `${localConfigFingerprint(snapshot)}:${localConfigDirectoryFingerprint(directorySnapshot)}`;
+  if (typeof expectedStateFingerprint !== "string" || stateFingerprint !== expectedStateFingerprint) {
+    throw new Error(`${scope} changed after its approved preview`);
+  }
   return { scope, desired, configOptions, snapshot, directorySnapshot, createdDirectoryStat: null };
 }
 
@@ -6175,42 +6198,6 @@ function rollbackMcpBundleRepairDirectory(prepared) {
   }
 }
 
-function removeEmptyApprovedSkillDirectories(prepared, skillSnapshots) {
-  if (prepared.directorySnapshot.exists || !prepared.createdDirectoryStat) return true;
-  const root = prepared.directorySnapshot.path;
-  try {
-    if (!sameConfigDirectory(prepared.createdDirectoryStat, lstatSync(root))) return false;
-  } catch {
-    return false;
-  }
-  const candidates = new Set();
-  for (const snapshot of skillSnapshots || []) {
-    if (snapshot.exists) continue;
-    let candidate = dirname(snapshot.path);
-    const child = relative(root, candidate);
-    if (!child || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) continue;
-    while (candidate !== root) {
-      candidates.add(candidate);
-      candidate = dirname(candidate);
-    }
-  }
-  const deepestFirst = [...candidates].sort((left, right) => right.length - left.length);
-  for (const path of deepestFirst) {
-    try {
-      const stat = lstatSync(path);
-      if (!stat.isDirectory() || stat.isSymbolicLink() ||
-          (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
-          readdirSync(path).length !== 0) {
-        return false;
-      }
-      rmdirSync(path);
-    } catch (error) {
-      if (error?.code !== "ENOENT") return false;
-    }
-  }
-  return true;
-}
-
 function mcpBundleRollbackIsCurrent(prepared) {
   try {
     const current = captureAgentConfigFile(prepared.snapshot.path, { allowAbsent: true });
@@ -6237,10 +6224,22 @@ function mcpBundleRollbackIsCurrent(prepared) {
   }
 }
 
-function createPreparedMcpConfigDirectory(prepared) {
+function createPreparedMcpConfigDirectory(prepared, transaction = []) {
   const { directorySnapshot } = prepared;
   if (directorySnapshot.exists || prepared.createdDirectoryStat) return;
-  if (existsSync(directorySnapshot.path) || !sameConfigDirectory(
+  if (existsSync(directorySnapshot.path)) {
+    const shared = transaction.find((item) => item.scope === "technician-skill")
+      ?.snapshots?.directories?.find((item) =>
+        item.path === directorySnapshot.path && item.created &&
+        sameConfigDirectory(item.created, lstatSync(directorySnapshot.path))
+      );
+    if (!shared) {
+      throw new Error(`${prepared.scope} config directory changed before its approved creation`);
+    }
+    prepared.createdDirectoryStat = shared.created;
+    return;
+  }
+  if (!sameConfigDirectory(
     directorySnapshot.parentStat,
     lstatSync(directorySnapshot.parentPath),
   )) {
@@ -6277,6 +6276,7 @@ function captureLocalAssistantRepairTransaction(context, options = {}) {
         item.scope,
         context.desired,
         options.mcpOptions || {},
+        item.state_fingerprint,
       ));
     }
   }
@@ -6295,14 +6295,11 @@ function rollbackLocalAssistantRepairTransaction(prepared, options = {}) {
       : rollbackMcpBundleRepair(item);
     if (!restored) failed.add(item.scope);
   }
-  // Config directories are approved writes too, but they may contain a skill
-  // file from an earlier selected scope. Restore every file first, then remove
-  // only an exact, transaction-created directory that is now empty.
-  const skillSnapshots = prepared.find((item) => item.scope === "technician-skill")?.snapshots || [];
+  // Config directories are approved writes too. The skill rollback owns any
+  // shared .claude or .codex tree it created; MCP-only roots are removed here.
   for (const item of [...prepared].reverse()) {
     if (item.scope !== "technician-skill" &&
-        (!removeEmptyApprovedSkillDirectories(item, skillSnapshots) ||
-          !rollbackMcpBundleRepairDirectory(item))) {
+        !rollbackMcpBundleRepairDirectory(item)) {
       failed.add(item.scope);
     }
   }
@@ -6397,12 +6394,6 @@ export async function cmdAssistantRepair(manifestPath, options = {}) {
   const preparedByScope = new Map(transaction.map((item) => [item.scope, item]));
   const results = [];
   try {
-    // Create every approved missing config directory only after the complete
-    // write set is snapshotted. This lets a skill and Codex share a fresh
-    // `.codex` root without either scope creating an undeclared path.
-    for (const prepared of transaction) {
-      if (prepared.scope !== "technician-skill") createPreparedMcpConfigDirectory(prepared);
-    }
     for (const item of context.items) {
       if (!item.write_set.length) {
         results.push({ scope: item.scope, status: item.status, changed: false });
@@ -6415,6 +6406,12 @@ export async function cmdAssistantRepair(manifestPath, options = {}) {
         throw new Error("the manifest changed after the approved plan was recomputed");
       }
       const prepared = preparedByScope.get(item.scope);
+      if (prepared && item.scope !== "technician-skill") {
+        // A preceding selected skill repair may already have created this same
+        // explicitly approved assistant root. Adopt only its exact transaction
+        // stat; otherwise create the approved directory here.
+        createPreparedMcpConfigDirectory(prepared, transaction);
+      }
       if (!prepared || !localAssistantRepairTransactionItemIsCurrent(prepared)) {
         throw new Error(`${item.scope} changed after the bundle snapshot and before its write`);
       }
@@ -6425,11 +6422,7 @@ export async function cmdAssistantRepair(manifestPath, options = {}) {
           observations: item.observations,
           snapshots: prepared.snapshots,
         });
-        const after = (options.inspectTechnicianSkills ?? inspectTechnicianSkillEverywhere)(
-          options.skillOptions || {},
-        );
-        const expectedPaths = new Set(item.write_set.map((entry) => entry.path));
-        if (after.some((entry) => expectedPaths.has(entry.path) && entry.status !== "current")) {
+        if (!technicianSkillRepairMatchesApproved(prepared.snapshots)) {
           throw new Error("the technician skill repair did not pass exact readback");
         }
         results.push({ scope: item.scope, status: "repaired", changed: true, receipt });
@@ -6471,6 +6464,12 @@ export async function cmdAssistantRepair(manifestPath, options = {}) {
         throw new Error(`${item.scope} changed configuration outside its previewed setting`);
       }
       results.push({ scope: item.scope, status: "repaired", changed: true });
+    }
+    const finalManifestFingerprint = createHash("sha256")
+      .update(readFileSync(context.absoluteManifest))
+      .digest("hex");
+    if (finalManifestFingerprint !== context.manifestFingerprint) {
+      throw new Error("the manifest changed before the approved repair could finish");
     }
   } catch (error) {
     const rollback = rollbackLocalAssistantRepairTransaction(transaction, options);
@@ -14813,9 +14812,31 @@ function normalizedRegistration(entry, name = null) {
   };
 }
 
-const PRIOR_INSTALLER_MCP_VERSIONS = new Set([
-  "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5",
-]);
+function registrationHasOnlyInstallerFields(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const direct = new Set(["name", "enabled", "type", "command", "args", "env", "env_vars", "cwd"]);
+  const wrapped = new Set(["name", "enabled", "disabled_reason", "transport"]);
+  const transport = new Set(["type", "command", "args", "env", "env_vars", "cwd"]);
+  if (entry.transport !== undefined) {
+    return entry.transport && typeof entry.transport === "object" && !Array.isArray(entry.transport) &&
+      Object.keys(entry).every((key) => wrapped.has(key)) &&
+      Object.keys(entry.transport).every((key) => transport.has(key));
+  }
+  return Object.keys(entry).every((key) => direct.has(key));
+}
+
+// The published v0.4.0-v0.4.5 packages all carried this exact MCP runtime.
+// Package metadata and a familiar install path are not ownership proof on
+// their own because either can coexist with owner-modified executable bytes.
+const PRIOR_INSTALLER_MCP_RUNTIME_SHA256 = Object.freeze({
+  "0.4.0": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.1": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.2": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.3": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.4": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.5": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+});
+const PRIOR_INSTALLER_MCP_VERSIONS = new Set(Object.keys(PRIOR_INSTALLER_MCP_RUNTIME_SHA256));
 
 function priorInstallerPackageRoot(runtimePath) {
   if (typeof runtimePath !== "string" || !isAbsolute(runtimePath) ||
@@ -14850,6 +14871,16 @@ function recognizedPriorInstallerRuntime(runtimePath) {
         !priorInstallerPackageRoot(canonicalRuntime)) {
       return false;
     }
+    const runtimeFd = openSync(runtimePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    let runtimeBytes;
+    try {
+      const openedRuntime = fstatSync(runtimeFd);
+      if (!sameOpenedFile(runtimeStat, openedRuntime)) return false;
+      runtimeBytes = readFileSync(runtimeFd);
+      if (runtimeBytes.length !== openedRuntime.size) return false;
+    } finally {
+      closeSync(runtimeFd);
+    }
     const packagePath = join(packageRoot, "package.json");
     const before = lstatSync(packagePath);
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 64 * 1024 ||
@@ -14863,7 +14894,11 @@ function recognizedPriorInstallerRuntime(runtimePath) {
       const bytes = readFileSync(fd);
       if (bytes.length !== opened.size) return false;
       const pkg = JSON.parse(bytes.toString("utf8"));
-      return pkg?.name === "brain-installer" && PRIOR_INSTALLER_MCP_VERSIONS.has(pkg.version);
+      if (pkg?.name !== "brain-installer" || !PRIOR_INSTALLER_MCP_VERSIONS.has(pkg.version)) {
+        return false;
+      }
+      return createHash("sha256").update(runtimeBytes).digest("hex") ===
+        PRIOR_INSTALLER_MCP_RUNTIME_SHA256[pkg.version];
     } finally {
       closeSync(fd);
     }
@@ -14892,7 +14927,7 @@ function recognizedInstallerNodeCommand(command, desiredCommand, priorRuntime) {
 
 export function mcpRegistrationIsExact(entry, desired) {
   const actual = normalizedRegistration(entry, desired.name);
-  return Boolean(actual) &&
+  return Boolean(actual) && registrationHasOnlyInstallerFields(entry) &&
     actual.name === desired.name &&
     actual.enabled !== false &&
     actual.type === "stdio" &&
@@ -14962,7 +14997,7 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
     desired.command,
     priorRuntime,
   );
-  return Boolean(actual) &&
+  return Boolean(actual) && registrationHasOnlyInstallerFields(entry) &&
     actual.name === desired.name &&
     actual.enabled !== false &&
     actual.type === "stdio" &&
@@ -15211,7 +15246,10 @@ function readClaudeRegistration(desired, options) {
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       throw new Error("foreign Claude config");
     }
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    const source = readFileSync(path, "utf8");
+    const structure = parseLosslessJsonStructure(source);
+    if (structure.type !== "object") throw new Error("invalid Claude config");
+    const parsed = JSON.parse(source);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("invalid Claude config");
     }
@@ -15281,33 +15319,351 @@ function captureAgentConfigFile(path, { allowAbsent = false } = {}) {
   }
 }
 
-function canonicalJsonValue(value) {
-  if (Array.isArray(value)) return value.map(canonicalJsonValue);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.keys(value).sort().map((key) => [key, canonicalJsonValue(value[key])]),
-  );
+/**
+ * Parse JSON structure while retaining source ranges. JSON.parse is allowed to
+ * inspect Claude's file, but it must never be used to reserialize unrelated
+ * owner settings because JavaScript cannot represent every JSON integer
+ * losslessly. Duplicate object keys are rejected instead of being hidden by
+ * last-value-wins parsing.
+ */
+function parseLosslessJsonStructure(source) {
+  let index = 0;
+  const skipWhitespace = () => {
+    while (index < source.length && /[\t\n\r ]/.test(source[index])) index++;
+  };
+  const parseString = () => {
+    const start = index;
+    if (source[index++] !== '"') throw new Error("invalid JSON string");
+    while (index < source.length) {
+      const character = source[index++];
+      if (character === '"') {
+        const raw = source.slice(start, index);
+        return { type: "string", start, end: index, value: JSON.parse(raw) };
+      }
+      if (character === "\\") {
+        if (index >= source.length) throw new Error("invalid JSON escape");
+        index++;
+      } else if (character.charCodeAt(0) < 0x20) {
+        throw new Error("invalid JSON control character");
+      }
+    }
+    throw new Error("unterminated JSON string");
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    const start = index;
+    if (source[index] === "{") {
+      index++;
+      const node = { type: "object", start, open: start, members: [], end: null, close: null };
+      const keys = new Set();
+      let previousComma = null;
+      skipWhitespace();
+      if (source[index] === "}") {
+        node.close = index++;
+        node.end = index;
+        return node;
+      }
+      while (index < source.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key.value)) throw new Error("duplicate JSON object key");
+        keys.add(key.value);
+        skipWhitespace();
+        if (source[index++] !== ":") throw new Error("invalid JSON object member");
+        const value = parseValue();
+        const member = {
+          key: key.value,
+          keyStart: key.start,
+          valueStart: value.start,
+          valueEnd: value.end,
+          value,
+          commaBefore: previousComma,
+          commaAfter: null,
+        };
+        node.members.push(member);
+        skipWhitespace();
+        if (source[index] === ",") {
+          member.commaAfter = index;
+          previousComma = index;
+          index++;
+          continue;
+        }
+        if (source[index] !== "}") throw new Error("invalid JSON object delimiter");
+        node.close = index++;
+        node.end = index;
+        return node;
+      }
+      throw new Error("unterminated JSON object");
+    }
+    if (source[index] === "[") {
+      index++;
+      const values = [];
+      skipWhitespace();
+      if (source[index] === "]") return { type: "array", start, end: ++index, values };
+      while (index < source.length) {
+        values.push(parseValue());
+        skipWhitespace();
+        if (source[index] === ",") {
+          index++;
+          continue;
+        }
+        if (source[index] !== "]") throw new Error("invalid JSON array delimiter");
+        return { type: "array", start, end: ++index, values };
+      }
+      throw new Error("unterminated JSON array");
+    }
+    if (source[index] === '"') return parseString();
+    for (const literal of ["true", "false", "null"]) {
+      if (source.startsWith(literal, index)) {
+        index += literal.length;
+        return { type: "literal", start, end: index };
+      }
+    }
+    const number = source.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (!number) throw new Error("invalid JSON value");
+    index += number[0].length;
+    return { type: "number", start, end: index };
+  };
+  const root = parseValue();
+  skipWhitespace();
+  if (index !== source.length) throw new Error("trailing JSON content");
+  return root;
+}
+
+function jsonObjectMember(node, key) {
+  return node?.type === "object" ? node.members.find((member) => member.key === key) : null;
+}
+
+function removeJsonMember(source, member) {
+  if (member.commaAfter !== null) {
+    return source.slice(0, member.keyStart) + source.slice(member.commaAfter + 1);
+  }
+  if (member.commaBefore !== null) {
+    return source.slice(0, member.commaBefore) + source.slice(member.valueEnd);
+  }
+  return source.slice(0, member.keyStart) + source.slice(member.valueEnd);
 }
 
 function claudeConfigOutsideTarget(bytes, name) {
-  if (bytes === null) return JSON.stringify({});
+  if (bytes === null) return "{}";
   const source = bytes.toString("utf8");
   if (!Buffer.from(source, "utf8").equals(bytes)) {
     throw new Error("Claude configuration is not valid UTF-8");
   }
-  const parsed = JSON.parse(source);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  const root = parseLosslessJsonStructure(source);
+  if (root.type !== "object") {
     throw new Error("invalid Claude configuration");
   }
-  const copy = structuredClone(parsed);
-  if (copy.mcpServers !== undefined) {
-    if (!copy.mcpServers || typeof copy.mcpServers !== "object" || Array.isArray(copy.mcpServers)) {
-      throw new Error("invalid Claude MCP configuration");
-    }
-    delete copy.mcpServers[name];
-    if (!Object.keys(copy.mcpServers).length) delete copy.mcpServers;
+  if (root.members.length === 0) return "{}";
+  const servers = jsonObjectMember(root, "mcpServers");
+  if (!servers) return source;
+  if (servers.value.type !== "object") throw new Error("invalid Claude MCP configuration");
+  const target = jsonObjectMember(servers.value, name);
+  // An empty container and a container holding only the selected registration
+  // are structural parts of that registration. Removing the complete member
+  // makes an add to a previously absent file compare byte-for-byte outside it.
+  if (servers.value.members.length === 0 ||
+      (target && servers.value.members.length === 1)) {
+    if (root.members.length === 1) return "{}";
+    return removeJsonMember(source, servers);
   }
-  return JSON.stringify(canonicalJsonValue(copy));
+  return target ? removeJsonMember(source, target) : source;
+}
+
+function tomlContentBeforeComment(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index];
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "#") return line.slice(0, index);
+  }
+  return line;
+}
+
+function parseTomlKeyPath(raw) {
+  const source = String(raw).trim();
+  const parts = [];
+  let index = 0;
+  while (index < source.length) {
+    while (/\s/.test(source[index] || "")) index++;
+    if (index >= source.length) break;
+    let value = "";
+    if (source[index] === '"') {
+      const start = index++;
+      let escaped = false;
+      while (index < source.length) {
+        const character = source[index++];
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') break;
+      }
+      value = JSON.parse(source.slice(start, index));
+    } else if (source[index] === "'") {
+      const end = source.indexOf("'", ++index);
+      if (end < 0) throw new Error("unterminated TOML key");
+      value = source.slice(index, end);
+      index = end + 1;
+    } else {
+      const match = source.slice(index).match(/^[A-Za-z0-9_-]+/);
+      if (!match) throw new Error("unsupported TOML key");
+      value = match[0];
+      index += match[0].length;
+    }
+    parts.push(value);
+    while (/\s/.test(source[index] || "")) index++;
+    if (index >= source.length) break;
+    if (source[index++] !== ".") throw new Error("unsupported TOML key path");
+  }
+  if (!parts.length) throw new Error("empty TOML key");
+  return parts;
+}
+
+function tomlAssignment(line) {
+  const content = tomlContentBeforeComment(line);
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < content.length; index++) {
+    const character = content[index];
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "=") {
+      return {
+        path: parseTomlKeyPath(content.slice(0, index)),
+        value: content.slice(index + 1).trim(),
+      };
+    }
+  }
+  return null;
+}
+
+function codexConfigAnalysis(source, name) {
+  const mainPath = ["mcp_servers", name];
+  const envPath = ["mcp_servers", name, "env"];
+  const main = {};
+  const env = {};
+  const ranges = [];
+  let currentSection = [];
+  let currentTarget = null;
+  let currentTargetStart = null;
+  let foundMain = 0;
+  let foundEnv = 0;
+  let unsupportedTarget = false;
+  let offset = 0;
+  const closeRange = (end) => {
+    if (currentTargetStart !== null) ranges.push({ start: currentTargetStart, end });
+    currentTargetStart = null;
+    currentTarget = null;
+  };
+  for (const segment of source.match(/[^\r\n]*(?:\r\n|\n|\r|$)/g) || []) {
+    if (!segment) continue;
+    const line = segment.replace(/[\r\n]+$/, "");
+    const content = tomlContentBeforeComment(line).trim();
+    const arrayHeader = content.match(/^\[\[(.*)]]$/);
+    const tableHeader = !arrayHeader && content.match(/^\[(.*)]$/);
+    if (arrayHeader || tableHeader) {
+      closeRange(offset);
+      try {
+        currentSection = parseTomlKeyPath((arrayHeader || tableHeader)[1]);
+      } catch {
+        currentSection = [];
+        if (/mcp_servers/i.test(content) && content.includes(name)) unsupportedTarget = true;
+      }
+      const targetsName = currentSection[0] === "mcp_servers" && currentSection[1] === name;
+      if (targetsName) {
+        if (arrayHeader ||
+            (currentSection.length !== 2 &&
+              !(currentSection.length === 3 && currentSection[2] === "env"))) {
+          unsupportedTarget = true;
+        } else {
+          currentTarget = currentSection.length === 2 ? "main" : "env";
+          currentTargetStart = offset;
+          if (currentTarget === "main") foundMain++;
+          else foundEnv++;
+          if (foundMain > 1 || foundEnv > 1) unsupportedTarget = true;
+        }
+      }
+      offset += segment.length;
+      continue;
+    }
+    if (!content) {
+      offset += segment.length;
+      continue;
+    }
+    let assignment = null;
+    try {
+      assignment = tomlAssignment(line);
+    } catch {
+      if (currentTarget || (/mcp_servers/i.test(content) && content.includes(name))) {
+        unsupportedTarget = true;
+      }
+    }
+    if (!assignment) {
+      if (currentTarget) unsupportedTarget = true;
+      offset += segment.length;
+      continue;
+    }
+    const fullPath = [...currentSection, ...assignment.path];
+    const targetsName = fullPath[0] === "mcp_servers" && fullPath[1] === name;
+    if (targetsName) {
+      const supported = currentTarget && assignment.path.length === 1 &&
+        ((currentTarget === "main" && fullPath.length === 3) ||
+          (currentTarget === "env" && fullPath.length === 4));
+      if (!supported) {
+        unsupportedTarget = true;
+      } else {
+        const target = currentTarget === "main" ? main : env;
+        const key = assignment.path[0];
+        if (Object.hasOwn(target, key)) unsupportedTarget = true;
+        else {
+          try {
+            target[key] = parseCanonicalTomlValue(assignment.value);
+          } catch {
+            unsupportedTarget = true;
+          }
+        }
+      }
+    } else if (currentTarget) {
+      unsupportedTarget = true;
+    }
+    offset += segment.length;
+  }
+  closeRange(source.length);
+  if (foundEnv && !foundMain) unsupportedTarget = true;
+  return { main, env, ranges, foundMain: foundMain > 0, foundEnv: foundEnv > 0, unsupportedTarget };
+}
+
+function removeCodexTargetRanges(source, ranges) {
+  let out = source;
+  for (const range of [...ranges].sort((left, right) => right.start - left.start)) {
+    out = out.slice(0, range.start) + out.slice(range.end);
+  }
+  return out;
 }
 
 function codexConfigOutsideTarget(bytes, name) {
@@ -15316,17 +15672,12 @@ function codexConfigOutsideTarget(bytes, name) {
   if (!Buffer.from(source, "utf8").equals(bytes)) {
     throw new Error("Codex configuration is not valid UTF-8");
   }
-  const targets = new Set([`mcp_servers.${name}`, `mcp_servers.${name}.env`]);
-  let insideTarget = false;
-  const kept = [];
-  for (const segment of source.match(/[^\r\n]*(?:\r\n|\n|\r|$)/g) || []) {
-    if (!segment) continue;
-    const line = segment.replace(/[\r\n]+$/, "");
-    const header = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
-    if (header) insideTarget = targets.has(header[1]);
-    if (!insideTarget) kept.push(segment);
-  }
-  return kept.join("");
+  const analysis = codexConfigAnalysis(source, name);
+  if (analysis.unsupportedTarget) throw new Error("unsupported Codex MCP TOML");
+  // A single final line ending may be the syntax separator required to append
+  // the selected table. Treat only that delimiter as part of the target write;
+  // every other byte outside the selected tables remains exact.
+  return removeCodexTargetRanges(source, analysis.ranges).replace(/(?:\r\n|\n|\r)$/, "");
 }
 
 function configOutsideTarget(snapshot, bytes) {
@@ -15470,25 +15821,43 @@ function exactMcpRegistration(desired) {
 }
 
 function claudeConfigWithExactRegistration(snapshot, desired) {
-  const parsed = snapshot.exists ? JSON.parse(snapshot.bytes.toString("utf8")) : {};
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
-      (parsed.mcpServers !== undefined &&
-        (!parsed.mcpServers || typeof parsed.mcpServers !== "object" || Array.isArray(parsed.mcpServers)))) {
-    throw new Error("invalid Claude configuration");
+  const source = snapshot.exists ? snapshot.bytes.toString("utf8") : "{}";
+  if (!Buffer.from(source, "utf8").equals(snapshot.exists ? snapshot.bytes : Buffer.from("{}"))) {
+    throw new Error("Claude configuration is not valid UTF-8");
   }
-  return Buffer.from(`${JSON.stringify({
-    ...parsed,
-    mcpServers: {
-      ...(parsed.mcpServers || {}),
+  const root = parseLosslessJsonStructure(source);
+  if (root.type !== "object") throw new Error("invalid Claude configuration");
+  const encoded = JSON.stringify(exactMcpRegistration(desired));
+  const servers = jsonObjectMember(root, "mcpServers");
+  let next;
+  if (!servers) {
+    const member = `${JSON.stringify("mcpServers")}:${JSON.stringify({
       [desired.name]: exactMcpRegistration(desired),
-    },
-  }, null, 2)}\n`, "utf8");
+    })}${root.members.length ? "," : ""}`;
+    next = source.slice(0, root.open + 1) + member + source.slice(root.open + 1);
+  } else {
+    if (servers.value.type !== "object") throw new Error("invalid Claude MCP configuration");
+    const target = jsonObjectMember(servers.value, desired.name);
+    if (target) {
+      next = source.slice(0, target.valueStart) + encoded + source.slice(target.valueEnd);
+    } else {
+      const member = `${JSON.stringify(desired.name)}:${encoded}${servers.value.members.length ? "," : ""}`;
+      next = source.slice(0, servers.value.open + 1) + member + source.slice(servers.value.open + 1);
+    }
+  }
+  parseLosslessJsonStructure(next);
+  return Buffer.from(next, "utf8");
 }
 
 function codexConfigWithExactRegistration(snapshot, desired) {
-  let source = codexConfigOutsideTarget(snapshot.bytes, desired.name);
+  const original = snapshot.exists ? snapshot.bytes.toString("utf8") : "";
+  if (snapshot.exists && !Buffer.from(original, "utf8").equals(snapshot.bytes)) {
+    throw new Error("Codex configuration is not valid UTF-8");
+  }
+  const analysis = codexConfigAnalysis(original, desired.name);
+  if (analysis.unsupportedTarget) throw new Error("unsupported Codex MCP TOML");
+  let source = removeCodexTargetRanges(original, analysis.ranges);
   if (source && !/[\r\n]$/.test(source)) source += "\n";
-  if (source && !/(?:\r?\n){2}$/.test(source)) source += "\n";
   const env = Object.entries(desired.env)
     .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`)
     .join("");
@@ -15724,46 +16093,20 @@ function readCodexRegistration(desired, options) {
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       throw new Error("foreign Codex config");
     }
-    const mainName = `mcp_servers.${desired.name}`;
-    const envName = `${mainName}.env`;
-    const main = {};
-    const env = {};
-    let section = null;
-    let foundMain = false;
-    let foundEnv = false;
-    for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
-      const header = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
-      if (header) {
-        section = header[1];
-        if (section === mainName) {
-          if (foundMain) throw new Error("duplicate Codex MCP table");
-          foundMain = true;
-        } else if (section === envName) {
-          if (foundEnv) throw new Error("duplicate Codex MCP env table");
-          foundEnv = true;
-        }
-        continue;
-      }
-      if (section !== mainName && section !== envName) continue;
-      if (!line.trim() || /^\s*#/.test(line)) continue;
-      const assignment = line.match(/^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(.+?)\s*$/);
-      if (!assignment) throw new Error("unsupported Codex MCP TOML");
-      const target = section === envName ? env : main;
-      if (Object.hasOwn(target, assignment[1])) throw new Error("duplicate Codex MCP value");
-      target[assignment[1]] = parseCanonicalTomlValue(assignment[2]);
+    const source = readFileSync(path, "utf8");
+    const analysis = codexConfigAnalysis(source, desired.name);
+    if (analysis.unsupportedTarget) {
+      return { path, entry: { name: desired.name, __unsupported_toml: true } };
     }
-    if (!foundMain) return { path, entry: null };
+    if (!analysis.foundMain) return { path, entry: null };
+    const main = analysis.main;
     return {
       path,
       entry: {
         name: desired.name,
-        enabled: main.enabled,
-        type: "stdio",
-        command: main.command,
-        args: Array.isArray(main.args) ? main.args : [],
-        env,
-        env_vars: Array.isArray(main.env_vars) ? main.env_vars : [],
-        cwd: main.cwd ?? null,
+        ...main,
+        type: main.type || "stdio",
+        env: analysis.env,
       },
     };
   } catch {

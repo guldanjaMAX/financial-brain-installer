@@ -24,6 +24,7 @@ import {
   inspectTechnicianSkillEverywhere,
   installClaudeTechnicianSkill,
   repairTechnicianSkillEverywhere,
+  reviewedSkillContent,
 } from "../operations/claude-skill.mjs";
 import {
   LOCAL_ASSISTANT_REPAIR_SCOPES,
@@ -79,7 +80,11 @@ function writePriorInstallerRuntime(parent) {
   const packageRoot = join(parent, ".financial-brain", "lib", "node_modules", "brain-installer");
   const runtime = join(packageRoot, "components", "brain-mcp.mjs");
   mkdirSync(dirname(runtime), { recursive: true, mode: 0o700 });
-  writeFileSync(runtime, "// reviewed v0.4.0 runtime fixture\n", { mode: 0o600 });
+  writeFileSync(
+    runtime,
+    readFileSync(new URL("./fixtures/published-v0.4.0-brain-mcp.mjs", import.meta.url)),
+    { mode: 0o600 },
+  );
   writeFileSync(
     join(packageRoot, "package.json"),
     `${JSON.stringify({ name: "brain-installer", version: "0.4.0" })}\n`,
@@ -103,6 +108,7 @@ try {
   assert.throws(() => parseLocalAssistantRepairScopes("codex-mcp,codex-mcp"), /more than once/i);
 
   const skillHome = join(sandbox, "skill-home");
+  mkdirSync(skillHome, { recursive: true, mode: 0o700 });
   const skillOptions = { home: skillHome };
   const manifestBefore = readFileSync(manifestPath);
   const firstPreview = await captured(() => cmdAssistantRepair(manifestPath, {
@@ -111,7 +117,7 @@ try {
   }));
   assert.equal(firstPreview.value.read_only, true);
   assert.equal(firstPreview.value.mode, "preview");
-  assert.equal(firstPreview.value.write_set.length, 2);
+  assert.equal(firstPreview.value.write_set.length, 8);
   assert.equal(firstPreview.value.transaction.scope, "complete-selected-write-set");
   assert.match(firstPreview.value.plan_id, /^[a-f0-9]{64}$/);
   assert.equal(firstPreview.value.schema_version, 2);
@@ -147,6 +153,7 @@ try {
   assert.deepEqual(readFileSync(manifestPath), manifestBefore, "the local repair never changes the manifest");
 
   const staleHome = join(sandbox, "stale-home");
+  mkdirSync(staleHome, { recursive: true, mode: 0o700 });
   const stalePreview = await buildLocalAssistantRepairPlan(
     manifestPath,
     ["technician-skill"],
@@ -173,6 +180,7 @@ try {
   writeFileSync(skillSourceA, `${CLAUDE_TECHNICIAN_SKILL_MARKER}\n# Same release\nFirst reviewed behavior.\n`);
   writeFileSync(skillSourceB, `${CLAUDE_TECHNICIAN_SKILL_MARKER}\n# Same release\nSecond reviewed behavior.\n`);
   const skillContentHome = join(sandbox, "skill-content-approval");
+  mkdirSync(skillContentHome, { recursive: true, mode: 0o700 });
   const skillContentPlanA = await buildLocalAssistantRepairPlan(
     manifestPath,
     ["technician-skill"],
@@ -187,6 +195,36 @@ try {
     skillContentPlanA.plan_id,
     skillContentPlanB.plan_id,
     "same-version plans with different reviewed skill bytes require different approvals",
+  );
+
+  const skillMutationHome = join(sandbox, "skill-source-mutation");
+  mkdirSync(skillMutationHome, { recursive: true, mode: 0o700 });
+  const approvedSkillBytes = reviewedSkillContent(skillSourceA);
+  const skillMutationPlan = await buildLocalAssistantRepairPlan(
+    manifestPath,
+    ["technician-skill"],
+    { skillOptions: { home: skillMutationHome, sourcePath: skillSourceA } },
+  );
+  await cmdAssistantRepair(manifestPath, {
+    flags: {
+      only: "technician-skill",
+      apply: true,
+      approve: skillMutationPlan.plan_id,
+    },
+    skillOptions: { home: skillMutationHome, sourcePath: skillSourceA },
+    repairTechnicianSkills(options) {
+      writeFileSync(skillSourceA, readFileSync(skillSourceB));
+      return repairTechnicianSkillEverywhere(options);
+    },
+  });
+  const installedAfterSourceMutation = inspectTechnicianSkillEverywhere({
+    home: skillMutationHome,
+    sourcePath: skillSourceB,
+  })[0].path;
+  assert.equal(
+    readFileSync(installedAfterSourceMutation, "utf8"),
+    approvedSkillBytes,
+    "the repair writes the exact approved skill bytes even if its source changes after capture",
   );
 
   const alternateManifestRoot = join(sandbox, "same-bytes-different-location");
@@ -244,10 +282,12 @@ try {
     "the approved plan binds the exact config destination");
 
   const rollbackHome = join(sandbox, "rollback-home");
+  mkdirSync(rollbackHome, { recursive: true, mode: 0o700 });
   let skillInstallCalls = 0;
   assert.throws(
     () => repairTechnicianSkillEverywhere({
       home: rollbackHome,
+      agentRoots: [".claude", ".codex"],
       installSkill(options) {
         skillInstallCalls++;
         if (skillInstallCalls === 2) throw new Error("synthetic second destination failure");
@@ -257,9 +297,17 @@ try {
     /Every completed skill write was rolled back/i,
   );
   assert.equal(skillInstallCalls, 2);
-  for (const item of inspectTechnicianSkillEverywhere({ home: rollbackHome })) {
+  for (const item of inspectTechnicianSkillEverywhere({
+    home: rollbackHome,
+    agentRoots: [".claude", ".codex"],
+  })) {
     assert.equal(item.status, "missing", "a failed multi-destination skill scope restores absence");
   }
+  assert.deepEqual(
+    pathInventory(rollbackHome),
+    [],
+    "a failed skill bundle removes every explicitly created private directory",
+  );
 
   const mcpHome = join(sandbox, "mcp-home");
   mkdirSync(mcpHome, { recursive: true });
@@ -338,7 +386,7 @@ try {
   mkdirSync(configuredCodexRoot, { recursive: true });
   writeFileSync(configuredCodexPath, "model = \"owner-preview-choice\"\n", { mode: 0o600 });
   const configuredCodexBefore = pathInventory(configuredCodexHome);
-  const codexPreview = await buildLocalAssistantRepairPlan(manifestPath, ["codex-mcp"], {
+  const configuredCodexOptions = {
     mcpOptions: {
       environment: {
         HOME: configuredCodexHome,
@@ -349,13 +397,54 @@ try {
       codexConfigPath: configuredCodexPath,
       runCommand: () => { throw new Error("a read-only preview must not execute Codex"); },
       verifyRuntime: () => true,
+      adminKeyPersistencePlan: () => ({ fixture: true }),
+      readAdminKeyDurably: () => "present",
     },
-  });
+  };
+  const codexPreview = await buildLocalAssistantRepairPlan(
+    manifestPath,
+    ["codex-mcp"],
+    configuredCodexOptions,
+  );
   assert.equal(codexPreview.items[0].status, "repairable");
   assert.deepEqual(
     pathInventory(configuredCodexHome),
     configuredCodexBefore,
     "Codex preview preserves every configured-home path, mode, and byte",
+  );
+  await cmdAssistantRepair(manifestPath, {
+    ...configuredCodexOptions,
+    flags: { only: "codex-mcp", apply: true, approve: codexPreview.plan_id },
+  });
+  assert.match(
+    readFileSync(configuredCodexPath, "utf8"),
+    /^model = "owner-preview-choice"\n\[mcp_servers\.fixture-brain]/,
+    "a one-newline owner config remains exact and receives only the needed TOML table delimiter",
+  );
+
+  const dottedCodexHome = join(sandbox, "dotted-codex-preserved");
+  const dottedCodexRoot = join(dottedCodexHome, ".codex");
+  const dottedCodexPath = join(dottedCodexRoot, "config.toml");
+  mkdirSync(dottedCodexRoot, { recursive: true, mode: 0o700 });
+  const dottedCodexBytes =
+    "model = \"owner-choice\"\n" +
+    "mcp_servers.fixture-brain = { command = \"/owner/custom\", args = [] }\n";
+  writeFileSync(dottedCodexPath, dottedCodexBytes, { mode: 0o600 });
+  const dottedCodexPlan = await buildLocalAssistantRepairPlan(manifestPath, ["codex-mcp"], {
+    mcpOptions: {
+      environment: { HOME: dottedCodexHome, PATH: "/fixture/bin", USER: process.env.USER || "fixture-user" },
+      installed: { "codex-mcp": true },
+      codexConfigPath: dottedCodexPath,
+      verifyRuntime: () => true,
+      runCommand: () => { throw new Error("a preserved Codex entry must not execute a client"); },
+    },
+  });
+  assert.equal(dottedCodexPlan.items[0].status, "preserved");
+  assert.equal(dottedCodexPlan.write_set.length, 0);
+  assert.equal(
+    readFileSync(dottedCodexPath, "utf8"),
+    dottedCodexBytes,
+    "a dotted or inline same-name Codex entry is preserved instead of duplicated",
   );
 
   const freshCodexHome = join(sandbox, "path-installed-fresh-codex");
@@ -421,6 +510,40 @@ try {
     "successful fresh Claude repair changes only its previewed config and preserves backup sentinels",
   );
 
+  const losslessClaudeHome = join(sandbox, "lossless-claude-config");
+  mkdirSync(losslessClaudeHome, { recursive: true, mode: 0o700 });
+  const losslessClaudePath = join(losslessClaudeHome, ".claude.json");
+  const losslessClaudeBytes =
+    "{\n  \"ownerCounter\":9007199254740993,\n  \"ownerText\" : \"keep exact spacing\"\n}\n";
+  writeFileSync(losslessClaudePath, losslessClaudeBytes, { mode: 0o600 });
+  const losslessClaudeOptions = {
+    mcpOptions: {
+      environment: { HOME: losslessClaudeHome, PATH: "/fixture/bin", USER: process.env.USER || "fixture-user" },
+      installed: { "claude-code-mcp": true },
+      claudeConfigPath: losslessClaudePath,
+      verifyRuntime: () => true,
+      adminKeyPersistencePlan: () => ({ fixture: true }),
+      readAdminKeyDurably: () => "present",
+      runCommand: () => { throw new Error("the narrow repair must not execute Claude"); },
+    },
+  };
+  const losslessClaudePlan = await buildLocalAssistantRepairPlan(
+    manifestPath,
+    ["claude-code-mcp"],
+    losslessClaudeOptions,
+  );
+  await cmdAssistantRepair(manifestPath, {
+    ...losslessClaudeOptions,
+    flags: { only: "claude-code-mcp", apply: true, approve: losslessClaudePlan.plan_id },
+  });
+  const losslessClaudeAfter = readFileSync(losslessClaudePath, "utf8");
+  assert.equal(
+    losslessClaudeAfter.endsWith(losslessClaudeBytes.slice(1)),
+    true,
+    "Claude repair preserves every unrelated raw byte, including integers beyond JavaScript's safe range",
+  );
+  assert.match(losslessClaudeAfter, /"ownerCounter":9007199254740993/);
+
   const customHome = join(sandbox, "custom-home");
   mkdirSync(customHome, { recursive: true });
   const customClaudePath = join(customHome, ".claude.json");
@@ -449,6 +572,110 @@ try {
   assert.equal(preserved.items[0].status, "preserved");
   assert.equal(preserved.write_set.length, 0);
   assert.equal(readFileSync(customClaudePath, "utf8"), customBytes);
+
+  const snapshotMutationHome = join(sandbox, "snapshot-mutation-home");
+  mkdirSync(snapshotMutationHome, { recursive: true, mode: 0o700 });
+  const snapshotMutationPath = join(snapshotMutationHome, ".claude.json");
+  const snapshotRuntime = writePriorInstallerRuntime(join(sandbox, "snapshot-prior-runtime"));
+  const snapshotDesired = mcpRegistrationDescriptor(manifest, manifestPath, {
+    baseUrl: "https://fixture.invalid",
+  });
+  const { BRAIN_AGENT_PROFILE: _snapshotProfile, ...snapshotPriorEnv } = snapshotDesired.env;
+  const snapshotMutationBytes = `${JSON.stringify({
+    mcpServers: {
+      [snapshotDesired.name]: {
+        type: "stdio",
+        command: snapshotDesired.command,
+        args: [snapshotRuntime],
+        env: snapshotPriorEnv,
+      },
+    },
+  }, null, 2)}\n`;
+  let snapshotVerifyCalls = 0;
+  let snapshotWriteCalls = 0;
+  const snapshotMutationOptions = {
+    mcpOptions: {
+      environment: { HOME: snapshotMutationHome, PATH: "/fixture/bin", USER: process.env.USER || "fixture-user" },
+      installed: { "claude-code-mcp": true },
+      claudeConfigPath: snapshotMutationPath,
+      verifyRuntime() {
+        snapshotVerifyCalls++;
+        if (snapshotVerifyCalls === 2) {
+          writeFileSync(snapshotMutationPath, snapshotMutationBytes, { mode: 0o600 });
+        }
+        return true;
+      },
+      adminKeyPersistencePlan: () => ({ fixture: true }),
+      readAdminKeyDurably: () => "present",
+      writeLocalMcpRegistration({ prepared, desired, writeDefault }) {
+        snapshotWriteCalls++;
+        return writeDefault(prepared, desired);
+      },
+    },
+  };
+  const snapshotMutationPlan = await buildLocalAssistantRepairPlan(
+    manifestPath,
+    ["claude-code-mcp"],
+    snapshotMutationOptions,
+  );
+  await assert.rejects(
+    cmdAssistantRepair(manifestPath, {
+      ...snapshotMutationOptions,
+      flags: {
+        only: "claude-code-mcp",
+        apply: true,
+        approve: snapshotMutationPlan.plan_id,
+      },
+    }),
+    /changed after its approved preview/i,
+  );
+  assert.equal(snapshotWriteCalls, 0, "a changed MCP destination is rejected before the first repair write");
+  assert.equal(
+    readFileSync(snapshotMutationPath, "utf8"),
+    snapshotMutationBytes,
+    "the concurrent MCP value is preserved byte-for-byte",
+  );
+
+  const manifestDriftHome = join(sandbox, "manifest-drift-home");
+  mkdirSync(manifestDriftHome, { recursive: true, mode: 0o700 });
+  const manifestDriftConfig = join(manifestDriftHome, ".claude.json");
+  const manifestDriftOptions = {
+    mcpOptions: {
+      environment: { HOME: manifestDriftHome, PATH: "/fixture/bin", USER: process.env.USER || "fixture-user" },
+      installed: { "claude-code-mcp": true },
+      claudeConfigPath: manifestDriftConfig,
+      verifyRuntime: () => true,
+      adminKeyPersistencePlan: () => ({ fixture: true }),
+      readAdminKeyDurably: () => "present",
+      writeLocalMcpRegistration({ prepared, desired, writeDefault }) {
+        const result = writeDefault(prepared, desired);
+        writeFileSync(
+          manifestPath,
+          `${JSON.stringify({ ...manifest, brain: { ...manifest.brain, domain: "changed.invalid" } }, null, 2)}\n`,
+          { mode: 0o600 },
+        );
+        return result;
+      },
+    },
+  };
+  const manifestDriftPlan = await buildLocalAssistantRepairPlan(
+    manifestPath,
+    ["claude-code-mcp"],
+    manifestDriftOptions,
+  );
+  await assert.rejects(
+    cmdAssistantRepair(manifestPath, {
+      ...manifestDriftOptions,
+      flags: {
+        only: "claude-code-mcp",
+        apply: true,
+        approve: manifestDriftPlan.plan_id,
+      },
+    }),
+    /manifest changed before the approved repair could finish/i,
+  );
+  assert.equal(existsSync(manifestDriftConfig), false, "final manifest drift rolls back the completed config write");
+  writeFileSync(manifestPath, manifestBefore, { mode: 0o600 });
 
   const failedHome = join(sandbox, "failed-add-home");
   mkdirSync(failedHome, { recursive: true });

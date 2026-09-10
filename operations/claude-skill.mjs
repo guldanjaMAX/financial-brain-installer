@@ -17,7 +17,9 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -81,10 +83,97 @@ function sameFile(left, right) {
     left.size === right.size && left.nlink === 1 && right.nlink === 1;
 }
 
+function safeOwnedDirectory(path) {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink() ||
+      (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+    throw new Error(`technician skill directory ${path} is not a safe owner directory`);
+  }
+  return stat;
+}
+
+function sameDirectory(left, right) {
+  return Boolean(left && right) && left.isDirectory() && right.isDirectory() &&
+    !left.isSymbolicLink() && !right.isSymbolicLink() &&
+    left.dev === right.dev && left.ino === right.ino && left.uid === right.uid &&
+    left.gid === right.gid && left.mode === right.mode;
+}
+
+function directoryFingerprint(path, exists, stat) {
+  return createHash("sha256")
+    .update(path)
+    .update(exists ? "\0present\0" : "\0absent\0")
+    .update(`${stat.dev}:${stat.ino}:${stat.uid}:${stat.gid}:${stat.mode}`)
+    .digest("hex");
+}
+
+/**
+ * Describe every directory the narrow repair may create. The owner home is a
+ * pre-existing trust anchor, never part of the write set. Missing assistant,
+ * skills, and named-skill directories are explicit approved destinations.
+ */
+function inspectSkillDirectoryChain(root, options = {}) {
+  const home = ownerHome(options);
+  const homeStat = safeOwnedDirectory(home);
+  const paths = [
+    join(home, root),
+    join(home, root, "skills"),
+    join(home, root, "skills", CLAUDE_TECHNICIAN_SKILL_NAME),
+  ];
+  const directories = [];
+  let nearestExisting = { path: home, stat: homeStat };
+  for (const path of paths) {
+    try {
+      const stat = safeOwnedDirectory(path);
+      directories.push(Object.freeze({
+        path,
+        exists: true,
+        state_fingerprint: directoryFingerprint(path, true, stat),
+      }));
+      nearestExisting = { path, stat };
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      directories.push(Object.freeze({
+        path,
+        exists: false,
+        state_fingerprint: directoryFingerprint(path, false, nearestExisting.stat),
+      }));
+    }
+  }
+  return Object.freeze({
+    base: Object.freeze({
+      path: home,
+      state_fingerprint: directoryFingerprint(home, true, homeStat),
+    }),
+    directories: Object.freeze(directories),
+  });
+}
+
 function inspectedSkill(root, options = {}) {
   const path = technicianSkillPathFor(root, options);
-  const desired = reviewedSkillContent(options.sourcePath);
+  const sourcePath = options.sourcePath ?? PACKAGED_SKILL_PATH;
+  const desired = reviewedSkillContent(sourcePath);
   const desiredFingerprint = createHash("sha256").update(desired, "utf8").digest("hex");
+  let directoryPlan;
+  try {
+    directoryPlan = inspectSkillDirectoryChain(root, options);
+  } catch {
+    return Object.freeze({
+      root,
+      path,
+      status: "unsafe",
+      will_change: false,
+      state_fingerprint: "unsafe-directory-chain",
+      desired_fingerprint: desiredFingerprint,
+      source_path: sourcePath,
+      directories: Object.freeze([]),
+      base_directory: null,
+    });
+  }
+  const withDirectories = {
+    directories: directoryPlan.directories,
+    base_directory: directoryPlan.base,
+  };
   let before;
   try {
     before = lstatSync(path);
@@ -95,8 +184,15 @@ function inspectedSkill(root, options = {}) {
         path,
         status: "missing",
         will_change: true,
-        state_fingerprint: "absent",
+        state_fingerprint: createHash("sha256")
+          .update("absent")
+          .update(directoryPlan.base.state_fingerprint)
+          .update(directoryPlan.directories.map((item) => item.state_fingerprint).join("\n"))
+          .digest("hex"),
+        file_state_fingerprint: "absent",
         desired_fingerprint: desiredFingerprint,
+        source_path: sourcePath,
+        ...withDirectories,
       });
     }
     return Object.freeze({
@@ -106,6 +202,8 @@ function inspectedSkill(root, options = {}) {
       will_change: false,
       state_fingerprint: "unreadable",
       desired_fingerprint: desiredFingerprint,
+      source_path: sourcePath,
+      ...withDirectories,
     });
   }
 
@@ -119,6 +217,8 @@ function inspectedSkill(root, options = {}) {
       will_change: false,
       state_fingerprint: `unsafe:${before.dev}:${before.ino}:${before.mode}:${before.size}:${before.nlink}`,
       desired_fingerprint: desiredFingerprint,
+      source_path: sourcePath,
+      ...withDirectories,
     });
   }
 
@@ -131,9 +231,14 @@ function inspectedSkill(root, options = {}) {
     if (bytes.length !== opened.size) throw new Error("the skill changed while it was read");
     const content = bytes.toString("utf8");
     if (!Buffer.from(content, "utf8").equals(bytes)) throw new Error("the skill is not valid UTF-8");
-    const stateFingerprint = createHash("sha256")
+    const fileStateFingerprint = createHash("sha256")
       .update(bytes)
       .update(`\0${opened.mode & 0o7777}`)
+      .digest("hex");
+    const stateFingerprint = createHash("sha256")
+      .update(fileStateFingerprint)
+      .update(directoryPlan.base.state_fingerprint)
+      .update(directoryPlan.directories.map((item) => item.state_fingerprint).join("\n"))
       .digest("hex");
     const status = content === desired
       ? "current"
@@ -146,7 +251,10 @@ function inspectedSkill(root, options = {}) {
       status,
       will_change: status === "installer_owned_outdated",
       state_fingerprint: stateFingerprint,
+      file_state_fingerprint: fileStateFingerprint,
       desired_fingerprint: desiredFingerprint,
+      source_path: sourcePath,
+      ...withDirectories,
     });
   } catch {
     return Object.freeze({
@@ -156,6 +264,8 @@ function inspectedSkill(root, options = {}) {
       will_change: false,
       state_fingerprint: `unsafe:${before.dev}:${before.ino}:${before.mode}:${before.size}:${before.nlink}`,
       desired_fingerprint: desiredFingerprint,
+      source_path: sourcePath,
+      ...withDirectories,
     });
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -172,9 +282,20 @@ export function inspectTechnicianSkillEverywhere(options = {}) {
 }
 
 function captureRepairableSkill(observation) {
+  const desired = reviewedSkillContent(observation.sourcePath);
+  const desiredFingerprint = createHash("sha256").update(desired, "utf8").digest("hex");
+  if (desiredFingerprint !== observation.desired_fingerprint) {
+    throw new Error("the reviewed technician skill changed after preview");
+  }
   if (observation.status === "missing") {
     if (existsSync(observation.path)) throw new Error("the skill destination changed after preview");
-    return Object.freeze({ ...observation, exists: false, bytes: null, mode: null });
+    return Object.freeze({
+      ...observation,
+      exists: false,
+      bytes: null,
+      mode: null,
+      desired,
+    });
   }
   let fd;
   try {
@@ -188,7 +309,7 @@ function captureRepairableSkill(observation) {
       .update(bytes)
       .update(`\0${opened.mode & 0o7777}`)
       .digest("hex");
-    if (fingerprint !== observation.state_fingerprint) {
+    if (fingerprint !== observation.file_state_fingerprint) {
       throw new Error("the skill changed after preview");
     }
     return Object.freeze({
@@ -196,13 +317,14 @@ function captureRepairableSkill(observation) {
       exists: true,
       bytes,
       mode: opened.mode & 0o7777,
+      desired,
     });
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
 }
 
-function restoreSkillSnapshot(snapshot, desired) {
+function restoreSkillSnapshot(snapshot) {
   let current;
   try {
     current = lstatSync(snapshot.path);
@@ -220,7 +342,7 @@ function restoreSkillSnapshot(snapshot, desired) {
   } catch {
     return false;
   }
-  if (currentBytes.toString("utf8") !== desired) return false;
+  if (currentBytes.toString("utf8") !== snapshot.desired) return false;
 
   if (!snapshot.exists) {
     try {
@@ -265,32 +387,149 @@ export function captureTechnicianSkillRepairSnapshot(observations) {
   if (!Array.isArray(observations) || observations.some((item) => item.status === "unsafe")) {
     throw new Error("the technician skill repair stopped because one destination is not safe to snapshot");
   }
-  return Object.freeze(
-    observations.filter((item) => item.will_change).map(captureRepairableSkill),
-  );
+  const files = observations.filter((item) => item.will_change).map((item) => {
+    // Keep the source locator private to this in-memory transaction. It is not
+    // emitted in the public plan, but lets capture bind the exact approved
+    // rendered bytes instead of rereading a mutable source during the write.
+    return captureRepairableSkill({ ...item, sourcePath: item.source_path });
+  });
+  const directories = new Map();
+  const baseDirectories = new Map();
+  for (const observation of observations.filter((item) => item.will_change)) {
+    const basePath = observation.base_directory?.path;
+    if (!basePath) throw new Error("the technician skill directory plan is incomplete");
+    const baseStat = safeOwnedDirectory(basePath);
+    if (directoryFingerprint(basePath, true, baseStat) !== observation.base_directory.state_fingerprint) {
+      throw new Error("the technician skill home changed after preview");
+    }
+    if (!baseDirectories.has(basePath)) {
+      baseDirectories.set(basePath, { path: basePath, stat: baseStat });
+    }
+    for (const expected of observation.directories || []) {
+      if (directories.has(expected.path)) continue;
+      if (expected.exists) {
+        const stat = safeOwnedDirectory(expected.path);
+        if (directoryFingerprint(expected.path, true, stat) !== expected.state_fingerprint) {
+          throw new Error("a technician skill directory changed after preview");
+        }
+        directories.set(expected.path, { path: expected.path, exists: true, stat, created: null });
+      } else {
+        if (existsSync(expected.path)) throw new Error("a technician skill directory appeared after preview");
+        directories.set(expected.path, { path: expected.path, exists: false, stat: null, created: null });
+      }
+    }
+  }
+  return {
+    files: Object.freeze(files),
+    directories: [...directories.values()].sort((left, right) => left.path.length - right.path.length),
+    base_directories: [...baseDirectories.values()],
+  };
+}
+
+function skillBaseDirectoriesAreCurrent(prepared) {
+  return Array.isArray(prepared?.base_directories) && prepared.base_directories.every((snapshot) => {
+    try {
+      return sameDirectory(snapshot.stat, safeOwnedDirectory(snapshot.path));
+    } catch {
+      return false;
+    }
+  });
 }
 
 function skillSnapshotIsCurrent(snapshot) {
   if (!snapshot.exists) return !existsSync(snapshot.path);
+  let fd;
   try {
-    const current = captureRepairableSkill(snapshot);
-    return current.exists && current.mode === snapshot.mode && current.bytes.equals(snapshot.bytes);
+    const before = lstatSync(snapshot.path);
+    fd = openSync(snapshot.path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    const opened = fstatSync(fd);
+    if (!sameFile(before, opened) || (opened.mode & 0o7777) !== snapshot.mode) return false;
+    const bytes = readFileSync(fd);
+    return bytes.length === opened.size && bytes.equals(snapshot.bytes);
   } catch {
     return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
-export function technicianSkillRepairSnapshotIsCurrent(snapshots) {
-  return Array.isArray(snapshots) && snapshots.every(skillSnapshotIsCurrent);
+export function technicianSkillRepairSnapshotIsCurrent(prepared) {
+  if (!prepared || !Array.isArray(prepared.files) || !Array.isArray(prepared.directories) ||
+      !skillBaseDirectoriesAreCurrent(prepared)) return false;
+  if (!prepared.files.every(skillSnapshotIsCurrent)) return false;
+  return prepared.directories.every((snapshot) => {
+    try {
+      if (snapshot.created) return sameDirectory(snapshot.created, safeOwnedDirectory(snapshot.path));
+      if (!snapshot.exists) return !existsSync(snapshot.path);
+      return sameDirectory(snapshot.stat, safeOwnedDirectory(snapshot.path));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Exact post-write proof against the bytes captured from the approved plan. */
+export function technicianSkillRepairMatchesApproved(prepared) {
+  if (!prepared || !Array.isArray(prepared.files) || !Array.isArray(prepared.directories) ||
+      !skillBaseDirectoriesAreCurrent(prepared)) return false;
+  const filesExact = prepared.files.every((snapshot) => {
+    try {
+      const stat = lstatSync(snapshot.path);
+      return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 &&
+        (stat.mode & 0o7777) === 0o600 &&
+        readFileSync(snapshot.path, "utf8") === snapshot.desired;
+    } catch {
+      return false;
+    }
+  });
+  if (!filesExact) return false;
+  return prepared.directories.every((snapshot) => {
+    try {
+      const expected = snapshot.created || snapshot.stat;
+      return sameDirectory(expected, safeOwnedDirectory(snapshot.path));
+    } catch {
+      return false;
+    }
+  });
+}
+
+function createTechnicianSkillRepairDirectories(prepared) {
+  for (const snapshot of prepared.directories) {
+    if (snapshot.exists || snapshot.created) continue;
+    const parent = dirname(snapshot.path);
+    safeOwnedDirectory(parent);
+    if (existsSync(snapshot.path)) throw new Error("a technician skill directory appeared before its approved creation");
+    mkdirSync(snapshot.path, { mode: 0o700 });
+    const created = safeOwnedDirectory(snapshot.path);
+    if ((created.mode & 0o777) !== 0o700) {
+      throw new Error("a technician skill directory was not created privately");
+    }
+    snapshot.created = created;
+  }
 }
 
 /** Restore all skill destinations, attempting every one even if another fails. */
-export function rollbackTechnicianSkillRepairSnapshot(snapshots, options = {}) {
-  const desired = reviewedSkillContent(options.sourcePath);
+export function rollbackTechnicianSkillRepairSnapshot(prepared) {
+  if (!prepared || !Array.isArray(prepared.files) || !Array.isArray(prepared.directories) ||
+      !skillBaseDirectoriesAreCurrent(prepared)) return false;
   let restored = true;
-  for (const snapshot of [...(snapshots || [])].reverse()) {
+  for (const snapshot of [...prepared.files].reverse()) {
     if (skillSnapshotIsCurrent(snapshot)) continue;
-    if (!restoreSkillSnapshot(snapshot, desired)) restored = false;
+    if (!restoreSkillSnapshot(snapshot)) restored = false;
+  }
+  for (const snapshot of [...prepared.directories].reverse()) {
+    if (!snapshot.created) continue;
+    try {
+      const current = safeOwnedDirectory(snapshot.path);
+      if (!sameDirectory(snapshot.created, current) || readdirSync(snapshot.path).length !== 0) {
+        restored = false;
+        continue;
+      }
+      rmdirSync(snapshot.path);
+      if (existsSync(snapshot.path)) restored = false;
+    } catch (error) {
+      if (error?.code !== "ENOENT") restored = false;
+    }
   }
   return restored;
 }
@@ -309,15 +548,25 @@ export function repairTechnicianSkillEverywhere(options = {}) {
   if (!technicianSkillRepairSnapshotIsCurrent(snapshots)) {
     throw new Error("a technician skill destination changed after it was snapshotted");
   }
+  createTechnicianSkillRepairDirectories(snapshots);
   const installSkill = options.installSkill ?? installClaudeTechnicianSkill;
   const completed = [];
   let attempted = null;
   try {
-    for (const snapshot of snapshots) {
+    for (const snapshot of snapshots.files) {
       attempted = snapshot;
-      const result = installSkill({ ...options, agentRoot: snapshot.root });
-      const after = inspectedSkill(snapshot.root, options);
-      if (!after || after.status !== "current") {
+      const result = installSkill({
+        ...options,
+        agentRoot: snapshot.root,
+        desiredContent: snapshot.desired,
+      });
+      let exact = false;
+      try {
+        const stat = lstatSync(snapshot.path);
+        exact = stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 &&
+          (stat.mode & 0o7777) === 0o600 && readFileSync(snapshot.path, "utf8") === snapshot.desired;
+      } catch { /* exact stays false */ }
+      if (!exact) {
         throw new Error(`${snapshot.root} technician skill did not pass exact readback`);
       }
       completed.push(snapshot);
@@ -331,7 +580,11 @@ export function repairTechnicianSkillEverywhere(options = {}) {
       .filter((snapshot, index, all) =>
         all.findIndex((candidate) => candidate.path === snapshot.path) === index
       );
-    const restored = rollbackTechnicianSkillRepairSnapshot(candidates, options);
+    const restored = rollbackTechnicianSkillRepairSnapshot({
+      files: candidates,
+      directories: snapshots.directories,
+      base_directories: snapshots.base_directories,
+    });
     const suffix = restored
       ? "Every completed skill write was rolled back."
       : "A concurrent local change prevented complete rollback; inspect the named skill destinations before retrying.";
@@ -392,7 +645,11 @@ export function installTechnicianSkillEverywhere(options = {}) {
 
 export function installClaudeTechnicianSkill(options = {}) {
   const target = claudeTechnicianSkillPath(options);
-  const content = reviewedSkillContent(options.sourcePath);
+  const content = options.desiredContent ?? reviewedSkillContent(options.sourcePath);
+  if (typeof content !== "string" || content.length > 64 * 1024 ||
+      !content.includes(CLAUDE_TECHNICIAN_SKILL_MARKER)) {
+    throw new Error("the approved Financial Brain technician skill content is invalid");
+  }
   ensureOwnedDirectory(dirname(target));
 
   if (existsSync(target)) {

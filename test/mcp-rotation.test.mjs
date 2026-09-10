@@ -73,7 +73,11 @@ function writePriorInstallerRuntime(parent, version = "0.4.0", prefix = ".financ
   const packageRoot = join(parent, prefix, "lib", "node_modules", "brain-installer");
   const runtime = join(packageRoot, "components", "brain-mcp.mjs");
   mkdirSync(dirname(runtime), { recursive: true, mode: 0o700 });
-  writeFileSync(runtime, "// reviewed prior installer runtime fixture\n", { mode: 0o600 });
+  writeFileSync(
+    runtime,
+    readFileSync(new URL("./fixtures/published-v0.4.0-brain-mcp.mjs", import.meta.url)),
+    { mode: 0o600 },
+  );
   writeFileSync(
     join(packageRoot, "package.json"),
     `${JSON.stringify({ name: "brain-installer", version })}\n`,
@@ -336,6 +340,28 @@ try {
   const priorInstallerEntry = { ...oldLocatorEntry, args: [priorRuntime] };
   assert.equal(mcpRegistrationIsInstallerOwned(priorInstallerEntry, descriptor), true,
     "the same Brain can migrate from the exact published prior installer root and version");
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...priorInstallerEntry,
+    startup_timeout_sec: 30,
+  }, descriptor), false, "an otherwise familiar registration with a custom top-level field is preserved");
+  const wrappedPriorInstallerEntry = codexEntry(
+    { ...descriptor, args: [priorRuntime] },
+    oldLocatorEnv,
+  );
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...wrappedPriorInstallerEntry,
+    transport: { ...wrappedPriorInstallerEntry.transport, owner_setting: "keep" },
+  }, descriptor), false, "an otherwise familiar transport with a custom field is preserved");
+  const modifiedPriorRuntime = writePriorInstallerRuntime(join(sandbox, "modified-prior-runtime"));
+  writeFileSync(
+    modifiedPriorRuntime,
+    Buffer.concat([readFileSync(modifiedPriorRuntime), Buffer.from("\n// owner modification\n")]),
+    { mode: 0o600 },
+  );
+  assert.equal(mcpRegistrationIsInstallerOwned({
+    ...priorInstallerEntry,
+    args: [modifiedPriorRuntime],
+  }, descriptor), false, "a modified prior runtime is not claimed from package metadata and path alone");
   assert.equal(mcpRegistrationIsInstallerOwned({
     ...priorInstallerEntry,
     args: [priorRuntime, "custom-argument"],
