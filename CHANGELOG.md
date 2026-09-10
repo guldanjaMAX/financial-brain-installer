@@ -31,6 +31,15 @@ that stops the waiting. Nothing here changes what your brain holds.
   bills you for every piece again. It now names what is missing and points at
   the one source that needs it.
 
+- **The deep diagnostic can finish on a large brain without pretending a
+  timeout was a clean result.** Its chunk checks now move through one bounded
+  page at a time and reuse that pass for missing, blank, oversized, source, and
+  zone checks. Source and zone repairs plus vector-projection changes are part
+  of the same opening and closing receipt. If the brain changes during the
+  check, a page cannot be read, or the safety budget is reached, it says the
+  report is incomplete and does not publish partial counts as proof that
+  everything is fine.
+
 ## 0.4.5
 
 Candidate only. This version has not been released.

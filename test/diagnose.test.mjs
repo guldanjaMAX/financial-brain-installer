@@ -13,7 +13,10 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { diagnose, drainOutbox, acquireDrainLease } from "../worker/src/lib/store-d1.js";
+import { diagnose, drainOutbox, acquireDrainLease, forget } from "../worker/src/lib/store-d1.js";
+import { DIAGNOSE_CHUNK_PAGE_SQL } from "../worker/src/lib/diagnose-scan.js";
+import { assignZone } from "../worker/src/lib/auth-store.js";
+import { resolveSourceKind } from "../worker/src/lib/source-receipt.js";
 
 import { makeEnv as makeDrainEnv, seed as seedDrain, embed as embedDrain } from "./fixtures/vector-fence-env.mjs";
 
@@ -23,7 +26,7 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
 const MIG = fileURLToPath(new URL("../migrations/d1/", import.meta.url));
 
 // A D1-shaped facade over real SQLite, so diagnose() runs unmodified.
-function makeEnv({ vectorCount = null } = {}) {
+function makeEnv({ vectorCount = null, beforeStatement = null } = {}) {
   const db = new DatabaseSync(":memory:");
   for (const f of readdirSync(MIG).filter((f) => f.endsWith(".sql")).sort()) {
     db.exec(readFileSync(join(MIG, f), "utf-8"));
@@ -33,17 +36,45 @@ function makeEnv({ vectorCount = null } = {}) {
        (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
      VALUES (1, 'fixture', '0.0.0', 11, 0, '2026-01-01T00:00:00Z', 'test')`
   ).run();
+  const queryLog = [];
+  const invoke = async (method, sql, params, operation) => {
+    const statement = { method, sql, params, number: queryLog.length + 1 };
+    queryLog.push(statement);
+    await beforeStatement?.({ ...statement, db });
+    return operation();
+  };
+  const prepared = (sql, params = []) => ({
+    bind: (...next) => prepared(sql, next),
+    first: async () => invoke("first", sql, params, () => db.prepare(sql).get(...params) ?? null),
+    all: async () => invoke("all", sql, params, () => ({ results: db.prepare(sql).all(...params) })),
+    run: async () => invoke("run", sql, params, () => {
+      const result = db.prepare(sql).run(...params);
+      return { meta: { changes: Number(result.changes || 0) } };
+    }),
+    runInBatch: async () => invoke("batch", sql, params, () => {
+      if (/^\s*(?:SELECT|WITH|PRAGMA)\b/i.test(sql)) {
+        return { results: db.prepare(sql).all(...params), meta: { changes: 0 } };
+      }
+      const result = db.prepare(sql).run(...params);
+      return { meta: { changes: Number(result.changes || 0) } };
+    }),
+  });
   const env = {
     _db: db,
+    _queryLog: queryLog,
     DB: {
-      prepare(sql) {
-        const mk = (params = []) => ({
-          bind: (...p) => mk(p),
-          first: async () => db.prepare(sql).get(...params) ?? null,
-          all: async () => ({ results: db.prepare(sql).all(...params) }),
-          run: async () => db.prepare(sql).run(...params),
-        });
-        return mk();
+      prepare(sql) { return prepared(sql); },
+      async batch(statements) {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const results = [];
+          for (const statement of statements) results.push(await statement.runInBatch());
+          db.exec("COMMIT");
+          return results;
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
       },
     },
   };
@@ -119,6 +150,16 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   const f = find(await diagnose(env), "store_agreement");
   check("MORE vectors than chunks is also caught", f?.severity === "crit", JSON.stringify(f));
   check("and is described as leftovers competing for slots", /compete for retrieval slots/i.test(f?.detail || ""), f?.detail);
+}
+
+/* ---- a verified empty cut is exact, even when the difference is only one ---- */
+{
+  const env = makeEnv({ vectorCount: 9 });
+  source(env._db, "documents");
+  for (let i = 0; i < 10; i++) { doc(env._db, `exact-${i}`); chunk(env._db, `exact-${i}#0`, `exact-${i}`); }
+  const f = find(await diagnose(env), "store_agreement");
+  check("one missing vector cannot hide inside a percentage tolerance",
+    f?.severity === "crit" && f.count === 1, JSON.stringify(f));
 }
 
 /* ---- a scanned PDF that indexed as nothing ---- */
@@ -420,6 +461,271 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("a quarantined row is excluded from ordinary retry totals", !find(await diagnose(env), "vector_retries"));
 }
 
+/* ---- one bounded keyset pass covers the final page and sparse integer ids ---- */
+{
+  const env = makeEnv({ vectorCount: 5 });
+  source(env._db, "documents");
+  for (let i = 1; i <= 8; i++) {
+    doc(env._db, `paged-${i}`);
+    chunk(env._db, `paged-${i}#0`, `paged-${i}`, i === 8 ? "   " : `text-${i}`);
+  }
+  env._db.prepare("DELETE FROM chunks WHERE id IN (2, 4, 5)").run();
+
+  const report = await diagnose(env, { chunkPageSize: 2 });
+  const pageQueries = env._queryLog.filter((entry) => /WITH chunk_page AS MATERIALIZED/.test(entry.sql));
+  check("a defect in the final keyset page is still counted",
+    find(report, "blank_chunks")?.count === 1, JSON.stringify(report));
+  check("sparse chunk ids reach the fixed high-water without inventing rows",
+    report.complete === true && report.totals.chunks === 5 && report.scan.pages === 3 &&
+      report.scan.coveredThroughId === report.scan.highWaterId && report.scan.highWaterId === 8,
+    JSON.stringify(report.scan));
+  check("every chunk page is range-bounded and never uses OFFSET",
+    pageQueries.length === 3 && pageQueries.every((entry) =>
+      /id > \?1 AND id <= \?2/.test(entry.sql) && /LIMIT \?3/.test(entry.sql) &&
+      !/OFFSET/i.test(entry.sql) && entry.params[2] === 2), JSON.stringify(pageQueries));
+  check("the returned statement count matches every D1 statement actually issued",
+    report.scan.statements === env._queryLog.length, `${report.scan.statements}/${env._queryLog.length}`);
+
+  const plan = env._db.prepare(`EXPLAIN QUERY PLAN ${DIAGNOSE_CHUNK_PAGE_SQL}`).all(0, 8, 2, 1800);
+  check("SQLite plans the chunk page from the integer primary key range",
+    plan.some((row) => /SEARCH chunks USING INTEGER PRIMARY KEY \(rowid>[?]? AND rowid<[?]?\)/i.test(row.detail)),
+    JSON.stringify(plan));
+}
+
+/* ---- a failed page stays incomplete and discards every dependent partial count ---- */
+{
+  let page = 0;
+  const env = makeEnv({
+    vectorCount: 6,
+    beforeStatement: ({ sql }) => {
+      if (/WITH chunk_page AS MATERIALIZED/.test(sql) && ++page === 2) {
+        throw new Error("synthetic page timeout");
+      }
+    },
+  });
+  source(env._db, "documents");
+  for (let i = 1; i <= 6; i++) {
+    doc(env._db, `failure-${i}`);
+    chunk(env._db, `failure-${i}#0`, `failure-${i}`, i === 1 ? "" : `text-${i}`);
+  }
+  const report = await diagnose(env, { chunkPageSize: 2 });
+  check("a page failure returns an explicitly incomplete scan",
+    report.complete === false && report.scan.complete === false &&
+      report.scan.reason === "page_query_failed" && report.scan.pages === 1,
+    JSON.stringify(report.scan));
+  check("partial chunk totals and findings are never promoted to exact results",
+    report.totals.chunks === null && !find(report, "blank_chunks") &&
+      report.skippedChecks.includes("blank_chunks") && report.skippedChecks.includes("store_agreement"),
+    JSON.stringify({ totals: report.totals, skipped: report.skippedChecks, findings: report.findings }));
+}
+
+/* ---- statement and page budgets stop before an unbracketed partial result ---- */
+{
+  const seed = (env) => {
+    source(env._db, "documents");
+    for (let i = 1; i <= 6; i++) {
+      doc(env._db, `budget-${i}`);
+      chunk(env._db, `budget-${i}#0`, `budget-${i}`);
+    }
+  };
+  const statementEnv = makeEnv({ vectorCount: 6 });
+  seed(statementEnv);
+  const statementReport = await diagnose(statementEnv, { chunkPageSize: 2, statementBudget: 4 });
+  check("statement exhaustion preserves one closing marker and returns incomplete",
+    statementReport.complete === false && statementReport.scan.reason === "statement_budget_exhausted" &&
+      statementReport.scan.statements === 4 && statementEnv._queryLog.length === 4,
+    JSON.stringify(statementReport.scan));
+
+  const pageEnv = makeEnv({ vectorCount: 6 });
+  seed(pageEnv);
+  const pageReport = await diagnose(pageEnv, { chunkPageSize: 2, chunkPageBudget: 1 });
+  check("the explicit page budget cannot turn prefix coverage into a clean diagnosis",
+    pageReport.complete === false && pageReport.scan.reason === "page_budget_exhausted" &&
+      pageReport.scan.coveredThroughId < pageReport.scan.highWaterId && pageReport.totals.chunks === null,
+    JSON.stringify(pageReport.scan));
+}
+
+/* ---- a concurrent corpus mutation invalidates the otherwise complete pages ---- */
+{
+  let markers = 0;
+  const env = makeEnv({
+    vectorCount: 4,
+    beforeStatement: ({ sql, db }) => {
+      if (/SELECT i\.schema_version AS schema_version/.test(sql) && ++markers === 2) {
+        db.prepare("UPDATE install_state SET outbox_generation = outbox_generation + 1 WHERE id = 1").run();
+      }
+    },
+  });
+  source(env._db, "documents");
+  for (let i = 1; i <= 4; i++) {
+    doc(env._db, `mutation-${i}`);
+    chunk(env._db, `mutation-${i}#0`, `mutation-${i}`, i === 4 ? "" : `text-${i}`);
+  }
+  const report = await diagnose(env, { chunkPageSize: 2 });
+  check("a changed corpus marker makes the whole diagnosis incomplete",
+    report.complete === false && report.scan.reason === "corpus_changed_during_diagnosis" &&
+      report.scan.mutationStart.outboxGeneration !== report.scan.mutationEnd.outboxGeneration,
+    JSON.stringify(report.scan));
+  check("findings derived from the moving chunk snapshot are removed",
+    report.totals.chunks === null && !find(report, "blank_chunks") &&
+      report.skippedChecks.includes("blank_chunks"), JSON.stringify(report));
+}
+
+/* ---- the supported bounded zone repair has its own durable mutation receipt ---- */
+{
+  let markers = 0;
+  let env;
+  env = makeEnv({
+    vectorCount: 4,
+    beforeStatement: async ({ sql }) => {
+      if (/SELECT i\.schema_version AS schema_version/.test(sql) && ++markers === 2) {
+        await assignZone(env, { source: "documents", zone: "books" });
+      }
+    },
+  });
+  source(env._db, "documents", "books");
+  for (let i = 1; i <= 4; i++) {
+    doc(env._db, `zone-mutation-${i}`);
+    chunk(env._db, `zone-mutation-${i}#0`, `zone-mutation-${i}`);
+  }
+  env._db.prepare("UPDATE documents SET zone = NULL WHERE source = 'documents'").run();
+  env._db.prepare("UPDATE chunks SET zone = NULL WHERE source = 'documents'").run();
+
+  const report = await diagnose(env, { chunkPageSize: 2 });
+  check("a concurrent supported zone projection repair invalidates the diagnosis",
+    report.complete === false && report.scan.reason === "corpus_changed_during_diagnosis" &&
+      report.scan.changedMarkers.includes("sources") &&
+      report.scan.mutationStart.sourceEventHighWater < report.scan.mutationEnd.sourceEventHighWater,
+    JSON.stringify(report.scan));
+  check("a zone count observed before the concurrent repair is not published as current",
+    report.totals.chunks === null && !find(report, "zone_projection") &&
+      report.skippedChecks.includes("zone_projection"), JSON.stringify(report));
+  check("the zone mutation marker exposes no provider mutation identity",
+    !Object.hasOwn(report.scan.mutationStart, "vectorProjectionMutationId") &&
+      !Object.hasOwn(report.scan.mutationEnd, "vectorProjectionMutationId"),
+    JSON.stringify(report.scan));
+}
+
+/* ---- source registration is bracketed even before its first ingest receipt ---- */
+{
+  let markers = 0;
+  let env;
+  env = makeEnv({
+    vectorCount: 2,
+    beforeStatement: async ({ sql }) => {
+      if (/SELECT i\.schema_version AS schema_version/.test(sql) && ++markers === 2) {
+        await resolveSourceKind(env, {
+          source: "new-source", requestedKind: "upload", defaultKind: "upload",
+        });
+      }
+    },
+  });
+  source(env._db, "documents");
+  for (let i = 1; i <= 2; i++) {
+    doc(env._db, `source-mutation-${i}`);
+    chunk(env._db, `source-mutation-${i}#0`, `source-mutation-${i}`);
+  }
+  const report = await diagnose(env, { chunkPageSize: 1 });
+  check("a concurrent supported source registration invalidates the diagnosis",
+    report.complete === false && report.scan.changedMarkers.includes("sources") &&
+      report.scan.mutationStart.sourceCount + 1 === report.scan.mutationEnd.sourceCount,
+    JSON.stringify(report.scan));
+  check("a source total from before that registration is not presented as current",
+    report.totals.sources === null, JSON.stringify(report.totals));
+}
+
+/* ---- a supported document removal cannot leave a clean blended count ---- */
+{
+  let markers = 0;
+  let env;
+  env = makeEnv({
+    vectorCount: 4,
+    beforeStatement: async ({ sql }) => {
+      if (/SELECT i\.schema_version AS schema_version/.test(sql) && ++markers === 2) {
+        await forget(env, { docUids: ["document-mutation-2"], dryRun: false });
+      }
+    },
+  });
+  source(env._db, "documents");
+  for (let i = 1; i <= 4; i++) {
+    doc(env._db, `document-mutation-${i}`);
+    chunk(env._db, `document-mutation-${i}#0`, `document-mutation-${i}`);
+  }
+  const report = await diagnose(env, { chunkPageSize: 2 });
+  check("a concurrent supported document removal invalidates the diagnosis",
+    report.complete === false && report.scan.changedMarkers.includes("corpus") &&
+      report.scan.mutationStart.outboxGeneration < report.scan.mutationEnd.outboxGeneration,
+    JSON.stringify(report.scan));
+  check("the pre-removal chunk total and store parity are withheld",
+    report.totals.documents === null && report.totals.chunks === null &&
+      !find(report, "store_agreement") &&
+      report.skippedChecks.includes("store_agreement"), JSON.stringify(report));
+}
+
+/* ---- a missing closing marker withholds every unbracketed count ---- */
+{
+  let markers = 0;
+  const env = makeEnv({
+    vectorCount: 2,
+    beforeStatement: ({ sql }) => {
+      if (/SELECT i\.schema_version AS schema_version/.test(sql) && ++markers === 2) {
+        throw new Error("synthetic closing marker timeout");
+      }
+    },
+  });
+  source(env._db, "documents");
+  for (let i = 1; i <= 2; i++) {
+    doc(env._db, `closing-${i}`);
+    chunk(env._db, `closing-${i}#0`, `closing-${i}`);
+  }
+  const report = await diagnose(env, { chunkPageSize: 1 });
+  check("an unavailable closing marker cannot leave a page-derived count behind",
+    report.complete === false && report.scan.reason === "closing_marker_unavailable" &&
+      report.totals.documents === null && report.totals.chunks === null &&
+      report.totals.sources === null,
+    JSON.stringify({ scan: report.scan, totals: report.totals }));
+  check("findings that depended on the unbracketed chunk pages are removed",
+    !find(report, "store_agreement") && report.skippedChecks.includes("store_agreement"),
+    JSON.stringify(report));
+}
+
+/* ---- store parity waits for an exact, settled vector cut ---- */
+{
+  const env = makeEnv({ vectorCount: 2 });
+  source(env._db, "documents");
+  for (let i = 1; i <= 2; i++) {
+    doc(env._db, `unsettled-${i}`);
+    chunk(env._db, `unsettled-${i}#0`, `unsettled-${i}`);
+  }
+  env._db.prepare(
+    "INSERT INTO vector_outbox (chunk_uid, op, queued_at, attempts) VALUES (?, 'upsert', ?, 0)",
+  ).run("unsettled-2#0", Date.now());
+  const report = await diagnose(env, { chunkPageSize: 1 });
+  const parity = find(report, "store_agreement");
+  check("an unsettled provider projection is not mislabeled as missing or orphan vectors",
+    parity?.severity === "warn" && parity.observable === false &&
+      /cannot be compared/.test(parity.title) && !/disagree/.test(parity.title),
+    JSON.stringify(parity));
+}
+
+/* ---- expensive optional groupings say not observable at scale ---- */
+{
+  const env = makeEnv({ vectorCount: 6 });
+  source(env._db, "documents");
+  for (let i = 1; i <= 6; i++) {
+    doc(env._db, `optional-${i}`);
+    chunk(env._db, `optional-${i}#0`, `optional-${i}`, `shared-${i % 2}`);
+  }
+  const report = await diagnose(env, { duplicateChunkScanLimit: 3, chunkPageSize: 2 });
+  check("large-corpus duplicate and outlier checks are explicit non-observations",
+    report.complete === true && find(report, "duplicate_chunks")?.observable === false &&
+      find(report, "chunk_outliers")?.observable === false,
+    JSON.stringify(report.findings));
+  check("skipped optional measurements do not claim measured defects",
+    !find(report, "duplicate_chunks")?.count && !find(report, "chunk_outliers")?.count,
+    JSON.stringify(report.findings));
+}
+
 /* ---- it must degrade rather than explode ---- */
 {
   const env = makeEnv();               // no VECTORIZE binding at all
@@ -428,8 +734,11 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   let threw = null, r = null;
   try { r = await diagnose(env); } catch (e) { threw = e.message; }
   check("no Vectorize binding does not throw", threw === null, `threw: ${threw}`);
-  check("and it says the comparison could not be made rather than passing it",
-    find(r, "store_agreement")?.severity === "info", JSON.stringify(find(r, "store_agreement")));
+  check("and it says the comparison could not be made rather than passing it or going healthy",
+    find(r, "store_agreement")?.severity === "warn" &&
+      find(r, "store_agreement")?.observable === false && r.complete === false &&
+      r.verdict !== "healthy" && r.skippedChecks.includes("store_agreement"),
+    JSON.stringify({ finding: find(r, "store_agreement"), complete: r.complete, verdict: r.verdict }));
 }
 
 console.log(`\ndiagnose: ${ran - fail}/${ran} passed`);

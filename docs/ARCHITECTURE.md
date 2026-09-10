@@ -454,6 +454,24 @@ matching mutable human wording.
 | `npm test` and CI | Does shared product behavior pass offline on supported operating systems and Node versions? |
 | Live field gates | Does the real connector, scale, scheduler, or account lifecycle work outside mocks? |
 
+The D1 diagnostic's chunk-integrity lane is a bounded snapshot, not a collection
+of independent whole-table aggregates. It fixes one integer chunk-id high-water
+mark, visits that range once with keyset pages, and fuses the exact total, blank,
+oversized, orphan, document-source mismatch, and zone-projection counts in each
+page. Opening and closing schema, outbox-generation, corpus-stat, source-event,
+source-count, and vector-projection markers cheaply detect supported concurrent
+corpus changes. The bounded zone command records its source-authoritative
+assignment and projection-repair page in the same transaction, so a same-zone
+repair cannot evade the marker. Any changed marker, failed page, coverage gap,
+or exhausted statement/page budget makes the additive report `complete: false`,
+removes page-derived counts, and names the skipped checks. Store parity runs
+only at a verified empty-queue cut, because provider acceptance can become
+visible asynchronously, and then requires exact count equality with no
+percentage tolerance. The renderer cannot issue a clean verdict from partial
+evidence. Expensive duplicate-text and per-document outlier groupings are
+explicitly unobservable at large scale until maintained hashes or aggregates
+make them indexable.
+
 The eval golden set is per install. It should include answerable single-document
 questions, multi-document questions, hard paraphrases, near-miss entities, and
 questions the corpus genuinely cannot answer. Retrieval is scored with recall at

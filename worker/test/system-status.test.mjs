@@ -151,6 +151,19 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
   check("the working reads still come through", s.sources.length === 2 && !!s.vectors);
 }
 {
+  const partial = async () => ({
+    complete: false,
+    totals: { documents: 12, chunks: null, sources: 1 },
+    summary: { crit: 0, warn: 1, info: 0, ok: 0 },
+    findings: [{ id: "chunk_scan", area: "meta", severity: "warn", title: "scan incomplete" }],
+  });
+  const s = await ownerSystemStatus({}, { ...deps, diagnose: partial });
+  check("a partial diagnosis is named as unavailable even when it found a problem",
+    s.unavailable.includes("diagnose") && s.problems.length === 1, JSON.stringify(s));
+  check("a verified document total survives while an unverified chunk total stays absent",
+    s.documents === 12 && !("chunks" in s), JSON.stringify(s));
+}
+{
   const s = await ownerSystemStatus({}, { ...deps, freshness: async () => { throw new Error("down"); } });
   check("a broken freshness is NAMED", s.unavailable.includes("freshness"));
   check("a broken freshness also leaves access zones unavailable", s.unavailable.includes("zones"));
