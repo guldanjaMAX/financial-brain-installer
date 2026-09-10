@@ -183,6 +183,12 @@ node brain.mjs drain <manifest>                      # empties it safely now
 ```
 
 An oldest-queued timestamp over 30 minutes means the cron is not running.
+The drain's human completion receipt names `actual_vectors` as the total
+query-visible count and `drained` as the number newly confirmed during this
+command. Its returned object preserves `drained`, `submitted`, and `remaining`
+and adds `confirmed_this_run`, `expected_vectors`, `actual_vectors`, and
+`vector_ready`. A no-op over a populated, ready index must never look like an
+empty index.
 
 ---
 

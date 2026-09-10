@@ -259,6 +259,12 @@ The command prompts for the question so it does not enter your shell history.
 Ask something only your documents could answer, then something they definitely
 do not cover. The second answer matters as much as the first.
 
+If you run `brain drain <manifest>` after a load, its completion line separates
+the total vectors currently available to search from the vectors newly
+confirmed during that command. A healthy no-op can therefore report an existing
+query-visible total and zero newly confirmed, rather than making the index look
+empty.
+
 ## Check changing facts and access zones
 
 ```bash

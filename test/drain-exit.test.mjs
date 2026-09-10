@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 
 import {
   assertDrainComplete,
+  buildCompletedDrainResult,
+  renderCompletedDrainResult,
   summariseResponseBody,
   validateDrainBusyReceipt,
   validateDrainReceipt,
@@ -35,6 +37,35 @@ const pausedExcessGuidance = vectorCountMismatchFailure(10, 13, {
 });
 assert.match(pausedExcessGuidance, /provider-only excess vectors.*reviewed recovery.*clean index/s);
 assert.doesNotMatch(pausedExcessGuidance, /\n\s*brain reindex <manifest>/);
+
+const healthyNoopResult = buildCompletedDrainResult({
+  drained: 0,
+  submitted: 0,
+  remaining: 0,
+  expectedVectors: 66,
+  actualVectors: 66,
+});
+assert.deepEqual(healthyNoopResult, {
+  drained: 0,
+  submitted: 0,
+  remaining: 0,
+  confirmed_this_run: 0,
+  expected_vectors: 66,
+  actual_vectors: 66,
+  vector_ready: true,
+});
+assert.equal(
+  renderCompletedDrainResult(healthyNoopResult),
+  "vector index is query-ready (66 total query-visible vector(s); 0 newly confirmed this run)",
+);
+assert.equal(
+  renderCompletedDrainResult(buildCompletedDrainResult({
+    drained: 0,
+    submitted: 0,
+    remaining: 0,
+  })),
+  "vector index is query-ready (total query-visible vector count unavailable; 0 newly confirmed this run)",
+);
 
 assert.deepEqual(validateDrainBusyReceipt({
   busy: true, remaining: 7, retry_after_seconds: 3,
