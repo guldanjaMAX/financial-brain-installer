@@ -1,7 +1,10 @@
-import { readFileSync, existsSync, lstatSync, realpathSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { basename, dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifiedNpmCliPath } from "../operations/npm-cli-runtime.mjs";
+
+export { verifiedNpmCliPath } from "../operations/npm-cli-runtime.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 
@@ -178,17 +181,6 @@ export function releaseAdjudication(cases, version) {
 // Run independently: a failed auth test must not prevent the recovery tests
 // from running. No shell, no output pipes, no inherited success from a later
 // command. A signal, timeout, or spawn error is a failure too.
-export function verifiedNpmCliPath(candidate) {
-  if (typeof candidate !== "string" || !candidate) return null;
-  try {
-    const cli = realpathSync(candidate);
-    const info = lstatSync(cli);
-    if (!info.isFile() || info.isSymbolicLink() || basename(cli) !== "npm-cli.js") return null;
-    const pkg = JSON.parse(readFileSync(resolve(dirname(cli), "..", "package.json"), "utf8"));
-    return pkg.name === "npm" && /^\d+\.\d+\.\d+(?:[-+].*)?$/.test(String(pkg.version || "")) ? cli : null;
-  } catch { return null; }
-}
-
 export function regressionEnvironment(env = process.env) {
   const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI"];
   const clean = Object.fromEntries(keys.filter((key) => typeof env[key] === "string").map((key) => [key, env[key]]));

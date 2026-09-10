@@ -1,6 +1,8 @@
 # A version tag is a request to test a release candidate, not permission to
 # publish untested bytes. The only route to the publish job passes through the
-# same six-job CI matrix and planted Windows traps used on pull requests.
+# exact-package CI gate and the current published package-contract matrix. Live
+# provisioning, deployed-browser proof, and physical ceremonies remain separate
+# field gates and are not implied by either reusable workflow.
 
 name: release
 
@@ -23,9 +25,17 @@ jobs:
     permissions:
       contents: read
 
+  public-contract-install:
+    name: current public field kit / fresh package install
+    uses: ./.github/workflows/install-matrix.yml
+    permissions:
+      contents: read
+
   publish:
     name: publish verified immutable assets
-    needs: gate
+    needs:
+      - gate
+      - public-contract-install
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

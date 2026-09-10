@@ -266,13 +266,17 @@ hand to work around a failed workflow.
    CI does not establish Windows ARM64 physical runtime acceptance.
 4. Integrate the reviewed candidate into main. Tag the exact reviewed source,
    preserving its identity and history. Do not move or recreate a release tag.
-   The tag invokes .github/workflows/release.yml, which calls the same CI gate.
+   The tag invokes .github/workflows/release.yml, which calls the same CI gate
+   plus the reusable current-public-package contract matrix.
 5. CI first requires zero findings in public and candidate Git history, then
    creates one tarball from exact locked dependencies. Every Windows/macOS/Linux
    Node 22/24 job and the Windows planted traps download that immutable artifact
    ID and verify its raw SHA-256. The six jobs also retain frontend bundle parity,
    installed CLI checks and both source and packed Windows DPAPI gates.
-6. Release publication cannot start until that reusable CI succeeds. It checks
+6. Release publication cannot start until reusable CI and the four-runner
+   public package-contract matrix succeed. The latter validates and installs
+   the current sealed field kit; it does not provision Cloudflare, exercise a
+   deployed browser, or replace the separate physical-device gates. CI checks
    tag/event/checkout identity and main ancestry, then audit:updates must pass
    before any release write. A separate one-repository administration-read
    RELEASE_ADMIN_READ_TOKEN proves immutable releases are enabled. Do not place

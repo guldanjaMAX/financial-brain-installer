@@ -345,9 +345,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: npm run audit:regressions
 
-      # A runner may legitimately have no Wrangler session or manifest, so the
-      # exit may be diagnostic. Require the packaged script to parse, execute,
-      # and print its identifying header.
+      # GitHub-hosted Windows runners are elevated. Require the packaged
+      # production script to parse, execute, and refuse that unsafe context for
+      # exactly the reason a customer would see. This is not a preflight bypass.
       - name: packaged preflight runs and prints (Windows)
         if: ${{ !cancelled() && steps.verify_package.outcome == 'success' && runner.os == 'Windows' }}
         shell: powershell
@@ -358,10 +358,14 @@ jobs:
           Write-Host $out
           Write-Host "preflight exit: $code"
           if ($out -notmatch 'Financial Brain preflight') { throw 'packaged preflight did not run' }
+          if ($out -notmatch 'STOP.*running as Administrator') { throw 'packaged preflight must refuse the elevated hosted runner' }
+          if ($out -notmatch 'ok.*this process has no Windows package identity') { throw 'packaged preflight did not prove the hosted PowerShell process is outside an app package' }
+          if ($code -ne 1) { throw "the packaged Administrator STOP must exit 1, got $code" }
           $e=$null; $t=$null
           [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$t, [ref]$e) | Out-Null
           if ($e.Count -gt 0) { $e | ForEach-Object { Write-Host $_ }; exit 1 }
           Write-Host "preflight.ps1 parsed clean"
+          exit 0
 
       - name: packaged preflight runs and prints (macOS and Linux)
         if: ${{ !cancelled() && steps.verify_package.outcome == 'success' && runner.os != 'Windows' }}
@@ -509,7 +513,7 @@ jobs:
           fi
           echo "clean"
 
-  # The preflight exists to catch three Windows traps. A clean runner has none
+  # The preflight exists to catch Windows traps. A clean runner has none
   # of them, so the job above proves only that it RUNS. This job plants each
   # trap and proves the preflight SAYS SO. A smoke detector that has never
   # smelled smoke is not known to work.
@@ -581,23 +585,42 @@ jobs:
         shell: powershell
         run: |
           Set-ExecutionPolicy -Scope CurrentUser Restricted -Force
-          $out = powershell -NoProfile -ExecutionPolicy Bypass -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1 | Out-String
+          $raw = & powershell -NoProfile -ExecutionPolicy Bypass -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1
+          $code = $LASTEXITCODE
+          $out = $raw | Out-String
           Set-ExecutionPolicy -Scope CurrentUser Undefined -Force
           Write-Host $out
           if ($out -notmatch 'WARN.*brain\.cmd, npm\.cmd and npx\.cmd') { Write-Host "::error::preflight did not warn about the .ps1 shim block"; exit 1 }
-          Write-Host "TRAP 1 DETECTED"
+          if ($out -notmatch 'STOP.*running as Administrator') { Write-Host "::error::the elevated CI runner was not refused"; exit 1 }
+          if ($out -notmatch 'ok.*this process has no Windows package identity') { Write-Host "::error::native package identity did not prove the hosted process is unpackaged"; exit 1 }
+          if ($code -ne 1) { Write-Host "::error::the Administrator STOP must exit 1, got $code"; exit 1 }
+          Write-Host "TRAP 1 DETECTED; elevated CI runner also refused as required"
+          exit 0
 
-      - name: "trap 2: running inside the Claude MSIX sandbox"
+      - name: "trap 2: an app-package data path remains fail-closed"
         shell: powershell
         run: |
           $env:APPDATA = "C:\Users\x\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming"
           $out = powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $out
-          if ($out -notmatch 'STOP.*MSIX sandbox') { Write-Host "::error::preflight did not stop on the MSIX sandbox"; exit 1 }
+          if ($out -notmatch 'STOP.*app-package data path') { Write-Host "::error::preflight did not stop on the app-package path heuristic"; exit 1 }
           if ($code -ne 1) { Write-Host "::error::a STOP must exit 1, got $code"; exit 1 }
-          Write-Host "TRAP 2 DETECTED, exit 1 as required"
+          Write-Host "TRAP 2 PATH HEURISTIC DETECTED, exit 1 as required"
           # The child correctly exited 1; do not let that leak out as this step's verdict.
+          exit 0
+
+      - name: "PowerShell 7 proves the native unpackaged-process branch"
+        shell: pwsh
+        run: |
+          $raw = & pwsh -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1
+          $code = $LASTEXITCODE
+          $out = $raw | Out-String
+          Write-Host $out
+          if ($out -notmatch 'ok.*this process has no Windows package identity') { Write-Host "::error::PowerShell 7 did not prove the native unpackaged-process branch"; exit 1 }
+          if ($out -notmatch 'STOP.*running as Administrator') { Write-Host "::error::the elevated PowerShell 7 runner was not refused"; exit 1 }
+          if ($code -ne 1) { Write-Host "::error::the Administrator STOP must exit 1, got $code"; exit 1 }
+          Write-Host "POWERSHELL 7 NATIVE PACKAGE CHECK PASSED"
           exit 0
 
       - name: "trap 3: more than one copy of the CLI on PATH"
@@ -629,10 +652,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $env:APPDATA 'xdg.config\.wrangler\config') | Out-Null
           $session = New-Item -ItemType Directory -Force -Path (Join-Path $env:APPDATA '.wrangler\config')
           Set-Content (Join-Path $session 'default.toml') 'fixture session marker only'
-          $out = powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1 | Out-String
+          $raw = & powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1
+          $code = $LASTEXITCODE
+          $out = $raw | Out-String
           Write-Host $out
           if ($out -notmatch 'ok\s+wrangler session found') { Write-Host "::error::an empty earlier directory masked the later Wrangler session"; exit 1 }
-          Write-Host "TRAP 4 DETECTED"
+          if ($out -notmatch 'STOP.*running as Administrator') { Write-Host "::error::the elevated CI runner was not refused"; exit 1 }
+          if ($code -ne 1) { Write-Host "::error::the Administrator STOP must exit 1, got $code"; exit 1 }
+          Write-Host "TRAP 4 DETECTED; elevated CI runner also refused as required"
+          exit 0
 
       - name: "trap 5: Node 21 is below the supported minimum"
         shell: powershell
@@ -648,11 +676,18 @@ jobs:
           Write-Host "TRAP 5 DETECTED, exit 1 as required"
           exit 0
 
-      - name: "control: a clean machine is told plainly that nothing is wrong"
+      - name: "control: the elevated CI machine is stopped for exactly that reason"
         shell: powershell
         run: |
-          $out = powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1 | Out-String
+          $raw = & powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1
+          $code = $LASTEXITCODE
+          $out = $raw | Out-String
           Write-Host $out
-          if ($out -notmatch 'Nothing is wrong here') { Write-Host "::error::clean machine should read as clean"; exit 1 }
-          if ($LASTEXITCODE -ne 0) { Write-Host "::error::clean machine should exit 0"; exit 1 }
-          Write-Host "CONTROL PASSED"
+          $stops = [regex]::Matches($out, '(?m)^\s+STOP\s+').Count
+          if ($out -notmatch 'ok\s+Windows 10 or newer') { Write-Host "::error::supported Windows was not accepted"; exit 1 }
+          if ($out -notmatch 'ok\s+LOCALAPPDATA drive has') { Write-Host "::error::the per-user install drive was not accepted"; exit 1 }
+          if ($out -notmatch 'STOP.*running as Administrator') { Write-Host "::error::the elevated CI runner was not refused"; exit 1 }
+          if ($stops -ne 1) { Write-Host "::error::expected only the Administrator STOP, saw $stops STOP lines"; exit 1 }
+          if ($code -ne 1) { Write-Host "::error::the Administrator STOP must exit 1, got $code"; exit 1 }
+          Write-Host "CONTROL PASSED: exact Administrator refusal"
+          exit 0
