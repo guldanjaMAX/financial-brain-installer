@@ -591,8 +591,10 @@ jobs:
           Set-ExecutionPolicy -Scope CurrentUser Undefined -Force
           Write-Host $out
           if ($out -notmatch 'WARN.*brain\.cmd, npm\.cmd and npx\.cmd') { Write-Host "::error::preflight did not warn about the .ps1 shim block"; exit 1 }
-          if ($code -ne 0) { throw "unexpected native preflight exit: $code" }
-          Write-Host "TRAP 1 DETECTED"
+          if ($out -notmatch 'STOP.*running as Administrator') { Write-Host "::error::the elevated CI runner was not refused"; exit 1 }
+          if ($code -ne 1) { Write-Host "::error::the Administrator STOP must exit 1, got $code"; exit 1 }
+          Write-Host "TRAP 1 DETECTED; elevated CI runner also refused as required"
+          exit 0
 
       - name: "trap 2: running inside the Claude MSIX sandbox"
         shell: powershell
@@ -643,8 +645,10 @@ jobs:
           $out = $raw | Out-String
           Write-Host $out
           if ($out -notmatch 'ok\s+wrangler session found') { Write-Host "::error::an empty earlier directory masked the later Wrangler session"; exit 1 }
-          if ($code -ne 0) { throw "unexpected native preflight exit: $code" }
-          Write-Host "TRAP 4 DETECTED"
+          if ($out -notmatch 'STOP.*running as Administrator') { Write-Host "::error::the elevated CI runner was not refused"; exit 1 }
+          if ($code -ne 1) { Write-Host "::error::the Administrator STOP must exit 1, got $code"; exit 1 }
+          Write-Host "TRAP 4 DETECTED; elevated CI runner also refused as required"
+          exit 0
 
       - name: "trap 5: Node 21 is below the supported minimum"
         shell: powershell
@@ -661,13 +665,18 @@ jobs:
           Write-Host "TRAP 5 DETECTED, exit 1 as required"
           exit 0
 
-      - name: "control: a clean machine is told plainly that nothing is wrong"
+      - name: "control: the elevated CI machine is stopped for exactly that reason"
         shell: powershell
         run: |
           $raw = & powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1
           $code = $LASTEXITCODE
           $out = $raw | Out-String
           Write-Host $out
-          if ($out -notmatch 'Nothing is wrong here') { Write-Host "::error::clean machine should read as clean"; exit 1 }
-          if ($code -ne 0) { Write-Host "::error::clean machine should exit 0"; exit 1 }
-          Write-Host "CONTROL PASSED"
+          $stops = [regex]::Matches($out, '(?m)^\s+STOP\s+').Count
+          if ($out -notmatch 'ok\s+Windows 10 or newer') { Write-Host "::error::supported Windows was not accepted"; exit 1 }
+          if ($out -notmatch 'ok\s+LOCALAPPDATA drive has') { Write-Host "::error::the per-user install drive was not accepted"; exit 1 }
+          if ($out -notmatch 'STOP.*running as Administrator') { Write-Host "::error::the elevated CI runner was not refused"; exit 1 }
+          if ($stops -ne 1) { Write-Host "::error::expected only the Administrator STOP, saw $stops STOP lines"; exit 1 }
+          if ($code -ne 1) { Write-Host "::error::the Administrator STOP must exit 1, got $code"; exit 1 }
+          Write-Host "CONTROL PASSED: exact Administrator refusal"
+          exit 0
