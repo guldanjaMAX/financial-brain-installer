@@ -49,11 +49,18 @@ registered Financial Brain MCP server before reaching for Cloudflare directly.
 ## Working together safely
 
 - Begin read-only and explain the exact files, folders, or external action that would help next.
+- Keep the owner in this conversation and ask for only one small action or answer at a time.
+- Before any provider page, hidden prompt, or system window, explain what will appear, why it is needed, the smallest access requested, and exactly what the owner should do next.
+- When browser control is available, offer to handle official-page navigation and non-secret fields after approval. Stop before sign-in, 2FA, credential reveal or entry, consent, billing, and every passkey window.
 - Keep Cloudflare tokens, Brain keys, OAuth secrets, app passwords, passkey material, and authentication codes in provider pages or hidden terminal prompts.
+- Never read, screenshot, copy, transcribe, paste, or store a secret shown by a provider or secure device window.
 - Keep Claude Code's normal approval prompts enabled.
+- Before fresh setup creates anything, use \`brain tools\` to prove Node 22+, at least 2 GiB free on the actual per-user install drive (LOCALAPPDATA on Windows), and a normal session without sudo, root, or Run as administrator.
+- Complete the named Cloudflare sign-in so the installer verifies the exact account, then let it open that account's Workers & Pages > Plans page. Require the owner to confirm it says Paid before provisioning. The narrow session cannot read billing status, so do not infer the plan from product access. Apply the same prerequisite to a prepared manifest, recovery lane, or approved automation; unattended setup needs the exact release's account-bound confirmation for the manifest account.
 - Start with the folder or connected-drive root the owner names. Use \`claude --add-dir <approved-folder>\` for that approved root.
 - Preview a discovered source and invite the owner to approve the exact folder before ingestion.
 - Pause for the owner's specific approval before a deploy, deletion, data-forget action, key rotation, access revocation, or billing change.
+- Optimize may report a missing CLI, skill, or MCP registration. After the report, one clearly previewed and approved bundle may repair the owner-selected skill, Claude MCP, and Codex MCP items only when the exact release advertises those atomic repair scopes. A combined scope needs approval for its whole previewed group. Preserve disabled, custom, and unrelated entries and files byte for byte; change only absent or exact installer-owned state, and restore prior installer-owned state if readback fails. Do not invent a command. Keep CLI replacement separate. Optimize does not run passkey enrollment or device review.
 
 ## Installed commands
 

@@ -2,8 +2,9 @@
 
 Provisions a retrieval brain into a **client's own Cloudflare account**. Text and
 keyword search live in D1, vectors live in Vectorize, and the Worker fuses them.
-Nothing runs on our infrastructure, and nothing but a scoped token is held during
-the engagement.
+Nothing runs on our infrastructure. Normal setup uses an owner-approved named
+Cloudflare browser profile in the owner's operating-system credential store; it
+does not create or copy an API token.
 
 **Status: 0.2.0 release candidate.** Provisioning, retrieval, resumable ingest,
 guarded deletion, owner actions, exact entity scope, document grants, passkey
@@ -27,18 +28,30 @@ release, owner-update, rollback, credential, and issue-evidence workflow.
 ## Requirements
 
 - Node 22 or newer (uses `node:sqlite` for the migration tests)
+- At least 2 GiB free on the actual per-user install drive. On Windows this is
+  the drive containing `LOCALAPPDATA`.
+- A normal current-user shell without `sudo`, root, or Run as administrator.
 - A Cloudflare account **on the Workers Paid plan**, 5 USD a month minimum.
   Vectorize has a Free allowance, but its vector capacity, D1 daily-write limit,
   and Worker CPU limit are prototype-scale. Paid is this product's supported
   production baseline.
-- A Cloudflare API token created in the client's own account with: Workers
-  Scripts Edit, D1 Edit, Vectorize Edit and Workers AI Read. It drives verify,
-  provisioning, migrations, deploy and secrets. Add Workers R2 Storage Edit only
-  when the manifest actually sets an R2 bucket.
+- An owner-controlled Cloudflare browser sign-in to the exact account that will
+  hold the Brain. The owner completes login, 2FA, account selection, and
+  Cloudflare consent. The named install profile is stored through Wrangler's
+  protected local credential store.
 
-Vectorize Edit was verified end to end on 2026-08-23: an account-scoped token
-created the index and all six metadata indexes through the API. `wrangler login`
-remains a compatibility fallback for an older token, not an install requirement.
+`brain tools` and setup check Node, the actual install drive, and elevation
+before provisioning. The narrow Cloudflare session verifies account and product
+access but does not prove billing state. After sign-in verifies the exact
+account, setup opens its account-specific plan page. Before resource creation,
+the owner must confirm **Workers & Pages > Plans > Paid** there. Do not widen the
+session just to inspect billing. Prepared-manifest, recovery, and automation
+setup paths have the same account-bound prerequisite.
+
+A scoped Cloudflare token is a bounded legacy, automation, or recovery path,
+not a fresh-install prerequisite. Use it only when that exact path is explicitly
+selected and keep it inside the reviewed hidden prompt or approved no-history
+launcher.
 
 ---
 
@@ -46,7 +59,7 @@ remains a compatibility fallback for an older token, not an install requirement.
 
 ```bash
 node brain.mjs doctor                        # check this machine first
-node brain.mjs setup                         # hidden token prompt, then one-command setup
+node brain.mjs setup                         # owner browser sign-in, then one-command setup
 ```
 
 `setup` runs everything below in the only order that works, generates the admin
@@ -854,6 +867,18 @@ argv, and cleared from the coordinator's buffers and child environment object
 after the command exits. Tests assert ordering, rerun behavior, ambient-secret
 scrubbing, exact hostname confirmation before invite creation, and stop-on-fail
 verification.
+
+Technician plan schema 3 also carries the owner briefing for every ceremony:
+what will open, why it is needed, the minimum access, the safe non-secret work
+a browser controller can do, the owner's handoff point, and the privacy
+boundary. The CLI renders that briefing before each provider command. The
+direct invite command renders the passkey briefing before it mints a link, and
+the enrollment page requires a device-neutral owner click before WebAuthn is
+invoked. Optimize is a separate read-only audit. It may detect a missing CLI,
+skill, or MCP registration, but it does not invoke passkey or device checks.
+After its report, the exact release may advertise a separately previewed local
+repair bundle for owner-selected skill, Claude MCP, and Codex MCP items. That
+bundle receives one approval and exact readback; CLI replacement stays separate.
 
 Current connector proof levels and the ranked acceptance backlog are maintained
 in [CONNECTOR-BACKLOG.md](./CONNECTOR-BACKLOG.md). Fixture coverage is never a

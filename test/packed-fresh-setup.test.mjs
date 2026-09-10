@@ -244,6 +244,7 @@ globalThis.fetch = async (input, options = {}) => {
         ...baseEnvironment,
         PATH: toolEnvironment.PATH,
         CLOUDFLARE_API_TOKEN: "fixture-token-for-packed-wrapper",
+        BRAIN_WORKERS_PAID_ACCOUNT_ID: accountId,
         ADMIN_KEY: (["fixture-","admin-ke","y-for-pa","cked-wra","pper-000","1"].join("")),
         NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
       },

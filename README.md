@@ -21,6 +21,12 @@ The guided path is at `financialbrain.ai/install`. It uses one immutable release
 asset and installs into a folder owned by your user account, so it needs no Git,
 `sudo`, or administrator access.
 
+Before running the install command, use a normal terminal as your current user,
+not `sudo`, root, or Run as administrator. The computer needs Node.js 22 or
+newer and at least 2 GiB free on the drive that holds the per-user install. On
+Windows that is the `LOCALAPPDATA` drive. The read-only `brain tools` check
+verifies all three before setup can create anything.
+
 Mac or Linux:
 
 ```bash
@@ -40,9 +46,15 @@ $env:Path = "$env:LOCALAPPDATA\FinancialBrain;$env:Path"
 The full command path below is deliberate. It keeps working after Terminal is
 closed, without `sudo`, administrator access, or a shell-profile change.
 
-Setup and updates ask for the scoped Cloudflare token
-inside a hidden terminal prompt. The token exists only for that command and is
-kept out of files, command arguments, logs, and issue notes.
+Normal setup and updates use an owner-controlled Cloudflare browser sign-in
+saved as this Brain's named local profile. The owner signs in, completes 2FA,
+chooses the exact account, and approves Cloudflare's consent page. No API token
+is created, revealed, copied, or pasted during an ordinary fresh install. A
+hidden token prompt appears only when the released CLI explicitly offers its
+bounded recovery path and the owner chooses it. That recovery-only token uses
+the minimum reviewed scope: Workers Scripts Edit, D1 Edit, Vectorize Edit, and
+Workers AI Read. It receives a short expiry and never belongs in chat or a
+command argument.
 
 Mac or Linux:
 
@@ -80,13 +92,26 @@ reviewed step at a time with `--run tools`, `cloudflare`, `google`, `zoom`,
 the physical passkey gesture. Tokens and app secrets go only into hidden
 terminal prompts or provider pages. The complete guide is
 [onboarding/09-technician-setup-and-rehearsal.md](onboarding/09-technician-setup-and-rehearsal.md).
+Claude Code explains each provider, purpose, minimum permission, and next
+owner action before anything opens. When browser control is available, it can
+handle official-page navigation and non-secret fields. The owner takes over
+only for sign-in, 2FA, credential reveal or entry, consent, billing, and the
+secure passkey window.
 
-You need three things first. `brain doctor` checks the technical access and tells
-you what to do about anything missing. Cloudflare does not expose the account's
-plan through the scoped install token, so confirm **Workers and Pages,
-Plans: Paid** in the dashboard yourself before a production install.
+Setup front-loads five prerequisites. `brain tools` checks the machine and tells
+you one clear fix for anything missing. The Cloudflare sign-in can verify the
+exact account and product access, but its narrow permission cannot read billing
+status. After sign-in verifies the account, setup opens that exact account's
+plan page. The owner confirms **Workers and Pages, Plans: Paid** before setup
+creates any resource. The same stop applies when setup resumes a prepared
+manifest or uses an approved recovery or automation path.
 
-1. **Claude Code and an eligible Claude account.** Install the current native
+1. **Node.js 22 or newer.** This runs the Brain CLI and pinned Wrangler.
+2. **At least 2 GiB free on the actual install drive.** On Windows the supported
+   per-user target is on the `LOCALAPPDATA` drive.
+3. **A normal current-user terminal.** Do not use `sudo`, root, or Run as
+   administrator. This keeps every local file owned by the person using it.
+4. **Claude Code and an eligible Claude account.** Install the current native
    CLI from Anthropic, sign in with `claude auth login`, then run `brain tools`.
    The command proves the version, sign-in, Anthropic installation doctor, and
    pinned Wrangler 4. It also installs and reads back the personal
@@ -94,14 +119,10 @@ Plans: Paid** in the dashboard yourself before a production install.
    confirm it appears, then type `/financial-brain-technician` whenever you want
    the reviewed install, connector, recovery, or handoff guide. Claude Code's
    normal approval prompts stay enabled.
-2. **A Cloudflare account on the Workers Paid plan.** 5 USD a month minimum.
+5. **A Cloudflare account on the Workers Paid plan.** 5 USD a month minimum.
    Cloudflare now lets Free accounts create the meaning-search index, but Free
    has prototype-scale vector, daily database-write, and Worker CPU limits. Paid
    is the supported production baseline so a real corpus does not hard-stop.
-3. **A Cloudflare API token**, created in your own account, with exactly four
-   permissions: Workers Scripts Edit, D1 Edit, Vectorize Edit and Workers AI
-   Read. The token can be limited to your account and given an expiry.
-
 Written answers use Cloudflare Workers AI through the same account. There is no
 second AI-provider account or API key to create.
 

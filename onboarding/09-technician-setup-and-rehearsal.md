@@ -76,21 +76,34 @@ next reviewed command. It contains no credentials. An agent may guide the
 browser and explain each page, but the owner enters every token or secret into
 the provider page or hidden terminal prompt.
 
+Claude Code should offer to do the non-secret browser work. After the owner
+approves the exact ceremony, it may open the provider's official page, navigate
+to the correct form, and fill non-secret labels, permission rows, account scope,
+app type, approved API switches, and expiry. It stops before sign-in, 2FA,
+credential reveal or entry, OAuth consent, billing approval, and every secure
+passkey window. Explain the provider, purpose, minimum permission, and one next
+owner action before anything opens. Do not give the owner a page of setup
+homework.
+
 ## Seven steps
 
 ### 1. Local tools
 
 Use the owner-facing `/install` page to install Node.js, Claude Code, and the
-released Brain CLI. The owner signs in to Claude in their own browser. Then run:
+released Brain CLI. Use a normal terminal as the current user, not `sudo`, root,
+or Run as administrator. The owner signs in to Claude in their own browser.
+Then run:
 
 ```bash
 brain technician "$HOME/Financial Brain/brain.manifest.json" --run tools
 ```
 
-This proves the Claude CLI version and sign-in, installs and reads back the
-personal `/financial-brain-technician` skill, runs Anthropic's interactive
-doctor, and verifies pinned Wrangler 4. Claude Code's normal approval prompts
-stay enabled.
+Before any Cloudflare resource can be created, this proves Node.js 22 or newer,
+at least 2 GiB free on the actual per-user install drive (`LOCALAPPDATA` on
+Windows), and a non-elevated current-user session. It also proves the Claude CLI
+version and sign-in, installs and reads back the personal
+`/financial-brain-technician` skill, runs Anthropic's interactive doctor, and
+verifies pinned Wrangler 4. Claude Code's normal approval prompts stay enabled.
 
 Open Claude Code and type `/skills`. Confirm `financial-brain-technician`
 appears, then start the reviewed guide with:
@@ -111,10 +124,25 @@ technician plan.
 brain technician "$HOME/Financial Brain/brain.manifest.json" --run cloudflare
 ```
 
-The owner signs in, confirms Workers Paid, creates the scoped installation
-token, and enters it into the hidden prompt. The existing setup command performs
-the account check, provisioning, migrations, deploy, key persistence, and
-health proof. It is safe to rerun after an interruption.
+Before opening Cloudflare, explain that the official browser sign-in lets the
+installer create and verify this Brain's Worker, D1 database, Vectorize index,
+and Workers AI access inside the exact account the owner chooses. Browser
+control may open the official page. The owner signs in, completes 2FA, chooses
+the account, reviews Cloudflare's consent, and approves it. After Cloudflare
+verifies that exact account, setup opens its Workers & Pages > Plans page. The
+owner confirms it says Paid before setup creates anything. The narrow installer
+session cannot read billing status, so successful product access is not plan
+proof. Any plan change or billing approval belongs to the owner. Normal fresh
+setup creates, reveals, and copies no API token. The protected named profile
+stays in the owner's operating-system credential store. The setup command
+performs the account check, provisioning, migrations, deploy, key persistence,
+and health proof. It is safe to rerun after an interruption.
+
+Describe the least-privilege hidden token path only if the released CLI says
+browser sign-in is unavailable and the owner explicitly selects that recovery
+path. It is not ordinary onboarding and must not be presented as a fresh-install
+task. It also does not bypass any machine check or the exact account's separate
+Workers Paid confirmation.
 
 ### 3. Google
 
@@ -128,6 +156,9 @@ The owner creates a Desktop OAuth client in their Google Cloud project. The
 client ID and optional client secret are entered at hidden prompts. Google
 consent stays in the owner's browser. The launcher passes the values only to the
 short-lived connector process and clears its input buffers afterward.
+Browser control may navigate, fill non-secret project and app labels, choose
+Desktop app, and enable only the APIs already approved in the manifest. The
+owner takes over for Google sign-in, 2FA, credential reveal, and OAuth consent.
 
 ### 4. Zoom
 
@@ -143,6 +174,9 @@ The Zoom admin creates a Server-to-Server OAuth app with
 The event subscription is `recording.transcript_completed`. The command probes
 the account, writes the four Worker secrets, and proves the live validation
 challenge before it prints the webhook URL to save in Zoom.
+Browser control may fill non-secret app labels, scope rows, and event fields
+after approval. The Zoom admin takes over for sign-in, 2FA, app consent, and
+every credential reveal or entry.
 
 ### 5. IMAP
 
@@ -156,6 +190,10 @@ brain technician "$HOME/Financial Brain/brain.manifest.json" --run imap \
 
 The app password is requested by the connector's hidden prompt. It is stored
 only after a real mailbox read succeeds.
+Browser control may find the provider's official app-password page and fill a
+non-secret label. The owner takes over for sign-in, 2FA, creation approval, and
+the displayed password. Use mail access only. Do not request contacts, sending,
+calendar, or account-management access.
 
 ### 6. Owner passkey
 
@@ -169,8 +207,18 @@ brain technician "$HOME/Financial Brain/brain.manifest.json" --run passkey \
 
 The confirmation exactly matches `brain.domain`. The command creates one
 single-use link that expires in 15 minutes. The owner opens it on their device
-and completes Face ID, fingerprint, or device PIN. This is the first point where
-a physical passkey becomes proven.
+and reads the explanation before choosing **Create my owner passkey**. That
+click opens the device's secure passkey window. The owner follows it with Face
+ID, fingerprint, device PIN, or screen lock. It confirms owner access without
+connecting files, messages, accounts, or anything else on the device.
+
+Before minting the link, explain this step and wait until the owner says they
+are ready. Financial Brain and the Claude Code guide cannot see or store the
+owner's passkey, Face ID, fingerprint, or device PIN. The device keeps the
+secret; the Brain receives only the public sign-in record. If the hostname or
+secure window looks unexpected, the owner chooses Cancel. Nothing is enrolled,
+and the same private link can be tried again until it expires. This is the first
+point where a physical passkey becomes proven.
 
 ### 7. Handoff checks
 
@@ -181,6 +229,11 @@ brain technician "$HOME/Financial Brain/brain.manifest.json" --run verify
 This runs doctor, health, source freshness, and enrolled-device checks in order.
 It stops on the first failure and does not mark anything complete. Record a
 connector as live-proven only after its exact acceptance event occurs.
+
+These enrolled-device checks are part of the explicit handoff ceremony. They
+are not part of Optimize. Optimize may report whether the current CLI, skill,
+or MCP registration is missing or outdated, including on a new computer, but
+it must not run passkey enrollment or device review.
 
 ## What the owner does and what the technician does
 

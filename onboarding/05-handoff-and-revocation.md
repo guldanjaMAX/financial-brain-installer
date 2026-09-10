@@ -70,10 +70,12 @@ Everything. Here it is written down, because "you own it" is worthless if nobody
 
 Routine checks use the admin key from the manifest's durable local storage, so
 you do not need to copy it into your shell. For account-changing work, run the
-supported `brain setup` or `brain update` path in an interactive terminal and
-enter the scoped Cloudflare token at its hidden prompt. Low-level automation
-must inject that token through an approved secret manager. Never paste a token
-into a shell command or leave it in shell history.
+supported `brain setup` or `brain update` path in an interactive terminal. It
+reuses this Brain's named Cloudflare browser sign-in. If Cloudflare asks for a
+refresh, the owner completes sign-in, 2FA, account choice, and consent in the
+official browser. A scoped token is used only when the released CLI offers a
+recovery path and the owner explicitly chooses it. Never paste one into a shell
+command or leave it in shell history.
 
 Then, from the installer folder:
 
@@ -117,14 +119,15 @@ Use the runbook you were given: `06-runbook-top-ten-failures.md`. It covers the 
 
 ### If you want me back in
 
-Issue a fresh scoped Cloudflare API token. At the start of the supported work,
-you enter it yourself at the hidden `brain setup` or `brain update` prompt. For
-low-level automation, your approved secret manager must launch the process and
-inject the token without exposing it in a command, log, or shell history. Do
-not send the credential to me or put it in a shared channel. **Delete it when
-the work is done.** That is the cost of the custody model and I would rather it
-be slightly inconvenient than have a standing key to your business sitting in
-my password manager for years.
+Keep control of the existing named Cloudflare browser sign-in. At the start of
+supported work, you complete any required sign-in, 2FA, account choice, and
+consent in the official browser yourself. Do not send a credential to me or put
+one in a shared channel.
+
+If the released CLI explicitly requires its recovery-only scoped token path,
+create the exact short-lived token named by that plan and enter it yourself at
+the hidden prompt. **Delete it when the work is done.** Routine work should not
+create a token merely because a technician is present.
 
 ---
 

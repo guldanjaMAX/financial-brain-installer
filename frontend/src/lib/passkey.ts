@@ -22,23 +22,32 @@ type RegisterOptions = { challenge: string; rp: { id: string; name: string }; us
  *  from an already signed-in session. */
 export async function enroll(code?: string): Promise<void> {
   const options = await api<RegisterOptions>("/auth/register/options", code ? { code } : {});
-  const credential = (await navigator.credentials.create({
-    publicKey: {
-      challenge: toBytes(options.challenge),
-      rp: { id: options.rp.id, name: options.rp.name },
-      user: {
-        id: crypto.getRandomValues(new Uint8Array(16)),
-        name: options.user_name,
-        displayName: options.user_name,
+  let credential: PublicKeyCredential | null;
+  try {
+    credential = (await navigator.credentials.create({
+      publicKey: {
+        challenge: toBytes(options.challenge),
+        rp: { id: options.rp.id, name: options.rp.name },
+        user: {
+          id: crypto.getRandomValues(new Uint8Array(16)),
+          name: options.user_name,
+          displayName: options.user_name,
+        },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        // residentKey so signing in later needs no username, and userVerification
+        // so it is genuinely a face or a fingerprint rather than mere presence.
+        authenticatorSelection: { residentKey: "required", userVerification: "required" },
+        attestation: "none",
       },
-      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
-      // residentKey so signing in later needs no username, and userVerification
-      // so it is genuinely a face or a fingerprint rather than mere presence.
-      authenticatorSelection: { residentKey: "required", userVerification: "required" },
-      attestation: "none",
-    },
-  })) as PublicKeyCredential | null;
-  if (!credential) throw new Error("no passkey was created");
+    })) as PublicKeyCredential | null;
+  } catch (error) {
+    throw explainCeremonyFailure(error, options.rp.id, "enroll");
+  }
+  if (!credential) {
+    throw new Error(
+      "No passkey was created. Nothing was enrolled. You can choose Create my owner passkey and try again while this private link is valid.",
+    );
+  }
   const response = credential.response as AuthenticatorAttestationResponse;
   await api("/auth/register/verify", {
     code,
@@ -57,10 +66,16 @@ export async function enroll(code?: string): Promise<void> {
  *  collapses three genuinely different failures into one sentence. Naming the
  *  exception matters too: which one it is decides where the bug lives, and
  *  without it every report is unfalsifiable. */
-function explainCeremonyFailure(error: unknown, rpId: string): Error {
+function explainCeremonyFailure(error: unknown, rpId: string, purpose: "enroll" | "sign_in" = "sign_in"): Error {
   const name = (error as { name?: string })?.name || "Error";
   const suffix = ` (${name})`;
   if (name === "NotAllowedError") {
+    if (purpose === "enroll") {
+      return new Error(
+        `No passkey was created for ${rpId}. The secure window may have been canceled or timed out. ` +
+        `Nothing was enrolled. You can choose Create my owner passkey and try again while this private link is valid.` + suffix,
+      );
+    }
     return new Error(
       `No passkey was offered for ${rpId}. Either this device has none saved ` +
       `for that exact address, or the prompt was dismissed before it finished. ` +
@@ -74,7 +89,9 @@ function explainCeremonyFailure(error: unknown, rpId: string): Error {
     );
   }
   if (name === "InvalidStateError") {
-    return new Error(`This device already has a passkey for ${rpId}.` + suffix);
+    return new Error(purpose === "enroll"
+      ? `This device already has an owner passkey for ${rpId}. Open the Brain at its normal address and sign in with it.` + suffix
+      : `This device already has a passkey for ${rpId}.` + suffix);
   }
   if (name === "NotSupportedError" || name === "AbortError") {
     return new Error(

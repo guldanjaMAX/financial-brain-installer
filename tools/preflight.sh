@@ -16,6 +16,20 @@ if command -v node >/dev/null 2>&1; then
   [ "$NMAJ" -ge 22 ] 2>/dev/null || stop "node $NV is too old; the installer needs 22 or newer"
 else stop "node is not installed"; fi
 command -v npm >/dev/null 2>&1 && printf "  npm             %s\n" "$(npm -v 2>/dev/null)" || stop "npm is not installed"
+if [ "$(id -u 2>/dev/null)" = "0" ]; then
+  stop "this shell is running as root; close it and use a normal Terminal without sudo"
+else
+  ok "running as the current user without root elevation"
+fi
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+FREE_KIB=$(df -Pk "$SCRIPT_DIR" 2>/dev/null | awk 'NR == 2 { print $4 }')
+if [ -z "$FREE_KIB" ] || ! [ "$FREE_KIB" -ge 0 ] 2>/dev/null; then
+  stop "free space could not be checked on the drive containing this Brain CLI"
+elif [ "$FREE_KIB" -lt 2097152 ]; then
+  stop "the actual install drive has less than 2 GiB free; free 2 GiB and rerun this check"
+else
+  ok "actual install drive has at least 2 GiB free"
+fi
 echo
 
 echo "THE BRAIN CLI"
