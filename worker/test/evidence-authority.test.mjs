@@ -326,6 +326,11 @@ test("the tax scope parser activates only for one exact named year and form", ()
     { form: "1065", year: "2023", entity: ["ocotillo", "desert"] },
     "ordinary subject-verb-preposition wording keeps the exact tax scope",
   );
+  assert.deepEqual(
+    taxQuestionScope("How much tax did Ocotillo Desert pay on its 2023 Form 1065?"),
+    { form: "1065", year: "2023", entity: ["ocotillo", "desert"] },
+    "pay wording keeps the exact taxpayer, year, and form scope",
+  );
   for (const [label, canonical] of [
     ["Form 1040-X", "1040-x"],
     ["Form 1120-S", "1120-s"],
@@ -379,6 +384,10 @@ test("the tax scope parser activates only for one exact named year and form", ()
     "What income was on the 2022 and 2023 Form 1065 returns?",
     "What income did the 2023 partnership return report?",
     "What income did the 2023 1065 tax return report?",
+    "What ordinary business income did Ocotillo Desert report on its 2023 1065?",
+    "How much did Ocotillo Desert owe on Form 1065?",
+    "What ordinary business income did Example Orchard report?",
+    "What ordinary business income did Example Orchard report on its 2023 return?",
   ]) {
     assert.equal(taxQuestionScope(question), null,
       `question words or a postfix entity cannot become the named entity: ${question}`);
@@ -397,6 +406,10 @@ test("the tax scope parser activates only for one exact named year and form", ()
     "What is Form 1065?",
     "How do I file Form 1065?",
     "Who prepared the 2023 Form 1065?",
+    "What does ordinary business income mean?",
+    "What was Example Orchard's income last month?",
+    "What revenue did Example Orchard report in its monthly management accounts?",
+    "What did Example Orchard pay for bookkeeping?",
   ]) {
     assert.deepEqual(
       taxQuestionScopeAssessment(question),

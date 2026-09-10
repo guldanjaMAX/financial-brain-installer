@@ -119,7 +119,8 @@ const ENTITY_PARSE_STOPWORDS = new Set([
   "a", "about", "accountant", "an", "at", "charge", "charged", "charges", "cost", "costs",
   "could", "did", "do", "does", "fee", "fees", "file", "filed", "filing", "for", "from", "he",
   "her", "hers", "his", "how", "in", "invoice", "is", "it", "its", "many", "much", "my", "of",
-  "on", "our", "paid", "pay", "pays", "preparation", "prepare", "prepared", "receive", "received",
+  "on", "our", "owe", "owed", "owes", "owing", "paid", "pay", "payment", "payments", "pays",
+  "preparation", "prepare", "prepared", "receive", "received",
   "receives", "report", "reported", "reports", "return", "returns", "she", "should", "spend", "spent",
   "the", "their", "theirs", "they", "to", "us", "was", "we", "were", "what", "when", "where",
   "which", "who", "whom", "whose", "why", "will", "with", "would", "you", "your", "yours",
@@ -128,7 +129,12 @@ const GENERIC_ENTITY_WORDS = new Set([
   "business", "co", "company", "corp", "corporation", "entity", "inc", "llc", "lp", "llp",
   "partnership", "taxpayer",
 ]);
-const NON_RETURN_CONTEXT = /\b(?:accountant|charg(?:e|ed|es|ing)|costs?|fees?|invoice|paid|pay|pays|prepar(?:ation|e|ed|er|es|ing)|spend|spent)\b/i;
+const TAX_PREPARATION_ACTIVITY = /\bprepar(?:ation|e|ed|er|ers|es|ing)\b/i;
+const TAX_SERVICE_ROLE = /\b(?:accountants?|bookkeep(?:er|ers|ing)|return\s+preparers?|tax\s+preparers?)\b/i;
+const SERVICE_PRICE_CONTEXT = /\b(?:charg(?:e|ed|es|ing)|costs?|fees?|invoices?|spend|spent)\b/i;
+const PAYMENT_CONTEXT = /\b(?:paid|pay|payments?|pays)\b/i;
+const DIRECT_SERVICE_PAYMENT = /\b(?:paid|pay|pays)\s+(?:(?:an?|my|our|the|their|your)\s+)?(?:accountants?|bookkeepers?|return\s+preparers?|tax\s+preparers?)\b/i;
+const STRONG_TAX_LINE_FACT = /\bordinary\s+business\s+(?:income|loss)\b/i;
 
 function conservativeEntityWords(value) {
   const withoutLeadingArticle = String(value || "").trim().replace(/^the\s+/i, "");
@@ -137,6 +143,24 @@ function conservativeEntityWords(value) {
   if (candidate.some((word) => ENTITY_PARSE_STOPWORDS.has(word))) return [];
   if (candidate.every((word) => GENERIC_ENTITY_WORDS.has(word))) return [];
   return candidate;
+}
+
+function isTaxPreparationServiceQuestion(value) {
+  const text = String(value || "");
+  const preparationActivity = TAX_PREPARATION_ACTIVITY.test(text);
+  const serviceRole = TAX_SERVICE_ROLE.test(text);
+  const servicePrice = SERVICE_PRICE_CONTEXT.test(text);
+  const payment = PAYMENT_CONTEXT.test(text);
+  return (preparationActivity && (servicePrice || payment)) ||
+    (serviceRole && servicePrice) || DIRECT_SERVICE_PAYMENT.test(text);
+}
+
+function hasNamedTaxLineFactQuestion(value) {
+  const text = String(value || "");
+  if (!STRONG_TAX_LINE_FACT.test(text)) return false;
+  const subject = /\b(?:did|does)\s+(.{1,120}?)\s+(?:report|show|list|state|record)\b/i
+    .exec(text)?.[1] || null;
+  return Boolean(subject && conservativeEntityWords(subject).length);
 }
 
 function queryEntity(question, yearIndex) {
@@ -149,7 +173,7 @@ function queryEntity(question, yearIndex) {
   // "What ordinary business income did Ocotillo Desert report on its 2023
   // Form 1065?" Capture only the grammatical subject before a bounded return
   // verb and the possessive/prepositional bridge into the year.
-  const reportingSubject = /\b(?:did|does)\s+(.{1,120}?)\s+(?:report|show|list|state|record)\b.{0,100}\b(?:on|in)\s+(?:its|the)\s*$/i
+  const reportingSubject = /\b(?:did|does)\s+(.{1,120}?)\s+(?:report|show|list|state|record|pay|owe)\b.{0,100}\b(?:on|in)\s+(?:its|the)\s*$/i
     .exec(prefix)?.[1] || null;
   if (reportingSubject) return conservativeEntityWords(reportingSubject);
 
@@ -178,7 +202,7 @@ function queryEntity(question, yearIndex) {
 
 function parseTaxQuestionScope(question = "") {
   const text = String(question || "");
-  if (NON_RETURN_CONTEXT.test(text)) return null;
+  if (isTaxPreparationServiceQuestion(text)) return null;
 
   const years = [...text.matchAll(/\b(?:19|20)\d{2}\b/g)];
   if (years.length !== 1) return null;
@@ -208,18 +232,23 @@ export function taxQuestionScope(question = "") {
  */
 export function taxQuestionScopeAssessment(question = "") {
   const text = String(question || "");
-  if (NON_RETURN_CONTEXT.test(text)) {
+  if (isTaxPreparationServiceQuestion(text)) {
     return Object.freeze({ applicable: false, resolved: false, scope: null });
   }
   const scope = parseTaxQuestionScope(text);
   if (scope) return Object.freeze({ applicable: true, resolved: true, scope });
   const formIntent = QUESTION_FORM_PATTERNS.some(([, pattern]) => pattern.test(text));
   const bareFormIntent = /\b(?:1040(?:-x)?|1065|1120(?:-s|-h)?|1099-(?:int|nec|misc|div|k|r|b|s)|941|940)\b/i.test(text);
+  const adjacentYearBareFormIntent = /\b(?:19|20)\d{2}\s+(?:1040(?:[\s-]*x)?|1065|1120(?:[\s-]*[sh])?|941|940)\b/i.test(text);
   const taxContext = /\b(?:tax|return|filing|irs|schedule|form|partnership|corporate)\b/i.test(text);
   const returnIntent = /\b(?:tax\s+(?:return|filing)|income\s+tax\s+return|partnership\s+return|corporate\s+return)\b/i.test(text);
-  const returnFactIntent = /\b(?:amount|balance|basis|credit|deduction|distribution|expense|income|liabilit(?:y|ies)|line\s+\d+|loss|ordinary\s+business|refund|report(?:ed|s|ing)?|revenue|show(?:ed|n|s|ing)?|state(?:d|s|ing)?|tax(?:es)?\s+(?:due|withheld)|wages?)\b/i.test(text);
+  const returnFactIntent = /\b(?:amount|balance|basis|credit|deduction|distribution|expense|income|liabilit(?:y|ies)|line\s+\d+|loss|ordinary\s+business|owe(?:d|s)?|owing|paid|pay(?:ment|ments|s)?|refund|report(?:ed|s|ing)?|revenue|show(?:ed|n|s|ing)?|state(?:d|s|ing)?|tax(?:es)?\s+(?:due|withheld)|wages?)\b/i.test(text);
+  const namedTaxLineFactIntent = hasNamedTaxLineFactQuestion(text);
   return Object.freeze({
-    applicable: returnFactIntent && (formIntent || (bareFormIntent && taxContext) || returnIntent),
+    applicable: returnFactIntent && (
+      formIntent || adjacentYearBareFormIntent || (bareFormIntent && taxContext) ||
+      returnIntent || namedTaxLineFactIntent
+    ),
     resolved: false,
     scope: null,
   });

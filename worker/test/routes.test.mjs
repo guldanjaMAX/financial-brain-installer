@@ -1077,6 +1077,17 @@ const call = (env, path) => {
     body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
       /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
     JSON.stringify({ gaps: body.gaps, gate: body.evidence_gate }));
+
+  const payQuestion = "How much tax did Ocotillo Desert pay on its 2023 Form 1065?";
+  const payBody = await (await call(env, `/api/rag/think?q=${encodeURIComponent(payQuestion)}`)).json();
+  check("exact tax-paid wording keeps the same entity-year-form evidence guard",
+    payBody.answer === null && payBody.status === "coverage_incomplete" &&
+      payBody.citations.length === 0 && payBody.evidence_gate?.supported === false,
+    JSON.stringify(payBody));
+  check("tax-paid wording cannot use another entity's K-1 as its answer",
+    payBody.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /tax evidence does not match the requested entity, tax year, and form/.test(payBody.evidence_gate?.reason || ""),
+    JSON.stringify({ gaps: payBody.gaps, gate: payBody.evidence_gate }));
 }
 
 /* A return fact request with year and form but no exact entity is tax intent,
@@ -1104,6 +1115,53 @@ const call = (env, path) => {
     body.gaps.some((gap) => gap.type === "tax_question_scope_unresolved") &&
       /exact entity, tax year, and form/i.test(body.notice || ""),
     JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* Common owner wording must not silently become a corpus-wide income search.
+   Each question is still missing an exact tax boundary, so prove the route
+   returns before D1, Vectorize, embeddings, or either answer model can run. */
+{
+  let aiCalls = 0;
+  const otherEntityK1 = {
+    ...ROW,
+    chunk_uid: "drive:other-entity-k1#0",
+    doc_uid: "drive:other-entity-k1",
+    source_id: "other-entity-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Other Entity 2023 Schedule K-1",
+    client: "Other Entity",
+    authority_document_head: "Other Entity. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a positive amount.",
+  };
+  const { env, seen } = mkEnv([otherEntityK1], {
+    vectorIds: [otherEntityK1.chunk_uid],
+    extra: {
+      AI: {
+        run: async () => {
+          aiCalls++;
+          throw new Error("a partial tax scope must stop before any model call");
+        },
+      },
+    },
+  });
+  const partialTaxQuestions = [
+    "What ordinary business income did Ocotillo Desert report on its 2023 1065?",
+    "How much did Ocotillo Desert owe on Form 1065?",
+    "What ordinary business income did Example Orchard report?",
+    "What ordinary business income did Example Orchard report on its 2023 return?",
+  ];
+  for (const question of partialTaxQuestions) {
+    const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+    check(`partial tax wording refuses without cross-entity retrieval: ${question}`,
+      body.answer === null && body.status === "coverage_incomplete" &&
+        body.citations.length === 0 && body.results.length === 0 &&
+        body.gaps.some((gap) => gap.type === "tax_question_scope_unresolved"),
+      JSON.stringify(body));
+  }
+  check("partial tax wording stops before D1, Vectorize, and every model call",
+    seen.sql.length === 0 && seen.vectorQueries.length === 0 && aiCalls === 0,
+    JSON.stringify({ sqlCalls: seen.sql.length, vectorCalls: seen.vectorQueries.length, aiCalls }));
 }
 
 /* Even correctly scoped OCR is not a trustworthy tax-number source. This
