@@ -174,6 +174,7 @@ import {
   normalizeCheckSubject,
   renderConfirmations,
   renderReport,
+  renderSetWaitingMessage,
   unavailableZoneReadiness,
   validateConfirmationReceipt,
 } from "./operations/check-run.mjs";
@@ -3700,10 +3701,17 @@ export async function cmdCheck(manifestPath, options = {}) {
   const conflicts = report.assessed.filter((item) => item.conflict);
   const resultBase = {
     conflicts: conflicts.length,
+    categories_total: report.coverage.total,
+    categories_completed: report.coverage.completed,
+    categories_unchecked: report.coverage.unchecked,
+    category_checks_complete: report.coverage.complete,
     zones_checked: zoneReadiness.checked === true,
     zones_ready: zoneReadiness.checked === true ? zoneReadiness.ready : null,
   };
   if (!flags.set) return { ...resultBase, wrote: false };
+  if (!report.coverage.complete) {
+    die(renderSetWaitingMessage(report.coverage));
+  }
   if (!conflicts.length) {
     ok("nothing to confirm from the returned records.");
     return { ...resultBase, wrote: false };

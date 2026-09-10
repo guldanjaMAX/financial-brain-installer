@@ -130,9 +130,15 @@ export function renderSweep(assessed = []) {
   const out = [];
   const conflicts = assessed.filter((a) => a.conflict);
   const missing = assessed.filter((a) => a.missing);
-  out.push(conflicts.length
-    ? `${conflicts.length} of ${assessed.length} checked categories have conflicting returned records. Worst first.`
-    : `No disagreement appeared in the returned records for ${assessed.length} checked categories.`);
+  if (!assessed.length) {
+    out.push("No automatically comparable category completed, so this run made no agreement finding.");
+  } else {
+    const category = assessed.length === 1 ? "category" : "categories";
+    const conflictVerb = conflicts.length === 1 ? "has" : "have";
+    out.push(conflicts.length
+      ? `${conflicts.length} of ${assessed.length} automatically comparable ${category} ${conflictVerb} conflicting returned records. Worst first.`
+      : `No disagreement appeared in the returned records for ${assessed.length} automatically comparable ${category}.`);
+  }
   for (const a of conflicts) {
     out.push("", `## ${a.name}`, `  ${a.verdict.line}`);
     for (const g of a.groups) {

@@ -57,6 +57,15 @@ that stops the waiting. Nothing here changes what your brain holds.
   and evidence verification, then keeps only a reviewed safe explanation. It
   no longer leaves the person running the test with "unknown."
 
+- **A check that could not finish no longer sounds clean.** If source history
+  is not yet proven or the search index is still building, `brain check` now
+  leads with how many record-review categories actually completed. When none
+  did, it says the check is still waiting and makes no agreement finding. Zero
+  completed categories can no longer be mistaken for zero conflicts or an
+  empty corpus. `brain check --set` also waits until every category completes,
+  exits nonzero without prompting or writing, and cannot turn a partial review
+  into a green confirmation result.
+
 ## 0.4.5
 
 Candidate only. This version has not been released.
