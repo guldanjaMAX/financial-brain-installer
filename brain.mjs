@@ -18057,7 +18057,10 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   const { m } = loadManifest(manifestPath);
   const feed = m?.corpora?.bank_feed || {};
   if (feed.enabled !== true) {
-    die("corpora.bank_feed.enabled is not true in this manifest. Enable the Plaid bank feed before opening its owner page.");
+    die(
+      "corpora.bank_feed.enabled is not true in this manifest. General Plaid bank invitations remain held. " +
+      "Enable the native feed only inside a named, version-scoped disposable-candidate field plan."
+    );
   }
   if (manifestBankFeedProvider(feed) !== "plaid") {
     die("brain connect bank currently opens the reviewed Plaid owner flow. Set corpora.bank_feed.provider to plaid first.");
@@ -18431,7 +18434,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect zoom     <manifest>      Zoom cloud-recording transcripts (needs a paid Zoom seat)
     brain connect imap     <manifest>      any IMAP mailbox (Yahoo, Fastmail, iCloud, a host): app
                                            password entered hidden, proven by a real read first
-    brain connect bank     <manifest>      open the owner-only Plaid Link and masked account assignment page
+    brain connect bank     <manifest>      held field-plan entrypoint for owner-only Plaid Link and masked account assignment
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end
