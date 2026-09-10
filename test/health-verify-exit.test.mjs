@@ -355,7 +355,9 @@ if (SCENARIO) {
       !/vector index is caught up/.test(oldQueue.output), oldQueue.output);
   check("a falling pending count is explicitly working, not a reason to start an update",
     /pending count is falling between checks, indexing is.*working/is.test(oldQueue.output) &&
-      /Do not start .*brain update.*healthy active-mode queue/is.test(oldQueue.output),
+      oldQueue.output.includes(renderCliCommands(
+        "Do not start `brain update` merely to accelerate a healthy active-mode queue;"
+      )),
     oldQueue.output);
 
   const processing = runScenario("health-vector-processing", "health", { adminKey: true });

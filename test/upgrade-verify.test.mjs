@@ -1679,7 +1679,8 @@ const bootstrapCompletion = () => ({
       preview?.confirmed === false && preview?.restored === false &&
         /nothing was changed/i.test(rendered) && /D1 restore is DESTRUCTIVE/i.test(rendered) &&
         /does not restore Vectorize/i.test(rendered) && /supervised clean-index recovery/i.test(rendered) &&
-        /brain update <manifest>/i.test(rendered) && /active-only reindex or drain/i.test(rendered) &&
+        rendered.includes(`${expectedBrainCliPrefix} update <manifest>`) &&
+        /active-only reindex or drain/i.test(rendered) &&
         /--yes/.test(rendered),
       rendered,
     );
