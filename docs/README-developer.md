@@ -502,6 +502,27 @@ revision it was called to reconcile. Any new producer that turns one input into
 many documents must stamp `family_of`; leaving it out is a hard refusal at plan
 time rather than a silently unreconcilable source.
 
+`family_of` is a storage and deletion relationship, not an evidence-authority
+claim. When a producer generates a report, pack, staging note, or other document
+from existing records, it must also send this versioned lineage metadata:
+
+```json
+{
+  "evidence_lineage": {
+    "version": 1,
+    "kind": "derived_record",
+    "root_ids": ["upload:stable-source-id"]
+  }
+}
+```
+
+Use `source_record` only when the producer is preserving a direct source
+artifact; it may omit `root_ids` to use its own fully qualified document uid.
+Use `agent_derived` for agent-written content and include every supporting id
+returned by Brain search when available. Unknown legacy lineage remains
+retrievable, but it cannot earn independent-confirmation credit or gain T1/T2
+authority from a suggestive filename.
+
 A Google Doc is exported as text, a Sheet as CSV, and a Google Form not at all.
 
 `modifiedTime` is deliberately **not** used as a document date. A sync or a

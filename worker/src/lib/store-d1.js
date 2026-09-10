@@ -34,6 +34,9 @@
 import { currentEvidenceCandidates, hasExplicitCurrentIntent } from "./query-intent.js";
 import { authorityFor } from "./evidence-authority.js";
 import {
+  annotateLineageFamilyTokens, attachEvidenceLineage, evidenceLineageFor,
+} from "./evidence-lineage.js";
+import {
   PUBLIC_INSTALL_SMOKE_CHUNK,
   PUBLIC_INSTALL_SMOKE_DOC_UID,
   PUBLIC_INSTALL_SMOKE_ID,
@@ -861,6 +864,7 @@ export async function search(env, {
     // content_hash is an internal dedupe key, not part of the authenticated
     // search response contract or a stable source identifier for clients.
     const authority = authorityFor(row, { query, current: hasExplicitCurrentIntent(query) });
+    const lineage = evidenceLineageFor(row, { trustedSourceRecord: authority.owner_confirmed === true });
     const {
       content_hash: _internalContentHash,
       authority_meta: _internalAuthorityMeta,
@@ -873,12 +877,14 @@ export async function search(env, {
       row.source,
       row.authority_meta ?? row._authority_meta,
     );
-    documents.push({
+    documents.push(attachEvidenceLineage({
       ...publicRow,
       authority,
+      lineage: lineage.lineage,
       ...(writeProvenance ? { write_provenance: writeProvenance } : {}),
-    });
+    }, lineage));
   }
+  await annotateLineageFamilyTokens(documents);
 
   return {
     results: documents.slice(0, limit),

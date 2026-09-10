@@ -33,8 +33,16 @@ const SUBJECT = "Example Owner";
 
 // Authority tiers are heuristics and always carry the rule that produced them.
 assert.equal(tierOf({ source: "plaid" }).tier, "T1");
-assert.equal(tierOf({ source: "drive", title: "Synthetic registrar record.pdf" }).tier, "T1");
-assert.equal(tierOf({ source: "drive", title: "Synthetic invoice.pdf" }).tier, "T2");
+assert.equal(tierOf({ source: "drive", title: "Synthetic registrar record.pdf" }).tier, "T3");
+assert.equal(tierOf({ source: "drive", title: "Synthetic invoice.pdf" }).tier, "T3");
+assert.equal(tierOf({
+  doc_uid: "drive:registrar", source: "drive", title: "Synthetic registrar record.pdf",
+  authority_meta: { evidence_lineage: { version: 1, kind: "source_record", root_ids: [] } },
+}).tier, "T1");
+assert.equal(tierOf({
+  doc_uid: "curated:invoice-summary", source: "curated", title: "Synthetic invoice.pdf",
+  authority_meta: { evidence_lineage: { version: 1, kind: "derived_record", root_ids: ["drive:registrar"] } },
+}).tier, "T2");
 assert.equal(tierOf({ source: "gmail", title: "Synthetic correspondence" }).tier, "T3");
 assert.equal(tierOf({ source: "zoom", title: "Synthetic weekly sync" }).tier, "T4");
 assert.equal(tierOf({ source: "plaid", source_kind: "upload", title: "Synthetic memo" }).tier, "T3");
@@ -58,9 +66,10 @@ assert.match(changingAgreement.line, /tracks how long something has been written
 assert.equal(agreementVerdict(softPile, { changes: false }).confident, true);
 assert.equal(
   agreementVerdict([...softPile, {
-    source: "drive", title: "Synthetic signed agreement.pdf",
+    doc_uid: "drive:signed-agreement", source: "drive", title: "Synthetic signed agreement.pdf",
     ts: "2026-01-15T00:00:00.000Z", date_reliable: true,
     text_source: "native", text_reliable: true,
+    authority_meta: { evidence_lineage: { version: 1, kind: "source_record", root_ids: [] } },
   }], { changes: true }).confident,
   true,
 );
@@ -85,7 +94,14 @@ const address = assessProbe({
     { value: "100 Example Avenue", doc: { source: "drive", title: "Synthetic note one", date: "2024-01-01", date_reliable: false } },
     { value: "100 Example Avenue", doc: { source: "imessage", title: "Synthetic note two", date: "2024-02-01", date_reliable: true } },
     { value: "100 example avenue", doc: { source: "gmail", title: "Synthetic note three", date: "2024-03-01", date_reliable: true } },
-    { value: "200 Sample Road", doc: { source: "drive", title: "Synthetic lease agreement.pdf", date: "2026-01-15", date_reliable: true } },
+    { value: "200 Sample Road", doc: {
+      doc_uid: "drive:lease-agreement",
+      source: "drive",
+      title: "Synthetic lease agreement.pdf",
+      date: "2026-01-15",
+      date_reliable: true,
+      authority_meta: { evidence_lineage: { version: 1, kind: "source_record", root_ids: [] } },
+    } },
   ],
 });
 assert.equal(address.conflict, true);

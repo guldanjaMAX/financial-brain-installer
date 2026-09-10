@@ -628,6 +628,7 @@ const expected = [
   "worker/src/lib/diagnose-scan.js",
   "worker/src/lib/document-access.js",
   "worker/src/lib/evidence-authority.js",
+  "worker/src/lib/evidence-lineage.js",
   "worker/src/lib/tax-evidence-scope.js",
   "worker/src/lib/fin-api.js",
   "worker/src/lib/fin-d1.js",

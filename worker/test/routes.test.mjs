@@ -2134,6 +2134,49 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
     JSON.stringify(storedCollisionUid));
 }
 
+/* Lineage is an ingest contract, not an advisory filename convention. A
+   malformed or rootless derived declaration must fail before it can create a
+   false independent source family. */
+{
+  const single = mkBatchEnv();
+  const response = await post(single.env, "/api/admin/brain/ingest", {
+    ...doc("rootless-derived"),
+    metadata: {
+      evidence_lineage: { version: 1, kind: "derived_record", root_ids: [] },
+    },
+  });
+  const receipt = await response.json();
+  check("single ingest rejects a derived record without source-family roots",
+    response.status === 400 && /root_ids/.test(receipt.error || ""), JSON.stringify(receipt));
+  check("invalid single-ingest lineage performs zero D1 calls or writes",
+    single.calls.remote === 0 && single.calls.submitted_statements === 0 &&
+      single.written.length === 0 && single.storedTexts.length === 0 && single.documents.size === 0,
+    JSON.stringify(single.calls));
+
+  const invalid = mkBatchEnv();
+  const invalidDocs = [
+    { ...doc("unknown-lineage-kind"), metadata: {
+      evidence_lineage: { version: 1, kind: "generated", root_ids: ["upload:source"] },
+    } },
+    { ...doc("unversioned-lineage"), metadata: {
+      evidence_lineage: { kind: "source_record", root_ids: [] },
+    } },
+    { ...doc("lineage-extra-field"), metadata: {
+      evidence_lineage: { version: 1, kind: "source_record", root_ids: [], trusted: true },
+    } },
+  ];
+  const batchReceipt = await (await post(invalid.env, "/api/admin/brain/ingest/batch", {
+    docs: invalidDocs,
+  })).json();
+  check("batch ingest rejects malformed lineage per document",
+    batchReceipt.failed === invalidDocs.length &&
+      batchReceipt.results.every((row) => row.status === "failed"), JSON.stringify(batchReceipt));
+  check("an all-invalid lineage batch performs zero D1 calls or writes",
+    invalid.calls.remote === 0 && invalid.calls.submitted_statements === 0 &&
+      invalid.written.length === 0 && invalid.storedTexts.length === 0 && invalid.documents.size === 0,
+    JSON.stringify(invalid.calls));
+}
+
 /* Date trust is optional, but every supplied claim must be type-safe. A true
    reliability flag is meaningful only beside a parseable date and a named
    provenance source. */

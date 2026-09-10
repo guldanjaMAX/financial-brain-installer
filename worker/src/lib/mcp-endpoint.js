@@ -33,6 +33,7 @@ import {
   CONFIDENCE, REMEMBER_LIMITS, renderLesson, validateLesson, validateRememberReceipt,
 } from "./remember-contract.js";
 import { profileDescription, profileHas } from "./agent-authority.js";
+import { evidenceLineageFor } from "./evidence-lineage.js";
 import {
   OWNER_NOTES_KIND, OWNER_NOTES_SOURCE, publicOwnerNoteProvenance,
 } from "./owner-note-contract.js";
@@ -92,7 +93,9 @@ const CONTRIBUTOR_TOOLS = [
       "When correcting something, pass the id " +
       "being corrected as `supersedes` so the record keeps why it changed instead " +
       "of silently overwriting. State how you know in `verification` whenever you " +
-      "claim `verified`.",
+      "claim `verified`. When Brain documents support the lesson, pass every " +
+      "supporting search id in `derived_from` so it cannot be counted later as " +
+      "independent confirmation of those documents.",
     inputSchema: {
       type: "object",
       properties: {
@@ -119,6 +122,11 @@ const CONTRIBUTOR_TOOLS = [
         tags: {
           type: "array", maxItems: REMEMBER_LIMITS.tags,
           items: { type: "string", minLength: 1, maxLength: REMEMBER_LIMITS.tag },
+        },
+        derived_from: {
+          type: "array", maxItems: 16,
+          items: { type: "string", minLength: 1, maxLength: 512 },
+          description: "Document ids returned by search that this lesson derives from. Leave empty when it came only from the owner's new statement.",
         },
       },
       required: ["title", "body", "confidence"],
@@ -194,6 +202,11 @@ function citationProvenance(citation) {
     const ref = String(citation.ref).replace(/\s+/g, " ").slice(0, 200);
     parts.push(`reference ${String(citation.source || "doc")}:${ref}`);
   }
+  if (citation?.lineage?.derived === true) {
+    parts.push("derived evidence, not independent of its sources");
+  } else if (citation?.lineage?.status !== "known") {
+    parts.push("derivation family unknown");
+  }
   return parts;
 }
 
@@ -249,6 +262,7 @@ async function runSearch(deps, args, origin) {
     date_reliable: typeof r.date_reliable === "boolean" ? r.date_reliable : null,
     text_source: r.text_source || "native",
     text_reliable: r.text_reliable !== false,
+    lineage: r.lineage || null,
   }));
   // An empty result list is indistinguishable from "your corpus has nothing"
   // to the model reading it, so an incomplete search has to say so in band
@@ -272,8 +286,8 @@ async function runFetch(env, args, origin) {
   let chunks;
   try {
     doc = await env.DB.prepare(
-      `SELECT title, uri, source, content_hash, document_date, date_source, date_reliable,
-              text_source, text_reliable, meta,
+      `SELECT doc_uid, title, uri, source, content_hash, document_date, date_source, date_reliable,
+              text_source, text_reliable, meta, meta AS authority_meta,
               COALESCE((SELECT kind FROM sources WHERE name = documents.source), 'unregistered') AS source_kind
          FROM documents WHERE doc_uid = ?`,
     ).bind(docUid).first();
@@ -299,6 +313,7 @@ async function runFetch(env, args, origin) {
     metadata: doc?.meta,
     contentHash: doc?.content_hash,
   });
+  const lineage = evidenceLineageFor(doc || {}).lineage;
   return text(JSON.stringify({
     id,
     title: doc?.title || "untitled",
@@ -315,6 +330,7 @@ async function runFetch(env, args, origin) {
       date_reliable: doc?.date_reliable === true || doc?.date_reliable === 1,
       text_source: doc?.text_source || "native",
       text_reliable: doc?.text_reliable !== false && doc?.text_reliable !== 0,
+      lineage,
     },
   }));
 }
@@ -347,6 +363,11 @@ async function runRemember(deps, args, profile) {
       agent_profile: profile,
       recorded_via: "remote_mcp",
       confidence: v.confidence,
+      evidence_lineage: {
+        version: 1,
+        kind: "agent_derived",
+        root_ids: v.derived_from,
+      },
       ...(v.claimed_confidence ? { claimed_confidence: v.claimed_confidence } : {}),
       ...(v.verification ? { verification: v.verification } : {}),
       ...(v.volatile ? { volatile: true } : {}),

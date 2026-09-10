@@ -42,7 +42,7 @@ export const REMEMBER_LIMITS = Object.freeze({
   tag: 80,
 });
 export const REMEMBER_FIELDS = Object.freeze([
-  "title", "body", "confidence", "verification", "supersedes", "tags",
+  "title", "body", "confidence", "verification", "supersedes", "tags", "derived_from",
 ]);
 export const REMEMBER_RECEIPT_ACTIONS = Object.freeze(["created", "updated", "unchanged"]);
 const OVERGENERALISED =
@@ -50,6 +50,9 @@ const OVERGENERALISED =
 const VOLATILE =
   /(\$[\d,]+|\b\d[\d,._]*\s*(%|users?|customers?|clients?|leads?|per month|\/mo|per day|\/day)\b)/i;
 const DATE_ANCHOR = /\bas of\b|\b\d{4}-\d{2}-\d{2}\b/i;
+const MAX_DERIVED_FROM = 16;
+const MAX_DERIVED_FROM_CHARS = 512;
+const DERIVED_FROM_CONTROL = /[\u0000-\u001f\u007f]/;
 
 const slugify = (s) =>
   String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) ||
@@ -71,7 +74,9 @@ export async function validateLesson(input, identityContext = {}) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return {
       ok: false,
-      errors: ["arguments must be an object containing only title, body, confidence, verification, supersedes, and tags"],
+      errors: [
+        "arguments must be an object containing only title, body, confidence, verification, supersedes, tags, and derived_from",
+      ],
       warnings,
       value: null,
     };
@@ -158,6 +163,17 @@ export async function validateLesson(input, identityContext = {}) {
     }
   }
 
+  const derivedFrom = input?.derived_from === undefined
+    ? []
+    : Array.isArray(input.derived_from)
+      ? [...new Set(input.derived_from.map((value) => typeof value === "string" ? value.trim() : value))]
+      : null;
+  if (!derivedFrom || derivedFrom.length > MAX_DERIVED_FROM || derivedFrom.some((id) =>
+    typeof id !== "string" || !id || id.length > MAX_DERIVED_FROM_CHARS ||
+    DERIVED_FROM_CONTROL.test(id) || !id.includes(":"))) {
+    errors.push(`derived_from must contain at most ${MAX_DERIVED_FROM} document ids exactly as search returned them`);
+  }
+
   if (errors.length) return { ok: false, errors, warnings, value: null };
 
   const volatile = VOLATILE.test(body);
@@ -191,6 +207,7 @@ export async function validateLesson(input, identityContext = {}) {
     volatile,
     supersedes,
     tags,
+    derived_from: derivedFrom || [],
   };
   const provenance = {
     written_by: normalizeText(String(identityContext.written_by || "unspecified")),
@@ -211,6 +228,7 @@ export async function validateLesson(input, identityContext = {}) {
       volatile: value.volatile,
       supersedes: value.supersedes,
       tags: value.tags,
+      derived_from: value.derived_from,
     },
   }));
   value.source_id = supersedes
@@ -245,7 +263,16 @@ export function validateRememberReceipt(receipt, envelope) {
 }
 
 export function renderLesson(v) {
-  const lines = [`# ${v.title}`, "", v.body, "", "---", `Confidence: ${v.confidence}`];
+  const lines = [
+    `# ${v.title}`,
+    "",
+    "Evidence-Lineage: agent-derived",
+    "",
+    v.body,
+    "",
+    "---",
+    `Confidence: ${v.confidence}`,
+  ];
   if (v.claimed_confidence)
     lines.push(`Claimed confidence: ${v.claimed_confidence} (downgraded at write time)`);
   if (v.verification) lines.push(`Verification: ${v.verification}`);

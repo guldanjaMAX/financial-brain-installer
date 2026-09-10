@@ -358,6 +358,24 @@ hash is removed from the response. This is retrieval protection, not physical
 deduplication: source lifecycle rows remain intact until an alias-aware storage
 plan can preserve update and deletion semantics.
 
+Evidence independence uses a separate metadata contract. A producer that knows
+the origin of a document may set `metadata.evidence_lineage` to version 1 with
+kind `source_record`, `derived_record`, or `agent_derived`. A derived record must
+name every durable source-family id in `root_ids`. A source record may omit
+`root_ids`, in which case its own fully qualified document uid is the root.
+Malformed contracts are rejected on new ingest. `family_of` still describes a
+physical split or import family, but does not by itself prove that the content is
+primary evidence.
+
+Retrieval keeps unknown-lineage documents and allows them to support what they
+directly say. Their filename cannot promote them to primary or derived authority,
+and they earn no independent-corroboration credit. Documents with overlapping
+roots form one corroboration group even when one is a generated report and the
+other is its ledger. Public results expose only opaque family tokens and a
+plain-language lineage status, never the underlying root ids. Agent memory writes
+are always stamped `agent_derived` in both metadata and native text so export and
+reingest cannot turn an agent's restatement into a new primary source.
+
 `/api/rag/unified` returns ranked evidence. It has no universal relevance floor,
 so a result list by itself is not proof that the corpus answers the question.
 `/api/rag/think` is the owner-facing answer path: it generates an answer from

@@ -12,6 +12,7 @@
  */
 
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
+import { evidenceLineageFor, independentEvidenceSummary } from "./evidence-lineage.js";
 import { taxEvidenceScope } from "./tax-evidence-scope.js";
 
 /** Highest authority first. T0 is absence, not a weak document. */
@@ -244,13 +245,21 @@ function authoritySource(row) {
 
 /** Classify one document's base record kind. Always returns a plain reason. */
 export function tierOf(row = {}) {
+  const owner = ownerConfirmedRecord(row);
+  const lineage = evidenceLineageFor(row, { trustedSourceRecord: owner.valid }).lineage;
+  // Agent-written material is useful context, but it is an account of the
+  // underlying evidence. This one-way demotion also survives file reingest via
+  // the marker in the native text.
+  if (lineage.kind === "agent_derived") {
+    return { tier: "T4", ...TIERS.T4, reason: lineage.reason };
+  }
   const carried = existingTier(row);
   if (carried) return carried;
 
   const source = authoritySource(row);
   const titleAndUri = `${row.title || ""} ${row.uri || ""}`;
   const folder = String(row.top_folder || "");
-  if (ownerConfirmedRecord(row).valid) {
+  if (owner.valid) {
     return { tier: "T1", ...TIERS.T1, reason: "an operative value you confirmed yourself" };
   }
   if (RELATIONSHIP_SOURCES.has(source)) {
@@ -260,12 +269,15 @@ export function tierOf(row = {}) {
     return { tier: "T1", ...TIERS.T1, reason: `a machine feed (${source}), not somebody's account of it` };
   }
   const primaryMatch = PRIMARY_TITLE.exec(titleAndUri) || PRIMARY_FOLDER.exec(folder);
-  if (primaryMatch) {
-    return { tier: "T1", ...TIERS.T1, reason: `named like an authoritative record (${primaryMatch[0]})` };
+  if (primaryMatch && lineage.kind === "source_record" && lineage.status === "known") {
+    return { tier: "T1", ...TIERS.T1, reason: `a recorded direct source artifact (${primaryMatch[0]})` };
   }
   const derivedMatch = DERIVED_TITLE.exec(titleAndUri);
-  if (derivedMatch) {
-    return { tier: "T2", ...TIERS.T2, reason: `prepared from a primary record (${derivedMatch[0]})` };
+  if (lineage.kind === "derived_record" && lineage.status === "known") {
+    return { tier: "T2", ...TIERS.T2, reason: lineage.reason };
+  }
+  if (derivedMatch && lineage.kind === "source_record" && lineage.status === "known") {
+    return { tier: "T2", ...TIERS.T2, reason: `a recorded source artifact prepared from primary records (${derivedMatch[0]})` };
   }
   if (RECOLLECTION_SOURCES.has(source)) {
     return { tier: "T4", ...TIERS.T4, reason: `a ${source} record of what was said` };
@@ -276,6 +288,13 @@ export function tierOf(row = {}) {
   const recollectionMatch = RECOLLECTION_TITLE.exec(titleAndUri);
   if (recollectionMatch) {
     return { tier: "T4", ...TIERS.T4, reason: `named like a record of a conversation (${recollectionMatch[0]})` };
+  }
+  if (primaryMatch || derivedMatch) {
+    const match = primaryMatch?.[0] || derivedMatch?.[0];
+    return {
+      tier: "T3", ...TIERS.T3,
+      reason: `its name suggests a ${primaryMatch ? "primary" : "derived"} record (${match}), but its derivation provenance was not recorded`,
+    };
   }
   return { tier: "T3", ...TIERS.T3, reason: "a document, with nothing to show it is authoritative" };
 }
@@ -356,18 +375,30 @@ export function agreementVerdict(docs = [], { changes = true, current = changes,
   if (!docs.length) return { confident: false, caution: true, line: "nothing in your records mentions this." };
   const best = bestTier(docs, { ...options, current });
   const n = docs.length;
+  const independence = independentEvidenceSummary(docs);
+  const familyPhrase = independence.groups >= 2
+    ? `${independence.groups} independent source families`
+    : independence.groups === 1
+      ? "one recorded source family"
+      : "no recorded derivation families";
   if (best.authoritative === true && best.rank <= TIERS.T2.rank) {
-    return { confident: true, caution: false, line: `${n} record(s), the strongest being ${best.name}: ${best.reason}.` };
+    return { confident: true, caution: false, line: `${n} record(s) across ${familyPhrase}, the strongest being ${best.name}: ${best.reason}.` };
   }
   if (!changes) {
-    return { confident: true, caution: false, line: `${n} record(s) agree, and this is not the kind of fact that changes.` };
+    return {
+      confident: true,
+      caution: independence.groups < 2,
+      line: independence.groups >= 2
+        ? `${familyPhrase} agree, and this is not the kind of fact that changes.`
+        : `${n} record(s) say the same thing, and this is not the kind of fact that changes, but independent corroboration is not established.`,
+    };
   }
   return {
     confident: false,
     caution: true,
     line: n === 1
       ? `one ${best.name} record, and nothing authoritative. This fact can change, so treat it as a lead rather than an answer.`
-      : `${n} records agree, but none is authoritative: the strongest is ${best.name}. For a fact that changes, agreement among records like these tracks how long something has been written down, not whether it is still true.`,
+      : `${n} records say the same thing across ${familyPhrase}, but none is authoritative: the strongest is ${best.name}. For a fact that changes, repetition among records like these tracks how long something has been written down, not whether it is still true.`,
   };
 }
 

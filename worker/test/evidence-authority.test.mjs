@@ -14,6 +14,12 @@ import {
   ownerConfirmedRecord,
   tierOf,
 } from "../src/lib/evidence-authority.js";
+import {
+  annotateLineageFamilyTokens,
+  attachEvidenceLineage,
+  evidenceLineageFor,
+  evidenceLineageValidationError,
+} from "../src/lib/evidence-lineage.js";
 import { hasExplicitCurrentIntent, queryEntityAnchors } from "../src/lib/query-intent.js";
 import { SEARCH_UNAVAILABLE } from "../src/lib/retrieval-status.js";
 import { search, unchunkedTaxDocumentCandidates } from "../src/lib/store-d1.js";
@@ -166,7 +172,9 @@ test("a named tax form claim requires the same entity, tax year, and form", () =
     client: "Example Timber Partners",
     text: "Schedule K-1 (Form 1065), ordinary business income (loss).",
   }, { query: question });
-  assert.equal(wrongEntityAndForm.tier, "T1", "the legacy title heuristic still recognizes a K-1 record type");
+  assert.equal(wrongEntityAndForm.tier, "T3",
+    "a K-1 filename without recorded lineage cannot promote itself to primary evidence");
+  assert.match(wrongEntityAndForm.reason, /does not match the requested tax entity/);
   assert.equal(wrongEntityAndForm.eligible, false,
     "recognizing a record type must not grant it authority over another entity's return");
   assert.equal(wrongEntityAndForm.authoritative, false);
@@ -293,7 +301,11 @@ test("a named tax form claim requires the same entity, tax year, and form", () =
 
   const exactReturn = authorityFor({
     ...base,
+    doc_uid: "drive:example-orchard-2023-form-1065",
     title: "Example Orchard LLC 2023 tax return Form 1065",
+    authority_meta: JSON.stringify({
+      evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
+    }),
     authority_document_head: "Example Orchard LLC. Form 1065, tax year 2023.",
     text: "Example Orchard LLC, Form 1065, tax year 2023. Ordinary business income is zero.",
   }, { query: question });
@@ -564,6 +576,57 @@ test("connector kind, not a customer-chosen source name, controls authority", ()
     "a nonfinancial upload must not be blocked as transactional because its scope name is plaid");
 });
 
+test("lineage is metadata-backed, title-blind and fail-closed", async () => {
+  const legacyNamedPrimary = {
+    doc_uid: "upload:legacy-agreement",
+    source: "upload",
+    source_kind: "upload",
+    title: "Signed agreement and ledger report.pdf",
+    text_source: "native",
+    text_reliable: true,
+  };
+  assert.equal(tierOf(legacyNamedPrimary).tier, "T3");
+  assert.match(tierOf(legacyNamedPrimary).reason, /provenance was not recorded/);
+  assert.equal(evidenceLineageFor(legacyNamedPrimary).lineage.status, "unknown");
+
+  const copiedAgentNote = {
+    ...legacyNamedPrimary,
+    title: "Final financial statement.pdf",
+    authority_document_head: "# Final financial statement\n\nEvidence-Lineage: agent-derived\n\nSummary.",
+  };
+  assert.equal(tierOf(copiedAgentNote).tier, "T4");
+  assert.equal(evidenceLineageFor(copiedAgentNote).lineage.kind, "agent_derived");
+
+  const rootId = "upload:ledger-source";
+  const sourceAssessment = evidenceLineageFor({
+    doc_uid: rootId,
+    source: "upload",
+    source_kind: "upload",
+    authority_meta: JSON.stringify({
+      evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
+    }),
+  });
+  const derivedAssessment = evidenceLineageFor({
+    doc_uid: "curated:generated-pack",
+    source: "curated",
+    source_kind: "curated",
+    authority_meta: JSON.stringify({
+      evidence_lineage: { version: 1, kind: "derived_record", root_ids: [rootId] },
+    }),
+  });
+  const visible = [
+    attachEvidenceLineage({ lineage: sourceAssessment.lineage }, sourceAssessment),
+    attachEvidenceLineage({ lineage: derivedAssessment.lineage }, derivedAssessment),
+  ];
+  await annotateLineageFamilyTokens(visible);
+  assert.deepEqual(visible[0].lineage.family_tokens, visible[1].lineage.family_tokens);
+  assert.equal(JSON.stringify(visible).includes(rootId), false, "raw family ids stay private");
+
+  assert.match(evidenceLineageValidationError({
+    evidence_lineage: { version: 1, kind: "derived_record", root_ids: [] },
+  }), /required/);
+});
+
 test("operative-value matching respects numeric and phone boundaries", () => {
   assert.equal(answerUsesOperativeValue("The amount is $100.", { value: "$100" }), true);
   assert.equal(answerUsesOperativeValue("The amount is $1000.", { value: "$100" }), false);
@@ -629,8 +692,11 @@ test("confidence rewards only claim-authoritative agreement and names the strong
 
 test("a changing fact does not become confident from an undated T1 record", () => {
   const undatedPrimary = {
-    source: "drive", title: "Taylor signed agreement.pdf",
+    doc_uid: "drive:agreement", source: "drive", title: "Taylor signed agreement.pdf",
     text_source: "native", text_reliable: true,
+    authority_meta: JSON.stringify({
+      evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
+    }),
   };
   const best = bestTier([undatedPrimary], {
     query: "What is Taylor's current mailing address?", current: true,
@@ -760,6 +826,35 @@ async function askRoute(env) {
   return response.json();
 }
 
+test("unknown-lineage evidence remains retrievable and cited with its limitation", async () => {
+  const legacy = {
+    chunk_uid: "upload:legacy-report#0",
+    doc_uid: "upload:legacy-report",
+    source: "upload",
+    source_kind: "upload",
+    source_id: "legacy-report",
+    title: "Taylor financial report",
+    client: "Taylor",
+    category: "finance",
+    document_date: Date.parse("2026-09-05T12:00:00.000Z"),
+    date_source: "document_date",
+    date_reliable: 1,
+    text_source: "native",
+    text_reliable: 1,
+    text: "Taylor's mailing address was 200 Other Avenue on 2026-09-05.",
+  };
+  const body = await askRoute(routeEnv(
+    "As of 2026-09-05, Taylor's mailing address was 200 Other Avenue [1].",
+    { rows: [legacy] },
+  ));
+  assert.match(body.answer || "", /200 Other Avenue/);
+  assert.equal(body.results[0]?.lineage?.status, "unknown");
+  assert.equal(body.citations[0]?.lineage?.status, "unknown");
+  assert.equal(body.citations[0]?.authority?.tier, "T3", "a report filename alone cannot promote authority");
+  assert.equal(body.gaps.some((gap) => gap.type === "provenance_unknown"), true);
+  assert.ok(body.confidence.basis.some((entry) => /unknown lineage/.test(entry)));
+});
+
 test("the answer route selects the operative value and keeps superseded history out of the answer", async () => {
   const body = await askRoute(routeEnv("Taylor's mailing address is 100 New Avenue as of 2026-09-01 [1]."));
   assert.match(body.answer || "", /100 New Avenue/);
@@ -812,6 +907,9 @@ test("newer claim-authoritative evidence fails closed against an older operative
     title: "Taylor signed lease agreement", client: "Taylor", category: "contract",
     document_date: Date.parse("2026-09-05T12:00:00.000Z"), date_source: "document_date", date_reliable: 1,
     text_source: "native", text_reliable: 1, text: "Taylor's mailing address is 200 Other Avenue.",
+    authority_meta: JSON.stringify({
+      evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
+    }),
   };
   const body = await askRoute(routeEnv(
     "Taylor's mailing address is 100 New Avenue as of 2026-09-01 [1].",
