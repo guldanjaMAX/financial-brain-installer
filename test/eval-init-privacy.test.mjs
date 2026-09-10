@@ -70,6 +70,11 @@ try {
     const environment = {
       ...process.env,
       BRAIN_TEST_USER_ROOT: isolatedUserRoot,
+      HOME: isolatedUserRoot,
+      USERPROFILE: isolatedUserRoot,
+      APPDATA: join(isolatedUserRoot, "AppData", "Roaming"),
+      LOCALAPPDATA: join(isolatedUserRoot, "AppData", "Local"),
+      XDG_CONFIG_HOME: join(isolatedUserRoot, ".config"),
     };
     delete environment.ADMIN_KEY;
     delete environment.CLOUDFLARE_API_TOKEN;
