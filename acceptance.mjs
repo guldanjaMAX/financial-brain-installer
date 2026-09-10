@@ -51,6 +51,18 @@ const responseObject = (value) => Boolean(value) && typeof value === "object" &&
 const nonemptyResponseText = (value) => typeof value === "string" && value.trim().length > 0;
 const ANSWER_UNAVAILABLE_STATUSES = new Set(["search_unavailable", "coverage_incomplete"]);
 
+function normalizedEvidenceNumbers(value, resultCount) {
+  if (!Array.isArray(value)) return false;
+  const seen = new Set();
+  for (const number of value) {
+    if (!Number.isInteger(number) || number < 1 || number > resultCount || seen.has(number)) {
+      return false;
+    }
+    seen.add(number);
+  }
+  return true;
+}
+
 /**
  * Refuse a 200-shaped answer whose fields contradict each other.
  *
@@ -82,6 +94,22 @@ export function answerResponseContractDiagnostic(payload) {
     return "the Worker returned an incomplete or incompatible evidence gate";
   }
   const evidenceGate = responseObject(payload.evidence_gate) ? payload.evidence_gate : null;
+  if (payload.results.some((result) =>
+    !responseObject(result) || !nonemptyResponseText(result.chunk_uid) ||
+    !(result.title === null || result.title === undefined || typeof result.title === "string") ||
+    !(result.source === null || result.source === undefined || typeof result.source === "string"))) {
+    return "the Worker returned an incomplete or incompatible candidate result";
+  }
+  if (evidenceGate && Object.prototype.hasOwnProperty.call(evidenceGate, "partial") &&
+      typeof evidenceGate.partial !== "boolean") {
+    return "the Worker returned an incomplete or incompatible evidence gate";
+  }
+  if (evidenceGate && Object.prototype.hasOwnProperty.call(evidenceGate, "error") &&
+      !nonemptyResponseText(evidenceGate.error)) {
+    return "the Worker returned an incomplete or incompatible evidence gate";
+  }
+  const evidenceGateHasError = Boolean(evidenceGate) &&
+    Object.prototype.hasOwnProperty.call(evidenceGate, "error");
 
   if (payload.answer === null) {
     if (payload.citations.length > 0) {
@@ -89,6 +117,21 @@ export function answerResponseContractDiagnostic(payload) {
     }
     if (evidenceGate?.supported === true) {
       return "the Worker withheld answer text despite a supported evidence gate";
+    }
+    if (evidenceGate) {
+      const ownsEvidence = Object.prototype.hasOwnProperty.call(evidenceGate, "evidence");
+      const normalizedEvidence = ownsEvidence &&
+        normalizedEvidenceNumbers(evidenceGate.evidence, payload.results.length);
+      const invalidErrorGate = evidenceGateHasError &&
+        (evidenceGate.supported !== false || evidenceGate.complete !== false ||
+         evidenceGate.partial === true || (ownsEvidence &&
+           (!normalizedEvidence || evidenceGate.evidence.length !== 0)));
+      const invalidOrdinaryGate = !evidenceGateHasError && !normalizedEvidence;
+      if (typeof evidenceGate.supported !== "boolean" ||
+          typeof evidenceGate.complete !== "boolean" ||
+          evidenceGate.partial === true || invalidErrorGate || invalidOrdinaryGate) {
+        return "the Worker returned an incomplete or incompatible evidence gate";
+      }
     }
     if (owns("answer_error") && payload.answer_error !== undefined &&
         payload.answer_error !== null && !nonemptyResponseText(payload.answer_error)) {
@@ -101,13 +144,16 @@ export function answerResponseContractDiagnostic(payload) {
   if (!answer) return "the Worker returned empty answer text instead of null";
 
   if (ANSWER_UNAVAILABLE_STATUSES.has(payload.status) ||
-      owns("answer_error") || evidenceGate?.error) {
+      owns("answer_error") ||
+      evidenceGateHasError) {
     return "the Worker returned answer text alongside an unavailable or error state";
   }
 
   if (answerIsRefusal(answer)) {
     if (payload.citations.length > 0 || !evidenceGate ||
-        evidenceGate.supported !== false || !Array.isArray(evidenceGate.evidence)) {
+        evidenceGate.supported !== false || typeof evidenceGate.complete !== "boolean" ||
+        evidenceGate.partial === true ||
+        !normalizedEvidenceNumbers(evidenceGate.evidence, payload.results.length)) {
       return "the Worker's refusal contradicted its citation or evidence receipt";
     }
     return null;
@@ -126,9 +172,6 @@ export function answerResponseContractDiagnostic(payload) {
       return "the Worker's factual answer and citation evidence did not agree";
     }
     const result = payload.results[citation.n - 1];
-    if (!responseObject(result) || !nonemptyResponseText(result.chunk_uid)) {
-      return "the Worker returned a citation without a real candidate result";
-    }
     const resultTitle = String(result.title || "untitled").slice(0, 140);
     const resultSource = String(result.source || "?");
     if (citation.title !== resultTitle || citation.source !== resultSource) {

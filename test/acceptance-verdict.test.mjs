@@ -142,6 +142,13 @@ for (const [label, manifest] of [
 
 /* ------------------------------------- 5. null-answer stage diagnostics */
 
+const validCandidate = (overrides = {}) => ({
+  title: "Candidate",
+  source: "drive",
+  chunk_uid: "drive:candidate#0",
+  ...overrides,
+});
+
 const validNullAnswer = (overrides = {}) => ({
   mode: "think",
   answer: null,
@@ -160,25 +167,25 @@ for (const [label, body, expectedStage, detailPattern] of [
   ],
   [
     "incomplete source coverage",
-    { status: "coverage_incomplete", notice: "One source is still loading.", results: [{ n: 1 }] },
+    { status: "coverage_incomplete", notice: "One source is still loading.", results: [validCandidate()] },
     "source_coverage",
     /not yet proven complete/i,
   ],
   [
     "an evidence refusal",
-    { results: [{ n: 1 }], model: "@cf/example", evidence_gate: { supported: false, complete: false, reason: "private-payload-canary\nfrom the draft" } },
+    { results: [validCandidate()], model: "@cf/example", evidence_gate: { supported: false, complete: false, evidence: [], reason: "private-payload-canary\nfrom the draft" } },
     "answer_verification",
     /not accepted because its cited evidence did not support it/i,
   ],
   [
     "a sanitized model error",
-    { results: [{ n: 1 }], answer_error: "Answer generation is unavailable right now. Try again in a moment." },
+    { results: [validCandidate()], answer_error: "Answer generation is unavailable right now. Try again in a moment." },
     "answer_model",
     /unavailable right now/i,
   ],
   [
     "an empty model response",
-    { results: [{ n: 1 }], model: "claude-example" },
+    { results: [validCandidate()], model: "claude-example" },
     "answer_model",
     /returned no answer text/i,
   ],
@@ -190,7 +197,7 @@ for (const [label, body, expectedStage, detailPattern] of [
   ],
   [
     "an impossible dispatch state",
-    { results: [{ n: 1 }] },
+    { results: [validCandidate()] },
     "answer_model_dispatch",
     /neither a model nor an answer error/i,
   ],
@@ -204,7 +211,7 @@ for (const [label, body, expectedStage, detailPattern] of [
 
 {
   const diagnostic = answerUnavailableDiagnostic(validNullAnswer({
-    results: [{ n: 1 }],
+    results: [validCandidate()],
     answer_error: "The evidence check could not verify support, so no answer was shown. Try again in a moment.",
     evidence_gate: { supported: false, complete: false, error: "verification unavailable" },
   }));
@@ -214,7 +221,7 @@ for (const [label, body, expectedStage, detailPattern] of [
 
 {
   const diagnostic = answerUnavailableDiagnostic(validNullAnswer({
-    results: [{ n: 1 }],
+    results: [validCandidate()],
     evidence_gate: {
       supported: false,
       complete: false,
@@ -228,7 +235,7 @@ for (const [label, body, expectedStage, detailPattern] of [
 
 {
   const diagnostic = answerUnavailableDiagnostic(validNullAnswer({
-    results: [{ n: 1 }],
+    results: [validCandidate()],
     answer_error: "provider failed with private-payload-canary",
   }));
   check("an older Worker's raw model error is replaced with reviewed public copy",
@@ -250,7 +257,7 @@ for (const [label, body, expectedStage, detailPattern] of [
           status: "coverage_incomplete",
           notice: "One source is still loading.",
           gaps: [{ type: "coverage_stale" }],
-          results: [{ title: "candidate" }],
+          results: [validCandidate()],
         },
       };
   await suite.tierRetrieval(["What changed?"]);
@@ -343,12 +350,21 @@ for (const [label, malformed] of [
   ["a placeholder result and citation", {
     ...validFactualAnswer, results: [null],
   }],
+  ["a candidate carrying object-shaped title and source fields", {
+    ...validFactualAnswer,
+    citations: [{ n: 1, title: "[object Object]", source: "[object Object]" }],
+    results: [{ title: {}, source: {}, chunk_uid: "drive:agreement#0" }],
+  }],
   ["answer text beside a top-level error", {
     ...validFactualAnswer, error: "private-payload-canary",
   }],
   ["an incomplete evidence gate without the partial-answer receipt", {
     ...validFactualAnswer,
     evidence_gate: { supported: true, complete: false, evidence: [1] },
+  }],
+  ["a factual answer carrying a non-boolean partial receipt", {
+    ...validFactualAnswer,
+    evidence_gate: { ...validFactualAnswer.evidence_gate, partial: "true" },
   }],
   ["a factual answer with no verifier evidence receipt", {
     ...validFactualAnswer,
@@ -393,6 +409,25 @@ for (const [label, malformed] of [
     ...validRefusal,
     citations: [{ n: 1, title: "Candidate", source: "drive" }],
   }],
+  ["a canonical refusal claiming a partial factual answer", {
+    ...validRefusal,
+    evidence_gate: { supported: false, complete: false, partial: true, evidence: [] },
+  }],
+  ["a canonical refusal carrying a non-boolean partial receipt", {
+    ...validRefusal,
+    evidence_gate: { supported: false, complete: false, partial: "true", evidence: [] },
+  }],
+  ["a canonical refusal carrying a string evidence number", {
+    ...validRefusal,
+    evidence_gate: { supported: false, complete: false, evidence: ["1"] },
+  }],
+  ["a canonical refusal carrying an out-of-range evidence number", {
+    ...validRefusal,
+    evidence_gate: { supported: false, complete: true, evidence: [9] },
+  }],
+  ["a canonical refusal carrying a placeholder candidate", {
+    ...validRefusal, results: [null],
+  }],
   ["a null answer carrying a top-level error", {
     ...validNullAnswer(), error: "private-payload-canary",
   }],
@@ -406,6 +441,37 @@ for (const [label, malformed] of [
   }],
   ["a null answer claiming supported evidence", {
     ...validNullAnswer(), evidence_gate: { supported: true, complete: true, evidence: [] },
+  }],
+  ["a null answer carrying an empty evidence gate", {
+    ...validNullAnswer(), evidence_gate: {},
+  }],
+  ["a null verifier error claiming complete evidence", {
+    ...validNullAnswer({ results: [validCandidate()] }),
+    evidence_gate: { supported: false, complete: true, error: "verification unavailable" },
+  }],
+  ["a null verifier error claiming approved evidence", {
+    ...validNullAnswer({ results: [validCandidate()] }),
+    evidence_gate: {
+      supported: false, complete: false, evidence: [1], error: "verification unavailable",
+    },
+  }],
+  ["a null answer claiming a partial factual answer", {
+    ...validNullAnswer(),
+    evidence_gate: { supported: false, complete: false, partial: true, evidence: [] },
+  }],
+  ["a null answer carrying a non-boolean partial receipt", {
+    ...validNullAnswer(),
+    evidence_gate: { supported: false, complete: false, partial: "true", evidence: [] },
+  }],
+  ["a null answer carrying a placeholder candidate", {
+    ...validNullAnswer({ results: [null] }),
+  }],
+  ["a factual answer carrying an unused placeholder candidate", {
+    ...validFactualAnswer, results: [...validFactualAnswer.results, null],
+  }],
+  ["a factual answer carrying an empty verifier error", {
+    ...validFactualAnswer,
+    evidence_gate: { ...validFactualAnswer.evidence_gate, error: "" },
   }],
   ["empty answer text in place of null", {
     ...validNullAnswer(), answer: "   ",
@@ -429,7 +495,15 @@ for (const [label, valid] of [
     evidence_gate: { supported: true, complete: false, partial: true, evidence: [1] },
   }],
   ["an exact evidence refusal", validRefusal],
+  ["an exact evidence refusal retaining normalized rejected evidence", {
+    ...validRefusal,
+    evidence_gate: { supported: false, complete: true, evidence: [1] },
+  }],
   ["a null no-results response", validNullAnswer()],
+  ["a null verifier-error response without an evidence array", validNullAnswer({
+    results: [validCandidate()],
+    evidence_gate: { supported: false, complete: false, error: "verification unavailable" },
+  })],
   ["a cited answer over an untitled document", {
     ...validFactualAnswer,
     citations: [{ n: 1, title: "untitled", source: "drive" }],
