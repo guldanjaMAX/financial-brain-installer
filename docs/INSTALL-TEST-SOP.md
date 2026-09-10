@@ -72,8 +72,12 @@ job downloads the current platform agent contract and sealed field kit from
 npm install command from the downloaded platform field guide, and refuses any
 change to its executable, mode flags, safety flags, owner prefix, or archive
 reference. It then substitutes only a throwaway prefix and the already-verified
-local archive, invokes the selected Node runtime's verified npm CLI without a
-shell, and runs the installed package's version and doctor checks.
+local archive. POSIX runners invoke the selected Node runtime's verified npm
+CLI directly. The Windows runner enters the parsed `npm.cmd` through a fixed
+PowerShell bridge, proves PATH resolves that shim beside setup-node's selected
+Node runtime, and preserves spaced prefix/archive arguments without evaluating
+guide text. Every runner then runs the installed package's version and doctor
+checks.
 
 | Runner | What it proves |
 |---|---|

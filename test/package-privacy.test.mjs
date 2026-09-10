@@ -497,6 +497,7 @@ const expected = [
   // contract rather than carrying one.
   "operations/npm-cli-runtime.mjs",
   "scripts/install-from-public-contract.mjs",
+  "scripts/invoke-public-npm-install.ps1",
   // Ported from the field line 2026-09-03. Reviewed for private identity and
   // live credentials before allowlisting; both scans clean.
   "CHANGELOG.md",

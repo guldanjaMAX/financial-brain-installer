@@ -1,8 +1,10 @@
 # Package-only portion of Tier 1 in docs/INSTALL-TEST-SOP.md. This workflow reads
-# the PUBLISHED supervised-install contract and its sealed field kit, validates
-# the platform guide's actual npm command, installs into a throwaway prefix, and
-# runs package-local version and doctor checks. It does not provision Cloudflare,
-# exercise the deployed browser, or complete a physical owner ceremony.
+# the PUBLISHED supervised-install contract and its sealed field kit, rejects a
+# malformed or mutable outer receipt, validates the platform guide's actual npm
+# command, installs into a throwaway prefix (including real PowerShell/npm.cmd on
+# Windows), and runs package-local version and doctor checks. It does not
+# provision Cloudflare, exercise the deployed browser, or complete a physical
+# owner ceremony.
 name: install-matrix
 
 on:

@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { checkInstallPage, ENDPOINTS, guideFields, validateDoorways, validatePublicManifest, verifyPublishedMetadata } from '../scripts/check-install-page-version.mjs';
+import {
+  checkInstallPage,
+  ENDPOINTS,
+  guideFields,
+  publicBytes,
+  readSupervisedInstallContract,
+  validateDoorways,
+  validatePublicManifest,
+  validateSupervisedInstallContract,
+  verifyPublishedMetadata,
+} from '../scripts/check-install-page-version.mjs';
 const bytes = Buffer.from('synthetic reviewed package fixture\n');
 const sha = createHash('sha256').update(bytes).digest('hex');
 const commit = createHash('sha1').update('synthetic candidate commit').digest('hex');
@@ -16,6 +26,8 @@ ARTIFACT_SHA256: ${sha}
 CANDIDATE_VERSION: 9.8.6
 CANDIDATE_COMMIT: ${commit}
 `;
+const macosInstallGuide = installGuide
+  .replace('TARGET: physical Windows 10 or newer', 'TARGET: macOS 13 or newer, Apple silicon or Intel');
 const held = (state = 'held') => ({ schema_version: 2, release_state: state, available: false, release: null, published_at: null,
   update_url: 'https://financialbrain.ai/update', installer: null, changes: [], held_reason: 'Synthetic field evidence pending.',
   proof: { archive_release_gate: 'not_passed', automated_release_suite: 'pending', live_client_acceptance: 'required' } });
@@ -70,6 +82,60 @@ test('duplicate fields, missing owner, swapped candidate URL, or update permissi
     assert.throws(() => validateDoorways({ manifest: held(), updateGuide: guide('held'), installGuide: bad }));
   }
   assert.throws(() => validateDoorways({ manifest: held(), installGuide, updateGuide: guide('held').replace('read-only-diagnosis', 'guided-update-after-release-and-owner-checks') }), /wrong operation/);
+});
+test('the reusable supervised-install parser refuses one defect at a time before an artifact can be selected', async () => {
+  assert.equal(validateSupervisedInstallContract(installGuide).candidateCommit, commit);
+  assert.equal(validateSupervisedInstallContract(macosInstallGuide, { platform: 'macos' }).guideUrl,
+    ENDPOINTS.installGuideMacos);
+  const mutations = [
+    ['duplicate status', installGuide.replace('STATUS: supervised field-test candidate',
+      'STATUS: supervised field-test candidate\nSTATUS: supervised field-test candidate')],
+    ['short commit', installGuide.replace(commit, commit.slice(0, 7))],
+    ['mutable artifact', installGuide.replace(/^ARTIFACT_URL: .*$/m,
+      'ARTIFACT_URL: https://financialbrain.ai/operator/latest.zip')],
+    ['arbitrary artifact', installGuide.replace(/^ARTIFACT_URL: .*$/m,
+      'ARTIFACT_URL: https://example.invalid/fixture.zip')],
+    ['missing owner', installGuide.replace(/^OWNER_PRESENT:.*\n/m, '')],
+    ['missing target', installGuide.replace(/^TARGET:.*\n/m, '')],
+    ['missing status', installGuide.replace(/^STATUS:.*\n/m, '')],
+  ];
+  for (const [label, badGuide] of mutations) {
+    const calls = [];
+    await assert.rejects(
+      readSupervisedInstallContract({
+        read: async (url, limit) => {
+          calls.push({ url, limit });
+          if (url === ENDPOINTS.installGuide) return Buffer.from(badGuide);
+          throw new Error('artifact download must not start');
+        },
+      }),
+      undefined,
+      label,
+    );
+    assert.deepEqual(calls, [{ url: ENDPOINTS.installGuide, limit: 200_000 }], label);
+  }
+});
+test('the supervised-install reader follows only the validated digest-derived URL with exact byte bounds', async () => {
+  const calls = [];
+  const result = await readSupervisedInstallContract({
+    read: async (url, limit) => {
+      calls.push({ url, limit });
+      if (url === ENDPOINTS.installGuide) return Buffer.from(installGuide);
+      if (url === validateSupervisedInstallContract(installGuide).artifactUrl) return bytes;
+      throw new Error('unexpected URL');
+    },
+  });
+  assert.deepEqual(calls, [
+    { url: ENDPOINTS.installGuide, limit: 200_000 },
+    { url: result.artifactUrl, limit: bytes.length },
+  ]);
+  assert.deepEqual(result.artifact, bytes);
+});
+test('the public byte reader stops a response as soon as its declared or streamed body exceeds the cap', async () => {
+  const oversized = async () => new Response(Buffer.alloc(9), { status: 200 });
+  await assert.rejects(publicBytes('https://fixture.invalid/body', 8, { fetchImpl: oversized }), /byte limit/);
+  await assert.rejects(publicBytes('https://fixture.invalid/body', 100 * 1024 * 1024 + 1,
+    { fetchImpl: oversized }), /invalid public response byte limit/);
 });
 test('transport and unreadable metadata fail closed', async () => {
   await assert.rejects(checkInstallPage({ read: async () => { throw new Error('synthetic unavailable'); } }), /unavailable/);

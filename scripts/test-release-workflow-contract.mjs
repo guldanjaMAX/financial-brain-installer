@@ -12,6 +12,8 @@ const readText = (path) => readFileSync(path, "utf8").replace(/\r\n/g, "\n");
 const ci = readText(join(root, ".github/workflows/ci.yml"));
 const release = readText(join(root, ".github/workflows/release.yml"));
 const installMatrix = readText(join(root, ".github/workflows/install-matrix.yml"));
+const installRunner = readText(join(root, "scripts/install-from-public-contract.mjs"));
+const windowsNpmHelper = readText(join(root, "scripts/invoke-public-npm-install.ps1"));
 const workflowsDir = join(root, ".github/workflows");
 const workflowFiles = readdirSync(workflowsDir)
   .filter((name) => /\.ya?ml$/.test(name))
@@ -39,6 +41,12 @@ assert.match(installMatrix, /verify and install from the published package contr
 assert.match(installMatrix, /node scripts\/install-from-public-contract\.mjs/);
 assert.doesNotMatch(installMatrix, /brain (?:setup|provision|drain|ask)/,
   "the package-only public-contract gate must not claim or start live provisioning");
+assert.match(installRunner, /readSupervisedInstallContract\(\{ platform: guideArg \}\)/,
+  "the install runner must reuse the strict live doorway validator before download");
+assert.match(installRunner, /if \(process\.platform === "win32"\)[\s\S]*buildWindowsNpmPowerShellInvocation/,
+  "the Windows path must enter the parsed npm.cmd contract through PowerShell");
+assert.match(windowsNpmHelper, /Get-Command -Name \$contract\.executable -CommandType Application/);
+assert.match(windowsNpmHelper, /& \$contract\.executable @arguments/);
 
 // One Node 24 job creates the package. All operating-system jobs resolve the
 // immutable artifact ID and verify the producer's raw SHA before installing it.

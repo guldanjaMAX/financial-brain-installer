@@ -10,6 +10,11 @@ const isPortableAbsolute = (path) => isAbsolute(path) || win32.isAbsolute(path);
 export function verifiedNpmCliPath(candidate) {
   if (typeof candidate !== "string" || !candidate) return null;
   try {
+    // Inspect the path the caller supplied before following it. A symlink to a
+    // real npm-cli.js is still an attacker-controlled locator and must not be
+    // laundered into a regular file by realpathSync().
+    const supplied = lstatSync(candidate);
+    if (!supplied.isFile() || supplied.isSymbolicLink()) return null;
     const cli = realpathSync(candidate);
     const info = lstatSync(cli);
     if (!info.isFile() || info.isSymbolicLink() || basename(cli) !== "npm-cli.js") return null;
@@ -48,7 +53,7 @@ function nodeRuntimeLayout(nodeExecutable, platform) {
       : resolve(directory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
     if (!candidates.includes(candidate)) candidates.push(candidate);
   }
-  return { candidates, trustedRoots };
+  return { candidates, trustedRoots, nodeDirectories };
 }
 
 function isInsideRoot(path, root) {
@@ -81,7 +86,7 @@ export function resolveNpmCliPath({
   // The Node distribution's own npm wins over every ambient locator.
   for (const candidate of layout.candidates) {
     const cli = verifiedNpmCliPath(candidate);
-    if (cli) return cli;
+    if (cli && layout.trustedRoots.some((root) => isInsideRoot(cli, root))) return cli;
   }
 
   // npm lifecycle scripts expose their own JavaScript entry. It is accepted
@@ -262,6 +267,110 @@ export function publicInstallArgumentsFromGuide(
     prefix,
     archive,
   ]);
+}
+
+function verifiedRegularCommandPath(candidate, expectedBasename) {
+  if (typeof candidate !== "string" || !isPortableAbsolute(candidate)) return null;
+  try {
+    const supplied = lstatSync(candidate);
+    if (!supplied.isFile() || supplied.isSymbolicLink()) return null;
+    const command = realpathSync(candidate);
+    const info = lstatSync(command);
+    if (!info.isFile() || info.isSymbolicLink() ||
+        basename(command).toLowerCase() !== expectedBasename.toLowerCase()) return null;
+    return command;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve npm.cmd beside the selected Windows Node runtime, never from PATH. */
+export function resolveWindowsNpmCommandPath({
+  nodeExecutable = process.execPath,
+  platform = process.platform,
+} = {}) {
+  if (platform !== "win32") throw new Error("windows_npm_command_requires_windows");
+  const layout = nodeRuntimeLayout(nodeExecutable, platform);
+  for (const directory of layout.nodeDirectories) {
+    const command = verifiedRegularCommandPath(resolve(directory, "npm.cmd"), "npm.cmd");
+    if (command && layout.trustedRoots.some((root) => isInsideRoot(command, root))) return command;
+  }
+  throw new Error("npm_command_unavailable_for_node_runtime");
+}
+
+/** Resolve the built-in Windows PowerShell host without a PATH lookup. */
+export function resolveWindowsPowerShellPath({
+  environment = process.env,
+  platform = process.platform,
+} = {}) {
+  if (platform !== "win32") throw new Error("windows_powershell_requires_windows");
+  const systemRoot = environment?.SystemRoot || environment?.SYSTEMROOT;
+  if (typeof systemRoot !== "string" || !win32.isAbsolute(systemRoot)) {
+    throw new Error("windows_system_root_unavailable");
+  }
+  const command = verifiedRegularCommandPath(
+    win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    "powershell.exe",
+  );
+  let trustedRoot = null;
+  try { trustedRoot = realpathSync(systemRoot); } catch { /* handled below */ }
+  if (!command || !trustedRoot || !isInsideRoot(command, trustedRoot)) {
+    throw new Error("windows_powershell_unavailable");
+  }
+  return command;
+}
+
+function assertWindowsNpmInstallArguments(args) {
+  if (!Array.isArray(args) || args.length !== PUBLIC_INSTALL_ARGS.length + 2 ||
+      PUBLIC_INSTALL_ARGS.some((arg, index) => args[index] !== arg)) {
+    throw new Error("windows_npm_install_arguments_refused");
+  }
+  const [prefix, archive] = args.slice(-2);
+  assertPublicInstallPaths(prefix, archive);
+  if ([prefix, archive].some((path) => /["%\^!&|<>()\r\n]/.test(path))) {
+    throw new Error("windows_npm_install_path_refused");
+  }
+}
+
+/**
+ * Build the fixed PowerShell bridge used to exercise npm.cmd exactly as the
+ * Windows field guide does. Dynamic values live in a private JSON file, not in
+ * PowerShell source, and the bridge verifies PATH resolves npm.cmd to the
+ * selected Node runtime before invoking it with an argument-array splat.
+ */
+export function buildWindowsNpmPowerShellInvocation({
+  executable,
+  args,
+  expectedCommand,
+  contractPath,
+  helperPath,
+  powershellPath,
+} = {}) {
+  if (executable !== "npm.cmd") throw new Error("windows_npm_executable_refused");
+  assertWindowsNpmInstallArguments(args);
+  const npmCommand = verifiedRegularCommandPath(expectedCommand, "npm.cmd");
+  const helper = verifiedRegularCommandPath(helperPath, "invoke-public-npm-install.ps1");
+  const powershell = verifiedRegularCommandPath(powershellPath, "powershell.exe");
+  if (!npmCommand) throw new Error("windows_npm_command_refused");
+  if (!helper) throw new Error("windows_npm_helper_refused");
+  if (!powershell) throw new Error("windows_powershell_refused");
+  if (typeof contractPath !== "string" || !isPortableAbsolute(contractPath) || /["\r\n]/.test(contractPath)) {
+    throw new Error("windows_npm_contract_path_refused");
+  }
+  const contract = JSON.stringify({
+    schema: 1,
+    executable,
+    expected_command: npmCommand,
+    arguments: args,
+  });
+  return Object.freeze({
+    command: powershell,
+    args: Object.freeze([
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-File", helper, contractPath,
+    ]),
+    shell: false,
+    contract,
+  });
 }
 
 export function installedBrainPath(prefix, platform = process.platform) {

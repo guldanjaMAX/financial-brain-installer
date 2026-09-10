@@ -5,15 +5,18 @@ import {
   mkdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   buildNpmCliInvocation,
   buildWindowsBatchInvocation,
+  buildWindowsNpmPowerShellInvocation,
   installedBrainPath,
   nodeRuntimeNpmCliPaths,
   npmInstallEnvironment,
@@ -21,8 +24,12 @@ import {
   publicInstallArgumentsFromGuide,
   publicContractChildEnvironment,
   resolveNpmCliPath,
+  resolveWindowsNpmCommandPath,
+  resolveWindowsPowerShellPath,
   verifiedNpmCliPath,
 } from "../operations/npm-cli-runtime.mjs";
+
+const powershellHelper = fileURLToPath(new URL("../scripts/invoke-public-npm-install.ps1", import.meta.url));
 
 const archiveName = "brain-installer-9.8.7.tgz";
 const windowsGuide = [
@@ -163,6 +170,35 @@ test("runtime-relative npm wins and an ambient npm locator cannot leave the Node
   }
 });
 
+test("npm CLI verification refuses a final symlink and a primary candidate escaping through an ancestor link", {
+  skip: process.platform === "win32",
+}, () => {
+  const sandbox = mkdtempSync(join(tmpdir(), "brain-install-npm-link-"));
+  try {
+    const targetRoot = join(sandbox, "target");
+    const targetCli = writeNpmFixture(targetRoot, join("npm", "bin", "npm-cli.js"));
+    const linkedCli = join(sandbox, "npm-cli.js");
+    symlinkSync(targetCli, linkedCli);
+    assert.equal(verifiedNpmCliPath(linkedCli), null,
+      "lstat must reject the supplied symlink before realpath can hide it");
+
+    const runtime = join(sandbox, "runtime");
+    const node = join(runtime, "bin", "node");
+    mkdirSync(dirname(node), { recursive: true });
+    writeFileSync(node, "");
+    const outsideLib = join(sandbox, "outside-lib");
+    writeNpmFixture(outsideLib, join("node_modules", "npm", "bin", "npm-cli.js"));
+    symlinkSync(outsideLib, join(runtime, "lib"), "dir");
+    assert.throws(
+      () => resolveNpmCliPath({ environment: {}, nodeExecutable: node, platform: "linux" }),
+      /npm_cli_unavailable/,
+      "a nominal primary path whose real file left the runtime root must fail",
+    );
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("a Windows-style runtime never trusts an npm package beside its Node install directory", () => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-install-windows-root-"));
   try {
@@ -235,13 +271,70 @@ test("npm runs directly with literal arguments and a credential-free allowlisted
   }
 });
 
+test("the Windows PowerShell bridge accepts only the parsed npm.cmd contract and batch-safe paths", () => {
+  const sandbox = mkdtempSync(join(tmpdir(), "brain-install-powershell-contract-"));
+  try {
+    const npmCommand = join(sandbox, "npm.cmd");
+    const powershell = join(sandbox, "powershell.exe");
+    const contractPath = join(sandbox, "install.json");
+    const prefix = join(sandbox, "prefix");
+    const archive = join(sandbox, archiveName);
+    mkdirSync(prefix);
+    writeFileSync(npmCommand, "fixture");
+    writeFileSync(powershell, "fixture");
+    writeFileSync(archive, "fixture");
+    const args = publicInstallArgumentsFromGuide(windowsGuide, {
+      guide: "windows", archiveName, prefix, archive,
+    });
+    const invocation = buildWindowsNpmPowerShellInvocation({
+      executable: "npm.cmd",
+      args,
+      expectedCommand: npmCommand,
+      contractPath,
+      helperPath: powershellHelper,
+      powershellPath: powershell,
+    });
+    assert.deepEqual(JSON.parse(invocation.contract).arguments, args);
+    assert.equal(invocation.shell, false);
+    assert.throws(() => buildWindowsNpmPowerShellInvocation({
+      executable: "npm",
+      args,
+      expectedCommand: npmCommand,
+      contractPath,
+      helperPath: powershellHelper,
+      powershellPath: powershell,
+    }), /executable_refused/);
+    assert.throws(() => buildWindowsNpmPowerShellInvocation({
+      executable: "npm.cmd",
+      args: [...args.slice(0, 2), "--force", ...args.slice(3)],
+      expectedCommand: npmCommand,
+      contractPath,
+      helperPath: powershellHelper,
+      powershellPath: powershell,
+    }), /arguments_refused/);
+    assert.throws(() => buildWindowsNpmPowerShellInvocation({
+      executable: "npm.cmd",
+      args: [...args.slice(0, -2), `${prefix}&whoami`, archive],
+      expectedCommand: npmCommand,
+      contractPath,
+      helperPath: powershellHelper,
+      powershellPath: powershell,
+    }), /path_refused/);
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("the Windows runner resolves its default npm and executes a temporary .cmd shim", {
   skip: process.platform !== "win32",
 }, () => {
   const npmCli = resolveNpmCliPath();
   const runtimeCli = nodeRuntimeNpmCliPaths().map(verifiedNpmCliPath).find(Boolean);
+  const runtimeCommand = resolveWindowsNpmCommandPath();
   if (process.env.GITHUB_ACTIONS === "true") {
     assert.equal(npmCli, runtimeCli, "setup-node npm must resolve from the selected Node runtime");
+    assert.equal(dirname(runtimeCommand).toLowerCase(), dirname(process.execPath).toLowerCase(),
+      "setup-node npm.cmd must resolve beside the selected Node runtime");
   } else {
     assert.equal(verifiedNpmCliPath(npmCli), npmCli);
   }
@@ -276,6 +369,57 @@ test("the Windows runner resolves its default npm and executes a temporary .cmd 
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
     }).trim();
     assert.equal(output, "fixture-version");
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("the Windows public install bridge enters npm.cmd through PowerShell PATH and preserves spaced arguments", {
+  skip: process.platform !== "win32",
+}, () => {
+  const sandbox = mkdtempSync(join(tmpdir(), "brain npm powershell "));
+  try {
+    const runtime = join(sandbox, "runtime with spaces");
+    const node = join(runtime, "node.exe");
+    const npmCommand = join(runtime, "npm.cmd");
+    const recorder = join(sandbox, "record arguments.mjs");
+    const prefix = join(sandbox, "prefix with spaces");
+    const archive = join(sandbox, archiveName);
+    const contractPath = join(sandbox, "install contract.json");
+    mkdirSync(runtime, { recursive: true });
+    mkdirSync(prefix, { recursive: true });
+    writeFileSync(node, "");
+    writeFileSync(archive, "fixture archive");
+    writeFileSync(recorder, "console.log(JSON.stringify(process.argv.slice(2)));\n");
+    writeFileSync(npmCommand, [
+      "@echo off",
+      `"${process.execPath}" "${recorder}" %*`,
+      "",
+    ].join("\r\n"));
+
+    const parsed = parsePublicInstallCommand(windowsGuide, { guide: "windows", archiveName });
+    const args = publicInstallArgumentsFromGuide(windowsGuide, {
+      guide: "windows", archiveName, prefix, archive,
+    });
+    const invocation = buildWindowsNpmPowerShellInvocation({
+      executable: parsed.executable,
+      args,
+      expectedCommand: resolveWindowsNpmCommandPath({ nodeExecutable: node, platform: "win32" }),
+      contractPath,
+      helperPath: powershellHelper,
+      powershellPath: resolveWindowsPowerShellPath(),
+    });
+    writeFileSync(contractPath, invocation.contract, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const environment = npmInstallEnvironment({
+      ...process.env,
+      PATH: `${runtime};${process.env.PATH || ""}`,
+    }, "win32");
+    const output = execFileSync(invocation.command, invocation.args, {
+      encoding: "utf8",
+      env: environment,
+      shell: invocation.shell,
+    }).trim();
+    assert.deepEqual(JSON.parse(output), args);
   } finally {
     rmSync(sandbox, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }

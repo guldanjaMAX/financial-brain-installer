@@ -22,17 +22,23 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildNpmCliInvocation,
   buildWindowsBatchInvocation,
+  buildWindowsNpmPowerShellInvocation,
   installedBrainPath,
   npmInstallEnvironment,
+  parsePublicInstallCommand,
   publicInstallArgumentsFromGuide,
   publicContractChildEnvironment,
   resolveNpmCliPath,
+  resolveWindowsNpmCommandPath,
+  resolveWindowsPowerShellPath,
 } from "../operations/npm-cli-runtime.mjs";
+import { readSupervisedInstallContract } from "./check-install-page-version.mjs";
 
 const workdir = resolve(process.argv[2] || "./install-contract-run");
 const guideArg = process.argv.includes("--guide")
@@ -45,34 +51,27 @@ const GUIDE = guideArg === "macos"
   ? "https://financialbrain.ai/install/agent-macos.md"
   : "https://financialbrain.ai/install/agent.md";
 const FIELD_GUIDE = guideArg === "macos" ? "MACOS-FIELD-TEST.md" : "WINDOWS-FIELD-TEST.md";
+const PUBLIC_NPM_HELPER = fileURLToPath(new URL("./invoke-public-npm-install.ps1", import.meta.url));
 
 const die = (m) => { console.error(`FAIL  ${m}`); process.exit(1); };
 const ok = (m) => console.log(`PASS  ${m}`);
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
-async function get(url, asText = false) {
-  const r = await fetch(url, { headers: { "user-agent": "brain-install-matrix", "cache-control": "no-cache" } });
-  if (!r.ok) die(`${url} returned ${r.status}`);
-  return asText ? r.text() : Buffer.from(await r.arrayBuffer());
-}
-
-const guide = await get(GUIDE, true);
-// The contract's own header block. Parsed, never assumed: a missing field is a
-// failure, because the client's agent would be reading the same absent line.
-const field = (name) => {
-  const m = guide.match(new RegExp(`^${name}:\\s*(.+)$`, "m"));
-  if (!m) die(`the public install contract has no ${name}`);
-  return m[1].trim();
-};
-const artifactUrl = field("ARTIFACT_URL");
-const artifactBytes = Number(field("ARTIFACT_BYTES"));
-const artifactSha = field("ARTIFACT_SHA256");
-const version = field("CANDIDATE_VERSION");
-const commit = field("CANDIDATE_COMMIT");
+// Use the same strict parser as the live install/update doorway checker. It
+// validates owner presence, exact platform target/status, unique fields, the
+// full commit, and a digest-derived bounded artifact URL before downloading it.
+const publicContract = await readSupervisedInstallContract({ platform: guideArg });
+const {
+  artifactBytes,
+  artifactSha256: artifactSha,
+  candidateVersion: version,
+  candidateCommit: commit,
+  artifact: zip,
+} = publicContract;
 ok(`contract read from ${GUIDE}`);
 console.log(`      version ${version}  commit ${commit.slice(0, 7)}  ${artifactBytes} bytes`);
 
-const zip = await get(artifactUrl);
+if (publicContract.guideUrl !== GUIDE) die("strict contract reader selected the wrong platform guide");
 if (zip.length !== artifactBytes) die(`ZIP is ${zip.length} bytes, contract says ${artifactBytes}`);
 ok("the published ZIP is the byte count the contract states");
 if (sha256(zip) !== artifactSha) die(`ZIP sha256 ${sha256(zip)} != contract ${artifactSha}`);
@@ -135,20 +134,46 @@ ok("the macOS guide pins the same commit as the public contract");
 // The install itself, into a prefix that is thrown away with the runner.
 const prefix = join(workdir, "prefix");
 mkdirSync(prefix, { recursive: true });
-const installArguments = publicInstallArgumentsFromGuide(fieldGuides.get(FIELD_GUIDE), {
+const selectedFieldGuide = fieldGuides.get(FIELD_GUIDE);
+const parsedInstall = parsePublicInstallCommand(selectedFieldGuide, {
+  guide: guideArg,
+  archiveName: declaredName,
+});
+const installArguments = publicInstallArgumentsFromGuide(selectedFieldGuide, {
   guide: guideArg,
   archiveName: declaredName,
   prefix,
   archive: tgzPath,
 });
 ok(`${FIELD_GUIDE} carries the exact reviewed npm install command`);
-// A Windows npm executable is npm.cmd, and Node cannot launch a batch file with
-// execFileSync. Reach the validated JavaScript entry through this Node runtime
-// on every platform instead. No shell parses the prefix or archive path.
+// On Windows, prove the guide's real surface: fixed PowerShell resolves the
+// parsed npm.cmd through PATH, verifies it belongs to setup-node's runtime, and
+// enters the batch shim with array-preserved arguments. Other hosts keep the
+// direct verified npm CLI path; a macOS runner cannot manufacture Windows proof.
 const npmCli = resolveNpmCliPath();
-const npmInstall = buildNpmCliInvocation(npmCli, installArguments);
-execFileSync(npmInstall.command, npmInstall.args,
-  { cwd: workdir, stdio: "inherit", shell: npmInstall.shell, env: npmInstallEnvironment() });
+if (process.platform === "win32") {
+  const contractDirectory = mkdtempSync(join(workdir, "npm-command-"));
+  const contractPath = join(contractDirectory, "install.json");
+  const npmInstall = buildWindowsNpmPowerShellInvocation({
+    executable: parsedInstall.executable,
+    args: installArguments,
+    expectedCommand: resolveWindowsNpmCommandPath(),
+    contractPath,
+    helperPath: PUBLIC_NPM_HELPER,
+    powershellPath: resolveWindowsPowerShellPath(),
+  });
+  writeFileSync(contractPath, `${npmInstall.contract}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  execFileSync(npmInstall.command, npmInstall.args, {
+    cwd: workdir,
+    stdio: "inherit",
+    shell: npmInstall.shell,
+    env: npmInstallEnvironment(),
+  });
+} else {
+  const npmInstall = buildNpmCliInvocation(npmCli, installArguments);
+  execFileSync(npmInstall.command, npmInstall.args,
+    { cwd: workdir, stdio: "inherit", shell: npmInstall.shell, env: npmInstallEnvironment() });
+}
 ok("the packaged archive installs into a clean prefix");
 
 const bin = installedBrainPath(prefix);
