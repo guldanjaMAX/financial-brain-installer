@@ -18,6 +18,25 @@ if ($node) {
 } else { Stop_ "node is not installed" }
 if (Get-Command npm.cmd -ErrorAction SilentlyContinue) { Write-Host ("  npm             " + (& npm.cmd -v)) }
 else { Stop_ "npm.cmd not found" }
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+$isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($isAdministrator) {
+  Stop_ "this PowerShell window is running as Administrator; close it and open a normal PowerShell window"
+} else { Ok "running as the current user without Administrator elevation" }
+if (-not $env:LOCALAPPDATA) {
+  Stop_ "LOCALAPPDATA is unavailable, so the actual Windows per-user install drive cannot be checked"
+} else {
+  try {
+    $installDriveRoot = [System.IO.Path]::GetPathRoot($env:LOCALAPPDATA)
+    $installDrive = [System.IO.DriveInfo]::new($installDriveRoot)
+    if ($installDrive.AvailableFreeSpace -lt 2GB) {
+      Stop_ "the LOCALAPPDATA install drive has less than 2 GiB free; free 2 GiB and rerun this check"
+    } else { Ok "LOCALAPPDATA install drive has at least 2 GiB free" }
+  } catch {
+    Stop_ "free space could not be checked on the LOCALAPPDATA install drive"
+  }
+}
 Write-Host ""
 
 Write-Host "WINDOWS TRAPS"

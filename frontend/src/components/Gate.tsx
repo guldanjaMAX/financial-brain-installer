@@ -65,19 +65,39 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
             </p>
           )}
 
-          {enrolling && (
-            <ul className="mt-6 space-y-2.5">
-              {[
-                "One tap sets up your face or fingerprint as the key",
-                "No password to create, remember, or lose",
-                "It lives in your own account. Nobody else can read it",
-              ].map((line) => (
-                <li key={line} className="flex gap-2.5 text-[15px]">
-                  <span className="text-accent font-bold leading-6">✓</span>
-                  <span className="leading-6">{line}</span>
+          {enrolling ? (
+            <div role="note" className="mt-6 rounded-xl border border-line bg-paper/60 p-4">
+              <h2 className="text-[15px] font-semibold">Here is what happens next</h2>
+              <ol className="mt-3 space-y-2.5">
+                <li className="flex gap-2.5 text-[14.5px] leading-6">
+                  <span className="text-accent font-semibold" aria-hidden="true">1</span>
+                  <span>Choose <strong>Create my owner passkey</strong> below.</span>
                 </li>
-              ))}
-            </ul>
+                <li className="flex gap-2.5 text-[14.5px] leading-6">
+                  <span className="text-accent font-semibold" aria-hidden="true">2</span>
+                  <span>
+                    Your device will open its secure passkey window. Follow that window using
+                    Face ID, fingerprint, your device PIN, or screen lock.
+                  </span>
+                </li>
+              </ol>
+              <p className="mt-3 text-[13.5px] leading-relaxed text-ink-soft">
+                This verifies that you are the owner and protects your private owner area without
+                another password. Financial Brain and your Claude or Codex guide cannot see or
+                store your passkey, Face ID, fingerprint, or device PIN. Those stay protected by
+                your device. The Brain keeps only the public sign-in record needed to recognize you.
+              </p>
+              <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
+                Nothing else on this device is connected. If the address or secure window looks
+                unexpected, choose Cancel. Nothing is enrolled, and you can try again before this
+                private link expires.
+              </p>
+            </div>
+          ) : (
+            <div role="note" className="mt-6 rounded-xl border border-line bg-paper/60 p-4 text-[14px] leading-relaxed text-ink-soft">
+              Choosing <strong>Sign in with my passkey</strong> opens your device's secure passkey
+              window. Financial Brain never receives your Face ID, fingerprint, or device PIN.
+            </div>
           )}
 
           {passkeysSupported() ? (
@@ -87,7 +107,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
               className="mt-7 w-full rounded-xl bg-accent px-5 py-3.5 text-white font-semibold
                          disabled:opacity-55 transition-opacity"
             >
-              {busy ? "Waiting for your device…" : enrolling ? "Set up with Face ID" : "Sign in"}
+              {busy ? "Waiting for your device…" : enrolling ? "Create my owner passkey" : "Sign in with my passkey"}
             </button>
           ) : (
             <p className="mt-7 text-sm text-ink-soft">
@@ -98,7 +118,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
 
           {enrolling && (
             <p className="mt-3 text-[13px] text-ink-soft">
-              Takes about ten seconds. Works on every device you own.
+              Usually takes about ten seconds. You stay in control of the secure device window.
             </p>
           )}
           {error && <p className="mt-4 text-[14px] text-red-700">{error}</p>}

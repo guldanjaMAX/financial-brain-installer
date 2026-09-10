@@ -1,6 +1,7 @@
 import {
   checkWorkersPaidPlan, checkPrioritySlice, run, localToolEnvironment, cloudflareCliEnvironment,
          checkNode, checkClaudeCode, checkCodex, checkAnthropicKey, checkGoogleConnection,
+         checkInstallDriveFreeSpace, checkInstallPrivilege, MIN_INSTALL_FREE_BYTES,
          checkWindowsCredentialProtection, persistWindowsClaudePath, windowsClaudePathState,
          checkWrangler,
          checkWranglerLogin, checkVectorize, checkVectorizeApi, checkCfToken, CF_TOKEN_SCOPES,
@@ -29,6 +30,44 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
 {
   const node = checkNode();
   check("Node on this machine passes", node.status === OK, JSON.stringify(node));
+  let checkedDrive = null;
+  const enoughSpace = checkInstallDriveFreeSpace({
+    platformName: "win32",
+    environment: { LOCALAPPDATA: "C:\\Users\\Fixture\\AppData\\Local" },
+    statfsImpl: (target) => {
+      checkedDrive = target;
+      return { bavail: 3n * 1024n * 1024n, bsize: 1024n };
+    },
+  });
+  check("Windows free-space readiness checks the actual LOCALAPPDATA drive",
+    enoughSpace.status === OK && checkedDrive === "C:\\Users\\Fixture\\AppData\\Local",
+    JSON.stringify(enoughSpace));
+  const lowSpace = checkInstallDriveFreeSpace({
+    platformName: "darwin",
+    cliPath: "/fixture/brain.mjs",
+    statfsImpl: () => ({ bavail: (MIN_INSTALL_FREE_BYTES - 1n) / 1024n, bsize: 1024n }),
+  });
+  check("less than 2 GiB on the install drive stops before setup",
+    lowSpace.status === FAIL && /2 GiB/.test(lowSpace.detail + lowSpace.fix),
+    JSON.stringify(lowSpace));
+  const standardWindows = checkInstallPrivilege({
+    platformName: "win32",
+    environment: { SystemRoot: "C:\\Windows" },
+    runCommand: () => ({ ok: true, out: "BRAIN_STANDARD_USER" }),
+  });
+  check("a normal Windows user session passes the install privilege gate",
+    standardWindows.status === OK, JSON.stringify(standardWindows));
+  const adminWindows = checkInstallPrivilege({
+    platformName: "win32",
+    environment: { SystemRoot: "C:\\Windows" },
+    runCommand: () => ({ ok: true, out: "BRAIN_ELEVATED" }),
+  });
+  check("an Administrator PowerShell stops with a normal-window remedy",
+    adminWindows.status === FAIL && /normal PowerShell|Run as administrator/i.test(adminWindows.fix),
+    JSON.stringify(adminWindows));
+  const rootPosix = checkInstallPrivilege({ platformName: "linux", getEffectiveUserId: () => 0 });
+  check("a root shell stops with a no-sudo remedy",
+    rootPosix.status === FAIL && /without `sudo`/.test(rootPosix.fix), JSON.stringify(rootPosix));
   const missingTool = () => ({ ok: false, out: "not found", missing: true });
   const healthyTool = (_command, args) => ({
     ok: true,
@@ -394,19 +433,18 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   const saved = process.env.CLOUDFLARE_API_TOKEN;
   delete process.env.CLOUDFLARE_API_TOKEN;
   const v = await checkVectorizeApi("0000");
-  check("a missing token skips the API probe with a useful warning", v.status === WARN && /token is missing/.test(v.detail), JSON.stringify(v));
-  // This required `brain setup` to be named ahead of `brain update`. Doctor is
-  // what an operator runs against a brain that is ALREADY stuck, and it cannot
-  // tell a half-finished upgrade from a fresh install; over a paused brain,
-  // setup reruns the cutover and pauses it again. Hidden entry is still the
-  // point, but update is the command that can safely offer it.
-  check("the missing-token remedy uses hidden entry rather than shell history",
-    /brain update.*hidden token entry/is.test(v.fix) && !/brain setup/.test(v.fix) &&
+  check("a missing optional token skips the API probe with a useful warning",
+    v.status === WARN && /optional API-token recovery path/i.test(v.detail), JSON.stringify(v));
+  check("the missing-token remedy leads with the named browser sign-in rather than token homework",
+    /named Cloudflare browser sign-in/i.test(v.fix) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(v.fix), v.fix);
   const tokenCheck = await checkCfToken();
-  check("doctor's required-token fix never prints a pasteable token command",
-    tokenCheck.status === FAIL && /without echo|secret manager/i.test(tokenCheck.fix) &&
+  check("doctor treats a missing recovery token as non-blocking and never assigns token homework",
+    tokenCheck.status === WARN && /ordinary owner setup does not need one/i.test(tokenCheck.detail) &&
+      /named Cloudflare browser sign-in/i.test(tokenCheck.fix) && /secret manager/i.test(tokenCheck.fix) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(tokenCheck.fix), tokenCheck.fix);
+  check("the normal no-token remedy never sends a fresh owner to create or reveal a token",
+    !/create (?:an?|the).*token|reveal(?:ed)? token|My Profile > API Tokens/i.test(tokenCheck.fix), tokenCheck.fix);
   // A token that has no token to recreate should never be told to recreate one.
   check("the no-token remedy does not tell you to RECREATE a token you do not have",
     !/Recreate the account-scoped token/i.test(tokenCheck.fix), tokenCheck.fix);
@@ -631,7 +669,9 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   });
 
   const missing = await checkWorkersPaidPlan(undefined, undefined, async () => { throw new Error("no fetch expected"); });
-  check("plan check without a token warns instead of probing", missing.status === WARN && /token/i.test(missing.detail), JSON.stringify(missing));
+  check("plan check without billing visibility warns and requires owner dashboard confirmation",
+    missing.status === WARN && /cannot read billing status/i.test(missing.detail) &&
+      /Workers & Pages > Plans > Paid/i.test(missing.fix), JSON.stringify(missing));
   const noAccount = await checkWorkersPaidPlan(undefined, "cf_token", async () => { throw new Error("no fetch expected"); });
   check("plan check without an account id warns instead of probing", noAccount.status === WARN, JSON.stringify(noAccount));
 

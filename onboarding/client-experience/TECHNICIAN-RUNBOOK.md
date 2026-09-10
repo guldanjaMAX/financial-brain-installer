@@ -3,17 +3,29 @@
 Use this with the owner present for every human ceremony. Start read-only and
 complete one stage before opening the next one.
 
+Claude Code is the primary guided surface. Before any provider page, hidden
+prompt, or system window, name the provider, explain why the step is needed,
+state the minimum permission, and give the owner one next action. When browser
+control is available, offer to navigate the official page and fill non-secret
+fields after exact approval. Stop before sign-in, 2FA, credential reveal or
+entry, consent, billing, and every secure passkey window. If the screen differs
+from the explanation, stop and explain before continuing.
+
 ## 1. Readiness
 
 1. Confirm the host computer, a current browser, internet access, and a separate
    passkey-capable device if the owner wants one.
-2. Confirm Node.js 22 or newer. This is technician plumbing, not an owner task.
-3. Confirm the owner can sign in to Claude Code in their own browser.
-4. Ask whether this is the owner's first Cloudflare account or an account they
-   already control. Confirm the Workers Paid plan and possible usage charges.
-5. Run `brain tools`. It verifies Claude Code, Claude sign-in, the installed
+2. Use a normal current-user terminal. Do not use `sudo`, root, or Run as
+   administrator.
+3. Run `brain tools`. Before any resource creation, it verifies Node.js 22 or
+   newer, at least 2 GiB free on the actual per-user install drive
+   (`LOCALAPPDATA` on Windows), Claude Code, Claude sign-in, the installed
    `financial-brain-technician` skill, Anthropic's doctor, and pinned Wrangler 4.
-6. In Claude Code, run `/skills` and confirm
+4. Ask whether this is the owner's first Cloudflare account or an account they
+   already control. Before provisioning, navigate to Workers & Pages > Plans
+   and have the owner confirm the exact account says Paid. The narrow sign-in
+   cannot read billing status. Do not infer the plan from product access.
+5. In Claude Code, run `/skills` and confirm
    `financial-brain-technician` appears. Then start
    `/financial-brain-technician` with the reviewed packet and manifest paths.
 
@@ -28,6 +40,13 @@ verify the email address, and complete Cloudflare's own sign-in protection. If
 the owner already has Cloudflare, choose **Use a Cloudflare account I already
 have** and sign in normally. When a login can reach more than one account, pause
 while the owner confirms the exact account by both name and ID.
+
+Before any resource is created, open Workers & Pages > Plans for that exact
+account and have the owner confirm it says Paid. Browser control may navigate
+there after approval, but the owner handles sign-in, 2FA, any plan change,
+payment, billing approval, and Cloudflare consent. The installer's narrow named
+session cannot read billing status and must not claim the plan is verified from
+successful Workers or Vectorize access.
 
 One Cloudflare account may hold several Brains. Each one still receives a
 separate Worker, D1 database, Vectorize index, secrets, hostname, and saved
@@ -74,6 +93,23 @@ The install stage is complete only when all of these are recorded:
 - no outstanding vector backlog before semantic-search acceptance.
 
 Automated app tests do not replace the final-hostname passkey ceremony.
+
+Immediately before the first enrollment, tell the owner that choosing **Create
+my owner passkey** opens the device's secure passkey window and confirms owner
+access to the private area. Tell them to follow the device window with Face ID,
+fingerprint, device PIN, or screen lock, and to choose Cancel if the hostname or
+prompt looks unexpected. Financial Brain and the Claude Code guide cannot see
+or store the passkey, Face ID, fingerprint, or device PIN. The passkey step
+connects no files, messages, accounts, or other device data.
+
+Keep Optimize separate from this explicit access ceremony. Optimize may detect
+a missing or outdated Brain CLI, technician skill, or MCP registration and
+report it without changing anything. After the report, one clearly previewed
+and approved bundle may repair the owner-selected technician skill, Claude MCP,
+and Codex MCP items only when the exact target release advertises those repair
+scopes. Do not invent a command, and keep CLI replacement separate. Optimize
+does not run `brain invite`, `brain devices`, passkey enrollment, or device
+review.
 
 ## 4. Source onboarding
 

@@ -36,18 +36,22 @@ export function cloudflareAccountPlan(value) {
       ? [
           "Create the account in Cloudflare's own page.",
           "Verify the email address and complete any sign-in protection Cloudflare requests.",
-          "Choose the supported Workers Paid plan after the installer identifies the exact account.",
+          "Open Workers & Pages > Plans in the account you intend to use. It must say Paid before setup creates anything.",
+          "If a plan change or payment is needed, the owner reviews and approves it in Cloudflare before returning here.",
         ]
       : [
           "Sign in to Cloudflare in its own page.",
           "If the login can reach several accounts, choose the exact account by name and ID before setup changes anything.",
-          "Confirm that the selected account uses the supported Workers Paid plan.",
+          "Open Workers & Pages > Plans for that exact account. It must say Paid before setup creates anything.",
+          "If a plan change or payment is needed, the owner reviews and approves it in Cloudflare before returning here.",
         ]),
-    convergence: "Continue with the same Wrangler browser sign-in. The installer verifies the exact reachable account before creating any Brain resource.",
+    convergence: "Continue with the same Wrangler browser sign-in. The installer verifies the exact reachable account, while the owner's dashboard confirmation supplies the separate Workers Paid proof, before any Brain resource is created.",
     multi_brain: "One Cloudflare account can hold many separate Brains. Each Brain receives its own Worker, D1 database, Vectorize index, secrets, hostname, and saved resource IDs.",
     boundaries: Object.freeze({
       account_creation: "human_in_cloudflare",
       login_2fa_and_billing: "human_in_cloudflare",
+      workers_paid_confirmation: "owner_confirmed_before_provisioning",
+      plan_visibility: "owner_dashboard_only_not_narrow_session",
       exact_account_selection: "owner_confirmed_then_api_verified",
       credential_storage: "wrangler_os_keyring",
       provisioning: "not_started_by_this_plan",

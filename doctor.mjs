@@ -18,7 +18,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, statfsSync } from "node:fs";
 import { platform } from "node:os";
 import { win32 as pathWin32 } from "node:path";
 import { tokenStorageStatus, verifyTokenStorageReadable } from "./connectors/google-auth.mjs";
@@ -30,6 +30,7 @@ export const WARN = "warn";
 export const FAIL = "fail";
 export const WRANGLER_PACKAGE = "wrangler@4.127.1";
 export const WRANGLER_AUTH_PROFILE_PATTERN = /^financial-brain-[a-f0-9]{24}$/;
+export const MIN_INSTALL_FREE_BYTES = 2n * 1024n * 1024n * 1024n;
 
 /**
  * The ONE description of how Vectorize is reached, so the CLI, the doctor, the
@@ -45,7 +46,8 @@ export const WRANGLER_AUTH_PROFILE_PATTERN = /^financial-brain-[a-f0-9]{24}$/;
  *     invalid token and is why this was misdiagnosed as a platform limit.
  *   - On 2026-08-23 a user-owned token scoped to one account with Vectorize Edit
  *     created a 768-dimensional index and all six metadata indexes through the
- *     API. Wrangler login is therefore a fallback, not a prerequisite.
+ *     API. That proves the bounded automation and recovery path. Normal fresh
+ *     owner setup now uses a named Wrangler browser sign-in instead.
  */
 /**
  * Plan and limits. Shared, because both the "no token yet" and the "token
@@ -58,11 +60,11 @@ export const CF_PLAN_NOTE =
   "  prototype-scale and can hard-stop a real corpus.";
 
 export const VECTORIZE_REMEDY =
-  "  Recreate the account-scoped token with Vectorize: Edit. That is the standard\n" +
-  "  path and has been verified for index and metadata-index creation.\n" +
-  "  Temporary fallback: run `brain doctor <manifest>` and follow its exact named\n" +
-  "  Wrangler-profile sign-in step. Provision confirms the manifest account before\n" +
-  "  that isolated session can be used for Vectorize.\n" +
+  "  Normal owner path: rerun the supported Brain command in an interactive terminal\n" +
+  "  and follow its named Cloudflare browser sign-in. The owner confirms the exact\n" +
+  "  account before that isolated session can be used for Vectorize.\n" +
+  "  Only an explicitly selected automation or recovery path uses a scoped API token.\n" +
+  "  In that path, its minimum permissions include Vectorize: Edit.\n" +
   CF_PLAN_NOTE;
 
 /** The token scopes, in one place, for the same reason. */
@@ -78,11 +80,12 @@ export const CF_TOKEN_SCOPES = ["Workers Scripts: Edit", "D1: Edit", "Vectorize:
  * person from fixing the most common install-day mistake there is.
  */
 export const CF_TOKEN_REJECTED_REMEDY =
-  "The value in CLOUDFLARE_API_TOKEN is not a token Cloudflare will accept.\n" +
-  "  Check it was copied whole, with no leading or trailing spaces, and that it\n" +
-  "  has not expired or been deleted: dash.cloudflare.com > My Profile > API Tokens.\n" +
-  `  Scopes: ${CF_TOKEN_SCOPES.join(", ")}.\n` +
-  "  Then re-run the command you were running, in an interactive terminal; it asks for the token without echo.";
+  "The explicitly selected automation or recovery value in CLOUDFLARE_API_TOKEN was rejected.\n" +
+  "  Ordinary owner setup does not need a token. Rerun the supported Brain command in\n" +
+  "  an interactive terminal and use its named Cloudflare browser sign-in.\n" +
+  "  If the reviewed automation or recovery plan specifically requires a token, the\n" +
+  "  owner can review that bounded credential in My Profile > API Tokens without\n" +
+  `  revealing it to the assistant. Minimum scopes: ${CF_TOKEN_SCOPES.join(", ")}.`;
 
 /** Does this failure mean the credential was refused, rather than the tool misbehaving? */
 export function isCredentialRejection(error) {
@@ -361,6 +364,114 @@ export function checkNode() {
   );
 }
 
+function installDriveTarget({
+  platformName = process.platform,
+  environment = process.env,
+  cliPath = process.argv[1],
+} = {}) {
+  if (platformName === "win32") {
+    const localAppData = String(environment?.LOCALAPPDATA || "").trim();
+    return localAppData || null;
+  }
+  return String(cliPath || process.cwd()).trim() || process.cwd();
+}
+
+/** Require room for the packaged CLI, local working state, and safe retries. */
+export function checkInstallDriveFreeSpace({
+  platformName = process.platform,
+  environment = process.env,
+  cliPath = process.argv[1],
+  statfsImpl = statfsSync,
+  minimumBytes = MIN_INSTALL_FREE_BYTES,
+} = {}) {
+  const target = installDriveTarget({ platformName, environment, cliPath });
+  if (!target) {
+    return check(
+      "Install drive",
+      FAIL,
+      "LOCALAPPDATA is unavailable, so the Windows per-user install drive cannot be checked",
+      "Open a normal, non-Administrator PowerShell window for your Windows account, then rerun `brain tools`. The supported install target is inside LOCALAPPDATA.",
+    );
+  }
+  try {
+    const stats = statfsImpl(target, { bigint: true });
+    const available = BigInt(stats.bavail) * BigInt(stats.bsize);
+    const minimum = BigInt(minimumBytes);
+    const tenths = (available * 10n) / (1024n * 1024n * 1024n);
+    const shown = `${tenths / 10n}.${tenths % 10n}`;
+    const location = platformName === "win32"
+      ? "the LOCALAPPDATA install drive"
+      : "the drive containing this Brain CLI";
+    if (available >= minimum) {
+      return check("Install drive", OK, `${shown} GiB free on ${location}; 2 GiB is required`);
+    }
+    return check(
+      "Install drive",
+      FAIL,
+      `only ${shown} GiB is free on ${location}; 2 GiB is required`,
+      `Free at least 2 GiB on ${location}, then rerun \`brain tools\`. Do not move the install into an Administrator or system profile.`,
+    );
+  } catch (error) {
+    return check(
+      "Install drive",
+      FAIL,
+      `free space could not be checked on the actual install drive (${String(error?.message || error).slice(0, 100)})`,
+      "Check that the per-user install location is available, then rerun `brain tools`. On Windows, use the current user's LOCALAPPDATA drive.",
+    );
+  }
+}
+
+const WINDOWS_ELEVATION_PROBE = [
+  "$identity = [Security.Principal.WindowsIdentity]::GetCurrent()",
+  "$principal = [Security.Principal.WindowsPrincipal]::new($identity)",
+  "$admin = [Security.Principal.WindowsBuiltInRole]::Administrator",
+  "if ($principal.IsInRole($admin)) { [Console]::Out.Write('BRAIN_ELEVATED') } else { [Console]::Out.Write('BRAIN_STANDARD_USER') }",
+].join("; ");
+
+/** Setup is deliberately per-user and must not inherit root or Administrator ownership. */
+export function checkInstallPrivilege({
+  platformName = process.platform,
+  environment = process.env,
+  runCommand = run,
+  getEffectiveUserId = process.geteuid,
+} = {}) {
+  let elevated = null;
+  if (platformName === "win32") {
+    const result = runCommand("powershell.exe", [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ELEVATION_PROBE,
+    ], {
+      timeout: 30_000,
+      inheritEnv: false,
+      env: localToolEnvironment(environment),
+    });
+    if (result.ok && /BRAIN_STANDARD_USER/.test(result.out)) elevated = false;
+    else if (result.ok && /BRAIN_ELEVATED/.test(result.out)) elevated = true;
+  } else if (typeof getEffectiveUserId === "function") {
+    elevated = Number(getEffectiveUserId()) === 0;
+  }
+  if (elevated === false) {
+    return check("Install session", OK, "running as the current user, without root or Administrator elevation");
+  }
+  if (elevated === true) {
+    return check(
+      "Install session",
+      FAIL,
+      platformName === "win32" ? "this PowerShell window is running as Administrator" : "this shell is running as root",
+      platformName === "win32"
+        ? "Close this window, open a normal PowerShell window as your own user, and rerun `brain tools`. Do not choose Run as administrator."
+        : "Leave this root shell, open a normal Terminal as your own user, and rerun `brain tools` without `sudo`.",
+    );
+  }
+  return check(
+    "Install session",
+    FAIL,
+    "the installer could not prove that this is a normal, non-elevated user session",
+    platformName === "win32"
+      ? "Open a normal PowerShell window as your own user, not Run as administrator, then rerun `brain tools`."
+      : "Open a normal Terminal as your own user, without `sudo`, then rerun `brain tools`.",
+  );
+}
+
 export function checkWrangler(runCommand = run) {
   const r = runCommand("npx", [WRANGLER_PACKAGE, "--version"], {
     timeout: 120_000,
@@ -462,9 +573,9 @@ export async function checkVectorizeApi(accountId, cloudflareToken = process.env
     return check(
       "Vectorize",
       WARN,
-      "not checked: Cloudflare token is missing",
-      "Run `brain update <manifest>` in an interactive terminal for hidden token entry. " +
-        "Low-level automation must inject it through an approved secret manager, never a pasted shell command.",
+      "not checked through the optional API-token recovery path",
+      "Use the supported Brain command's named Cloudflare browser sign-in in an interactive terminal. " +
+        "Low-level automation may use a scoped token only through an approved secret manager, never a pasted shell command.",
     );
   }
   if (!accountId) {
@@ -675,8 +786,8 @@ export function checkGoogleConnection(storageStatus, verify = verifyTokenStorage
 }
 
 /**
- * The scoped API token drives every Cloudflare step. Wrangler login is only a
- * fallback for an older or incorrectly scoped token.
+ * Validate an API token only when automation, recovery, or an older manifest
+ * explicitly selected that lane. Normal owner setup uses a named browser sign-in.
  */
 export async function checkCfToken(cloudflareToken = process.env.CLOUDFLARE_API_TOKEN, {
   accountId,
@@ -841,14 +952,11 @@ export async function checkCfToken(cloudflareToken = process.env.CLOUDFLARE_API_
   }
   return check(
     "Cloudflare token",
-    FAIL,
-    "CLOUDFLARE_API_TOKEN is not set",
-    "Create one in the Cloudflare account that will own this brain: dash.cloudflare.com > My Profile > API Tokens.\n" +
-      `  Scopes: ${CF_TOKEN_SCOPES.join(", ")}.
-` +
-      "  Set \'Expires on\' to tomorrow. Nothing here needs to outlive the install.\n" +
-      "  Then re-run the command you were running, in an interactive terminal; it asks for the token without echo.\n" +
-      "  Low-level automation must inject it through an approved secret manager, never a pasted shell command.\n" +
+    WARN,
+    "no API-token recovery credential is set; ordinary owner setup does not need one",
+    "Run the supported Brain command in an interactive terminal and follow its named Cloudflare browser sign-in.\n" +
+      "  CLOUDFLARE_API_TOKEN is reserved for an explicitly selected automation or recovery path and\n" +
+      "  must come from an approved secret manager, never a pasted shell command.\n" +
       CF_PLAN_NOTE
   );
 }
@@ -1011,8 +1119,9 @@ export async function checkWorkersPaidPlan(
 ) {
   const name = "Workers plan";
   if (!cloudflareToken) {
-    return check(name, WARN, "not checked: Cloudflare token is missing",
-      "Run `brain update <manifest>` in an interactive terminal for hidden token entry.\n" + CF_PLAN_NOTE);
+    return check(name, WARN, "not checked: the named browser session cannot read billing status",
+      "Before any resources are created, the owner confirms by eye:\n" +
+        "    Cloudflare dashboard > Workers & Pages > Plans > Paid\n" + CF_PLAN_NOTE);
   }
   if (!accountId) {
     return check(name, WARN, "not checked: Cloudflare account id is not known yet",
@@ -1041,10 +1150,10 @@ export async function checkWorkersPaidPlan(
       name,
       WARN,
       "cannot be read with this token's scopes, so it is not verified here",
-      "This is expected with the standard install token: reading the plan needs a\n" +
+      "This is expected with a narrow automation or recovery token: reading the plan needs a\n" +
         "  billing scope it deliberately does not carry, and it should not be widened\n" +
-        "  for a check. Confirm the plan by eye instead:\n" +
-        "    Cloudflare dashboard > Workers & Pages > Plans\n" + CF_PLAN_NOTE,
+        "  for a check. Before any resources are created, the owner confirms by eye:\n" +
+        "    Cloudflare dashboard > Workers & Pages > Plans > Paid\n" + CF_PLAN_NOTE,
     );
   }
   if (payload?.success && Array.isArray(payload.result)) {
@@ -1111,6 +1220,11 @@ export async function runAll({
   localRun = run,
   networkCheck = checkNetwork,
   skipCloudflare = false,
+  platformName = process.platform,
+  environment = process.env,
+  cliPath = process.argv[1],
+  statfsImpl = statfsSync,
+  getEffectiveUserId = process.geteuid,
 } = {}) {
   const out = [];
   // Each result is handed to the caller the moment it exists, so a slow check
@@ -1121,6 +1235,13 @@ export async function runAll({
     return x;
   };
   push(checkNode());
+  push(checkInstallDriveFreeSpace({ platformName, environment, cliPath, statfsImpl }));
+  push(checkInstallPrivilege({
+    platformName,
+    environment,
+    runCommand: localRun,
+    getEffectiveUserId,
+  }));
   push(checkWrangler(localRun));
   push(await networkCheck());
   if (!skipCloudflare) {

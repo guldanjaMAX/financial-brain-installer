@@ -16,20 +16,78 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { renderCopyableCommand } from "./command-display.mjs";
 
+function ownerGuidance({ before_action, why, minimum_access, browser_help, owner_only, privacy }) {
+  return Object.freeze({ before_action, why, minimum_access, browser_help, owner_only, privacy });
+}
+
+export const TECHNICIAN_INTERACTION_POLICY = Object.freeze({
+  one_action_at_a_time: true,
+  browser_assistance:
+    "When browser control is available, the assistant offers to handle official-page navigation and non-secret form fields after the owner approves the exact step.",
+  owner_handoff:
+    "The assistant stops before sign-in, 2FA, credential reveal or entry, OAuth consent, billing approval, and every passkey system prompt.",
+  unexpected_screen:
+    "If the page or prompt differs from the explanation, stop and explain the difference before anyone clicks or enters anything.",
+});
+
+export const TECHNICIAN_PREREQUISITES = Object.freeze([
+  Object.freeze({
+    id: "node",
+    requirement: "Node.js 22 or newer",
+    proof: "brain tools checks the running Node version before setup",
+  }),
+  Object.freeze({
+    id: "install_drive",
+    requirement: "At least 2 GiB free on the actual per-user install drive, using LOCALAPPDATA on Windows",
+    proof: "brain tools reads free space on that drive before setup",
+  }),
+  Object.freeze({
+    id: "install_session",
+    requirement: "A normal current-user terminal, without sudo, root, or Run as administrator",
+    proof: "brain tools stops if the session is elevated or cannot be verified",
+  }),
+  Object.freeze({
+    id: "cloudflare_account",
+    requirement: "A Cloudflare account the owner chooses for this Brain",
+    proof: "the named browser sign-in verifies the exact reachable account before provisioning",
+  }),
+  Object.freeze({
+    id: "workers_paid",
+    requirement: "Workers & Pages > Plans must show Paid before any Brain resource is created",
+    proof: "the owner confirms the dashboard because the installer's narrow session cannot read billing status",
+  }),
+]);
+
 export const TECHNICIAN_STEPS = Object.freeze([
   Object.freeze({
     id: "tools",
-    title: "Install and verify Claude Code, the Brain CLI, and Wrangler",
+    title: "Check this computer and install the owner tools",
     dashboard_url: "https://financialbrain.ai/install",
-    human_boundary: "The owner signs in to Claude in their browser. The technician runs Anthropic's interactive doctor with Claude Code's normal approval prompts enabled.",
-    automated_proof: "The installer verifies the Claude CLI version and sign-in, installs and reads back the personal /financial-brain-technician skill, runs claude doctor in a real terminal, and runs the pinned Wrangler 4 CLI with a credential-scrubbed environment.",
+    human_boundary: "The owner uses a normal, non-Administrator terminal and signs in to Claude in their browser. The technician runs Anthropic's interactive doctor with Claude Code's normal approval prompts enabled.",
+    automated_proof: "Before setup, the installer verifies Node 22+, at least 2 GiB free on the actual per-user install drive, a non-elevated current-user session, Claude CLI version and sign-in, the personal /financial-brain-technician skill, Anthropic's doctor, and pinned Wrangler 4.",
+    owner_guidance: ownerGuidance({
+      before_action: "First, the installer will read this computer's Node version, free space, and user-session type. If those pass, Claude Code may open its official sign-in page and installation check.",
+      why: "This prevents a partial install owned by Administrator or stranded on a full drive, and makes sure the owner's everyday assistant and reviewed guide are ready before any account or private data is touched.",
+      minimum_access: "Read-only machine checks, Node.js 22 or newer, 2 GiB free on the actual install drive, and Claude sign-in only. This requests no Cloudflare, provider, source, or Brain access.",
+      browser_help: "The assistant can open the official page and continue the local checks after sign-in succeeds.",
+      owner_only: "The owner signs in, completes 2FA, and answers any Claude account prompt.",
+      privacy: "No Cloudflare token, Brain key, source credential, or private document belongs in this step.",
+    }),
   }),
   Object.freeze({
     id: "cloudflare",
     title: "Install the private Brain",
-    dashboard_url: "https://dash.cloudflare.com/profile/api-tokens",
-    human_boundary: "The owner signs in, completes 2FA, and creates the least-privilege token. The hidden terminal prompt is ready when it is time to enter the token.",
-    automated_proof: "The installer verifies the token, provisions the exact account, deploys, migrates, and runs health checks.",
+    dashboard_url: "https://dash.cloudflare.com/",
+    human_boundary: "The owner signs in, completes 2FA, chooses the exact account, and confirms Workers & Pages > Plans says Paid. Before any resource is created, the owner approves Cloudflare's browser consent. Normal fresh setup creates no API token.",
+    automated_proof: "The installer verifies the named browser sign-in and exact account, provisions that account, deploys, migrates, and runs health checks. The narrow sign-in does not claim to verify billing; the owner's dashboard confirmation is the plan proof.",
+    owner_guidance: ownerGuidance({
+      before_action: "Cloudflare's official page will open. Before setup creates anything, the owner confirms the intended account shows Workers & Pages > Plans > Paid, then approves this Brain's named local browser session.",
+      why: "The installer uses that owner-approved session to create and verify this Brain's Worker, database, meaning-search index, and Workers AI access in the selected account.",
+      minimum_access: "The installer confines every action to the exact Cloudflare account the owner selects and confirms for this Brain. Normal fresh setup creates, reveals, and copies no API token.",
+      browser_help: "The assistant can open the official sign-in page and continue the installer after Cloudflare returns the confirmed account.",
+      owner_only: "The owner signs in, completes 2FA, selects the exact account, confirms Plans says Paid, then reviews and approves consent. Any plan change or billing approval stays with the owner.",
+      privacy: "The protected browser session stays in the owner's operating-system credential store. The assistant must not inspect or export it. This narrow sign-in does not verify billing; the owner's dashboard confirmation is the plan proof.",
+    }),
   }),
   Object.freeze({
     id: "smoke",
@@ -37,6 +95,14 @@ export const TECHNICIAN_STEPS = Object.freeze([
     dashboard_url: null,
     human_boundary: "The owner approves one fixed, public, non-customer smoke document and its tiny Workers AI embedding cost. No local file, account credential, or customer content is read.",
     automated_proof: "The installer posts the fixed document through the deployed authenticated ingest boundary, requires its exact per-document receipt, records a ready manual source receipt, drains the vector work, and leaves the document in the owner's Brain as durable first-install evidence.",
+    owner_guidance: ownerGuidance({
+      before_action: "The installer will add one fixed public test note to the new Brain.",
+      why: "This proves the real private ingest and meaning-search path before any owner document is considered.",
+      minimum_access: "Only the fixed public test note and its small Workers AI embedding cost.",
+      browser_help: "No browser or provider account is needed.",
+      owner_only: "The owner approves this exact test write and cost before it runs.",
+      privacy: "No local file, private content, or source credential is read.",
+    }),
   }),
   Object.freeze({
     id: "google",
@@ -44,6 +110,14 @@ export const TECHNICIAN_STEPS = Object.freeze([
     dashboard_url: "https://console.cloud.google.com/apis/credentials",
     human_boundary: "The owner chooses or creates the Google project and approves the OAuth consent screen in their browser.",
     automated_proof: "The connector stores the refresh grant locally and dry-runs each requested Google source.",
+    owner_guidance: ownerGuidance({
+      before_action: "Google Cloud's official console will open to prepare a Desktop OAuth client, followed by Google's account consent page.",
+      why: "This gives the owner's Brain a revocable local connection to only the Google sources approved in the manifest.",
+      minimum_access: "Only the Drive, Gmail, and Calendar scopes for sources the owner has enabled. Do not add another Google API or scope for convenience.",
+      browser_help: "After exact approval, the assistant can navigate, fill non-secret project and app labels, choose Desktop app, enable the approved APIs, and select the reviewed scope choices.",
+      owner_only: "The owner signs in, completes 2FA, confirms the Google account, approves OAuth consent, and enters any revealed client value directly into the hidden terminal prompt.",
+      privacy: "The assistant must stop for every credential reveal or consent screen and must not read, copy, screenshot, transcribe, or store the value.",
+    }),
   }),
   Object.freeze({
     id: "zoom",
@@ -51,6 +125,14 @@ export const TECHNICIAN_STEPS = Object.freeze([
     dashboard_url: "https://marketplace.zoom.us/develop/create",
     human_boundary: "A Zoom admin creates a Server-to-Server OAuth app, grants the recording scope, and later saves the verified webhook subscription.",
     automated_proof: "The connector probes the account and plan, writes Worker secrets, proves the live webhook challenge, and only then prints the URL to save.",
+    owner_guidance: ownerGuidance({
+      before_action: "Zoom's official App Marketplace will open to prepare a Server-to-Server OAuth app and one transcript event subscription.",
+      why: "This lets the Brain receive completed cloud-recording transcripts from the approved Zoom account.",
+      minimum_access: "cloud_recording:read:admin for transcripts, user:read:admin only for the plan check, and recording.transcript_completed for delivery.",
+      browser_help: "After exact approval, the assistant can navigate and fill non-secret app labels, scope choices, and the verified event-subscription fields.",
+      owner_only: "A Zoom admin signs in, completes 2FA, approves the app and scopes, and enters every revealed account or client value into the hidden terminal prompt.",
+      privacy: "The assistant must stop before a credential is revealed and must not read, copy, screenshot, transcribe, or store it.",
+    }),
   }),
   Object.freeze({
     id: "imap",
@@ -58,6 +140,14 @@ export const TECHNICIAN_STEPS = Object.freeze([
     dashboard_url: null,
     human_boundary: "The mailbox owner creates an app password in their provider and enters it only into the hidden terminal prompt.",
     automated_proof: "The connector performs a real read before storing the app password locally.",
+    owner_guidance: ownerGuidance({
+      before_action: "The mailbox provider's official security page may open to create a separate app password for this mail connection.",
+      why: "The separate credential lets the Brain read the approved mailbox without using or storing the owner's normal mailbox password.",
+      minimum_access: "Mail access only, using a revocable app password when the provider supports one. Do not request contacts, calendar, sending, or account-management access.",
+      browser_help: "After exact approval, the assistant can find the provider's official app-password page and fill non-secret labels or mail-host settings.",
+      owner_only: "The owner signs in, completes 2FA, approves creation, and enters the displayed app password directly into the hidden terminal prompt.",
+      privacy: "The assistant must stop before the app password is displayed and must not read, copy, screenshot, transcribe, or store it.",
+    }),
   }),
   Object.freeze({
     id: "passkey",
@@ -65,6 +155,14 @@ export const TECHNICIAN_STEPS = Object.freeze([
     dashboard_url: null,
     human_boundary: "The owner opens the 15-minute link on their device and completes Face ID, fingerprint, or device PIN on the final Brain hostname.",
     automated_proof: "The live Brain records privacy-safe ceremony outcome and timing. A local rehearsal cannot prove the physical-device ceremony.",
+    owner_guidance: ownerGuidance({
+      before_action: "After the owner opens the one-time link, the Brain page explains the step. Choosing Create my owner passkey then opens the device's secure passkey window.",
+      why: "The passkey confirms that this is the owner and protects the private owner area without creating another password.",
+      minimum_access: "One owner sign-in credential for this exact Brain hostname. It does not connect files, messages, accounts, or any other part of the device.",
+      browser_help: "The assistant can explain the page, but the owner opens the private link and controls the secure device window.",
+      owner_only: "The owner chooses Create my owner passkey, then follows the device window using Face ID, fingerprint, device PIN, or screen lock. Cancel if the hostname or prompt is unexpected.",
+      privacy: "Financial Brain and the assistant cannot see or store the owner's passkey, Face ID, fingerprint, or device PIN. The device keeps the secret; the Brain receives only the public sign-in record.",
+    }),
   }),
   Object.freeze({
     id: "verify",
@@ -72,6 +170,14 @@ export const TECHNICIAN_STEPS = Object.freeze([
     dashboard_url: null,
     human_boundary: "The technician reviews each result and keeps unavailable connector or passkey checks clearly marked for follow-up.",
     automated_proof: "Doctor, health, source freshness, and enrolled-device checks run in order and stop on the first failure.",
+    owner_guidance: ownerGuidance({
+      before_action: "The installer will read the finished setup checks in order and stop if any result needs attention.",
+      why: "This separates what is verified now from what still needs a live provider, source, or device check.",
+      minimum_access: "Read-only health, source freshness, and enrolled-device status. No passkey is created and no device is changed.",
+      browser_help: "No browser action is normally needed. If a result names a provider action, explain it before opening anything.",
+      owner_only: "The owner confirms any unresolved account or device question rather than guessing from a label.",
+      privacy: "Keep credentials, private source content, and one-time links out of the result record.",
+    }),
   }),
 ]);
 
@@ -154,13 +260,15 @@ export function technicianPlan(manifestPath, deps = {}) {
       })
     : null;
   return {
-    schema_version: 2,
+    schema_version: 3,
     mode: "read_only_plan",
     proof_level: "workflow_only",
     manifest,
     cli,
     refresh,
     warning: "This plan prepares the workflow. Live proof arrives during the account, connector, webhook, mailbox, and physical passkey checks.",
+    interaction: TECHNICIAN_INTERACTION_POLICY,
+    prerequisites: TECHNICIAN_PREREQUISITES,
     coverage: {
       guided_steps: TECHNICIAN_RUN_STEPS.filter((step) => !DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step)),
       not_guided_in_this_release: [
@@ -180,6 +288,10 @@ export function technicianPlan(manifestPath, deps = {}) {
     },
     rules: [
       "Run one step at a time and rerun the same step after an interruption.",
+      "Before setup, require Node 22+, 2 GiB free on the actual install drive, and a normal non-elevated user terminal.",
+      "Before creating any Cloudflare resource, require the owner to confirm Workers & Pages > Plans says Paid for the exact account; the narrow sign-in cannot prove billing.",
+      "Before any provider page or system prompt, explain what will appear, why it is needed, and the one action the owner should take next.",
+      "Offer browser help for official-page navigation and non-secret fields, then hand control back before sign-in, 2FA, a credential, consent, billing, or a passkey prompt.",
       "Keep tokens, client secrets, app passwords, invite codes, and authentication codes in provider pages or hidden terminal prompts.",
       "The owner handles login, 2FA, consent, billing, and physical-device prompts.",
       "Enroll the first passkey only after the final Brain hostname is fixed.",
@@ -257,13 +369,19 @@ export function renderTechnicianPlan(plan) {
     `Final hostname: ${plan.manifest.final_hostname || "not fixed yet"}`,
     "",
     "This screen prepares the visit. Each live check will add its own proof.",
-    "The owner handles login, 2FA, consent, billing, and physical passkey prompts.",
+    "We will do one small action at a time and explain each page or prompt before it opens.",
+    "When browser help is available, it can handle official-page navigation and non-secret fields.",
+    "The owner takes over for login, 2FA, consent, billing, credentials, and physical passkey prompts.",
     "Sensitive values stay in provider pages or hidden terminal prompts.",
+    "",
+    "Before setup can create anything:",
+    ...plan.prerequisites.map((item) => `- ${item.requirement}`),
     "",
   ];
   for (const step of plan.steps) {
     lines.push(`${step.order}. ${step.title}`);
     if (step.state !== "not_checked") lines.push(`   State: ${step.state.replaceAll("_", " ")}`);
+    lines.push(`   What to expect: ${step.owner_guidance.before_action}`);
     lines.push(`   ${step.human_boundary}`);
     if (step.command) lines.push(`   Run: ${step.command}`);
     else if (step.owner_only_command) lines.push(`   Owner-only direct terminal: ${step.owner_only_display}`);
@@ -272,6 +390,26 @@ export function renderTechnicianPlan(plan) {
     lines.push("");
   }
   return lines.join("\n");
+}
+
+export function renderTechnicianStepBriefing(stepOrId) {
+  const step = typeof stepOrId === "string"
+    ? TECHNICIAN_STEPS.find((candidate) => candidate.id === stepOrId)
+    : stepOrId;
+  if (!step?.owner_guidance) throw new Error("the technician step has no owner briefing");
+  const guidance = step.owner_guidance;
+  return [
+    "",
+    `Before we start: ${step.title}`,
+    "--------------------------------",
+    `What will happen: ${guidance.before_action}`,
+    `Why this helps: ${guidance.why}`,
+    `Smallest access: ${guidance.minimum_access}`,
+    `Browser help: ${guidance.browser_help}`,
+    `Your part: ${guidance.owner_only}`,
+    `Privacy: ${guidance.privacy}`,
+    "",
+  ].join("\n");
 }
 
 function childCommands(step, manifestPath, flags, scriptPath) {

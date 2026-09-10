@@ -79,7 +79,7 @@ The brain runs entirely inside accounts you own. I never hold a copy of your dat
 
 **5.2** Do you already have a Cloudflare account? If not, you will create one.
 
-**5.3** Is that account on the **Workers Paid plan**? It has a 5 USD monthly minimum, and it is our required production baseline. Cloudflare now lets a Free account create the meaning-search index, but Free has prototype-scale vector capacity, daily database writes, and Worker CPU. A real corpus can hard-stop during its first load. Check under Workers and Pages, then Plans. Send a screenshot of that page rather than answering from memory.
+**5.3** Is that account on the **Workers Paid plan**? It has a 5 USD monthly minimum, and it is our required production baseline. Cloudflare now lets a Free account create the meaning-search index, but Free has prototype-scale vector capacity, daily database writes, and Worker CPU. A real corpus can hard-stop during its first load. During setup, the guide can navigate to Workers and Pages, then Plans. Confirm that the exact account says Paid before any resource is created. You do not need to send a screenshot.
 
 > Why I ask: this is the single most common way an install session dies in its first ten minutes. Two minutes and a card fix it in advance; discovering it live costs the session.
 
@@ -91,7 +91,7 @@ The brain runs entirely inside accounts you own. I never hold a copy of your dat
 
 **5.6** What computer will you run the install from: Windows or Mac? Which eligible Claude account will the owner use for **Claude Code**? Claude Code is part of the delivered setup, not an optional add-on. Codex can also be connected when the owner already uses it.
 
-**5.7** Before our session, run `brain tools`, then the full preflight on that machine and send me what it prints. The first command checks Claude Code, Claude sign-in, Anthropic's interactive doctor, and Wrangler 4. The full preflight checks Node, Cloudflare access, Vectorize, and local clients. The Paid-plan proof is the dashboard screenshot from 5.3. The last line should say "ready to install".
+**5.7** At the start of our session, the guide runs `brain tools` and the packaged preflight on that machine. You do not need to copy or send the output. These checks verify Node 22+, at least 2 GiB on the actual install drive, a non-elevated user terminal, Claude Code, Claude sign-in, Anthropic's interactive doctor, and Wrangler 4. The owner separately confirms the exact Cloudflare account says Workers Paid because the narrow sign-in cannot read billing status.
 
 > Why I ask: every answer above can also be checked by the preflight, and the preflight does not misremember. When 5.7 comes back green, the install session is boring, which is the goal.
 
