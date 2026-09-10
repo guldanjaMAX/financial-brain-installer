@@ -73,11 +73,22 @@ synthetic setup, folder, connector, migration, search, owner-action, access, and
 technician scenarios. The final receipt separates automatic proof from the
 remaining live Cloudflare, provider, and physical-device checks.
 
-For an install day, `brain technician <manifest>` prints the seven-step read-only
+For an install day, `brain technician <manifest>` prints the nine-step read-only
 plan. Add `--json` when a local coding agent is guiding the session. Run one
-reviewed step at a time with `--run tools`, `cloudflare`, `google`, `zoom`,
-`imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent, and
-the physical passkey gesture. Tokens and app secrets go only into hidden
+reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zoom`,
+`imap`, `plaid`, `passkey`, or `verify`. The Plaid step remains limited to an
+approved, version-scoped field plan while general bank invitations are held.
+Its exact command is marked owner-only and refuses outside a direct interactive
+terminal before either provider value is requested. It requires one nominated
+owner computer and the plan's `--confirm-single-setup-machine` flag because the
+private lock is local and no remote first-setup compare-and-swap exists. Do not
+run the ceremony concurrently on another computer. `brain secrets` refuses
+bank-feed environment values, and custom-provider credential setup remains
+held. Plaid secret entry also remains held on Windows until a native masked
+input bridge is implemented and physically proven; the current terminal reader
+cannot prove that PowerShell suppressed echo.
+The owner still handles login, 2FA, OAuth consent, Production-access review,
+and the physical passkey gesture. Tokens and app secrets go only into hidden
 terminal prompts or provider pages. The complete guide is
 [onboarding/09-technician-setup-and-rehearsal.md](onboarding/09-technician-setup-and-rehearsal.md).
 

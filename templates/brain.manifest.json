@@ -283,6 +283,7 @@
       "provider": "plaid",
       "environment": "sandbox",
       "registered_redirect_uris": [],
+      "registered_webhook_uris": [],
       "country_codes": [
         "US"
       ],

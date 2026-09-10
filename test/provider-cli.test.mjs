@@ -40,8 +40,10 @@ writeFileSync(bankManifestPath, JSON.stringify({
   infrastructure: { cloudflare: { account_id: "fixture-account", storage: "d1" } },
   corpora: { bank_feed: {
     enabled: true,
+    provider: "plaid",
     environment: "sandbox",
     registered_redirect_uris: ["https://fixture.invalid/app/connect/bank"],
+    registered_webhook_uris: ["https://fixture.invalid/api/webhooks/plaid"],
   } },
 }));
 
