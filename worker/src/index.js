@@ -58,6 +58,7 @@ import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
 } from "./lib/evidence-authority.js";
+import { taxEvidenceScope, taxQuestionScope } from "./lib/tax-evidence-scope.js";
 import {
   COVERAGE_INCOMPLETE, coverageIncompleteNotice, emptyRetrievalDisclosure,
 } from "./lib/retrieval-status.js";
@@ -582,6 +583,51 @@ async function coverageForRead(env, { access, scope, requestedSource = null }) {
   return coverageGapReport(env, { allowedSources });
 }
 
+const TAX_EVIDENCE_UNREADABLE_GAP = Object.freeze({
+  type: "tax_evidence_unreadable",
+  detail: "A record matching the requested tax entity, year, and form was found, but its text was not obtained from a reliable native text layer. Do not treat a missing answer as proof that the filing omits it.",
+});
+const TAX_DOCUMENT_INVENTORY_GAP = Object.freeze({
+  type: "tax_document_inventory_unverified",
+  detail: "Document-level coverage for the requested tax entity, year, and form could not be verified completely. Do not treat a missing answer as proof that the filing is absent or omits it.",
+});
+const TAX_EVIDENCE_UNREADABLE_NOTICE = "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete.";
+const TAX_DOCUMENT_INVENTORY_NOTICE = "The requested tax filing could not be checked against the complete document inventory. This is not proof that the filing is absent or omits the answer. Finish document extraction or use an exact business scope before treating the result as complete.";
+
+async function taxDocumentCoverageForRead(env, {
+  question, filters, access, scope,
+}) {
+  const requested = taxQuestionScope(question);
+  if (!requested) return { applicable: false, unreadable: false, complete: true };
+
+  // Do not narrow this legacy recovery probe by the modern entity_slug column.
+  // Older encrypted rows can predate that projection even when the request has
+  // an exact business scope. The bounded lookup still repeats every source,
+  // date, zone, and exact-grant boundary, and taxEvidenceScope checks the
+  // private title/metadata tuple before it can produce an aggregate gap.
+  const documentFilters = { ...filters };
+  delete documentFilters.entity_slug;
+  try {
+    const lookup = await storeFor(env).taxDocumentCandidates(env, {
+      entitySlug: null,
+      limit: 20,
+      filters: documentFilters,
+      access,
+      scope,
+    });
+    const unreadable = (lookup.results || []).some((row) => {
+      const receipt = taxEvidenceScope(row, question);
+      return receipt?.matched === true || receipt?.title_candidate_matched === true;
+    });
+    const complete = lookup?.complete === true;
+    return { applicable: true, unreadable, complete, unavailable: lookup?.unavailable === true };
+  } catch {
+    // D1/provider errors can contain bound private values. Keep them out of the
+    // response and turn lookup failure into a conservative aggregate gap.
+    return { applicable: true, unreadable: false, complete: false, unavailable: true };
+  }
+}
+
 async function handleThink(
   env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner",
 ) {
@@ -599,17 +645,31 @@ async function handleThink(
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
   } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind });
   const results = Array.isArray(matches) ? matches : [];
-  const coverage = await coverageForRead(env, {
-    access,
-    scope: grantScope,
-    requestedSource: filtersFrom(url).source || null,
-  });
+  const requestedFilters = filtersFrom(url);
+  const [coverage, taxDocumentCoverage] = await Promise.all([
+    coverageForRead(env, {
+      access,
+      scope: grantScope,
+      requestedSource: requestedFilters.source || null,
+    }),
+    taxDocumentCoverageForRead(env, {
+      question: q,
+      filters: requestedFilters,
+      access,
+      scope: grantScope,
+    }),
+  ]);
   const sourceCoverageGaps = coverage.unavailable
     ? [{
         type: "coverage_unavailable",
         detail: "Source coverage could not be checked. A missing result cannot be treated as proof that the available records contain no answer.",
       }]
     : coverage.gaps;
+  let documentTaxGap = taxDocumentCoverage.unreadable
+    ? TAX_EVIDENCE_UNREADABLE_GAP
+    : taxDocumentCoverage.applicable && !taxDocumentCoverage.complete
+      ? TAX_DOCUMENT_INVENTORY_GAP
+      : null;
 
   if (results.length === 0) {
     // Zero results has two causes that look identical from here, and only one
@@ -618,12 +678,14 @@ async function handleThink(
     // knows nothing about the corpus, so its gap must forbid the absence claim
     // rather than issue it. See worker/src/lib/retrieval-status.js.
     const disclosure = emptyRetrievalDisclosure(degraded);
-    const gaps = disclosure.unavailable
+    let gaps = disclosure.unavailable
       ? [...sourceCoverageGaps, ...disclosure.gaps]
       : sourceCoverageGaps.length
         ? sourceCoverageGaps
         : disclosure.gaps;
-    const coverageIncomplete = !disclosure.unavailable && sourceCoverageGaps.length > 0;
+    if (documentTaxGap) gaps = [documentTaxGap, ...gaps];
+    const coverageIncomplete = !disclosure.unavailable &&
+      (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap));
     return jsonResponse({
       mode: "think",
       entity_scope: entityScope,
@@ -642,7 +704,11 @@ async function handleThink(
       notice: disclosure.unavailable
         ? disclosure.notice
         : coverageIncomplete
-          ? coverageIncompleteNotice(coverage.unavailable)
+          ? taxDocumentCoverage.unreadable
+            ? TAX_EVIDENCE_UNREADABLE_NOTICE
+            : documentTaxGap
+              ? TAX_DOCUMENT_INVENTORY_NOTICE
+              : coverageIncompleteNotice(coverage.unavailable)
           : undefined,
       answer: null,
       citations: [],
@@ -704,6 +770,14 @@ async function handleThink(
     ref: r.ref_key || r.drive_file_id || null,
     snippet: (r.snippet || "").replace(/\s+/g, " ").slice(0, 900),
   }));
+  const unreadableRequestedTaxEvidence = taxDocumentCoverage.unreadable || docs.some((doc) =>
+    doc.authority?.tax_scope?.applicable === true &&
+    (doc.authority.tax_scope.matched === true ||
+      doc.authority.tax_scope.title_candidate_matched === true) &&
+    (doc.text_source !== "native" || doc.text_reliable !== true)
+  );
+  if (unreadableRequestedTaxEvidence) documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
+  if (documentTaxGap) gaps.unshift(documentTaxGap);
 
   const renderDocs = (items) => items
     .map((d) => {
@@ -805,7 +879,8 @@ async function handleThink(
     "10. For an explicit current, latest, still, or going-on question, an older source establishes history only. A present-status claim must cite newest reliable-dated evidence that itself states that status. Billing or payment activity alone does not establish an ongoing client, customer, contract, or relationship status.",
     "11. A message, file, meeting note, or other non-authoritative source supports only an as-of statement tied to its exact reliable date. Authority is claim-specific: billing and subscription systems can establish their own account or subscription state, but only a relationship system such as a CRM can establish an unqualified current client or customer relationship. Otherwise state the exact as-of date or say current status cannot be confirmed.",
     "12. An OPERATIVE section records the owner's current decision for that one named fact. Use its Operative value. Every value under Supersedes is historical and must never be repeated as current or counted as supporting agreement.",
-    "13. When a claim rests on reliably dated evidence, weave that date into the sentence naturally, like: per the 2026-07-31 call transcript. A dated claim can be checked; an undated one has to be trusted. Never state a date the documents do not carry.",
+    "13. For a named tax-form question, the cited record must match the exact taxpayer or entity, tax year, and filing type. A partner's Schedule K-1 is not the partnership's Form 1065 return, even though its header mentions Form 1065.",
+    "14. When a claim rests on reliably dated evidence, weave that date into the sentence naturally, like: per the 2026-07-31 call transcript. A dated claim can be checked; an undated one has to be trusted. Never state a date the documents do not carry.",
     env.BRAIN_STYLE_RULE || "",
   ]
     .filter(Boolean)
@@ -882,6 +957,7 @@ async function handleThink(
               "The newest cited document must itself explicitly support the claimed status. Merely co-citing a newest invoice, payment failure, scheduling message, or other activity record does not make an older client or relationship status current.",
               "A message, file, meeting note, or other non-authoritative source supports only a status qualified with its exact reliable as-of date. Authority is claim-specific: billing and subscription systems can establish their own account or subscription state, but only a relationship system such as a CRM can establish an unqualified current client or customer relationship. Otherwise require an as-of date or abstention.",
               "When a cited document contains an OPERATIVE section for this question, only its Operative value is current. Values under Supersedes are historical. Reject an answer that substitutes or repeats a superseded value as current.",
+              "For a named tax-form question, the citation must match the requested taxpayer or entity, tax year, and exact filing type. A Schedule K-1 is not the partnership's Form 1065 return, even when the K-1 header mentions Form 1065.",
               "A similar name, generic guidance, another entity's policy, another property's lease, a transaction, an account statement, or a draft does not establish the requested governing fact.",
               "When a question uses my, our, we, or an unnamed definite subject such as 'the term sheet', require the citation to explicitly connect that subject to the configured brain owner or to an organization, property, agreement, or project named in the question. First-person words inside an unrelated newsletter or third-party document refer to its author, not the brain owner.",
               "Example false: an answer gives our parental leave policy but cites another company's policy.",
@@ -913,6 +989,21 @@ async function handleThink(
           }
           const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
           const allowedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
+          const mismatchedTaxEvidence = taxDocumentCoverage.applicable && allowedDocs.some((doc) =>
+            doc.authority?.tax_scope?.matched !== true
+          );
+          if (evidenceGate.supported && mismatchedTaxEvidence) {
+            evidenceGate.supported = false;
+            evidenceGate.reason = "cited tax evidence does not match the requested entity, tax year, and form";
+          }
+          const unreadableTaxEvidence = allowedDocs.some((doc) =>
+            doc.authority?.tax_scope?.matched === true &&
+            (doc.text_source !== "native" || doc.text_reliable !== true)
+          );
+          if (evidenceGate.supported && unreadableTaxEvidence) {
+            evidenceGate.supported = false;
+            evidenceGate.reason = "the matching tax filing was not read from a reliable native text layer";
+          }
           const asksOwnerSpecificHighRiskFact = /\b(?:term sheet|parental leave|jury duty|i-9|401\s*\(?k\)?|office lease|ownership agreements?|blood type|soc\s*2|security certification|tpt license|vat|gst)\b/i.test(q);
           const ownerTokens = String(owner).toLowerCase().match(/[a-z0-9]+/g)?.filter((token) =>
             !new Set(["the", "owner", "brain", "shadow", "company", "inc", "llc"]).has(token)
@@ -1058,9 +1149,12 @@ async function handleThink(
   const refusalSearchDisclosure = categoricalRefusal && degraded
     ? emptyRetrievalDisclosure(degraded)
     : null;
-  const coverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
+  const sourceCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
     sourceCoverageGaps.length > 0;
-  const confidence = answerError || refusalSearchDisclosure || coverageBlocksAbsence
+  const taxDocumentCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
+    Boolean(documentTaxGap);
+  const incompleteCoverageBlocksAbsence = sourceCoverageBlocksAbsence || taxDocumentCoverageBlocksAbsence;
+  const confidence = answerError || refusalSearchDisclosure || incompleteCoverageBlocksAbsence
     ? undefined
     : answer === unsupportedAnswer || !approvedDocs.length
       ? refusalConfidence({
@@ -1078,11 +1172,15 @@ async function handleThink(
     degraded_reason: degradedReason || undefined,
     retrieval_scope: retrievalScope,
     access: accessSummary,
-    status: refusalSearchDisclosure?.status || (coverageBlocksAbsence ? COVERAGE_INCOMPLETE : undefined),
-    notice: refusalSearchDisclosure?.notice || (coverageBlocksAbsence
-      ? coverageIncompleteNotice(coverage.unavailable, results.length > 0)
-      : undefined),
-    answer: refusalSearchDisclosure || coverageBlocksAbsence ? null : answer,
+    status: refusalSearchDisclosure?.status || (incompleteCoverageBlocksAbsence ? COVERAGE_INCOMPLETE : undefined),
+    notice: refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence && unreadableRequestedTaxEvidence
+      ? TAX_EVIDENCE_UNREADABLE_NOTICE
+      : taxDocumentCoverageBlocksAbsence
+        ? TAX_DOCUMENT_INVENTORY_NOTICE
+      : sourceCoverageBlocksAbsence
+        ? coverageIncompleteNotice(coverage.unavailable, results.length > 0)
+        : undefined),
+    answer: refusalSearchDisclosure || incompleteCoverageBlocksAbsence ? null : answer,
     answer_error: answerError || undefined,
     model: model || undefined,
     evidence_gate: evidenceGate || undefined,

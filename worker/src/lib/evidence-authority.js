@@ -12,6 +12,7 @@
  */
 
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
+import { taxEvidenceScope } from "./tax-evidence-scope.js";
 
 /** Highest authority first. T0 is absence, not a weak document. */
 export const TIERS = Object.freeze({
@@ -301,9 +302,11 @@ export function authorityFor(row = {}, {
   const operativeSection = owner.valid ? operativeSectionForQuery(row, query) : null;
   const relationshipBlocked = claimKind === CLAIM_KINDS.RELATIONSHIP_STATUS && transactionalEvidence(row) && !owner.valid;
   const ownerSectionMismatch = owner.valid && !operativeSection;
+  const taxScope = taxEvidenceScope(row, query);
+  const taxScopeBlocked = taxScope?.matched === false;
   const textIsReliable = reliableText(row);
   const dateIsReliable = !current || reliableDate(row);
-  const eligible = !relationshipBlocked && !ownerSectionMismatch;
+  const eligible = !relationshipBlocked && !ownerSectionMismatch && !taxScopeBlocked;
   const authoritative = eligible && base.rank <= TIERS.T2.rank && textIsReliable && dateIsReliable;
 
   let reason = base.reason;
@@ -311,6 +314,8 @@ export function authorityFor(row = {}, {
     reason = `${String(row.source || "this financial record")} can establish its account or transaction state, not a relationship`;
   } else if (ownerSectionMismatch) {
     reason = "an owner-confirmed record, but no operative section matches this claim";
+  } else if (taxScopeBlocked) {
+    reason = "this record does not match the requested tax entity, tax year, and exact form";
   } else if (!textIsReliable) {
     reason = `${base.reason}; its text was not obtained from a reliable native text layer`;
   } else if (!dateIsReliable) {
@@ -330,6 +335,7 @@ export function authorityFor(row = {}, {
     current: Boolean(current),
     owner_confirmed: owner.valid,
     operative: Boolean(operativeSection),
+    ...(taxScope ? { tax_scope: taxScope } : {}),
     ...(operativeSection ? { operative_section: operativeSection } : {}),
   };
 }
