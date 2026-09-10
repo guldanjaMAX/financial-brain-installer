@@ -205,7 +205,36 @@ const call = (env, path) => {
   check("think replaces raw answer-model errors before they reach clients",
     response.status === 200 && body.answer === null &&
       body.answer_error === ANSWER_ERROR_MESSAGES.unavailable &&
+      Array.isArray(body.citations) && body.citations.length === 0 &&
+      Array.isArray(body.results) && body.results.length === 1 &&
       !JSON.stringify(body).includes(rawProviderFailure),
+    JSON.stringify(body).slice(0, 300));
+}
+
+/* A successful provider envelope with no text is still a null answer. The
+   retrieved rows remain useful diagnostics, but none was cited or approved. */
+{
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async () => {
+      providerCalls++;
+      return new Response(JSON.stringify({
+        content: [], model: "claude-fixture", usage: { input_tokens: 1, output_tokens: 0 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: { ANTHROPIC_API_KEY: "fixture-key", ANSWER_MODEL: "claude-fixture" },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("an empty answer-model response keeps candidates but approves no citations",
+    providerCalls === 1 && body.answer === null && body.citations.length === 0 &&
+      body.results.length === 1 && body.results[0].chunk_uid === "meeting:123#0",
     JSON.stringify(body).slice(0, 300));
 }
 

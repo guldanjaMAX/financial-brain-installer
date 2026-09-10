@@ -38,6 +38,11 @@ that stops the waiting. Nothing here changes what your brain holds.
   bills you for every piece again. It now names what is missing and points at
   the one source that needs it.
 
+- **A test that receives no written answer now names the stage that stopped.**
+  It distinguishes retrieval, incomplete source coverage, answer generation,
+  and evidence verification, then keeps only a reviewed safe explanation. It
+  no longer leaves the person running the test with "unknown."
+
 ## 0.4.5
 
 Candidate only. This version has not been released.

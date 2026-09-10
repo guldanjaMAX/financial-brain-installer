@@ -374,8 +374,11 @@ check("a password assignment in a gap detail is redacted", has(leaky, "[redacted
 check("redactSecrets leaves ordinary prose alone",
   redactSecrets("we agreed the password would be changed on Friday") ===
     "we agreed the password would be changed on Friday");
+const syntheticPrivateKey = [
+  "-----BEGIN", "RSA PRIVATE KEY-----\nabc\n-----END", "RSA PRIVATE KEY-----",
+].join(" ");
 check("redactSecrets handles a private key block",
-  redactSecrets("-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----") ===
+  redactSecrets(syntheticPrivateKey) ===
     "[redacted private key]");
 check("redactSecrets is stable across repeated calls",
   redactSecrets(LEAKED) === redactSecrets(LEAKED) && redactSecrets(LEAKED) === "[redacted anthropic key]");
@@ -530,10 +533,15 @@ const fetchStub = async (url, init = {}) => {
   if (u.pathname === "/api/rag/think") {
     privateQueryCalls.push({ url: u, init, body: JSON.parse(init.body || "{}") });
     return reply(200, {
+      mode: "think",
       answer: "They were let go after two missed windows [1].",
       gaps: [{ type: "thin_coverage", detail: "Only 2 sources matched." }],
       citations: [{ n: 1, title: "Vendor review call", source: "meeting", ref: "m/1", ts: "2026-03-04T00:00:00Z" }],
-      results: [{ title: "a doc" }, { title: "another" }],
+      results: [
+        { title: "Vendor review call", source: "meeting", chunk_uid: "meeting:m/1#0" },
+        { title: "Invoice dispute thread", source: "message", chunk_uid: "message:gmail/18f2#0" },
+      ],
+      evidence_gate: { supported: true, complete: true, evidence: [1] },
     });
   }
   return reply(404, { error: "not found" });

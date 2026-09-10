@@ -832,6 +832,7 @@ async function handleThink(
     });
     answer = (data?.content?.[0]?.text || "").trim() || null;
     model = data?.model || null;
+    if (!answer) approvedDocs = [];
     if (answer) {
       const headsUpAt = answer.search(/\n\s*Heads up:/i);
       if (headsUpAt >= 0) {
@@ -844,6 +845,10 @@ async function handleThink(
     }
   } catch (e) {
     answerError = answerGenerationError(e);
+    // Retrieval candidates are not approved citations when answer generation
+    // itself failed. Keep the candidates in `results` for diagnostics, but do
+    // not attach them to a null answer as if the model had cited them.
+    approvedDocs = [];
   }
 
   // Retrieval always returns the nearest candidates, even when none answers
