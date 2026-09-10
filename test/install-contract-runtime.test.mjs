@@ -144,27 +144,48 @@ test("public field-guide install mutations fail before npm arguments are derived
   }
 });
 
-test("runtime-relative npm wins and an ambient npm locator cannot leave the Node install tree", () => {
+test("runtime-relative npm wins and an ambient npm locator cannot leave either Node install layout", () => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-install-runtime-"));
   try {
-    const runtime = join(sandbox, "runtime");
-    const node = join(runtime, "bin", "node");
-    mkdirSync(dirname(node), { recursive: true });
-    writeFileSync(node, "");
-    const runtimeCli = writeNpmFixture(runtime);
+    for (const platform of ["linux", "win32"]) {
+      const runtime = join(sandbox, `runtime-${platform}`);
+      const node = platform === "win32"
+        ? join(runtime, "node.exe")
+        : join(runtime, "bin", "node");
+      mkdirSync(dirname(node), { recursive: true });
+      writeFileSync(node, "");
+      const primaryTree = platform === "win32" ? "node_modules" : "lib";
+      const primaryCli = platform === "win32"
+        ? join("node_modules", "npm", "bin", "npm-cli.js")
+        : join("lib", "node_modules", "npm", "bin", "npm-cli.js");
+      const runtimeCli = writeNpmFixture(runtime, primaryCli);
 
-    const outside = join(sandbox, "outside");
-    const outsideCli = writeNpmFixture(outside, join("npm", "bin", "npm-cli.js"));
-    assert.equal(resolveNpmCliPath({ environment: { npm_execpath: outsideCli }, nodeExecutable: node }), runtimeCli);
+      const outside = join(sandbox, `outside-${platform}`);
+      const outsideCli = writeNpmFixture(outside, join("npm", "bin", "npm-cli.js"));
+      assert.equal(resolveNpmCliPath({
+        environment: { npm_execpath: outsideCli },
+        nodeExecutable: node,
+        platform,
+      }), runtimeCli, platform);
 
-    rmSync(join(runtime, "lib"), { recursive: true, force: true });
-    assert.throws(
-      () => resolveNpmCliPath({ environment: { npm_execpath: outsideCli }, nodeExecutable: node }),
-      /npm_cli_unavailable/,
-    );
+      rmSync(join(runtime, primaryTree), { recursive: true, force: true });
+      assert.throws(
+        () => resolveNpmCliPath({
+          environment: { npm_execpath: outsideCli },
+          nodeExecutable: node,
+          platform,
+        }),
+        /npm_cli_unavailable/,
+        platform,
+      );
 
-    const fallbackCli = writeNpmFixture(runtime, join("tools", "npm", "bin", "npm-cli.js"));
-    assert.equal(resolveNpmCliPath({ environment: { npm_execpath: fallbackCli }, nodeExecutable: node }), fallbackCli);
+      const fallbackCli = writeNpmFixture(runtime, join("tools", "npm", "bin", "npm-cli.js"));
+      assert.equal(resolveNpmCliPath({
+        environment: { npm_execpath: fallbackCli },
+        nodeExecutable: node,
+        platform,
+      }), fallbackCli, platform);
+    }
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
