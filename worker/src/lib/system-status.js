@@ -228,6 +228,41 @@ export async function ownerSystemStatus(env, deps) {
         // difference between "you have a task" and "someone owes you a fix".
         fix_owner: "installer",
       }));
+  } else if (diag?.complete === false) {
+    // A bounded partial report can carry counts and problems that were
+    // positively observed. It cannot turn an unknown count into zero, surface
+    // the meta warning itself as a corpus defect, or publish a clean problem
+    // register while some checks remain unavailable.
+    if (exactNonnegativeCount(diag.totals?.documents)) out.documents = diag.totals.documents;
+    if (exactNonnegativeCount(diag.totals?.chunks)) out.chunks = diag.totals.chunks;
+    const unavailableIds = new Set(Array.isArray(diag.unavailable_checks)
+      ? diag.unavailable_checks.map(String)
+      : []);
+    const confirmedFindings = Array.isArray(diag.findings)
+      ? diag.findings.filter((finding) =>
+          finding?.incomplete !== true && finding?.observable !== false &&
+          ["coverage", "integrity", "efficiency"].includes(finding?.area) &&
+          !unavailableIds.has(String(finding?.id || "")))
+      : [];
+    const confirmedProblems = confirmedFindings
+      .filter((finding) => finding.severity === "crit" || finding.severity === "warn");
+    if (confirmedProblems.length) {
+      out.problem_counts = {
+        crit: confirmedFindings.filter((finding) => finding.severity === "crit").length,
+        warn: confirmedFindings.filter((finding) => finding.severity === "warn").length,
+        info: confirmedFindings.filter((finding) => finding.severity === "info").length,
+      };
+      out.problems = confirmedProblems.map((finding) => ({
+        id: finding.id,
+        area: finding.area,
+        severity: finding.severity,
+        count: Number(finding.count || 0),
+        title: finding.title,
+        detail: finding.detail,
+        fix_owner: "installer",
+      }));
+    }
+    unavailable.push("diagnose");
   } else {
     unavailable.push("diagnose");
   }

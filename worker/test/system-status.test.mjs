@@ -170,6 +170,25 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
     !("problems" in s) && !("problem_counts" in s), JSON.stringify(s));
 }
 {
+  const partial = async () => ({
+    complete: false,
+    totals: { documents: 12, chunks: null, sources: 1 },
+    unavailable_checks: ["chunk_scan"],
+    summary: { crit: 0, warn: 2, info: 0, ok: 0, unavailable: 1 },
+    findings: [
+      { id: "source_mismatch", area: "integrity", severity: "warn", count: 1,
+        title: "one source mismatch was confirmed" },
+      { id: "chunk_scan", area: "meta", severity: "warn", observable: false,
+        incomplete: true, title: "scan incomplete" },
+    ],
+  });
+  const s = await ownerSystemStatus({}, { ...deps, diagnose: partial });
+  check("a partial diagnosis is named as unavailable even when it found a problem",
+    s.unavailable.includes("diagnose") && s.problems.length === 1, JSON.stringify(s));
+  check("a verified document total survives while an unverified chunk total stays absent",
+    s.documents === 12 && !("chunks" in s), JSON.stringify(s));
+}
+{
   const s = await ownerSystemStatus({}, { ...deps, freshness: async () => { throw new Error("down"); } });
   check("a broken freshness is NAMED", s.unavailable.includes("freshness"));
   check("a broken freshness also leaves access zones unavailable", s.unavailable.includes("zones"));

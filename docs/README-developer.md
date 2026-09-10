@@ -867,6 +867,23 @@ good enough. Do not move a client to another backend based on chunk count alone.
 Require a measured failure on the golden set, a diagnosed cause, and an approved
 architecture change.
 
+`brain diagnose` follows the same refusal to guess at scale. It pins the current
+maximum integer `chunks.id`, then keyset-pages through that fixed range in
+50,000-row statements. One page derives the total, blank, oversized, orphan,
+document-source mismatch, and source-zone mismatch counts together. The report
+also brackets the complete run with durable schema, outbox, `corpus_stats`,
+source-event, source-count, and vector-projection markers. `brain zone` writes a
+source event in the same transaction as its bounded projection repair, including
+same-zone retries. Store parity is attempted only when the durable projection is
+verified and its outbox is empty, then requires exact count equality. A page
+failure, fixed-range coverage gap, statement or page budget, or changed marker
+produces `complete: false`; partial counts never become a healthy verdict.
+Exact duplicate-text and per-document
+outlier grouping remain `observable: false` above their safe bound because they
+require a second whole-corpus grouping pass. A disposable D1 field gate at
+roughly 1.5 million synthetic chunks remains required before this is called
+provider-scale proof.
+
 ---
 
 ## Tests

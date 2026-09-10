@@ -462,8 +462,17 @@ step, or worth reviewing with the technician first.
 ```bash
 brain doctor                          # what is wrong with this machine
 brain health ./brain.manifest.json    # what is wrong with the brain
+brain diagnose ./brain.manifest.json  # what is missing or stored incorrectly
 brain secrets ./brain.manifest.json   # exact durable ADMIN_KEY rotation command
 ```
+
+`brain diagnose` is read-only and safe to rerun. On a large corpus it fixes one
+chunk high-water mark and checks bounded keyset pages, so no individual page has
+to scan the whole database. The report says `not verified` instead of zero when
+a page, statement budget, or closing corpus marker prevents a complete count.
+Duplicate-chunk and per-document outlier measurements are explicitly marked as
+not observable when their exact grouping would require another whole-corpus
+pass.
 
 The failures most likely to hit a working install, each with what you see, why
 it happens, and the exact command, are in

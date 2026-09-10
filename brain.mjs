@@ -15590,8 +15590,8 @@ async function reportBacklog(manifestPath) {
 /** Render a diagnosis for a human. Exported so it can be exercised without a network. */
 export function renderDiagnosis(r, renderOptions = {}) {
   const diagnosticCount = (value) => Number.isSafeInteger(value) && value >= 0
-    ? num(value).padStart(9)
-    : "  unknown";
+    ? num(value).padStart(12)
+    : "not verified".padStart(12);
   console.log(`\n  ${c.bold("what is in the brain")}`);
   console.log(`    ${diagnosticCount(r?.totals?.documents)}  documents`);
   console.log(`    ${diagnosticCount(r?.totals?.chunks)}  chunks`);
@@ -15626,16 +15626,26 @@ export function renderDiagnosis(r, renderOptions = {}) {
   // second pass finds nothing left to substitute.
   const okVerdict = (line) => ok(renderCliCommands(line, renderOptions));
   const warnVerdict = (line) => warn(renderCliCommands(line, renderOptions));
+  const unobservable = (r.findings || []).filter((finding) => finding.observable === false).length;
   console.log("");
   if (r.verdict === "incomplete" || r.complete !== true) {
     warnVerdict(
-      `diagnosis is incomplete: ${Number(s.unavailable || r?.unavailable_checks?.length || 0)} check(s) could not run.` + "\n" +
-        "        Unknown counts are not zero, and this result does not prove readiness or a repair cause."
+      "diagnosis is incomplete because the diagnostic did not finish, so this report cannot say the brain is clear." +
+        (s.crit ? ` It did confirm ${s.crit} problem(s), and more may remain.` : "") + "\n" +
+        "        Counts marked not verified are not zero. Fix the unavailable check above, then run `brain diagnose <manifest>` again."
+    );
+  } else if (r.verdict === "healthy" && unobservable) {
+    warnVerdict(
+      `the completed core checks found no problem. ${unobservable} optional measurement(s) were not observable at this scale,` + "\n" +
+        "        so this is not a claim that every efficiency check ran."
     );
   } else if (r.verdict === "healthy") {
-    okVerdict("all diagnostic checks completed without a detected issue.");
+    okVerdict("nothing is missing, nothing is stored wrong, and nothing is being wasted.");
   } else if (r.verdict === "usable_with_gaps") {
-    warnVerdict(`${s.warn} diagnosed gap(s) may make answers incomplete or less reliable.`);
+    warnVerdict(
+      `the brain is usable, with ${s.warn} gap(s) worth fixing. Some gaps can make answers incomplete.` + "\n" +
+        "        Read each finding before relying on the brain for a complete picture."
+    );
   } else {
     warnVerdict(
       `${s.crit} problem(s) that WILL make answers wrong or incomplete, and ${s.warn} worth fixing.` + "\n" +
