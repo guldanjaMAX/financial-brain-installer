@@ -37,6 +37,9 @@ const OVERGENERALISED =
 const VOLATILE =
   /(\$[\d,]+|\b\d[\d,._]*\s*(%|users?|customers?|clients?|leads?|per month|\/mo|per day|\/day)\b)/i;
 const DATE_ANCHOR = /\bas of\b|\b\d{4}-\d{2}-\d{2}\b/i;
+const MAX_DERIVED_FROM = 16;
+const MAX_DERIVED_FROM_CHARS = 512;
+const DERIVED_FROM_CONTROL = /[\u0000-\u001f\u007f]/;
 
 const slugify = (s) =>
   String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) ||
@@ -63,6 +66,17 @@ export function validateLesson(input) {
     errors.push(
       'confidence is "verified" but no verification was given. Say how you know. If you cannot, the honest value is "inferred".'
     );
+
+  const derivedFrom = input?.derived_from === undefined
+    ? []
+    : Array.isArray(input.derived_from)
+      ? [...new Set(input.derived_from.map((value) => typeof value === "string" ? value.trim() : value))]
+      : null;
+  if (!derivedFrom || derivedFrom.length > MAX_DERIVED_FROM || derivedFrom.some((id) =>
+    typeof id !== "string" || !id || id.length > MAX_DERIVED_FROM_CHARS ||
+    DERIVED_FROM_CONTROL.test(id) || !id.includes(":"))) {
+    errors.push(`derived_from must contain at most ${MAX_DERIVED_FROM} document ids exactly as search returned them`);
+  }
 
   if (errors.length) return { ok: false, errors, warnings, value: null };
 
@@ -97,12 +111,22 @@ export function validateLesson(input) {
       volatile,
       supersedes: input?.supersedes ? String(input.supersedes).trim() : null,
       tags: Array.isArray(input?.tags) ? input.tags.map(String).filter(Boolean) : [],
+      derived_from: derivedFrom || [],
     },
   };
 }
 
 export function renderLesson(v) {
-  const lines = [`# ${v.title}`, "", v.body, "", "---", `Confidence: ${v.confidence}`];
+  const lines = [
+    `# ${v.title}`,
+    "",
+    "Evidence-Lineage: agent-derived",
+    "",
+    v.body,
+    "",
+    "---",
+    `Confidence: ${v.confidence}`,
+  ];
   if (v.claimed_confidence)
     lines.push(`Claimed confidence: ${v.claimed_confidence} (downgraded at write time)`);
   if (v.verification) lines.push(`Verification: ${v.verification}`);

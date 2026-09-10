@@ -133,9 +133,16 @@ const ABSENCE =
       uri: "https://files.example/statement", chunk_uid: "upload:statement-source-id#4",
       title: "Scanned statement", category: "upload",
       ts: "2026-01-02T00:00:00.000Z", date_source: "filename", date_reliable: false,
-      text_source: "ocr_partial", text_reliable: false, snippet: "Balance shown on scan",
+      text_source: "ocr_partial", text_reliable: false,
+      lineage: {
+        kind: "unclassified", status: "unknown", derived: false,
+        reason: "derivation family was not recorded",
+      },
+      snippet: "Balance shown on scan",
     }],
   }, "brain_search");
+  assert.equal(out.results[0].id, "upload:statement-source-id",
+    "raw search must expose the exact id the remember contract accepts");
   assert.equal(out.results[0].ref, "statement-public-ref");
   assert.equal(out.results[0].source_id, "statement-source-id");
   assert.equal(out.results[0].uri, "https://files.example/statement");
@@ -144,6 +151,7 @@ const ABSENCE =
   assert.equal(out.results[0].date_reliable, false);
   assert.equal(out.results[0].text_source, "ocr_partial");
   assert.equal(out.results[0].text_reliable, false);
+  assert.equal(out.results[0].lineage.status, "unknown");
   console.log("PASS raw search keeps date and extraction provenance");
 }
 

@@ -102,6 +102,7 @@ export function candidatesFrom(probe, rows = []) {
       text_source: r.text_source || "native",
       text_reliable: r.text_reliable !== false,
       authority: r.authority || null,
+      lineage: r.lineage || null,
       text,
     };
     if (probe.freeform) { out.push({ value: null, doc }); continue; }

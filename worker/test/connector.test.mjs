@@ -219,6 +219,12 @@ test("the full connector journey, register through revocation", async () => {
     date_reliable: false,
     text_source: "ocr_partial",
     text_reliable: false,
+    lineage: {
+      kind: "unclassified",
+      status: "unknown",
+      derived: false,
+      reason: "derivation family was not recorded; this document may support what it directly says but cannot count as independent corroboration",
+    },
   });
 
   // ask flows through the REAL think handler; with no LLM key configured the
@@ -373,10 +379,14 @@ test("structured-contributor can correct the brain and the contract still applie
     body: "The pause runs August and September and was agreed on the call, not in July as recorded.",
     confidence: "verified", verification: "read the 2026-07-22 transcript",
     supersedes: "lesson/retainer-paused-july",
+    derived_from: ["zoom:transcript-2026-07-22"],
   });
   assert.match(ok, /Recorded as lesson\//);
   assert.match(ok, /supersedes lesson\/retainer-paused-july/);
   assert.equal(written[0].metadata.written_by, "connector");
+  assert.equal(written[0].metadata.evidence_lineage.kind, "agent_derived");
+  assert.deepEqual(written[0].metadata.evidence_lineage.root_ids, ["zoom:transcript-2026-07-22"]);
+  assert.match(written[0].content, /^Evidence-Lineage: agent-derived$/m);
   assert.equal(written[0].metadata.supersedes, "lesson/retainer-paused-july");
   assert.equal(written[0].source_type, "curated");
 

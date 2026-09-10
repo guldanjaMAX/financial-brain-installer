@@ -31,6 +31,7 @@ import { COVERAGE_INCOMPLETE } from "./retrieval-status.js";
 // brain under two standards is how a record quietly becomes untrustworthy.
 import { validateLesson, renderLesson } from "./remember-contract.js";
 import { profileDescription, profileHas } from "./agent-authority.js";
+import { evidenceLineageFor } from "./evidence-lineage.js";
 
 const PROTOCOLS = new Set(["2025-06-18", "2025-03-26", "2024-11-05"]);
 const MAX_FETCH_CHARS = 60_000;
@@ -82,7 +83,9 @@ const CONTRIBUTOR_TOOLS = [
       "Use this the moment the owner tells you the brain is mistaken: pass the id " +
       "being corrected as `supersedes` so the record keeps why it changed instead " +
       "of silently overwriting. State how you know in `verification` whenever you " +
-      "claim `verified`.",
+      "claim `verified`. When Brain documents support the lesson, pass every " +
+      "supporting search id in `derived_from` so it cannot be counted later as " +
+      "independent confirmation of those documents.",
     inputSchema: {
       type: "object",
       properties: {
@@ -94,6 +97,10 @@ const CONTRIBUTOR_TOOLS = [
         },
         verification: { type: "string", description: "Required when confidence is verified. How you know." },
         supersedes: { type: "string", description: "The id this corrects, e.g. lesson/old-slug." },
+        derived_from: {
+          type: "array", items: { type: "string" },
+          description: "Document ids returned by search that this lesson derives from. Leave empty when it came only from the owner's new statement.",
+        },
         tags: { type: "array", items: { type: "string" } },
       },
       required: ["title", "body", "confidence"],
@@ -158,6 +165,11 @@ function citationProvenance(citation) {
     const ref = String(citation.ref).replace(/\s+/g, " ").slice(0, 200);
     parts.push(`reference ${String(citation.source || "doc")}:${ref}`);
   }
+  if (citation?.lineage?.derived === true) {
+    parts.push("derived evidence, not independent of its sources");
+  } else if (citation?.lineage?.status !== "known") {
+    parts.push("derivation family unknown");
+  }
   return parts;
 }
 
@@ -212,6 +224,7 @@ async function runSearch(deps, args, origin) {
     date_reliable: typeof r.date_reliable === "boolean" ? r.date_reliable : null,
     text_source: r.text_source || "native",
     text_reliable: r.text_reliable !== false,
+    lineage: r.lineage || null,
   }));
   // An empty result list is indistinguishable from "your corpus has nothing"
   // to the model reading it, so an incomplete search has to say so in band
@@ -235,7 +248,7 @@ async function runFetch(env, args, origin) {
   let chunks;
   try {
     doc = await env.DB.prepare(
-      `SELECT title, uri, source, document_date, date_source, date_reliable,
+      `SELECT doc_uid, title, uri, source, meta AS authority_meta, document_date, date_source, date_reliable,
               text_source, text_reliable,
               COALESCE((SELECT kind FROM sources WHERE name = documents.source), 'unregistered') AS source_kind
          FROM documents WHERE doc_uid = ?`,
@@ -256,6 +269,7 @@ async function runFetch(env, args, origin) {
   const date = Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toISOString()
     : null;
+  const lineage = evidenceLineageFor(doc || {}).lineage;
   return text(JSON.stringify({
     id,
     title: doc?.title || "untitled",
@@ -270,6 +284,7 @@ async function runFetch(env, args, origin) {
       date_reliable: doc?.date_reliable === true || doc?.date_reliable === 1,
       text_source: doc?.text_source || "native",
       text_reliable: doc?.text_reliable !== false && doc?.text_reliable !== 0,
+      lineage,
     },
   }));
 }
@@ -295,6 +310,11 @@ async function runRemember(deps, args) {
       category: "lesson",
       written_by: "connector",
       confidence: v.confidence,
+      evidence_lineage: {
+        version: 1,
+        kind: "agent_derived",
+        root_ids: v.derived_from,
+      },
       ...(v.supersedes ? { supersedes: v.supersedes } : {}),
       ...(v.tags.length ? { tags: v.tags } : {}),
     },

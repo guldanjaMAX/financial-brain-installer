@@ -32,6 +32,9 @@ import { embedText, supabaseRpc } from "./supabase.js";
 import { sanitizeEnvelope, sanitizeSensitiveLinks } from "./secret-scan.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
+import {
+  attachEvidenceLineage, evidenceLineageFor, evidenceLineageRootIds,
+} from "./evidence-lineage.js";
 
 export const D1 = "d1";
 export const SUPABASE = "supabase";
@@ -422,7 +425,7 @@ const d1Backend = {
             ? x.doc_uid.slice(x.source.length + 1)
             : x.doc_uid || x.chunk_uid
         );
-        return {
+        const publicRow = {
           chunk_uid: x.chunk_uid,
           doc_uid: x.doc_uid || null,
           source_id: sourceId,
@@ -459,8 +462,10 @@ const d1Backend = {
           // row. It is additive public metadata, kept beside date and text
           // provenance so a citation never presents a tier without its reason.
           authority: x.authority || null,
+          lineage: x.lineage || evidenceLineageFor(x).lineage,
           score: x.rrf_score,
         };
+        return attachEvidenceLineage(publicRow, { root_ids: evidenceLineageRootIds(x) });
       }),
       degraded: r.degraded,
       degraded_reason: r.degraded_reason ?? null,
