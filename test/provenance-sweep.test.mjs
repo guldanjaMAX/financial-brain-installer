@@ -21,6 +21,7 @@ import {
   renderConfirmations,
   renderCoverageSummary,
   renderReport,
+  renderSetWaitingMessage,
   renderZoneReadiness,
   unavailableZoneReadiness,
   validateConfirmationReceipt,
@@ -216,6 +217,9 @@ assert.match(waitingReport.text, /cannot yet say whether your records agree or d
 assert.match(waitingReport.text, /not a finding that your records are empty/);
 assert.doesNotMatch(waitingReport.text, /No disagreement appeared/);
 assert.match(waitingReport.text, /No automatically comparable category completed/);
+assert.match(waitingReport.text, /Owner confirmation is still waiting/);
+assert.match(waitingReport.text, /Do not use `--set` until every category completes/);
+assert.doesNotMatch(waitingReport.text, /Run the same command with --set to record your answers/);
 assert.equal(
   renderCoverageSummary({ total: 2, completed: 1, unchecked: 1 }),
   "Record review partial: 1 of 2 categories was checked; 1 could not be checked.\n" +
@@ -223,7 +227,25 @@ assert.equal(
 );
 assert.equal(
   renderCoverageSummary({ total: 1, completed: 1, unchecked: 0 }),
-  "Record review complete: all 1 category was checked.",
+  "Record review complete: the category was checked.",
+);
+assert.equal(
+  renderCoverageSummary({ total: 1, completed: 0, unchecked: 1 }),
+  "Record review still waiting: the category could not be checked completely.\n" +
+    "This run cannot yet say whether your records agree or disagree. This is not a finding that your records are empty.\n" +
+    "Follow the reasons under Could not check, then run this check again.",
+);
+assert.match(
+  renderSetWaitingMessage({ total: 14, unchecked: 1 }),
+  /1 of 14 categories is unchecked/,
+);
+assert.match(
+  renderSetWaitingMessage({ total: 1, unchecked: 1 }),
+  /1 of 1 category is unchecked/,
+);
+assert.match(
+  renderSetWaitingMessage({ total: 14, unchecked: 2 }),
+  /2 of 14 categories are unchecked/,
 );
 ok("an unavailable check is a waiting state, never a clean zero-category result");
 
@@ -292,6 +314,7 @@ assert.match(runReport.text, /Worth your own eyes/);
 assert.match(runReport.text, /OCR text may be incomplete/);
 assert.match(runReport.text, /## Access zones/);
 assert.match(runReport.text, /Nothing has been written/);
+assert.match(runReport.text, /Run the same command with --set to record your answers/);
 ok("one read-only report shows subject-scoped provenance and access-zone readiness");
 
 const failedGather = await gather(async ({ q }) => {
@@ -422,6 +445,42 @@ assert.equal(waitingCommand.categories_completed, 0);
 assert.equal(waitingCommand.categories_unchecked, 14);
 assert.equal(waitingCommand.category_checks_complete, false);
 ok("brain check returns exact complete and unchecked category counts for local agents");
+
+let zeroCoverageAsked = false;
+let zeroCoverageWrote = false;
+await assert.rejects(cmdCheck(manifestPath, {
+  adminKey: "synthetic", baseUrl: "https://fixture.invalid", flags: { set: true },
+  search: async () => ({
+    status: "search_unavailable", degraded: "vector",
+    notice: "the vector index is still building; this category was not checked",
+    results: [],
+  }),
+  readZones,
+  ask: async () => { zeroCoverageAsked = true; return "1"; },
+  write: async () => { zeroCoverageWrote = true; },
+}), /owner confirmation is still waiting because 14 of 14 categories are unchecked.*Nothing was written/);
+assert.equal(zeroCoverageAsked, false);
+assert.equal(zeroCoverageWrote, false);
+ok("--set exits nonzero without prompting or writing when no category completed");
+
+let partialCoverageAsked = false;
+let partialCoverageWrote = false;
+await assert.rejects(cmdCheck(manifestPath, {
+  adminKey: "synthetic", baseUrl: "https://fixture.invalid", flags: { set: true },
+  search: async ({ q }) => /mailing address/i.test(q)
+    ? rowsFor(q)
+    : {
+      status: "coverage_incomplete",
+      notice: "source history is not yet proven complete; this category was not checked",
+      results: [],
+    },
+  readZones,
+  ask: async () => { partialCoverageAsked = true; return "1"; },
+  write: async () => { partialCoverageWrote = true; },
+}), /owner confirmation is still waiting because 13 of 14 categories are unchecked.*Nothing was written/);
+assert.equal(partialCoverageAsked, false);
+assert.equal(partialCoverageWrote, false);
+ok("--set exits nonzero without prompting or writing when a conflict appears in partial coverage");
 
 let writtenEnvelope = null;
 const setResult = await cmdCheck(manifestPath, {

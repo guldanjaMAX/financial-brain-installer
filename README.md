@@ -249,7 +249,9 @@ an empty search result is never called proof that the corpus contains nothing.
 The record review first says exactly how many categories completed. If source
 history is not yet proven or the search index is still building, an all-unchecked
 run is labeled as waiting and makes no agreement finding. It never presents
-zero completed categories as a clean result.
+zero completed categories as a clean result. If even one category is still
+unchecked, `brain check --set` exits nonzero without prompting or writing, so
+an agent or script cannot mistake a refused partial review for success.
 
 The same report reads the Brain's access-zone readiness proof. It shows the
 grouped source, document, and chunk counts for context, while the source

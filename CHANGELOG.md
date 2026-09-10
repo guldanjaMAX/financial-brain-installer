@@ -36,7 +36,9 @@ that stops the waiting. Nothing here changes what your brain holds.
   leads with how many record-review categories actually completed. When none
   did, it says the check is still waiting and makes no agreement finding. Zero
   completed categories can no longer be mistaken for zero conflicts or an
-  empty corpus.
+  empty corpus. `brain check --set` also waits until every category completes,
+  exits nonzero without prompting or writing, and cannot turn a partial review
+  into a green confirmation result.
 
 ## 0.4.5
 

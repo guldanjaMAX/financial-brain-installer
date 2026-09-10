@@ -257,12 +257,16 @@ export function renderCoverageSummary({ total = 0, completed = 0, unchecked = 0 
     ].join("\n");
   }
   if (!unchecked) {
-    const checkedVerb = total === 1 ? "was" : "were";
-    return `Record review complete: all ${total} ${categories} ${checkedVerb} checked.`;
+    return total === 1
+      ? "Record review complete: the category was checked."
+      : `Record review complete: all ${total} categories were checked.`;
   }
   if (!completed) {
+    const waitingLine = total === 1
+      ? "Record review still waiting: the category could not be checked completely."
+      : `Record review still waiting: none of the ${total} categories could be checked completely.`;
     return [
-      `Record review still waiting: none of the ${total} ${categories} could be checked completely.`,
+      waitingLine,
       "This run cannot yet say whether your records agree or disagree. This is not a finding that your records are empty.",
       "Follow the reasons under Could not check, then run this check again.",
     ].join("\n");
@@ -273,6 +277,13 @@ export function renderCoverageSummary({ total = 0, completed = 0, unchecked = 0 
     `Record review partial: ${completed} of ${total} ${categories} ${checkedVerb} checked; ${unchecked} could not be checked.`,
     `Any agreement or disagreement below applies only to the ${completed} completed ${completedCategories}. Follow the reasons under Could not check, then run this check again.`,
   ].join("\n");
+}
+
+export function renderSetWaitingMessage({ total = 0, unchecked = 0 } = {}) {
+  const category = total === 1 ? "category" : "categories";
+  const uncheckedVerb = unchecked === 1 ? "is" : "are";
+  return `owner confirmation is still waiting because ${unchecked} of ${total} ${category} ${uncheckedVerb} unchecked. ` +
+    "Nothing was written. Follow the reasons under Could not check, then run `brain check` again.";
 }
 
 export function renderReport(gathered = [], { zoneReadiness = null, subject = "" } = {}) {
@@ -308,7 +319,15 @@ export function renderReport(gathered = [], { zoneReadiness = null, subject = ""
     out.push("These were NOT checked. Do not read the rest as a clean bill for them.");
   }
   out.push("", renderZoneReadiness(zoneReadiness));
-  out.push("", "Nothing has been written. Run the same command with --set to record your answers.");
+  if (!coverage.complete) {
+    out.push("",
+      "Nothing has been written. Owner confirmation is still waiting because the record review is incomplete.",
+      "Follow the reasons under Could not check, then run `brain check` again. Do not use `--set` until every category completes.");
+  } else if (assessed.some((item) => item.conflict)) {
+    out.push("", "Nothing has been written. Run the same command with --set to record your answers.");
+  } else {
+    out.push("", "Nothing has been written. The completed review found no automatically comparable conflicts to confirm.");
+  }
   return { text: out.join("\n"), assessed, freeform, failed, coverage };
 }
 
