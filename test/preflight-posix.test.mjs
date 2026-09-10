@@ -122,7 +122,7 @@ test("Windows preflight checks LOCALAPPDATA space and refuses Administrator exec
   assert.match(source, /running as Administrator.*open a normal PowerShell window/i);
   assert.match(source, /GetPathRoot\(\$env:LOCALAPPDATA\)/);
   assert.match(source, /AvailableFreeSpace -lt 2GB/);
-  assert.match(source, /LOCALAPPDATA install drive has at least 2 GiB free/i);
+  assert.match(source, /LOCALAPPDATA drive has .*2 GiB required/i);
 });
 
 test("POSIX preflight finds every Brain CLI on PATH", { skip: process.platform === "win32" }, () => {

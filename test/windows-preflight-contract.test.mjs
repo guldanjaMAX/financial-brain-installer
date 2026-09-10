@@ -21,6 +21,12 @@ test("Windows preflight blocks unsupported OS, elevation, and low per-user disk 
   assert.match(script, /LOCALAPPDATA drive/);
   assert.match(script, /AvailableFreeSpace -lt 2GB/);
   assert.match(script, /at least 2 GiB before download/);
+  assert.equal(script.match(/WindowsBuiltInRole\]::Administrator/g)?.length, 1,
+    "Administrator execution must produce one prerequisite check and one STOP");
+  assert.equal(script.match(/GetPathRoot\(\$env:LOCALAPPDATA\)/g)?.length, 1,
+    "the per-user install drive must be checked exactly once");
+  assert.equal(script.match(/AvailableFreeSpace -lt 2GB/g)?.length, 1,
+    "the per-user free-space threshold must be checked exactly once");
 });
 
 test("Windows preflight uses native package identity and keeps path detection as defense in depth", () => {
