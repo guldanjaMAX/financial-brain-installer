@@ -127,21 +127,22 @@ brain technician "$HOME/Financial Brain/brain.manifest.json" --run cloudflare
 Before opening Cloudflare, explain that the official browser sign-in lets the
 installer create and verify this Brain's Worker, D1 database, Vectorize index,
 and Workers AI access inside the exact account the owner chooses. Browser
-control may open the official page. Before setup creates anything, navigate to
-Workers & Pages > Plans and have the owner confirm the exact account says Paid.
-The narrow installer session cannot read billing status, so successful product
-access is not plan proof. The owner signs in, completes 2FA, chooses and confirms
-the account, reviews Cloudflare's consent, and approves it. Any plan change or
-billing approval belongs to the owner. Normal fresh setup creates, reveals, and
-copies no API token. The protected named profile stays in the owner's
-operating-system credential store. The setup command performs the account check,
-provisioning, migrations, deploy, key persistence, and health proof. It is safe
-to rerun after an interruption.
+control may open the official page. The owner signs in, completes 2FA, chooses
+the account, reviews Cloudflare's consent, and approves it. After Cloudflare
+verifies that exact account, setup opens its Workers & Pages > Plans page. The
+owner confirms it says Paid before setup creates anything. The narrow installer
+session cannot read billing status, so successful product access is not plan
+proof. Any plan change or billing approval belongs to the owner. Normal fresh
+setup creates, reveals, and copies no API token. The protected named profile
+stays in the owner's operating-system credential store. The setup command
+performs the account check, provisioning, migrations, deploy, key persistence,
+and health proof. It is safe to rerun after an interruption.
 
 Describe the least-privilege hidden token path only if the released CLI says
 browser sign-in is unavailable and the owner explicitly selects that recovery
 path. It is not ordinary onboarding and must not be presented as a fresh-install
-task.
+task. It also does not bypass any machine check or the exact account's separate
+Workers Paid confirmation.
 
 ### 3. Google
 

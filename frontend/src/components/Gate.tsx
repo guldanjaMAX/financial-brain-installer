@@ -121,7 +121,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
               Usually takes about ten seconds. You stay in control of the secure device window.
             </p>
           )}
-          {error && <p className="mt-4 text-[14px] text-red-700">{error}</p>}
+          {error && <p role="alert" className="mt-4 text-[14px] text-red-700">{error}</p>}
         </div>
       </div>
     </div>

@@ -54,7 +54,7 @@ export const TECHNICIAN_PREREQUISITES = Object.freeze([
   Object.freeze({
     id: "workers_paid",
     requirement: "Workers & Pages > Plans must show Paid before any Brain resource is created",
-    proof: "the owner confirms the dashboard because the installer's narrow session cannot read billing status",
+    proof: "after sign-in verifies the exact account, the owner confirms its account-specific dashboard because the installer's narrow session cannot read billing status",
   }),
 ]);
 
@@ -78,14 +78,14 @@ export const TECHNICIAN_STEPS = Object.freeze([
     id: "cloudflare",
     title: "Install the private Brain",
     dashboard_url: "https://dash.cloudflare.com/",
-    human_boundary: "The owner signs in, completes 2FA, chooses the exact account, and confirms Workers & Pages > Plans says Paid. Before any resource is created, the owner approves Cloudflare's browser consent. Normal fresh setup creates no API token.",
+    human_boundary: "The owner signs in, completes 2FA, and chooses the exact account. After Cloudflare verifies it, the installer opens that account's Workers & Pages plan page for the owner's Paid confirmation. Before any resource is created, the owner approves Cloudflare's browser consent. Normal fresh setup creates no API token.",
     automated_proof: "The installer verifies the named browser sign-in and exact account, provisions that account, deploys, migrates, and runs health checks. The narrow sign-in does not claim to verify billing; the owner's dashboard confirmation is the plan proof.",
     owner_guidance: ownerGuidance({
-      before_action: "Cloudflare's official page will open. Before setup creates anything, the owner confirms the intended account shows Workers & Pages > Plans > Paid, then approves this Brain's named local browser session.",
+      before_action: "Cloudflare's official sign-in will open first. After it verifies the selected account, the installer opens that exact account's Workers & Pages > Plans page. The owner confirms it says Paid before setup creates anything.",
       why: "The installer uses that owner-approved session to create and verify this Brain's Worker, database, meaning-search index, and Workers AI access in the selected account.",
       minimum_access: "The installer confines every action to the exact Cloudflare account the owner selects and confirms for this Brain. Normal fresh setup creates, reveals, and copies no API token.",
       browser_help: "The assistant can open the official sign-in page and continue the installer after Cloudflare returns the confirmed account.",
-      owner_only: "The owner signs in, completes 2FA, selects the exact account, confirms Plans says Paid, then reviews and approves consent. Any plan change or billing approval stays with the owner.",
+      owner_only: "The owner signs in, completes 2FA, selects the exact account, reviews and approves consent, then confirms that account's plan page says Paid. Any plan change or billing approval stays with the owner.",
       privacy: "The protected browser session stays in the owner's operating-system credential store. The assistant must not inspect or export it. This narrow sign-in does not verify billing; the owner's dashboard confirmation is the plan proof.",
     }),
   }),
@@ -208,12 +208,17 @@ const SAFE_ENV_NAMES = Object.freeze([
   "SSH_AUTH_SOCK", "DISPLAY", "WAYLAND_DISPLAY", "XDG_CONFIG_HOME",
   "LOCALAPPDATA", "APPDATA", "USERPROFILE", "SYSTEMROOT", "COMSPEC", "PATHEXT",
   "BRAIN_GOOGLE_TOKEN_STORE", "BRAIN_IMAP_CREDENTIAL_STORE",
+  // Non-secret, exact-account proof for an explicitly approved unattended
+  // setup. The child still refuses a missing or different verified account id.
+  "BRAIN_WORKERS_PAID_ACCOUNT_ID",
 ]);
 
 export function technicianChildEnvironment(base = {}, explicit = {}) {
   const result = {};
   for (const name of SAFE_ENV_NAMES) {
-    if (typeof base[name] === "string" && base[name] !== "") result[name] = base[name];
+    if (typeof base[name] !== "string" || base[name] === "") continue;
+    if (name === "BRAIN_WORKERS_PAID_ACCOUNT_ID" && !/^[a-f0-9]{32}$/i.test(base[name])) continue;
+    result[name] = base[name];
   }
   for (const [name, value] of Object.entries(explicit)) {
     if (typeof value === "string" && value !== "") result[name] = value;
@@ -289,7 +294,7 @@ export function technicianPlan(manifestPath, deps = {}) {
     rules: [
       "Run one step at a time and rerun the same step after an interruption.",
       "Before setup, require Node 22+, 2 GiB free on the actual install drive, and a normal non-elevated user terminal.",
-      "Before creating any Cloudflare resource, require the owner to confirm Workers & Pages > Plans says Paid for the exact account; the narrow sign-in cannot prove billing.",
+      "After Cloudflare verifies the exact account, require the owner to confirm its Workers & Pages > Plans page says Paid before creating any resource; the narrow sign-in cannot prove billing. Apply this to fresh, resumed, recovery, and automation setup paths.",
       "Before any provider page or system prompt, explain what will appear, why it is needed, and the one action the owner should take next.",
       "Offer browser help for official-page navigation and non-secret fields, then hand control back before sign-in, 2FA, a credential, consent, billing, or a passkey prompt.",
       "Keep tokens, client secrets, app passwords, invite codes, and authentication codes in provider pages or hidden terminal prompts.",
