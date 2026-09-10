@@ -119,8 +119,10 @@ secure passkey window.
 Setup front-loads five prerequisites. `brain tools` checks the machine and tells
 you one clear fix for anything missing. The Cloudflare sign-in can verify the
 exact account and product access, but its narrow permission cannot read billing
-status. The owner therefore confirms **Workers and Pages, Plans: Paid** in that
-exact account before setup creates any resource.
+status. After sign-in verifies the account, setup opens that exact account's
+plan page. The owner confirms **Workers and Pages, Plans: Paid** before setup
+creates any resource. The same stop applies when setup resumes a prepared
+manifest or uses an approved recovery or automation path.
 
 1. **Node.js 22 or newer.** This runs the Brain CLI and pinned Wrangler.
 2. **At least 2 GiB free on the actual install drive.** On Windows the supported

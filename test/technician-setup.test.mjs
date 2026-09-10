@@ -238,8 +238,10 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(content, /at least 2 GiB free.*LOCALAPPDATA/is);
   assert.match(content, /without `sudo`, root, or Run as\s+administrator/i);
   assert.match(content, /Workers & Pages > Plans/i);
-  assert.match(content, /owner confirm.*exact account.*Paid/is);
+  assert.match(content, /sign-in.*verifies the\s+exact account.*owner confirm.*Paid/is);
   assert.match(content, /before any Cloudflare\s+resource is created/i);
+  assert.match(content, /prepared or\s+older manifest.*token recovery lane.*approved\s+automation/is);
+  assert.match(content, /generic yes, a different account ID, or no proof\s+must stop/is);
   assert.match(content, /cannot see or store your passkey, Face ID, fingerprint/i);
   assert.match(content, /> or device PIN/i);
   assert.match(optimizeRoute, /CLI, technician skill,\s+and MCP registration/i);
@@ -247,8 +249,13 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute, /one clearly previewed bundle/i);
   assert.match(optimizeRoute, /technician skill, Claude\s+MCP registration, and Codex MCP registration/i);
   assert.match(optimizeRoute, /ask once for approval of that bundle/i);
-  assert.match(optimizeRoute, /Do not invent or guess a repair command/i);
-  assert.match(optimizeRoute, /CLI installation or replacement on its own supported path and approval/i);
+  assert.match(optimizeRoute, /actual atomic repair scopes/i);
+  assert.match(optimizeRoute, /combined assistant repair.*approval for the whole group/is);
+  assert.match(optimizeRoute, /Preserve deliberately disabled entries, custom or unrelated registrations/i);
+  assert.match(optimizeRoute, /only an absent entry or\s+one that exact installer ownership proves it owns/is);
+  assert.match(optimizeRoute, /If readback fails, restore the\s+prior installer-owned state/is);
+  assert.match(optimizeRoute, /Do not invent\s+or guess a repair command/i);
+  assert.match(optimizeRoute, /CLI installation or\s+replacement on its own supported path and approval/i);
   assert.match(optimizeRoute, /must not run/i);
   assert.ok(optimizeRoute.includes(renderCliCommands("brain invite")));
   assert.ok(optimizeRoute.includes(renderCliCommands("brain devices")));
@@ -297,9 +304,13 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.match(content, /one small action or answer at a time/i);
   assert.match(content, /browser control is available.*official-page navigation and non-secret fields/i);
   assert.match(content, /Node 22\+.*2 GiB.*LOCALAPPDATA.*without sudo, root, or Run as administrator/i);
-  assert.match(content, /Workers & Pages > Plans > Paid.*narrow named browser session cannot read billing status/i);
+  assert.match(content, /verifies the exact account.*Workers & Pages > Plans page.*confirm it says Paid.*narrow session cannot read billing status/i);
+  assert.match(content, /prepared manifest, recovery lane, or approved automation/i);
   assert.match(content, /Optimize may report a missing CLI, skill, or MCP registration/i);
   assert.match(content, /one clearly previewed and approved bundle.*skill, Claude MCP, and Codex MCP/is);
+  assert.match(content, /atomic repair scopes.*combined scope needs approval for its whole previewed group/i);
+  assert.match(content, /Preserve disabled, custom, and unrelated entries and files byte for byte/i);
+  assert.match(content, /restore prior installer-owned state if readback fails/i);
   assert.match(content, /Do not invent a command.*CLI replacement separate/is);
   assert.match(content, /does not run passkey enrollment or device review/i);
   assert.doesNotMatch(content, /CLOUDFLARE_API_TOKEN|ADMIN_KEY|client_secret|app_password/);
@@ -385,6 +396,7 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   ]);
   assert.match(JSON.stringify(plan.prerequisites), /LOCALAPPDATA/i);
   assert.match(JSON.stringify(plan.prerequisites), /narrow session cannot read billing status/i);
+  assert.match(plan.rules.join(" "), /fresh, resumed, recovery, and automation setup paths/i);
   assert.ok(plan.steps.every((step) => step.owner_guidance?.before_action && step.owner_guidance?.privacy));
   assert.match(JSON.stringify(plan), /hidden terminal prompts/i);
   assert.equal(plan.assistance.primary_surface, "claude_code");
@@ -447,8 +459,8 @@ test("the normal Cloudflare briefing uses owner browser sign-in and cannot assig
   const text = renderTechnicianStepBriefing(cloudflare);
   assert.equal(cloudflare.dashboard_url, "https://dash.cloudflare.com/");
   assert.match(text, /official sign-in page/i);
-  assert.match(text, /owner signs in, completes 2FA, selects the exact account, confirms Plans says Paid/i);
-  assert.match(text, /Workers & Pages > Plans > Paid/i);
+  assert.match(text, /owner signs in, completes 2FA, selects the exact account.*approves consent.*confirms that account's plan page says Paid/i);
+  assert.match(text, /Workers & Pages > Plans page.*confirms it says Paid/is);
   assert.match(text, /narrow sign-in does not verify billing/i);
   assert.match(text, /Normal fresh setup creates, reveals, and copies no API token/i);
   assert.doesNotMatch(text, /create (?:an?|the).*token|reveal(?:ed)? token|API Tokens page/i);
@@ -510,6 +522,7 @@ test("the Cloudflare technician step forwards the complete owner-reviewed browse
     "workers-paid-confirmed": true,
   };
   let call;
+  let paidAccountProof;
   const receipt = await runTechnicianStep({
     step: "cloudflare",
     manifestPath: freshManifest,
@@ -517,7 +530,11 @@ test("the Cloudflare technician step forwards the complete owner-reviewed browse
     scriptPath: fixtureScriptPath,
     nodePath: fixtureNodePath,
     baseEnv: { PATH: "/safe/bin", CLOUDFLARE_API_TOKEN: "must-not-cross" },
-    spawn: (node, args, options) => { call = { node, args, options }; return { status: 0 }; },
+    spawn: (node, args, options) => {
+      paidAccountProof = options.env.BRAIN_WORKERS_PAID_ACCOUNT_ID;
+      call = { node, args, options };
+      return { status: 0 };
+    },
   });
   assert.deepEqual(receipt, { step: "cloudflare", completed: true, commands_run: 1 });
   assert.deepEqual(call.args, [
@@ -530,6 +547,8 @@ test("the Cloudflare technician step forwards the complete owner-reviewed browse
     "--workers-paid-confirmed",
   ]);
   assert.equal(call.options.env.CLOUDFLARE_API_TOKEN, undefined);
+  assert.equal(paidAccountProof, "a".repeat(32));
+  assert.equal(call.options.env.BRAIN_WORKERS_PAID_ACCOUNT_ID, "");
 });
 
 test("the Cloudflare technician step refuses incomplete context before spawning", async () => {
@@ -702,10 +721,12 @@ test("the smoke step runs only the injected deployed proof contract", async () =
 });
 
 test("the child environment strips ambient credentials and unrelated application state", () => {
+  const paidAccountId = "d".repeat(32);
   const env = technicianChildEnvironment({
     PATH: "/safe/bin",
     HOME: "/safe/home",
     LANG: "en_US.UTF-8",
+    BRAIN_WORKERS_PAID_ACCOUNT_ID: paidAccountId,
     CLOUDFLARE_API_TOKEN: "must-not-cross",
     OPENAI_API_KEY: "must-not-cross",
     AWS_SECRET_ACCESS_KEY: "must-not-cross",
@@ -713,8 +734,18 @@ test("the child environment strips ambient credentials and unrelated application
     ZOOM_CLIENT_SECRET: "must-not-cross",
     RANDOM_APPLICATION_VALUE: "must-not-cross",
   });
-  assert.deepEqual(env, { PATH: "/safe/bin", HOME: "/safe/home", LANG: "en_US.UTF-8" });
+  assert.deepEqual(env, {
+    PATH: "/safe/bin",
+    HOME: "/safe/home",
+    LANG: "en_US.UTF-8",
+    BRAIN_WORKERS_PAID_ACCOUNT_ID: paidAccountId,
+  });
   assert.doesNotMatch(JSON.stringify(env), /must-not-cross/);
+  assert.deepEqual(
+    technicianChildEnvironment({ BRAIN_WORKERS_PAID_ACCOUNT_ID: "must-not-cross" }),
+    {},
+    "the non-secret approval channel accepts only an account id",
+  );
 });
 
 test("Google credentials cross only the child environment, never argv, and input buffers are zeroed", async () => {

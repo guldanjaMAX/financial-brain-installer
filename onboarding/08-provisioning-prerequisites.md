@@ -54,12 +54,13 @@ vector dimensions hold only about 6,500 chunks. The Free plan also hard-stops at
 100,000 D1 row writes per day and 10 ms of Worker CPU per request. A normal
 personal or company corpus can cross those limits during its first load.
 
-**Confirm it before any resource is created.** In the exact Cloudflare account,
-open Workers and Pages, then Plans. It should say Paid. Upgrading takes about
-two minutes and a card, and every billing action belongs to the owner.
-`brain doctor` can prove product access, but the narrow installer sign-in cannot
-read billing status, so the owner's dashboard confirmation remains the plan
-proof. Never infer Paid from successful Vectorize access.
+**Confirm it before any resource is created.** First let the named sign-in
+verify the exact Cloudflare account. Setup then opens that account's Workers and
+Pages, Plans page. It should say Paid. Upgrading takes about two minutes and a
+card, and every billing action belongs to the owner. `brain doctor` can prove
+product access, but the narrow installer sign-in cannot read billing status, so
+the owner's dashboard confirmation remains the plan proof. Never infer Paid
+from successful Vectorize access.
 
 Current limits:
 
@@ -88,6 +89,11 @@ A scoped token remains available for a reviewed legacy, automation, or recovery
 path. Describe it only when the released CLI says browser sign-in is unavailable
 and the owner explicitly chooses that path. It is not a normal fresh-install
 prerequisite.
+
+Those paths do not bypass the Node, free-space, elevation, exact-account, or
+Workers Paid prerequisites. An unattended setup launcher must provide the
+released CLI's non-secret account-bound Paid confirmation for the exact manifest
+account. A generic yes or a different account ID must stop before provisioning.
 
 That recovery token uses only Workers Scripts Edit, D1 Edit, Vectorize Edit,
 and Workers AI Read at account scope. Add R2 Storage Edit only when the manifest

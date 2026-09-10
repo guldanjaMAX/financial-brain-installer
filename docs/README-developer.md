@@ -42,9 +42,11 @@ release, owner-update, rollback, credential, and issue-evidence workflow.
 
 `brain tools` and setup check Node, the actual install drive, and elevation
 before provisioning. The narrow Cloudflare session verifies account and product
-access but does not prove billing state. Before resource creation, the owner
-must confirm **Workers & Pages > Plans > Paid** in the exact account. Do not
-widen the session just to inspect billing.
+access but does not prove billing state. After sign-in verifies the exact
+account, setup opens its account-specific plan page. Before resource creation,
+the owner must confirm **Workers & Pages > Plans > Paid** there. Do not widen the
+session just to inspect billing. Prepared-manifest, recovery, and automation
+setup paths have the same account-bound prerequisite.
 
 A scoped Cloudflare token is a bounded legacy, automation, or recovery path,
 not a fresh-install prerequisite. Use it only when that exact path is explicitly

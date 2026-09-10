@@ -22,9 +22,10 @@ from the explanation, stop and explain before continuing.
    (`LOCALAPPDATA` on Windows), Claude Code, Claude sign-in, the installed
    `financial-brain-technician` skill, Anthropic's doctor, and pinned Wrangler 4.
 4. Ask whether this is the owner's first Cloudflare account or an account they
-   already control. Before provisioning, navigate to Workers & Pages > Plans
-   and have the owner confirm the exact account says Paid. The narrow sign-in
-   cannot read billing status. Do not infer the plan from product access.
+   already control. Let the named sign-in verify the exact account first. Before
+   provisioning, setup opens that account's Workers & Pages > Plans page and the
+   owner confirms it says Paid. The narrow sign-in cannot read billing status.
+   Do not infer the plan from product access.
 5. In Claude Code, run `/skills` and confirm
    `financial-brain-technician` appears. Then start
    `/financial-brain-technician` with the reviewed packet and manifest paths.
@@ -41,12 +42,13 @@ the owner already has Cloudflare, choose **Use a Cloudflare account I already
 have** and sign in normally. When a login can reach more than one account, pause
 while the owner confirms the exact account by both name and ID.
 
-Before any resource is created, open Workers & Pages > Plans for that exact
-account and have the owner confirm it says Paid. Browser control may navigate
-there after approval, but the owner handles sign-in, 2FA, any plan change,
-payment, billing approval, and Cloudflare consent. The installer's narrow named
-session cannot read billing status and must not claim the plan is verified from
-successful Workers or Vectorize access.
+After Cloudflare verifies the selected account, setup opens Workers & Pages >
+Plans for that exact account. The owner confirms it says Paid before any
+resource is created. Browser control may navigate there after approval, but the
+owner handles sign-in, 2FA, any plan change, payment, billing approval, and
+Cloudflare consent. The installer's narrow named session cannot read billing
+status and must not claim the plan is verified from successful Workers or
+Vectorize access.
 
 One Cloudflare account may hold several Brains. Each one still receives a
 separate Worker, D1 database, Vectorize index, secrets, hostname, and saved
@@ -67,6 +69,12 @@ expiry, normally two days. Let the owner enter the value only through the Brain
 CLI's hidden prompt, or let reviewed automation use an approved no-history
 launcher. It stays out of the command line, chat, environment files,
 screenshots, and support notes.
+
+Prepared-manifest, recovery-token, and approved automation setup paths must pass
+the same machine checks and the same exact-account Workers Paid prerequisite.
+Unattended setup needs the released CLI's non-secret account-bound confirmation
+for the manifest account. A generic yes or a different account ID stops before
+provisioning.
 
 The named-profile and keyring contract passes deterministic local tests. A real
 browser callback on the final Mac and Windows machines, plus live Vectorize

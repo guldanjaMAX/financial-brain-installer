@@ -171,8 +171,17 @@ scopes. If it explicitly supports them, offer one clearly previewed bundle
 containing only the local items the owner selects: the technician skill, Claude
 MCP registration, and Codex MCP registration. List each selected action and
 local destination, ask once for approval of that bundle, then verify every
-readback. Do not invent or guess a repair command the release does not provide.
-Keep CLI installation or replacement on its own supported path and approval.
+readback. The selection must match the release's actual atomic repair scopes. If
+the release offers only one combined assistant repair, preview every destination
+in that group and ask approval for the whole group, or do nothing. Do not invent
+or guess a repair command the release does not provide. Keep CLI installation or
+replacement on its own supported path and approval.
+
+Preserve deliberately disabled entries, custom or unrelated registrations, and
+unrelated skill files byte for byte. A repair may change only an absent entry or
+one that exact installer ownership proves it owns. If readback fails, restore the
+prior installer-owned state. If that restoration cannot be proved, report the
+repair as incomplete instead of calling it fixed.
 
 ## Route an update request first
 
@@ -365,11 +374,11 @@ resource is created:
   administrator. On Windows the space check must target `LOCALAPPDATA`, not a
   guessed home or system drive.
 - Confirm the owner has chosen a Cloudflare account for this Brain. Before
-  provisioning, help them navigate to **Workers & Pages > Plans** and have the
-  owner confirm that the exact account says **Paid**. The named browser session
-  can verify the account and product access, but its narrow permission cannot
-  read billing status. Never turn Vectorize access into a claim that the plan
-  is Paid.
+  provisioning, complete the named sign-in so the installer first verifies the
+  exact account. Then let it open that account's **Workers & Pages > Plans** page
+  and have the owner confirm that it says **Paid**. The narrow browser session
+  can verify the account and product access, but it cannot read billing status.
+  Never turn Vectorize access into a claim that the plan is Paid.
 - Browser control may handle the approved non-secret navigation. Stop for
   Cloudflare sign-in, 2FA, account choice, any plan change, payment, billing
   approval, and consent. Ask only for the one current action.
@@ -377,6 +386,13 @@ resource is created:
 If a machine prerequisite fails, explain the one fix it names and stop. Do not
 start an account ceremony, write a manifest, or create a resource while it is
 unresolved.
+
+These prerequisites apply again when setup resumes from a locally prepared or
+older manifest, uses the explicit token recovery lane, or runs through approved
+automation. A recovery credential is not proof of Workers Paid. Non-interactive
+setup must carry the exact release's non-secret, account-bound Paid confirmation
+for the manifest account; a generic yes, a different account ID, or no proof
+must stop before resource creation.
 
 1. Ask which of those jobs the owner wants. Quietly inspect the reviewed default
    manifest location and the package's local bootstrap status. If exactly one

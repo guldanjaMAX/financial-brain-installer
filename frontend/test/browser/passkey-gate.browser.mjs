@@ -69,7 +69,7 @@ try {
   await page.waitForFunction(() => window.__passkeyPromptCalls === 1);
   check("the device prompt starts only after the explicit owner click",
     await page.evaluate(() => window.__passkeyPromptCalls) === 1);
-  await page.getByText("no passkey was created", { exact: true }).waitFor();
+  await page.getByRole("alert").getByText(/No passkey was created\. Nothing was enrolled\./).waitFor();
   check("the mobile post-prompt page has no horizontal overflow",
     await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
 

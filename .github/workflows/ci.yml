@@ -367,6 +367,8 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$t, [ref]$e) | Out-Null
           if ($e.Count -gt 0) { $e | ForEach-Object { Write-Host $_ }; exit 1 }
           Write-Host "preflight.ps1 parsed clean"
+          # Hosted Windows runners are elevated, so the preflight correctly
+          # exits 1. This smoke step checks execution and parsing, not readiness.
           exit 0
 
       - name: packaged preflight runs and prints (macOS and Linux)
@@ -515,10 +517,10 @@ jobs:
           fi
           echo "clean"
 
-  # The preflight exists to catch Windows traps. A clean runner has none
-  # of them, so the job above proves only that it RUNS. This job plants each
-  # trap and proves the preflight SAYS SO. A smoke detector that has never
-  # smelled smoke is not known to work.
+  # The preflight exists to catch Windows traps. The hosted runner is itself
+  # elevated, so this job also proves that the Administrator prerequisite is a
+  # STOP while it plants the other traps and proves the preflight says so. It
+  # also checks the native unpackaged-process identity branch explicitly.
   preflight-traps:
     needs: package
     runs-on: windows-latest
@@ -678,7 +680,7 @@ jobs:
           Write-Host "TRAP 5 DETECTED, exit 1 as required"
           exit 0
 
-      - name: "control: the elevated CI machine is stopped for exactly that reason"
+      - name: "control: an elevated automation host is stopped for exactly that reason"
         shell: powershell
         run: |
           $raw = & powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1

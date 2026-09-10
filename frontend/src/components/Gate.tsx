@@ -130,7 +130,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
               passkey may sync through your chosen passkey provider.
             </p>
           )}
-          {error && <p className="mt-4 text-[14px] text-red-700">{error}</p>}
+          {error && <p role="alert" className="mt-4 text-[14px] text-red-700">{error}</p>}
         </div>
       </div>
     </div>

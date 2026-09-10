@@ -25,11 +25,14 @@ Cloudflare Worker in the owner's account
       +---- FTS5 keyword index
 ```
 
-The installer uses a scoped Cloudflare token only for control-plane work such
-as verification, provisioning, deployment, migration, and Worker secrets.
-Routine use goes through the deployed Worker with the brain's own admin key.
-At handoff, the control-plane token can be revoked without disabling retrieval,
-health, ingest through a configured domain, evaluation, drain, or reindex.
+Normal owner setup and updates use a per-install named Cloudflare browser
+profile in the operating-system credential store for control-plane work such as
+verification, provisioning, deployment, migration, and Worker secrets. Scoped
+API tokens are limited to explicit automation, recovery, and older manifests.
+Routine use goes through the deployed Worker with the Brain's own admin key.
+Removing the control-plane profile or revoking a recovery token does not disable
+retrieval, health, ingest through a configured domain, evaluation, drain, or
+reindex.
 
 The standard backend is D1 plus Vectorize. Legacy Supabase adapters and
 migration tools remain so an existing corpus can be moved or temporarily
@@ -81,11 +84,15 @@ live path.
    technician-machine install keeps Claude advisory on that machine.
 2. Create or resume the manifest, declare durable admin-key storage, and
    prepare the exact desired key before remote changes.
-3. Verify the scoped token and account, then provision D1 and Vectorize. A new
-   install with no existing Worker can migrate and deploy directly. A resumed
-   D1 install with an existing Worker first captures a required bookmark,
-   deploys and verifies the paused compatibility Worker, waits the declared
-   20-minute old-invocation window, migrates, and deploys active mode.
+3. Verify the selected Cloudflare approval and exact account. Because the
+   narrow session cannot read billing, open that account's plan page and bind
+   the separate owner Workers Paid confirmation to it before provisioning D1 or
+   Vectorize. The same account-bound prerequisite applies to resumed, recovery,
+   and automation setup paths. A new install with no existing Worker can migrate
+   and deploy directly. A resumed D1 install with an existing Worker first
+   captures a required bookmark, deploys and verifies the paused compatibility
+   Worker, waits the declared 20-minute old-invocation window, migrates, and
+   deploys active mode.
 4. Persist and read back the admin key, set Worker secrets, and verify health.
 5. Register locator-only MCP entries for supported AI tools with the local-only
    `owner-assistant` profile, then verify the advertised tool list includes

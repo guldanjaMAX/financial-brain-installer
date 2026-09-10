@@ -162,6 +162,7 @@ import {
 import {
   chooseCloudflareAccountPath,
   cloudflareAccountPlan,
+  cloudflareWorkersPlanUrl,
 } from "./operations/cloudflare-account-bootstrap.mjs";
 import {
   CloudflareOAuthSessionError,
@@ -1226,22 +1227,22 @@ function createSetupManifest(path, m) {
 }
 
 /**
- * Resolve the account from the token itself.
+ * Resolve the account from the current command-scoped Cloudflare approval.
  *
- * If the manifest names an account, it must MATCH one the token can see. A
- * mismatch is a hard stop: it usually means the wrong token, and provisioning
- * a brain into someone else's account is the one error with no clean undo.
+ * If the manifest names an account, it must MATCH one this approval can see. A
+ * mismatch is a hard stop: it usually means the wrong account was authorized,
+ * and provisioning a brain into someone else's account has no clean undo.
  */
 async function resolveAccount(m) {
   const accounts = await cf("/accounts");
-  if (!accounts.length) die("this token cannot see any Cloudflare account.");
+  if (!accounts.length) die("this Cloudflare approval cannot see any account.");
 
   const declared = m.infrastructure?.cloudflare?.account_id;
   if (declared && !declared.startsWith("REQUIRED")) {
     const match = accounts.find((a) => a.id === declared);
     if (!match) {
       die(
-        `the manifest declares account ${declared}, but this token can only see:\n` +
+        `the manifest declares account ${declared}, but this Cloudflare approval can only see:\n` +
           accounts.map((a) => `        ${a.id}  ${a.name}`).join("\n") +
           "\n      Refusing to provision into a different account than the manifest names."
       );
@@ -1251,7 +1252,7 @@ async function resolveAccount(m) {
 
   if (accounts.length > 1) {
     die(
-      "this token can see more than one account and the manifest does not say which:\n" +
+      "this Cloudflare approval can see more than one account and the manifest does not say which:\n" +
         accounts.map((a) => `        ${a.id}  ${a.name}`).join("\n") +
         "\n      Set infrastructure.cloudflare.account_id in the manifest."
     );
@@ -1259,7 +1260,7 @@ async function resolveAccount(m) {
   return accounts[0];
 }
 
-/** Pick a fresh install's account from the hidden scoped token, never Wrangler. */
+/** Pick a fresh install's account from the exact active Cloudflare approval. */
 export async function chooseSetupAccount(prompt, options = {}) {
   const listAccounts = options.listAccounts ?? (() => cf("/accounts"));
   const accounts = await listAccounts();
@@ -1270,7 +1271,7 @@ export async function chooseSetupAccount(prompt, options = {}) {
         "If this used browser sign-in, its local profile may remain saved for retry."
     );
   }
-  if (!accounts.length) die("this token cannot see any Cloudflare account.");
+  if (!accounts.length) die("this Cloudflare approval cannot see any account.");
   if (accounts.length === 1) return accounts[0];
 
   console.log(`\n  ${c.yellow("This permission pass can see several Cloudflare accounts.")}`);
@@ -17011,19 +17012,67 @@ export async function prepareCloudflareAccountCeremony(options = {}) {
   const opened = (options.openBrowserImpl ?? openBrowser)(plan.start_url, options.openBrowserOptions || {});
   if (opened) write("  Cloudflare opened in your browser. The installer is waiting here.");
   else write(`  Open this Cloudflare page in your browser: ${plan.start_url}`);
-  write("  The installer can verify the account and product access, but this narrow sign-in cannot read billing status.");
+  write("  Sign-in verifies the exact account first. The installer will then open that account's plan page before creating anything.");
+  await prompt("Press Enter after the Cloudflare account is ready", "");
+  return plan;
+}
+
+/**
+ * Bind the separate Workers Paid proof to the exact account Cloudflare returned.
+ *
+ * The narrow browser session cannot read billing. Interactive owners confirm on
+ * the account-specific dashboard page. An unattended launcher must carry the
+ * same non-secret account id in BRAIN_WORKERS_PAID_ACCOUNT_ID; a generic yes is
+ * deliberately insufficient because it could refer to another reachable
+ * account.
+ */
+export async function confirmCloudflareWorkersPaidAccount(account, options = {}) {
+  const accountId = String(account?.id || "").trim().toLowerCase();
+  const accountName = String(account?.name || "").trim();
+  if (!/^[a-f0-9]{32}$/.test(accountId) || !accountName || /[\u0000-\u001f\u007f]/.test(accountName)) {
+    die("setup could not bind the Workers Paid check to one verified Cloudflare account. Nothing was created.");
+  }
+
+  const write = options.write ?? ((line) => console.log(line));
+  const plansUrl = cloudflareWorkersPlanUrl(accountId);
+  write("");
+  write(`  Workers Paid check for Cloudflare account \"${accountName}\" (${accountId})`);
+  const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (interactive) {
+    const opened = (options.openBrowserImpl ?? openBrowser)(plansUrl, options.openBrowserOptions || {});
+    if (opened) write("  That exact account's Workers & Pages plan page opened in your browser.");
+    else write(`  Open this exact account's Workers & Pages plan page: ${plansUrl}`);
+    write("  The installer can verify the account and product access, but its narrow sign-in cannot read billing status.");
+  }
+  if (!interactive) {
+    const confirmedAccountId = String(
+      (options.environment ?? process.env).BRAIN_WORKERS_PAID_ACCOUNT_ID || "",
+    ).trim().toLowerCase();
+    if (confirmedAccountId !== accountId) {
+      die(
+        "unattended setup stopped before creating any Cloudflare resource. " +
+          "After the owner confirms Workers & Pages > Plans says Paid for the exact manifest account, " +
+          "the approved launcher may set BRAIN_WORKERS_PAID_ACCOUNT_ID to that account id. " +
+          "A missing or different account id is not approval.",
+      );
+    }
+    write("  The unattended Workers Paid confirmation matches the exact verified account. No Cloudflare resource has been created yet.");
+    return Object.freeze({ account_id: accountId, confirmation: "account_bound_automation" });
+  }
+
+  const prompt = options.askFn ?? ask;
   const paid = String(await prompt(
-    "Before setup creates anything, confirm this exact account shows Workers & Pages > Plans > Paid. Type PAID to continue, or leave blank to stop",
+    `Confirm account \"${accountName}\" (${accountId}) shows Workers & Pages > Plans > Paid. Type PAID to continue, or leave blank to stop`,
     "",
   )).trim().toUpperCase();
   if (paid !== "PAID") {
     die(
-      "setup stopped before creating any Cloudflare resource. Confirm the intended account shows Workers & Pages > Plans > Paid, then rerun the same setup command. " +
+      "setup stopped before creating any Cloudflare resource. Confirm the exact account above shows Workers & Pages > Plans > Paid, then rerun the same setup command. " +
         "Any plan change, payment, or billing approval belongs to the owner in Cloudflare.",
     );
   }
-  write("  Workers Paid confirmed by the owner. No Cloudflare resource has been created yet.");
-  return plan;
+  write("  Workers Paid confirmed by the owner for the exact verified account. No Cloudflare resource has been created yet.");
+  return Object.freeze({ account_id: accountId, confirmation: "owner_dashboard" });
 }
 
 /**
@@ -17198,28 +17247,21 @@ async function cmdSetupInteractive(manifestPath) {
   }
   return withCloudflareControlCredential(
     async (session) => {
+      // OAuth returns the exact selected account. The token lane must resolve
+      // the same account from the manifest, or choose it before any setup write.
+      // Only then can the separate owner-visible billing proof be meaningful.
+      const selectedAccount = session.account || (manifest
+        ? await resolveAccount(manifest)
+        : await chooseSetupAccount(ask));
+      await confirmCloudflareWorkersPaidAccount(selectedAccount, {
+        interactive,
+        askFn: ask,
+        environment: process.env,
+      });
       return cmdSetup(manifestPath, {
         flags,
         cloudflareAccountPath: accountPath,
         cloudflareAuthProfile: session.profile || authProfile,
-        ...(!resumed && !automationToken ? {
-          confirmSelectedAccount: async (selectedAccount) => {
-            if (suppliedAccountId && String(selectedAccount?.id || "").toLowerCase() !== suppliedAccountId) {
-              const error = new Error(
-                "the Cloudflare account selected in browser sign-in does not match --cloudflare-account-id. " +
-                "No Brain or Cloudflare resources were created; the local browser sign-in may remain saved for retry. " +
-                "Review the exact account and rerun setup."
-              );
-              error.code = "CLOUDFLARE_ACCOUNT_BINDING_MISMATCH";
-              throw error;
-            }
-            return confirmWorkersPaidForSetup(selectedAccount, {
-              confirmed: workersPaidConfirmed,
-              interactive,
-              askFn: ask,
-            });
-          },
-        } : {}),
         ...(localPreflightChecks ? {
           preflightChecks: [
             ...localPreflightChecks,
@@ -17241,7 +17283,7 @@ async function cmdSetupInteractive(manifestPath) {
             }]),
           ],
         } : {}),
-        ...(session.account ? { listCloudflareAccounts: async () => [session.account] } : {}),
+        listCloudflareAccounts: async () => [selectedAccount],
       });
     },
     {
