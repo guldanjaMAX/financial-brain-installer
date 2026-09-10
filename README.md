@@ -37,6 +37,13 @@ npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LO
 $env:Path = "$env:LOCALAPPDATA\FinancialBrain;$env:Path"
 ```
 
+On Windows, open PowerShell from the Start menu before installing. Do not run
+the install inside Claude Desktop or another app's embedded terminal. Windows
+can redirect that install into the app's private container, where normal
+PowerShell cannot see it. The guided installer checks the process's native
+Windows package identity and stops before `npm.cmd` if it cannot prove the
+window is ordinary PowerShell.
+
 The full command path below is deliberate. It keeps working after Terminal is
 closed, without `sudo`, administrator access, or a shell-profile change.
 
