@@ -246,6 +246,10 @@ number, email address, or recurring amount. Each value is shown beside the
 source rule that gave it an evidence tier. A source tier is a review aid, not
 an automatic winner. A partial or degraded search is labeled as unchecked, and
 an empty search result is never called proof that the corpus contains nothing.
+The record review first says exactly how many categories completed. If source
+history is not yet proven or the search index is still building, an all-unchecked
+run is labeled as waiting and makes no agreement finding. It never presents
+zero completed categories as a clean result.
 
 The same report reads the Brain's access-zone readiness proof. It shows the
 grouped source, document, and chunk counts for context, while the source

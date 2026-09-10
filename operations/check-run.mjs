@@ -243,11 +243,55 @@ export function partition(gathered = []) {
   };
 }
 
+/**
+ * Say how much of the review actually completed before showing any findings.
+ * A zero here is an unavailable check, never evidence that the corpus has zero
+ * records or zero disagreements.
+ */
+export function renderCoverageSummary({ total = 0, completed = 0, unchecked = 0 } = {}) {
+  const categories = total === 1 ? "category" : "categories";
+  if (!total) {
+    return [
+      "Record review incomplete: there were no categories to check.",
+      "This run cannot say whether your records agree or disagree.",
+    ].join("\n");
+  }
+  if (!unchecked) {
+    const checkedVerb = total === 1 ? "was" : "were";
+    return `Record review complete: all ${total} ${categories} ${checkedVerb} checked.`;
+  }
+  if (!completed) {
+    return [
+      `Record review still waiting: none of the ${total} ${categories} could be checked completely.`,
+      "This run cannot yet say whether your records agree or disagree. This is not a finding that your records are empty.",
+      "Follow the reasons under Could not check, then run this check again.",
+    ].join("\n");
+  }
+  const completedCategories = completed === 1 ? "category" : "categories";
+  const checkedVerb = completed === 1 ? "was" : "were";
+  return [
+    `Record review partial: ${completed} of ${total} ${categories} ${checkedVerb} checked; ${unchecked} could not be checked.`,
+    `Any agreement or disagreement below applies only to the ${completed} completed ${completedCategories}. Follow the reasons under Could not check, then run this check again.`,
+  ].join("\n");
+}
+
 export function renderReport(gathered = [], { zoneReadiness = null, subject = "" } = {}) {
   const { structured, freeform, failed } = partition(gathered);
   const assessed = sweep(structured.map((s) => ({ name: s.name, changes: s.changes, candidates: s.candidates })));
   const scopedSubject = normalizeCheckSubject(subject);
-  const out = [scopedSubject ? `# Brain check for ${scopedSubject}` : "# Brain check", "", renderSweep(assessed)];
+  const coverage = {
+    total: structured.length + freeform.length + failed.length,
+    completed: structured.length + freeform.length,
+    unchecked: failed.length,
+    complete: structured.length + freeform.length > 0 && failed.length === 0,
+  };
+  const out = [
+    scopedSubject ? `# Brain check for ${scopedSubject}` : "# Brain check",
+    "",
+    renderCoverageSummary(coverage),
+    "",
+    renderSweep(assessed),
+  ];
 
   if (freeform.length) {
     out.push("", "## Worth your own eyes",
@@ -265,7 +309,7 @@ export function renderReport(gathered = [], { zoneReadiness = null, subject = ""
   }
   out.push("", renderZoneReadiness(zoneReadiness));
   out.push("", "Nothing has been written. Run the same command with --set to record your answers.");
-  return { text: out.join("\n"), assessed, freeform, failed };
+  return { text: out.join("\n"), assessed, freeform, failed, coverage };
 }
 
 /**

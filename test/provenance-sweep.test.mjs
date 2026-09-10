@@ -19,6 +19,7 @@ import {
   partition,
   rowMatchesSubject,
   renderConfirmations,
+  renderCoverageSummary,
   renderReport,
   renderZoneReadiness,
   unavailableZoneReadiness,
@@ -196,6 +197,36 @@ assert.match(incompleteCoverage[0].error, /source history is incomplete/);
 assert.match(renderReport(incompleteCoverage, { subject: SUBJECT }).text, /NOT checked/);
 ok("coverage-incomplete raw search cannot make a check category look complete");
 
+const waitingCoverage = await gather(async () => ({
+  status: "coverage_incomplete",
+  notice: "source history is not yet proven complete while records may still be loading",
+  gaps: [{ type: "history_unproven", source: "fixture-mail" }],
+  results: [],
+}), {
+  subject: SUBJECT,
+  probes: [
+    { name: "Mailing address", changes: true, extract: () => [], query: "mailing address" },
+    { name: "Who currently pays them", changes: true, freeform: true, query: "current client" },
+  ],
+});
+const waitingReport = renderReport(waitingCoverage, { subject: SUBJECT });
+assert.deepEqual(waitingReport.coverage, { total: 2, completed: 0, unchecked: 2, complete: false });
+assert.match(waitingReport.text, /Record review still waiting: none of the 2 categories could be checked completely/);
+assert.match(waitingReport.text, /cannot yet say whether your records agree or disagree/);
+assert.match(waitingReport.text, /not a finding that your records are empty/);
+assert.doesNotMatch(waitingReport.text, /No disagreement appeared/);
+assert.match(waitingReport.text, /No automatically comparable category completed/);
+assert.equal(
+  renderCoverageSummary({ total: 2, completed: 1, unchecked: 1 }),
+  "Record review partial: 1 of 2 categories was checked; 1 could not be checked.\n" +
+    "Any agreement or disagreement below applies only to the 1 completed category. Follow the reasons under Could not check, then run this check again.",
+);
+assert.equal(
+  renderCoverageSummary({ total: 1, completed: 1, unchecked: 0 }),
+  "Record review complete: all 1 category was checked.",
+);
+ok("an unavailable check is a waiting state, never a clean zero-category result");
+
 const zoneReadiness = assessZoneReadiness({
   zones: [
     { zone: "records", sources: 2, documents: 11, chunks: 39 },
@@ -369,9 +400,28 @@ assert.equal(readOnly.wrote, false);
 assert.equal(wrote, false);
 assert.equal(readOnly.zones_checked, true);
 assert.equal(readOnly.zones_ready, true);
+assert.equal(readOnly.categories_total, 14);
+assert.equal(readOnly.categories_completed, 14);
+assert.equal(readOnly.categories_unchecked, 0);
+assert.equal(readOnly.category_checks_complete, true);
 assert.match(querySeen, /Records about Example Owner/);
 assert.ok(readOnly.conflicts >= 1);
 ok("brain check is subject-scoped and read-only by default");
+
+const waitingCommand = await cmdCheck(manifestPath, {
+  adminKey: "synthetic", baseUrl: "https://fixture.invalid", flags: {},
+  search: async () => ({
+    status: "search_unavailable", degraded: "vector",
+    notice: "the vector index is still building; this category was not checked",
+    results: [],
+  }),
+  readZones,
+});
+assert.equal(waitingCommand.categories_total, 14);
+assert.equal(waitingCommand.categories_completed, 0);
+assert.equal(waitingCommand.categories_unchecked, 14);
+assert.equal(waitingCommand.category_checks_complete, false);
+ok("brain check returns exact complete and unchecked category counts for local agents");
 
 let writtenEnvelope = null;
 const setResult = await cmdCheck(manifestPath, {

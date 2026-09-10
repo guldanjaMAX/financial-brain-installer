@@ -3503,6 +3503,10 @@ export async function cmdCheck(manifestPath, options = {}) {
   const conflicts = report.assessed.filter((item) => item.conflict);
   const resultBase = {
     conflicts: conflicts.length,
+    categories_total: report.coverage.total,
+    categories_completed: report.coverage.completed,
+    categories_unchecked: report.coverage.unchecked,
+    category_checks_complete: report.coverage.complete,
     zones_checked: zoneReadiness.checked === true,
     zones_ready: zoneReadiness.checked === true ? zoneReadiness.ready : null,
   };
