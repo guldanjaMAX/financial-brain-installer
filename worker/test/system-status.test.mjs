@@ -27,8 +27,10 @@ const check = (n, c, d = "") => {
 
 const okHealth = () => ({ status: "ok", accepting_documents: true, vector_drain_mode: "active" });
 const okDiagnose = async () => ({
+  complete: true,
   totals: { documents: 70844, chunks: 876761, sources: 3 },
-  summary: { crit: 2, warn: 1, info: 2, ok: 1 },
+  unavailable_checks: [],
+  summary: { crit: 2, warn: 1, info: 2, ok: 1, unavailable: 0 },
   findings: [
     { id: "empty_documents", area: "coverage", severity: "crit", count: 1,
       title: "1 document(s) hold no text", detail: "d",
@@ -151,6 +153,23 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
   check("the working reads still come through", s.sources.length === 2 && !!s.vectors);
 }
 {
+  const incomplete = async () => ({
+    complete: false,
+    totals: { documents: null, chunks: null, sources: null },
+    unavailable_checks: ["totals"],
+    summary: { crit: 0, warn: 19, info: 0, ok: 0, unavailable: 19 },
+    findings: [{ id: "totals", severity: "warn", title: "check could not run" }],
+    verdict: "incomplete",
+  });
+  const s = await ownerSystemStatus({}, { ...deps, diagnose: incomplete });
+  check("an incomplete diagnose report is NAMED as unavailable",
+    s.unavailable.includes("diagnose"), JSON.stringify(s.unavailable));
+  check("an incomplete report cannot recreate false zero corpus counts",
+    !("documents" in s) && !("chunks" in s), JSON.stringify(s));
+  check("an incomplete report cannot project a seemingly available problem list",
+    !("problems" in s) && !("problem_counts" in s), JSON.stringify(s));
+}
+{
   const s = await ownerSystemStatus({}, { ...deps, freshness: async () => { throw new Error("down"); } });
   check("a broken freshness is NAMED", s.unavailable.includes("freshness"));
   check("a broken freshness also leaves access zones unavailable", s.unavailable.includes("zones"));
@@ -249,7 +268,13 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
 
 /* ------------------------------------------------ an empty brain is not a broken one */
 {
-  const empty = async () => ({ totals: { documents: 0, chunks: 0, sources: 0 }, summary: {}, findings: [] });
+  const empty = async () => ({
+    complete: true,
+    totals: { documents: 0, chunks: 0, sources: 0 },
+    unavailable_checks: [],
+    summary: { crit: 0, warn: 0, info: 0, ok: 0, unavailable: 0 },
+    findings: [],
+  });
   const s = await ownerSystemStatus({}, { ...deps, diagnose: empty });
   check("an EMPTY brain reports 0 documents present", s.documents === 0 && !s.unavailable.includes("diagnose"));
   check("which is distinguishable from a broken read", "documents" in s);

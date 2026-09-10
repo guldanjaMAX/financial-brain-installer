@@ -376,6 +376,12 @@ Every `brain zone` assignment repairs up to 1,000 live documents and 1,000
 chunks in the same transaction as the source registry update, reports what
 remains, and can be repeated until the legacy projections converge. No retrieval
 path may trust those projections before that bounded repair completes.
+The CLI retries only the field-observed HTML/proxy HTTP 500 for an exact
+source-to-zone POST. It repeats the same idempotent assignment at most three
+times with 1, 2, and 4 second delays, announces that the prior pass may already
+be committed, and preserves the last confirmed checkpoint on exhaustion. It
+does not replay JSON 500 responses, other statuses, transport failures, list
+requests, or partial assignments.
 The exact access-zone readiness audit compares every live document and chunk
 with the source registry, so its cost grows with the corpus. It runs only from
 the explicit zones and `brain check` path, not from polled health or owner

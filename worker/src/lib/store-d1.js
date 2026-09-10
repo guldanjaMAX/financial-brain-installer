@@ -2023,8 +2023,8 @@ const qAll = async (env, sql, ...bind) => {
 /**
  * Never prescribe an action the state that produced the message forbids.
  *
- * A paused brain refuses reindex and drain with 503, and the pause only lifts
- * when the update completes. Advising either from inside that state is a closed
+ * A paused brain refuses reindex, drain, and forget with 503, and the pause only
+ * lifts when the update completes. Advising one from inside that state is a closed
  * loop: the operator reads a remedy, runs it, is refused, and has learned
  * nothing. Four separate messages did this, and one client followed them across
  * four update attempts over 97 hours.
@@ -2032,11 +2032,17 @@ const qAll = async (env, sql, ...bind) => {
  * The rule is simple. If the brain is paused, say so and name what can actually
  * be done from here.
  */
-function remedyForState(env, remedy) {
+export function remedyForState(env, remedy, { pausedRemedy = null } = {}) {
   if (env?.VECTOR_DRAIN_MODE !== "paused-for-upgrade") return remedy;
-  return "This brain is paused for an upgrade, so reindex and drain both return 503 " +
-    "until it finishes. Complete or resume the update first; the pause lifts with it. " +
-    "Once it is running again, the remedy is: " + remedy;
+  const recovery = typeof pausedRemedy === "string" && pausedRemedy
+    ? pausedRemedy
+    : "Run `brain update <manifest>` to resume the durable paused work.";
+  return "This brain is paused for an upgrade, so corpus mutations including ingest, source registration, " +
+    "zone assignment, reindex, drain, and forget all return 503 until it finishes. " +
+    `${recovery} The update ` +
+    "is the only supported projection writer while this barrier holds. If the update " +
+    "reports this same finding again without progress, keep the brain paused and report " +
+    "that update failure for reviewed repair. Do not clear the pause or run reindex, drain, or forget by hand.";
 }
 
 export async function diagnose(env, {
@@ -2044,12 +2050,14 @@ export async function diagnose(env, {
   duplicateChunkScanLimit = 100_000,
 } = {}) {
   const findings = [];
+  const unavailableChecks = [];
   const add = (f) => findings.push(f);
   const safe = async (id, fn) => {
     try { return await fn(); } catch (e) {
+      unavailableChecks.push(id);
       add({ id, area: "meta", severity: "warn", title: `check "${id}" could not run`,
         detail: String(e.message || e).slice(0, 200),
-        action: "Usually a schema older than this version. Run `brain upgrade`." });
+        action: "This result proves no repair cause. Retry after the database recovers. If it persists, have a technician inspect this exact failed check before changing the corpus or schema." });
       return null;
     }
   };
@@ -2058,7 +2066,7 @@ export async function diagnose(env, {
     documents: Number((await q1(env, "SELECT count(*) n FROM documents WHERE deleted_at IS NULL"))?.n || 0),
     chunks: Number((await q1(env, "SELECT count(*) n FROM chunks"))?.n || 0),
     sources: Number((await q1(env, "SELECT count(*) n FROM sources"))?.n || 0),
-  }))) || { documents: 0, chunks: 0, sources: 0 };
+  }))) || { documents: null, chunks: null, sources: null };
 
   /* ---------------- COVERAGE: what did not make it in ---------------- */
 
@@ -2075,7 +2083,7 @@ export async function diagnose(env, {
       title: `${n} document(s) were indexed but hold no text`,
       detail: "The brain believes it has these and can never answer from them. Almost always a scanned PDF with no text layer, or a format that extracted nothing.",
       samples: rows.map((r) => r.title || r.uri || r.doc_uid),
-      action: "If OCR is off, turn it on (safety.ocr.enabled) and re-ingest; these are the documents it exists for. If it is already on, these were refused for a stated reason, so read the ingest report and remove them rather than leaving the document count overstating what the brain knows." });
+      action: remedyForState(env, "If OCR is off, turn it on (safety.ocr.enabled) and re-ingest; these are the documents it exists for. If it is already on, these were refused for a stated reason, so read the ingest report and remove them rather than leaving the document count overstating what the brain knows.") });
   });
 
   // How much of this corpus was read by a machine off a picture. An owner
@@ -2119,7 +2127,7 @@ export async function diagnose(env, {
     for (const r of rows) add({ id: "unregistered_source", area: "coverage", severity: "warn", count: Number(r.n),
       title: `${r.n} document(s) sit under an unregistered source "${r.source}"`,
       detail: "They exist in the brain but no source owns them, so `brain forget` cannot remove them and freshness reporting cannot see them.",
-      action: `Register it: brain sources <manifest> --add ${r.source}` });
+      action: remedyForState(env, `Register it: brain sources <manifest> --add ${r.source}`) });
   });
 
   await safe("empty_sources", async () => {
@@ -2130,7 +2138,7 @@ export async function diagnose(env, {
     for (const r of rows) add({ id: "empty_source", area: "coverage", severity: "warn",
       title: `source "${r.name}" is registered but holds nothing`,
       detail: "Either it was never loaded, or a load failed and left no trace.",
-      action: "Run its ingest, or remove the registration so it stops implying coverage that does not exist." });
+      action: remedyForState(env, "Run its ingest, or remove the registration so it stops implying coverage that does not exist.") });
   });
 
   await safe("zone_assignment", async () => {
@@ -2150,7 +2158,7 @@ export async function diagnose(env, {
       add({ id: "zone_assignment", area: "coverage", severity: "warn", count: unzoned,
         title: `${unzoned} of ${sources} source(s) have no zone assignment`,
         detail: "Unzoned sources remain owner-only and are excluded from every named zone grant. A partially zoned corpus can therefore look complete to the owner while a scoped person cannot search most of it.",
-        action: "Run `brain sources <manifest>` to review the registered sources, then assign each intended source with `brain zone <manifest> --source NAME --zone ZONE`." });
+        action: remedyForState(env, "Run `brain sources <manifest>` to review the registered sources, then assign each intended source with `brain zone <manifest> --source NAME --zone ZONE`.") });
       return;
     }
     add({ id: "zone_assignment", area: "coverage", severity: "ok", count: sources,
@@ -2176,7 +2184,7 @@ export async function diagnose(env, {
     add({ id: "zone_projection", area: "integrity", severity: "warn", count: documents + chunks,
       title: `zone projection is behind for ${documents} document(s) and ${chunks} chunk(s)`,
       detail: "Access still follows the registered source's zone, so this drift does not widen a scoped grant. The denormalized document and chunk fields are not ready to become authorization inputs until the legacy rows are repaired.",
-      action: "Keep retrieval source-authoritative. Rerun `brain zone <manifest> --source NAME --zone ZONE` for each assigned source; every pass repairs at most 1,000 documents and 1,000 chunks. Repeat until the command reports no pending rows, then rerun `brain diagnose <manifest>`." });
+      action: remedyForState(env, "Keep retrieval source-authoritative. Rerun `brain zone <manifest> --source NAME --zone ZONE` for each assigned source; every pass repairs at most 1,000 documents and 1,000 chunks. Repeat until the command reports no pending rows, then rerun `brain diagnose <manifest>`.") });
   });
 
   await safe("chunk_document_source_mismatch", async () => {
@@ -2188,7 +2196,7 @@ export async function diagnose(env, {
     add({ id: "chunk_document_source_mismatch", area: "integrity", severity: "warn", count,
       title: `${count} chunk(s) disagree with their owning document's source`,
       detail: "Authorization follows the document source, so this drift does not widen access. Source filters and provenance can still be misleading until the chunk projection is repaired.",
-      action: "Reingest the affected registered source. If the mismatch remains, run `brain update <manifest>` before relying on source-filtered results." });
+      action: remedyForState(env, "Reingest the affected registered source. If the mismatch remains, run `brain update <manifest>` before relying on source-filtered results.") });
   });
 
   /* ---------------- INTEGRITY: is it stored correctly ---------------- */
@@ -2299,7 +2307,9 @@ export async function diagnose(env, {
       title: `${n} vector operation(s) failed and were set aside`,
       detail: "Upsert failures stay invisible to meaning search; delete failures leave stale vectors consuming candidates. Both remain queued for repair.",
       samples: rows.map((r) => `${r.chunk_uid}: ${String(r.last_error || "").slice(0, 90)}`),
-      action: remedyForState(env, "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain drain <manifest>`.") });
+      action: remedyForState(env,
+        "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain drain <manifest>`.",
+        { pausedRemedy: "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain update <manifest>` to resume the paused bootstrap." }) });
   });
 
   await safe("vector_retries", async () => {
@@ -2334,7 +2344,7 @@ export async function diagnose(env, {
     if (n) add({ id: "blank_chunks", area: "integrity", severity: "warn", count: n,
       title: `${n} chunk(s) hold no text`,
       detail: "Each occupies a vector and can be returned as a hit while carrying nothing.",
-      action: "Re-ingest the documents they came from." });
+      action: remedyForState(env, "Re-ingest the documents they came from.") });
   });
 
   await safe("duplicate_documents", async () => {
@@ -2374,7 +2384,7 @@ export async function diagnose(env, {
       title: `one document produced ${top} chunks, ${share}% of the entire corpus`,
       detail: "Usually a spreadsheet. It crowds out every other document in retrieval and dominates cost, while rarely being what anyone is actually asking about.",
       samples: rows.slice(0, 5).map((r) => `${r.n} chunks: ${(r.title || r.uri || "?").slice(0, 60)}`),
-      action: "Consider loading a summary instead of the raw sheet, or excluding it." });
+      action: remedyForState(env, "Consider loading a summary instead of the raw sheet, or excluding it.") });
   });
 
   await safe("oversized_chunks", async () => {
@@ -2407,15 +2417,27 @@ export async function diagnose(env, {
     if (groups > 10) add({ id: "duplicate_chunks", area: "efficiency", severity: "info", count: groups,
       title: `${groups}+ groups of identical chunk text`,
       detail: "Repeated headers, footers or boilerplate. Each copy is embedded and stored separately and can occupy a retrieval slot.",
-      action: "Harmless at small scale. Worth trimming on a large corpus." });
+      action: remedyForState(env, "Harmless at small scale. Worth trimming on a large corpus.") });
   });
 
   const count = (s) => findings.filter((f) => f.severity === s).length;
+  const complete = unavailableChecks.length === 0;
   return {
     totals,
     findings,
-    summary: { crit: count("crit"), warn: count("warn"), info: count("info"), ok: count("ok") },
-    verdict: count("crit") ? "problems" : count("warn") ? "usable_with_gaps" : "healthy",
+    complete,
+    unavailable_checks: unavailableChecks,
+    summary: {
+      crit: count("crit"), warn: count("warn"), info: count("info"), ok: count("ok"),
+      unavailable: unavailableChecks.length,
+    },
+    verdict: !complete
+      ? "incomplete"
+      : count("crit")
+        ? "problems"
+        : count("warn")
+          ? "usable_with_gaps"
+          : "healthy",
   };
 }
 

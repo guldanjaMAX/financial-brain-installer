@@ -518,12 +518,13 @@ const driveCli = async (env, db) => {
       /excess vectors/i.test(stallMessage)),
     stallMessage);
   check("the stall no longer prescribes a re-run that cannot change the vector count",
-    !stalled || (/cannot change this/i.test(stallMessage) &&
+    !stalled || (/already stopped the paused bootstrap/i.test(stallMessage) &&
+      /report this update failure for reviewed repair before retrying/i.test(stallMessage) &&
       !/Re-run `brain update/.test(stallMessage)),
     stallMessage);
   check("the stall still reports the movement budget and that the brain stays paused",
     !stalled || (/has not moved for \d+ minutes/.test(stallMessage) &&
-      /remains paused/i.test(stallMessage)),
+      /Keep the Worker paused/i.test(stallMessage)),
     stallMessage);
   if (stalled) {
     console.log("      ^ open defect: receipt had expected_vectors=" +

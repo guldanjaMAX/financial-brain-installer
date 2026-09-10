@@ -48,8 +48,18 @@ const done = receipt({ phase: "complete", epoch: 6, confirmed: 1213, queued: 0, 
     actual_vectors: 1163, blocked_on: "quarantine", blocked_rows: 50 });
   await assert.rejects(
     runAcceleratedBootstrap({ ...opts(), request: async () => { i++; return res(blocked); } }),
-    /50 quarantined row\(s\)[\s\S]*vector-retry[\s\S]*brain forget/,
-    "quarantine is refused by name with both remedies, before the not-yet-visible wait");
+    (error) => {
+      const message = String(error?.message || "");
+      assert.match(message, /50 quarantined row\(s\)[\s\S]*vector-retry[\s\S]*reviewed repair/);
+      const preview = message.indexOf('{"confirm":false}');
+      const release = message.indexOf('{"confirm":true}');
+      assert.ok(preview >= 0 && release > preview,
+        "the quarantine remedy must preview before it offers the mutating confirmation");
+      assert.match(message, /read-only receipt[\s\S]*owner reviews that count/);
+      assert.doesNotMatch(message, /brain forget|brain reindex|brain drain/);
+      return true;
+    },
+    "quarantine is refused by name with preview-first retry and reviewed-repair paths, before the not-yet-visible wait");
   assert.equal(i, 1, "refused on the first receipt, no waiting");
 }
 // A cleanup receipt naming the fence waits the movement budget, then dies naming the fence.
