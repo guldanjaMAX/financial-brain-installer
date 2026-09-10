@@ -26,6 +26,13 @@ that stops the waiting. Nothing here changes what your brain holds.
   released stuck work while the rebuild was running, which is what the product
   tells you to do, the update treated its own progress as a fault and quit.
 
+- **Closing a laptop no longer makes an index rebuild look stalled.** The
+  fifteen-minute no-movement check now counts only time the updater could keep
+  observing. Waking the computer continues from the durable rebuild instead of
+  treating the sleep interval as proof of a stuck index. The separate six-hour
+  wall-clock safety limit still applies, and a stopped update still keeps the
+  Brain's writes paused until the same update command is run again.
+
 - **When a rebuild finishes and some vectors are still missing, the advice is
   now safe.** It used to point at a command that rebuilds the entire corpus and
   bills you for every piece again. It now names what is missing and points at
