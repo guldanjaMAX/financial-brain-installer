@@ -840,6 +840,49 @@ const call = (env, path) => {
   check("the partial approval identifies the citation mismatch", /every citation/.test(body.evidence_gate?.reason || ""), JSON.stringify(body.evidence_gate));
 }
 
+/* D1 prepends `[title]\n\n` to chunk zero. A filename can be stale or wrong,
+   so the deterministic guard must inspect the native body after that exact
+   product-generated prefix instead of letting the filename overrule the
+   taxpayer printed in the return. */
+{
+  const title = "Example Orchard LLC 2023 tax return Form 1065";
+  const wrongSameFormReturn = {
+    ...ROW,
+    chunk_uid: "drive:misnamed-other-entity-return#0",
+    doc_uid: "drive:misnamed-other-entity-return",
+    source_id: "misnamed-other-entity-return",
+    source: "drive",
+    source_kind: "upload",
+    title,
+    client: "Example Orchard LLC",
+    authority_document_head: `[${title}]\n\nTaxpayer: Example Timber Partners. 2023 Form 1065 partnership return.`,
+    text: "Ordinary business income was a negative amount.",
+  };
+  const { env } = mkEnv([wrongSameFormReturn], {
+    vectorIds: [wrongSameFormReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the filename, form, and year match" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("a D1-injected matching filename cannot override a different taxpayer in the native body",
+    body.answer === "The documents do not answer the question." &&
+      body.citations.length === 0 &&
+      body.evidence_gate?.supported === false,
+    JSON.stringify(body));
+  check("the misnamed same-form return fails the deterministic entity boundary",
+    /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body.evidence_gate));
+}
+
 /* A nearest-neighbor tax hit can carry the right line label and tax year while
    belonging to a different entity and a different filing. The expected return
    is present but unreadable, which mirrors the dangerous case where retrieval

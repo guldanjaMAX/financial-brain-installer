@@ -114,9 +114,21 @@ export function taxQuestionScope(question = "") {
 function projectedDocumentHead(row) {
   const present = Object.hasOwn(row || {}, "authority_document_head") ||
     Object.hasOwn(row || {}, "_authority_document_head");
-  const value = Object.hasOwn(row || {}, "authority_document_head")
+  const projected = Object.hasOwn(row || {}, "authority_document_head")
     ? row.authority_document_head
     : row?._authority_document_head;
+  if (!present || typeof projected !== "string") return { present, value: projected };
+
+  // D1 chunking prepends this exact product-generated header to every chunk:
+  // `[title]\n\n`. It is useful retrieval context, but it is still a filename,
+  // not the tax return's native header. Strip only the exact prefix generated
+  // from this row's exact title. Never strip a merely bracket-shaped first line
+  // from owner content, and never guess when the stored title differs.
+  const title = typeof row?.title === "string" ? row.title : "";
+  const injectedPrefix = title ? `[${title}]\n\n` : "";
+  const value = injectedPrefix && projected.startsWith(injectedPrefix)
+    ? projected.slice(injectedPrefix.length)
+    : projected;
   return { present, value };
 }
 

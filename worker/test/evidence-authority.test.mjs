@@ -237,21 +237,21 @@ test("a named tax form claim requires the same entity, tax year, and form", () =
   const misleadingFilename = authorityFor({
     ...base,
     title: "Example Orchard LLC 2023 tax return Form 1065",
-    authority_document_head: "Example Timber Partners. 2023 Form 1065 partnership return.",
+    authority_document_head: "[Example Orchard LLC 2023 tax return Form 1065]\n\nExample Timber Partners. 2023 Form 1065 partnership return.",
     text: "Example Orchard LLC, Form 1065, tax year 2023.",
   }, { query: question });
   assert.equal(misleadingFilename.eligible, false,
-    "a matching filename must not override a different taxpayer in the projected native header");
+    "the title prepended to a real D1 chunk must not override a different taxpayer in the native header");
   assert.equal(misleadingFilename.tax_scope?.entity_matched, false);
 
   const misleadingTaxFilename = authorityFor({
     ...base,
     title: "Example Orchard LLC 2023 tax return Form 1065",
-    authority_document_head: "Example Orchard LLC. 2022 Form 1120-S corporate return.",
+    authority_document_head: "[Example Orchard LLC 2023 tax return Form 1065]\n\nExample Orchard LLC. 2022 Form 1120-S corporate return.",
     text: "Example Orchard LLC, Form 1065, tax year 2023.",
   }, { query: question });
   assert.equal(misleadingTaxFilename.eligible, false,
-    "a matching filename must not override a different year and form in the projected native header");
+    "the title prepended to a real D1 chunk must not override a different year and form in the native header");
   assert.equal(misleadingTaxFilename.tax_scope?.entity_matched, true);
   assert.equal(misleadingTaxFilename.tax_scope?.year_matched, false);
   assert.equal(misleadingTaxFilename.tax_scope?.form_matched, false);
