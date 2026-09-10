@@ -9,7 +9,12 @@
  * does not claim that every historical conversation was captured.
  */
 
-import { sourceFamilyCounts } from "./store-d1.js";
+import {
+  documentAccessSql, scopeSql, sourceFamilyCounts,
+} from "./store-d1.js";
+import {
+  EVIDENCE_LINEAGE_VERSION, evidenceLineageValidationError,
+} from "./evidence-lineage.js";
 import { isSourceKindConflict, resolveSourceKind } from "./source-receipt.js";
 import {
   OWNER_NOTES_KIND, OWNER_NOTES_SOURCE,
@@ -25,6 +30,8 @@ export {
 } from "./owner-note-contract.js";
 
 const RECEIPT_ACTIONS = new Set(["created", "updated", "unchanged"]);
+const OWNER_NOTE_LINEAGE_MAX_ROOTS = 16;
+const LINEAGE_ID_CONTROL = /[\u0000-\u001f\u007f]/;
 export class OwnerNoteLifecycleError extends Error {
   constructor(message, {
     code = "owner_note_lifecycle_failed",
@@ -37,6 +44,189 @@ export class OwnerNoteLifecycleError extends Error {
     this.status = status;
     this.may_have_written = mayHaveWritten;
   }
+}
+
+function metadataObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (value === null || value === undefined || value === "") return {};
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function lineageFailure(message, { code, status = 422 } = {}) {
+  return new OwnerNoteLifecycleError(message, { code, status });
+}
+
+function lineageTooLarge() {
+  return lineageFailure(
+    "The supporting-document lineage is too large to verify safely in one write. Nothing was written.",
+    { code: "owner_note_lineage_too_large", status: 413 },
+  );
+}
+
+function validLineageDocumentId(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    value.includes(":") && !LINEAGE_ID_CONTROL.test(value);
+}
+
+function validLineageRootId(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    !LINEAGE_ID_CONTROL.test(value);
+}
+
+/**
+ * Read one lineage node through the same exact D1 authorization predicates as
+ * retrieval. Returning one generic refusal for absent, deleted, empty, and
+ * out-of-scope rows prevents this write path from becoming a document oracle.
+ */
+async function readableLineageDocument(env, docUid, { scope, access }) {
+  const scoped = scopeSql(scope, "d", 2);
+  const exact = documentAccessSql(access, "d", "d", scoped.nextParam);
+  try {
+    const row = await env.DB.prepare(
+      `SELECT d.doc_uid, d.meta
+         FROM documents d
+        WHERE d.doc_uid=?1
+          AND d.deleted_at IS NULL
+          AND EXISTS (SELECT 1 FROM chunks readable_chunk WHERE readable_chunk.doc_uid=d.doc_uid)
+          ${scoped.clause}${exact.clause}`,
+    ).bind(docUid, ...scoped.params, ...exact.params).first();
+    if (row) return row;
+  } catch {
+    throw lineageFailure(
+      "The Brain could not verify the supporting-document lineage. Nothing was written.",
+      { code: "owner_note_lineage_unavailable", status: 503 },
+    );
+  }
+  throw lineageFailure(
+    "One or more supporting documents could not be confirmed as live and readable in this connection. Nothing was written.",
+    { code: "owner_note_lineage_reference_unavailable" },
+  );
+}
+
+function storedLineageRoots(row) {
+  const metadata = metadataObject(row?.meta);
+  if (!metadata) {
+    throw lineageFailure(
+      "A supporting document has unreadable lineage metadata. Nothing was written.",
+      { code: "owner_note_lineage_invalid", status: 409 },
+    );
+  }
+  const contractError = evidenceLineageValidationError(metadata);
+  if (contractError) {
+    throw lineageFailure(
+      "A supporting document has invalid lineage metadata. Nothing was written.",
+      { code: "owner_note_lineage_invalid", status: 409 },
+    );
+  }
+  const lineage = metadata.evidence_lineage;
+  if (lineage && Array.isArray(lineage.root_ids) && lineage.root_ids.length) {
+    return [...new Set(lineage.root_ids.map((id) => String(id).trim()))].sort();
+  }
+
+  // root_ids and family_of are already durable family identifiers. They may
+  // deliberately have no documents row, so neither is recursively resolved as
+  // though it were another search result id.
+  if ((!lineage || lineage.kind === "source_record") && metadata.family_of !== undefined) {
+    const family = typeof metadata.family_of === "string" ? metadata.family_of.trim() : "";
+    if (!validLineageRootId(family)) {
+      throw lineageFailure(
+        "A supporting document has invalid family lineage. Nothing was written.",
+        { code: "owner_note_lineage_invalid", status: 409 },
+      );
+    }
+    return [family];
+  }
+  if (lineage?.kind === "agent_derived" || lineage?.kind === "derived_record") return [];
+  return [String(row.doc_uid)];
+}
+
+/**
+ * Resolve MCP `derived_from` search-result ids to the durable source families
+ * already recorded on those exact readable documents before the owner-note
+ * source, document, chunks, or outbox can be changed. Recorded roots are
+ * terminal identifiers, not document ids to dereference. The returned ids
+ * stay server-private storage metadata.
+ */
+export async function resolveOwnerNoteLineage(env, derivedFrom, {
+  scope = { all: true },
+  access = null,
+  successorDocUid = null,
+} = {}) {
+  const requested = Array.isArray(derivedFrom)
+    ? [...new Set(derivedFrom.map((id) => typeof id === "string" ? id.trim() : id))].sort()
+    : null;
+  if (!requested || requested.length > OWNER_NOTE_LINEAGE_MAX_ROOTS ||
+      requested.some((id) => !validLineageDocumentId(id))) {
+    throw lineageTooLarge();
+  }
+  if (!requested.length) return [];
+
+  const roots = new Set();
+  for (const docUid of requested) {
+    if (docUid === successorDocUid) {
+      throw lineageFailure(
+        "The supporting-document lineage contains a cycle. Nothing was written.",
+        { code: "owner_note_lineage_cycle", status: 409 },
+      );
+    }
+    const row = await readableLineageDocument(env, docUid, { scope, access });
+    for (const root of storedLineageRoots(row)) {
+      if (!validLineageRootId(root)) {
+        throw lineageFailure(
+          "A supporting document has invalid lineage metadata. Nothing was written.",
+          { code: "owner_note_lineage_invalid", status: 409 },
+        );
+      }
+      if (root === successorDocUid) {
+        throw lineageFailure(
+          "The supporting-document lineage contains a cycle. Nothing was written.",
+          { code: "owner_note_lineage_cycle", status: 409 },
+        );
+      }
+      roots.add(root);
+    }
+    if (roots.size > OWNER_NOTE_LINEAGE_MAX_ROOTS) throw lineageTooLarge();
+  }
+  return [...roots].sort();
+}
+
+async function canonicalizeOwnerNoteLineage(env, envelope, { scope, access }) {
+  const submitted = envelope.metadata.evidence_lineage;
+  if (submitted !== undefined && submitted.kind !== "agent_derived") {
+    throw new OwnerNoteLifecycleError(
+      "Conversational owner notes must be recorded as agent-derived evidence. Nothing was written.",
+      { code: "owner_note_lineage_kind_invalid", status: 400 },
+    );
+  }
+  const directIds = Array.isArray(submitted?.root_ids) ? submitted.root_ids : [];
+  const rootIds = await resolveOwnerNoteLineage(env, directIds, {
+    scope,
+    access,
+    successorDocUid: `${OWNER_NOTES_SOURCE}:${envelope.source_id}`,
+  });
+  envelope.metadata = {
+    ...envelope.metadata,
+    evidence_lineage: {
+      version: EVIDENCE_LINEAGE_VERSION,
+      kind: "agent_derived",
+      root_ids: rootIds,
+    },
+  };
+  return rootIds;
+}
+
+function exactStoredLineage(metadata, expectedRootIds) {
+  const value = metadataObject(metadata);
+  const lineage = value?.evidence_lineage;
+  return lineage?.version === EVIDENCE_LINEAGE_VERSION && lineage?.kind === "agent_derived" &&
+    Array.isArray(lineage.root_ids) &&
+    JSON.stringify([...lineage.root_ids].sort()) === JSON.stringify([...expectedRootIds].sort());
 }
 
 function envelopeError(envelope, provenance) {
@@ -66,6 +256,8 @@ function envelopeError(envelope, provenance) {
 export async function beginOwnerNoteWrite(env, envelope, {
   channel,
   expectedContentHash,
+  scope = { all: true },
+  access = null,
 } = {}) {
   const provenance = ownerNoteWriteProvenance(channel);
   if (!provenance) {
@@ -81,6 +273,11 @@ export async function beginOwnerNoteWrite(env, envelope, {
       status: 400,
     });
   }
+  // This is intentionally the first database-backed owner-note operation.
+  // Every caller-supplied search id is live and readable in the caller's exact
+  // scope before source registration or any corpus write. Its recorded durable
+  // roots are inherited as terminal family identifiers.
+  const lineageRootIds = await canonicalizeOwnerNoteLineage(env, envelope, { scope, access });
   let supersession = null;
   if (envelope.metadata.supersedes) {
     const successorDocUid = `${OWNER_NOTES_SOURCE}:${envelope.source_id}`;
@@ -114,7 +311,7 @@ export async function beginOwnerNoteWrite(env, envelope, {
     }
     throw error;
   }
-  return { provenance, supersession };
+  return { provenance, supersession, lineageRootIds };
 }
 
 /**
@@ -161,6 +358,7 @@ export async function completeOwnerNoteWrite(env, envelope, receipt, {
   channel,
   now = Date.now(),
   expectedContentHash,
+  expectedLineageRootIds = [],
   supersession = null,
 } = {}) {
   const provenance = ownerNoteWriteProvenance(channel);
@@ -200,7 +398,8 @@ export async function completeOwnerNoteWrite(env, envelope, receipt, {
   const exactProvenance = storedProvenance?.channel === provenance.recorded_via &&
     storedProvenance?.actor === provenance.written_by &&
     storedProvenance?.agent_profile === provenance.agent_profile;
-  if (!exactDocument || !exactProvenance) {
+  const exactLineage = exactStoredLineage(stored?.meta, expectedLineageRootIds);
+  if (!exactDocument || !exactProvenance || !exactLineage) {
     throw new OwnerNoteLifecycleError(
       "The Brain could not read the exact owner note and its provenance back from storage. Retry the same note; do not claim it was saved yet.",
       { code: "owner_note_readback_unconfirmed", mayHaveWritten: true },

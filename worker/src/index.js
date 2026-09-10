@@ -1439,6 +1439,7 @@ async function handleIngest(env, request, scope = { all: true }, {
       ownerNoteWrite = await beginOwnerNoteWrite(env, envelope, {
         channel: ownerNoteChannel,
         expectedContentHash: expectedOwnerNoteHash,
+        scope,
       });
     } catch (error) {
       if (!(error instanceof OwnerNoteLifecycleError)) throw error;
@@ -1481,6 +1482,7 @@ async function handleIngest(env, request, scope = { all: true }, {
       const confirmed = await completeOwnerNoteWrite(env, envelope, out, {
         channel: ownerNoteChannel,
         expectedContentHash: expectedOwnerNoteHash,
+        expectedLineageRootIds: ownerNoteWrite?.lineageRootIds || [],
         supersession: ownerNoteWrite?.supersession || null,
       });
       return privateNoStore(jsonResponse(confirmed));
@@ -2700,7 +2702,7 @@ export default {
         return await handleIngest(env, request, scope);
       }
       if (path === OWNER_NOTES_ROUTE && request.method === "POST") {
-        return await handleIngest(env, request, { all: true }, {
+        return await handleIngest(env, request, scope, {
           ownerNoteChannel: "local_mcp",
         });
       }
