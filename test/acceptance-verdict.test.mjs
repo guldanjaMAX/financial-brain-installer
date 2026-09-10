@@ -283,7 +283,10 @@ for (const [label, body, expectedStage, detailPattern] of [
 
 {
   const malformed = {
+    mode: "think",
     answer: "Invented answer [1]",
+    citations: [],
+    results: [],
     gaps: [],
   };
   const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
@@ -294,6 +297,72 @@ for (const [label, body, expectedStage, detailPattern] of [
   check("answer text in a malformed 200 cannot bypass the response contract",
     suite.results.some((result) => result.status === "fail" && result.name === "think response contract") &&
       !suite.results.some((result) => result.status === "pass" && result.name === "think returns an answer"),
+    JSON.stringify(suite.results));
+}
+
+for (const [label, malformed] of [
+  [
+    "a citation marker absent from the citation receipt",
+    {
+      mode: "think",
+      answer: "Invented answer [2]",
+      citations: [{ n: 1 }],
+      results: [{ title: "candidate" }],
+      gaps: [],
+    },
+  ],
+  [
+    "answer text beside a model error",
+    {
+      mode: "think",
+      answer: "Invented answer [1]",
+      answer_error: "private-payload-canary",
+      citations: [{ n: 1 }],
+      results: [{ title: "candidate" }],
+      gaps: [],
+    },
+  ],
+  [
+    "a factual claim that merely contains refusal-like words",
+    {
+      mode: "think",
+      answer: "There is no information missing, so the invented total is $9,999.",
+      citations: [],
+      results: [{ title: "candidate" }],
+      gaps: [],
+    },
+  ],
+]) {
+  const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
+  suite.post = async (path) => path === "/api/rag/unified"
+    ? { ok: true, status: 200, json: { results: [{ title: "candidate" }] } }
+    : { ok: true, status: 200, json: malformed };
+  await suite.tierRetrieval(["What changed?"]);
+  const contractFailure = suite.results.find((result) =>
+    result.status === "fail" && result.name === "think response contract"
+  );
+  check(`${label} fails the response contract`, Boolean(contractFailure), JSON.stringify(suite.results));
+  check(`${label} cannot false-green acceptance`, suite.summary().passed === false, JSON.stringify(suite.summary()));
+  check(`${label} exposes no private diagnostic text`,
+    !/private-payload-canary/i.test(contractFailure?.detail || ""), JSON.stringify(contractFailure));
+}
+
+{
+  const valid = {
+    mode: "think",
+    answer: "The agreement ends in June [1].",
+    citations: [{ n: 1, title: "Agreement" }],
+    results: [{ title: "Agreement" }],
+    gaps: [],
+  };
+  const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
+  suite.post = async (path) => path === "/api/rag/unified"
+    ? { ok: true, status: 200, json: { results: [{ title: "candidate" }] } }
+    : { ok: true, status: 200, json: valid };
+  await suite.tierRetrieval(["When does it end?"]);
+  check("a consistent cited answer still passes the answer contract",
+    suite.results.some((result) => result.status === "pass" && result.name === "think returns an answer") &&
+      !suite.results.some((result) => result.name === "think response contract"),
     JSON.stringify(suite.results));
 }
 

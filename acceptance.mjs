@@ -50,6 +50,60 @@ const diagnosticText = (value, fallback) => {
   return text ? text.slice(0, 240) : fallback;
 };
 
+const answerIsRefusal = (answer) =>
+  /^the documents do not answer\b/i.test(String(answer || "").trim());
+
+/**
+ * Refuse a 200-shaped answer whose fields contradict each other.
+ *
+ * Type checks alone are insufficient here: plausible answer text paired with
+ * no candidates, no citations, or an unavailable/error state is not evidence
+ * that the reviewed answer path ran. All returned details stay fixed public
+ * copy so a malformed older Worker cannot leak provider or private text.
+ */
+export function answerResponseContractDiagnostic(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "the Worker returned no structured answer response";
+  }
+
+  const owns = (field) => Object.prototype.hasOwnProperty.call(payload, field);
+  if (payload.mode !== "think" || !owns("answer") ||
+      !(payload.answer === null || typeof payload.answer === "string") ||
+      !Array.isArray(payload.results) || !Array.isArray(payload.gaps) ||
+      !Array.isArray(payload.citations)) {
+    return "the Worker returned an incomplete or incompatible answer response";
+  }
+
+  const answer = typeof payload.answer === "string" ? payload.answer.trim() : "";
+  if (!answer) return null;
+
+  const evidenceGate = payload.evidence_gate && typeof payload.evidence_gate === "object" &&
+    !Array.isArray(payload.evidence_gate)
+    ? payload.evidence_gate
+    : null;
+  if (["search_unavailable", "coverage_incomplete"].includes(payload.status) ||
+      payload.answer_error || evidenceGate?.error) {
+    return "the Worker returned answer text alongside an unavailable or error state";
+  }
+
+  if (answerIsRefusal(answer)) return null;
+  if (payload.results.length === 0) {
+    return "the Worker returned a factual answer without candidate evidence";
+  }
+
+  const markers = [...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
+  const citationNumbers = payload.citations.map((citation) => citation?.n);
+  if (!markers.length || !citationNumbers.length ||
+      citationNumbers.some((n) => !Number.isInteger(n) || n < 1 || n > payload.results.length) ||
+      markers.some((n) => !citationNumbers.includes(n))) {
+    return "the Worker's factual answer and citation evidence did not agree";
+  }
+  if (evidenceGate && evidenceGate.supported === false) {
+    return "the Worker returned a factual answer its evidence gate did not support";
+  }
+  return null;
+}
+
 /**
  * Name the exact stage that left `/api/rag/think` without an answer.
  *
@@ -63,21 +117,11 @@ const diagnosticText = (value, fallback) => {
  * errors are sanitized by the Worker before this function sees them.
  */
 export function answerUnavailableDiagnostic(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+  const contractDiagnostic = answerResponseContractDiagnostic(payload);
+  if (contractDiagnostic) {
     return {
       stage: "response_contract",
-      detail: "the Worker returned no structured answer response",
-    };
-  }
-
-  const owns = (field) => Object.prototype.hasOwnProperty.call(payload, field);
-  if (payload.mode !== "think" || !owns("answer") ||
-      !(payload.answer === null || typeof payload.answer === "string") ||
-      !Array.isArray(payload.results) || !Array.isArray(payload.gaps) ||
-      !Array.isArray(payload.citations)) {
-    return {
-      stage: "response_contract",
-      detail: "the Worker returned an incomplete or incompatible answer response",
+      detail: contractDiagnostic,
     };
   }
 
@@ -615,10 +659,7 @@ export class Acceptance {
         // citations, because it makes no factual claim to cite. Requiring
         // markers unconditionally fails the brain for behaving honestly, which
         // is the opposite of what this check is for.
-        const isRefusal =
-          /\b(do(es)? not (contain|answer|address)|no (information|record|mention)|nothing (recorded|found))\b/i.test(
-            answer
-          );
+        const isRefusal = answerIsRefusal(answer);
         const cited = /\[\d+\]/.test(answer);
         if (isRefusal && !cited) {
           this.record(t, "answer citation discipline", PASS, "honest refusal, nothing to cite");
