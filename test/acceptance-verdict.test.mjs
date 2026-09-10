@@ -281,5 +281,21 @@ for (const [label, body, expectedStage, detailPattern] of [
     JSON.stringify(suite.results));
 }
 
+{
+  const malformed = {
+    answer: "Invented answer [1]",
+    gaps: [],
+  };
+  const suite = new Acceptance({ base: "https://brain.example", adminKey: "k", manifest: {} });
+  suite.post = async (path) => path === "/api/rag/unified"
+    ? { ok: true, status: 200, json: { results: [{ title: "candidate" }] } }
+    : { ok: true, status: 200, json: malformed };
+  await suite.tierRetrieval(["What changed?"]);
+  check("answer text in a malformed 200 cannot bypass the response contract",
+    suite.results.some((result) => result.status === "fail" && result.name === "think response contract") &&
+      !suite.results.some((result) => result.status === "pass" && result.name === "think returns an answer"),
+    JSON.stringify(suite.results));
+}
+
 console.log(`\nacceptance verdict: ${ran - fail}/${ran} passed`);
 if (fail) process.exit(1);

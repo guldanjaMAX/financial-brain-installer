@@ -600,35 +600,40 @@ export class Acceptance {
     }
     if (!think.ok) {
       this.record(t, "think endpoint", FAIL, `HTTP ${think.status}`);
-    } else if (think.json?.answer) {
-      const answer = think.json.answer;
-      this.record(t, "think returns an answer", PASS, `${answer.length} chars`);
-      // A refusal ("the documents do not answer this") correctly carries no
-      // citations, because it makes no factual claim to cite. Requiring
-      // markers unconditionally fails the brain for behaving honestly, which
-      // is the opposite of what this check is for.
-      const isRefusal =
-        /\b(do(es)? not (contain|answer|address)|no (information|record|mention)|nothing (recorded|found))\b/i.test(
-          answer
-        );
-      const cited = /\[\d+\]/.test(answer);
-      if (isRefusal && !cited) {
-        this.record(t, "answer citation discipline", PASS, "honest refusal, nothing to cite");
-      } else {
-        this.record(
-          t,
-          "answer carries inline citations",
-          cited ? PASS : FAIL,
-          cited ? "found [n] markers" : "the answer makes claims but cites nothing"
-        );
-      }
     } else {
-      // A complete null-answer response proves the endpoint degraded rather
-      // than crashed. A malformed 200 proves neither and must fail closed.
+      // Validate the complete public response envelope before trusting answer
+      // text. A malformed 200 containing plausible prose is not proof that the
+      // Worker ran the reviewed answer path, and must never turn acceptance
+      // green merely because `answer` is truthy.
       const diagnostic = answerUnavailableDiagnostic(think.json);
       if (diagnostic.stage === "response_contract") {
         this.record(t, "think response contract", FAIL, diagnostic.detail);
+      } else if (think.json?.answer) {
+        const answer = think.json.answer;
+        this.record(t, "think returns an answer", PASS, `${answer.length} chars`);
+        // A refusal ("the documents do not answer this") correctly carries no
+        // citations, because it makes no factual claim to cite. Requiring
+        // markers unconditionally fails the brain for behaving honestly, which
+        // is the opposite of what this check is for.
+        const isRefusal =
+          /\b(do(es)? not (contain|answer|address)|no (information|record|mention)|nothing (recorded|found))\b/i.test(
+            answer
+          );
+        const cited = /\[\d+\]/.test(answer);
+        if (isRefusal && !cited) {
+          this.record(t, "answer citation discipline", PASS, "honest refusal, nothing to cite");
+        } else {
+          this.record(
+            t,
+            "answer carries inline citations",
+            cited ? PASS : FAIL,
+            cited ? "found [n] markers" : "the answer makes claims but cites nothing"
+          );
+        }
       } else {
+        // A complete null-answer response proves the endpoint degraded rather
+        // than crashed. Its reviewed fields identify the stage without
+        // exposing model- or provider-generated private text.
         this.record(
           t,
           "think degrades cleanly",
