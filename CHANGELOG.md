@@ -8,6 +8,15 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 Candidate only. This version has not been released.
 
+- **Optimize can now read exact source and provenance receipts without a
+  Cloudflare sign-in.** `brain sources <manifest> --json` uses the Brain's saved
+  owner credential and private Worker route to return a stable D1 source
+  inventory with masked scope/cursor state, physical and logical counts,
+  freshness, extraction, OCR, lineage, and exact missing fields. A separate
+  `--json --recovery` mode pages opaque record identities and closed reason
+  codes for planning. Both modes are strictly read-only, reveal no raw source
+  locator, and stop if the snapshot changes. They do not run OCR or repair.
+
 - **Account and passkey steps now explain themselves before anything opens.**
   Claude Code can handle official-page navigation and non-secret form fields,
   then pauses for sign-in, 2FA, secrets, consent, billing, and the secure device

@@ -206,7 +206,7 @@ import {
   runTechnicianStep,
   technicianPlan,
 } from "./operations/technician-setup.mjs";
-import { guardBrainAdminFetch } from "./components/brain-http.mjs";
+import { fetchBrainWithAdminKey, guardBrainAdminFetch, secureBrainRequestUrl } from "./components/brain-http.mjs";
 import { confidenceLine } from "./worker/src/lib/confidence.js";
 import {
   absenceUnproven, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
@@ -7447,131 +7447,440 @@ async function reportFreshness(m, acct, manifestPath) {
   }
 }
 
-async function cmdSources(manifestPath) {
-  const { m } = loadManifest(manifestPath);
-  const acct = await resolveAccount(m);
-  const dbId = m.infrastructure?.cloudflare?.d1_database_id;
-  if (!dbId) die("no d1_database_id in the manifest. Run `brain provision` first.");
+class SourceInventoryClientError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "SourceInventoryClientError";
+    this.code = code;
+  }
+}
 
-  const flags = parseFlags(process.argv.slice(4));
-  const base = await resolveBase(m, acct);
-  const adminKey = resolveAdminKey(manifestPath);
-  const sourceRegistryWrite = Boolean(flags.add) || flags.refresh !== undefined;
-  if (sourceRegistryWrite && !adminKey) {
-    die(
-      "no durable admin key was found, so the source registry cannot be changed through its paused-write guard." + "\n" +
-        "      Repair it with `brain setup <manifest>` or `brain secrets <manifest>`."
+function sourceInventoryBaseUrl(m) {
+  const declared = String(m?.brain?.domain || "").trim();
+  if (!declared) {
+    throw new SourceInventoryClientError(
+      "brain_domain_missing",
+      "this manifest has no saved brain.domain, so the source inventory cannot reach the Brain without Cloudflare account access. " +
+        "Run `brain update <manifest>` once to save the deployed address, then rerun this command. No Cloudflare sign-in was attempted.",
     );
   }
+  let candidate;
+  try {
+    candidate = new URL(declared.includes("://") ? declared : `https://${declared}`);
+  } catch {
+    throw new SourceInventoryClientError(
+      "brain_domain_invalid",
+      "brain.domain is not a valid deployed HTTPS hostname. Run `brain doctor <manifest>` before retrying the source inventory.",
+    );
+  }
+  if (candidate.protocol !== "https:" || candidate.username || candidate.password || candidate.port ||
+      candidate.pathname !== "/" || candidate.search || candidate.hash) {
+    throw new SourceInventoryClientError(
+      "brain_domain_invalid",
+      "brain.domain must be one HTTPS hostname with no port, path, sign-in value, query, or fragment.",
+    );
+  }
+  try {
+    return secureBrainRequestUrl(candidate).origin;
+  } catch {
+    throw new SourceInventoryClientError(
+      "brain_domain_invalid",
+      "brain.domain is not a safe deployed HTTPS address. Run `brain doctor <manifest>` before retrying the source inventory.",
+    );
+  }
+}
 
-  // Registering by hand exists because the connectors are still being written.
-  // When an ingest driver lands it registers its own source on first run and
-  // this stays as the escape hatch for a corpus that has no connector.
-  if (flags.add) {
-    const name = assertSourceName(flags.add === true ? null : flags.add);
-    const kind =
-      (flags.kind !== true && flags.kind) ||
-      Object.keys(m.corpora || {}).find((k) => k.replace(/_/g, "-") === name) ||
-      "upload";
-    const registration = await postSourceRegistration(base, adminKey, {
-      source: name,
-      kind: String(kind),
+function validateSourceInventoryPage(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      body.contract_version !== 1 || body.kind !== "source_inventory") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an unsupported source-inventory receipt");
+  }
+  if (!Number.isSafeInteger(body.total) || body.total < 0 ||
+      !Number.isSafeInteger(body.returned) || body.returned < 0 ||
+      !Array.isArray(body.sources) || body.returned !== body.sources.length ||
+      typeof body.truncated !== "boolean" || body.complete !== !body.truncated ||
+      !body.recovery_plan_summary || typeof body.recovery_plan_summary !== "object") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an inconsistent source-inventory page");
+  }
+  if ((body.truncated && (typeof body.cursor !== "string" || !body.cursor)) ||
+      (!body.truncated && body.cursor !== null)) {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-inventory cursor receipt");
+  }
+  const asOfMillis = Date.parse(String(body.as_of || ""));
+  if (!Number.isFinite(asOfMillis) || new Date(asOfMillis).toISOString() !== body.as_of ||
+      !body.snapshot || typeof body.snapshot !== "object" ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(body.snapshot.id || "")) ||
+      body.snapshot.as_of !== body.as_of || body.snapshot.stable !== true ||
+      body.snapshot.total !== body.total) {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-inventory snapshot receipt");
+  }
+  const exactRowFields = [
+    "configuration", "connector", "freshness", "kind", "name", "provenance", "readability",
+    "receipt", "recovery_plan", "registered", "source_id", "storage", "zone",
+  ].sort().join(",");
+  for (const row of body.sources) {
+    if (!row || typeof row !== "object" || Array.isArray(row) ||
+        Object.keys(row).sort().join(",") !== exactRowFields ||
+        typeof row.source_id !== "string" || row.source_id !== row.name ||
+        !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(row.source_id) ||
+        typeof row.kind !== "string" || typeof row.registered !== "boolean" ||
+        !(row.zone === null || typeof row.zone === "string") ||
+        !row.storage || !row.readability || !row.freshness ||
+        (row.registered ? !row.receipt : row.receipt !== null)) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source row");
+    }
+    assertSourceInventoryPrivacy(row, "source");
+  }
+  assertSourceInventoryPrivacy(body.recovery_plan_summary, "recovery_plan_summary");
+  return body;
+}
+
+function assertSourceInventoryPrivacy(value, root = "inventory") {
+  const privateOrInvented = [];
+  (function inspect(item, path) {
+    if (Array.isArray(item)) return item.forEach((entry, index) => inspect(entry, `${path}[${index}]`));
+    if (!item || typeof item !== "object") return;
+    for (const [key, child] of Object.entries(item)) {
+      if (/^(?:admin_key|secret|token|credential|entity|entity_slug|tax_year|year|title|uri|doc_uid|raw_source_id|provider_record_id)$/i.test(key)) {
+        privateOrInvented.push(`${path}.${key}`);
+      }
+      inspect(child, `${path}.${key}`);
+    }
+  })(value, root);
+  if (privateOrInvented.length) {
+    throw new SourceInventoryClientError(
+      "inventory_privacy_invalid",
+      "the Brain returned unsupported private, inferred, or raw locator fields",
+    );
+  }
+}
+
+function validateSourceRecoveryPage(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      body.contract_version !== 1 || body.kind !== "source_recovery_plan") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an unsupported source-recovery receipt");
+  }
+  if (!Number.isSafeInteger(body.total) || body.total < 0 ||
+      !Number.isSafeInteger(body.returned) || body.returned < 0 ||
+      !Array.isArray(body.candidates) || body.returned !== body.candidates.length ||
+      typeof body.truncated !== "boolean" || body.complete !== !body.truncated ||
+      !(body.source_filter === null ||
+        (typeof body.source_filter === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.source_filter))) ||
+      !body.recovery_plan_summary || typeof body.recovery_plan_summary !== "object") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an inconsistent source-recovery page");
+  }
+  if ((body.truncated && (typeof body.cursor !== "string" || !body.cursor)) ||
+      (!body.truncated && body.cursor !== null)) {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-recovery cursor receipt");
+  }
+  const asOfMillis = Date.parse(String(body.as_of || ""));
+  if (!Number.isFinite(asOfMillis) || new Date(asOfMillis).toISOString() !== body.as_of ||
+      !body.snapshot || typeof body.snapshot !== "object" ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(body.snapshot.id || "")) ||
+      body.snapshot.as_of !== body.as_of || body.snapshot.stable !== true ||
+      body.snapshot.total !== body.total || body.snapshot.basis !== "corpus_mutation_receipt") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-recovery snapshot receipt");
+  }
+  const exactCandidateFields = [
+    "ingested_at", "locator", "ocr", "plan", "provenance", "reasons", "record_id",
+    "registered", "source_id", "source_kind", "text", "zone",
+  ].sort().join(",");
+  for (const candidate of body.candidates) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate) ||
+        Object.keys(candidate).sort().join(",") !== exactCandidateFields ||
+        !/^sha256:[a-f0-9]{64}$/.test(String(candidate.record_id || "")) ||
+        !candidate.locator || candidate.locator.kind !== "opaque_document_digest" ||
+        candidate.locator.value !== candidate.record_id || candidate.locator.reversible !== false ||
+        typeof candidate.source_id !== "string" ||
+        !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(candidate.source_id) ||
+        typeof candidate.source_kind !== "string" || typeof candidate.registered !== "boolean" ||
+        !(candidate.zone === null || typeof candidate.zone === "string") ||
+        !candidate.text || !candidate.ocr || !candidate.provenance || !candidate.plan ||
+        !Array.isArray(candidate.reasons) || !Array.isArray(candidate.provenance.missing_subfields)) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-recovery candidate");
+    }
+  }
+  assertSourceInventoryPrivacy({
+    candidates: body.candidates,
+    recovery_plan_summary: body.recovery_plan_summary,
+  }, "recovery");
+  return body;
+}
+
+/**
+ * Collect a source inventory without ever accepting a partial or mixed
+ * snapshot. `requestPage` is already authenticated by the caller and receives
+ * only the private JSON body.
+ */
+export async function collectSourceInventoryPages(requestPage, { limit = 250 } = {}) {
+  if (typeof requestPage !== "function") throw new TypeError("a source inventory request function is required");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
+    throw new TypeError("source inventory page limit must be an integer from 1 to 250");
+  }
+  let cursor = null;
+  let snapshot = null;
+  let total = null;
+  let limitations = null;
+  let recoveryPlanSummary = null;
+  const sources = [];
+  const ids = new Set();
+  const cursors = new Set();
+  for (let pageNumber = 0; pageNumber <= 40; pageNumber++) {
+    const response = await requestPage({ limit, ...(cursor ? { cursor } : {}) });
+    let body = null;
+    try { body = JSON.parse(await response.text()); } catch { /* handled below */ }
+    if (!response.ok) {
+      const knownCode = typeof body?.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code)
+        ? body.code
+        : "inventory_request_failed";
+      throw new SourceInventoryClientError(
+        knownCode,
+        response.status === 401 || response.status === 403
+          ? "the Brain did not accept this computer's saved owner credential. Run `brain setup <manifest>` to repair it; do not paste a key into the command."
+          : `the Brain could not provide a source inventory (HTTP ${response.status}; ${knownCode})`,
+      );
+    }
+    const page = validateSourceInventoryPage(body);
+    const pageSnapshot = `${page.snapshot.id}|${page.snapshot.as_of}|${page.snapshot.total}`;
+    if (snapshot === null) {
+      snapshot = pageSnapshot;
+      total = page.total;
+      limitations = page.limitations;
+      recoveryPlanSummary = page.recovery_plan_summary;
+    } else if (pageSnapshot !== snapshot || page.total !== total) {
+      throw new SourceInventoryClientError("inventory_snapshot_changed", "the source inventory changed while it was being read; rerun it for one stable snapshot");
+    }
+    if (JSON.stringify(page.recovery_plan_summary) !== JSON.stringify(recoveryPlanSummary)) {
+      throw new SourceInventoryClientError("inventory_snapshot_changed", "the source recovery summary changed while its source snapshot was being read");
+    }
+    for (const row of page.sources) {
+      const prior = sources[sources.length - 1]?.source_id || null;
+      if (ids.has(row.source_id) || (prior !== null && row.source_id <= prior)) {
+        throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned duplicate or unordered source rows");
+      }
+      ids.add(row.source_id);
+      sources.push(row);
+    }
+    if (sources.length > total) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned more source rows than its snapshot total");
+    }
+    if (!page.truncated) {
+      if (sources.length !== total) {
+        throw new SourceInventoryClientError("inventory_incomplete", "the Brain ended its source inventory before every row was returned");
+      }
+      return {
+        ...page,
+        complete: true,
+        total,
+        returned: sources.length,
+        truncated: false,
+        cursor: null,
+        sources,
+        recovery_plan_summary: recoveryPlanSummary,
+        limitations,
+      };
+    }
+    if (page.sources.length === 0 || cursors.has(page.cursor)) {
+      throw new SourceInventoryClientError("inventory_cursor_stalled", "the Brain's source inventory cursor did not advance");
+    }
+    cursors.add(page.cursor);
+    cursor = page.cursor;
+  }
+  throw new SourceInventoryClientError("inventory_page_limit", "the source inventory exceeded its safe pagination bound");
+}
+
+function sourceInventoryFailure(json, error) {
+  const known = error instanceof SourceInventoryClientError || error instanceof Fatal;
+  const code = error instanceof SourceInventoryClientError ? error.code : known ? "invalid_options" : "source_inventory_unavailable";
+  const message = known
+    ? error.message
+    : "the source inventory could not be completed. No source, credential, or Cloudflare setting was changed.";
+  if (json) {
+    throw new JsonFatal({
+      ok: false,
+      kind: "source_inventory",
+      error: { code, message },
     });
-    if (registration.registered) {
-      ok(`registered source "${name}" (kind ${kind})`);
+  }
+  die(message);
+}
+
+export async function cmdSources(manifestPath, options = {}) {
+  const argv = options.argv ?? process.argv;
+  const flags = options.flags ?? parseFlags(argv.slice(4));
+  const json = flags.json !== undefined;
+  try {
+    assertKnownFlags(flags, ["json", "add", "cursor", "kind", "limit", "recovery", "refresh", "source"], "brain sources");
+    if (flags.json !== undefined && flags.json !== true) {
+      throw new SourceInventoryClientError("invalid_options", "--json does not take a value");
+    }
+    if (flags.recovery !== undefined && flags.recovery !== true) {
+      throw new SourceInventoryClientError("invalid_options", "--recovery does not take a value");
+    }
+    const recovery = flags.recovery === true;
+    if (recovery && !json) {
+      throw new SourceInventoryClientError("invalid_options", "--recovery is a machine-readable preview and requires --json");
+    }
+    if ((flags.cursor !== undefined || flags.limit !== undefined) && !recovery) {
+      throw new SourceInventoryClientError("invalid_options", "--cursor and --limit are available here only with --json --recovery");
+    }
+    const sourceRegistryWrite = Boolean(flags.add) || flags.refresh !== undefined;
+    if (json && sourceRegistryWrite) {
+      throw new SourceInventoryClientError(
+        "read_only_json_required",
+        "--json is a read-only source inventory and cannot be combined with --add or --refresh",
+      );
+    }
+    if (flags.kind !== undefined && !flags.add) {
+      throw new SourceInventoryClientError("invalid_options", "--kind is valid only with --add <source>");
+    }
+    if (flags.source !== undefined && flags.refresh === undefined && !recovery) {
+      throw new SourceInventoryClientError("invalid_options", "--source is valid here only with --refresh <schedule> or --json --recovery");
+    }
+
+    const { m } = loadManifest(manifestPath);
+    const base = sourceInventoryBaseUrl(m);
+    const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+    const fetchImpl = options.fetchImpl ?? fetch;
+    let durableKey;
+    let credentialRead = false;
+    const credential = () => {
+      if (!credentialRead) {
+        credentialRead = true;
+        durableKey = resolveKey(manifestPath, { ignoreEnvironment: true });
+      }
+      if (!durableKey) {
+        throw new SourceInventoryClientError(
+          "owner_credential_missing",
+          "no saved owner credential was found for this Brain. Run `brain setup <manifest>` to repair it; do not paste a key into the command.",
+        );
+      }
+      return durableKey;
+    };
+    const authenticatedRequest = (target, init = {}, requestOptions = {}) =>
+      fetchBrainWithAdminKey(
+        (safeTarget, safeInit) => http(safeTarget, safeInit, {
+          timeoutMs: requestOptions.timeoutMs ?? 30_000,
+          what: requestOptions.what ?? "the source inventory",
+          fetchImpl,
+        }),
+        target,
+        init,
+        credential,
+      );
+    // Existing source writes stay available, but their credential is added by
+    // this internal resolver instead of crossing a CLI option or environment
+    // variable. The read-only --json mode is rejected above before this path.
+    const managedSourceRequest = (target, init = {}, requestOptions = {}) => {
+      const headers = new Headers(init.headers || {});
+      headers.delete("X-Admin-Key");
+      return authenticatedRequest(target, { ...init, headers }, requestOptions);
+    };
+
+    if (flags.add) {
+      const name = assertSourceName(flags.add === true ? null : flags.add);
+      const kind =
+        (flags.kind !== true && flags.kind) ||
+        Object.keys(m.corpora || {}).find((key) => key.replace(/_/g, "-") === name) ||
+        "upload";
+      const registration = await postSourceRegistration(base, "", {
+        source: name,
+        kind: String(kind),
+      }, managedSourceRequest);
+      if (registration.registered) ok(`registered source "${name}" (kind ${kind})`);
+      else info(`source "${name}" is already registered, leaving it alone`);
+    }
+
+    if (flags.refresh !== undefined) {
+      const name = assertSourceName(flags.source === true ? null : flags.source);
+      const spec = String(flags.refresh === true ? "" : flags.refresh).toLowerCase();
+      const seconds = { hourly: 3600, daily: 86400, weekly: 604800, monthly: 2592000, never: null, off: null };
+      if (!(spec in seconds)) {
+        throw new SourceInventoryClientError(
+          "invalid_refresh",
+          "--refresh needs one of: hourly, daily, weekly, monthly, never. `never` clears the expectation.",
+        );
+      }
+      await postSourceExpectation(base, "", {
+        source: name,
+        expected_refresh_seconds: seconds[spec],
+      }, managedSourceRequest);
+      if (seconds[spec] === null) ok(`"${name}" will no longer be reported as stale`);
+      else ok(`"${name}" is expected to refresh ${spec}; it will be reported stale past 1.5x that`);
+    }
+
+    if (recovery) {
+      const limit = flags.limit === undefined ? 100 : Number(flags.limit);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
+        throw new SourceInventoryClientError("invalid_options", "--limit must be an integer from 1 to 250");
+      }
+      if (flags.cursor === true) {
+        throw new SourceInventoryClientError("invalid_options", "--cursor needs the opaque value returned by the previous recovery page");
+      }
+      const source = flags.source === undefined ? null : assertSourceName(flags.source === true ? null : flags.source);
+      const payload = {
+        mode: "recovery",
+        limit,
+        ...(source ? { source } : {}),
+        ...(flags.cursor ? { cursor: String(flags.cursor) } : {}),
+      };
+      const response = await authenticatedRequest(`${base}/api/admin/brain/sources`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      let body = null;
+      try { body = JSON.parse(await response.text()); } catch { /* handled below */ }
+      if (!response.ok) {
+        const code = typeof body?.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code)
+          ? body.code
+          : "inventory_request_failed";
+        throw new SourceInventoryClientError(
+          code,
+          response.status === 401 || response.status === 403
+            ? "the Brain did not accept this computer's saved owner credential. Run `brain setup <manifest>` to repair it; do not paste a key into the command."
+            : `the Brain could not provide a source recovery preview (HTTP ${response.status}; ${code})`,
+        );
+      }
+      const preview = validateSourceRecoveryPage(body);
+      console.log(JSON.stringify(preview, null, 2));
+      return preview;
+    }
+
+    const inventory = await collectSourceInventoryPages(
+      (payload) => authenticatedRequest(`${base}/api/admin/brain/sources`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+    );
+    if (json) {
+      console.log(JSON.stringify(inventory, null, 2));
+      return inventory;
+    }
+
+    if (!inventory.sources.length) {
+      warn("this Brain has no registered or stored sources yet.");
+      info(`add the first one with: brain sources ${manifestPath} --add <name> --kind <drive|gmail|imap|calendar|upload>`);
     } else {
-      info(`source "${name}" is already registered, leaving it alone`);
+      const nameWidth = Math.max(4, ...inventory.sources.map((row) => row.name.length));
+      const kindWidth = Math.max(4, ...inventory.sources.map((row) => row.kind.length));
+      console.log(`\n  ${"name".padEnd(nameWidth)}  ${"kind".padEnd(kindWidth)}  ${"zone".padEnd(12)}  ${"physical".padStart(9)}  ${"readable".padStart(10)}  freshness`);
+      for (const row of inventory.sources) {
+        console.log(
+          `  ${row.name.padEnd(nameWidth)}  ${row.kind.padEnd(kindWidth)}  ${String(row.zone || "unassigned").padEnd(12)}  ` +
+            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${row.freshness.state}`,
+        );
+      }
     }
+    console.log("");
+    info(`complete D1 snapshot: ${inventory.returned} of ${inventory.total} sources as of ${inventory.as_of}`);
+    info("source names do not prove an entity, tax year, financial reconciliation, or tax completeness; those remain separate checks.");
+    console.log("");
+    return inventory;
+  } catch (error) {
+    sourceInventoryFailure(json, error);
   }
-
-  // Set (or clear) how often a source is EXPECTED to refresh. Without this
-  // nothing ever has an expectation, so no staleness claim is ever made and the
-  // whole freshness signal stays silent, which is worse than not having it.
-  if (flags.refresh !== undefined) {
-    const name = assertSourceName(flags.source === true ? null : flags.source);
-    const spec = String(flags.refresh === true ? "" : flags.refresh).toLowerCase();
-    const SECONDS = { hourly: 3600, daily: 86400, weekly: 604800, monthly: 2592000, never: null, off: null };
-    if (!(spec in SECONDS)) {
-      die(
-        `--refresh needs one of: hourly, daily, weekly, monthly, never.` + "\n" +
-          `  "never" clears the expectation, and a source with no expectation is never` + "\n" +
-          "  reported as stale, which is the right default for a one-off folder load."
-      );
-    }
-    await postSourceExpectation(base, adminKey, {
-      source: name,
-      expected_refresh_seconds: SECONDS[spec],
-    });
-    if (SECONDS[spec] === null) ok(`"${name}" will no longer be reported as stale`);
-    else ok(`"${name}" is expected to refresh ${spec}; it will be reported stale past 1.5x that`);
-  }
-
-  const rows = await readSources(acct.id, dbId);
-  const live = await liveSourceCounts(base, resolveAdminKey(manifestPath));
-
-  if (!rows.length) {
-    warn("no named sources registered in this install.");
-    info(`register one with: brain sources ${manifestPath} --add <name> --kind <drive|gmail|imap|calendar|upload>`);
-  } else {
-    const w = (key, min) => Math.max(min, ...rows.map((r) => String(r[key] || "").length));
-    const wName = w("name", 4);
-    const wKind = w("kind", 4);
-    const wStat = w("status", 6);
-    console.log(
-      `\n  ${"name".padEnd(wName)}  ${"kind".padEnd(wKind)}  ${"status".padEnd(wStat)}  ${"documents".padStart(11)}  last ingest`
-    );
-    for (const r of rows) {
-      // Compare DOCUMENTS to documents. The store also reports a chunk count,
-      // which is always larger, and comparing against that showed drift on every
-      // healthy install.
-      const liveRow = live?.get(r.name);
-      const shown = documentCountOf(liveRow);
-      const drift =
-        shown !== undefined && Number(shown) !== Number(r.document_count)
-          ? c.yellow(`  (store says ${num(shown)})`)
-          : "";
-      const chunks = liveRow?.chunks !== undefined ? c.dim(`  ${num(liveRow.chunks)} chunks`) : "";
-      console.log(
-        `  ${r.name.padEnd(wName)}  ${String(r.kind).padEnd(wKind)}  ${String(r.status).padEnd(wStat)}  ${num(r.document_count).padStart(11)}  ${r.last_ingest_at ? r.last_ingest_at.slice(0, 19) : c.dim("never")}${drift}${chunks}`
-      );
-    }
-  }
-
-  // Freshness, stated per source. This is the half that was invisible: a source
-  // nobody re-reads looks exactly like a source with nothing new in it.
-  await reportFreshness(m, acct, manifestPath).catch(() => {});
-
-  if (!live) {
-    console.log(
-      `\n  ${c.dim("counts above are the registry's own last receipt. Repair the manifest's durable")}`
-    );
-    console.log(`  ${c.dim("admin-key storage to cross-check them against what the brain actually holds.")}`);
-  } else {
-    // Everything ingested before this feature existed, or by a path that never
-    // registered itself, lands here. It is the honest version of the listing:
-    // these documents exist, and `brain forget` cannot take them back out.
-    const orphans = [...live.entries()].filter(([k]) => !rows.some((r) => r.name === k));
-    if (orphans.length) {
-      console.log(renderCliCommands(`\n  ${c.yellow("in the store but not registered")}, so \`brain forget\` cannot remove them:`));
-      for (const [k, v] of orphans) console.log(`    ${k.padEnd(16)} ${num(documentCountOf(v)).padStart(9)} documents`);
-    }
-  }
-
-  const events = await d1Query(
-    acct.id,
-    dbId,
-    "SELECT source_name, event, at, documents FROM source_events ORDER BY at DESC LIMIT 5"
-  ).catch(() => null);
-  const evs = events?.results || [];
-  if (evs.length) {
-    console.log("\n  recent source events:");
-    for (const e of evs) {
-      const n = e.documents === null || e.documents === undefined ? "" : `  ${num(e.documents)} documents`;
-      const mark = e.event === "forget" ? c.yellow("forget") : e.event;
-      console.log(`    ${e.at.slice(0, 19)}  ${String(mark).padEnd(18)} ${e.source_name}${n}`);
-    }
-  }
-  console.log("");
 }
 
 /**
@@ -21126,7 +21435,7 @@ const commands = {
   connect: cmdConnect,
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
-  sources: (path) => withManifestCloudflareControl(path, () => cmdSources(path)),
+  sources: cmdSources,
   forget: (path) => withManifestCloudflareControl(path, () => cmdForget(path)),
   drain: cmdDrain,
   reindex: cmdReindex,
@@ -21157,6 +21466,19 @@ const HELP_ARGUMENTS = new Set(["--help", "-h", "help"]);
 const VERSION_ARGUMENTS = new Set(["--version", "-v", "version"]);
 const helpRequested = HELP_ARGUMENTS.has(cmd);
 const versionRequested = VERSION_ARGUMENTS.has(cmd);
+
+/**
+ * Routine source inventory uses only the saved Brain domain and owner/admin
+ * credential. Keep it outside the Wrangler session boundary so even reading a
+ * local Cloudflare login cannot become an accidental prerequisite or mutate
+ * that credential state.
+ */
+export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
+  if (typeof run !== "function") throw new TypeError("a CLI command function is required");
+  if (command === "sources") return Promise.resolve().then(run);
+  const withWrangler = options.withWranglerSession ?? withWranglerSessionIfNeeded;
+  return withWrangler(run, options.wranglerOptions || {});
+}
 
 if (IS_MAIN && versionRequested) {
   console.log(PRODUCT_VERSION);
@@ -21257,7 +21579,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
     brain whatsnew   [manifest]            what changed in this version, and are you on it
     brain status     <manifest>            versions, pending migrations, upgrade history
-    brain sources    <manifest>            named ingest sources, counts, last ingest
+    brain sources    <manifest>            complete read-only D1 source inventory; --json for Optimize
+    brain sources    <manifest> --json --recovery  one bounded provenance and OCR recovery preview page
     brain forget     <manifest>            remove one named source (destructive)
     brain upgrade    <manifest>            snapshot, migrate, deploy, verify
     brain doctor     <manifest> --repair   diagnose a brain stuck mid-upgrade (--yes to resume)
@@ -21300,9 +21623,19 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   direction was verified against a balance or taken on trust from the format.
   Re-importing the same file updates the same rows rather than adding a copy.
 
-  brain sources takes --add <name> [--kind <drive|gmail|imap|calendar|upload>] to register one,
-  and --source <name> --refresh <hourly|daily|weekly|monthly|never> to say how often it
-  should refresh. A source with no expectation is never reported as stale.
+  brain sources reads every registered or stored source through the saved Brain
+  domain and owner credential. brain sources <manifest> --json returns a stable,
+  complete machine-readable snapshot without Cloudflare sign-in or a control-plane
+  token. It reports source, masked configuration receipts, physical and logical
+  storage, readability, provenance, freshness, and a recovery-plan summary. It
+  never guesses an entity, year, scan-only state, or missing provider fact.
+  Add --recovery for one read-only page of opaque record ids that need provenance
+  or OCR review. Use its returned --cursor value for the next stable page, and
+  optionally --source <name> to narrow the preview. It never runs OCR, reingest,
+  repair, or any other write. Use --add <name>
+  [--kind <drive|gmail|imap|calendar|upload>] to register one, and --source <name>
+  --refresh <hourly|daily|weekly|monthly|never> to say how often it should refresh.
+  A source with no expectation is never reported as stale.
   brain forget needs --source <name>, and --yes before it removes anything. Without
   --yes it prints exactly what would go and stops.
 
@@ -21323,7 +21656,7 @@ if (IS_MAIN) {
 
   // Wrapped so a client who signed in with `wrangler login` never has to mint
   // or paste a token. Scoped to this one invocation.
-  withWranglerSessionIfNeeded(() => commands[cmd](manifestPath)).catch((e) => {
+  runCliCommandWithCredentialBoundary(cmd, () => commands[cmd](manifestPath)).catch((e) => {
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a

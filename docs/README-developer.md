@@ -990,6 +990,49 @@ After its report, the exact release may advertise a separately previewed local
 repair bundle for owner-selected skill, Claude MCP, and Codex MCP items. That
 bundle receives one approval and exact readback; CLI replacement stays separate.
 
+Optimize source evidence comes from `POST /api/admin/brain/sources`, not from
+Wrangler or the Cloudflare D1 control plane. The route accepts either the full
+admin key or a positively identified owner session with its companion CSRF
+header. It rejects scoped grants, including a grant that carries `administer`.
+All responses are private and `no-store`. The handler issues D1 `SELECT`
+statements only and does not touch passkeys, source receipts, sync cursors,
+credential storage, OCR, or the corpus.
+
+The default request mode returns stable source-id pages. The source set and
+all aggregates are read from one bounded D1 statement, hashed with an as-of
+receipt, and sorted by source id. A continuation cursor binds its last source,
+as-of time, total, and snapshot hash. If any returned source field changes,
+the next page returns `source_inventory_changed` instead of combining moments.
+The CLI collects every source page before printing JSON and refuses incomplete,
+duplicated, unordered, or privacy-invalid output.
+
+`mode: "recovery"` returns one bounded record-candidate page. Stable opaque
+document digests permit a later before/after comparison without revealing raw
+document ids, provider locators, paths, titles, URIs, or metadata. Candidate
+selection is limited to recorded conditions: no nonblank chunks, partial OCR,
+missing extraction/readability receipts, missing source identity, or missing
+or unrecognized lineage. The top-level summary groups candidates by safe source
+identity with exact closed reason counts and stored-evidence priority signals.
+The cursor carries no raw locator. Opening and closing corpus markers refuse a
+page that overlaps supported writes, and a later marker mismatch returns 409.
+The schema cannot prove that an empty document is scan-only, so that field is
+explicitly unavailable. Recovery mode is a plan only and contains no repair
+operation.
+
+`brain sources <manifest> --json` and `--json --recovery` resolve the existing
+durable admin credential with `ignoreEnvironment: true` only after validating
+the saved HTTPS Brain origin. They use the shared redirect-refusing transport,
+do not accept a literal key option, and bypass the Wrangler session wrapper.
+This feature does not add or change an MCP tool. The existing exactly four
+owner MCP tools keep their current authority.
+
+The current ingest boundary validates an evidence-lineage contract when one is
+present, but it does not yet require a versioned complete provenance receipt or
+prevent a weaker reingest from replacing stronger provenance. Inventory labels
+that debt as partial or unavailable. A separate write-contract change must
+cover every connector, owner write, importer, chunk split, OCR result, summary,
+and reingest before incomplete legacy rows can be repaired safely.
+
 `brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
 local handoff lane. Its only accepted scopes are `technician-skill`,
 `claude-code-mcp`, and `codex-mcp`; there is deliberately no CLI, setup,

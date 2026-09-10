@@ -201,6 +201,41 @@ cannot replace the CLI and cannot change Brain records, sources, providers,
 access, zones, passkeys, devices, or cloud resources. A CLI install or update
 remains a separate release-controlled action.
 
+### Audit source receipts and plan provenance recovery
+
+Optimize can read the Brain's own D1 source receipts without asking the owner
+to sign in to Cloudflare or expose an admin key:
+
+```bash
+brain sources ./brain.manifest.json --json
+```
+
+The CLI resolves this Brain's existing owner credential from its reviewed
+manifest and operating-system store, sends it only to the saved HTTPS Brain
+domain, and returns one stable, complete source snapshot. It reports registered
+source identity, a safe connector/provider label, zone, masked scope and cursor
+receipts, first and last ingest evidence, complete-history-through, physical
+and logical document counts, readable and unreadable counts, extraction method,
+OCR state, derivation lineage, and exact missing provenance fields. It never
+returns the raw sync cursor, configured root values, document title, URI,
+provider id, or document id. It does not infer an entity, owner, tax year, or
+whether an empty document was a scan.
+
+To inspect the exact records behind the recovery counts, request one bounded
+preview page:
+
+```bash
+brain sources ./brain.manifest.json --json --recovery
+brain sources ./brain.manifest.json --json --recovery --source drive
+```
+
+Each candidate has a stable opaque digest, closed reason codes, and only the
+stored text and provenance state needed to plan a repair. Use the returned
+`--cursor` value to request the next page. A changed corpus invalidates the
+cursor instead of mixing two snapshots. Recovery mode does not run OCR,
+reingest, repair, or any other write. A later write requires a separately
+reviewed and approved repair path.
+
 If a first setup is interrupted after D1 commits only part of a migration, the
 next setup does not guess that the database is unused. It stops before another
 write and prints two exact commands: run `brain update <manifest>` to establish
