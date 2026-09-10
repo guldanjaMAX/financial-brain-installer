@@ -87,9 +87,11 @@ live path.
    deploys and verifies the paused compatibility Worker, waits the declared
    20-minute old-invocation window, migrates, and deploys active mode.
 4. Persist and read back the admin key, set Worker secrets, and verify health.
-5. Register locator-only MCP entries for supported AI tools. When Claude Code
-   is connected, write an owner-only `CLAUDE.md` beside the manifest with exact
-   locators and safe approved-folder rules. Preserve an unrelated existing file.
+5. Register locator-only MCP entries for supported AI tools with the local-only
+   `owner-assistant` profile, then verify the advertised tool list includes
+   curated write and diagnostics. When Claude Code is connected, write an
+   owner-only `CLAUDE.md` beside the manifest with exact locators and safe
+   approved-folder rules. Preserve an unrelated existing file.
 6. Optionally ingest the first folder and report the vector backlog.
 
 Deploy must happen before Worker secrets because Cloudflare attaches secrets to
@@ -387,9 +389,24 @@ aggregate counters rather than moving this scan into its request path.
 Durable secrets never belong in the manifest or MCP registration. The manifest
 contains only a non-secret locator when Keychain is used. Standard durable
 stores are macOS login Keychain, Windows DPAPI CurrentUser-protected files, and
-owner-only Linux files. AI-tool registrations carry the manifest locator and
-resolve the current key when the MCP process starts, so rotation does not leave
-stale copied credentials.
+owner-only Linux files. AI-tool registrations carry the manifest locator plus
+the nonsecret local profile and resolve the current key when the MCP process
+starts, so rotation does not leave stale copied credentials. The local
+`owner-assistant` profile may read, write contract-checked records to the
+registered `owner-notes` source, and run diagnostics. That source is
+non-refreshable, carries customer-visible MCP provenance, remains unzoned and
+excluded from named grants until assigned, and is classified as recollection
+rather than authoritative evidence. The owner and an explicitly approved Brain
+connector can still use it. A successful response requires exact D1 row and
+source readback. A direct write proves that record, not complete conversation history.
+It has no delete or access-control tool. Remote OAuth profiles are
+a separate list and can never request `owner-assistant`.
+
+The local MCP registration is user-wide, so repository instructions are not an
+authorization boundary. `brain_remember` is marked as data-changing and
+non-destructive, and the AI client's per-call approval must remain
+enabled. The model's tool instructions require a direct current-user request,
+but those instructions are defense in depth rather than proof of user presence.
 
 Every shipped client request carrying `X-Admin-Key` requires HTTPS, except for
 an explicit loopback test URL, and refuses redirects before sending the header.

@@ -47,7 +47,7 @@ import {
   scanEnvelope as scanEnvelopeSecrets,
   sanitizeEnvelope as sanitizeIngestEnvelope,
 } from "./lib/secret-scan.js";
-import { storeFor, backendOf, D1, TEXT_SOURCES } from "./lib/store.js";
+import { storeFor, backendOf, D1, TEXT_SOURCES, expectedD1ContentHash } from "./lib/store.js";
 import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
@@ -82,6 +82,10 @@ import {
   isSourceKindConflict, normalizeSourceReceiptIssueCode, resolveSourceKind,
   sourceReceiptOwnerMessage,
 } from "./lib/source-receipt.js";
+import {
+  beginOwnerNoteWrite, completeOwnerNoteWrite, failOwnerNoteWrite, OwnerNoteLifecycleError,
+} from "./lib/owner-notes.js";
+import { OWNER_NOTES_ROUTE, OWNER_NOTES_SOURCE } from "./lib/owner-note-contract.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -692,6 +696,7 @@ async function handleThink(
     title: (r.title || "untitled").slice(0, 140),
     source: r.source || "?",
     source_kind: r.source_kind || null,
+    write_provenance: r.write_provenance || null,
     client: r.client || null,
     ts: r.ts || null,
     occurred_at: r.occurred_at || null,
@@ -1091,6 +1096,7 @@ async function handleThink(
     evidence_authority: approvedDocs.length ? strongestEvidenceAuthority(approvedDocs) || undefined : undefined,
     citations: approvedDocs.map((d) => ({
       n: d.n, title: d.title, source: d.source, source_kind: d.source_kind,
+      ...(d.write_provenance ? { write_provenance: d.write_provenance } : {}),
       ref: d.ref, ts: d.ts,
       date_reliable: d.date_reliable, date_source: d.date_source,
       // A citation drawn from a scan must never look identical to one drawn
@@ -1157,7 +1163,9 @@ function ingestEnvelopeValidationError(envelope) {
   return null;
 }
 
-async function handleIngest(env, request, scope = { all: true }) {
+async function handleIngest(env, request, scope = { all: true }, {
+  ownerNoteChannel = null,
+} = {}) {
   // Checked BEFORE the body is read. The batch route documents exactly this
   // hazard and guards against it; this route, which is the one a client reaches
   // for when testing by hand, had no guard at all. A 40MB document becomes
@@ -1238,9 +1246,92 @@ async function handleIngest(env, request, scope = { all: true }) {
     }
   }
 
-  const out = await storeFor(env).ingest(env, envelope);
+  // `owner-notes` is a reserved lifecycle, not a convenient label a generic
+  // producer may borrow. That keeps every row under it registered, reversible,
+  // and visibly attributable to one of the two reviewed MCP channels.
+  if (source_type === OWNER_NOTES_SOURCE && !ownerNoteChannel) {
+    return jsonResponse({
+      error: `the ${OWNER_NOTES_SOURCE} source is reserved for the conversational owner-note route`,
+      code: "owner_note_route_required",
+    }, 409);
+  }
+
+  let expectedOwnerNoteHash = null;
+  let ownerNoteWrite = null;
+  if (ownerNoteChannel) {
+    if (backendOf(env) !== D1) {
+      return jsonResponse({
+        error: "conversational owner notes require the standard D1 backend",
+        code: "owner_note_backend_unsupported",
+      }, 400);
+    }
+    try {
+      expectedOwnerNoteHash = await expectedD1ContentHash(env, envelope);
+      ownerNoteWrite = await beginOwnerNoteWrite(env, envelope, {
+        channel: ownerNoteChannel,
+        expectedContentHash: expectedOwnerNoteHash,
+      });
+    } catch (error) {
+      if (!(error instanceof OwnerNoteLifecycleError)) throw error;
+      return privateNoStore(jsonResponse({
+        error: error.message,
+        code: error.code,
+        confirmed: false,
+        may_have_written: error.may_have_written,
+      }, error.status));
+    }
+  }
+
+  let out;
+  try {
+    out = await storeFor(env).ingest(env, envelope);
+  } catch (error) {
+    if (!ownerNoteChannel) throw error;
+    await failOwnerNoteWrite(env).catch(() => {});
+    return privateNoStore(jsonResponse({
+      error: "The Brain could not confirm whether the owner note finished storing. Retry the exact same note; do not claim it was saved yet.",
+      code: "owner_note_store_unconfirmed",
+      confirmed: false,
+      may_have_written: true,
+    }, 500));
+  }
   if (!out || (!out.doc_uid && !out.brain_doc_id)) {
+    if (ownerNoteChannel) {
+      await failOwnerNoteWrite(env).catch(() => {});
+      return privateNoStore(jsonResponse({
+        error: "The Brain returned no exact owner-note row. Retry the exact same note; do not claim it was saved yet.",
+        code: "owner_note_store_unconfirmed",
+        confirmed: false,
+        may_have_written: true,
+      }, 500));
+    }
     return jsonResponse({ error: "ingest returned no row" }, 500);
+  }
+  if (ownerNoteChannel) {
+    try {
+      const confirmed = await completeOwnerNoteWrite(env, envelope, out, {
+        channel: ownerNoteChannel,
+        expectedContentHash: expectedOwnerNoteHash,
+        supersession: ownerNoteWrite?.supersession || null,
+      });
+      return privateNoStore(jsonResponse(confirmed));
+    } catch (error) {
+      await failOwnerNoteWrite(env).catch(() => {});
+      if (!(error instanceof OwnerNoteLifecycleError)) {
+        return privateNoStore(jsonResponse({
+          error: "The Brain stored part of this request but could not verify the complete owner-note receipt. Retry the exact same note; do not claim it was saved yet.",
+          code: "owner_note_completion_unconfirmed",
+          confirmed: false,
+          may_have_written: true,
+        }, 500));
+      }
+      return privateNoStore(jsonResponse({
+        error: error.message,
+        code: error.code,
+        confirmed: false,
+        may_have_written: error.may_have_written,
+      }, error.status));
+    }
   }
   return jsonResponse(out);
 }
@@ -1288,6 +1379,12 @@ async function handleIngestBatch(env, request, scope = { all: true }) {
       { error: `too many documents: ${docs.length} (max ${BATCH_MAX_DOCS})`, max_docs: BATCH_MAX_DOCS },
       413
     );
+  }
+  if (docs.some((doc) => String(doc?.source_type || "") === OWNER_NOTES_SOURCE)) {
+    return jsonResponse({
+      error: `the ${OWNER_NOTES_SOURCE} source is reserved for the conversational owner-note route`,
+      code: "owner_note_route_required",
+    }, 409);
   }
 
   if (!scopeIsUnrestricted(scope)) {
@@ -1853,6 +1950,7 @@ async function handleDocuments(env) {
 const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   "/api/admin/brain/ingest",
   "/api/admin/brain/ingest/batch",
+  OWNER_NOTES_ROUTE,
   "/api/admin/brain/source-receipt",
   "/api/admin/brain/source-expectation",
   "/api/admin/brain/forget",
@@ -2118,12 +2216,17 @@ export default {
         grant,
         think: async (body) => (await handleThink(env, internalJson("/api/rag/think", body))).json(),
         search: async (body) => (await handleUnified(env, internalJson("/api/rag/unified", body))).json(),
-        // Writes take the ordinary ingest door rather than a private one, so
-        // the credential scanner, the statement budget and every other guard
-        // apply to a connector exactly as they do to a folder or a Drive sync.
+        // Writes take the dedicated owner-note lifecycle around the ordinary
+        // ingest guards. The credential scanner and storage contract stay the
+        // same, while source registration and exact readback cannot be skipped.
         write: async (envelope) => {
           if (upgradePauseHolds(env)) return pausedCorpusRefusal();
-          return (await handleIngest(env, internalJson("/api/admin/brain/ingest", envelope))).json();
+          return (await handleIngest(
+            env,
+            internalJson(OWNER_NOTES_ROUTE, envelope),
+            { all: true },
+            { ownerNoteChannel: "remote_mcp" },
+          )).json();
         },
         diagnose: async () => diagnose(env),
         previewDeletion: async ({ entitySlug, documentIds }) => {
@@ -2270,6 +2373,11 @@ export default {
       }
       if (path === "/api/admin/brain/ingest" && request.method === "POST") {
         return await handleIngest(env, request, scope);
+      }
+      if (path === OWNER_NOTES_ROUTE && request.method === "POST") {
+        return await handleIngest(env, request, { all: true }, {
+          ownerNoteChannel: "local_mcp",
+        });
       }
       if (path === "/api/admin/brain/ingest/batch" && request.method === "POST") {
         return await handleIngestBatch(env, request, scope);

@@ -1728,6 +1728,10 @@ const bootstrapCompletion = () => ({
     const skillRefreshOk = [];
     const skillRefreshWarnings = [];
     const skillRefreshTokenStates = [];
+    const ownerAgentRefreshCalls = [];
+    const ownerAgentRefreshMessages = [];
+    const workspaceGuideRefreshCalls = [];
+    const workspaceGuideRefreshMessages = [];
     const installTemporarySkills = (options) => {
       skillRefreshTokenStates.push(cloudflareTokenAvailable());
       return installTechnicianSkillEverywhere(options);
@@ -1763,6 +1767,35 @@ const bootstrapCompletion = () => ({
     const successfulUpdateResult = await cmdUpdate(undefined, {
       ...updateSkillOptions,
       installedManifestOptions,
+      reconcileExistingOwnerAgents: async (manifest, path, agentOptions) => {
+        ownerAgentRefreshCalls.push({
+          manifest,
+          path,
+          agentOptions,
+          tokenAvailable: cloudflareTokenAvailable(),
+        });
+        return {
+          wired: ["Claude Code"],
+          skipped: ["Codex"],
+          preserved: [],
+          failures: [],
+        };
+      },
+      resolveUpdateAgentBaseUrl: async () => "https://fixture.invalid",
+      reportAgentRefreshOk: (message) => ownerAgentRefreshMessages.push(message),
+      reportAgentRefreshInfo: (message) => ownerAgentRefreshMessages.push(message),
+      reportAgentRefreshWarning: (message) => ownerAgentRefreshMessages.push(`warning:${message}`),
+      writeClaudeWorkspaceGuideAfterUpdate: (path, guideOptions) => {
+        workspaceGuideRefreshCalls.push({
+          path,
+          guideOptions,
+          tokenAvailable: cloudflareTokenAvailable(),
+        });
+        return { path: join(dirname(path), "CLAUDE.md"), changed: true, status: "written" };
+      },
+      reportWorkspaceGuideRefreshOk: (message) => workspaceGuideRefreshMessages.push(message),
+      reportWorkspaceGuideRefreshInfo: (message) => workspaceGuideRefreshMessages.push(message),
+      reportWorkspaceGuideRefreshWarning: (message) => workspaceGuideRefreshMessages.push(`warning:${message}`),
       readCloudflareToken: async () => Buffer.from("x".repeat(24), "ascii"),
       cmdVerify: async (path) => {
         events.push(`verify:${path}`);
@@ -1798,6 +1831,66 @@ const bootstrapCompletion = () => ({
       "the local skill refresh runs only after the command-scoped token is cleared",
       skillRefreshTokenStates.length === 1 && skillRefreshTokenStates.every((available) => !available),
       JSON.stringify(skillRefreshTokenStates),
+    );
+    check(
+      "a successful update upgrades only existing registrations through the strict Owner assistant migration mode",
+      ownerAgentRefreshCalls.length === 1 &&
+        ownerAgentRefreshCalls[0].path === manifestPath &&
+        ownerAgentRefreshCalls[0].manifest.client.slug === "fixture" &&
+        ownerAgentRefreshCalls[0].tokenAvailable === false &&
+        ownerAgentRefreshCalls[0].agentOptions.existingOnly === true &&
+        ownerAgentRefreshCalls[0].agentOptions.rotationOnly === false &&
+        ownerAgentRefreshCalls[0].agentOptions.ownerAssistantMigrationOnly === true &&
+        ownerAgentRefreshCalls[0].agentOptions.baseUrl === "https://fixture.invalid" &&
+        ownerAgentRefreshMessages.some((message) => /can now use Owner assistant access/i.test(message)) &&
+        ownerAgentRefreshMessages.some((message) => /keep normal per-call approvals enabled/i.test(message)) &&
+        ownerAgentRefreshMessages.some((message) => /did not add (?:any|a) missing/i.test(message)) &&
+        !ownerAgentRefreshMessages.some((message) => message.startsWith("warning:")),
+      JSON.stringify({ ownerAgentRefreshCalls, ownerAgentRefreshMessages }),
+    );
+    check(
+      "a successful update refreshes only an existing managed CLAUDE.md after credentials are cleared",
+      workspaceGuideRefreshCalls.length === 1 &&
+        workspaceGuideRefreshCalls[0].path === manifestPath &&
+        workspaceGuideRefreshCalls[0].tokenAvailable === false &&
+        workspaceGuideRefreshCalls[0].guideOptions.existingOnly === true &&
+        workspaceGuideRefreshMessages.some((message) => /CLAUDE\.md refreshed/i.test(message)) &&
+        !workspaceGuideRefreshMessages.some((message) => message.startsWith("warning:")),
+      JSON.stringify({ workspaceGuideRefreshCalls, workspaceGuideRefreshMessages }),
+    );
+
+    let unverifiedClaudeGuideWrites = 0;
+    const codexOnlyUpdateResult = await cmdUpdate(undefined, {
+      ...updateSkillOptions,
+      installTechnicianSkills: () => [
+        { root: ".claude", status: "verified" },
+        { root: ".codex", status: "verified" },
+      ],
+      reportSkillRefreshOk: () => {},
+      reportSkillRefreshWarning: () => {},
+      installedManifestOptions,
+      reconcileExistingOwnerAgents: async () => ({
+        wired: ["Codex"],
+        skipped: ["Claude Code"],
+        preserved: [],
+        failures: [],
+      }),
+      resolveUpdateAgentBaseUrl: async () => "https://fixture.invalid",
+      reportAgentRefreshOk: () => {},
+      reportAgentRefreshInfo: () => {},
+      reportAgentRefreshWarning: () => {},
+      writeClaudeWorkspaceGuideAfterUpdate: () => {
+        unverifiedClaudeGuideWrites++;
+        return { status: "written" };
+      },
+      readCloudflareToken: async () => Buffer.from("g".repeat(24), "ascii"),
+      cmdVerify: async () => {},
+      cmdUpgrade: async () => upgradeResultSentinel,
+    });
+    check(
+      "update preserves CLAUDE.md unless this exact Claude Owner assistant connection was verified",
+      codexOnlyUpdateResult === upgradeResultSentinel && unverifiedClaudeGuideWrites === 0,
+      JSON.stringify({ codexOnlyUpdateResult, unverifiedClaudeGuideWrites }),
     );
     check(
       "the first update remembers the canonical manifest without storing credentials",
@@ -1922,6 +2015,8 @@ const bootstrapCompletion = () => ({
     writeFileSync(collisionClaudeSkill, unmanagedSkillBytes);
     const collisionWarnings = [];
     const collisionSuccesses = [];
+    const collisionAgentWarnings = [];
+    const collisionAgentTokenStates = [];
     let collisionRefreshHadToken = null;
     const collisionUpgradeResult = { updated: "collision-fixture" };
     const collisionResult = await cmdUpdate(undefined, {
@@ -1933,6 +2028,12 @@ const bootstrapCompletion = () => ({
       },
       reportSkillRefreshOk: (message) => collisionSuccesses.push(message),
       reportSkillRefreshWarning: (message) => collisionWarnings.push(message),
+      reconcileExistingOwnerAgents: async () => {
+        collisionAgentTokenStates.push(cloudflareTokenAvailable());
+        throw new Error(`private agent config detail: ${sandbox}`);
+      },
+      resolveUpdateAgentBaseUrl: async () => "https://fixture.invalid",
+      reportAgentRefreshWarning: (message) => collisionAgentWarnings.push(message),
       readCloudflareToken: async () => Buffer.from("c".repeat(24), "ascii"),
       cmdVerify: async () => {},
       cmdUpgrade: async () => collisionUpgradeResult,
@@ -1949,8 +2050,13 @@ const bootstrapCompletion = () => ({
         /protected and unmanaged skill files were left unchanged/i.test(collisionWarning) &&
         /financialbrain\.ai\/update\/agent\.md/.test(collisionWarning) &&
         /do not rerun brain update/i.test(collisionWarning) &&
+        collisionAgentTokenStates.length === 1 && collisionAgentTokenStates[0] === false &&
+        collisionAgentWarnings.length === 1 &&
+        /software update is verified/i.test(collisionAgentWarnings[0]) &&
+        /not add a missing connection/i.test(collisionAgentWarnings[0]) &&
+        !collisionAgentWarnings[0].includes(sandbox) &&
         !collisionWarning.includes(collisionSkillHome),
-      JSON.stringify({ collisionSuccesses, collisionWarnings }),
+      JSON.stringify({ collisionSuccesses, collisionWarnings, collisionAgentWarnings, collisionAgentTokenStates }),
     );
 
     const refreshExceptionWarnings = [];
