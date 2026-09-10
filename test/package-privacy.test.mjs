@@ -534,6 +534,7 @@ const expected = [
   "operations/cloudflare-account-bootstrap.mjs",
   "operations/cloudflare-oauth-session.mjs",
   "operations/command-display.mjs",
+  "operations/zone-assignment-retry.mjs",
   "operations/off-provider-backup.mjs",
   "operations/plaid-sandbox-runner.mjs",
   "operations/provider-scheduler.mjs",

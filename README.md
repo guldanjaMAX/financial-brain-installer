@@ -256,6 +256,13 @@ shown as complete. Missing, partial, or inconsistent proof is unavailable
 rather than clear. The command never assigns a zone. Use `brain zone` only
 after the owner decides that access boundary.
 
+A zone assignment repairs a bounded pass and saves each completed pass in D1.
+If Cloudflare returns the specific HTML 500 seen in the field after one of
+those passes, the CLI says that the pass may already be saved and retries the
+same idempotent source-to-zone checkpoint after 1, 2, and 4 seconds. It prints
+every retry and stops after three. JSON errors, other HTTP statuses, transport
+failures, zone listings, and incomplete assignment arguments are never replayed.
+
 The subject defaults to `client.display_name` in the manifest. If the Brain is
 about a different person or organization, state it explicitly:
 

@@ -131,6 +131,13 @@ import {
 import { writeClaudeWorkspaceGuide } from "./operations/claude-workspace.mjs";
 import { installTechnicianSkillEverywhere } from "./operations/claude-skill.mjs";
 import {
+  isHtmlDocumentBody,
+  requestZoneAssignmentWithRetry,
+  zoneAssignmentExhaustedMessage,
+  zoneAssignmentRecoveredNotice,
+  zoneAssignmentRetryNotice,
+} from "./operations/zone-assignment-retry.mjs";
+import {
   bootstrapManifestObservation,
   bootstrapStatusFilePath,
   buildBootstrapStatus,
@@ -14721,7 +14728,7 @@ export function summariseResponseBody(raw) {
     const message = parsed?.error || parsed?.message || parsed?.errors?.[0]?.message;
     return message ? String(message).slice(0, 200) : text.slice(0, 200);
   } catch { /* not JSON: fall through */ }
-  if (/^\s*<(?:!doctype|html|head|body)\b/i.test(text)) {
+  if (isHtmlDocumentBody(text)) {
     return "the reply was a web page, not this brain. That usually means the address " +
       "is not serving the worker yet, or a proxy answered instead of it";
   }
@@ -17083,15 +17090,32 @@ async function cmdZone(manifestPath) {
   if (!adminKey) die("no durable admin key was found. Run `brain setup <manifest>` first.");
   const source = typeof flags.source === "string" ? flags.source.trim() : "";
   const zone = typeof flags.zone === "string" ? flags.zone.trim() : "";
-  const response = await http(`${base}/api/admin/brain/zones`, {
-    method: source || zone ? "POST" : "GET",
+  const isAssignment = Boolean(source || zone);
+  const makeRequest = () => http(`${base}/api/admin/brain/zones`, {
+    method: isAssignment ? "POST" : "GET",
     headers: {
       "X-Admin-Key": adminKey,
-      ...(source || zone ? { "Content-Type": "application/json" } : {}),
+      ...(isAssignment ? { "Content-Type": "application/json" } : {}),
     },
-    ...(source || zone ? { body: JSON.stringify({ source, zone }) } : {}),
+    ...(isAssignment ? { body: JSON.stringify({ source, zone }) } : {}),
   }, { timeoutMs: 60_000, what: "the zone assignment" });
-  if (!response.ok) die(`zone command failed (${response.status}): ${summariseResponseBody(await response.text())}`);
+  const requestResult = await requestZoneAssignmentWithRetry(makeRequest, {
+    source,
+    zone,
+    onRetry: (notice) => warn(zoneAssignmentRetryNotice({ source, zone, ...notice })),
+  });
+  const { response } = requestResult;
+  if (!response.ok) {
+    const raw = requestResult.raw === null ? await response.text() : requestResult.raw;
+    const detail = summariseResponseBody(raw);
+    if (requestResult.exhausted) {
+      die(zoneAssignmentExhaustedMessage({ source, zone, status: response.status, detail }));
+    }
+    die(`zone command failed (${response.status}): ${detail}`);
+  }
+  if (requestResult.recovered) {
+    ok(zoneAssignmentRecoveredNotice({ source, zone, retries: requestResult.retries }));
+  }
   const result = await response.json();
   if (result.zones) {
     if (!result.zones.length) info("Nothing is loaded yet, so there are no zones.");

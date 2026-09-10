@@ -33,6 +33,13 @@ that stops the waiting. Nothing here changes what your brain holds.
   mismatch stops that update again. Once the Brain is active, the ordinary
   reindex recovery remains available.
 
+- **A zone repair now rides through the exact Cloudflare edge error seen in a
+  live run.** If Cloudflare answers one assignment pass with an HTML 500, the
+  command says that the pass may already be saved, retries that same safe
+  checkpoint after 1, 2, and 4 seconds, and shows each attempt. It stops after
+  three retries and keeps every other failure immediate, so a different error
+  is never hidden or replayed by guesswork.
+
 ## 0.4.5
 
 Candidate only. This version has not been released.
