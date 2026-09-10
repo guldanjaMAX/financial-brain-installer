@@ -493,8 +493,8 @@ export async function runTechnicianStep({
   if (!manifestPath || !scriptPath) throw new Error("the technician step needs a manifest and installer path");
   if (platformName === "win32" && ["google", "zoom", "imap"].includes(step)) {
     throw codedError(
-      "this connector needs private credential entry that the current Windows release cannot safely provide from Claude Code. " +
-        "The generic terminal prompt can echo secrets, so this step is unavailable on this computer. " +
+      "this connector needs private credential entry, and this release does not include a verified Windows secret-entry bridge for Claude Code. " +
+        "The generic terminal prompt can echo secrets, so the technician stops before asking for one or launching the connector. " +
         "Do not place the credential in a command or persistent environment variable.",
       "windows_secure_input_unavailable",
     );

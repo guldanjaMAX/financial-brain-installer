@@ -461,21 +461,34 @@ test("the technician tools contract cannot complete without the interactive Clau
   );
 });
 
-test("Windows connector secrets refuse the generic Node prompt", async () => {
-  await assert.rejects(
-    runTechnicianStep({
-      step: "google",
-      manifestPath,
-      scriptPath: fixtureScriptPath,
-      nodePath: fixtureNodePath,
-      platformName: "win32",
-      readHidden: async () => Buffer.from("must-not-be-read"),
-      secureInputAttested: true,
-    }),
-    (error) => error.code === "windows_secure_input_unavailable" &&
-      /current Windows release cannot safely provide/i.test(error.message) &&
-      /persistent environment variable/i.test(error.message),
-  );
+test("Windows connector steps stop before every secret prompt and child launch", async () => {
+  for (const step of ["google", "zoom", "imap"]) {
+    let promptCalls = 0;
+    let childCalls = 0;
+    await assert.rejects(
+      runTechnicianStep({
+        step,
+        manifestPath,
+        scriptPath: fixtureScriptPath,
+        nodePath: fixtureNodePath,
+        platformName: "win32",
+        readHidden: async () => {
+          promptCalls++;
+          return Buffer.from("must-not-be-read");
+        },
+        spawn: () => {
+          childCalls++;
+          return { status: 0 };
+        },
+      }),
+      (error) => error.code === "windows_secure_input_unavailable" &&
+        /does not include a verified Windows secret-entry bridge/i.test(error.message) &&
+        /stops before asking.*launching the connector/i.test(error.message) &&
+        /persistent environment variable/i.test(error.message),
+    );
+    assert.equal(promptCalls, 0, `${step} must not ask for a secret on Windows`);
+    assert.equal(childCalls, 0, `${step} must not launch its connector on Windows`);
+  }
 });
 
 test("the smoke step runs only the injected deployed proof contract", async () => {

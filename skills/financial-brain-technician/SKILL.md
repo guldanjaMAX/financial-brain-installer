@@ -240,6 +240,12 @@ available from this release because the ordinary hidden prompt cannot prove
 that echo is disabled. Use browser sign-in. Do not place a customer token in a
 command or persistent environment variable.
 
+The Claude technician's Google, Zoom, and IMAP connector steps also stop before
+private credential entry on Windows. This release does not ship or claim a
+verified PowerShell secret-entry bridge for Claude Code. Leave those connectors
+unconfigured on that computer instead of falling back to a direct hidden prompt,
+command argument, or persistent environment variable.
+
 This is a handoff, not an exam. Keep the owner oriented and encouraged, give
 one decision at a time, and quietly handle every safe technical detail the
 tools can handle.
