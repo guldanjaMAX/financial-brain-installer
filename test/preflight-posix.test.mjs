@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,13 +8,20 @@ import test from "node:test";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PREFLIGHT = join(ROOT, "tools", "preflight.sh");
+const WINDOWS_PREFLIGHT = join(ROOT, "tools", "preflight.ps1");
 
 function executable(path, body) {
   writeFileSync(path, `#!/bin/sh\n${body}\n`);
   chmodSync(path, 0o755);
 }
 
-function runPreflight({ nodeVersion = "v22.0.0", brainCopies = 0, wranglerSession = null } = {}) {
+function runPreflight({
+  nodeVersion = "v22.0.0",
+  brainCopies = 0,
+  wranglerSession = null,
+  elevated = false,
+  freeKib = 3 * 1024 * 1024,
+} = {}) {
   const fixture = mkdtempSync(join(tmpdir(), "brain-preflight-"));
   try {
     const home = join(fixture, "home");
@@ -22,6 +29,8 @@ function runPreflight({ nodeVersion = "v22.0.0", brainCopies = 0, wranglerSessio
     mkdirSync(home);
     mkdirSync(bin);
     executable(join(bin, "uname"), "printf '%s\\n' 'Darwin'");
+    executable(join(bin, "id"), `printf '%s\\n' '${elevated ? 0 : 501}'`);
+    executable(join(bin, "df"), `printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' '/dev/fixture 9999999 1 ${freeKib} 1% /fixture'`);
 
     if (wranglerSession === "home-fallback") {
       // An existing but empty earlier directory must not hide a later file.
@@ -90,6 +99,30 @@ test("POSIX preflight rejects Node 21 and accepts Node 22", { skip: process.plat
   const supportedNode = runPreflight({ nodeVersion: "v22.0.0" });
   assert.equal(supportedNode.status, 0, supportedNode.stderr || supportedNode.stdout);
   assert.doesNotMatch(supportedNode.stdout, /node .* is too old/);
+});
+
+test("POSIX preflight rejects root and less than 2 GiB on the actual install drive", { skip: process.platform === "win32" }, () => {
+  const root = runPreflight({ elevated: true });
+  assert.equal(root.status, 1);
+  assert.match(root.stdout, /STOP\s+this shell is running as root.*without sudo/i);
+
+  const full = runPreflight({ freeKib: 2 * 1024 * 1024 - 1 });
+  assert.equal(full.status, 1);
+  assert.match(full.stdout, /STOP\s+the actual install drive has less than 2 GiB free/i);
+
+  const ready = runPreflight({ freeKib: 2 * 1024 * 1024 });
+  assert.equal(ready.status, 0, ready.stderr || ready.stdout);
+  assert.match(ready.stdout, /ok\s+actual install drive has at least 2 GiB free/i);
+  assert.match(ready.stdout, /ok\s+running as the current user without root elevation/i);
+});
+
+test("Windows preflight checks LOCALAPPDATA space and refuses Administrator execution", () => {
+  const source = readFileSync(WINDOWS_PREFLIGHT, "utf8");
+  assert.match(source, /IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]::Administrator\)/);
+  assert.match(source, /running as Administrator.*open a normal PowerShell window/i);
+  assert.match(source, /GetPathRoot\(\$env:LOCALAPPDATA\)/);
+  assert.match(source, /AvailableFreeSpace -lt 2GB/);
+  assert.match(source, /LOCALAPPDATA install drive has at least 2 GiB free/i);
 });
 
 test("POSIX preflight finds every Brain CLI on PATH", { skip: process.platform === "win32" }, () => {

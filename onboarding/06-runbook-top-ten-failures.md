@@ -107,10 +107,12 @@ brain setup <manifest>
 brain health <manifest>
 ```
 
-`brain setup` prompts for the Cloudflare token without echo, reuses the
-manifest's verified durable admin key, and applies that durable value to the
-Worker. Keeping the key change inside `brain setup` preserves the local and
-Worker verification as one step.
+`brain setup` reuses this Brain's named owner-approved Cloudflare browser
+profile, reuses the manifest's verified durable admin key, and applies that
+durable value to the Worker. Keeping the key change inside `brain setup`
+preserves the local and Worker verification as one step. If the released CLI
+explicitly offers its recovery-only hidden token path, explain why and use it
+only after the owner chooses that path.
 
 If the remote update fails, the durable value stays as the desired state.
 Rerun `brain setup <manifest>` and it will apply that same durable value again.
@@ -244,10 +246,13 @@ brain setup <manifest>
 brain health <manifest>
 ```
 
-Setup prompts for the Cloudflare token without echo and reuses the durable
-admin key. If that durable copy is missing or is not the intended value, stop
-and use the installer/operator's approved no-history credential launcher with
-`brain secrets`, keeping the admin key out of shell commands and history.
+Setup reuses this Brain's named Cloudflare browser sign-in and the durable admin
+key. The owner completes Cloudflare sign-in, 2FA, account selection, and consent
+if the saved session needs renewal. If that durable key is missing or is not the
+intended value, stop and use the installer/operator's approved no-history
+credential launcher with `brain secrets`, keeping the admin key out of shell
+commands and history. An API token is only for an explicitly selected automation
+or recovery lane.
 
 **Prevention:** deploy with `node brain.mjs deploy`. That is what it is for.
 
@@ -471,7 +476,11 @@ First look at what changed. This reads and prints, and changes nothing:
 node brain.mjs doctor <manifest> --repair-checksum
 ```
 
-It reads your database, so like `brain setup` and `brain update` it asks for the Cloudflare token at a hidden prompt, or reuses the one this machine already remembers.
+It reads your database, so like `brain setup` and `brain update` it reuses this
+Brain's named Cloudflare browser sign-in. If that protected session needs a
+refresh, the owner approves the official browser prompt. The bounded hidden
+token path appears only when the released CLI offers recovery and the owner
+chooses it.
 
 For every migration that no longer matches, it prints when it was applied, both checksums, the current file's size in lines and bytes, and whether the difference is only line endings. That last line is a proof rather than a guess: it converts the current file to LF and to CRLF and checks each against the recorded checksum. If neither reproduces it, it says `not confirmable as a pure line-ending change` and tells you to review the file by hand, because the bytes that originally ran were never kept, only their checksum was.
 

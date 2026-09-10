@@ -462,7 +462,7 @@ if (SCENARIO) {
     noR2.output);
 
   const optionalWarnings = runScenario("verify-optional-warnings", "verify", { cloudflareToken: true });
-  check("optional R2 and Vectorize access remain warnings",
+  check("optional R2 and Vectorize access remain warnings with the ordinary owner path",
     optionalWarnings.code === 0 && /R2 is not ready/.test(optionalWarnings.output) &&
       /Provision can use browser sign-in as a temporary fallback/.test(optionalWarnings.output) &&
       /D1 is reachable/.test(optionalWarnings.output) && /Workers is reachable/.test(optionalWarnings.output),

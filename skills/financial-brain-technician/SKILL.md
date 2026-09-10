@@ -17,12 +17,55 @@ In Claude Code, invoke this guide as `/financial-brain-technician`. In Codex,
 use `$financial-brain-technician` or ask in plain language, such as "update my
 Brain." Supply the absolute test-kit and manifest paths only when needed.
 
+## Make every owner step feel clear
+
+Claude Code is the primary guided install surface. Keep the owner in this one
+conversation, handle the technical details yourself, and ask for only one
+small action or answer at a time.
+
+Before opening a provider page, hidden prompt, or operating-system window:
+
+1. Name the provider and say in plain language what is about to appear and why
+   the Brain needs it.
+2. State the smallest permission, source scope, account, and expiry the step
+   requires. Do not ask for a broader permission for convenience.
+3. When browser control is available, offer to handle the official-page
+   navigation and non-secret form fields after the owner approves that exact
+   action. This includes non-secret labels, permission rows, account scope, app
+   type, approved API switches, and expiry.
+4. Hand control back before sign-in, 2FA, credential reveal or entry, OAuth
+   consent, billing approval, a passkey window, or an unexpected choice. Never
+   read, screenshot, copy, transcribe, paste, or store a secret.
+5. Tell the owner the one button or action they need next. After they finish,
+   continue the technical workflow without giving them a list of homework.
+
+If the next screen differs from what you explained, stop and describe the
+difference before anyone clicks or enters anything.
+
+Before creating an owner enrollment link, say this in your own natural voice:
+
+> Next, the Brain page will explain how to create your owner passkey. When you
+> choose Create my owner passkey, your device will open its secure passkey
+> window. This confirms it is you and protects your private owner area. Follow
+> the device window with Face ID, fingerprint, your device PIN, or screen lock.
+> Financial Brain and I cannot see or store your passkey, Face ID, fingerprint,
+> or device PIN. If the address or prompt looks unexpected, choose Cancel.
+
+Wait for the owner to say they are ready before minting the private link. Keep
+the link out of chat, screenshots, logs, and files. The owner opens it and
+controls the secure device window.
+
 ## Route an Optimize request first
 
 When the owner pastes `https://financialbrain.ai/optimize`, says "Optimize my
 Brain," or asks for the truth audit described there, treat it as an included
 owner feature. It is not a developer preview, a release privilege, or access
 the owner needs to qualify for.
+
+An Optimize request may check whether the current Brain CLI, technician skill,
+and MCP registration are present and current, including after a move to a new
+computer. The audit itself remains read-only and does not silently install or
+change anything.
 
 1. Read `https://financialbrain.ai/optimize/agent.md` and follow that live,
    read-only contract. Do not search repositories, release history, planning
@@ -114,9 +157,22 @@ especially after a move to a new computer. Name it, then offer to repair it only
 after the report and a separate explanation and approval. Offer the detailed
 check results at the end instead of making them the default experience.
 
+Optimize must not run `brain invite`, `brain devices`, passkey enrollment,
+device review, or ask the owner to identify device labels. Those belong only in
+an explicitly requested passkey, access, or handoff ceremony, where the owner
+has context and a useful interface.
+
 If the live contract is missing, contradicts the exact installed CLI, or the
 installed version is too old to perform a named check safely, stop before that
 check. Say simply what needs updating and that nothing was changed.
+
+After showing the report, inspect the exact target release's advertised repair
+scopes. If it explicitly supports them, offer one clearly previewed bundle
+containing only the local items the owner selects: the technician skill, Claude
+MCP registration, and Codex MCP registration. List each selected action and
+local destination, ask once for approval of that bundle, then verify every
+readback. Do not invent or guess a repair command the release does not provide.
+Keep CLI installation or replacement on its own supported path and approval.
 
 ## Route an update request first
 
@@ -300,6 +356,28 @@ sign-out and sign-in check before calling the passkey proven.
 For a fresh install, checkup, connector, passkey, or handoff request, continue
 below. The update route above replaces this setup-oriented sequence.
 
+For a fresh install, front-load these prerequisites before any Cloudflare
+resource is created:
+
+- Run `brain tools` and the packaged read-only preflight. They must prove
+  Node.js 22 or newer, at least 2 GiB free on the actual per-user install drive,
+  and a normal current-user terminal without `sudo`, root, or Run as
+  administrator. On Windows the space check must target `LOCALAPPDATA`, not a
+  guessed home or system drive.
+- Confirm the owner has chosen a Cloudflare account for this Brain. Before
+  provisioning, help them navigate to **Workers & Pages > Plans** and have the
+  owner confirm that the exact account says **Paid**. The named browser session
+  can verify the account and product access, but its narrow permission cannot
+  read billing status. Never turn Vectorize access into a claim that the plan
+  is Paid.
+- Browser control may handle the approved non-secret navigation. Stop for
+  Cloudflare sign-in, 2FA, account choice, any plan change, payment, billing
+  approval, and consent. Ask only for the one current action.
+
+If a machine prerequisite fails, explain the one fix it names and stop. Do not
+start an account ceremony, write a manifest, or create a resource while it is
+unresolved.
+
 1. Ask which of those jobs the owner wants. Quietly inspect the reviewed default
    manifest location and the package's local bootstrap status. If exactly one
    existing manifest is identified, use it without asking the owner to find a
@@ -334,6 +412,11 @@ below. The update route above replaces this setup-oriented sequence.
 
 ## Credential boundary
 
+- Normal fresh Cloudflare setup uses the owner's official browser sign-in and
+  the Brain's named protected local profile. Do not send a fresh owner to the
+  API Tokens page or ask them to create, reveal, copy, or paste a token.
+  Describe the hidden token path only if the released CLI says browser sign-in
+  is unavailable and the owner explicitly selects that recovery path.
 - The owner handles login, 2FA, billing, OAuth consent, credential reveal, and
   every physical passkey gesture.
 - Keep Cloudflare tokens, Brain keys, OAuth secrets, app passwords,

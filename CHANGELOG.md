@@ -8,6 +8,21 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 Candidate only. This version has not been released.
 
+- **Account and passkey steps now explain themselves before anything opens.**
+  Claude Code can handle official-page navigation and non-secret form fields,
+  then pauses for sign-in, 2FA, secrets, consent, billing, and the secure device
+  window. The first owner screen now says why the passkey protects the owner
+  area, what the next click opens, what to do or cancel, and what Financial
+  Brain and the assistant cannot see. It no longer promises that one passkey
+  works on every device.
+
+- **Setup checks the boring prerequisites before it can create anything.** It
+  now stops early if Node is older than 22, the real install drive has less than
+  2 GiB free, or the terminal is running as root or Administrator. On Windows it
+  checks the `LOCALAPPDATA` drive. The Cloudflare step also waits for the owner
+  to confirm the exact account says Workers Paid, because its narrow sign-in
+  cannot read billing status and should never pretend otherwise.
+
 For a brain whose search index fell behind and stayed behind, this is the one
 that stops the waiting. Nothing here changes what your brain holds.
 

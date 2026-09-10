@@ -40,9 +40,11 @@ extend the schedule. The technician records the actual time and remaining gates.
 - The pre-interview answers and the twenty questions the owner wrote before
   retrieval was available.
 
-Node.js 22 or newer is a behind-the-scenes technician prerequisite. The owner
-does not need to learn Node.js or use it directly. The technician installs it
-from the official source when the readiness check says it is missing.
+Node.js 22 or newer is a behind-the-scenes technician prerequisite. So are at
+least 2 GiB free on the actual per-user install drive and a normal non-elevated
+terminal. On Windows the space check uses `LOCALAPPDATA`. The owner does not
+need to learn Node.js or inspect a drive. The guided `brain tools` check does
+that work and names one fix when anything is missing.
 
 ## Start the pre-interview in Claude
 

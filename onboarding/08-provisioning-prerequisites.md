@@ -15,9 +15,10 @@ account alone.
 |---|---|---|---|
 | 1 | Claude Code plus an eligible Claude account | 5 min | Claude Code is part of the owner handoff and is connected directly to the Brain |
 | 2 | Node.js 22 or newer | 5 min | Runs the Brain CLI and the pinned Wrangler 4 command |
-| 3 | A Cloudflare account | 5 min | Everything lives here. Theirs, not ours |
-| 4 | **Workers Paid plan on it** | 2 min | 5 USD/month minimum. The Free plan is prototype-scale, not a supported production home for a real corpus |
-| 5 | An account-scoped, expiring API token | 5 min | One token drives every Cloudflare step |
+| 3 | At least 2 GiB free on the actual install drive | 2 min | Prevents a partial install. On Windows this means the `LOCALAPPDATA` drive |
+| 4 | A normal non-elevated terminal | 1 min | Keeps files owned by the current user. Do not use `sudo`, root, or Run as administrator |
+| 5 | A Cloudflare account | 5 min | Everything lives here. Theirs, not ours |
+| 6 | **Workers Paid plan on it** | 2 min | 5 USD/month minimum. The Free plan is prototype-scale, not a supported production home for a real corpus |
 
 No Supabase, database password, or separate answer-model API key is required.
 The Claude account is for the owner's Claude Code client, not for Worker answers.
@@ -33,7 +34,9 @@ brain tools
 ```
 
 The automated part proves the Claude version, `claude auth status`, and
-`npx wrangler@4.73.0 --version` in a credential-scrubbed child environment. In a real
+the pinned Wrangler version in a credential-scrubbed child environment. It also
+checks Node 22+, at least 2 GiB free on the actual per-user install drive, and a
+non-elevated current-user session. In a real
 terminal it also opens `claude doctor`, which owns an interactive terminal UI
 and therefore cannot be truthfully replaced by a headless fixture.
 
@@ -43,7 +46,7 @@ credentials just to print its version.
 
 ---
 
-## Item 2 is the one that bites
+## Workers Paid is the prerequisite that bites
 
 Vectorize now has a Free allowance, but that does not make the Free plan a safe
 production baseline for this product. At 768 dimensions, its 5 million stored
@@ -51,11 +54,12 @@ vector dimensions hold only about 6,500 chunks. The Free plan also hard-stops at
 100,000 D1 row writes per day and 10 ms of Worker CPU per request. A normal
 personal or company corpus can cross those limits during its first load.
 
-**Confirm it before the session, not during it.** Cloudflare dashboard, Workers
-and Pages, Plans. It should say Paid. Upgrading takes about two minutes and a
-card. `brain doctor` proves Vectorize access, but Cloudflare does not expose the
-plan check through the scoped install token, so the dashboard remains the plan
-proof.
+**Confirm it before any resource is created.** In the exact Cloudflare account,
+open Workers and Pages, then Plans. It should say Paid. Upgrading takes about
+two minutes and a card, and every billing action belongs to the owner.
+`brain doctor` can prove product access, but the narrow installer sign-in cannot
+read billing status, so the owner's dashboard confirmation remains the plan
+proof. Never infer Paid from successful Vectorize access.
 
 Current limits:
 
@@ -65,56 +69,41 @@ Current limits:
 
 ---
 
-## Credential: one scoped API token
+## Normal Cloudflare approval: browser sign-in
 
-The client issues a token at dash.cloudflare.com, My Profile, API Tokens,
-Create Token, Custom token, with exactly these permissions:
+`brain setup` opens Cloudflare's official browser sign-in. The owner signs in,
+completes 2FA, chooses the exact account, reviews Cloudflare's consent page, and
+approves it. Wrangler saves this Brain's named profile in the owner's protected
+operating-system credential store. Normal fresh setup creates, reveals, copies,
+and pastes no API token.
 
-    Account > Workers Scripts        Edit
-    Account > D1                     Edit
-    Account > Vectorize              Edit
-    Account > Workers AI             Read
-    Account > Workers R2 Storage     Edit    (only if the manifest sets r2_bucket)
+When browser control is available, the assistant may open the official page and
+continue the installer after the owner finishes. The owner controls sign-in,
+2FA, account selection, and consent. If the account or consent screen differs
+from the explanation, stop before approval.
 
-Set an expiry. Nothing here needs to outlive the engagement.
+### Recovery-only scoped token
 
-Keep the value in the account owner's password manager. Do not email it,
-message it, or put it in a shared terminal. The account owner enters it only at
-the hidden prompt in `brain setup` or `brain update`. Low-level automation must
-use an approved no-history secret-manager launcher.
+A scoped token remains available for a reviewed legacy, automation, or recovery
+path. Describe it only when the released CLI says browser sign-in is unavailable
+and the owner explicitly chooses that path. It is not a normal fresh-install
+prerequisite.
 
-Vectorize Edit was verified end to end on 2026-08-23: the account-scoped token
-created the 768-dimensional index and all six metadata indexes through the API.
-
-The guided setup and update paths probe every required permission and name
-whichever is missing before making account changes. Run the appropriate path as
-soon as the account owner has created the token, not at the start of a support
-session.
-
-### Compatibility fallback
-
-If an older token cannot reach Vectorize, create a correctly scoped replacement
-and enter it at the hidden `brain setup` or `brain update` prompt. Do not leave
-the old value in a shell environment.
-
-For a temporary compatibility test of an older account, the account owner can
-instead run:
-
-```bash
-npx wrangler@4.73.0 login
-```
-
-They approve in their own browser. Provision uses that local OAuth session only
-for Vectorize. New installs should fix the scoped token and use hidden prompt
-entry so every client follows the same supported path.
+That recovery token uses only Workers Scripts Edit, D1 Edit, Vectorize Edit,
+and Workers AI Read at account scope. Add R2 Storage Edit only when the manifest
+sets an R2 bucket, and use a short expiry. The owner enters it only into the
+Brain CLI's hidden prompt. Never email it, message it, place it in a command, or
+let an assistant read, copy, screenshot, transcribe, or store it.
 
 ---
 
 ## Verify before you start
 
 Run `node brain.mjs setup <manifest>` for a new install or
-`node brain.mjs update <manifest>` for an existing install. Enter the scoped
-token only when the hidden prompt asks for it.
+`node brain.mjs update <manifest>` for an existing install. For a new install,
+complete the owner-controlled Cloudflare browser sign-in and confirm the exact
+account when prompted. A hidden token prompt is a separately selected recovery
+path, not an ordinary setup step.
 
 The preflight should show five green lines: account resolved, R2, D1, Workers,
 Vectorize. A

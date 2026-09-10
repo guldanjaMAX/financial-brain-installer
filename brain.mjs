@@ -10,23 +10,24 @@
  *
  * DESIGN RULES
  *
- * Everything runs against the CLIENT's Cloudflare account using a scoped token
- * the client issued. We never hold their data and the token is revoked at
- * handoff, so this tool must work from a standing start with nothing but that
- * token and a manifest.
+ * Everything runs against the owner's Cloudflare account. Normal fresh setup
+ * uses an owner-approved named browser session stored in the operating-system
+ * credential store. Scoped API tokens exist only for explicit automation,
+ * recovery, and older manifests.
  *
- * The account id is RESOLVED FROM THE TOKEN, never hardcoded and never taken
- * from the manifest as gospel. A token that can see two accounts is ambiguous
- * and must fail loudly rather than provision into the wrong one, because
- * provisioning into the wrong account is the one mistake with no clean undo.
+ * The account id is resolved from the selected Cloudflare control credential,
+ * never hardcoded and never taken from the manifest as gospel. Access that can
+ * see two accounts is ambiguous and must fail loudly rather than provision into
+ * the wrong one, because provisioning into the wrong account has no clean undo.
  *
  * Every step is idempotent: re-running finds existing resources by name and
  * adopts them rather than creating duplicates. An installer you are afraid to
  * re-run is an installer you will not use.
  *
- * The token is read from CLOUDFLARE_API_TOKEN for automation or from a hidden,
- * command-scoped terminal prompt for setup/update. It is never written to the
- * manifest, logged, or passed as a command-line argument where `ps` could read it.
+ * Automation can inject CLOUDFLARE_API_TOKEN, and an explicitly selected
+ * recovery path can use a hidden command-scoped prompt. It is never written to
+ * the manifest, logged, or passed as a command-line argument where `ps` could
+ * read it. Ordinary owner setup creates and reveals no API token.
  */
 
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
@@ -88,6 +89,8 @@ import {
 } from "./worker/src/lib/secret-scan.js";
 import {
   cloudflareCliEnvironment,
+  checkInstallDriveFreeSpace,
+  checkInstallPrivilege,
   checkNode,
   checkWindowsCredentialProtection,
   localToolEnvironment,
@@ -184,6 +187,7 @@ import {
   PLAID_WINDOWS_SECRET_ENTRY_HOLD,
   plaidTechnicianPreflight,
   renderTechnicianPlan,
+  renderTechnicianStepBriefing,
   runTechnicianStep,
   technicianPlan,
 } from "./operations/technician-setup.mjs";
@@ -784,10 +788,10 @@ export async function withCloudflareToken(action, options = {}) {
 }
 
 /**
- * Use an already available or remembered Cloudflare token without ever
- * prompting. Diagnostics need this distinction: `brain doctor <manifest>`
- * should verify the token setup already stored, but a missing token is itself
- * one of the findings and must not turn a read-only preflight into a ceremony.
+ * Use an already available automation or recovery token without ever prompting.
+ * Diagnostics need this distinction: doctor may inspect a token lane already
+ * selected by an older manifest, but it must never turn a missing optional
+ * token into a fresh-owner credential ceremony.
  */
 export async function withAvailableCloudflareToken(action, options = {}) {
   if (cloudflareTokenAvailable() || !options.accountId) return action();
@@ -1302,7 +1306,7 @@ async function cmdVerify(manifestPath) {
   const { m } = loadManifest(manifestPath);
   const acct = await resolveAccount(m);
   const browserProfile = cloudflareAccessUsesBrowserProfile();
-  ok(`${browserProfile ? "Cloudflare browser sign-in verified" : "Cloudflare API token verified"}, account "${acct.name}" (${acct.id})`);
+  ok(`Cloudflare access confirmed for account "${acct.name}" (${acct.id})`);
 
   // R2 needs separate activation and a card on file, even for the free tier.
   // It is the most common mid-install surprise, so it is checked up front, but
@@ -1365,12 +1369,12 @@ async function cmdVerify(manifestPath) {
 
 
 /**
- * Vectorize through the API token, with wrangler as a compatibility fallback.
+ * Vectorize through the selected Cloudflare control credential.
  *
  * The earlier tokens failed because they lacked Vectorize Edit. A user-owned,
  * account-scoped token with that permission created the index and all metadata
- * indexes through the API on 2026-08-23. Wrangler's OAuth session remains a
- * fallback so an older install can still be repaired without deleting resources.
+ * indexes through the API on 2026-08-23. That remains a bounded automation and
+ * recovery lane. A named Wrangler browser session is the normal owner path.
  *
  * CLOUDFLARE_API_TOKEN must be cleared for the child process. Wrangler prefers it
  * when set and will silently authenticate as the wrong identity.
@@ -1708,15 +1712,15 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
     try {
       list = await cf(`/accounts/${acct.id}/vectorize/v2/indexes`);
     } catch (e) {
-      // An older token may lack Vectorize Edit. Fall through to wrangler rather
-      // than stopping an install that can still complete.
+      // A bounded recovery token may lack Vectorize Edit. Fall through to the
+      // named browser session rather than stopping an install that can complete.
       viaApi = false;
-      info("the API token cannot reach Vectorize, trying wrangler's own session");
+      info("the recovery credential cannot reach Vectorize, trying this Brain's named browser session");
       if (!wranglerAvailable(acct.id, cfg.auth_profile || null)) {
         die(
           `Vectorize is unreachable both ways, so the install cannot continue.\n` +
-            `  API token: ${e.message.slice(0, 100)}\n` +
-            "  wrangler:  not logged in.\n\n" +
+            `  recovery credential: ${e.message.slice(0, 100)}\n` +
+            "  named browser sign-in: not available.\n\n" +
             VECTORIZE_REMEDY + "\n  Then re-run provision."
         );
       }
@@ -13489,8 +13493,8 @@ export async function captureSetupD1Bookmark(manifestPath, options = {}) {
  *
  * The step ORDER here is not cosmetic. A clean-room rehearsal established that
  * secrets must come after deploy because a secret is set on an existing worker
- * script. Vectorize uses the scoped API token and only falls back to wrangler's
- * own session for older tokens.
+ * script. Vectorize uses the selected Cloudflare control path. Normal owner
+ * setup uses the named browser session; API tokens are automation or recovery only.
  *
  * Every step is idempotent and the manifest is written after each, so an
  * interrupted setup is resumed by re-running the same command.
@@ -16954,6 +16958,45 @@ export function setupManifestTarget(manifestPath, flags = {}) {
   return positional || flagged || "./brain.manifest.json";
 }
 
+/** Keep automation and recovery setup behind the same non-negotiable machine gates. */
+export async function setupLocalPreflightChecks({
+  tokenPath = false,
+  skipConnections = false,
+  doctor = doctorRunAll,
+  nodeCheck = checkNode,
+  driveCheck = checkInstallDriveFreeSpace,
+  privilegeCheck = checkInstallPrivilege,
+  platformName = process.platform,
+  environment = process.env,
+  cliPath = fileURLToPath(import.meta.url),
+  statfsImpl,
+  getEffectiveUserId,
+  runCommand,
+} = {}) {
+  if (!tokenPath) {
+    return doctor({
+      skipCloudflare: true,
+      requireClaudeCode: !skipConnections,
+      platformName,
+      environment,
+      cliPath,
+      statfsImpl,
+      getEffectiveUserId,
+      ...(runCommand ? { localRun: runCommand } : {}),
+    });
+  }
+  return [
+    nodeCheck(),
+    driveCheck({ platformName, environment, cliPath, statfsImpl }),
+    privilegeCheck({
+      platformName,
+      environment,
+      ...(runCommand ? { runCommand } : {}),
+      getEffectiveUserId,
+    }),
+  ];
+}
+
 /** Open the owner-facing Cloudflare prerequisite before Wrangler asks for access. */
 export async function prepareCloudflareAccountCeremony(options = {}) {
   const prompt = options.askFn ?? ask;
@@ -16968,7 +17011,18 @@ export async function prepareCloudflareAccountCeremony(options = {}) {
   const opened = (options.openBrowserImpl ?? openBrowser)(plan.start_url, options.openBrowserOptions || {});
   if (opened) write("  Cloudflare opened in your browser. The installer is waiting here.");
   else write(`  Open this Cloudflare page in your browser: ${plan.start_url}`);
-  await prompt("Press Enter after the Cloudflare account is ready", "");
+  write("  The installer can verify the account and product access, but this narrow sign-in cannot read billing status.");
+  const paid = String(await prompt(
+    "Before setup creates anything, confirm this exact account shows Workers & Pages > Plans > Paid. Type PAID to continue, or leave blank to stop",
+    "",
+  )).trim().toUpperCase();
+  if (paid !== "PAID") {
+    die(
+      "setup stopped before creating any Cloudflare resource. Confirm the intended account shows Workers & Pages > Plans > Paid, then rerun the same setup command. " +
+        "Any plan change, payment, or billing approval belongs to the owner in Cloudflare.",
+    );
+  }
+  write("  Workers Paid confirmed by the owner. No Cloudflare resource has been created yet.");
   return plan;
 }
 
@@ -17118,27 +17172,27 @@ async function cmdSetupInteractive(manifestPath) {
     );
   }
 
-  let localPreflightChecks = null;
-  if (!tokenPath) {
-    localPreflightChecks = await doctorRunAll({
-      skipCloudflare: true,
-      requireClaudeCode: !shouldSkipSetupConnections(flags),
-    });
-    const fatal = localPreflightChecks.filter((check) => check.status === D_FAIL);
-    if (fatal.length) {
-      console.log(renderCliCommands(`\n  ${c.bold("brain setup")}  ${c.dim("nothing to a working brain")}\n`));
-      console.log(`  ${c.bold("Step 1 of 6")}  checking this machine\n`);
-      for (const check of localPreflightChecks) {
-        const mark = check.status === D_OK ? c.green("ok  ") : check.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
-        console.log(`    ${mark}  ${check.name}  ${c.dim(check.detail)}`);
-      }
-      console.log("");
-      for (const check of fatal) console.log(`  ${c.red(check.name)}\n    ${renderCliCommands(check.fix).split("\n").join("\n    ")}\n`);
-      closePrompts();
-      die("setup cannot continue until the blocking items above are fixed. Re-run when they are.");
+  // The automation/recovery token lane cannot bypass the machine gates. It
+  // does not need the browser/network checks here, but it still must never
+  // create resources from an elevated shell or a nearly full install drive.
+  const localPreflightChecks = await setupLocalPreflightChecks({
+    tokenPath,
+    skipConnections: shouldSkipSetupConnections(flags),
+  });
+  const fatal = localPreflightChecks.filter((check) => check.status === D_FAIL);
+  if (fatal.length) {
+    console.log(renderCliCommands(`\n  ${c.bold("brain setup")}  ${c.dim("nothing to a working brain")}\n`));
+    console.log(`  ${c.bold("Step 1 of 6")}  checking this machine\n`);
+    for (const check of localPreflightChecks) {
+      const mark = check.status === D_OK ? c.green("ok  ") : check.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
+      console.log(`    ${mark}  ${check.name}  ${c.dim(check.detail)}`);
     }
+    console.log("");
+    for (const check of fatal) console.log(`  ${c.red(check.name)}\n    ${renderCliCommands(check.fix).split("\n").join("\n    ")}\n`);
+    closePrompts();
+    die("setup cannot continue until the blocking items above are fixed. Re-run when they are.");
   }
-  if (!resumed && !tokenPath && interactive) {
+  if (!resumed && interactive) {
     const ceremony = await prepareCloudflareAccountCeremony({ accountPath, askFn: ask });
     accountPath = ceremony.path;
   }
@@ -17279,6 +17333,15 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
     } catch (error) {
       die(String(error?.message || error));
     }
+  }
+
+  // The direct invite command owns the passkey explanation so the owner sees
+  // it immediately before the one-time link is minted. Every other ceremony
+  // is introduced here before a provider page, hidden prompt, or child command
+  // can appear.
+  if (step !== "passkey") {
+    const writeBriefing = options.writeBriefing || ((text) => console.log(renderCliCommands(text)));
+    writeBriefing(renderTechnicianStepBriefing(step));
   }
 
   const readHidden = options.readHidden || (({ prompt, noun, optional }) => readHiddenInput({
@@ -17534,6 +17597,18 @@ export async function cmdLocalTools(options = {}) {
     existsImpl: options.existsImpl,
   });
   const node = checkNode();
+  const installDrive = checkInstallDriveFreeSpace({
+    platformName,
+    environment,
+    cliPath: options.brainCliPath || fileURLToPath(import.meta.url),
+    statfsImpl: options.statfsImpl,
+  });
+  const installSession = checkInstallPrivilege({
+    platformName,
+    environment,
+    runCommand,
+    getEffectiveUserId: options.getEffectiveUserId,
+  });
   const wrangler = checkWrangler(runCommand);
   const dpapi = platformName === "win32"
     ? checkWindowsCredentialProtection({
@@ -17543,8 +17618,8 @@ export async function cmdLocalTools(options = {}) {
       })
     : { name: "Windows credential protection", status: D_OK, detail: "not applicable", rounds: 0 };
   const visibleChecks = platformName === "win32"
-    ? [node, claude, wrangler, dpapi]
-    : [node, claude, wrangler];
+    ? [node, installDrive, installSession, claude, wrangler, dpapi]
+    : [node, installDrive, installSession, claude, wrangler];
   if (!json) console.log(`\n  ${c.bold("Financial Brain local tools")}\n`);
   for (const item of visibleChecks) {
     if (json) continue;
@@ -17562,7 +17637,15 @@ export async function cmdLocalTools(options = {}) {
     productVersion: PRODUCT_VERSION,
     manifest,
     cli,
-    checks: { node, claude, claude_path: claudePath, wrangler, dpapi },
+    checks: {
+      node,
+      install_drive: installDrive,
+      install_session: installSession,
+      claude,
+      claude_path: claudePath,
+      wrangler,
+      dpapi,
+    },
     skill,
     claudeDoctor,
     deepDpapi,
@@ -17973,6 +18056,10 @@ async function cmdInvite(manifestPath) {
   const base = await resolveBaseUrl(m, acct);
   const adminKey = resolveAdminKey(manifestPath);
   if (!adminKey) die("no durable admin key was found. Repair it with `brain setup <manifest>` or `brain secrets <manifest>`.");
+  // This is printed before the invite write and therefore before the owner can
+  // reach a browser or device prompt. The secure window should never appear as
+  // an unexplained surprise.
+  console.log(renderTechnicianStepBriefing("passkey"));
   const res = await http(`${base}/api/admin/auth/invite`, {
     method: "POST",
     headers: { "X-Admin-Key": adminKey },
@@ -18537,10 +18624,10 @@ const DOCTOR_FLAGS = ["repair", "rollback", "repair-checksum", "yes"];
  * path (resume or restore a mid-migration pause). `brain doctor <manifest>
  * --repair-checksum [--yes]` is the DIFFERENT path for an applied migration
  * whose file content has since changed — see diagnoseChecksumDrift's own
- * comment for why the two must not be conflated. All three need a Cloudflare
- * token (they read D1 and, once confirmed, mutate it) so each is wrapped in
- * withCloudflareToken exactly like `brain update` and `brain setup` already
- * are. Only one of the three may be requested at a time.
+ * comment for why the two must not be conflated. All three need Cloudflare
+ * control access (they read D1 and, once confirmed, mutate it), so each uses
+ * the same named browser or explicit recovery boundary as update and setup.
+ * Only one of the three may be requested at a time.
  */
 async function dispatchDoctor(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
@@ -19765,7 +19852,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain grant      <manifest> --name "X" --can ask,file   give one person scoped access; prints the token once
     brain grants     <manifest>            who has access; --revoke <id> ends one
     brain zone       <manifest>            what is in which zone; --source X --zone Y to set one
-    brain invite     <manifest>            private one-time owner passkey link (15 min)
+    brain invite     <manifest>            15-minute owner passkey link; explains the secure device window first
     brain devices    <manifest>            enrolled passkeys; --revoke <credential id> removes one
     brain test       <manifest>            full acceptance suite (5 tiers)
     brain connect google --scopes drive,gmail,calendar  authorise the client's own Google account

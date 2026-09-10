@@ -78,6 +78,26 @@ function outcomeFor({ productVersion, manifest, checks, skill, deepDpapi, observ
       recovery: "No provisioning action was started.",
     };
   }
+  if (checks.install_drive?.status === "fail") {
+    return {
+      status: "action_required",
+      issue_code: "INSTALL_DRIVE_SPACE_LOW",
+      retry_safe: true,
+      requires_human: true,
+      next_action: "Free at least 2 GiB on the actual per-user install drive, then rerun the same bootstrap command.",
+      recovery: "No provisioning action was started.",
+    };
+  }
+  if (checks.install_session?.status === "fail") {
+    return {
+      status: "action_required",
+      issue_code: "ELEVATED_INSTALL_SESSION",
+      retry_safe: true,
+      requires_human: true,
+      next_action: "Open a normal terminal as the current user, without sudo or Run as administrator, then rerun the same bootstrap command.",
+      recovery: "No provisioning action was started and no system-wide ownership was created.",
+    };
+  }
   if (checks.claude_path?.status === "failed") {
     return {
       status: "action_required",
@@ -129,7 +149,7 @@ function outcomeFor({ productVersion, manifest, checks, skill, deepDpapi, observ
       issue_code: "CLOUDFLARE_ACCOUNT_MISMATCH",
       retry_safe: false,
       requires_human: true,
-      next_action: "The owner selects the intended Cloudflare account and creates or supplies a token scoped to that account.",
+      next_action: "The owner selects the intended Cloudflare account during the named browser sign-in, then retries the same check.",
       recovery: "No account switch or provisioning action is allowed automatically.",
     };
   }
@@ -139,8 +159,8 @@ function outcomeFor({ productVersion, manifest, checks, skill, deepDpapi, observ
       issue_code: "CLOUDFLARE_PERMISSION_MISSING",
       retry_safe: true,
       requires_human: true,
-      next_action: "The owner reviews the token summary for the four named required capabilities, then retries the same check.",
-      recovery: "A token-verification rejection alone is not an invalid-token verdict.",
+      next_action: "Re-authorize the named browser sign-in. Only an explicitly selected automation or recovery plan should review a scoped token.",
+      recovery: "A narrow credential response alone is not proof of the Workers plan. It is not an invalid-token verdict.",
     };
   }
   if (["download", "deploy", "migration"].includes(observations.network_loss_stage)) {
@@ -287,6 +307,8 @@ export function buildBootstrapStatus({
     status_file: statusFile ? resolve(statusFile) : null,
     checks: Object.freeze({
       node: checks.node?.status || "unknown",
+      install_drive: checks.install_drive?.status || "unknown",
+      install_session: checks.install_session?.status || "unknown",
       claude: checks.claude?.status || "unknown",
       claude_path: checks.claude_path?.status || "not_applicable",
       wrangler: checks.wrangler?.status || "unknown",

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   GRANT_VIEWS, GrantWorkspace, OWNER_VIEWS, visibleView,
 } from "./App";
+import { Gate } from "./components/Gate";
 import type { Me } from "./lib/api";
 
 const grantMe: Me = {
@@ -48,5 +49,21 @@ describe("principal workspace routing", () => {
     expect(html).not.toContain("Access</button>");
     expect(html).not.toContain("Owner preferences");
     expect(html).not.toContain("Add a text record");
+  });
+});
+
+describe("passkey enrollment welcome", () => {
+  it("explains the secure device window and privacy boundary before offering enrollment", () => {
+    const html = renderToStaticMarkup(
+      <Gate owner="Morgan Example" inviteCode="synthetic-invite" onIn={() => undefined} />,
+    );
+    expect(html).toContain("Here is what happens next");
+    expect(html).toContain("Create my owner passkey");
+    expect(html).toContain("secure passkey window");
+    expect(html).toContain("This verifies that you are the owner");
+    expect(html).toContain("cannot see or store your passkey, Face ID, fingerprint, or device PIN");
+    expect(html).toContain("choose Cancel");
+    expect(html).not.toContain("Set up with Face ID");
+    expect(html).not.toContain("Works on every device you own");
   });
 });

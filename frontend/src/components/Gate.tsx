@@ -56,8 +56,8 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
           </h1>
           <p className="text-ink-soft mt-3 leading-relaxed">
             {enrolling
-              ? "Create the owner passkey you will use to open this Brain without making a Brain password or handling the installer's admin key."
-              : "Sign in to ask your Brain a question. Your device will open its normal passkey window only after you choose the button below."}
+              ? "Everything you have written, decided and been told, in one place that belongs to you. Ask it anything and it answers with its sources."
+              : "Sign in to ask your brain a question."}
           </p>
 
           {notice && (
@@ -66,27 +66,45 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
             </p>
           )}
 
-          {enrolling && (
-            <div className="mt-6 rounded-xl border border-line bg-paper px-4 py-4 text-[14px] leading-relaxed">
-              <p className="font-semibold text-ink">What will happen</p>
-              <ol className="mt-2 list-decimal space-y-2 pl-5 text-ink-soft">
-                <li>Nothing opens until you choose <strong className="text-ink">Create my owner passkey</strong>.</li>
-                <li>Your device will show its normal passkey window. It may ask for Face ID, Touch ID, a fingerprint, a security key, or your device PIN.</li>
-                <li>Check that this page is at <strong className="text-ink">{hostname}</strong>, then complete the device step yourself. If anything looks wrong, cancel.</li>
+          {enrolling ? (
+            <div role="note" className="mt-6 rounded-xl border border-line bg-paper/60 p-4">
+              <h2 className="text-[15px] font-semibold">Here is what happens next</h2>
+              <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
+                What will happen remains in your control. Nothing opens until you choose the button below.
+              </p>
+              <ol className="mt-3 space-y-2.5">
+                <li className="flex gap-2.5 text-[14.5px] leading-6">
+                  <span className="text-accent font-semibold" aria-hidden="true">1</span>
+                  <span>Choose <strong>Create my owner passkey</strong> below.</span>
+                </li>
+                <li className="flex gap-2.5 text-[14.5px] leading-6">
+                  <span className="text-accent font-semibold" aria-hidden="true">2</span>
+                  <span>
+                    Your device will open its secure passkey window. Follow that window using
+                    Face ID, Touch ID, a fingerprint, a security key, your device PIN, or screen
+                    lock. First check that this page is at <strong>{hostname}</strong>.
+                  </span>
+                </li>
               </ol>
-              <p className="mt-3 text-ink-soft">
-                Your biometric data and device PIN never go to Financial Brain. The private passkey stays
-                with your device or passkey provider. This Brain stores only the public verification data
-                needed to recognize it, and cannot use the passkey to read other files on your device.
+              <p className="mt-3 text-[13.5px] leading-relaxed text-ink-soft">
+                This verifies that you are the owner and protects your private owner area without
+                another password. Your biometric data and device PIN never go to Financial Brain.
+                Financial Brain and your Claude or Codex guide cannot see or store your passkey,
+                Face ID, fingerprint, or device PIN. The private passkey stays with your device or
+                passkey provider. The Brain keeps only the public sign-in record needed to recognize you.
+              </p>
+              <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
+                Nothing else on this device is connected. If the address or secure window looks
+                unexpected, choose Cancel. Nothing is enrolled. Canceling the device prompt does
+                not use it, so you can try again before this private link expires.
               </p>
             </div>
-          )}
-
-          {!enrolling && (
-            <p className="mt-5 text-[14px] leading-relaxed text-ink-soft">
-              Check that this page is at <strong className="text-ink">{hostname}</strong>, then answer the
-              system prompt yourself. Financial Brain does not receive your biometric data or device PIN.
-            </p>
+          ) : (
+            <div role="note" className="mt-6 rounded-xl border border-line bg-paper/60 p-4 text-[14px] leading-relaxed text-ink-soft">
+              Your device will open its normal passkey window only after you choose the button
+              below. Check that this page is at <strong>{hostname}</strong>, then answer the system
+              prompt yourself. Financial Brain never receives your biometric data or device PIN.
+            </div>
           )}
 
           {passkeysSupported() ? (
@@ -107,9 +125,9 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
 
           {enrolling && (
             <p className="mt-3 text-[13px] text-ink-soft">
-              This private link expires 15 minutes after it was created and works once. Canceling the
-              device prompt does not use it, so you can retry before it expires. Your passkey may sync
-              through your chosen passkey provider, but availability on every device is not guaranteed.
+              Usually takes about ten seconds. This private link expires 15 minutes after it was
+              created and works once. You stay in control of the secure device window, and your
+              passkey may sync through your chosen passkey provider.
             </p>
           )}
           {error && <p className="mt-4 text-[14px] text-red-700">{error}</p>}
