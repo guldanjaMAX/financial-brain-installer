@@ -581,10 +581,13 @@ jobs:
         shell: powershell
         run: |
           Set-ExecutionPolicy -Scope CurrentUser Restricted -Force
-          $out = powershell -NoProfile -ExecutionPolicy Bypass -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1 | Out-String
+          $raw = & powershell -NoProfile -ExecutionPolicy Bypass -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1
+          $code = $LASTEXITCODE
+          $out = $raw | Out-String
           Set-ExecutionPolicy -Scope CurrentUser Undefined -Force
           Write-Host $out
           if ($out -notmatch 'WARN.*brain\.cmd, npm\.cmd and npx\.cmd') { Write-Host "::error::preflight did not warn about the .ps1 shim block"; exit 1 }
+          if ($code -ne 0) { throw "unexpected native preflight exit: $code" }
           Write-Host "TRAP 1 DETECTED"
 
       - name: "trap 2: running inside the Claude MSIX sandbox"
