@@ -46,6 +46,16 @@ import { sourceReceiptOwnerMessage } from "./source-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { probeStalledVectorFence } from "./vector-fence-probe.js";
+import {
+  DEFAULT_DIAGNOSE_CHUNK_PAGE_BUDGET,
+  DEFAULT_DIAGNOSE_CHUNK_PAGE_SIZE,
+  DEFAULT_DIAGNOSE_STATEMENT_BUDGET,
+  DIAGNOSE_MUTATION_MARKER_SQL,
+  mutationMarker,
+  mutationMarkerChanges,
+  publicMutationMarker,
+  scanChunkPages,
+} from "./diagnose-scan.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
@@ -2042,32 +2052,159 @@ function remedyForState(env, remedy) {
 export async function diagnose(env, {
   sampleLimit = 10,
   duplicateChunkScanLimit = 100_000,
+  chunkPageSize = DEFAULT_DIAGNOSE_CHUNK_PAGE_SIZE,
+  chunkPageBudget = DEFAULT_DIAGNOSE_CHUNK_PAGE_BUDGET,
+  statementBudget = DEFAULT_DIAGNOSE_STATEMENT_BUDGET,
 } = {}) {
   const findings = [];
+  const skippedChecks = new Set();
+  const incompleteReasons = new Set();
+  let statements = 0;
+  let budgetExhausted = false;
+  let reportComplete = true;
+
+  if (!Number.isSafeInteger(statementBudget) || statementBudget < 2) {
+    throw new Error("diagnose statementBudget must be a whole number of at least 2");
+  }
+
+  class DiagnoseStatementBudgetError extends Error {
+    constructor() {
+      super("the diagnostic statement budget was exhausted");
+      this.name = "DiagnoseStatementBudgetError";
+    }
+  }
+
+  // One statement is always held back for the closing mutation marker. Without
+  // that read, a report that used its whole budget could not tell whether the
+  // corpus changed while the earlier pages were being counted.
+  const query = async (method, sql, bind, { closingMarker = false } = {}) => {
+    const ceiling = closingMarker ? statementBudget : statementBudget - 1;
+    if (statements >= ceiling) throw new DiagnoseStatementBudgetError();
+    statements++;
+    const prepared = env.DB.prepare(sql);
+    const bound = bind.length ? prepared.bind(...bind) : prepared;
+    if (method === "first") return await bound.first();
+    const result = await bound.all();
+    return result?.results || [];
+  };
+  const one = (sql, ...bind) => query("first", sql, bind);
+  const all = (sql, ...bind) => query("all", sql, bind);
+  const closingMarker = (sql, ...bind) => query("first", sql, bind, { closingMarker: true });
   const add = (f) => findings.push(f);
+  const chunkDependentIds = new Set([
+    "store_agreement", "zone_projection", "chunk_document_source_mismatch",
+    "orphan_chunks", "blank_chunks", "chunk_outliers", "oversized_chunks",
+    "duplicate_chunks",
+  ]);
+  const addChunkDependent = (f) => findings.push({ ...f, chunkScanDependent: true });
+  const markIncomplete = (reason) => {
+    reportComplete = false;
+    incompleteReasons.add(reason);
+  };
   const safe = async (id, fn) => {
+    if (budgetExhausted) {
+      skippedChecks.add(id);
+      return null;
+    }
     try { return await fn(); } catch (e) {
+      const exhausted = e instanceof DiagnoseStatementBudgetError;
+      if (exhausted) budgetExhausted = true;
+      markIncomplete(exhausted ? "statement_budget_exhausted" : `check_failed:${id}`);
       add({ id, area: "meta", severity: "warn", title: `check "${id}" could not run`,
+        observable: false, incomplete: true,
         detail: String(e.message || e).slice(0, 200),
         action: "Usually a schema older than this version. Run `brain upgrade`." });
       return null;
     }
   };
 
-  const totals = (await safe("totals", async () => ({
-    documents: Number((await q1(env, "SELECT count(*) n FROM documents WHERE deleted_at IS NULL"))?.n || 0),
-    chunks: Number((await q1(env, "SELECT count(*) n FROM chunks"))?.n || 0),
-    sources: Number((await q1(env, "SELECT count(*) n FROM sources"))?.n || 0),
-  }))) || { documents: 0, chunks: 0, sources: 0 };
+  const openingRow = await safe("chunk_scan_marker", () => one(DIAGNOSE_MUTATION_MARKER_SQL));
+  let mutationStart = null;
+  let highWaterId = null;
+  if (openingRow) {
+    try {
+      mutationStart = mutationMarker(openingRow);
+      highWaterId = Number(openingRow.high_water_id);
+      if (!Number.isSafeInteger(highWaterId) || highWaterId < 0) {
+        throw new Error("diagnose returned an invalid chunk high-water id");
+      }
+    } catch (error) {
+      markIncomplete("invalid_opening_marker");
+      add({ id: "chunk_scan_marker", area: "meta", severity: "warn",
+        observable: false, incomplete: true,
+        title: "the opening corpus marker could not be read",
+        detail: String(error.message || error).slice(0, 200),
+        action: "Run `brain upgrade`, then rerun this diagnostic." });
+    }
+  }
+
+  const totalRow = await safe("totals", () => one(
+    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL) AS documents,
+            (SELECT count(*) FROM sources) AS sources`,
+  ));
+  const totalValue = (value, name) => {
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 0) {
+      throw new Error(`diagnose returned an invalid ${name} total`);
+    }
+    return number;
+  };
+  let documents = null;
+  let sources = null;
+  if (totalRow) {
+    try {
+      documents = totalValue(totalRow.documents, "document");
+      sources = totalValue(totalRow.sources, "source");
+    } catch (error) {
+      markIncomplete("invalid_totals");
+      add({ id: "totals", area: "meta", severity: "warn", observable: false, incomplete: true,
+        title: "the document totals could not be verified",
+        detail: String(error.message || error).slice(0, 200),
+        action: "Run `brain upgrade`, then rerun this diagnostic." });
+    }
+  }
+
+  let chunkScan = {
+    complete: false,
+    pageSize: chunkPageSize,
+    pages: 0,
+    highWaterId,
+    coveredThroughId: 0,
+    reason: "opening_marker_unavailable",
+    counts: null,
+  };
+  if (mutationStart && highWaterId !== null) {
+    chunkScan = await scanChunkPages(one, {
+      highWaterId,
+      pageSize: chunkPageSize,
+      pageBudget: chunkPageBudget,
+      chunkCharWarn: CHUNK_CHAR_WARN,
+      canReadPage: () => statements < statementBudget - 1,
+    });
+  }
+  if (!chunkScan.complete) {
+    if (chunkScan.reason === "statement_budget_exhausted") budgetExhausted = true;
+    markIncomplete(chunkScan.reason);
+    add({ id: "chunk_scan", area: "meta", severity: "warn", observable: false, incomplete: true,
+      title: "the bounded chunk audit did not finish",
+      detail: `It covered chunk ids through ${chunkScan.coveredThroughId ?? 0} of the fixed high-water ${chunkScan.highWaterId ?? "unknown"}. Reason: ${chunkScan.reason}. Partial counts were not treated as complete.`,
+      action: "Wait for active loading to finish, then rerun `brain diagnose <manifest>`. If this repeats, update the installer before relying on a clean result." });
+  }
+
+  const totals = {
+    documents,
+    chunks: chunkScan.complete ? chunkScan.counts.total : null,
+    sources,
+  };
 
   /* ---------------- COVERAGE: what did not make it in ---------------- */
 
   await safe("empty_documents", async () => {
-    const n = Number((await q1(env,
+    const n = Number((await one(
       `SELECT count(*) n FROM documents d LEFT JOIN chunks c ON c.doc_uid = d.doc_uid
        WHERE d.deleted_at IS NULL AND c.chunk_uid IS NULL`))?.n || 0);
     if (!n) return;
-    const rows = await qAll(env,
+    const rows = await all(
       `SELECT d.doc_uid, d.title, d.uri FROM documents d
        LEFT JOIN chunks c ON c.doc_uid = d.doc_uid
        WHERE d.deleted_at IS NULL AND c.chunk_uid IS NULL LIMIT ?1`, sampleLimit);
@@ -2082,7 +2219,7 @@ export async function diagnose(env, {
   // reading an answer deserves to know the shape of the evidence underneath it,
   // and this is the only place that number is visible in aggregate.
   await safe("ocr_coverage", async () => {
-    const row = await q1(env,
+    const row = await one(
       // Aliased ocr_full, not full: FULL is a reserved word in SQLite (FULL
       // OUTER JOIN) and the bare alias is a syntax error.
       `SELECT SUM(CASE WHEN text_source = 'ocr' THEN 1 ELSE 0 END) ocr_full,
@@ -2100,7 +2237,7 @@ export async function diagnose(env, {
   });
 
   await safe("undated", async () => {
-    const n = Number((await q1(env, "SELECT count(*) n FROM documents WHERE deleted_at IS NULL AND document_date IS NULL"))?.n || 0);
+    const n = Number((await one("SELECT count(*) n FROM documents WHERE deleted_at IS NULL AND document_date IS NULL"))?.n || 0);
     if (!n) return;
     const pct = totals.documents ? Math.round((n / totals.documents) * 100) : 0;
     add({ id: "undated", area: "coverage", severity: pct >= 34 ? "warn" : "info", count: n,
@@ -2112,7 +2249,7 @@ export async function diagnose(env, {
   });
 
   await safe("unregistered_sources", async () => {
-    const rows = await qAll(env,
+    const rows = await all(
       `SELECT d.source, count(*) n FROM documents d
        LEFT JOIN sources s ON s.name = d.source
        WHERE d.deleted_at IS NULL AND s.name IS NULL GROUP BY d.source`);
@@ -2123,7 +2260,7 @@ export async function diagnose(env, {
   });
 
   await safe("empty_sources", async () => {
-    const rows = await qAll(env,
+    const rows = await all(
       `SELECT s.name FROM sources s
        LEFT JOIN documents d ON d.source = s.name AND d.deleted_at IS NULL
        GROUP BY s.name HAVING count(d.doc_uid) = 0`);
@@ -2134,7 +2271,7 @@ export async function diagnose(env, {
   });
 
   await safe("zone_assignment", async () => {
-    const row = await q1(env,
+    const row = await one(
       `SELECT count(*) AS sources,
               sum(CASE WHEN zone IS NULL OR trim(zone) = '' THEN 1 ELSE 0 END) AS unzoned,
               sum(CASE WHEN zone IS NOT NULL AND trim(zone) != '' THEN 1 ELSE 0 END) AS zoned
@@ -2159,75 +2296,97 @@ export async function diagnose(env, {
   });
 
   await safe("zone_projection", async () => {
-    const row = await q1(env,
+    const row = await one(
       `SELECT
          (SELECT count(*)
             FROM documents d JOIN sources s ON s.name = d.source
            WHERE d.deleted_at IS NULL AND d.zone IS NOT s.zone) AS documents,
-         (SELECT count(*)
-            FROM chunks c JOIN sources s ON s.name = c.source
-           WHERE c.zone IS NOT s.zone) AS chunks,
          (SELECT count(*) FROM sources
            WHERE zone IS NOT NULL AND trim(zone) != '') AS zoned_sources`);
     if (!Number(row?.zoned_sources || 0)) return;
+    if (!chunkScan.complete) {
+      skippedChecks.add("zone_projection");
+      return;
+    }
     const documents = Number(row?.documents || 0);
-    const chunks = Number(row?.chunks || 0);
+    const chunks = chunkScan.counts.zoneMismatch;
     if (!documents && !chunks) return;
-    add({ id: "zone_projection", area: "integrity", severity: "warn", count: documents + chunks,
+    addChunkDependent({ id: "zone_projection", area: "integrity", severity: "warn", count: documents + chunks,
       title: `zone projection is behind for ${documents} document(s) and ${chunks} chunk(s)`,
       detail: "Access still follows the registered source's zone, so this drift does not widen a scoped grant. The denormalized document and chunk fields are not ready to become authorization inputs until the legacy rows are repaired.",
       action: "Keep retrieval source-authoritative. Rerun `brain zone <manifest> --source NAME --zone ZONE` for each assigned source; every pass repairs at most 1,000 documents and 1,000 chunks. Repeat until the command reports no pending rows, then rerun `brain diagnose <manifest>`." });
   });
 
-  await safe("chunk_document_source_mismatch", async () => {
-    const count = Number((await q1(env,
-      `SELECT count(*) AS n
-         FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
-        WHERE c.source IS NOT d.source`))?.n || 0);
-    if (!count) return;
-    add({ id: "chunk_document_source_mismatch", area: "integrity", severity: "warn", count,
+  if (chunkScan.complete && chunkScan.counts.sourceMismatch) {
+    const count = chunkScan.counts.sourceMismatch;
+    addChunkDependent({ id: "chunk_document_source_mismatch", area: "integrity", severity: "warn", count,
       title: `${count} chunk(s) disagree with their owning document's source`,
       detail: "Authorization follows the document source, so this drift does not widen access. Source filters and provenance can still be misleading until the chunk projection is repaired.",
       action: "Reingest the affected registered source. If the mismatch remains, run `brain update <manifest>` before relying on source-filtered results." });
-  });
+  } else if (!chunkScan.complete) {
+    skippedChecks.add("chunk_document_source_mismatch");
+  }
 
   /* ---------------- INTEGRITY: is it stored correctly ---------------- */
 
   await safe("store_agreement", async () => {
+    if (!chunkScan.complete) {
+      skippedChecks.add("store_agreement");
+      return;
+    }
+    const queue = await one(
+      `SELECT sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) upserts,
+              sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) deletes,
+              (SELECT vector_projection_status FROM install_state WHERE id = 1) projection_status
+       FROM vector_outbox`);
+    const pendingUpserts = totalValue(queue?.upserts ?? 0, "pending vector upsert");
+    const pendingDeletes = totalValue(queue?.deletes ?? 0, "pending vector delete");
+    const projectionStatus = String(queue?.projection_status || "");
+
+    // Provider acceptance and provider visibility are separate states. While
+    // an outbox row or an unverified projection remains, Vectorize can change
+    // between describe() and this D1 read without any corpus row changing. A
+    // count comparison in that interval can falsely call accepted work an
+    // orphan or a missing vector. The backlog and projection receipts already
+    // name that unsettled state; compare stores only at a verified empty cut.
+    if (pendingUpserts || pendingDeletes || projectionStatus !== "verified") {
+      addChunkDependent({ id: "store_agreement", area: "integrity", severity: "warn",
+        observable: false,
+        title: "the two stores cannot be compared while vector work is unsettled",
+        detail: `D1 holds ${totals.chunks} chunk(s), with ${pendingUpserts} upsert(s) and ${pendingDeletes} delete(s) still queued. The projection state is ${projectionStatus || "unavailable"}. A Vectorize count during this interval is not an exact snapshot of either side.`,
+        action: remedyForState(env, "Let the current vector work finish, then rerun `brain diagnose <manifest>`.") });
+      return;
+    }
+
     let vectors = null;
     try {
       const d = await env.VECTORIZE.describe();
       const v = Number(d?.vectorCount ?? d?.vectorsCount ?? d?.count);
-      if (Number.isFinite(v)) vectors = v;
+      if (Number.isSafeInteger(v) && v >= 0) vectors = v;
     } catch { /* older binding without describe() */ }
-
-    const queue = await q1(env,
-      `SELECT sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) upserts,
-              sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) deletes
-       FROM vector_outbox`);
-    const pendingUpserts = Number(queue?.upserts || 0);
-    const pendingDeletes = Number(queue?.deletes || 0);
-    const expected = totals.chunks - pendingUpserts;
+    const expected = totals.chunks;
 
     if (vectors === null) {
-      add({ id: "store_agreement", area: "integrity", severity: "info",
+      markIncomplete("vector_count_unavailable");
+      skippedChecks.add("store_agreement");
+      addChunkDependent({ id: "store_agreement", area: "integrity", severity: "warn",
+        observable: false, incomplete: true,
         title: "the vector count could not be read from Vectorize",
-        detail: `D1 holds ${totals.chunks} chunk(s) with ${pendingUpserts} upsert(s) and ${pendingDeletes} delete(s) queued, so ${expected} current chunk(s) should be embedded. The vector store could not be asked how many it holds, so the two cannot be compared.`,
-        action: "Not a fault. This check needs a Vectorize binding that supports describe()." });
+        detail: `D1 holds ${totals.chunks} chunk(s) at a verified empty-queue cut. The vector store could not be asked how many it holds, so the two cannot be compared.`,
+        action: "Rerun this check. If it repeats, update the installer before relying on a clean result." });
       return;
     }
     const drift = Math.abs(vectors - expected);
-    const tolerance = Math.max(5, Math.round(expected * 0.01));
-    if (drift <= tolerance) {
-      add({ id: "store_agreement", area: "integrity", severity: "ok",
+    if (drift === 0) {
+      addChunkDependent({ id: "store_agreement", area: "integrity", severity: "ok",
         title: `both stores agree: ${vectors} vector(s) for ${expected} embedded chunk(s)`,
         detail: "The text store and the vector store hold the same corpus.", action: null });
       return;
     }
     const missing = vectors < expected;
-    add({ id: "store_agreement", area: "integrity", severity: "crit", count: drift,
+    addChunkDependent({ id: "store_agreement", area: "integrity", severity: "crit", count: drift,
       title: `the two stores disagree by ${drift} vector(s)`,
-      detail: `D1 says ${totals.chunks} chunk(s) with ${pendingUpserts} upsert(s) and ${pendingDeletes} delete(s) queued, so ${expected} current chunk(s) should be embedded. Vectorize holds ${vectors}. ` + (missing
+      detail: `D1 says ${totals.chunks} chunk(s) at a verified empty-queue cut, and Vectorize holds ${vectors}. ` + (missing
         ? "Vectors are MISSING: those chunks still answer keyword queries and are invisible to meaning-based search, which reads as poor retrieval rather than as a fault."
         : "There are MORE vectors than chunks: deleted documents likely left theirs behind, and they still compete for retrieval slots."),
       action: remedyForState(env, missing
@@ -2236,7 +2395,7 @@ export async function diagnose(env, {
   });
 
   await safe("backlog", async () => {
-    const row = await q1(env,
+    const row = await one(
       `SELECT count(*) n, min(queued_at) oldest, max(queued_at) newest,
               sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) upserts,
               sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) deletes
@@ -2250,7 +2409,7 @@ export async function diagnose(env, {
     // The projection fence retains the last accepted mutation timestamp even
     // after release. Report that durable evidence separately from a currently
     // held lease; neither proves exact provider visibility or future progress.
-    const state = await q1(env,
+    const state = await one(
       `SELECT CASE WHEN vector_drain_lease_owner IS NULL THEN 0 ELSE 1 END AS held,
               vector_drain_lease_expires_at AS expires,
               vector_projection_submitted_at AS submitted_at
@@ -2286,12 +2445,12 @@ export async function diagnose(env, {
   });
 
   await safe("quarantined", async () => {
-    const n = Number((await q1(env,
+    const n = Number((await one(
       `SELECT count(*) n FROM vector_outbox o
        JOIN vector_outbox_retry_state s ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
        WHERE s.quarantined_at IS NOT NULL`))?.n || 0);
     if (!n) return;
-    const rows = await qAll(env,
+    const rows = await all(
       `SELECT o.chunk_uid, s.attempts, s.last_error FROM vector_outbox o
        JOIN vector_outbox_retry_state s ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
        WHERE s.quarantined_at IS NOT NULL ORDER BY s.attempts DESC LIMIT ?1`, sampleLimit);
@@ -2305,7 +2464,7 @@ export async function diagnose(env, {
   await safe("vector_retries", async () => {
     // Attempts record history, not quarantine. Only the current generation's
     // retry state can say whether a row is held or waiting on its backoff.
-    const row = await q1(env,
+    const row = await one(
       `SELECT count(*) n,
               sum(CASE WHEN s.next_attempt_at>?1 THEN 1 ELSE 0 END) delayed
          FROM vector_outbox o LEFT JOIN vector_outbox_retry_state s
@@ -2320,22 +2479,25 @@ export async function diagnose(env, {
       action: remedyForState(env, "Let the scheduled drain retry eligible work, then check the next receipt or run `brain drain <manifest>`. If progress stops, inspect the next drain result.") });
   });
 
-  await safe("orphan_chunks", async () => {
-    const n = Number((await q1(env,
-      "SELECT count(*) n FROM chunks c LEFT JOIN documents d ON d.doc_uid = c.doc_uid WHERE d.doc_uid IS NULL"))?.n || 0);
-    if (n) add({ id: "orphan_chunks", area: "integrity", severity: "crit", count: n,
+  if (chunkScan.complete && chunkScan.counts.orphaned) {
+    const n = chunkScan.counts.orphaned;
+    addChunkDependent({ id: "orphan_chunks", area: "integrity", severity: "crit", count: n,
       title: `${n} chunk(s) belong to no document`,
       detail: "They can still be retrieved and cited, but the document behind the citation is gone.",
       action: remedyForState(env, "Report this, it should not happen. `brain reindex <manifest> --yes` will not clear it on its own.") });
-  });
+  } else if (!chunkScan.complete) {
+    skippedChecks.add("orphan_chunks");
+  }
 
-  await safe("blank_chunks", async () => {
-    const n = Number((await q1(env, "SELECT count(*) n FROM chunks WHERE trim(text) = ''"))?.n || 0);
-    if (n) add({ id: "blank_chunks", area: "integrity", severity: "warn", count: n,
+  if (chunkScan.complete && chunkScan.counts.blank) {
+    const n = chunkScan.counts.blank;
+    addChunkDependent({ id: "blank_chunks", area: "integrity", severity: "warn", count: n,
       title: `${n} chunk(s) hold no text`,
       detail: "Each occupies a vector and can be returned as a hit while carrying nothing.",
       action: "Re-ingest the documents they came from." });
-  });
+  } else if (!chunkScan.complete) {
+    skippedChecks.add("blank_chunks");
+  }
 
   await safe("duplicate_documents", async () => {
     // Sampling the largest groups made the displayed count look exact while it
@@ -2343,7 +2505,7 @@ export async function diagnose(env, {
     // the complete grouped result, and keep private identities out of the
     // finding. This stays cheap because documents stores one content hash per
     // document rather than full chunk bodies.
-    const summary = await q1(env,
+    const summary = await one(
       `SELECT count(*) groups, COALESCE(sum(n - 1), 0) extra
        FROM (
          SELECT content_hash, count(*) n FROM documents
@@ -2360,7 +2522,19 @@ export async function diagnose(env, {
   /* ---------------- EFFICIENCY: is it stored well ---------------- */
 
   await safe("chunk_outliers", async () => {
-    const rows = await qAll(env,
+    if (!chunkScan.complete) {
+      skippedChecks.add("chunk_outliers");
+      return;
+    }
+    if (totals.chunks > duplicateChunkScanLimit) {
+      addChunkDependent({ id: "chunk_outliers", area: "efficiency", severity: "info",
+        observable: false,
+        title: "exact per-document chunk outliers are not observable at this scale",
+        detail: `The exact grouping check is bounded to ${duplicateChunkScanLimit} chunks, and this corpus has ${totals.chunks}. Running it here would add another whole-corpus pass after the bounded integrity scan.`,
+        action: "No fault was inferred. Review unusually large source files during ingest; a future maintained aggregate will make this exact check scale safely." });
+      return;
+    }
+    const rows = await all(
       `SELECT d.title, d.uri, count(*) n FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        WHERE d.deleted_at IS NULL GROUP BY c.doc_uid ORDER BY n DESC LIMIT ?1`, sampleLimit);
     if (!rows.length) return;
@@ -2370,50 +2544,119 @@ export async function diagnose(env, {
     // one chunk each makes the largest 33% of everything. Firing there would
     // warn on every healthy small install, which is how a client learns to
     // ignore this report entirely.
-    if (totals.chunks >= 50 && share >= 20) add({ id: "chunk_outliers", area: "efficiency", severity: "warn", count: top,
+    if (totals.chunks >= 50 && share >= 20) addChunkDependent({ id: "chunk_outliers", area: "efficiency", severity: "warn", count: top,
       title: `one document produced ${top} chunks, ${share}% of the entire corpus`,
       detail: "Usually a spreadsheet. It crowds out every other document in retrieval and dominates cost, while rarely being what anyone is actually asking about.",
       samples: rows.slice(0, 5).map((r) => `${r.n} chunks: ${(r.title || r.uri || "?").slice(0, 60)}`),
       action: "Consider loading a summary instead of the raw sheet, or excluding it." });
   });
 
-  await safe("oversized_chunks", async () => {
-    const n = Number((await q1(env, "SELECT count(*) n FROM chunks WHERE length(text) > ?1", CHUNK_CHAR_WARN))?.n || 0);
-    if (!n) return;
+  if (chunkScan.complete && chunkScan.counts.oversized) {
+    const n = chunkScan.counts.oversized;
     const pct = totals.chunks ? Math.round((n / totals.chunks) * 100) : 0;
-    add({ id: "oversized_chunks", area: "efficiency", severity: pct >= 20 ? "warn" : "info", count: n,
+    addChunkDependent({ id: "oversized_chunks", area: "efficiency", severity: pct >= 20 ? "warn" : "info", count: n,
       title: `${n} chunk(s) (${pct}%) are long enough to be truncated before embedding`,
       detail: `The embedding model reads about 512 tokens. Past roughly ${CHUNK_CHAR_WARN} characters the rest is silently cut, so the tail is stored but never searchable by meaning.`,
       action: "Not urgent, and invisible in every other way. Worth knowing before blaming retrieval quality." });
-  });
+  } else if (!chunkScan.complete) {
+    skippedChecks.add("oversized_chunks");
+  }
 
   await safe("duplicate_chunks", async () => {
+    if (!chunkScan.complete) {
+      skippedChecks.add("duplicate_chunks");
+      return;
+    }
     // Exact GROUP BY over every full chunk body exceeds D1's query budget on a
     // large corpus. A timed-out diagnostic used to become a generic warning,
     // which made a healthy large install look broken while proving nothing
     // about duplicates. Stay explicit about the unavailable measurement until
     // chunk text hashes make the check bounded and indexable.
     if (totals.chunks > duplicateChunkScanLimit) {
-      add({ id: "duplicate_chunks", area: "efficiency", severity: "info",
+      addChunkDependent({ id: "duplicate_chunks", area: "efficiency", severity: "info",
         observable: false,
         title: "exact duplicate chunk measurement is not observable at this scale",
         detail: `The exact full-text grouping check is bounded to ${duplicateChunkScanLimit} chunks, and this corpus has ${totals.chunks}. Running it here could exhaust D1's query budget without returning evidence.`,
         action: "Use the duplicate-document result today. A future chunk text-hash migration will make this exact check scale safely." });
       return;
     }
-    const rows = await qAll(env,
+    const rows = await all(
       "SELECT count(*) n FROM (SELECT text FROM chunks GROUP BY text HAVING count(*) > 1 LIMIT 5000)");
     const groups = Number(rows?.[0]?.n || 0);
-    if (groups > 10) add({ id: "duplicate_chunks", area: "efficiency", severity: "info", count: groups,
+    if (groups > 10) addChunkDependent({ id: "duplicate_chunks", area: "efficiency", severity: "info", count: groups,
       title: `${groups}+ groups of identical chunk text`,
       detail: "Repeated headers, footers or boilerplate. Each copy is embedded and stored separately and can occupy a retrieval slot.",
       action: "Harmless at small scale. Worth trimming on a large corpus." });
   });
 
-  const count = (s) => findings.filter((f) => f.severity === s).length;
+  let mutationEnd = null;
+  try {
+    mutationEnd = mutationMarker(await closingMarker(DIAGNOSE_MUTATION_MARKER_SQL));
+  } catch (error) {
+    const reason = error instanceof DiagnoseStatementBudgetError
+      ? "statement_budget_exhausted"
+      : "closing_marker_unavailable";
+    markIncomplete(reason);
+    chunkScan.complete = false;
+    chunkScan.reason = reason;
+    add({ id: "chunk_scan_marker", area: "meta", severity: "warn",
+      observable: false, incomplete: true,
+      title: "the closing corpus marker could not be read",
+      detail: "The diagnostic cannot prove that its pages describe one stable corpus. No partial count was treated as a clean result.",
+      action: "Wait for active loading to finish, then rerun `brain diagnose <manifest>`." });
+  }
+
+  const changedMarkers = mutationStart && mutationEnd
+    ? mutationMarkerChanges(mutationStart, mutationEnd)
+    : [];
+  if (changedMarkers.length) {
+    markIncomplete("corpus_changed_during_diagnosis");
+    chunkScan.complete = false;
+    chunkScan.reason = "corpus_changed_during_diagnosis";
+    add({ id: "chunk_scan", area: "meta", severity: "warn",
+      observable: false, incomplete: true,
+      title: "the corpus changed while it was being checked",
+      detail: "The opening and closing mutation markers differ. Counts from different moments were not combined into a clean result.",
+      action: "Let the current load, update, or deletion finish, then rerun `brain diagnose <manifest>`." });
+  }
+
+  if (!chunkScan.complete) {
+    for (const id of chunkDependentIds) skippedChecks.add(id);
+    // A page-derived count may have been valid when it was read, but it is not
+    // an exact report of one corpus after a concurrent mutation was observed.
+    for (let index = findings.length - 1; index >= 0; index--) {
+      if (findings[index].chunkScanDependent) findings.splice(index, 1);
+    }
+    totals.chunks = null;
+  }
+  const stableMarkerBracket = Boolean(mutationStart && mutationEnd && changedMarkers.length === 0);
+  if (!stableMarkerBracket) {
+    // These totals came from separate statements inside the same bracket. If
+    // either marker is missing or changed, none is a current count receipt.
+    totals.documents = null;
+    totals.sources = null;
+  }
+
+  const publicFindings = findings.map(({ chunkScanDependent: _internal, ...finding }) => finding);
+  const count = (s) => publicFindings.filter((f) => f.severity === s).length;
+  const scan = {
+    complete: reportComplete && chunkScan.complete,
+    pageSize: chunkScan.pageSize,
+    pages: chunkScan.pages,
+    statements,
+    highWaterId: chunkScan.highWaterId,
+    coveredThroughId: chunkScan.coveredThroughId,
+    mutationStart: publicMutationMarker(mutationStart),
+    mutationEnd: publicMutationMarker(mutationEnd),
+    changedMarkers,
+    reason: reportComplete && chunkScan.complete ? null : [...incompleteReasons][0] || chunkScan.reason,
+  };
   return {
+    complete: scan.complete,
+    scan,
     totals,
-    findings,
+    findings: publicFindings,
+    skippedChecks: [...skippedChecks].sort(),
     summary: { crit: count("crit"), warn: count("warn"), info: count("info"), ok: count("ok") },
     verdict: count("crit") ? "problems" : count("warn") ? "usable_with_gaps" : "healthy",
   };

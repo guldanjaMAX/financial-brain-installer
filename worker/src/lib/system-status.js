@@ -186,8 +186,8 @@ export async function ownerSystemStatus(env, deps) {
   if (!health) unavailable.push("health");
 
   if (diag) {
-    out.documents = Number(diag.totals?.documents ?? 0);
-    out.chunks = Number(diag.totals?.chunks ?? 0);
+    if (Number.isFinite(diag.totals?.documents)) out.documents = Number(diag.totals.documents);
+    if (Number.isFinite(diag.totals?.chunks)) out.chunks = Number(diag.totals.chunks);
     out.problem_counts = {
       crit: Number(diag.summary?.crit || 0),
       warn: Number(diag.summary?.warn || 0),
@@ -206,6 +206,9 @@ export async function ownerSystemStatus(env, deps) {
         // difference between "you have a task" and "someone owes you a fix".
         fix_owner: "installer",
       }));
+    // A bounded partial report can still carry confirmed problems, but it must
+    // never turn an uncounted chunk corpus into zero or a clean system card.
+    if (diag.complete === false) unavailable.push("diagnose");
   } else {
     unavailable.push("diagnose");
   }

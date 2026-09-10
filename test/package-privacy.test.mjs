@@ -612,6 +612,7 @@ const expected = [
   "worker/src/lib/confidence.js",
   "worker/src/lib/connections.js",
   "worker/src/lib/core.js",
+  "worker/src/lib/diagnose-scan.js",
   "worker/src/lib/document-access.js",
   "worker/src/lib/evidence-authority.js",
   "worker/src/lib/fin-api.js",
