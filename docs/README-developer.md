@@ -871,6 +871,24 @@ after the command exits. Tests assert ordering, rerun behavior, ambient-secret
 scrubbing, exact hostname confirmation before invite creation, and stop-on-fail
 verification.
 
+`brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
+local handoff lane. Its only accepted scopes are `technician-skill`,
+`claude-code-mcp`, and `codex-mcp`; there is deliberately no CLI, setup,
+passkey, device, corpus, source, access, zone, provider, or Cloudflare scope.
+Without `--apply` it only inspects safe local files, starts the packaged MCP
+runtime for an offline initialize and exact tool-list exchange, and prints a
+SHA-256 plan ID bound to the manifest and current destination bytes. Apply also
+requires `--approve <plan-id>`, recomputes the plan, and stops before writes if
+anything drifted. The MCP reconciler receives exactly one selected target at a
+time, refuses custom and disabled entries, uses a credential-scrubbed child
+environment, and restores a safe prior locator or absence when exact readback
+fails. The skill scope treats its Claude and Codex copies as one transaction
+and restores completed writes if either destination fails. Before the first
+selected write, the command snapshots all repairable skill and MCP destinations
+in memory. Failure in any later scope rolls the full selected write set back in
+reverse order; restoration refuses a concurrent custom replacement and reports
+the exact scope that needs inspection.
+
 Current connector proof levels and the ranked acceptance backlog are maintained
 in [CONNECTOR-BACKLOG.md](./CONNECTOR-BACKLOG.md). Fixture coverage is never a
 substitute for the named real-system field gate.

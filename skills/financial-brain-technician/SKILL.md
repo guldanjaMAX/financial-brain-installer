@@ -72,6 +72,44 @@ other homework.
    source that still needs attention. Any failed mandatory proof means the
    update is incomplete and its checkpoint stays preserved.
 
+## Optimize and repair a new computer
+
+Optimize is a read-only audit. It may check the installed CLI, this technician
+skill, the Claude Code MCP entry, and the Codex MCP entry, but it must not
+install or rewrite any of them during the audit. Leave passkeys and enrolled
+device review out of Optimize.
+
+After the report, first require the independent public release target to be
+stable, available, and to advertise the exact Owner assistant profile, four
+tools, and every selected local repair scope. A missing or older CLI is a
+separate executable replacement and never belongs in the local assistant
+bundle below.
+
+For any owner-selected combination of `technician-skill`, `claude-code-mcp`,
+and `codex-mcp`, use the exact released CLI to preview one bundle:
+
+```bash
+brain assistant-repair "/absolute/path/to/brain.manifest.json" --only technician-skill,claude-code-mcp,codex-mcp
+```
+
+The preview is read-only. Show the owner its exact write set, preserved custom
+or disabled entries, per-item rollback and verification, excluded scopes, and
+the state-bound plan ID. Remove any item whose release scope is not advertised.
+One explicit owner approval may cover the complete remaining bundle. After
+that approval, run the preview's exact apply command once, including its plan
+ID. A stale plan stops before writing. Do not substitute `brain tools`, generic
+`brain mcp-config --apply`, setup, or onboarding.
+
+After apply, require exact file or setting readback. Each repaired MCP entry
+must initialize as `owner-assistant` and expose exactly `brain_think`,
+`brain_search`, `brain_remember`, and `brain_health`. A custom or disabled entry
+is preserved. The CLI snapshots the complete selected write set before the
+first write; any failed item restores every destination in reverse order to its
+previewed bytes or absence. A failed verification is a blocker, not permission
+to keep rewriting it. This repair never changes Brain records, sources,
+providers, access, zones, passkeys, devices, cloud resources, or the CLI
+executable.
+
 ## Start here
 
 For a fresh install, checkup, connector, passkey, or handoff request, continue
