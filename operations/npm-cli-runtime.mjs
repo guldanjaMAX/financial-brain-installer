@@ -149,14 +149,118 @@ export function npmInstallEnvironment(source = process.env, platform = process.p
   return Object.freeze(clean);
 }
 
-export function publicInstallArguments(prefix, archive) {
+function assertPublicInstallPaths(prefix, archive) {
   if (typeof prefix !== "string" || !isPortableAbsolute(prefix) ||
       typeof archive !== "string" || !isPortableAbsolute(archive)) {
     throw new Error("public_install_paths_must_be_absolute");
   }
+}
+
+const PUBLIC_INSTALL_ARGS = Object.freeze([
+  "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix",
+]);
+
+const FIELD_GUIDE_INSTALL_CONTRACTS = Object.freeze({
+  macos: Object.freeze({
+    executable: "npm",
+    prefix: "$HOME/.npm-global",
+  }),
+  windows: Object.freeze({
+    executable: "npm.cmd",
+    prefix: "$env:LOCALAPPDATA\\FinancialBrain",
+  }),
+});
+
+function tokenizeFieldGuideCommand(line) {
+  const tokens = [];
+  let token = null;
+  let quoted = false;
+  for (const character of line) {
+    if (character === '"') {
+      quoted = !quoted;
+      if (token === null) token = "";
+      continue;
+    }
+    if (/\s/.test(character) && !quoted) {
+      if (token !== null) tokens.push(token);
+      token = null;
+      continue;
+    }
+    if (token === null) token = "";
+    token += character;
+  }
+  if (quoted) throw new Error("public_install_command_has_unclosed_quote");
+  if (token !== null) tokens.push(token);
+  return tokens;
+}
+
+/**
+ * Parse the one npm install command a downloaded platform field guide gives to
+ * an owner. The runner never evaluates the guide as shell text. It accepts the
+ * exact reviewed executable, flags, prefix expression, and archive reference,
+ * so a public edit cannot silently leave CI testing a different command.
+ */
+export function parsePublicInstallCommand(fieldGuide, { guide, archiveName } = {}) {
+  if (typeof fieldGuide !== "string" || !fieldGuide) {
+    throw new Error("public_install_field_guide_missing");
+  }
+  const contract = FIELD_GUIDE_INSTALL_CONTRACTS[guide];
+  if (!contract) throw new Error("public_install_field_guide_platform_refused");
+  if (typeof archiveName !== "string" ||
+      !/^brain-installer-\d+\.\d+\.\d+\.tgz$/.test(archiveName)) {
+    throw new Error("public_install_archive_name_refused");
+  }
+
+  const lines = fieldGuide.split(/\r?\n/).map((line) => line.trim());
+  const installLines = lines.filter((line) => /^(?:npm|npm\.cmd)\s+install(?:\s|$)/.test(line));
+  if (installLines.length !== 1) {
+    throw new Error(`public_install_command_count_${installLines.length}`);
+  }
+
+  const tokens = tokenizeFieldGuideCommand(installLines[0]);
+  const archiveReference = guide === "windows" ? "$Archive" : `./${archiveName}`;
+  const expected = [contract.executable, ...PUBLIC_INSTALL_ARGS, contract.prefix, archiveReference];
+  if (tokens.length !== expected.length || tokens.some((token, index) => token !== expected[index])) {
+    throw new Error("public_install_command_contract_drift");
+  }
+
+  if (guide === "windows") {
+    const archiveAssignments = lines.filter((line) => /^\$Archive\s*=/.test(line));
+    if (archiveAssignments.length !== 1) {
+      throw new Error(`public_install_archive_assignment_count_${archiveAssignments.length}`);
+    }
+    const assignment = archiveAssignments[0].match(
+      /^\$Archive\s*=\s*Join-Path\s+\(Get-Location\)\.Path\s+"([^"]+)"$/,
+    );
+    if (!assignment || assignment[1] !== archiveName) {
+      throw new Error("public_install_archive_assignment_drift");
+    }
+  }
+
+  return Object.freeze({
+    executable: tokens[0],
+    args: Object.freeze(tokens.slice(1)),
+  });
+}
+
+/**
+ * Rebind only the guide's owner prefix and verified archive to throwaway local
+ * paths. Every npm mode flag comes from the parsed and validated public guide.
+ */
+export function publicInstallArgumentsFromGuide(
+  fieldGuide,
+  { guide, archiveName, prefix, archive } = {},
+) {
+  assertPublicInstallPaths(prefix, archive);
+  const parsed = parsePublicInstallCommand(fieldGuide, { guide, archiveName });
+  const prefixFlag = parsed.args.indexOf("--prefix");
+  if (prefixFlag < 0 || prefixFlag !== parsed.args.lastIndexOf("--prefix")) {
+    throw new Error("public_install_prefix_contract_drift");
+  }
   return Object.freeze([
-    "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
-    "--prefix", prefix, archive,
+    ...parsed.args.slice(0, prefixFlag + 1),
+    prefix,
+    archive,
   ]);
 }
 

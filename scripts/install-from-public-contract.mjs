@@ -29,7 +29,7 @@ import {
   buildWindowsBatchInvocation,
   installedBrainPath,
   npmInstallEnvironment,
-  publicInstallArguments,
+  publicInstallArgumentsFromGuide,
   publicContractChildEnvironment,
   resolveNpmCliPath,
 } from "../operations/npm-cli-runtime.mjs";
@@ -37,9 +37,14 @@ import {
 const workdir = resolve(process.argv[2] || "./install-contract-run");
 const guideArg = process.argv.includes("--guide")
   ? process.argv[process.argv.indexOf("--guide") + 1] : "windows";
+if (!["macos", "windows"].includes(guideArg)) {
+  console.error("FAIL  --guide must be macos or windows");
+  process.exit(1);
+}
 const GUIDE = guideArg === "macos"
   ? "https://financialbrain.ai/install/agent-macos.md"
   : "https://financialbrain.ai/install/agent.md";
+const FIELD_GUIDE = guideArg === "macos" ? "MACOS-FIELD-TEST.md" : "WINDOWS-FIELD-TEST.md";
 
 const die = (m) => { console.error(`FAIL  ${m}`); process.exit(1); };
 const ok = (m) => console.log(`PASS  ${m}`);
@@ -102,8 +107,10 @@ ok("the packaged archive is the version the contract declares");
 // person is told to read and compare against. Checked here because this is the
 // only place that sees the PUBLISHED kit rather than the repo's idea of it.
 const human = tgz.length.toLocaleString("en-US");
+const fieldGuides = new Map();
 for (const doc of ["WINDOWS-FIELD-TEST.md", "MACOS-FIELD-TEST.md"]) {
   const text = readFileSync(join(root, doc), "utf8");
+  fieldGuides.set(doc, text);
   const stated = [...text.matchAll(/[0-9]{1,3}(?:,[0-9]{3})+/g)].map((m) => m[0]);
   const wrong = stated.filter((s) => s !== human);
   if (wrong.length) die(`${doc} states a byte count that is not this package: ${wrong.join(", ")}`);
@@ -128,11 +135,18 @@ ok("the macOS guide pins the same commit as the public contract");
 // The install itself, into a prefix that is thrown away with the runner.
 const prefix = join(workdir, "prefix");
 mkdirSync(prefix, { recursive: true });
+const installArguments = publicInstallArgumentsFromGuide(fieldGuides.get(FIELD_GUIDE), {
+  guide: guideArg,
+  archiveName: declaredName,
+  prefix,
+  archive: tgzPath,
+});
+ok(`${FIELD_GUIDE} carries the exact reviewed npm install command`);
 // A Windows npm executable is npm.cmd, and Node cannot launch a batch file with
 // execFileSync. Reach the validated JavaScript entry through this Node runtime
 // on every platform instead. No shell parses the prefix or archive path.
 const npmCli = resolveNpmCliPath();
-const npmInstall = buildNpmCliInvocation(npmCli, publicInstallArguments(prefix, tgzPath));
+const npmInstall = buildNpmCliInvocation(npmCli, installArguments);
 execFileSync(npmInstall.command, npmInstall.args,
   { cwd: workdir, stdio: "inherit", shell: npmInstall.shell, env: npmInstallEnvironment() });
 ok("the packaged archive installs into a clean prefix");

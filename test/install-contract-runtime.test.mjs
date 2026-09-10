@@ -17,11 +17,25 @@ import {
   installedBrainPath,
   nodeRuntimeNpmCliPaths,
   npmInstallEnvironment,
-  publicInstallArguments,
+  parsePublicInstallCommand,
+  publicInstallArgumentsFromGuide,
   publicContractChildEnvironment,
   resolveNpmCliPath,
   verifiedNpmCliPath,
 } from "../operations/npm-cli-runtime.mjs";
+
+const archiveName = "brain-installer-9.8.7.tgz";
+const windowsGuide = [
+  "## Verify and install",
+  `$Archive = Join-Path (Get-Location).Path "${archiveName}"`,
+  'npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\\FinancialBrain" "$Archive"',
+  "",
+].join("\r\n");
+const macosGuide = [
+  "## Verify and install",
+  `    npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.npm-global" ./${archiveName}`,
+  "",
+].join("\n");
 
 function writeNpmFixture(root, relativeCli = join("lib", "node_modules", "npm", "bin", "npm-cli.js")) {
   const cli = join(root, relativeCli);
@@ -33,15 +47,39 @@ function writeNpmFixture(root, relativeCli = join("lib", "node_modules", "npm", 
 
 test("the public install invocation and installed binary paths exactly match both field guides", () => {
   const posixPrefix = "/tmp/Financial Brain";
-  const posixArchive = "/tmp/kit/brain-installer-0.4.6.tgz";
-  assert.deepEqual(publicInstallArguments(posixPrefix, posixArchive), [
+  const posixArchive = `/tmp/kit/${archiveName}`;
+  assert.deepEqual(parsePublicInstallCommand(macosGuide, { guide: "macos", archiveName }), {
+    executable: "npm",
+    args: [
+      "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
+      "--prefix", "$HOME/.npm-global", `./${archiveName}`,
+    ],
+  });
+  assert.deepEqual(parsePublicInstallCommand(windowsGuide, { guide: "windows", archiveName }), {
+    executable: "npm.cmd",
+    args: [
+      "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
+      "--prefix", "$env:LOCALAPPDATA\\FinancialBrain", "$Archive",
+    ],
+  });
+  assert.deepEqual(publicInstallArgumentsFromGuide(macosGuide, {
+    guide: "macos", archiveName, prefix: posixPrefix, archive: posixArchive,
+  }), [
+    "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
+    "--prefix", posixPrefix, posixArchive,
+  ]);
+  assert.deepEqual(publicInstallArgumentsFromGuide(windowsGuide, {
+    guide: "windows", archiveName, prefix: posixPrefix, archive: posixArchive,
+  }), [
     "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
     "--prefix", posixPrefix, posixArchive,
   ]);
   assert.equal(installedBrainPath(posixPrefix, "darwin"), "/tmp/Financial Brain/bin/brain");
   assert.equal(installedBrainPath("C:\\Users\\Owner\\FinancialBrain", "win32"),
     "C:\\Users\\Owner\\FinancialBrain\\brain.cmd");
-  assert.throws(() => publicInstallArguments("relative-prefix", posixArchive), /paths_must_be_absolute/);
+  assert.throws(() => publicInstallArgumentsFromGuide(macosGuide, {
+    guide: "macos", archiveName, prefix: "relative-prefix", archive: posixArchive,
+  }), /paths_must_be_absolute/);
 
   const batch = buildWindowsBatchInvocation(
     "C:\\Windows\\System32\\cmd.exe",
@@ -58,6 +96,45 @@ test("the public install invocation and installed binary paths exactly match bot
   ).args, ['/d /s /c ""C:\\Runner Temp\\brain.cmd" doctor"']);
   assert.throws(() => buildWindowsBatchInvocation(batch.command, "C:\\bad%path\\brain.cmd", []), /wrapper_path_refused/);
   assert.throws(() => buildWindowsBatchInvocation(batch.command, "C:\\brain.cmd", ["doctor & whoami"]), /arguments_refused/);
+});
+
+test("public field-guide install mutations fail before npm arguments are derived", () => {
+  const mutations = [
+    ["missing global mode", windowsGuide.replace(" --global", "")],
+    ["missing script refusal", windowsGuide.replace(" --ignore-scripts", "")],
+    ["unexpected npm behavior", windowsGuide.replace(" --no-audit", " --force --no-audit")],
+    ["wrong Windows executable", windowsGuide.replace("npm.cmd install", "npm install")],
+    ["different Windows prefix", windowsGuide.replace("$env:LOCALAPPDATA\\FinancialBrain", "$env:TEMP\\FinancialBrain")],
+    ["different archive variable", windowsGuide.replace('"$Archive"', '"$OtherArchive"')],
+    ["different archive assignment", windowsGuide.replace(archiveName, "brain-installer-9.8.6.tgz")],
+    ["trailing shell command", windowsGuide.replace('"$Archive"', '"$Archive"; whoami')],
+    ["duplicate install command", `${windowsGuide}\r\n${windowsGuide.split(/\r?\n/)[2]}\r\n`],
+  ];
+  for (const [label, mutatedGuide] of mutations) {
+    assert.throws(
+      () => publicInstallArgumentsFromGuide(mutatedGuide, {
+        guide: "windows",
+        archiveName,
+        prefix: "/tmp/Financial Brain",
+        archive: `/tmp/${archiveName}`,
+      }),
+      /public_install_/,
+      label,
+    );
+  }
+
+  for (const [label, mutatedGuide] of [
+    ["wrong macOS executable", macosGuide.replace("npm install", "npm.cmd install")],
+    ["different macOS prefix", macosGuide.replace("$HOME/.npm-global", "$HOME/.financial-brain")],
+    ["different macOS archive", macosGuide.replace(`./${archiveName}`, "./other.tgz")],
+    ["reordered safety flags", macosGuide.replace("--ignore-scripts --no-audit", "--no-audit --ignore-scripts")],
+  ]) {
+    assert.throws(
+      () => parsePublicInstallCommand(mutatedGuide, { guide: "macos", archiveName }),
+      /public_install_/,
+      label,
+    );
+  }
 });
 
 test("runtime-relative npm wins and an ambient npm locator cannot leave the Node install tree", () => {
