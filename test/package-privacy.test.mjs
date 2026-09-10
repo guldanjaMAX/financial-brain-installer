@@ -778,8 +778,9 @@ for (const path of privateScanPaths) {
 // A packlist can name every file and still hide a broken relative import or a
 // skill that cannot be installed from the packed tree. Build and unpack the
 // actual tarball, import the recovery adapter, then install the reviewed skill
-// for both assistants and compare each readback with the packed source. These
-// probes invoke no CLI entry point or network.
+// for Claude Code by default and for Codex only when its config tree already
+// exists. Compare every readback with the packed source. These probes invoke
+// no CLI entry point or network.
 let packedAdapterImportFailed = false;
 let packedSkillInstallFailed = false;
 const packageProbeDirectory = SCAN_ONLY ? null : mkdtempSync(join(tmpdir(), "brain-package-probe-"));
@@ -849,7 +850,7 @@ if (packageProbeDirectory) try {
           "--eval",
           [
             "const {pathToFileURL}=await import('node:url')",
-            "const {mkdtempSync,readFileSync,rmSync}=await import('node:fs')",
+            "const {mkdirSync,mkdtempSync,readFileSync,rmSync}=await import('node:fs')",
             "const {tmpdir}=await import('node:os')",
             "const {join}=await import('node:path')",
             "const skill=await import(pathToFileURL(process.env.PACK_SKILL_MODULE).href)",
@@ -857,11 +858,17 @@ if (packageProbeDirectory) try {
             "const home=mkdtempSync(join(tmpdir(),'brain-packed-skill-'))",
             "try{",
             "const first=skill.installTechnicianSkillEverywhere({home})",
-            "if(first.length!==2||first.some((x)=>x.status!=='installed'))throw new Error('packed skill did not install for both assistants')",
+            "if(first.length!==1||first[0]?.root!=='.claude'||first[0]?.status!=='installed')throw new Error('packed skill did not default to Claude Code')",
             "const source=renderCliCommands(readFileSync(process.env.PACK_SKILL_SOURCE,'utf8'))",
             "for(const path of skill.technicianSkillPaths({home}))if(readFileSync(path,'utf8')!==source)throw new Error('installed skill differs from packed source')",
             "const second=skill.installTechnicianSkillEverywhere({home})",
             "if(second.some((x)=>x.status!=='verified'||x.changed!==false))throw new Error('packed skill reinstall was not idempotent')",
+            "mkdirSync(join(home,'.codex'),{recursive:true})",
+            "const third=skill.installTechnicianSkillEverywhere({home})",
+            "if(third.length!==2||third[0]?.status!=='verified'||third[1]?.root!=='.codex'||third[1]?.status!=='installed')throw new Error('packed skill did not add Codex when already present')",
+            "for(const path of skill.technicianSkillPaths({home}))if(readFileSync(path,'utf8')!==source)throw new Error('installed assistant skill differs from packed source')",
+            "const fourth=skill.installTechnicianSkillEverywhere({home})",
+            "if(fourth.some((x)=>x.status!=='verified'||x.changed!==false))throw new Error('packed assistant skill reinstall was not idempotent')",
             "}finally{rmSync(home,{recursive:true,force:true})}",
           ].join(";"),
         ], {

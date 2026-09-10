@@ -33,6 +33,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/reprojection-pause-order.test.mjs",
   "node --no-warnings test/legacy-manifest-auth-profile.test.mjs",
   "node --no-warnings test/adopt-cloudflare-profile-consent.test.mjs",
+  "node --test test/setup-browser-sign-in.test.mjs",
   "node --test test/windows-preflight-contract.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
   "node --test test/plaid-technician-setup.test.mjs",
@@ -258,6 +259,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/legacy-manifest-auth-profile.test.mjs",
   "node --no-warnings test/adopt-cloudflare-profile-consent.test.mjs",
   "node --no-warnings test/zone-assignment-retry.test.mjs",
+  "node --test test/setup-browser-sign-in.test.mjs",
 ]);
 
 export function parseTestCommand(command) {

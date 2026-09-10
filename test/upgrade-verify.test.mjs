@@ -1973,15 +1973,15 @@ const bootstrapCompletion = () => ({
     const installedSkillPaths = technicianSkillPaths(skillOptions);
     const installedSkillBytes = installedSkillPaths.map((path) => readFileSync(path, "utf8"));
     check(
-      "a successful update returns its original result and refreshes both managed assistant skills",
+      "a successful update returns its original result and refreshes the current Claude Code skill",
       successfulUpdateResult === upgradeResultSentinel &&
-        installedSkillBytes.length === 2 &&
+        installedSkillBytes.length === 1 &&
         installedSkillBytes.every((content) =>
           content === installedSkillBytes[0] &&
           content.includes(CLAUDE_TECHNICIAN_SKILL_MARKER) &&
           /update my Brain/i.test(content)
         ) &&
-        skillRefreshOk.filter((message) => /installed after update/.test(message)).length === 2 &&
+        skillRefreshOk.filter((message) => /installed after update/.test(message)).length === 1 &&
         skillRefreshWarnings.length === 0,
       JSON.stringify({ successfulUpdateResult, skillRefreshOk, skillRefreshWarnings }),
     );
@@ -2097,7 +2097,7 @@ const bootstrapCompletion = () => ({
       technicianSkillPaths(skillOptions).every((path) =>
         readFileSync(path, "utf8") === installedSkillBytes[0]
       ) &&
-        skillRefreshOk.filter((message) => /verified after update/.test(message)).length === 2 &&
+        skillRefreshOk.filter((message) => /verified after update/.test(message)).length === 1 &&
         skillRefreshWarnings.length === 0 &&
         skillRefreshTokenStates.length === 2 &&
         skillRefreshTokenStates.every((available) => !available),
@@ -2107,6 +2107,7 @@ const bootstrapCompletion = () => ({
     process.chdir(sandbox);
 
     const collisionSkillHome = join(sandbox, "collision-skill-home");
+    mkdirSync(join(collisionSkillHome, ".codex"), { recursive: true });
     const [collisionClaudeSkill, collisionCodexSkill] = technicianSkillPaths({ home: collisionSkillHome });
     const unmanagedSkillBytes = "# Owner's custom skill\n\nDo not replace this file.\n";
     mkdirSync(dirname(collisionClaudeSkill), { recursive: true });

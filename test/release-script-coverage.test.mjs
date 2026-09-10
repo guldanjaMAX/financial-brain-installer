@@ -8,6 +8,7 @@ const read = (path) => readFileSync(join(root, path), 'utf8');
 const pkg = JSON.parse(read('package.json'));
 const frontend = JSON.parse(read('frontend/package.json'));
 assert.equal(pkg.scripts.test, 'node scripts/run-test-chain.mjs');
+assert.equal(frontend.scripts.test, 'vitest run --no-file-parallelism --testTimeout 15000');
 const scheduled = new Set(TEST_COMMANDS.flatMap((command) => {
   const parsed = parseTestCommand(command);
   return parsed.kind === 'node' ? parsed.args.filter((arg) => !arg.startsWith('--')) : [];
@@ -35,11 +36,11 @@ for (const required of ['npm ci --prefix frontend --ignore-scripts', 'npm --pref
   assert.ok(ci.includes(required), `newer gate was lost: ${required}`);
 }
 assert.match(ci, /- name: unit and integration suite\s+if: \$\{\{ !cancelled\(\) \}\}\s+run: npm test -- --continue-on-failure/);
-const matrixStep = (name) => {
-  const start = ci.indexOf(`      - name: ${name}\n`);
+const matrixStep = (name, workflow = ci) => {
+  const start = workflow.indexOf(`      - name: ${name}\n`);
   assert.ok(start >= 0, `CI omits ${name}`);
-  const next = ci.indexOf('\n      - name: ', start + 1);
-  return ci.slice(start, next < 0 ? ci.length : next);
+  const next = workflow.indexOf('\n      - name: ', start + 1);
+  return workflow.slice(start, next < 0 ? workflow.length : next);
 };
 // Continuation steps fall into two kinds, and the difference is a security
 // boundary, not a style choice. Steps that only exercise the source checkout
@@ -53,6 +54,8 @@ assert.ok(
   'the exact-package verification step has no id for later steps to require',
 );
 for (const [name, condition] of [
+  ['install owner browser test runtime', 'if: ${{ !cancelled() }}'],
+  ['owner scope browser regressions', 'if: ${{ !cancelled() }}'],
   ['unit and integration suite', 'if: ${{ !cancelled() }}'],
   ['independent incident regressions', 'if: ${{ !cancelled() }}'],
   ['cli starts and prints usage', 'if: ${{ !cancelled() }}'],
@@ -62,6 +65,11 @@ for (const [name, condition] of [
   const step = matrixStep(name);
   assert.ok(step.includes(condition), `${name} can be hidden by an earlier failure`);
   assert.ok(!step.includes(PACKAGE_BARRIER), `${name} runs from source and must not wait on the package`);
+}
+const windowsRehearsal = read('.github/workflows/windows-rehearsal.yml').replace(/\r\n/g, '\n');
+for (const name of ['install owner browser test runtime', 'owner scope browser regressions']) {
+  assert.ok(matrixStep(name, windowsRehearsal).includes('if: ${{ !cancelled() }}'),
+    `${name} can be hidden by an earlier Windows rehearsal failure`);
 }
 for (const [name, condition] of [
   ['packed tarball installs globally and the bin works', `if: \${{ !cancelled() && ${PACKAGE_BARRIER} }}`],

@@ -34,7 +34,6 @@ test("Windows preflight uses native package identity and keeps path detection as
   assert.match(script, /Open PowerShell from the Start menu/);
   assert.doesNotMatch(script, /else \{ Ok "not running inside an MSIX/);
 });
-
 test("the machine-only preflight does not pretend to prove account or billing state", () => {
   assert.match(script, /Cloudflare authorization is not proven here/i);
   assert.doesNotMatch(script, /Workers Paid (?:is|plan is) (?:active|verified)/i);
