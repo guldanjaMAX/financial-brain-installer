@@ -35,6 +35,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/adopt-cloudflare-profile-consent.test.mjs",
   "node --test test/windows-preflight-contract.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
+  "node --test test/plaid-technician-setup.test.mjs",
   // Client upgrade rehearsals, added after the launcher freeze. Every shipped
   // release through v0.3.6 ships 22 migrations and this release ships 35, so
   // 0023..0035 have never run on a real client brain until these.
@@ -145,6 +146,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/doctor.test.mjs",
   "node --test test/drain-cron-default.test.mjs",
   "node --no-warnings test/bank-feed-secrets.test.mjs",
+  "node --test test/plaid-technician-setup.test.mjs",
   "node test/bank-feed-deploy-path.test.mjs",
   "node test/migrations.test.mjs",
   "node test/doc-date.test.mjs",

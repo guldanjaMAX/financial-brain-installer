@@ -23,7 +23,6 @@ import { platform } from "node:os";
 import { win32 as pathWin32 } from "node:path";
 import { tokenStorageStatus, verifyTokenStorageReadable } from "./connectors/google-auth.mjs";
 import { probeWindowsDpapi } from "./operations/admin-key-file.mjs";
-import { manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
 
 export const OK = "ok";
 export const WARN = "warn";
@@ -903,13 +902,20 @@ export function checkBankFeedRedirect(manifest) {
   }
 
   const required = bankFeedRedirectUri(domain);
-  const provider = manifestBankFeedProvider(feed);
+  const requiredWebhook = plaidWebhookUri(domain);
+  const provider = typeof feed.provider === "string" ? feed.provider.trim().toLowerCase() : "";
+  const environment = typeof feed.environment === "string"
+    ? feed.environment.trim().toLowerCase()
+    : "";
   if (!["plaid", "custom"].includes(provider) ||
-      (feed.environment !== undefined && !["sandbox", "production"].includes(feed.environment))) {
+      !["sandbox", "production"].includes(environment)) {
     return check("Bank feed", FAIL, "the bank provider or environment is invalid",
       "  Choose provider plaid or custom and environment sandbox or production.");
   }
   const declared = Array.isArray(feed.registered_redirect_uris) ? feed.registered_redirect_uris : [];
+  const declaredWebhooks = Array.isArray(feed.registered_webhook_uris)
+    ? feed.registered_webhook_uris
+    : [];
   const missingConfig = provider === "custom" ? [
       !feed.api_base && "corpora.bank_feed.api_base",
       !feed.link_sdk_url && "corpora.bank_feed.link_sdk_url",
@@ -927,6 +933,18 @@ export function checkBankFeedRedirect(manifest) {
       `      corpora.bank_feed.registered_redirect_uris: ["${required}"]\n\n` +
       "  Skip this and the client will authorise successfully at their bank and then\n" +
       "  land on a dead return, with you sitting next to them."
+    );
+  }
+  if (provider === "plaid" && !declaredWebhooks.includes(requiredWebhook)) {
+    return check(
+      "Bank feed", FAIL,
+      "the signed webhook destination for this brain is not recorded as registered",
+      "  Register this exact webhook in the same Plaid environment as the credentials:\n\n" +
+      `      ${requiredWebhook}\n\n` +
+      "  Then record it in the manifest so this check can confirm it:\n" +
+      `      corpora.bank_feed.registered_webhook_uris: [\"${requiredWebhook}\"]\n\n` +
+      "  Keep scheduled reconciliation enabled. A registered webhook requests prompt\n" +
+      "  refresh, but it is never the only source of truth."
     );
   }
   if (missingConfig.length) {
@@ -947,8 +965,7 @@ export function checkBankFeedRedirect(manifest) {
       "  provider: custom only for a separately reviewed compatible provider."
     );
   }
-  const environment = feed.environment === "production" ? "production" : "sandbox";
-  const webhook = provider === "plaid" ? plaidWebhookUri(domain) : null;
+  const webhook = provider === "plaid" ? requiredWebhook : null;
   return check(
     "Bank feed", OK,
     `${provider}; ${environment}; return address registered (${required})${webhook ? `; signed webhook ${webhook}` : ""}`,

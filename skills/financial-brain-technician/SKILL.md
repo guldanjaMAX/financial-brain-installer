@@ -128,6 +128,56 @@ below. The update route above replaces this setup-oriented sequence.
   Ask only about unresolved account ownership; do not request bank credentials
   or statements in chat. A configured developer account or passing local test
   does not establish a working deployed connection.
+- General Plaid invitations remain held. Run the plan's `plaid` technician step
+  only for a named, version-scoped disposable candidate or a separately
+  approved production pilot, and only when the installed CLI actually lists
+  that owner-only step. Run its exact command in the owner's direct interactive
+  terminal, never through an agent shell. First verify
+  `corpora.bank_feed.provider` is `plaid`, the manifest
+  environment is the same Plaid Dashboard environment, and the exact final
+  hostname is settled. In Production, the owner must personally confirm the
+  dashboard shows Production access.
+- Plaid secret entry is held on Windows. The current shared terminal reader
+  cannot prove that PowerShell suppressed echo, so never ask the owner to type
+  or export either value there. A native masked-input bridge and physical
+  Windows acceptance evidence are still required.
+- The only reviewed Plaid application setup path is `brain technician
+  <manifest> --run plaid` with the plan's exact non-secret
+  `--confirm-environment`, `--confirm-redirect`, and `--confirm-webhook` values,
+  `--confirm-single-setup-machine`, plus `--confirm-production-access` for
+  Production. The single-machine confirmation means one nominated owner
+  computer and one supervised run. Its private lock covers only that computer;
+  there is no remote first-setup compare-and-swap, so never start this ceremony
+  concurrently from a second computer or terminal. Do not substitute direct
+  Wrangler, `brain secrets`, environment-variable injection, a shell export,
+  or a custom secret script. The command hidden-prompts the client ID and
+  environment-specific secret, generates or reuses the separately protected
+  wrapping key, atomically applies only the three bank-feed Worker secrets, and
+  reads back only those binding names. It requires the deployed wrapping-key
+  fingerprint to stay equal across the bounded propagation window over the
+  exact resolved Worker's enabled workers.dev route before replacing an
+  existing binding, then proves it again after the patch. Allow up to one minute
+  for each bounded wait. If another session may have just changed that key,
+  stop and recover or settle the exact custody first. If the route is disabled
+  or cannot be proved, fix Cloudflare
+  route access and rerun `brain deploy` before retrying the ceremony, even when
+  the owner uses a custom Brain hostname.
+- Only the native Plaid provider has this reviewed ceremony. A custom-provider
+  credential setup remains held. Do not route it through the Plaid step or
+  reconstruct the former bank-feed environment-variable path.
+- When browser control is available, offer to navigate to the Plaid environment
+  and fill the two non-secret values printed by the plan:
+  `https://<brain.domain>/app/connect/bank` as the redirect and
+  `https://<brain.domain>/api/webhooks/plaid` as the webhook. The owner handles
+  Plaid sign-in, 2FA, environment selection, Production-access review, and the
+  final save. Never inspect, capture, copy, paste, screenshot, or retain the
+  client ID or secret with browser control. Hand the real terminal to the owner
+  for both hidden prompts.
+- A successful Plaid technician step prepares the application only. It does not
+  open Link or contact a bank. Enroll the owner passkey on the final hostname
+  next, then use `brain connect bank <manifest>` with the owner present and only
+  inside the approved field plan. Every masked account needs explicit entity
+  assignment; unassigned accounts remain staged.
 - A partial, unavailable, stale, refused, or interrupted source is not
   complete. A healthy empty result and an unavailable result must remain visibly
   different.

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { cmdLocalTools } from "../brain.mjs";
+import { cmdLocalTools, cmdTechnician, VALUE_FLAGS } from "../brain.mjs";
 import { WRANGLER_PACKAGE } from "../doctor.mjs";
 
 import {
@@ -45,6 +45,13 @@ writeFileSync(manifestPath, JSON.stringify({
     calendar: { enabled: true },
     zoom: { enabled: true },
     imap: { enabled: true },
+    bank_feed: {
+      enabled: true,
+      provider: "plaid",
+      environment: "production",
+      registered_redirect_uris: ["https://brain.fixture.test/app/connect/bank"],
+      registered_webhook_uris: ["https://brain.fixture.test/api/webhooks/plaid"],
+    },
   },
 }));
 
@@ -213,6 +220,26 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.match(plan.warning, /Live proof arrives/i);
   assert.match(JSON.stringify(plan), /hidden terminal prompts/i);
   assert.doesNotMatch(JSON.stringify(plan), /client_secret|app_password|api_token/i);
+
+  const configured = technicianPlan(manifestPath, {
+    cli: { command: safeNodePath, args: [safeBrainPath] },
+  });
+  const plaid = configured.steps.find((candidate) => candidate.id === "plaid");
+  assert.equal(plaid.command, null);
+  assert.equal(plaid.owner_only_command.execution_boundary, "owner_direct_terminal");
+  assert.equal(plaid.owner_only_command.must_run_in_direct_owner_terminal, true);
+  assert.deepEqual(plaid.owner_only_command.args, [
+    safeBrainPath,
+    "technician", manifestPath, "--run", "plaid",
+    "--confirm-environment", "production",
+    "--confirm-redirect", "https://brain.fixture.test/app/connect/bank",
+    "--confirm-webhook", "https://brain.fixture.test/api/webhooks/plaid",
+    "--confirm-single-setup-machine",
+    "--confirm-production-access",
+  ]);
+  for (const flag of ["confirm-environment", "confirm-redirect", "confirm-webhook"]) {
+    assert.equal(VALUE_FLAGS.has(flag), true, `--${flag} must refuse when its value is missing`);
+  }
 });
 
 test("the first technician step verifies local tools before any manifest or account exists", async () => {
@@ -365,6 +392,316 @@ test("IMAP passes only non-secret routing values and leaves app-password prompti
   ]);
   assert.equal(call.options.env.IMAP_PASSWORD, undefined);
   assert.doesNotMatch(JSON.stringify(call), /ambient-secret/);
+});
+
+test("Plaid refuses before hidden entry unless environment, URLs, and Production access are exact", async () => {
+  let hiddenReads = 0;
+  let setupCalls = 0;
+  const common = {
+    step: "plaid",
+    manifestPath,
+    platformName: "linux",
+    scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath,
+    readHidden: async () => { hiddenReads++; return Buffer.from("must-not-be-read"); },
+    runPlaidSetup: async () => { setupCalls++; return {}; },
+  };
+  await assert.rejects(
+    runTechnicianStep({ ...common, flags: {} }),
+    /confirm-environment.*production/i,
+  );
+  await assert.rejects(
+    runTechnicianStep({
+      ...common,
+      flags: {
+        "confirm-environment": "production",
+        "confirm-redirect": "https://wrong.fixture.test/app/connect/bank",
+      },
+    }),
+    /confirm-redirect.*brain\.fixture\.test/i,
+  );
+  await assert.rejects(
+    runTechnicianStep({
+      ...common,
+      flags: {
+        "confirm-environment": "production",
+        "confirm-redirect": "https://brain.fixture.test/app/connect/bank",
+        "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+        "confirm-single-setup-machine": true,
+      },
+    }),
+    /Production access.*confirm-production-access/i,
+  );
+  await assert.rejects(
+    runTechnicianStep({
+      ...common,
+      isTTY: true,
+      flags: {
+        "confirm-environment": "production",
+        "confirm-redirect": "https://brain.fixture.test/app/connect/bank",
+        "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+        "confirm-production-access": true,
+      },
+    }),
+    /no remote cross-machine lock.*confirm-single-setup-machine/i,
+  );
+  assert.equal(hiddenReads, 0);
+  assert.equal(setupCalls, 0);
+});
+
+test("Plaid local refusal runs before Cloudflare control or a hidden prompt", async () => {
+  let cloudflareControls = 0;
+  let hiddenReads = 0;
+  await assert.rejects(
+    cmdTechnician(manifestPath, {
+      run: "plaid",
+      "confirm-environment": "production",
+      "confirm-redirect": "https://wrong.fixture.test/app/connect/bank",
+      "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+      "confirm-production-access": true,
+      "confirm-single-setup-machine": true,
+    }, {
+      platformName: "linux",
+      isTTY: true,
+      scriptPath: fixtureScriptPath,
+      nodePath: fixtureNodePath,
+      readHidden: async () => { hiddenReads++; return Buffer.from("must-not-be-read"); },
+      withManifestControl: async () => { cloudflareControls++; },
+    }),
+    /confirm-redirect.*brain\.fixture\.test/i,
+  );
+  assert.equal(cloudflareControls, 0);
+  assert.equal(hiddenReads, 0);
+});
+
+test("Plaid refuses Windows before Cloudflare control because hidden entry is not proven", async () => {
+  let cloudflareControls = 0;
+  let hiddenReads = 0;
+  await assert.rejects(
+    cmdTechnician(manifestPath, {
+      run: "plaid",
+      "confirm-environment": "production",
+      "confirm-redirect": "https://brain.fixture.test/app/connect/bank",
+      "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+      "confirm-production-access": true,
+      "confirm-single-setup-machine": true,
+    }, {
+      platformName: "win32",
+      isTTY: true,
+      scriptPath: fixtureScriptPath,
+      nodePath: fixtureNodePath,
+      readHidden: async () => { hiddenReads++; return Buffer.from("must-not-be-read"); },
+      withManifestControl: async () => { cloudflareControls++; },
+    }),
+    /held on Windows.*cannot prove that PowerShell hid/is,
+  );
+  assert.equal(cloudflareControls, 0);
+  assert.equal(hiddenReads, 0);
+});
+
+test("Plaid requires explicit native configuration and a direct owner terminal before hidden entry", async () => {
+  let hiddenReads = 0;
+  let setupCalls = 0;
+  const writePlaidManifest = (name, bankFeed, domain = "brain.fixture.test") => {
+    const path = join(sandbox, `${name}.json`);
+    writeFileSync(path, JSON.stringify({ brain: { domain }, corpora: { bank_feed: bankFeed } }));
+    return path;
+  };
+  const common = {
+    step: "plaid",
+    platformName: "linux",
+    scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath,
+    readHidden: async () => { hiddenReads++; return Buffer.from("must-not-be-read"); },
+    runPlaidSetup: async () => { setupCalls++; return {}; },
+  };
+  const cases = [
+    ["implicit-provider", {
+      enabled: true,
+      environment: "sandbox",
+      registered_redirect_uris: ["https://brain.fixture.test/app/connect/bank"],
+      registered_webhook_uris: ["https://brain.fixture.test/api/webhooks/plaid"],
+    }, /explicitly set to plaid/i],
+    ["missing-environment", {
+      enabled: true,
+      provider: "plaid",
+      registered_redirect_uris: ["https://brain.fixture.test/app/connect/bank"],
+      registered_webhook_uris: ["https://brain.fixture.test/api/webhooks/plaid"],
+    }, /must explicitly select sandbox or production/i],
+    ["endpoint-override", {
+      enabled: true,
+      provider: "plaid",
+      environment: "sandbox",
+      api_base: "https://override.invalid",
+      registered_redirect_uris: ["https://brain.fixture.test/app/connect/bank"],
+      registered_webhook_uris: ["https://brain.fixture.test/api/webhooks/plaid"],
+    }, /does not accept.*overrides/i],
+    ["scheme-in-domain", {
+      enabled: true,
+      provider: "plaid",
+      environment: "sandbox",
+      registered_redirect_uris: ["https://brain.fixture.test/app/connect/bank"],
+      registered_webhook_uris: ["https://brain.fixture.test/api/webhooks/plaid"],
+    }, /final Brain address is still open/i, "https://brain.fixture.test"],
+  ];
+  for (const [name, feed, expected, domain] of cases) {
+    await assert.rejects(
+      runTechnicianStep({ ...common, manifestPath: writePlaidManifest(name, feed, domain), flags: {} }),
+      expected,
+    );
+  }
+
+  const sandboxManifest = writePlaidManifest("direct-terminal", {
+    enabled: true,
+    provider: "plaid",
+    environment: "sandbox",
+    registered_redirect_uris: ["https://brain.fixture.test/app/connect/bank"],
+    registered_webhook_uris: ["https://brain.fixture.test/api/webhooks/plaid"],
+  });
+  await assert.rejects(
+    runTechnicianStep({
+      ...common,
+      manifestPath: sandboxManifest,
+      isTTY: false,
+      flags: {
+        "confirm-environment": "sandbox",
+        "confirm-redirect": "https://brain.fixture.test/app/connect/bank",
+        "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+        "confirm-single-setup-machine": true,
+      },
+    }),
+    /direct interactive terminal controlled by the owner/i,
+  );
+  await assert.rejects(
+    runTechnicianStep({
+      ...common,
+      manifestPath: sandboxManifest,
+      isTTY: true,
+      flags: {
+        port: "443",
+        "confirm-environment": "sandbox",
+        "confirm-redirect": "https://brain.fixture.test/app/connect/bank",
+        "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+      },
+    }),
+    /does not use --port/i,
+  );
+  await assert.rejects(
+    runTechnicianStep({
+      ...common,
+      manifestPath: sandboxManifest,
+      isTTY: true,
+      flags: {
+        "confirm-environment": "sandbox",
+        "confirm-redirect": "https://brain.fixture.test/app/connect/bank",
+        "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+        "confirm-production-access": true,
+        "confirm-single-setup-machine": true,
+      },
+    }),
+    /applies only to the Production environment/i,
+  );
+  assert.equal(hiddenReads, 0);
+  assert.equal(setupCalls, 0);
+});
+
+test("Plaid explains the ceremony, accepts values only through hidden prompts, and opens no child or bank flow", async () => {
+  const clientId = Buffer.from("fixture-plaid-client-id");
+  const clientSecret = Buffer.from("fixture-plaid-secret");
+  const entered = [clientId, clientSecret];
+  const announcements = [];
+  let setupInput = null;
+  let childCalls = 0;
+  const receipt = await runTechnicianStep({
+    step: "plaid",
+    manifestPath,
+    platformName: "linux",
+    isTTY: true,
+    flags: {
+      "confirm-environment": "production",
+      "confirm-redirect": "https://brain.fixture.test/app/connect/bank",
+      "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+      "confirm-production-access": true,
+      "confirm-single-setup-machine": true,
+    },
+    scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath,
+    baseEnv: {
+      PATH: "/safe/bin",
+      BANK_FEED_CLIENT_ID: "ambient-client-id",
+      BANK_FEED_SECRET: "ambient-secret",
+      BANK_FEED_WRAPPING_KEY_V2: "ambient-wrapping-key",
+    },
+    announce: (message) => announcements.push(message),
+    readHidden: async () => entered.shift(),
+    spawn: () => { childCalls++; return { status: 0 }; },
+    runPlaidSetup: async (input) => {
+      assert.equal(input.clientId.toString(), "fixture-plaid-client-id");
+      assert.equal(input.clientSecret.toString(), "fixture-plaid-secret");
+      setupInput = {
+        manifestPath: input.manifestPath,
+        environment: input.environment,
+        redirectUri: input.redirectUri,
+        webhookUri: input.webhookUri,
+      };
+      return {
+        applied_atomically: true,
+        secret_names_verified: [
+          "BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET", "BANK_FEED_WRAPPING_KEY_V2",
+        ],
+        opened_bank_connection: false,
+      };
+    },
+  });
+  assert.deepEqual(setupInput, {
+    manifestPath,
+    environment: "production",
+    redirectUri: "https://brain.fixture.test/app/connect/bank",
+    webhookUri: "https://brain.fixture.test/api/webhooks/plaid",
+  });
+  assert.equal(childCalls, 0);
+  assert.equal(receipt.proof_level, "worker_secret_name_readback");
+  assert.equal(receipt.coordination_boundary, "single_supervised_owner_machine");
+  assert.equal(receipt.remote_first_setup_compare_and_swap, false);
+  assert.deepEqual(receipt.next, ["enroll_owner_passkey", "brain_connect_bank"]);
+  assert.match(announcements.join("\n"), /changes only three Worker secrets/i);
+  assert.match(announcements.join("\n"), /not placed in the command, shell history, plan, or support note/i);
+  assert.doesNotMatch(announcements.join("\n"), /fixture-plaid/);
+  assert.ok(clientId.every((byte) => byte === 0));
+  assert.ok(clientSecret.every((byte) => byte === 0));
+});
+
+test("Plaid wipes the first hidden value when the second prompt is interrupted", async () => {
+  const clientId = Buffer.from("fixture-plaid-client-id");
+  let reads = 0;
+  let setupCalls = 0;
+  await assert.rejects(
+    runTechnicianStep({
+      step: "plaid",
+      manifestPath,
+      platformName: "linux",
+      isTTY: true,
+      flags: {
+        "confirm-environment": "production",
+        "confirm-redirect": "https://brain.fixture.test/app/connect/bank",
+        "confirm-webhook": "https://brain.fixture.test/api/webhooks/plaid",
+        "confirm-production-access": true,
+        "confirm-single-setup-machine": true,
+      },
+      scriptPath: fixtureScriptPath,
+      nodePath: fixtureNodePath,
+      readHidden: async () => {
+        reads++;
+        if (reads === 1) return clientId;
+        throw new Error("owner cancelled the second hidden prompt");
+      },
+      runPlaidSetup: async () => { setupCalls++; },
+    }),
+    /owner cancelled the second hidden prompt/,
+  );
+  assert.equal(reads, 2);
+  assert.equal(setupCalls, 0);
+  assert.ok(clientId.every((byte) => byte === 0));
 });
 
 test("passkey enrollment refuses before mutation unless the exact final hostname is confirmed", async () => {

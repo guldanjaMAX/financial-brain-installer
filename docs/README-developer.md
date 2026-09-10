@@ -862,12 +862,48 @@ runs.
 
 `brain technician <manifest>` is the matching install-day coordinator. Its
 default and `--json` forms are read-only. A selected `--run` step launches the
-existing command in a child process with an allowlisted environment. Google and
-Zoom values are collected by the shared hidden-input primitive, never placed in
-argv, and cleared from the coordinator's buffers and child environment object
-after the command exits. Tests assert ordering, rerun behavior, ambient-secret
-scrubbing, exact hostname confirmation before invite creation, and stop-on-fail
+existing command in a child process with an allowlisted environment, except the
+Plaid credential step, which stays in the coordinator's dedicated reviewed
+boundary. Google, Zoom, and Plaid values are collected by the shared
+hidden-input primitive and never placed in argv. Plaid uses the Cloudflare
+account already bound to this manifest, and its plan entry is an owner-only
+direct-terminal action rather than an agent-executable command. The exact
+command includes `--confirm-single-setup-machine`: the private lock covers one
+computer only, and no remote compare-and-swap protects a brand-new wrapping key
+from a concurrent first setup on another computer. General setup therefore
+remains held and must use one nominated supervised owner session. It uses the
+script `secrets-bulk` endpoint to apply exactly `BANK_FEED_CLIENT_ID`,
+`BANK_FEED_SECRET`, and `BANK_FEED_WRAPPING_KEY_V2` atomically, then reads back
+only those three binding names. The independent wrapping key is committed and
+verified first in macOS Keychain, a Windows DPAPI CurrentUser encrypted file,
+or an atomic mode-0600 Linux file, and is reused on retry. The coordinator
+refuses to generate a replacement when that Worker already has the binding but
+the local protected record is missing. For an existing key it requires the
+runtime fingerprint to remain equal across the bounded propagation window
+before PATCH, not merely match once, and proves it again afterward. It derives
+the authenticated proof
+origin from the resolved Cloudflare account, Worker, and workers.dev subdomain,
+requires that exact Worker's workers.dev route to be enabled, refuses redirects,
+and verifies the deployed wrapping-key fingerprint before replacing an existing
+binding and after the patch. This proof route remains required when the public
+Brain has a custom hostname; rerun `brain deploy` after fixing route access if
+it is unavailable. Plaid secret entry is held on Windows until a native masked
+bridge is implemented and physically proven, because the shared terminal reader
+cannot prove that PowerShell suppressed echo. `brain secrets` refuses all
+three bank-feed environment values. Custom-provider credential setup has no
+reviewed ceremony and remains held. The coordinator clears owned input
+buffers after the step exits. Tests assert ordering, rerun
+behavior, ambient-secret scrubbing, exact Plaid environment, redirect, webhook,
+Production-access and single-machine gates, exact hostname confirmation before
+invite creation, and stop-on-fail
 verification.
+
+For a fresh Worker whose approved field-plan manifest already enables the bank
+feed, `brain secrets` preserves its provider-cleanup order, installs the three
+core access keys, then deliberately pauses at bank-secret completeness. That
+makes the authenticated proof route available to the owner-only ceremony
+without accepting any bank-feed value from the environment. Rerun `brain
+secrets` after the ceremony to prove the complete binding set.
 
 Current connector proof levels and the ranked acceptance backlog are maintained
 in [CONNECTOR-BACKLOG.md](./CONNECTOR-BACKLOG.md). Fixture coverage is never a

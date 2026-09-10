@@ -265,6 +265,10 @@
     "bank_feed": {
       "_comment": [
         "Plaid is the reviewed bank-feed profile. Keep this off until the",
+        "version-scoped disposable-candidate field plan is approved. General",
+        "customer bank invitations remain held until that journey and a",
+        "separately approved production pilot pass. A native command existing",
+        "does not by itself open the gate. After field-plan approval, the",
         "client has a Plaid account, Sandbox credentials have been entered",
         "through the hidden prompt, the independent bank wrapping key is in",
         "reviewed owner recovery custody, and the exact return and webhook URLs are",
@@ -279,6 +283,7 @@
       "provider": "plaid",
       "environment": "sandbox",
       "registered_redirect_uris": [],
+      "registered_webhook_uris": [],
       "country_codes": [
         "US"
       ],
