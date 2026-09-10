@@ -40,7 +40,7 @@ export function zoneAssignmentExhaustedMessage({ source, zone, status, detail })
     `zone command failed (${status}): ${detail}\n` +
     `  All ${ZONE_HTML_RETRY_DELAYS_MS.length} bounded retries were exhausted for ` +
     `${checkpointLabel(source, zone)}. A previous pass may already be saved.\n` +
-    "  The last confirmed checkpoint is the prior successful brain zone output, not this failed pass.\n" +
+    "  This command confirmed no checkpoint. If an earlier brain zone run succeeded, that prior output remains the last confirmed checkpoint.\n" +
     "  It is safe to rerun the same brain zone command later; it resumes from the stored pending count."
   );
 }

@@ -57,7 +57,8 @@ const exhaustedCopy = zoneAssignmentExhaustedMessage({
 assert.doesNotMatch(exhaustedCopy, /drive\nnot-a-checkpoint/, "checkpoint labels must not inject terminal lines");
 assert.match(exhaustedCopy, /all 3 bounded retries were exhausted/i);
 assert.match(exhaustedCopy, /previous pass may already be saved/i);
-assert.match(exhaustedCopy, /last confirmed checkpoint is the prior successful brain zone output/i);
+assert.match(exhaustedCopy, /this command confirmed no checkpoint/i);
+assert.match(exhaustedCopy, /if an earlier brain zone run succeeded.*last confirmed checkpoint/i);
 assert.match(exhaustedCopy, /safe to rerun the same brain zone command/i);
 
 {
