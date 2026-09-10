@@ -21,6 +21,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/mcp-upgrade-pause.test.mjs",
   "node --no-warnings worker/test/oauth-consent-query.test.mjs",
   "node --no-warnings worker/test/public-guard-coverage.test.mjs",
+  "node --no-warnings worker/test/owner-notes-lifecycle.test.mjs",
+  "node --no-warnings worker/test/memory-supersession.test.mjs",
   "node --test test/subdomain-read-names-its-cause.test.mjs",
   "node --test test/adoption-requires-prior-ownership.test.mjs",
   "node --test test/vectorize-ownership-persisted.test.mjs",
@@ -34,8 +36,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/adopt-cloudflare-profile-consent.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
   // Client upgrade rehearsals, added after the launcher freeze. Every shipped
-  // release through v0.3.6 ships 22 migrations and this release ships 35, so
-  // 0023..0035 have never run on a real client brain until these.
+  // release through v0.3.6 ships 22 migrations and this release ships 37, so
+  // 0023..0037 have never run on a real client brain until these.
   "node --no-warnings test/migration-walk-22-to-35.test.mjs",
   "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
@@ -81,7 +83,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/vector-delete-outbox.test.mjs",
   "node --no-warnings test/vector-bootstrap-paused-strand.test.mjs",
   // Client upgrade rehearsals. Every shipped release through v0.3.6 carries 22
-  // migrations and this release carries 35, so 0023..0035 have never run on a
+  // migrations and this release carries 37, so 0023..0037 have never run on a
   // real client brain. These walk a populated schema-22 database forward.
   "node --no-warnings test/migration-walk-22-to-35.test.mjs",
   "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
@@ -239,6 +241,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/mcp-upgrade-pause.test.mjs",
   "node --no-warnings worker/test/oauth-consent-query.test.mjs",
   "node --no-warnings worker/test/public-guard-coverage.test.mjs",
+  "node --no-warnings worker/test/owner-notes-lifecycle.test.mjs",
+  "node --no-warnings worker/test/memory-supersession.test.mjs",
   "node --test test/subdomain-read-names-its-cause.test.mjs",
   "node --test test/adoption-requires-prior-ownership.test.mjs",
   "node --test test/vectorize-ownership-persisted.test.mjs",

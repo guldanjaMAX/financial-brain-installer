@@ -48,7 +48,9 @@ const TRANSACTIONAL_SOURCES = new Set([
 const CORRESPONDENCE_SOURCES = new Set([
   "email", "fb_messenger", "gmail", "imessage", "imap", "messages", "sms", "whatsapp",
 ]);
-const RECOLLECTION_SOURCES = new Set(["fireflies", "granola", "meeting-notes", "otter", "zoom"]);
+const RECOLLECTION_SOURCES = new Set([
+  "fireflies", "granola", "meeting-notes", "otter", "owner-notes", "zoom",
+]);
 
 const RELATIONSHIP_STATUS_CLAIM = /\b(client|customer|member|patient|employee|tenant|vendor|partner)s?\b/i;
 const PRESENT_RELATIONSHIP_CLAIM =

@@ -181,6 +181,18 @@ async function prepareD1Envelope(env, envelope) {
 }
 
 /**
+ * Recompute the exact durable content marker for a D1 envelope.
+ *
+ * This is intentionally narrower than exposing the full prepared write. The
+ * conversational owner-note lifecycle uses it only for same-primary
+ * read-after-write verification, so a successful HTTP response cannot be
+ * mistaken for proof that the intended content reached the intended row.
+ */
+export async function expectedD1ContentHash(env, envelope) {
+  return (await prepareD1Envelope(env, envelope)).hash;
+}
+
+/**
  * The only three answers to "where did this text come from".
  * `native` is the default and the state of every pre-OCR document.
  */
@@ -459,6 +471,9 @@ const d1Backend = {
           // row. It is additive public metadata, kept beside date and text
           // provenance so a citation never presents a tier without its reason.
           authority: x.authority || null,
+          // Closed, server-verified origin for conversational owner notes. No
+          // arbitrary document metadata crosses this public boundary.
+          ...(x.write_provenance ? { write_provenance: x.write_provenance } : {}),
           score: x.rrf_score,
         };
       }),
