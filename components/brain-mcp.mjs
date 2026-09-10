@@ -558,5 +558,8 @@ process.stdin.on("data", (chunk) => {
 
 process.stdin.on("end", async () => {
   while (inFlight.size) await Promise.allSettled([...inFlight]);
-  process.exit(0);
+  // Let Node drain fetch/socket cleanup naturally. A forced process.exit()
+  // can tear down libuv async handles while they are already closing; Node
+  // 24 on Windows treats that race as a fatal assertion.
+  process.exitCode = 0;
 });
