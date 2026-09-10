@@ -579,6 +579,10 @@ const expected = [
   "worker/src/lib/zoom-deliveries.js",
   "operations/session-signing-key.mjs",
   "operations/source-ingest-lock.mjs",
+  // Reviewed 2026-09-09: the Plaid technician ceremony accepts provider
+  // values only through hidden-input buffers, keeps the independent wrapping
+  // key in the owner's protected store, and returns metadata-only receipts.
+  "operations/plaid-technician-setup.mjs",
   "operations/technician-setup.mjs",
   "operations/rag-proxy-key.mjs",
   "operations/curated-dual-sync.mjs",

@@ -247,7 +247,8 @@ without exposing source identifiers.
 | OCR for scanned PDFs | Built, optional, and provenance-marked; local synthetic scans pass and private real scans remain a field gate |
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |
 | Microsoft 365 and Dropbox | Built behind field gates for mail and files, cursor resume, tombstones, and scheduling; no real tenant or account has completed acceptance |
-| QuickBooks Online, Plaid, and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
+| QuickBooks Online and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
+| Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. The candidate technician ceremony hidden-prompts provider values, safeguards an independent local wrapping key, atomically applies only the three bank-feed Worker secrets, and verifies both names and deployed key fingerprint. It requires one nominated supervised computer because its lock is local and no remote first-setup compare-and-swap exists. `brain secrets` rejects bank-feed environment values; custom-provider credential setup remains held. `brain connect bank` remains a field-plan entrypoint until disposable-candidate acceptance and a separately approved production pilot pass |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
