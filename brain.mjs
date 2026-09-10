@@ -15305,6 +15305,37 @@ export function assertDrainComplete({
   return { remaining, rounds };
 }
 
+/**
+ * Keep the command result explicit about scope: `drained` is work confirmed by
+ * this invocation, while `actual_vectors` is the total currently query-visible.
+ * Older callers keep their existing fields and can adopt the additive names.
+ */
+export function buildCompletedDrainResult({
+  drained,
+  submitted,
+  remaining,
+  expectedVectors = null,
+  actualVectors = null,
+} = {}) {
+  return {
+    drained,
+    submitted,
+    remaining,
+    confirmed_this_run: drained,
+    expected_vectors: Number.isSafeInteger(expectedVectors) ? expectedVectors : null,
+    actual_vectors: Number.isSafeInteger(actualVectors) ? actualVectors : null,
+    vector_ready: true,
+  };
+}
+
+/** Render the completion receipt without mistaking a no-op run for an empty index. */
+export function renderCompletedDrainResult(result) {
+  const total = Number.isSafeInteger(result?.actual_vectors)
+    ? `${result.actual_vectors} total query-visible vector(s)`
+    : "total query-visible vector count unavailable";
+  return `vector index is query-ready (${total}; ${result.confirmed_this_run} newly confirmed this run)`;
+}
+
 async function cmdReindex(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
   const { m } = loadManifest(manifestPath);
@@ -15486,11 +15517,17 @@ async function cmdDrain(manifestPath, options = {}) {
     remaining = receipt.remaining;
     const mins = (now() - started) / 60000;
     const rate = mins > 0.05 ? Math.round(drained / mins) : null;
-    info(
-      `${drained} query-visible, ${submitted} accepted, ${remaining} to go` +
-        (rate ? `, ~${rate}/min` : "") +
-        (rate && remaining ? `, about ${Math.max(1, Math.ceil(remaining / rate))} min left` : "")
-    );
+    const progress = [
+      Number.isSafeInteger(actualVectors)
+        ? `${actualVectors} total query-visible vector(s)`
+        : "total query-visible vector count unavailable",
+      `${drained} newly confirmed this run`,
+      `${submitted} accepted this run`,
+      `${remaining} to go`,
+    ];
+    if (rate) progress.push(`~${rate}/min`);
+    if (rate && remaining) progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
+    info(progress.join("; "));
     if (remaining === 0) break;
     if (receipt.waiting > 0) {
       // Vectorize V2 processes changesets asynchronously. Poll slowly enough to
@@ -15509,8 +15546,15 @@ async function cmdDrain(manifestPath, options = {}) {
     );
   }
   assertDrainComplete({ remaining, rounds, maxRounds, expectedVectors, actualVectors });
-  ok(`vector index is query-ready (${drained} confirmed)`);
-  return { drained, submitted, remaining };
+  const result = buildCompletedDrainResult({
+    drained,
+    submitted,
+    remaining,
+    expectedVectors,
+    actualVectors,
+  });
+  ok(renderCompletedDrainResult(result));
+  return result;
 }
 
 function supportCommandOperation(label, operation) {

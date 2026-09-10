@@ -44,6 +44,11 @@ const RECEIPTS = {
     drained: 5, submitted: 5, waiting: 0, remaining: 0, vector_ready: true,
     expected_vectors: 5, actual_vectors: 5,
   },
+  // A healthy existing corpus can need no new work during this invocation.
+  "drain-healthy-noop": {
+    drained: 0, submitted: 0, waiting: 0, remaining: 0, vector_ready: true,
+    expected_vectors: 66, actual_vectors: 66,
+  },
   // A brain with no corpus yet is legitimately ready at zero.
   "drain-empty-corpus": {
     drained: 0, submitted: 0, waiting: 0, remaining: 0, vector_ready: true,
@@ -134,10 +139,21 @@ if (SCENARIO) {
   check("a drain whose vectors match D1 still declares query readiness",
     complete.code === 0 && /vector index is query-ready/.test(complete.output),
     `code=${complete.code} ${complete.output}`);
+  check("a completing drain distinguishes the total from this run's confirmations",
+    /5 total query-visible vector\(s\); 5 newly confirmed this run/.test(complete.output),
+    complete.output);
+
+  const healthyNoop = runScenario("drain-healthy-noop");
+  check("a healthy no-op reports the existing total instead of zero confirmed",
+    healthyNoop.code === 0 &&
+      /66 total query-visible vector\(s\); 0 newly confirmed this run/.test(healthyNoop.output) &&
+      !/query-ready \(0 confirmed\)/.test(healthyNoop.output),
+    `code=${healthyNoop.code} ${healthyNoop.output}`);
 
   const emptyCorpus = runScenario("drain-empty-corpus");
   check("a brain with nothing to embed is still allowed to be ready",
-    emptyCorpus.code === 0 && /vector index is query-ready/.test(emptyCorpus.output),
+    emptyCorpus.code === 0 &&
+      /0 total query-visible vector\(s\); 0 newly confirmed this run/.test(emptyCorpus.output),
     `code=${emptyCorpus.code} ${emptyCorpus.output}`);
 
   console.log(`${ran - fail}/${ran} drain query-ready gate checks passed`);
