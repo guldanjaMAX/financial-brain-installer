@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { confirmWorkersPaidForSetup } from "../brain.mjs";
 
 const ACCOUNT = "a".repeat(32);
+const BRAIN_ENTRYPOINT = fileURLToPath(new URL("../brain.mjs", import.meta.url));
 
 test("Workers Paid confirmation is bound to the exact verified account", async () => {
   const lines = [];
@@ -53,7 +55,7 @@ test("an owner-controlled terminal can confirm after exact account selection", a
 test("Claude-guided fresh browser sign-in refuses incomplete owner context before preflight", () => {
   const sandbox = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "fb-browser-consent-")));
   try {
-    const brain = resolve(new URL("../brain.mjs", import.meta.url).pathname);
+    const brain = BRAIN_ENTRYPOINT;
     const result = spawnSync(process.execPath, [
       brain,
       "setup",
@@ -85,7 +87,7 @@ test("Claude-guided fresh browser sign-in refuses incomplete owner context befor
 test("explicit browser sign-in cannot silently fall back to an inherited automation token", () => {
   const sandbox = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "fb-browser-token-conflict-")));
   try {
-    const brain = resolve(new URL("../brain.mjs", import.meta.url).pathname);
+    const brain = BRAIN_ENTRYPOINT;
     const manifest = join(sandbox, "brain.manifest.json");
     const result = spawnSync(process.execPath, [
       brain,
@@ -127,7 +129,7 @@ test("explicit browser sign-in cannot silently fall back to an inherited automat
 test("Claude-guided setup rejects an unsafe slug before browser sign-in", () => {
   const sandbox = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "fb-browser-name-")));
   try {
-    const brain = resolve(new URL("../brain.mjs", import.meta.url).pathname);
+    const brain = BRAIN_ENTRYPOINT;
     const manifest = join(sandbox, "brain.manifest.json");
     const result = spawnSync(process.execPath, [
       brain,

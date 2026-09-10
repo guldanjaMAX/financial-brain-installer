@@ -137,9 +137,12 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute, /missing connector receipt does not mean.*stored corpus is absent/is);
   assert.match(optimizeRoute, /Unzoned sources with no grants are sharing-readiness\s+work, not evidence that somebody currently has access/i);
   assert.match(optimizeRoute, /Leave passkeys\s+and enrolled devices out of Optimize/i);
-  assert.match(optimizeRoute, /Do not run `brain devices`/i);
-  assert.match(optimizeRoute, /Do not run `brain\s+tools` during Optimize/i);
-  assert.match(optimizeRoute, /do not run `brain mcp-config --apply`/i);
+  assert.match(optimizeRoute,
+    new RegExp("Do not run `" + renderedCommand("brain devices") + "`", "i"));
+  assert.match(optimizeRoute,
+    new RegExp("Do not run `" + renderedCommand("brain tools") + "` during Optimize", "i"));
+  assert.match(optimizeRoute,
+    new RegExp("do not run `" + renderedCommand("brain mcp-config --apply") + "`", "i"));
   assert.match(optimizeRoute, /especially after a move to a new computer/i);
   assert.match(optimizeRoute, /Do not run a Golden evaluation, create a canned refusal exercise/i);
   assert.match(optimizeRoute, /Do not ask a\s+known-answer content question for MCP proof/i);
@@ -179,8 +182,10 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(conciergeRoute, /Stop on the final review screen/i);
   assert.match(conciergeRoute, /owner checks the summary, chooses \*\*Create Token\*\*/i);
   assert.match(conciergeRoute, /Do not resume browser observation until.*secret is no longer visible/is);
-  assert.match(conciergeRoute, /`brain tools` installs or updates the reviewed technician skill/i);
-  assert.match(conciergeRoute, /Fresh `brain setup` normally\s+adds or updates this Brain's MCP entry/i);
+  assert.match(conciergeRoute,
+    new RegExp("`" + renderedCommand("brain tools") + "` installs or updates the reviewed technician skill", "i"));
+  assert.match(conciergeRoute,
+    new RegExp("Fresh `" + renderedCommand("brain setup") + "` normally\\s+adds or updates this Brain's MCP entry", "i"));
   assert.match(conciergeRoute, /run setup\s+with `--no-connect`/i);
   const passkeyRoute = content.slice(passkeyRouteStart, setupRouteStart);
   assert.match(passkeyRoute, /how the owner signs in.*private app/is);
@@ -191,7 +196,8 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(passkeyRoute, /Biometric data never goes to Financial Brain/i);
   assert.match(passkeyRoute, /private passkey stays with\s+the device or the owner's chosen passkey provider/i);
   assert.match(passkeyRoute, /Are you ready to create the one-time owner\s+link in your own terminal\?/i);
-  assert.match(passkeyRoute, /Never execute or capture `brain invite` in the agent\s+session/i);
+  assert.match(passkeyRoute,
+    new RegExp("Never execute or capture `" + renderedCommand("brain invite") + "` in the agent\\s+session", "i"));
   assert.match(passkeyRoute, /Do not click the web control/i);
   assert.match(passkeyRoute, /Canceling before a\s+passkey is successfully verified does not consume the link/i);
   assert.match(passkeyRoute, /Creating an invite is not proof of\s+enrollment, and enrollment is not proof of sign-in/i);
@@ -551,6 +557,7 @@ test("Google credentials cross only the child environment, never argv, and input
   const calls = [];
   const receipt = await runTechnicianStep({
     step: "google",
+    platformName: "darwin",
     manifestPath,
     flags: {},
     scriptPath: fixtureScriptPath,
@@ -585,6 +592,7 @@ test("Zoom collects the exact S2S values, strips ambient secrets, and zeroes eve
   let call;
   await runTechnicianStep({
     step: "zoom",
+    platformName: "darwin",
     manifestPath,
     scriptPath: fixtureScriptPath,
     nodePath: fixtureNodePath,
@@ -612,6 +620,7 @@ test("IMAP passes only non-secret routing values and leaves app-password prompti
   let call;
   await runTechnicianStep({
     step: "imap",
+    platformName: "darwin",
     manifestPath,
     flags: { host: "imap.example.test", user: "owner@example.test", port: "993", source: "owner-mail" },
     scriptPath: fixtureScriptPath,
