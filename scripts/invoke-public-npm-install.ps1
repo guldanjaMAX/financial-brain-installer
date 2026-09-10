@@ -10,6 +10,58 @@ function Refuse-PublicNpmContract([string]$Code) {
   exit 1
 }
 
+function Get-WindowsPackageContext {
+  try {
+    if (-not ("FinancialBrainPackageContextNative" -as [type])) {
+      Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class FinancialBrainPackageContextNative
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetCurrentPackageFullName(
+        ref uint packageFullNameLength,
+        StringBuilder packageFullName);
+}
+'@ -ErrorAction Stop | Out-Null
+    }
+
+    [uint32]$length = 0
+    $status = [FinancialBrainPackageContextNative]::GetCurrentPackageFullName([ref]$length, $null)
+    if ($status -eq 15700) {
+      return [pscustomobject]@{ Known = $true; Packaged = $false; Code = $status }
+    }
+    if ($status -ne 122 -or $length -lt 1) {
+      return [pscustomobject]@{ Known = $false; Packaged = $false; Code = $status }
+    }
+
+    $name = New-Object System.Text.StringBuilder -ArgumentList ([int]$length)
+    $status = [FinancialBrainPackageContextNative]::GetCurrentPackageFullName([ref]$length, $name)
+    if ($status -ne 0) {
+      return [pscustomobject]@{ Known = $false; Packaged = $false; Code = $status }
+    }
+    return [pscustomobject]@{ Known = $true; Packaged = $true; Code = $status }
+  } catch {
+    return [pscustomobject]@{ Known = $false; Packaged = $false; Code = "native-check-failed" }
+  }
+}
+
+# A packaged desktop app can virtualize LOCALAPPDATA without exposing that fact
+# in the environment strings. Check the calling process through Windows before
+# reading the install contract, and retain the path test as defense in depth.
+$packageContext = Get-WindowsPackageContext
+if (-not $packageContext.Known) {
+  [Console]::Error.WriteLine("Financial Brain stopped before installing because Windows could not verify this PowerShell window. Open PowerShell from the Start menu and try again there.")
+  Refuse-PublicNpmContract "package_identity_unverified"
+}
+if ($packageContext.Packaged -or
+    $env:APPDATA -like '*\Packages\*' -or
+    $env:LOCALAPPDATA -like '*\Packages\*') {
+  [Console]::Error.WriteLine("Financial Brain stopped before installing inside an app's private Windows container. Open PowerShell from the Start menu and try again there.")
+  Refuse-PublicNpmContract "packaged_shell"
+}
+
 try {
   $contract = [System.IO.File]::ReadAllText($ContractPath) | ConvertFrom-Json
 } catch {

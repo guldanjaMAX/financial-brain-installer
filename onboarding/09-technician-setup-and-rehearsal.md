@@ -87,6 +87,13 @@ released Brain CLI. The owner signs in to Claude in their own browser. Then run:
 brain technician "$HOME/Financial Brain/brain.manifest.json" --run tools
 ```
 
+On Windows, open PowerShell from the Start menu for the Brain installation.
+Claude can explain the command and follow along, but do not execute the install
+inside Claude Desktop's own shell. Windows may redirect files from a packaged
+app into that app's private container. Both the preflight and the installation
+bridge check native Windows package identity and stop before installing when
+the process is packaged or its identity cannot be proven.
+
 This proves the Claude CLI version and sign-in, installs and reads back the
 personal `/financial-brain-technician` skill, runs Anthropic's interactive
 doctor, and verifies pinned Wrangler 4. Claude Code's normal approval prompts

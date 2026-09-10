@@ -47,6 +47,14 @@ assert.match(installRunner, /if \(process\.platform === "win32"\)[\s\S]*buildWin
   "the Windows path must enter the parsed npm.cmd contract through PowerShell");
 assert.match(windowsNpmHelper, /Get-Command -Name \$contract\.executable -CommandType Application/);
 assert.match(windowsNpmHelper, /& \$contract\.executable @arguments/);
+assert.match(windowsNpmHelper, /GetCurrentPackageFullName/);
+assert.match(windowsNpmHelper, /PUBLIC_NPM_REFUSED.*packaged_shell/s);
+assert.match(windowsNpmHelper, /PUBLIC_NPM_REFUSED.*package_identity_unverified/s);
+const packageIdentityIndex = windowsNpmHelper.indexOf("$packageContext = Get-WindowsPackageContext");
+const contractReadIndex = windowsNpmHelper.indexOf("ReadAllText($ContractPath)");
+const npmInvokeIndex = windowsNpmHelper.indexOf("& $contract.executable @arguments");
+assert.ok(packageIdentityIndex > 0 && contractReadIndex > packageIdentityIndex && npmInvokeIndex > contractReadIndex,
+  "the Windows installer must prove it is outside an app package before reading the contract or invoking npm");
 
 // One Node 24 job creates the package. All operating-system jobs resolve the
 // immutable artifact ID and verify the producer's raw SHA before installing it.
