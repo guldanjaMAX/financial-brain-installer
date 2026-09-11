@@ -323,7 +323,8 @@ test("public whatsnew copy matches the fail-closed provenance repair command", a
   const whatsnew = await captureLogs(() => cmdWhatsnew(undefined, {
     discoverManifest: () => null,
   }));
-  const currentEntry = whatsnew.output.match(
+  const normalizedOutput = whatsnew.output.replace(/\r\n?/g, "\n");
+  const currentEntry = normalizedOutput.match(
     /# What's new[\s\S]*?\n## \d+\.\d+\.\d+\n([\s\S]*?)(?=\n## \d|$)/,
   )?.[1] || "";
   assert.match(currentEntry, /stays read-only/i);
