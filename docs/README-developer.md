@@ -1094,39 +1094,53 @@ Owner assistant tools are `brain_think`, `brain_search`, `brain_remember`,
 `brain_health`, and `brain_financial_map`. The last tool can read map state and
 store an expiring preview, but it has no activation operation.
 
-The current ingest boundary validates an evidence-lineage contract when one is
-present, but it does not yet require a versioned complete provenance receipt or
-prevent a weaker reingest from replacing stronger provenance. Inventory labels
-that debt as partial or unavailable. `brain provenance-repair <manifest>
---source <name>` can recover only the narrower legacy case where the exact
-original source is still available through a supported whole-source ingest
-path. Its read-only preview binds a canonical semantic generation rather than
-the Worker's raw snapshot ID, because raw IDs include a new `as_of` on every
-read. The semantic generation retains every source row, candidate, reason and
-count while excluding only observation time and pagination fields. Apply
-recomputes it, then uses reset with no limit for exactly one manifest-declared
-local-folder, Drive, Gmail, or Calendar source. No candidate-level ingest path
-is invented.
+The current ingest boundary validates evidence lineage and versioned text-origin
+receipts on new writes, and it refuses a later write that weakens established
+proof. Migration defaults and legacy `native/1` columns are still explicitly
+unassessed. Inventory labels that debt as partial or unavailable rather than
+retrospectively upgrading it.
 
-The source rewalk retains every ordinary ingestion invariant, including
-credential custody, Gmail's source lock, Drive/local reconciliation, and the
-separate aggregate removal approval. A loaded macOS Drive or folder scheduler
-blocks preview; this release has no Windows/Linux scheduler for those sources,
-so non-macOS readiness names that absence instead of pretending to inspect a
-service. Google plans also bind an opaque in-process digest of the exact decoded
-saved credential record, so reconnecting a different account invalidates an
-earlier approval without exposing any OAuth value or the digest itself. After a
-run, the command requires a different completed latest-run
-receipt with `walk_complete`, measured zero refusals/failures, and a new
-`complete_history_through`, then reads the exact recovery source again. It
-computes fixed IDs only as the approved opaque set minus the readback set. A
-missing receipt, readback failure, remaining candidate, new candidate, or
-second removal approval exits without a complete-success claim.
+`brain provenance-repair <manifest> --source <name>` schema 1 is now a legacy
+inventory preview only. The canonical semantic plan still binds every source
+row, candidate, reason and count while excluding observation-time pagination
+noise. It also records the proposed whole-source reset/no-limit method and OCR
+policy so the historical plan remains auditable. It always returns
+`can_apply: false`. A missing candidate after a rewalk could have been deleted,
+replaced, refused, or skipped, so set difference is not repair proof. Any
+`--apply` invocation throws before manifest, credential, network, scheduler, or
+source access, and schema-1 readback keeps all prior candidates unresolved.
 
-This rewalk bridge does not solve the broader write-contract gap. A separate
-change must still cover every connector, owner write, importer, chunk split,
-OCR result, summary, and reingest before the store can require complete
-provenance or prevent a weaker future write from replacing stronger evidence.
+The local assessment boundary accepts one to ten explicit source-relative
+locators for a manifest-approved upload root. It resolves them by exact
+equality through the existing no-follow file walk, reads content only for the
+resolved targets, and fails the target set closed if traversal or exact
+resolution is incomplete. OCR is passed explicitly as disabled. Native text,
+reliable OCR, partial OCR, scan-only, empty, password-protected, unsupported,
+extraction-failed, and unavailable are separate states. PDF page count is
+included only when the PDF parser directly established a positive count. A
+public receipt contains only ordinals and closed outcome fields; the private
+handoff retains exact locators and original-byte hashes for the Worker contract
+and must never be printed or persisted as a public artifact. Multi-record
+archives remain an explicit ambiguity rather than being matched by filename or
+content similarity.
+
+Migration 0042 adds the independent opaque-ID key and append-only
+`source_original_observations` ledger. `POST
+/api/admin/brain/source-original-observations` is D1-only and full-admin-only;
+scoped grants and owner sessions do not inherit it. Seal, inventory, and verify
+are read-only. Record uses one bounded D1 batch, exact readback, immutable
+replay hashes, and the upgrade write-pause guard. Schema 42 can record and
+revalidate only gap, failure, and adjudicated-exclusion observations. The
+Worker rejects every accepted outcome, and a D1 trigger applies the same guard
+to recovery imports and direct writes. The corpus currently has no
+authoritative per-family raw-original hash and byte count, so a valid-looking
+document at the same locator is not proof that it came from the bytes the local
+assessor observed. A later migration and ingest contract must add that binding
+before accepted repair is representable. Missing rows, deletion, replacement
+bytes, refused or unavailable originals, and changed document families remain
+unresolved. The route always states that its target set is bounded and that
+whole-source completeness is false. No CLI currently turns this evidence
+contract into OCR, reingest, repair, or deletion authority.
 
 `brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
 local handoff lane. Its only accepted scopes are `technician-skill`,

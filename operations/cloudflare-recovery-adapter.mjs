@@ -246,6 +246,12 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "owner_financial_map_inventory_state",
   "owner_financial_map_previews",
   "owner_financial_map_snapshots",
+  // Schema 42: the independent HMAC key and append-only observation ledger
+  // are one recovery unit. Restoring rows without their original identity key
+  // would make later bounded verification impossible; minting a replacement
+  // key would silently assign different identities to the same originals.
+  "source_original_id_key_state",
+  "source_original_observations",
 ]);
 
 /**
@@ -466,6 +472,10 @@ const SCHEMA_41_TABLES = Object.freeze([
   "owner_financial_map_previews",
   "owner_financial_map_snapshots",
 ]);
+const SCHEMA_42_TABLES = Object.freeze([
+  "source_original_id_key_state",
+  "source_original_observations",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -486,7 +496,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_24_TABLES, ...SCHEMA_25_TABLES, ...SCHEMA_26_TABLES, ...SCHEMA_27_TABLES,
      ...SCHEMA_28_TABLES, ...SCHEMA_30_TABLES, ...SCHEMA_31_TABLES,
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
-     ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES].includes(table)
+     ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
+     ...SCHEMA_42_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1289,7 +1300,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 35 || !SCHEMA_35_TABLES.includes(table)) &&
     (latest >= 36 || !SCHEMA_36_TABLES.includes(table)) &&
     (latest >= 37 || !SCHEMA_37_TABLES.includes(table)) &&
-    (latest >= 41 || !SCHEMA_41_TABLES.includes(table)));
+    (latest >= 41 || !SCHEMA_41_TABLES.includes(table)) &&
+    (latest >= 42 || !SCHEMA_42_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(migrations, { excludeBankItems = false } = {}) {

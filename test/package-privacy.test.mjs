@@ -480,6 +480,7 @@ const expected = [
   // install, repair, provider refresh, scheduler change, or Brain mutation.
   "operations/machine-continuity.mjs",
   "operations/provenance-repair.mjs",
+  "operations/provenance-source-assessment.mjs",
   // Reviewed read-only Optimize inventory client. It accepts no literal key,
   // validates HTTPS before resolving the protected credential, refuses
   // redirects, and sends only bounded exact filters to the Brain data plane.
@@ -556,6 +557,7 @@ const expected = [
   "migrations/d1/0039_document_provenance_assessment.sql",
   "migrations/d1/0040_source_failure_evidence.sql",
   "migrations/d1/0041_owner_financial_map.sql",
+  "migrations/d1/0042_source_original_observations.sql",
   "operations/bank-access-wrapping-key.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
@@ -607,6 +609,7 @@ const expected = [
   // Owner-only D1 source inventory. Reviewed for raw locator, credential,
   // entity/year inference, and package identity disclosure before allowlisting.
   "worker/src/lib/source-inventory-api.js",
+  "worker/src/lib/source-original-observation.js",
   // Sealed owner map with opaque row references and passkey-only activation.
   "worker/src/lib/owner-financial-map.js",
   "worker/src/lib/support-access.js",

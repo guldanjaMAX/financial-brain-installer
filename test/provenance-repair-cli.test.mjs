@@ -6,14 +6,12 @@ import test from "node:test";
 
 import {
   ProvenanceRepairIncompleteError,
-  buildProvenanceRepairPlan,
   cmdProvenanceRepair,
   collectSourceRecoveryPages,
   inspectProvenanceRepairReadiness,
   runCliCommandWithCredentialBoundary,
 } from "../brain.mjs";
 import { inspectGoogleTokenStorage, saveTokens } from "../connectors/google-auth.mjs";
-import { DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 import {
   provenanceRepairPlan,
   provenanceRepairReadback,
@@ -226,7 +224,13 @@ test("approval ID binds selection, config, full reset/no-limit mode, OCR, and ex
     ocr: { applies: true, enabled: false, model: "fixture", max_pages_per_document: 40, detail: "off" },
   };
   const plan = provenanceRepairPlan(input);
-  assert.equal(plan.can_apply, true);
+  assert.equal(plan.can_apply, false);
+  assert.deepEqual(plan.apply_compatibility, {
+    supported: false,
+    required_schema_version: 2,
+    reason_code: "candidate_resolution_ledger_required",
+  });
+  assert.match(plan.blockers.join("\n"), /candidate-resolution ledger/);
   assert.deepEqual(plan.expected_candidates.ids, [CANDIDATE_A]);
   assert.notEqual(provenanceRepairPlan({ ...input, sourceConfigFingerprint: "3".repeat(64) }).plan_id, plan.plan_id);
   assert.notEqual(provenanceRepairPlan({ ...input, source: { id: "other", kind: "drive" } }).plan_id, plan.plan_id);
@@ -271,101 +275,73 @@ test("recovery pagination collects one exact source snapshot and rejects duplica
   );
 });
 
-test("preview is read-only and apply recomputes, runs exact whole-source reset, and proves readback", async () => {
+test("schema-1 preview is read-only and never advertises an apply command", async () => {
   await withManifest(async (manifest) => {
-    let rewalkCalls = 0;
-    const previewState = state();
-    const preview = await buildProvenanceRepairPlan(manifest, "drive", {
-      readRemoteState: async () => previewState,
-      inspectReadiness: readiness,
-    });
-
-    const applyStates = [
-      state({
-        asOf: LATER,
-        inventorySnapshot: `sha256:${"7".repeat(64)}`,
-        snapshot: `sha256:${"8".repeat(64)}`,
-      }),
-      state({
-        asOf: "2026-09-10T12:10:00.000Z",
-        inventorySnapshot: `sha256:${"9".repeat(64)}`,
-        snapshot: `sha256:${"0".repeat(64)}`,
-        candidates: [],
-        receipt: {
-          status: "ready",
-          complete_history_through: "2026-09-10T12:09:00.000Z",
-          latest_run: {
-            lane: "sweep",
-            started_at: "2026-09-10T12:06:00.000Z",
-            finished_at: "2026-09-10T12:09:00.000Z",
-            walk_complete: true,
-            docs_refused: 0,
-            docs_failed: 0,
-            outcome: "completed",
-          },
-        },
-      }),
-    ];
-    const result = await cmdProvenanceRepair(manifest, {
-      flags: { source: "drive", apply: true, approve: preview.plan_id },
-      readRemoteState: async () => applyStates.shift(),
-      inspectReadiness: readiness,
-      async runSourceRewalk(args) {
-        rewalkCalls++;
-        assert.equal(args.source.id, "drive");
-        assert.equal(args.source.kind, "drive");
-        assert.equal(args.reset, true);
-        assert.equal(args.limit, null);
-        assert.equal(args.removalApproval, null);
-        return { created: 0, updated: 1, unchanged: 0, refused: 0, scanned: 1, skipped: 0 };
-      },
-    });
-    assert.equal(rewalkCalls, 1);
-    assert.equal(result.status, "complete");
-    assert.deepEqual(result.fixed_candidate_ids, [CANDIDATE_A]);
-    assert.equal(result.source_receipt.latest_run.outcome, "completed");
-  });
-});
-
-test("stale approval and removal review both fail closed before claiming a fixed candidate", async () => {
-  await withManifest(async (manifest) => {
-    const approved = await buildProvenanceRepairPlan(manifest, "drive", {
+    const { value: preview, output } = await captureLogs(() => cmdProvenanceRepair(manifest, {
+      flags: { source: "drive" },
       readRemoteState: async () => state(),
       inspectReadiness: readiness,
-    });
-    let runs = 0;
-    await assert.rejects(
-      cmdProvenanceRepair(manifest, {
-        flags: { source: "drive", apply: true, approve: approved.plan_id },
-        readRemoteState: async () => ({
-          inventory: inventory(),
-          recovery: recovery({ candidates: [candidate(CANDIDATE_A, ["text_reliability_missing"])] }),
-        }),
-        inspectReadiness: readiness,
-        runSourceRewalk: async () => { runs++; },
-      }),
-      /missing, stale, or different/,
-    );
-    assert.equal(runs, 0);
+      runSourceRewalk: async () => assert.fail("preview must not run a source rewalk"),
+    }));
+    assert.equal(preview.read_only, true);
+    assert.equal(preview.can_apply, false);
+    assert.equal(preview.apply_compatibility.reason_code, "candidate_resolution_ledger_required");
+    assert.match(output, /Apply unavailable/);
+    assert.doesNotMatch(output, /--apply/);
 
-    await assert.rejects(
-      cmdProvenanceRepair(manifest, {
-        flags: { source: "drive", apply: true, approve: approved.plan_id },
-        readRemoteState: async () => state(),
-        inspectReadiness: readiness,
-        runSourceRewalk: async () => {
-          throw new DriveRemovalReviewRequired("review then --approve-removals " + "4".repeat(64));
-        },
-      }),
-      (error) => error instanceof ProvenanceRepairIncompleteError &&
-        error.receipt?.status === "safety_review_required" &&
-        error.receipt.fixed_candidate_ids.length === 0 &&
-        /no provenance-repair success is claimed/i.test(error.message),
-    );
+    const json = await captureLogs(() => cmdProvenanceRepair(manifest, {
+      flags: { source: "drive", json: true },
+      readRemoteState: async () => state(),
+      inspectReadiness: readiness,
+      runSourceRewalk: async () => assert.fail("JSON preview must not run a source rewalk"),
+    }));
+    assert.equal(JSON.parse(json.output).can_apply, false);
   });
 });
 
-test("readback reports only actually absent candidates and withholds every claim without a new full-sweep receipt", () => {
+test("schema-1 apply rejects before manifest, remote, credential, readiness, or rewalk access", async () => {
+  const calls = { remote: 0, readiness: 0, rewalk: 0 };
+  await assert.rejects(
+    cmdProvenanceRepair("/definitely/not/a/provenance-manifest.json", {
+      flags: { source: "drive", apply: true, approve: "legacy-plan-id" },
+      readRemoteState: async () => { calls.remote++; },
+      inspectReadiness: async () => { calls.readiness++; },
+      runSourceRewalk: async () => { calls.rewalk++; },
+    }),
+    (error) => error instanceof ProvenanceRepairIncompleteError &&
+      error.code === "PROVENANCE_REPAIR_INCOMPLETE" &&
+      error.receipt?.status === "apply_schema_unsupported" &&
+      error.receipt?.complete === false &&
+      error.receipt?.required_schema_version === 2 &&
+      error.receipt?.fixed_count === 0,
+  );
+  assert.deepEqual(calls, { remote: 0, readiness: 0, rewalk: 0 });
+});
+
+test("every legacy approval and removal flag stops at the schema boundary", async () => {
+  await withManifest(async (manifest) => {
+    let runs = 0;
+    for (const flags of [
+      { source: "drive", apply: true, approve: "stale" },
+      { source: "drive", apply: true, approve: "legacy", "approve-removals": "4".repeat(64) },
+    ]) {
+      await assert.rejects(
+        cmdProvenanceRepair(manifest, {
+          flags,
+          readRemoteState: async () => assert.fail("apply must not read remote state"),
+          inspectReadiness: async () => assert.fail("apply must not inspect readiness"),
+          runSourceRewalk: async () => { runs++; },
+        }),
+        (error) => error instanceof ProvenanceRepairIncompleteError &&
+          error.receipt?.status === "apply_schema_unsupported" &&
+          error.receipt?.fixed_candidate_ids.length === 0,
+      );
+    }
+    assert.equal(runs, 0);
+  });
+});
+
+test("schema-1 readback preserves disappeared candidates as unresolved observations", () => {
   const before = provenanceRepairRemoteGeneration({
     inventory: inventory({ candidateCount: 2 }),
     recovery: recovery({ candidates: [candidate(), candidate(CANDIDATE_B)] }),
@@ -389,17 +365,31 @@ test("readback reports only actually absent candidates and withholds every claim
     recovery: recovery({ candidates: [candidate(CANDIDATE_B)] }),
     sourceId: "drive",
   });
-  const partial = provenanceRepairReadback({ before, after });
-  assert.equal(partial.status, "partial");
-  assert.deepEqual(partial.fixed_candidate_ids, [CANDIDATE_A]);
-  assert.deepEqual(partial.remaining_candidate_ids, [CANDIDATE_B]);
+  const result = provenanceRepairReadback({ before, after });
+  assert.equal(result.status, "unsupported_schema");
+  assert.equal(result.complete, false);
+  assert.deepEqual(result.fixed_candidate_ids, []);
+  assert.deepEqual(result.observed_absent_candidate_ids, [CANDIDATE_A]);
+  assert.deepEqual(result.unresolved_candidate_ids, [CANDIDATE_A, CANDIDATE_B]);
+  assert.deepEqual(result.remaining_candidate_ids, [CANDIDATE_A, CANDIDATE_B]);
+  assert.match(result.meaning, /deletion, replacement, refusal, or skip/);
 
   const unverifiedAfter = structuredClone(after);
   unverifiedAfter.source.receipt.latest_run.docs_failed = 1;
   const unverified = provenanceRepairReadback({ before, after: unverifiedAfter });
-  assert.equal(unverified.status, "unverified");
+  assert.equal(unverified.status, "unsupported_schema");
+  assert.equal(unverified.receipt.verified, false);
   assert.deepEqual(unverified.fixed_candidate_ids, []);
-  assert.equal(unverified.remaining_count, null);
+  assert.deepEqual(unverified.unresolved_candidate_ids, [CANDIDATE_A, CANDIDATE_B]);
+
+  assert.throws(
+    () => provenanceRepairReadback({ before, after, schemaVersion: 2 }),
+    /candidate-resolution ledger schema/,
+  );
+  assert.throws(
+    () => provenanceRepairReadback({ before, after, schemaVersion: 99 }),
+    /candidate-resolution ledger schema/,
+  );
 });
 
 test("provenance repair bypasses Wrangler custody but leaves other commands wrapped", async () => {

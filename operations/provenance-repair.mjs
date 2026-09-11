@@ -17,6 +17,28 @@ export const PROVENANCE_REPAIR_SOURCE_KINDS = Object.freeze([
   "calendar",
 ]);
 
+export const PROVENANCE_REPAIR_SCHEMA_VERSION = 1;
+
+/**
+ * Schema 1 can inventory recovery candidates, but it has no durable
+ * candidate-resolution ledger. In particular, it cannot distinguish a
+ * repaired record from one that was deleted, replaced, refused, or skipped.
+ */
+export function provenanceRepairApplyCompatibility(version) {
+  if (version === PROVENANCE_REPAIR_SCHEMA_VERSION) {
+    return Object.freeze({
+      supported: false,
+      required_schema_version: 2,
+      reason_code: "candidate_resolution_ledger_required",
+    });
+  }
+  return Object.freeze({
+    supported: false,
+    required_schema_version: 2,
+    reason_code: "unsupported_schema",
+  });
+}
+
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SNAPSHOT_RE = /^sha256:[a-f0-9]{64}$/;
 const CANDIDATE_RE = /^hmac-sha256:[a-f0-9]{64}$/;
@@ -168,8 +190,9 @@ export function provenanceRepairPlan({
       expectedIds.some((id) => !CANDIDATE_RE.test(id))) {
     throw new TypeError("provenance repair candidate IDs are invalid or duplicated");
   }
+  const applyCompatibility = provenanceRepairApplyCompatibility(PROVENANCE_REPAIR_SCHEMA_VERSION);
   const internal = {
-    schema_version: 1,
+    schema_version: PROVENANCE_REPAIR_SCHEMA_VERSION,
     operation: "provenance-repair",
     product_version: String(productVersion || ""),
     manifest_fingerprint: manifestFingerprint,
@@ -187,6 +210,7 @@ export function provenanceRepairPlan({
     readiness,
     rewalk,
     ocr,
+    apply_compatibility: applyCompatibility,
   };
   const planId = hash(internal);
   const supported = PROVENANCE_REPAIR_SOURCE_KINDS.includes(source.kind);
@@ -194,10 +218,11 @@ export function provenanceRepairPlan({
     ...readiness.blockers.map(String),
     ...(!supported ? [`source kind ${source.kind} has no supported full rewalk`] : []),
     ...(expectedIds.length === 0 ? ["this source has no current recovery candidates"] : []),
+    "schema 1 has no candidate-resolution ledger; deletion, replacement, refusal, or skip cannot prove repair",
   ];
 
   return Object.freeze({
-    schema_version: 1,
+    schema_version: PROVENANCE_REPAIR_SCHEMA_VERSION,
     operation: "provenance-repair",
     mode: "preview",
     read_only: true,
@@ -219,6 +244,7 @@ export function provenanceRepairPlan({
     readiness: Object.freeze({ ...readiness, blockers: Object.freeze([...readiness.blockers]) }),
     rewalk: Object.freeze({ ...rewalk }),
     ocr: Object.freeze({ ...ocr }),
+    apply_compatibility: applyCompatibility,
     effects: Object.freeze([
       "re-read and reingest the entire selected source through its existing supported ingest path",
       "create or update current source documents and reconcile split-document families",
@@ -266,7 +292,13 @@ export function renderProvenanceRepairPlan(plan, applyCommand) {
       `    ${applyCommand}`,
     );
   } else {
-    lines.push("", "  This plan cannot be applied:");
+    lines.push(
+      "",
+      "  Apply unavailable: schema 1 can inventory candidates but cannot distinguish repair from deletion or replacement.",
+      "  Schema 2 candidate-resolution evidence is required.",
+      "",
+      "  This plan cannot be applied:",
+    );
     for (const blocker of plan.blockers) lines.push(`    - ${blocker}`);
   }
   return `${lines.join("\n")}\n`;
@@ -296,47 +328,43 @@ function completedFullSweepReceipt(afterSource, beforeSource) {
   return Object.freeze({ verified: reasons.length === 0, reasons: Object.freeze(reasons) });
 }
 
-/** Compare exact opaque candidates only after the new full-sweep receipt passes. */
-export function provenanceRepairReadback({ before, after }) {
+/**
+ * Schema-1 readback is diagnostic only. Candidate disappearance is preserved
+ * as an observation, never promoted to a repair claim.
+ */
+export function provenanceRepairReadback({
+  before,
+  after,
+  schemaVersion = PROVENANCE_REPAIR_SCHEMA_VERSION,
+}) {
+  if (schemaVersion !== PROVENANCE_REPAIR_SCHEMA_VERSION) {
+    throw new TypeError("provenance repair readback requires an implemented candidate-resolution ledger schema");
+  }
   if (!before?.source || !after?.source ||
       before.source.source_id !== after.source.source_id ||
       before.source.kind !== after.source.kind) {
     throw new TypeError("provenance repair readback source identity changed");
   }
   const receipt = completedFullSweepReceipt(after.source, before.source);
-  if (!receipt.verified) {
-    return Object.freeze({
-      status: "unverified",
-      complete: false,
-      receipt,
-      fixed_candidate_ids: Object.freeze([]),
-      fixed_count: 0,
-      remaining_candidate_ids: Object.freeze([]),
-      remaining_count: null,
-      new_candidate_ids: Object.freeze([]),
-      new_count: null,
-      meaning: "The source rewalk may have changed records, but no candidate is called fixed because the exact full-sweep receipt did not verify.",
-    });
-  }
-
   const beforeIds = new Set(before.candidate_ids || []);
   const afterIds = new Set(after.candidate_ids || []);
-  const fixed = [...beforeIds].filter((id) => !afterIds.has(id)).sort();
-  const remaining = [...beforeIds].filter((id) => afterIds.has(id)).sort();
+  const observedAbsent = [...beforeIds].filter((id) => !afterIds.has(id)).sort();
+  const unresolved = [...beforeIds].sort();
   const introduced = [...afterIds].filter((id) => !beforeIds.has(id)).sort();
-  const complete = remaining.length === 0 && introduced.length === 0;
   return Object.freeze({
-    status: complete ? "complete" : fixed.length ? "partial" : "no_change",
-    complete,
+    status: "unsupported_schema",
+    complete: false,
     receipt,
-    fixed_candidate_ids: Object.freeze(fixed),
-    fixed_count: fixed.length,
-    remaining_candidate_ids: Object.freeze(remaining),
-    remaining_count: remaining.length,
+    fixed_candidate_ids: Object.freeze([]),
+    fixed_count: 0,
+    unresolved_candidate_ids: Object.freeze(unresolved),
+    unresolved_count: unresolved.length,
+    remaining_candidate_ids: Object.freeze(unresolved),
+    remaining_count: unresolved.length,
+    observed_absent_candidate_ids: Object.freeze(observedAbsent),
+    observed_absent_count: observedAbsent.length,
     new_candidate_ids: Object.freeze(introduced),
     new_count: introduced.length,
-    meaning: complete
-      ? "Every candidate in the approved source-level preview is absent from the fresh recovery readback."
-      : "Only candidates absent from the fresh recovery readback are called fixed; remaining and newly observed candidates stay unresolved.",
+    meaning: "Schema 1 has no candidate-resolution ledger. Absence may mean deletion, replacement, refusal, or skip, so every prior candidate remains unresolved and none is called repaired.",
   });
 }
