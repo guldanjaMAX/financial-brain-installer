@@ -36,6 +36,7 @@ export const SANDBOX_SCENARIOS = Object.freeze([
   { id: "document-journey", label: "Document processing journey", proof: "Teaching view of accepted, stored, projected, and query-visible states" },
   { id: "signin", label: "First passkey screen", proof: "Visual rehearsal only, no physical ceremony" },
   { id: "empty", label: "Healthy empty Brain", proof: "Shows the difference between empty and unavailable" },
+  { id: "zero-entities", label: "No financial entities yet", proof: "Owner can add one reviewed entity without guessing or combining records" },
   { id: "partial", label: "Partial financial evidence", proof: "One section unavailable while the rest remains usable" },
   { id: "degraded", label: "Degraded services", proof: "Unavailable data stays explicit and never becomes zero" },
   { id: "conflict", label: "Conflicting owner action", proof: "A stale decision or reused request ID refuses safely" },

@@ -30,7 +30,7 @@ export function PasskeyDiagnostics() {
   return (
     <Section
       title="Passkey checks"
-      blurb="These checks show whether passkeys are set up, whether a practice check worked, and whether someone independently tested the live Brain. A practice result is not a live result."
+      blurb="These checks show whether passkeys are set up and whether the Brain recorded a successful passkey action. The record does not identify where that action happened."
     >
       {error && <Attention>{error}</Attention>}
       {!status && !error && <Empty>Reading privacy-safe passkey checks.</Empty>}
@@ -51,19 +51,13 @@ export function PasskeyStatusDetails({ status }: { status: PasskeyStatus }) {
           detail="The Brain has the settings needed to use passkeys."
         />
         <Proof
-          label="Practice check"
+          label="Successful passkey activity"
           value={status.proof.locally_verified}
-          positive="A local check worked"
-          negative="No local check yet"
-          detail="A privacy-safe result shows whether passkey setup worked in a practice environment."
+          positive="A successful action is recorded"
+          negative="No successful action is recorded"
+          detail="This privacy-safe result does not identify the address or environment where the action happened."
         />
-        <Proof
-          label="Your live Brain"
-          value={status.proof.live_proven}
-          positive="A live check worked"
-          negative="Not checked live yet"
-          detail="This requires an independent check at your Brain's normal web address."
-        />
+        <ProofBoundary />
       </div>
       <Note>
         Passkeys are tied to this web address: {status.rp_id}. {status.devices.owner} owner {status.devices.owner === 1 ? "passkey" : "passkeys"} and {status.devices.grant} shared-document {status.devices.grant === 1 ? "passkey" : "passkeys"} are recorded.
@@ -86,6 +80,20 @@ export function PasskeyStatusDetails({ status }: { status: PasskeyStatus }) {
       ))}
       <Note>{status.privacy}</Note>
     </>
+  );
+}
+
+function ProofBoundary() {
+  // The status receipt does not currently carry independently attributable
+  // environment evidence. Do not infer it from a successful passkey event.
+  return (
+    <div className="p-4 border-b sm:border-b-0 sm:border-r border-line last:border-0">
+      <p className="text-[13px] font-medium">Where it happened</p>
+      <p className="mt-1 text-[13.5px] font-semibold text-amber-800">Not identified</p>
+      <p className="mt-1 text-[12.5px] text-ink-soft leading-relaxed">
+        This status does not identify the address or environment and is not proof of an independent check.
+      </p>
+    </div>
   );
 }
 

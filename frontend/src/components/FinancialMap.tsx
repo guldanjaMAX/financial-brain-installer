@@ -435,25 +435,67 @@ export function FinancialMapAssistantPath({ action, onReadLatest }: {
   action: "create" | "correct";
   onReadLatest: () => void;
 }) {
-  const verb = action === "correct" ? "correct" : "create";
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const prompt = financialMapAssistantPrompt(action);
+  const copyPrompt = async () => {
+    setCopyState(await copyFinancialMapAssistantPrompt(action) ? "copied" : "failed");
+  };
   return (
     <section className="mt-5 rounded-2xl border border-line bg-card px-4 py-4 sm:px-5">
       <h2 className="text-[15px] font-semibold">{action === "correct" ? "Create a corrected review" : "Create a review with your assistant"}</h2>
       <p className="mt-1.5 text-[13.5px] leading-relaxed text-ink-soft">
         Open Claude Code or Codex where it is already connected to this Brain, then paste this request:
       </p>
-      <blockquote className="mt-3 rounded-xl border border-line bg-paper px-3 py-3 text-[13.5px] leading-relaxed text-ink">
-        Help me {verb} my complete Owner Financial Map. Use <code>brain_financial_map</code> in read mode first,
-        ask me one short question at a time, and do not infer missing answers. When the map is complete, explain
-        that preview mode writes one expiring review copy and ask for my approval before using it.
-      </blockquote>
+      <blockquote className="mt-3 rounded-xl border border-line bg-paper px-3 py-3 text-[13.5px] leading-relaxed text-ink">{prompt}</blockquote>
+      <button
+        type="button"
+        aria-describedby="financial-map-copy-boundary"
+        onClick={copyPrompt}
+        className="mt-3 rounded-lg border border-line-strong bg-paper px-3 py-2 text-[13px] font-semibold text-ink hover:bg-card"
+      >
+        {copyState === "copied" ? "Copied" : "Copy request"}
+      </button>
+      {copyState === "failed" && (
+        <p role="status" className="mt-2 text-[12.5px] leading-relaxed text-amber-900">
+          This browser could not copy the request. Select the request above and copy it manually. Nothing changed.
+        </p>
+      )}
+      {copyState === "copied" && (
+        <p role="status" className="mt-2 text-[12.5px] leading-relaxed text-emerald-800">
+          Request copied. Nothing was read, created, or confirmed.
+        </p>
+      )}
       <p className="mt-3 text-[12.5px] leading-relaxed text-ink-soft">
         The assistant can read the map and, only after that separate approval, create a preview. It cannot confirm the map.
         After it says the preview is ready, return here and read the latest map.
       </p>
+      <p id="financial-map-copy-boundary" className="mt-2 text-[12.5px] leading-relaxed text-ink-soft">
+        Copying only places this request on your clipboard. It does not contact the Brain, create a preview, or confirm a map.
+      </p>
       <ReadLatestMapButton onClick={onReadLatest} />
     </section>
   );
+}
+
+export function financialMapAssistantPrompt(action: "create" | "correct"): string {
+  const verb = action === "correct" ? "correct" : "create";
+  return `Help me ${verb} my complete Owner Financial Map. Use brain_financial_map in read mode first, ask me one short question at a time, and do not infer missing answers. When the map is complete, explain that preview mode writes one expiring review copy and ask for my approval before using it.`;
+}
+
+export async function copyFinancialMapAssistantPrompt(
+  action: "create" | "correct",
+  writeText?: (value: string) => Promise<void>,
+): Promise<boolean> {
+  try {
+    const writer = writeText ?? (typeof navigator !== "undefined" && navigator.clipboard?.writeText
+      ? navigator.clipboard.writeText.bind(navigator.clipboard)
+      : null);
+    if (!writer) return false;
+    await writer(financialMapAssistantPrompt(action));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function ReadLatestMapButton({ onClick }: { onClick: () => void }) {
@@ -634,14 +676,40 @@ export function FinancialMapCorrectionChoice({
   onContinue: () => void;
   onReadLatest: () => void;
 }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const prompt = financialMapAssistantPrompt("correct");
+  const copyPrompt = async () => {
+    setCopyState(await copyFinancialMapAssistantPrompt("correct") ? "copied" : "failed");
+  };
+
   if (requested) {
     return (
       <div role="status" className="mt-5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-4 text-amber-950">
         <h3 className="text-[14px] font-semibold">Stop here and correct the preview</h3>
         <p className="mt-1.5 text-[13.5px] leading-relaxed">
-          Open Claude Code or Codex where it is connected to this Brain. Tell it what is wrong, ask it to use <code>brain_financial_map</code>
-          in read mode, and ask it to help you correct the complete map one question at a time. It must explain the preview write
-          and ask for your approval before using preview mode.
+          Open Claude Code or Codex where it is already connected to this Brain. Tell it what was wrong, then paste this exact request:
+        </p>
+        <blockquote className="mt-3 rounded-xl border border-amber-300 bg-white px-3 py-3 text-[13.5px] leading-relaxed text-amber-950">{prompt}</blockquote>
+        <button
+          type="button"
+          aria-describedby="financial-map-correction-copy-boundary"
+          onClick={copyPrompt}
+          className="mt-3 rounded-lg border border-amber-400 bg-white px-3 py-2 text-[13px] font-semibold text-amber-950 hover:bg-amber-100"
+        >
+          {copyState === "copied" ? "Copied" : "Copy request"}
+        </button>
+        {copyState === "failed" && (
+          <p className="mt-2 text-[12.5px] leading-relaxed">
+            This browser could not copy the request. Select the request above and copy it manually. Nothing changed.
+          </p>
+        )}
+        {copyState === "copied" && (
+          <p className="mt-2 text-[12.5px] leading-relaxed">
+            Request copied. Nothing was read, created, or confirmed.
+          </p>
+        )}
+        <p id="financial-map-correction-copy-boundary" className="mt-2 text-[12.5px] leading-relaxed">
+          Copying only places this request on your clipboard. It does not contact the Brain, create a preview, or confirm a map.
         </p>
         <p className="mt-1.5 text-[12.5px] leading-relaxed">
           This choice did not activate or change anything, and no passkey window opened. After the assistant says the fresh preview is ready,

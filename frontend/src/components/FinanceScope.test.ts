@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { FinEntity } from "../lib/api";
 import {
-  entityScopeState, financeScopeLabel, retainExplicitEntityScope, savedDefaultEntityScope,
-  savedDefaultStillApplies, scopeStatusMessage,
+  entityScopeState, financeScopeLabel, firstEntitySlug, matchingEntityCreateReceipt,
+  retainExplicitEntityScope, savedDefaultEntityScope, savedDefaultStillApplies,
+  scopeStatusMessage,
 } from "./FinanceScope";
 
 const entities: FinEntity[] = [
@@ -109,5 +110,38 @@ describe("explicit financial-entity scope", () => {
     expect(scopeStatusMessage("not_installed", false)?.detail).toContain("whole-Brain read-only page");
     expect(scopeStatusMessage("unavailable", true)?.detail).toContain("Nothing has been added or changed");
     expect(scopeStatusMessage("ready", true)).toBeNull();
+  });
+
+  it("creates a private transport slug without treating the owner's label as an identifier", () => {
+    const first = firstEntitySlug(" Rivera & Family, LLC ", "entity_12345678");
+    expect(first).toBe("rivera-family-llc-12345678");
+    expect(first).toMatch(/^[a-z0-9][a-z0-9_-]{0,63}$/);
+    expect(firstEntitySlug("Rivera & Family, LLC", "entity_87654321")).not.toBe(first);
+    expect(firstEntitySlug("家族", "entity_12345678")).toBe("entity-12345678");
+  });
+
+  it("accepts only the exact first-entity receipt before selecting it", () => {
+    const review = {
+      legalName: "Rivera Household",
+      kind: "household" as const,
+      requestId: "entity_12345678",
+      entitySlug: "rivera-household-12345678",
+    };
+    const receipt = {
+      request_id: review.requestId,
+      entity_scope: { entity_slug: review.entitySlug },
+      entity: {
+        entity_slug: review.entitySlug,
+        legal_name: review.legalName,
+        kind: review.kind,
+      },
+      changed: true,
+      replayed: false,
+    };
+    expect(matchingEntityCreateReceipt(receipt, review)).toBe(true);
+    expect(matchingEntityCreateReceipt({
+      ...receipt, entity_scope: { entity_slug: "another-entity" },
+    }, review)).toBe(false);
+    expect(matchingEntityCreateReceipt({ ...receipt, replayed: undefined }, review)).toBe(false);
   });
 });

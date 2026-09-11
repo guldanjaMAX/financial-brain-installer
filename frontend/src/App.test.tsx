@@ -114,7 +114,7 @@ describe("principal workspace routing", () => {
     expect(access).not.toContain("Select one person, household, business, trust, property, or investment");
   });
 
-  it("waits for inventory, then requires a choice while allowing safe fallback reads", () => {
+  it("waits for inventory, quarantines saved scope, then allows safe fallback reads", () => {
     expect(ownerViewScopeGate("home", false, "checking")).toBe("checking");
     expect(ownerViewScopeGate("documents", false, "unavailable")).toBeNull();
     expect(ownerViewScopeGate("ask", false, "not_installed")).toBeNull();
@@ -141,7 +141,7 @@ describe("principal workspace routing", () => {
       setItem: () => undefined,
       removeItem: () => undefined,
     });
-    const explicitAll = renderToStaticMarkup(
+    const savedAllStillChecking = renderToStaticMarkup(
       <FinanceScopeProvider>
         <OwnerWorkspace
           owner="Morgan Example"
@@ -152,8 +152,9 @@ describe("principal workspace routing", () => {
         />
       </FinanceScopeProvider>,
     );
-    expect(explicitAll).toContain("What deserves your attention");
-    expect(explicitAll).not.toContain("Choose one part of your finances or Whole Brain");
+    expect(savedAllStillChecking).toContain("Checking your financial list");
+    expect(savedAllStillChecking).not.toContain("What deserves your attention");
+    expect(savedAllStillChecking).not.toContain("Choose one part of your finances or Whole Brain");
   });
 
   it("renders no owner navigation or owner-only route in the grant shell", () => {

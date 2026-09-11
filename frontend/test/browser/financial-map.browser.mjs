@@ -100,12 +100,16 @@ async function fresh({
   await page.addInitScript(({ cancelPrompt }) => {
     window.__passkeyPromptCalls = 0;
     window.__clipboardCalls = 0;
+    window.__copiedRequest = null;
     Object.defineProperty(window, "PublicKeyCredential", {
       configurable: true, value: function SyntheticPublicKeyCredential() {},
     });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
-      value: { writeText: async () => { window.__clipboardCalls += 1; } },
+      value: { writeText: async value => {
+        window.__clipboardCalls += 1;
+        window.__copiedRequest = value;
+      } },
     });
     Object.defineProperty(navigator, "credentials", {
       configurable: true,
@@ -227,11 +231,30 @@ try {
       && state.options === 0 && state.activations.length === 0);
     check("correction stops confirmation until the owner returns to review",
       await page.getByRole("button", { name: "Create a fresh preview before confirming", exact: true }).isDisabled());
+    const correctionText = await page.locator("body").innerText();
+    check("the correction path supplies the bounded one-question-at-a-time request",
+      correctionText.includes("Use brain_financial_map in read mode first")
+      && correctionText.includes("ask me one short question at a time")
+      && correctionText.includes("ask for my approval before using it"));
+    check("the correction copy action explains that it cannot change the Brain",
+      correctionText.includes("does not contact the Brain, create a preview, or confirm a map"));
+    const displayedCorrectionPrompt = await page.locator("blockquote").innerText();
+    await page.getByRole("button", { name: "Copy request", exact: true }).click();
+    await page.getByRole("button", { name: "Copied", exact: true }).waitFor();
+    check("the correction path copies exactly the displayed bounded request",
+      await page.evaluate(expected => window.__clipboardCalls === 1
+        && typeof window.__copiedRequest === "string"
+        && window.__copiedRequest === expected
+        && window.__copiedRequest.includes("Use brain_financial_map in read mode first")
+        && window.__copiedRequest.includes("ask for my approval before using it"), displayedCorrectionPrompt));
+    check("copying the correction request invokes no passkey, options request, or activation",
+      await page.evaluate(() => window.__passkeyPromptCalls) === 0
+      && state.options === 0 && state.activations.length === 0);
     check("the correction state has no horizontal overflow",
       await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    check("the correction state leaks no selectors, hashes, storage, URL, or clipboard data", !(await page.locator("body").innerText()).includes("ofmp_")
+    check("the correction state leaks no selectors, hashes, storage, or URL data", !(await page.locator("body").innerText()).includes("ofmp_")
       && !page.url().includes("ofmp_")
-      && await page.evaluate(() => localStorage.length === 0 && sessionStorage.length === 0 && window.__clipboardCalls === 0));
+      && await page.evaluate(() => localStorage.length === 0 && sessionStorage.length === 0));
     await page.screenshot({ path: path.join(output, "financial-map-correction-mobile.png"), fullPage: true });
     await page.getByRole("button", { name: "Keep reviewing this preview", exact: true }).click();
     check("returning to review still invokes no passkey or activation",
@@ -241,9 +264,16 @@ try {
     await page.getByText(/Nothing was confirmed or changed/).waitFor();
     check("cancelling the passkey activates nothing",
       await page.evaluate(() => window.__passkeyPromptCalls) === 1 && state.activations.length === 0);
-    check("selectors and hashes never enter UI, URL, storage, or clipboard", !(await page.locator("body").innerText()).includes("ofmp_")
+    check("selectors and hashes never enter UI, URL, storage, or the bounded clipboard request", !(await page.locator("body").innerText()).includes("ofmp_")
       && !page.url().includes("ofmp_")
-      && await page.evaluate(() => localStorage.length === 0 && sessionStorage.length === 0 && window.__clipboardCalls === 0));
+      && await page.evaluate(({ selector, hash, denominator }) => localStorage.length === 0
+        && sessionStorage.length === 0
+        && window.__clipboardCalls === 1
+        && !window.__copiedRequest.includes(selector)
+        && !window.__copiedRequest.includes(hash)
+        && !window.__copiedRequest.includes(denominator), {
+        selector: reviewId, hash: mapHash, denominator: denominatorHash,
+      }));
     await page.close();
   }
 
@@ -342,6 +372,44 @@ try {
     check("a stale confirmed map is not presented as current for completeness checks",
       text.includes("Create a corrected review") &&
       !text.includes("latest confirmed map remains available for future completeness checks"));
+    await page.close();
+  }
+
+  {
+    const page = await harness.newPage({ viewport: { width: 390, height: 844 } });
+    await page.addInitScript(() => {
+      window.__copiedRequests = [];
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: async value => { window.__copiedRequests.push(value); } },
+      });
+    });
+    let reviewRequests = 0;
+    await page.route("**/api/**", route => {
+      const endpoint = new URL(route.request().url()).pathname;
+      assert.equal(endpoint, "/api/owner/financial-map/review");
+      reviewRequests += 1;
+      return route.fulfill({ json: {
+        status: "no_pending_review", review_state: "none", complete: true, truncated: false,
+        active_map_present: false, active_map_authoritative: false, active_sequence: null,
+        active_map_hash: null, active_denominator_hash: null, active_activated_at: null,
+        owner_message: "No Financial Map is waiting for review.",
+      } });
+    });
+    await page.goto(new URL("/test/browser/fixtures/financial-map.html", harness.origin).href);
+    await page.getByRole("button", { name: "Copy request", exact: true }).waitFor();
+    const before = await page.locator("body").innerText();
+    check("the copy action explains that it cannot create or confirm a map",
+      before.includes("does not contact the Brain, create a preview, or confirm a map"));
+    await page.getByRole("button", { name: "Copy request", exact: true }).click();
+    await page.getByRole("button", { name: "Copied", exact: true }).waitFor();
+    const copied = await page.evaluate(() => window.__copiedRequests);
+    check("one tap copies exactly one bounded assistant request",
+      copied.length === 1 && copied[0].includes("Use brain_financial_map in read mode first")
+      && copied[0].includes("ask for my approval before using it"));
+    check("copying the assistant request performs no Brain write or activation",
+      reviewRequests === 1 && await page.evaluate(() => localStorage.length === 0 && sessionStorage.length === 0));
+    await page.screenshot({ path: path.join(output, "financial-map-assistant-mobile.png"), fullPage: true });
     await page.close();
   }
 

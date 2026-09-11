@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { FinEntity } from "../lib/api";
+import { FirstEntitySetup } from "./FinanceScope";
 import { ScopeBar } from "./ScopeBar";
 
 const entities: FinEntity[] = [
@@ -71,5 +72,21 @@ describe("financial-entity scope choice", () => {
     expect(html).toContain("Selected");
     expect(html).not.toContain("Choose one part of your finances to continue");
     expect(html).toMatch(/aria-pressed="true"[^>]*>Household<\/button>/);
+  });
+
+  it("gives a zero-entity owner a reviewed creation path without guessing completeness", () => {
+    const html = renderToStaticMarkup(
+      <FirstEntitySetup refresh={async () => []} select={vi.fn()} />,
+    );
+
+    expect(html).toContain("Add your first financial entity");
+    expect(html).toContain("Nothing has been guessed or combined");
+    expect(html).toContain("does not import an account, decide a tax treatment, or claim that your Financial Map is complete");
+    expect(html).toContain("Exact name");
+    expect(html).toContain("What is it?");
+    expect(html).toContain("Choose one");
+    expect(html).not.toContain('value="household" selected');
+    expect(html).toContain(">Review</button>");
+    expect(html).toContain("Do not guess");
   });
 });

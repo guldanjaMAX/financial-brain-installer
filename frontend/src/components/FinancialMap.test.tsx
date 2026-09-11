@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../lib/api";
 import type { FinancialMapReview, MapReviewField } from "../lib/financial-map";
 import {
-  exactReviewedMapIsActive, financialMapReadFailure, FinancialMapAssistantPath,
+  copyFinancialMapAssistantPrompt, exactReviewedMapIsActive, financialMapAssistantPrompt,
+  financialMapReadFailure, FinancialMapAssistantPath,
   FinancialMapCorrectionChoice, FinancialMapFieldList,
 } from "./FinancialMap";
 
@@ -90,8 +91,26 @@ describe("Financial Map review clarity", () => {
     expect(html).toContain("read mode first");
     expect(html).toContain("ask for my approval before using it");
     expect(html).toContain("It cannot confirm the map");
+    expect(html).toContain("Copy request");
+    expect(html).toContain("does not contact the Brain, create a preview, or confirm a map");
     expect(html).toContain("Read latest map");
     expect(onReadLatest).not.toHaveBeenCalled();
+  });
+
+  it("copies only the exact non-authorizing assistant request", async () => {
+    const writeText = vi.fn(async () => undefined);
+
+    await expect(copyFinancialMapAssistantPrompt("correct", writeText)).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(writeText).toHaveBeenCalledWith(financialMapAssistantPrompt("correct"));
+    expect(financialMapAssistantPrompt("correct")).toContain("read mode first");
+    expect(financialMapAssistantPrompt("correct")).toContain("ask for my approval before using it");
+  });
+
+  it("fails closed when clipboard access is unavailable", async () => {
+    const writeText = vi.fn(async () => { throw new Error("clipboard blocked"); });
+
+    await expect(copyFinancialMapAssistantPrompt("create", writeText)).resolves.toBe(false);
   });
 
   it("renders a correction stop without invoking callbacks or a passkey prompt", () => {
@@ -134,8 +153,11 @@ describe("Financial Map review clarity", () => {
 
     expect(html).toContain('role="status"');
     expect(html).toContain("Stop here and correct the preview");
-    expect(html).toContain("Open Claude Code or Codex where it is connected to this Brain");
-    expect(html).toContain("brain_financial_map");
+    expect(html).toContain("Open Claude Code or Codex where it is already connected to this Brain");
+    expect(html).toContain(financialMapAssistantPrompt("correct"));
+    expect(html).toContain("Copy request");
+    expect(html).toContain("Copying only places this request on your clipboard");
+    expect(html).toContain("does not contact the Brain, create a preview, or confirm a map");
     expect(html).toContain("Read latest map");
     expect(html).toContain("did not activate or change anything");
     expect(html).toContain("no passkey window opened");

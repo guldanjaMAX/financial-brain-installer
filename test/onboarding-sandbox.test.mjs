@@ -119,7 +119,7 @@ test("healthy-empty stays empty when the owner moves from Home to Explore", () =
 
 test("the scenario menu covers happy, empty, unavailable, retry, conflict, and scoped-access states", () => {
   const ids = new Set(SANDBOX_SCENARIOS.map((scenario) => scenario.id));
-  for (const id of ["populated", "financial-map", "document-journey", "empty", "partial", "degraded", "conflict", "idempotent", "grant", "grant-unavailable", "signin"]) {
+  for (const id of ["populated", "financial-map", "document-journey", "empty", "zero-entities", "partial", "degraded", "conflict", "idempotent", "grant", "grant-unavailable", "signin"]) {
     assert.ok(ids.has(id), `missing ${id}`);
   }
 });

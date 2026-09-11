@@ -243,7 +243,7 @@ function snapshotFor(sections, entitySlug, scenario) {
       ? new Set(["obligations"])
       : new Set();
   const values = {
-    entities,
+    entities: scenario === "zero-entities" ? [] : entities,
     accounts: empty ? [] : filterRows(accounts, entitySlug),
     documents: empty ? [] : filterRows(documents, entitySlug),
     deadlines: empty ? [] : filterRows(deadlines, entitySlug),
