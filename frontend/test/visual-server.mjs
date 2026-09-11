@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ownerThinkResponse } from "./rehearsal-responses.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(HERE, "..", "dist");
@@ -484,7 +485,7 @@ const server = createServer(async (request, response) => {
       ? { answer: null, answer_error: "search unavailable", status: "unavailable", degraded: "vector" }
       : scenario === "scope-mismatch"
         ? { answer: "This answer was not safely narrowed.", entity_scope: { entity_slug: null, applied: false }, filter_not_applied: true }
-        : { answer: "Mesa Coffee has one confirmed cash figure as of July 31. [1] The rental account is not included because no confirmed figure is recorded.", entity_scope: { entity_slug: body.entity_slug || null, applied: Boolean(body.entity_slug) }, degraded: body.entity_slug ? "vector" : undefined, degraded_reason: body.entity_slug ? "entity-vector-authority-unindexed" : undefined, confidence: { percent: 86, band: "high", basis: ["Strongest evidence is T1 primary: named like an authoritative record (statement)", "One known account is explicitly missing"] }, citations: [{ n: 1, title: "Mesa Coffee checking, July 2026", source: "drive", ts: "2026-07-31", authority: { tier: "T1", rank: 1, name: "primary", reason: "named like an authoritative record (statement)", eligible: true, authoritative: true } }] });
+        : ownerThinkResponse(scenario, body.entity_slug));
   }
 
   const requested = url.pathname === "/" || url.pathname === "/app" ? "index.html" : url.pathname.replace(/^\//, "");

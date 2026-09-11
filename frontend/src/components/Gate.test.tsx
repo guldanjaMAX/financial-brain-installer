@@ -1,7 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Gate } from "./Gate";
-import { AddPasskeyContext } from "./Settings";
+import { ApiError } from "../lib/api";
+import { FinanceScopeProvider } from "./FinanceScope";
+import { Gate, gatePasskeyFailure } from "./Gate";
+import { AddPasskeyContext, Settings, addPasskeyFailure } from "./Settings";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -68,5 +70,51 @@ describe("passkey ceremony context", () => {
     expect(html).toContain("Complete that system step yourself");
     expect(html).toContain("Continue to my device");
     expect(html).toContain("Cancel");
+  });
+
+  it("turns a missing passkey route into calm context and a real next step", () => {
+    const raw404 = new ApiError(404, { error: "not found" }, "HTTP 404");
+    const gate = gatePasskeyFailure(raw404, { enrolling: true, rehearsal: false });
+    const add = addPasskeyFailure(raw404, false);
+
+    expect(gate.unavailable).toBe(true);
+    expect(gate.message).toContain("No passkey was enrolled");
+    expect(gate.message).toContain("Ask your installer for a fresh private setup link");
+    expect(gate.message).not.toContain("404");
+    expect(add.unavailable).toBe(true);
+    expect(add.message).toContain("No passkey was added");
+    expect(add.message).toContain("Reload Access once");
+    expect(add.message).not.toContain("404");
+  });
+
+  it("preserves a real non-404 passkey error", () => {
+    const failure = addPasskeyFailure(new Error("The device declined the passkey request."), false);
+    expect(failure).toEqual({
+      message: "The device declined the passkey request.",
+      unavailable: false,
+    });
+  });
+
+  it("labels passkey actions unavailable in rehearsal before they can look live", () => {
+    vi.stubGlobal("window", { PublicKeyCredential: class {} });
+    vi.stubGlobal("location", { hostname: "127.0.0.1", search: "?state=populated" });
+    const gate = renderToStaticMarkup(
+      <Gate owner="Dana Owner" inviteCode="local-rehearsal-only" onIn={() => undefined} />,
+    );
+    const settings = renderToStaticMarkup(
+      <FinanceScopeProvider>
+        <Settings devices={[]} connections={[]} onChange={() => undefined} />
+      </FinanceScopeProvider>,
+    );
+
+    expect(gate).toContain("intentionally unavailable in this local rehearsal");
+    expect(gate).toContain("Passkey setup unavailable here");
+    expect(gate).toContain("disabled");
+    expect(settings).toContain("Adding a passkey is intentionally unavailable in this local rehearsal");
+    expect(settings).toContain("Passkey setup unavailable");
+    expect(settings).not.toContain("Continue to my device");
+    expect(settings.indexOf("Your passkeys")).toBeLessThan(settings.indexOf("Passkey checks"));
+    expect(settings.indexOf("Passkey checks")).toBeLessThan(settings.indexOf("Shared document access"));
+    expect(settings.indexOf("Passkey checks")).toBeLessThan(settings.indexOf("Owner preferences"));
   });
 });

@@ -46,15 +46,52 @@ function responseMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-function failedState(error: unknown): PageState {
+export function financialMapReadFailure(error: unknown): PageState {
   if (error instanceof ApiError) {
-    if (error.status === 404) return { kind: "missing", message: responseMessage(error, "No Financial Map is waiting for review.") };
-    if (error.status === 410) return { kind: "expired", message: responseMessage(error, "This Financial Map review expired.") };
-    if (error.status === 409) return { kind: "stale", message: responseMessage(error, "This Financial Map review is no longer current.") };
+    if (error.status === 404) {
+      return {
+        kind: "unavailable",
+        message: "Financial Map is not available on this Brain yet. This is not an empty review queue. Update the Brain or ask the installer to finish enabling Financial Map, then try again.",
+      };
+    }
+    if (error.status === 410) return { kind: "expired", message: "This Financial Map review expired. Nothing was activated." };
+    if (error.status === 409) {
+      return {
+        kind: "stale",
+        message: "This Financial Map review is no longer current. Read the latest map before deciding again.",
+      };
+    }
   }
   return {
     kind: "unavailable",
     message: responseMessage(error, "The complete Financial Map review could not be read. Nothing was treated as empty or confirmed."),
+  };
+}
+
+export function exactReviewedMapIsActive(value: unknown, review: FinancialMapReview): boolean {
+  return validFinancialMapNoPending(value) && value.active_map_present &&
+    value.active_map_authoritative && value.active_sequence === review.expected_sequence &&
+    value.active_map_hash === review.map_hash &&
+    value.active_denominator_hash === review.denominator_hash;
+}
+
+function activationConflictMessage(error: ApiError): PageState {
+  const code = typeof error.body.code === "string" ? error.body.code : null;
+  if (code === "owner_financial_map_preview_not_found") {
+    return {
+      kind: "missing",
+      message: "This exact Financial Map review could not be found, and the Brain did not show that reviewed map as active. Create and review a fresh preview before deciding again.",
+    };
+  }
+  if (code === "owner_financial_map_preview_stale") {
+    return {
+      kind: "stale",
+      message: "The map or its supporting records changed after this review was prepared. The Brain did not show this reviewed map as active. Read the latest map before deciding again.",
+    };
+  }
+  return {
+    kind: "stale",
+    message: "The confirmation could not be completed because this review was already used or the current map changed. The Brain did not show this exact reviewed map as active. Read the latest map before deciding again.",
   };
 }
 
@@ -66,6 +103,7 @@ function sameCounts(left: FinancialMapReview["counts"], right: FinancialMapRevie
 
 export function FinancialMap() {
   const [state, setState] = useState<PageState>({ kind: "loading" });
+  const [readRevision, setReadRevision] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [correctionRequested, setCorrectionRequested] = useState(false);
   const [ceremonyNote, setCeremonyNote] = useState<string | null>(null);
@@ -77,7 +115,19 @@ export function FinancialMap() {
       .then((value) => {
         if (!current) return;
         if (validFinancialMapNoPending(value)) {
-          setState({ kind: "idle", message: value.owner_message });
+          if (value.active_map_present && !value.active_map_authoritative) {
+            setState({
+              kind: "stale",
+              message: "Your last confirmed Financial Map no longer matches the Brain's current records, so it is not being treated as a current completeness map. Create and review a fresh preview before relying on it.",
+            });
+            return;
+          }
+          setState({
+            kind: "idle",
+            message: value.active_map_present
+              ? "No Financial Map is waiting for review. The latest confirmed map remains available for future completeness checks."
+              : "No Financial Map is waiting for review.",
+          });
           return;
         }
         if (!validFinancialMapReview(value)) {
@@ -89,9 +139,19 @@ export function FinancialMap() {
         }
         setState({ kind: "ready", review: value });
       })
-      .catch((error) => { if (current) setState(failedState(error)); });
+      .catch((error) => { if (current) setState(financialMapReadFailure(error)); });
     return () => { current = false; };
-  }, []);
+  }, [readRevision]);
+
+  const readLatestMap = () => {
+    // Recovery reads are offered only when no signed activation response is
+    // unresolved. Starting one clears this page's non-authorizing review UI.
+    attempt.current = null;
+    setCorrectionRequested(false);
+    setCeremonyNote(null);
+    setState({ kind: "loading" });
+    setReadRevision((current) => current + 1);
+  };
 
   const confirm = async (review: FinancialMapReview) => {
     setConfirming(true);
@@ -148,7 +208,31 @@ export function FinancialMap() {
       if (error instanceof PasskeyCeremonyCancelledError) {
         setCeremonyNote(error.message);
       } else {
-        const next = failedState(error);
+        if (error instanceof ApiError && [404, 409].includes(error.status) && !receiptVerified) {
+          // These refusals can also mean another tab already used the preview.
+          // Re-read the authoritative head before telling the owner what happened.
+          attempt.current = null;
+          try {
+            const active = await api<unknown>("/api/owner/financial-map/review", {});
+            if (exactReviewedMapIsActive(active, review)) {
+              setState({ kind: "activated" });
+            } else if (validFinancialMapNoPending(active) || validFinancialMapReview(active)) {
+              setState(activationConflictMessage(error));
+            } else {
+              setState({
+                kind: "unavailable",
+                message: "The confirmation was refused, but the Brain did not return a complete current map for verification. Do not assume it was confirmed. Read the latest map before taking another action.",
+              });
+            }
+          } catch {
+            setState({
+              kind: "unavailable",
+              message: "The confirmation was refused, and the Brain could not verify whether this reviewed map is active. Do not repeat the confirmation. Read the latest map before taking another action.",
+            });
+          }
+          return;
+        }
+        const next = financialMapReadFailure(error);
         const conclusiveActivationRefusal = error instanceof ApiError && error.status >= 400 &&
           error.status < 500 && !receiptVerified;
         if (conclusiveActivationRefusal) attempt.current = null;
@@ -173,16 +257,36 @@ export function FinancialMap() {
     return <PageShell><Empty>Reading the complete Financial Map review.</Empty></PageShell>;
   }
   if (state.kind === "missing") {
-    return <PageShell><TruthNote>{state.message} Complete the guided interview in Claude Code or Codex, then return here.</TruthNote></PageShell>;
+    return (
+      <PageShell>
+        <TruthNote>{state.message}</TruthNote>
+        <FinancialMapAssistantPath action="create" onReadLatest={readLatestMap} />
+      </PageShell>
+    );
   }
   if (state.kind === "idle") {
-    return <PageShell><TruthNote>{state.message}</TruthNote></PageShell>;
+    return (
+      <PageShell>
+        <TruthNote>{state.message}</TruthNote>
+        <FinancialMapAssistantPath action="create" onReadLatest={readLatestMap} />
+      </PageShell>
+    );
   }
   if (state.kind === "expired" || state.kind === "stale") {
-    return <PageShell><Attention>{state.message} Complete a fresh guided interview before confirming a map.</Attention></PageShell>;
+    return (
+      <PageShell>
+        <Attention>{state.message}</Attention>
+        <FinancialMapAssistantPath action="correct" onReadLatest={readLatestMap} />
+      </PageShell>
+    );
   }
   if (state.kind === "unavailable") {
-    return <PageShell><Attention>{state.message}</Attention></PageShell>;
+    return (
+      <PageShell>
+        <Attention>{state.message}</Attention>
+        <ReadLatestMapButton onClick={readLatestMap} />
+      </PageShell>
+    );
   }
   if (state.kind === "activated") {
     return (
@@ -202,7 +306,7 @@ export function FinancialMap() {
   return (
     <PageShell>
       <TruthNote>
-        This is a review, not a change. It shows the complete map prepared during your guided interview,
+        This is a review, not a change. It shows the complete map prepared with your connected Claude Code or Codex assistant,
         including what the Brain currently holds and anything that remains unknown or different.
       </TruthNote>
 
@@ -289,6 +393,7 @@ export function FinancialMap() {
             setCorrectionRequested(true);
           }}
           onContinue={() => setCorrectionRequested(false)}
+          onReadLatest={readLatestMap}
         />
         {ceremonyNote && <div role="status" className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[13.5px] text-amber-900">{ceremonyNote}</div>}
         <button
@@ -323,6 +428,43 @@ function PageShell({ children }: { children: ReactNode }) {
       </p>
       <div className="mt-6">{children}</div>
     </div>
+  );
+}
+
+export function FinancialMapAssistantPath({ action, onReadLatest }: {
+  action: "create" | "correct";
+  onReadLatest: () => void;
+}) {
+  const verb = action === "correct" ? "correct" : "create";
+  return (
+    <section className="mt-5 rounded-2xl border border-line bg-card px-4 py-4 sm:px-5">
+      <h2 className="text-[15px] font-semibold">{action === "correct" ? "Create a corrected review" : "Create a review with your assistant"}</h2>
+      <p className="mt-1.5 text-[13.5px] leading-relaxed text-ink-soft">
+        Open Claude Code or Codex where it is already connected to this Brain, then paste this request:
+      </p>
+      <blockquote className="mt-3 rounded-xl border border-line bg-paper px-3 py-3 text-[13.5px] leading-relaxed text-ink">
+        Help me {verb} my complete Owner Financial Map. Use <code>brain_financial_map</code> in read mode first,
+        ask me one short question at a time, and do not infer missing answers. When the map is complete, explain
+        that preview mode writes one expiring review copy and ask for my approval before using it.
+      </blockquote>
+      <p className="mt-3 text-[12.5px] leading-relaxed text-ink-soft">
+        The assistant can read the map and, only after that separate approval, create a preview. It cannot confirm the map.
+        After it says the preview is ready, return here and read the latest map.
+      </p>
+      <ReadLatestMapButton onClick={onReadLatest} />
+    </section>
+  );
+}
+
+export function ReadLatestMapButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="mt-4 rounded-lg border border-line-strong bg-paper px-3 py-2 text-[13px] font-semibold text-ink hover:bg-card"
+    >
+      Read latest map
+    </button>
   );
 }
 
@@ -429,6 +571,7 @@ export function FinancialMapFieldList({ fields, order }: { fields: Record<string
       {order.map((field) => {
         const answer = fields[field];
         if (!answer) return null;
+        const differs = answer.assessment === "confirmed" && answer.comparison === "differs_from_current";
         return (
           <div
             key={field}
@@ -440,9 +583,25 @@ export function FinancialMapFieldList({ fields, order }: { fields: Record<string
             <Value label="Owner answer" value={mapValue(field, answer.owner_value)} />
             <Value label="Current record" value={mapValue(field, answer.current_value)} />
             <LabeledComparison value={answer.comparison} assessment={answer.assessment} />
+            {differs && <DifferentFieldMeaning field={field} answer={answer} />}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+export function DifferentFieldMeaning({ field, answer }: { field: string; answer: MapReviewField }) {
+  const label = humanMapWord(field);
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12.5px] leading-relaxed text-amber-950 sm:col-start-2 sm:col-span-3">
+      <span className="font-semibold">What confirming this difference accepts: </span>
+      <span>
+        <strong>{mapValue(field, answer.owner_value)}</strong> becomes the owner-approved {label} in this Financial Map
+        for future completeness checks. The current structured record still says <strong>{mapValue(field, answer.current_value)}</strong>.
+        Confirmation does not rewrite that record or remove its supporting evidence. This new map snapshot keeps both values,
+        and earlier confirmed Financial Maps remain preserved in history.
+      </span>
     </div>
   );
 }
@@ -466,31 +625,44 @@ function LabeledComparison({ value, assessment }: { value: MapReviewField["compa
 }
 
 export function FinancialMapCorrectionChoice({
-  requested, confirmationInProgress, confirmationUnresolved, onRequest, onContinue,
+  requested, confirmationInProgress, confirmationUnresolved, onRequest, onContinue, onReadLatest,
 }: {
   requested: boolean;
   confirmationInProgress: boolean;
   confirmationUnresolved: boolean;
   onRequest: () => void;
   onContinue: () => void;
+  onReadLatest: () => void;
 }) {
   if (requested) {
     return (
       <div role="status" className="mt-5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-4 text-amber-950">
         <h3 className="text-[14px] font-semibold">Stop here and correct the preview</h3>
         <p className="mt-1.5 text-[13.5px] leading-relaxed">
-          Return to the Claude Code or Codex conversation that prepared this Financial Map. Explain what is wrong and ask it to create a complete fresh preview, then reload this page.
+          Open Claude Code or Codex where it is connected to this Brain. Tell it what is wrong, ask it to use <code>brain_financial_map</code>
+          in read mode, and ask it to help you correct the complete map one question at a time. It must explain the preview write
+          and ask for your approval before using preview mode.
         </p>
         <p className="mt-1.5 text-[12.5px] leading-relaxed">
-          This choice did not activate or change anything, and no passkey window opened.
+          This choice did not activate or change anything, and no passkey window opened. After the assistant says the fresh preview is ready,
+          read the latest map here.
         </p>
-        <button
-          type="button"
-          onClick={onContinue}
-          className="mt-3 rounded-lg border border-amber-400 bg-white px-3 py-2 text-[13px] font-semibold text-amber-950 hover:bg-amber-100"
-        >
-          Keep reviewing this preview
-        </button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onReadLatest}
+            className="rounded-lg bg-amber-900 px-3 py-2 text-[13px] font-semibold text-white hover:brightness-95"
+          >
+            Read latest map
+          </button>
+          <button
+            type="button"
+            onClick={onContinue}
+            className="rounded-lg border border-amber-400 bg-white px-3 py-2 text-[13px] font-semibold text-amber-950 hover:bg-amber-100"
+          >
+            Keep reviewing this preview
+          </button>
+        </div>
       </div>
     );
   }
@@ -499,7 +671,7 @@ export function FinancialMapCorrectionChoice({
     <div className="mt-5 rounded-xl border border-line bg-card px-4 py-4">
       <h3 className="text-[14px] font-semibold">Something is wrong?</h3>
       <p id="financial-map-correction-help" className="mt-1.5 text-[13.5px] leading-relaxed text-ink-soft">
-        Do not confirm this version. Choose the correction option, return to your guided interview, and ask for a complete fresh preview.
+        Do not confirm this version. Choose the correction option for the exact Claude Code or Codex request and refresh path.
       </p>
       <button
         type="button"
@@ -526,7 +698,7 @@ export function FinancialMapCorrectionChoice({
 function Comparison({ value, assessment }: { value: MapReviewField["comparison"]; assessment: string }) {
   if (assessment !== "confirmed") return <Assessment value={assessment} />;
   if (value === "matches_current") return <Badge tone="accent">Matches current</Badge>;
-  if (value === "differs_from_current") return <Badge tone="warn">Different</Badge>;
+  if (value === "differs_from_current") return <Badge tone="warn">Different from current</Badge>;
   return <Badge tone="muted">Not compared</Badge>;
 }
 

@@ -1,5 +1,41 @@
 import { useState } from "react";
+import { ApiError } from "../lib/api";
 import { enroll, signIn, passkeysSupported } from "../lib/passkey";
+
+const REHEARSAL_PASSKEY_NOTICE = "Passkey creation is intentionally unavailable in this local rehearsal. No passkey was enrolled in a Brain, and nothing changed. To create a real passkey, use the private setup link from your technician at your Brain's normal web address.";
+
+export function gatePasskeyFailure(error: unknown, {
+  enrolling,
+  rehearsal,
+}: {
+  enrolling: boolean;
+  rehearsal: boolean;
+}): { message: string; unavailable: boolean } {
+  if (!(error instanceof ApiError) || error.status !== 404) {
+    return {
+      message: error instanceof Error ? error.message : String(error),
+      unavailable: false,
+    };
+  }
+  if (rehearsal) {
+    return {
+      message: REHEARSAL_PASSKEY_NOTICE,
+      unavailable: true,
+    };
+  }
+  return {
+    message: enrolling
+      ? "This private setup link could not start or finish passkey creation. No passkey was enrolled in this Brain, and nothing changed here. Ask your installer for a fresh private setup link, then open it at your Brain's normal web address."
+      : "Passkey sign-in is unavailable at this address. Nothing changed. Open your Brain at its normal web address and try again. If you are already there, ask your installer to check that the Brain is up to date.",
+    unavailable: true,
+  };
+}
+
+function isLocalRehearsalPage(): boolean {
+  if (typeof location === "undefined") return false;
+  const loopback = location.hostname === "localhost" || location.hostname === "127.0.0.1" || location.hostname === "::1";
+  return loopback && new URLSearchParams(location.search || "").has("state");
+}
 
 /**
  * The first screen a client ever sees, usually on a phone, from a text
@@ -12,9 +48,11 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
   notice?: string | null;
   onIn: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const enrolling = Boolean(inviteCode);
+  const rehearsal = isLocalRehearsalPage();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(() => rehearsal ? REHEARSAL_PASSKEY_NOTICE : null);
+  const [unavailable, setUnavailable] = useState(rehearsal);
   const possessive = owner ? (/s$/i.test(owner) ? `${owner}'` : `${owner}'s`) : "Your";
   const hostname = typeof location === "undefined" ? "this Brain's address" : location.hostname;
   // First name in the greeting: a client opening this is being welcomed, not
@@ -37,7 +75,9 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
       // Surface the real reason. "Something went wrong" on a security screen
       // is how someone decides the product is broken rather than that they
       // cancelled their device's passkey prompt.
-      setError(e instanceof Error ? e.message : String(e));
+      const failure = gatePasskeyFailure(e, { enrolling, rehearsal });
+      setError(failure.message);
+      setUnavailable(failure.unavailable);
     } finally {
       setBusy(false);
     }
@@ -65,17 +105,26 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
               {notice}
             </p>
           )}
+          {error && unavailable && (
+            <p role="status" className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-[14px] leading-relaxed text-amber-900">
+              {error}
+            </p>
+          )}
 
           {enrolling ? (
             <div role="note" className="mt-6 rounded-xl border border-line bg-paper/60 p-4">
-              <h2 className="text-[15px] font-semibold">Here is what happens next</h2>
+              <h2 className="text-[15px] font-semibold">
+                {rehearsal ? "What happens on the real setup page" : "Here is what happens next"}
+              </h2>
               <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
-                What will happen remains in your control. Nothing opens until you choose the button below.
+                {rehearsal
+                  ? "This rehearsal explains the real passkey step, but it never opens a secure device window or creates a passkey."
+                  : "What will happen remains in your control. Nothing opens until you choose the button below."}
               </p>
               <ol className="mt-3 space-y-2.5">
                 <li className="flex gap-2.5 text-[14.5px] leading-6">
                   <span className="text-accent font-semibold" aria-hidden="true">1</span>
-                  <span>Choose <strong>Create my owner passkey</strong> below.</span>
+                  <span>{rehearsal ? "On the real setup page, choose " : "Choose "}<strong>Create my owner passkey</strong>{rehearsal ? "." : " below."}</span>
                 </li>
                 <li className="flex gap-2.5 text-[14.5px] leading-6">
                   <span className="text-accent font-semibold" aria-hidden="true">2</span>
@@ -111,11 +160,17 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
           {passkeysSupported() ? (
             <button
               onClick={go}
-              disabled={busy}
+              disabled={busy || unavailable}
               className="mt-7 w-full rounded-xl bg-accent px-5 py-3.5 text-white font-semibold
                          disabled:opacity-55 transition-opacity"
             >
-              {busy ? "Waiting for your device…" : enrolling ? "Create my owner passkey" : "Continue to my passkey"}
+              {busy
+                ? "Waiting for your device…"
+                : unavailable
+                  ? "Passkey setup unavailable here"
+                  : enrolling
+                    ? "Create my owner passkey"
+                    : "Continue to my passkey"}
             </button>
           ) : (
             <p className="mt-7 text-sm text-ink-soft">
@@ -126,12 +181,19 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
 
           {enrolling && (
             <p className="mt-3 text-[13px] text-ink-soft">
-              Usually takes about ten seconds. This private link expires 15 minutes after it was
+              {rehearsal ? "On the real setup page, this usually" : "Usually"} takes about ten seconds. The private link expires 15 minutes after it was
               created and works once. You stay in control of the secure device window, and your
               passkey may sync through your chosen passkey provider.
             </p>
           )}
-          {error && <p role="alert" className="mt-4 text-[14px] text-red-700">{error}</p>}
+          {error && !unavailable && (
+            <p
+              role="alert"
+              className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3 text-[14px] leading-relaxed text-red-700"
+            >
+              {error}
+            </p>
+          )}
         </div>
       </div>
     </div>

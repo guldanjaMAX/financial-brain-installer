@@ -91,7 +91,11 @@ async function visibleLabelCount(page, label) {
   }).length);
 }
 
-async function fresh({ cancel = false, loseFirstActivationResponse = false } = {}) {
+async function fresh({
+  cancel = false,
+  loseFirstActivationResponse = false,
+  activationConflict = null,
+} = {}) {
   const page = await harness.newPage({ viewport: { width: 1440, height: 1000 } });
   await page.addInitScript(({ cancelPrompt }) => {
     window.__passkeyPromptCalls = 0;
@@ -119,7 +123,7 @@ async function fresh({ cancel = false, loseFirstActivationResponse = false } = {
       } },
     });
   }, { cancelPrompt: cancel });
-  const state = { activated: false, options: 0, activations: [], reviews: 0 };
+  const state = { activated: false, activeHash: mapHash, options: 0, activations: [], reviews: 0 };
   await page.route("**/api/**", async route => {
     const endpoint = new URL(route.request().url()).pathname;
     const body = route.request().postDataJSON() || {};
@@ -128,7 +132,7 @@ async function fresh({ cancel = false, loseFirstActivationResponse = false } = {
       return route.fulfill({ json: state.activated ? {
         status: "no_pending_review", review_state: "none", complete: true, truncated: false,
         active_map_present: true, active_map_authoritative: true, active_sequence: 2,
-        active_map_hash: mapHash, active_denominator_hash: denominatorHash,
+        active_map_hash: state.activeHash, active_denominator_hash: denominatorHash,
         active_activated_at: 1770000000000,
         owner_message: "No Financial Map is waiting for review.",
       } : pending });
@@ -148,6 +152,13 @@ async function fresh({ cancel = false, loseFirstActivationResponse = false } = {
       assert.equal(body.review_id, reviewId);
       assert.match(body.request_id, /^financial_map_/);
       state.activated = true;
+      if (activationConflict) {
+        if (activationConflict === "different-active-map") state.activeHash = "d".repeat(64);
+        return route.fulfill({ status: 409, json: {
+          error: "conflict", code: "owner_financial_map_preview_replayed",
+          detail: "This preview was already used or altered.",
+        } });
+      }
       if (loseFirstActivationResponse && state.activations.length === 1) {
         return route.abort("connectionreset");
       }
@@ -279,6 +290,58 @@ try {
       !text.includes(firstBody.clientDataJSON) && !text.includes(firstBody.signature) &&
       !page.url().includes("ofmp_") && await page.evaluate(() =>
         localStorage.length === 0 && sessionStorage.length === 0 && window.__clipboardCalls === 0));
+    await page.close();
+  }
+
+  {
+    const { page, state } = await fresh({ activationConflict: "exact-active-map" });
+    await page.getByRole("button", { name: "Confirm this Financial Map with my passkey", exact: true }).click();
+    await page.getByRole("heading", { name: "Your Financial Map is confirmed", exact: true }).waitFor();
+    check("a replay conflict succeeds only after the exact authoritative active map is reread",
+      state.activations.length === 1 && state.reviews === 2);
+    await page.close();
+  }
+
+  {
+    const { page, state } = await fresh({ activationConflict: "different-active-map" });
+    await page.getByRole("button", { name: "Confirm this Financial Map with my passkey", exact: true }).click();
+    await page.getByText(/did not show this exact reviewed map as active/).waitFor();
+    const text = await page.locator("body").innerText();
+    check("a conflict with a different active map never claims confirmation or no activation",
+      state.reviews === 2 && !text.includes("Your Financial Map is confirmed") &&
+      !text.includes("Nothing was activated"));
+    await page.close();
+  }
+
+  {
+    const page = await harness.newPage({ viewport: { width: 390, height: 844 } });
+    await page.route("**/api/owner/financial-map/review", route => route.fulfill({
+      status: 404,
+      json: { error: "not found" },
+    }));
+    await page.goto(new URL("/test/browser/fixtures/financial-map.html", harness.origin).href);
+    await page.getByText(/not an empty review queue/).waitFor();
+    const text = await page.locator("body").innerText();
+    check("a missing Financial Map route is called unavailable and update-needed",
+      text.includes("ask the installer") && !text.includes("No Financial Map is waiting for review"));
+    await page.close();
+  }
+
+  {
+    const page = await harness.newPage({ viewport: { width: 390, height: 844 } });
+    await page.route("**/api/owner/financial-map/review", route => route.fulfill({ json: {
+      status: "no_pending_review", review_state: "none", complete: true, truncated: false,
+      active_map_present: true, active_map_authoritative: false, active_sequence: 2,
+      active_map_hash: mapHash, active_denominator_hash: denominatorHash,
+      active_activated_at: 1770000000000,
+      owner_message: "No Financial Map is waiting for review.",
+    } }));
+    await page.goto(new URL("/test/browser/fixtures/financial-map.html", harness.origin).href);
+    await page.getByText(/no longer matches the Brain's current records/).waitFor();
+    const text = await page.locator("body").innerText();
+    check("a stale confirmed map is not presented as current for completeness checks",
+      text.includes("Create a corrected review") &&
+      !text.includes("latest confirmed map remains available for future completeness checks"));
     await page.close();
   }
 

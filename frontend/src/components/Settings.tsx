@@ -1,10 +1,33 @@
 import { useEffect, useState } from "react";
-import { api, apiGet, type Device, type Connection, type BankStatus } from "../lib/api";
+import { ApiError, api, apiGet, type Device, type Connection, type BankStatus } from "../lib/api";
 import { enroll } from "../lib/passkey";
 import { Section, Row, Note, Empty, Badge, Chip, Confirm, EditableName, ago, agoISO } from "./ui";
 import { OwnerPreferences } from "./OwnerPreferences";
 import { DocumentAccess } from "./DocumentAccess";
 import { PasskeyDiagnostics } from "./PasskeyDiagnostics";
+
+const REHEARSAL_PASSKEY_NOTICE = "Adding a passkey is intentionally unavailable in this local rehearsal. No passkey will be added, and nothing will change. To add a real passkey, open Access at your Brain's normal web address.";
+
+export function addPasskeyFailure(error: unknown, rehearsal: boolean): { message: string; unavailable: boolean } {
+  if (!(error instanceof ApiError) || error.status !== 404) {
+    return {
+      message: error instanceof Error ? error.message : String(error),
+      unavailable: false,
+    };
+  }
+  return {
+    message: rehearsal
+      ? REHEARSAL_PASSKEY_NOTICE
+      : "This Brain could not start or finish adding a passkey. No passkey was added to this Brain, and nothing changed here. Reload Access once. If it is still unavailable, ask your installer to check that the Brain is up to date before trying again.",
+    unavailable: true,
+  };
+}
+
+function isLocalRehearsalPage(): boolean {
+  if (typeof location === "undefined") return false;
+  const loopback = location.hostname === "localhost" || location.hostname === "127.0.0.1" || location.hostname === "::1";
+  return loopback && new URLSearchParams(location.search || "").has("state");
+}
 
 export function AddPasskeyContext({ busy, hostname, onContinue, onCancel }: {
   busy: boolean;
@@ -62,6 +85,9 @@ export function Settings({ devices, connections, onChange }: {
   const [busy, setBusy] = useState(false);
   const [banks, setBanks] = useState<BankStatus | null>(null);
   const [showPasskeyContext, setShowPasskeyContext] = useState(false);
+  const [passkeyUnavailable, setPasskeyUnavailable] = useState<string | null>(() =>
+    isLocalRehearsalPage() ? REHEARSAL_PASSKEY_NOTICE : null,
+  );
   const hostname = typeof location === "undefined" ? "this Brain's address" : location.hostname;
 
   // The bank feed is a separate surface with its own auth, so it is fetched
@@ -84,6 +110,27 @@ export function Settings({ devices, connections, onChange }: {
     }
   }
 
+  async function addPasskey() {
+    setError(null);
+    setBusy(true);
+    try {
+      await enroll();
+      setShowPasskeyContext(false);
+      onChange();
+      await loadBanks();
+    } catch (next) {
+      const failure = addPasskeyFailure(next, isLocalRehearsalPage());
+      if (failure.unavailable) {
+        setPasskeyUnavailable(failure.message);
+        setShowPasskeyContext(false);
+      } else {
+        setError(failure.message);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const bankRows = banks?.connections || [];
   const attention = new Set((banks?.needs_attention || []).map((b) => b.item_ref));
 
@@ -93,7 +140,7 @@ export function Settings({ devices, connections, onChange }: {
         <p className="eyebrow">People, devices, and apps</p>
         <h1 className="page-title">Access</h1>
         <p className="page-intro">
-          See owner devices, connected apps, exact-document access, and passkey proof at the level this brain can verify.
+          See who and what can open this Brain, manage shared documents, and check whether passkeys are ready.
         </p>
       </header>
       {error && (
@@ -102,33 +149,34 @@ export function Settings({ devices, connections, onChange }: {
         </p>
       )}
 
-      <OwnerPreferences />
-
-      <DocumentAccess />
-
-      <PasskeyDiagnostics />
-
       <Section
-        title="Your devices"
-        blurb="Passkeys that can open this Brain. A passkey may sync through your chosen passkey provider, but availability on every device is not guaranteed. Add another only when you intend to give that device or provider owner access."
+        title="Your passkeys"
+        blurb="These passkeys can open this Brain. A passkey may sync through your chosen passkey provider, but availability on every device is not guaranteed. Add another only when you intend to give that device or provider owner access."
         action={
           <button
-            disabled={busy}
+            disabled={busy || Boolean(passkeyUnavailable)}
+            aria-describedby={passkeyUnavailable ? "passkey-action-unavailable" : undefined}
             onClick={() => setShowPasskeyContext((shown) => !shown)}
             className="text-[13.5px] text-accent font-medium disabled:opacity-50 shrink-0"
           >
-            + Add a passkey
+            {passkeyUnavailable ? "Passkey setup unavailable" : "+ Add a passkey"}
           </button>
         }
       >
+        {passkeyUnavailable && (
+          <p
+            id="passkey-action-unavailable"
+            role="status"
+            className="px-4 py-3.5 text-[14px] leading-relaxed text-amber-900 bg-amber-50 border-b border-amber-200"
+          >
+            {passkeyUnavailable}
+          </p>
+        )}
         {showPasskeyContext && (
           <AddPasskeyContext
             busy={busy}
             hostname={hostname}
-            onContinue={() => run(async () => {
-              await enroll();
-              setShowPasskeyContext(false);
-            })}
+            onContinue={addPasskey}
             onCancel={() => setShowPasskeyContext(false)}
           />
         )}
@@ -166,6 +214,12 @@ export function Settings({ devices, connections, onChange }: {
           </Row>
         ))}
       </Section>
+
+      <PasskeyDiagnostics />
+
+      <DocumentAccess />
+
+      <OwnerPreferences />
 
       <Section
         title="Connected AI"

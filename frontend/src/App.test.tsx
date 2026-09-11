@@ -1,9 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  GRANT_VIEWS, GrantWorkspace, OWNER_VIEWS, initialOwnerView, visibleView,
+  GRANT_VIEWS, GrantWorkspace, OWNER_VIEWS, OwnerHeader, OwnerWorkspace,
+  initialOwnerView, ownerViewRequiresEntity, ownerViewScopeGate, visibleView,
 } from "./App";
 import { Gate } from "./components/Gate";
+import { FinanceScopeProvider } from "./components/FinanceScope";
 import type { Me } from "./lib/api";
 
 const grantMe: Me = {
@@ -28,6 +30,14 @@ const grantMe: Me = {
   },
 };
 
+const ownerMe: Me = {
+  signed_in: true,
+  brain: "Fixture Brain",
+  principal: { kind: "owner", grant_id: null },
+  devices: [],
+  connections: [],
+};
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("principal workspace routing", () => {
@@ -46,6 +56,104 @@ describe("principal workspace routing", () => {
     expect(initialOwnerView()).toBe("financial-map");
     vi.stubGlobal("location", { search: "?view=ofmp_private" });
     expect(initialOwnerView()).toBe("home");
+  });
+
+  it("uses a visible mobile menu and keeps Access and passkeys directly findable", () => {
+    const html = renderToStaticMarkup(
+      <OwnerHeader owner="Morgan Example" now="home" go={() => undefined} />,
+    );
+
+    expect(html).toContain("Access &amp; passkeys");
+    expect(html).toContain('aria-label="Open Access and passkeys"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-controls="owner-primary-navigation"');
+    expect(html).toContain("Menu");
+    expect(html).not.toContain("overflow-x-auto");
+  });
+
+  it("guards entity-specific owner pages without narrowing owner-wide pages", () => {
+    expect(ownerViewRequiresEntity("year")).toBe(true);
+    expect(ownerViewRequiresEntity("review")).toBe(true);
+    expect(ownerViewRequiresEntity("access")).toBe(false);
+    expect(ownerViewRequiresEntity("home")).toBe(false);
+    expect(ownerViewRequiresEntity("financial-map")).toBe(false);
+    expect(ownerViewRequiresEntity("documents")).toBe(false);
+    expect(ownerViewRequiresEntity("ask")).toBe(false);
+    expect(ownerViewScopeGate("access", true, "required")).toBeNull();
+    expect(ownerViewScopeGate("access", false, "checking")).toBeNull();
+    expect(ownerViewScopeGate("financial-map", false, "checking")).toBeNull();
+
+    const html = renderToStaticMarkup(
+      <FinanceScopeProvider>
+        <OwnerWorkspace
+          owner="Morgan Example"
+          me={ownerMe}
+          view="review"
+          setView={() => undefined}
+          refresh={async () => undefined}
+        />
+      </FinanceScopeProvider>,
+    );
+    expect(html).toContain("Choose one financial entity");
+    expect(html).toContain("Select one person, household, business, trust, property, or investment");
+    expect(html).not.toContain("Intake and decisions");
+
+    const access = renderToStaticMarkup(
+      <FinanceScopeProvider>
+        <OwnerWorkspace
+          owner="Morgan Example"
+          me={ownerMe}
+          view="access"
+          setView={() => undefined}
+          refresh={async () => undefined}
+        />
+      </FinanceScopeProvider>,
+    );
+    expect(access).toContain("Your passkeys");
+    expect(access).toContain("Passkey checks");
+    expect(access).not.toContain("Select one person, household, business, trust, property, or investment");
+  });
+
+  it("waits for inventory, then requires a choice while allowing safe fallback reads", () => {
+    expect(ownerViewScopeGate("home", false, "checking")).toBe("checking");
+    expect(ownerViewScopeGate("documents", false, "unavailable")).toBeNull();
+    expect(ownerViewScopeGate("ask", false, "not_installed")).toBeNull();
+    expect(ownerViewScopeGate("review", false, "unavailable")).toBe("entity");
+    expect(ownerViewScopeGate("year", true, "checking")).toBe("entity");
+    expect(ownerViewScopeGate("ask", true, "required")).toBeNull();
+
+    const waiting = renderToStaticMarkup(
+      <FinanceScopeProvider>
+        <OwnerWorkspace
+          owner="Morgan Example"
+          me={ownerMe}
+          view="home"
+          setView={() => undefined}
+          refresh={async () => undefined}
+        />
+      </FinanceScopeProvider>,
+    );
+    expect(waiting).toContain("Checking your financial list");
+    expect(waiting).not.toContain("What deserves your attention");
+
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => key === "financial-brain:entity-scope-choice" ? "all" : null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    });
+    const explicitAll = renderToStaticMarkup(
+      <FinanceScopeProvider>
+        <OwnerWorkspace
+          owner="Morgan Example"
+          me={ownerMe}
+          view="home"
+          setView={() => undefined}
+          refresh={async () => undefined}
+        />
+      </FinanceScopeProvider>,
+    );
+    expect(explicitAll).toContain("What deserves your attention");
+    expect(explicitAll).not.toContain("Choose one part of your finances or Whole Brain");
   });
 
   it("renders no owner navigation or owner-only route in the grant shell", () => {

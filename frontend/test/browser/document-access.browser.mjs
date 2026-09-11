@@ -94,6 +94,8 @@ async function fresh(options = {}) {
   const state = {
     grants: [],
     creates: [],
+    reissues: [],
+    revokes: [],
     searchArrived: searchArrival.promise,
     releaseSearch: searchRelease.resolve,
     createArrived: createArrival.promise,
@@ -158,6 +160,7 @@ async function fresh(options = {}) {
         response = receiptFor(body, options);
       }
     } else if (endpoint === "/api/app/document-access/reissue") {
+      state.reissues.push(body);
       const grant = state.grants.find((item) => item.grant_id === body.grant_id);
       if (!grant) throw new Error("Synthetic reissue referenced an unknown grant");
       if (options.holdReissue) {
@@ -171,6 +174,19 @@ async function fresh(options = {}) {
         invite_state: "active",
         enrollment_url: `https://enrollment.invalid/reissue-${grant.grant_id}`,
         enrollment_expires_at: Date.now() + 15 * 60_000,
+      };
+    } else if (endpoint === "/api/app/document-access/revoke") {
+      state.revokes.push(body);
+      const grant = state.grants.find((item) => item.grant_id === body.grant_id);
+      if (!grant) throw new Error("Synthetic revoke referenced an unknown grant");
+      grant.state = "revoked";
+      grant.revoked_at = Date.now();
+      response = {
+        status: "revoked",
+        grant_id: grant.grant_id,
+        changed: true,
+        replayed: false,
+        revoked_at: grant.revoked_at,
       };
     } else {
       throw new Error(`Unexpected synthetic endpoint ${endpoint}`);
@@ -368,6 +384,11 @@ try {
     await page.getByRole("button", { name: "Copy private enrollment link", exact: true }).waitFor();
     await page.getByLabel("Who is this for?").fill("Another draft");
     await page.getByRole("button", { name: "New link", exact: true }).click();
+    await page.getByText("Replace any earlier unused link with a new one?", { exact: true }).waitFor();
+    check("new-link consequence appears before the request",
+      state.reissues.length === 0
+      && (await page.locator("body").innerText()).includes("New link replaces any earlier unused link."));
+    await page.getByRole("button", { name: "Yes", exact: true }).click();
     await bounded(state.reissueArrived, "Synthetic reissue did not arrive");
     check("create and history mutations retain one shared action lock",
       await page.getByRole("button", { name: "Saving", exact: true }).isDisabled()
@@ -386,6 +407,15 @@ try {
     check("reissue copy confirmation names the same immutable receipt",
       (await page.locator("body").innerText()).includes("Private enrollment link for Current recipient in Company alpha copied. Send it only to the intended person before it expires.")
       && await page.evaluate(() => String(window.__copiedEnrollmentLink || "").includes("/reissue-dg_")));
+
+    await page.getByRole("button", { name: "Revoke", exact: true }).click();
+    await page.getByText("End this person's access now? Their current passkey session will stop working.", { exact: true }).waitFor();
+    check("revoke consequence appears before the request",
+      state.revokes.length === 0
+      && (await page.locator("body").innerText()).includes("Revoke ends this person's document access and current passkey session."));
+    await page.getByRole("button", { name: "Yes", exact: true }).click();
+    await page.getByText("Document access was revoked. Its passkey session can no longer read or ask.", { exact: true }).waitFor();
+    check("confirmed revoke ends the active grant", state.revokes.length === 1);
     await page.close();
   }
 
