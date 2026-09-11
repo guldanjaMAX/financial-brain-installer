@@ -1132,15 +1132,36 @@ are read-only. Record uses one bounded D1 batch, exact readback, immutable
 replay hashes, and the upgrade write-pause guard. Schema 42 can record and
 revalidate only gap, failure, and adjudicated-exclusion observations. The
 Worker rejects every accepted outcome, and a D1 trigger applies the same guard
-to recovery imports and direct writes. The corpus currently has no
-authoritative per-family raw-original hash and byte count, so a valid-looking
-document at the same locator is not proof that it came from the bytes the local
-assessor observed. A later migration and ingest contract must add that binding
-before accepted repair is representable. Missing rows, deletion, replacement
-bytes, refused or unavailable originals, and changed document families remain
-unresolved. The route always states that its target set is bounded and that
-whole-source completeness is false. No CLI currently turns this evidence
-contract into OCR, reingest, repair, or deletion authority.
+to recovery imports and direct writes.
+
+Migration 0043 adds the previously missing binding substrate. Ordinary
+single-record local ingestion measures the exact extracted file bytes and sends
+a private four-field receipt. The Worker derives the opaque original ID from
+the schema-42 key and the envelope's existing single or structural-family
+locator. It does not copy that locator into the immutable binding receipt or
+ledger; the existing document identity fields still retain it for retrieval
+and source lifecycle. Every changed corpus write receives a new
+revision ID. A bound revision commits its final content hash and immutable raw
+hash, byte count, provenance digest, and binding hash in one D1 transaction;
+exact readback recomputes the complete receipt. Unchanged detection includes
+the binding, so the same extracted text from different raw bytes is a new
+revision. Legacy rows, unbound writes, and multi-record `family_of` exports are
+not upgraded or guessed. The trust claim is only a full-admin-authorized local
+ingest assertion over exact descriptor bytes. It neither proves the producer
+binary nor recomputes the raw file because the Worker never receives it.
+The schema-43 D1 trigger and Worker rejection still block every accepted
+outcome because the complete acceptance chain is not implemented. Missing rows, deletion, replacement bytes, refused or unavailable
+originals, and changed or incomplete document families remain unresolved. The
+route always states that its target set is bounded and that whole-source
+completeness is false. No CLI currently turns this evidence contract into OCR,
+reingest, repair, or deletion authority.
+
+Do not treat schema 43 as acceptance proof. A separate stacked schema must
+commit a database-enforced result-family receipt over every current document
+revision and exact chunk, including title prefixes, then verify target outbox
+zero, global vector readiness, deterministic private retrieval, and citation to
+that same family. Accepted remains blocked until the whole chain is reviewed
+and proven.
 
 `brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
 local handoff lane. Its only accepted scopes are `technician-skill`,

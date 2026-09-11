@@ -63,6 +63,13 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_id_key_state"), t
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_id_key_state"), true);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_observations"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_observations"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_bindings"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_bindings"), true);
+assert.ok(
+  RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") >
+    RECOVERY_EXPORT_TABLES.indexOf("documents"),
+  "recovery restores current document rows before their immutable binding history",
+);
 
 const sourceManifestPath = join(sandbox, "source.manifest.json");
 const targetManifestPath = join(sandbox, "target.manifest.json");
@@ -180,6 +187,8 @@ assert.equal(recoveryExportTables(appliedMigrations.slice(0, 41)).includes("sour
 assert.equal(recoveryExportTables(appliedMigrations.slice(0, 41)).includes("source_original_observations"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_id_key_state"), true);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_observations"), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 42)).includes("source_original_result_bindings"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_result_bindings"), true);
 const installStateColumns = Object.freeze([
   ["id", "INTEGER"],
   ["client_slug", "TEXT"],
@@ -665,9 +674,15 @@ function providerHarness({
     "owner_financial_map_previews",
     "owner_financial_map_snapshots",
   ]);
+  const sourceOriginalTables = new Set([
+    "source_original_id_key_state",
+    "source_original_observations",
+  ]);
   const durableTablesForVersion = (version) => RECOVERY_DURABLE_TABLES.filter((name) =>
     (version >= 37 || name !== "memory_supersessions") &&
-    (version >= 41 || !mapTables.has(name)));
+    (version >= 41 || !mapTables.has(name)) &&
+    (version >= 42 || !sourceOriginalTables.has(name)) &&
+    (version >= 43 || name !== "source_original_result_bindings"));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
@@ -992,6 +1007,9 @@ function providerHarness({
       health.version = "0.1.12";
       return response(healthTransform({
         ...health,
+        ...(mode === "active"
+          ? { schema_version: migrationVersionForAccount(targetManifest.infrastructure.cloudflare.account_id) }
+          : {}),
         vector_drain_mode: healthModeOverride ?? health.vector_drain_mode,
         vector_writer_protocol: healthProtocolOverride ?? health.vector_writer_protocol,
       }));
@@ -1862,7 +1880,11 @@ try {
     (error) => error.code === "RECOVERY_D1_RESOURCE_AMBIGUOUS",
   );
 
-  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 12 });
+  // Schema 42 has the reviewed vector protocol, but the current Worker reads
+  // schema-43 binding state on every ingest. It must be updated before export;
+  // restoring the older prefix would otherwise produce a healthy-looking brain
+  // whose next ordinary write fails.
+  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 42 });
   const prefixSourceGate = createCloudflareRecoveryFieldGateAdapters(
     approvedAdapterConfig,
     prefixSourceHarness.dependencies,
@@ -2190,10 +2212,10 @@ try {
 
   // A resumed journal can carry an old verify_d1 checkpoint. Recheck the live
   // target schema before any current drain or Vectorize call instead of
-  // assuming the historical checkpoint has the schema-13 writer protocol.
+  // assuming the historical checkpoint is compatible with the current Worker.
   const prefixTargetHarness = providerHarness({
     initialTargetRestored: true,
-    targetMigrationVersion: 12,
+    targetMigrationVersion: 42,
   });
   const prefixTargetGate = createCloudflareRecoveryFieldGateAdapters(
     approvedAdapterConfig,
@@ -2447,6 +2469,39 @@ try {
         assert.equal(h.promotionCalls, 0);
       }
     }
+  }
+
+  // Active health is the last cheap proof that the promoted Worker and restored
+  // database still belong to the same release. A schema-42 time-travel restore
+  // between resumable stages must not pass as an active schema-43 brain.
+  for (const schemaVersion of [undefined, 42]) {
+    const staleSchemaHarness = providerHarness({
+      targetVersionId: activeWorkerVersionId,
+      initialTargetRestored: true,
+      initialVectorCount: 5,
+      healthTransform: (health) => {
+        const changed = { ...health };
+        if (schemaVersion === undefined) delete changed.schema_version;
+        else changed.schema_version = schemaVersion;
+        return changed;
+      },
+    });
+    const staleSchemaGate = createCloudflareRecoveryFieldGateAdapters(
+      approvedAdapterConfig,
+      staleSchemaHarness.dependencies,
+    );
+    await assert.rejects(
+      staleSchemaGate.adapters.verify_health({
+        stage: "verify_health",
+        planFingerprint: initialized.plan.plan_fingerprint,
+        targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
+        completed: [],
+      }),
+      (error) => error.code === "RECOVERY_HEALTH_IDENTITY_MISMATCH",
+      `active ${schemaVersion === undefined ? "missing" : "stale"} schema version`,
+    );
+    assert.equal(staleSchemaHarness.bootstrapCalls, 0);
+    assert.equal(staleSchemaHarness.promotionCalls, 0);
   }
 
   const badHealthModeHarness = providerHarness({ healthModeOverride: "active" });

@@ -252,6 +252,11 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   // key would silently assign different identities to the same originals.
   "source_original_id_key_state",
   "source_original_observations",
+  // Schema 43: raw-original result bindings are immutable provenance history.
+  // They remain durable after a later document revision or approved deletion,
+  // so recovery must carry the ledger together with the current document
+  // revision and binding-pointer columns.
+  "source_original_result_bindings",
 ]);
 
 /**
@@ -349,12 +354,10 @@ const INSTALL_STATE_ZERO_NORMALIZED_COLUMNS = Object.freeze([
   "outbox_generation",
   "vector_projection_bootstrap_base_count",
 ]);
-// Schemas 14 through 22 add owner passkeys, capability grants, zones, the financial ledger, bank feeds,
-// connector OAuth, extraction provenance, owner workspace state, and exact
-// document security. The vector protocol itself is unchanged, but the recovery
-// The minimum schema carrying the reviewed vector recovery protocol. Additive
-// migrations after this floor are accepted only when their exact checked-in
-// prefix and table inventory pass the recovery contract below.
+// The minimum schema carrying the reviewed vector recovery protocol. Historical
+// additive prefixes after this floor remain available to offline artifact and
+// table-contract inspection. The live field runner separately requires the
+// exact current schema because it promotes this package's current Worker.
 const RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION = 36;
 
 function quoteIdentifier(value) {
@@ -476,6 +479,7 @@ const SCHEMA_42_TABLES = Object.freeze([
   "source_original_id_key_state",
   "source_original_observations",
 ]);
+const SCHEMA_43_TABLES = Object.freeze(["source_original_result_bindings"]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -497,7 +501,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_28_TABLES, ...SCHEMA_30_TABLES, ...SCHEMA_31_TABLES,
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
-     ...SCHEMA_42_TABLES].includes(table)
+     ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1301,7 +1305,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 36 || !SCHEMA_36_TABLES.includes(table)) &&
     (latest >= 37 || !SCHEMA_37_TABLES.includes(table)) &&
     (latest >= 41 || !SCHEMA_41_TABLES.includes(table)) &&
-    (latest >= 42 || !SCHEMA_42_TABLES.includes(table)));
+    (latest >= 42 || !SCHEMA_42_TABLES.includes(table)) &&
+    (latest >= 43 || !SCHEMA_43_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(migrations, { excludeBankItems = false } = {}) {
@@ -2179,22 +2184,23 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     return validateMigrationContract(rows);
   }
 
-  async function requireCurrentVectorProtocol(
+  async function requireCurrentRecoverySchema(
     binding,
     code = "RECOVERY_TARGET_UPGRADE_REQUIRED",
   ) {
     const migrations = await remoteMigrationContract(binding);
-    if (!recoveryVectorProtocolSupported(migrations)) {
-      // Recovery requires at least the schema-36 generation, lease,
-      // async-visibility, and durable bulk-bootstrap protocol. A historical
-      // exact-prefix artifact remains
-      // inspectable offline, but the field runner has no implicit live-upgrade
-      // authority and therefore stops before export, restore, or provider I/O.
-      // Say what to do: every brain that has not run `brain update` on this
-      // build lands here, and the operator sheet is "update first, then recover".
+    const requiredSchemaVersion = migrationFileContract().at(-1)?.version || 0;
+    if (!recoveryVectorProtocolSupported(migrations) ||
+        migrations.at(-1)?.version !== requiredSchemaVersion) {
+      // Historical exact-prefix artifacts remain inspectable offline, but the
+      // field runner promotes this package's current Worker. Once that Worker
+      // reads a newly added column or table on an ordinary path, restoring an
+      // older additive prefix would create an apparently healthy brain whose
+      // next write fails. The runner has no implicit live-upgrade authority, so
+      // stop before export, restore, or provider I/O and say what to do.
       refuse(code,
         `this brain's schema is at ${migrations.at(-1)?.version ?? "an unknown version"} and this recovery runner ` +
-        `requires ${RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION}. Run \`brain update <manifest>\` on it first, then recover. ` +
+        `requires the current schema ${requiredSchemaVersion}. Run \`brain update <manifest>\` on it first, then recover. ` +
         "The runner never upgrades a brain implicitly.");
     }
     return migrations;
@@ -2528,13 +2534,17 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     // A reachable paused Worker deliberately reports not-ok and refuses
     // documents. Requiring ok:true would reject the real compatibility Worker
     // while accepting a response that conceals a missing write barrier.
+    // Paused health deliberately performs no D1 read, but active health must
+    // prove that the promoted Worker is serving against this package's schema.
+    const requiredSchemaVersion = migrationFileContract().at(-1)?.version || 0;
     if (!["active", "paused-for-upgrade"].includes(expectedMode) ||
         health?.ok !== active || health?.accepting_documents !== active ||
         health?.status !== (active ? "ok" : "paused-for-upgrade") ||
         health?.version !== pins.binding.target.productVersion ||
         health?.brain !== pins.binding.target.clientSlug ||
         health?.vector_writer_protocol !== "lease-v1" ||
-        health?.vector_drain_mode !== expectedMode) {
+        health?.vector_drain_mode !== expectedMode ||
+        (active && health?.schema_version !== requiredSchemaVersion)) {
       refuse("RECOVERY_HEALTH_IDENTITY_MISMATCH");
     }
     return health;
@@ -2622,7 +2632,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
       assertContext(context, "export_d1");
       assertNoRecoveryArtifactResidue(pins.artifacts.path);
       await assertExactCloudflareResources(pins.binding.source, "source");
-      const migrations = await requireCurrentVectorProtocol(
+      const migrations = await requireCurrentRecoverySchema(
         pins.binding.source,
         "RECOVERY_SOURCE_UPGRADE_REQUIRED",
       );
@@ -2791,7 +2801,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
       assertContext(context, "verify_d1");
       await assertExactCloudflareResources(pins.binding.target, "target", "paused");
       await targetHealth("paused-for-upgrade");
-      await requireCurrentVectorProtocol(pins.binding.target);
+      await requireCurrentRecoverySchema(pins.binding.target);
       const restored = await targetDatabaseSnapshot();
       const nonBank = await remoteDataFingerprint(pins.binding.target, { excludeBankItems: true });
       const bankProof = await withTargetKey((key) => bankSecurityProof(key, new Date(now()).toISOString()));
@@ -2826,7 +2836,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
       // Recheck on every resumed rebuild. An old journal checkpoint or an
       // out-of-band target replacement must never route schema-prefix data to
       // the current bulk bootstrap endpoint.
-      await requireCurrentVectorProtocol(pins.binding.target);
+      await requireCurrentRecoverySchema(pins.binding.target);
       const restored = completedEvidence(context, "reconcile_security") ||
         completedEvidence(context, "verify_d1");
       assertSameRecoveryCorpus(

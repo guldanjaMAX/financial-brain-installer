@@ -9,22 +9,28 @@
 
 import { jsonResponse, privateNoStore, validateAdminKey } from "./core.js";
 import { storedProvenanceMarkerAssessment } from "./provenance-receipt.js";
+import {
+  SOURCE_ORIGINAL_TENANT_ID,
+  SourceOriginalBindingError,
+  deriveSourceOriginalId,
+  hashSourceOriginalResultBinding,
+  loadSourceOriginalSigningKey,
+  normalizeSourceOriginalLocator,
+  normalizeSourceOriginalReceipt,
+  normalizeSourceOriginalSource,
+} from "./source-original-binding.js";
 import { backendOf, D1 } from "./store.js";
 
 export const SOURCE_ORIGINAL_OBSERVATION_PATH = "/api/admin/brain/source-original-observations";
 export const SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION = 1;
 export const SOURCE_ORIGINAL_OBSERVATION_MAX_TARGETS = 10;
 
-const TENANT_ID = "primary";
 const MAX_REQUEST_BYTES = 128 * 1024;
-const MAX_LOCATOR_BYTES = 2048;
 const MAX_DOCUMENTS_PER_ORIGINAL = 256;
-const SOURCE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RUN_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA_RE = /^[a-f0-9]{64}$/;
 const SHA_ID_RE = /^sha256:[a-f0-9]{64}$/;
 const ORIGINAL_ID_RE = /^hmac-sha256:[a-f0-9]{64}$/;
-const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 const encoder = new TextEncoder();
 
 const OBSERVATION_STAGES = Object.freeze(["discovery", "repair"]);
@@ -72,7 +78,8 @@ export const SOURCE_ORIGINAL_OBSERVATION_VOCABULARY = Object.freeze({
   reason_codes: OBSERVATION_REASON_CODES,
   outcome_triples: OBSERVATION_OUTCOME_TRIPLES,
   recordable_outcomes: Object.freeze(["gap", "adjudicated_exclusion", "failed"]),
-  accepted_result_binding: "unavailable",
+  raw_original_result_binding: "available_for_bound_current_revisions",
+  accepted_result_family_receipt: "unavailable",
 });
 
 const STAGES = new Set(OBSERVATION_STAGES);
@@ -156,24 +163,11 @@ async function requestBody(request) {
 }
 
 function normalizedSource(value) {
-  if (typeof value !== "string" || !SOURCE_RE.test(value)) {
-    refuse("source_original_invalid_source", "source must be a normalized source id");
-  }
-  return value;
+  return normalizeSourceOriginalSource(value);
 }
 
 function normalizedLocator(value) {
-  if (typeof value !== "string" || value.length === 0 ||
-      encoder.encode(value).length > MAX_LOCATOR_BYTES || value !== value.normalize("NFC") ||
-      value.startsWith("/") || value.endsWith("/") || value.includes("\\") ||
-      value.includes("//") || CONTROL_RE.test(value)) {
-    refuse("source_original_invalid_locator", "target locator must be one canonical source-relative path");
-  }
-  const segments = value.split("/");
-  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
-    refuse("source_original_invalid_locator", "target locator must be one canonical source-relative path");
-  }
-  return value;
+  return normalizeSourceOriginalLocator("source_relative_path", value).locator;
 }
 
 function normalizedLocatorTarget(value, { recorded = false } = {}) {
@@ -271,31 +265,18 @@ function commonBinding(body, { recorded = false } = {}) {
   };
 }
 
-async function signingKey(env) {
-  const row = await env.DB.prepare(
-    "SELECT tenant_id, signing_salt FROM source_original_id_key_state WHERE tenant_id=?1",
-  ).bind(TENANT_ID).first();
-  const secret = String(row?.signing_salt || "");
-  if (row?.tenant_id !== TENANT_ID || !SHA_RE.test(secret)) {
-    throw new ObservationRequestError(503, "source_original_id_key_unavailable", "original identity key is unavailable");
-  }
-  return crypto.subtle.importKey(
-    "raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
-  );
-}
-
-async function originalId(key, source, target) {
-  const input = `financial-brain:source-original:v1\0${TENANT_ID}\0${source}\0${target.locator_kind}\0${target.locator}`;
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(input));
-  const hex = [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `hmac-sha256:${hex}`;
-}
-
 async function sealedTargets(env, binding) {
-  const key = await signingKey(env);
+  const key = await loadSourceOriginalSigningKey(env);
   const targets = [];
   for (const target of binding.targets) {
-    targets.push({ ...target, original_id: await originalId(key, binding.source, target) });
+    targets.push({
+      ...target,
+      original_id: await deriveSourceOriginalId(key, {
+        source: binding.source,
+        locator_kind: target.locator_kind,
+        locator: target.locator,
+      }),
+    });
   }
   if (new Set(targets.map((target) => target.original_id)).size !== targets.length) {
     refuse("source_original_duplicate_target", "targets must be unique");
@@ -332,6 +313,26 @@ async function currentDocumentSnapshot(env, source, locator) {
     `SELECT d.doc_uid,d.source,d.source_id,d.ingested_at,d.content_hash,d.meta,d.text_source,d.text_reliable,
             d.provenance_receipt_version,d.provenance_receipt_status,
             d.provenance_receipt_reason,d.provenance_receipt_digest,
+            d.document_revision_id,d.source_original_binding_hash,
+            (SELECT json_object(
+               'contract_version',bound.contract_version,
+               'tenant_id',bound.tenant_id,
+               'source',bound.source,
+               'original_id',bound.original_id,
+               'locator_kind',bound.locator_kind,
+               'document_revision_id',bound.document_revision_id,
+               'original_content_sha256',bound.original_content_sha256,
+               'original_byte_count',bound.original_byte_count,
+               'document_content_hash',bound.document_content_hash,
+               'provenance_receipt_digest',bound.provenance_receipt_digest,
+               'binding_hash',bound.binding_hash)
+               FROM source_original_result_bindings AS bound
+              WHERE bound.binding_hash=d.source_original_binding_hash
+                AND bound.document_revision_id=d.document_revision_id
+                AND bound.source=d.source
+                AND bound.document_content_hash=d.content_hash
+                AND bound.provenance_receipt_digest=d.provenance_receipt_digest
+              LIMIT 1) AS source_original_binding_receipt,
             COUNT(c.id) AS chunk_count,
             SUM(CASE WHEN length(trim(c.text)) > 0 THEN 1 ELSE 0 END) AS readable_chunk_count,
             COALESCE(SUM(length(c.text)),0) AS chunk_text_bytes
@@ -354,6 +355,7 @@ async function currentDocumentSnapshot(env, source, locator) {
     throw new ObservationRequestError(503, "source_original_family_too_large", "document family exceeds the verification bound");
   }
   const documents = [];
+  const bindingDocuments = [];
   for (const row of rows) {
     const assessment = await storedProvenanceMarkerAssessment(row);
     let metadata = null;
@@ -367,6 +369,18 @@ async function currentDocumentSnapshot(env, source, locator) {
     const receiptRoots = Array.isArray(metadata?.provenance_receipt?.root_ids)
       ? metadata.provenance_receipt.root_ids
       : [];
+    let sourceOriginalBinding = null;
+    try {
+      const parsed = typeof row.source_original_binding_receipt === "string"
+        ? JSON.parse(row.source_original_binding_receipt)
+        : row.source_original_binding_receipt;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        sourceOriginalBinding = parsed;
+      }
+    } catch {
+      // A malformed binding is not readiness. Keep it out of the stable
+      // document-set hash and let the exact verifier fail closed below.
+    }
     documents.push({
       doc_uid: String(row.doc_uid),
       source: String(row.source),
@@ -389,6 +403,15 @@ async function currentDocumentSnapshot(env, source, locator) {
       readable_chunk_count: Number(row.readable_chunk_count || 0),
       chunk_text_bytes: Number(row.chunk_text_bytes || 0),
     });
+    bindingDocuments.push({
+      doc_uid: String(row.doc_uid),
+      source: String(row.source),
+      content_hash: String(row.content_hash),
+      provenance_receipt_digest: row.provenance_receipt_digest ?? null,
+      document_revision_id: row.document_revision_id ?? null,
+      source_original_binding_hash: row.source_original_binding_hash ?? null,
+      source_original_binding: sourceOriginalBinding,
+    });
   }
   const structuralParts = documents.map((document) => {
     if (!document.doc_uid.startsWith(`${base}#part`)) return null;
@@ -410,6 +433,7 @@ async function currentDocumentSnapshot(env, source, locator) {
     count: documents.length,
     hash: await sha256Id(canonical(documents)),
     documents,
+    binding_documents: bindingDocuments,
     family_complete: familyComplete,
   };
 }
@@ -430,11 +454,51 @@ function provenanceEvidenceMatches(textState, snapshot) {
   );
 }
 
-function acceptedEvidenceIsValid(target, snapshot) {
-  return target.outcome !== "accepted" || provenanceEvidenceMatches(target.text_state, snapshot);
+async function rawOriginalBindingEvidenceMatches(target, snapshot) {
+  if (!snapshot.family_complete || !snapshot.documents.length ||
+      snapshot.binding_documents.length !== snapshot.documents.length ||
+      !ORIGINAL_ID_RE.test(target.original_id || "") ||
+      !SHA_RE.test(target.original_content_sha256 || "") ||
+      !Number.isSafeInteger(target.original_byte_count) || target.original_byte_count < 0) {
+    return false;
+  }
+  for (const document of snapshot.binding_documents) {
+    const stored = document.source_original_binding;
+    if (!stored || typeof stored !== "object" || Array.isArray(stored) ||
+        stored.binding_hash !== document.source_original_binding_hash) return false;
+    const { binding_hash: bindingHash, ...storedReceipt } = stored;
+    const expectedReceipt = {
+      contract_version: SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION,
+      tenant_id: SOURCE_ORIGINAL_TENANT_ID,
+      source: document.source,
+      original_id: target.original_id,
+      locator_kind: target.locator_kind,
+      document_revision_id: document.document_revision_id,
+      original_content_sha256: target.original_content_sha256,
+      original_byte_count: target.original_byte_count,
+      document_content_hash: document.content_hash,
+      provenance_receipt_digest: document.provenance_receipt_digest,
+    };
+    try {
+      const expectedHash = await hashSourceOriginalResultBinding(expectedReceipt);
+      if (bindingHash !== expectedHash ||
+          await hashSourceOriginalResultBinding(storedReceipt) !== expectedHash ||
+          canonical(storedReceipt) !== canonical(expectedReceipt)) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
-function observedOutcomeMatches(target, snapshot) {
+async function acceptedEvidenceIsValid(target, snapshot) {
+  return target.outcome !== "accepted" || (
+    provenanceEvidenceMatches(target.text_state, snapshot) &&
+    await rawOriginalBindingEvidenceMatches(target, snapshot)
+  );
+}
+
+async function observedOutcomeMatches(target, snapshot) {
   if (target.outcome === "accepted") return acceptedEvidenceIsValid(target, snapshot);
   if (target.outcome === "gap" && target.reason_code === "current_document_missing") {
     return snapshot.count === 0;
@@ -446,6 +510,48 @@ function observedOutcomeMatches(target, snapshot) {
     return true;
   }
   return true;
+}
+
+/**
+ * Read-only readiness check for one directly observed original. This is an
+ * internal substrate for a later accepted-outcome change; schema 43 and the
+ * record route continue to reject accepted observations in this release until
+ * the complete family, chunk, vector, retrieval and citation chain exists.
+ */
+export async function sourceOriginalResultBindingReadiness(env, {
+  source,
+  locator,
+  locator_kind: locatorKind = "source_relative_path",
+  original_content_sha256: originalContentSha256,
+  original_byte_count: originalByteCount,
+} = {}) {
+  const normalizedSource = normalizeSourceOriginalSource(source);
+  const normalizedLocator = normalizeSourceOriginalLocator(locatorKind, locator);
+  const rawReceipt = normalizeSourceOriginalReceipt({
+    version: SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION,
+    locator_kind: normalizedLocator.locator_kind,
+    original_content_sha256: originalContentSha256,
+    original_byte_count: originalByteCount,
+  });
+  const signingKey = await loadSourceOriginalSigningKey(env);
+  const originalId = await deriveSourceOriginalId(signingKey, {
+    source: normalizedSource,
+    ...normalizedLocator,
+  });
+  const snapshot = await currentDocumentSnapshot(env, normalizedSource, normalizedLocator.locator);
+  const ready = await rawOriginalBindingEvidenceMatches({
+    original_id: originalId,
+    locator_kind: rawReceipt.locator_kind,
+    original_content_sha256: rawReceipt.original_content_sha256,
+    original_byte_count: rawReceipt.original_byte_count,
+  }, snapshot);
+  return Object.freeze({
+    ready,
+    original_id: originalId,
+    document_count: snapshot.count,
+    document_set_hash: snapshot.hash,
+    family_complete: snapshot.family_complete,
+  });
 }
 
 function receiptFields(value) {
@@ -539,7 +645,7 @@ function boundedScope() {
     whole_source_complete: false,
     accepted_outcomes_supported: false,
     repair_verification_supported: false,
-    raw_original_family_binding: "unavailable",
+    raw_original_result_family_receipt: "unavailable",
     meaning: "Evidence applies only to the explicitly sealed originals; it is not a whole-source enumeration.",
   };
 }
@@ -581,23 +687,23 @@ async function handleRecord(env, body) {
   const receipts = [];
   for (const target of binding.targets) {
     if (target.outcome === "accepted") {
-      // documents.content_hash binds normalized/chunked corpus content, not
-      // the raw original bytes observed by the local assessor. A stale good
-      // row at the same locator therefore cannot be called the result of this
-      // original until a later schema persists an authoritative byte receipt.
+      // Schema 43 can prove the exact raw original to each current document
+      // revision. That is necessary but not sufficient for acceptance: no
+      // database receipt yet freezes the whole current result family and exact
+      // chunks or proves vector, retrieval and same-family citation readiness.
       throw new ObservationRequestError(
         409,
-        "source_original_result_binding_unavailable",
-        "accepted outcomes require an authoritative raw-original document binding",
+        "source_original_acceptance_chain_unavailable",
+        "accepted outcomes require a result-family receipt and retrieval proof",
       );
     }
     const snapshot = await currentDocumentSnapshot(env, binding.source, target.locator);
-    if (!observedOutcomeMatches(target, snapshot)) {
+    if (!await observedOutcomeMatches(target, snapshot)) {
       refuse("source_original_outcome_unobserved", "claimed outcome does not match exact current document evidence", 409);
     }
     const receipt = {
       contract_version: SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION,
-      tenant_id: TENANT_ID,
+      tenant_id: SOURCE_ORIGINAL_TENANT_ID,
       source: binding.source,
       original_id: target.original_id,
       locator_kind: target.locator_kind,
@@ -723,7 +829,7 @@ async function handleInventory(env, body) {
     refuse("source_original_invalid_request", "inventory request does not match the exact contract");
   }
   const source = normalizedSource(body.source);
-  await signingKey(env);
+  await loadSourceOriginalSigningKey(env);
   const after = body.after_sequence === undefined ? 0 : body.after_sequence;
   const limit = body.limit === undefined ? SOURCE_ORIGINAL_OBSERVATION_MAX_TARGETS : body.limit;
   if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) ||
@@ -811,7 +917,7 @@ async function handleVerify(env, body) {
       if (!bindingMatches || await observationHash(row) !== row.observation_hash) {
         status = "observation_corrupt";
       } else if (row.outcome === "accepted") {
-        status = "result_binding_unavailable";
+        status = "acceptance_chain_unavailable";
       } else if (target.original_content_sha256 !== row.original_content_sha256) {
         // The HMAC identity is path-stable, so bytes are a separate required
         // fence. Replacement at the same path is a new observation, never a
@@ -885,7 +991,7 @@ export async function handleSourceOriginalObservation(env, request) {
     if (body.mode === "verify") return await handleVerify(env, body);
     refuse("source_original_mode_unsupported", "mode must be seal, record, inventory, or verify");
   } catch (error) {
-    if (error instanceof ObservationRequestError) {
+    if (error instanceof ObservationRequestError || error instanceof SourceOriginalBindingError) {
       return respond({ error: error.message, code: error.code }, error.status);
     }
     return respond({ error: "source original observation is unavailable", code: "source_original_unavailable" }, 503);

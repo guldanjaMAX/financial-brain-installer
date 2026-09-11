@@ -2909,6 +2909,32 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
     JSON.stringify(body));
 }
 
+/* Bound receipts add identity-key, ledger, and exact-readback work. A request
+   that could cross the invocation query cap after a failed preflight must be
+   refused before its first D1 statement. */
+{
+  const { env, written, calls } = mkBatchEnv();
+  const docs = Array.from({ length: 50 }, (_, index) => ({
+    ...doc(`bound-budget-${index}`, "x".repeat(index < 25 ? 4_000 : 5_200)),
+    source_type: `bound${index}`,
+    source_original_receipt: {
+      version: 1,
+      locator_kind: "source_relative_path",
+      original_content_sha256: String(index).padStart(64, "0"),
+      original_byte_count: 1,
+    },
+  }));
+  const response = await post(env, "/api/admin/brain/ingest/batch", { docs });
+  const body = await response.json();
+  check("a worst-case bound batch is refused at the exact conservative estimate",
+    response.status === 413 && body.estimated_statements === 1_051,
+    JSON.stringify(body));
+  check("the bound query-budget refusal occurs before identity or corpus SQL",
+    calls.remote === 0 && calls.submitted_statements === 0 && written.length === 0,
+    JSON.stringify(calls));
+}
+
+
 /* A document missing required fields is reported, not silently skipped. */
 {
   const { env } = mkBatchEnv();
@@ -4036,6 +4062,41 @@ function mkForgetEnv({
     { source_type: "brand-new-source", source_id: "x", content: "hello" });
   check("nor invent a new source, whose documents would be born unzoned",
     unknown.status === 403, String(unknown.status));
+
+  const receipt = {
+    version: 1,
+    locator_kind: "source_relative_path",
+    original_content_sha256: "1".repeat(64),
+    original_byte_count: 7,
+  };
+  const singleReceiptFixture = scopedEnv();
+  const singleReceipt = await post("/api/admin/brain/ingest", {
+    source_type: "books",
+    source_id: "allowed-receipt.txt",
+    content: "fixture",
+    source_original_receipt: receipt,
+  }, singleReceiptFixture);
+  const batchReceiptFixture = scopedEnv();
+  const batchReceipt = await post("/api/admin/brain/ingest/batch", { docs: [{
+    source_type: "books",
+    source_id: "allowed-batch-receipt.txt",
+    content: "fixture",
+    source_original_receipt: receipt,
+  }] }, batchReceiptFixture);
+  check("a scoped file grant cannot mint single or batch raw-byte receipts",
+    singleReceipt.status === 403 && batchReceipt.status === 403,
+    JSON.stringify({ single: singleReceipt.status, batch: batchReceipt.status }));
+  const receiptSql = [singleReceiptFixture, batchReceiptFixture].flatMap((fixture) =>
+    fixture.seen.sql.filter((sql) =>
+      /source_original_id_key_state|source_original_result_bindings|(?:FROM|INTO|UPDATE) documents/.test(sql)));
+  check("receipt authority is refused before identity-key or corpus SQL",
+    receiptSql.length === 0, receiptSql.join("\n"));
+
+  const ordinaryBooks = await post("/api/admin/brain/ingest", {
+    source_type: "books", source_id: "ordinary-allowed", content: "ordinary fixture",
+  });
+  check("the same file grant remains able to submit an ordinary in-zone document",
+    ordinaryBooks.status !== 403, String(ordinaryBooks.status));
 }
 
 

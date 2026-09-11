@@ -3,10 +3,58 @@
 import { evidenceLineageValidationError } from "./evidence-lineage.js";
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
 import { provenanceReceiptValidationError, TEXT_SOURCES } from "./provenance-receipt.js";
+import {
+  normalizeSourceOriginalLocator,
+  normalizeSourceOriginalReceipt,
+} from "./source-original-binding.js";
 
 const INGEST_SOURCE_TYPE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const INGEST_DATE_SOURCE_MAX_CHARS = 200;
 const INGEST_DATE_SOURCE_CONTROL = /[\u0000-\u001f\u007f]/;
+
+const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+
+/** Validate the optional private exact-byte attestation and its family shape. */
+export function sourceOriginalReceiptValidationError(envelope) {
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) ||
+      !owns(envelope, "source_original_receipt")) return null;
+
+  let receipt;
+  try {
+    receipt = normalizeSourceOriginalReceipt(envelope.source_original_receipt);
+  } catch (error) {
+    return String(error?.message || "source original receipt is invalid");
+  }
+
+  const metadata = envelope.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return "metadata must be an object";
+  }
+  if (owns(metadata, "family_of")) {
+    return "source original receipt cannot bind an ambiguous multi-record family_of export";
+  }
+
+  const structuralFields = ["part", "part_count", "part_of"];
+  const structural = structuralFields.some((field) => owns(metadata, field));
+  let locator = envelope.source_id;
+  if (structural) {
+    if (!structuralFields.every((field) => owns(metadata, field)) ||
+        !Number.isSafeInteger(metadata.part) || metadata.part < 1 ||
+        !Number.isSafeInteger(metadata.part_count) || metadata.part_count < 2 ||
+        metadata.part > metadata.part_count || typeof metadata.part_of !== "string" ||
+        envelope.source_id !== `${metadata.part_of}#part${metadata.part}of${metadata.part_count}`) {
+      return "source original receipt requires one exact structural #partNofM family";
+    }
+    locator = metadata.part_of;
+  }
+
+  try {
+    normalizeSourceOriginalLocator(receipt.locator_kind, locator);
+  } catch (error) {
+    return String(error?.message || "source original locator is invalid");
+  }
+  return null;
+}
 
 export function ingestEnvelopeValidationError(envelope) {
   if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
@@ -57,5 +105,7 @@ export function ingestEnvelopeValidationError(envelope) {
   if (envelope.text_source === "unknown" && envelope.text_reliable) {
     return "text_source unknown requires text_reliable false";
   }
+  const sourceOriginalError = sourceOriginalReceiptValidationError(envelope);
+  if (sourceOriginalError) return sourceOriginalError;
   return provenanceReceiptValidationError(envelope);
 }

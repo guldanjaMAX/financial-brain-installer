@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   ProvenanceRepairIncompleteError,
+  cmdWhatsnew,
   cmdProvenanceRepair,
   collectSourceRecoveryPages,
   inspectProvenanceRepairReadiness,
@@ -316,6 +317,29 @@ test("schema-1 apply rejects before manifest, remote, credential, readiness, or 
       error.receipt?.fixed_count === 0,
   );
   assert.deepEqual(calls, { remote: 0, readiness: 0, rewalk: 0 });
+});
+
+test("public whatsnew copy matches the fail-closed provenance repair command", async () => {
+  const whatsnew = await captureLogs(() => cmdWhatsnew(undefined, {
+    discoverManifest: () => null,
+  }));
+  const normalizedOutput = whatsnew.output.replace(/\r\n?/g, "\n");
+  const currentEntry = normalizedOutput.match(
+    /# What's new[\s\S]*?\n## \d+\.\d+\.\d+\n([\s\S]*?)(?=\n## \d|$)/,
+  )?.[1] || "";
+  assert.match(currentEntry, /stays read-only/i);
+  assert.match(currentEntry, /schema-1 `--apply` path is unavailable/i);
+  assert.match(currentEntry, /Nothing is changed and zero candidates are reported fixed/i);
+  assert.doesNotMatch(currentEntry, /runs the ordinary source ingest|reset and no limit|candidate is called fixed/i);
+
+  await assert.rejects(
+    cmdProvenanceRepair("/definitely/not/a/provenance-manifest.json", {
+      flags: { source: "drive", apply: true, approve: "legacy-plan-id" },
+    }),
+    (error) => error instanceof ProvenanceRepairIncompleteError &&
+      error.receipt?.status === "apply_schema_unsupported" &&
+      error.receipt?.fixed_count === 0,
+  );
 });
 
 test("every legacy approval and removal flag stops at the schema boundary", async () => {

@@ -335,7 +335,7 @@ async function ocrPdf(ocr, r, scanned) {
  * unreadable scans. One retry costs milliseconds on a file that is genuinely
  * empty and rescues one that was merely cold.
  */
-export async function extractPdf(buf, { reread, ocr } = {}, { pdfPassImpl = pdfPassIsolated } = {}) {
+export async function extractPdf(buf, { reread, onRereadAccepted, ocr } = {}, { pdfPassImpl = pdfPassIsolated } = {}) {
   // Rendering is requested up front only when there is somewhere to send the
   // pixels. Without an OCR callback this is byte-for-byte the old behaviour,
   // which is the point: a PDF with a text layer must never pay for a feature
@@ -366,7 +366,15 @@ export async function extractPdf(buf, { reread, ocr } = {}, { pdfPassImpl = pdfP
     if (fresh) {
       try {
         const again = await pdfPassImpl(fresh, wantImages ? { withPageImages: wantImages } : undefined);
-        if (again.body && again.body.length) r = again;
+        if (again.body && again.body.length) {
+          // The caller's byte receipt must change only when this parse becomes
+          // the result we actually retain. A changed reread that is empty or
+          // throws is discarded, and OCR still consumes the first pass's page
+          // images; binding that outcome to the discarded bytes would make the
+          // raw-original receipt false.
+          if (typeof onRereadAccepted === "function") onRereadAccepted(fresh);
+          r = again;
+        }
       } catch (e) {
         if (e?.fatal === true) throw e;
         // Keep the first result; a retry that throws proves nothing new.

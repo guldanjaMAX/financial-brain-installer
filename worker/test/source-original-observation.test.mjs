@@ -56,7 +56,11 @@ test("closed vocabulary matches the local assessment states and authoritative pa
     SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.recordable_outcomes,
     ["gap", "adjudicated_exclusion", "failed"],
   );
-  assert.equal(SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.accepted_result_binding, "unavailable");
+  assert.equal(
+    SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.raw_original_result_binding,
+    "available_for_bound_current_revisions",
+  );
+  assert.equal(SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.accepted_result_family_receipt, "unavailable");
 });
 
 test("recovery preserves the identity domain and an unresolved observation exactly", async (t) => {
@@ -368,18 +372,18 @@ test("stable private identities, append-only lineage, and direct verification fa
   };
   response = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, repairRequest, ADMIN);
   assert.equal(response.status, 409);
-  assert.equal((await body(response)).code, "source_original_result_binding_unavailable");
+  assert.equal((await body(response)).code, "source_original_acceptance_chain_unavailable");
   assert.equal(fixture.first("SELECT COUNT(*) AS n FROM source_original_observations").n, 2);
 
-  // Even a different current byte claim at the same locator cannot borrow the
-  // stale good document. Schema 42 has no raw-byte-to-document binding.
+  // Even a different current byte claim at the same locator cannot borrow this
+  // stale legacy row, which has no raw-byte-to-document binding.
   response = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, {
     ...repairRequest,
     run_id: "changed_bytes_run",
     targets: [{ ...acceptedTarget, original_content_sha256: "4".repeat(64) }],
   }, ADMIN);
   assert.equal(response.status, 409);
-  assert.equal((await body(response)).code, "source_original_result_binding_unavailable");
+  assert.equal((await body(response)).code, "source_original_acceptance_chain_unavailable");
 
   assert.throws(() => fixture.raw(
     `INSERT INTO source_original_observations
@@ -393,7 +397,7 @@ test("stable private identities, append-only lineage, and direct verification fa
         result_document_count,result_document_set_hash,observation_hash,?,recorded_at
        FROM source_original_observations WHERE sequence=1`,
     `sha256:${"9".repeat(64)}`,
-  ), /future raw-original binding/);
+  ), /future result-family receipt and retrieval proof/);
 
   response = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, {
     ...verifyDiscovery,
@@ -651,7 +655,7 @@ test("an incomplete structural family can never create or verify an accepted rep
   };
   const recordResponse = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, request, ADMIN);
   assert.equal(recordResponse.status, 409);
-  assert.equal((await body(recordResponse)).code, "source_original_result_binding_unavailable");
+  assert.equal((await body(recordResponse)).code, "source_original_acceptance_chain_unavailable");
   assert.equal(fixture.first("SELECT COUNT(*) AS n FROM source_original_observations").n, 0);
 
   const verifyResponse = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, {
