@@ -398,9 +398,21 @@ export function sameCanonicalSourceRoot(left, right, platform = process.platform
   return pathWin32.relative(left, right) === "";
 }
 
+/** Expand Windows filesystem aliases before comparing source roots. */
+export function canonicalSourceRoot(
+  value,
+  {
+    platform = process.platform,
+    nativeRealpath = realpathSync.native,
+    portableRealpath = realpathSync,
+  } = {},
+) {
+  return platform === "win32" ? nativeRealpath(value) : portableRealpath(value);
+}
+
 export function readSourceIdentity(expectSha, env, dependencies = {}) {
   const root = resolve(dependencies.root || ROOT);
-  const canonicalRoot = realpathSync(root);
+  const canonicalRoot = canonicalSourceRoot(root);
   const readGit = dependencies.git || ((args) => git(args, env, root));
   const readBytes = (path) => {
     const value = (dependencies.readFile || readFileSync)(path);
@@ -411,7 +423,7 @@ export function readSourceIdentity(expectSha, env, dependencies = {}) {
     "-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--check", headSha,
   ], { env, capture: true, cwd: root, timeoutMs: 60_000 }));
   const readGitState = () => {
-    const top = realpathSync(readGit(["rev-parse", "--show-toplevel"]));
+    const top = canonicalSourceRoot(readGit(["rev-parse", "--show-toplevel"]));
     const headSha = readGit(["rev-parse", "HEAD"]);
     return {
       top,
