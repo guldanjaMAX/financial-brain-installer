@@ -169,6 +169,10 @@ for (const t of [
   "source_original_id_key_state",
   "source_original_observations",
   "source_original_result_bindings",
+  "source_original_result_family_members",
+  "source_original_result_family_receipts",
+  "source_original_result_family_verifications",
+  "source_original_result_family_recovery_state",
 ]) {
   check(`${t} exists`, names.has(t), [...names].join(", "));
 }
@@ -176,6 +180,35 @@ for (const t of [
   const documentColumns = new Set(db.prepare("PRAGMA table_info(documents)").all().map((row) => row.name));
   check("0043 adds nullable document revision and raw-original binding pointers",
     documentColumns.has("document_revision_id") && documentColumns.has("source_original_binding_hash"));
+}
+{
+  const chunkColumns = new Set(db.prepare("PRAGMA table_info(chunks)").all().map((row) => row.name));
+  check("0044 adds nullable exact revision and stored-chunk receipt pointers",
+    chunkColumns.has("bound_document_revision_id") && chunkColumns.has("result_chunk_receipt_hash"));
+}
+for (const object of [
+  "idx_source_original_result_family_members_revision",
+  "idx_source_original_result_family_receipts_original_sequence",
+  "idx_source_original_result_family_verifications_family_sequence",
+  "chunks_source_original_receipt_insert",
+  "chunks_source_original_receipt_update",
+  "chunks_source_original_receipt_no_stale_update",
+  "chunks_source_original_receipt_no_stale_replace",
+  "source_original_result_family_recovery_state_validate_insert",
+  "source_original_result_family_member_no_duplicate_insert",
+  "source_original_result_family_member_after_seal_insert",
+  "source_original_result_family_member_no_update",
+  "source_original_result_family_member_no_sealed_delete",
+  "source_original_result_family_receipt_no_duplicate_insert",
+  "source_original_result_family_receipt_validate_insert",
+  "source_original_result_family_receipt_no_update",
+  "source_original_result_family_receipt_no_delete",
+  "source_original_result_family_verification_no_duplicate_insert",
+  "source_original_result_family_verification_validate_insert",
+  "source_original_result_family_verification_no_update",
+  "source_original_result_family_verification_no_delete",
+]) {
+  check(`${object} exists`, names.has(object));
 }
 for (const t of ["chunks_ai", "chunks_ad", "chunks_au"]) {
   check(`trigger ${t} exists`, names.has(t), "MISSING — keyword search would silently return nothing forever");
@@ -940,7 +973,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
     });
   } catch (error) { schema32Error = error; }
   check("direct migrate refuses a live schema-32 brain before dropping its FTS writer",
-    /0010-0013 or 0033.*brain update/is.test(schema32Error?.message || "") &&
+    /0010-0013, 0033, or 0044.*brain update/is.test(schema32Error?.message || "") &&
       schema32Fault.mutations === 0 &&
       schema32.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger' AND name='chunks_ai'").get().n === 1,
     `${schema32Error?.message}; mutations=${schema32Fault.mutations}`);

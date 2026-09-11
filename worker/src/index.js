@@ -224,6 +224,45 @@ function strongestEvidenceAuthority(results) {
   } : null;
 }
 
+function citationCandidateForResult(result, index) {
+  return {
+    n: index + 1,
+    title: (result.title || "untitled").slice(0, 140),
+    source: result.source || "?",
+    source_kind: result.source_kind || null,
+    write_provenance: result.write_provenance || null,
+    client: result.client || null,
+    ts: result.ts || null,
+    occurred_at: result.occurred_at || null,
+    date_reliable: result.date_reliable === true,
+    date_source: result.date_source || null,
+    text_source: result.text_source || "unknown",
+    text_reliable: result.text_reliable === true,
+    current_authoritative: result.current_authoritative === true,
+    authority: result.authority || null,
+    lineage: result.lineage || evidenceLineageFor(result).lineage,
+    _lineage_root_ids: evidenceLineageRootIds(result),
+    ref: result.ref_key || result.drive_file_id || null,
+    snippet: (result.snippet || "").replace(/\s+/g, " ").slice(0, 900),
+  };
+}
+
+function citationForDocument(document) {
+  return {
+    n: document.n, title: document.title, source: document.source,
+    source_kind: document.source_kind,
+    ...(document.write_provenance ? { write_provenance: document.write_provenance } : {}),
+    ref: document.ref, ts: document.ts,
+    date_reliable: document.date_reliable, date_source: document.date_source,
+    // A citation drawn from a scan must never look identical to one drawn from
+    // a text layer. Preserve the exact public answer-path projection here so a
+    // result-family proof exercises the same citation contract.
+    text_source: document.text_source, text_reliable: document.text_reliable,
+    authority: document.authority,
+    lineage: document.lineage,
+  };
+}
+
 async function unifiedRetrieve(env, url, {
   limit, access = null, scope = { all: true }, scopePrincipalKind = "owner",
 }) {
@@ -831,26 +870,7 @@ async function handleThink(
         : "The vector index is not fully query-ready. Keyword evidence remains available, but new or differently phrased evidence may be missing until `brain drain` confirms the complete projection.",
     });
   }
-  const docs = results.slice(0, 12).map((r, i) => ({
-    n: i + 1,
-    title: (r.title || "untitled").slice(0, 140),
-    source: r.source || "?",
-    source_kind: r.source_kind || null,
-    write_provenance: r.write_provenance || null,
-    client: r.client || null,
-    ts: r.ts || null,
-    occurred_at: r.occurred_at || null,
-    date_reliable: r.date_reliable === true,
-    date_source: r.date_source || null,
-    text_source: r.text_source || "unknown",
-    text_reliable: r.text_reliable === true,
-    current_authoritative: r.current_authoritative === true,
-    authority: r.authority || null,
-    lineage: r.lineage || evidenceLineageFor(r).lineage,
-    _lineage_root_ids: evidenceLineageRootIds(r),
-    ref: r.ref_key || r.drive_file_id || null,
-    snippet: (r.snippet || "").replace(/\s+/g, " ").slice(0, 900),
-  }));
+  const docs = results.slice(0, 12).map(citationCandidateForResult);
   const unreadableRequestedTaxEvidence = taxDocumentCoverage.unreadable || docs.some((doc) =>
     doc.authority?.tax_scope?.applicable === true &&
     (doc.authority.tax_scope.matched === true ||
@@ -1278,18 +1298,7 @@ async function handleThink(
     gaps,
     confidence,
     evidence_authority: approvedDocs.length ? strongestEvidenceAuthority(approvedDocs) || undefined : undefined,
-    citations: approvedDocs.map((d) => ({
-      n: d.n, title: d.title, source: d.source, source_kind: d.source_kind,
-      ...(d.write_provenance ? { write_provenance: d.write_provenance } : {}),
-      ref: d.ref, ts: d.ts,
-      date_reliable: d.date_reliable, date_source: d.date_source,
-      // A citation drawn from a scan must never look identical to one drawn
-      // from a text layer. This is the field that makes the difference
-      // visible at the point of reading, which is the only place it counts.
-      text_source: d.text_source, text_reliable: d.text_reliable,
-      authority: d.authority,
-      lineage: d.lineage,
-    })),
+    citations: approvedDocs.map(citationForDocument),
     results: results.slice(0, limit),
   });
 }
@@ -2592,7 +2601,35 @@ export default {
     // handler enforces its own pause boundary for record mode while leaving
     // seal, inventory and verify read-only.
     if (path === SOURCE_ORIGINAL_OBSERVATION_PATH) {
-      return handleSourceOriginalObservation(env, request);
+      return handleSourceOriginalObservation(env, request, {
+        // Keep the private query inside this request while exercising the exact
+        // production owner retrieval and citation projections twice. Calling
+        // unifiedRetrieve directly guarantees the proof cannot enable rerank.
+        retrieve: async ({ query, limit }) => {
+          const internal = new URL("https://brain.invalid/api/rag/unified");
+          internal.searchParams.set("q", query);
+          const retrieval = await unifiedRetrieve(env, internal, {
+            limit,
+            access: null,
+            scope: { all: true },
+            scopePrincipalKind: "owner",
+          });
+          const results = retrieval.matches.slice(0, limit).map((result, index) => ({
+            result,
+            citation: citationForDocument(citationCandidateForResult(result, index)),
+          }));
+          return {
+            results,
+            // The proof contract uses an exact healthy boolean. Preserve the
+            // production reason separately without admitting truthy strings.
+            degraded: retrieval.degraded !== null,
+            degraded_reason: retrieval.degradedReason,
+            ignored_filters: retrieval.ignoredFilters,
+            retrieval_scope: retrieval.retrievalScope,
+            access: retrieval.access,
+          };
+        },
+      });
     }
 
     // The financial map is a full owner-reviewed denominator, not an inferred

@@ -20,6 +20,10 @@ import {
   normalizeSourceOriginalSource,
 } from "./source-original-binding.js";
 import { backendOf, D1 } from "./store.js";
+import {
+  handleSourceOriginalResultFamily,
+  SourceOriginalResultFamilyError,
+} from "./source-original-result-family.js";
 
 export const SOURCE_ORIGINAL_OBSERVATION_PATH = "/api/admin/brain/source-original-observations";
 export const SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION = 1;
@@ -79,7 +83,7 @@ export const SOURCE_ORIGINAL_OBSERVATION_VOCABULARY = Object.freeze({
   outcome_triples: OBSERVATION_OUTCOME_TRIPLES,
   recordable_outcomes: Object.freeze(["gap", "adjudicated_exclusion", "failed"]),
   raw_original_result_binding: "available_for_bound_current_revisions",
-  accepted_result_family_receipt: "unavailable",
+  accepted_result_family_receipt: "available_non_authorizing",
 });
 
 const STAGES = new Set(OBSERVATION_STAGES);
@@ -514,9 +518,9 @@ async function observedOutcomeMatches(target, snapshot) {
 
 /**
  * Read-only readiness check for one directly observed original. This is an
- * internal substrate for a later accepted-outcome change; schema 43 and the
- * record route continue to reject accepted observations in this release until
- * the complete family, chunk, vector, retrieval and citation chain exists.
+ * internal prerequisite for the schema-44 result-family proof. The record
+ * route continues to reject accepted observations in this release even when
+ * the separate non-authorizing family proof exists.
  */
 export async function sourceOriginalResultBindingReadiness(env, {
   source,
@@ -645,7 +649,7 @@ function boundedScope() {
     whole_source_complete: false,
     accepted_outcomes_supported: false,
     repair_verification_supported: false,
-    raw_original_result_family_receipt: "unavailable",
+    raw_original_result_family_receipt: "available_non_authorizing",
     meaning: "Evidence applies only to the explicitly sealed originals; it is not a whole-source enumeration.",
   };
 }
@@ -687,10 +691,9 @@ async function handleRecord(env, body) {
   const receipts = [];
   for (const target of binding.targets) {
     if (target.outcome === "accepted") {
-      // Schema 43 can prove the exact raw original to each current document
-      // revision. That is necessary but not sufficient for acceptance: no
-      // database receipt yet freezes the whole current result family and exact
-      // chunks or proves vector, retrieval and same-family citation readiness.
+      // Schema 44 can record the complete family and retrieval evidence, but
+      // that proof is deliberately non-authorizing. Accepted repair remains a
+      // separate reviewed change, so this release still refuses it here.
       throw new ObservationRequestError(
         409,
         "source_original_acceptance_chain_unavailable",
@@ -966,8 +969,8 @@ async function handleVerify(env, body) {
   }, observationVerified ? 200 : 409);
 }
 
-/** Handle all four modes behind one admin-only, body-only private endpoint. */
-export async function handleSourceOriginalObservation(env, request) {
+/** Handle every mode behind one admin-only, body-only private endpoint. */
+export async function handleSourceOriginalObservation(env, request, dependencies = {}) {
   if (!validateAdminKey(request, env)) {
     return respond({ error: "unauthorized", code: "admin_required" }, 401);
   }
@@ -989,9 +992,16 @@ export async function handleSourceOriginalObservation(env, request) {
     if (body.mode === "record") return await handleRecord(env, body);
     if (body.mode === "inventory") return await handleInventory(env, body);
     if (body.mode === "verify") return await handleVerify(env, body);
-    refuse("source_original_mode_unsupported", "mode must be seal, record, inventory, or verify");
+    if (body.mode === "result_family") {
+      return respond(await handleSourceOriginalResultFamily(env, body, {
+        ...dependencies,
+        readBindingReadiness: sourceOriginalResultBindingReadiness,
+      }));
+    }
+    refuse("source_original_mode_unsupported", "mode must be seal, record, inventory, verify, or result_family");
   } catch (error) {
-    if (error instanceof ObservationRequestError || error instanceof SourceOriginalBindingError) {
+    if (error instanceof ObservationRequestError || error instanceof SourceOriginalBindingError ||
+        error instanceof SourceOriginalResultFamilyError) {
       return respond({ error: error.message, code: error.code }, error.status);
     }
     return respond({ error: "source original observation is unavailable", code: "source_original_unavailable" }, 503);

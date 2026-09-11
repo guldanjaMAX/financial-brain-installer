@@ -218,6 +218,19 @@ excluded from both the content export and aggregate fingerprint.
 `agent_action_receipts` holds live single-use authority, so its rows are also
 excluded; the restored table must remain empty before and after bank security
 reconciliation.
+
+Schema 44 result-family members and their portable family headers are durable
+history and are restored after the schema-43 raw binding rows. The
+`source_original_result_family_verifications` table remains in the schema, but
+its rows are excluded from export and restore because they describe the source
+deployment's Vectorize projection. A restored portable seal is historical
+evidence only. It is not query-ready proof until the target Vectorize rebuild
+finishes and the private deterministic retrieval verification is repeated.
+The artifact opens `source_original_result_family_recovery_state` only while
+the target has no imported corpus or provenance rows, keeps immutable binding
+checks active, then deletes the marker and executes a fail-closed empty-state
+assertion. Source inspection, restored snapshot checks, and promotion also
+refuse any target with that marker left open.
 The exact verified artifact also anchors a versioned bank security proof in the
 private recovery journal. Each ordered pair of hashes commits the row identity
 and every bank field: the exact original semantic row and its one permitted

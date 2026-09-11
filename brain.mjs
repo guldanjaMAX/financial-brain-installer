@@ -3774,9 +3774,11 @@ export async function cmdMigrate(manifestPath, options = {}) {
 
   // 0010-0013 change the protocol used by every Vectorize writer. Migration
   // 0033 replaces the live FTS insert trigger across two independently
-  // committed D1 statements. A public `brain migrate` against an active Worker
-  // could therefore race either the vector protocol change or the interval
-  // between DROP TRIGGER and CREATE TRIGGER. The private option keeps its
+  // committed D1 statements. 0044 adds the exact chunk-receipt columns read by
+  // the result-family writer. A public `brain migrate` against an active Worker
+  // could therefore race either the vector protocol change, the interval
+  // between DROP TRIGGER and CREATE TRIGGER, or a schema-44 chunk write. The
+  // private option keeps its
   // historical name, but it is passed only after setup/update has deployed the
   // whole-corpus write barrier and waited out older invocations. It is
   // intentionally not a CLI flag.
@@ -3786,7 +3788,7 @@ export async function cmdMigrate(manifestPath, options = {}) {
   // migrate is `vectorDrainPauseCompleted`: setup/update set it once the
   // paused deployment and the full grace are behind them. Unverified is loud,
   // not fatal, because a transport blip must not block every update.
-  const writerQuiescenceMigrations = new Set([10, 11, 12, 13, 33]);
+  const writerQuiescenceMigrations = new Set([10, 11, 12, 13, 33, 44]);
   const cutoverAuthorized = options.vectorDrainQuiesced === true ||
     options.vectorDrainPauseCompleted === true;
   if ((m.infrastructure?.cloudflare?.storage || "d1") === "d1" &&
@@ -3813,7 +3815,7 @@ export async function cmdMigrate(manifestPath, options = {}) {
       // eligible for the direct fresh-install path; every other prefix must use
       // setup/update's paused-worker quiescence protocol.
       die(
-        "this existing brain needs the verified paused-writer cutover before migrations 0010-0013 or 0033.\n" +
+        "this existing brain needs the verified paused-writer cutover before migrations 0010-0013, 0033, or 0044.\n" +
         "      Run `brain update` instead; direct migrate was stopped before changing D1.",
       );
     }
@@ -3832,7 +3834,7 @@ export async function cmdMigrate(manifestPath, options = {}) {
     if (!inventory || !Array.isArray(inventory.results) || inventory.results.length !== 1 ||
         Number(inventory.results[0]?.user_table_count) !== 0) {
       die(
-        "this database is not provably fresh, so migrations 0010-0013 or 0033 require the verified paused-writer cutover.\n" +
+        "this database is not provably fresh, so migrations 0010-0013, 0033, or 0044 require the verified paused-writer cutover.\n" +
         "      Run `brain update` instead; direct migrate was stopped before changing D1.",
       );
     }
