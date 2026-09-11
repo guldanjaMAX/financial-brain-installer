@@ -374,8 +374,18 @@ export function assertNoProjectNpmConfig(root) {
   return true;
 }
 
+/** Keep source identity independent of ambient Git configuration while still
+ *  honoring the standard LF-index/CRLF-worktree shape of a Windows checkout. */
+export function sourceIdentityGitArgs(args, platform = process.platform) {
+  return [
+    "-c", "core.fsmonitor=false",
+    ...(platform === "win32" ? ["-c", "core.autocrlf=true"] : []),
+    ...args,
+  ];
+}
+
 function git(args, env, cwd = ROOT) {
-  const result = run("git", ["-c", "core.fsmonitor=false", ...args], {
+  const result = run("git", sourceIdentityGitArgs(args), {
     env, capture: true, cwd, timeoutMs: 60_000,
   });
   if (!result.ok) throw new Error(`git_${args[0]}_failed`);
@@ -419,9 +429,9 @@ export function readSourceIdentity(expectSha, env, dependencies = {}) {
     return Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(String(value));
   };
   const pathExists = dependencies.exists || existsSync;
-  const readDiffCheck = dependencies.diffCheck || ((headSha) => run("git", [
-    "-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--check", headSha,
-  ], { env, capture: true, cwd: root, timeoutMs: 60_000 }));
+  const readDiffCheck = dependencies.diffCheck || ((headSha) => run("git",
+    sourceIdentityGitArgs(["diff", "--no-ext-diff", "--check", headSha]),
+    { env, capture: true, cwd: root, timeoutMs: 60_000 }));
   const readGitState = () => {
     const top = canonicalSourceRoot(readGit(["rev-parse", "--show-toplevel"]));
     const headSha = readGit(["rev-parse", "HEAD"]);

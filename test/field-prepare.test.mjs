@@ -28,6 +28,7 @@ import {
   renderFieldChecklist,
   runFieldPrepare,
   sameCanonicalSourceRoot,
+  sourceIdentityGitArgs,
 } from "../scripts/field-prepare.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -241,6 +242,18 @@ test("source roots preserve exact POSIX comparisons", () => {
   assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/Brain", "linux"), true);
   assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/brain", "linux"), false);
   assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/Brain/", "darwin"), false);
+});
+
+test("source identity pins only the Windows line-ending conversion rule", () => {
+  assert.deepEqual(sourceIdentityGitArgs(["status"], "win32"), [
+    "-c", "core.fsmonitor=false", "-c", "core.autocrlf=true", "status",
+  ]);
+  assert.deepEqual(sourceIdentityGitArgs(["status"], "linux"), [
+    "-c", "core.fsmonitor=false", "status",
+  ]);
+  assert.deepEqual(sourceIdentityGitArgs(["status"], "darwin"), [
+    "-c", "core.fsmonitor=false", "status",
+  ]);
 });
 
 test("the command boundary refuses live modes, manifests, and mutating Cloudflare runners", () => {
@@ -460,6 +473,7 @@ function makeCleanPlanFixture() {
     type: "module",
   }, null, 2)}\n`);
   writeFixtureLock(root, "9.9.9");
+  writeFileSync(join(root, "README.md"), "Field preparation fixture.\n");
   runFixtureGit(root, ["init", "--quiet"]);
   return { root, sha: commitFixture(root, "clean plan fixture") };
 }
@@ -543,6 +557,8 @@ test("CLI plan binds a clean checkout and returns structured refusals without ou
   try {
     const outputRoot = join(fixture.root, ".field-prepare");
     const cleanIndex = readFileSync(join(fixture.root, ".git", "index"));
+    const cleanScript = readFileSync(join(fixture.root, "scripts", "field-prepare.mjs"));
+    const cleanReadme = readFileSync(join(fixture.root, "README.md"));
     const success = runPlanFixture(fixture.root, fixture.sha);
     assert.equal(success.status, 0, `${success.stdout}\n${success.stderr}`);
     const plan = JSON.parse(success.stdout);
@@ -584,8 +600,45 @@ test("CLI plan binds a clean checkout and returns structured refusals without ou
     assert.equal(dirtyReceipt.candidate_binding.working_tree_clean, false);
     assert.equal(existsSync(outputRoot), false);
     assert.deepEqual(readFileSync(join(fixture.root, ".git", "index")), cleanIndex);
-
     rmSync(join(fixture.root, "untracked.fixture"));
+
+    writeFileSync(join(fixture.root, "scripts", "field-prepare.mjs"), Buffer.concat([
+      cleanScript, Buffer.from("\n// tracked fixture edit\n"),
+    ]));
+    const tracked = runPlanFixture(fixture.root, fixture.sha);
+    assert.equal(tracked.status, 1, `${tracked.stdout}\n${tracked.stderr}`);
+    assert.equal(JSON.parse(tracked.stdout).failure_code, "working_tree_not_clean");
+    writeFileSync(join(fixture.root, "scripts", "field-prepare.mjs"), cleanScript);
+
+    writeFileSync(join(fixture.root, "scripts", "field-prepare.mjs"), Buffer.concat([
+      cleanScript, Buffer.from("\n// whitespace fixture edit  \n"),
+    ]));
+    assert.throws(
+      () => readSourceIdentity(fixture.sha, createPlanEnvironment(process.env), { root: fixture.root }),
+      (error) => {
+        assert.equal(error.code, "working_tree_not_clean");
+        assert.equal(error.sourceIdentity.diff_check_clean, false);
+        return true;
+      },
+    );
+    writeFileSync(join(fixture.root, "scripts", "field-prepare.mjs"), cleanScript);
+
+    writeFileSync(join(fixture.root, "scripts", "field-prepare.mjs"), Buffer.concat([
+      cleanScript, Buffer.from("\n// staged fixture edit\n"),
+    ]));
+    runFixtureGit(fixture.root, ["add", "scripts/field-prepare.mjs"]);
+    const staged = runPlanFixture(fixture.root, fixture.sha);
+    assert.equal(staged.status, 1, `${staged.stdout}\n${staged.stderr}`);
+    assert.equal(JSON.parse(staged.stdout).failure_code, "working_tree_not_clean");
+    writeFileSync(join(fixture.root, "scripts", "field-prepare.mjs"), cleanScript);
+    runFixtureGit(fixture.root, ["add", "scripts/field-prepare.mjs"]);
+
+    rmSync(join(fixture.root, "README.md"));
+    const deleted = runPlanFixture(fixture.root, fixture.sha);
+    assert.equal(deleted.status, 1, `${deleted.stdout}\n${deleted.stderr}`);
+    assert.equal(JSON.parse(deleted.stdout).failure_code, "working_tree_not_clean");
+    writeFileSync(join(fixture.root, "README.md"), cleanReadme);
+
     writeFixtureLock(fixture.root, "9.9.8");
     const misalignedSha = commitFixture(fixture.root, "misaligned package lock fixture");
     const misaligned = runPlanFixture(fixture.root, misalignedSha);
