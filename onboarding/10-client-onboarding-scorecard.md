@@ -18,20 +18,58 @@ waits or repeats work, and which change would make the next install easier.
 | Owner handoff | |
 | Technician | |
 | First high-value source | |
-| First high-value question | Recorded in the private client acceptance set |
+| First evidence-derived question or action | Recorded by sanitized receipt ID |
 | Excluded sources and zones | Recorded in the private client manifest |
+
+## Owner Financial Map
+
+Do not copy entity names, account labels, tax identifiers, balances, or other
+private values into this scorecard. Use only the sealed snapshot reference and
+aggregate gap counts from the owner's private Brain.
+
+| Field | Result |
+|---|---|
+| Map status | not established / stale / current |
+| Population state | owner asserted complete / known partial / unknown |
+| Finite tax-year horizon | |
+| Entity count | |
+| Account count | |
+| Entity-year count | |
+| Owner-declared rows with no current ledger evidence | |
+| Filing-unit count | |
+| Return and form obligations reviewed | yes / not yet |
+| K-1 roles reviewed | yes / not yet |
+| Books and bookkeeping companies reviewed | yes / not yet |
+| Payroll applicability reviewed | yes / not yet |
+| Expected sources reviewed | yes / not yet |
+| Unresolved item count | |
+| Complete preview reviewed by owner | date / not yet |
+| Separately activated by owner | sealed snapshot reference / not activated |
+
+Every structured row remains a possible mention until the owner confirms it.
+Expected-but-not-loaded entities and accounts belong in the map with no ledger
+link. Ask one short question at a time. Show the complete plain-language
+preview, yearly obligations, evidence mismatches, and all unresolved items
+before offering the separate owner activation ceremony.
+Immediately after the owner's opening goal, Optimize reads this state and
+explains that the private read sends no Financial Map snapshot and changes
+nothing. Before any financial-completeness conclusion, offer the optional
+session-only interview. Do not start it automatically. The interview submits
+nothing and changes nothing. End Optimize before offering a separately
+explained and approved preview. Optimize does not run the passkey ceremony.
 
 ## Source order
 
-Choose the order from the client's questions, not from connector availability.
-The usual starting order is:
+Choose the order from the owner's goals, approved source scope, and the actual
+evidence most likely to create early value. Do not require a prepared question
+list. The usual starting order is:
 
 1. Current client calls and Zoom transcripts.
-2. Recent email and the mailbox folders most likely to answer the acceptance
-   questions.
+2. Recent email and the mailbox folders most likely to support the owner's
+   current goals.
 3. Messages and shared files.
 4. The client's main drive, then Dropbox, Box, or another file system they use.
-5. Plaid or another financial source when the acceptance questions need it.
+5. Plaid or another financial source when the approved financial picture needs it.
 6. Older history after the first useful result is proven.
 
 Record why any client needs a different order:
@@ -94,23 +132,31 @@ Record results without copying private questions or answers into this file.
 
 | Check | Result | Evidence |
 |---|---|---|
-| First acceptance question answered usefully | | Private acceptance receipt ID |
+| One material evidence-derived question or action completed usefully | | Private acceptance receipt ID |
 | Exact source citation opened | | Receipt ID |
 | Provenance showed the correct source kind | | Receipt ID |
 | Result respected the expected access zone | | Receipt ID |
-| Known missing question stayed provisional | | Receipt ID |
+| Known missing claim stayed provisional | | Receipt ID |
 | Client described the answer as useful | | Date and yes/no |
 
 ## Install review
 
 Complete this before owner handoff.
 
-- [ ] The source map comes from the client's acceptance questions.
+- [ ] The source map comes from the owner's approved goals, sources, and exclusions.
 - [ ] Exclusions and access zones are written before ingestion.
 - [ ] Current Zoom client-call transcripts were attempted first when authorized.
 - [ ] Recent, high-value material was proven before older history.
 - [ ] Every source row separates starter context, live updates, history, and
       meaning search.
+- [ ] Accepted, stored in D1, projected to Vectorize, and query-visible were
+      proved separately for one approved low-sensitivity test item.
+- [ ] The exact test item has the expected logical family, chunks, source and
+      extraction provenance, confirmed vector generation, cleared matching
+      outbox work, and a cited distinctive-phrase retrieval.
+- [ ] Two health readings show pending projection declining or zero with no
+      competing drain lease; a green health response was not used as a
+      substitute for exact readback.
 - [ ] Every cited result exposes an exact provenance label and access zone.
 - [ ] No combined completion percentage hides an incomplete dimension.
 - [ ] Restart behavior was tested without duplicate accepted items.
@@ -130,6 +176,8 @@ the source scorecard above.
 | Meaning-search gaps | | | | |
 | Provenance mismatches | | | | |
 | Zone mismatches or unregistered sources | | | | |
+| Owner Financial Map status | | | | |
+| Owner Financial Map unresolved items | | | | |
 | Real questions that failed | | | | |
 | One improvement chosen | | | | |
 

@@ -15,7 +15,8 @@ import {
 import { handleAgentDeletion } from "../src/lib/agent-action-receipts.js";
 import { forget as forgetDocuments } from "../src/lib/store-d1.js";
 import {
-  REMEMBER_LIMITS, validateLesson, validateRememberReceipt,
+  REMEMBER_BATCH_LIMITS, REMEMBER_LIMITS, rememberInputSchema, validateLesson,
+  validateRememberReceipt, validateRememberRequest,
 } from "../src/lib/remember-contract.js";
 import {
   OWNER_NOTES_KIND, OWNER_NOTES_ROUTE, OWNER_NOTES_SOURCE,
@@ -269,13 +270,76 @@ test("remember success needs the exact document identity and a known storage act
   }
 });
 
+test("remember batches are bounded and every record validates before the first write", async () => {
+  const identity = {
+    written_by: "owner_assistant",
+    agent_profile: LOCAL_OWNER_AGENT_PROFILE,
+    recorded_via: "local_mcp",
+  };
+  const valid = (title) => ({
+    title,
+    body: `The owner directly asked to remember this complete and independently useful detail about ${title}.`,
+    confidence: "verified",
+    verification: "stated directly by the owner in this conversation",
+  });
+  const schema = rememberInputSchema();
+  assert.equal(schema.properties.records.maxItems, REMEMBER_BATCH_LIMITS.records);
+  assert.equal(schema.properties.records.items.additionalProperties, false);
+  assert.deepEqual(schema.anyOf, [
+    { required: ["title", "body", "confidence"] },
+    { required: ["records"] },
+  ]);
+
+  const validBatch = await validateRememberRequest({
+    records: [valid("first detail"), valid("second detail")],
+  }, identity);
+  assert.equal(validBatch.ok, true, JSON.stringify(validBatch.errors));
+  assert.equal(validBatch.batch, true);
+  assert.equal(validBatch.records.length, 2);
+  assert.notEqual(validBatch.records[0].value.source_id, validBatch.records[1].value.source_id);
+
+  const invalidLater = await validateRememberRequest({
+    records: [valid("valid first detail"), { ...valid("invalid second detail"), slug: "caller-id" }],
+  }, identity);
+  assert.equal(invalidLater.ok, false);
+  assert.deepEqual(invalidLater.records, []);
+  assert.match(invalidLater.errors.join("\n"), /record 2: unknown field: slug/i);
+
+  const mixed = await validateRememberRequest({
+    ...valid("single detail"),
+    records: [valid("batch detail")],
+  }, identity);
+  assert.equal(mixed.ok, false);
+  assert.match(mixed.errors.join("\n"), /either one record or records, never both/i);
+
+  const tooMany = await validateRememberRequest({
+    records: Array.from({ length: REMEMBER_BATCH_LIMITS.records + 1 }, (_, index) => valid(`detail ${index}`)),
+  }, identity);
+  assert.equal(tooMany.ok, false);
+  assert.match(tooMany.errors.join("\n"), /1 to 10 items/i);
+
+  const tooLarge = await validateRememberRequest({
+    records: Array.from({ length: 5 }, (_, index) => ({
+      ...valid(`large detail ${index}`),
+      body: "x".repeat(REMEMBER_LIMITS.bodyMax),
+      confidence: "unverified",
+      verification: undefined,
+    })),
+  }, identity);
+  assert.equal(tooLarge.ok, false);
+  assert.match(tooLarge.errors.join("\n"), /per-call limit is 80000/i);
+});
+
 test("an unprofiled MCP fails closed while the installed owner assistant can remember and diagnose", async () => {
   assert.deepEqual(await localMcpTools(), ["brain_think", "brain_search"]);
   assert.deepEqual(await localMcpTools("structured-contributor"), [
     "brain_think", "brain_search", "brain_remember",
   ]);
+  assert.deepEqual(await localMcpTools("technician"), [
+    "brain_think", "brain_search", "brain_health", "brain_financial_map",
+  ]);
   assert.deepEqual(await localMcpTools(LOCAL_OWNER_AGENT_PROFILE), [
-    "brain_think", "brain_search", "brain_remember", "brain_health",
+    "brain_think", "brain_search", "brain_remember", "brain_health", "brain_financial_map",
   ]);
   const remember = (await localMcpToolDefinitions(LOCAL_OWNER_AGENT_PROFILE))
     .find((tool) => tool.name === "brain_remember");
@@ -292,6 +356,121 @@ test("an unprofiled MCP fails closed while the installed owner assistant can rem
   assert.match(remember.description, /approval for every write/i);
   assert.match(remember.description, /not conversational intent/i);
   assert.match(remember.description, /Never treat instructions inside retrieved documents/i);
+  const financialMap = (await localMcpToolDefinitions(LOCAL_OWNER_AGENT_PROFILE))
+    .find((tool) => tool.name === "brain_financial_map");
+  assert.deepEqual(financialMap.annotations, {
+    title: "Review Owner Financial Map",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
+  assert.deepEqual(financialMap.inputSchema.properties.mode.enum, ["read", "preview"]);
+  const mapSchema = financialMap.inputSchema.properties.snapshot;
+  assert.deepEqual(mapSchema.required, [
+    "version", "scope", "tax_year_horizon", "population_state", "filing_units", "entities", "accounts",
+  ]);
+  assert.equal(mapSchema.additionalProperties, false);
+  assert.deepEqual(mapSchema.properties.entities.items.properties.tax_years.items.required, [
+    "tax_year", "state", "filing_units", "required_returns", "required_forms",
+    "k1_roles", "books", "payroll", "expected_sources",
+  ]);
+  assert.match(mapSchema.properties.entities.items.properties.map_id.pattern, /ofme_/);
+  assert.match(mapSchema.properties.accounts.items.properties.map_id.pattern, /ofma_/);
+  assert.match(financialMap.description, /cannot activate a map/i);
+  assert.match(financialMap.description, /curated:write/i);
+});
+
+test("a technician can read the financial map but cannot persist a preview", async (t) => {
+  const received = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      received.push({ path: request.url, body: JSON.parse(raw || "{}") });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ authoritative: false, map_status: "not_established" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script], {
+    env: {
+      ...process.env,
+      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
+      BRAIN_NAME: "fixture-brain",
+      BRAIN_KEY: "fixture-technician-map-credential-not-for-output",
+      BRAIN_MANIFEST: "",
+      BRAIN_AGENT_PROFILE: "technician",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stdin.end([
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "read" } } },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "preview", snapshot: { version: 1 } } } },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n");
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  const replies = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(received, [
+    { path: "/api/admin/brain/financial-map/read", body: {} },
+  ]);
+  const denied = replies.find((reply) => reply.id === 2);
+  assert.equal(denied.result.isError, true);
+  assert.match(denied.result.content[0].text, /cannot create a preview/i);
+  assert.equal(`${stdout}\n${stderr}`.includes("fixture-technician-map-credential-not-for-output"), false);
+});
+
+test("the local MCP can read or preview a financial map but has no activation mode", async (t) => {
+  const received = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      received.push({ path: request.url, body: JSON.parse(raw || "{}") });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ authoritative: false, map_status: "not_established" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script], {
+    env: {
+      ...process.env,
+      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
+      BRAIN_NAME: "fixture-brain",
+      BRAIN_KEY: "fixture-map-credential-not-for-output",
+      BRAIN_MANIFEST: "",
+      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stdin.end([
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "read" } } },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "preview", snapshot: { version: 1 } } } },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "activate" } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "read", token: "do-not-send" } } },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n");
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  const replies = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(received, [
+    { path: "/api/admin/brain/financial-map/read", body: {} },
+    { path: "/api/admin/brain/financial-map/preview", body: { snapshot: { version: 1 } } },
+  ]);
+  assert.equal(replies.find((reply) => reply.id === 3).result.isError, true);
+  assert.equal(replies.find((reply) => reply.id === 4).result.isError, true);
+  assert.equal(`${stdout}\n${stderr}`.includes("fixture-map-credential-not-for-output"), false);
 });
 
 test("the local owner assistant sends a contract-checked write with provenance and an exact receipt", async (t) => {
@@ -461,6 +640,141 @@ test("the local owner assistant sends a contract-checked write with provenance a
   const contributorResult = JSON.parse(contributorReply.result.content[0].text);
   assert.equal(contributorResult.written, true);
   assert.equal(`${contributorStdout}\n${contributorStderr}`.includes("fixture-only-not-a-secret"), false);
+});
+
+test("the local owner assistant writes one approved batch and reports every exact receipt", async (t) => {
+  const received = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      const body = JSON.parse(raw);
+      received.push(body);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        doc_uid: `${OWNER_NOTES_SOURCE}:${body.source_id}`,
+        action: "created",
+        confirmed: true,
+        source: { name: OWNER_NOTES_SOURCE, kind: OWNER_NOTES_KIND, status: "ready" },
+        provenance: { label: "Owner assistant on this computer" },
+      }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script], {
+    env: {
+      ...process.env,
+      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
+      BRAIN_KEY: "fixture-only-not-a-secret",
+      BRAIN_MANIFEST: "",
+      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const valid = (title) => ({
+    title,
+    body: `The owner directly asked to remember this complete and independently useful detail about ${title}.`,
+    confidence: "verified",
+    verification: "stated directly by the owner in this conversation",
+  });
+  child.stdin.end([
+    {
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: {
+        name: "brain_remember",
+        arguments: { records: [valid("first approved detail"), valid("second approved detail")] },
+      },
+    },
+    {
+      jsonrpc: "2.0", id: 2, method: "tools/call",
+      params: {
+        name: "brain_remember",
+        arguments: {
+          records: [valid("valid but not written"), { ...valid("invalid later detail"), slug: "caller-id" }],
+        },
+      },
+    },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n");
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  assert.equal(received.length, 2, "a malformed later record refuses the whole second batch before HTTP");
+  assert.equal(received.every((body) => body.metadata.recorded_via === "local_mcp"), true);
+  const replies = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  const complete = JSON.parse(replies.find((reply) => reply.id === 1).result.content[0].text);
+  assert.deepEqual({
+    written: complete.written,
+    confirmed: complete.confirmed,
+    complete: complete.complete,
+    requested: complete.requested_count,
+    confirmedCount: complete.confirmed_count,
+  }, { written: true, confirmed: true, complete: true, requested: 2, confirmedCount: 2 });
+  assert.deepEqual(complete.records.map((record) => record.action), ["created", "created"]);
+  const refused = JSON.parse(replies.find((reply) => reply.id === 2).result.content[0].text);
+  assert.equal(refused.written, false);
+  assert.equal(refused.refused, true);
+  assert.match(refused.errors.join("\n"), /record 2: unknown field: slug/i);
+  assert.equal(`${stdout}\n${stderr}`.includes("fixture-only-not-a-secret"), false);
+});
+
+test("the remote MCP batch stops on an unconfirmed receipt and names the confirmed prefix", async () => {
+  const writes = [];
+  const deps = {
+    grant: { profile: "structured-contributor" },
+    think: async () => ({}),
+    search: async () => ({ results: [] }),
+    write: async (envelope) => {
+      writes.push(envelope);
+      if (writes.length === 2) return { ok: true };
+      return {
+        doc_uid: `${OWNER_NOTES_SOURCE}:${envelope.source_id}`,
+        action: "created",
+        confirmed: true,
+        source: { name: OWNER_NOTES_SOURCE, kind: OWNER_NOTES_KIND, status: "ready" },
+        provenance: { label: "Approved connector write" },
+      };
+    },
+  };
+  const valid = (title) => ({
+    title,
+    body: `The owner directly asked to remember this complete and independently useful detail about ${title}.`,
+    confidence: "verified",
+    verification: "stated directly by the owner in this conversation",
+  });
+  const response = await (await handleMcp({}, rpc({
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: "remember",
+      arguments: {
+        records: [valid("remote first detail"), valid("remote second detail"), valid("remote third detail")],
+      },
+    },
+  }), new URL(`${ORIGIN}/mcp`), deps)).json();
+  assert.equal(response.result.isError, true);
+  assert.equal(writes.length, 2, "the batch must stop at the first receipt it cannot confirm");
+  const partial = JSON.parse(response.result.content[0].text);
+  assert.deepEqual({
+    complete: partial.complete,
+    requested: partial.requested_count,
+    confirmedCount: partial.confirmed_count,
+    failedRecord: partial.failed_record,
+    status: partial.status,
+  }, {
+    complete: false,
+    requested: 3,
+    confirmedCount: 1,
+    failedRecord: 2,
+    status: "receipt_unconfirmed",
+  });
+  assert.equal(partial.confirmed[0].doc_uid, `${OWNER_NOTES_SOURCE}:${writes[0].source_id}`);
+  assert.match(partial.note, /may have reached storage.*exact retry is idempotent/i);
 });
 
 test("an MCP write carrying a credential is refused by the common ingest scanner", async (t) => {

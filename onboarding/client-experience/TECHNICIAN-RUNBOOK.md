@@ -7,8 +7,10 @@ Claude Code is the primary guided surface. Before any provider page, hidden
 prompt, or system window, name the provider, explain why the step is needed,
 state the minimum permission, and give the owner one next action. When browser
 control is available, offer to navigate the official page and fill non-secret
-fields after exact approval. Stop before sign-in, 2FA, credential reveal or
-entry, consent, billing, and every secure passkey window. If the screen differs
+fields after exact approval. Stop before every sign-in, 2FA, credential reveal
+or entry, consent, billing, financial-provider handoff, and secure passkey
+window. Explain what is happening and why before asking for the owner's click.
+If the screen differs
 from the explanation, stop and explain before continuing.
 
 ## 1. Readiness
@@ -17,8 +19,12 @@ from the explanation, stop and explain before continuing.
    passkey-capable device if the owner wants one.
 2. Use a normal current-user terminal. Do not use `sudo`, root, or Run as
    administrator.
-3. Run `brain tools`. Before any resource creation, it verifies Node.js 22 or
-   newer, at least 2 GiB free on the actual per-user install drive
+3. Before the first `brain tools` run, explain that it is a local setup action,
+   not a read-only check. It installs or updates the reviewed technician skill,
+   and may write local bootstrap status and may update the current user's PATH to
+   include the Brain CLI folder. Ask the owner to approve those local
+   changes, then run it. Before any resource creation, it also verifies Node.js
+   22 or newer, at least 2 GiB free on the actual per-user install drive
    (`LOCALAPPDATA` on Windows), Claude Code, Claude sign-in, the installed
    `financial-brain-technician` skill, Anthropic's doctor, and pinned Wrangler 4.
 4. Ask whether this is the owner's first Cloudflare account or an account they
@@ -116,10 +122,74 @@ report it without changing anything. After the report, one clearly previewed
 and approved bundle may repair the owner-selected technician skill, Claude MCP,
 and Codex MCP items only when the exact target release advertises those repair
 scopes. Do not invent a command, and keep CLI replacement separate. Optimize
-does not run `brain invite`, `brain devices`, passkey enrollment, or device
-review.
+uses the non-writing machine-continuity audit, MCP discovery, and configuration
+inspection. Optimize never runs `brain tools`, `brain invite`, `brain devices`,
+passkey enrollment, or device review.
 
-## 4. Source onboarding
+## 4. Owner Financial Map
+
+Establish the completeness denominator with the owner before calling the
+financial picture complete. Begin with `brain_financial_map` in read mode. It
+may show structured entities and accounts from earlier records, but each is a
+possible mention until the owner confirms it.
+
+Immediately before that read, say: "I'm about to read your current Financial
+Map. This sends no Financial Map snapshot and changes nothing. Your assistant
+may still show an approval prompt because it is authorizing a private read from
+your Brain." A normal host approval prompt must not arrive without this
+explanation.
+
+Offer a guided interview and ask one short question at a time. Confirm:
+
+- the finite tax-year horizon;
+- whether the owner believes the full entity and account population is present,
+  knows it is partial, or does not yet know;
+- each current entity exactly once as included, excluded, or unavailable;
+- each current account exactly once as included, excluded, or unavailable;
+- any entity or account the owner expects but the current records do not show;
+- each entity-year pair in the horizon;
+- entity kind, status, what it holds, ownership, tax class, relationship, and
+  parent, plus account assignment, kind, balance role, currency, and status,
+  with an independent confirmed, unknown, unavailable, or not-applicable answer; and
+- for each entity-year, filing units, required returns and forms, K-1 roles,
+  books and any bookkeeping company, payroll applicability, and expected
+  sources, each with its own confirmed, unknown, unavailable, or not-applicable
+  answer.
+
+Do not infer one answer from another or convert a document mention into owner
+truth. Give owner-declared missing rows opaque local map IDs and keep their
+missing ledger evidence visible. When the interview is complete, explain that
+creating a full version 1 preview writes one expiring, non-authoritative review
+copy to the owner's Brain. It changes no ledger, source, tax, books, payroll, or
+account record. Ask for separate explicit approval before preview mode. The MCP response is deliberately compact: report its state, counts, unresolved count,
+and expiration, but do not echo the submitted private map or place any selector
+in chat. Ask the owner to open **Financial Map** inside their signed-in Brain to
+see the complete exact map, its changes from the last confirmed map, and every unresolved item.
+
+Activation is a separate owner choice. The signed-in Financial Map screen
+explains that a fresh passkey confirms the exact preview, its full denominator,
+and the current map head. It provides one explicit confirmation button and
+independently verifies the activation receipt before showing success. The MCP,
+Optimize, and installer admin key cannot activate it. Never copy an internal
+review value into a URL or chat, and never open a raw API ceremony.
+
+If browser control is available, offer to open the owner app, choose **Financial
+Map**, and scroll through the complete review. Stop before the confirmation
+button. The owner alone decides whether to choose it and completes or cancels
+the device passkey window. If the installed release does not advertise this
+screen, stop and update through the supported release process instead of
+inventing a workaround.
+
+During later Optimize reviews, first ask one goal question, then give the
+no-snapshot explanation immediately before the read and report the map status
+and unresolved gaps. If the map is missing, stale, incomplete, or unresolved,
+before making any financial completeness conclusion, offer the guided read-only interview. Never start it automatically. The interview creates only a
+conversational working draft. End Optimize before preview mode, obtain separate
+approval for the expiring preview, and keep activation behind another owner
+decision and the fresh passkey ceremony. Keep all passkey and device checks out
+of Optimize.
+
+## 5. Source onboarding
 
 Connect one source at a time. For every source:
 
@@ -136,9 +206,30 @@ Connect one source at a time. For every source:
    resume from its own state.
 7. Record created, updated, unchanged, refused, partial, unavailable, and failed
    outcomes separately.
-8. Verify freshness, provenance, and one known item from the real source.
+8. Prove the same approved low-sensitivity item through the four-stage chain
+   below.
 9. Run the applicable exclusion or leak tripwires from the pre-interview.
 10. Record the proof level and the next missing live acceptance step.
+
+For that one item, record these states separately and stop at the first state
+that is not proved:
+
+1. **Accepted:** the source receipt reached a terminal state and names exact
+   accepted, refused, unreadable, failed, and retryable counts. A connector
+   counter is not a storage receipt.
+2. **Stored and provenanced:** the exact same item exists as the expected
+   logical family in D1, has chunks, and carries the correct source and
+   extraction provenance.
+3. **Projected:** that exact generation has a confirmed Vectorize receipt and
+   no matching outbox work remains. Read health twice and require pending work
+   to decline or stay at zero with no competing drain lease.
+4. **Query-visible and cited:** a distinctive phrase from that exact same item
+   is returned by the supported search path with the expected source citation
+   and provenance.
+
+Do not substitute a green health response, an aggregate connector count, or a
+different document at a later stage. Accepted is not stored, stored is not
+projected, and projected is not query-visible.
 
 Use one scorecard row for every authorized source. Keep these four readiness
 dimensions independent: **starter context**, **live updates**, **history**, and
@@ -161,7 +252,7 @@ is assigned and tested.
    30-day reconciliation and ongoing webhook delivery as separate proof. Import
    older recordings only after this current-call path is accepted.
 2. **Email:** begin with recent, high-value mail and the authorized folders most
-   likely to answer the owner's acceptance questions. Backfill a large mailbox
+   likely to support the owner's goal and evidence-derived acceptance checks. Backfill a large mailbox
    in bounded resumable windows. Record fetched items, accepted items, retries,
    elapsed time, and active human time separately. Do not call live updates
    ready until a later change arrives through a proven refresh path.
@@ -189,11 +280,21 @@ explicit.
 ### Source onboarding prompt
 
 ```text
-Read onboarding/07-ingest-source-matrix.md and the current manifest. Begin read-only. Show me the sources that are configured, released but not connected, partial, unavailable, or export-only. Recommend one valuable low-risk source to preview first. Do not log in, connect, ingest, delete, schedule, or change a provider until I approve that exact action. Keep credentials and private source content out of this conversation. After each approved source, report its counts, freshness, provenance, proof level, and remaining live acceptance test.
+Read onboarding/07-ingest-source-matrix.md and the current manifest. Begin read-only. Show me the sources that are configured, released but not connected, partial, unavailable, or export-only. Recommend one valuable low-risk source to preview first. Do not log in, connect, ingest, delete, schedule, or change a provider until I approve that exact action. Keep credentials and private source content out of this conversation. After an approved load, use the same approved low-sensitivity item for every checkpoint and stop at the first unproven state: Accepted means a terminal source receipt with exact accepted, refused, unreadable, failed, and retryable counts; Stored and provenanced means that exact same item is the expected logical family in D1 with chunks and correct source and extraction provenance; Projected means that exact generation has a confirmed Vectorize receipt, no matching outbox work, and two health readings show pending work declining or zero with no competing drain lease; Query-visible and cited means a distinctive phrase from that exact same item returns through the supported search path with the expected source citation and provenance. Never substitute a different item, a connector counter, or a green health response. Report freshness, proof level, and the next unproven checkpoint.
 ```
 
-## 5. Before Golden 20
+## 6. Adaptive assisted acceptance
 
-Do not start the Golden 20 while a required source is unavailable, the initial
-vector backlog is nonzero, a known exclusion leaks, or the owner has not written
-the twenty questions from memory. Fix or explicitly accept each gap first.
+Start from the actual receipts and evidence, not owner homework. Claude Code
+offers one evidence-derived check at a time and explains why it matters. The
+owner may use it, reword it, replace it with a real question, or skip it. Zero owner-authored questions are required for install, acceptance, Optimize, or
+handoff. Stop a check when its source is unavailable, its same-item chain is
+unproven, the vector backlog is not ready, or an exclusion leaks. Record that
+honest gap and the next safe action instead of inventing an answer.
+
+Claude Code handles the safe technical details; the owner does not need to
+know or type exact commands.
+
+Golden 20 is an optional private regression exercise only when the owner wants
+one. It is not the acceptance gate and may remain unfinished without blocking
+handoff.

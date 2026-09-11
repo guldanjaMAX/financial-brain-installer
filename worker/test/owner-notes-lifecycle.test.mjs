@@ -8,6 +8,10 @@ import { renderLesson, validateLesson } from "../src/lib/remember-contract.js";
 import {
   OWNER_NOTES_KIND, OWNER_NOTES_ROUTE, OWNER_NOTES_SOURCE,
 } from "../src/lib/owner-note-contract.js";
+import {
+  storedProvenanceMarkerAssessment,
+  withFirstPartySourceProvenance,
+} from "../src/lib/provenance-receipt.js";
 import { createProductFixture } from "./product-contract-fixture.mjs";
 
 const ORIGIN = "https://brain.invalid";
@@ -28,7 +32,7 @@ async function ownerEnvelope(input = {}) {
   });
   assert.equal(checked.ok, true, JSON.stringify(checked.errors));
   const value = checked.value;
-  return {
+  return withFirstPartySourceProvenance({
     source_type: OWNER_NOTES_SOURCE,
     source_id: value.source_id,
     title: value.title,
@@ -46,7 +50,7 @@ async function ownerEnvelope(input = {}) {
         root_ids: value.derived_from,
       },
     },
-  };
+  }, { textSource: "native", textReliable: true });
 }
 
 async function ingestFixtureDocument(fixture, {
@@ -91,6 +95,40 @@ async function mcp(fixture, token, name, args) {
   return body.result;
 }
 
+test("the dedicated owner-note boundary stamps a legacy caller's omitted text provenance", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  const envelope = await ownerEnvelope({
+    title: "The owner prefers a native provenance receipt",
+    body: "The owner directly asked that native owner notes preserve an explicit extraction receipt.",
+  });
+  delete envelope.text_source;
+  delete envelope.text_reliable;
+  delete envelope.metadata.provenance_receipt;
+
+  const response = await fixture.post(OWNER_NOTES_ROUTE, envelope, ownerHeaders(fixture));
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  const stored = fixture.first(
+    `SELECT source,source_id,text_source,text_reliable,meta,
+            provenance_receipt_version,provenance_receipt_status,
+            provenance_receipt_reason,provenance_receipt_digest
+       FROM documents WHERE doc_uid=?`,
+    body.doc_uid,
+  );
+  assert.equal(stored.text_source, "native");
+  assert.equal(stored.text_reliable, 1);
+  assert.equal(JSON.parse(stored.meta).provenance_receipt.reason, "lineage_unavailable");
+  assert.deepEqual(await storedProvenanceMarkerAssessment(stored), {
+    provenance_assessed: true,
+    provenance_status: "partial",
+    provenance_reason: "lineage_unavailable",
+    text_source: "native",
+    text_reliable: true,
+    provenance_marker_valid: true,
+  });
+});
+
 test("fresh owner notes are registered, attributable, reversible recollections across both MCP paths", async (t) => {
   const fixture = await createProductFixture();
   t.after(() => fixture.close());
@@ -125,14 +163,23 @@ test("fresh owner notes are registered, attributable, reversible recollections a
   });
 
   const storedLocal = fixture.first(
-    "SELECT source,source_id,title,content_hash,meta FROM documents WHERE doc_uid=?",
+    "SELECT source,source_id,title,content_hash,text_source,text_reliable,meta FROM documents WHERE doc_uid=?",
     local.doc_uid,
   );
   assert.equal(storedLocal.source, OWNER_NOTES_SOURCE);
   assert.equal(storedLocal.source_id, localEnvelope.source_id);
   assert.equal(storedLocal.title, localEnvelope.title);
   assert.match(storedLocal.content_hash, /^[a-f0-9]{64}$/);
-  assert.equal(JSON.parse(storedLocal.meta).recorded_via, "local_mcp");
+  const storedLocalMetadata = JSON.parse(storedLocal.meta);
+  assert.equal(storedLocalMetadata.recorded_via, "local_mcp");
+  assert.equal(storedLocal.text_source, "native");
+  assert.equal(storedLocal.text_reliable, 1);
+  assert.deepEqual(storedLocalMetadata.provenance_receipt, {
+    version: 1,
+    status: "partial",
+    reason: "lineage_unavailable",
+    root_ids: [`owner-notes:${localEnvelope.source_id}`],
+  });
 
   const token = "fixture-owner-notes-connector-token-123456789";
   fixture.raw(
@@ -177,6 +224,17 @@ test("fresh owner notes are registered, attributable, reversible recollections a
   const fetched = JSON.parse((await mcp(fixture, token, "fetch", { id: hit.id })).content[0].text);
   assert.deepEqual(fetched.metadata.write_provenance, hit.write_provenance);
   assert.equal(fetched.metadata.source_kind, OWNER_NOTES_KIND);
+  assert.equal(fetched.metadata.text_source, "native");
+  assert.equal(fetched.metadata.text_reliable, true);
+  assert.equal(fetched.metadata.provenance_status, "partial");
+  assert.equal(fetched.metadata.provenance_reason, "lineage_unavailable");
+  const storedRemote = fixture.first(
+    "SELECT text_source,text_reliable,meta FROM documents WHERE source=? AND title=?",
+    OWNER_NOTES_SOURCE, "The owner prefers amber compass summaries",
+  );
+  assert.equal(storedRemote.text_source, "native");
+  assert.equal(storedRemote.text_reliable, 1);
+  assert.equal(JSON.parse(storedRemote.meta).provenance_receipt.reason, "lineage_unavailable");
 
   const unifiedResponse = await fixture.post(
     "/api/rag/unified", { q: "violet lantern" }, ownerHeaders(fixture),

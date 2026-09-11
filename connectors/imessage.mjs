@@ -457,7 +457,11 @@ export async function captureOnce({
     documents_sent: 0,
     documents_would_send: 0,
     sessions_open: 0,
+    started_watermark: state.last_rowid,
     watermark: state.last_rowid,
+    caught_up: false,
+    first_row_at: null,
+    last_row_at: null,
     dry_run: dryRun,
   };
 
@@ -495,7 +499,10 @@ export async function captureOnce({
       const limit = Math.min(pageSize, remaining);
       if (limit <= 0) break;
       const rows = fetchMessagesSince(opened.db, counts.watermark, limit);
-      if (!rows.length) break;
+      if (!rows.length) {
+        counts.caught_up = true;
+        break;
+      }
       counts.pages++;
       counts.rows_seen += rows.length;
       remaining -= rows.length;
@@ -505,6 +512,10 @@ export async function captureOnce({
       for (const raw of rows) {
         pageMaxRowid = Math.max(pageMaxRowid, Number(raw.rowid) || 0);
         const row = rowToSessionRow(raw);
+        if (row.ts) {
+          if (!counts.first_row_at || Date.parse(row.ts) < Date.parse(counts.first_row_at)) counts.first_row_at = row.ts;
+          if (!counts.last_row_at || Date.parse(row.ts) > Date.parse(counts.last_row_at)) counts.last_row_at = row.ts;
+        }
         if (!row.id) { counts.rows_skipped.no_guid++; continue; }
         if (!row.ts) { counts.rows_skipped.no_timestamp++; continue; }
         if (!row.body) {
@@ -528,7 +539,10 @@ export async function captureOnce({
 
       // A short page proves the scan is caught up; a full page means known
       // backlog, so continue immediately rather than sleeping on it.
-      if (rows.length < limit) break;
+      if (rows.length < limit) {
+        counts.caught_up = true;
+        break;
+      }
     }
 
     const stale = finishStaleSessions(sessionizer, { nowMs: now(), maxGapMs });

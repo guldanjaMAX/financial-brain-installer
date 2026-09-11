@@ -11,7 +11,7 @@
 import { PROBES, candidatesFrom } from "./check-probes.mjs";
 import { defaultNormalise, renderSweep, sweep } from "./contradiction-sweep.mjs";
 import { OWNER_CONFIRMED_SOURCE } from "./provenance.mjs";
-import { absenceUnproven } from "../worker/src/lib/retrieval-status.js";
+import { COVERAGE_INCOMPLETE, retrievalUnavailable } from "../worker/src/lib/retrieval-status.js";
 
 const readableError = (error, fallback) => {
   const text = String(error?.message || error || "").replace(/\s+/g, " ").trim().slice(0, 240);
@@ -48,13 +48,14 @@ export async function gather(search, { probes = PROBES, limit = 25, subject = ""
   for (const probe of probes) {
     let rows = [];
     let error = null;
+    let coverageWarning = null;
     try {
       const body = await search({
         q: scopedSubject ? `Records about ${scopedSubject}. ${probe.query}` : probe.query,
         limit,
       });
       if (body?.status === "unavailable" || body?.status === "partial" ||
-          absenceUnproven(body) || body?.degraded) {
+          retrievalUnavailable(body) || body?.degraded) {
         const state = body?.degraded || body?.status || "partial";
         error = readableError(
           body?.notice || body?.degraded_reason,
@@ -62,6 +63,12 @@ export async function gather(search, { probes = PROBES, limit = 25, subject = ""
         );
       } else if (Array.isArray(body?.results)) {
         rows = scopedSubject ? body.results.filter((row) => rowMatchesSubject(row, scopedSubject)) : body.results;
+        if (body?.status === COVERAGE_INCOMPLETE) {
+          coverageWarning = readableError(
+            body?.notice,
+            "source history is not proven complete; returned records are provisional",
+          );
+        }
       } else if (Array.isArray(body)) {
         // Legacy Workers returned the result array directly.
         rows = scopedSubject ? body.filter((row) => rowMatchesSubject(row, scopedSubject)) : body;
@@ -73,7 +80,7 @@ export async function gather(search, { probes = PROBES, limit = 25, subject = ""
     }
     results.push({
       name: probe.name, changes: probe.changes, freeform: Boolean(probe.freeform),
-      error, rows,
+      error, coverage_warning: coverageWarning, rows,
       candidates: error ? [] : candidatesFrom(probe, rows),
     });
   }
@@ -237,8 +244,9 @@ export function renderZoneReadiness(readiness) {
  */
 export function partition(gathered = []) {
   return {
-    structured: gathered.filter((g) => !g.freeform && !g.error),
-    freeform: gathered.filter((g) => g.freeform && !g.error),
+    structured: gathered.filter((g) => !g.freeform && !g.error && !g.coverage_warning),
+    freeform: gathered.filter((g) => g.freeform && !g.error && !g.coverage_warning),
+    provisional: gathered.filter((g) => !g.error && g.coverage_warning),
     failed: gathered.filter((g) => g.error),
   };
 }
@@ -248,7 +256,7 @@ export function partition(gathered = []) {
  * A zero here is an unavailable check, never evidence that the corpus has zero
  * records or zero disagreements.
  */
-export function renderCoverageSummary({ total = 0, completed = 0, unchecked = 0 } = {}) {
+export function renderCoverageSummary({ total = 0, completed = 0, unchecked = 0, provisional = 0 } = {}) {
   const categories = total === 1 ? "category" : "categories";
   if (!total) {
     return [
@@ -265,6 +273,15 @@ export function renderCoverageSummary({ total = 0, completed = 0, unchecked = 0 
     const waitingLine = total === 1
       ? "Record review still waiting: the category could not be checked completely."
       : `Record review still waiting: none of the ${total} categories could be checked completely.`;
+    if (provisional) {
+      const provisionalCategory = provisional === 1 ? "category has" : "categories have";
+      return [
+        waitingLine,
+        `${provisional} ${provisionalCategory} usable returned records reviewed below as provisional evidence.`,
+        "Those records can reveal a conflict, but apparent agreement or a missing record is not a complete-corpus finding.",
+        "Follow the reasons under Could not check, then run this check again.",
+      ].join("\n");
+    }
     return [
       waitingLine,
       "This run cannot yet say whether your records agree or disagree. This is not a finding that your records are empty.",
@@ -273,10 +290,16 @@ export function renderCoverageSummary({ total = 0, completed = 0, unchecked = 0 
   }
   const completedCategories = completed === 1 ? "category" : "categories";
   const checkedVerb = completed === 1 ? "was" : "were";
-  return [
+  const lines = [
     `Record review partial: ${completed} of ${total} ${categories} ${checkedVerb} checked; ${unchecked} could not be checked.`,
     `Any agreement or disagreement below applies only to the ${completed} completed ${completedCategories}. Follow the reasons under Could not check, then run this check again.`,
-  ].join("\n");
+  ];
+  if (provisional) {
+    lines.push(
+      `${provisional} incomplete ${provisional === 1 ? "category has" : "categories have"} usable records shown separately as provisional evidence.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 export function renderSetWaitingMessage({ total = 0, unchecked = 0 } = {}) {
@@ -287,36 +310,76 @@ export function renderSetWaitingMessage({ total = 0, unchecked = 0 } = {}) {
 }
 
 export function renderReport(gathered = [], { zoneReadiness = null, subject = "" } = {}) {
-  const { structured, freeform, failed } = partition(gathered);
-  const assessed = sweep(structured.map((s) => ({ name: s.name, changes: s.changes, candidates: s.candidates })));
+  const { structured, freeform, provisional, failed } = partition(gathered);
+  const provisionalWithRows = provisional.filter((item) => item.rows.length > 0);
+  const provisionalEmpty = provisional.filter((item) => item.rows.length === 0);
+  const provisionalStructured = provisional.filter((item) => !item.freeform && item.candidates.length > 0);
+  const provisionalFreeform = provisional.filter((item) => item.freeform && item.rows.length > 0);
+  const provisionalUnparsed = provisional.filter((item) =>
+    !item.freeform && item.rows.length > 0 && item.candidates.length === 0);
+  const completedAssessed = sweep(structured.map((s) => ({
+    name: s.name, changes: s.changes, candidates: s.candidates,
+  })));
+  const provisionalAssessed = sweep(provisionalStructured.map((s) => ({
+    name: s.name, changes: s.changes, candidates: s.candidates,
+  }))).map((item) => ({ ...item, provisional: true }));
+  const assessed = sweep([...structured, ...provisionalStructured].map((s) => ({
+    name: s.name, changes: s.changes, candidates: s.candidates,
+  }))).map((item) => ({
+    ...item,
+    provisional: provisionalStructured.some((source) => source.name === item.name),
+  }));
   const scopedSubject = normalizeCheckSubject(subject);
   const coverage = {
-    total: structured.length + freeform.length + failed.length,
+    total: structured.length + freeform.length + provisional.length + failed.length,
     completed: structured.length + freeform.length,
-    unchecked: failed.length,
-    complete: structured.length + freeform.length > 0 && failed.length === 0,
+    provisional: provisionalWithRows.length,
+    absence_unproven: provisionalEmpty.length,
+    unchecked: provisional.length + failed.length,
+    complete: structured.length + freeform.length > 0 && provisional.length === 0 && failed.length === 0,
   };
   const out = [
     scopedSubject ? `# Brain check for ${scopedSubject}` : "# Brain check",
     "",
     renderCoverageSummary(coverage),
     "",
-    renderSweep(assessed),
+    renderSweep(completedAssessed),
   ];
 
-  if (freeform.length) {
+  if (provisionalStructured.length) {
+    out.push(
+      "",
+      "## Provisional evidence from records already available",
+      "Source coverage is incomplete, but these returned records are still useful for finding conflicts.",
+      "Agreement here does not prove that another value is absent, and nothing in this section is eligible for `--set` yet.",
+      "",
+      renderSweep(provisionalAssessed),
+    );
+  }
+
+  const readableFreeform = [...freeform, ...provisionalFreeform, ...provisionalUnparsed];
+  if (readableFreeform.length) {
     out.push("", "## Worth your own eyes",
       "These change, and they have no dependable shape for a machine to read, so",
       "nothing here is grouped or guessed. Skim the records and tell me what is current.");
-    for (const f of freeform) {
+    for (const f of readableFreeform) {
       const withRecords = f.rows.length;
-      out.push(`  • ${f.name}: ${withRecords} matching record(s) returned`);
+      out.push(`  • ${f.name}: ${withRecords} matching record(s) returned${f.coverage_warning ? "; provisional coverage" : ""}`);
     }
   }
-  if (failed.length) {
+  if (failed.length || provisional.length) {
     out.push("", "## Could not check");
     for (const f of failed) out.push(`  • ${f.name}: ${f.error}`);
-    out.push("These were NOT checked. Do not read the rest as a clean bill for them.");
+    for (const f of provisional) {
+      const evidence = f.rows.length
+        ? "Returned evidence is shown above, but this category is not complete."
+        : "Zero returned records cannot prove that the source contains no answer.";
+      out.push(`  • ${f.name}: ${f.coverage_warning} ${evidence}`);
+    }
+    if (failed.length) out.push("Search failures were NOT checked. Do not read the rest as a clean bill for them.");
+    if (provisional.length) {
+      out.push("Coverage-limited categories remain unchecked even when useful records were returned.");
+    }
   }
   out.push("", renderZoneReadiness(zoneReadiness));
   if (!coverage.complete) {
@@ -328,7 +391,7 @@ export function renderReport(gathered = [], { zoneReadiness = null, subject = ""
   } else {
     out.push("", "Nothing has been written. The completed review found no automatically comparable conflicts to confirm.");
   }
-  return { text: out.join("\n"), assessed, freeform, failed, coverage };
+  return { text: out.join("\n"), assessed, freeform: readableFreeform, provisional, failed, coverage };
 }
 
 /**

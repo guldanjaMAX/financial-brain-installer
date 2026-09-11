@@ -6,8 +6,10 @@ import { syncBuiltinESMExports } from "node:module";
 
 const userRoot = String(process.env.BRAIN_DRIVE_SKIP_USER_ROOT || "");
 const evidencePath = String(process.env.BRAIN_DRIVE_SKIP_EVIDENCE || "");
+const fixtureMode = String(process.env.BRAIN_DRIVE_SKIP_MODE || "mixed");
 if (!userRoot) throw new Error("BRAIN_DRIVE_SKIP_USER_ROOT is required");
 if (!evidencePath) throw new Error("BRAIN_DRIVE_SKIP_EVIDENCE is required");
+if (!["mixed", "adjudicated-only"].includes(fixtureMode)) throw new Error("invalid Drive active-skip fixture mode");
 
 os.homedir = () => userRoot;
 syncBuiltinESMExports();
@@ -25,6 +27,7 @@ const initialEvidence = () => ({
   ingestBatchWrites: 0,
   retainedFamilyReachedForget: false,
   receipts: { indexing: 0, error: 0, ready: 0 },
+  lastFinalReceipt: null,
 });
 
 function readEvidence() {
@@ -61,9 +64,9 @@ function parseBody(options) {
 }
 
 function files() {
-  return [
+  const all = [
     {
-      id: "active-migrated", name: "migrated.bin", mimeType: "application/octet-stream", size: "200",
+      id: "active-migrated", name: "migrated.png", mimeType: "image/png", size: "200",
       createdTime: "2025-01-01T00:00:00Z", modifiedTime: "2026-08-20T00:00:00Z", md5Checksum: "migrated-current", parents: ["fixture-root"],
     },
     {
@@ -75,6 +78,7 @@ function files() {
       createdTime: "2025-01-01T00:00:00Z", modifiedTime: "2026-08-22T00:00:00Z", md5Checksum: "sensitive-current", parents: ["fixture-root"],
     },
   ];
+  return fixtureMode === "adjudicated-only" ? [all[0]] : all;
 }
 
 globalThis.fetch = async (input, options = {}) => {
@@ -111,9 +115,11 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.inventoryReads++;
     saveEvidence(evidence);
-    const families = evidence.removedFamilies
-      ? [MIGRATED]
-      : [MIGRATED, STALE, SENSITIVE, MISSING].sort();
+    const families = fixtureMode === "adjudicated-only"
+      ? (evidence.removedFamilies >= 4 ? [] : [MIGRATED])
+      : evidence.removedFamilies
+        ? [MIGRATED]
+        : [MIGRATED, STALE, SENSITIVE, MISSING].sort();
     return json({ source: parseBody(options).source, families, next_cursor: null });
   }
 
@@ -122,8 +128,12 @@ globalThis.fetch = async (input, options = {}) => {
     const families = (request.families || []).map((family) => String(family?.base_doc_uid || ""));
     const evidence = readEvidence();
     evidence.forgetRequests++;
-    if (families.includes(MIGRATED)) evidence.retainedFamilyReachedForget = true;
-    if (!families.length || request.confirm !== true || families.some((uid) => !ALLOWED_REMOVALS.has(uid))) {
+    if (families.includes(MIGRATED) && fixtureMode !== "adjudicated-only") evidence.retainedFamilyReachedForget = true;
+    const allowed = new Set([
+      ...ALLOWED_REMOVALS,
+      ...(fixtureMode === "adjudicated-only" ? [MIGRATED] : []),
+    ]);
+    if (!families.length || request.confirm !== true || families.some((uid) => !allowed.has(uid))) {
       saveEvidence(evidence);
       throw new Error("fixture received an unsafe active-skip removal");
     }
@@ -149,6 +159,17 @@ globalThis.fetch = async (input, options = {}) => {
     const receipt = parseBody(options);
     const evidence = readEvidence();
     if (Object.hasOwn(evidence.receipts, receipt.status)) evidence.receipts[receipt.status]++;
+    if (receipt.status !== "indexing") {
+      evidence.lastFinalReceipt = {
+        status: receipt.status,
+        complete_sweep: receipt.complete_sweep ?? null,
+        walk_complete: receipt.walk_complete ?? null,
+        docs_refused: receipt.docs_refused ?? null,
+        docs_failed: receipt.docs_failed ?? null,
+        issue_code: receipt.issue_code || null,
+        detail: receipt.detail || null,
+      };
+    }
     saveEvidence(evidence);
     return json({ source: receipt.source, status: receipt.status, run_id: receipt.run_id });
   }

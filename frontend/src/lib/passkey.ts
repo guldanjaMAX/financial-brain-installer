@@ -17,6 +17,24 @@ export const passkeysSupported = (): boolean =>
   typeof window !== "undefined" && !!window.PublicKeyCredential;
 
 type RegisterOptions = { challenge: string; rp: { id: string; name: string }; user_name: string };
+export type AssertionOptions = {
+  challenge: string;
+  rp_id: string;
+  allow_credentials?: string[];
+};
+export type AssertionPayload = {
+  credentialId: string;
+  authenticatorData: string;
+  clientDataJSON: string;
+  signature: string;
+};
+
+export class PasskeyCeremonyCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PasskeyCeremonyCancelledError";
+  }
+}
 
 /** Create a passkey. `code` is the one-time invite; omit it to add a device
  *  from an already signed-in session. */
@@ -66,7 +84,11 @@ export async function enroll(code?: string): Promise<void> {
  *  collapses three genuinely different failures into one sentence. Naming the
  *  exception matters too: which one it is decides where the bug lives, and
  *  without it every report is unfalsifiable. */
-function explainCeremonyFailure(error: unknown, rpId: string, purpose: "enroll" | "sign_in" = "sign_in"): Error {
+function explainCeremonyFailure(
+  error: unknown,
+  rpId: string,
+  purpose: "enroll" | "sign_in" | "confirm_map" = "sign_in",
+): Error {
   const name = (error as { name?: string })?.name || "Error";
   const suffix = ` (${name})`;
   if (name === "NotAllowedError") {
@@ -74,6 +96,11 @@ function explainCeremonyFailure(error: unknown, rpId: string, purpose: "enroll" 
       return new Error(
         `No passkey was created for ${rpId}. The secure window may have been canceled or timed out. ` +
         `Nothing was enrolled. You can choose Create my owner passkey and try again while this private link is valid.` + suffix,
+      );
+    }
+    if (purpose === "confirm_map") {
+      return new PasskeyCeremonyCancelledError(
+        "The secure passkey window was canceled or timed out. Nothing was confirmed or changed. You can review the map and try again when you are ready." + suffix,
       );
     }
     return new Error(
@@ -102,8 +129,17 @@ function explainCeremonyFailure(error: unknown, rpId: string, purpose: "enroll" 
   return new Error(String((error as { message?: string })?.message || error) + suffix);
 }
 
-export async function signIn(): Promise<void> {
-  const options = await api<{ challenge: string; rp_id: string }>("/auth/login/options");
+/**
+ * Ask the device for one assertion. Calling this function is the WebAuthn
+ * boundary, so owner screens must call it only from the owner's explicit click.
+ */
+export async function requestPasskeyAssertion(
+  options: AssertionOptions,
+  purpose: "sign_in" | "confirm_map" = "sign_in",
+): Promise<AssertionPayload> {
+  if (!passkeysSupported()) {
+    throw new Error("This browser cannot open a passkey window. Open this Brain in Safari or Chrome and try again.");
+  }
   let assertion: PublicKeyCredential | null;
   try {
     assertion = (await navigator.credentials.get({
@@ -111,18 +147,30 @@ export async function signIn(): Promise<void> {
         challenge: toBytes(options.challenge),
         rpId: options.rp_id,
         userVerification: "required",
-        allowCredentials: [],
+        allowCredentials: (options.allow_credentials || []).map((id) => ({
+          id: toBytes(id), type: "public-key" as const,
+        })),
       },
     })) as PublicKeyCredential | null;
   } catch (error) {
-    throw explainCeremonyFailure(error, options.rp_id);
+    throw explainCeremonyFailure(error, options.rp_id, purpose);
   }
-  if (!assertion) throw new Error("no passkey was offered");
+  if (!assertion) {
+    if (purpose === "confirm_map") {
+      throw new PasskeyCeremonyCancelledError("No passkey was offered. Nothing was confirmed or changed.");
+    }
+    throw new Error("No passkey was offered.");
+  }
   const response = assertion.response as AuthenticatorAssertionResponse;
-  await api("/auth/login/verify", {
+  return {
     credentialId: assertion.id,
     authenticatorData: toB64u(response.authenticatorData),
     clientDataJSON: toB64u(response.clientDataJSON),
     signature: toB64u(response.signature),
-  });
+  };
+}
+
+export async function signIn(): Promise<void> {
+  const options = await api<{ challenge: string; rp_id: string }>("/auth/login/options");
+  await api("/auth/login/verify", await requestPasskeyAssertion(options));
 }

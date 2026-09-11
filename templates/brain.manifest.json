@@ -371,15 +371,14 @@
   },
   "testing": {
     "_comment": [
-      "Filled from section 6 of the intake questionnaire, in the CLIENT'S OWN",
-      "WORDS. Do not tidy them into better English: 'why did we stop using",
-      "those guys' retrieves differently than 'vendor termination rationale',",
-      "and theirs is the phrasing that has to work.",
+      "Optional private regression questions. Leave this list empty during setup",
+      "unless the owner chooses to save a real question. Zero prepared questions",
+      "are required for setup, adaptive acceptance, or handoff.",
       "",
-      "These do double duty. The acceptance suite uses them as retrieval probes,",
-      "so a passing install is one that answers THIS client's questions rather",
-      "than generic ones. And they are the kickoff script: the first thing the",
-      "client sees is their own ten questions answered with citations."
+      "When questions are saved, keep the owner's wording and use them as repeatable",
+      "retrieval checks. They supplement the required same-item evidence gate; they",
+      "do not replace proof that one real item was accepted, stored with provenance,",
+      "projected, and query-visible with a citation."
     ],
     "probe_questions": [],
     "things_only_they_know": [],

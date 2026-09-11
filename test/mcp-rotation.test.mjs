@@ -454,6 +454,7 @@ try {
             jsonrpc: "2.0", id: 2,
             result: { tools: [
               { name: "brain_health" },
+              { name: "brain_financial_map" },
               { name: "brain_remember" },
               { name: "brain_search" },
               { name: "brain_think" },

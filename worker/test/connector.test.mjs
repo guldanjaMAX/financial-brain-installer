@@ -201,10 +201,18 @@ test("the full connector journey, register through revocation", async () => {
   assert.match(searchedBody.note || "", /could not be completed/i);
 
   db.tables.documents.set("drive:doc-1", {
-    title: "Fixture doc", uri: null, source: "client-drive", source_kind: "drive",
+    title: "Fixture doc", uri: null, source: "client-drive", source_id: "doc-1", source_kind: "drive",
     document_date: Date.parse("2026-01-02T00:00:00Z"),
     date_source: "provider_timestamp", date_reliable: 0,
     text_source: "ocr_partial", text_reliable: 0,
+    meta: JSON.stringify({
+      provenance_receipt: {
+        version: 1,
+        status: "partial",
+        reason: "lineage_unavailable",
+        root_ids: ["client-drive:doc-1"],
+      },
+    }),
   });
   db.tables.chunks.push({ doc_uid: "drive:doc-1", text: "the fixture body" });
   const fetched = await (await worker.fetch(jsonPost("/mcp", {
@@ -222,6 +230,8 @@ test("the full connector journey, register through revocation", async () => {
     date_reliable: false,
     text_source: "ocr_partial",
     text_reliable: false,
+    provenance_status: "partial",
+    provenance_reason: "lineage_unavailable",
     lineage: {
       kind: "unclassified",
       status: "unknown",

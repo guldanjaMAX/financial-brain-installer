@@ -71,13 +71,16 @@ change anything.
    read-only contract. Do not search repositories, release history, planning
    notes, or the web to decide whether Optimize exists when that contract is
    available and agrees with the installed CLI.
-2. Begin in ordinary owner language: "I can check your Brain without changing
-   its data, settings, access, or indexes. I will run the read-only checks and
-   report what I find. If a CLI check fails, it may save a private support note
-   on this computer so the problem can be explained later." Do not narrate
-   skill selection, source-code inspection, PATH archaeology, release research,
-   or whether the workflow "shipped." Those are internal implementation details,
-   not part of the owner's experience.
+2. Open with exactly one goal question and no setup quiz: "What would you most
+   like your Financial Brain to help you understand or keep current?" Let the
+   owner answer, say "not sure," or skip it. Then say in ordinary owner
+   language: "I can check your Brain without changing its data, settings,
+   access, or indexes. I will run the read-only checks and report what I find.
+   If a CLI check fails, it may save a private support note on this computer so
+   the problem can be explained later." Do not narrate
+   skill selection, source-code inspection, PATH archaeology, release research, or whether the
+   workflow "shipped." Those are internal implementation details, not part of
+   the owner's experience.
 3. Resolve the installed `brain` executable and remembered manifest quietly
    using the packaged discovery path. A normal successful lookup gets no status
    story. If there is no unambiguous Brain to check, state the one concrete
@@ -89,6 +92,25 @@ change anything.
 5. Work quietly, with one brief progress update only if the checks take long.
    Report the observed result and its limits. Do not dump commands, internal
    filenames, version-search history, or tool activity unless the owner asks.
+
+Make the Owner Financial Map state the first audit evidence after that opening
+question. Immediately before calling `brain_financial_map` with `mode: "read"`,
+say: "I'm about to read your current Financial Map. This sends no Financial Map
+snapshot and changes nothing. Your assistant may still show an approval prompt
+because it is authorizing a private read from your Brain." Do not let a normal
+host approval prompt arrive without that explanation. Then perform the read and
+report whether the active map is current, stale, or not established, its
+declared population state, and its unresolved items.
+
+Treat every structured entity or account as a
+possible mention until the owner confirms it. A missing, stale, incomplete, or unresolved map means the financial
+completeness denominator is not established. Before making any financial
+completeness conclusion, offer the guided Owner Financial Map interview. Do not
+start it automatically. If the owner declines, continue the other read-only
+checks and report that completeness remains unproven. If the owner chooses the
+interview, ask one short adaptive question at a time. The interview itself is
+read-only and creates only a conversational working draft; it does not submit a
+preview, activate a map, confirm ledger rows, or authorize any other write.
 
 The default owner report begins, "Optimize complete. I made no changes to your
 Brain, data, settings, access, or indexes." If a CLI check failed, add that it
@@ -119,8 +141,36 @@ Use the records and metadata already present. Compare provenance, effective and
 modified dates, source receipts with stored counts, extraction gaps, conflicting
 values, superseded evidence, duplicate document families, and whose voice each
 claim represents. Resolve every ambiguity that those records can resolve. Ask
-at most one small, specific owner question, and only when a material ambiguity
-remains after that evidence review.
+at most one additional small, specific owner question outside an owner-chosen
+guided map interview, and only when a material ambiguity remains after that
+evidence review.
+
+For the Financial Picture stage, run the read-only
+`brain financial-picture <manifest> --json` inventory. Use its exact entity,
+possible-mention, business, account, tax-year, period, custody, extraction,
+supersession, and conflict records as an interview map. Start with the bounded
+full inventory, then use only its exact entity, year, or period filters when a
+focused follow-up is needed. Never turn an empty, Unavailable, truncated, or
+unresolved section into an answer. Never infer or auto-confirm ownership,
+entity-to-account scope, a tax period, or a supersession target from a name or
+raw identifier. Treat `owner_stated` plus `confirmed` as a stored assertion, not
+proof of who performed a confirmation ceremony. The inventory requires current
+owner confirmation because the schema has no owner-actor receipt for these
+mappings. If one additional owner question is needed outside the guided map
+interview, choose it from a material blocking gap or conflict that the cited
+provenance cannot resolve, and name the evidence that made the question
+necessary.
+
+An owner's interview answer does not authorize a write. Keep any correction,
+mapping confirmation, supersession, OCR, reingest, or reconciliation ruling
+outside Optimize. Offer it only after the read-only report through a supported,
+exactly previewed mutation path, and run it only after separate explicit owner
+approval.
+
+Do not turn an entity, account, ownership claim, tax year, or field found in
+documents or structured records into owner-confirmed truth. A map that cannot
+establish the denominator does not mean the owner has no other entities or
+accounts.
 
 Do not run a Golden evaluation, create a canned refusal exercise, or require the
 owner to prepare test questions. Those remain optional, separate testing tools,
@@ -161,6 +211,44 @@ Optimize must not run `brain invite`, `brain devices`, passkey enrollment,
 device review, or ask the owner to identify device labels. Those belong only in
 an explicitly requested passkey, access, or handoff ceremony, where the owner
 has context and a useful interface.
+
+When the owner chooses the guided Owner Financial Map interview before the
+financial completeness conclusion, use plain names instead of internal ids.
+Cover the finite tax-year horizon, whether the whole entity and account
+population is complete, every possible entity and account exactly once, every
+entity-year pair, and each independently assessed material field. Ask what
+entities and accounts the owner expects but the current records do not show.
+Keep those as owner-declared working rows with opaque local IDs and no ledger
+link. Do not create or alter a ledger row to make the evidence look complete.
+
+For each entity and each year, separately ask about its filing unit, required
+returns, required forms, K-1 roles, books and bookkeeping company, payroll
+applicability, and expected sources. A confirmed empty list, unknown, unavailable,
+and not applicable are different answers. Preserve that distinction. When a
+material entity or account field is confirmed, record the owner's value
+separately from the current ledger value so any mismatch remains visible. Never
+infer a missing answer or use one answer to confirm a different field.
+
+When the interview is complete, finish the remaining read-only checks and end
+Optimize without submitting the working draft. Explain that previewing will
+create a complete non-authoritative version 1 preview by writing one expiring
+review copy to the owner's Brain, and changes no ledger, source, tax, books,
+payroll, or account record. Ask for separate explicit owner approval outside Optimize before calling
+`brain_financial_map` in preview mode. If approved, report only the returned
+state, counts, unresolved count, and expiration. Do not echo the submitted
+private map, expose a selector, or place an activation value in chat. Ask the
+owner to open **Financial Map** in the signed-in owner app, where they can review
+the entire exact map, its differences from the last confirmed map, and every
+unresolved item. A preview has no authority. The MCP has no activation operation.
+
+Activation requires another separate owner decision after preview and remains a
+separate owner ceremony outside Optimize. Explain that the fresh passkey
+confirms the exact reviewed map, denominator, and current map head, then let the
+owner choose whether to continue in the Financial Map owner screen. Browser
+control may open that screen and scroll the complete review, but it must stop
+before the one confirmation button. Never put a review selector in a URL,
+browser storage, clipboard, or chat. Never trigger a passkey prompt from
+Optimize and never substitute the admin key.
 
 If the live contract is missing, contradicts the exact installed CLI, or the
 installed version is too old to perform a named check safely, stop before that
@@ -263,7 +351,8 @@ For every browser-assisted account ceremony:
    reviewed live runbook. Confirm the hostname before entering anything.
 2. Fill safe fields such as app names, reviewed permission scopes, one-account
    restrictions, short expirations, redirect addresses, and webhook addresses.
-3. Before sign-in or a final approval, stop and give a ten-second handoff: why
+3. Before sign-in, a financial-provider handoff, or a final approval, stop and
+   give a ten-second handoff: why
    the page is open, the exact account or hostname, what the owner should
    review, and the single control they should choose if it looks right.
 4. The owner personally handles passwords, 2FA, CAPTCHA, billing acceptance,
@@ -368,7 +457,7 @@ install or rewrite any of them during the audit. Leave passkeys and enrolled
 device review out of Optimize.
 
 After the report, first require the independent public release target to be
-stable, available, and to advertise the exact Owner assistant profile, four
+stable, available, and to advertise the exact Owner assistant profile, five
 tools, and every selected local repair scope. A missing or older CLI is a
 separate executable replacement and never belongs in the local assistant
 bundle below.
@@ -390,7 +479,7 @@ ID. A stale plan stops before writing. Do not substitute `brain tools`, generic
 
 After apply, require exact file or setting readback. Each repaired MCP entry
 must initialize as `owner-assistant` and expose exactly `brain_think`,
-`brain_search`, `brain_remember`, and `brain_health`. A custom or disabled entry
+`brain_search`, `brain_remember`, `brain_health`, and `brain_financial_map`. A custom or disabled entry
 is preserved. The CLI snapshots the complete selected write set before the
 first write; any failed item restores every destination in reverse order to its
 previewed bytes or absence. A failed verification is a blocker, not permission
@@ -570,8 +659,13 @@ must stop before resource creation.
 - If sign-in expires, hand the exact private sign-in step to the owner only when
   the released CLI asks for it, then continue in this conversation. Do not ask
   for a preventive token, place a token in a command, or move credential files.
-- Before calling a brain proven, count `testing.probe_questions` in the
-  manifest. An empty list means the retrieval tier was not exercised.
+- Zero owner-authored questions are required for setup, adaptive acceptance, or
+  handoff. Before calling a Brain proven, use the source receipts and prove the
+  same approved low-sensitivity item as accepted, stored with source and
+  extraction provenance, projected with its exact generation confirmed, and
+  query-visible with the expected citation and provenance. Stop at the first
+  unproven state. `testing.probe_questions` remains an optional private
+  regression list that may be added later; it never replaces that evidence gate.
 - For a loading or scoring call, start read-only: two `brain health`
   readings two minutes apart, then `brain sources`. Pending falling means the
   index is making progress. Inspect the reported pause state, drain lease, and

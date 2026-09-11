@@ -7,6 +7,7 @@
  */
 
 import { ArchiveSafetyError, extractZipEntries } from "./archive.mjs";
+import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 const KNOWN = new Map([
   ["connections.csv", "Connections"], ["positions.csv", "Positions"],
@@ -129,7 +130,7 @@ export function parseLinkedInArchive(bytes, { sourceName = "linkedin", archivePa
     const headers = rows[0].map((header) => String(header).toLowerCase());
     const dateIndex = headers.findIndex((header) => /(?:date|time|started on|ended on|connected on)/.test(header));
     const occurredAt = dateIndex >= 0 ? safeIso(first[dateIndex]) : null;
-    envelopes.push({
+    envelopes.push(withFirstPartySourceProvenance({
       source_type: sourceName,
       source_id: `linkedin:${normalizedArchivePath}:${key}`,
       title: `LinkedIn ${label}`,
@@ -143,7 +144,7 @@ export function parseLinkedInArchive(bytes, { sourceName = "linkedin", archivePa
         export_file: name, row_count: rendered.total, indexed_row_count: rendered.indexed,
         omitted_row_count: rendered.omitted,
       },
-    });
+    }, { textSource: "native", textReliable: rendered.omitted === 0 }));
   }
   return envelopes.length
     ? { envelopes, skipped, error: null }

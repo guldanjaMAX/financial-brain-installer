@@ -13,19 +13,29 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This checkout is the unreleased 0.4.4 candidate. The versioned commands below
-describe its intended release; they are not an available customer update.
-Check the guided page for the current release status before installing.
+This checkout is an unreleased hardening candidate based on the public 0.4.6
+package. Changes in this checkout are not an available customer update. Check
+the guided page for the current release status before installing.
 
-The guided path is at `financialbrain.ai/install`. It uses one immutable release
-asset and installs into a folder owned by your user account, so it needs no Git,
-`sudo`, or administrator access.
+The guided install path is at `financialbrain.ai/install`. It uses one immutable
+release asset and installs into a folder owned by your user account, so it needs
+no Git, `sudo`, or administrator access. After the Brain is installed, continue
+at `financialbrain.ai/onboard`; `financialbrain.ai/onboarding` opens that same
+onboarding page.
 
 Before running the install command, use a normal terminal as your current user,
 not `sudo`, root, or Run as administrator. The computer needs Node.js 22 or
 newer and at least 2 GiB free on the drive that holds the per-user install. On
-Windows that is the `LOCALAPPDATA` drive. The read-only `brain tools` check
-verifies all three before setup can create anything.
+Windows that is the `LOCALAPPDATA` drive.
+
+Before the first `brain tools` run, explain that it is a local setup action,
+not a read-only check. It verifies those prerequisites, installs or updates the
+reviewed Financial Brain technician skill, and may write local bootstrap status
+and may update the current user's PATH to include the Brain CLI folder. Ask the
+owner
+to approve those local changes before running it.
+Optimize never runs `brain tools`; it uses the non-writing machine-continuity,
+MCP discovery, and configuration checks instead.
 
 Mac or Linux:
 
@@ -86,6 +96,12 @@ checkout, run `npm run rehearse:onboarding`. It opens the real owner-workspace
 bundle with synthetic data and an unmistakable local-only banner. No account,
 credential, manifest, or deployment is used.
 
+The bounded headless contract is
+`npm run rehearse:onboarding -- --smoke --no-open`. It builds the same bundle,
+starts only loopback services, verifies the guide, app shell, and synthetic
+owner API, then exits with a stable sanitized result. It does not test automatic
+browser opening or replace a physical Windows owner rehearsal.
+
 Want to see how recovery behaves before install day? Run
 `npm run rehearse:hiccups` from the source checkout. It safely interrupts
 synthetic setup, folder, connector, migration, search, owner-action, access, and
@@ -116,8 +132,9 @@ handle official-page navigation and non-secret fields. The owner takes over
 only for sign-in, 2FA, credential reveal or entry, consent, billing, and the
 secure passkey window.
 
-Setup front-loads five prerequisites. `brain tools` checks the machine and tells
-you one clear fix for anything missing. The Cloudflare sign-in can verify the
+Setup front-loads five prerequisites. After the owner approves the disclosed
+local changes, `brain tools` checks the machine and tells you one clear fix for
+anything missing. The Cloudflare sign-in can verify the
 exact account and product access, but its narrow permission cannot read billing
 status. After sign-in verifies the account, setup opens that exact account's
 plan page. The owner confirms **Workers and Pages, Plans: Paid** before setup
@@ -172,14 +189,34 @@ ciphertext; Linux uses an owner-only adjacent file. An existing legacy Mac
 
 The local Claude Code and Codex connection uses **Owner assistant** access. It
 can answer from the Brain, add or correct durable information when the owner
-asks, and check that the connection is working. It cannot delete records or
-change who has access. Setup verifies that the write tool is actually present,
+asks, check that the connection is working, and review the Owner Financial Map.
+It may create a complete non-authoritative map preview after an owner interview.
+It cannot activate that map, delete records, or change who has access. Setup
+verifies that the expected tools are actually present,
 so a silently read-only owner connection is a failed setup, not a success.
 Keep the AI client's normal approval prompt enabled. Every `brain_remember`
 write is advertised as a data-changing action so a compatible client can give
 the owner the final click.
 The owner remains the administrator of their Brain. Deletion and access
 changes stay in explicit owner controls instead of becoming silent chat tools.
+
+The Owner Financial Map is the denominator for later financial-completeness
+work. Immediately after the owner's opening goal, Optimize reads whether that
+map is current, stale, or not established and reports its unresolved gaps.
+Before the private read, it explains that no map snapshot will be sent, nothing
+will change, and the assistant may still show an approval prompt for the read.
+Before any financial-completeness conclusion, it offers an optional guided,
+session-only interview, one short question at a time. It does not start the
+interview automatically. If the owner declines, completeness remains unproven.
+Structured records remain possible mentions until the owner confirms a complete
+map. The interview submits nothing and changes nothing. Optimize ends before a
+separately explained and approved preview may write one expiring,
+non-authoritative review copy. The owner can add expected entities and accounts
+that do not yet have ledger rows. Each entity-year separately records filing
+units, required returns and forms, K-1 roles, books, payroll, and expected
+sources. Activation is another separate owner decision and explained
+fresh-passkey ceremony bound to that exact map and prior head. It never changes
+ledger, source, tax, books, payroll, or account records.
 
 ### Repair a missing local assistant handoff
 
@@ -200,6 +237,199 @@ the entire selected write set in reverse order if any item fails. The command
 cannot replace the CLI and cannot change Brain records, sources, providers,
 access, zones, passkeys, devices, or cloud resources. A CLI install or update
 remains a separate release-controlled action.
+
+### Audit a new computer before continuing a sync
+
+Run the continuity audit before reconnecting sources or installing unattended
+refresh on a replacement computer:
+
+```bash
+brain machine-continuity ./brain.manifest.json --json
+```
+
+It checks the exact local manifest and current package entrypoint, the saved owner
+credential, connector credential readability, local source folders, supported
+schedulers, source checkpoints, the technician skill, and the exact Claude
+Code and Codex MCP configuration and protocol discovery. It may reuse the
+Brain's authenticated read-only D1 source inventory, but it never opens a
+browser, prompts, refreshes a provider, reads Cloudflare's control plane, or
+changes anything.
+
+The JSON contains only `ready`, `missing`, `unproven`, and `inapplicable`
+statuses plus the smallest safe next step. It contains no customer name,
+domain, source name, path, account or resource ID, credential, provider
+identity, or cursor value. Today the D1 inventory deliberately masks cursor
+values and does not echo Cloudflare resource IDs. Legacy local checkpoints also
+do not carry a manifest binding. Local self-inspection cannot prove that its own
+CLI bytes are the current authentic public release; that requires an
+independently resolved release target and artifact receipt. The audit reports
+all of those comparisons as `unproven`; it does not call matching source counts
+or a self-declared version proof that a new computer can resume safely.
+
+### Audit source receipts and plan provenance recovery
+
+Optimize can read the Brain's own D1 source receipts without asking the owner
+to sign in to Cloudflare or expose an admin key:
+
+```bash
+brain sources ./brain.manifest.json --json
+```
+
+The CLI resolves this Brain's existing owner credential from its reviewed
+manifest and operating-system store, sends it only to the saved HTTPS Brain
+domain, and returns one stable, complete source snapshot. It reports registered
+source identity, a safe connector/provider label, zone, masked scope and cursor
+receipts, first and last ingest evidence, complete-history-through, physical
+and logical document counts, readable and unreadable counts, extraction method,
+OCR state, derivation lineage, and exact missing provenance fields. It never
+returns the raw sync cursor, configured root values, document title, URI,
+provider id, or document id. It does not infer an entity, owner, tax year, or
+whether an empty document was a scan.
+
+To inspect the exact records behind the recovery counts, request one bounded
+preview page:
+
+```bash
+brain sources ./brain.manifest.json --json --recovery
+brain sources ./brain.manifest.json --json --recovery --source drive
+```
+
+Each candidate has a stable opaque digest, closed reason codes, and only the
+stored text and provenance state needed to plan a repair. Use the returned
+`--cursor` value to request the next page. A changed corpus invalidates the
+cursor instead of mixing two snapshots. Recovery mode does not run OCR,
+reingest, repair, or any other write. A later write requires a separately
+reviewed and approved repair path.
+
+For one source that has recovery candidates, preview that write path explicitly:
+
+```bash
+brain provenance-repair ./brain.manifest.json --source drive
+```
+
+The preview is still read-only. It checks that the exact source is one
+manifest-declared local folder, Drive, Gmail, or Calendar source; that this
+computer can still read the required source and saved credential; and that no
+supported local scheduler can race the rewalk. Its plan ID binds the manifest,
+selected source/configuration and exact saved credential identity, complete
+source inventory, exact opaque candidate set and reasons, reset/no-limit mode,
+and OCR policy. Worker snapshot
+timestamps are shown as observations but do not make an otherwise unchanged
+plan stale.
+
+After the owner approves the whole-source rewalk and any stated OCR cost, use
+the exact `--apply --approve <plan-id>` command printed by the preview. Apply
+recomputes the plan before changing data, then calls the ordinary supported
+ingest path with reset and no item limit. It never changes old labels just to
+make the audit green. Existing removal limits remain in force and can stop the
+run for a separate `--approve-removals` decision. Afterward, a new completed
+full-sweep source receipt and fresh recovery readback are both required. Only
+opaque candidates actually absent from that readback are reported fixed;
+anything remaining or newly observed stays unresolved and the command does not
+claim complete success. Unsupported or unavailable original access cannot be
+repaired by this command.
+
+### Inventory the financial picture
+
+Optimize can read the structured financial evidence without searching prose or
+changing anything:
+
+```bash
+brain financial-picture ./brain.manifest.json --json
+```
+
+The receipt always names entities and possible mentions separately, exact
+stored periods, masked accounts, non-disclosing QuickBooks company references, tax and
+filing evidence, custody, provenance, supersession, and structured conflicts.
+Nested reconciliation targets are keyed references, never raw transaction or
+provider IDs.
+Optimize uses those records and blocking gaps as an interview map: it resolves
+what the stored provenance can answer first, then asks only a material question
+the evidence cannot resolve. An interview answer never auto-confirms a mapping
+or authorizes a write. Any correction, supersession, OCR, reingest, or
+reconciliation ruling remains a separate previewed action that requires the
+owner's explicit approval.
+Every section reports its total, returned count, truncation, cursor, applied
+filters, schema limitations, and page-bounded verification gaps. Each record
+names stored extraction state and exact missing provenance or freshness fields,
+plus whether the gap blocks financial verification. Payroll applicability,
+filing-unit identity, tax form, K-1 issuer-versus-recipient role, rejected
+scan-only versus empty documents, and freshness evaluation policy are currently
+reported as Unavailable because the schema cannot prove them. An empty list
+never stands in for one of those gaps.
+
+Use `--entity <exact-id>`, `--year <YYYY>`, `--period-start YYYY-MM-DD`,
+`--period-end YYYY-MM-DD`, `--sections <comma-separated-names>`, or `--limit
+<1-500>` to narrow the receipt. Continue a truncated section by requesting only
+that section with its returned `--cursor`. Each page is a separate snapshot;
+compare `database_version_ref` when it is available before combining pages.
+The content hash binds the exact page plus its as-of, consistency, and keyed
+database-version metadata, and will differ across separately captured pages. The
+command reads the durable admin credential from the owner's configured
+protected store only and deliberately ignores an ambient `ADMIN_KEY`
+environment variable. It requires a saved valid HTTPS `brain.domain` and fails
+before any account lookup, Wrangler session, credential read, or request when
+that domain is missing or invalid. It has no flag for a literal key. With
+`--json`, even a failure is one sanitized machine-readable error receipt rather
+than prose.
+
+To prove that a later ingest did not introduce new provenance debt, pass the
+exact `snapshot.as_of` from the earlier receipt:
+
+```bash
+brain financial-picture ./brain.manifest.json --json \
+  --sections entities,periods,accounts,books,tax_returns,filing_payments,evidence,conflicts \
+  --provenance-baseline 2026-09-10T12:00:00.000Z
+```
+
+The gate considers only durable rows whose stored `recorded_at` is strictly
+later than that cutoff. Future cutoffs are refused. It returns
+`insufficient_scope` instead of passing when a page or nested derivation-root
+list is truncated, a timestamp cannot be classified, or the selected registry
+has no records. Counts are provenance-record occurrences and can overlap when
+the same evidence appears in more than one requested section. Source lineage
+status and reason codes remain separate from mapping assertions. Because the
+current schema has no owner-actor receipt for entity or mapping confirmation,
+an `owner_stated` and `confirmed` tuple remains a stored assertion and produces
+a current owner confirmation gap rather than an owner-confirmed state. Each
+material entity field, including kind, status, holdings, ownership percentage,
+tax class, and relationship, carries its own confirmed or unconfirmed state so
+Optimize cannot present a stored guess as settled owner truth. A stored
+owner-stated assertion also remains provenance debt until the schema can prove
+the owner actor and ceremony. Any requested Unavailable section forces a
+baseline result to `insufficient_scope`; it cannot be excluded into a pass.
+Raw corpus document UIDs, feed keys, source names, and structured source
+locators stay inside the Worker because they can contain provider identifiers.
+The receipt exposes domain-separated HMAC-SHA-256 references plus explicit
+presence and resolution states instead. Those references are keyed by the
+Brain's secret, stay equal across its pages until that secret rotates, and
+cannot be dictionary-tested without the secret. Missing signing material fails
+closed before records are returned. Only connector kinds from a closed
+allowlist may be readable; every actual source or feed key remains hash-only.
+The Worker and CLI enforce the same closed version-2 response schema and reject
+unknown or raw-looking nested identifier fields before output. Orphaned coverage or statement
+rows are counted tenant-wide, remain visible as unresolved period evidence,
+and force `insufficient_scope` even when an entity filter cannot attribute
+them.
+
+This inventory reports what the Brain can cite. It does not decide that the
+financial picture is complete or that the books or tax filings are correct.
+Its gap output is recovery planning only and cannot OCR, reingest, or repair a
+record.
+
+Legacy `documents.text_source` and `text_reliable` values are not extraction
+proof. Financial Picture runs every linked corpus row through the shared
+`storedProvenanceAssessment` receipt validator and exposes normalized text
+fields only when that assessment succeeds. A missing, malformed, or
+row-mismatched receipt makes extraction unavailable and counts as provenance
+debt. Source coverage is likewise projected by the shared coverage helper from
+the registry row and one exact latest sync-run receipt carried through the same
+D1 batch. A clean older range is never combined with newer refused, failed, or
+unmeasured counts, and the route still does not claim that a source is current
+or that the owner's machine is the blocker from a raw registry status. Grouped
+QuickBooks provenance materializes at most 50 ordered receipts; the full exact
+evidence count remains visible and every unmaterialized member is explicit
+unassessed debt.
 
 If a first setup is interrupted after D1 commits only part of a migration, the
 next setup does not guess that the database is unused. It stops before another

@@ -267,6 +267,19 @@ document. `documents.text_source` and `text_reliable` carry the OCR provenance
 through retrieval and citations. Local synthetic scans prove this contract;
 real typed, fax-quality, and handwritten scans remain a private field gate.
 
+Every corpus write also carries the exact `metadata.provenance_receipt` v1
+object: `version`, `status`, `reason`, and sorted unique `root_ids`. `complete`
+means only that lineage and text-origin fields were recorded. It says nothing
+about date coverage, extraction quality, or factual correctness. A producer
+that cannot assess provenance is normalized to `text_source: "unknown"`,
+`text_reliable: false`, status `unavailable`, and reason
+`provenance_unavailable`; omission is never promoted to native/reliable.
+Malformed explicit claims are refused. Legacy rows whose only provenance is
+migration 0020's `native/1` column backfill remain unproven until a receipt
+validates against the row's source or recorded family identity. Inventory and
+authority code must use `storedProvenanceAssessment(row)` rather than trusting
+those columns directly.
+
 CSV and TSV are rendered row-wise as `Header: value` rather than as a bare grid,
 because `15234.11` on its own is unretrievable while `Balance: 15234.11` answers
 a question about a balance.
@@ -303,7 +316,9 @@ node brain.mjs mcp-config ./acme.manifest.json
 The generated registration carries only the URL, display name, executable path,
 absolute manifest locator, and the nonsecret `owner-assistant` profile. That
 local profile can read, add or correct owner notes, and run a basic connection
-check. Each accepted write lands in the registered, non-refreshable
+check. It can also read the Owner Financial Map and create a non-authoritative
+complete preview after a guided interview. It cannot activate the map. Each
+accepted owner-note write lands in the registered, non-refreshable
 `owner-notes` source with a visible local or remote MCP provenance label. It is
 treated as recollection, not current authoritative source evidence. The source
 stays outside named grants until the owner assigns it a zone; the owner and an
@@ -336,12 +351,23 @@ node brain.mjs ingest ./acme.manifest.json --from drive
 node brain.mjs ingest ./acme.manifest.json --from gmail
 ```
 
-A mutating Gmail ingest takes a nonblocking per-source owner lease under
-`~/.brain/locks` before it reads credentials or contacts either service. Manual
-invocations and `brain load` therefore cannot write the same adjacent resume
-state concurrently on macOS, Windows, or Linux. The owner record is private,
-heartbeated, and recoverable after a stale dead process; `--dry-run` remains
-concurrent because it writes neither resume state nor source receipts.
+Every mutating local-folder, Drive, Gmail, and Calendar ingest takes a
+nonblocking per-source owner lease under `~/.brain/locks` before it reads
+credentials or contacts a service. Direct commands, provenance repair,
+scheduled children, and `brain load` therefore cannot write the same adjacent
+resume state concurrently on macOS, Windows, or Linux. The owner record is
+private, heartbeated, and recoverable after a stale dead process; `--dry-run`
+remains concurrent because it writes neither resume state nor source receipts.
+Manifest-file symlinks resolve to the target's adjacent state identity. A
+manifest with multiple hard links is refused with a path-free safety error,
+because separate parent directories cannot portably share one adjacent state.
+Drive, Gmail, and Calendar take the source lease first and then a shared
+`provider:google` credential-record lease. `brain connect google` takes that
+same shared lease, so credential migration and replacement cannot overlap a
+source run. A mutating `brain load` inspects only credential-store metadata
+during preflight; the real credential is opened after both leases are held.
+Dry-run source reads use a dedicated non-migrating loader, including for legacy
+Windows plaintext and macOS file-backed records.
 
 For a mailbox that is not Gmail:
 
@@ -409,6 +435,10 @@ macOS token file is deleted only after the full credential record has been
 written to Keychain and read back exactly. Browser, Keychain, Expect, ACL, and
 DPAPI helper processes receive a small allowlisted environment rather than the
 Terminal's ambient credentials.
+Planning and dry-run reads never trigger either legacy migration. A real source
+run performs migration only while holding both its source lease and the shared
+Google credential-record lease; `brain connect google` holds the shared lease
+for its complete OAuth and verified storage ceremony.
 
 Choose OAuth client type **Desktop app**. Desktop clients accept the local
 loopback callback automatically. Google Cloud does not provide, or require, a
@@ -551,9 +581,10 @@ public install safely completes both halves. The LaunchAgent runs
 `brain ingest <manifest> --from drive`, uses macOS's native per-client advisory
 lock to prevent two scheduler-launched syncs from overlapping, and writes
 separate stdout and stderr logs under `~/.brain/logs`. Manual `brain ingest`
-runs do not participate in this lock. Never start a manual run while the
-scheduler is active, or kickstart the scheduler while a manual run is active.
-Remove preserves the logs as an audit trail.
+runs and scheduled children also share the command's cross-platform per-source
+lease, so they fail closed before credential or network access instead of
+overlapping. Read-only dry runs do not contend. Remove preserves the logs as an
+audit trail.
 LaunchAgent calendar times use the Mac's local timezone; status reports a
 mismatch with `client.timezone` instead of silently presenting the wrong
 schedule. Cron fields are numeric; month and weekday names are not accepted
@@ -923,6 +954,19 @@ scenario routing, and absence of credential fields. This is browser-contract
 and layout evidence only. Cloudflare install, provider OAuth, webhook delivery,
 mailbox access, and physical WebAuthn remain field gates.
 
+Every npm, Vite, fixture, and browser child in this rehearsal receives a strict
+operating-system allowlist instead of the desktop environment. npm also reads
+neither ambient npm credential variables nor the owner's user or machine-wide
+configuration, so an ordinary registry token cannot cross into this
+public-dependency install. Before dependency installation and again before the
+Vite build, the rehearsal refuses every `frontend/.env*` entry. This prevents an
+ignored local Vite file from restoring a value that the child allowlist removed.
+Windows Node 22 and 24 CI run
+`npm.cmd run rehearse:onboarding -- --smoke --no-open`; the bounded mode
+builds the app, verifies the loopback guide, app shell, and synthetic owner API,
+then closes both local servers. The hosted Windows runner is elevated, so this
+is not proof of a physical non-administrator session or browser launch.
+
 `npm run rehearse:hiccups` is the matching offline failure rehearsal. It runs a
 curated set of product tests for interrupted setup, missing mounts and removal
 guards, partial connectors, lost-response idempotency, restart-safe migrations,
@@ -989,6 +1033,100 @@ skill, or MCP registration, but it does not invoke passkey or device checks.
 After its report, the exact release may advertise a separately previewed local
 repair bundle for owner-selected skill, Claude MCP, and Codex MCP items. That
 bundle receives one approval and exact readback; CLI replacement stays separate.
+
+Optimize source evidence comes from `POST /api/admin/brain/sources`, not from
+Wrangler or the Cloudflare D1 control plane. The route accepts either the full
+admin key or a positively identified owner session with its companion CSRF
+header. It rejects scoped grants, including a grant that carries `administer`.
+All responses are private and `no-store`. The handler issues D1 `SELECT`
+statements only and does not touch passkeys, source receipts, sync cursors,
+credential storage, OCR, or the corpus.
+
+Optimize also reads `POST /api/admin/brain/financial-map/read`. Migration 0041
+starts with no map history and never promotes existing structured rows by
+backfill. The response calls those rows possible mentions, exposes current,
+stale, or not-established map state, and returns the complete unresolved-item
+list. This is the first audit evidence after the owner's opening goal. Before
+the read, the host explains that it sends no map snapshot and changes nothing,
+even if the assistant displays an approval prompt for the private read. Before
+any financial-completeness conclusion, the host offers the optional guided,
+session-only interview and asks one short question at a time if the owner
+accepts. The interview submits nothing and changes nothing. If the owner
+declines, the report keeps completeness unproven. Optimize ends before
+`brain_financial_map` may submit a full version 1 preview under a separate,
+explicit owner approval. The full map can add owner-declared entities and
+accounts with no current ledger row, and records filing units, return and form
+obligations, K-1 roles, books, payroll, and expected sources for every
+entity-year. Nullable ledger evidence stays separate from owner truth and no
+`fin_*` row is synthesized. Preview writes only an expiring non-authoritative
+receipt. Activation is a separate owner passkey ceremony with no admin-key or
+MCP fallback. It appends a sealed linear snapshot and changes no existing
+financial or source record. See `docs/OWNER-WORKSPACE-API.md` for the closed
+snapshot contract.
+
+The default request mode returns stable source-id pages. The source set and
+all aggregates are read from one bounded D1 statement, hashed with an as-of
+receipt, and sorted by source id. A continuation cursor binds its last source,
+as-of time, total, and snapshot hash. If any returned source field changes,
+the next page returns `source_inventory_changed` instead of combining moments.
+The CLI collects every source page before printing JSON and refuses incomplete,
+duplicated, unordered, or privacy-invalid output.
+
+`mode: "recovery"` returns one bounded record-candidate page. Stable opaque
+document digests permit a later before/after comparison without revealing raw
+document ids, provider locators, paths, titles, URIs, or metadata. Candidate
+selection is limited to recorded conditions: no nonblank chunks, partial OCR,
+missing extraction/readability receipts, missing source identity, or missing
+or unrecognized lineage. The top-level summary groups candidates by safe source
+identity with exact closed reason counts and stored-evidence priority signals.
+The cursor carries no raw locator. Opening and closing corpus markers refuse a
+page that overlaps supported writes, and a later marker mismatch returns 409.
+The schema cannot prove that an empty document is scan-only, so that field is
+explicitly unavailable. Recovery mode is a plan only and contains no repair
+operation.
+
+`brain sources <manifest> --json` and `--json --recovery` resolve the existing
+durable admin credential with `ignoreEnvironment: true` only after validating
+the saved HTTPS Brain origin. They use the shared redirect-refusing transport,
+do not accept a literal key option, and bypass the Wrangler session wrapper.
+This source-inventory feature does not widen MCP authority. The five local
+Owner assistant tools are `brain_think`, `brain_search`, `brain_remember`,
+`brain_health`, and `brain_financial_map`. The last tool can read map state and
+store an expiring preview, but it has no activation operation.
+
+The current ingest boundary validates an evidence-lineage contract when one is
+present, but it does not yet require a versioned complete provenance receipt or
+prevent a weaker reingest from replacing stronger provenance. Inventory labels
+that debt as partial or unavailable. `brain provenance-repair <manifest>
+--source <name>` can recover only the narrower legacy case where the exact
+original source is still available through a supported whole-source ingest
+path. Its read-only preview binds a canonical semantic generation rather than
+the Worker's raw snapshot ID, because raw IDs include a new `as_of` on every
+read. The semantic generation retains every source row, candidate, reason and
+count while excluding only observation time and pagination fields. Apply
+recomputes it, then uses reset with no limit for exactly one manifest-declared
+local-folder, Drive, Gmail, or Calendar source. No candidate-level ingest path
+is invented.
+
+The source rewalk retains every ordinary ingestion invariant, including
+credential custody, Gmail's source lock, Drive/local reconciliation, and the
+separate aggregate removal approval. A loaded macOS Drive or folder scheduler
+blocks preview; this release has no Windows/Linux scheduler for those sources,
+so non-macOS readiness names that absence instead of pretending to inspect a
+service. Google plans also bind an opaque in-process digest of the exact decoded
+saved credential record, so reconnecting a different account invalidates an
+earlier approval without exposing any OAuth value or the digest itself. After a
+run, the command requires a different completed latest-run
+receipt with `walk_complete`, measured zero refusals/failures, and a new
+`complete_history_through`, then reads the exact recovery source again. It
+computes fixed IDs only as the approved opaque set minus the readback set. A
+missing receipt, readback failure, remaining candidate, new candidate, or
+second removal approval exits without a complete-success claim.
+
+This rewalk bridge does not solve the broader write-contract gap. A separate
+change must still cover every connector, owner write, importer, chunk split,
+OCR result, summary, and reingest before the store can require complete
+provenance or prevent a weaker future write from replacing stronger evidence.
 
 `brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
 local handoff lane. Its only accepted scopes are `technician-skill`,

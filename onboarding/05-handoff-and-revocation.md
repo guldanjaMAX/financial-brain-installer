@@ -37,8 +37,10 @@ Do not take my word for any of the above. All three are checkable in about five 
 1. **Cloudflare.** Log in, go to **My Profile, then API Tokens**. The token named `[TOKEN NAME]` should not be listed. If it is, delete it now and tell me.
 2. **Google.** Open the sharing settings on the folders you granted, or the service account list at [LOCATION]. My access should not appear.
 3. **Your admin key.** You rotated it during our session. I was not shown the new value and it exists only in your own store.
-After all three, run `node brain.mjs test <manifest>` yourself. If the brain
-still answers, the remaining credentials and Cloudflare AI binding are working.
+After all three, run `node brain.mjs test <manifest>` yourself. Then complete
+one adaptive evidence-derived check and confirm the expected citation and
+provenance. No prepared question list is required. If both checks pass, the
+remaining credentials, answer path, and Cloudflare AI binding are working.
 
 If any of those three does not check out, that is a real problem and I want to hear about it the same day.
 
@@ -52,15 +54,20 @@ Everything. Here it is written down, because "you own it" is worthless if nobody
 |---|---|---|
 | Cloudflare account | [ACCOUNT EMAIL], account ID `[ACCOUNT_ID]` | Everything below sits inside it |
 | Your brain (the worker) | `[WORKER_NAME]`, at `[BRAIN URL]` | The service that answers questions |
-| Database | Cloudflare D1, `[D1_NAME]`, ID `[D1_ID]` | Version tracking and spend accounting |
-| File storage | Cloudflare R2 bucket `[R2_BUCKET]` | Stored files |
+| Database | Cloudflare D1, `[D1_NAME]`, ID `[D1_ID]` | Extracted text, metadata, keyword search, version tracking, and spend accounting |
+| Optional original-file copy, omit this row when absent | Cloudflare R2 bucket `[R2_BUCKET]` | Original-file storage only when this install separately configured and proved it |
 | Search index | Cloudflare Vectorize index `[VECTORIZE_INDEX]`, in YOUR account | The meaning of your material, as vectors |
-| Text and keywords | Cloudflare D1 database `[D1_NAME]`, in YOUR account | Your material itself, and the keyword index over it |
+| Text and keywords | Cloudflare D1 database `[D1_NAME]`, in YOUR account | Extracted text, source metadata, and the keyword index over it |
 | Answer model | Cloudflare Workers AI in [ACCOUNT EMAIL] | Writes the answers in the same account, capped at $[CAP] per day |
 | Source access | [GOOGLE SERVICE ACCOUNT / OAUTH CLIENT] | Read-only access to your own folders |
 | Admin key | [WHERE YOU STORED IT] | The password to your brain. Treat it like one |
 | Your manifest | `[PATH / REPO]` | The one file that describes your install. Contains no secrets |
 | The installer and its tools | `[PATH / REPO]` | Everything needed to verify, update, or rebuild |
+
+Original files remain in their source provider unless this install separately
+configured and proved an R2 original-file copy. D1 holds extracted text and
+metadata, not a backup of the original binary. Remove the R2 row above whenever
+the manifest has no R2 bucket.
 
 **The manifest is the important one.** It is the single file that differs between one install and another. Anyone competent, holding that file and your own credentials, can rebuild or move this. That is deliberate: it means you are not dependent on me existing.
 
@@ -81,7 +88,7 @@ Then, from the installer folder:
 
 | You want to | Run |
 |---|---|
-| Prove the whole thing works, all five layers | `node brain.mjs test <manifest>` |
+| Run the five automated acceptance layers | `node brain.mjs test <manifest>` |
 | Quick "is it up" check | `node brain.mjs health <manifest>` |
 | See what it holds, per source, and when each last updated | `node brain.mjs sources <manifest>` |
 | Remove one source and everything it brought in | `node brain.mjs forget <manifest> --source <name>` |
@@ -102,7 +109,18 @@ the non-secret manifest locator during rotation. Claude Desktop is not changed
 automatically: replace its manual entry with the locator-only output from
 `brain mcp-config <manifest>`, then restart Claude Desktop.
 
-`test` is the one that matters. It runs five layers in order: is it reachable and locked down, is there anything in it and is it current, does a real question return real sources, does the credential protection actually refuse, and is the version and configuration right. It is read-only apart from one deliberate probe that must be refused.
+`test` runs five layers in order: is it reachable and locked down, is there
+anything in it and is it current, do any optional saved owner questions return
+real sources, does the credential protection actually refuse, and is the
+version and configuration right. It is read-only apart from one deliberate
+probe that must be refused. Zero owner-authored questions are required for
+setup, adaptive acceptance, or handoff.
+
+Before handoff, use the actual source receipts and prove one approved
+low-sensitivity item through four separate states: accepted, stored with source
+and extraction provenance, projected with its exact generation confirmed, and
+query-visible with the expected citation and provenance. Stop at the first
+unproven state. A green automated test does not replace that evidence gate.
 
 **It is the same suite I ran in front of you with my access removed.** Nothing about it needs me.
 
@@ -145,13 +163,20 @@ Without `--yes` it removes nothing and prints exactly what would go. That is the
 
 The rest of this section is for removing **all** of it.
 
-**Read this first: every step below is irreversible.** Deleting the database and the search index destroys your index permanently. It does not touch your original documents in Google Drive, which are untouched throughout and always have been.
+**Read this first: every step below is irreversible.** Deleting the database and
+the search index destroys your extracted text, metadata, keyword index, and
+meaning index permanently. Original files normally remain in their source
+provider. If a separately configured R2 original-file copy exists, deleting
+that copy does not delete the provider's original.
 
 In this order:
 
 1. **Delete the search index.** In your own Cloudflare account: `npx wrangler@4.73.0 vectorize delete [VECTORIZE_INDEX]` removes the vectors, and Workers and Pages, D1, then delete `[D1_NAME]` removes the text and the keyword index. Both live in your account, so this is yours to do and needs nothing from me.
 2. **Delete the database.** Cloudflare dashboard, Workers and Pages, D1, `[D1_NAME]`, Delete. This removes version history and spend records, including its time travel history.
-3. **Delete the file storage.** Cloudflare dashboard, R2, bucket `[R2_BUCKET]`, Delete.
+3. **If configured, delete the R2 original-file copy.** First confirm the
+   manifest actually declares bucket `[R2_BUCKET]`, then use Cloudflare
+   dashboard, R2, bucket `[R2_BUCKET]`, Delete. Omit this step entirely when the
+   install has no R2 bucket.
 4. **Delete the brain.** Cloudflare dashboard, Workers and Pages, `[WORKER_NAME]`, Settings, Delete.
 5. **Revoke source access.** Remove [SERVICE ACCOUNT / OAUTH CLIENT] from the folders it could read, and delete it in the Google Cloud console.
 
@@ -167,7 +192,7 @@ Complete list. Nothing omitted.
 
 | What | Contains | How long |
 |---|---|---|
-| Your intake answers and my notes | Your ten questions, your sources, your exclusions. No credentials | Until you ask me to delete them |
+| Your intake answers and my notes | Your goals, approved sources, exclusions, and any optional questions you chose to save. No credentials | Until you ask me to delete them |
 | A copy of your manifest | Resource names and IDs. **No secrets.** Every credential in it is a reference to a store, never a value | Until you ask me to delete it |
 | Our email and message history | Whatever we wrote to each other | Normal business records |
 

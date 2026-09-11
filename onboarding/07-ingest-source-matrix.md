@@ -148,7 +148,14 @@ It reads your manifest, works out which sources you actually have, runs every on
 
 - **It takes the work from your manifest, not from a list in the code.** If your install does not use WhatsApp, WhatsApp never appears as work. If a new connector is added later and your manifest declares it, it is picked up without anyone editing a list.
 - **One source failing does not stop the others.** A dead Gmail token does not prevent Drive and Calendar from loading. The failure is caught, the sweep carries on, and every failure is listed at the end with what to do about it. This is deliberate: a partial load with an honest list beats an aborted run.
-- **It tells you what is IN and what is NOT**, in four separate lists: what loaded, what was deliberately skipped and why, what is enabled but unavailable, and what failed while running. A skipped or unavailable source is never counted as loaded. If a count is not available it says *unknown*, never zero. If a source loaded in part it says so in those words.
+- **It tells you what this run did and did not load**, in four separate lists:
+  what loaded, what was deliberately skipped and why, what was enabled but
+  unavailable, and what failed while running. A failed or unavailable status
+  means the source was not loaded successfully in this run. It does not prove
+  D1 has no older records from an earlier run. Use the authenticated
+  `brain sources <manifest>` inventory before calling older material absent. If
+  a count is unavailable it says *unknown*, never zero. If a source loaded in
+  part it says so in those words.
 - **Submitted is not accepted.** For iMessage, WhatsApp, and iPhone-backup loads, the report counts only Worker-accepted conversations as present. A conversation refused by the credential gate is named as not indexed and makes that source partial.
 - **It is resumable.** It keeps no progress file of its own. Every source already remembers where it got to, and re-running the command is how an interrupted load finishes. For that same reason it refuses `--reset`: resetting everything at once is almost never what anyone means. Reset one source deliberately with `brain ingest <manifest> --from drive --reset`.
 - **It runs cheap sources first.** Calendar, then messages, then your folders, then Gmail, then Drive, with a one-time iPhone backup last. You see something working in the first minute rather than after forty silent ones.
@@ -176,13 +183,15 @@ Source names are the keys under `corpora` in your manifest, and the obvious shor
 ```
   totals: 4 loaded, 2 skipped, 2 unavailable, 1 failed, of 9 declared
   943 created, 14 updated, 127 unchanged, 7 conversation document(s) sent
-  5 of 9 declared source(s) are NOT in the brain. The lists above say which, and why.
+  5 of 9 declared source(s) did not load in this run. Check authenticated inventory for older stored records.
 ```
 
 If an enabled source failed, was unavailable, or loaded only in part, the
 command exits non-zero **after** printing the whole report. A script cannot
 mistake an incomplete sweep for success, and a person can still read what did
-work. Deliberately disabled and push-only sources remain stated skips.
+work. That status describes this run only. It does not prove older stored
+records are absent. Deliberately disabled and push-only sources remain stated
+skips.
 
 ### Every load has a name, and the name is an undo
 
@@ -481,7 +490,11 @@ If you are ever unsure whether a source is connected, do not consult this page. 
 node brain.mjs sources <manifest>
 ```
 
-One line per source: what it is, whether it is pending, loading, ready, or errored, how many documents it holds, and when it last took anything in. It is the only answer that cannot be out of date.
+One line per source: what it is, whether it is pending, loading, ready, or
+errored, how many documents it holds, and when it last took anything in. This is
+the authenticated current inventory available to the command. Its source-level
+status and count still do not prove that an exact file arrived, that history is
+complete, or that the item is query-visible.
 
 The same command also cross-checks the registry against the authenticated live
 document store whenever the install's durable admin key is available:

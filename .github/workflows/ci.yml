@@ -307,6 +307,15 @@ jobs:
       - name: install owner app
         run: npm ci --prefix frontend --ignore-scripts
 
+      # Exercise the same npm.cmd entrypoint a Windows owner will use, but keep
+      # CI synthetic and headless. Hosted runners are elevated, so this proves
+      # build, loopback guide/app/API, and clean exit rather than the physical
+      # non-admin terminal or automatic browser-opening field gates.
+      - name: Windows synthetic onboarding smoke
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: powershell
+        run: npm.cmd run rehearse:onboarding -- --smoke --no-open
+
       - name: owner app tests
         run: npm --prefix frontend test
 

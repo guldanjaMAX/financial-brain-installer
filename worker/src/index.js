@@ -8,10 +8,14 @@
  *   POST /api/rag/think                 cited answer + explicit gaps
  *   POST /api/admin/brain/ingest        write path, credential-gated
  *   POST /api/admin/brain/ocr           one scanned page, read in this account
+ *   POST /api/admin/brain/sources       owner-only read-only source inventory
  *   POST /api/admin/brain/source-families read-only private inventory paging
+ *   POST /api/admin/brain/financial-map owner map read and compact preview
+ *   POST /api/owner/financial-map       private owner-app review and ceremony
  *   GET  /api/admin/brain/documents     per-source counts and freshness
  *
- * Everything except /health requires X-Admin-Key.
+ * Everything except /health requires a route-specific credential. The source
+ * inventory accepts either the full admin key or the owner's passkey session.
  *
  * WHAT WAS DELIBERATELY LEFT OUT of v1: the CRM, pipeline, email tracking,
  * meeting filing, GHL sync, Stripe webhooks, OAuth sessions, and the knowledge
@@ -47,11 +51,13 @@ import {
   scanEnvelope as scanEnvelopeSecrets,
   sanitizeEnvelope as sanitizeIngestEnvelope,
 } from "./lib/secret-scan.js";
-import { storeFor, backendOf, D1, TEXT_SOURCES, expectedD1ContentHash } from "./lib/store.js";
+import {
+  storeFor, backendOf, D1, expectedD1ContentHash, ProvenanceTransitionError,
+} from "./lib/store.js";
 import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
-  currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence, parseCanonicalEvidenceDate,
+  currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import {
@@ -63,8 +69,11 @@ import {
 } from "./lib/tax-evidence-scope.js";
 import {
   attachEvidenceLineage, evidenceLineageFor, evidenceLineageRootIds,
-  evidenceLineageValidationError,
 } from "./lib/evidence-lineage.js";
+import { ingestEnvelopeValidationError } from "./lib/ingest-envelope.js";
+import {
+  normalizeIngestEnvelopeProvenance, restampFirstPartySourceProvenance,
+} from "./lib/provenance-receipt.js";
 import {
   COVERAGE_INCOMPLETE, coverageIncompleteNotice, emptyRetrievalDisclosure,
 } from "./lib/retrieval-status.js";
@@ -86,13 +95,19 @@ import {
 } from "./lib/oauth.js";
 import { handleMcp } from "./lib/mcp-endpoint.js";
 import {
-  isSourceKindConflict, normalizeSourceReceiptIssueCode, resolveSourceKind,
-  sourceReceiptOwnerMessage,
+  isSourceKindConflict, normalizeSourceFailureEvidence, normalizeSourceReceiptIssueCode,
+  resolveSourceKind, sourceReceiptOwnerMessage,
 } from "./lib/source-receipt.js";
 import {
   beginOwnerNoteWrite, completeOwnerNoteWrite, failOwnerNoteWrite, OwnerNoteLifecycleError,
 } from "./lib/owner-notes.js";
 import { OWNER_NOTES_ROUTE, OWNER_NOTES_SOURCE } from "./lib/owner-note-contract.js";
+import {
+  handleSourceInventoryApi, SOURCE_INVENTORY_PATH,
+} from "./lib/source-inventory-api.js";
+import {
+  handleOwnerFinancialMap, OWNER_FINANCIAL_MAP_PATH_PREFIX, OWNER_FINANCIAL_MAP_APP_PATH_PREFIX,
+} from "./lib/owner-financial-map.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -824,8 +839,8 @@ async function handleThink(
     occurred_at: r.occurred_at || null,
     date_reliable: r.date_reliable === true,
     date_source: r.date_source || null,
-    text_source: r.text_source || "native",
-    text_reliable: r.text_reliable !== false,
+    text_source: r.text_source || "unknown",
+    text_reliable: r.text_reliable === true,
     current_authoritative: r.current_authoritative === true,
     authority: r.authority || null,
     lineage: r.lineage || evidenceLineageFor(r).lineage,
@@ -1276,62 +1291,6 @@ async function handleThink(
   });
 }
 
-// This is the same source-name contract enforced by the CLI and provider
-// runner. `doc_uid` joins source_type and source_id with a colon, so allowing a
-// colon in source_type makes distinct pairs such as a:b/c and a/b:c address the
-// same document. source_id stays otherwise unrestricted because provider ids,
-// paths and split-family ids legitimately contain punctuation.
-const INGEST_SOURCE_TYPE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const INGEST_DATE_SOURCE_MAX_CHARS = 200;
-const INGEST_DATE_SOURCE_CONTROL = /[\u0000-\u001f\u007f]/;
-
-function ingestEnvelopeValidationError(envelope) {
-  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
-    return "ingest body must be a document object";
-  }
-  if (typeof envelope.source_type !== "string" || !INGEST_SOURCE_TYPE.test(envelope.source_type)) {
-    return "source_type must be 1-64 lowercase letters, digits, hyphens or underscores, starting with a letter or digit";
-  }
-  if (typeof envelope.source_id !== "string" || !envelope.source_id.trim()) {
-    return "source_id must be a non-empty string";
-  }
-  if (typeof envelope.content !== "string") return "content must be a string";
-  const lineageError = evidenceLineageValidationError(envelope.metadata);
-  if (lineageError) return lineageError;
-
-  const occurredAt = envelope.occurred_at;
-  const hasOccurredAt = occurredAt !== undefined && occurredAt !== null;
-  if (hasOccurredAt &&
-      (typeof occurredAt !== "string" || parseCanonicalEvidenceDate(occurredAt) === null)) {
-    return "occurred_at must be YYYY-MM-DD, an RFC 3339 timestamp, or null";
-  }
-
-  const dateSource = envelope.date_source;
-  const hasDateSource = dateSource !== undefined && dateSource !== null;
-  if (hasDateSource &&
-      (typeof dateSource !== "string" || !dateSource.trim() ||
-       dateSource.length > INGEST_DATE_SOURCE_MAX_CHARS || INGEST_DATE_SOURCE_CONTROL.test(dateSource))) {
-    return `date_source must be a non-empty string of at most ${INGEST_DATE_SOURCE_MAX_CHARS} characters or null`;
-  }
-
-  if (envelope.date_reliable !== undefined && typeof envelope.date_reliable !== "boolean") {
-    return "date_reliable must be a boolean when provided";
-  }
-  if (envelope.date_reliable === true &&
-      (!hasOccurredAt || !hasDateSource || dateSource.trim().toLowerCase() === "none")) {
-    return "date_reliable true requires occurred_at and a specific date_source";
-  }
-
-  if (envelope.text_source !== undefined && envelope.text_source !== null &&
-      (typeof envelope.text_source !== "string" || !TEXT_SOURCES.has(envelope.text_source))) {
-    return "text_source must be native, ocr, ocr_partial or null";
-  }
-  if (envelope.text_reliable !== undefined && typeof envelope.text_reliable !== "boolean") {
-    return "text_reliable must be a boolean when provided";
-  }
-  return null;
-}
-
 async function handleIngest(env, request, scope = { all: true }, {
   ownerNoteChannel = null,
 } = {}) {
@@ -1384,10 +1343,31 @@ async function handleIngest(env, request, scope = { all: true }, {
     );
   }
 
-  envelope = sanitizeIngestEnvelope(envelope);
+  const sanitizedEnvelope = sanitizeIngestEnvelope(envelope);
+  // Both reviewed MCP surfaces render the owner-note text themselves. That is
+  // a first-party native text origin, regardless of whether a single record or
+  // a future batch reached this shared lifecycle route. Generic ingests never
+  // receive this promotion, and an explicit malformed receipt is preserved so
+  // validation below refuses it.
+  envelope = ownerNoteChannel
+    ? restampFirstPartySourceProvenance(sanitizedEnvelope, {
+      textSource: "native",
+      textReliable: true,
+    })
+    : normalizeIngestEnvelopeProvenance(sanitizedEnvelope);
   const validationError = ingestEnvelopeValidationError(envelope);
   if (validationError) return jsonResponse({ error: validationError }, 400);
   const { source_type } = envelope;
+
+  // The rollback adapter cannot read the normalized receipt back with parity.
+  // Refuse before any legacy RPC rather than claim a provenance guarantee the
+  // alternate schema cannot prove.
+  if (backendOf(env) !== D1) {
+    return jsonResponse({
+      error: "corpus ingest requires the provenance-capable D1 backend; nothing was written",
+      code: "provenance_storage_unsupported",
+    }, 409);
+  }
 
   if (!scopeIsUnrestricted(scope)) {
     const allowed = await sourcesInScope(env, scope);
@@ -1456,6 +1436,9 @@ async function handleIngest(env, request, scope = { all: true }, {
   try {
     out = await storeFor(env).ingest(env, envelope);
   } catch (error) {
+    if (error instanceof ProvenanceTransitionError) {
+      return jsonResponse({ error: error.message, code: error.code }, error.status);
+    }
     if (!ownerNoteChannel) throw error;
     await failOwnerNoteWrite(env).catch(() => {});
     return privateNoStore(jsonResponse({
@@ -1558,6 +1541,13 @@ async function handleIngestBatch(env, request, scope = { all: true }) {
     }, 409);
   }
 
+  if (backendOf(env) !== D1) {
+    return jsonResponse({
+      error: "corpus ingest requires the provenance-capable D1 backend; nothing was written",
+      code: "provenance_storage_unsupported",
+    }, 409);
+  }
+
   if (!scopeIsUnrestricted(scope)) {
     const allowed = new Set(await sourcesInScope(env, scope));
     if (docs.some((doc) => !allowed.has(String(doc?.source_type || "")))) {
@@ -1613,7 +1603,7 @@ async function handleIngestBatch(env, request, scope = { all: true }) {
       };
       continue;
     }
-    const envelope = sanitizeIngestEnvelope(rawEnvelope);
+    const envelope = normalizeIngestEnvelopeProvenance(sanitizeIngestEnvelope(rawEnvelope));
     const ref = envelope && envelope.source_id != null ? String(envelope.source_id) : null;
     const slot = { source_id: ref, source_type: envelope?.source_type ?? null };
 
@@ -1761,6 +1751,49 @@ const receiptCount = (value) => {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 };
 
+const RECEIPT_COUNT_FIELDS = Object.freeze([
+  "files_seen", "docs_added", "docs_updated", "docs_unchanged",
+  "docs_refused", "docs_failed", "proposed_deletes",
+]);
+
+function invalidReceiptCountField(body) {
+  return RECEIPT_COUNT_FIELDS.find((field) => Object.hasOwn(body || {}, field) &&
+    !(typeof body[field] === "number" && Number.isSafeInteger(body[field]) && body[field] >= 0));
+}
+
+function receiptRange(value, label) {
+  if (value === null || value === undefined) return { from: null, through: null };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object with optional from and through dates`);
+  }
+  const unknownKey = Object.keys(value).find((key) => key !== "from" && key !== "through");
+  if (unknownKey) {
+    throw new TypeError(`${label} may contain only from and through`);
+  }
+  const endpoint = (raw, name) => {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw !== "string") {
+      throw new TypeError(`${label}.${name} must be YYYY-MM-DD or a canonical UTC timestamp`);
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      const parsed = Date.parse(`${raw}T00:00:00.000Z`);
+      if (Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === raw) {
+        return new Date(parsed).toISOString();
+      }
+    } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(raw)) {
+      const parsed = Date.parse(raw);
+      if (Number.isFinite(parsed) && new Date(parsed).toISOString() === raw) return raw;
+    }
+    throw new TypeError(`${label}.${name} must be YYYY-MM-DD or a canonical UTC timestamp`);
+  };
+  const from = endpoint(value.from, "from");
+  const through = endpoint(value.through, "through");
+  if (from && through && Date.parse(from) > Date.parse(through)) {
+    throw new TypeError(`${label}.from must not be after ${label}.through`);
+  }
+  return { from, through };
+}
+
 /**
  * Record a connector lifecycle receipt against the authoritative D1 count.
  *
@@ -1807,6 +1840,33 @@ async function handleSourceReceipt(env, request) {
   if (runId && !/^[A-Za-z0-9_-]{1,128}$/.test(runId)) {
     return jsonResponse({ error: "run_id must contain only letters, numbers, underscores, or hyphens" }, 400);
   }
+  const invalidCountField = invalidReceiptCountField(body);
+  if (invalidCountField) {
+    return jsonResponse({ error: `${invalidCountField} must be a non-negative safe integer` }, 400);
+  }
+  // Both fields opt the receipt into the versioned, measured outcome shape.
+  // Missing counters remain unknown rather than defaulting to a clean zero.
+  const metricsVersion = Object.hasOwn(body, "docs_refused") && Object.hasOwn(body, "docs_failed") ? 1 : 0;
+  if (body?.failure_evidence != null && !requestedKind) {
+    return jsonResponse({ error: "kind is required when failure_evidence is supplied" }, 400);
+  }
+  if (body?.failure_evidence != null && !runId) {
+    return jsonResponse({ error: "run_id is required when failure_evidence is supplied" }, 400);
+  }
+  let failureEvidence;
+  try {
+    // Validate the complete closed object before source identity resolution can
+    // register anything. The later immutable-kind claim proves this requested
+    // Gmail identity still matches an existing source, if one exists.
+    failureEvidence = normalizeSourceFailureEvidence(body?.failure_evidence, {
+      status,
+      kind: requestedKind,
+      metricsVersion,
+      measuredDocsFailed: metricsVersion === 1 ? body.docs_failed : null,
+    });
+  } catch (error) {
+    return jsonResponse({ error: error.message }, 400);
+  }
 
   let kind;
   try {
@@ -1852,7 +1912,7 @@ async function handleSourceReceipt(env, request) {
          VALUES (?1,?2,?3,?4)
          ON CONFLICT(run_id) DO UPDATE SET
            source=excluded.source, lane=excluded.lane, started_at=excluded.started_at,
-           finished_at=NULL, error=NULL`
+           finished_at=NULL, error=NULL, failure_evidence=NULL`
       ).bind(runId, source, lane, startedMs),
       env.DB.prepare(
         "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'ingest',?2,?3)"
@@ -1866,6 +1926,14 @@ async function handleSourceReceipt(env, request) {
     : new Date().toISOString();
   const completedMs = Date.parse(completedAt);
   const startedMs = receiptTimeMs(body?.started_at, completedMs);
+  let confirmedRange;
+  let targetRange;
+  try {
+    confirmedRange = receiptRange(body?.confirmed_range, "confirmed_range");
+    targetRange = receiptRange(body?.target_range, "target_range");
+  } catch (error) {
+    return jsonResponse({ error: error.message }, 400);
+  }
   const countRow = await sourceFamilyCounts(env, { source });
   // Split parts and declared export families can cross physical row namespaces
   // while remaining one source family. The source registry and connector state
@@ -1881,6 +1949,26 @@ async function handleSourceReceipt(env, request) {
   const walkComplete = body?.walk_complete === true || (
     status === "ready" && body?.walk_complete === undefined && body?.complete_sweep === true
   );
+  // A migrated default zero is not measured evidence. Only receipts that
+  // explicitly supply both new outcome counters opt into the versioned shape;
+  // older callers remain readable with refused/failed reported as unknown.
+  // `complete_sweep` is a stronger assertion than a successful receipt. It
+  // may advance durable history coverage only when the same receipt proves a
+  // completed walk and explicitly measures zero refused and failed documents.
+  // Missing outcome counters are legacy/unknown evidence, never a clean zero.
+  const completeSweep = status === "ready" && body?.complete_sweep === true &&
+    walkComplete && metricsVersion === 1 &&
+    receiptCount(body?.docs_refused) === 0 && receiptCount(body?.docs_failed) === 0 &&
+    !body?.refusal_reason;
+  // Gmail failure evidence has its own closed durable contract. Do not let a
+  // connector route a provider message, remote id, path, or token around that
+  // contract through older free-form receipt fields.
+  const deleteAction = failureEvidence
+    ? null
+    : body?.delete_action ? String(body.delete_action).slice(0, 64) : null;
+  const refusalReason = failureEvidence
+    ? null
+    : body?.refusal_reason ? String(body.refusal_reason).slice(0, 500) : null;
   const statements = [];
 
   if (status === "ready") {
@@ -1892,7 +1980,7 @@ async function handleSourceReceipt(env, request) {
          document_count=excluded.document_count, stale_reason=NULL,
          last_complete_sweep_at=CASE WHEN ?5 = 1 THEN excluded.last_ingest_at ELSE sources.last_complete_sweep_at END
        WHERE sources.kind=excluded.kind`
-    ).bind(source, kind, completedAt, documents, body?.complete_sweep === true ? 1 : 0));
+    ).bind(source, kind, completedAt, documents, completeSweep ? 1 : 0));
   } else {
     // A failed attempt does not become the last successful ingest. Advancing
     // last_ingest_at here would make a broken daily sync look current for the
@@ -1911,24 +1999,34 @@ async function handleSourceReceipt(env, request) {
     statements.push(env.DB.prepare(
       `INSERT INTO sync_runs
          (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
-          docs_added,docs_updated,docs_unchanged,proposed_deletes,delete_action,refusal_reason,error)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+          docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+          proposed_deletes,delete_action,refusal_reason,
+          confirmed_from,confirmed_through,target_from,target_through,error,failure_evidence)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
        ON CONFLICT(run_id) DO UPDATE SET
          source=excluded.source, lane=excluded.lane, finished_at=excluded.finished_at,
          walk_complete=excluded.walk_complete, files_seen=excluded.files_seen,
          docs_added=excluded.docs_added, docs_updated=excluded.docs_updated,
-         docs_unchanged=excluded.docs_unchanged, proposed_deletes=excluded.proposed_deletes,
-         delete_action=excluded.delete_action, refusal_reason=excluded.refusal_reason,
-         error=excluded.error`
+         docs_unchanged=excluded.docs_unchanged, docs_refused=excluded.docs_refused,
+         docs_failed=excluded.docs_failed, metrics_version=excluded.metrics_version,
+         proposed_deletes=excluded.proposed_deletes, delete_action=excluded.delete_action,
+         refusal_reason=excluded.refusal_reason,
+         confirmed_from=excluded.confirmed_from, confirmed_through=excluded.confirmed_through,
+         target_from=excluded.target_from, target_through=excluded.target_through,
+         error=excluded.error, failure_evidence=excluded.failure_evidence`
     ).bind(
       runId, source, lane, startedMs, completedMs,
       walkComplete ? 1 : 0,
       receiptCount(body?.files_seen), receiptCount(body?.docs_added),
       receiptCount(body?.docs_updated), receiptCount(body?.docs_unchanged),
+      receiptCount(body?.docs_refused), receiptCount(body?.docs_failed), metricsVersion,
       receiptCount(body?.proposed_deletes),
-      body?.delete_action ? String(body.delete_action).slice(0, 64) : null,
-      body?.refusal_reason ? String(body.refusal_reason).slice(0, 500) : null,
-      errorReason
+      deleteAction,
+      refusalReason,
+      confirmedRange.from, confirmedRange.through,
+      targetRange.from, targetRange.through,
+      errorReason,
+      failureEvidence ? JSON.stringify(failureEvidence) : null,
     ));
   }
   statements.push(env.DB.prepare(
@@ -1943,6 +2041,7 @@ async function handleSourceReceipt(env, request) {
     stored_documents: storedDocuments, completed_at: completedAt,
     ...(runId ? { run_id: runId } : {}),
     ...(errorReason ? { issue_code: errorReason } : {}),
+    ...(failureEvidence ? { failure_evidence: failureEvidence } : {}),
   });
 }
 
@@ -2448,6 +2547,31 @@ export default {
     // operator can see what the client sees without a screen share.
     if (path.startsWith(FIN_PATH_PREFIX)) {
       return handleFinApi(env, request, url, path);
+    }
+
+    // Optimize needs exact source rows but should never need Cloudflare's
+    // account control plane. This narrow handler positively requires the owner
+    // session or full admin key, rejects scoped grants, and performs D1 reads
+    // only. It sits before the general admin gate because owner sessions are a
+    // first-class credential for this one private read.
+    if (path === SOURCE_INVENTORY_PATH) {
+      return handleSourceInventoryApi(env, request);
+    }
+
+    // The financial map is a full owner-reviewed denominator, not an inferred
+    // ledger rewrite. Admin tooling and an exact owner session may read and
+    // create a non-authoritative preview. Only its dedicated fresh-passkey
+    // ceremony can append an immutable snapshot, and the handler has no admin
+    // key fallback for that activation.
+    if (path.startsWith(OWNER_FINANCIAL_MAP_PATH_PREFIX)) {
+      return handleOwnerFinancialMap(env, request, path);
+    }
+
+    // The owner app discovers one pending review through its exact unscoped
+    // owner session, then keeps the non-authorizing opaque selector only in
+    // memory for the explicit passkey ceremony.
+    if (path.startsWith(OWNER_FINANCIAL_MAP_APP_PATH_PREFIX)) {
+      return handleOwnerFinancialMap(env, request, path);
     }
 
     // Destructive corpus execution is deliberately separate from ordinary

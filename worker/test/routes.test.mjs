@@ -153,6 +153,7 @@ const ROW = {
   chunk_uid: "meeting:123#0", doc_uid: "meeting:123", text: "We agreed to defer the retainer.",
   source: "meeting", source_kind: "zoom", source_id: "123", uri: "meeting://123", title: "Q3 sync", document_date: 1750000000000, client: "Acme", category: "meeting",
   date_reliable: 1, date_source: "fixture:event_date", top_folder: "Clients", platform: "imessage",
+  text_source: "native", text_reliable: 1,
 };
 const call = (env, path) => {
   const url = new URL("https://b.example" + path);
@@ -1534,6 +1535,9 @@ const zeroChunkExpectedReturn = {
       seen.sql.some((sql) => /substr\(family_doc_uid, 1, length\(\?1\) \+ 1\)/.test(sql)),
     JSON.stringify(seen.sql));
   check("the receipt updates freshness and leaves an audit event", seen.sql.some((sql) => /INSERT INTO sources/.test(sql)) && seen.sql.some((sql) => /INSERT INTO source_events/.test(sql)), JSON.stringify(seen.sql));
+  const legacySourceBind = seen.binds.find((values) => values[0] === "drive" && values.length === 5);
+  check("a legacy sweep without measured refused and failed counters cannot advance history completeness",
+    legacySourceBind?.[4] === 0, JSON.stringify(legacySourceBind));
 
   const bad = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
     method: "POST",
@@ -1652,6 +1656,96 @@ const zeroChunkExpectedReturn = {
   check("an unknown connector lifecycle status is refused", invalid.status === 400, String(invalid.status));
 }
 
+/* ---- Gmail failure evidence is closed, metadata-only, and context-bound ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const safeEvidence = {
+    version: 1,
+    operation_class: "gmail_message_read",
+    http_status: 400,
+    provider_reason: "failed_precondition",
+    checkpoint_readback: "verified",
+    checkpoint_done: 108300,
+    checkpoint_skipped: 11647,
+    cursor_preservation: "absent_preserved",
+  };
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "gmail", kind: "gmail", status: "error", run_id: "run_gmail_failure_evidence",
+      lane: "sweep", issue_code: "INGEST_FAILED", failure_evidence: safeEvidence,
+      docs_refused: 0, docs_failed: 1,
+      error: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL /private/message-id",
+      detail: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL provider response",
+      provider_message: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL token",
+      refusal_reason: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL refusal path",
+      delete_action: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL",
+    }),
+  }), env, {});
+  const body = await response.json();
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_gmail_failure_evidence" && values.length === 22);
+  let stored = null;
+  try { stored = JSON.parse(runBind?.[21] || "null"); } catch { /* assertion below owns failure */ }
+  check("a Gmail error stores only server-reconstructed closed failure evidence",
+    response.status === 200 && JSON.stringify(body.failure_evidence) === JSON.stringify(safeEvidence) &&
+      JSON.stringify(stored) === JSON.stringify(safeEvidence),
+    JSON.stringify({ status: response.status, body, runBind }));
+  check("raw error, detail, provider message, ids, paths, and tokens never enter durable Gmail failure metadata",
+    !JSON.stringify(seen.binds).includes("SYNTHETIC_PRIVATE_FAILURE_SENTINEL") &&
+      !JSON.stringify(body).includes("SYNTHETIC_PRIVATE_FAILURE_SENTINEL"),
+    JSON.stringify({ body, binds: seen.binds }));
+}
+
+{
+  const valid = {
+    version: 1,
+    operation_class: "gmail_message_read",
+    http_status: 400,
+    provider_reason: "failed_precondition",
+    checkpoint_readback: "verified",
+    checkpoint_done: 12,
+    checkpoint_skipped: 3,
+    cursor_preservation: "present_preserved",
+  };
+  const cases = [
+    ["an extra evidence key", { ...valid, provider_message: "private" }, "error", "gmail"],
+    ["a string HTTP status", { ...valid, http_status: "400" }, "error", "gmail"],
+    ["a raw provider reason", { ...valid, provider_reason: "Precondition check failed." }, "error", "gmail"],
+    ["an unknown operation", { ...valid, operation_class: "gmail_message_private-id" }, "error", "gmail"],
+    ["claimed counts without readback", {
+      ...valid, checkpoint_readback: "unverified", cursor_preservation: "unverified",
+    }, "error", "gmail"],
+    ["failure evidence on a ready receipt", valid, "ready", "gmail"],
+    ["failure evidence on a non-Gmail receipt", valid, "error", "drive"],
+    ["failure evidence without a durable run id", valid, "error", "gmail", true],
+    ["a measured document-operation failure with zero failed documents", valid, "error", "gmail", false,
+      { docs_refused: 0, docs_failed: 0 }],
+  ];
+  const failures = [];
+  for (const [index, [description, evidence, status, kind, omitRunId, counters]] of cases.entries()) {
+    const { env, seen } = mkEnv([]);
+    const runId = `run_invalid_failure_evidence_${index}`;
+    const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify({
+        source: `failure-evidence-${index}`, kind, status,
+        ...(omitRunId ? {} : { run_id: runId }),
+        ...(counters || {}),
+        failure_evidence: evidence,
+      }),
+    }), env, {});
+    if (response.status !== 400 || seen.sql.length !== 0 ||
+        seen.binds.some((values) => values[0] === runId && values.length === 22)) {
+      failures.push({ description, status: response.status, binds: seen.binds });
+    }
+  }
+  check("the Gmail failure-evidence boundary rejects extra fields, raw strings, coercion, and invalid contexts",
+    failures.length === 0, JSON.stringify(failures));
+}
+
 /* ---- a failed sweep can never be recorded as a completed walk ---- */
 {
   const { env, seen } = mkEnv([]);
@@ -1663,9 +1757,156 @@ const zeroChunkExpectedReturn = {
       lane: "sweep", complete_sweep: true, walk_complete: false, error: "walk aborted",
     }),
   }), env, {});
-  const runBind = seen.binds.find((values) => values[0] === "run_failed_sweep" && values.length === 14);
+  const runBind = seen.binds.find((values) => values[0] === "run_failed_sweep" && values.length === 22);
   check("an error receipt cannot turn complete_sweep into walk_complete",
-    response.status === 200 && runBind?.[5] === 0, JSON.stringify(runBind));
+    response.status === 200 && runBind?.[5] === 0 && runBind?.[12] === 0, JSON.stringify(runBind));
+}
+
+/* ---- an inconsistent ready receipt cannot advance durable history proof ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "calendar-inconsistent", kind: "calendar", status: "ready",
+      run_id: "run_inconsistent_sweep", lane: "sweep",
+      complete_sweep: true, walk_complete: false,
+    }),
+  }), env, {});
+  const sourceBind = seen.binds.find((values) =>
+    values[0] === "calendar-inconsistent" && values.length === 5);
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_inconsistent_sweep" && values.length === 22);
+  check("complete_sweep is fail-closed when the same ready receipt did not complete its walk",
+    response.status === 200 && sourceBind?.[4] === 0 && runBind?.[5] === 0 && runBind?.[12] === 0,
+    JSON.stringify({ sourceBind, runBind }));
+}
+
+/* ---- only explicit valid outcome counters become measured telemetry ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "measured-calendar", kind: "calendar", status: "ready",
+      run_id: "run_measured_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 0, docs_failed: 1,
+    }),
+  }), env, {});
+  const sourceBind = seen.binds.find((values) =>
+    values[0] === "measured-calendar" && values.length === 5);
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_measured_sweep" && values.length === 22);
+  check("measured document failures prevent an otherwise complete receipt from advancing history",
+    response.status === 200 && sourceBind?.[4] === 0 && runBind?.[11] === 1 && runBind?.[12] === 1,
+    JSON.stringify({ sourceBind, runBind }));
+
+  const refused = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "refused-calendar", kind: "calendar", status: "ready",
+      run_id: "run_refused_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 1, docs_failed: 0,
+    }),
+  }), env, {});
+  const refusedSourceBind = seen.binds.find((values) =>
+    values[0] === "refused-calendar" && values.length === 5);
+  const refusedRunBind = seen.binds.find((values) =>
+    values[0] === "run_refused_sweep" && values.length === 22);
+  check("measured document refusals prevent an otherwise complete receipt from advancing history",
+    refused.status === 200 && refusedSourceBind?.[4] === 0 &&
+      refusedRunBind?.[10] === 1 && refusedRunBind?.[11] === 0 && refusedRunBind?.[12] === 1,
+    JSON.stringify({ refusedSourceBind, refusedRunBind }));
+
+  const adjudicated = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "adjudicated-drive", kind: "drive", status: "ready",
+      run_id: "run_adjudicated_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 0, docs_failed: 0,
+      detail: "policy_skipped=2; coverage_gaps=0; adjudicated_skips=3",
+    }),
+  }), env, {});
+  const adjudicatedSourceBind = seen.binds.find((values) =>
+    values[0] === "adjudicated-drive" && values.length === 5);
+  const adjudicatedRunBind = seen.binds.find((values) =>
+    values[0] === "run_adjudicated_sweep" && values.length === 22);
+  check("measured policy and adjudicated skips do not block a zero-refusal completed walk",
+    adjudicated.status === 200 && adjudicatedSourceBind?.[4] === 1 &&
+      adjudicatedRunBind?.[5] === 1 && adjudicatedRunBind?.[10] === 0 &&
+      adjudicatedRunBind?.[11] === 0 && adjudicatedRunBind?.[12] === 1,
+    JSON.stringify({ adjudicatedSourceBind, adjudicatedRunBind }));
+
+  const invalid = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "invalid-count", kind: "calendar", status: "ready",
+      run_id: "run_invalid_count", docs_failed: -1,
+    }),
+  }), env, {});
+  check("invalid receipt counters are refused instead of being coerced to clean zeroes",
+    invalid.status === 400 &&
+      !seen.binds.some((values) => values[0] === "run_invalid_count"), String(invalid.status));
+}
+
+/* ---- provenance ranges accept only the connector's explicit wire formats ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "range-contract", kind: "calendar", status: "ready",
+      run_id: "run_range_contract", lane: "sweep",
+      docs_refused: 0, docs_failed: 0,
+      confirmed_range: { from: "2026-03-04", through: "2026-03-05T12:34:56.789Z" },
+      target_range: { from: null, through: "2026-03-06" },
+    }),
+  }), env, {});
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_range_contract" && values.length === 22);
+  check("receipt ranges normalize an exact calendar date and preserve a canonical UTC timestamp",
+    response.status === 200 &&
+      runBind?.[16] === "2026-03-04T00:00:00.000Z" &&
+      runBind?.[17] === "2026-03-05T12:34:56.789Z" &&
+      runBind?.[18] === null && runBind?.[19] === "2026-03-06T00:00:00.000Z",
+    JSON.stringify({ status: response.status, runBind }));
+}
+
+{
+  const invalidRanges = [
+    ["an unknown range key", { from: "2026-03-04", timezone: "UTC" }],
+    ["an ambiguous locale date", { from: "03/04/2026" }],
+    ["a prose date", { from: "March 4, 2026" }],
+    ["an offset timestamp", { from: "2026-03-04T00:00:00-07:00" }],
+    ["a non-canonical UTC timestamp", { from: "2026-03-04T00:00:00Z" }],
+    ["an impossible calendar date", { from: "2026-02-30" }],
+    ["an empty date", { from: "" }],
+    ["a numeric timestamp", { from: 1772582400000 }],
+  ];
+  const failures = [];
+  for (const [index, [description, confirmedRange]] of invalidRanges.entries()) {
+    const { env, seen } = mkEnv([]);
+    const runId = `run_invalid_range_${index}`;
+    const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify({
+        source: "invalid-range", kind: "calendar", status: "ready",
+        run_id: runId, confirmed_range: confirmedRange,
+      }),
+    }), env, {});
+    if (response.status !== 400 || seen.binds.some((values) => values[0] === runId && values.length === 22)) {
+      failures.push({ description, status: response.status, binds: seen.binds });
+    }
+  }
+  check("receipt ranges reject extra fields and ambiguous or non-canonical date values before run evidence is written",
+    failures.length === 0, JSON.stringify(failures));
 }
 
 /* ---- manual source registration stays behind the Worker write barrier ---- */
@@ -2124,7 +2365,10 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         doc_uid: b[0], source: b[1], source_id: b[2], title: b[3],
         uri: b[4], document_date: b[5], date_source: b[6], date_reliable: b[7],
         client: b[8], category: b[9], top_folder: b[10], platform: b[11],
-        content_hash: b[13], meta: b[14],
+        ingested_at: b[12], content_hash: b[13], meta: b[14],
+        text_source: b[21], text_reliable: b[22], entity_slug: b[23],
+        provenance_receipt_version: b[25], provenance_receipt_status: b[26],
+        provenance_receipt_reason: b[27], provenance_receipt_digest: b[28],
       });
       written.push(String(b[2]));
       changes = 1;
@@ -2504,19 +2748,15 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
   }
   const rawReceipt = await response.text();
   const rpcBody = rpcCalls[0]?.body || "";
-  const parsedRpc = JSON.parse(rpcBody || "{}");
-  check("legacy Supabase source_subtype is sanitized before its RPC storage boundary",
-    response.status === 200 &&
-      parsedRpc.p_source_subtype.includes("billing thread") &&
-      parsedRpc.p_source_subtype.includes("[REDACTED:sensitive_payment_url]"));
-  check("legacy Supabase RPC input, receipt, and logs never contain the capability token",
-    rpcCalls.length === 1 &&
+  const parsedReceipt = JSON.parse(rawReceipt || "{}");
+  check("legacy Supabase corpus ingest is explicitly refused because provenance parity is unavailable",
+    response.status === 409 && parsedReceipt.code === "provenance_storage_unsupported");
+  check("the Supabase provenance refusal occurs before any RPC and never leaks the capability token",
+    rpcCalls.length === 0 &&
       !rpcBody.includes(paymentToken) && !rpcBody.includes("invoice.stripe.com") &&
       !rawReceipt.includes(paymentToken) && !observedLogs.join("\n").includes(paymentToken));
-  check("legacy Supabase metadata keys and values are sanitized without dropping useful prose",
-    rpcBody.includes("private lookup [REDACTED:sensitive_payment_url]") &&
-      rpcBody.includes("Follow-up context [REDACTED:sensitive_payment_url]") &&
-      parsedRpc.p_content === "Useful billing context remains searchable.");
+  check("the alternate-store refusal claims no write",
+    /nothing was written/.test(parsedReceipt.error || "") && rpcBody === "");
 }
 
 {

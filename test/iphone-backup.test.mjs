@@ -870,6 +870,11 @@ let cliDocs = [];
     cliDocs.length === 2 && fakes.batches.length === 1, JSON.stringify(cliDocs.map((d) => d.source_id)));
   check("every document carries source_type iphone-backup, which is the scope key forget deletes on",
     cliDocs.every((d) => d.source_type === "iphone-backup"), JSON.stringify(cliDocs.map((d) => d.source_type)));
+  check("every decodable backup session carries its final native snapshot family",
+    cliDocs.every((d) => d.text_source === "native" && d.text_reliable === true &&
+      d.metadata.provenance_receipt.status === "complete" &&
+      JSON.stringify(d.metadata.provenance_receipt.root_ids) === JSON.stringify([`iphone-backup:${d.source_id}`])),
+    JSON.stringify(cliDocs.map((d) => d.metadata.provenance_receipt)));
   check("the platform tagging survives the rename: iMessage stays imessage, forwarded texts stay sms",
     cliDocs.map((d) => d.metadata.platform).sort().join(",") === "imessage,sms",
     JSON.stringify(cliDocs.map((d) => d.metadata.platform)));
@@ -883,9 +888,13 @@ let cliDocs = [];
   check("the ready receipt records the document counts and repeats that this is a snapshot",
     fakes.receipts[1].docs_added === 2 && /snapshot, not live capture/.test(fakes.receipts[1].detail),
     JSON.stringify(fakes.receipts[1]));
-  check("a full unbounded backup walk is explicitly proven complete in its terminal receipt",
-    fakes.receipts[1].complete_sweep === true && fakes.receipts[1].walk_complete === true &&
-      fakes.receipts[1].files_seen === result.rows_seen,
+  check("a full backup walk stays distinct from searchable completeness when one row has no text",
+    fakes.receipts[1].complete_sweep === false && fakes.receipts[1].walk_complete === true &&
+      fakes.receipts[1].files_seen === result.rows_seen &&
+      fakes.receipts[1].docs_refused === 1 && fakes.receipts[1].docs_failed === 0 &&
+      !("confirmed_range" in fakes.receipts[1]) &&
+      fakes.receipts[1].target_range?.from === "2026-03-02T17:00:00.000Z" &&
+      fakes.receipts[1].target_range?.through === "2026-03-02T18:04:00.000Z",
     JSON.stringify(fakes.receipts[1]));
 
   // The honesty rules are product law: the output must not let anyone mistake
@@ -955,7 +964,10 @@ let cliDocs = [];
   check("a refused backup conversation is explicit and never completion-shaped",
     refused.refused === 2 && refused.documents_accepted === 0 &&
     refused.outcome?.kind === "partial" && refused.outcome?.complete === false &&
-    /credential gate/.test(refusing.receipts.at(-1)?.refusal_reason || ""),
+    refusing.receipts.at(-1)?.walk_complete === true &&
+    refusing.receipts.at(-1)?.complete_sweep === false &&
+    !("confirmed_range" in refusing.receipts.at(-1)) &&
+      /credential gate/.test(refusing.receipts.at(-1)?.refusal_reason || ""),
     JSON.stringify({ refused, receipt: refusing.receipts.at(-1) }));
 
   // A failed load closes its receipt as an error instead of leaving the run open.

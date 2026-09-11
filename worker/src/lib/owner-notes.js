@@ -15,6 +15,9 @@ import {
 import {
   EVIDENCE_LINEAGE_VERSION, evidenceLineageValidationError,
 } from "./evidence-lineage.js";
+import {
+  normalizeIngestEnvelopeProvenance, storedProvenanceAssessment,
+} from "./provenance-receipt.js";
 import { isSourceKindConflict, resolveSourceKind } from "./source-receipt.js";
 import {
   OWNER_NOTES_KIND, OWNER_NOTES_SOURCE,
@@ -218,6 +221,14 @@ async function canonicalizeOwnerNoteLineage(env, envelope, { scope, access }) {
       root_ids: rootIds,
     },
   };
+  // The caller's ids above have now been resolved to durable source families.
+  // Refresh the server-authored receipt so it records those canonical roots
+  // rather than the pre-resolution document references.
+  delete envelope.metadata.provenance_receipt;
+  const normalized = normalizeIngestEnvelopeProvenance(envelope);
+  envelope.text_source = normalized.text_source;
+  envelope.text_reliable = normalized.text_reliable;
+  envelope.metadata = normalized.metadata;
   return rootIds;
 }
 
@@ -385,7 +396,7 @@ export async function completeOwnerNoteWrite(env, envelope, receipt, {
     );
   }
   const stored = await env.DB.prepare(
-    `SELECT doc_uid, source, source_id, title, content_hash, meta
+    `SELECT doc_uid, source, source_id, title, content_hash, text_source, text_reliable, meta
        FROM documents
       WHERE doc_uid=?1 AND deleted_at IS NULL`
   ).bind(expectedDocUid).first();
@@ -399,7 +410,13 @@ export async function completeOwnerNoteWrite(env, envelope, receipt, {
     storedProvenance?.actor === provenance.written_by &&
     storedProvenance?.agent_profile === provenance.agent_profile;
   const exactLineage = exactStoredLineage(stored?.meta, expectedLineageRootIds);
-  if (!exactDocument || !exactProvenance || !exactLineage) {
+  const storedExtraction = storedProvenanceAssessment({ ...stored, authority_meta: stored?.meta });
+  const exactReceipt = storedExtraction.provenance_assessed === true &&
+    storedExtraction.text_source === envelope.text_source &&
+    storedExtraction.text_reliable === envelope.text_reliable &&
+    JSON.stringify(metadataObject(stored?.meta)?.provenance_receipt) ===
+      JSON.stringify(envelope.metadata.provenance_receipt);
+  if (!exactDocument || !exactProvenance || !exactLineage || !exactReceipt) {
     throw new OwnerNoteLifecycleError(
       "The Brain could not read the exact owner note and its provenance back from storage. Retry the same note; do not claim it was saved yet.",
       { code: "owner_note_readback_unconfirmed", mayHaveWritten: true },

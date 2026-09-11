@@ -187,12 +187,24 @@ resumable. A failure stays retryable. Drive policy changes and periodic full
 sweeps compare source truth with stored families so excluded, deleted, moved,
 or no-longer-accessible files can be removed safely.
 
-Mutating Gmail runs share one cross-platform owner lease keyed to the canonical
-adjacent source-state path. The lease is acquired before credential or network
-access, checked before each state write, and released in `finally`. Its private
-owner token and heartbeat allow a stale dead process to be recovered without
-letting an old timestamp evict a live long-running sync. Gmail dry runs do not
-take the lease because they write no state or source receipt.
+Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
+owner lease keyed to the canonical adjacent source-state path. The lease is
+acquired before credential or network access, checked before every document or
+batch send and before each OCR, removal, state, and source-receipt mutation,
+and released in `finally`.
+Direct commands, scheduled children, `brain load`, and provenance repair enter
+the same writer boundary exactly once. Its private owner token and heartbeat
+allow a stale dead process to be recovered without letting an old timestamp
+evict a live long-running sync. Dry runs do not take the lease because they
+write no state or source receipt.
+Manifest-file symlinks resolve to the target before the state identity is
+derived. A multiply hard-linked manifest is rejected before the runtime lock,
+credentials, or network because it has no portable single adjacent state path.
+Google source writers acquire that source lease first and then one shared
+`provider:google` lease before opening the credential record. The Google OAuth
+connect ceremony uses the same shared lease. Mutating load preflight reads only
+credential-store metadata; dry-run connectors use a full-record reader that
+cannot migrate legacy Windows or macOS storage.
 
 The authenticated HTTP batch route preserves one receipt per input document.
 For D1 it reads prior rows for unique document identities in one batch preflight,
@@ -446,6 +458,66 @@ The client also rejects a response whose final origin differs from the reviewed
 request origin. This is a shared transport invariant because Node preserves
 custom headers across a cross-origin redirect even though it strips the standard
 `Authorization` header.
+
+The owner-only source inventory is a narrow data-plane exception to the general
+admin route gate. `POST /api/admin/brain/sources` accepts the full admin key or
+an unscoped owner passkey session, rejects scoped grants, and reads D1 directly.
+It never asks for Cloudflare account authority. Default mode returns a complete
+or explicitly paged source receipt with masked configuration, physical/logical
+storage, readability, freshness, extraction, and lineage evidence. Recovery
+mode returns bounded opaque record identities and exact provenance/OCR reason
+codes for planning only. Both modes are private, stable-snapshot contracts and
+fail on observed corpus drift. Neither inventory mode can write, OCR, reingest,
+infer an entity or period, expose a raw locator, or alter the existing MCP tool
+set. `/zones` keeps its existing aggregate semantics and authorization boundary.
+
+The separate CLI `provenance-repair` bridge is an owner-approved data-plane
+operation, not a writable inventory endpoint. Preview binds one exact source,
+manifest and source configuration, complete semantic source-inventory and
+recovery generations, exact opaque candidate set, machine readiness,
+reset/no-limit rewalk mode, and OCR policy. Apply recomputes that plan and calls
+only the existing local-folder, Drive, Gmail, or Calendar full-source ingest.
+It cannot relabel legacy metadata or address an opaque candidate individually.
+The existing deletion review remains a second approval boundary. A different
+completed full-sweep source receipt and fresh candidate readback are required
+before the set difference can call any candidate fixed; incomplete evidence is
+reported as unresolved rather than success.
+
+The new-computer continuity report composes that same authenticated source
+inventory with local-only observations. It reads the exact manifest, durable
+owner credential, connector stores, declared local roots, LaunchAgent status,
+resume state, current package entrypoint, technician skill, and Claude Code/Codex MCP
+registrations. It never accepts an ambient admin key or credential-store mode,
+enters a Wrangler session, opens a browser, refreshes a source, or writes. Its
+JSON projects every observation onto four states: `ready`, `missing`,
+`unproven`, or `inapplicable`. Raw paths, source and provider identities,
+Cloudflare resource IDs, credential values, and cursor values remain inside the
+inspection boundary. Since the source inventory masks cursors and does not echo
+the manifest's Cloudflare resource bindings, legacy checkpoint continuity and
+the exact deployed-resource match stay `unproven` until a future keyed receipt
+can prove them. The current package's existence and self-declared version are
+local facts only. Public release integrity and currency require an independently
+resolved release target and artifact receipt, so the report also keeps that
+claim `unproven`.
+
+The Owner Financial Map has a narrow technician read/preview contract under
+`/api/admin/brain/financial-map/` and a separate private review/confirmation
+contract under `/api/owner/financial-map/`. Migration 0041 adds no inferred
+history or backfill. Read and preview accept the durable admin credential or
+the exact owner session. The complete private review, passkey options, and
+activation require the exact unscoped owner app session with no admin-key,
+CLI, or MCP fallback. The old admin passkey and activation routes return 410.
+Every preview is a full closed snapshot of
+the current entity and account inventory, any owner-declared expected rows that
+are not in the ledger, and a finite entity-year horizon. Each entity-year names
+its filing-unit, return, form, K-1, books, payroll, and expected-source
+obligations. Opaque local map IDs keep that declared denominator separate from
+nullable ledger evidence. Rows and current values are represented by
+database-salt HMAC-bound references and hashes.
+The immutable activation chain binds the map hash, denominator hash, inventory
+generation, and one prior head. Local MCP can read and create an expiring
+non-authoritative preview only. It has no activation operation. No map route
+rewrites the ledger, sources, tax records, books, payroll, or accounts.
 
 Google OAuth uses Keychain by default on macOS and a protected file under
 `~/.brain/` on other supported paths. Scheduler logs and locks also live under

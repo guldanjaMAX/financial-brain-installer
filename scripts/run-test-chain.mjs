@@ -13,6 +13,11 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/source-inventory-cli.test.mjs",
+  "node --no-warnings --test test/machine-continuity.test.mjs",
+  "node --test test/provenance-repair-cli.test.mjs",
+  "node --no-warnings --test worker/test/source-inventory.test.mjs",
+  "node --no-warnings test/provenance-boundary.test.mjs",
   "node --test test/install-contract-runtime.test.mjs",
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
   "node --no-warnings test/vector-bootstrap-stale-pending.test.mjs",
@@ -40,9 +45,11 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/windows-preflight-contract.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
   "node --test test/plaid-technician-setup.test.mjs",
+  "node --no-warnings worker/test/financial-picture.test.mjs",
+  "node --no-warnings test/financial-picture-cli.test.mjs",
   // Client upgrade rehearsals, added after the launcher freeze. Every shipped
-  // release through v0.3.6 ships 22 migrations and this release ships 37, so
-  // 0023..0037 have never run on a real client brain until these.
+  // release through v0.3.6 ships 22 migrations and this release ships 41, so
+  // 0023..0041 have never run on a real client brain until these.
   "node --no-warnings test/migration-walk-22-to-35.test.mjs",
   "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
@@ -53,12 +60,19 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/vector-drain-cutover-unverified.test.mjs",
   "node --no-warnings test/setup-paused-brain-guard.test.mjs",
   "node --no-warnings test/zone-assignment-retry.test.mjs",
+  "node --no-warnings test/source-failure-evidence.test.mjs",
+  "node --no-warnings --test test/owner-financial-map-migration.test.mjs worker/test/owner-financial-map.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
   "node test/test-chain-runner.test.mjs",
+  "node --test test/source-inventory-cli.test.mjs",
+  "node --no-warnings --test test/machine-continuity.test.mjs",
+  "node --test test/provenance-repair-cli.test.mjs",
+  "node --no-warnings --test worker/test/source-inventory.test.mjs",
   "node --test test/install-contract-runtime.test.mjs",
   "node --no-warnings test/provenance-sweep.test.mjs",
+  "node --no-warnings test/provenance-boundary.test.mjs",
   "node test/current-version.test.mjs",
   "node test/brain-http.test.mjs",
   "node --test test/golden20-backlog-guard.test.mjs",
@@ -90,7 +104,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/vector-delete-outbox.test.mjs",
   "node --no-warnings test/vector-bootstrap-paused-strand.test.mjs",
   // Client upgrade rehearsals. Every shipped release through v0.3.6 carries 22
-  // migrations and this release carries 37, so 0023..0037 have never run on a
+  // migrations and this release carries 41, so 0023..0041 have never run on a
   // real client brain. These walk a populated schema-22 database forward.
   "node --no-warnings test/migration-walk-22-to-35.test.mjs",
   "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
@@ -190,6 +204,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node worker/test/spend-cap.test.mjs",
   "node --no-warnings worker/test/fin-d1.test.mjs",
   "node --no-warnings worker/test/fin-routes.test.mjs",
+  "node --no-warnings worker/test/financial-picture.test.mjs",
+  "node --no-warnings test/financial-picture-cli.test.mjs",
   "node --no-warnings --test worker/test/product-migration-contract.test.mjs worker/test/owner-actions-contract.test.mjs worker/test/business-scope-contract.test.mjs worker/test/security-contract.test.mjs",
   "node worker/test/system-status.test.mjs",
   "node --no-warnings worker/test/bank-feed.test.mjs",
@@ -266,6 +282,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/adopt-cloudflare-profile-consent.test.mjs",
   "node --no-warnings test/zone-assignment-retry.test.mjs",
   "node --test test/setup-browser-sign-in.test.mjs",
+  "node --no-warnings test/source-failure-evidence.test.mjs",
+  "node --no-warnings --test test/owner-financial-map-migration.test.mjs worker/test/owner-financial-map.test.mjs",
 ]);
 
 export function parseTestCommand(command) {
@@ -410,10 +428,23 @@ export function exitDisposition(result, { continueOnFailure = false } = {}) {
   return Object.freeze({ code: 1, signal: null });
 }
 
+/**
+ * Keep the test graph out of the developer's persisted Wrangler session.
+ * Individual Wrangler tests inject their own fake session readers directly;
+ * ordinary CLI fixtures must never discover or refresh a real login merely
+ * because `npm test` was launched from an authenticated workstation.
+ */
+export function isolatedTestEnvironment(env = process.env) {
+  return Object.freeze({ ...env, BRAIN_NO_WRANGLER_LOGIN: "1" });
+}
+
 function runFromCli() {
   try {
     const options = parseRunnerOptions(process.argv.slice(2));
-    const result = runTestCommands(options);
+    const result = runTestCommands({
+      ...options,
+      env: isolatedTestEnvironment(),
+    });
     if (result.ok) {
       console.log(`test chain complete: ${result.attempted}/${result.total} commands passed`);
       return;

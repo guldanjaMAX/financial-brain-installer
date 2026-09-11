@@ -8,6 +8,59 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 Candidate only. This version has not been released.
 
+- **A reviewed source can now re-prove legacy provenance without pretending a
+  label is proof.** `brain provenance-repair <manifest> --source <name>` first
+  shows a read-only, state-bound whole-source plan for one manifest-declared
+  local folder, Drive, Gmail, or Calendar source. Apply needs the exact plan ID,
+  rechecks the source and this computer, then runs the ordinary source ingest
+  with reset and no limit. OCR state and possible cost are disclosed first,
+  and the existing deletion safety stop remains separate. A candidate is called
+  fixed only after a new completed full-sweep receipt and fresh recovery
+  readback prove its opaque ID is gone. Missing original access, remaining
+  candidates, new candidates, or unverifiable readback stay unresolved.
+
+- **Optimize can now read exact source and provenance receipts without a
+  Cloudflare sign-in.** `brain sources <manifest> --json` uses the Brain's saved
+  owner credential and private Worker route to return a stable D1 source
+  inventory with masked scope/cursor state, physical and logical counts,
+  freshness, extraction, OCR, lineage, and exact missing fields. A separate
+  `--json --recovery` mode pages opaque record identities and closed reason
+  codes for planning. Both modes are strictly read-only, reveal no raw source
+  locator, and stop if the snapshot changes. They do not run OCR or repair.
+- **Optimize can now inventory the stored financial picture without changing
+  it.** The new `brain financial-picture <manifest> --json` command reads one
+  bounded D1 snapshot of exact entity, period, masked-account, books, tax,
+  filing, custody, provenance, extraction, supersession, and conflict evidence.
+  A document-derived name stays a possible mention until the owner explicitly
+  confirms it. Stored `owner_stated` data also remains an unconfirmed assertion
+  because the current schema has no durable owner-actor receipt; Optimize asks
+  for current owner confirmation instead of treating that tuple as authority.
+  Page-bounded gap counts name missing provenance, OCR or
+  readability state, freshness policy, payroll, filing-unit, tax-form,
+  K-1-role, and payment-confirmation evidence instead of guessing from search
+  results. A prior receipt's exact as-of time can now gate whether newly
+  recorded rows introduced provenance debt, while empty, page-truncated, or
+  nested-lineage-truncated scope refuses to pass. Recovery is planning only.
+  The receipt hash also binds its as-of and keyed database-version metadata; raw
+  corpus document IDs, source and feed keys, and provider locators stay private
+  behind per-Brain HMAC-SHA-256 references and resolution states. The keyed
+  references remain equal across pages until the Brain secret rotates and are
+  not dictionaryable without that secret; missing signing material fails
+  closed. Only closed-list connector kinds may be readable. A shared closed
+  version-2 schema rejects unknown or raw-looking nested fields at both the
+  Worker JSON boundary and CLI output boundary. Every material entity field has
+  its own confirmation state, stored owner assertions remain provenance debt,
+  and any requested Unavailable section forces baseline scope to be
+  insufficient. Orphaned statement or
+  coverage rows and missing extraction-reliability metadata remain explicit
+  blocking gaps instead of disappearing from a scoped audit.
+  Optimize uses those gaps as an evidence-first interview map, and an owner's
+  answer never auto-confirms a mapping or authorizes a mutation. The CLI also
+  requires a saved valid HTTPS Brain domain and never opens a Wrangler/account
+  session for this data-plane read.
+  The receipt is an inventory, never a
+  completeness, books-correctness, or tax-correctness verdict.
+
 - **Account and passkey steps now explain themselves before anything opens.**
   Claude Code can handle official-page navigation and non-secret form fields,
   then pauses for sign-in, 2FA, secrets, consent, billing, and the secure device
@@ -46,6 +99,20 @@ that stops the waiting. Nothing here changes what your brain holds.
   failure anywhere restores the full bundle to its previewed state. It cannot
   replace the Brain CLI or change anything in your Brain, Cloudflare account,
   sources, access, zones, passkeys, or devices.
+
+- **A new computer can now be audited before it resumes a source.**
+  `brain machine-continuity <manifest> --json` checks the exact local manifest,
+  saved owner credential readability, local connector credentials and folders,
+  supported scheduler state and drift, resume checkpoints, current local CLI,
+  technician skill, and exact Claude Code and Codex MCP discovery. It reuses
+  only the authenticated read-only D1 source inventory and never opens a
+  browser, refreshes a provider, reads Cloudflare's control plane, checks a
+  passkey, installs, or writes. The receipt exposes only closed statuses and a
+  safe next step, not customer values, paths, resource IDs, credentials, or
+  cursors. Because a CLI cannot authenticate its own release, D1 masks cursors,
+  and legacy checkpoints have no manifest binding, release integrity, exact
+  cross-computer resume, and deployed-resource matches remain explicitly
+  unproven instead of being guessed from self-declared versions or counts.
 
 - **A large backlog is rebuilt in hours instead of days.** When your index is
   incomplete and the queue of waiting work is large, the update now re-embeds

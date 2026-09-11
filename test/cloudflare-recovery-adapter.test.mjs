@@ -51,6 +51,14 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("plaid_sync_leases"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("plaid_sync_leases"), true);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("memory_supersessions"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("memory_supersessions"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_inventory_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_inventory_state"), false);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_key_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_key_state"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_snapshots"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_snapshots"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_previews"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_previews"), false);
 
 const sourceManifestPath = join(sandbox, "source.manifest.json");
 const targetManifestPath = join(sandbox, "target.manifest.json");
@@ -161,6 +169,9 @@ assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 36)), tr
 assert.equal(recoveryVectorProtocolSupported(appliedMigrations), true);
 assert.equal(recoveryExportTables(appliedMigrations.slice(0, 36)).includes("memory_supersessions"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("memory_supersessions"), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 40)).includes("owner_financial_map_snapshots"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("owner_financial_map_snapshots"), true);
+assert.equal(recoveryExportTables(appliedMigrations).includes("owner_financial_map_previews"), false);
 const installStateColumns = Object.freeze([
   ["id", "INTEGER"],
   ["client_slug", "TEXT"],
@@ -640,8 +651,15 @@ function providerHarness({
     accountId === sourceManifest.infrastructure.cloudflare.account_id
       ? sourceMigrationVersion
       : targetMigrationVersion;
+  const mapTables = new Set([
+    "owner_financial_map_key_state",
+    "owner_financial_map_inventory_state",
+    "owner_financial_map_previews",
+    "owner_financial_map_snapshots",
+  ]);
   const durableTablesForVersion = (version) => RECOVERY_DURABLE_TABLES.filter((name) =>
-    version >= 37 || name !== "memory_supersessions");
+    (version >= 37 || name !== "memory_supersessions") &&
+    (version >= 41 || !mapTables.has(name)));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
@@ -890,8 +908,9 @@ function providerHarness({
           .sort().map((name) => ({ name }));
       } else if (/SELECT type,name,tbl_name/.test(sql)) {
         const version = migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID);
-        rows = schemaRows.filter((row) => version >= 37 ||
-          (row.name !== "memory_supersessions" && row.tbl_name !== "memory_supersessions"));
+        rows = schemaRows.filter((row) =>
+          (version >= 37 || (row.name !== "memory_supersessions" && row.tbl_name !== "memory_supersessions")) &&
+          (version >= 41 || (!mapTables.has(row.name) && !mapTables.has(row.tbl_name))));
       } else if (/documents_ingested_max/.test(sql)) {
         assert.match(
           sql,

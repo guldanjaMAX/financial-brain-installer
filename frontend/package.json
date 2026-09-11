@@ -13,7 +13,7 @@
     "dev": "vite",
     "build": "vite build && node build-to-worker.mjs",
     "test": "vitest run --no-file-parallelism --testTimeout 15000",
-    "test:browser": "node test/browser/passkey-gate.browser.mjs && node test/browser/owner-upload.browser.mjs && node test/browser/document-access.browser.mjs",
+    "test:browser": "node test/browser/passkey-gate.browser.mjs && node test/browser/owner-upload.browser.mjs && node test/browser/document-access.browser.mjs && node test/browser/financial-map.browser.mjs && node test/browser/document-journey.browser.mjs",
     "test:browser:install": "playwright install --with-deps --only-shell chromium"
   },
   "dependencies": {

@@ -27,8 +27,12 @@ describe("passkey ceremony context", () => {
     expect(html).toContain("Create my owner passkey");
     expect(html).toContain("Nothing opens until you choose");
     expect(html).toContain("brain.fixture.test");
+    expect(html).toContain("material connected to your Brain");
+    expect(html).toContain("coverage it cannot prove");
+    expect(html).not.toContain("Everything you have written");
     expect(html).toContain("biometric data and device PIN never go to Financial Brain");
     expect(html).toContain("private passkey stays with your device or passkey provider");
+    expect(html).toContain("does not connect files, messages, accounts, or other device data");
     expect(html).toContain("Canceling the device prompt does not use it");
     expect(html).not.toContain("Set up with Face ID");
     expect(html).not.toContain("Works on every device");

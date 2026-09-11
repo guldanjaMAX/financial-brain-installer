@@ -213,6 +213,9 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
         date_reliable: binds[7], client: binds[8], category: binds[9],
         top_folder: binds[10], platform: binds[11], ingested_at: binds[12],
         content_hash: binds[13], meta: binds[14],
+        text_source: binds[21], text_reliable: binds[22], entity_slug: binds[23],
+        provenance_receipt_version: binds[25], provenance_receipt_status: binds[26],
+        provenance_receipt_reason: binds[27], provenance_receipt_digest: binds[28],
       };
       rows.document = rows.document
         ? { ...rows.document, ...incoming }

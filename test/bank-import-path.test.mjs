@@ -133,7 +133,7 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
 /* ============ 1. END TO END: a real file becomes real ledger rows ============ */
 {
   const b = brain();
-  const { value: receipt, error } = await runImport(b, { file: fixture("checking-july.ofx") });
+  const { value: receipt, error } = await runImport(b, { file: fixture("checking-july.ofx"), entity: "primary" });
 
   check("THE ENTRY POINT EXISTS AND RUNS: a downloaded OFX file imports without error",
     error === null && receipt?.imported === true, error?.message || JSON.stringify(receipt));
@@ -190,7 +190,7 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
 
   /* ---- 2. the same file again ---- */
   const before = b.count("fin_transactions");
-  const second = await runImport(b, { file: fixture("checking-july.ofx") });
+  const second = await runImport(b, { file: fixture("checking-july.ofx"), entity: "primary" });
   check("A SECOND IMPORT OF THE SAME FILE DOES NOT DOUBLE THE LEDGER",
     second.error === null && before === 5 && b.count("fin_transactions") === 5,
     `${before} then ${b.count("fin_transactions")}: ${second.error?.message || ""}`);
@@ -200,6 +200,15 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
     [b.count("fin_accounts"), b.count("fin_statements"), b.count("fin_account_coverage"), b.count("fin_balance_snapshots")].join(","));
   check("and the operator is TOLD that re-running is safe, rather than left to guess",
     /does not add a second copy/.test(second.out), second.out);
+}
+
+/* Financial scope is owner input, never an implicit primary-business default. */
+{
+  const b = brain();
+  const { error } = await runImport(b, { file: fixture("checking-july.ofx") });
+  check("a bank import with no explicit entity is refused before any ledger request",
+    error !== null && /--entity/.test(error.message || "") && b.calls.length === 0,
+    error?.message || JSON.stringify(b.calls));
 }
 
 /* ============ 3. an inverted OFX is caught, not trusted ============ */
@@ -219,7 +228,9 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
 
   // The same file with its signs the right way round is imported AND says so.
   const good = brain();
-  const { value: receipt, out } = await runImport(good, { file: fixture("reconciled-july.ofx") });
+  const { value: receipt, out } = await runImport(good, {
+    file: fixture("reconciled-july.ofx"), entity: "primary",
+  });
   check("the honest twin of that file imports, and its direction is reported as VERIFIED",
     receipt?.imported === true && /direction: VERIFIED/.test(out), out.slice(0, 400));
   const coverage = good.db.prepare("SELECT * FROM fin_account_coverage").get();
@@ -233,7 +244,7 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
 /* ============ 4. what was NOT verified says so ============ */
 {
   const b = brain();
-  const { out } = await runImport(b, { file: fixture("checking-july.ofx") });
+  const { out } = await runImport(b, { file: fixture("checking-july.ofx"), entity: "primary" });
   check("a statement with no balance to check against is reported as taken ON TRUST",
     /taken ON TRUST from the OFX specification, not verified/.test(out), out.slice(0, 600));
   const coverage = b.db.prepare("SELECT * FROM fin_account_coverage").get();
@@ -280,7 +291,7 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
   const b = brain();
   const { value: receipt } = await runImport(b, {
     file: fixture("paired-columns.csv"), account: "fixture-operating", "account-kind": "checking",
-    institution: "Fixture Mutual",
+    institution: "Fixture Mutual", entity: "primary",
   });
   check("a CSV named on the command line imports, under the account the operator named",
     receipt?.imported === true && b.db.prepare("SELECT * FROM fin_accounts").get()?.account_slug === "fixture-operating",
@@ -308,7 +319,7 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
   const envelope = readBankExport(readFileSync(fixture("checking-july.ofx")), { name: "checking-july.ofx" });
   const tampered = structuredClone(envelope);
   tampered.accounts[0].transactions[1].direction = "inflow"; // the -1875.40 line
-  const flipped = await post({ envelope: tampered }, { "X-Admin-Key": ADMIN_KEY });
+  const flipped = await post({ envelope: tampered, entity_slug: "primary" }, { "X-Admin-Key": ADMIN_KEY });
   const flippedBody = await flipped.json();
   check("AN ENVELOPE WHOSE DIRECTION CONTRADICTS ITS OWN SOURCE FIGURE IS REFUSED BY THE BRAIN",
     flipped.status === 400 && /calls it an inflow/.test(flippedBody.reason || ""), JSON.stringify(flippedBody));
@@ -317,18 +328,20 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
 
   const invented = structuredClone(envelope);
   invented.signConvention = "whatever_the_client_says";
-  const unknown = await post({ envelope: invented }, { "X-Admin-Key": ADMIN_KEY });
+  const unknown = await post({ envelope: invented, entity_slug: "primary" }, { "X-Admin-Key": ADMIN_KEY });
   check("a sign convention this brain does not define is refused rather than recorded as fact",
     unknown.status === 400 && /not a sign convention this brain defines/.test((await unknown.json()).reason || ""), "");
 
   const owed = structuredClone(envelope);
   owed.accounts[0].accountKind = "card";
   owed.accounts[0].balanceRole = "asset";
-  const lie = await post({ envelope: owed }, { "X-Admin-Key": ADMIN_KEY });
+  const lie = await post({ envelope: owed, entity_slug: "primary" }, { "X-Admin-Key": ADMIN_KEY });
   check("MONEY OWED CANNOT BE IMPORTED AS MONEY HELD, whatever the envelope claims",
     lie.status === 400 && /cannot be recorded as money held/.test((await lie.json()).reason || ""), "");
 
-  const refused = await post({ envelope: { ok: false, refusal: "the reader declined this file" } }, { "X-Admin-Key": ADMIN_KEY });
+  const refused = await post({
+    envelope: { ok: false, refusal: "the reader declined this file" }, entity_slug: "primary",
+  }, { "X-Admin-Key": ADMIN_KEY });
   check("an envelope the reader already refused cannot be pushed through the back door",
     refused.status === 400 && /refused by the reader/.test((await refused.json()).reason || ""), "");
 }
@@ -363,7 +376,7 @@ const runImport = (b, flags) => captured(() => cmdImportBank(manifest, manifestP
   const envelope = readBankExport(readFileSync(fixture("checking-july.ofx")), { name: "checking-july.ofx" });
   const res = await worker.fetch(new Request(`https://fixture.invalid${BANK_IMPORT_PATH}`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": ADMIN_KEY },
-    body: JSON.stringify({ envelope }),
+    body: JSON.stringify({ envelope, entity_slug: "primary" }),
   }), env, { waitUntil() {}, passThroughOnException() {} });
   const body = await res.json();
   check("a brain with no financial ledger says which migration is missing and which command runs it",

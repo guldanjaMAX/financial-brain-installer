@@ -9,6 +9,7 @@
  */
 
 import { ingestionOutcome } from "./ingestion-outcome.js";
+import { withFirstPartySourceProvenance } from "./provenance-receipt.js";
 
 export const PROVIDER_HTTP_DEFAULTS = Object.freeze({
   deadlineMs: 30_000,
@@ -391,12 +392,14 @@ export function providerEnvelope(provider, id, {
   occurredAt = null,
   uri = null,
   metadata = {},
+  textSource = "native",
+  textReliable = true,
 } = {}) {
   const sourceId = clean(id);
   const text = clean(content);
   if (!sourceId) throw new TypeError(`${provider} document identity is empty`);
   if (!text) throw new TypeError(`${provider} document ${sourceId} has no content`);
-  return {
+  return withFirstPartySourceProvenance({
     source_type: provider,
     source_id: sourceId,
     title: clean(title).slice(0, 200) || `${provider} record`,
@@ -406,7 +409,7 @@ export function providerEnvelope(provider, id, {
     date_reliable: Boolean(occurredAt),
     uri: uri || null,
     metadata: { category: provider, provider, ...metadata },
-  };
+  }, { textSource, textReliable });
 }
 
 export function providerSyncResult({
@@ -417,6 +420,7 @@ export function providerSyncResult({
   proposedCursor = null,
   deletionAuthority = "authoritative",
   complete = true,
+  walkComplete = complete,
   reason = null,
   outcomeKind = null,
 } = {}) {
@@ -436,6 +440,10 @@ export function providerSyncResult({
     deletion_authority: deletionAuthority,
     proposed_cursor: proposedCursor,
     cursor_can_advance: outcome.kind === "completed",
+    // Enumeration and deletion authority are different claims. A provider can
+    // fully traverse every readable page while lacking a permanent-deletion
+    // stream. Adapters set this false for bounded or unreadable content.
+    walk_complete: walkComplete === true,
     outcome,
   });
 }

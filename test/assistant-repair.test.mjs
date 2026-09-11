@@ -373,6 +373,11 @@ try {
     mcpOptions,
   }));
   assert.equal(mcpPreview.value.items[0].status, "repairable");
+  assert.equal(
+    mcpPreview.value.items[0].protocol_discovery_verified,
+    true,
+    "the preview exposes protocol proof only after the packaged initialize and tools/list probe passes",
+  );
   assert.equal(mcpPreview.value.write_set.length, 1);
   assert.equal(mcpPreview.value.write_set[0].path, claudeConfigPath);
   assert.equal(existsSync(claudeConfigPath), false, "MCP preview does not create a config");

@@ -40,6 +40,12 @@ const confirmedReconcile = async (plans) => ({ families: plans.length, documents
   check("email keeps the original message identity", envelope.source_id === "e1", JSON.stringify(envelope));
   check("email stays one coherent document", /Email thread: Taylor/.test(envelope.content) && /From: Morgan Diaz/.test(envelope.content));
   check("email date and thread metadata survive", envelope.date_reliable === true && envelope.metadata.thread_id === "t1");
+  check("email native text carries a complete source-record provenance receipt",
+    envelope.text_source === "native" && envelope.text_reliable === true &&
+      envelope.metadata.evidence_lineage.kind === "source_record" &&
+      envelope.metadata.provenance_receipt.status === "complete" &&
+      JSON.stringify(envelope.metadata.provenance_receipt.root_ids) === JSON.stringify(["message:e1"]),
+    JSON.stringify(envelope.metadata));
 }
 
 {
@@ -50,6 +56,10 @@ const confirmedReconcile = async (plans) => ({ families: plans.length, documents
   check("one thread becomes one session document", envelope.metadata.message_count === 2, JSON.stringify(envelope));
   check("speaker and direction context become searchable", /Taylor: First note/.test(envelope.content) && /Morgan Diaz: My reply/.test(envelope.content));
   check("the session citation is stable at its first message", envelope.source_id === "m1" && envelope.metadata.last_message_id === "m2");
+  check("chat session native text carries the generic migration family before caller remapping",
+    envelope.text_source === "native" && envelope.text_reliable === true &&
+      JSON.stringify(envelope.metadata.provenance_receipt.root_ids) === JSON.stringify(["message:m1"]),
+    JSON.stringify(envelope.metadata));
 }
 
 {
@@ -91,6 +101,8 @@ const confirmedReconcile = async (plans) => ({ families: plans.length, documents
 {
   const s = new MessageSessionizer();
   check("a media marker with no transcript is skipped", s.push(row({ body: "[audio]" })).length === 0 && s.finish().length === 0);
+  check("media-only email is not labeled or ingested",
+    emailEnvelope(row({ id: "email-media", platform: "email", body: "[video]" })) === null);
 }
 
 {
@@ -116,12 +128,18 @@ const confirmedReconcile = async (plans) => ({ families: plans.length, documents
 
 {
   const envelope = emailEnvelope(row({ id: "e2", platform: "email", body: "Body" }));
-  const receipt = await sendMessageEnvelopes([envelope], async (items) => ({
-    results: items.map(({ envelope: item }) => ({
+  let sent = null;
+  const receipt = await sendMessageEnvelopes([envelope], async (items) => {
+    sent = items[0].envelope;
+    return { results: items.map(({ envelope: item }) => ({
       source_id: item.source_id, source_type: item.source_type, status: "created", chunks: 2,
-    })),
-  }), { reconcileFn: confirmedReconcile });
+    })) };
+  }, { reconcileFn: confirmedReconcile });
   check("message migration accounts for target receipts", receipt.created === 1 && receipt.target_chunks === 2, JSON.stringify(receipt));
+  check("message migration preserves the source-record family across its send boundary",
+    sent.text_source === "native" && sent.text_reliable === true &&
+      JSON.stringify(sent.metadata.provenance_receipt.root_ids) === JSON.stringify(["message:e2"]),
+    JSON.stringify(sent?.metadata));
 }
 
 {

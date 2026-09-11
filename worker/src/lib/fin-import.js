@@ -56,6 +56,7 @@ export function balanceRoleFor(accountKind) {
 
 /** Ledger rows written by this module always carry the tenant they belong to. */
 export const DEFAULT_TENANT = "primary";
+const ENTITY_SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /** D1 caps a batch; anything larger is split so a big first import still lands. */
 const MAX_BATCH = 90;
@@ -145,11 +146,22 @@ function locatorFor(envelope, part) {
  */
 export function prepareBankExportImport(envelope, {
   tenantId = DEFAULT_TENANT,
-  entitySlug = "primary",
+  entitySlug = null,
   entityLabel = null,
   now = null,
   origin = null,
 } = {}) {
+  if (typeof entitySlug !== "string" || !ENTITY_SLUG.test(entitySlug)) {
+    return {
+      receipt: {
+        imported: false,
+        refused: true,
+        reason: "an explicit valid entity_slug is required; no primary entity was assumed",
+      },
+      statements: [],
+      transactionUids: [],
+    };
+  }
   if (!envelope?.ok) {
     return {
       receipt: { imported: false, refused: true, reason: envelope?.refusal || "the export could not be read" },

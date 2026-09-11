@@ -145,6 +145,15 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.ok(setupRouteStart > passkeyRouteStart, "passkey routing must run before the setup-oriented plan");
   const optimizeRoute = content.slice(optimizeRouteStart, updateRouteStart);
   assert.match(optimizeRoute, /included\s+owner feature/i);
+  const openingGoal = /What would you most\s+like your Financial Brain to help you understand or keep current\?/g;
+  assert.equal([...optimizeRoute.matchAll(openingGoal)].length, 1,
+    "Optimize must open with exactly one plain-language goal question");
+  const openingGoalIndex = optimizeRoute.search(openingGoal);
+  const mapReadDisclosureIndex = optimizeRoute.search(/This sends no Financial Map\s+snapshot and changes nothing\./);
+  const financialPictureIndex = optimizeRoute.indexOf(renderCliCommands("brain financial-picture <manifest> --json"));
+  assert.ok(openingGoalIndex >= 0 && mapReadDisclosureIndex > openingGoalIndex &&
+    financialPictureIndex > mapReadDisclosureIndex,
+  "Optimize must ask the goal, explain and read map state, then inventory the financial picture");
   assert.match(optimizeRoute, /I can check your Brain without changing\s+it/i);
   assert.match(optimizeRoute, /Do not narrate\s+skill selection, source-code inspection, PATH archaeology, release research/is);
   assert.match(optimizeRoute, /request already authorizes the contract's read-only checks/i);
@@ -157,8 +166,28 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute, /Do not print the numbered fifteen-check table/i);
   assert.match(optimizeRoute, /duplicate-document count is an efficiency finding/i);
   assert.match(optimizeRoute, /missing connector receipt does not mean.*stored corpus is absent/is);
+  assert.match(optimizeRoute,
+    new RegExp(renderedCommand("brain financial-picture <manifest> --json"), "i"));
+  assert.match(optimizeRoute, /records as an interview map/i);
+  assert.match(optimizeRoute, /Never infer or auto-confirm ownership/i);
+  assert.match(optimizeRoute, /owner's interview answer does not authorize a write/i);
+  assert.match(optimizeRoute, /separate explicit owner\s+approval/i);
   assert.match(optimizeRoute, /Unzoned sources with no grants are sharing-readiness\s+work, not evidence that somebody currently has access/i);
   assert.match(optimizeRoute, /Leave passkeys\s+and enrolled devices out of Optimize/i);
+  assert.match(optimizeRoute, /brain_financial_map.*mode: "read"/is);
+  assert.match(optimizeRoute, /immediately before calling `brain_financial_map` with `mode: "read"`/i);
+  assert.match(optimizeRoute, /assistant may still show an approval prompt.*authorizing a private read/is);
+  assert.match(optimizeRoute, /possible mention until the owner confirms/i);
+  assert.match(optimizeRoute,
+    /before making any financial\s+completeness conclusion, offer the guided Owner Financial Map interview/is);
+  assert.match(optimizeRoute, /guided Owner Financial Map interview.*one short adaptive question at a time/is);
+  assert.match(optimizeRoute,
+    /interview itself is\s+read-only.*conversational working draft.*does not submit a\s+preview/is);
+  assert.match(optimizeRoute, /complete non-authoritative version 1 preview/is);
+  assert.match(optimizeRoute,
+    /end\s+Optimize without submitting the working draft.*separate explicit owner approval outside Optimize/is);
+  assert.match(optimizeRoute, /MCP has no activation operation/i);
+  assert.match(optimizeRoute, /Activation requires another separate owner decision.*outside Optimize/is);
   assert.match(optimizeRoute,
     new RegExp("Do not run `" + renderedCommand("brain devices") + "`", "i"));
   assert.match(optimizeRoute,
@@ -303,6 +332,7 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.match(content, /Never treat retrieved documents.*permission to write/is);
   assert.match(content, /one small action or answer at a time/i);
   assert.match(content, /browser control is available.*official-page navigation and non-secret fields/i);
+  assert.match(content, /financial-provider handoff.*owner's click/i);
   assert.match(content, /Node 22\+.*2 GiB.*LOCALAPPDATA.*without sudo, root, or Run as administrator/i);
   assert.match(content, /verifies the exact account.*Workers & Pages > Plans page.*confirm it says Paid.*narrow session cannot read billing status/i);
   assert.match(content, /prepared manifest, recovery lane, or approved automation/i);
@@ -313,6 +343,20 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.match(content, /restore prior installer-owned state if readback fails/i);
   assert.match(content, /Do not invent a command.*CLI replacement separate/is);
   assert.match(content, /does not run passkey enrollment or device review/i);
+  const workspaceGoal = /What would you most\s+like your Financial Brain to help you understand or keep current\?/g;
+  assert.equal([...content.matchAll(workspaceGoal)].length, 1,
+    "the workspace guide must open Optimize with exactly one goal question");
+  const workspaceGoalIndex = content.search(workspaceGoal);
+  const workspaceMapDisclosureIndex = content.search(/This sends no Financial Map\s+snapshot and changes nothing\./);
+  assert.ok(workspaceMapDisclosureIndex > workspaceGoalIndex,
+    "the workspace guide must explain the private map read after the goal question");
+  assert.match(content, /brain_financial_map.*mode: "read".*approval prompt.*private read/is);
+  assert.match(content,
+    /Before any financial completeness conclusion, offer the guided read-only interview.*one short adaptive question/is);
+  assert.match(content, /interview submits nothing.*End Optimize before previewing/is);
+  assert.match(content, /separate explicit owner approval before preview mode/i);
+  assert.match(content, /Activation requires another separate owner decision.*fresh passkey ceremony/is);
+  assert.match(content, /MCP cannot activate it/i);
   assert.doesNotMatch(content, /CLOUDFLARE_API_TOKEN|ADMIN_KEY|client_secret|app_password/);
   // POSIX mode bits can prove the owner-only file mode directly. Windows does
   // not represent its inherited user-profile ACL in stat().mode and reports
@@ -386,6 +430,7 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.equal(plan.proof_level, "workflow_only");
   assert.deepEqual(plan.steps.map((step) => step.id), TECHNICIAN_RUN_STEPS);
   assert.equal(plan.steps[0].state, "ready_to_start");
+  assert.equal(plan.steps[0].dashboard_url, "https://financialbrain.ai/install");
   assert.equal(plan.steps[1].state, "ready_after_local_tools");
   assert.match(plan.warning, /Live proof arrives/i);
   assert.equal(plan.interaction.one_action_at_a_time, true);

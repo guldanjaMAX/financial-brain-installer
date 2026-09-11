@@ -13,7 +13,13 @@ const scheduled = new Set(TEST_COMMANDS.flatMap((command) => {
   const parsed = parseTestCommand(command);
   return parsed.kind === 'node' ? parsed.args.filter((arg) => !arg.startsWith('--')) : [];
 }));
-for (const browserTest of ['owner-upload.browser.mjs', 'document-access.browser.mjs']) {
+for (const browserTest of [
+  'passkey-gate.browser.mjs',
+  'owner-upload.browser.mjs',
+  'document-access.browser.mjs',
+  'financial-map.browser.mjs',
+  'document-journey.browser.mjs',
+]) {
   assert.ok(frontend.scripts['test:browser'].includes(`test/browser/${browserTest}`), `owner browser gate omits ${browserTest}`);
 }
 for (const name of readdirSync(join(root, 'scripts')).filter((path) => /^test-.*\.mjs$/.test(path))) {

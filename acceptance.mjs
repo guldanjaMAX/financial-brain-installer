@@ -676,26 +676,31 @@ export class Acceptance {
     }
   }
 
-  /* --------------------------------------------------- tier 3: retrieval */
+  /* ---------------------------------- tier 3: optional owner-question checks */
 
   async tierRetrieval(probes) {
     const t = 3;
-    // Retrieval is proven with the CLIENT's own probe questions, not generic
-    // ones. A brain that returns results for "test" but nothing for "what did
-    // we agree with our biggest customer" has passed a meaningless check.
-    if (!probes || !probes.length) {
-      this.untested.push("retrieval");
+    // Saved owner questions are an optional regression aid. Setup and handoff
+    // do not depend on the owner preparing a question list: the technician
+    // proves one real item separately through accepted, stored with provenance,
+    // projected, and query-visible with citation. When questions are present,
+    // keep exercising the full retrieval and answer contracts below.
+    const savedQuestions = Array.isArray(probes)
+      ? probes.filter((question) => String(question || "").trim())
+      : [];
+    if (!savedQuestions.length) {
+      this.untested.push("optional_owner_questions");
       return this.record(
         t,
-        "retrieval probes",
+        "optional owner-question checks",
         SKIP,
-        "no probe questions in the manifest (testing.probe_questions)"
+        "none saved; zero are required for setup, adaptive acceptance, or handoff"
       );
     }
 
     let answered = 0;
     let vectorDegraded = 0;
-    for (const q of probes) {
+    for (const q of savedQuestions) {
       const r = await this.post("/api/rag/unified", { q, limit: 5, rerank: 0 });
       const n = r.json?.results?.length || 0;
       if (n > 0) answered++;
@@ -710,8 +715,8 @@ export class Acceptance {
     this.record(
       t,
       "probe coverage",
-      answered === probes.length ? PASS : answered > 0 ? WARN : FAIL,
-      `${answered}/${probes.length} probes returned sources`
+      answered === savedQuestions.length ? PASS : answered > 0 ? WARN : FAIL,
+      `${answered}/${savedQuestions.length} probes returned sources`
     );
     this.record(
       t,
@@ -719,14 +724,14 @@ export class Acceptance {
       vectorDegraded === 0 ? PASS : FAIL,
       vectorDegraded === 0
         ? "no probe degraded to keyword-only retrieval"
-        : `${vectorDegraded}/${probes.length} probe(s) were keyword-only because Vectorize returned no candidates`,
+        : `${vectorDegraded}/${savedQuestions.length} probe(s) were keyword-only because Vectorize returned no candidates`,
     );
 
     // `think` must degrade rather than 500. This is the path most likely to
     // break quietly, because it only fails when the LLM key, the spend cap or
     // the model name is wrong, none of which show up until someone asks a
     // question.
-    const think = await this.post("/api/rag/think", { q: probes[0], limit: 5 });
+    const think = await this.post("/api/rag/think", { q: savedQuestions[0], limit: 5 });
     if (think.json?.degraded === "vector") {
       this.record(
         t,
@@ -932,29 +937,36 @@ export class Acceptance {
 /**
  * The one-line verdict a person reads last, with any honesty qualifiers.
  *
- * A suite that skipped its whole retrieval tier has not proven the thing the
- * client actually bought, and an unqualified "passed" is how a false green
- * reaches a kickoff call: reach, data, safety and operations were checked,
- * and nobody asked the brain a single question. The headline itself changes,
- * not just a detail line above it, because the headline is the sentence that
- * gets read aloud and pasted into a thread.
+ * Saved owner questions are optional. Their absence is reported without
+ * turning onboarding into homework. The separate same-item evidence gate is
+ * what proves retrieval before handoff. A legacy summary that says the whole
+ * retrieval capability went untested remains qualified so old results cannot
+ * be mistaken for evidence.
  *
  * Exit semantics are the caller's and stay unchanged: a failed suite still
  * fails, a passed-but-unqualified suite still exits clean.
  */
 export function acceptanceVerdict(summary) {
-  if (!summary?.passed) return { headline: "acceptance suite FAILED", warnings: [] };
+  if (!summary?.passed) return { headline: "acceptance suite FAILED", warnings: [], notes: [] };
   const untested = Array.isArray(summary.untested) ? summary.untested : [];
   if (untested.includes("retrieval")) {
     return {
-      headline: "acceptance suite passed — but retrieval was NOT tested",
+      headline: "automated checks passed; query-visible retrieval still needs evidence",
       warnings: [
-        "retrieval was NOT tested: testing.probe_questions is empty in the manifest.",
-        "Reach, data, safety and operations were checked; nobody asked this brain a",
-        "single question. Fill testing.probe_questions from the intake — the client's",
-        "own words, not tidied English — then re-run: brain test <manifest>",
+        "This older result did not include query-visible retrieval proof.",
+        "Do not ask the owner to prepare a question list. Prove one approved",
+        "low-sensitivity item as accepted, stored with provenance, projected,",
+        "and query-visible with a citation before handoff.",
       ],
+      notes: [],
     };
   }
-  return { headline: "acceptance suite passed", warnings: [] };
+  const notes = untested.includes("optional_owner_questions")
+    ? [
+        "No owner-authored regression questions were run. Zero are required for setup, adaptive acceptance, or handoff.",
+        "Owner handoff still requires the separate same-item evidence gate: accepted, stored with provenance, projected, and query-visible with a citation.",
+        "Add saved owner questions later only if they would be useful for repeatable regression checks.",
+      ]
+    : [];
+  return { headline: "automated acceptance checks passed", warnings: [], notes };
 }

@@ -29,6 +29,7 @@ import "../ingest/formats.mjs";
 import { textQuality, isLikelyBinary } from "../ingest/quality.mjs";
 import { documentDate } from "../ingest/doc-date.mjs";
 import { isBinaryFormat } from "../ingest/extract.mjs";
+import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 export const API = "https://www.googleapis.com/drive/v3";
 export const SOURCE_TYPE = "drive";
@@ -59,11 +60,18 @@ const FIELDS = `nextPageToken, incompleteSearch, files(${FILE_FIELDS})`;
 const SKIP_MIME = /^(image|video|audio)\//;
 
 export class DriveError extends Error {
-  constructor(message, status, reason, { retryable = false, cause } = {}) {
+  constructor(message, status, reason, {
+    retryable = false, cause, providerReason = null, providerStatus = null,
+  } = {}) {
     super(message, cause ? { cause } : undefined);
     this.name = "DriveError";
     this.status = status;
     this.reason = reason;
+    // `reason` also names local connector conditions such as networkError and
+    // repeatedPageToken. Only this separate field came from a parsed Google
+    // error response and may be collapsed into durable provider metadata.
+    this.providerReason = providerReason;
+    this.providerStatus = providerStatus;
     this.retryable = retryable;
   }
 }
@@ -188,7 +196,11 @@ export async function api(getAccessToken, path, {
       res.status >= 500 ||
       (res.status === 403 && /rateLimit|userRateLimit|quotaExceeded|backendError/i.test(reason));
 
-    lastErr = new DriveError(body?.error?.message || `HTTP ${res.status}`, res.status, reason, { retryable });
+    lastErr = new DriveError(body?.error?.message || `HTTP ${res.status}`, res.status, reason, {
+      retryable,
+      providerReason: reason || null,
+      providerStatus: res.status,
+    });
     if (!retryable) throw lastErr;
     if (retryAuth) forceRefresh = true;
     if (i + 1 >= totalAttempts) throw lastErr;
@@ -734,7 +746,7 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
     // namespacing and constructs `<source_type>:<source_id>` exactly once. This
     // is also the identity used by the Supabase migration, so the first live
     // sync updates that document instead of creating `drive:drive:<id>`.
-    envelope: {
+    envelope: withFirstPartySourceProvenance({
       source_type: sourceName,
       source_id: String(file.id),
       title: file.name,
@@ -761,7 +773,10 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
         ...(got.incomplete === true ? { extraction_incomplete: true } : {}),
         ...(got.provenance ? { ocr: got.provenance } : {}),
       },
-    },
+    }, {
+      textSource: got.provenance?.text_source || "native",
+      textReliable: got.provenance?.text_reliable ?? got.incomplete !== true,
+    }),
     // Drive's own change signal. Cheaper than hashing content we already have,
     // and it is what the changes feed reports against.
     version: driveVersion(file, folder),

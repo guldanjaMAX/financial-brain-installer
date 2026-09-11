@@ -37,6 +37,8 @@ read, and no account is contacted.
 This proves local layout, navigation, API response handling, access-surface
 separation, and empty-versus-unavailable language. It does not prove Cloudflare,
 Google consent, a real mailbox, Zoom delivery, or a physical passkey ceremony.
+For a physical Windows owner test, use the pasteable, no-account instructions in
+[the Windows onboarding rehearsal](./11-windows-onboarding-rehearsal.md).
 
 ## Rehearse the customer hiccups
 
@@ -354,6 +356,28 @@ it must not run passkey enrollment or device review.
 | Record proof and unresolved gaps | Confirm result | Yes |
 
 ## Live acceptance events
+
+An item being accepted is not proof that it is searchable. For every source,
+record these four states separately and stop at the first state that is not
+proved:
+
+1. The source receipt reached a terminal state and names exact accepted,
+   refused, unreadable, failed, and retryable counts. A connector counter is
+   not a storage receipt.
+2. One approved low-sensitivity test item exists as the expected logical family
+   in D1, has chunks, and carries the correct source and extraction provenance.
+3. That exact generation has a confirmed Vectorize receipt and no matching
+   outbox work remains. Read health twice and require pending work to decline or
+   stay at zero with no competing drain lease.
+4. A distinctive phrase from the test item is returned by the supported search
+   path with the expected source citation and provenance.
+
+Keep source coverage, D1 storage, meaning-search projection, and query
+visibility as independent results. A source error must remain visible even when
+another source is healthy. A green health endpoint or an accepted-document
+count cannot substitute for the exact readback above. Use the package's fixed
+synthetic smoke item for first-install proof; use a customer-source item only
+after the owner approves that exact low-sensitivity test.
 
 The following are the shortest honest field gates:
 

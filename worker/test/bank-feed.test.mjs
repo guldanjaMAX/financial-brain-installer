@@ -34,6 +34,7 @@ import {
   directionFor, accountKindFor, tenantReference, redirectUriFor, feedScopeKey,
   bankFeedConfig, bankFeedEnabled, normaliseFeedPage, redactFeedText, safeFeedError,
   bankFeedOwnerErrorMessage,
+  reviewedBankFeedEntityForItem,
   classifyItemError, encryptAccessReference, decryptAccessReference,
   rewrapBankAccessReferences,
   bankRecoverySnapshotPage,
@@ -86,6 +87,17 @@ function d1(db, extra = {}) {
     BANK_FEED_API_BASE: "https://sandbox.provider.invalid",
     BANK_FEED_LINK_SDK_URL: "https://cdn.provider.invalid/link/v2/link.js",
     BANK_FEED_LINK_GLOBAL: "ProviderLink",
+    BANK_FEED_REVIEWED_ITEM_ENTITIES: JSON.stringify({
+      version: 1,
+      items: {
+        "item-fixture": {
+          entity_slug: "primary", reviewed_by: "owner", reviewed_at: NOW,
+        },
+        "item-broken": {
+          entity_slug: "primary", reviewed_by: "owner", reviewed_at: NOW,
+        },
+      },
+    }),
     ...extra,
   };
 }
@@ -188,16 +200,16 @@ const refuses = (db, sql, params = []) => {
   const db = freshDb();
   const env = d1(db);
   const envelope = readBankExport(readFileSync(join(FIXTURES, "paired-columns.csv")), { name: "paired-columns.csv" });
-  await importBankExport(env, envelope, { now: NOW });
+  await importBankExport(env, envelope, { now: NOW, entitySlug: "primary" });
   const first = db.prepare("SELECT count(*) c FROM fin_transactions").get().c;
-  await importBankExport(env, envelope, { now: NOW });
+  await importBankExport(env, envelope, { now: NOW, entitySlug: "primary" });
   check("a CSV with no transaction ids still does not duplicate on re-import",
     first === 5 && db.prepare("SELECT count(*) c FROM fin_transactions").get().c === 5, String(first));
 
   const twins = readBankExport(
     "Date,Description,Debit,Credit\n2026-07-02,COFFEE,4.50,\n2026-07-02,COFFEE,4.50,\n2026-07-03,RENT,900.00,\n",
     { name: "twins.csv" });
-  const receipt = await importBankExport(env, twins, { now: NOW });
+  const receipt = await importBankExport(env, twins, { now: NOW, entitySlug: "primary" });
   check("two genuinely identical transactions on the same day BOTH survive",
     receipt.transactions === 3, JSON.stringify(receipt));
   check("ordinals make that work: the same shape gets a different uid per occurrence",
@@ -301,6 +313,82 @@ const refuses = (db, sql, params = []) => {
     redirectUriFor("https://demo.example.workers.dev/anything?x=1"));
   check("the feed's scope key is one equality match, so a disconnect can remove exactly its rows",
     feedScopeKey("item-fixture") === "bank-feed:item-fixture", feedScopeKey("item-fixture"));
+  const reviewed = {
+    version: 1,
+    items: {
+      "item-personal": {
+        entity_slug: "household", reviewed_by: "owner", reviewed_at: NOW,
+      },
+      "item-company": {
+        entity_slug: "operating-company", reviewed_by: "owner", reviewed_at: NOW,
+      },
+    },
+  };
+  check("two custom-feed items can carry two different exact reviewed entities",
+    reviewedBankFeedEntityForItem({ BANK_FEED_REVIEWED_ITEM_ENTITIES: JSON.stringify(reviewed) }, "item-personal")?.entity_slug === "household" &&
+    reviewedBankFeedEntityForItem({ BANK_FEED_REVIEWED_ITEM_ENTITIES: reviewed }, "item-company")?.entity_slug === "operating-company", "");
+  check("a legacy global entity is not treated as an item review",
+    reviewedBankFeedEntityForItem({ BANK_FEED_ENTITY: "primary" }, "item-personal") === null, "");
+}
+
+/* ===== custom feeds stay paused until the exact item has an owner review ===== */
+{
+  let providerTouched = false;
+  const result = await syncItemSlice(d1(freshDb(), {
+    BANK_FEED_REVIEWED_ITEM_ENTITIES: undefined,
+    BANK_FEED_ENTITY: "primary",
+  }), "item-unreviewed", {
+    fetchImpl: async () => { providerTouched = true; throw new Error("provider reached"); },
+    now: NOW,
+  });
+  check("an unmapped custom-feed item fails closed before provider or storage access",
+    result.ok === false && result.status === "error" && /remains paused/.test(result.reason) && !providerTouched,
+    JSON.stringify(result));
+}
+
+{
+  const db = freshDb();
+  const personalToken = "fixture-access-personal";
+  const companyToken = "fixture-access-company";
+  const mapping = {
+    version: 1,
+    items: {
+      "item-personal": { entity_slug: "household", reviewed_by: "owner", reviewed_at: NOW },
+      "item-company": { entity_slug: "operating-company", reviewed_by: "owner", reviewed_at: NOW },
+    },
+  };
+  const env = d1(db, { BANK_FEED_REVIEWED_ITEM_ENTITIES: JSON.stringify(mapping) });
+  for (const [itemRef, token] of [["item-personal", personalToken], ["item-company", companyToken]]) {
+    const sealed = await encryptAccessReference(env, token);
+    db.prepare(`INSERT INTO bank_feed_items
+      (tenant_id,item_ref,institution_label,access_ciphertext,access_iv,key_version,environment,connected_at)
+      VALUES ('primary',?,?,?,?,?,'sandbox',?)`)
+      .run(itemRef, `Fixture ${itemRef}`, sealed.ciphertext, sealed.iv, sealed.keyVersion, NOW);
+  }
+  const provider = async (url, options) => {
+    const path = new URL(url).pathname;
+    const request = JSON.parse(options.body);
+    const suffix = request.access_token === personalToken ? "personal" : "company";
+    const body = path === "/accounts/get"
+      ? { accounts: [{
+        account_id: `acct-${suffix}`, name: `Account ${suffix}`, mask: suffix === "personal" ? "1111" : "2222",
+        type: "depository", subtype: "checking", balances: { current: 100, iso_currency_code: "USD" },
+      }] }
+      : { added: [{
+        transaction_id: `txn-${suffix}`, account_id: `acct-${suffix}`,
+        date: "2026-07-02", amount: 10, name: `Fixture ${suffix}`,
+      }], modified: [], removed: [], next_cursor: `done-${suffix}`, has_more: false };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const personal = await syncItemSlice(env, "item-personal", { fetchImpl: provider, now: NOW });
+  const company = await syncItemSlice(env, "item-company", { fetchImpl: provider, now: NOW });
+  const accounts = db.prepare("SELECT account_slug,entity_slug FROM fin_accounts ORDER BY account_slug").all();
+  check("two reviewed custom-feed items persist their distinct entity scopes into the ledger",
+    personal.ok === true && company.ok === true &&
+    JSON.stringify(accounts) === JSON.stringify([
+      { account_slug: "feed-item-company-acct-company", entity_slug: "operating-company" },
+      { account_slug: "feed-item-personal-acct-personal", entity_slug: "household" },
+    ]), JSON.stringify(accounts));
 }
 
 /* ============ custody of the access reference ============ */

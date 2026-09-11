@@ -1,14 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   finalizeMemorySupersession, prepareMemorySupersession,
 } from "../src/lib/memory-supersession.js";
 import { OWNER_NOTES_ROUTE, OWNER_NOTES_SOURCE } from "../src/lib/owner-note-contract.js";
+import { withFirstPartySourceProvenance } from "../src/lib/provenance-receipt.js";
 import { renderLesson, validateLesson } from "../src/lib/remember-contract.js";
 import { expectedD1ContentHash, storeFor } from "../src/lib/store.js";
 import { createProductFixture } from "./product-contract-fixture.mjs";
+
+const MIGRATION_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "migrations", "d1");
+const LATEST_SCHEMA = Math.max(
+  ...readdirSync(MIGRATION_DIR)
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .map((name) => Number(name.slice(0, 4))),
+);
 
 const ownerHeaders = (fixture) => ({ "X-Admin-Key": fixture.env.ADMIN_KEY });
 const LOCAL_IDENTITY = Object.freeze({
@@ -22,7 +33,7 @@ async function ownerEnvelope(input) {
   const checked = await validateLesson(input, LOCAL_IDENTITY);
   assert.equal(checked.ok, true, JSON.stringify(checked.errors));
   const value = checked.value;
-  return {
+  return withFirstPartySourceProvenance({
     source_type: OWNER_NOTES_SOURCE,
     source_id: value.source_id,
     title: value.title,
@@ -33,10 +44,20 @@ async function ownerEnvelope(input) {
       agent_profile: "owner-assistant",
       recorded_via: "local_mcp",
       confidence: value.confidence,
+      evidence_lineage: {
+        version: 1,
+        kind: "agent_derived",
+        root_ids: value.derived_from,
+      },
       ...(value.verification ? { verification: value.verification } : {}),
       ...(value.supersedes ? { supersedes: value.supersedes } : {}),
+      evidence_lineage: {
+        version: 1,
+        kind: "agent_derived",
+        root_ids: value.derived_from,
+      },
     },
-  };
+  }, { textSource: "native", textReliable: true });
 }
 
 async function writeOwnerNote(fixture, envelope) {
@@ -308,11 +329,11 @@ test("the paused release Worker keeps schema 36 reads available before migration
   assert.equal(Object.hasOwn(fetched.metadata, "memory_history"), false);
 });
 
-test("schema 37 fails the authenticated search route closed when its correction ledger is missing", async (t) => {
+test("the current schema fails the authenticated search route closed when its correction ledger is missing", async (t) => {
   const fixture = await createProductFixture();
   t.after(() => fixture.close());
   const envelope = await ownerEnvelope({
-    title: "Schema 37 correction-ledger integrity fixture",
+    title: "Current-schema correction-ledger integrity fixture",
     body: "This ordinary memory contains schemathirtysevenintegritymarker and must never yield a clean absence.",
     confidence: "inferred",
   });
@@ -320,7 +341,7 @@ test("schema 37 fails the authenticated search route closed when its correction 
   assert.equal(written.response.status, 200, JSON.stringify(written.body));
 
   fixture.sqlite.exec("DROP TABLE memory_supersessions");
-  assert.equal(fixture.first("SELECT schema_version FROM install_state WHERE id=1").schema_version, 37);
+  assert.equal(fixture.first("SELECT schema_version FROM install_state WHERE id=1").schema_version, LATEST_SCHEMA);
 
   const response = await fixture.post(
     "/api/rag/unified",

@@ -245,6 +245,64 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
     closedCoverage.counts.seen === 66500 && closedCoverage.counts.accepted === 66000 &&
       closedCoverage.counts.refused === null && closedCoverage.counts.failed === null,
     JSON.stringify(closedCoverage.counts));
+  const measuredCoverage = sourceCoverageFromEvidence({
+    kind: "whatsapp", state: "ok", documents: 17, last_complete_sweep_at: null,
+  }, {
+    latestRun: {
+      files_seen: 20, docs_added: 15, docs_updated: 1, docs_unchanged: 1,
+      docs_refused: 2, docs_failed: 1, metrics_version: 1, walk_complete: 1,
+      confirmed_from: "2026-09-01T00:00:00.000Z",
+      confirmed_through: "2026-09-06T11:00:00.000Z",
+      target_from: "2026-09-01T00:00:00.000Z",
+      target_through: "2026-09-06T11:00:00.000Z",
+      finished_at: "2026-09-06T11:00:00.000Z",
+    },
+    projectionPending: 0,
+  });
+  check("a measured walk exposes refusal and failure counts",
+    measuredCoverage.counts.seen === 20 && measuredCoverage.counts.accepted === 17 &&
+      measuredCoverage.counts.refused === 2 && measuredCoverage.counts.failed === 1,
+    JSON.stringify(measuredCoverage.counts));
+  check("a measured refusal or failure suppresses the receipt's claimed range",
+    measuredCoverage.confirmed_range.from === null &&
+      measuredCoverage.confirmed_range.through === null &&
+      measuredCoverage.history.state !== "complete" &&
+      /not yet proven complete/i.test(provisionalCoverageNotice("Messages", measuredCoverage) || ""),
+    JSON.stringify(measuredCoverage));
+  const cleanCoverage = sourceCoverageFromEvidence({
+    kind: "whatsapp", state: "ok", documents: 17, last_complete_sweep_at: null,
+  }, {
+    latestRun: {
+      files_seen: 17, docs_added: 15, docs_updated: 1, docs_unchanged: 1,
+      docs_refused: 0, docs_failed: 0, metrics_version: 1, walk_complete: 1,
+      confirmed_from: "2026-09-01T00:00:00.000Z",
+      confirmed_through: "2026-09-06T11:00:00.000Z",
+      finished_at: "2026-09-06T11:00:00.000Z",
+    },
+    projectionPending: 0,
+  });
+  check("a clean measured receipt exposes only its own bounded confirmed range",
+    cleanCoverage.confirmed_range.from === "2026-09-01T00:00:00.000Z" &&
+      cleanCoverage.confirmed_range.through === "2026-09-06T11:00:00.000Z" &&
+      /confirmed from 2026-09-01 through 2026-09-06/i.test(
+        provisionalCoverageNotice("Messages", cleanCoverage) || ""),
+    JSON.stringify(cleanCoverage));
+  const erroredRange = sourceCoverageFromEvidence({
+    kind: "calendar", state: "broken", documents: 17, last_complete_sweep_at: null,
+  }, {
+    latestRun: {
+      docs_added: 17, docs_updated: 0, docs_unchanged: 0,
+      docs_refused: 0, docs_failed: 0, metrics_version: 1, walk_complete: 1,
+      confirmed_from: "2026-09-01T00:00:00.000Z",
+      confirmed_through: "2026-09-06T11:00:00.000Z",
+      error: "cancellation removal remained pending",
+      finished_at: "2026-09-06T11:00:00.000Z",
+    },
+    projectionPending: 0,
+  });
+  check("a terminal receipt error suppresses a clean-count claimed range",
+    erroredRange.confirmed_range.from === null && erroredRange.confirmed_range.through === null,
+    JSON.stringify(erroredRange));
   const unmeasuredCoverage = sourceCoverageFromEvidence({
     kind: "zoom", state: "manual", documents: 4,
   }, {

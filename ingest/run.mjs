@@ -36,6 +36,7 @@ import {
 import "./formats.mjs";
 import { textQuality, isLikelyBinary, utf16Encoding } from "./quality.mjs";
 import { documentDate } from "./doc-date.mjs";
+import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 import { detectWhatsAppExport, parseWhatsAppExport, deriveThreadTitle } from "./whatsapp-export.mjs";
 import {
   detectSmsBackupXml, parseSmsBackupXml,
@@ -449,13 +450,20 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
           path: rel,
           reason: "symbolic links and junctions are not ingested",
           subtree: true,
+          coverage_gap: false,
+          adjudication: "preserve_external_subtree",
         });
         continue;
       }
       if (e.isDirectory()) {
         if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
         if (isPrivate(rel)) {
-          skipped.push({ path: rel, reason: "matched a private path prefix from the manifest" });
+          skipped.push({
+            path: rel,
+            reason: "matched a private path prefix from the manifest",
+            coverage_gap: false,
+            adjudication: "source_policy",
+          });
           continue;
         }
         visit(full);
@@ -470,7 +478,12 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
       if (e.name.startsWith("._")) continue;
       if (JUNK_FILES.has(e.name.toLowerCase())) continue;
       if (isPrivate(rel)) {
-        skipped.push({ path: rel, reason: "matched a private path prefix from the manifest" });
+        skipped.push({
+          path: rel,
+          reason: "matched a private path prefix from the manifest",
+          coverage_gap: false,
+          adjudication: "source_policy",
+        });
         continue;
       }
       let approval;
@@ -489,7 +502,15 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
         complete = false;
         continue;
       }
-      if (size === 0) { skipped.push({ path: rel, reason: "file is empty" }); continue; }
+      if (size === 0) {
+        skipped.push({
+          path: rel,
+          reason: "file is empty",
+          coverage_gap: false,
+          adjudication: "empty_content",
+        });
+        continue;
+      }
       const sizeLimit = fileSizeLimitFor(e.name, maxBytes, archiveBytes);
       if (size > sizeLimit) {
         skipped.push({ path: rel, reason: `file is ${(size / 1048576).toFixed(1)}MB, over the ${(sizeLimit / 1048576).toFixed(0)}MB limit` });
@@ -545,9 +566,12 @@ export function sourceFileFamilyUid(file, sourceName) {
 
 /** Stamp every document a multi-document file produced with its family uid. */
 function declareFamily(envelopes, familyUid) {
-  return envelopes.map((envelope) => ({
-    ...envelope,
-    metadata: { ...(envelope.metadata || {}), family_of: familyUid },
+  return envelopes.map((envelope) => restampFirstPartySourceProvenance(envelope, {
+    // Family declaration changes identity, not extraction facts. Preserve a
+    // producer omission so the shared boundary records unknown/unavailable.
+    textSource: envelope.text_source,
+    textReliable: envelope.text_reliable,
+    metadataPatch: { family_of: familyUid },
   }));
 }
 
@@ -807,6 +831,8 @@ async function prepareMboxArchive(file, { sourceName, scanBytes }) {
       occurred_at: parsed.occurredAt,
       date_source: parsed.occurredAt ? "mbox:date_header" : "none",
       date_reliable: !!parsed.occurredAt,
+      text_source: "native",
+      text_reliable: true,
       uri: key,
       metadata: {
         category: sourceName,
@@ -1033,7 +1059,7 @@ export async function prepare(file, { sourceName, ocr = null }) {
       // flag that never reaches the reader is not a flag.
       ...(got.provenance
         ? { text_source: got.provenance.text_source, text_reliable: got.provenance.text_reliable }
-        : {}),
+        : { text_source: "native", text_reliable: got.incomplete !== true }),
       metadata: {
         category: sourceName, extracted_as: got.how, bytes: actualBytes,
         ...(note ? { extraction_note: note } : {}),
@@ -1089,7 +1115,15 @@ export async function* batchStream(files, prepareOne, { maxDocs = 50, maxBytes =
     // A remote producer may need the split count before anything is sent so it
     // can reconcile an old document family safely. Let it supply the one-file
     // split rather than doing the same large string slicing twice.
-    const envelopes = r.envelopes || splitOversized(r.envelope);
+    const stampSource = (envelope) => restampFirstPartySourceProvenance(envelope, {
+      // Batching and splitting do not establish a text origin. If a producer
+      // did not assess it, keep the normalized unknown/unavailable receipt.
+      textSource: envelope?.text_source,
+      textReliable: envelope?.text_reliable,
+    });
+    const envelopes = r.envelopes
+      ? r.envelopes.map(stampSource)
+      : splitOversized(stampSource(r.envelope));
     const { envelope: _envelope, envelopes: _envelopes, unchanged: _unchanged, skip: _skip, ...context } = r;
     for (const envelope of envelopes) {
       const n = envelopeBytes(envelope);

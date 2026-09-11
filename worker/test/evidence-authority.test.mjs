@@ -48,6 +48,12 @@ const ownerRow = ({
   text_reliable: 1,
   authority_meta: JSON.stringify({
     authority: "T1", operative: true, subject: "Taylor", client_name: "Taylor",
+    provenance_receipt: {
+      version: 1,
+      status: "partial",
+      reason: "lineage_unavailable",
+      root_ids: [`curated:owner-confirmed/${day}/${id}`],
+    },
   }),
   text: [
     `# Confirmed by the owner, ${day}`,
@@ -950,6 +956,12 @@ test("newer claim-authoritative evidence fails closed against an older operative
     text_source: "native", text_reliable: 1, text: "Taylor's mailing address is 200 Other Avenue.",
     authority_meta: JSON.stringify({
       evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
+      provenance_receipt: {
+        version: 1,
+        status: "complete",
+        reason: "lineage_and_text_recorded",
+        root_ids: ["drive:newer-lease"],
+      },
     }),
   };
   const body = await askRoute(routeEnv(

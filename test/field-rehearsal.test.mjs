@@ -131,8 +131,8 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
   const src = readFileSync(new URL("../brain.mjs", import.meta.url), "utf-8");
   const body = src.slice(src.indexOf("async function cmdIngest(manifestPath)"));
   check("dry-run and a saved domain skip account resolution",
-    /const acct = dry \? null : m\.brain\?\.domain \? null : await resolveAccount/.test(body));
-  check("dry-run skips the admin key", /const adminKey = dry \? null : resolveAdminKey/.test(body));
+    /const acct = dry \? null : m\.brain\?\.domain \? null : await resolveIngestAccount/.test(body));
+  check("dry-run skips the admin key", /const adminKey = dry \? null : resolveKey/.test(body));
 }
 
 /* ---- the RECOVERY path, which a fresh install does not represent ----

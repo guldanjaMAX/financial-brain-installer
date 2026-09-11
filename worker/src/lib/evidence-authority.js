@@ -63,9 +63,9 @@ const STATUS_LANGUAGE = /\b(active|inactive|current(?:ly)?|still|remains?|contin
 
 const trueValue = (value) => value === true || value === 1 || value === "1";
 const reliableText = (row) => {
-  const source = String(row?.text_source || "native").toLowerCase();
+  const source = String(row?.text_source || "unknown").toLowerCase();
   const reliable = row?.text_reliable === undefined || row?.text_reliable === null
-    ? source === "native"
+    ? false
     : trueValue(row.text_reliable);
   return source === "native" && reliable;
 };

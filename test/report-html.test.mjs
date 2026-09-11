@@ -23,7 +23,10 @@ import {
   collectReportData,
   escapeHtml,
   redactSecrets,
+  classifyAnswer,
+  normalizedSearchStatus,
 } from "../report-html.mjs";
+import { buildReport, corpusReportCounts, sourceReceiptSummary } from "../report.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 let failures = 0;
@@ -101,8 +104,54 @@ const cleanCorpus = {
     submitted: 0,
   },
   rows: [
-    { source_type: "drive_file", total: 2915, embedded: 2915, last_ingested: new Date().toISOString() },
-    { source_type: "message", total: 1187, embedded: 1100, last_ingested: new Date(Date.now() - 40 * 864e5).toISOString() },
+    { source_type: "drive_file", logical_documents: 2040, chunks: 2915, total: 2915, embedded: 2915, last_ingested: "2026-08-15T12:00:00.000Z" },
+    { source_type: "message", logical_documents: 910, chunks: 1187, total: 1187, embedded: 1100, last_ingested: "2026-01-01T12:00:00.000Z" },
+  ],
+};
+
+const cleanSourceInventory = {
+  kind: "source_inventory",
+  complete: true,
+  truncated: false,
+  total: 2,
+  returned: 2,
+  cursor: null,
+  snapshot: { id: `sha256:${"a".repeat(64)}` },
+  sources: [
+    {
+      source_id: "drive",
+      kind: "drive",
+      registered: true,
+      freshness: {
+        state: "ok",
+        expected_refresh_seconds: 86400,
+        last_ingest_at: "2026-08-15T12:00:00.000Z",
+        last_complete_sweep_at: "2026-08-15T12:00:00.000Z",
+        coverage: { history: { state: "complete" } },
+      },
+      receipt: {
+        last_successful_run_at: "2026-08-15T12:00:00.000Z",
+        complete_history_through: "2026-08-15T12:00:00.000Z",
+        latest_run: { outcome: "completed" },
+      },
+    },
+    {
+      source_id: "messages",
+      kind: "gmail",
+      registered: true,
+      freshness: {
+        state: "manual",
+        expected_refresh_seconds: null,
+        last_ingest_at: "2026-01-01T12:00:00.000Z",
+        last_complete_sweep_at: "2026-01-01T12:00:00.000Z",
+        coverage: { history: { state: "complete" } },
+      },
+      receipt: {
+        last_successful_run_at: "2026-01-01T12:00:00.000Z",
+        complete_history_through: "2026-01-01T12:00:00.000Z",
+        latest_run: { outcome: "completed" },
+      },
+    },
   ],
 };
 
@@ -114,6 +163,7 @@ const cleanReport = renderReportHtml({
     { question: "what is our headcount plan for 2028", answer: "The documents do not contain a headcount plan for 2028.", citations: [{ n: 1, title: "Board deck", source: "drive" }], gaps: [], resultCount: 3 },
   ],
   corpus: cleanCorpus,
+  sourceInventory: cleanSourceInventory,
   installState: { product_version: "0.2.0", schema_version: 2, gate_version: 2 },
   base: "https://brain.acme.com",
   generatedAt: new Date("2026-08-16T12:00:00Z"),
@@ -228,9 +278,9 @@ check("failing tier is marked as a failing tier", has(failing, "tier tier-fail")
 check("the verdict block is the blocked state", has(failing, "verdict v-blocked"));
 check("the verdict word says NOT READY", has(failing, ">NOT READY<"));
 check("the verdict counts the failures", has(failing, "2 checks failed"));
-check("a failing report never claims readiness", !has(failing, "Ready. Everything checked out."));
+check("a failing report never claims readiness", !has(failing, "Ready for adaptive acceptance."));
 check("the failing detail text is rendered", has(failing, "THE GATE IS NOT ACTIVE"));
-check("a passing report does claim readiness", has(cleanReport, "Ready. Everything checked out."));
+check("a passing report is ready for adaptive acceptance", has(cleanReport, "Ready for adaptive acceptance."));
 check("a passing report shows no fail pill", !has(cleanReport, "pill pill-fail"));
 
 // A tier 1 failure stops the run, and the verdict has to explain the silence
@@ -283,8 +333,69 @@ const hollow = renderReportHtml({
   corpus: cleanCorpus,
 });
 check("passing checks with no answered questions is not 'ready'",
-  !has(hollow, "Ready. Everything checked out.") && has(hollow, "verdict v-attention"));
-check("an unanswered question is named in the gap list", has(hollow, "No sources at all"));
+  !has(hollow, "Ready for adaptive acceptance.") && has(hollow, "verdict v-attention"));
+check("a completed zero is scoped to the material actually searched",
+  has(hollow, "No indexed match in the searched material") &&
+    has(hollow, "does not establish nonexistence"));
+
+/* ------------------ search truth precedes result-count interpretation */
+
+const unavailableZero = {
+  question: "what changed",
+  search_status: "search_unavailable",
+  degraded: "vector",
+  notice: "Meaning search is still projecting. This is not an absence finding.",
+  resultCount: 0,
+  citations: [],
+  gaps: [],
+};
+const incompleteZero = {
+  question: "what changed",
+  status: "coverage_incomplete",
+  notice: "One declared source has not proven its history.",
+  resultCount: 0,
+  citations: [],
+  gaps: [],
+};
+const legacyDegradedZero = {
+  question: "what changed",
+  degraded: "fts",
+  resultCount: 0,
+  citations: [],
+  gaps: [],
+};
+const healthyZero = {
+  question: "what changed",
+  status: "no_results",
+  resultCount: 0,
+  citations: [],
+  gaps: [{ type: "no_results", detail: "No indexed rows matched." }],
+};
+
+check("explicit unavailable search outranks a zero result count",
+  classifyAnswer(unavailableZero) === "search_unavailable");
+check("coverage-incomplete search outranks a zero result count",
+  classifyAnswer(incompleteZero) === "coverage_incomplete");
+check("legacy degradation outranks a zero result count",
+  normalizedSearchStatus(legacyDegradedZero) === "degraded" &&
+    classifyAnswer(legacyDegradedZero) === "search_unavailable");
+check("only a healthy completed zero becomes a scoped no-match",
+  classifyAnswer(healthyZero) === "no_match");
+
+const searchTruthReport = renderReportHtml({
+  manifest: cleanManifest,
+  acceptance: passingAcceptance,
+  seedAnswers: [unavailableZero, incompleteZero, legacyDegradedZero, healthyZero],
+  corpus: cleanCorpus,
+  sourceInventory: cleanSourceInventory,
+});
+check("unavailable and incomplete searches retain their notices",
+  has(searchTruthReport, unavailableZero.notice) && has(searchTruthReport, incompleteZero.notice));
+check("failed or degraded zeroes never render as absence",
+  (searchTruthReport.match(/No indexed match in the searched material/g) || []).length === 2,
+  String((searchTruthReport.match(/No indexed match in the searched material/g) || []).length));
+check("customer report removes world-level zero-result language",
+  !/No sources at all|not written down anywhere|Nothing from .* is in the brain/i.test(searchTruthReport));
 
 /* ------------------------- 4. empty seed set degrades gracefully */
 
@@ -297,16 +408,22 @@ const noSeeds = renderReportHtml({
 });
 
 check("empty seeds still renders the questions section", has(noSeeds, 'id="questions"'));
-check("empty seeds explains what is missing",
-  has(noSeeds, "No seed questions were captured"));
-check("empty seeds says what to do about it",
-  has(noSeeds, "probe_questions"));
+check("empty seeds explain that saved owner questions are optional",
+  has(noSeeds, "No optional owner-authored questions were saved"));
+check("empty seeds require zero prepared questions",
+  has(noSeeds, "Zero prepared questions are required for setup, adaptive acceptance, or handoff"));
+check("empty seeds name the real same-item handoff gate",
+  /accepted,[\s\S]*stored with provenance,[\s\S]*projected,[\s\S]*query-visible with a citation/i.test(noSeeds));
+check("empty seeds offer adaptive evidence-derived help",
+  has(noSeeds, "one evidence-derived question at a time"));
+check("empty seeds never expose manifest internals or question homework",
+  !/probe_questions|send us ten|questions you gave us at intake/i.test(noSeeds));
 check("empty seeds renders no empty question card", !has(noSeeds, 'class="qa"'));
 check("empty seeds renders no empty citation list", !has(noSeeds, "<ol class=\"cite-list\"></ol>"));
 check("empty seeds does not claim questions were answered",
   !/of your questions/.test(noSeeds));
 check("empty seeds shows no hollow 0/0 tile",
-  !has(noSeeds, ">0/0<") && has(noSeeds, "questions captured"));
+  !has(noSeeds, ">0/0<") && has(noSeeds, "optional questions saved"));
 check("empty seeds still renders coverage and checks",
   has(noSeeds, 'id="coverage"') && has(noSeeds, 'id="checks"'));
 check("empty seeds keeps the verdict truthful", has(noSeeds, "verdict v-ready"));
@@ -432,8 +549,9 @@ check("an answered question is labelled as answered", has(cleanReport, "Answered
 check("repeated gaps are listed once",
   (cleanReport.match(/Newest source is 41 days old\./g) || []).length === 1,
   String((cleanReport.match(/Newest source is 41 days old\./g) || []).length));
-check("disconnected sources are named as gaps",
-  has(cleanReport, "Not connected") && has(cleanReport, "Gmail"));
+check("disabled sources are local intent, not asserted disconnections",
+  has(cleanReport, "Disabled in this local configuration") && has(cleanReport, "Gmail") &&
+    has(cleanReport, "intended configuration only") && !has(cleanReport, "Not connected"));
 
 // Severity order. A question that found nothing must not sit below routine
 // housekeeping where it gets skimmed past.
@@ -447,12 +565,14 @@ const ordered = renderReportHtml({
   corpus: cleanCorpus,
 });
 check("the hardest gap is listed first",
-  ordered.indexOf("No sources at all") < ordered.indexOf("Answered with an honest no"));
+  ordered.indexOf("No indexed match in the searched material") < ordered.indexOf("Answered with an honest no"));
 check("housekeeping gaps sink below the real ones",
-  ordered.indexOf("No sources at all") < ordered.indexOf("Not connected"));
-check("deliberate exclusions are stated",
-  has(cleanReport, "Deliberately excluded") && has(cleanReport, "Legal/Sealed"));
-check("a stale corpus is called out", has(cleanReport, "Behind on updates"));
+  ordered.indexOf("No indexed match in the searched material") < ordered.indexOf("Disabled in this local configuration"));
+check("local exclusion rules do not assert historical absence",
+  has(cleanReport, "Local exclusion rules are configured") && has(cleanReport, "Legal/Sealed") &&
+    has(cleanReport, "does not prove whether those items existed historically"));
+check("an old ingest timestamp alone does not invent a stale-source finding",
+  !has(cleanReport, "Behind on updates") && !/days behind/i.test(cleanReport));
 
 check("the prediction block renders", has(cleanReport, "The ones you predicted it would miss"));
 check("a correctly predicted miss is called out as predicted",
@@ -474,8 +594,30 @@ check("a prediction that was wrong says so and shows the answer",
 check("coverage totals are formatted for a human", has(cleanReport, "4,102"));
 check("coverage names sources in the client's words",
   has(cleanReport, "Documents and files") && !has(cleanReport, ">drive_file<"));
-check("partly embedded corpora are explained",
-  has(cleanReport, "still being processed"));
+check("logical documents, extracted chunks, and semantic visibility stay separate",
+  has(cleanReport, ">2,950</b><span>logical documents") &&
+    has(cleanReport, ">4,102</b><span>extracted chunks") &&
+    has(cleanReport, ">4,015</b><span>meaning-search visible") &&
+    !has(cleanReport, "items indexed"));
+check("pending semantic visibility stays distinct from keyword search",
+  has(cleanReport, "not yet visibility-confirmed for meaning search") &&
+    has(cleanReport, "may still be available to keyword search"));
+check("authenticated registry receipts, not manifest toggles, name live status",
+  has(cleanReport, "Authenticated source receipts") &&
+    has(cleanReport, "Only the Brain's live source registry") &&
+    has(cleanReport, "current against the authenticated refresh expectation"));
+check("manual source freshness stays unverified even with an old receipt",
+  has(cleanReport, "freshness unverified; no authenticated refresh expectation proves currentness") &&
+    has(cleanReport, "last successful ingest receipt 2026-01-01"));
+check("complete history is reported only from its receipt",
+  has(cleanReport, "complete sweep recorded through 2026-08-15"));
+check("the local manifest's enabled state is described only as intent",
+  has(cleanReport, "enabled in this local manifest") &&
+    has(cleanReport, "do not prove an authenticated connection"));
+check("the report explains its mixed evidence sources and unknown rule",
+  has(cleanReport, "combines completed live checks") &&
+    has(cleanReport, "intended local configuration") &&
+    has(cleanReport, "Incomplete or unavailable checks are marked unknown"));
 check("the custody promise is stated", has(cleanReport, "no copy of your material leaves the accounts you own"));
 // The command is rendered for the host platform (a bare `brain` on POSIX, a
 // full node invocation on Windows) and then HTML-escaped, so build the
@@ -483,6 +625,68 @@ check("the custody promise is stated", has(cleanReport, "no copy of your materia
 check("re-running it is spelled out",
   has(cleanReport, escapeHtml(renderCliCommands("brain test <manifest> --report"))));
 check("tier headings explain why the tier matters", has(cleanReport, "answering without a key"));
+
+const countContract = corpusReportCounts(cleanCorpus);
+check("the pure corpus count contract does not treat chunks as documents",
+  countContract.logicalDocuments === 2950 && countContract.extractedChunks === 4102 &&
+    countContract.semanticVisibleChunks === 4015,
+  JSON.stringify(countContract));
+const legacyCountContract = corpusReportCounts({ rows: [{ total: 9, embedded: 7 }] });
+check("legacy total remains a chunk count and leaves logical documents unknown",
+  legacyCountContract.logicalDocuments === null && legacyCountContract.extractedChunks === 9 &&
+    legacyCountContract.semanticVisibleChunks === 7,
+  JSON.stringify(legacyCountContract));
+
+const staleReceipt = {
+  source_id: "drive",
+  kind: "drive",
+  registered: true,
+  freshness: {
+    state: "stale",
+    expected_refresh_seconds: 86400,
+    reason: "the recorded daily refresh is late",
+    coverage: { history: { state: "unknown" } },
+  },
+  receipt: {
+    last_successful_run_at: "2026-08-01T00:00:00.000Z",
+    latest_run: { outcome: "failed" },
+  },
+};
+const staleSummary = sourceReceiptSummary(staleReceipt);
+check("an authenticated failed run outranks an otherwise late status",
+  /latest authenticated run did not complete cleanly/.test(staleSummary.currency) &&
+    staleSummary.run === "latest run outcome failed" &&
+    /completeness unverified/.test(staleSummary.history),
+  JSON.stringify(staleSummary));
+
+const staleByReceipt = renderReportHtml({
+  manifest: cleanManifest,
+  acceptance: passingAcceptance,
+  seedAnswers: goodSeeds,
+  corpus: cleanCorpus,
+  sourceInventory: {
+    ...cleanSourceInventory,
+    total: 1,
+    returned: 1,
+    sources: [staleReceipt],
+  },
+});
+check("authenticated stale and failed receipts produce an attention finding",
+  has(staleByReceipt, "Google Drive needs attention") &&
+    has(staleByReceipt, "latest run outcome failed"));
+
+const unknownSources = renderReportHtml({
+  manifest: cleanManifest,
+  acceptance: passingAcceptance,
+  seedAnswers: goodSeeds,
+  corpus: cleanCorpus,
+  sourceInventory: null,
+  sourceInventoryError: "authenticated source inventory returned HTTP 404",
+});
+check("missing authenticated source receipts stay unknown",
+  has(unknownSources, "Authenticated source status is unknown") &&
+    has(unknownSources, "Local manifest settings do not replace that proof") &&
+    !has(unknownSources, "source connected"));
 
 /* ------------------------- 8. the real Acceptance shape, offline */
 
@@ -504,6 +708,7 @@ const fetchStub = async (url, init = {}) => {
 
   if (u.pathname === "/health") return reply(200, { ok: true, version: "0.2.0" });
   if (!authed) return reply(401, { error: "unauthorized" });
+  if (u.pathname === "/api/admin/brain/sources") return reply(200, cleanSourceInventory);
   if (u.pathname === "/api/admin/brain/documents") return reply(200, cleanCorpus);
   // Added when this file was found failing: the acceptance suite calls these two
   // and the stub's catch-all answered 404, which reads as "the Worker cannot
@@ -567,15 +772,93 @@ check("report and acceptance questions use private JSON POST bodies",
   JSON.stringify(privateQueryCalls.map((call) => ({ method: call.init.method, search: call.url.search, body: call.body }))));
 check("collect normalises a trailing slash on the base", collected.base === "https://brain.acme.com");
 check("collect keeps citations from think", collected.seedAnswers[0].citations.length === 1);
+check("collect obtains a complete authenticated source receipt snapshot",
+  collected.sourceInventory?.complete === true && collected.sourceInventory.sources.length === 2 &&
+    collected.sourceInventoryError === null,
+  JSON.stringify(collected.sourceInventory));
+
+const statusFetch = async (url, init = {}) => {
+  if (new URL(url).pathname === "/api/rag/think") {
+    return reply(200, {
+      status: "coverage_incomplete",
+      degraded: "vector",
+      degraded_reason: "projection-incomplete",
+      notice: "One declared source history is incomplete.",
+      coverage_state: "partial",
+      coverage: { state: "partial" },
+      source_coverage: { state: "unknown" },
+      retrieval_scope: "owner",
+      answer: null,
+      citations: [],
+      results: [],
+      gaps: [{ type: "history_unproven", detail: "History is unproven." }],
+      evidence_gate: { supported: false, complete: false },
+    });
+  }
+  return fetchStub(url, init);
+};
+const statusCollected = await collectReportData({
+  base: "https://brain.acme.com",
+  adminKey: "the-real-key",
+  manifest: { ...cleanManifest, testing: { probe_questions: ["what changed"], expected_to_fail: [] } },
+  installState: { product_version: "0.2.0", schema_version: 2, gate_version: 2 },
+  fetchImpl: statusFetch,
+});
+const preserved = statusCollected.seedAnswers[0];
+check("collection preserves search, degradation, notice, and coverage truth",
+  preserved.search_status === "coverage_incomplete" &&
+    preserved.status === "coverage_incomplete" && preserved.degraded === "vector" &&
+    preserved.degraded_reason === "projection-incomplete" &&
+    preserved.notice === "One declared source history is incomplete." &&
+    preserved.coverage_state === "partial" && preserved.coverage?.state === "partial" &&
+    preserved.source_coverage?.state === "unknown" &&
+    preserved.retrieval_scope === "owner" && preserved.evidence_gate?.complete === false,
+  JSON.stringify(preserved));
+check("preserved coverage status prevents a false no-match",
+  classifyAnswer(preserved) === "coverage_incomplete");
+
+const markdownReport = await buildReport({
+  base: "https://brain.acme.com",
+  adminKey: "the-real-key",
+  manifest: cleanManifest,
+  installState: { product_version: "0.2.0", schema_version: 2, gate_version: 2 },
+  fetchImpl: fetchStub,
+});
+check("the Markdown report keeps all three corpus units separate",
+  /Logical documents: \*\*2,950\*\*/.test(markdownReport.markdown) &&
+    /Extracted keyword-searchable chunks: \*\*4,102\*\*/.test(markdownReport.markdown) &&
+    /Visibility-confirmed semantic chunks: \*\*4,015\*\*/.test(markdownReport.markdown));
+check("the Markdown report uses receipt-based freshness without fixed-age claims",
+  /current against the authenticated refresh expectation/.test(markdownReport.markdown) &&
+    /freshness unverified; no authenticated refresh expectation/.test(markdownReport.markdown) &&
+    !/days behind|nothing new has come in for \d+ days/i.test(markdownReport.markdown));
+check("the Markdown report carries the evidence-source disclaimer",
+  /combines completed live checks, intended local configuration, and explanatory guidance/.test(markdownReport.markdown) &&
+    /Incomplete or unavailable checks are marked unknown/.test(markdownReport.markdown));
 
 const live = renderReportHtml(collected);
 check("the real shape renders", live.startsWith("<!doctype html>") && has(live, "Vendor review call"));
 check("the real shape renders every tier name",
-  ["Reachable and access controlled", "Data present and current", "Search and answers working",
+  ["Reachable and access controlled", "Data present and current", "Optional owner-question checks",
    "Credential protection active", "Version and configuration"].every((t) => has(live, t)));
 check("the real shape carries no external tag", !EXTERNAL_TAGS.test(live));
 check("the real acceptance statuses map to pills",
   has(live, 'class="pill pill-pass"') && has(live, ">PASS<"));
+
+const whitespaceOnly = await collectReportData({
+  base: "https://brain.acme.com/",
+  adminKey: "the-real-key",
+  manifest: {
+    ...cleanManifest,
+    testing: { probe_questions: ["   "], expected_to_fail: [] },
+  },
+  installState: { product_version: "0.2.0", schema_version: 2, gate_version: 2 },
+  fetchImpl: fetchStub,
+});
+check("the report does not turn whitespace into an owner question",
+  whitespaceOnly.seedAnswers.length === 0 &&
+    whitespaceOnly.acceptance.untested.includes("optional_owner_questions"),
+  JSON.stringify(whitespaceOnly.seedAnswers));
 
 // A transport that fails must cost one question, not the whole document.
 const brokenThink = async (url, init) => {
@@ -604,7 +887,7 @@ const degradedHtml = renderReportHtml(degraded);
 check("a dead think endpoint still produces a document",
   degradedHtml.startsWith("<!doctype html>") && has(degradedHtml, "This check could not run"));
 check("an unfinished run is never reported as ready",
-  !has(degradedHtml, "Ready. Everything checked out.") && has(degradedHtml, "did not finish"));
+  !has(degradedHtml, "Ready for adaptive acceptance.") && has(degradedHtml, "did not finish"));
 check("an unfinished run names the error that stopped it",
   has(degradedHtml, "connection reset"));
 check("an unfinished run warns that missing tiers are unknown, not passing",

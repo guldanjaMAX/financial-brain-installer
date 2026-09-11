@@ -921,6 +921,7 @@
       "properties": {
         "probe_questions": {
           "type": "array",
+          "description": "Optional owner-authored private regression questions. Zero are required for setup, adaptive acceptance, or handoff; when present, the automated acceptance run exercises them without replacing the separate same-item receipt and evidence gate.",
           "items": {
             "type": "string"
           }

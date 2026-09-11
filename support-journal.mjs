@@ -51,6 +51,7 @@ export const SUPPORT_COMMANDS = Object.freeze([
   "doctor",
   "drain",
   "eval",
+  "financial-picture",
   "forget",
   "health",
   "ingest",
@@ -58,6 +59,7 @@ export const SUPPORT_COMMANDS = Object.freeze([
   "mcp-config",
   "migrate",
   "provision",
+  "provenance-repair",
   "reindex",
   "rollback",
   "schedule",
@@ -74,6 +76,7 @@ export const SUPPORT_COMMANDS = Object.freeze([
 ]);
 
 export const SUPPORT_SOURCES = Object.freeze([
+  "brain-data-plane",
   "calendar",
   "cloudflare",
   "drive",

@@ -56,7 +56,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
           </h1>
           <p className="text-ink-soft mt-3 leading-relaxed">
             {enrolling
-              ? "Everything you have written, decided and been told, in one place that belongs to you. Ask it anything and it answers with its sources."
+              ? "A private place to ask about the material connected to your Brain. Each answer shows its sources and calls out coverage it cannot prove."
               : "Sign in to ask your brain a question."}
           </p>
 
@@ -94,9 +94,10 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
                 passkey provider. The Brain keeps only the public sign-in record needed to recognize you.
               </p>
               <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
-                Nothing else on this device is connected. If the address or secure window looks
-                unexpected, choose Cancel. Nothing is enrolled. Canceling the device prompt does
-                not use it, so you can try again before this private link expires.
+                This passkey step does not connect files, messages, accounts, or other device data.
+                If the address or secure window looks unexpected, choose Cancel. Nothing is enrolled.
+                Canceling the device prompt does not use it, so you can try again before this private
+                link expires.
               </p>
             </div>
           ) : (

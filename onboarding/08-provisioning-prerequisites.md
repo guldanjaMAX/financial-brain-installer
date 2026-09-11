@@ -27,13 +27,21 @@ The Claude account is for the owner's Claude Code client, not for Worker answers
 
 Install Claude Code only from Anthropic's official installer. The owner signs in
 in their own browser. Do not use `sudo`, a permission-bypass mode, or a copied
-Claude credential. Then run:
+Claude credential.
+
+Before the first `brain tools` run, tell the owner that this is a local setup
+action, not a read-only check. It installs or updates the reviewed Financial
+Brain technician skill and may write local bootstrap status and may update the
+current user's PATH to include the Brain CLI folder. Ask the owner to
+approve those local changes. Optimize never runs `brain tools`; it uses the
+non-writing machine-continuity, MCP discovery, and configuration checks instead.
+After approval, run:
 
 ```bash
 brain tools
 ```
 
-The automated part proves the Claude version, `claude auth status`, and
+The automated part then proves the Claude version, `claude auth status`, and
 the pinned Wrangler version in a credential-scrubbed child environment. It also
 checks Node 22+, at least 2 GiB free on the actual per-user install drive, and a
 non-elevated current-user session. In a real

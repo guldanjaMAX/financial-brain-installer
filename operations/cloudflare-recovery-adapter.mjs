@@ -238,6 +238,14 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   // Schema 37: append-only, server-verified correction history. Losing this
   // ledger would make known-wrong conversational memories current again.
   "memory_supersessions",
+  // Schema 41: the immutable, owner-activated financial-map chain and the key
+  // that verifies it are durable owner records. Expiring previews and the
+  // replay-derived inventory counter remain in the table inventory but are
+  // not recovery content.
+  "owner_financial_map_key_state",
+  "owner_financial_map_inventory_state",
+  "owner_financial_map_previews",
+  "owner_financial_map_snapshots",
 ]);
 
 /**
@@ -259,6 +267,8 @@ export const RECOVERY_EXPORT_TABLES = Object.freeze(
       table !== "support_enrollment_codes" && table !== "support_auth_challenges" &&
       table !== "support_passkeys" &&
       table !== "agent_action_receipts" &&
+      table !== "owner_financial_map_inventory_state" &&
+      table !== "owner_financial_map_previews" &&
       table !== "bank_feed_link_sessions" &&
       table !== "oauth_clients" && table !== "oauth_codes" && table !== "oauth_tokens"),
 );
@@ -450,6 +460,12 @@ const SCHEMA_35_TABLES = Object.freeze([
 ]);
 const SCHEMA_36_TABLES = Object.freeze(["vector_projection_events"]);
 const SCHEMA_37_TABLES = Object.freeze(["memory_supersessions"]);
+const SCHEMA_41_TABLES = Object.freeze([
+  "owner_financial_map_key_state",
+  "owner_financial_map_inventory_state",
+  "owner_financial_map_previews",
+  "owner_financial_map_snapshots",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -470,7 +486,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_24_TABLES, ...SCHEMA_25_TABLES, ...SCHEMA_26_TABLES, ...SCHEMA_27_TABLES,
      ...SCHEMA_28_TABLES, ...SCHEMA_30_TABLES, ...SCHEMA_31_TABLES,
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
-     ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES].includes(table)
+     ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1272,7 +1288,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 34 || !SCHEMA_34_TABLES.includes(table)) &&
     (latest >= 35 || !SCHEMA_35_TABLES.includes(table)) &&
     (latest >= 36 || !SCHEMA_36_TABLES.includes(table)) &&
-    (latest >= 37 || !SCHEMA_37_TABLES.includes(table)));
+    (latest >= 37 || !SCHEMA_37_TABLES.includes(table)) &&
+    (latest >= 41 || !SCHEMA_41_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(migrations, { excludeBankItems = false } = {}) {

@@ -209,10 +209,39 @@ const incompleteCoverage = await gather(async () => ({
   gaps: [{ type: "history_unproven", source: "client-mail" }],
   results: rowsFor("mailing address").results,
 }), { subject: SUBJECT, probes: [{ name: "Mailing address", changes: true, extract: () => ["x"], query: "mailing address" }] });
-assert.equal(incompleteCoverage[0].candidates.length, 0);
-assert.match(incompleteCoverage[0].error, /source history is incomplete/);
-assert.match(renderReport(incompleteCoverage, { subject: SUBJECT }).text, /NOT checked/);
-ok("coverage-incomplete raw search cannot make a check category look complete");
+assert.equal(incompleteCoverage[0].candidates.length, 2);
+assert.equal(incompleteCoverage[0].error, null);
+assert.match(incompleteCoverage[0].coverage_warning, /source history is incomplete/);
+const incompleteCoverageReport = renderReport(incompleteCoverage, { subject: SUBJECT });
+assert.match(incompleteCoverageReport.text, /Provisional evidence from records already available/);
+assert.match(incompleteCoverageReport.text, /Returned evidence is shown above, but this category is not complete/);
+assert.equal(incompleteCoverageReport.coverage.complete, false);
+ok("coverage-incomplete raw search retains positive evidence without making the category complete");
+
+const mixedCoverageProbes = Array.from({ length: 14 }, (_, index) => ({
+  name: `Mixed category ${index + 1}`,
+  changes: true,
+  query: `mixed-${index + 1}`,
+  extract: index === 0 ? () => ["Synthetic current value"] : () => [],
+}));
+const mixedCoverage = await gather(async ({ q }) => ({
+  status: "coverage_incomplete",
+  notice: "one declared source has not proven its complete history",
+  results: /mixed-(1|2)$/.test(q) ? [{
+    snippet: `${SUBJECT} has a usable synthetic record`,
+    title: `${SUBJECT} synthetic record`,
+    source: "drive",
+  }] : [],
+}), { subject: SUBJECT, probes: mixedCoverageProbes });
+const mixedCoverageReport = renderReport(mixedCoverage, { subject: SUBJECT });
+assert.deepEqual(mixedCoverageReport.coverage, {
+  total: 14, completed: 0, provisional: 2, absence_unproven: 12, unchecked: 14, complete: false,
+});
+assert.match(mixedCoverageReport.text, /2 categories have usable returned records/);
+assert.doesNotMatch(mixedCoverageReport.text, /14 categories have usable returned records/);
+assert.match(mixedCoverageReport.text, /Mixed category 2: 1 matching record\(s\) returned; provisional coverage/);
+assert.match(mixedCoverageReport.text, /Mixed category 14:.*Zero returned records cannot prove/);
+ok("a corpus-wide gap reports two useful probes and twelve unproven absences exactly");
 
 const waitingCoverage = await gather(async () => ({
   status: "coverage_incomplete",
@@ -227,7 +256,9 @@ const waitingCoverage = await gather(async () => ({
   ],
 });
 const waitingReport = renderReport(waitingCoverage, { subject: SUBJECT });
-assert.deepEqual(waitingReport.coverage, { total: 2, completed: 0, unchecked: 2, complete: false });
+assert.deepEqual(waitingReport.coverage, {
+  total: 2, completed: 0, provisional: 0, absence_unproven: 2, unchecked: 2, complete: false,
+});
 assert.match(waitingReport.text, /Record review still waiting: none of the 2 categories could be checked completely/);
 assert.match(waitingReport.text, /cannot yet say whether your records agree or disagree/);
 assert.match(waitingReport.text, /not a finding that your records are empty/);
@@ -458,9 +489,28 @@ const waitingCommand = await cmdCheck(manifestPath, {
 });
 assert.equal(waitingCommand.categories_total, 14);
 assert.equal(waitingCommand.categories_completed, 0);
+assert.equal(waitingCommand.categories_with_provisional_evidence, 0);
+assert.equal(waitingCommand.categories_with_unproven_absence, 0);
 assert.equal(waitingCommand.categories_unchecked, 14);
 assert.equal(waitingCommand.category_checks_complete, false);
 ok("brain check returns exact complete and unchecked category counts for local agents");
+
+const mixedCommand = await cmdCheck(manifestPath, {
+  adminKey: "synthetic", baseUrl: "https://fixture.invalid", flags: {},
+  search: async ({ q }) => ({
+    status: "coverage_incomplete",
+    notice: "one declared source has not proven its complete history",
+    results: /mailing address|current client/i.test(q) ? rowsFor(q).results : [],
+  }),
+  readZones,
+});
+assert.equal(mixedCommand.categories_total, 14);
+assert.equal(mixedCommand.categories_completed, 0);
+assert.equal(mixedCommand.categories_with_provisional_evidence, 2);
+assert.equal(mixedCommand.categories_with_unproven_absence, 12);
+assert.equal(mixedCommand.categories_unchecked, 14);
+assert.equal(mixedCommand.category_checks_complete, false);
+ok("brain check exposes the synthetic two-positive and twelve-unproven coverage split to the calling agent");
 
 let zeroCoverageAsked = false;
 let zeroCoverageWrote = false;

@@ -53,6 +53,7 @@ import "../ingest/formats.mjs";
 import { parseEmailMessage } from "../ingest/formats.mjs";
 import { textQuality } from "../ingest/quality.mjs";
 import { loadTokens, saveTokens, tokenStorageDescription } from "./google-auth.mjs";
+import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 /** Both connectors write email, so both must land in one retrieval category. */
 export const SOURCE_TYPE = "email";
@@ -1129,7 +1130,7 @@ export async function toEnvelope(message, { sourceName = SOURCE_TYPE, host = "",
   }
 
   return {
-    envelope: {
+    envelope: withFirstPartySourceProvenance({
       source_type: sourceName,
       // Bare connector identity: the store adds the source type exactly once,
       // and pre-prefixing here made family deletion target a document that was
@@ -1154,7 +1155,7 @@ export async function toEnvelope(message, { sourceName = SOURCE_TYPE, host = "",
         identity: identity.by,
         ...(parsed.from ? { sender: parsed.from } : {}),
       },
-    },
+    }, { textSource: "native", textReliable: true }),
     // CONTENT-derived, not `uidvalidity:uid:size`. A UID-derived version would
     // change for every message on a UIDVALIDITY roll and force a full re-embed,
     // defeating the whole point of the content-stable id above. This makes the

@@ -139,7 +139,15 @@ syncBuiltinESMExports();
       USERPROFILE: privateHome,
       APPDATA: join(privateHome, "AppData", "Roaming"),
       LOCALAPPDATA: join(privateHome, "AppData", "Local"),
+      // This fixture owns its credential boundary. A developer's saved
+      // Wrangler OAuth session must not turn the no-credential branch into a
+      // real Cloudflare preflight.
+      BRAIN_NO_WRANGLER_LOGIN: "1",
       NO_COLOR: "1",
+      // The fixture needs Wrangler's machine response, not its asynchronous
+      // per-user log. Keeping the logger off also keeps the disposable HOME
+      // quiescent before strict cleanup on macOS.
+      WRANGLER_LOG: "none",
       NODE_OPTIONS: `--import=${pathToFileURL(standardUserPreload).href}`,
     });
     const manifestPath = join(sandbox, "new-brain", "brain.manifest.json");

@@ -842,8 +842,14 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
     const nxt = src.indexOf("\nasync function ", i + 20);
     return src.slice(i, nxt === -1 ? src.length : nxt);
   };
+  const bodyBetween = (startMarker, endMarker) => {
+    const start = src.indexOf(startMarker);
+    if (start === -1) return null;
+    const end = src.indexOf(endMarker, start + startMarker.length);
+    return src.slice(start, end === -1 ? src.length : end);
+  };
 
-  for (const name of ["cmdEval", "cmdDiagnose", "cmdDrain", "cmdReindex", "cmdHealth", "cmdIngest", "cmdIngestRemote"]) {
+  for (const name of ["cmdEval", "cmdDiagnose", "cmdDrain", "cmdReindex", "cmdHealth"]) {
     const b = bodyOf(name);
     check(`${name} exists`, b !== null);
     if (!b) continue;
@@ -852,6 +858,20 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
       "it resolves the account unconditionally");
     check(`${name} resolves the account only as a fallback`,
       /m\.brain\?\.domain \? null : await resolveAccount\(m\)/.test(b));
+  }
+  const local = bodyBetween("async function cmdIngestLocalRun(", "\nasync function parseForgetResponse");
+  const remote = bodyBetween("const cmdIngestRemoteRun = async (", "\nasync function sendBatches");
+  for (const [name, publicMarker, body] of [
+    ["cmdIngest", "async function cmdIngest(manifestPath)", local],
+    ["cmdIngestRemote", "export async function cmdIngestRemote(", remote],
+  ]) {
+    check(`${name} exists`, src.includes(publicMarker) && body !== null);
+    if (!body) continue;
+    check(`${name} does not demand a Cloudflare token when the manifest has a domain`,
+      !/^\s*const acct = await resolveIngestAccount\(m\);/m.test(body),
+      "it resolves the account unconditionally");
+    check(`${name} resolves the account only as a fallback`,
+      /m\.brain\?\.domain \? null : await resolveIngestAccount\(m\)/.test(body));
   }
   const evalCommand = bodyOf("cmdEval");
   const evalArgumentsStart = src.indexOf("export function evalChildArguments(");
@@ -870,8 +890,6 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   check("domain-based health never dereferences a deliberately absent Cloudflare account",
     /const sub = acct\s*\? await cf/.test(health || ""), String(health).slice(0, 900));
 
-  const remote = bodyOf("cmdIngestRemote");
-  const local = bodyOf("cmdIngest");
   check("an incomplete local walk aborts before any source-truth cleanup",
     /if \(!walkComplete\)[\s\S]*nothing was sent and no prior document was removed/.test(local || ""),
     String(local).slice(0, 1200));

@@ -92,6 +92,9 @@ export function localAssistantRepairPlan({
       scope: item.scope,
       state_fingerprint: item.state_fingerprint,
       status: item.status,
+      protocol_discovery_verified: item.scope.endsWith("-mcp")
+        ? item.protocol_discovery_verified === true
+        : null,
       destinations: item.destinations,
       write_set: item.write_set,
     })),
@@ -116,6 +119,9 @@ export function localAssistantRepairPlan({
       scope: item.scope,
       label: LABELS[item.scope],
       status: item.status,
+      ...(item.scope.endsWith("-mcp")
+        ? { protocol_discovery_verified: item.protocol_discovery_verified === true }
+        : {}),
       detail: item.detail,
       destinations: Object.freeze((item.destinations || []).map((entry) => Object.freeze({ ...entry }))),
       write_set: Object.freeze((item.write_set || []).map((entry) => Object.freeze({ ...entry }))),

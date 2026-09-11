@@ -40,11 +40,16 @@ put("docs/report.pdf", "%PDF-1.4 not really");
     !rels.some((r) => r.startsWith("Private Client")), rels.join(", "));
   check("and each exclusion is RECORDED, not silent",
     skipped.filter((s) => /private path prefix/.test(s.reason)).length >= 2, JSON.stringify(skipped));
+  check("private paths are explicitly adjudicated as removable source policy, not missing coverage",
+    skipped.filter((s) => /private path prefix/.test(s.reason)).every((s) =>
+      s.adjudication === "source_policy" && s.coverage_gap === false), JSON.stringify(skipped));
 
   check("skips node_modules", !rels.some((r) => r.includes("node_modules")));
   check("skips dot directories", !rels.some((r) => r.includes(".hidden/")));
   check("skips dot files", !rels.some((r) => r.endsWith(".hidden.md")));
-  check("an empty file is skipped WITH a reason", skipped.some((s) => /empty/.test(s.reason)), JSON.stringify(skipped));
+  check("an empty file is adjudicated as current empty source truth",
+    skipped.some((s) => /empty/.test(s.reason) &&
+      s.adjudication === "empty_content" && s.coverage_gap === false), JSON.stringify(skipped));
   check("a fully readable folder walk is explicitly complete", complete === true, String(complete));
 }
 {

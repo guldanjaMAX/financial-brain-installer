@@ -1118,11 +1118,15 @@ await check("completion receipts are available only after aggregate accounting v
     docs_added: receipt.docs_added,
     docs_updated: receipt.docs_updated,
     docs_unchanged: receipt.docs_unchanged,
+    docs_refused: receipt.docs_refused,
+    docs_failed: receipt.docs_failed,
   }, {
     files_seen: 0,
     docs_added: 0,
     docs_updated: 0,
     docs_unchanged: 0,
+    docs_refused: 0,
+    docs_failed: 0,
   }, "the terminal receipt carries measured counters instead of relying on Worker defaults");
   assert.match(receipt.run_id, /^migration-[a-f0-9]{32}$/);
   assert.equal(receipt.run_id, messageCompletionReceipt(
