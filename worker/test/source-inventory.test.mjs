@@ -18,6 +18,16 @@ const MIGRATIONS = join(HERE, "..", "..", "migrations", "d1");
 const ORIGIN = "https://brain.invalid";
 const OWNER_CREDENTIAL = "fixture-owner-source-inventory";
 const SCOPED_CREDENTIAL = "fixture-scoped-source-inventory";
+const SAFE_GMAIL_FAILURE = Object.freeze({
+  version: 1,
+  operation_class: "gmail_message_read",
+  http_status: 400,
+  provider_reason: "failed_precondition",
+  checkpoint_readback: "verified",
+  checkpoint_done: 55,
+  checkpoint_skipped: 3,
+  cursor_preservation: "absent_preserved",
+});
 
 function migratedDb(label = "fixture") {
   const db = new DatabaseSync(":memory:");
@@ -167,13 +177,15 @@ async function addInventoryFixture(db, prefix = "") {
   db.prepare(
     `INSERT INTO sync_runs
        (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
-        docs_added,docs_updated,docs_unchanged,proposed_deletes,delete_action,refusal_reason,error)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+        proposed_deletes,delete_action,refusal_reason,error,failure_evidence)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     `${source("beta")}-run`, source("beta"), "incremental",
     Date.parse("2026-09-01T00:00:00.000Z"), Date.parse("2026-09-01T00:01:00.000Z"),
-    0, 1, 0, 0, 0, 0, null, null,
+    0, 1, 0, 0, 0, 0, 1, 1, 0, null, null,
     "private provider failure for secret-account@example.invalid",
+    JSON.stringify(SAFE_GMAIL_FAILURE),
   );
 }
 
@@ -339,6 +351,7 @@ test("source inventory pages are complete, stable, supported, and read-only", as
   assert.equal(first.sources[0].receipt.latest_run.metrics_version, 1);
   assert.equal(first.sources[0].receipt.latest_run.docs_refused, 0);
   assert.equal(first.sources[0].receipt.latest_run.docs_failed, 0);
+  assert.equal(first.sources[0].last_failure, null);
   assert.equal(first.sources[0].freshness.coverage.history.state, "complete");
   assert.deepEqual(first.sources[0].freshness.coverage.confirmed_range, {
     from: "2020-01-01T00:00:00.000Z",
@@ -359,6 +372,7 @@ test("source inventory pages are complete, stable, supported, and read-only", as
   assert.equal(second.sources[0].provenance.status, "partial");
   assert.deepEqual(second.sources[0].provenance.missing_subfields, ["derivation_lineage"]);
   assert.equal(second.sources[0].freshness.state, "broken");
+  assert.deepEqual(second.sources[0].last_failure, SAFE_GMAIL_FAILURE);
   assert.doesNotMatch(
     JSON.stringify({ first, second }),
     /secret-account|private provider failure|private-cursor|private-root|secret scope label/i,
@@ -375,6 +389,7 @@ test("source inventory pages are complete, stable, supported, and read-only", as
   assert.equal(third.sources[0].connector.provider, null);
   assert.equal(third.sources[0].configuration.status, "unavailable");
   assert.equal(third.sources[0].freshness.state, "unregistered");
+  assert.equal(third.sources[0].last_failure, null);
   assert.equal(third.truncated, false);
   assert.equal(third.cursor, null);
   assert.equal(third.complete, true);
@@ -394,6 +409,23 @@ test("source inventory pages are complete, stable, supported, and read-only", as
   assert.equal(seen.runs, 0);
   assert.equal(seen.batches, 0);
   assert.ok(seen.prepared.every((sql) => !/^\s*(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b/i.test(sql)));
+});
+
+test("source inventory suppresses stored Gmail failure evidence that fails the closed privacy contract", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const privateSentinel = "SYNTHETIC_PRIVATE_PROVIDER_MESSAGE /private/message-id cursor-value secret";
+  db.prepare("UPDATE sync_runs SET failure_evidence=? WHERE source='beta'").run(JSON.stringify({
+    ...SAFE_GMAIL_FAILURE,
+    provider_message: privateSentinel,
+  }));
+  const { env } = d1Env(db);
+  const response = await call(env, post({ limit: 10 }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(response.status, 200, await response.clone().text());
+  const inventory = await response.json();
+  const beta = inventory.sources.find((source) => source.source_id === "beta");
+  assert.equal(beta.last_failure, null);
+  assert.doesNotMatch(JSON.stringify(inventory), /SYNTHETIC_PRIVATE_PROVIDER_MESSAGE|message-id|cursor-value|secret/i);
 });
 
 test("source recovery preview is exhaustive through stable opaque pages and performs no repair", async () => {

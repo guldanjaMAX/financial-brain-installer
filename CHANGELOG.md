@@ -23,10 +23,13 @@ Candidate only. This version has not been released.
   Cloudflare sign-in.** `brain sources <manifest> --json` uses the Brain's saved
   owner credential and private Worker route to return a stable D1 source
   inventory with masked scope/cursor state, physical and logical counts,
-  freshness, extraction, OCR, lineage, and exact missing fields. A separate
-  `--json --recovery` mode pages opaque record identities and closed reason
-  codes for planning. Both modes are strictly read-only, reveal no raw source
-  locator, and stop if the snapshot changes. They do not run OCR or repair.
+  freshness, extraction, OCR, lineage, exact missing fields, and a validated
+  metadata-only Gmail failure receipt when available. Human output summarizes
+  that receipt without exposing a provider message, ID, path, cursor value,
+  content, or secret. A separate `--json --recovery` mode pages opaque record
+  identities and closed reason codes for planning. Both modes are strictly
+  read-only, reveal no raw source locator, and stop if the snapshot changes.
+  They do not run OCR or repair.
 - **Optimize can now inventory the stored financial picture without changing
   it.** The new `brain financial-picture <manifest> --json` command reads one
   bounded D1 snapshot of exact entity, period, masked-account, books, tax,

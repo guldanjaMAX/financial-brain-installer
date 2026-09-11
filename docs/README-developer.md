@@ -1072,6 +1072,15 @@ the next page returns `source_inventory_changed` instead of combining moments.
 The CLI collects every source page before printing JSON and refuses incomplete,
 duplicated, unordered, or privacy-invalid output.
 
+Each inventory row includes `last_failure`. It is `null` unless the newest run
+has a Gmail failure receipt that passes the closed source-failure validator.
+The only permitted fields are the fixed operation class, HTTP status, canonical
+provider reason, aggregate checkpoint counts/readback state, and the
+cursor-preservation category. Raw provider messages, IDs, paths, cursor values,
+content, and secrets are neither selected for this receipt nor rendered by the
+CLI. Invalid stored evidence fails closed to `null`; invalid response evidence
+is rejected by the CLI.
+
 `mode: "recovery"` returns one bounded record-candidate page. Stable opaque
 document digests permit a later before/after comparison without revealing raw
 document ids, provider locators, paths, titles, URIs, or metadata. Candidate

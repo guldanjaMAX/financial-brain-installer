@@ -55,6 +55,7 @@ function sourceRow(candidateCount = 1, receipt = null) {
         outcome: "completed",
       },
     },
+    last_failure: null,
     freshness: { state: "ok" },
   };
 }
