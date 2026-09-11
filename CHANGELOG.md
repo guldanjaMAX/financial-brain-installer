@@ -8,16 +8,14 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 Candidate only. This version has not been released.
 
-- **A reviewed source can now re-prove legacy provenance without pretending a
-  label is proof.** `brain provenance-repair <manifest> --source <name>` first
-  shows a read-only, state-bound whole-source plan for one manifest-declared
-  local folder, Drive, Gmail, or Calendar source. Apply needs the exact plan ID,
-  rechecks the source and this computer, then runs the ordinary source ingest
-  with reset and no limit. OCR state and possible cost are disclosed first,
-  and the existing deletion safety stop remains separate. A candidate is called
-  fixed only after a new completed full-sweep receipt and fresh recovery
-  readback prove its opaque ID is gone. Missing original access, remaining
-  candidates, new candidates, or unverifiable readback stay unresolved.
+- **The provenance recovery preview stays read-only until it can prove the
+  exact repair result.** `brain provenance-repair <manifest> --source <name>`
+  shows a state-bound inventory for one manifest-declared local folder, Drive,
+  Gmail, or Calendar source. Its schema-1 `--apply` path is unavailable and
+  stops before reading the manifest, credentials, network, scheduler, or
+  source. Nothing is changed and zero candidates are reported fixed. The
+  preview never advertises an apply command; every candidate stays unresolved
+  until a later schema can bind the exact result family and retrieval evidence.
 
 - **Optimize can now read exact source and provenance receipts without a
   Cloudflare sign-in.** `brain sources <manifest> --json` uses the Brain's saved

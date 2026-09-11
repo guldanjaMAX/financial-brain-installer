@@ -251,6 +251,41 @@ function stubOcr({ reply = () => pageText, model = "@cf/google/gemma-4-26b-a4b-i
   check("extract() forwards the provenance instead of dropping it",
     viaExtract.provenance?.text_source === "ocr" && viaExtract.provenance.text_reliable === false,
     JSON.stringify(viaExtract.provenance));
+
+  // A cold-file retry is allowed to return different bytes. When that second
+  // parse still has no text, extractPdf deliberately keeps the first parse and
+  // OCRs its rendered pages. The raw-original receipt must therefore stay on
+  // the first bytes rather than following a reread that did not win.
+  const firstBytes = Buffer.from("first scan bytes");
+  const changedReread = Buffer.from("changed reread bytes");
+  const rereadOcr = stubOcr();
+  let acceptedReread = null;
+  let pass = 0;
+  const retainedFirst = await extractPdf(firstBytes, {
+    reread: async () => changedReread,
+    onRereadAccepted: (bytes) => { acceptedReread = bytes; },
+    ocr: rereadOcr,
+  }, {
+    pdfPassImpl: async (bytes) => {
+      pass++;
+      return {
+        body: "",
+        totalPages: 1,
+        perPage: 0,
+        pageImages: [{
+          page: 1,
+          png_base64: Buffer.from(bytes).equals(firstBytes)
+            ? "first-page-image".repeat(8)
+            : "reread-page-image".repeat(8),
+        }],
+      };
+    },
+  });
+  check("a changed empty PDF reread is parsed but not selected", pass === 2 && acceptedReread === null,
+    JSON.stringify({ pass, acceptedReread: Boolean(acceptedReread) }));
+  check("OCR succeeds against the retained first PDF parse",
+    retainedFirst.provenance?.text_source === "ocr" && rereadOcr.calls.length === 1,
+    JSON.stringify(retainedFirst));
 }
 
 {

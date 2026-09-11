@@ -92,6 +92,14 @@ function textPdf() {
   check("and it records HOW it was dated", r.envelope.date_source === "filename", r.envelope.date_source);
   check("a content hash is returned for resume", typeof r.hash === "string" && r.hash.length === 64);
   check("the source_type is the named source", r.envelope.source_type === "docs");
+  check("the private original receipt binds the exact raw bytes without duplicating the locator",
+    JSON.stringify(Object.keys(r.envelope.source_original_receipt).sort()) ===
+      JSON.stringify(["locator_kind", "original_byte_count", "original_content_sha256", "version"]) &&
+    r.envelope.source_original_receipt.version === 1 &&
+    r.envelope.source_original_receipt.locator_kind === "source_relative_path" &&
+    r.envelope.source_original_receipt.original_content_sha256 === r.hash &&
+    r.envelope.source_original_receipt.original_byte_count === one("notes/2026-08-14 review.md").size,
+    JSON.stringify(r.envelope.source_original_receipt));
 }
 {
   const r = await prepare(one("data/table.csv"), { sourceName: "docs" });
@@ -225,7 +233,28 @@ function textPdf() {
   const r1 = await prepare(p, { sourceName: "docs" });
   writeFileSync(p.full, "An ordinary note with enough words in it to clear the minimum length floor comfortably. Changed.");
   const r2 = await prepare(p, { sourceName: "docs" });
-  check("editing a file changes its hash, so a resume re-sends it", r1.hash !== r2.hash);
+  check("editing a file changes its hash, so a resume re-sends it",
+    r1.hash !== r2.hash &&
+    r1.envelope.source_original_receipt.original_content_sha256 === r1.hash &&
+    r2.envelope.source_original_receipt.original_content_sha256 === r2.hash);
+  const decomposed = await prepare({
+    ...p,
+    rel: "notes/cafe\u0301.txt",
+    name: "cafe\u0301.txt",
+  }, { sourceName: "docs" });
+  check("a decomposed macOS filename remains ingestible but explicitly unbound",
+    decomposed.envelope?.source_id === "notes/cafe\u0301.txt" &&
+    !Object.hasOwn(decomposed.envelope, "source_original_receipt") &&
+    decomposed.envelope.metadata?.source_original_binding_status === "unavailable" &&
+    decomposed.envelope.metadata?.source_original_binding_reason === "source_locator_not_nfc",
+    JSON.stringify(decomposed));
+  let invalidLocatorRefused = false;
+  try {
+    await prepare({ ...p, rel: "../plain.txt" }, { sourceName: "docs" });
+  } catch (error) {
+    invalidLocatorRefused = /source-relative|parent segments/.test(String(error?.message || ""));
+  }
+  check("a raw receipt refuses a non-canonical source-relative identity", invalidLocatorRefused);
 }
 
 /* ---- the binary guard must not eat the binary FORMATS ----
@@ -279,13 +308,26 @@ function textPdf() {
   // WRONG BEFORE: this asserted that an oversized document is emitted as its own
   // batch. It is, and the Worker then 413s it and the document is LOST. It has
   // to be split before it ever reaches batching.
-  const parts = splitOversized({ source_id: "big.txt", title: "Big", content: "x".repeat(1_000_000) });
+  const originalReceipt = Object.freeze({
+    version: 1,
+    locator_kind: "source_relative_path",
+    original_content_sha256: "a".repeat(64),
+    original_byte_count: 1_000_000,
+  });
+  const parts = splitOversized({
+    source_id: "big.txt",
+    title: "Big",
+    content: "x".repeat(1_000_000),
+    source_original_receipt: originalReceipt,
+  });
   check("an oversized document is split into parts", parts.length === 3, String(parts.length));
   check("every part fits the request ceiling", parts.every((p) => p.content.length <= MAX_DOC_CHARS));
   check("no text is lost in the split", parts.reduce((n, p) => n + p.content.length, 0) === 1_000_000);
   check("parts keep the original identity in their ids", parts[1].source_id === "big.txt#part2of3", parts[1].source_id);
   check("and say which part they are, so a citation is legible", /part 2 of 3/.test(parts[1].title), parts[1].title);
   check("and record what they came from", parts[1].metadata.part_of === "big.txt");
+  check("every structural part carries the same raw-original receipt",
+    parts.every((part) => part.source_original_receipt === originalReceipt));
   check("a normal document is passed through untouched", splitOversized({ source_id: "a", content: "short" }).length === 1);
   // batches() takes { envelope } wrappers, which is how the CLI feeds it.
   const grouped = batches(parts.map((envelope) => ({ envelope })), { maxBytes: 900_000 });

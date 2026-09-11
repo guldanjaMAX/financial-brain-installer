@@ -136,13 +136,13 @@ function publicReceipt({
     accepted_repair: Object.freeze({
       attempted: false,
       available: false,
-      reason_code: "durable_original_byte_binding_unverified",
+      reason_code: "complete_acceptance_chain_unavailable",
     }),
     originals: frozenOriginals,
     blockers: frozenBlockers,
     coverage_blockers: Object.freeze([
       "candidate_matching_not_attempted",
-      "durable_original_byte_binding_unverified",
+      "complete_acceptance_chain_unavailable",
     ]),
     limitations: Object.freeze([
       "local_upload_only",
@@ -151,7 +151,7 @@ function publicReceipt({
       "no_filename_or_content_similarity_matching",
       "no_raw_paths_content_errors_or_hashes_in_public_output",
       "multi_record_originals_require_separate_identity_evidence",
-      "local_original_bytes_are_not_accepted_repair_evidence_without_durable_binding",
+      "raw_original_binding_alone_is_not_accepted_repair_evidence",
     ]),
   });
 }

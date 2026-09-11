@@ -121,7 +121,7 @@ check(`all ${applied} statements across ${files.length} files applied`, true);
   db.exec("RELEASE provenance_marker_fixture");
 }
 
-/* ---- a populated schema-36 sync history survives 0037 through 0042 ---- */
+/* ---- a populated schema-36 sync history survives every later additive migration ---- */
 {
   const schema36 = new DatabaseSync(":memory:");
   for (const file of files.filter((name) => Number(name.slice(0, 4)) <= 36)) {
@@ -168,8 +168,14 @@ for (const t of [
   "install_state",
   "source_original_id_key_state",
   "source_original_observations",
+  "source_original_result_bindings",
 ]) {
   check(`${t} exists`, names.has(t), [...names].join(", "));
+}
+{
+  const documentColumns = new Set(db.prepare("PRAGMA table_info(documents)").all().map((row) => row.name));
+  check("0043 adds nullable document revision and raw-original binding pointers",
+    documentColumns.has("document_revision_id") && documentColumns.has("source_original_binding_hash"));
 }
 for (const t of ["chunks_ai", "chunks_ad", "chunks_au"]) {
   check(`trigger ${t} exists`, names.has(t), "MISSING — keyword search would silently return nothing forever");

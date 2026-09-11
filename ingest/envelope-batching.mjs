@@ -56,9 +56,12 @@ export function envelopeBytes(envelope) {
 /**
  * Mirror of the worker's conservative D1 statement estimate for one envelope
  * (worker/src/lib/store.js: 9 fixed statements plus 2 per sliding-window
- * chunk at the default 1500/300 geometry). Deliberately duplicated rather
- * than imported: this module stays dependency-free by design, and a test
- * imports the worker's real estimator to prove the two never drift.
+ * chunk at the default 1500/300 geometry). A bound receipt uses 12 fixed
+ * statements plus one shared identity-key read. This per-envelope helper
+ * charges that shared read every time, which is safely conservative when a
+ * local batch contains more than one bound file. Deliberately duplicated
+ * rather than imported: this module stays dependency-free by design, and a
+ * test imports the worker's real estimator to prove the single-file case.
  */
 export function estimatedStatements(envelope) {
   const body = String(envelope?.content || "");
@@ -67,7 +70,7 @@ export function estimatedStatements(envelope) {
     : body.length <= 1500
       ? 1
       : 1 + Math.ceil((body.length - 1500) / 1200);
-  return 9 + chunks * 2;
+  return (envelope?.source_original_receipt != null ? 13 : 9) + chunks * 2;
 }
 
 /**

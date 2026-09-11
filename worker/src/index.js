@@ -1296,6 +1296,7 @@ async function handleThink(
 
 async function handleIngest(env, request, scope = { all: true }, {
   ownerNoteChannel = null,
+  allowSourceOriginalReceipt = false,
 } = {}) {
   // Checked BEFORE the body is read. The batch route documents exactly this
   // hazard and guards against it; this route, which is the one a client reaches
@@ -1320,6 +1321,19 @@ async function handleIngest(env, request, scope = { all: true }, {
     envelope = await request.json();
   } catch {
     return jsonResponse({ error: "invalid JSON body" }, 400);
+  }
+
+  // A source-original receipt is a full-admin-authorized assertion about raw
+  // bytes observed outside the Worker. A coarse `file` grant may still ingest
+  // ordinary text, but it cannot mint evidence a later repair verifier could
+  // mistake for the trusted local ingest path.
+  if (!allowSourceOriginalReceipt &&
+      envelope && typeof envelope === "object" && !Array.isArray(envelope) &&
+      Object.hasOwn(envelope, "source_original_receipt")) {
+    return jsonResponse({
+      error: "source-original byte receipts require full administrator authorization",
+      code: "source_original_receipt_admin_required",
+    }, 403);
   }
 
   // Content-Length can be absent or wrong, so the parsed size is checked too.
@@ -1520,7 +1534,9 @@ async function handleIngest(env, request, scope = { all: true }, {
 const BATCH_MAX_DOCS = 50;
 const BATCH_MAX_BYTES = 1_000_000;
 
-async function handleIngestBatch(env, request, scope = { all: true }) {
+async function handleIngestBatch(env, request, scope = { all: true }, {
+  allowSourceOriginalReceipt = false,
+} = {}) {
   let body;
   try {
     body = await request.json();
@@ -1536,6 +1552,14 @@ async function handleIngestBatch(env, request, scope = { all: true }) {
       { error: `too many documents: ${docs.length} (max ${BATCH_MAX_DOCS})`, max_docs: BATCH_MAX_DOCS },
       413
     );
+  }
+  if (!allowSourceOriginalReceipt && docs.some((doc) =>
+    doc && typeof doc === "object" && !Array.isArray(doc) &&
+    Object.hasOwn(doc, "source_original_receipt"))) {
+    return jsonResponse({
+      error: "source-original byte receipts require full administrator authorization",
+      code: "source_original_receipt_admin_required",
+    }, 403);
   }
   if (docs.some((doc) => String(doc?.source_type || "") === OWNER_NOTES_SOURCE)) {
     return jsonResponse({
@@ -2836,7 +2860,9 @@ export default {
         return await handleOcr(env, request);
       }
       if (path === "/api/admin/brain/ingest" && request.method === "POST") {
-        return await handleIngest(env, request, scope);
+        return await handleIngest(env, request, scope, {
+          allowSourceOriginalReceipt: ownerKeyAuthorized,
+        });
       }
       if (path === OWNER_NOTES_ROUTE && request.method === "POST") {
         return await handleIngest(env, request, scope, {
@@ -2844,7 +2870,9 @@ export default {
         });
       }
       if (path === "/api/admin/brain/ingest/batch" && request.method === "POST") {
-        return await handleIngestBatch(env, request, scope);
+        return await handleIngestBatch(env, request, scope, {
+          allowSourceOriginalReceipt: ownerKeyAuthorized,
+        });
       }
       if (path === "/api/admin/brain/source-receipt" && request.method === "POST") {
         return await handleSourceReceipt(env, request);

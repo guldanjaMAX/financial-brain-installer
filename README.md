@@ -329,12 +329,39 @@ explicit local-upload originals. A private admin route can seal raw
 source-relative locators into stable opaque IDs, append a closed observation
 outcome, and later revalidate that observation against the exact stored
 document family. Schema 42 accepts only gaps, failures, and adjudicated
-exclusions; accepted repair is blocked until the corpus stores an authoritative
-raw-original byte binding. Raw locators are neither stored nor returned.
+exclusions; accepted repair remains blocked. Raw locators are neither copied
+into the observation ledger nor returned by that route.
 Read-only local assessment disables OCR and does no filename or
 content-similarity matching. This bounded contract is not a whole-source
 enumeration, is not connected to the legacy repair CLI, and does not itself
 authorize OCR, reingest, deletion, or repair.
+
+Migration 0043 makes the missing raw-original binding representable without
+enabling repair. The full-admin-authorized local ingest path attaches a private
+hash and byte count from the exact file bytes it extracted. The Worker
+HMAC-seals the existing `source_id` or structural `part_of` locator, assigns a
+fresh
+`document_revision_id`, and commits an immutable
+`source_original_result_bindings` receipt in the same D1 transaction that
+commits the revision's final content hash. The raw locator is not copied into
+the immutable receipt or ledger. It remains in the existing document identity
+fields needed for retrieval and source lifecycle. Exact replay is unchanged,
+but different raw bytes with identical extracted text create a distinct
+revision and cannot inherit the prior binding. Structural `#partNofM` families
+are supported; ambiguous
+multi-record `family_of` exports and legacy rows remain explicitly unbound.
+This is a full-admin-authorized assertion, not cryptographic proof of the
+producer binary or a server-side recomputation over uploaded raw bytes. Both
+the schema-43 D1 guard and the Worker still reject every accepted observation,
+and no OCR, backfill, repair, or deployment is implied.
+
+Schema 43 is necessary but not sufficient for acceptance. A later stacked gate
+must add a database-enforced result-family receipt that binds the original to
+every current document revision and the exact resulting chunk set, including
+title prefixes. That gate must also prove target outbox zero, global vector
+readiness, deterministic private retrieval, and citation to the same family.
+Accepted outcomes stay fail-closed until that complete chain is separately
+reviewed and proven.
 
 ### Inventory the financial picture
 

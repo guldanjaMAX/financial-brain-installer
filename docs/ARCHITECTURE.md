@@ -144,8 +144,9 @@ then resets the derived outbox generation and bulk-bootstrap base to zero,
 forces the bootstrap protocol to `NULL`, and excludes provider-specific queue
 and batch receipts before hashing the remaining durable data.
 Exact older migration prefixes remain inspectable by the offline verifier only.
-The field recovery runner requires schema 13 on both source and restored target
-before it can export or invoke the current drain protocol.
+The live field recovery runner requires this package's exact current migration
+prefix on both source and restored target before it can export, promote the
+current Worker, or invoke the current drain protocol.
 
 ## Ingest lifecycle
 
@@ -489,13 +490,34 @@ from an independent recoverable D1 key, and never stores or returns those
 locators. Seal, inventory, and verify are read-only. Record is append-only,
 transactional, bound to one source snapshot and exact target set, and blocked
 during an upgrade write pause. Schema 42 records and verifies only gaps,
-failures, and adjudicated exclusions. Accepted outcomes are blocked in both the
-Worker and D1 because the current document family has no authoritative raw-byte
-receipt that can bind it to the locally observed original. A later migration
-must add and validate that binding before any repair claim can exist. Deletion,
-absence, replacement bytes, an unreadable original, or a changed result family
-therefore remains unresolved. Every receipt says `whole_source_complete:
-false`; this contract neither enumerates a source nor authorizes OCR or ingest.
+failures, and adjudicated exclusions.
+
+Migration 0043 adds a revision-scoped raw-original result-binding ledger. The
+full-admin-authorized local ingest path hashes the exact bytes used by a
+one-record extraction. The Worker derives the schema-42 HMAC identity from the
+existing envelope locator and does not copy that locator into the immutable
+binding receipt or ledger. Existing document identity fields still retain the
+source-relative locator for retrieval and source lifecycle. A changed document
+receives a new revision ID. Its final semantic content hash, provenance digest, original hash
+and byte count, and deterministic binding hash commit atomically in D1. Full
+receipt readback, not pointer presence, is the verification boundary. Exact
+replay preserves the revision, while changed raw bytes create a new revision
+even when extracted text is identical. Structural parts can share one opaque
+original identity; `family_of` exports and legacy content remain unbound. This
+proves a full-admin-authorized local ingest assertion, not server-side raw-byte
+recomputation, and it does not cryptographically identify the producer binary.
+Accepted outcomes remain blocked in both the Worker and the
+schema-43 D1 trigger until a separate reviewed change authorizes their use.
+Deletion, absence, replacement bytes, an unreadable original, or a changed or
+incomplete result family therefore remains unresolved. Every observation
+receipt says `whole_source_complete: false`; this contract neither enumerates
+a source nor authorizes OCR or ingest.
+
+The next stacked gate must be database-enforced and bind the original to every
+current document revision plus the exact chunk set, including title prefixes.
+It must then prove target outbox zero, global vector readiness, deterministic
+private retrieval, and citation to that same family. Schema 43 alone cannot
+authorize an accepted observation.
 
 The new-computer continuity report composes that same authenticated source
 inventory with local-only observations. It reads the exact manifest, durable

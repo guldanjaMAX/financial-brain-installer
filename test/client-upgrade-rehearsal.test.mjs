@@ -329,18 +329,33 @@ function snapshotRows(db, tables = null) {
 // lands and the pure new-table files (0023, 0024, 0025, 0027, 0030, 0031, 0032)
 // are not silently untested.
 function declarationsOf(sql) {
-  const objects = [];
+  const objects = new Map();
   const columns = [];
-  const text = sql.split("\n").filter((line) => !line.trim().startsWith("--")).join("\n");
-  const objectRe = /CREATE\s+(?:VIRTUAL\s+)?(TABLE|INDEX|TRIGGER|VIEW)\s+(?:UNIQUE\s+)?(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/gi;
-  const uniqueIndexRe = /CREATE\s+UNIQUE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/gi;
-  const alterRe = /ALTER\s+TABLE\s+([A-Za-z0-9_]+)\s+ADD\s+COLUMN\s+([A-Za-z0-9_]+)/gi;
-  for (const m of text.matchAll(objectRe)) objects.push({ kind: m[1].toLowerCase(), name: m[2] });
-  for (const m of text.matchAll(uniqueIndexRe)) objects.push({ kind: "index", name: m[1] });
-  for (const m of text.matchAll(alterRe)) columns.push({ table: m[1], column: m[2] });
-  const seen = new Set();
+  for (const statement of splitStatements(sql)) {
+    const created = statement.match(
+      /^\s*CREATE\s+(?:UNIQUE\s+)?(?:VIRTUAL\s+)?(TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/i,
+    );
+    if (created) {
+      const value = { kind: created[1].toLowerCase(), name: created[2] };
+      objects.set(`${value.kind}:${value.name}`, value);
+      continue;
+    }
+    const dropped = statement.match(
+      /^\s*DROP\s+(TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_]+)/i,
+    );
+    if (dropped) {
+      // Temporary guards are tested at the independent statement boundaries,
+      // but they are not part of the migration's final declared inventory.
+      objects.delete(`${dropped[1].toLowerCase()}:${dropped[2]}`);
+      continue;
+    }
+    const altered = statement.match(
+      /^\s*ALTER\s+TABLE\s+([A-Za-z0-9_]+)\s+ADD\s+COLUMN\s+([A-Za-z0-9_]+)/i,
+    );
+    if (altered) columns.push({ table: altered[1], column: altered[2] });
+  }
   return {
-    objects: objects.filter((o) => (seen.has(o.kind + o.name) ? false : seen.add(o.kind + o.name))),
+    objects: [...objects.values()],
     columns,
   };
 }

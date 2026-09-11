@@ -38,6 +38,10 @@ import { extractPdf, parseEmailMessage } from "./formats.mjs";
 import { textQuality, isLikelyBinary, utf16Encoding } from "./quality.mjs";
 import { documentDate } from "./doc-date.mjs";
 import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
+import {
+  normalizeSourceOriginalReceipt,
+  SOURCE_ORIGINAL_BINDING_CONTRACT_VERSION,
+} from "../worker/src/lib/source-original-binding.js";
 import { detectWhatsAppExport, parseWhatsAppExport, deriveThreadTitle } from "./whatsapp-export.mjs";
 import {
   detectSmsBackupXml, parseSmsBackupXml,
@@ -624,6 +628,22 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 
+/** Private raw-byte evidence attached only to one-original document families. */
+export const SOURCE_ORIGINAL_RECEIPT_VERSION = SOURCE_ORIGINAL_BINDING_CONTRACT_VERSION;
+
+function sourceOriginalReceipt(file, contentSha256, byteCount) {
+  // `source_id` carries the locator for an unsplit local document and
+  // splitOversized records the same value as `metadata.part_of` for every
+  // structural part. Do not duplicate that private path inside the receipt.
+  canonicalLocalAssessmentLocator(String(file?.rel || "").split(sep).join("/"));
+  return normalizeSourceOriginalReceipt({
+    version: SOURCE_ORIGINAL_RECEIPT_VERSION,
+    locator_kind: "source_relative_path",
+    original_content_sha256: contentSha256,
+    original_byte_count: byteCount,
+  });
+}
+
 /** Same decode the core plain-text extractor uses: real encoding, BOM stripped. */
 function decodeText(buf) {
   const enc = utf16Encoding(buf) || "utf-8";
@@ -1082,13 +1102,20 @@ export function sourceFileFamilyUid(file, sourceName) {
 
 /** Stamp every document a multi-document file produced with its family uid. */
 function declareFamily(envelopes, familyUid) {
-  return envelopes.map((envelope) => restampFirstPartySourceProvenance(envelope, {
-    // Family declaration changes identity, not extraction facts. Preserve a
-    // producer omission so the shared boundary records unknown/unavailable.
-    textSource: envelope.text_source,
-    textReliable: envelope.text_reliable,
-    metadataPatch: { family_of: familyUid },
-  }));
+  return envelopes.map((envelope) => {
+    // One raw file produced several independently addressed documents. There
+    // is no authoritative per-result byte binding yet, so a producer must not
+    // let one file receipt look like proof for every `family_of` member.
+    const withoutAmbiguousOriginal = { ...envelope };
+    delete withoutAmbiguousOriginal.source_original_receipt;
+    return restampFirstPartySourceProvenance(withoutAmbiguousOriginal, {
+      // Family declaration changes identity, not extraction facts. Preserve a
+      // producer omission so the shared boundary records unknown/unavailable.
+      textSource: envelope.text_source,
+      textReliable: envelope.text_reliable,
+      metadataPatch: { family_of: familyUid },
+    });
+  });
 }
 
 /**
@@ -1534,13 +1561,17 @@ export async function prepare(file, { sourceName, ocr = null }) {
   const got = await extract(buf, file.name, {
     reread: () => {
       try {
-        const reread = readApprovedLocalFile(file, { maxBytes: sizeLimit });
-        hash = sha(reread);
-        actualBytes = reread.length;
-        return reread;
+        return readApprovedLocalFile(file, { maxBytes: sizeLimit });
       } catch {
         return null;
       }
+    },
+    // Couple the receipt to the PDF parse that won. The extractor can discard
+    // an empty or failed reread and OCR the first pass instead; merely reading
+    // fresh bytes is therefore not enough to make them authoritative.
+    onRereadAccepted: (reread) => {
+      hash = sha(reread);
+      actualBytes = reread.length;
     },
     // Null on a dry run and whenever OCR is off, so the cheapest command stays
     // the cheapest command and nothing bills the owner without being asked.
@@ -1559,18 +1590,39 @@ export async function prepare(file, { sourceName, ocr = null }) {
 
   // NOT the file mtime. See ingest/doc-date.mjs for why that is refused outright.
   const dd = documentDate({ filename: file.name, relPath: dirname(file.rel), contentHead: got.text.slice(0, 1200) });
+  const localSourceLocator = file.rel.split(sep).join("/");
+  let originalByteReceipt = null;
+  let originalBindingUnavailableReason = null;
+  try {
+    originalByteReceipt = sourceOriginalReceipt(file, hash, actualBytes);
+  } catch (error) {
+    // macOS commonly exposes decomposed Unicode filenames. Preserve the
+    // existing source_id byte-for-byte so an upgrade cannot fork a document's
+    // identity. Such a row remains explicitly unbound instead of aborting the
+    // entire source run or HMAC-sealing a normalization collision.
+    if (localSourceLocator !== localSourceLocator.normalize("NFC")) {
+      canonicalLocalAssessmentLocator(localSourceLocator.normalize("NFC"));
+      originalBindingUnavailableReason = "source_locator_not_nfc";
+    } else {
+      throw error;
+    }
+  }
 
   return {
     hash,
     envelope: {
       source_type: sourceName,
-      source_id: file.rel.split(sep).join("/"),
+      source_id: localSourceLocator,
+      // The full-admin-authorized local ingester attests to the exact
+      // descriptor bytes used by extraction. The Worker derives the transient
+      // locator from source_id/part_of and never needs a second path copy here.
+      ...(originalByteReceipt ? { source_original_receipt: originalByteReceipt } : {}),
       title: basename(file.name, extensionOf(file.name)) || file.name,
       content: got.text,
       occurred_at: dd.value ? new Date(dd.value).toISOString() : null,
       date_source: dd.source,
       date_reliable: dd.reliable,
-      uri: file.rel.split(sep).join("/"),
+      uri: localSourceLocator,
       // Promoted out of metadata on purpose: these two reach a citation, and a
       // flag that never reaches the reader is not a flag.
       ...(got.provenance
@@ -1581,6 +1633,10 @@ export async function prepare(file, { sourceName, ocr = null }) {
         ...(note ? { extraction_note: note } : {}),
         ...(got.incomplete === true ? { extraction_incomplete: true } : {}),
         ...(got.provenance ? { ocr: got.provenance } : {}),
+        ...(originalBindingUnavailableReason ? {
+          source_original_binding_status: "unavailable",
+          source_original_binding_reason: originalBindingUnavailableReason,
+        } : {}),
       },
     },
     note,

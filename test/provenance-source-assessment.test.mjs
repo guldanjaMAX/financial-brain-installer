@@ -226,8 +226,8 @@ for (const reasonCode of Object.values(ORIGINAL_REASON_CODE_BY_STATE)) {
   assert.equal(result.ocr.attempted, false);
   assert.equal(result.candidate_matching.attempted, false);
   assert.equal(result.accepted_repair.available, false);
-  assert.equal(result.accepted_repair.reason_code, "durable_original_byte_binding_unverified");
-  assert(result.coverage_blockers.includes("durable_original_byte_binding_unverified"));
+  assert.equal(result.accepted_repair.reason_code, "complete_acceptance_chain_unavailable");
+  assert(result.coverage_blockers.includes("complete_acceptance_chain_unavailable"));
   assert.equal(result.originals.find((item) => item.format === "pdf").page_count, 4);
   assert.equal(result.originals.find((item) => item.format === "pdf").page_count_state, "authoritative");
   assert.equal(result.originals.some((item) => item.page_count === 999), false);

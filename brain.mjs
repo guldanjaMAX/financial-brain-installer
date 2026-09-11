@@ -3521,6 +3521,8 @@ function addedColumnDescriptor(statement) {
     type: match[3].toUpperCase(),
     notNull: /\bNOT\s+NULL\b/i.test(tail),
     defaultValue: defaultMatch ? defaultMatch[1] : null,
+    definition: `${match[2]} ${match[3]}${tail}`,
+    hasCheckConstraint: /\bCHECK\s*\(/i.test(tail),
   };
 }
 
@@ -3531,6 +3533,118 @@ function normalizedSqlDefault(value) {
     text = text.slice(1, -1).trim();
   }
   return text;
+}
+
+function tableDefinitionClauses(createSql) {
+  const source = String(createSql || "");
+  const clauses = [];
+  let depth = 0;
+  let start = -1;
+  let quote = null;
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (quote) {
+      if (character === quote) {
+        if (quote !== "]" && next === quote) index++;
+        else quote = null;
+      }
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "[") {
+      quote = "]";
+      continue;
+    }
+    if (character === "-" && next === "-") {
+      index += 2;
+      while (index < source.length && source[index] !== "\n" && source[index] !== "\r") index++;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      index += 2;
+      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) index++;
+      if (index < source.length) index++;
+      continue;
+    }
+    if (character === "(") {
+      depth++;
+      if (depth === 1) start = index + 1;
+      continue;
+    }
+    if (character === ")") {
+      if (depth === 1 && start >= 0) {
+        clauses.push(source.slice(start, index));
+        return clauses;
+      }
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (character === "," && depth === 1 && start >= 0) {
+      clauses.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  return [];
+}
+
+function canonicalSqlTokens(fragment) {
+  const source = String(fragment || "");
+  const tokens = [];
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (/\s/.test(character)) continue;
+    if (character === "-" && next === "-") {
+      index += 2;
+      while (index < source.length && source[index] !== "\n" && source[index] !== "\r") index++;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      index += 2;
+      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) index++;
+      if (index < source.length) index++;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`" || character === "[") {
+      const closing = character === "[" ? "]" : character;
+      let quoted = character;
+      for (index++; index < source.length; index++) {
+        quoted += source[index];
+        if (source[index] !== closing) continue;
+        if (closing !== "]" && source[index + 1] === closing) {
+          quoted += source[++index];
+          continue;
+        }
+        break;
+      }
+      tokens.push(`quoted:${quoted}`);
+      continue;
+    }
+    if (/[A-Za-z0-9_$]/.test(character)) {
+      let end = index + 1;
+      while (end < source.length && /[A-Za-z0-9_$]/.test(source[end])) end++;
+      tokens.push(`word:${source.slice(index, end).toLowerCase()}`);
+      index = end - 1;
+      continue;
+    }
+    tokens.push(`symbol:${character}`);
+  }
+  return tokens;
+}
+
+function exactAddedColumnDefinition(createSql, descriptor) {
+  const expected = canonicalSqlTokens(descriptor.definition);
+  const leadingColumnToken = `word:${descriptor.column.toLowerCase()}`;
+  for (const clause of tableDefinitionClauses(createSql)) {
+    const actual = canonicalSqlTokens(clause);
+    if (actual[0] !== leadingColumnToken) continue;
+    return actual.length === expected.length && actual.every((token, index) => token === expected[index]);
+  }
+  return false;
 }
 
 /**
@@ -3562,9 +3676,19 @@ export async function runRestartSafeMigrationStatements(
       }
       const existing = inspected.results.find((row) => row?.name === descriptor.column);
       if (existing) {
-        const compatible = String(existing.type || "").toUpperCase() === descriptor.type &&
+        let compatible = String(existing.type || "").toUpperCase() === descriptor.type &&
           Number(existing.notnull || 0) === Number(descriptor.notNull) &&
           normalizedSqlDefault(existing.dflt_value) === normalizedSqlDefault(descriptor.defaultValue);
+        if (compatible && descriptor.hasCheckConstraint) {
+          const schema = await queryStatement(
+            `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${descriptor.table}'`,
+          );
+          if (!schema || !Array.isArray(schema.results) || schema.results.length !== 1 ||
+              typeof schema.results[0]?.sql !== "string") {
+            throw new Error(`migration could not inspect ${descriptor.table}.${descriptor.column} definition`);
+          }
+          compatible = exactAddedColumnDefinition(schema.results[0].sql, descriptor);
+        }
         if (!compatible) {
           throw new Error(
             `migration column ${descriptor.table}.${descriptor.column} already exists with an incompatible schema`,

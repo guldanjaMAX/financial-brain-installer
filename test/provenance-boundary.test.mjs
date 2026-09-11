@@ -6,6 +6,7 @@ import { prepareBankExportImport } from "../worker/src/lib/fin-import.js";
 import { handleBankExportImport } from "../worker/src/lib/fin-upload.js";
 import { ingestEnvelopeValidationError } from "../worker/src/lib/ingest-envelope.js";
 import { publicInstallSmokeEnvelope } from "../worker/src/lib/install-smoke.js";
+import { scanEnvelope } from "../worker/src/lib/secret-scan.js";
 import {
   normalizeIngestEnvelopeProvenance,
   provenanceReceiptTransitionError,
@@ -113,6 +114,48 @@ const doc = (extra = {}) => ({
     [["drive:file-1"], ["drive:file-1"], ["drive:file-1"]],
   );
   assert.ok(parts.every((part) => ingestEnvelopeValidationError(part) === null));
+}
+
+// A trusted local byte receipt is exact, locator-minimal and valid only for a
+// single document or one structural #partNofM family.
+{
+  const sourceOriginalReceipt = {
+    version: 1,
+    locator_kind: "source_relative_path",
+    original_content_sha256: "a".repeat(64),
+    original_byte_count: 90,
+  };
+  const local = withFirstPartySourceProvenance(doc({
+    source_type: "localdocs",
+    source_id: "folder/report.txt",
+    content: "x".repeat(90),
+    source_original_receipt: sourceOriginalReceipt,
+  }), { textSource: "native", textReliable: true });
+  assert.equal(ingestEnvelopeValidationError(local), null);
+  assert.equal(scanEnvelope(local).shouldRefuse, false,
+    "a content digest must not be mistaken for an admin credential");
+
+  const parts = splitOversized(local, 30);
+  assert.equal(parts.length, 3);
+  assert.ok(parts.every((part) =>
+    part.source_original_receipt === sourceOriginalReceipt &&
+    ingestEnvelopeValidationError(part) === null));
+
+  const leakedLocator = structuredClone(local);
+  leakedLocator.source_original_receipt.locator = "folder/report.txt";
+  assert.match(ingestEnvelopeValidationError(leakedLocator), /exact contract/);
+
+  const traversal = structuredClone(local);
+  traversal.source_id = "../report.txt";
+  assert.match(ingestEnvelopeValidationError(traversal), /canonical source-relative path/);
+
+  const malformedPart = structuredClone(parts[0]);
+  malformedPart.metadata.part_count = 4;
+  assert.match(ingestEnvelopeValidationError(malformedPart), /exact structural #partNofM family/);
+
+  const ambiguous = structuredClone(local);
+  ambiguous.metadata.family_of = "localdocs:folder/archive.txt";
+  assert.match(ingestEnvelopeValidationError(ambiguous), /ambiguous multi-record family_of/);
 }
 
 // A derived summary keeps its recorded roots, and an accepted reingest cannot
