@@ -7,7 +7,9 @@ import { Home } from "./components/Home";
 import { Documents } from "./components/Documents";
 import { ThisYear } from "./components/ThisYear";
 import { AddReview } from "./components/AddReview";
-import { FinanceScopeProvider } from "./components/FinanceScope";
+import {
+  FinanceScopeBar, FinanceScopeProvider, useFinanceScope, type EntityScopeState,
+} from "./components/FinanceScope";
 import { ScopedDocuments } from "./components/ScopedDocuments";
 import { FinancialMap } from "./components/FinancialMap";
 import { Attention } from "./components/ui";
@@ -27,6 +29,32 @@ const shellOwner = root?.dataset.owner || "";
 export type View = "home" | "year" | "financial-map" | "documents" | "ask" | "review" | "access";
 export const OWNER_VIEWS: readonly View[] = ["home", "year", "financial-map", "documents", "ask", "review", "access"];
 export const GRANT_VIEWS: readonly View[] = ["documents", "ask"];
+const ENTITY_REQUIRED_VIEWS: readonly View[] = ["year", "review"];
+const SCOPE_CHOICE_VIEWS: readonly View[] = ["home", "documents", "ask"];
+
+export function ownerViewRequiresEntity(view: View): boolean {
+  return ENTITY_REQUIRED_VIEWS.includes(view);
+}
+
+export function ownerViewScopeGate(
+  view: View,
+  scopeChoiceMade: boolean,
+  entityScopeState: EntityScopeState,
+): "entity" | "choice" | "checking" | null {
+  // These pages contain entity-scoped writes, so a stale saved choice or an
+  // unavailable inventory never opens them. The backend validates any owned
+  // financial entity, not businesses alone.
+  if (ownerViewRequiresEntity(view) && entityScopeState !== "selected") return "entity";
+  if (SCOPE_CHOICE_VIEWS.includes(view) && !scopeChoiceMade) {
+    if (entityScopeState === "checking") return "checking";
+    if (entityScopeState === "required") return "choice";
+    // Whole-Brain reads remain useful when the optional financial ledger is
+    // absent or temporarily unavailable. Their own read boundaries still say
+    // whether the requested data was available.
+    return null;
+  }
+  return null;
+}
 
 export function initialOwnerView(): View {
   if (typeof location === "undefined") return "home";
@@ -82,53 +110,143 @@ export function App() {
   }
 
   const owner = me.owner || shellOwner;
-  const possessive = owner ? (/s$/i.test(owner) ? `${owner}'` : `${owner}'s`) : "Your";
 
   return (
     <FinanceScopeProvider>
-      <div className="min-h-dvh">
-        <header className="px-4 sm:px-6 lg:px-8 border-b border-line bg-card/90 backdrop-blur sticky top-0 z-20">
-          <div className="max-w-6xl mx-auto min-h-16 flex flex-col justify-center gap-2 py-3 lg:flex-row lg:items-center lg:justify-between lg:gap-6">
-            <button
-              onClick={() => setView("home")}
-              className="flex items-center gap-2 text-[14.5px] text-ink-soft hover:text-ink shrink-0"
-            >
-              <span className="w-7 h-7 rounded-lg bg-ink text-white grid place-items-center text-[12px] font-semibold" aria-hidden="true">FB</span>
-              <span>{possessive} brain</span>
-            </button>
-            <nav aria-label="Primary" className="flex items-center gap-1 text-[13.5px] w-full overflow-x-auto lg:w-auto pb-0.5 lg:pb-0">
-              <Tab now={view} go={setView} to="home">Home</Tab>
-              <Tab now={view} go={setView} to="year">This Year</Tab>
-              <Tab now={view} go={setView} to="financial-map">Financial Map</Tab>
-              <Tab now={view} go={setView} to="documents">Documents</Tab>
-              <Tab now={view} go={setView} to="ask">Explore</Tab>
-              <Tab now={view} go={setView} to="review">Add &amp; Review</Tab>
-              <Tab now={view} go={setView} to="access">Access</Tab>
-            </nav>
-          </div>
-        </header>
-        <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-7 sm:py-9 pb-24">
-          {/* Explore stays mounted across a visit to Access: losing an answer
-              because you checked who had access is a small betrayal of a page
-              whose whole subject is trust. */}
-          {view === "home" && <Home />}
-          {view === "year" && <ThisYear />}
-          {view === "financial-map" && <FinancialMap />}
-          {view === "documents" && <Documents />}
+      <OwnerWorkspace
+        owner={owner}
+        me={me}
+        view={view}
+        setView={setView}
+        refresh={refresh}
+      />
+    </FinanceScopeProvider>
+  );
+}
+
+export function OwnerWorkspace({ owner, me, view, setView, refresh }: {
+  owner: string;
+  me: Me;
+  view: View;
+  setView: (view: View) => void;
+  refresh: () => Promise<void>;
+}) {
+  const { entityScopeState, scopeChoiceMade } = useFinanceScope();
+  const scopeGate = ownerViewScopeGate(view, scopeChoiceMade, entityScopeState);
+  const guardedTitle = view === "year" ? "This Year" : "Add & Review";
+
+  return (
+    <div className="min-h-dvh">
+      <OwnerHeader owner={owner} now={view} go={setView} />
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-7 sm:py-9 pb-24">
+        {scopeGate ? (
+          <section className="max-w-2xl" aria-labelledby="scope-required-title">
+            <p className="eyebrow">
+              {scopeGate === "entity" ? "Choose one financial entity"
+                : scopeGate === "checking" ? "Checking your financial list" : "Choose what to view"}
+            </p>
+            <h1 id="scope-required-title" className="page-title">
+              {scopeGate === "entity" ? guardedTitle : view === "ask" ? "Ask & Explore" : view === "documents" ? "Documents" : "Home"}
+            </h1>
+            <p className="page-intro">
+              {scopeGate === "entity"
+                ? "Select one person, household, business, trust, property, or investment before opening this page. This keeps separate financial records and decisions from being combined."
+                : scopeGate === "checking"
+                  ? "The Brain is checking which parts of your finances are available before it opens this page."
+                  : "Choose one part of your finances or Whole Brain before opening this page. Nothing is combined until you make that choice."}
+            </p>
+            <div className="mt-6"><FinanceScopeBar requireEntity={scopeGate === "entity"} /></div>
+          </section>
+        ) : (
+          <>
+            {view === "home" && <Home onNavigate={setView} />}
+            {view === "year" && <ThisYear />}
+            {view === "financial-map" && <FinancialMap />}
+            {view === "documents" && <Documents />}
+            {view === "review" && <AddReview />}
+            {view === "access" && (
+              <Settings
+                devices={me.devices || []}
+                connections={me.connections || []}
+                onChange={refresh}
+              />
+            )}
+          </>
+        )}
+        {/* Keep an answer in place while the owner checks another page,
+            including a page waiting for a financial-entity choice. */}
+        {(scopeChoiceMade || (view === "ask" && scopeGate === null)) && (
           <div className={view === "ask" ? "" : "hidden"}>
             <Ask />
           </div>
-          {view === "review" && <AddReview />}
-          {view === "access" && (
-            <Settings
-              devices={me.devices || []}
-              connections={me.connections || []}
-              onChange={refresh}
-            />
-          )}
-        </main>
+        )}
+      </main>
+    </div>
+  );
+}
+
+export function OwnerHeader({ owner, now, go }: {
+  owner: string;
+  now: View;
+  go: (view: View) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const possessive = owner ? (/s$/i.test(owner) ? `${owner}'` : `${owner}'s`) : "Your";
+  const navigate = (view: View) => {
+    setMenuOpen(false);
+    go(view);
+  };
+
+  return (
+    <header className="px-4 sm:px-6 lg:px-8 border-b border-line bg-card/90 backdrop-blur sticky top-0 z-20">
+      <div className="max-w-6xl mx-auto min-h-16 py-3 lg:flex lg:items-center lg:justify-between lg:gap-6">
+        <div className="flex items-center justify-between gap-3 min-w-0">
+          <button
+            type="button"
+            onClick={() => navigate("home")}
+            className="flex items-center gap-2 min-w-0 text-[14.5px] text-ink-soft hover:text-ink"
+          >
+            <span className="w-7 h-7 rounded-lg bg-ink text-white grid place-items-center text-[12px] font-semibold shrink-0" aria-hidden="true">FB</span>
+            <span className="truncate">{possessive} brain</span>
+          </button>
+          <div className="flex items-center gap-1.5 shrink-0 lg:hidden">
+            <button
+              type="button"
+              onClick={() => navigate("access")}
+              aria-label="Open Access and passkeys"
+              aria-current={now === "access" ? "page" : undefined}
+              className={`px-2.5 py-2 rounded-lg whitespace-nowrap text-[13px] font-medium ${
+                now === "access" ? "bg-accent-soft text-accent" : "text-accent hover:bg-accent-soft"
+              }`}
+            >
+              Access &amp; passkeys
+            </button>
+            <button
+              type="button"
+              aria-expanded={menuOpen}
+              aria-controls="owner-primary-navigation"
+              onClick={() => setMenuOpen((open) => !open)}
+              className="px-2.5 py-2 rounded-lg text-[13px] font-medium text-ink-soft hover:bg-paper hover:text-ink"
+            >
+              {menuOpen ? "Close" : "Menu"}
+            </button>
+          </div>
+        </div>
+        <nav
+          id="owner-primary-navigation"
+          aria-label="Primary"
+          className={`${menuOpen ? "grid" : "hidden"} grid-cols-2 gap-1 w-full pt-2 mt-2 border-t border-line text-[13.5px] lg:mt-0 lg:flex lg:items-center lg:w-auto lg:pt-0 lg:border-0`}
+        >
+          <Tab now={now} go={navigate} to="home">Home</Tab>
+          <Tab now={now} go={navigate} to="year">This Year</Tab>
+          <Tab now={now} go={navigate} to="financial-map">Financial Map</Tab>
+          <Tab now={now} go={navigate} to="documents">Documents</Tab>
+          <Tab now={now} go={navigate} to="ask">Explore</Tab>
+          <Tab now={now} go={navigate} to="review">Add &amp; Review</Tab>
+          <Tab now={now} go={navigate} to="access" mobileHidden>Access</Tab>
+        </nav>
       </div>
-    </FinanceScopeProvider>
+    </header>
   );
 }
 
@@ -170,8 +288,12 @@ function UnavailableSession({ message }: { message: string }) {
   );
 }
 
-function Tab({ now, to, go, children }: {
-  now: View; to: View; go: (v: View) => void; children: ReactNode;
+function Tab({ now, to, go, children, mobileHidden = false }: {
+  now: View;
+  to: View;
+  go: (v: View) => void;
+  children: ReactNode;
+  mobileHidden?: boolean;
 }) {
   const active = now === to;
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -183,9 +305,10 @@ function Tab({ now, to, go, children }: {
   return (
     <button
       ref={buttonRef}
+      type="button"
       onClick={() => go(to)}
       aria-current={active ? "page" : undefined}
-      className={`px-3 py-2 rounded-lg whitespace-nowrap ${
+      className={`w-full px-3 py-2 rounded-lg whitespace-nowrap text-left lg:w-auto lg:text-center ${mobileHidden ? "hidden lg:block" : ""} ${
         active ? "bg-accent-soft text-accent font-medium" : "text-ink-soft hover:bg-paper hover:text-ink"
       }`}
     >

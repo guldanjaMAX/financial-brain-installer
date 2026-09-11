@@ -21,6 +21,7 @@ import {
   sandboxScenarioFromReferer,
   verifyOnboardingSmoke,
 } from "../scripts/onboarding-sandbox.mjs";
+import { ownerThinkResponse } from "../frontend/test/rehearsal-responses.mjs";
 
 const SENTINEL = "must-not-reach-rehearsal-child";
 
@@ -102,9 +103,23 @@ test("the mock scenario follows the app page that initiated the API call", () =>
   assert.equal(sandboxScenarioFromReferer("not a url", base), "populated");
 });
 
+test("healthy-empty stays empty when the owner moves from Home to Explore", () => {
+  const empty = ownerThinkResponse("empty", "mesa-coffee");
+  assert.equal(empty.answer, null);
+  assert.equal(empty.status, "no_results");
+  assert.deepEqual(empty.citations, []);
+  assert.deepEqual(empty.results, []);
+  assert.equal(empty.confidence, undefined);
+
+  const populated = ownerThinkResponse("populated", "mesa-coffee");
+  assert.match(populated.answer, /confirmed cash figure/);
+  assert.equal(populated.confidence.percent, 86);
+  assert.equal(populated.citations.length, 1);
+});
+
 test("the scenario menu covers happy, empty, unavailable, retry, conflict, and scoped-access states", () => {
   const ids = new Set(SANDBOX_SCENARIOS.map((scenario) => scenario.id));
-  for (const id of ["populated", "financial-map", "document-journey", "empty", "partial", "degraded", "conflict", "idempotent", "grant", "grant-unavailable", "signin"]) {
+  for (const id of ["populated", "financial-map", "document-journey", "empty", "zero-entities", "partial", "degraded", "conflict", "idempotent", "grant", "grant-unavailable", "signin"]) {
     assert.ok(ids.has(id), `missing ${id}`);
   }
 });

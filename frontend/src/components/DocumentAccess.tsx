@@ -161,9 +161,9 @@ export function DocumentAccess() {
   return (
     <Section
       title="Shared document access"
-      blurb="Create and revoke access to exact documents. A business selection narrows discovery, but it never grants the whole business."
+      blurb="Create and revoke access to exact documents. A financial-entity selection narrows discovery, but it never grants the whole entity."
     >
-      <div className="p-4 border-b border-line"><FinanceScopeBar /></div>
+      <div className="p-4 border-b border-line"><FinanceScopeBar requireEntity /></div>
       <ScopedGrantEditor
         key={scope === null ? "no-scope" : `entity:${scope}`}
         scope={scope}
@@ -199,9 +199,25 @@ export function DocumentAccess() {
             </span>
           </span>
           {grant.state === "active" && (
-            <span className="flex items-center gap-2">
-              <button disabled={busy} className="text-[13px] text-accent px-2 py-1 disabled:opacity-50" onClick={() => reissue(grant)}>New link</button>
-              <Confirm label="Revoke" question="Revoke this exact access?" disabled={busy} onConfirm={() => revoke(grant.grant_id)} />
+            <span className="min-w-0 sm:max-w-md sm:text-right">
+              <span className="flex items-center gap-2 sm:justify-end">
+                <Confirm
+                  label="New link"
+                  question="Replace any earlier unused link with a new one?"
+                  tone="quiet"
+                  disabled={busy}
+                  onConfirm={() => reissue(grant)}
+                />
+                <Confirm
+                  label="Revoke"
+                  question="End this person's access now? Their current passkey session will stop working."
+                  disabled={busy}
+                  onConfirm={() => revoke(grant.grant_id)}
+                />
+              </span>
+              <span className="block mt-1 text-[12px] leading-relaxed text-ink-soft">
+                New link replaces any earlier unused link. Revoke ends this person's document access and current passkey session.
+              </span>
             </span>
           )}
         </Row>
@@ -345,7 +361,7 @@ function ScopedGrantEditor({
   return (
     <div className="p-4 border-b border-line">
       <TruthNote>Documents are owner-only by default. Every grant is an immutable exact-document allowlist enforced by the brain.</TruthNote>
-      {!scope && <Attention>Select one business before finding documents to share.</Attention>}
+      {!scope && <Attention>Select one part of your finances before finding documents to share.</Attention>}
       <label className="block text-[12.5px] text-ink-soft">Who is this for?
         <input className="field mt-1" value={subject} maxLength={120} onChange={(event) => updateSubject(event.target.value)} placeholder="Accountant, attorney, reviewer" />
       </label>

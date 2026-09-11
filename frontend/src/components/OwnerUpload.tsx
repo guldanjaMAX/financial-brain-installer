@@ -63,7 +63,7 @@ function ScopedOwnerUpload({ scope, activeLabel, onStored }: {
   }
 
   async function upload() {
-    if (!scope) return setError("Select one business before adding a record.");
+    if (!scope) return setError("Select one part of your finances before adding a record.");
     if (!file || !capabilities || busy) return;
     setBusy(true);
     setError(null);
@@ -120,7 +120,7 @@ function ScopedOwnerUpload({ scope, activeLabel, onStored }: {
     : undefined;
 
   return (
-    <Section title="Add a text record" blurb={`Add UTF-8 text or Markdown to ${scope ? activeLabel : "one selected business"}. The brain scans and stores it through the same ingestion path as every other source.`}>
+    <Section title="Add a text record" blurb={`Add UTF-8 text or Markdown to ${scope ? activeLabel : "one selected part of your finances"}. The Brain scans and stores it through the same ingestion path as every other source.`}>
       {capabilitiesUnavailable && (
         <Attention>Upload limits could not be read from the brain, so file selection is unavailable. No file was submitted.</Attention>
       )}
@@ -142,7 +142,7 @@ function ScopedOwnerUpload({ scope, activeLabel, onStored }: {
           <p className="mt-2 text-[12.5px] text-ink-soft leading-relaxed">
             PDF, image, Office, RTF, email, archive, binary, and unknown file types are not supported in owner upload. They require a separate extraction path and will not be labeled uploaded.
           </p>
-          {!scope && <div className="mt-3"><Attention>Select one business above before adding a record.</Attention></div>}
+          {!scope && <div className="mt-3"><Attention>Select one part of your finances above before adding a record.</Attention></div>}
           {file && <p className="mt-3 text-[13.5px]">Ready to submit: <span className="font-medium">{file.name}</span></p>}
           {error && <div className="mt-3"><Attention>{error}</Attention></div>}
           {message && <div className="mt-3"><Note>{message}</Note></div>}

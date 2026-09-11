@@ -1,11 +1,49 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MapReviewField } from "../lib/financial-map";
-import { FinancialMapCorrectionChoice, FinancialMapFieldList } from "./FinancialMap";
+import { ApiError } from "../lib/api";
+import type { FinancialMapReview, MapReviewField } from "../lib/financial-map";
+import {
+  copyFinancialMapAssistantPrompt, exactReviewedMapIsActive, financialMapAssistantPrompt,
+  financialMapReadFailure, FinancialMapAssistantPath,
+  FinancialMapCorrectionChoice, FinancialMapFieldList,
+} from "./FinancialMap";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Financial Map review clarity", () => {
+  it("treats a missing review route as unavailable rather than an empty queue", () => {
+    const state = financialMapReadFailure(new ApiError(404, { error: "not found" }, "HTTP 404"));
+
+    expect(state.kind).toBe("unavailable");
+    expect(state.message).toContain("not an empty review queue");
+    expect(state.message).toContain("ask the installer");
+  });
+
+  it("recognises only the exact authoritative reviewed map as active", () => {
+    const review = {
+      expected_sequence: 7,
+      map_hash: "a".repeat(64),
+      denominator_hash: "b".repeat(64),
+    } as FinancialMapReview;
+    const active = {
+      status: "no_pending_review",
+      review_state: "none",
+      complete: true,
+      truncated: false,
+      active_map_present: true,
+      active_map_authoritative: true,
+      active_sequence: 7,
+      active_map_hash: review.map_hash,
+      active_denominator_hash: review.denominator_hash,
+      active_activated_at: 1770000000000,
+      owner_message: "No Financial Map is waiting for review.",
+    };
+
+    expect(exactReviewedMapIsActive(active, review)).toBe(true);
+    expect(exactReviewedMapIsActive({ ...active, active_map_hash: "c".repeat(64) }, review)).toBe(false);
+    expect(exactReviewedMapIsActive({ ...active, active_map_authoritative: false }, review)).toBe(false);
+  });
+
   it("keeps the owner and current-record labels visible for every compared field", () => {
     const fields: Record<string, MapReviewField> = {
       tax_class: {
@@ -33,7 +71,46 @@ describe("Financial Map review clarity", () => {
     expect(html).toContain('aria-label="Tax Class comparison"');
     expect(html).toContain("S corporation");
     expect(html).toContain("LLC");
+    expect(html).toContain("Different from current");
+    expect(html).toContain("What confirming this difference accepts");
+    expect(html.match(/What confirming this difference accepts/g)).toHaveLength(1);
+    expect(html).toContain("becomes the owner-approved Tax Class in this Financial Map");
+    expect(html).toContain("does not rewrite that record or remove its supporting evidence");
+    expect(html).toContain("earlier confirmed Financial Maps remain preserved in history");
     expect(html).not.toContain("sm:hidden");
+  });
+
+  it("provides the available assistant read and separately approved preview path", () => {
+    const onReadLatest = vi.fn();
+    const html = renderToStaticMarkup(
+      <FinancialMapAssistantPath action="create" onReadLatest={onReadLatest} />,
+    );
+
+    expect(html).toContain("Open Claude Code or Codex where it is already connected to this Brain");
+    expect(html).toContain("brain_financial_map");
+    expect(html).toContain("read mode first");
+    expect(html).toContain("ask for my approval before using it");
+    expect(html).toContain("It cannot confirm the map");
+    expect(html).toContain("Copy request");
+    expect(html).toContain("does not contact the Brain, create a preview, or confirm a map");
+    expect(html).toContain("Read latest map");
+    expect(onReadLatest).not.toHaveBeenCalled();
+  });
+
+  it("copies only the exact non-authorizing assistant request", async () => {
+    const writeText = vi.fn(async () => undefined);
+
+    await expect(copyFinancialMapAssistantPrompt("correct", writeText)).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(writeText).toHaveBeenCalledWith(financialMapAssistantPrompt("correct"));
+    expect(financialMapAssistantPrompt("correct")).toContain("read mode first");
+    expect(financialMapAssistantPrompt("correct")).toContain("ask for my approval before using it");
+  });
+
+  it("fails closed when clipboard access is unavailable", async () => {
+    const writeText = vi.fn(async () => { throw new Error("clipboard blocked"); });
+
+    await expect(copyFinancialMapAssistantPrompt("create", writeText)).resolves.toBe(false);
   });
 
   it("renders a correction stop without invoking callbacks or a passkey prompt", () => {
@@ -50,12 +127,13 @@ describe("Financial Map review clarity", () => {
         confirmationUnresolved={false}
         onRequest={onRequest}
         onContinue={onContinue}
+        onReadLatest={() => undefined}
       />,
     );
 
     expect(html).toContain("Something is wrong?");
     expect(html).toContain("Do not confirm this version");
-    expect(html).toContain("complete fresh preview");
+    expect(html).toContain("exact Claude Code or Codex request and refresh path");
     expect(onRequest).not.toHaveBeenCalled();
     expect(onContinue).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
@@ -69,12 +147,18 @@ describe("Financial Map review clarity", () => {
         confirmationUnresolved={false}
         onRequest={() => undefined}
         onContinue={() => undefined}
+        onReadLatest={() => undefined}
       />,
     );
 
     expect(html).toContain('role="status"');
     expect(html).toContain("Stop here and correct the preview");
-    expect(html).toContain("Return to the Claude Code or Codex conversation");
+    expect(html).toContain("Open Claude Code or Codex where it is already connected to this Brain");
+    expect(html).toContain(financialMapAssistantPrompt("correct"));
+    expect(html).toContain("Copy request");
+    expect(html).toContain("Copying only places this request on your clipboard");
+    expect(html).toContain("does not contact the Brain, create a preview, or confirm a map");
+    expect(html).toContain("Read latest map");
     expect(html).toContain("did not activate or change anything");
     expect(html).toContain("no passkey window opened");
   });

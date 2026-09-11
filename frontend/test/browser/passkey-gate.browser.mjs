@@ -74,6 +74,36 @@ try {
     await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
 
   await page.close();
+
+  const unavailablePage = await harness.newPage({ viewport: { width: 390, height: 844 } });
+  await unavailablePage.addInitScript(() => {
+    window.__passkeyPromptCalls = 0;
+    Object.defineProperty(window, "PublicKeyCredential", {
+      configurable: true,
+      value: function SyntheticPublicKeyCredential() {},
+    });
+    Object.defineProperty(navigator, "credentials", {
+      configurable: true,
+      value: {
+        create: async () => {
+          window.__passkeyPromptCalls += 1;
+          return null;
+        },
+      },
+    });
+  });
+  await unavailablePage.goto(new URL("/test/browser/fixtures/passkey-gate.html", harness.origin).href);
+  await unavailablePage.getByRole("button", { name: "Create my owner passkey", exact: true }).click();
+  await unavailablePage.getByText(/No passkey was enrolled in this Brain, and nothing changed here/).waitFor();
+  const unavailableText = await unavailablePage.locator("body").innerText();
+  check("a missing passkey route explains the safe result and next step without raw HTTP",
+    !unavailableText.includes("HTTP 404")
+    && unavailableText.includes("Ask your installer for a fresh private setup link")
+    && await unavailablePage.getByRole("button", { name: "Passkey setup unavailable here", exact: true }).isDisabled());
+  check("a missing passkey route never opens the device prompt",
+    await unavailablePage.evaluate(() => window.__passkeyPromptCalls) === 0);
+  await unavailablePage.close();
+
   console.log(JSON.stringify({ local_only: true, synthetic_only: true, passed: checks.filter(item => item.passed).length, total: checks.length, checks }));
   assert.ok(checks.every(item => item.passed), "one or more passkey welcome checks failed");
 } finally {
