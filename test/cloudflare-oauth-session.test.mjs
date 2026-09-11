@@ -1066,9 +1066,13 @@ test("plain doctor runs deployed migration checks inside the saved browser profi
   let insideSavedProfile = false;
   let checksumChecks = 0;
   let request = null;
+  let doctorOptions = null;
   try {
     await cmdDoctor(manifestPath, {
-      doctorRunAll: async () => [],
+      doctorRunAll: async (received) => {
+        doctorOptions = received;
+        return [];
+      },
       withAvailableCloudflareToken: async (action) => action(),
       withCloudflareControl: async (action, received) => {
         request = received;
@@ -1098,6 +1102,7 @@ test("plain doctor runs deployed migration checks inside the saved browser profi
     });
 
     assert.equal(checksumChecks, 1);
+    assert.equal(doctorOptions.allowCodexForExistingBrain, true);
     assert.equal(request.manifestPath, manifestPath);
     assert.equal(request.accountId, ACCOUNT_A);
     assert.equal(request.authProfile, profile);

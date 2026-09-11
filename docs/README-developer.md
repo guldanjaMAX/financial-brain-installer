@@ -988,6 +988,14 @@ ambient-secret scrubbing, exact hostname confirmation before invite creation,
 and stop-on-fail
 verification.
 
+Claude Code remains a blocking prerequisite for fresh setup and `brain tools`.
+For plain doctor on a valid existing manifest, an available Codex client makes a
+missing or signed-out Claude Code result advisory so the read-only technician
+sequence can reach health and source evidence. The warning explicitly says that
+Claude Code was not proven. If Codex is also unavailable, Claude remains fatal.
+Later health, source, and device failures remain nonzero and preserve the
+technician coordinator's stop-on-first-failure contract.
+
 Plaid application-credential setup is intentionally absent from generic setup.
 `brain setup`, `brain secrets`, and `brain technician` never accept or write the
 three bank-feed credential bindings. For an approved enabled feed, a complete

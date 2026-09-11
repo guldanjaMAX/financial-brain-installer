@@ -15538,11 +15538,13 @@ async function buildChecksumDriftCheck(manifestPath, options = {}) {
 export async function cmdDoctor(manifestPath, options = {}) {
   let accountId;
   let cloudflareAuthProfile;
+  let existingBrain = false;
   if (manifestPath && existsSync(manifestPath)) {
     try {
       const cloudflare = loadManifest(manifestPath).m?.infrastructure?.cloudflare;
       accountId = cloudflare?.account_id;
       cloudflareAuthProfile = cloudflare?.auth_profile;
+      existingBrain = true;
     } catch { /* doctor must work without a valid manifest */ }
   }
 
@@ -15559,6 +15561,11 @@ export async function cmdDoctor(manifestPath, options = {}) {
       accountId,
       cloudflareAuthProfile,
       cloudflareToken: activeCloudflareToken(),
+      // Claude Code remains mandatory for fresh setup and `brain tools`.
+      // Once a valid install record exists, Codex can guide these read-only
+      // checks without making an unrelated Claude sign-in a false health stop.
+      allowCodexForExistingBrain:
+        options.allowCodexForExistingBrain ?? existingBrain,
       onResult: (x) => {
         const mark = x.status === D_OK ? c.green("ok  ") : x.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
         console.log(`  ${mark}  ${x.name.padEnd(18)}  ${x.detail}`);
