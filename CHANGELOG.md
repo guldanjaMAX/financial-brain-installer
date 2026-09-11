@@ -17,6 +17,19 @@ Candidate only. This version has not been released.
   preview never advertises an apply command; every candidate stays unresolved
   until a later schema can bind the exact result family and retrieval evidence.
 
+- **A private result-family proof can now seal exact stored chunks and test
+  retrieval without authorizing repair.** For one explicitly named local
+  original, schema 44 binds every current document revision and title-prefixed
+  chunk, requires a fully drained and count-matched vector index, repeats the
+  production owner retrieval path, and proves the top citation belongs to that
+  family. Private locators, queries, document IDs, titles, and text do not enter
+  the durable proof. Portable family evidence survives recovery, while the
+  deployment-local retrieval check must be repeated after Vectorize is rebuilt.
+  Historical seals restore only inside an empty-target marker that the verified
+  artifact closes and checks before the recovery can advance.
+  Accepted repair remains blocked, and this does not authorize OCR, reingest,
+  deletion, or a whole-source completeness claim.
+
 - **Optimize can now read exact source and provenance receipts without a
   Cloudflare sign-in.** `brain sources <manifest> --json` uses the Brain's saved
   owner credential and private Worker route to return a stable D1 source

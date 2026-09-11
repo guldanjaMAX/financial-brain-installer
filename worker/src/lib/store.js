@@ -535,7 +535,21 @@ async function sourceOriginalBindingChanged(env, prior, prepared) {
 
 async function d1RevisionUnchanged(env, prior, prepared) {
   if (!prior || prior.content_hash !== prepared.hash || d1MetadataChanged(prior, prepared)) return false;
-  return !await sourceOriginalBindingChanged(env, prior, prepared);
+  if (await sourceOriginalBindingChanged(env, prior, prepared)) return false;
+  if (prepared.sourceOriginalIdentity) {
+    // Schema 44 deliberately leaves already-bound schema-43 chunks unclaimed.
+    // Force one authoritative reingest rather than letting the content no-op
+    // strand NULL receipt columns forever. Counts also catch a missing or extra
+    // chunk before the result-family gate is asked to seal it.
+    const effectiveTitle = d1PersistedState(prior, prepared).title;
+    const expectedChunks = chunkText(prepared.content, {
+      header: effectiveTitle ? `[${effectiveTitle}]` : "",
+      ...prepared.geometry,
+    }).length;
+    if (Number(prior.stored_chunk_count) !== expectedChunks ||
+        Number(prior.bound_chunk_receipt_count) !== expectedChunks) return false;
+  }
+  return true;
 }
 
 function validDeferredRevision(revision) {
@@ -785,6 +799,12 @@ const d1Backend = {
                 provenance_receipt_version, provenance_receipt_status,
                 provenance_receipt_reason, provenance_receipt_digest,
                 document_revision_id, source_original_binding_hash,
+                (SELECT COUNT(*) FROM chunks AS receipt_chunks
+                  WHERE receipt_chunks.doc_uid=documents.doc_uid) AS stored_chunk_count,
+                (SELECT COUNT(*) FROM chunks AS receipt_chunks
+                  WHERE receipt_chunks.doc_uid=documents.doc_uid
+                    AND receipt_chunks.bound_document_revision_id=documents.document_revision_id
+                    AND receipt_chunks.result_chunk_receipt_hash IS NOT NULL) AS bound_chunk_receipt_count,
                 ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
          FROM documents WHERE doc_uid = ?1`
       ).bind(docUid).first();
@@ -881,7 +901,11 @@ const d1Backend = {
         sourceOriginalBinding?.binding_hash ?? null
       );
 
-    const header = title ? `[${title}]` : "";
+    // Missing incoming metadata preserves the sanitized stored document title.
+    // Build the searchable bytes from that same effective value so a schema-43
+    // adoption replay cannot leave the document and its chunk receipts split.
+    const effectiveTitle = persisted.title;
+    const header = effectiveTitle ? `[${effectiveTitle}]` : "";
     const pieces = chunkText(content, { header, ...geometry });
     const baseChunks = pieces.map((text, i) => ({
       chunk_uid: `${docUid}#${i}`,
@@ -889,8 +913,11 @@ const d1Backend = {
       chunk_ix: i,
       text,
       source: source_type,
-      title: title ?? null,
+      title: effectiveTitle ?? null,
       document_date: Number.isFinite(docDate) ? docDate : null,
+      // Only raw-bound revisions participate in the immutable result-family
+      // receipt. The D1 writer recomputes the exact stored-text commitment.
+      bound_document_revision_id: sourceOriginalBinding ? revisionId : null,
     }));
 
     let chunks = baseChunks;
@@ -1047,6 +1074,12 @@ const d1Backend = {
               provenance_receipt_version, provenance_receipt_status,
               provenance_receipt_reason, provenance_receipt_digest,
               document_revision_id, source_original_binding_hash,
+              (SELECT COUNT(*) FROM chunks AS receipt_chunks
+                WHERE receipt_chunks.doc_uid=documents.doc_uid) AS stored_chunk_count,
+              (SELECT COUNT(*) FROM chunks AS receipt_chunks
+                WHERE receipt_chunks.doc_uid=documents.doc_uid
+                  AND receipt_chunks.bound_document_revision_id=documents.document_revision_id
+                  AND receipt_chunks.result_chunk_receipt_hash IS NOT NULL) AS bound_chunk_receipt_count,
               ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
        FROM documents WHERE doc_uid = ?1`
     ).bind(input.docUid)));

@@ -513,11 +513,29 @@ incomplete result family therefore remains unresolved. Every observation
 receipt says `whole_source_complete: false`; this contract neither enumerates
 a source nor authorizes OCR or ingest.
 
-The next stacked gate must be database-enforced and bind the original to every
-current document revision plus the exact chunk set, including title prefixes.
-It must then prove target outbox zero, global vector readiness, deterministic
-private retrieval, and citation to that same family. Schema 43 alone cannot
-authorize an accepted observation.
+Migration 0044 adds a two-phase, non-authorizing proof. Each raw-bound chunk
+stores a Worker-computed digest over its exact revision ID, chunk index, title,
+and stored text after title prefixing. A portable seal then binds the
+all-and-only current logical family, with structural parts required to be a
+complete contiguous set. The portable tables contain only opaque revision IDs
+and hashes, not locators, document IDs, titles, text, queries, or citations.
+
+A second deployment-local seal reads Vectorize before D1, binds the exact
+outbox generation and mutation fence, requires target and global outbox zero
+and corpus-wide vector-count parity, and runs the production owner retrieval
+path twice without reranking. Both ranked results and citations must be
+identical, and the top result and citation must resolve to the sealed family.
+The final D1 insert rechecks the family and readiness state so a concurrent
+corpus mutation fails closed.
+
+Recovery restores portable members before their family header, but excludes
+the deployment-local verification because recovery rebuilds Vectorize. A new
+verification is required against the recovered projection. Historical headers
+use a narrow import marker that can open only before any recovery data exists.
+The artifact closes and checks that marker after import, while immutable
+schema-43 binding validation remains active throughout. Accepted
+observations remain blocked by both the Worker and D1; schema 44 supplies
+evidence, not repair authority or whole-source completeness.
 
 The new-computer continuity report composes that same authenticated source
 inventory with local-only observations. It reads the exact manifest, durable

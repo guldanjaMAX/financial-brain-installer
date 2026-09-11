@@ -355,13 +355,23 @@ producer binary or a server-side recomputation over uploaded raw bytes. Both
 the schema-43 D1 guard and the Worker still reject every accepted observation,
 and no OCR, backfill, repair, or deployment is implied.
 
-Schema 43 is necessary but not sufficient for acceptance. A later stacked gate
-must add a database-enforced result-family receipt that binds the original to
-every current document revision and the exact resulting chunk set, including
-title prefixes. That gate must also prove target outbox zero, global vector
-readiness, deterministic private retrieval, and citation to the same family.
-Accepted outcomes stay fail-closed until that complete chain is separately
-reviewed and proven.
+Migration 0044 adds that result-family proof without enabling accepted repair.
+Raw-bound ingests now commit an opaque digest for every exact stored chunk,
+including its title prefix. The private admin route can seal an all-and-only
+current family of up to 256 revisions and 500 chunks, then require target and
+global outbox zero, exact Vectorize parity, two identical passes through the
+production owner retrieval path, and a top citation from the sealed family.
+The raw locator, retrieval query, document IDs, titles, text, and citation
+references are not copied into durable proof rows. Portable family members and
+headers survive recovery; the deployment-local retrieval verification does not
+and must be repeated after Vectorize is rebuilt. Historical headers restore
+inside a schema-only marker that can open only on an empty recovery target;
+the artifact closes it and proves it empty before the target can advance.
+
+This is proof substrate only. The schema-43 D1 guard and Worker still reject
+every accepted observation. A stored result-family verification does not
+authorize OCR, reingest, deletion, retrospective repair, or whole-source
+completeness, and it is not a production or release receipt.
 
 ### Inventory the financial picture
 

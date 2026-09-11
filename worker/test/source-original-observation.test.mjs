@@ -60,7 +60,10 @@ test("closed vocabulary matches the local assessment states and authoritative pa
     SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.raw_original_result_binding,
     "available_for_bound_current_revisions",
   );
-  assert.equal(SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.accepted_result_family_receipt, "unavailable");
+  assert.equal(
+    SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.accepted_result_family_receipt,
+    "available_non_authorizing",
+  );
 });
 
 test("recovery preserves the identity domain and an unresolved observation exactly", async (t) => {

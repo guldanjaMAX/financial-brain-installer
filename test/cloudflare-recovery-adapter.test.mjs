@@ -65,10 +65,22 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_observations"), t
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_observations"), true);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_bindings"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_bindings"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_family_members"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_members"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_family_receipts"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_receipts"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_family_verifications"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_verifications"), false);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_family_recovery_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_recovery_state"), false);
 assert.ok(
-  RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") >
-    RECOVERY_EXPORT_TABLES.indexOf("documents"),
-  "recovery restores current document rows before their immutable binding history",
+  RECOVERY_EXPORT_TABLES.indexOf("documents") <
+    RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") &&
+    RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") <
+      RECOVERY_EXPORT_TABLES.indexOf("source_original_result_family_members") &&
+    RECOVERY_EXPORT_TABLES.indexOf("source_original_result_family_members") <
+      RECOVERY_EXPORT_TABLES.indexOf("source_original_result_family_receipts"),
+  "recovery restores documents, raw bindings, family members, then sealed family headers",
 );
 
 const sourceManifestPath = join(sandbox, "source.manifest.json");
@@ -189,6 +201,11 @@ assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_i
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_observations"), true);
 assert.equal(recoveryExportTables(appliedMigrations.slice(0, 42)).includes("source_original_result_bindings"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_result_bindings"), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 43)).includes("source_original_result_family_members"), false);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 43)).includes("source_original_result_family_receipts"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_result_family_members"), true);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_result_family_receipts"), true);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_result_family_verifications"), false);
 const installStateColumns = Object.freeze([
   ["id", "INTEGER"],
   ["client_slug", "TEXT"],
@@ -288,6 +305,43 @@ const aggregateTemplate = aggregateFromSql(
 );
 const deterministicDataExport = "-- deterministic data-only fixture\n";
 const deterministicDataFingerprint = hash(normalizedInstallStateSql + deterministicDataExport);
+const historicalFamilyDataExport = `INSERT INTO "sources"
+  ("name","kind","status","created_at")
+  VALUES ('localdocs','upload','ready','2026-09-11T00:00:00Z');
+INSERT INTO "documents"
+  ("doc_uid","source","source_id","title","ingested_at","content_hash","meta","deleted_at",
+   "text_source","text_reliable","provenance_receipt_version","provenance_receipt_status",
+   "provenance_receipt_reason","provenance_receipt_digest","document_revision_id",
+   "source_original_binding_hash")
+  VALUES ('localdocs:historical','localdocs','historical','Historical fixture',7,'${"4".repeat(64)}','{}',10,
+          'native',1,1,'complete','lineage_and_text_recorded','${"5".repeat(64)}',
+          'rev-v1:${"2".repeat(64)}','sha256:${"6".repeat(64)}');
+INSERT INTO "chunks"
+  ("chunk_uid","doc_uid","chunk_ix","text","source","title","vector_id",
+   "bound_document_revision_id","result_chunk_receipt_hash")
+  VALUES ('localdocs:historical#0','localdocs:historical',0,
+          '[Historical fixture]' || char(10) || char(10) || 'Recovered body.',
+          'localdocs','Historical fixture','localdocs:historical#0',
+          'rev-v1:${"2".repeat(64)}','sha256:${"7".repeat(64)}');
+INSERT INTO "source_original_result_bindings"
+  ("contract_version","tenant_id","source","original_id","locator_kind","document_revision_id",
+   "original_content_sha256","original_byte_count","document_content_hash",
+   "provenance_receipt_digest","binding_hash","bound_at")
+  VALUES (1,'primary','localdocs','hmac-sha256:${"1".repeat(64)}','source_relative_path',
+          'rev-v1:${"2".repeat(64)}','${"3".repeat(64)}',123,'${"4".repeat(64)}',
+          '${"5".repeat(64)}','sha256:${"6".repeat(64)}',7);
+INSERT INTO "source_original_result_family_members"
+  ("family_receipt_hash","document_revision_id","source_original_binding_hash","chunk_ix","chunk_receipt_hash")
+  VALUES ('sha256:${"8".repeat(64)}','rev-v1:${"2".repeat(64)}','sha256:${"6".repeat(64)}',0,
+          'sha256:${"7".repeat(64)}');
+INSERT INTO "source_original_result_family_receipts"
+  ("contract_version","tenant_id","source","original_id","locator_kind","original_content_sha256",
+   "original_byte_count","document_count","document_set_hash","chunk_count","chunk_set_hash",
+   "family_receipt_hash","sealed_at")
+  VALUES (1,'primary','localdocs','hmac-sha256:${"1".repeat(64)}','source_relative_path',
+          '${"3".repeat(64)}',123,1,'sha256:${"a".repeat(64)}',1,'sha256:${"b".repeat(64)}',
+          'sha256:${"8".repeat(64)}',8);
+`;
 const expectedSnapshot = Object.freeze({
   integrity: "ok",
   schema_fingerprint: hash(canonical({ migrations: appliedMigrations, schema: schemaRows })),
@@ -623,6 +677,10 @@ function providerHarness({
   readinessLagAfterBootstrap = false,
   recoveryArtifactKey = fixtureRecoveryArtifactKey,
   sourceDrainLease = false,
+  sourceFamilyRecoveryStateActive = false,
+  targetFamilyRecoveryStateActive = false,
+  dataExport = deterministicDataExport,
+  inspectCombinedArtifact = null,
   sourceWrappingSecret = false,
   partialZoomSecretGroup = false,
   zoomSecretGroup = false,
@@ -678,11 +736,18 @@ function providerHarness({
     "source_original_id_key_state",
     "source_original_observations",
   ]);
+  const sourceOriginalResultFamilyTables = new Set([
+    "source_original_result_family_members",
+    "source_original_result_family_receipts",
+    "source_original_result_family_verifications",
+    "source_original_result_family_recovery_state",
+  ]);
   const durableTablesForVersion = (version) => RECOVERY_DURABLE_TABLES.filter((name) =>
     (version >= 37 || name !== "memory_supersessions") &&
     (version >= 41 || !mapTables.has(name)) &&
     (version >= 42 || !sourceOriginalTables.has(name)) &&
-    (version >= 43 || name !== "source_original_result_bindings"));
+    (version >= 43 || name !== "source_original_result_bindings") &&
+    (version >= 44 || !sourceOriginalResultFamilyTables.has(name)));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
@@ -849,7 +914,7 @@ function providerHarness({
       assert.equal(exportedTables.includes("agent_action_receipts"), false);
       writeFileSync(
         output,
-        `${includesBank && bankFixture ? bankFixture.exportData() : deterministicDataExport}${corpusMutated ? "\n-- synthetic corpus mutation\n" : ""}`,
+        `${includesBank && bankFixture ? bankFixture.exportData() : dataExport}${corpusMutated ? "\n-- synthetic corpus mutation\n" : ""}`,
         { mode: 0o600 },
       );
       return ok();
@@ -857,7 +922,23 @@ function providerHarness({
     if (args[0] === "d1" && args[1] === "execute" && args.includes("--file")) {
       const importPath = args[args.indexOf("--file") + 1];
       assert.match(importPath, /\.brain-recovery-plaintext\.tmp-[0-9a-f]+$/);
-      assert.equal(readFileSync(importPath, "utf8").includes("CREATE TABLE"), true);
+      const importSql = readFileSync(importPath, "utf8");
+      assert.equal(importSql.includes("CREATE TABLE"), true);
+      if (sourceMigrationVersion >= 44) {
+        const markerOpen = importSql.indexOf(
+          `INSERT INTO "source_original_result_family_recovery_state" ("id","mode")`,
+        );
+        const durableRows = importSql.indexOf(dataExport.slice(0, 32));
+        const markerClose = importSql.indexOf(
+          `DELETE FROM "source_original_result_family_recovery_state"`,
+        );
+        const markerAssertion = importSql.indexOf(
+          `SELECT 2,'verified_recovery_import' WHERE EXISTS`,
+        );
+        assert.ok(markerOpen >= 0 && durableRows > markerOpen && markerClose > durableRows &&
+          markerAssertion > markerClose,
+        "portable family history is restored only inside the bounded recovery marker");
+      }
       importCalls++;
       targetRestored = true;
       bootstrapRequired = true;
@@ -880,6 +961,11 @@ function providerHarness({
         rows = [];
       } else if (/PRAGMA quick_check/.test(sql)) {
         rows = [{ quick_check: "ok" }];
+      } else if (/COUNT\(\*\) AS active_imports FROM source_original_result_family_recovery_state/.test(sql)) {
+        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
+        rows = [{ active_imports: isSource
+          ? (sourceFamilyRecoveryStateActive ? 1 : 0)
+          : (targetFamilyRecoveryStateActive ? 1 : 0) }];
       } else if (/SELECT version,name,checksum/.test(sql)) {
         const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
         const latest = isSource ? sourceMigrationVersion : targetMigrationVersion;
@@ -1156,6 +1242,7 @@ function providerHarness({
         const text = readFileSync(path, "utf8");
         assert.match(text, /CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts/);
         assert.equal(text.includes(privateSentinel), false);
+        if (inspectCombinedArtifact) await inspectCombinedArtifact(text);
         return expectedSnapshot;
       },
       runEval: async ({ args, env, input }) => {
@@ -1599,6 +1686,84 @@ try {
     approveWrapper: drillPreview.wrapper_approval_fingerprint,
     approveGolden: drillPreview.golden_approval_fingerprint,
   });
+  const openFamilyImportHarness = providerHarness({ sourceFamilyRecoveryStateActive: true });
+  const openFamilyImportGate = createCloudflareRecoveryFieldGateAdapters(
+    { ...approvedDrillConfig, plan: drillInitialized.plan },
+    openFamilyImportHarness.dependencies,
+  );
+  await assert.rejects(
+    openFamilyImportGate.adapters.export_d1({
+      stage: "export_d1",
+      attempt: 1,
+      planFingerprint: drillInitialized.plan.plan_fingerprint,
+      targetResourceFingerprint: drillInitialized.plan.target_resource_fingerprint,
+      completed: [],
+    }),
+    (error) => error.code === "RECOVERY_RESULT_FAMILY_IMPORT_STATE_ACTIVE",
+  );
+  assert.equal(openFamilyImportHarness.wranglerCalls.some((call) =>
+    call.args[0] === "d1" && call.args[1] === "export"), false);
+
+  const historicalFamilyHarness = providerHarness({
+    dataExport: historicalFamilyDataExport,
+    inspectCombinedArtifact: (sql) => {
+      const replay = new DatabaseSync(":memory:");
+      try {
+        replay.exec(sql);
+        assert.deepEqual({
+          active_imports: replay.prepare(
+            "SELECT count(*) AS n FROM source_original_result_family_recovery_state",
+          ).get().n,
+          deleted_receipted_chunks: replay.prepare(
+            `SELECT count(*) AS n
+               FROM chunks c JOIN documents d ON d.doc_uid=c.doc_uid
+              WHERE d.deleted_at IS NOT NULL
+                AND c.bound_document_revision_id IS NOT NULL
+                AND c.result_chunk_receipt_hash IS NOT NULL`,
+          ).get().n,
+          portable_receipts: replay.prepare(
+            "SELECT count(*) AS n FROM source_original_result_family_receipts",
+          ).get().n,
+          local_verifications: replay.prepare(
+            "SELECT count(*) AS n FROM source_original_result_family_verifications",
+          ).get().n,
+        }, {
+          active_imports: 0,
+          deleted_receipted_chunks: 1,
+          portable_receipts: 1,
+          local_verifications: 0,
+        });
+      } finally {
+        replay.close();
+      }
+    },
+  });
+  const historicalFamilyGate = createCloudflareRecoveryFieldGateAdapters(
+    approvedAdapterConfig,
+    historicalFamilyHarness.dependencies,
+  );
+  const historicalExport = await historicalFamilyGate.adapters.export_d1(
+    stageContext("export_d1"),
+  );
+  await historicalFamilyGate.adapters.verify_export(stageContext("verify_export", [{
+    id: "export_d1",
+    evidence: historicalExport,
+  }]));
+  unlinkSync(join(artifactDirectory, initialized.plan.artifact.relative_name));
+
+  const openTargetFamilyImportHarness = providerHarness({
+    initialTargetRestored: true,
+    targetFamilyRecoveryStateActive: true,
+  });
+  const openTargetFamilyImportGate = createCloudflareRecoveryFieldGateAdapters(
+    approvedAdapterConfig,
+    openTargetFamilyImportHarness.dependencies,
+  );
+  await assert.rejects(
+    openTargetFamilyImportGate.adapters.verify_d1(stageContext("verify_d1")),
+    (error) => error.code === "RECOVERY_RESULT_FAMILY_IMPORT_STATE_ACTIVE",
+  );
+
   const drillHarness = providerHarness();
   const exportCalls = () => drillHarness.wranglerCalls.filter((call) =>
     call.env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id &&
@@ -1880,11 +2045,11 @@ try {
     (error) => error.code === "RECOVERY_D1_RESOURCE_AMBIGUOUS",
   );
 
-  // Schema 42 has the reviewed vector protocol, but the current Worker reads
-  // schema-43 binding state on every ingest. It must be updated before export;
+  // Schema 43 has the reviewed vector protocol, but the current Worker reads
+  // schema-44 result-family state on every ingest. It must be updated before export;
   // restoring the older prefix would otherwise produce a healthy-looking brain
   // whose next ordinary write fails.
-  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 42 });
+  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 43 });
   const prefixSourceGate = createCloudflareRecoveryFieldGateAdapters(
     approvedAdapterConfig,
     prefixSourceHarness.dependencies,
@@ -2215,7 +2380,7 @@ try {
   // assuming the historical checkpoint is compatible with the current Worker.
   const prefixTargetHarness = providerHarness({
     initialTargetRestored: true,
-    targetMigrationVersion: 42,
+    targetMigrationVersion: 43,
   });
   const prefixTargetGate = createCloudflareRecoveryFieldGateAdapters(
     approvedAdapterConfig,
@@ -2472,9 +2637,9 @@ try {
   }
 
   // Active health is the last cheap proof that the promoted Worker and restored
-  // database still belong to the same release. A schema-42 time-travel restore
-  // between resumable stages must not pass as an active schema-43 brain.
-  for (const schemaVersion of [undefined, 42]) {
+  // database still belong to the same release. A schema-43 time-travel restore
+  // between resumable stages must not pass as an active schema-44 brain.
+  for (const schemaVersion of [undefined, 43]) {
     const staleSchemaHarness = providerHarness({
       targetVersionId: activeWorkerVersionId,
       initialTargetRestored: true,

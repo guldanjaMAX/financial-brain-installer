@@ -1156,12 +1156,51 @@ route always states that its target set is bounded and that whole-source
 completeness is false. No CLI currently turns this evidence contract into OCR,
 reingest, repair, or deletion authority.
 
-Do not treat schema 43 as acceptance proof. A separate stacked schema must
-commit a database-enforced result-family receipt over every current document
-revision and exact chunk, including title prefixes, then verify target outbox
-zero, global vector readiness, deterministic private retrieval, and citation to
-that same family. Accepted remains blocked until the whole chain is reviewed
-and proven.
+Migration 0044 adds the non-authorizing result-family receipt on the same
+private endpoint. Use an explicit operation even though omission defaults to
+`record`:
+
+```json
+{
+  "contract_version": 1,
+  "mode": "result_family",
+  "operation": "record",
+  "source": "localdocs",
+  "locator_kind": "source_relative_path",
+  "locator": "statements/example.pdf",
+  "original_content_sha256": "<64 lowercase hex characters>",
+  "original_byte_count": 1234,
+  "retrieval_query": "a private exact query for this original"
+}
+```
+
+The route accepts only registered upload sources, at most 256 current
+revisions and 500 chunks, and a normalized nonempty retrieval query of at most
+4096 UTF-8 bytes. A schema-43-bound document upgraded with null chunk receipts
+must pass once through authoritative ingest before it can be sealed. Each new
+ingest writes a digest over the revision ID, chunk index, title, and exact
+stored text, including the title prefix. The portable member rows and family
+header contain only opaque revision IDs and hashes. Recovery can replay older
+headers only inside the schema-44 empty-target import marker. Binding-ledger
+validation remains active, and the generated artifact closes and checks the
+marker after all portable rows are restored.
+
+`record` computes and atomically stores the portable family plus one
+deployment-local verification. `verify` reruns the current proof but refuses
+to create a missing row. Both operations require target and global outbox zero,
+the same outbox generation and Vectorize mutation fence observed by the global
+readiness check, exact vector-count parity, and two identical calls to the
+production unrestricted-owner retrieval path with reranking bypassed. The top
+result and its projected citation must resolve to the sealed family. A final D1
+trigger rechecks the current family, queue, generation, and mutation fence in
+the write transaction.
+
+Neither the locator nor the raw query is returned or persisted. Durable proof
+rows also exclude document IDs, chunk IDs, titles, text, answers, and citation
+references. The response explicitly reports
+`accepted_outcome_authorized: false`. The schema-43 accepted trigger and Worker
+rejection remain in force, so schema 44 cannot authorize accepted repair, OCR,
+reingest, deletion, or a whole-source claim.
 
 `brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
 local handoff lane. Its only accepted scopes are `technician-skill`,

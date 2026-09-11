@@ -8,6 +8,7 @@ import worker from "../worker/src/index.js";
 import { storeFor } from "../worker/src/lib/store.js";
 import { forget, replaceDocumentChunks, upsertChunks } from "../worker/src/lib/store-d1.js";
 import { sourceOriginalResultBindingReadiness } from "../worker/src/lib/source-original-observation.js";
+import { sourceOriginalChunkReceiptHash } from "../worker/src/lib/source-original-chunk.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrationDir = join(here, "..", "migrations", "d1");
@@ -695,6 +696,17 @@ for (const sourceId of ["race-stale-first", "race-winner-first", "race-mixed"]) 
   assert.equal(firstBinding.document_revision_id, firstDocument.document_revision_id);
   assert.equal(firstBinding.document_content_hash, firstDocument.content_hash);
   assert.equal(Object.hasOwn(firstBinding, "locator"), false);
+  const firstChunk = plainRow(sqlite.prepare(
+    `SELECT chunk_ix,title,text,bound_document_revision_id,result_chunk_receipt_hash
+       FROM chunks WHERE doc_uid=? ORDER BY chunk_ix LIMIT 1`
+  ).get(docUid));
+  assert.equal(firstChunk.bound_document_revision_id, firstDocument.document_revision_id);
+  assert.equal(firstChunk.result_chunk_receipt_hash, await sourceOriginalChunkReceiptHash({
+    document_revision_id: firstDocument.document_revision_id,
+    chunk_ix: firstChunk.chunk_ix,
+    title: firstChunk.title,
+    text: firstChunk.text,
+  }));
   const firstReady = await sourceOriginalResultBindingReadiness(env, {
     source: "localdocs",
     locator: sourceId,
@@ -718,6 +730,44 @@ for (const sourceId of ["race-stale-first", "race-winner-first", "race-mixed"]) 
     "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE original_id=?"
   ).get(firstBinding.original_id).n, 1);
 
+  // A schema-43 brain reaches schema 44 with its already-bound chunks
+  // deliberately unreceipted. The first authoritative replay must adopt those
+  // chunks even when the connector omits an unchanged title, and must use the
+  // effective persisted title for both the document and searchable bytes.
+  const chunkReceiptUpdateTrigger = sqlite.prepare(
+    `SELECT sql FROM sqlite_master
+      WHERE type='trigger' AND name='chunks_source_original_receipt_update'`,
+  ).get().sql;
+  sqlite.exec("DROP TRIGGER chunks_source_original_receipt_update");
+  sqlite.prepare(
+    `UPDATE chunks
+        SET bound_document_revision_id=NULL,result_chunk_receipt_hash=NULL
+      WHERE doc_uid=?`,
+  ).run(docUid);
+  sqlite.exec(chunkReceiptUpdateTrigger);
+  const replayWithoutTitle = boundEnvelope(sourceId, rawA, content);
+  delete replayWithoutTitle.title;
+  const adoptedReplay = await post([replayWithoutTitle]);
+  assert.equal(adoptedReplay.updated, 1);
+  const adoptedDocument = plainRow(sqlite.prepare(
+    `SELECT title,document_revision_id FROM documents WHERE doc_uid=?`,
+  ).get(docUid));
+  const adoptedChunk = plainRow(sqlite.prepare(
+    `SELECT chunk_ix,title,text,bound_document_revision_id,result_chunk_receipt_hash
+       FROM chunks WHERE doc_uid=? ORDER BY chunk_ix LIMIT 1`,
+  ).get(docUid));
+  assert.equal(adoptedDocument.title, `Synthetic ${sourceId}`);
+  assert.equal(adoptedChunk.title, adoptedDocument.title);
+  assert.ok(adoptedChunk.text.startsWith(`[${adoptedDocument.title}]\n\n`));
+  assert.equal(adoptedChunk.bound_document_revision_id, adoptedDocument.document_revision_id);
+  assert.equal(adoptedChunk.result_chunk_receipt_hash, await sourceOriginalChunkReceiptHash({
+    document_revision_id: adoptedDocument.document_revision_id,
+    chunk_ix: adoptedChunk.chunk_ix,
+    title: adoptedChunk.title,
+    text: adoptedChunk.text,
+  }));
+  assert.equal((await post([replayWithoutTitle])).unchanged, 1);
+
   const differentRaw = await post([boundEnvelope(sourceId, rawB, content)]);
   assert.equal(differentRaw.updated, 1);
   const secondDocument = plainRow(sqlite.prepare(
@@ -729,7 +779,7 @@ for (const sourceId of ["race-stale-first", "race-winner-first", "race-mixed"]) 
   assert.notEqual(secondDocument.source_original_binding_hash, firstDocument.source_original_binding_hash);
   assert.equal(sqlite.prepare(
     "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE original_id=?"
-  ).get(firstBinding.original_id).n, 2);
+  ).get(firstBinding.original_id).n, 3);
   assert.equal(sqlite.prepare(
     "SELECT original_content_sha256 FROM source_original_result_bindings WHERE binding_hash=?"
   ).get(secondDocument.source_original_binding_hash).original_content_sha256, rawB);
@@ -763,7 +813,7 @@ for (const sourceId of ["race-stale-first", "race-winner-first", "race-mixed"]) 
   assert.equal((await post([envelope(sourceId, content, "localdocs")])).unchanged, 1);
   assert.equal(sqlite.prepare(
     "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE original_id=?"
-  ).get(firstBinding.original_id).n, 2, "unbinding never rewrites immutable history");
+  ).get(firstBinding.original_id).n, 3, "unbinding never rewrites immutable history");
 }
 
 // Structural parts from one file bind to the same opaque original id while

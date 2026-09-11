@@ -68,6 +68,7 @@ import {
   publicMutationMarker,
   scanChunkPages,
 } from "./diagnose-scan.js";
+import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
@@ -928,31 +929,47 @@ export async function upsertChunks(env, chunks, { expectedContentHash = null } =
     // Computed at write time so a search hit can be resolved back to its chunk
     // even when the id had to be hashed to fit Vectorize's 64-byte ceiling.
     c.vector_id = await vectorIdFor(c.chunk_uid);
+    const boundRevisionId = c.bound_document_revision_id ?? null;
+    const chunkReceiptHash = boundRevisionId === null
+      ? null
+      : await sourceOriginalChunkReceiptHash({
+          document_revision_id: boundRevisionId,
+          chunk_ix: c.chunk_ix,
+          title: c.title ?? null,
+          text: c.text,
+        });
     const chunkStatement = env.DB.prepare(
       guarded
-        ? `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id)
-           SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12
+        ? `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id,
+                               bound_document_revision_id,result_chunk_receipt_hash)
+           SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14
            WHERE EXISTS (
-             SELECT 1 FROM documents WHERE doc_uid = ?2 AND content_hash = ?13
+             SELECT 1 FROM documents WHERE doc_uid = ?2 AND content_hash = ?15
            )
            ON CONFLICT(chunk_uid) DO UPDATE SET
              text = excluded.text, title = excluded.title,
              document_date = excluded.document_date,
              client = excluded.client, category = excluded.category,
              top_folder = excluded.top_folder, platform = excluded.platform,
-             vector_id = excluded.vector_id`
-        : `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+             vector_id = excluded.vector_id,
+             bound_document_revision_id = excluded.bound_document_revision_id,
+             result_chunk_receipt_hash = excluded.result_chunk_receipt_hash`
+        : `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id,
+                               bound_document_revision_id,result_chunk_receipt_hash)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
            ON CONFLICT(chunk_uid) DO UPDATE SET
              text = excluded.text, title = excluded.title,
              document_date = excluded.document_date,
              client = excluded.client, category = excluded.category,
              top_folder = excluded.top_folder, platform = excluded.platform,
-             vector_id = excluded.vector_id`
+             vector_id = excluded.vector_id,
+             bound_document_revision_id = excluded.bound_document_revision_id,
+             result_chunk_receipt_hash = excluded.result_chunk_receipt_hash`
     ).bind(
       c.chunk_uid, c.doc_uid, c.chunk_ix, c.text, c.source, c.title ?? null,
       c.document_date ?? null, c.client ?? null, c.category ?? null,
       c.top_folder ?? null, c.platform ?? null, c.vector_id,
+      boundRevisionId, chunkReceiptHash,
       ...(guarded ? [expectedContentHash] : [])
     );
     stmts.push(chunkStatement);
@@ -1053,22 +1070,35 @@ export async function stageDocumentRevision(env, {
   const requiredWriteIndexes = [0];
   for (const chunk of chunks) {
     chunk.vector_id = await vectorIdFor(chunk.chunk_uid);
+    const boundRevisionId = chunk.bound_document_revision_id ?? null;
+    const chunkReceiptHash = boundRevisionId === null
+      ? null
+      : await sourceOriginalChunkReceiptHash({
+          document_revision_id: boundRevisionId,
+          chunk_ix: chunk.chunk_ix,
+          title: chunk.title ?? null,
+          text: chunk.text,
+        });
     requiredWriteIndexes.push(statements.length);
     statements.push(env.DB.prepare(
-      `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id)
+      `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id,
+                           bound_document_revision_id,result_chunk_receipt_hash)
        SELECT ?1,?2,?3,?4,?5,?6,?7,
-              documents.client, documents.category, documents.top_folder, documents.platform, ?8
+              documents.client, documents.category, documents.top_folder, documents.platform, ?8,?9,?10
        FROM documents
-       WHERE documents.doc_uid = ?2 AND documents.content_hash = ?9
+       WHERE documents.doc_uid = ?2 AND documents.content_hash = ?11
        ON CONFLICT(chunk_uid) DO UPDATE SET
          text = excluded.text, title = excluded.title,
          document_date = excluded.document_date,
          client = excluded.client, category = excluded.category,
          top_folder = excluded.top_folder, platform = excluded.platform,
-         vector_id = excluded.vector_id`
+         vector_id = excluded.vector_id,
+         bound_document_revision_id = excluded.bound_document_revision_id,
+         result_chunk_receipt_hash = excluded.result_chunk_receipt_hash`
     ).bind(
       chunk.chunk_uid, chunk.doc_uid, chunk.chunk_ix, chunk.text, chunk.source,
       chunk.title ?? null, chunk.document_date ?? null, chunk.vector_id,
+      boundRevisionId, chunkReceiptHash,
       expectedContentHash
     ));
 
@@ -6034,6 +6064,7 @@ export async function vectorReadiness(env) {
 
   const state = await env.DB.prepare(
     `SELECT schema_version,
+            outbox_generation,
             vector_projection_mutation_id AS mutation_id,
             vector_projection_submitted_at AS mutation_submitted_at,
             vector_projection_status AS projection_status,
@@ -6053,7 +6084,9 @@ export async function vectorReadiness(env) {
   const expected = Number(state.expected_vectors);
   const pending = Number(state.pending);
   const submitted = Number(state.submitted);
-  if (![expected, pending, submitted].every((value) => Number.isSafeInteger(value) && value >= 0) ||
+  const outboxGeneration = Number(state.outbox_generation ?? 0);
+  if (![expected, pending, submitted, outboxGeneration]
+      .every((value) => Number.isSafeInteger(value) && value >= 0) ||
       submitted > pending) {
     throw new Error("the vector readiness counts are invalid");
   }
@@ -6118,6 +6151,8 @@ export async function vectorReadiness(env) {
     actual_vectors: vectorCount,
     pending,
     submitted,
+    outbox_generation: outboxGeneration,
+    mutation_id: mutationId,
     oldest_queued_at: state.oldest_queued_at ?? null,
     mutation_submitted_at: state.mutation_submitted_at ?? null,
     projection_status: status,
