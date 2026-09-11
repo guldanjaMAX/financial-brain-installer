@@ -19,6 +19,7 @@ import {
   buildNpmInvocation,
   buildStepPlan,
   buildWindowsBatchInvocation,
+  canonicalSourceRoot,
   createCredentialFreeProviderEnvironment,
   createPlanEnvironment,
   createSafeEnvironment,
@@ -172,6 +173,34 @@ test("source roots accept equivalent Windows case and path spellings", () => {
   );
 });
 
+test("source roots expand the GitHub Windows runner 8.3 temp alias", () => {
+  const shortRoot = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\brain-field-plan-test-fixture";
+  const longRoot = "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\brain-field-plan-test-fixture";
+  const otherRoot = "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\another-checkout";
+  const nativeCalls = [];
+  const nativeRealpath = (value) => {
+    nativeCalls.push(value);
+    return value === shortRoot ? longRoot : value;
+  };
+  const portableRealpath = () => {
+    throw new Error("Windows source roots must use the native resolver");
+  };
+
+  assert.equal(sameCanonicalSourceRoot(shortRoot, longRoot, "win32"), false);
+  const canonicalShort = canonicalSourceRoot(shortRoot, {
+    platform: "win32", nativeRealpath, portableRealpath,
+  });
+  const canonicalLong = canonicalSourceRoot(longRoot, {
+    platform: "win32", nativeRealpath, portableRealpath,
+  });
+  const canonicalOther = canonicalSourceRoot(otherRoot, {
+    platform: "win32", nativeRealpath, portableRealpath,
+  });
+  assert.deepEqual(nativeCalls, [shortRoot, longRoot, otherRoot]);
+  assert.equal(sameCanonicalSourceRoot(canonicalShort, canonicalLong, "win32"), true);
+  assert.equal(sameCanonicalSourceRoot(canonicalShort, canonicalOther, "win32"), false);
+});
+
 test("source roots reject different Windows directories", () => {
   assert.equal(
     sameCanonicalSourceRoot(
@@ -201,6 +230,14 @@ test("source roots reject different Windows directories", () => {
 });
 
 test("source roots preserve exact POSIX comparisons", () => {
+  const exactRoot = canonicalSourceRoot("/tmp/Brain", {
+    platform: "linux",
+    nativeRealpath() {
+      throw new Error("POSIX source roots must not use the Windows native resolver");
+    },
+    portableRealpath: (value) => value,
+  });
+  assert.equal(exactRoot, "/tmp/Brain");
   assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/Brain", "linux"), true);
   assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/brain", "linux"), false);
   assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/Brain/", "darwin"), false);
