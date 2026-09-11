@@ -24,7 +24,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename, dirname, isAbsolute, join, relative, resolve, sep, win32 as pathWin32,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -372,8 +374,18 @@ export function assertNoProjectNpmConfig(root) {
   return true;
 }
 
+/** Keep source identity independent of ambient Git configuration while still
+ *  honoring the standard LF-index/CRLF-worktree shape of a Windows checkout. */
+export function sourceIdentityGitArgs(args, platform = process.platform) {
+  return [
+    "-c", "core.fsmonitor=false",
+    ...(platform === "win32" ? ["-c", "core.autocrlf=true"] : []),
+    ...args,
+  ];
+}
+
 function git(args, env, cwd = ROOT) {
-  const result = run("git", ["-c", "core.fsmonitor=false", ...args], {
+  const result = run("git", sourceIdentityGitArgs(args), {
     env, capture: true, cwd, timeoutMs: 60_000,
   });
   if (!result.ok) throw new Error(`git_${args[0]}_failed`);
@@ -387,20 +399,41 @@ function sourceIdentityFailure(code, source) {
   return error;
 }
 
+/** Compare real source roots using the path semantics of the host platform. */
+export function sameCanonicalSourceRoot(left, right, platform = process.platform) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  if (left === right) return true;
+  if (platform !== "win32") return false;
+  if (!pathWin32.isAbsolute(left) || !pathWin32.isAbsolute(right)) return false;
+  return pathWin32.relative(left, right) === "";
+}
+
+/** Expand Windows filesystem aliases before comparing source roots. */
+export function canonicalSourceRoot(
+  value,
+  {
+    platform = process.platform,
+    nativeRealpath = realpathSync.native,
+    portableRealpath = realpathSync,
+  } = {},
+) {
+  return platform === "win32" ? nativeRealpath(value) : portableRealpath(value);
+}
+
 export function readSourceIdentity(expectSha, env, dependencies = {}) {
   const root = resolve(dependencies.root || ROOT);
-  const canonicalRoot = realpathSync(root);
+  const canonicalRoot = canonicalSourceRoot(root);
   const readGit = dependencies.git || ((args) => git(args, env, root));
   const readBytes = (path) => {
     const value = (dependencies.readFile || readFileSync)(path);
     return Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(String(value));
   };
   const pathExists = dependencies.exists || existsSync;
-  const readDiffCheck = dependencies.diffCheck || ((headSha) => run("git", [
-    "-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--check", headSha,
-  ], { env, capture: true, cwd: root, timeoutMs: 60_000 }));
+  const readDiffCheck = dependencies.diffCheck || ((headSha) => run("git",
+    sourceIdentityGitArgs(["diff", "--no-ext-diff", "--check", headSha]),
+    { env, capture: true, cwd: root, timeoutMs: 60_000 }));
   const readGitState = () => {
-    const top = realpathSync(readGit(["rev-parse", "--show-toplevel"]));
+    const top = canonicalSourceRoot(readGit(["rev-parse", "--show-toplevel"]));
     const headSha = readGit(["rev-parse", "HEAD"]);
     return {
       top,
@@ -414,7 +447,9 @@ export function readSourceIdentity(expectSha, env, dependencies = {}) {
   };
 
   const opening = readGitState();
-  if (opening.top !== canonicalRoot) throw new Error("source_root_mismatch");
+  if (!sameCanonicalSourceRoot(opening.top, canonicalRoot)) {
+    throw new Error("source_root_mismatch");
+  }
   const packageJsonBytes = readBytes(join(root, "package.json"));
   const packageLockBytes = readBytes(join(root, "package-lock.json"));
   const closingPackageJsonBytes = readBytes(join(root, "package.json"));
@@ -454,7 +489,7 @@ export function readSourceIdentity(expectSha, env, dependencies = {}) {
     shallow_repository: opening.shallowRepository,
     diff_check_clean: openingDiffClean,
     identity_stable_during_check:
-      closing.top === opening.top &&
+      sameCanonicalSourceRoot(closing.top, opening.top) &&
       closing.headSha === opening.headSha &&
       closing.treeSha === opening.treeSha &&
       closing.shallowRepository === opening.shallowRepository &&
