@@ -419,7 +419,9 @@ test("provenance repair bypasses Wrangler custody but leaves other commands wrap
 test("read-only Google readiness accepts an installed-app token with no client secret and exposes no OAuth value", () => {
   const directory = mkdtempSync(join(tmpdir(), "brain-google-readiness-"));
   const path = join(directory, "google.json");
-  const options = { backend: "file", platform: "linux", path };
+  // Use the host's real storage semantics. A Linux override on Windows would
+  // ask NTFS to prove POSIX mode bits instead of exercising DPAPI and its ACL.
+  const options = { backend: "file", path };
   const refreshToken = "fixture-refresh-value-never-returned";
   try {
     saveTokens({
