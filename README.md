@@ -288,6 +288,9 @@ checkpoint counts, and cursor-preservation state. It never returns a provider
 message, raw sync cursor or cursor value, configured root values, document
 title, URI, provider id, document id, path, content, or secret. It does not infer
 an entity, owner, tax year, or whether an empty document was a scan.
+This is source-inventory contract v3. Inventory and recovery cursors are bound
+to that version; a v2 response or cursor is refused instead of being
+misinterpreted.
 
 To inspect the exact records behind the recovery counts, request one bounded
 preview page:

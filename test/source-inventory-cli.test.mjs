@@ -77,7 +77,7 @@ function sourceRow(name, overrides = {}) {
 
 function inventoryPage({ source, cursor = null, truncated = false, row = null, total = 2 }) {
   return {
-    contract_version: 2,
+    contract_version: 3,
     kind: "source_inventory",
     complete: !truncated,
     total,
@@ -95,7 +95,7 @@ function inventoryPage({ source, cursor = null, truncated = false, row = null, t
 function recoveryPage() {
   const recordId = `hmac-sha256:${"c".repeat(64)}`;
   return {
-    contract_version: 2,
+    contract_version: 3,
     kind: "source_recovery_plan",
     complete: true,
     total: 1,
@@ -241,6 +241,13 @@ test("source inventory CLI exposes only validated Gmail failure evidence in JSON
   await assert.rejects(
     collectSourceInventoryPages(async () => new Response(JSON.stringify(privatePage), { status: 200 })),
     /invalid connector failure evidence/,
+  );
+
+  const oldContractPage = structuredClone(page);
+  oldContractPage.contract_version = 2;
+  await assert.rejects(
+    collectSourceInventoryPages(async () => new Response(JSON.stringify(oldContractPage), { status: 200 })),
+    /unsupported source-inventory receipt/,
   );
 });
 

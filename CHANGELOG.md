@@ -29,7 +29,11 @@ Candidate only. This version has not been released.
   content, or secret. A separate `--json --recovery` mode pages opaque record
   identities and closed reason codes for planning. Both modes are strictly
   read-only, reveal no raw source locator, and stop if the snapshot changes.
-  They do not run OCR or repair.
+  They do not run OCR or repair. The required failure field advances the shared
+  inventory/recovery response and cursor contract to v3; v2 is refused, while
+  schema 39 remains readable with the new evidence explicitly unknown. Because
+  0.4.6 is already live, the enforcing release audit blocks this contract from
+  shipping under that version and requires 0.4.7 or newer.
 - **Optimize can now inventory the stored financial picture without changing
   it.** The new `brain financial-picture <manifest> --json` command reads one
   bounded D1 snapshot of exact entity, period, masked-account, books, tax,

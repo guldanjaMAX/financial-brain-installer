@@ -178,6 +178,28 @@ export function releaseAdjudication(cases, version) {
   };
 }
 
+export const SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION = "0.4.7";
+
+/** Prevent the v3 inventory contract from reusing an already-published package identity. */
+export function assertSourceInventoryV3ReleaseVersion(version) {
+  const parse = (value) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value));
+    if (!match) throw new Error("package.json does not name an exact release version");
+    return match.slice(1).map(Number);
+  };
+  const candidate = parse(version);
+  const minimum = parse(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION);
+  for (let index = 0; index < candidate.length; index++) {
+    if (candidate[index] > minimum[index]) return version;
+    if (candidate[index] < minimum[index]) break;
+  }
+  if (candidate.every((part, index) => part === minimum[index])) return version;
+  throw new Error(
+    `source inventory contract v3 cannot ship under already-live package ${version}; ` +
+    `the package version must be ${SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION} or newer`,
+  );
+}
+
 // Run independently: a failed auth test must not prevent the recovery tests
 // from running. No shell, no output pipes, no inherited success from a later
 // command. A signal, timeout, or spawn error is a failure too.
@@ -217,6 +239,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     // already pins to the tag. No flag, no environment override.
     const version = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).version;
     if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error("package.json does not name an exact release version");
+    if (mode === "--release") assertSourceInventoryV3ReleaseVersion(version);
     const cases = assertEvidenceDocuments(assertUndeferrableRegistered(
       validateIncidents(JSON.parse(readFileSync(resolve(root, "docs/update-incidents.json"), "utf8")), undefined, version)));
     if (mode === "--check") console.log("ADVISORY MODE: --check never fails. The release gate is --release.");

@@ -3412,7 +3412,7 @@ const LINEAGE_SHAPE_SQL = `CASE WHEN
   )
 THEN 1 ELSE 0 END`;
 
-const sourceInventorySql = `
+const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `
   WITH live_documents AS MATERIALIZED (
     SELECT d.rowid AS document_rowid,
            d.doc_uid,
@@ -3539,7 +3539,8 @@ const sourceInventorySql = `
     SELECT source,lane,started_at,finished_at,walk_complete,files_seen,
            docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
            confirmed_from,confirmed_through,target_from,target_through,proposed_deletes,
-           delete_action,refusal_reason,error,failure_evidence
+           delete_action,refusal_reason,error,
+           ${includeFailureEvidence ? "failure_evidence" : "NULL AS failure_evidence"}
       FROM (
         SELECT sr.*,
                ROW_NUMBER() OVER (
@@ -3657,7 +3658,18 @@ export async function sourceInventory(env, {
     throw new TypeError("source inventory row limit is invalid");
   }
 
-  const result = await env.DB.prepare(sourceInventorySql).bind(maxRows + 1).all();
+  let result;
+  try {
+    result = await env.DB.prepare(sourceInventorySql()).bind(maxRows + 1).all();
+  } catch (error) {
+    if (!missingFailureEvidenceColumn(error)) throw error;
+    // Schema 39 remains readable while migration 0040 is pending. Missing
+    // failure evidence is unknown; every older receipt and coverage field
+    // keeps its exact meaning, and malformed/non-schema errors never retry.
+    result = await env.DB.prepare(sourceInventorySql({ includeFailureEvidence: false }))
+      .bind(maxRows + 1)
+      .all();
+  }
   const rawRows = Array.isArray(result?.results) ? result.results : [];
   const total = rawRows.length ? inventoryCount(rawRows[0].inventory_total) : 0;
   if (total > maxRows || rawRows.length > maxRows) {

@@ -12,6 +12,7 @@ import {
   normalizeIngestEnvelopeProvenance,
   provenanceAssessmentMarker,
 } from "../src/lib/provenance-receipt.js";
+import { sourceInventory } from "../src/lib/store-d1.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "..", "..", "migrations", "d1");
@@ -29,9 +30,11 @@ const SAFE_GMAIL_FAILURE = Object.freeze({
   cursor_preservation: "absent_preserved",
 });
 
-function migratedDb(label = "fixture") {
+function migratedDb(label = "fixture", { throughMigration = Infinity } = {}) {
   const db = new DatabaseSync(":memory:");
-  for (const file of readdirSync(MIGRATIONS).filter((name) => name.endsWith(".sql")).sort()) {
+  for (const file of readdirSync(MIGRATIONS)
+    .filter((name) => name.endsWith(".sql") && Number(name.slice(0, 4)) <= throughMigration)
+    .sort()) {
     const sql = readFileSync(join(MIGRATIONS, file), "utf8");
     for (const statement of splitStatements(sql)) db.exec(statement);
   }
@@ -54,7 +57,7 @@ function migratedDb(label = "fixture") {
   return db;
 }
 
-async function addInventoryFixture(db, prefix = "") {
+async function addInventoryFixture(db, prefix = "", { includeFailureEvidence = true } = {}) {
   const source = (name) => `${prefix}${name}`;
   db.prepare(
     `INSERT INTO sources
@@ -174,19 +177,29 @@ async function addInventoryFixture(db, prefix = "") {
     "2020-01-01T00:00:00.000Z", "2026-09-09T00:00:00.000Z",
     0, "applied", null, null,
   );
-  db.prepare(
-    `INSERT INTO sync_runs
-       (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
-        docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
-        proposed_deletes,delete_action,refusal_reason,error,failure_evidence)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-  ).run(
+  const betaRunValues = [
     `${source("beta")}-run`, source("beta"), "incremental",
     Date.parse("2026-09-01T00:00:00.000Z"), Date.parse("2026-09-01T00:01:00.000Z"),
     0, 1, 0, 0, 0, 0, 1, 1, 0, null, null,
     "private provider failure for secret-account@example.invalid",
-    JSON.stringify(SAFE_GMAIL_FAILURE),
-  );
+  ];
+  if (includeFailureEvidence) {
+    db.prepare(
+      `INSERT INTO sync_runs
+         (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+          docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+          proposed_deletes,delete_action,refusal_reason,error,failure_evidence)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(...betaRunValues, JSON.stringify(SAFE_GMAIL_FAILURE));
+  } else {
+    db.prepare(
+      `INSERT INTO sync_runs
+         (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+          docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+          proposed_deletes,delete_action,refusal_reason,error)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(...betaRunValues);
+  }
 }
 
 function d1Env(db, label = "fixture") {
@@ -227,6 +240,11 @@ const post = (body = {}, headers = {}) => new Request(`${ORIGIN}/api/admin/brain
 });
 
 const call = (env, request) => worker.fetch(request, env, { waitUntil() {}, passThroughOnException() {} });
+
+function cursorWithVersion(value, version) {
+  const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  return Buffer.from(JSON.stringify({ ...decoded, v: version }), "utf8").toString("base64url");
+}
 
 async function ownerHeaders(env, credential = OWNER_CREDENTIAL, grantId = null) {
   const cookie = await mintSessionCookie(env, 1, { credentialId: credential, grantId });
@@ -281,6 +299,7 @@ test("source inventory pages are complete, stable, supported, and read-only", as
   const firstResponse = await call(env, post({ limit: 1 }, { "X-Admin-Key": "test-admin-key" }));
   assert.equal(firstResponse.status, 200, await firstResponse.clone().text());
   const first = await firstResponse.json();
+  assert.equal(first.contract_version, 3);
   assert.equal(first.total, 3);
   assert.equal(first.returned, 1);
   assert.equal(first.truncated, true);
@@ -428,6 +447,36 @@ test("source inventory suppresses stored Gmail failure evidence that fails the c
   assert.doesNotMatch(JSON.stringify(inventory), /SYNTHETIC_PRIVATE_PROVIDER_MESSAGE|message-id|cursor-value|secret/i);
 });
 
+test("source inventory reads schema 39 with unknown failure evidence and rethrows non-schema failures", async () => {
+  const db = migratedDb("schema39", { throughMigration: 39 });
+  await addInventoryFixture(db, "", { includeFailureEvidence: false });
+  const { env, seen } = d1Env(db, "schema39");
+  const response = await call(env, post({ limit: 10 }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(response.status, 200, await response.clone().text());
+  const inventory = await response.json();
+  assert.equal(inventory.contract_version, 3);
+  const beta = inventory.sources.find((source) => source.source_id === "beta");
+  assert.equal(beta.last_failure, null);
+  assert.equal(beta.receipt.latest_run.metrics_version, 1);
+  assert.equal(beta.receipt.latest_run.docs_failed, 1);
+  assert.ok(seen.prepared.some((sql) => /NULL AS failure_evidence/.test(sql)));
+  assert.doesNotMatch(JSON.stringify(inventory), /private provider failure|secret-account/i);
+
+  let attempts = 0;
+  await assert.rejects(
+    sourceInventory({
+      DB: {
+        prepare() {
+          attempts++;
+          throw new Error("D1 transport timeout");
+        },
+      },
+    }),
+    /D1 transport timeout/,
+  );
+  assert.equal(attempts, 1, "non-schema failures must not enter the compatibility retry");
+});
+
 test("source recovery preview is exhaustive through stable opaque pages and performs no repair", async () => {
   const db = migratedDb();
   await addInventoryFixture(db);
@@ -523,6 +572,13 @@ test("source inventory refuses mixed snapshots and owner selection", async () =>
   await addInventoryFixture(db);
   const { env } = d1Env(db);
   const first = await (await call(env, post({ limit: 1 }, { "X-Admin-Key": "test-admin-key" }))).json();
+
+  const oldContractResponse = await call(env, post({
+    limit: 1,
+    cursor: cursorWithVersion(first.cursor, 2),
+  }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(oldContractResponse.status, 400);
+  assert.match(await oldContractResponse.text(), /cursor is not valid/);
 
   db.prepare(
     `INSERT INTO sources (name,kind,status,created_at,document_count)

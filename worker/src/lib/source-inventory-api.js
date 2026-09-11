@@ -12,7 +12,7 @@ import { ownerSessionPrincipal } from "./owner-auth.js";
 import { sourceInventory, sourceRecoveryCandidates } from "./store-d1.js";
 
 export const SOURCE_INVENTORY_PATH = "/api/admin/brain/sources";
-export const SOURCE_INVENTORY_CONTRACT_VERSION = 2;
+export const SOURCE_INVENTORY_CONTRACT_VERSION = 3;
 export const SOURCE_INVENTORY_DEFAULT_PAGE_SIZE = 100;
 export const SOURCE_INVENTORY_MAX_PAGE_SIZE = 250;
 

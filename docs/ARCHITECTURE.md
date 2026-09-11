@@ -476,6 +476,12 @@ cursor-preservation category. Raw provider messages, IDs, paths, cursor values,
 content, and secrets never cross this boundary. `/zones` keeps its existing
 aggregate semantics and authorization boundary.
 
+The required row key makes this source-inventory contract v3, including both
+inventory and recovery cursors. Version mismatch is a refusal, not a partial
+parse. A schema-39 database receives one narrowly matched compatibility query
+that substitutes `NULL` for the not-yet-created `failure_evidence` column;
+other D1 errors cannot enter that fallback.
+
 The separate CLI `provenance-repair` bridge is an owner-approved data-plane
 operation, not a writable inventory endpoint. Preview binds one exact source,
 manifest and source configuration, complete semantic source-inventory and

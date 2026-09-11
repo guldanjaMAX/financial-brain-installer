@@ -1081,6 +1081,12 @@ content, and secrets are neither selected for this receipt nor rendered by the
 CLI. Invalid stored evidence fails closed to `null`; invalid response evidence
 is rejected by the CLI.
 
+Adding the required `last_failure` row key advances the shared inventory and
+recovery response/cursor contract to v3. The Worker rejects v2 cursors and the
+CLI rejects v2 responses. On schema 39, the inventory performs one exact
+missing-`failure_evidence` fallback that projects `last_failure: null`; every
+other query failure is rethrown and becomes the ordinary unavailable response.
+
 `mode: "recovery"` returns one bounded record-candidate page. Stable opaque
 document digests permit a later before/after comparison without revealing raw
 document ids, provider locators, paths, titles, URIs, or metadata. Candidate

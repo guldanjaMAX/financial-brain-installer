@@ -7758,7 +7758,7 @@ function sourceInventoryBaseUrl(m) {
 
 function validateSourceInventoryPage(body) {
   if (!body || typeof body !== "object" || Array.isArray(body) ||
-      body.contract_version !== 2 || body.kind !== "source_inventory") {
+      body.contract_version !== 3 || body.kind !== "source_inventory") {
     throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an unsupported source-inventory receipt");
   }
   if (!Number.isSafeInteger(body.total) || body.total < 0 ||
@@ -7839,7 +7839,7 @@ function assertSourceInventoryPrivacy(value, root = "inventory") {
 
 function validateSourceRecoveryPage(body) {
   if (!body || typeof body !== "object" || Array.isArray(body) ||
-      body.contract_version !== 2 || body.kind !== "source_recovery_plan") {
+      body.contract_version !== 3 || body.kind !== "source_recovery_plan") {
     throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an unsupported source-recovery receipt");
   }
   if (!Number.isSafeInteger(body.total) || body.total < 0 ||
