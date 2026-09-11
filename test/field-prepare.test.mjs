@@ -26,6 +26,7 @@ import {
   readSourceIdentity,
   renderFieldChecklist,
   runFieldPrepare,
+  sameCanonicalSourceRoot,
 } from "../scripts/field-prepare.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -158,6 +159,51 @@ test("read-only planning must use the direct Node entrypoint", () => {
     assertDirectPlanEntrypoint(parseFieldPrepareArgs([]), { npm_lifecycle_event: "field:prepare" }),
     true,
   );
+});
+
+test("source roots accept equivalent Windows case and path spellings", () => {
+  assert.equal(
+    sameCanonicalSourceRoot(
+      "D:\\a\\financial-brain-installer\\scripts\\..",
+      "d:/A/FINANCIAL-BRAIN-INSTALLER/",
+      "win32",
+    ),
+    true,
+  );
+});
+
+test("source roots reject different Windows directories", () => {
+  assert.equal(
+    sameCanonicalSourceRoot(
+      "D:\\a\\financial-brain-installer",
+      "D:\\a\\another-checkout",
+      "win32",
+    ),
+    false,
+  );
+  assert.equal(
+    sameCanonicalSourceRoot("D:\\a\\financial-brain-installer", "D:\\a\\financial-brain", "win32"),
+    false,
+  );
+  assert.equal(
+    sameCanonicalSourceRoot(
+      "D:\\a\\financial-brain-installer",
+      "D:\\a\\financial-brain-installer\\child",
+      "win32",
+    ),
+    false,
+  );
+  assert.equal(
+    sameCanonicalSourceRoot("D:\\a\\financial-brain-installer", "C:\\a\\financial-brain-installer", "win32"),
+    false,
+  );
+  assert.equal(sameCanonicalSourceRoot("relative\\repo", "relative/repo", "win32"), false);
+});
+
+test("source roots preserve exact POSIX comparisons", () => {
+  assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/Brain", "linux"), true);
+  assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/brain", "linux"), false);
+  assert.equal(sameCanonicalSourceRoot("/tmp/Brain", "/tmp/Brain/", "darwin"), false);
 });
 
 test("the command boundary refuses live modes, manifests, and mutating Cloudflare runners", () => {

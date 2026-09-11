@@ -24,7 +24,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename, dirname, isAbsolute, join, relative, resolve, sep, win32 as pathWin32,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -387,6 +389,15 @@ function sourceIdentityFailure(code, source) {
   return error;
 }
 
+/** Compare real source roots using the path semantics of the host platform. */
+export function sameCanonicalSourceRoot(left, right, platform = process.platform) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  if (left === right) return true;
+  if (platform !== "win32") return false;
+  if (!pathWin32.isAbsolute(left) || !pathWin32.isAbsolute(right)) return false;
+  return pathWin32.relative(left, right) === "";
+}
+
 export function readSourceIdentity(expectSha, env, dependencies = {}) {
   const root = resolve(dependencies.root || ROOT);
   const canonicalRoot = realpathSync(root);
@@ -414,7 +425,9 @@ export function readSourceIdentity(expectSha, env, dependencies = {}) {
   };
 
   const opening = readGitState();
-  if (opening.top !== canonicalRoot) throw new Error("source_root_mismatch");
+  if (!sameCanonicalSourceRoot(opening.top, canonicalRoot)) {
+    throw new Error("source_root_mismatch");
+  }
   const packageJsonBytes = readBytes(join(root, "package.json"));
   const packageLockBytes = readBytes(join(root, "package-lock.json"));
   const closingPackageJsonBytes = readBytes(join(root, "package.json"));
@@ -454,7 +467,7 @@ export function readSourceIdentity(expectSha, env, dependencies = {}) {
     shallow_repository: opening.shallowRepository,
     diff_check_clean: openingDiffClean,
     identity_stable_during_check:
-      closing.top === opening.top &&
+      sameCanonicalSourceRoot(closing.top, opening.top) &&
       closing.headSha === opening.headSha &&
       closing.treeSha === opening.treeSha &&
       closing.shallowRepository === opening.shallowRepository &&
