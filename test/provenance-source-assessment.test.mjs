@@ -415,7 +415,7 @@ const put = (root, rel, content) => {
   const root = makeRoot("source-noncanonical");
   try {
     put(root, "good.md", "This ordinary synthetic record is long enough for native extraction.");
-    put(root, "bad\\name.txt", "This path cannot be represented in the sealed locator contract.");
+    put(root, "bad-e\u0301.txt", "This path cannot be represented in the sealed locator contract.");
     const listed = localOriginalsForAssessment(root, { relativeLocators: ["good.md"] });
     assert.equal(listed.traversal_complete, false);
     assert.equal(listed.traversal_gap_count, 1);
