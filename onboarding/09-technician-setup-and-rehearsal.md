@@ -2,7 +2,7 @@
 
 The owner should not have to understand OAuth, webhook validation, terminal
 environment variables, or passkey relying-party rules. The technician workflow
-turns those details into nine small ceremonies. It does not hide the parts only
+turns those details into eight small ceremonies. It does not hide the parts only
 the account owner can do.
 
 Copy and use the [client onboarding scorecard](./10-client-onboarding-scorecard.md)
@@ -75,8 +75,18 @@ brain technician "$HOME/Financial Brain/brain.manifest.json" --json
 
 The JSON contains workflow state, dashboard links, proof boundaries, and the
 next reviewed command. It contains no credentials. An agent may guide the
-browser and explain each page, but the owner enters every token or secret into
-the provider page or hidden terminal prompt.
+browser and explain each page. For the supported Google, Zoom, and IMAP steps,
+the owner enters every token or secret into the provider page or hidden
+terminal prompt.
+
+**Bank connections are not part of ordinary onboarding yet.** They are still
+being tested. You did nothing wrong, and there is no bank password,
+verification code, or Plaid setup key to enter here. Ordinary onboarding leaves
+bank connections off and the technician will never ask you to paste those
+values into chat or a normal command. If this Brain is an already approved
+pilot, its complete existing bank setup is left unchanged. If any saved piece
+is missing, setup stops before changing a credential and explains the
+separately reviewed next step.
 
 Claude Code should offer to do the non-secret browser work. After the owner
 approves the exact ceremony, it may open the provider's official page, navigate
@@ -87,7 +97,7 @@ passkey window. Explain the provider, purpose, minimum permission, and one next
 owner action before anything opens. Do not give the owner a page of setup
 homework.
 
-## Nine steps
+## Eight steps
 
 ### 1. Local tools
 
@@ -218,86 +228,7 @@ non-secret label. The owner takes over for sign-in, 2FA, creation approval, and
 the displayed password. Use mail access only. Do not request contacts, sending,
 calendar, or account-management access.
 
-### 7. Plaid application setup, held field plan only
-
-General bank invitations remain held. Use this step only for the named,
-version-scoped disposable candidate or a separately approved production pilot.
-It prepares the native connector but does not open Plaid Link or contact a bank.
-Plaid secret entry is currently held on Windows because the shared terminal
-reader cannot prove that PowerShell suppressed echo. Do not type or export the
-values there. Windows needs a separately reviewed native masked-input bridge
-and physical field proof before this step can run.
-
-In the owner's Plaid Dashboard, select the same environment recorded in
-`corpora.bank_feed.environment`. For Production, the owner must see that their
-Plaid account has Production access. Register and save these exact non-secret
-values, replacing the hostname with the final `brain.domain`:
-
-```text
-Redirect URI: https://brain.example.com/app/connect/bank
-Webhook URL:  https://brain.example.com/api/webhooks/plaid
-```
-
-Record those exact saved values in `registered_redirect_uris` and
-`registered_webhook_uris` in the manifest. A local assistant with browser
-control may navigate to the right Plaid page and fill these two non-secret URLs.
-The owner handles sign-in, 2FA, environment selection, Production-access review,
-and the final save. Do not let browser control, chat, screenshots, or logs read
-the client ID or secret.
-
-Then run the command printed by the read-only technician plan. For a Production
-candidate it has this shape:
-
-```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run plaid \
-  --confirm-environment production \
-  --confirm-redirect https://brain.example.com/app/connect/bank \
-  --confirm-webhook https://brain.example.com/api/webhooks/plaid \
-  --confirm-single-setup-machine \
-  --confirm-production-access
-```
-
-For Sandbox, use `sandbox` and omit `--confirm-production-access`. Keep every
-other flag, including `--confirm-single-setup-machine`. That confirmation means
-one nominated owner computer is running one supervised setup session. The local
-lock prevents two runs on that computer, but Cloudflare does not provide this
-workflow a remote compare-and-swap for a brand-new wrapping key. Do not start
-the ceremony from another computer or terminal at the same time.
-
-The command refuses before asking for a credential unless the manifest,
-environment, both exact URLs, direct-owner terminal, and single-machine
-confirmation agree. It also derives the authenticated proof address from the
-resolved Cloudflare account and Worker, rather than trusting the public Brain
-hostname. The exact Worker's workers.dev route must be enabled even when the
-owner uses a custom Brain hostname; if the check refuses, fix Cloudflare route
-access and rerun `brain deploy` before this ceremony. When the context screen
-appears, hand the terminal to the owner. The client ID and
-environment-specific Plaid secret are entered at two hidden prompts and never
-placed in argv, shell history, the plan, or a support note.
-
-The installer generates an independent `BANK_FEED_WRAPPING_KEY_V2` or reuses
-the exact protected value from a prior attempt. It commits and reads that key
-back in macOS Keychain, a Windows DPAPI CurrentUser encrypted file, or an atomic
-mode-0600 Linux file before changing Cloudflare. It then uses Cloudflare's
-script secrets-bulk operation to atomically apply only
-`BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, and
-`BANK_FEED_WRAPPING_KEY_V2`, and reads back only those three binding names.
-It proves the deployed Worker's wrapping-key fingerprint before replacing an
-existing binding, keeps that proof stable across the bounded propagation
-window, and proves it again after the patch. Cloudflare propagation can take up
-to one minute. If any other session may have just changed the key, stop and
-settle or recover that exact custody first. An interruption keeps the same
-protected wrapping key as desired state, so rerun the same ceremony with the
-same provider values on that nominated computer.
-
-If this Worker already has a wrapping key but the protected local copy is
-missing, the step stops without replacing it. Recover that owner's key custody
-before continuing so retained bank connections do not become unreadable.
-`brain secrets` refuses bank-feed values from environment variables, and the
-custom-provider credential path remains held because it has no reviewed setup
-ceremony. Neither is a substitute for this native Plaid step.
-
-### 8. Owner passkey
+### 7. Owner passkey
 
 Settle the final Brain hostname first. With the owner and intended device
 present, run:
@@ -322,12 +253,7 @@ secure window looks unexpected, the owner chooses Cancel. Nothing is enrolled,
 and the same private link can be tried again until it expires. This is the first
 point where a physical passkey becomes proven.
 
-After passkey enrollment succeeds and only while the approved field plan is
-active, run `brain connect bank <manifest>` with the owner present. The owner
-signs in with that passkey, completes Plaid Link and their bank's 2FA privately,
-then assigns each masked account. Unassigned accounts stay staged.
-
-### 9. Handoff checks
+### 8. Handoff checks
 
 ```bash
 brain technician "$HOME/Financial Brain/brain.manifest.json" --run verify
@@ -393,10 +319,6 @@ The following are the shortest honest field gates:
   `recording.transcript_completed` event.
 - IMAP: Inbox and Sent read successfully, excluded folders are named, and a
   second sync resumes from the UID watermarks.
-- Plaid: the exact candidate and environment pass owner passkey sign-in, private
-  Link, masked-account assignment with unassigned accounts staged, real signed
-  webhook delivery, scheduled reconciliation, repair, disconnect, and resume.
-  Fixture or API-only proof does not open general invitations.
 - Passkey: enroll, sign out, sign back in, add a second device, revoke it, and
   confirm the owner-facing telemetry contains no credential or ceremony secret.
 

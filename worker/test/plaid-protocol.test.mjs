@@ -114,10 +114,13 @@ check("manifest schema names Plaid without accepting Plaid endpoint overrides", 
 check("public manifest template keeps Plaid disabled and contains no credential", () => {
   const template = JSON.parse(readFileSync(new URL("../../templates/brain.manifest.json", import.meta.url), "utf8"));
   const feed = template.corpora.bank_feed;
+  const runtimeFeed = Object.fromEntries(
+    Object.entries(feed).filter(([key]) => !key.startsWith("_")),
+  );
   assert.equal(feed.enabled, false);
   assert.equal(feed.provider, "plaid");
   assert.equal(feed.environment, "sandbox");
-  assert.equal(/client_id|secret/i.test(JSON.stringify(feed)), false);
+  assert.equal(/client_id|secret/i.test(JSON.stringify(runtimeFeed)), false);
 });
 
 check("connect mode asks only for read-only Transactions", () => {

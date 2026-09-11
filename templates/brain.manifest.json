@@ -18,7 +18,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.6",
+    "version": "0.4.7",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },
@@ -264,15 +264,15 @@
     },
     "bank_feed": {
       "_comment": [
-        "Plaid is the reviewed bank-feed profile. Keep this off until the",
-        "version-scoped disposable-candidate field plan is approved. General",
-        "customer bank invitations remain held until that journey and a",
-        "separately approved production pilot pass. A native command existing",
-        "does not by itself open the gate. After field-plan approval, the",
-        "client has a Plaid account, Sandbox credentials have been entered",
-        "through the hidden prompt, the independent bank wrapping key is in",
-        "reviewed owner recovery custody, and the exact return and webhook URLs are",
-        "registered in that Plaid environment. Credentials never go here.",
+        "Plaid is the reviewed bank-feed profile. Keep this off.",
+        "General customer bank invitations remain held. Application-credential setup remains held too.",
+        "Generic brain setup, brain secrets, and technician workflows do not accept or write",
+        "BANK_FEED_CLIENT_ID, BANK_FEED_SECRET, or BANK_FEED_WRAPPING_KEY_V2.",
+        "An approved candidate needs a separately reviewed owner-custody setup with",
+        "all three secret names already present on its Worker. Record only the exact",
+        "non-secret return and webhook URLs already saved in that Plaid environment.",
+        "A native command or these URI fields do not open the gate. Credentials never",
+        "go in this manifest.",
         "The account holder completes Link themselves. This brain requests only",
         "read-only Transactions and never sees bank login credentials. Scheduled",
         "reconciliation remains active because webhooks are not a sole source of truth.",

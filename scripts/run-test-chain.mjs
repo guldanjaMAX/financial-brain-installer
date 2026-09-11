@@ -44,7 +44,6 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/setup-browser-sign-in.test.mjs",
   "node --test test/windows-preflight-contract.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
-  "node --test test/plaid-technician-setup.test.mjs",
   "node --no-warnings worker/test/financial-picture.test.mjs",
   "node --no-warnings test/financial-picture-cli.test.mjs",
   // Client upgrade rehearsals, added after the launcher freeze. Every shipped
@@ -169,7 +168,6 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/doctor.test.mjs",
   "node --test test/drain-cron-default.test.mjs",
   "node --no-warnings test/bank-feed-secrets.test.mjs",
-  "node --test test/plaid-technician-setup.test.mjs",
   "node test/bank-feed-deploy-path.test.mjs",
   "node test/migrations.test.mjs",
   "node test/doc-date.test.mjs",

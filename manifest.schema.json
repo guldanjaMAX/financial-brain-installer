@@ -494,7 +494,7 @@
         },
         "bank_feed": {
           "type": "object",
-          "description": "A hosted, read-only bank connection the ACCOUNT HOLDER authorises themselves, in their own browser, on their own bank's screen. No password, one-time code, or bank credential is ever seen, requested, handled, or stored by the operator or by this codebase; what the brain receives is a read-only reference for fetching transaction history, and it is stored encrypted in the client's own D1. Setting enabled:true makes BANK_FEED_CLIENT_ID, BANK_FEED_SECRET, and the independently held BANK_FEED_WRAPPING_KEY_V2 eligible Worker secrets, but brain secrets refuses those values from the environment. The reviewed native Plaid technician ceremony applies exactly those three together after hidden entry and protected local wrapping-key readback. It requires one nominated supervised owner computer because its lock is local and no remote first-setup compare-and-swap exists. The wrapping key is never derived from provider, admin, or session credentials and remains owner custody needed for recovery. With enabled:false the provider client ID and secret are deleted by the next brain secrets run, stopping sync. The independent wrapping key is preserved so disabling and later re-enabling cannot silently destroy access-reference recovery custody; removing that key requires a separate explicit teardown. Custom-provider credential setup has no reviewed ceremony and remains held. Recommended posture is per-client credentials in the client's own provider account, so one leaked worker secret is one client's exposure. Start Plaid in sandbox so an install can be rehearsed before the client's production approval lands. brain doctor fails unless registered_redirect_uris and registered_webhook_uris record this Brain's exact Plaid destinations, because either registration cannot be fixed while a client is sitting in front of you mid-authorisation.",
+          "description": "A hosted, read-only bank connection the ACCOUNT HOLDER authorises themselves, in their own browser, on their own bank's screen. No password, one-time code, or bank credential is ever seen, requested, handled, or stored by the operator or by this codebase; what the brain receives is a read-only reference for fetching transaction history, and it is stored encrypted in the client's own D1. General invitations and application-credential setup remain held. Generic `brain secrets`, `brain setup`, and technician workflows never accept BANK_FEED_CLIENT_ID, BANK_FEED_SECRET, or BANK_FEED_WRAPPING_KEY_V2 from environment variables. When enabled:true, routine secret repair requires all three names to exist already on the Worker before rotating core keys and preserves those existing bindings; a missing binding stops for a separately reviewed owner-custody setup. The wrapping key is never derived from provider, admin, or session credentials and remains owner custody needed for recovery. With enabled:false the provider client ID and secret are deleted by the next `brain secrets` run, stopping sync. The independent wrapping key is preserved so disabling and later re-enabling cannot silently destroy access-reference recovery custody; removing that key requires a separate explicit teardown. `brain doctor` fails unless the manifest records this brain's exact return and Plaid webhook addresses. Those URI fields are non-secret evidence only and do not perform the held provider-dashboard setup.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -506,7 +506,7 @@
                 "custom"
               ],
               "default": "plaid",
-              "description": "plaid selects the reviewed native endpoint profile and technician credential ceremony. custom preserves an explicitly configured compatible bank-feed model, but its credential setup has no reviewed ceremony and remains held. A legacy manifest that predates this field and carries endpoint metadata is treated as custom; it must still provide the complete custom endpoint set. Credentials never belong in this manifest."
+              "description": "plaid selects the reviewed public endpoint profile. custom preserves an explicitly configured compatible bank-feed provider. A legacy manifest that predates this field and carries endpoint metadata is treated as custom; it must still provide the complete custom endpoint set. Credentials never belong in this manifest."
             },
             "environment": {
               "enum": [
@@ -535,7 +535,7 @@
                 "type": "string",
                 "format": "uri"
               },
-              "description": "The return addresses actually registered in the client's own provider dashboard. Must contain https://<brain.domain>/app/connect/bank."
+              "description": "The return addresses already registered in the client's own provider dashboard through a separately reviewed setup. Must contain https://<brain.domain>/app/connect/bank. Recording this non-secret evidence does not perform or authorize the held dashboard setup."
             },
             "registered_webhook_uris": {
               "type": "array",
@@ -543,7 +543,7 @@
                 "type": "string",
                 "format": "uri"
               },
-              "description": "The signed event destinations actually registered in the client's own Plaid dashboard. For provider:plaid this must contain https://<brain.domain>/api/webhooks/plaid. Scheduled reconciliation remains required even when this is registered."
+              "description": "The webhook destinations already registered in the client's own Plaid environment through a separately reviewed setup. For Plaid, must contain https://<brain.domain>/api/webhooks/plaid before doctor can report the signed webhook ready. Recording this non-secret evidence does not perform or authorize the held dashboard setup."
             },
             "entity_slug": {
               "type": "string",
