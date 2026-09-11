@@ -24,7 +24,8 @@
  *
  * The last section is the message an operator meets FIRST in that state. When
  * Cloudflare access cannot be established, the AUTH_REQUIRED failure must name
- * `brain update` and the explicit non-interactive consent switch, never setup.
+ * `brain update` and the explicit non-interactive consent flag, never setup or
+ * a persistent customer environment-variable workaround.
  */
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -256,9 +257,9 @@ try {
   check("AUTH_REQUIRED names `brain update <manifest>` from an interactive terminal",
     /brain update <manifest>/.test(authMessage) && /interactive terminal/i.test(authMessage),
     authMessage);
-  check("and it names the explicit consent switch a non-interactive session needs",
+  check("and it names only the explicit consent flag a non-interactive session needs",
     /--adopt-cloudflare-profile/.test(authMessage) &&
-      /BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(authMessage),
+      !/BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(authMessage),
     authMessage);
   check("and that consent is described as the owner's, not something to assume",
     /approv/i.test(authMessage), authMessage);
@@ -268,20 +269,19 @@ try {
    * --------------------------------------------------------------------- */
 
   // Doctor is what an operator runs against a brain that is already stuck, and
-  // it cannot tell a paused install from a fresh one. Its token advice must
-  // therefore never be the one command that pauses a paused brain again.
+  // it cannot tell a paused install from a fresh one. Its ordinary owner advice
+  // must use browser sign-in and must never be the command that pauses it again.
   const doctorAdvice = readFileSync(join(ROOT, "doctor.mjs"), "utf8").split("\n")
-    .filter((line) => /hidden token entry|token without echo/.test(line));
-  check("doctor still carries its token-entry advice where an operator meets it",
+    .filter((line) => /browser sign-in|supported Brain command in an interactive terminal/.test(line));
+  check("doctor carries the ordinary owner browser-sign-in advice where an operator meets it",
     doctorAdvice.length >= 4, String(doctorAdvice.length));
   check("and not one line of it sends a stuck brain to `brain setup`",
     !doctorAdvice.some((line) => /brain setup/.test(line)),
     doctorAdvice.filter((line) => /brain setup/.test(line)).join("\n"));
-  const hiddenEntry = doctorAdvice.filter((line) => /hidden token entry/.test(line));
-  check("the hidden-token-entry advice names `brain update` in an interactive terminal",
-    hiddenEntry.length >= 2 &&
-      hiddenEntry.every((line) => /brain update/.test(line) && /interactive terminal/.test(line)),
-    hiddenEntry.join("\n"));
+  check("the owner advice uses an interactive terminal and does not assign token creation",
+    doctorAdvice.some((line) => /interactive terminal/.test(line)) &&
+      !doctorAdvice.some((line) => /create.*token|API Tokens/.test(line)),
+    doctorAdvice.join("\n"));
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }

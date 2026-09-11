@@ -7,7 +7,11 @@
  * names where the credential came from. Reproduced live 2026-09-02 (20:49 MST).
  */
 import assert from "node:assert/strict";
-import { withWranglerSessionIfNeeded, cloudflareApiRequest } from "../brain.mjs";
+import {
+  withWranglerSessionIfNeeded,
+  cloudflareApiRequest,
+  cloudflareAccessUsesBrowserProfile,
+} from "../brain.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -58,6 +62,8 @@ try {
       { status: 200, body: granted },
     ]);
     const { lines } = await capturedLogs(() => withWranglerSessionIfNeeded(async () => {
+      assert.equal(cloudflareAccessUsesBrowserProfile(), true,
+        "a legacy Wrangler browser session must not be described as an API token");
       await cloudflareApiRequest("/accounts");
       await cloudflareApiRequest("/accounts");
     }, { env: {}, argv: [], readWranglerOAuthToken: () => A }));

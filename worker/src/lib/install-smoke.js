@@ -16,14 +16,29 @@ export const PUBLIC_INSTALL_SMOKE_METADATA = Object.freeze({
   proof_kind: "public_first_install_smoke",
   contains_customer_data: false,
   schema_version: 1,
+  evidence_lineage: Object.freeze({
+    version: 1,
+    kind: "source_record",
+    root_ids: Object.freeze([PUBLIC_INSTALL_SMOKE_DOC_UID]),
+  }),
+  provenance_receipt: Object.freeze({
+    version: 1,
+    status: "complete",
+    reason: "lineage_and_text_recorded",
+    root_ids: Object.freeze([PUBLIC_INSTALL_SMOKE_DOC_UID]),
+  }),
 });
 export const PUBLIC_INSTALL_SMOKE_CHUNK =
   `[${PUBLIC_INSTALL_SMOKE_TITLE}]\n\n${PUBLIC_INSTALL_SMOKE_CONTENT}`;
 export const DEFAULT_INGEST_CHUNK_SIZE = 1500;
 export const DEFAULT_INGEST_CHUNK_OVERLAP = 300;
 
-const ENVELOPE_KEYS = ["content", "metadata", "source_id", "source_type", "title"];
-const METADATA_KEYS = ["contains_customer_data", "proof_kind", "schema_version"];
+const ENVELOPE_KEYS = [
+  "content", "metadata", "source_id", "source_type", "text_reliable", "text_source", "title",
+];
+const METADATA_KEYS = [
+  "contains_customer_data", "evidence_lineage", "proof_kind", "provenance_receipt", "schema_version",
+];
 
 export function ingestChunkGeometry(env = {}) {
   const rawSize = Number.parseInt(env.CHUNK_SIZE, 10);
@@ -70,7 +85,12 @@ export function isCanonicalPublicInstallSmokeEnvelope(envelope) {
     exactKeys(envelope.metadata, METADATA_KEYS) &&
     envelope.metadata.proof_kind === PUBLIC_INSTALL_SMOKE_METADATA.proof_kind &&
     envelope.metadata.contains_customer_data === PUBLIC_INSTALL_SMOKE_METADATA.contains_customer_data &&
-    envelope.metadata.schema_version === PUBLIC_INSTALL_SMOKE_METADATA.schema_version;
+    envelope.metadata.schema_version === PUBLIC_INSTALL_SMOKE_METADATA.schema_version &&
+    JSON.stringify(envelope.metadata.evidence_lineage) ===
+      JSON.stringify(PUBLIC_INSTALL_SMOKE_METADATA.evidence_lineage) &&
+    JSON.stringify(envelope.metadata.provenance_receipt) ===
+      JSON.stringify(PUBLIC_INSTALL_SMOKE_METADATA.provenance_receipt) &&
+    envelope.text_source === "native" && envelope.text_reliable === true;
 }
 
 export function publicInstallSmokeEnvelope() {
@@ -79,6 +99,8 @@ export function publicInstallSmokeEnvelope() {
     source_id: PUBLIC_INSTALL_SMOKE_ID,
     title: PUBLIC_INSTALL_SMOKE_TITLE,
     content: PUBLIC_INSTALL_SMOKE_CONTENT,
+    text_source: "native",
+    text_reliable: true,
     metadata: PUBLIC_INSTALL_SMOKE_METADATA,
   });
 }

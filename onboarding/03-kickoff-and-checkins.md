@@ -10,64 +10,79 @@ The first half of this document is the agenda the client sees. The second half i
 
 ## Before we start
 
-Nothing to install, nothing to prepare. Bring the ten questions you wrote at intake, because they are the agenda.
+Nothing to install, nothing to prepare, and no question quota. Bring a real question if one is already on your mind, but zero prepared questions is fine. We begin with what your Brain can actually prove and choose each useful check together.
 
-You are not going to watch me type into a terminal. You are going to read a report about your own business, and then take the controls.
+Claude Code handles the safe technical work. You stay in control of accounts, private information, billing, access decisions, and passkey gestures. You may pause, skip, or say "I do not know."
 
 ## The hour
 
 | Time | What happens | What you do |
 |---|---|---|
-| **0:00 to 0:05** | What you are looking at, and where it lives | Listen |
-| **0:05 to 0:25** | Your ten questions, answered, with sources | Read. Interrupt whenever something is wrong |
-| **0:25 to 0:35** | What it does not know, including the two you predicted it would miss | Decide which gaps matter to you |
-| **0:35 to 0:42** | One question that no keyword search could have assembled | Watch, then try to break it |
-| **0:42 to 0:52** | Connect it to your own AI tools, on your own machine | You type. I stay quiet |
-| **0:52 to 1:00** | I remove my access, live, and we re-run the full check with me locked out | Watch the screen |
+| **0:00 to 0:05** | What the Brain is, where it lives, and what today's checks can prove | Ask anything that would help you feel oriented |
+| **0:05 to 0:15** | Your current goal, Financial Map state, sources, freshness, and honest gaps | Correct anything that does not sound like your real situation |
+| **0:15 to 0:35** | Adaptive acceptance, one evidence-derived check at a time | Use it, reword it, replace it with a real question, or skip it |
+| **0:35 to 0:42** | One useful answer, conflict, or unresolved gap explored in depth | Decide whether the result matters and whether the cited source is right |
+| **0:42 to 0:52** | Your AI tool uses your Brain from your own computer | Make only the private or consequential choices Claude Code cannot make for you |
+| **0:52 to 1:00** | Access, support, and next steps | Confirm what is ready, partial, blocked, or deferred |
+
+These times are a guide. Follow the useful question or gap rather than rushing to complete a script.
 
 ## 0:00, what you are looking at
 
-Your brain runs inside accounts you own. It read the material you pointed it at and nothing else. I hold no copy of any of it.
+Your brain runs inside accounts you own. Today we use its receipts to see which
+approved material is actually loaded, readable, current, available to you, and
+searchable. Anything outside that proven scope stays unknown. The installer
+operator does not receive a central copy of your corpus.
 
-You will see one report. Everything in it was produced by running live checks against your own infrastructure, and you can produce the same report yourself at any time, including after today.
+You will see a report from live checks against your own infrastructure, and you
+can ask Claude Code to produce the same non-writing checks after today. Optimize
+uses the machine-continuity audit, MCP discovery, and configuration inspection.
+Optimize never runs the setup-oriented `brain tools` command. We name whether each
+result is configured, locally validated, fixture-proven, live-tested, accepted,
+blocked, or still unproven.
 
-## 0:05, your ten questions
+## 0:05, start from the evidence
 
-These are the questions you wrote at intake, in your words, not tidied up. Each answer carries bracketed numbers that map to the documents it came from.
+Begin with one goal question: what would you most like your Financial Brain to help you understand or keep current?
 
-**Interrupt.** If an answer is wrong, say so in the moment. A wrong answer found today costs ten minutes. Found in month two, it costs your trust in the whole thing.
+Then read the current Financial Map, source receipts, freshness, provenance, reading quality, access zones, and vector readiness without changing anything. Claude Code explains beforehand that the Financial Map read sends no snapshot and changes nothing, even though the AI tool may show its normal approval prompt for the private read.
 
-## 0:25, what it does not know
+If the Financial Map is missing, stale, incomplete, or unresolved, do not call the financial picture complete. Offer the optional guided read-only map interview before that conclusion, one short adaptive question at a time. It submits nothing. Preview and activation are later, separately approved actions outside Optimize.
 
-This is the part most tools do not show you.
+## 0:15, adaptive acceptance
 
-Two of these are the failures you predicted at intake. We look at them on purpose, next to the answers that worked, because a tool that tells you what it does not know is worth more than one that always sounds confident.
+Claude Code offers one check based on the evidence already present and explains why it matters. You may use it, reword it, replace it with a real question, or skip it. After a chosen question runs, inspect its citations, freshness, provenance, reading warning, and access zone together.
 
-Some gaps are fixable, meaning the material exists and needs connecting. Some are not, meaning the answer was never written down anywhere, by anyone. You will be able to tell them apart by the end of this segment, and that distinction is worth more than any single answer.
+Continue only while another check would be useful. There is no required number.
 
-## 0:35, the question you could not have googled
+**Interrupt.** If an answer is wrong, say so in the moment. Record it as failed or blocked, not defended or quietly rewritten. If the evidence is missing, the answer remains unknown.
 
-One question whose answer is assembled from several documents that do not mention each other. This is the thing that separates it from search.
+Separate three kinds of gap out loud:
 
-Then try to break it. Genuinely. Ask something you think it should get and see what happens.
+- **Connectable.** The material exists in a source that is not ready, not yet approved, or not readable through a supported path.
+- **No record in the proven scope.** After authorized history, freshness,
+  readability, zones, and search are proved, no record was found in that bounded
+  material. This is not proof that nothing exists elsewhere.
+- **Unproven.** One or more of those boundaries is not proved, so an empty result
+  remains unknown.
 
-## 0:42, your turn
+Knowing which kind applies is often worth more than forcing another answer.
 
-I hand you a configuration block. You paste it once, and your own AI tools can ask your own brain, from your own machine, in any folder you work in.
+## 0:35, explore what matters most
 
-Then you ask it something. Not one of the ten. Something you thought of this morning.
+Choose one useful answer, changing fact, conflict, source-history edge, reading warning, scoped-access result, or gap. Follow the one that best supports the owner's goal. Do not manufacture a multi-document question merely to create a demo moment.
 
-This is the moment it stops being a system I showed you and becomes a thing you own.
+## 0:42, use it through your AI tool
 
-## 0:52, I remove my access
+Claude Code verifies the installed Owner assistant connection and handles the safe technical details. You do not need to paste a configuration block, copy long identifiers, or type exact commands from memory. You step in for a normal host approval, a private answer, or a consequential decision that belongs to you.
 
-Live, on the screen, with you watching.
+Ask one real question if one is useful. Claude Code helps read the result and its limits. This is the moment it becomes a thing you own, not a typing test.
 
-I delete the token I have been using. Then we run the full verification suite again, with me locked out of your account, and it passes exactly as it did five minutes earlier.
+## 0:52, access and handoff
 
-That is the promise made physical instead of claimed. No vendor with a hosted product can perform that demonstration at any price, because their access is the product.
+Review who can currently use the Brain, which whole-source zones each named grant includes, and whether any temporary technician access exists. Never assume access needs revocation. Preview any requested change and ask for separate approval before making it.
 
-Afterwards I hand you the handoff letter: what was revoked, what you own, how to run it without me, and how to delete all of it if you ever want to.
+Finish with what is working, what needs attention, what the owner chose to defer, and the one next action. The handoff letter records what changed, what they own, and the supported checkup, update, support, access, and deletion paths.
 
 ---
 
@@ -79,98 +94,109 @@ Fifteen minutes each, one week apart. Same time each week. They are short on pur
 
 | Time | What happens |
 |---|---|
-| 0:00 to 0:08 | **You** show me three real questions you asked this week and what came back |
-| 0:08 to 0:13 | I tell you which are fixable and which are gaps in your own records |
-| 0:13 to 0:15 | The one thing I change before next week |
+| 0:00 to 0:08 | Start with `/optimize`; review any real issue the owner brings, or offer one evidence-derived check. Zero prepared examples is fine |
+| 0:08 to 0:13 | Decide whether the result is fixable or an honest gap in the records |
+| 0:13 to 0:15 | Choose one next action, or defer it |
 
-Bring failures, not compliments. A week of real use finds things no test suite does, and this is the only session where that material is still fresh.
+Bring failures, not compliments, when any occurred. A week of real use finds things no test suite does. Hold 30 minutes on the calendar and end early if there is nothing useful to resolve.
 
 ## Check-in 2, day 22: did the fixes land
 
 | Time | What happens |
 |---|---|
-| 0:00 to 0:05 | We re-ask last week's three failures |
-| 0:05 to 0:10 | The rest of your material has finished loading. We look at one line per source, and what that changed |
-| 0:10 to 0:15 | Your first monthly report, walked through line by line |
+| 0:00 to 0:05 | Revisit last week's issue if there was one |
+| 0:05 to 0:10 | Compare one line per source with the prior receipt and say what changed |
+| 0:10 to 0:15 | Walk through the current monthly report or one material Financial Map gap |
 
-By now the long tail of your material is in, so questions that returned thin answers in week one often return real ones. We check that rather than assume it.
+Do not assume the long tail finished loading because a week passed. Check the receipts.
 
-## Check-in 3, day 29: you run it
+## Check-in 3, day 29: you direct it
 
 | Time | What happens |
 |---|---|
-| 0:00 to 0:05 | **You** run the verification suite yourself, on your machine, while I watch |
-| 0:05 to 0:10 | You read the output and tell me what it says. I correct nothing unless you ask |
-| 0:10 to 0:15 | What the monthly rhythm looks like from here, and how to reach me |
+| 0:00 to 0:05 | You ask for the verification; Claude Code runs the supported read-only workflow |
+| 0:05 to 0:10 | You read the result and ask about anything unclear |
+| 0:10 to 0:15 | Review the monthly rhythm and how to reach support |
 
-This one is a test, and it is a test of me rather than of you. If you cannot run and read your own verification without me on the call, then you do not really own this yet, and I have more work to do.
+This one is a test of the guidance, not of the owner. If they cannot request and understand their own verification without memorizing commands, improve the instructions and repeat the check.
 
-You also leave with the runbook: the ten things most likely to go wrong, what each one looks like, and the exact command that fixes it.
+They also leave with the runbook: the most likely problems, what each one looks like, and the supported recovery path.
 
----
 ---
 
 # Internal notes. Not for the client.
 
 Update [the client onboarding scorecard](./10-client-onboarding-scorecard.md)
 during kickoff and each check-in. Keep customer content in the private manifest
-and acceptance receipts; put only opaque IDs and aggregate measurements in the
-scorecard.
+and acceptance receipts. Put only opaque IDs and aggregate measurements in the
+shared scorecard.
 
 ## Before the kickoff call
 
 Have open, in this order, and nothing else visible:
 
-1. The report, already rendered, already read by you in full.
+1. The report, already rendered and read by you in full.
 2. The manifest, in a window you are not sharing.
-3. A terminal, minimized. It does not appear until 0:42.
-4. The Cloudflare token page, logged in, on the token you are about to delete.
-5. The handoff letter, filled in, ready to send the moment the session ends.
+3. A terminal, minimized. It does not appear until it provides useful proof.
+4. The current grants or temporary-access view, only when the owner is actually reviewing access.
+5. The handoff letter, filled in and ready when the session ends.
 
-**Do not open a terminal before 0:42.** A terminal is the single fastest way to turn a business owner into a spectator. The report is the artifact; the terminal is the proof, and proof comes after belief, not before.
+Do not require the owner to prepare test questions. Use the evidence to propose
+one useful check at a time. Never invent a person, entity, account, event,
+document, expected answer, or refusal case.
+
+**Keep the terminal out of view until it helps.** A terminal is the fastest way to turn a business owner into a spectator. The report is the artifact; the terminal is supporting proof.
 
 ## The rule for the whole hour
 
-You have already read every answer. Nothing in this session should surprise you. The day 7 gate exists precisely so that the first time an answer is read aloud is not the first time it has been read.
+Read every planned result before the call. **If an answer is wrong in the room, say it is wrong.** Do not explain it away or reach for context. Name it, record it, keep the unsupported fact out of the Financial Map, and move on. The product is built on stating what it does not know.
 
-**If an answer is wrong in the room, say it is wrong.** Do not explain it away, do not reach for context, do not say "well, what it means is". Name it, write it down, move on. The whole product is built on stating what it does not know. Defending a bad answer in the first hour undoes the thing you are selling.
+## The gap segment
 
-Confidence that this posture outperforms recovery-by-explanation: 0.9. It is also the only posture consistent with the rest of the offer.
+Separate the three kinds of gap out loud:
 
-## 0:25, the gap segment
+- **Connectable.** The material exists in a source not yet ready, approved, or readable. This is a real scope conversation.
+- **No record in the proven scope.** After the full authorized boundary is
+  proved, no record was found in that bounded material. The owner may later ask
+  to remember an unrecorded decision through the separately approved owner-note
+  path.
+- **Unproven.** Incomplete history, freshness, readability, zones, or search
+  keeps the result unknown.
 
-Show the two predicted failures deliberately and name them as predicted. Calibration is the point: they told you at intake what they expected it to fumble, and being right about that is evidence the system is honest rather than evidence it is weak.
+## The acceptance loop
 
-Separate the two kinds of gap out loud:
+For each check:
 
-- **Connectable.** The material exists, in a source not yet wired up, or in a file type not read. This is a scope conversation, and it is a real one.
-- **Never written down.** No system can retrieve a decision that only ever happened in a hallway. Say this plainly. It is often the most valuable thing they hear all hour, because it changes how they run their business rather than how they use the tool.
+1. explain why it matters and which evidence it exercises;
+2. let the owner use, reword, replace, or skip it;
+3. run only the chosen question;
+4. inspect citations, dates, freshness, provenance, reading quality, and zone;
+5. record accepted, failed, blocked, or deferred; and
+6. ask whether another check would be useful.
 
-## 0:42, the MCP handoff
+Stop at honest uncertainty. Do not turn a partial source or an unconfirmed
+Financial Map into a completeness claim.
 
-Let them type. Resist correcting the first command. A ten second fumble they resolve themselves is worth more than a flawless demo you drive.
+## The AI-tool handoff
 
-Do not use one of the ten questions here. Those are yours to have prepared. This one has to be theirs, unrehearsed, or the moment does not land.
+Drive the safe technical work. Explain host approval prompts before they appear and say exactly what the action will and will not change. Do not turn the handoff into a silent typing exercise. Custody means the owner controls identity, approval, data, and access decisions; it does not mean they must memorize syntax or troubleshoot unfamiliar software alone.
 
-## 0:52, the revocation
+## Access changes
 
-**Actually delete the token.** Not a screenshot, not a description, not "and then I would delete this". If it is simulated, do not perform it at all, because a demonstration they later discover was theater is worse than never running it.
-
-Then re-run the suite with the token gone. It passes because nothing in the running install depends on your access, which is the entire architectural claim.
-
-Say the trade out loud before they ask: **from this moment, if something needs my hands, they issue a fresh temporary token and revoke it again when the work is done.** That is a real cost of the custody model and naming it here beats discovering it in week two.
-
-Have the replacement path ready in writing in the handoff letter, so "how do I get you back in" already has an answer.
+Read current access first; discovery is not permission to remove it. If a temporary technician token or grant is actually present and the owner approves removing it, perform the real supported removal rather than a screenshot or simulation. Then re-run the relevant check. Explain that future hands-on help may require new bounded temporary access. If no such access exists or live removal cannot be proved, do not stage the scene.
 
 ## Check-in 1 will run long. Let it.
 
-It is scheduled for 15 minutes and it will go to 30 if they bring real material, which is the outcome you want. This is the session where the monthly stops being a line item and becomes obviously worth paying, because it is the first time they have watched something they found get fixed.
-
-Do not cut it short to protect the calendar. Book a 30 minute hold and end early if there is nothing.
+It is scheduled for 15 minutes and may go to 30 if the owner brings real material. Book a 30 minute hold and end early if there is nothing to resolve.
 
 ## What to listen for across all three
 
-- **They stopped using it after day 3.** The most important signal available, and it never arrives as a complaint. Ask directly: how many times did you ask it something this week. Zero is a finding, not an insult.
-- **They only ask their original ten.** Means it has not entered their workflow. The fix is usually a habit prompt tied to something they already do weekly, not a feature.
-- **Every failure is one connector away.** If two of the three weekly failures point at the same missing source, that is the next sale and you should price it, not build it for free.
-- **They cannot run the suite at check-in 3.** Do not paper over it by running it for them. Fix the instructions and run the check-in again. Custody they cannot exercise is custody they do not have.
+- **They stopped using it.** Ask kindly what got in the way. Confusion is a
+  product finding, not an owner failure.
+- **Every gap points to one source.** Prioritize that source only if it supports
+  the owner's current goal and the owner approves its scope.
+- **The owner cannot explain a result's limits.** Improve the plain-language
+  explanation and repeat one useful check.
+- **The owner needs exact technical prompting for every step.** Increase the
+  assistant's safe concierge work while preserving the owner's sign-in,
+  approval, secret, billing, access, and passkey boundaries.

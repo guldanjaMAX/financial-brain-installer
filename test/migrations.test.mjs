@@ -83,6 +83,77 @@ for (const f of files) {
 }
 check(`all ${applied} statements across ${files.length} files applied`, true);
 
+/* ---- provenance assessment markers are new proof, never a legacy backfill ---- */
+{
+  const documentColumns = new Set(db.prepare("PRAGMA table_info(documents)").all().map((row) => row.name));
+  check("0039 adds the complete provenance assessment marker",
+    ["provenance_receipt_version", "provenance_receipt_status", "provenance_receipt_reason",
+      "provenance_receipt_digest"].every((column) => documentColumns.has(column)));
+  db.exec("SAVEPOINT provenance_marker_fixture");
+  db.prepare(
+    `INSERT INTO documents (doc_uid,source,source_id,ingested_at,content_hash,meta,text_source,text_reliable)
+     VALUES ('marker:test','marker','test',1,'fixture-hash','{}','native',1)`,
+  ).run();
+  const legacy = db.prepare(
+    `SELECT provenance_receipt_version,provenance_receipt_status,
+            provenance_receipt_reason,provenance_receipt_digest
+       FROM documents WHERE doc_uid='marker:test'`,
+  ).get();
+  check("0039 leaves a legacy native/1 row explicitly unassessed",
+    Object.values(legacy).every((value) => value === null), JSON.stringify(legacy));
+  db.prepare(
+    `UPDATE documents
+        SET provenance_receipt_version=1,
+            provenance_receipt_status='partial',
+            provenance_receipt_reason='lineage_unavailable',
+            provenance_receipt_digest=?
+      WHERE doc_uid='marker:test'`,
+  ).run("a".repeat(64));
+  db.prepare("UPDATE documents SET text_source='ocr' WHERE doc_uid='marker:test'").run();
+  const invalidated = db.prepare(
+    `SELECT provenance_receipt_version,provenance_receipt_status,
+            provenance_receipt_reason,provenance_receipt_digest
+       FROM documents WHERE doc_uid='marker:test'`,
+  ).get();
+  check("0039 invalidates a marker when low-level provenance changes without a matching marker",
+    Object.values(invalidated).every((value) => value === null), JSON.stringify(invalidated));
+  db.exec("ROLLBACK TO provenance_marker_fixture");
+  db.exec("RELEASE provenance_marker_fixture");
+}
+
+/* ---- a populated schema-36 sync history survives 0037 through 0041 ---- */
+{
+  const schema36 = new DatabaseSync(":memory:");
+  for (const file of files.filter((name) => Number(name.slice(0, 4)) <= 36)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, file), "utf-8"))) schema36.exec(statement);
+  }
+  schema36.prepare(
+    `INSERT INTO sync_runs
+       (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+        docs_added,docs_updated,docs_unchanged,proposed_deletes,delete_action,refusal_reason,error)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run("schema36_run", "drive", "sweep", 10, 20, 1, 7, 2, 3, 2, 0, "applied", null, null);
+  for (const file of files.filter((name) => Number(name.slice(0, 4)) > 36)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, file), "utf-8"))) schema36.exec(statement);
+  }
+  const upgradedRun = schema36.prepare(
+    `SELECT run_id,files_seen,docs_added,docs_updated,docs_unchanged,
+            docs_refused,docs_failed,metrics_version,
+            confirmed_from,confirmed_through,target_from,target_through
+       FROM sync_runs WHERE run_id='schema36_run'`,
+  ).get();
+  check("a populated schema-36 sync run survives the coverage telemetry migration",
+    upgradedRun?.run_id === "schema36_run" && upgradedRun.files_seen === 7 &&
+      upgradedRun.docs_added === 2 && upgradedRun.docs_updated === 3 && upgradedRun.docs_unchanged === 2,
+    JSON.stringify(upgradedRun));
+  check("legacy refusal counts remain explicitly unmeasured after upgrade",
+    upgradedRun?.docs_refused === 0 && upgradedRun?.docs_failed === 0 && upgradedRun?.metrics_version === 0 &&
+      upgradedRun?.confirmed_from === null && upgradedRun?.confirmed_through === null &&
+      upgradedRun?.target_from === null && upgradedRun?.target_through === null,
+    JSON.stringify(upgradedRun));
+  schema36.close();
+}
+
 /* ---- the objects the worker hard-depends on must exist ---- */
 const names = new Set(db.prepare("SELECT name FROM sqlite_master").all().map((r) => r.name));
 for (const t of ["documents", "document_source_inventory", "chunks", "chunks_fts", "vector_outbox", "vector_bootstrap_batches", "corpus_stats", "schema_migrations", "install_state"]) {
@@ -930,6 +1001,10 @@ check("restart guard refuses an existing migration column with the wrong contrac
       seededSingleton.status === "bootstrap_required" && seededSingleton.epoch === 1 &&
       seededSingleton.cursor === null && seededSingleton.high_water === "legacy:missing-row#0",
     JSON.stringify(seededSingleton));
+  check("fresh migration completion seeds one durable owner financial map key",
+    missingSingleton.prepare(
+      "SELECT count(*) AS n FROM owner_financial_map_key_state WHERE tenant_id='primary'",
+    ).get()?.n === 1);
   missingSingleton.close();
   rmSync(sandbox, { recursive: true, force: true });
 }
@@ -1007,10 +1082,33 @@ check("restart guard refuses an existing migration column with the wrong contrac
 
   const ready = await (await post({
     source: "drive", kind: "drive", status: "ready", run_id: "real_run_1",
-    lane: "sweep", started_at: oldStart, complete_sweep: true,
+    lane: "sweep", started_at: oldStart, complete_sweep: true, walk_complete: true,
+    files_seen: 4, docs_added: 1, docs_updated: 1, docs_unchanged: 1,
+    docs_refused: 1, docs_failed: 0,
+    confirmed_range: { from: "2025-01-01T00:00:00.000Z", through: "2026-09-06T00:00:00.000Z" },
+    target_range: { from: "2025-01-01T00:00:00.000Z", through: null },
   })).json();
   check("a real completion counts one split family as one logical document",
     ready.documents === 2 && ready.stored_documents === 3, JSON.stringify(ready));
+  const measuredRun = db.prepare(
+    `SELECT files_seen,docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+            confirmed_from,confirmed_through,target_from,target_through
+       FROM sync_runs WHERE run_id='real_run_1'`,
+  ).get();
+  check("a terminal receipt durably stores measured refusal counts and claimed ranges",
+    measuredRun?.files_seen === 4 && measuredRun?.docs_refused === 1 && measuredRun?.docs_failed === 0 &&
+      measuredRun?.metrics_version === 1 && measuredRun?.confirmed_from === "2025-01-01T00:00:00.000Z" &&
+      measuredRun?.confirmed_through === "2026-09-06T00:00:00.000Z" &&
+      measuredRun?.target_from === "2025-01-01T00:00:00.000Z" && measuredRun?.target_through === null,
+    JSON.stringify(measuredRun));
+  const invalidRange = await post({
+    source: "drive", kind: "drive", status: "ready", run_id: "invalid_range_run",
+    lane: "sweep", confirmed_range: { from: "2026-01-02", through: "2026-01-01" },
+  });
+  check("an inverted claimed range is refused before a sync run is written",
+    invalidRange.status === 400 &&
+      db.prepare("SELECT count(*) AS n FROM sync_runs WHERE run_id='invalid_range_run'").get().n === 0,
+    await invalidRange.text());
   const successfulAt = db.prepare("SELECT last_ingest_at FROM sources WHERE name='drive'").get().last_ingest_at;
 
   await post({ source: "drive", kind: "drive", status: "indexing", run_id: "real_run_2", lane: "incremental" });

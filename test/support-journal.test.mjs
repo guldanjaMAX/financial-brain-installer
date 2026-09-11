@@ -119,7 +119,7 @@ try {
   assert.doesNotMatch(moduleSource.slice(0, 500), /telemetry/i);
 
   const publicCommands = [
-    "setup", "ask", "doctor", "whatsnew", "verify", "provision", "deploy", "secrets",
+    "setup", "ask", "assistant-repair", "provenance-repair", "doctor", "whatsnew", "verify", "provision", "deploy", "secrets", "financial-picture",
     "health", "test", "mcp-config", "migrate", "ingest", "connect", "status",
     "sources", "forget", "drain", "reindex", "diagnose", "eval", "upgrade",
     "rollback", "schedule", "support",

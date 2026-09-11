@@ -6,9 +6,12 @@ procedure: what gets tested, on what machines, how often, and with zero
 client data. Anyone with this repo and an explicitly approved disposable test
 credential can run it.
 
-**When it runs:** on every release tag, and in full before every client
-install day. The rule this SOP exists to enforce: nothing weird gets
-discovered on the day of an install.
+**When it runs:** the published package-contract matrix runs every morning, on
+manual dispatch, and as a required job in every release-tag workflow. The live
+provisioning, deployed-browser, and physical-owner portions are separate gates
+before a client install day; the build-status table below states which remain
+open. The rule this SOP exists to enforce: nothing weird gets discovered on the
+day of an install.
 
 ---
 
@@ -25,7 +28,8 @@ live in the operator's private bench note, outside this repo. What matters publi
 
 - The token lives in the operator's OS keychain, never in a file, an argument,
   or a shell history line. The scripts read it from there.
-- CI reads it from the repository secret `BRAIN_TEST_CF_TOKEN`.
+- The planned live provisioning lane will read it from the repository secret
+  `BRAIN_TEST_CF_TOKEN`; the package-contract matrix uses no Cloudflare secret.
 - Proven 2026-08-27 and again 2026-08-28 on two separate accounts: those four
   permissions are sufficient for everything an install does, INCLUDING creating
   the Vectorize index. No `wrangler login` is required anywhere in the flow.
@@ -60,25 +64,46 @@ safely before teardown.
 `npm test`: the full assertion suite. Necessary, and proven insufficient on
 its own: none of these assertions can see a screen.
 
-## Tier 1: fresh-machine install matrix (CI)
+## Tier 1A: published package-contract matrix (CI, built)
 
-GitHub Actions workflow `install-matrix.yml`. Every runner is a genuinely
-fresh machine. Each job executes the install commands **verbatim from the
-public install page** (not from repo internals; the point is testing what a
-client actually types), then `brain whatsnew`, `brain doctor`, `brain setup`,
-a minimal `brain drain`, health verify, one `brain ask`, then teardown.
+GitHub Actions workflow `install-matrix.yml` runs on fresh hosted runners. Each
+job downloads the current platform agent contract and sealed field kit from
+`financialbrain.ai`, verifies the outer and inner receipts, parses the actual
+npm install command from the downloaded platform field guide, and refuses any
+change to its executable, mode flags, safety flags, owner prefix, or archive
+reference. It then substitutes only a throwaway prefix and the already-verified
+local archive. POSIX runners invoke the selected Node runtime's verified npm
+CLI directly. The Windows runner enters the parsed `npm.cmd` through a fixed
+PowerShell bridge, proves PATH resolves that shim beside setup-node's selected
+Node runtime, and preserves spaced prefix/archive arguments without evaluating
+guide text. Every runner then runs the installed package's version and doctor
+checks.
 
 | Runner | What it proves |
 |---|---|
 | macos-latest (Apple Silicon) | The Mac path most clients are on |
 | macos-13 (Intel) | Older Macs |
-| windows-latest | The PowerShell / npm.cmd path, which has never been human-tested |
+| windows-latest | The Windows npm.cmd contract, generated brain.cmd execution, and x64 hosted runtime |
 | ubuntu-latest | The Linux path and the cheapest canary |
 
-Artifacts per job: the full terminal transcript and timing. A failed job
-blocks the release. Trigger: release tag plus manual dispatch.
+The Actions log is the command transcript, and the downloaded public Markdown
+guides and receipts are retained as artifacts. `release.yml` calls this reusable
+workflow and cannot publish unless all four jobs pass. Manual and scheduled runs
+exercise the same workflow.
 
-## Tier 2: browser matrix against the /app surface (CI + local)
+This gate does **not** run `brain setup`, provision a Worker, D1 database, or
+Vectorize index, query a deployed Brain, open a browser, or exercise a physical
+passkey. Calling it an end-to-end install or provisioning gate would be false.
+
+## Tier 1B: disposable Cloudflare provisioning (open)
+
+The next job must create one allowlisted disposable Worker, D1 database, and
+Vectorize index, ingest only the package's public `CHANGELOG.md`, prove one
+supported answer and one refusal, and run the exact protected teardown. It
+remains absent until the required repository secrets and live-resource lock are
+available and the cleanup path is reviewed. A skipped green job is not proof.
+
+## Tier 2: deployed-browser matrix against the /app surface (open)
 
 The worker and `/app` page live in Cloudflare, so browser testing needs no
 VM at all. A Playwright suite targets the deployed **test** brain:
@@ -131,7 +156,9 @@ The short list automation cannot cover:
 1. Real passkey enrolment with Face ID on an actual iPhone against the test
    brain (domain settled first; passkeys bind to the exact host).
 2. One real `brain eval --golden-20` guided session end to end.
-3. Read the latest Tier 1 transcripts for anything a client would ask about.
+3. Read the latest Tier 1A Actions logs and contract artifacts, plus the latest
+   completed Tier 1B receipt when that gate exists, for anything a client would
+   ask about.
 
 ## Evidence filing
 
@@ -148,8 +175,9 @@ offboarding). File defect write-ups with the gate id in the title.
 | Tier 0 suite | BUILT (`npm test`) |
 | Test account + keychain-held scoped token | BUILT 2026-08-27 (token verified; Vectorize create/delete probe passed). Identifiers in the private bench note. |
 | `scripts/teardown-test-brain.mjs` | BUILT 2026-08-28. Allowlist-only, dry-run by default, refuses protected and non-test names; create/detect/delete verified live. |
-| `install-matrix.yml` (Tier 1) | TODO |
-| Playwright suite (Tier 2) | TODO |
+| `install-matrix.yml` (Tier 1A) | BUILT 2026-09-09. Required by `release.yml`; verifies the current public kit and package install on four hosted runners. It does not provision Cloudflare or prove the tagged candidate is already public. |
+| Disposable Cloudflare provisioning (Tier 1B) | TODO. Required secrets, protected-resource lock, exact setup/retrieval/refusal receipt, and teardown proof remain open. |
+| Deployed test-Brain Playwright suite (Tier 2) | TODO. Local synthetic browser regressions in ordinary CI are not this live gate. |
 | Tart bench (Tier 3, Mac) | BUILT 2026-08-28. Tart 2.32.1 + `macos-tahoe-base` (26.6.2); clone boots, SSH drivable, full install verified end to end in 8s. ⚠️ Requires WARP disconnected. |
 | UTM bench (Tier 3, Windows) | TODO (disk now available: 35GB free after 2026-08-27 cleanup) |
 | Golden-20 eval harness | BUILT (`brain eval <manifest> --golden-20`) |
@@ -422,8 +450,8 @@ testing that a test install left a live
 ## Fix pass, 2026-08-28
 
 F-07 through F-12 are fixed in the 0.2.0 candidate with focused regression
-coverage. This does not close F-01, the missing Tier 1 fresh-machine setup
-workflow, the missing browser matrix, the Windows human bench, or the physical
+coverage. This does not close F-01, the missing Tier 1B disposable provisioning
+gate, the deployed-browser matrix, the Windows human bench, or the physical
 passkey and provider field gates.
 
 

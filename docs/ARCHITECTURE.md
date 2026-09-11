@@ -25,11 +25,14 @@ Cloudflare Worker in the owner's account
       +---- FTS5 keyword index
 ```
 
-The installer uses a scoped Cloudflare token only for control-plane work such
-as verification, provisioning, deployment, migration, and Worker secrets.
-Routine use goes through the deployed Worker with the brain's own admin key.
-At handoff, the control-plane token can be revoked without disabling retrieval,
-health, ingest through a configured domain, evaluation, drain, or reindex.
+Normal owner setup and updates use a per-install named Cloudflare browser
+profile in the operating-system credential store for control-plane work such as
+verification, provisioning, deployment, migration, and Worker secrets. Scoped
+API tokens are limited to explicit automation, recovery, and older manifests.
+Routine use goes through the deployed Worker with the Brain's own admin key.
+Removing the control-plane profile or revoking a recovery token does not disable
+retrieval, health, ingest through a configured domain, evaluation, drain, or
+reindex.
 
 The standard backend is D1 plus Vectorize. Legacy Supabase adapters and
 migration tools remain so an existing corpus can be moved or temporarily
@@ -81,15 +84,21 @@ live path.
    technician-machine install keeps Claude advisory on that machine.
 2. Create or resume the manifest, declare durable admin-key storage, and
    prepare the exact desired key before remote changes.
-3. Verify the scoped token and account, then provision D1 and Vectorize. A new
-   install with no existing Worker can migrate and deploy directly. A resumed
-   D1 install with an existing Worker first captures a required bookmark,
-   deploys and verifies the paused compatibility Worker, waits the declared
-   20-minute old-invocation window, migrates, and deploys active mode.
+3. Verify the selected Cloudflare approval and exact account. Because the
+   narrow session cannot read billing, open that account's plan page and bind
+   the separate owner Workers Paid confirmation to it before provisioning D1 or
+   Vectorize. The same account-bound prerequisite applies to resumed, recovery,
+   and automation setup paths. A new install with no existing Worker can migrate
+   and deploy directly. A resumed D1 install with an existing Worker first
+   captures a required bookmark, deploys and verifies the paused compatibility
+   Worker, waits the declared 20-minute old-invocation window, migrates, and
+   deploys active mode.
 4. Persist and read back the admin key, set Worker secrets, and verify health.
-5. Register locator-only MCP entries for supported AI tools. When Claude Code
-   is connected, write an owner-only `CLAUDE.md` beside the manifest with exact
-   locators and safe approved-folder rules. Preserve an unrelated existing file.
+5. Register locator-only MCP entries for supported AI tools with the local-only
+   `owner-assistant` profile, then verify the advertised tool list includes
+   curated write and diagnostics. When Claude Code is connected, write an
+   owner-only `CLAUDE.md` beside the manifest with exact locators and safe
+   approved-folder rules. Preserve an unrelated existing file.
 6. Optionally ingest the first folder and report the vector backlog.
 
 Deploy must happen before Worker secrets because Cloudflare attaches secrets to
@@ -178,12 +187,24 @@ resumable. A failure stays retryable. Drive policy changes and periodic full
 sweeps compare source truth with stored families so excluded, deleted, moved,
 or no-longer-accessible files can be removed safely.
 
-Mutating Gmail runs share one cross-platform owner lease keyed to the canonical
-adjacent source-state path. The lease is acquired before credential or network
-access, checked before each state write, and released in `finally`. Its private
-owner token and heartbeat allow a stale dead process to be recovered without
-letting an old timestamp evict a live long-running sync. Gmail dry runs do not
-take the lease because they write no state or source receipt.
+Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
+owner lease keyed to the canonical adjacent source-state path. The lease is
+acquired before credential or network access, checked before every document or
+batch send and before each OCR, removal, state, and source-receipt mutation,
+and released in `finally`.
+Direct commands, scheduled children, `brain load`, and provenance repair enter
+the same writer boundary exactly once. Its private owner token and heartbeat
+allow a stale dead process to be recovered without letting an old timestamp
+evict a live long-running sync. Dry runs do not take the lease because they
+write no state or source receipt.
+Manifest-file symlinks resolve to the target before the state identity is
+derived. A multiply hard-linked manifest is rejected before the runtime lock,
+credentials, or network because it has no portable single adjacent state path.
+Google source writers acquire that source lease first and then one shared
+`provider:google` lease before opening the credential record. The Google OAuth
+connect ceremony uses the same shared lease. Mutating load preflight reads only
+credential-store metadata; dry-run connectors use a full-record reader that
+cannot migrate legacy Windows or macOS storage.
 
 The authenticated HTTP batch route preserves one receipt per input document.
 For D1 it reads prior rows for unique document identities in one batch preflight,
@@ -247,7 +268,8 @@ without exposing source identifiers.
 | OCR for scanned PDFs | Built, optional, and provenance-marked; local synthetic scans pass and private real scans remain a field gate |
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |
 | Microsoft 365 and Dropbox | Built behind field gates for mail and files, cursor resume, tombstones, and scheduling; no real tenant or account has completed acceptance |
-| QuickBooks Online, Plaid, and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
+| QuickBooks Online and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
+| Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. The candidate technician ceremony hidden-prompts provider values, safeguards an independent local wrapping key, atomically applies only the three bank-feed Worker secrets, and verifies both names and deployed key fingerprint. It requires one nominated supervised computer because its lock is local and no remote first-setup compare-and-swap exists. `brain secrets` rejects bank-feed environment values; custom-provider credential setup remains held. `brain connect bank` remains a field-plan entrypoint until disposable-candidate acceptance and a separately approved production pilot pass |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
@@ -348,6 +370,24 @@ hash is removed from the response. This is retrieval protection, not physical
 deduplication: source lifecycle rows remain intact until an alias-aware storage
 plan can preserve update and deletion semantics.
 
+Evidence independence uses a separate metadata contract. A producer that knows
+the origin of a document may set `metadata.evidence_lineage` to version 1 with
+kind `source_record`, `derived_record`, or `agent_derived`. A derived record must
+name every durable source-family id in `root_ids`. A source record may omit
+`root_ids`, in which case its own fully qualified document uid is the root.
+Malformed contracts are rejected on new ingest. `family_of` still describes a
+physical split or import family, but does not by itself prove that the content is
+primary evidence.
+
+Retrieval keeps unknown-lineage documents and allows them to support what they
+directly say. Their filename cannot promote them to primary or derived authority,
+and they earn no independent-corroboration credit. Documents with overlapping
+roots form one corroboration group even when one is a generated report and the
+other is its ledger. Public results expose only opaque family tokens and a
+plain-language lineage status, never the underlying root ids. Agent memory writes
+are always stamped `agent_derived` in both metadata and native text so export and
+reingest cannot turn an agent's restatement into a new primary source.
+
 `/api/rag/unified` returns ranked evidence. It has no universal relevance floor,
 so a result list by itself is not proof that the corpus answers the question.
 `/api/rag/think` is the owner-facing answer path: it generates an answer from
@@ -376,6 +416,12 @@ Every `brain zone` assignment repairs up to 1,000 live documents and 1,000
 chunks in the same transaction as the source registry update, reports what
 remains, and can be repeated until the legacy projections converge. No retrieval
 path may trust those projections before that bounded repair completes.
+The CLI retries only the field-observed HTML/proxy HTTP 500 for an exact
+source-to-zone POST. It repeats the same idempotent assignment at most three
+times with 1, 2, and 4 second delays, announces that the prior pass may already
+be committed, and preserves the last confirmed checkpoint on exhaustion. It
+does not replay JSON 500 responses, other statuses, transport failures, list
+requests, or partial assignments.
 The exact access-zone readiness audit compares every live document and chunk
 with the source registry, so its cost grows with the corpus. It runs only from
 the explicit zones and `brain check` path, not from polled health or owner
@@ -387,9 +433,24 @@ aggregate counters rather than moving this scan into its request path.
 Durable secrets never belong in the manifest or MCP registration. The manifest
 contains only a non-secret locator when Keychain is used. Standard durable
 stores are macOS login Keychain, Windows DPAPI CurrentUser-protected files, and
-owner-only Linux files. AI-tool registrations carry the manifest locator and
-resolve the current key when the MCP process starts, so rotation does not leave
-stale copied credentials.
+owner-only Linux files. AI-tool registrations carry the manifest locator plus
+the nonsecret local profile and resolve the current key when the MCP process
+starts, so rotation does not leave stale copied credentials. The local
+`owner-assistant` profile may read, write contract-checked records to the
+registered `owner-notes` source, and run diagnostics. That source is
+non-refreshable, carries customer-visible MCP provenance, remains unzoned and
+excluded from named grants until assigned, and is classified as recollection
+rather than authoritative evidence. The owner and an explicitly approved Brain
+connector can still use it. A successful response requires exact D1 row and
+source readback. A direct write proves that record, not complete conversation history.
+It has no delete or access-control tool. Remote OAuth profiles are
+a separate list and can never request `owner-assistant`.
+
+The local MCP registration is user-wide, so repository instructions are not an
+authorization boundary. `brain_remember` is marked as data-changing and
+non-destructive, and the AI client's per-call approval must remain
+enabled. The model's tool instructions require a direct current-user request,
+but those instructions are defense in depth rather than proof of user presence.
 
 Every shipped client request carrying `X-Admin-Key` requires HTTPS, except for
 an explicit loopback test URL, and refuses redirects before sending the header.
@@ -397,6 +458,77 @@ The client also rejects a response whose final origin differs from the reviewed
 request origin. This is a shared transport invariant because Node preserves
 custom headers across a cross-origin redirect even though it strips the standard
 `Authorization` header.
+
+The owner-only source inventory is a narrow data-plane exception to the general
+admin route gate. `POST /api/admin/brain/sources` accepts the full admin key or
+an unscoped owner passkey session, rejects scoped grants, and reads D1 directly.
+It never asks for Cloudflare account authority. Default mode returns a complete
+or explicitly paged source receipt with masked configuration, physical/logical
+storage, readability, freshness, extraction, and lineage evidence. Recovery
+mode returns bounded opaque record identities and exact provenance/OCR reason
+codes for planning only. Both modes are private, stable-snapshot contracts and
+fail on observed corpus drift. Neither inventory mode can write, OCR, reingest,
+infer an entity or period, expose a raw locator, or alter the existing MCP tool
+set. A source row's `last_failure` is either `null` or the latest Gmail error's
+revalidated closed receipt: fixed operation class, HTTP status, canonical
+provider reason, aggregate checkpoint counts/readback state, and
+cursor-preservation category. Raw provider messages, IDs, paths, cursor values,
+content, and secrets never cross this boundary. `/zones` keeps its existing
+aggregate semantics and authorization boundary.
+
+The required row key makes this source-inventory contract v3, including both
+inventory and recovery cursors. Version mismatch is a refusal, not a partial
+parse. A schema-39 database receives one narrowly matched compatibility query
+that substitutes `NULL` for the not-yet-created `failure_evidence` column;
+other D1 errors cannot enter that fallback.
+
+The separate CLI `provenance-repair` bridge is an owner-approved data-plane
+operation, not a writable inventory endpoint. Preview binds one exact source,
+manifest and source configuration, complete semantic source-inventory and
+recovery generations, exact opaque candidate set, machine readiness,
+reset/no-limit rewalk mode, and OCR policy. Apply recomputes that plan and calls
+only the existing local-folder, Drive, Gmail, or Calendar full-source ingest.
+It cannot relabel legacy metadata or address an opaque candidate individually.
+The existing deletion review remains a second approval boundary. A different
+completed full-sweep source receipt and fresh candidate readback are required
+before the set difference can call any candidate fixed; incomplete evidence is
+reported as unresolved rather than success.
+
+The new-computer continuity report composes that same authenticated source
+inventory with local-only observations. It reads the exact manifest, durable
+owner credential, connector stores, declared local roots, LaunchAgent status,
+resume state, current package entrypoint, technician skill, and Claude Code/Codex MCP
+registrations. It never accepts an ambient admin key or credential-store mode,
+enters a Wrangler session, opens a browser, refreshes a source, or writes. Its
+JSON projects every observation onto four states: `ready`, `missing`,
+`unproven`, or `inapplicable`. Raw paths, source and provider identities,
+Cloudflare resource IDs, credential values, and cursor values remain inside the
+inspection boundary. Since the source inventory masks cursors and does not echo
+the manifest's Cloudflare resource bindings, legacy checkpoint continuity and
+the exact deployed-resource match stay `unproven` until a future keyed receipt
+can prove them. The current package's existence and self-declared version are
+local facts only. Public release integrity and currency require an independently
+resolved release target and artifact receipt, so the report also keeps that
+claim `unproven`.
+
+The Owner Financial Map has a narrow technician read/preview contract under
+`/api/admin/brain/financial-map/` and a separate private review/confirmation
+contract under `/api/owner/financial-map/`. Migration 0041 adds no inferred
+history or backfill. Read and preview accept the durable admin credential or
+the exact owner session. The complete private review, passkey options, and
+activation require the exact unscoped owner app session with no admin-key,
+CLI, or MCP fallback. The old admin passkey and activation routes return 410.
+Every preview is a full closed snapshot of
+the current entity and account inventory, any owner-declared expected rows that
+are not in the ledger, and a finite entity-year horizon. Each entity-year names
+its filing-unit, return, form, K-1, books, payroll, and expected-source
+obligations. Opaque local map IDs keep that declared denominator separate from
+nullable ledger evidence. Rows and current values are represented by
+database-salt HMAC-bound references and hashes.
+The immutable activation chain binds the map hash, denominator hash, inventory
+generation, and one prior head. Local MCP can read and create an expiring
+non-authoritative preview only. It has no activation operation. No map route
+rewrites the ledger, sources, tax records, books, payroll, or accounts.
 
 Google OAuth uses Keychain by default on macOS and a protected file under
 `~/.brain/` on other supported paths. Scheduler logs and locks also live under
@@ -453,6 +585,24 @@ matching mutable human wording.
 | `brain eval` | Does this install retrieve the required documents, refuse unsupported questions honestly, and avoid regression? |
 | `npm test` and CI | Does shared product behavior pass offline on supported operating systems and Node versions? |
 | Live field gates | Does the real connector, scale, scheduler, or account lifecycle work outside mocks? |
+
+The D1 diagnostic's chunk-integrity lane is a bounded snapshot, not a collection
+of independent whole-table aggregates. It fixes one integer chunk-id high-water
+mark, visits that range once with keyset pages, and fuses the exact total, blank,
+oversized, orphan, document-source mismatch, and zone-projection counts in each
+page. Opening and closing schema, outbox-generation, corpus-stat, source-event,
+source-count, and vector-projection markers cheaply detect supported concurrent
+corpus changes. The bounded zone command records its source-authoritative
+assignment and projection-repair page in the same transaction, so a same-zone
+repair cannot evade the marker. Any changed marker, failed page, coverage gap,
+or exhausted statement/page budget makes the additive report `complete: false`,
+removes page-derived counts, and names the skipped checks. Store parity runs
+only at a verified empty-queue cut, because provider acceptance can become
+visible asynchronously, and then requires exact count equality with no
+percentage tolerance. The renderer cannot issue a clean verdict from partial
+evidence. Expensive duplicate-text and per-document outlier groupings are
+explicitly unobservable at large scale until maintained hashes or aggregates
+make them indexable.
 
 The eval golden set is per install. It should include answerable single-document
 questions, multi-document questions, hard paraphrases, near-miss entities, and

@@ -1,13 +1,14 @@
 /**
- * golden-20 — a guided session that builds an install's first golden question
- * set live against the brain it will judge.
+ * golden-20: an optional guided session that builds a private regression
+ * question set live against the brain it will judge.
  *
  * The blank template asks the owner to author questions alone, and the field
  * result of that is an empty workbook: the eval machinery exists but no client
- * sits down with a JSON file and writes 20 questions unprompted. This session
- * is the handoff ritual instead — operator and owner fill twenty slots
- * together in one sitting, and the file it writes is immediately scorable by
- * eval/run.mjs.
+ * sits down with a JSON file and writes 20 questions unprompted. When an owner
+ * chooses this advanced regression exercise, operator and owner fill twenty
+ * slots together in one sitting, and the file it writes is immediately
+ * scorable by eval/run.mjs. It is not required for setup, adaptive acceptance,
+ * or handoff and does not replace the same-item receipt and evidence gate.
  *
  * Two invariants carried over from the workbook, because they are what make
  * the score mean anything:
@@ -145,10 +146,13 @@ function loadOrStartGolden(goldenPath, manifest, now) {
     created: now().toISOString().slice(0, 10),
     built_by: "the owner and the operator, in a guided Golden 20 session",
     _how_to_read_this: [
-      "Built with `brain eval --golden-20`: each question was written from",
-      "memory BEFORE retrieval ran, then the owner confirmed which returned",
-      "documents are the right evidence. Unanswerable entries are questions",
-      "the brain must refuse. Score with `brain eval <manifest>`.",
+      "This is an optional private regression set. It is not required for",
+      "setup, adaptive acceptance, or handoff and does not replace the",
+      "same-item receipt and evidence gate. Built with `brain eval",
+      "--golden-20`: each question was written from memory BEFORE retrieval",
+      "ran, then the owner confirmed which returned documents are the right",
+      "evidence. Unanswerable entries are questions the brain must refuse.",
+      "Score with `brain eval <manifest>`.",
     ],
     questions: [],
   };
@@ -392,7 +396,9 @@ export async function runGolden20Session({
   }
 
   log("");
-  log(`  Golden ${target} — ${golden.questions.length} written, ${slots.reduce((n, s) => n + s.count, 0)} to go.`);
+  log("  Optional private regression session. This is not required for setup,");
+  log("  adaptive acceptance, or handoff.");
+  log(`  Golden ${target}: ${golden.questions.length} written, ${slots.reduce((n, s) => n + s.count, 0)} to go.`);
   log("  Write each question FROM MEMORY. Do not open files: a question written");
   log("  while reading a document borrows its wording and flatters the score.");
   log("  A blank question skips the slot; re-run --golden-20 later to finish.");

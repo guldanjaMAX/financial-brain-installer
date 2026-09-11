@@ -11,6 +11,9 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const readText = (path) => readFileSync(path, "utf8").replace(/\r\n/g, "\n");
 const ci = readText(join(root, ".github/workflows/ci.yml"));
 const release = readText(join(root, ".github/workflows/release.yml"));
+const installMatrix = readText(join(root, ".github/workflows/install-matrix.yml"));
+const installRunner = readText(join(root, "scripts/install-from-public-contract.mjs"));
+const windowsNpmHelper = readText(join(root, "scripts/invoke-public-npm-install.ps1"));
 const workflowsDir = join(root, ".github/workflows");
 const workflowFiles = readdirSync(workflowsDir)
   .filter((name) => /\.ya?ml$/.test(name))
@@ -29,6 +32,29 @@ assert.match(ci, /os: \[windows-latest, macos-latest, ubuntu-latest\]/);
 assert.match(ci, /node: \['22', '24'\]/);
 assert.match(ci, /^  preflight-traps:$/m);
 assert.match(release, /^  push:\n    tags:\n      - "v\*\.\*\.\*"$/m);
+assert.match(installMatrix, /^  workflow_dispatch:$/m);
+assert.match(installMatrix, /^  workflow_call:$/m);
+assert.match(installMatrix, /^  schedule:$/m);
+assert.doesNotMatch(installMatrix, /^  push:$/m,
+  "release.yml must call the public-contract matrix rather than racing an independent tag run");
+assert.match(installMatrix, /verify and install from the published package contract/);
+assert.match(installMatrix, /node scripts\/install-from-public-contract\.mjs/);
+assert.doesNotMatch(installMatrix, /brain (?:setup|provision|drain|ask)/,
+  "the package-only public-contract gate must not claim or start live provisioning");
+assert.match(installRunner, /readSupervisedInstallContract\(\{ platform: guideArg \}\)/,
+  "the install runner must reuse the strict live doorway validator before download");
+assert.match(installRunner, /if \(process\.platform === "win32"\)[\s\S]*buildWindowsNpmPowerShellInvocation/,
+  "the Windows path must enter the parsed npm.cmd contract through PowerShell");
+assert.match(windowsNpmHelper, /Get-Command -Name \$contract\.executable -CommandType Application/);
+assert.match(windowsNpmHelper, /& \$contract\.executable @arguments/);
+assert.match(windowsNpmHelper, /GetCurrentPackageFullName/);
+assert.match(windowsNpmHelper, /PUBLIC_NPM_REFUSED.*packaged_shell/s);
+assert.match(windowsNpmHelper, /PUBLIC_NPM_REFUSED.*package_identity_unverified/s);
+const packageIdentityIndex = windowsNpmHelper.indexOf("$packageContext = Get-WindowsPackageContext");
+const contractReadIndex = windowsNpmHelper.indexOf("ReadAllText($ContractPath)");
+const npmInvokeIndex = windowsNpmHelper.indexOf("& $contract.executable @arguments");
+assert.ok(packageIdentityIndex > 0 && contractReadIndex > packageIdentityIndex && npmInvokeIndex > contractReadIndex,
+  "the Windows installer must prove it is outside an app package before reading the contract or invoking npm");
 
 // One Node 24 job creates the package. All operating-system jobs resolve the
 // immutable artifact ID and verify the producer's raw SHA before installing it.
@@ -92,12 +118,16 @@ assert.match(preflightTrapJob, /trap 5: Node 21 is below the supported minimum[\
   "Windows CI must refuse Node 21 rather than only testing supported runtimes");
 
 const gateIndex = release.indexOf("  gate:");
+const publicContractIndex = release.indexOf("  public-contract-install:");
 const publishIndex = release.indexOf("  publish:");
-assert.ok(gateIndex > 0 && publishIndex > gateIndex, "publish must follow the reusable CI gate");
-const gate = release.slice(gateIndex, publishIndex);
+assert.ok(gateIndex > 0 && publicContractIndex > gateIndex && publishIndex > publicContractIndex,
+  "publish must follow both reusable release gates");
+const gate = release.slice(gateIndex, publicContractIndex);
+const publicContractGate = release.slice(publicContractIndex, publishIndex);
 const publish = release.slice(publishIndex);
 assert.match(gate, /uses: \.\/\.github\/workflows\/ci\.yml/);
-assert.match(publish, /^    needs: gate$/m);
+assert.match(publicContractGate, /uses: \.\/\.github\/workflows\/install-matrix\.yml/);
+assert.match(publish, /^    needs:\n      - gate\n      - public-contract-install$/m);
 assert.match(publish, /^    permissions:\n      contents: write$/m);
 
 const releaseDownloadIndex = release.indexOf("- name: download the package already tested by CI");

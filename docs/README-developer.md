@@ -2,8 +2,9 @@
 
 Provisions a retrieval brain into a **client's own Cloudflare account**. Text and
 keyword search live in D1, vectors live in Vectorize, and the Worker fuses them.
-Nothing runs on our infrastructure, and nothing but a scoped token is held during
-the engagement.
+Nothing runs on our infrastructure. Normal setup uses an owner-approved named
+Cloudflare browser profile in the owner's operating-system credential store; it
+does not create or copy an API token.
 
 **Status: 0.2.0 release candidate.** Provisioning, retrieval, resumable ingest,
 guarded deletion, owner actions, exact entity scope, document grants, passkey
@@ -27,18 +28,30 @@ release, owner-update, rollback, credential, and issue-evidence workflow.
 ## Requirements
 
 - Node 22 or newer (uses `node:sqlite` for the migration tests)
+- At least 2 GiB free on the actual per-user install drive. On Windows this is
+  the drive containing `LOCALAPPDATA`.
+- A normal current-user shell without `sudo`, root, or Run as administrator.
 - A Cloudflare account **on the Workers Paid plan**, 5 USD a month minimum.
   Vectorize has a Free allowance, but its vector capacity, D1 daily-write limit,
   and Worker CPU limit are prototype-scale. Paid is this product's supported
   production baseline.
-- A Cloudflare API token created in the client's own account with: Workers
-  Scripts Edit, D1 Edit, Vectorize Edit and Workers AI Read. It drives verify,
-  provisioning, migrations, deploy and secrets. Add Workers R2 Storage Edit only
-  when the manifest actually sets an R2 bucket.
+- An owner-controlled Cloudflare browser sign-in to the exact account that will
+  hold the Brain. The owner completes login, 2FA, account selection, and
+  Cloudflare consent. The named install profile is stored through Wrangler's
+  protected local credential store.
 
-Vectorize Edit was verified end to end on 2026-08-23: an account-scoped token
-created the index and all six metadata indexes through the API. `wrangler login`
-remains a compatibility fallback for an older token, not an install requirement.
+`brain tools` and setup check Node, the actual install drive, and elevation
+before provisioning. The narrow Cloudflare session verifies account and product
+access but does not prove billing state. After sign-in verifies the exact
+account, setup opens its account-specific plan page. Before resource creation,
+the owner must confirm **Workers & Pages > Plans > Paid** there. Do not widen the
+session just to inspect billing. Prepared-manifest, recovery, and automation
+setup paths have the same account-bound prerequisite.
+
+A scoped Cloudflare token is a bounded legacy, automation, or recovery path,
+not a fresh-install prerequisite. Use it only when that exact path is explicitly
+selected and keep it inside the reviewed hidden prompt or approved no-history
+launcher.
 
 ---
 
@@ -46,7 +59,7 @@ remains a compatibility fallback for an older token, not an install requirement.
 
 ```bash
 node brain.mjs doctor                        # check this machine first
-node brain.mjs setup                         # hidden token prompt, then one-command setup
+node brain.mjs setup                         # owner browser sign-in, then one-command setup
 ```
 
 `setup` runs everything below in the only order that works, generates the admin
@@ -111,6 +124,20 @@ bypass those gates. Neither path restores D1 automatically because that would
 discard writes made after the bookmark. Direct `brain migrate` refuses a live
 D1 install when the pending writer-protocol migrations require this cutover.
 
+The accelerated bootstrap keeps two separate time boundaries. Its six-hour
+wall-clock deadline remains a hard stop. Its fifteen-minute no-movement budget
+counts only intervals the updater could continuously observe, so a laptop sleep
+or another unobserved local pause cannot by itself stand in for proof that the
+remote projection stalled. Any stop still leaves writes paused and resumes only
+through the same verified update path.
+
+The observation budget uses a short, unreferenced event-loop heartbeat rather
+than trusting the requested length of a poll or ownership-backoff timer. A
+transport retry or aggregate-only 409 busy receipt also breaks the sequence of
+comparable receipts; the fifteen-minute semantic window restarts only when the
+next full receipt arrives. The raw deadline is rechecked after every awaited
+pin hook, request, response body, retry wait, and postflight before completion.
+
 Always `--dry-run` first. It walks, extracts and judges every file without
 sending anything, and prints what would be skipped and why. On a real corpus
 that list is the useful part: it is where you find out that 12,000 PDFs are not
@@ -169,6 +196,12 @@ node brain.mjs drain <manifest>                      # empties it safely now
 ```
 
 An oldest-queued timestamp over 30 minutes means the cron is not running.
+The drain's human completion receipt names `actual_vectors` as the total
+query-visible count and `drained` as the number newly confirmed during this
+command. Its returned object preserves `drained`, `submitted`, and `remaining`
+and adds `confirmed_this_run`, `expected_vectors`, `actual_vectors`, and
+`vector_ready`. A no-op over a populated, ready index must never look like an
+empty index.
 
 ---
 
@@ -234,6 +267,19 @@ document. `documents.text_source` and `text_reliable` carry the OCR provenance
 through retrieval and citations. Local synthetic scans prove this contract;
 real typed, fax-quality, and handwritten scans remain a private field gate.
 
+Every corpus write also carries the exact `metadata.provenance_receipt` v1
+object: `version`, `status`, `reason`, and sorted unique `root_ids`. `complete`
+means only that lineage and text-origin fields were recorded. It says nothing
+about date coverage, extraction quality, or factual correctness. A producer
+that cannot assess provenance is normalized to `text_source: "unknown"`,
+`text_reliable: false`, status `unavailable`, and reason
+`provenance_unavailable`; omission is never promoted to native/reliable.
+Malformed explicit claims are refused. Legacy rows whose only provenance is
+migration 0020's `native/1` column backfill remain unproven until a receipt
+validates against the row's source or recorded family identity. Inventory and
+authority code must use `storedProvenanceAssessment(row)` rather than trusting
+those columns directly.
+
 CSV and TSV are rendered row-wise as `Header: value` rather than as a bare grid,
 because `15234.11` on its own is unretrievable while `Balance: 15234.11` answers
 a question about a balance.
@@ -268,13 +314,31 @@ node brain.mjs mcp-config ./acme.manifest.json
 ```
 
 The generated registration carries only the URL, display name, executable path,
-and absolute manifest locator. The MCP process reads the current admin key from
-the manifest's validated durable Keychain or protected-file backend at runtime.
+absolute manifest locator, and the nonsecret `owner-assistant` profile. That
+local profile can read, add or correct owner notes, and run a basic connection
+check. It can also read the Owner Financial Map and create a non-authoritative
+complete preview after a guided interview. It cannot activate the map. Each
+accepted owner-note write lands in the registered, non-refreshable
+`owner-notes` source with a visible local or remote MCP provenance label. It is
+treated as recollection, not current authoritative source evidence. The source
+stays outside named grants until the owner assigns it a zone; the owner and an
+explicitly approved Brain connector can still use it. The profile cannot delete
+records or change access. The MCP process
+reads the current admin key from the manifest's validated durable Keychain or
+protected-file backend at runtime.
+
+Do not disable the AI client's normal approval prompt for `brain_remember`.
+The tool is advertised as data-changing but non-destructive: it creates a durable
+record without deleting or replacing another one. Tool copy limits it to a
+direct owner request, but copy is not authorization enforcement; the owner must
+retain the final click.
+
 `brain setup` reconciles installer-owned Claude Code and Codex registrations and
-accepts them only after an exact local readback. It never relies on a name-only
-listing or prints a stored legacy credential. Claude Desktop remains a manual
-config update; replace its entry with the locator-only JSON from `mcp-config`
-and restart it after a rotation.
+accepts them only after an exact local readback plus an MCP tool-list check that
+proves `brain_remember` is present. It never relies on a name-only listing or
+prints a stored legacy credential. Claude Desktop remains a manual config
+update; replace its entry with the locator-only JSON from `mcp-config` and
+restart it after a rotation.
 
 ---
 
@@ -287,12 +351,23 @@ node brain.mjs ingest ./acme.manifest.json --from drive
 node brain.mjs ingest ./acme.manifest.json --from gmail
 ```
 
-A mutating Gmail ingest takes a nonblocking per-source owner lease under
-`~/.brain/locks` before it reads credentials or contacts either service. Manual
-invocations and `brain load` therefore cannot write the same adjacent resume
-state concurrently on macOS, Windows, or Linux. The owner record is private,
-heartbeated, and recoverable after a stale dead process; `--dry-run` remains
-concurrent because it writes neither resume state nor source receipts.
+Every mutating local-folder, Drive, Gmail, and Calendar ingest takes a
+nonblocking per-source owner lease under `~/.brain/locks` before it reads
+credentials or contacts a service. Direct commands, provenance repair,
+scheduled children, and `brain load` therefore cannot write the same adjacent
+resume state concurrently on macOS, Windows, or Linux. The owner record is
+private, heartbeated, and recoverable after a stale dead process; `--dry-run`
+remains concurrent because it writes neither resume state nor source receipts.
+Manifest-file symlinks resolve to the target's adjacent state identity. A
+manifest with multiple hard links is refused with a path-free safety error,
+because separate parent directories cannot portably share one adjacent state.
+Drive, Gmail, and Calendar take the source lease first and then a shared
+`provider:google` credential-record lease. `brain connect google` takes that
+same shared lease, so credential migration and replacement cannot overlap a
+source run. A mutating `brain load` inspects only credential-store metadata
+during preflight; the real credential is opened after both leases are held.
+Dry-run source reads use a dedicated non-migrating loader, including for legacy
+Windows plaintext and macOS file-backed records.
 
 For a mailbox that is not Gmail:
 
@@ -360,6 +435,10 @@ macOS token file is deleted only after the full credential record has been
 written to Keychain and read back exactly. Browser, Keychain, Expect, ACL, and
 DPAPI helper processes receive a small allowlisted environment rather than the
 Terminal's ambient credentials.
+Planning and dry-run reads never trigger either legacy migration. A real source
+run performs migration only while holding both its source lease and the shared
+Google credential-record lease; `brain connect google` holds the shared lease
+for its complete OAuth and verified storage ceremony.
 
 Choose OAuth client type **Desktop app**. Desktop clients accept the local
 loopback callback automatically. Google Cloud does not provide, or require, a
@@ -453,6 +532,27 @@ revision it was called to reconcile. Any new producer that turns one input into
 many documents must stamp `family_of`; leaving it out is a hard refusal at plan
 time rather than a silently unreconcilable source.
 
+`family_of` is a storage and deletion relationship, not an evidence-authority
+claim. When a producer generates a report, pack, staging note, or other document
+from existing records, it must also send this versioned lineage metadata:
+
+```json
+{
+  "evidence_lineage": {
+    "version": 1,
+    "kind": "derived_record",
+    "root_ids": ["upload:stable-source-id"]
+  }
+}
+```
+
+Use `source_record` only when the producer is preserving a direct source
+artifact; it may omit `root_ids` to use its own fully qualified document uid.
+Use `agent_derived` for agent-written content and include every supporting id
+returned by Brain search when available. Unknown legacy lineage remains
+retrievable, but it cannot earn independent-confirmation credit or gain T1/T2
+authority from a suggestive filename.
+
 A Google Doc is exported as text, a Sheet as CSV, and a Google Form not at all.
 
 `modifiedTime` is deliberately **not** used as a document date. A sync or a
@@ -481,9 +581,10 @@ public install safely completes both halves. The LaunchAgent runs
 `brain ingest <manifest> --from drive`, uses macOS's native per-client advisory
 lock to prevent two scheduler-launched syncs from overlapping, and writes
 separate stdout and stderr logs under `~/.brain/logs`. Manual `brain ingest`
-runs do not participate in this lock. Never start a manual run while the
-scheduler is active, or kickstart the scheduler while a manual run is active.
-Remove preserves the logs as an audit trail.
+runs and scheduled children also share the command's cross-platform per-source
+lease, so they fail closed before credential or network access instead of
+overlapping. Read-only dry runs do not contend. Remove preserves the logs as an
+audit trail.
 LaunchAgent calendar times use the Mac's local timezone; status reports a
 mismatch with `client.timezone` instead of silently presenting the wrong
 schedule. Cron fields are numeric; month and weekday names are not accepted
@@ -818,6 +919,23 @@ good enough. Do not move a client to another backend based on chunk count alone.
 Require a measured failure on the golden set, a diagnosed cause, and an approved
 architecture change.
 
+`brain diagnose` follows the same refusal to guess at scale. It pins the current
+maximum integer `chunks.id`, then keyset-pages through that fixed range in
+50,000-row statements. One page derives the total, blank, oversized, orphan,
+document-source mismatch, and source-zone mismatch counts together. The report
+also brackets the complete run with durable schema, outbox, `corpus_stats`,
+source-event, source-count, and vector-projection markers. `brain zone` writes a
+source event in the same transaction as its bounded projection repair, including
+same-zone retries. Store parity is attempted only when the durable projection is
+verified and its outbox is empty, then requires exact count equality. A page
+failure, fixed-range coverage gap, statement or page budget, or changed marker
+produces `complete: false`; partial counts never become a healthy verdict.
+Exact duplicate-text and per-document
+outlier grouping remain `observable: false` above their safe bound because they
+require a second whole-corpus grouping pass. A disposable D1 field gate at
+roughly 1.5 million synthetic chunks remains required before this is called
+provider-scale proof.
+
 ---
 
 ## Tests
@@ -836,6 +954,19 @@ scenario routing, and absence of credential fields. This is browser-contract
 and layout evidence only. Cloudflare install, provider OAuth, webhook delivery,
 mailbox access, and physical WebAuthn remain field gates.
 
+Every npm, Vite, fixture, and browser child in this rehearsal receives a strict
+operating-system allowlist instead of the desktop environment. npm also reads
+neither ambient npm credential variables nor the owner's user or machine-wide
+configuration, so an ordinary registry token cannot cross into this
+public-dependency install. Before dependency installation and again before the
+Vite build, the rehearsal refuses every `frontend/.env*` entry. This prevents an
+ignored local Vite file from restoring a value that the child allowlist removed.
+Windows Node 22 and 24 CI run
+`npm.cmd run rehearse:onboarding -- --smoke --no-open`; the bounded mode
+builds the app, verifies the loopback guide, app shell, and synthetic owner API,
+then closes both local servers. The hosted Windows runner is elevated, so this
+is not proof of a physical non-administrator session or browser launch.
+
 `npm run rehearse:hiccups` is the matching offline failure rehearsal. It runs a
 curated set of product tests for interrupted setup, missing mounts and removal
 guards, partial connectors, lost-response idempotency, restart-safe migrations,
@@ -848,12 +979,187 @@ runs.
 
 `brain technician <manifest>` is the matching install-day coordinator. Its
 default and `--json` forms are read-only. A selected `--run` step launches the
-existing command in a child process with an allowlisted environment. Google and
-Zoom values are collected by the shared hidden-input primitive, never placed in
-argv, and cleared from the coordinator's buffers and child environment object
-after the command exits. Tests assert ordering, rerun behavior, ambient-secret
-scrubbing, exact hostname confirmation before invite creation, and stop-on-fail
+existing command in a child process with an allowlisted environment, except the
+Plaid credential step, which stays in the coordinator's dedicated reviewed
+boundary. Google, Zoom, and Plaid values are collected by the shared
+hidden-input primitive and never placed in argv. Plaid uses the Cloudflare
+account already bound to this manifest, and its plan entry is an owner-only
+direct-terminal action rather than an agent-executable command. The exact
+command includes `--confirm-single-setup-machine`: the private lock covers one
+computer only, and no remote compare-and-swap protects a brand-new wrapping key
+from a concurrent first setup on another computer. General setup therefore
+remains held and must use one nominated supervised owner session. It uses the
+script `secrets-bulk` endpoint to apply exactly `BANK_FEED_CLIENT_ID`,
+`BANK_FEED_SECRET`, and `BANK_FEED_WRAPPING_KEY_V2` atomically, then reads back
+only those three binding names. The independent wrapping key is committed and
+verified first in macOS Keychain, a Windows DPAPI CurrentUser encrypted file,
+or an atomic mode-0600 Linux file, and is reused on retry. The coordinator
+refuses to generate a replacement when that Worker already has the binding but
+the local protected record is missing. For an existing key it requires the
+runtime fingerprint to remain equal across the bounded propagation window
+before PATCH, not merely match once, and proves it again afterward. It derives
+the authenticated proof
+origin from the resolved Cloudflare account, Worker, and workers.dev subdomain,
+requires that exact Worker's workers.dev route to be enabled, refuses redirects,
+and verifies the deployed wrapping-key fingerprint before replacing an existing
+binding and after the patch. This proof route remains required when the public
+Brain has a custom hostname; rerun `brain deploy` after fixing route access if
+it is unavailable. Plaid secret entry is held on Windows until a native masked
+bridge is implemented and physically proven, because the shared terminal reader
+cannot prove that PowerShell suppressed echo. `brain secrets` refuses all
+three bank-feed environment values. Custom-provider credential setup has no
+reviewed ceremony and remains held. The coordinator clears owned input
+buffers after the step exits. Tests assert ordering, rerun
+behavior, ambient-secret scrubbing, exact Plaid environment, redirect, webhook,
+Production-access and single-machine gates, exact hostname confirmation before
+invite creation, and stop-on-fail
 verification.
+
+For a fresh Worker whose approved field-plan manifest already enables the bank
+feed, `brain secrets` preserves its provider-cleanup order, installs the three
+core access keys, then deliberately pauses at bank-secret completeness. That
+makes the authenticated proof route available to the owner-only ceremony
+without accepting any bank-feed value from the environment. Rerun `brain
+secrets` after the ceremony to prove the complete binding set.
+
+Technician plan schema 4 also carries the owner briefing for every ceremony:
+what will open, why it is needed, the minimum access, the safe non-secret work
+a browser controller can do, the owner's handoff point, and the privacy
+boundary. The CLI renders that briefing before each provider command. The
+direct invite command renders the passkey briefing before it mints a link, and
+the enrollment page requires a device-neutral owner click before WebAuthn is
+invoked. Optimize is a separate read-only audit. It may detect a missing CLI,
+skill, or MCP registration, but it does not invoke passkey or device checks.
+After its report, the exact release may advertise a separately previewed local
+repair bundle for owner-selected skill, Claude MCP, and Codex MCP items. That
+bundle receives one approval and exact readback; CLI replacement stays separate.
+
+Optimize source evidence comes from `POST /api/admin/brain/sources`, not from
+Wrangler or the Cloudflare D1 control plane. The route accepts either the full
+admin key or a positively identified owner session with its companion CSRF
+header. It rejects scoped grants, including a grant that carries `administer`.
+All responses are private and `no-store`. The handler issues D1 `SELECT`
+statements only and does not touch passkeys, source receipts, sync cursors,
+credential storage, OCR, or the corpus.
+
+Optimize also reads `POST /api/admin/brain/financial-map/read`. Migration 0041
+starts with no map history and never promotes existing structured rows by
+backfill. The response calls those rows possible mentions, exposes current,
+stale, or not-established map state, and returns the complete unresolved-item
+list. This is the first audit evidence after the owner's opening goal. Before
+the read, the host explains that it sends no map snapshot and changes nothing,
+even if the assistant displays an approval prompt for the private read. Before
+any financial-completeness conclusion, the host offers the optional guided,
+session-only interview and asks one short question at a time if the owner
+accepts. The interview submits nothing and changes nothing. If the owner
+declines, the report keeps completeness unproven. Optimize ends before
+`brain_financial_map` may submit a full version 1 preview under a separate,
+explicit owner approval. The full map can add owner-declared entities and
+accounts with no current ledger row, and records filing units, return and form
+obligations, K-1 roles, books, payroll, and expected sources for every
+entity-year. Nullable ledger evidence stays separate from owner truth and no
+`fin_*` row is synthesized. Preview writes only an expiring non-authoritative
+receipt. Activation is a separate owner passkey ceremony with no admin-key or
+MCP fallback. It appends a sealed linear snapshot and changes no existing
+financial or source record. See `docs/OWNER-WORKSPACE-API.md` for the closed
+snapshot contract.
+
+The default request mode returns stable source-id pages. The source set and
+all aggregates are read from one bounded D1 statement, hashed with an as-of
+receipt, and sorted by source id. A continuation cursor binds its last source,
+as-of time, total, and snapshot hash. If any returned source field changes,
+the next page returns `source_inventory_changed` instead of combining moments.
+The CLI collects every source page before printing JSON and refuses incomplete,
+duplicated, unordered, or privacy-invalid output.
+
+Each inventory row includes `last_failure`. It is `null` unless the newest run
+has a Gmail failure receipt that passes the closed source-failure validator.
+The only permitted fields are the fixed operation class, HTTP status, canonical
+provider reason, aggregate checkpoint counts/readback state, and the
+cursor-preservation category. Raw provider messages, IDs, paths, cursor values,
+content, and secrets are neither selected for this receipt nor rendered by the
+CLI. Invalid stored evidence fails closed to `null`; invalid response evidence
+is rejected by the CLI.
+
+Adding the required `last_failure` row key advances the shared inventory and
+recovery response/cursor contract to v3. The Worker rejects v2 cursors and the
+CLI rejects v2 responses. On schema 39, the inventory performs one exact
+missing-`failure_evidence` fallback that projects `last_failure: null`; every
+other query failure is rethrown and becomes the ordinary unavailable response.
+
+`mode: "recovery"` returns one bounded record-candidate page. Stable opaque
+document digests permit a later before/after comparison without revealing raw
+document ids, provider locators, paths, titles, URIs, or metadata. Candidate
+selection is limited to recorded conditions: no nonblank chunks, partial OCR,
+missing extraction/readability receipts, missing source identity, or missing
+or unrecognized lineage. The top-level summary groups candidates by safe source
+identity with exact closed reason counts and stored-evidence priority signals.
+The cursor carries no raw locator. Opening and closing corpus markers refuse a
+page that overlaps supported writes, and a later marker mismatch returns 409.
+The schema cannot prove that an empty document is scan-only, so that field is
+explicitly unavailable. Recovery mode is a plan only and contains no repair
+operation.
+
+`brain sources <manifest> --json` and `--json --recovery` resolve the existing
+durable admin credential with `ignoreEnvironment: true` only after validating
+the saved HTTPS Brain origin. They use the shared redirect-refusing transport,
+do not accept a literal key option, and bypass the Wrangler session wrapper.
+This source-inventory feature does not widen MCP authority. The five local
+Owner assistant tools are `brain_think`, `brain_search`, `brain_remember`,
+`brain_health`, and `brain_financial_map`. The last tool can read map state and
+store an expiring preview, but it has no activation operation.
+
+The current ingest boundary validates an evidence-lineage contract when one is
+present, but it does not yet require a versioned complete provenance receipt or
+prevent a weaker reingest from replacing stronger provenance. Inventory labels
+that debt as partial or unavailable. `brain provenance-repair <manifest>
+--source <name>` can recover only the narrower legacy case where the exact
+original source is still available through a supported whole-source ingest
+path. Its read-only preview binds a canonical semantic generation rather than
+the Worker's raw snapshot ID, because raw IDs include a new `as_of` on every
+read. The semantic generation retains every source row, candidate, reason and
+count while excluding only observation time and pagination fields. Apply
+recomputes it, then uses reset with no limit for exactly one manifest-declared
+local-folder, Drive, Gmail, or Calendar source. No candidate-level ingest path
+is invented.
+
+The source rewalk retains every ordinary ingestion invariant, including
+credential custody, Gmail's source lock, Drive/local reconciliation, and the
+separate aggregate removal approval. A loaded macOS Drive or folder scheduler
+blocks preview; this release has no Windows/Linux scheduler for those sources,
+so non-macOS readiness names that absence instead of pretending to inspect a
+service. Google plans also bind an opaque in-process digest of the exact decoded
+saved credential record, so reconnecting a different account invalidates an
+earlier approval without exposing any OAuth value or the digest itself. After a
+run, the command requires a different completed latest-run
+receipt with `walk_complete`, measured zero refusals/failures, and a new
+`complete_history_through`, then reads the exact recovery source again. It
+computes fixed IDs only as the approved opaque set minus the readback set. A
+missing receipt, readback failure, remaining candidate, new candidate, or
+second removal approval exits without a complete-success claim.
+
+This rewalk bridge does not solve the broader write-contract gap. A separate
+change must still cover every connector, owner write, importer, chunk split,
+OCR result, summary, and reingest before the store can require complete
+provenance or prevent a weaker future write from replacing stronger evidence.
+
+`brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
+local handoff lane. Its only accepted scopes are `technician-skill`,
+`claude-code-mcp`, and `codex-mcp`; there is deliberately no CLI, setup,
+passkey, device, corpus, source, access, zone, provider, or Cloudflare scope.
+Without `--apply` it only inspects safe local files, starts the packaged MCP
+runtime for an offline initialize and exact tool-list exchange, and prints a
+SHA-256 plan ID bound to the manifest and current destination bytes. Apply also
+requires `--approve <plan-id>`, recomputes the plan, and stops before writes if
+anything drifted. The MCP reconciler receives exactly one selected target at a
+time, refuses custom and disabled entries, uses a credential-scrubbed child
+environment, and restores a safe prior locator or absence when exact readback
+fails. The skill scope treats its Claude and Codex copies as one transaction
+and restores completed writes if either destination fails. Before the first
+selected write, the command snapshots all repairable skill and MCP destinations
+in memory. Failure in any later scope rolls the full selected write set back in
+reverse order; restoration refuses a concurrent custom replacement and reports
+the exact scope that needs inspection.
 
 Current connector proof levels and the ranked acceptance backlog are maintained
 in [CONNECTOR-BACKLOG.md](./CONNECTOR-BACKLOG.md). Fixture coverage is never a

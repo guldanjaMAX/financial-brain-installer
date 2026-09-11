@@ -707,6 +707,8 @@ export function messageCompletionReceipt(lane, completedAt = new Date().toISOStr
     docs_added: lane.created,
     docs_updated: lane.updated,
     docs_unchanged: lane.unchanged,
+    docs_refused: accounting.refused_parts_after_upgrade,
+    docs_failed: lane.failed,
     detail: [
       "Message migration complete",
       `expected=${accounting.expected_source_messages}`,

@@ -235,6 +235,17 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "document_source_inventory",
   "plaid_sync_leases",
   "vector_projection_events",
+  // Schema 37: append-only, server-verified correction history. Losing this
+  // ledger would make known-wrong conversational memories current again.
+  "memory_supersessions",
+  // Schema 41: the immutable, owner-activated financial-map chain and the key
+  // that verifies it are durable owner records. Expiring previews and the
+  // replay-derived inventory counter remain in the table inventory but are
+  // not recovery content.
+  "owner_financial_map_key_state",
+  "owner_financial_map_inventory_state",
+  "owner_financial_map_previews",
+  "owner_financial_map_snapshots",
 ]);
 
 /**
@@ -256,6 +267,8 @@ export const RECOVERY_EXPORT_TABLES = Object.freeze(
       table !== "support_enrollment_codes" && table !== "support_auth_challenges" &&
       table !== "support_passkeys" &&
       table !== "agent_action_receipts" &&
+      table !== "owner_financial_map_inventory_state" &&
+      table !== "owner_financial_map_previews" &&
       table !== "bank_feed_link_sessions" &&
       table !== "oauth_clients" && table !== "oauth_codes" && table !== "oauth_tokens"),
 );
@@ -333,14 +346,9 @@ const INSTALL_STATE_ZERO_NORMALIZED_COLUMNS = Object.freeze([
 // Schemas 14 through 22 add owner passkeys, capability grants, zones, the financial ledger, bank feeds,
 // connector OAuth, extraction provenance, owner workspace state, and exact
 // document security. The vector protocol itself is unchanged, but the recovery
-// contract tracks the EXACT current schema by design: a drill against a
-// database one migration behind would export a table or column set that does
-// not match the reviewed list. Bumping this is required for every migration.
-// The schema this recovery contract has been reviewed against. The adapter
-// REFUSES to export a tree whose last migration is anything else, which is
-// the point: a recovery drill against an unreviewed schema could omit a
-// durable table silently. Never raise this without reviewing each migration's
-// tables and recovery behavior.
+// The minimum schema carrying the reviewed vector recovery protocol. Additive
+// migrations after this floor are accepted only when their exact checked-in
+// prefix and table inventory pass the recovery contract below.
 const RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION = 36;
 
 function quoteIdentifier(value) {
@@ -451,6 +459,13 @@ const SCHEMA_35_TABLES = Object.freeze([
   "plaid_sync_leases",
 ]);
 const SCHEMA_36_TABLES = Object.freeze(["vector_projection_events"]);
+const SCHEMA_37_TABLES = Object.freeze(["memory_supersessions"]);
+const SCHEMA_41_TABLES = Object.freeze([
+  "owner_financial_map_key_state",
+  "owner_financial_map_inventory_state",
+  "owner_financial_map_previews",
+  "owner_financial_map_snapshots",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -471,7 +486,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_24_TABLES, ...SCHEMA_25_TABLES, ...SCHEMA_26_TABLES, ...SCHEMA_27_TABLES,
      ...SCHEMA_28_TABLES, ...SCHEMA_30_TABLES, ...SCHEMA_31_TABLES,
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
-     ...SCHEMA_36_TABLES].includes(table)
+     ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1250,7 +1265,7 @@ function assertSameRecoveryCorpus(left, right, code = "RECOVERY_D1_SNAPSHOT_MISM
 const SCHEMA_14_TABLES = Object.freeze(["owner_passkeys", "auth_challenges", "enrollment_codes"]);
 
 function expectedRecoveryTables(migrations) {
-  const latest = migrations?.at(-1)?.version || RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION;
+  const latest = migrations?.at(-1)?.version || migrationFileContract().at(-1)?.version || 0;
   return RECOVERY_DURABLE_TABLES.filter((table) =>
     (latest >= 13 || table !== "vector_bootstrap_batches") &&
     (latest >= 14 || !SCHEMA_14_TABLES.includes(table)) &&
@@ -1272,7 +1287,19 @@ function expectedRecoveryTables(migrations) {
     (latest >= 32 || !SCHEMA_32_TABLES.includes(table)) &&
     (latest >= 34 || !SCHEMA_34_TABLES.includes(table)) &&
     (latest >= 35 || !SCHEMA_35_TABLES.includes(table)) &&
-    (latest >= 36 || !SCHEMA_36_TABLES.includes(table)));
+    (latest >= 36 || !SCHEMA_36_TABLES.includes(table)) &&
+    (latest >= 37 || !SCHEMA_37_TABLES.includes(table)) &&
+    (latest >= 41 || !SCHEMA_41_TABLES.includes(table)));
+}
+
+export function recoveryExportTables(migrations, { excludeBankItems = false } = {}) {
+  const present = new Set(expectedRecoveryTables(migrations));
+  return RECOVERY_EXPORT_TABLES.filter((table) =>
+    present.has(table) && (!excludeBankItems || table !== "bank_feed_items"));
+}
+
+export function recoveryVectorProtocolSupported(migrations) {
+  return (migrations?.at(-1)?.version || 0) >= RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION;
 }
 
 function assertExpectedTables(rows, migrations) {
@@ -2145,8 +2172,8 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     code = "RECOVERY_TARGET_UPGRADE_REQUIRED",
   ) {
     const migrations = await remoteMigrationContract(binding);
-    if (migrations.at(-1)?.version !== RECOVERY_VECTOR_PROTOCOL_SCHEMA_VERSION) {
-      // The current Worker requires the exact schema-36 generation, lease,
+    if (!recoveryVectorProtocolSupported(migrations)) {
+      // Recovery requires at least the schema-36 generation, lease,
       // async-visibility, and durable bulk-bootstrap protocol. A historical
       // exact-prefix artifact remains
       // inspectable offline, but the field runner has no implicit live-upgrade
@@ -2228,7 +2255,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
       await wrangler(binding, [
         "d1", "export", binding.databaseName,
         "--remote", "--no-schema", "--output", path,
-        ...RECOVERY_EXPORT_TABLES.filter((table) => !excludeBankItems || table !== "bank_feed_items")
+        ...recoveryExportTables(migrations, { excludeBankItems })
           .flatMap((table) => ["--table", table]),
       ]);
       if (process.platform !== "win32") chmodSync(path, 0o600);
@@ -2615,7 +2642,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         await wrangler(pins.binding.source, [
           "d1", "export", pins.binding.source.databaseName,
           "--remote", "--no-schema", "--output", dataPartial,
-          ...RECOVERY_EXPORT_TABLES.flatMap((table) => ["--table", table]),
+          ...recoveryExportTables(migrations).flatMap((table) => ["--table", table]),
         ]);
         if (process.platform !== "win32") chmodSync(dataPartial, 0o600);
         assertArtifactFile(dataPartial, { maxBytes: plan.artifact.max_single_import_bytes, allowEmpty: true });

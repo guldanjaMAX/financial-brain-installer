@@ -474,19 +474,21 @@ Build coverage in this order:
 
 ### The Golden 20 session
 
-`brain eval <manifest> --golden-20` is step 1 operationalized as a handoff
-ritual: operator and owner fill twenty slots together in one sitting — six
-single-document facts, three multi-document syntheses, three temporal
-questions about things that changed, three person-distinction questions, and
-five unanswerable questions the brain must refuse. The owner writes every
-question from memory before retrieval runs, so the wording cannot borrow from
-the answering document; the session then runs their question and the owner
-confirms which returned documents are the right evidence, which records
-scorer-stable identities without any hand-edited JSON. Unanswerable entries
-get an on-the-spot live refusal check. The file saves after every question and
-the session resumes where it stopped, so an interrupted sitting loses nothing.
-The result is a valid smoke suite the moment the session ends — a starting
-point for the growth path above, not a substitute for it.
+`brain eval <manifest> --golden-20` is an optional advanced private regression
+exercise. It is not required for setup, adaptive acceptance, or handoff, and it
+does not replace the same-item source receipt and evidence gate. When the owner
+chooses it, operator and owner fill twenty slots together in one sitting: six
+single-document facts, three multi-document syntheses, three temporal questions
+about things that changed, three person-distinction questions, and five
+unanswerable questions the brain must refuse. The owner writes every question
+from memory before retrieval runs, so the wording cannot borrow from the
+answering document. The session then runs the question and the owner confirms
+which returned documents are the right evidence. That records scorer-stable
+identities without any hand-edited JSON. Unanswerable entries get an on-the-spot
+live refusal check. The file saves after every question and the session resumes
+where it stopped, so an interrupted sitting loses nothing. The result is a
+valid smoke suite the moment the session ends, a starting point for the growth
+path above rather than a substitute for it.
 
 A small suite is a smoke test. A first release suite should contain roughly 60
 to 80 reviewed cases across its required slices. A stable release suite should

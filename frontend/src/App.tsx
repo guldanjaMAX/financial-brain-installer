@@ -9,6 +9,7 @@ import { ThisYear } from "./components/ThisYear";
 import { AddReview } from "./components/AddReview";
 import { FinanceScopeProvider } from "./components/FinanceScope";
 import { ScopedDocuments } from "./components/ScopedDocuments";
+import { FinancialMap } from "./components/FinancialMap";
 import { Attention } from "./components/ui";
 import { grantWorkspaceConfirmed } from "./lib/security";
 
@@ -23,9 +24,15 @@ const inviteCode = (typeof location === "undefined" ? null : (location.hash.matc
 const root = typeof document === "undefined" ? null : document.getElementById("root");
 const shellOwner = root?.dataset.owner || "";
 
-export type View = "home" | "year" | "documents" | "ask" | "review" | "access";
-export const OWNER_VIEWS: readonly View[] = ["home", "year", "documents", "ask", "review", "access"];
+export type View = "home" | "year" | "financial-map" | "documents" | "ask" | "review" | "access";
+export const OWNER_VIEWS: readonly View[] = ["home", "year", "financial-map", "documents", "ask", "review", "access"];
 export const GRANT_VIEWS: readonly View[] = ["documents", "ask"];
+
+export function initialOwnerView(): View {
+  if (typeof location === "undefined") return "home";
+  const requested = new URLSearchParams(location.search).get("view") as View | null;
+  return requested && OWNER_VIEWS.includes(requested) ? requested : "home";
+}
 
 export function visibleView(kind: "owner" | "grant", requested: View): View {
   const allowed = kind === "grant" ? GRANT_VIEWS : OWNER_VIEWS;
@@ -34,7 +41,7 @@ export function visibleView(kind: "owner" | "grant", requested: View): View {
 
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
-  const [view, setView] = useState<View>("home");
+  const [view, setView] = useState<View>(initialOwnerView);
   const [ready, setReady] = useState(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
 
@@ -92,6 +99,7 @@ export function App() {
             <nav aria-label="Primary" className="flex items-center gap-1 text-[13.5px] w-full overflow-x-auto lg:w-auto pb-0.5 lg:pb-0">
               <Tab now={view} go={setView} to="home">Home</Tab>
               <Tab now={view} go={setView} to="year">This Year</Tab>
+              <Tab now={view} go={setView} to="financial-map">Financial Map</Tab>
               <Tab now={view} go={setView} to="documents">Documents</Tab>
               <Tab now={view} go={setView} to="ask">Explore</Tab>
               <Tab now={view} go={setView} to="review">Add &amp; Review</Tab>
@@ -105,6 +113,7 @@ export function App() {
               whose whole subject is trust. */}
           {view === "home" && <Home />}
           {view === "year" && <ThisYear />}
+          {view === "financial-map" && <FinancialMap />}
           {view === "documents" && <Documents />}
           <div className={view === "ask" ? "" : "hidden"}>
             <Ask />

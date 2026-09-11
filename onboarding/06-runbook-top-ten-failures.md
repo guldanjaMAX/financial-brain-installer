@@ -55,7 +55,13 @@ And the one that answers "what is actually in there, and is each part current":
 node brain.mjs sources <manifest>
 ```
 
-That prints one line per source with its status (pending, indexing, ready, or error), how many documents it holds, and when it last took anything in. When the durable admin key is available it also cross-checks those counts against what your brain actually holds and flags any gap, because the registry's number is its last receipt and the brain is the authority. **A drift of thousands is the cheapest signal available that a load died halfway.**
+That prints one line per source with its status (pending, indexing, ready, or
+error), how many documents it holds, and when it last took anything in. When
+the durable admin key is available it also cross-checks those counts against
+what your brain actually holds and flags any gap, because the registry's number
+is its last receipt and the brain is the authority. These are source-level clues,
+not proof that any exact file arrived or is searchable. **A drift of thousands
+is the cheapest signal available that a load died halfway.**
 
 And the one that checks the parts of the install that are not questions and answers at all:
 
@@ -107,10 +113,12 @@ brain setup <manifest>
 brain health <manifest>
 ```
 
-`brain setup` prompts for the Cloudflare token without echo, reuses the
-manifest's verified durable admin key, and applies that durable value to the
-Worker. Keeping the key change inside `brain setup` preserves the local and
-Worker verification as one step.
+`brain setup` reuses this Brain's named owner-approved Cloudflare browser
+profile, reuses the manifest's verified durable admin key, and applies that
+durable value to the Worker. Keeping the key change inside `brain setup`
+preserves the local and Worker verification as one step. If the released CLI
+explicitly offers its recovery-only hidden token path, explain why and use it
+only after the owner chooses that path.
 
 If the remote update fails, the durable value stays as the desired state.
 Rerun `brain setup <manifest>` and it will apply that same durable value again.
@@ -244,10 +252,13 @@ brain setup <manifest>
 brain health <manifest>
 ```
 
-Setup prompts for the Cloudflare token without echo and reuses the durable
-admin key. If that durable copy is missing or is not the intended value, stop
-and use the installer/operator's approved no-history credential launcher with
-`brain secrets`, keeping the admin key out of shell commands and history.
+Setup reuses this Brain's named Cloudflare browser sign-in and the durable admin
+key. The owner completes Cloudflare sign-in, 2FA, account selection, and consent
+if the saved session needs renewal. If that durable key is missing or is not the
+intended value, stop and use the installer/operator's approved no-history
+credential launcher with `brain secrets`, keeping the admin key out of shell
+commands and history. An API token is only for an explicitly selected automation
+or recovery lane.
 
 **Prevention:** deploy with `node brain.mjs deploy`. That is what it is for.
 
@@ -428,7 +439,10 @@ node brain.mjs sources <manifest>
 node brain.mjs sources <manifest>
 ```
 
-If the source you expected is missing, or its count is zero, or its status is still `pending`, the file never arrived. That is a loading problem, not a search problem, and no amount of rephrasing the question will fix it.
+If the source you expected is missing, its count is zero, or its status is still
+`pending`, the source load needs attention. Those source-level clues do not
+prove that this exact file never arrived. A ready source and a nonzero count do
+not prove that it did.
 
 The same command cross-checks the registry against the authenticated live
 document store whenever the install's durable admin key is available:
@@ -437,9 +451,36 @@ document store whenever the install's durable admin key is available:
 node brain.mjs sources <manifest>
 ```
 
+Choose one approved low-sensitivity item and follow it through this exact chain.
+Stop at the first unproven checkpoint:
+
+1. **Accepted:** a terminal source receipt names exact accepted, refused,
+   unreadable, failed, and retryable counts for the run.
+2. **D1 stored and provenanced:** that same item is represented as the expected
+   logical family in D1, has chunks, and carries the correct source and
+   extraction provenance. This is not proof that an original file or binary was
+   copied or backed up.
+3. **Projected:** that exact generation has a confirmed Vectorize receipt and no
+   matching outbox work remains.
+4. **Independently query-visible and cited:** a distinctive phrase from that
+   same item returns through the supported search path with the expected source
+   citation and provenance.
+
+Never substitute a source count, a pending total, a green health response, or a
+different item at a later checkpoint. Rephrasing is useful only after this chain
+proves the item reached the supported query path.
+
 **b. Is it still being processed?** The acceptance suite reports this as "embedding backlog". A backlog is normal for a few minutes after new material lands. A large one means processing is stuck, and the symptom you experience is exactly this: search does not find your document.
 
-**c. Is the file type readable at all?** Images, video, audio, and scanned PDFs with no text layer are not read. There is no text recognition on scanned documents. See `07-ingest-source-matrix.md` for the full list of what is and is not read.
+**c. What is the file's reading state?** A PDF with a native text layer is read
+directly. A scanned PDF with no text layer can be read with OCR, but OCR is off
+by default. Each scanned page uses Workers AI in the owner's Cloudflare account,
+so first show the estimated page count, cost range, time range, and daily spend
+cap. Run OCR only after the owner separately enables and approves it. Mark the
+result as machine-read text, and refuse an unusable reading instead of guessing.
+An uninspected file or failed extraction remains unknown; neither one proves the
+file is a scan. Images, video, and audio still have no general transcription
+path. See `07-ingest-source-matrix.md` for the complete matrix.
 
 **d. Is it in an excluded folder?** Anything you excluded at intake was excluded at the source and was never read.
 
@@ -471,7 +512,11 @@ First look at what changed. This reads and prints, and changes nothing:
 node brain.mjs doctor <manifest> --repair-checksum
 ```
 
-It reads your database, so like `brain setup` and `brain update` it asks for the Cloudflare token at a hidden prompt, or reuses the one this machine already remembers.
+It reads your database, so like `brain setup` and `brain update` it reuses this
+Brain's named Cloudflare browser sign-in. If that protected session needs a
+refresh, the owner approves the official browser prompt. The bounded hidden
+token path appears only when the released CLI offers recovery and the owner
+chooses it.
 
 For every migration that no longer matches, it prints when it was applied, both checksums, the current file's size in lines and bytes, and whether the difference is only line endings. That last line is a proof rather than a guess: it converts the current file to LF and to CRLF and checks each against the recorded checksum. If neither reproduces it, it says `not confirmable as a pure line-ending change` and tells you to review the file by hand, because the bytes that originally ran were never kept, only their checksum was.
 

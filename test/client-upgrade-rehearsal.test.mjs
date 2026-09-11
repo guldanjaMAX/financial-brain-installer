@@ -3,8 +3,8 @@
 //
 // WHY THIS FILE EXISTS. Every release published through v0.3.6 ships exactly 22
 // migrations. Both brains in the field are therefore at schema 22 with a
-// POPULATED database, and migrations 0023..0035 have never been applied to a
-// real one. test/migrations.test.mjs only PARSES the migration SQL and asserts
+// POPULATED database, and migrations 0023 through the current head have never
+// been applied to a real one. test/migrations.test.mjs only PARSES the migration SQL and asserts
 // that indexes and columns appear in the file text; nothing applied them to
 // rows that already exist. That was the gap.
 //
@@ -13,7 +13,8 @@
 //
 //   FIELD-HEALTHY  a v0.2.0 install whose health check passes. Schema 22, live
 //                  documents, chunks, an FTS index, financial rows, drifted
-//                  corpus_stats. It must cross 22 -> 35 without losing a row.
+//                  corpus_stats. It must cross 22 -> current head without
+//                  losing a row.
 //   FIELD-STRANDED the same schema prefix, but PAUSED for an upgrade with one
 //                  chunk queued by ordinary ingest in the seconds before the
 //                  pause landed, and a projection fence left over from an
@@ -27,7 +28,8 @@
 //  * The walk is driven by the REAL `cmdMigrate`, not a local copy of its
 //    loop, so its checksum guard, its pending filter, its writer-quiescence
 //    refusal and its install_state upsert are all under test.
-//  * Block 3 is a negative control. Every one of 0023..0035 is neutered in
+//  * Block 3 is a negative control. Every migration after the shipped schema
+//    22 prefix is neutered in
 //    turn -- its statements are swallowed while the ledger row is still
 //    written, which is exactly "the migration silently did nothing" -- and the
 //    same assertion battery must fail for each. A rehearsal that still passes
@@ -547,7 +549,7 @@ function baselineOf(db) {
 }
 
 /* ===================================================================== 1 ==
- * FIELD-HEALTHY: a passing v0.2.0 brain crosses 22 -> 35.
+ * FIELD-HEALTHY: a passing v0.2.0 brain crosses schema 22 to the current head.
  * ======================================================================== */
 {
   const db = buildFieldBrain();
@@ -586,7 +588,7 @@ function baselineOf(db) {
   // A second run must be a no-op, because a re-run is what an operator does
   // after any interrupted upgrade.
   const again = await migrate(db);
-  check("re-running the walk applies nothing and leaves the ledger at 35",
+  check(`re-running the walk applies nothing and leaves the ledger at ${HEAD_MAX}`,
     again.applied === 0 && again.schemaVersion === HEAD_MAX &&
       db.prepare("SELECT count(*) AS n FROM schema_migrations").get().n === HEAD_MAX,
     JSON.stringify(again));
@@ -747,7 +749,7 @@ const projectionOf = (db) => probe(() => db.prepare(
   // cmdMigrate's ON CONFLICT touches client_slug, schema_version and
   // gate_version only. Widening it would reset a mid-recovery fence on every
   // upgrade and re-create this failure by hand.
-  check("the 22 -> 35 walk leaves the stranded projection fence byte-identical",
+  check(`the 22 -> ${HEAD_MAX} walk leaves the stranded projection fence byte-identical`,
     migrated.status === before.status && migrated.epoch === before.epoch &&
       migrated.cursor === before.cursor && migrated.high_water === before.high_water &&
       migrated.protocol === before.protocol && Number(migrated.base) === Number(before.base) &&
@@ -825,11 +827,13 @@ const projectionOf = (db) => probe(() => db.prepare(
 }
 
 /* ===================================================================== 3 ==
- * NEGATIVE CONTROL. If 0023..0035 silently did nothing, this file must FAIL.
+ * NEGATIVE CONTROL. If every pending migration silently did nothing, this
+ * file must FAIL.
  * ======================================================================== */
 
 // "Did nothing" is modelled honestly: the real cmdMigrate runs, the ledger row
-// is still written and install_state still moves to 35, but the neutered file's
+// is still written and install_state still moves to the derived current head,
+// but the neutered file's
 // own statements are swallowed on the way to the database. That is exactly the
 // state a migration that ran and had no effect would leave behind, and it is
 // the state a ledger-only assertion cannot see.
@@ -858,19 +862,25 @@ function statementsOf(versions) {
 }
 
 // Neutering a migration that a later one builds on makes the WALK itself throw
-// (0029 alters a table 0026 creates). That is a load-bearing signal too, so it
-// is recorded as a failed battery item rather than crashing the file.
+// (0029 alters a table 0026 creates). That is a load-bearing signal too. Keep
+// the read-only state battery as well: a late post-migration finalizer can fail
+// after the ledger reaches the head, and the negative control must still prove
+// that the schema itself is absent rather than treating that finalizer as the
+// only failure.
 async function walkSwallowing(swallow) {
   const db = buildFieldBrain();
   try {
     const baseline = baselineOf(db);
+    let walkError = null;
     try {
       await migrate(db, { swallow });
     } catch (error) {
-      return [{ name: "the walk itself could not complete", ok: false,
-        detail: String(error?.message || error).slice(0, 200) }];
+      walkError = { name: "the walk itself could not complete", ok: false,
+        detail: String(error?.message || error).slice(0, 200) };
     }
-    return evaluate(db, baseline);
+    const results = evaluate(db, baseline);
+    if (walkError) results.push(walkError);
+    return results;
   } finally { db.close(); }
 }
 
@@ -895,12 +905,17 @@ function statementsMatching(predicate) {
   check(`negative control: with all ${all.size} pending migrations neutered, the battery FAILS`,
     failed.length > 0,
     `${failed.length}/${results.length} failed`);
-  // The walk still reports success and the ledger still reads 35, which is the
-  // whole reason a ledger-only check is not evidence.
-  check("and it fails on real state, not on the ledger: schema_migrations still reads 35",
-    results.find((r) => r.name.includes("contiguous"))?.ok === true &&
-      results.find((r) => r.name.includes("records schema"))?.ok === true,
-    JSON.stringify(results.filter((r) => /contiguous|records schema/.test(r.name))));
+  // Older heads can still report success and advance the ledger even when all
+  // migration statements were swallowed. The current head adds a post-migration
+  // key finalizer, so a missing map table instead stops the walk before it can
+  // make that false claim. Both outcomes prove that ledger rows alone are not
+  // accepted as real state.
+  const ledgerChecks = results.filter((r) => /contiguous|records schema/.test(r.name));
+  const finalizerRefusal = results.find((r) => r.name === "the walk itself could not complete");
+  check("and it fails on real state instead of trusting the migration ledger alone",
+    (ledgerChecks.length === 2 && ledgerChecks.every((r) => r.ok)) ||
+      /owner_financial_map_key_state/.test(finalizerRefusal?.detail || ""),
+    JSON.stringify(finalizerRefusal || ledgerChecks));
 
   const silent = [];
   const howItBreaks = {};

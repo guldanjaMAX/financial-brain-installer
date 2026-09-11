@@ -90,8 +90,15 @@ ordered that way, and they cannot be:
 
 Clearing the pause also buys the client nothing they do not already have. The
 pause is a corpus **write** barrier, not a read barrier: it refuses `POST` on
-ingest, batch ingest, source receipts and expectations, forget, reindex,
-vector-retry, drain, and bank import. Retrieval is untouched. `/api/rag/think`
+ingest, batch ingest, source registration, receipts and expectations, zone
+assignment, forget, reindex, drain, and bank import. Retrieval is untouched.
+The one retry-state exception is `/api/admin/brain/vector-retry`: its preview
+with `{"confirm":false}` is read-only, and an owner-reviewed
+`{"confirm":true}` deletes each selected retry-state row, including its
+quarantine marker, failure code, last error, attempt history, timestamps, and
+backoff, then resets attempts and the last error on the matching outbox row.
+That discards stored failure evidence so the generation can be tried as new. It
+does not write the corpus or call Vectorize. `/api/rag/think`
 and `/api/rag/unified` answer normally while paused, and the MCP connector's
 `think` and `search` are deliberately left open so a paused brain can still be
 asked questions. What the client loses under the pause is the ability to add

@@ -6,6 +6,45 @@ import { OwnerPreferences } from "./OwnerPreferences";
 import { DocumentAccess } from "./DocumentAccess";
 import { PasskeyDiagnostics } from "./PasskeyDiagnostics";
 
+export function AddPasskeyContext({ busy, hostname, onContinue, onCancel }: {
+  busy: boolean;
+  hostname: string;
+  onContinue: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div role="region" aria-label="Add an owner passkey" className="mb-4 rounded-xl border border-line bg-paper px-4 py-4">
+      <p className="text-[14.5px] font-semibold">Before your device opens a passkey window</p>
+      <p className="mt-2 text-[14px] leading-relaxed text-ink-soft">
+        Continuing will ask your device or security key to create another owner sign-in for
+        <strong className="text-ink"> {hostname}</strong>. It may use Face ID, Touch ID, a fingerprint,
+        a security key, or your device PIN. Complete that system step yourself only if the address is correct.
+      </p>
+      <p className="mt-2 text-[14px] leading-relaxed text-ink-soft">
+        Your biometric data and device PIN never go to Financial Brain. The private passkey stays with
+        your device or passkey provider. This Brain stores only public verification data and cannot use
+        the passkey to read other files on your device.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          disabled={busy}
+          onClick={onContinue}
+          className="rounded-lg bg-accent px-3.5 py-2 text-[13.5px] font-medium text-white disabled:opacity-50"
+        >
+          {busy ? "Waiting for your device…" : "Continue to my device"}
+        </button>
+        <button
+          disabled={busy}
+          onClick={onCancel}
+          className="rounded-lg px-3.5 py-2 text-[13.5px] text-ink-soft hover:bg-card disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** Who and what can open this brain.
  *
  *  There are four ways in, and an owner who has just handed over their
@@ -22,6 +61,8 @@ export function Settings({ devices, connections, onChange }: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [banks, setBanks] = useState<BankStatus | null>(null);
+  const [showPasskeyContext, setShowPasskeyContext] = useState(false);
+  const hostname = typeof location === "undefined" ? "this Brain's address" : location.hostname;
 
   // The bank feed is a separate surface with its own auth, so it is fetched
   // here rather than folded into /api/app/me: a brain with no bank configured
@@ -69,17 +110,28 @@ export function Settings({ devices, connections, onChange }: {
 
       <Section
         title="Your devices"
-        blurb="Passkeys that can open this brain. Yours syncs to your own devices through your password manager, so add one here only for a device outside that sync. The list below is the enforcement itself, not a description of it."
+        blurb="Passkeys that can open this Brain. A passkey may sync through your chosen passkey provider, but availability on every device is not guaranteed. Add another only when you intend to give that device or provider owner access."
         action={
           <button
             disabled={busy}
-            onClick={() => run(() => enroll())}
+            onClick={() => setShowPasskeyContext((shown) => !shown)}
             className="text-[13.5px] text-accent font-medium disabled:opacity-50 shrink-0"
           >
-            + Add this device
+            + Add a passkey
           </button>
         }
       >
+        {showPasskeyContext && (
+          <AddPasskeyContext
+            busy={busy}
+            hostname={hostname}
+            onContinue={() => run(async () => {
+              await enroll();
+              setShowPasskeyContext(false);
+            })}
+            onCancel={() => setShowPasskeyContext(false)}
+          />
+        )}
         {devices.length === 0 ? (
           <Empty>No devices yet.</Empty>
         ) : devices.map((device) => (

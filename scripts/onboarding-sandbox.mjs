@@ -11,15 +11,29 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FRONTEND = join(ROOT, "frontend");
+const CHILD_TIMEOUT_MS = 120_000;
+
+// A rehearsal never needs provider, deployment, model, Vite, or npm credentials.
+// Keep this list intentionally small: these values are only the operating-system
+// paths and locale needed to start Node, npm, Vite, and the user's browser.
+const CHILD_ENVIRONMENT_KEYS = Object.freeze([
+  "PATH", "Path",
+  "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT",
+  "TEMP", "TMP", "TMPDIR",
+  "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+  "LANG", "LC_ALL",
+]);
 
 export const SANDBOX_SCENARIOS = Object.freeze([
   { id: "populated", label: "Normal owner workspace", proof: "Real UI with synthetic populated records" },
+  { id: "financial-map", label: "Owner Financial Map review", proof: "Complete synthetic map, prior changes, unresolved items, and passkey context" },
+  { id: "document-journey", label: "Document processing journey", proof: "Teaching view of accepted, stored, projected, and query-visible states" },
   { id: "signin", label: "First passkey screen", proof: "Visual rehearsal only, no physical ceremony" },
   { id: "empty", label: "Healthy empty Brain", proof: "Shows the difference between empty and unavailable" },
   { id: "partial", label: "Partial financial evidence", proof: "One section unavailable while the rest remains usable" },
@@ -30,6 +44,68 @@ export const SANDBOX_SCENARIOS = Object.freeze([
   { id: "grant-unavailable", label: "Guest search degraded", proof: "No unauthorized result and no false healthy-empty answer" },
 ]);
 
+export const DOCUMENT_JOURNEY_STAGES = Object.freeze([
+  {
+    id: "accepted",
+    label: "Accepted",
+    description: "The source handed the document to the Brain and the Brain accepted it for processing. This alone does not prove durable storage.",
+  },
+  {
+    id: "stored",
+    label: "Stored",
+    description: "The same approved item is represented as the expected logical D1 family with chunks and source and extraction provenance. This does not mean the original file or binary was copied or backed up, and it does not prove projection or query visibility.",
+  },
+  {
+    id: "projected",
+    label: "Projected",
+    description: "Readable pieces of text have been prepared for search. This alone does not prove that an independent query can find them.",
+  },
+  {
+    id: "query-visible",
+    label: "Query-visible",
+    description: "An independent search can retrieve the expected text. This is the stage that proves the document is visible to search.",
+  },
+]);
+
+export const DOCUMENT_JOURNEY_OUTCOMES = Object.freeze(["ready", "pending", "unavailable"]);
+
+function journeyParams(value) {
+  if (value instanceof URLSearchParams) return value;
+  if (typeof value === "string") return new URLSearchParams(value);
+  if (value && typeof value === "object") return new URLSearchParams(Object.entries(value));
+  return new URLSearchParams();
+}
+
+export function documentJourneyStatuses(value) {
+  const params = journeyParams(value);
+  return Object.fromEntries(DOCUMENT_JOURNEY_STAGES.map(({ id }) => {
+    const requested = params.get(id);
+    return [id, DOCUMENT_JOURNEY_OUTCOMES.includes(requested) ? requested : "ready"];
+  }));
+}
+
+function journeyHref(statuses, stageId, outcome) {
+  const params = new URLSearchParams(statuses);
+  params.set(stageId, outcome);
+  return `/document-journey?${params.toString()}`;
+}
+
+export function documentJourneyHtml({ searchParams } = {}) {
+  const statuses = documentJourneyStatuses(searchParams);
+  const cards = DOCUMENT_JOURNEY_STAGES.map((stage, index) => {
+    const outcome = statuses[stage.id];
+    const choices = DOCUMENT_JOURNEY_OUTCOMES.map((choice) => {
+      const active = choice === outcome;
+      return `<a class="choice${active ? " active" : ""}" href="${esc(journeyHref(statuses, stage.id, choice))}"${active ? ' aria-current="true"' : ""}>${esc(choice)}</a>`;
+    }).join("");
+    return `<article class="stage" data-stage="${esc(stage.id)}" data-outcome="${esc(outcome)}"><div class="step">${index + 1}</div><div class="stage-copy"><div class="stage-top"><h2>${esc(stage.label)}</h2><span class="status ${esc(outcome)}">${esc(outcome)}</span></div><p>${esc(stage.description)}</p><div class="choices" aria-label="Choose a teaching state for ${esc(stage.label)}">${choices}</div></div></article>`;
+  }).join('<div class="arrow" aria-hidden="true">↓</div>');
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Synthetic document journey</title>
+  <style>
+  :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171a24;background:#f4f5f8}*{box-sizing:border-box}body{margin:0}.wrap{max-width:880px;margin:0 auto;padding:40px 20px 72px}.flag{display:inline-flex;padding:8px 12px;border-radius:999px;background:#fff0d9;color:#784000;font-size:12px;font-weight:850;letter-spacing:.07em}.hero{margin:18px 0 24px;background:#12141a;color:#fff;border-radius:24px;padding:30px;box-shadow:0 20px 60px #17204a20}.hero h1{font-size:clamp(30px,6vw,48px);letter-spacing:-.035em;margin:0 0 12px}.hero p{color:#c8cedc;line-height:1.6;margin:0;max-width:710px}.boundary{margin:0 0 24px;padding:16px 18px;border:1px solid #efc474;background:#fff9ec;border-radius:16px;line-height:1.5}.stage{display:flex;gap:16px;background:#fff;border:1px solid #dfe2ea;border-radius:18px;padding:20px}.step{display:grid;place-items:center;flex:0 0 34px;height:34px;border-radius:10px;background:#ebefff;color:#334fc0;font-weight:850}.stage-copy{min-width:0;flex:1}.stage-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.stage h2{font-size:21px;margin:2px 0 8px}.stage p{color:#5f6675;line-height:1.55;margin:0}.status{border-radius:999px;padding:5px 9px;font-size:12px;font-weight:800;text-transform:capitalize}.status.ready{background:#dff6e8;color:#17663a}.status.pending{background:#fff0d9;color:#7a4300}.status.unavailable{background:#fee5e5;color:#8b2626}.choices{display:flex;flex-wrap:wrap;gap:7px;margin-top:15px}.choice{padding:7px 10px;border:1px solid #d8dce7;border-radius:9px;color:#464e60;text-decoration:none;font-size:13px;text-transform:capitalize}.choice:hover,.choice:focus-visible{border-color:#6680ed;outline:none}.choice.active{border-color:#6680ed;background:#eef1ff;color:#263f9e;font-weight:750}.arrow{text-align:center;color:#99a0af;font-size:20px;height:28px;line-height:28px}.foot{margin-top:24px;color:#62697a;font-size:14px;line-height:1.55}.home{color:#334fc0}@media(max-width:520px){.wrap{padding:24px 14px 48px}.hero{padding:24px 20px;border-radius:20px}.stage{padding:17px 15px}.stage-top{align-items:flex-start}.choices{gap:6px}}
+  </style><body><main class="wrap"><span class="flag">TEACHING ONLY · SYNTHETIC DATA · NO LIVE SYSTEM CHECKED</span><section class="hero"><h1>How one document becomes searchable</h1><p>These are four separate checkpoints. Accepted is not the same as stored, stored is not the same as projected, and projected is not the same as query-visible.</p></section><div class="boundary"><strong>Proof boundary:</strong> every status on this page is invented for rehearsal. None of these cards proves that a provider, a Brain, or a document is live. Use the controls to rehearse each checkpoint as ready, pending, or unavailable.</div><section aria-label="Synthetic document processing stages">${cards}</section><p class="foot"><a class="home" href="/">Back to all rehearsal scenarios</a>. Changing a teaching state makes no request to a provider or Brain, stores nothing, and never opens a passkey prompt.</p></main></body></html>`;
+}
+
 function esc(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -39,7 +115,10 @@ function esc(value) {
 export function onboardingGuideHtml({ appOrigin }) {
   const cards = SANDBOX_SCENARIOS.map((scenario, index) => {
     const fragment = scenario.id === "signin" ? "#enroll=local-rehearsal-only" : "";
-    const href = `${appOrigin}/app?state=${encodeURIComponent(scenario.id)}${fragment}`;
+    const view = scenario.id === "financial-map" ? "&view=financial-map" : "";
+    const href = scenario.id === "document-journey"
+      ? `${appOrigin}/document-journey`
+      : `${appOrigin}/app?state=${encodeURIComponent(scenario.id)}${view}${fragment}`;
     return `<a class="card" href="${esc(href)}"><span>${index + 1}</span><div><strong>${esc(scenario.label)}</strong><p>${esc(scenario.proof)}</p></div></a>`;
   }).join("");
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Financial Brain local rehearsal</title>
@@ -58,28 +137,87 @@ export function sandboxScenarioFromReferer(referer, base) {
   catch { return "populated"; }
 }
 
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.cmd` : name;
+export function onboardingSandboxEnvironment(environment = process.env, {
+  fixturePort = null,
+  npm = false,
+  platform = process.platform,
+} = {}) {
+  const clean = {};
+  for (const name of CHILD_ENVIRONMENT_KEYS) {
+    if (typeof environment?.[name] === "string" && environment[name]) clean[name] = environment[name];
+  }
+  if (npm) {
+    // Public rehearsal dependencies need no registry identity. Point npm's user
+    // and global config reads at distinct names for the platform null device.
+    // npm rejects loading the exact same path twice, so the second name resolves
+    // to fd 0 on POSIX (which is always ignored for this child) or Windows NUL.
+    clean.NPM_CONFIG_USERCONFIG = platform === "win32" ? "NUL" : "/dev/null";
+    clean.NPM_CONFIG_GLOBALCONFIG = platform === "win32"
+      ? "\\\\.\\NUL"
+      : platform === "darwin" ? "/dev/fd/0" : "/proc/self/fd/0";
+  }
+  if (fixturePort !== null) clean.BRAIN_VISUAL_PORT = String(fixturePort);
+  return clean;
+}
+
+export function assertNoFrontendEnvironmentFiles(frontend) {
+  let entries;
+  try { entries = readdirSync(frontend, { withFileTypes: true }); }
+  catch { throw new Error("the local rehearsal frontend could not be inspected"); }
+  if (entries.some((entry) => entry.name.startsWith(".env"))) {
+    // Keep the name and contents private. Smoke mode reduces this again to its
+    // stable start_failed receipt.
+    throw new Error("the local rehearsal refuses frontend environment files");
+  }
 }
 
 function runChecked(command, args, options = {}) {
-  const result = spawnSync(command, args, { stdio: "inherit", ...options });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with exit ${result.status}`);
+  const result = spawnSync(command, args, {
+    stdio: "inherit",
+    timeout: CHILD_TIMEOUT_MS,
+    ...options,
+  });
+  if (result.error?.code === "ETIMEDOUT") throw new Error("the local rehearsal build timed out");
+  if (result.error) throw new Error("the local rehearsal build could not start");
+  if (result.status !== 0) throw new Error("the local rehearsal dependency or build step failed");
 }
 
-export function prepareFrontend({ root = ROOT } = {}) {
+export function prepareFrontend({
+  root = ROOT,
+  run = runChecked,
+  npmExecPath = process.env.npm_execpath,
+  environment = process.env,
+  platform = process.platform,
+  stdio = "inherit",
+} = {}) {
   const frontend = join(root, "frontend");
-  const vite = process.platform === "win32"
-    ? join(frontend, "node_modules", ".bin", "vite.cmd")
-    : join(frontend, "node_modules", ".bin", "vite");
+  const vite = join(frontend, "node_modules", "vite", "bin", "vite.js");
+  assertNoFrontendEnvironmentFiles(frontend);
   if (!existsSync(vite)) {
     console.log("Installing the local UI test dependencies. No account credential is used.");
-    runChecked(commandName("npm"), ["ci", "--ignore-scripts"], { cwd: frontend });
+    const npmEnvironment = onboardingSandboxEnvironment(environment, { npm: true, platform });
+    if (npmExecPath && existsSync(npmExecPath)) {
+      run(process.execPath, [npmExecPath, "ci", "--ignore-scripts"], {
+        cwd: frontend,
+        env: npmEnvironment,
+        stdio: stdio === "inherit" ? ["ignore", "inherit", "inherit"] : stdio,
+      });
+    } else {
+      run(platform === "win32" ? "npm.cmd" : "npm", ["ci", "--ignore-scripts"], {
+        cwd: frontend,
+        env: npmEnvironment,
+        stdio: stdio === "inherit" ? ["ignore", "inherit", "inherit"] : stdio,
+      });
+    }
   }
   // Run Vite directly. `npm run build` also folds the result into the committed
   // Worker asset module, which a local rehearsal must not rewrite.
-  runChecked(vite, ["build"], { cwd: frontend });
+  assertNoFrontendEnvironmentFiles(frontend);
+  run(process.execPath, [vite, "build"], {
+    cwd: frontend,
+    env: onboardingSandboxEnvironment(environment, { platform }),
+    stdio,
+  });
 }
 
 async function waitForFixture(origin, child) {
@@ -87,7 +225,7 @@ async function waitForFixture(origin, child) {
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error("the synthetic UI fixture exited before it became ready");
     try {
-      const response = await fetch(`${origin}/app`);
+      const response = await fetch(`${origin}/app`, { signal: AbortSignal.timeout(2_000) });
       if (response.ok) return;
     } catch { /* fixture still starting */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
@@ -123,11 +261,35 @@ async function proxyToFixture(request, response, fixtureOrigin, publicOrigin) {
   response.end(bytes);
 }
 
-function openBrowser(url) {
-  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-  const child = spawn(command, args, { detached: true, stdio: "ignore" });
+export function openBrowser(url, {
+  platform = process.platform,
+  environment = process.env,
+  spawnChild = spawn,
+} = {}) {
+  const command = platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
+  const args = platform === "win32" ? ["/c", "start", "", url] : [url];
+  const child = spawnChild(command, args, {
+    detached: true,
+    stdio: "ignore",
+    env: onboardingSandboxEnvironment(environment, { platform }),
+  });
   child.unref();
+}
+
+export function launchOnboardingFixture({
+  root = ROOT,
+  frontend = FRONTEND,
+  fixturePort,
+  environment = process.env,
+  platform = process.platform,
+  spawnChild = spawn,
+  quiet = false,
+} = {}) {
+  return spawnChild(process.execPath, [join(frontend, "test", "visual-server.mjs")], {
+    cwd: root,
+    env: onboardingSandboxEnvironment(environment, { fixturePort, platform }),
+    stdio: quiet ? "ignore" : ["ignore", "pipe", "inherit"],
+  });
 }
 
 export async function startOnboardingSandbox({
@@ -136,16 +298,27 @@ export async function startOnboardingSandbox({
   fixturePort = Number(process.env.BRAIN_VISUAL_PORT || 4177),
   open = true,
   prepare = true,
+  environment = process.env,
+  platform = process.platform,
+  spawnChild = spawn,
+  quiet = false,
 } = {}) {
-  if (prepare) prepareFrontend();
-  const fixture = spawn(process.execPath, [join(FRONTEND, "test", "visual-server.mjs")], {
-    cwd: ROOT,
-    env: { ...process.env, BRAIN_VISUAL_PORT: String(fixturePort) },
-    stdio: ["ignore", "pipe", "inherit"],
+  if (prepare) prepareFrontend({ environment, platform, stdio: quiet ? "ignore" : "inherit" });
+  const fixture = launchOnboardingFixture({
+    fixturePort,
+    environment,
+    platform,
+    spawnChild,
+    quiet,
   });
   fixture.stdout?.on("data", () => {});
   const fixtureOrigin = `http://${host}:${fixturePort}`;
-  await waitForFixture(fixtureOrigin, fixture);
+  try {
+    await waitForFixture(fixtureOrigin, fixture);
+  } catch (error) {
+    if (fixture.exitCode === null) fixture.kill("SIGTERM");
+    throw error;
+  }
 
   const publicOrigin = `http://${host}:${port}`;
   const server = createServer(async (request, response) => {
@@ -157,29 +330,115 @@ export async function startOnboardingSandbox({
         response.end(html);
         return;
       }
+      if (url.pathname === "/document-journey") {
+        const html = documentJourneyHtml({ searchParams: url.searchParams });
+        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        response.end(html);
+        return;
+      }
       await proxyToFixture(request, response, fixtureOrigin, publicOrigin);
     } catch (error) {
       response.writeHead(502, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
       response.end(`Local rehearsal unavailable: ${error.message}`);
     }
   });
-  await new Promise((resolveListen, rejectListen) => {
-    server.once("error", rejectListen);
-    server.listen(port, host, resolveListen);
-  });
-  console.log("");
-  console.log("Financial Brain local onboarding rehearsal is ready:");
-  console.log(`  ${publicOrigin}/`);
-  console.log("");
-  console.log("LOCAL REHEARSAL ONLY: synthetic data, no deployment, no accounts, no real passkey proof.");
-  console.log("Press Control-C when finished.");
-  if (open) openBrowser(`${publicOrigin}/`);
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen(port, host, resolveListen);
+    });
+  } catch (error) {
+    if (fixture.exitCode === null) fixture.kill("SIGTERM");
+    throw error;
+  }
+  if (!quiet) {
+    console.log("");
+    console.log("Financial Brain local onboarding rehearsal is ready:");
+    console.log(`  ${publicOrigin}/`);
+    console.log("");
+    console.log("LOCAL REHEARSAL ONLY: synthetic data, no deployment, no accounts, no real passkey proof.");
+    console.log("Press Control-C when finished.");
+  }
+  if (open) openBrowser(`${publicOrigin}/`, { platform, environment, spawnChild });
 
   const close = async () => {
-    await new Promise((resolveClose) => server.close(resolveClose));
     if (fixture.exitCode === null) fixture.kill("SIGTERM");
+    server.closeAllConnections?.();
+    await new Promise((resolveClose) => server.close(resolveClose));
   };
   return { server, fixture, origin: publicOrigin, close };
+}
+
+function smokeFailure(code) {
+  const error = new Error(code);
+  error.smokeCode = code;
+  return error;
+}
+
+async function smokeFetch(fetchRequest, url, options = {}) {
+  const { smokeCode = "request_unavailable", ...requestOptions } = options;
+  try {
+    return await fetchRequest(url, { ...requestOptions, signal: AbortSignal.timeout(5_000) });
+  } catch {
+    throw smokeFailure(smokeCode);
+  }
+}
+
+export async function verifyOnboardingSmoke(origin, { fetchRequest = fetch } = {}) {
+  const guideResponse = await smokeFetch(fetchRequest, `${origin}/`, { smokeCode: "guide_unavailable" });
+  if (!guideResponse.ok) throw smokeFailure("guide_unavailable");
+  const guide = await guideResponse.text();
+  if (!guide.includes("LOCAL REHEARSAL") || !guide.includes("SYNTHETIC DATA") || !guide.includes("state=populated")) {
+    throw smokeFailure("guide_contract_failed");
+  }
+
+  const appResponse = await smokeFetch(fetchRequest, `${origin}/app?state=populated`, { smokeCode: "app_unavailable" });
+  if (!appResponse.ok) throw smokeFailure("app_unavailable");
+  const app = await appResponse.text();
+  if (!app.includes("LOCAL REHEARSAL · SYNTHETIC DATA · NO ACCOUNTS CONNECTED") || !app.includes('id="root"')) {
+    throw smokeFailure("app_contract_failed");
+  }
+
+  const apiResponse = await smokeFetch(fetchRequest, `${origin}/api/app/me`, {
+    smokeCode: "synthetic_api_unavailable",
+    headers: { referer: `${origin}/app?state=populated` },
+  });
+  if (!apiResponse.ok) throw smokeFailure("synthetic_api_unavailable");
+  let body;
+  try { body = await apiResponse.json(); }
+  catch { throw smokeFailure("synthetic_api_contract_failed"); }
+  if (body?.signed_in !== true || body?.principal?.kind !== "owner") {
+    throw smokeFailure("synthetic_api_contract_failed");
+  }
+  return Object.freeze({ ok: true, checks: Object.freeze(["guide", "app", "synthetic_api"]) });
+}
+
+export async function runOnboardingSmoke({
+  start = startOnboardingSandbox,
+  verify = verifyOnboardingSmoke,
+} = {}) {
+  let sandbox;
+  let receipt;
+  let failure = null;
+  try {
+    sandbox = await start({ open: false, quiet: true });
+  } catch {
+    failure = smokeFailure("start_failed");
+  }
+  if (sandbox) {
+    try {
+      receipt = await verify(sandbox.origin);
+    } catch (error) {
+      failure = smokeFailure(typeof error?.smokeCode === "string" ? error.smokeCode : "verification_failed");
+    }
+    try {
+      await sandbox.close();
+    } catch {
+      if (!failure) failure = smokeFailure("shutdown_failed");
+    }
+  }
+  if (failure) throw failure;
+  return receipt;
 }
 
 const IS_MAIN = (() => {
@@ -189,12 +448,27 @@ const IS_MAIN = (() => {
 
 if (IS_MAIN) {
   const noOpen = process.argv.includes("--no-open");
-  startOnboardingSandbox({ open: !noOpen }).then(({ close }) => {
-    const stop = async () => { await close(); process.exit(0); };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-  }).catch((error) => {
-    console.error(`Financial Brain local rehearsal could not start: ${error.message}`);
-    process.exit(1);
-  });
+  const smoke = process.argv.includes("--smoke");
+  if (smoke) {
+    if (!noOpen) {
+      console.error("ONBOARDING_SMOKE_FAILED code=no_open_required");
+      process.exit(1);
+    }
+    runOnboardingSmoke().then((receipt) => {
+      console.log(`ONBOARDING_SMOKE_OK checks=${receipt.checks.join(",")}`);
+    }).catch((error) => {
+      const code = typeof error?.smokeCode === "string" ? error.smokeCode : "unexpected_failure";
+      console.error(`ONBOARDING_SMOKE_FAILED code=${code}`);
+      process.exitCode = 1;
+    });
+  } else {
+    startOnboardingSandbox({ open: !noOpen }).then(({ close }) => {
+      const stop = async () => { await close(); process.exit(0); };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    }).catch((error) => {
+      console.error(`Financial Brain local rehearsal could not start: ${error.message}`);
+      process.exit(1);
+    });
+  }
 }

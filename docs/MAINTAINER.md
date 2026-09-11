@@ -266,13 +266,17 @@ hand to work around a failed workflow.
    CI does not establish Windows ARM64 physical runtime acceptance.
 4. Integrate the reviewed candidate into main. Tag the exact reviewed source,
    preserving its identity and history. Do not move or recreate a release tag.
-   The tag invokes .github/workflows/release.yml, which calls the same CI gate.
+   The tag invokes .github/workflows/release.yml, which calls the same CI gate
+   plus the reusable current-public-package contract matrix.
 5. CI first requires zero findings in public and candidate Git history, then
    creates one tarball from exact locked dependencies. Every Windows/macOS/Linux
    Node 22/24 job and the Windows planted traps download that immutable artifact
    ID and verify its raw SHA-256. The six jobs also retain frontend bundle parity,
    installed CLI checks and both source and packed Windows DPAPI gates.
-6. Release publication cannot start until that reusable CI succeeds. It checks
+6. Release publication cannot start until reusable CI and the four-runner
+   public package-contract matrix succeed. The latter validates and installs
+   the current sealed field kit; it does not provision Cloudflare, exercise a
+   deployed browser, or replace the separate physical-device gates. CI checks
    tag/event/checkout identity and main ancestry, then audit:updates must pass
    before any release write. A separate one-repository administration-read
    RELEASE_ADMIN_READ_TOKEN proves immutable releases are enabled. Do not place
@@ -420,7 +424,15 @@ improvise that drill against a live target.
 
 ## Credential boundaries
 
-The standard account-scoped Cloudflare token has exactly these permissions:
+Normal owner setup and updates use the Brain's named Cloudflare browser profile
+in the operating-system credential store. The owner signs in, completes 2FA,
+selects the exact account, and approves Cloudflare's consent page. The command
+uses the short-lived access value only for its exact control-plane action and
+clears it afterward. Ordinary fresh setup does not create, reveal, copy, or
+paste an API token.
+
+A scoped Cloudflare token is limited to an explicitly selected automation,
+recovery, or older-manifest path. It has exactly these permissions:
 
 - Workers Scripts Edit
 - D1 Edit
@@ -429,13 +441,22 @@ The standard account-scoped Cloudflare token has exactly these permissions:
 
 Add Workers R2 Storage Edit only if the manifest really provisions R2. Scope
 the token to the intended account, give it an expiry, and revoke it when the
-control-plane work is finished.
+bounded control-plane work is finished.
 
-The supported setup and update flows request the token in a hidden terminal
-prompt. The token must not be placed in source, a manifest, an argument, shell
-history, a support note, a log, or a shared message. Low-level automation must
-use an approved secret-manager-backed launcher that resolves the secret only
-at execution time and passes a minimal environment to the child process.
+The released CLI may request a recovery token only in its hidden terminal
+prompt after the owner explicitly chooses that path. The token must not be
+placed in source, a manifest, an argument, shell history, a support note, a log,
+or a shared message. Low-level automation must use an approved
+secret-manager-backed launcher that resolves the secret only at execution time
+and passes a minimal environment to the child process.
+
+Every setup lane must also pass the same Node, install-drive, and non-elevated
+session checks. Before resource creation, the exact Cloudflare account must be
+verified and the owner must confirm its Workers & Pages > Plans page says Paid.
+For non-interactive setup, `BRAIN_WORKERS_PAID_ACCOUNT_ID` is a non-secret,
+account-bound confirmation supplied by the approved launcher only after that
+owner check. It must exactly match the verified manifest account. A generic yes,
+a missing value, or another account ID is not approval and must stop setup.
 
 The Brain admin key is a different credential. It grants operator access to the
 whole Brain and lives only in the install's declared durable store. Routine

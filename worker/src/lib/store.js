@@ -32,6 +32,29 @@ import { embedText, supabaseRpc } from "./supabase.js";
 import { sanitizeEnvelope, sanitizeSensitiveLinks } from "./secret-scan.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
+import {
+  attachEvidenceLineage, evidenceLineageFor, evidenceLineageRootIds,
+} from "./evidence-lineage.js";
+import {
+  hasStoredProvenanceMarker,
+  normalizeIngestEnvelopeProvenance,
+  provenanceAssessmentMarker,
+  provenanceReceiptTransitionError,
+  storedProvenanceAssessment,
+  TEXT_SOURCES,
+} from "./provenance-receipt.js";
+import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
+
+export { TEXT_SOURCES } from "./provenance-receipt.js";
+
+export class ProvenanceTransitionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProvenanceTransitionError";
+    this.code = "provenance_transition_refused";
+    this.status = 409;
+  }
+}
 
 export const D1 = "d1";
 export const SUPABASE = "supabase";
@@ -123,7 +146,13 @@ async function sha256Hex(s) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function prepareD1Envelope(env, envelope) {
+async function prepareD1Envelope(env, submittedEnvelope) {
+  const envelope = normalizeIngestEnvelopeProvenance(submittedEnvelope);
+  // HTTP routes validate earlier for a useful 400 response, but storage is the
+  // last common mutation boundary for direct first-party callers too. Never
+  // let an internal path persist a malformed provenance claim by accident.
+  const validationError = ingestEnvelopeValidationError(envelope);
+  if (validationError) throw new TypeError(validationError);
   const { source_type, source_id, content, title } = envelope;
   const docUid = `${source_type}:${source_id}`;
   const md = envelope.metadata || {};
@@ -140,20 +169,17 @@ async function prepareD1Envelope(env, envelope) {
   const incomingTopFolder = md.top_folder || null;
   const incomingPlatform = md.platform || null;
   const docDate = envelope.occurred_at ? Date.parse(envelope.occurred_at) : null;
-  // How the text was OBTAINED, as opposed to what it says. Absent means the
-  // file carried its own text layer, which is true of every document written
-  // before OCR existed and of every non-PDF format now. Last write wins here,
-  // unlike client/category: a document that has just been re-extracted from a
-  // real text layer must stop being marked as a scan.
-  const textSource = TEXT_SOURCES.has(envelope.text_source) ? envelope.text_source : "native";
-  const textReliable = textSource === "native"
-    ? envelope.text_reliable !== false
-    : envelope.text_reliable === true;
+  // How the text was OBTAINED, as opposed to what it says. The shared boundary
+  // makes omission explicit as unknown/false. Storage must never turn an
+  // absent producer claim into native/reliable provenance.
+  const textSource = TEXT_SOURCES.has(envelope.text_source) ? envelope.text_source : "unknown";
+  const textReliable = envelope.text_reliable === true && textSource !== "unknown";
   const geometry = chunkGeometry(env);
   // Geometry is part of storage identity. A deploy that corrects chunk size
   // must re-chunk unchanged documents on their next ingest instead of taking
   // the content-only no-op path forever.
   const hash = await sha256Hex(`chunk-v1:${geometry.size}:${geometry.overlap}\0${content}`);
+  const provenanceMarker = await provenanceAssessmentMarker(envelope);
   return {
     envelope,
     source_type,
@@ -177,14 +203,21 @@ async function prepareD1Envelope(env, envelope) {
     docDate,
     geometry,
     hash,
+    provenanceMarker,
   };
 }
 
 /**
- * The only three answers to "where did this text come from".
- * `native` is the default and the state of every pre-OCR document.
+ * Recompute the exact durable content marker for a D1 envelope.
+ *
+ * This is intentionally narrower than exposing the full prepared write. The
+ * conversational owner-note lifecycle uses it only for same-primary
+ * read-after-write verification, so a successful HTTP response cannot be
+ * mistaken for proof that the intended content reached the intended row.
  */
-export const TEXT_SOURCES = new Set(["native", "ocr", "ocr_partial"]);
+export async function expectedD1ContentHash(env, envelope) {
+  return (await prepareD1Envelope(env, envelope)).hash;
+}
 
 function jsonValue(raw, fallback = {}) {
   if (raw && typeof raw === "object") return raw;
@@ -245,9 +278,56 @@ function d1PersistedState(prior, prepared) {
 
   const priorMeta = jsonValue(current.meta);
   const safePriorMeta = sanitizeEnvelope({ metadata: priorMeta }).metadata || {};
-  const targetMeta = mergeJsonPatch(safePriorMeta, prepared.md);
-  const priorMetaChangedBySafety = canonicalJson(priorMeta) !== canonicalJson(safePriorMeta);
-
+  const priorProvenance = storedProvenanceAssessment({
+    ...current,
+    source: prepared.source_type,
+    source_id: prepared.source_id,
+    authority_meta: safePriorMeta,
+  });
+  const transitionError = provenanceReceiptTransitionError(safePriorMeta, prepared.md, {
+    priorTextSource: current.text_source ?? "unknown",
+    priorTextReliable: current.text_reliable,
+    incomingTextSource: prepared.textSource,
+    incomingTextReliable: prepared.textReliable,
+    sameContent: current.content_hash === prepared.hash,
+    priorProvenanceAssessed: hasStoredProvenanceMarker(current, priorProvenance),
+  });
+  if (transitionError) throw new ProvenanceTransitionError(transitionError);
+  // Provenance is an exact versioned unit, not an extensible merge patch.
+  // Remove every prior provenance-bearing field before applying the incoming
+  // unit. Otherwise a legacy family marker or lineage object could survive an
+  // authoritative reingest and make the newly validated receipt false after it
+  // reaches D1.
+  const targetBaseMeta = { ...safePriorMeta };
+  const provenanceKeys = ["provenance_receipt", "evidence_lineage", "family_of", "part_of"];
+  for (const key of provenanceKeys) {
+    delete targetBaseMeta[key];
+  }
+  const targetMeta = mergeJsonPatch(targetBaseMeta, prepared.md);
+  // When a metadata-only revision reasserts the same semantic receipt with a
+  // different object-key order, retain the prior representation. The D1
+  // invalidation trigger is intentionally conservative and compares stored
+  // JSON values, so this prevents a harmless serialization reorder from
+  // demoting an otherwise unchanged receipt.
+  for (const key of provenanceKeys) {
+    if (Object.prototype.hasOwnProperty.call(safePriorMeta, key) &&
+        Object.prototype.hasOwnProperty.call(targetMeta, key) &&
+        canonicalJson(safePriorMeta[key]) === canonicalJson(targetMeta[key])) {
+      targetMeta[key] = safePriorMeta[key];
+    }
+  }
+  const targetProvenance = storedProvenanceAssessment({
+    source: prepared.source_type,
+    source_id: prepared.source_id,
+    text_source: prepared.textSource,
+    text_reliable: prepared.textReliable,
+    authority_meta: targetMeta,
+  });
+  if (!targetProvenance.provenance_assessed ||
+      targetProvenance.provenance_status !== prepared.provenanceMarker.provenance_receipt_status ||
+      targetProvenance.provenance_reason !== prepared.provenanceMarker.provenance_receipt_reason) {
+    throw new TypeError("the persisted provenance unit does not match its validated assessment marker");
+  }
   const incomingDateSource = prepared.envelope.date_source ?? (prepared.docDate ? "provided" : null);
   const forceDateSourceSafety = safeDateSource !== current.date_source;
   const replaceDate = Boolean(prepared.envelope.date_reliable) || current.document_date == null;
@@ -276,6 +356,7 @@ function d1PersistedState(prior, prepared) {
     platform: prepared.hasPlatform ? prepared.incomingPlatform : safePlatform ?? null,
     text_source: prepared.textSource,
     text_reliable: prepared.textReliable ? 1 : 0,
+    ...prepared.provenanceMarker,
     meta: targetMeta,
     // Bind a safe prior value only when an omitted incoming field would
     // otherwise preserve an already-stored capability URL.
@@ -293,8 +374,10 @@ function d1PersistedState(prior, prepared) {
     writeHasCategory: prepared.hasCategory || forceCategorySafety,
     writeHasTopFolder: prepared.hasTopFolder || forceTopFolderSafety,
     writeHasPlatform: prepared.hasPlatform || forcePlatformSafety,
-    writeMeta: priorMetaChangedBySafety ? targetMeta : prepared.md,
-    replaceMeta: priorMetaChangedBySafety,
+    // The full target preserves unrelated metadata but replaces provenance as
+    // one unit, including deletion of stale legacy keys.
+    writeMeta: targetMeta,
+    replaceMeta: true,
   };
 }
 
@@ -315,8 +398,12 @@ function d1MetadataChanged(prior, prepared) {
     // A document that was OCR'd and is now readable from a real text layer (or
     // the reverse) must rewrite even when its text happens to hash the same,
     // or the corpus would keep claiming a provenance that is no longer true.
-    target.text_source !== (prior.text_source ?? "native") ||
-    target.text_reliable !== Number(prior.text_reliable ?? 1) ||
+    target.text_source !== (prior.text_source ?? "unknown") ||
+    target.text_reliable !== Number(prior.text_reliable ?? 0) ||
+    target.provenance_receipt_version !== Number(prior.provenance_receipt_version || 0) ||
+    target.provenance_receipt_status !== (prior.provenance_receipt_status ?? null) ||
+    target.provenance_receipt_reason !== (prior.provenance_receipt_reason ?? null) ||
+    target.provenance_receipt_digest !== (prior.provenance_receipt_digest ?? null) ||
     canonicalJson(target.meta) !== canonicalJson(jsonValue(prior.meta))
   );
 }
@@ -422,7 +509,7 @@ const d1Backend = {
             ? x.doc_uid.slice(x.source.length + 1)
             : x.doc_uid || x.chunk_uid
         );
-        return {
+        const publicRow = {
           chunk_uid: x.chunk_uid,
           doc_uid: x.doc_uid || null,
           source_id: sourceId,
@@ -451,22 +538,39 @@ const d1Backend = {
           date_source: x.date_source || null,
           // How this evidence was READ. Travels beside how it was DATED,
           // because a reader weighing an answer needs both.
-          text_source: x.text_source || "native",
+          text_source: x.text_source || "unknown",
           text_reliable: x.text_reliable === undefined || x.text_reliable === null
-            ? true
+            ? false
             : x.text_reliable === true || x.text_reliable === 1 || x.text_reliable === "1",
           // Query-time, claim-specific authority is derived from the durable D1
           // row. It is additive public metadata, kept beside date and text
           // provenance so a citation never presents a tier without its reason.
           authority: x.authority || null,
+          // Closed, server-verified origin for conversational owner notes. No
+          // arbitrary document metadata crosses this public boundary.
+          ...(x.write_provenance ? { write_provenance: x.write_provenance } : {}),
+          lineage: x.lineage || evidenceLineageFor(x).lineage,
           score: x.rrf_score,
         };
+        return attachEvidenceLineage(publicRow, { root_ids: evidenceLineageRootIds(x) });
       }),
       degraded: r.degraded,
       degraded_reason: r.degraded_reason ?? null,
       ignored_filters: r.ignored_filters,
       counts: r.counts,
     };
+  },
+
+  async taxDocumentCandidates(env, {
+    entitySlug = null, limit = 20, filters = {}, access = null, scope = null,
+  } = {}) {
+    return d1.unchunkedTaxDocumentCandidates(env, {
+      entitySlug,
+      limit,
+      filters,
+      access,
+      scope,
+    });
   },
 
   async ingest(env, envelope, { deferFinalize = false, prepared = null } = {}) {
@@ -485,7 +589,9 @@ const d1Backend = {
       ? input.prior
       : await env.DB.prepare(
         `SELECT content_hash, title, uri, document_date, date_source, date_reliable,
-                entity_slug, client, category, top_folder, platform, text_source, text_reliable, meta
+                entity_slug, client, category, top_folder, platform, text_source, text_reliable, meta,
+                provenance_receipt_version, provenance_receipt_status,
+                provenance_receipt_reason, provenance_receipt_digest
          FROM documents WHERE doc_uid = ?1`
       ).bind(docUid).first();
     // Identical content AND filter identity is a no-op. Folder moves and title
@@ -515,8 +621,11 @@ const d1Backend = {
       `INSERT INTO documents (doc_uid, source, source_id, title, uri, document_date,
                               date_source, date_reliable, client, category,
                               top_folder, platform, ingested_at, content_hash, meta,
-                              text_source, text_reliable, entity_slug)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?22,?23,?24)
+                              text_source, text_reliable, entity_slug,
+                              provenance_receipt_version, provenance_receipt_status,
+                              provenance_receipt_reason, provenance_receipt_digest)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?22,?23,?24,
+               ?26,?27,?28,?29)
        ON CONFLICT(doc_uid) DO UPDATE SET
          title=COALESCE(excluded.title, documents.title),
          uri=COALESCE(excluded.uri, documents.uri),
@@ -539,6 +648,10 @@ const d1Backend = {
          -- asserting a reading that has since been redone.
          text_source=excluded.text_source,
          text_reliable=excluded.text_reliable,
+         provenance_receipt_version=excluded.provenance_receipt_version,
+         provenance_receipt_status=excluded.provenance_receipt_status,
+         provenance_receipt_reason=excluded.provenance_receipt_reason,
+         provenance_receipt_digest=excluded.provenance_receipt_digest,
          meta=CASE WHEN ?21 = 1 THEN excluded.meta
                    ELSE json_patch(COALESCE(documents.meta, '{}'), excluded.meta) END`
     )
@@ -559,7 +672,11 @@ const d1Backend = {
         persisted.text_source,
         persisted.text_reliable,
         persisted.writeEntity ?? null,
-        persisted.writeHasEntity ? 1 : 0
+        persisted.writeHasEntity ? 1 : 0,
+        persisted.provenance_receipt_version,
+        persisted.provenance_receipt_status,
+        persisted.provenance_receipt_reason,
+        persisted.provenance_receipt_digest
       );
 
     const header = title ? `[${title}]` : "";
@@ -681,7 +798,9 @@ const d1Backend = {
     const prepared = await Promise.all(envelopes.map((envelope) => prepareD1Envelope(env, envelope)));
     const priorResults = await env.DB.batch(prepared.map((input) => env.DB.prepare(
       `SELECT content_hash, title, uri, document_date, date_source, date_reliable,
-              entity_slug, client, category, top_folder, platform, text_source, text_reliable, meta
+              entity_slug, client, category, top_folder, platform, text_source, text_reliable, meta,
+              provenance_receipt_version, provenance_receipt_status,
+              provenance_receipt_reason, provenance_receipt_digest
        FROM documents WHERE doc_uid = ?1`
     ).bind(input.docUid)));
 
@@ -862,6 +981,7 @@ const supabaseBackend = {
           title: r.title, snippet: String(r.content || "").slice(0, 900),
           ts: r.meeting_date || null, score: null,
           date_reliable: null, date_source: null,
+          text_source: "unknown", text_reliable: false,
           client: r.client_name || null, category: r.category || null,
           top_folder: r.top_folder || null, platform: r.platform || null,
         })),
@@ -882,6 +1002,7 @@ const supabaseBackend = {
         chunk_uid: r.ref_key, ref_key: r.ref_key, source: r.source, title: r.title,
         snippet: r.snippet, ts: r.ts || null, score: r.rrf_score,
         date_reliable: null, date_source: null,
+        text_source: "unknown", text_reliable: false,
         client: r.client || null, category: r.category || null,
         top_folder: r.top_folder || null, platform: r.platform || null,
       })),
@@ -889,15 +1010,19 @@ const supabaseBackend = {
     };
   },
 
+  async taxDocumentCandidates() {
+    // The rollback adapter has no document-level inventory contract. Returning
+    // unknown prevents it from turning a missing chunk result into proof that
+    // an exact tax filing is absent.
+    return { results: [], complete: false, unavailable: true };
+  },
+
   async ingest(env, envelope) {
-    const rows = await supabaseRpc(env, "notes_brain_ingest", {
-      p_source_type: envelope.source_type, p_source_id: String(envelope.source_id),
-      p_content: envelope.content, p_source_subtype: envelope.source_subtype || null,
-      p_occurred_at: envelope.occurred_at || null, p_title: envelope.title || null,
-      p_metadata: envelope.metadata || {}, p_legacy_table: null, p_legacy_id: null,
-    });
-    const row = Array.isArray(rows) ? rows[0] : rows;
-    return { doc_uid: row?.id, action: row?.action, chunks: null, queued: 0, needs_embed: row?.needs_embed };
+    void env;
+    void envelope;
+    throw new Error(
+      "Supabase corpus ingest is refused because its RPC cannot prove normalized provenance parity",
+    );
   },
 
   async stats(env) {

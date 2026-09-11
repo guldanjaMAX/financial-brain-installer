@@ -519,6 +519,7 @@ function stubOcr({ reply = () => pageText, model = "@cf/google/gemma-4-26b-a4b-i
   await store.ingest(env, {
     source_type: "upload", source_id: "notes/plain.md",
     title: "Plain note", content: `A note that arrived with its own text layer. ${longPage(9)}`,
+    text_source: "native", text_reliable: true,
     metadata: { category: "upload" },
   });
 
@@ -549,6 +550,7 @@ function stubOcr({ reply = () => pageText, model = "@cf/google/gemma-4-26b-a4b-i
   await store.ingest(env, {
     source_type: "upload", source_id: "scans/statement.pdf",
     title: "Statement", content: `A rescanned copy that now carries a text layer. ${longPage(2)}`,
+    text_source: "native", text_reliable: true,
     metadata: { category: "upload" },
   });
   check("a document re-read from a real text layer stops being marked as a scan",
