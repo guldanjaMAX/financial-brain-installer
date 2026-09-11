@@ -301,13 +301,13 @@ cursor instead of mixing two snapshots. Recovery mode does not run OCR,
 reingest, repair, or any other write. A later write requires a separately
 reviewed and approved repair path.
 
-For one source that has recovery candidates, preview that write path explicitly:
+For one source that has recovery candidates, inspect the legacy recovery plan:
 
 ```bash
 brain provenance-repair ./brain.manifest.json --source drive
 ```
 
-The preview is still read-only. It checks that the exact source is one
+The preview is read-only. It checks that the exact source is one
 manifest-declared local folder, Drive, Gmail, or Calendar source; that this
 computer can still read the required source and saved credential; and that no
 supported local scheduler can race the rewalk. Its plan ID binds the manifest,
@@ -317,17 +317,24 @@ and OCR policy. Worker snapshot
 timestamps are shown as observations but do not make an otherwise unchanged
 plan stale.
 
-After the owner approves the whole-source rewalk and any stated OCR cost, use
-the exact `--apply --approve <plan-id>` command printed by the preview. Apply
-recomputes the plan before changing data, then calls the ordinary supported
-ingest path with reset and no item limit. It never changes old labels just to
-make the audit green. Existing removal limits remain in force and can stop the
-run for a separate `--approve-removals` decision. Afterward, a new completed
-full-sweep source receipt and fresh recovery readback are both required. Only
-opaque candidates actually absent from that readback are reported fixed;
-anything remaining or newly observed stays unresolved and the command does not
-claim complete success. Unsupported or unavailable original access cannot be
-repaired by this command.
+Schema 1 is inventory-only and always reports `can_apply: false`. It has no
+durable candidate-resolution ledger, so a candidate disappearing after a
+rewalk could mean repair, deletion, replacement, refusal, or skip. The CLI
+therefore prints no apply command. Any legacy `--apply` invocation stops before
+reading the manifest, credentials, remote state, or source, and changes
+nothing.
+
+Migration 0042 adds a separate foundation for direct evidence about one to ten
+explicit local-upload originals. A private admin route can seal raw
+source-relative locators into stable opaque IDs, append a closed observation
+outcome, and later revalidate that observation against the exact stored
+document family. Schema 42 accepts only gaps, failures, and adjudicated
+exclusions; accepted repair is blocked until the corpus stores an authoritative
+raw-original byte binding. Raw locators are neither stored nor returned.
+Read-only local assessment disables OCR and does no filename or
+content-similarity matching. This bounded contract is not a whole-source
+enumeration, is not connected to the legacy repair CLI, and does not itself
+authorize OCR, reingest, deletion, or repair.
 
 ### Inventory the financial picture
 

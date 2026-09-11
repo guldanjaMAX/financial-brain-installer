@@ -3778,6 +3778,20 @@ export async function cmdMigrate(manifestPath, options = {}) {
        VALUES ('primary', lower(hex(randomblob(32))))`,
     );
   }
+  // Migration 0042 uses the same recovery-safe pattern for opaque original
+  // identities: recovery imports the source key after schema creation, while
+  // a fresh install seeds one only after install_state exists.
+  if (schemaVersion >= 42) {
+    await queryDatabase(
+      acct.id,
+      dbId,
+      `INSERT INTO source_original_id_key_state (tenant_id, signing_salt)
+       SELECT 'primary', lower(hex(randomblob(32)))
+        WHERE NOT EXISTS (
+          SELECT 1 FROM source_original_id_key_state WHERE tenant_id = 'primary'
+        )`,
+    );
+  }
   if (!silent) ok(`schema at version ${schemaVersion}`);
   return { applied: pending.length, schemaVersion };
 }
@@ -8600,6 +8614,24 @@ export async function cmdProvenanceRepair(manifestPath, options = {}) {
     die("--approve-removals is used only with --apply after the existing source-removal gate prints its exact fingerprint");
   }
   if (flags.apply && flags.json) die("--json is a read-only preview option and cannot be combined with --apply");
+
+  // Schema 1 has no durable candidate-resolution ledger. Reject before
+  // reading the manifest, remote state, credentials, readiness, or source so
+  // a legacy approval can never reach the whole-source mutation path.
+  if (flags.apply) {
+    throw new ProvenanceRepairIncompleteError(
+      "Provenance repair apply is unavailable: schema 1 cannot distinguish a repaired candidate from deletion, replacement, refusal, or skip. Nothing was read or changed. Run the read-only preview for inventory only.",
+      {
+        schema_version: 1,
+        operation: "provenance-repair",
+        status: "apply_schema_unsupported",
+        complete: false,
+        required_schema_version: 2,
+        fixed_candidate_ids: [],
+        fixed_count: 0,
+      },
+    );
+  }
 
   const context = await provenanceRepairContext(manifestPath, source, options);
   const { plan } = context;
@@ -22919,9 +22951,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            apply one approved state-bound bundle; scopes are
                                            technician-skill,claude-code-mcp,codex-mcp
     brain provenance-repair <manifest> --source <name>  read-only whole-source provenance recovery preview
-    brain provenance-repair <manifest> --source <name> --apply --approve <plan-id>
-                                           approved reset/no-limit source rewalk with exact receipt and recovery readback;
-                                           supports one manifest-declared local folder, Drive, Gmail, or Calendar source
+                                           schema 1 is inventory-only; repair apply requires a future
+                                           candidate-resolution ledger and is intentionally unavailable
     brain schedule   <manifest> --install  install unattended Drive refresh on macOS
     brain schedule   <manifest> --install --folder  install unattended refresh of the watched
                                            local folder declared in corpora.local_folder (macOS)

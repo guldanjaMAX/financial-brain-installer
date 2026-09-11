@@ -59,6 +59,10 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_snapshots"), 
 assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_snapshots"), true);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_previews"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_previews"), false);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_id_key_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_id_key_state"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_observations"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_observations"), true);
 
 const sourceManifestPath = join(sandbox, "source.manifest.json");
 const targetManifestPath = join(sandbox, "target.manifest.json");
@@ -172,6 +176,10 @@ assert.equal(recoveryExportTables(appliedMigrations).includes("memory_supersessi
 assert.equal(recoveryExportTables(appliedMigrations.slice(0, 40)).includes("owner_financial_map_snapshots"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("owner_financial_map_snapshots"), true);
 assert.equal(recoveryExportTables(appliedMigrations).includes("owner_financial_map_previews"), false);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 41)).includes("source_original_id_key_state"), false);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 41)).includes("source_original_observations"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_id_key_state"), true);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_observations"), true);
 const installStateColumns = Object.freeze([
   ["id", "INTEGER"],
   ["client_slug", "TEXT"],

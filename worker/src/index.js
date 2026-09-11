@@ -106,6 +106,9 @@ import {
   handleSourceInventoryApi, SOURCE_INVENTORY_PATH,
 } from "./lib/source-inventory-api.js";
 import {
+  handleSourceOriginalObservation, SOURCE_ORIGINAL_OBSERVATION_PATH,
+} from "./lib/source-original-observation.js";
+import {
   handleOwnerFinancialMap, OWNER_FINANCIAL_MAP_PATH_PREFIX, OWNER_FINANCIAL_MAP_APP_PATH_PREFIX,
 } from "./lib/owner-financial-map.js";
 
@@ -2556,6 +2559,16 @@ export default {
     // first-class credential for this one private read.
     if (path === SOURCE_INVENTORY_PATH) {
       return handleSourceInventoryApi(env, request);
+    }
+
+    // A raw source-relative locator may enter only this admin-only handler and
+    // is immediately reduced to an opaque durable identity. Keeping the route
+    // before the shared grant gate prevents an administer-capable scoped grant
+    // from becoming authority to record whole-owner repair evidence. The
+    // handler enforces its own pause boundary for record mode while leaving
+    // seal, inventory and verify read-only.
+    if (path === SOURCE_ORIGINAL_OBSERVATION_PATH) {
+      return handleSourceOriginalObservation(env, request);
     }
 
     // The financial map is a full owner-reviewed denominator, not an inferred

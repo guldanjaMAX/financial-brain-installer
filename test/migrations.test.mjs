@@ -121,7 +121,7 @@ check(`all ${applied} statements across ${files.length} files applied`, true);
   db.exec("RELEASE provenance_marker_fixture");
 }
 
-/* ---- a populated schema-36 sync history survives 0037 through 0041 ---- */
+/* ---- a populated schema-36 sync history survives 0037 through 0042 ---- */
 {
   const schema36 = new DatabaseSync(":memory:");
   for (const file of files.filter((name) => Number(name.slice(0, 4)) <= 36)) {
@@ -156,7 +156,19 @@ check(`all ${applied} statements across ${files.length} files applied`, true);
 
 /* ---- the objects the worker hard-depends on must exist ---- */
 const names = new Set(db.prepare("SELECT name FROM sqlite_master").all().map((r) => r.name));
-for (const t of ["documents", "document_source_inventory", "chunks", "chunks_fts", "vector_outbox", "vector_bootstrap_batches", "corpus_stats", "schema_migrations", "install_state"]) {
+for (const t of [
+  "documents",
+  "document_source_inventory",
+  "chunks",
+  "chunks_fts",
+  "vector_outbox",
+  "vector_bootstrap_batches",
+  "corpus_stats",
+  "schema_migrations",
+  "install_state",
+  "source_original_id_key_state",
+  "source_original_observations",
+]) {
   check(`${t} exists`, names.has(t), [...names].join(", "));
 }
 for (const t of ["chunks_ai", "chunks_ad", "chunks_au"]) {
@@ -1006,6 +1018,23 @@ check("restart guard refuses an existing migration column with the wrong contrac
       "SELECT count(*) AS n FROM owner_financial_map_key_state WHERE tenant_id='primary'",
     ).get()?.n === 1);
   missingSingleton.close();
+
+  const fresh = new DatabaseSync(":memory:");
+  const freshFault = { after: null, mutations: 0 };
+  await cmdMigrate(manifestPath, {
+    silent: true,
+    resolveAccount: async () => ({ id: "fixture-account" }),
+    d1Query: adapterFor(fresh, freshFault),
+  });
+  const freshOriginalKey = fresh.prepare(
+    "SELECT signing_salt FROM source_original_id_key_state WHERE tenant_id='primary'",
+  ).get();
+  check("fresh cmdMigrate completion seeds one durable source-original identity key",
+    fresh.prepare("SELECT schema_version FROM install_state WHERE id=1").get()?.schema_version === LATEST_SCHEMA &&
+      fresh.prepare("SELECT count(*) AS n FROM source_original_id_key_state").get()?.n === 1 &&
+      /^[a-f0-9]{64}$/.test(freshOriginalKey?.signing_salt || ""),
+    JSON.stringify(freshOriginalKey));
+  fresh.close();
   rmSync(sandbox, { recursive: true, force: true });
 }
 

@@ -192,8 +192,9 @@ owner lease keyed to the canonical adjacent source-state path. The lease is
 acquired before credential or network access, checked before every document or
 batch send and before each OCR, removal, state, and source-receipt mutation,
 and released in `finally`.
-Direct commands, scheduled children, `brain load`, and provenance repair enter
-the same writer boundary exactly once. Its private owner token and heartbeat
+Direct commands, scheduled children, and `brain load` enter the same writer
+boundary exactly once. Legacy provenance repair apply is disabled before this
+boundary; any future repair executor must enter it. Its private owner token and heartbeat
 allow a stale dead process to be recovered without letting an old timestamp
 evict a live long-running sync. Dry runs do not take the lease because they
 write no state or source receipt.
@@ -471,17 +472,30 @@ fail on observed corpus drift. Neither inventory mode can write, OCR, reingest,
 infer an entity or period, expose a raw locator, or alter the existing MCP tool
 set. `/zones` keeps its existing aggregate semantics and authorization boundary.
 
-The separate CLI `provenance-repair` bridge is an owner-approved data-plane
-operation, not a writable inventory endpoint. Preview binds one exact source,
-manifest and source configuration, complete semantic source-inventory and
-recovery generations, exact opaque candidate set, machine readiness,
-reset/no-limit rewalk mode, and OCR policy. Apply recomputes that plan and calls
-only the existing local-folder, Drive, Gmail, or Calendar full-source ingest.
-It cannot relabel legacy metadata or address an opaque candidate individually.
-The existing deletion review remains a second approval boundary. A different
-completed full-sweep source receipt and fresh candidate readback are required
-before the set difference can call any candidate fixed; incomplete evidence is
-reported as unresolved rather than success.
+The legacy CLI `provenance-repair` schema 1 contract is inventory-only. Its
+preview still binds one exact source, manifest and source configuration,
+semantic inventory and recovery generations, opaque candidate set, machine
+readiness, proposed reset/no-limit rewalk mode, and OCR policy. It always
+reports `can_apply: false`, because candidate disappearance cannot distinguish
+repair from deletion, replacement, refusal, or skip. `--apply` stops before
+manifest, credential, network, or source access. Schema-1 readback preserves
+every prior candidate as unresolved even when a later inventory no longer
+contains it.
+
+Migration 0042 introduces a separate bounded observation ledger for one to ten
+explicit local-upload originals. The private admin route accepts raw canonical
+source-relative locators only in a JSON request, derives stable HMAC identities
+from an independent recoverable D1 key, and never stores or returns those
+locators. Seal, inventory, and verify are read-only. Record is append-only,
+transactional, bound to one source snapshot and exact target set, and blocked
+during an upgrade write pause. Schema 42 records and verifies only gaps,
+failures, and adjudicated exclusions. Accepted outcomes are blocked in both the
+Worker and D1 because the current document family has no authoritative raw-byte
+receipt that can bind it to the locally observed original. A later migration
+must add and validate that binding before any repair claim can exist. Deletion,
+absence, replacement bytes, an unreadable original, or a changed result family
+therefore remains unresolved. Every receipt says `whole_source_complete:
+false`; this contract neither enumerates a source nor authorizes OCR or ingest.
 
 The new-computer continuity report composes that same authenticated source
 inventory with local-only observations. It reads the exact manifest, durable

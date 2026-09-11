@@ -43,10 +43,52 @@ export const PDF_PROCESS_MAX_OUTPUT_BYTES = 96 * 1024 * 1024;
 const PDF_CHILD_PATH = fileURLToPath(new URL("./pdf-child.mjs", import.meta.url));
 const PDF_HANDSHAKE_MAX_BYTES = 4_096;
 
+/**
+ * A content-free observation of what the PDF parser directly established.
+ *
+ * This deliberately travels beside the legacy text/error result. Retrospective
+ * assessment must not recover a page count or password state by parsing prose,
+ * and callers must be able to discard extracted text without discarding those
+ * facts. `page_count` is present only when the PDF parser itself returned it.
+ */
+function pdfOriginalObservation(state, {
+  totalPages,
+  reasonCode = null,
+  textReliable = null,
+  extractionComplete = null,
+} = {}) {
+  return {
+    state,
+    format: "pdf",
+    ...(Number.isInteger(totalPages) && totalPages >= 1 && totalPages <= 10_000
+      ? { page_count: totalPages, page_count_authoritative: true }
+      : {}),
+    ...(typeof textReliable === "boolean" ? { text_reliable: textReliable } : {}),
+    ...(typeof extractionComplete === "boolean" ? { extraction_complete: extractionComplete } : {}),
+    ...(reasonCode ? { reason_code: reasonCode } : {}),
+  };
+}
+
 function pdfFailure(name = "unreadable") {
   const safeName = typeof name === "string" && name ? name.slice(0, 80) : "unreadable";
-  if (/Password/i.test(safeName)) return { text: null, error: "the PDF is password protected" };
-  return { text: null, error: `the PDF could not be opened (${safeName})` };
+  if (/Password/i.test(safeName)) {
+    return {
+      text: null,
+      error: "the PDF is password protected",
+      observation: pdfOriginalObservation("password_protected", {
+        reasonCode: "password_protected",
+        extractionComplete: false,
+      }),
+    };
+  }
+  return {
+    text: null,
+    error: `the PDF could not be opened (${safeName})`,
+    observation: pdfOriginalObservation("extraction_failed", {
+      reasonCode: "extraction_failed",
+      extractionComplete: false,
+    }),
+  };
 }
 
 function pdfResult(text, totalPages) {
@@ -305,10 +347,19 @@ export async function extractPdf(buf, { reread, ocr } = {}, { pdfPassImpl = pdfP
   } catch (e) {
     if (e?.fatal === true) throw e;
     const name = e?.name || "";
-    if (/Password/i.test(name)) return { text: null, error: "the PDF is password protected" };
-    return { text: null, error: `the PDF could not be opened (${name || "unreadable"})` };
+    return pdfFailure(name || "unreadable");
   }
-  if (r.text === null && r.error) return r;
+  if (r.text === null && r.error) {
+    return r.observation
+      ? r
+      : {
+          ...r,
+          observation: pdfOriginalObservation("extraction_failed", {
+            reasonCode: "extraction_failed",
+            extractionComplete: false,
+          }),
+        };
+  }
 
   if (!r.body.length && typeof reread === "function") {
     const fresh = await reread();
@@ -331,9 +382,42 @@ export async function extractPdf(buf, { reread, ocr } = {}, { pdfPassImpl = pdfP
     const scanned = `no text layer: this is a scanned PDF (${r.totalPages} page${r.totalPages === 1 ? "" : "s"} of images).`;
     if (typeof ocr === "function") {
       const got = await ocrPdf(ocr, r, scanned);
-      if (got) return got;
+      if (got) {
+        const hasOcrText = typeof got.text === "string" && got.text.trim().length > 0;
+        // OCR is reliable only when the OCR result says that explicitly. Text
+        // without that positive assertion is still useful evidence, but it is
+        // partial evidence and must never be upgraded by mere presence.
+        const state = hasOcrText && got.provenance?.text_reliable === true &&
+            got.provenance?.text_source !== "ocr_partial"
+          ? "ocr_reliable"
+          : hasOcrText
+            ? "ocr_partial"
+            : "scan_only_ocr_needed";
+        return {
+          ...got,
+          observation: pdfOriginalObservation(state, {
+            totalPages: r.totalPages,
+            reasonCode: state === "ocr_partial"
+              ? "ocr_partial_review"
+              : state === "scan_only_ocr_needed"
+                ? "scan_only_ocr_needed"
+                : "provenance_unassessed",
+            textReliable: got.provenance?.text_reliable === true,
+            extractionComplete: state === "ocr_reliable",
+          }),
+        };
+      }
     }
-    return { text: null, error: `${scanned} It needs OCR before it can be indexed.` };
+    return {
+      text: null,
+      error: `${scanned} It needs OCR before it can be indexed.`,
+      observation: pdfOriginalObservation("scan_only_ocr_needed", {
+        totalPages: r.totalPages,
+        reasonCode: "scan_only_ocr_needed",
+        textReliable: false,
+        extractionComplete: false,
+      }),
+    };
   }
   if (r.perPage < MIN_CHARS_PER_PAGE) {
     // Returned rather than refused. There IS text; there is just not much, and
@@ -342,9 +426,23 @@ export async function extractPdf(buf, { reread, ocr } = {}, { pdfPassImpl = pdfP
       text: r.body,
       note: `only ${Math.round(r.perPage)} characters per page, so this PDF is probably a scan and most of its content is not searchable`,
       incomplete: true,
+      observation: pdfOriginalObservation("native_readable", {
+        totalPages: r.totalPages,
+        reasonCode: "provenance_unassessed",
+        textReliable: false,
+        extractionComplete: false,
+      }),
     };
   }
-  return { text: r.body };
+  return {
+    text: r.body,
+    observation: pdfOriginalObservation("native_readable", {
+      totalPages: r.totalPages,
+      reasonCode: "provenance_unassessed",
+      textReliable: true,
+      extractionComplete: true,
+    }),
+  };
 }
 
 register(".pdf", extractPdf, "pdf", { binary: true });
