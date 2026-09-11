@@ -23,6 +23,7 @@ import { platform } from "node:os";
 import { win32 as pathWin32 } from "node:path";
 import { tokenStorageStatus, verifyTokenStorageReadable } from "./connectors/google-auth.mjs";
 import { probeWindowsDpapi } from "./operations/admin-key-file.mjs";
+import { manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
 
 export const OK = "ok";
 export const WARN = "warn";
@@ -1011,12 +1012,9 @@ export function checkBankFeedRedirect(manifest) {
 
   const required = bankFeedRedirectUri(domain);
   const requiredWebhook = plaidWebhookUri(domain);
-  const provider = typeof feed.provider === "string" ? feed.provider.trim().toLowerCase() : "";
-  const environment = typeof feed.environment === "string"
-    ? feed.environment.trim().toLowerCase()
-    : "";
+  const provider = manifestBankFeedProvider(feed);
   if (!["plaid", "custom"].includes(provider) ||
-      !["sandbox", "production"].includes(environment)) {
+      (feed.environment !== undefined && !["sandbox", "production"].includes(feed.environment))) {
     return check("Bank feed", FAIL, "the bank provider or environment is invalid",
       "  Choose provider plaid or custom and environment sandbox or production.");
   }
@@ -1047,9 +1045,11 @@ export function checkBankFeedRedirect(manifest) {
     return check(
       "Bank feed", FAIL,
       "the signed webhook destination for this brain is not recorded as registered",
-      "  Register this exact webhook in the same Plaid environment as the credentials:\n\n" +
+      "  Plaid credential setup and dashboard changes remain held outside generic\n" +
+      "  onboarding. In the separately reviewed setup, register this exact webhook\n" +
+      "  in the same Plaid environment as the existing Worker credentials:\n\n" +
       `      ${requiredWebhook}\n\n` +
-      "  Then record it in the manifest so this check can confirm it:\n" +
+      "  Then record only that non-secret URI in the manifest:\n" +
       `      corpora.bank_feed.registered_webhook_uris: [\"${requiredWebhook}\"]\n\n` +
       "  Keep scheduled reconciliation enabled. A registered webhook requests prompt\n" +
       "  refresh, but it is never the only source of truth."
@@ -1073,6 +1073,7 @@ export function checkBankFeedRedirect(manifest) {
       "  provider: custom only for a separately reviewed compatible provider."
     );
   }
+  const environment = feed.environment === "production" ? "production" : "sandbox";
   const webhook = provider === "plaid" ? requiredWebhook : null;
   return check(
     "Bank feed", OK,

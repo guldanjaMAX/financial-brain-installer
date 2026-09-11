@@ -2,10 +2,9 @@
  * A small coordinator for the install-day account ceremonies.
  *
  * It deliberately does not become another credential store. Dashboard values
- * are read with the installer's existing hidden-input primitive. Existing
- * connector ceremonies use short-lived children with allowlisted environments;
- * Plaid stays inside its dedicated reviewed API boundary. Input buffers are
- * then zeroed. Nothing secret is placed in argv, a receipt, or JSON.
+ * are read with the installer's existing hidden-input primitive, passed to one
+ * short-lived child command through an allowlisted environment, then the input
+ * buffers are zeroed. Nothing secret is placed in argv, a receipt, or JSON.
  *
  * The default command is read-only and machine-readable. This lets a human
  * technician, Codex, or another local assistant guide the same reviewed steps
@@ -16,7 +15,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { renderCopyableCommand } from "./command-display.mjs";
-import { bankFeedRedirectUri, plaidWebhookUri } from "../doctor.mjs";
 
 function ownerGuidance({ before_action, why, minimum_access, browser_help, owner_only, privacy }) {
   return Object.freeze({ before_action, why, minimum_access, browser_help, owner_only, privacy });
@@ -152,21 +150,6 @@ export const TECHNICIAN_STEPS = Object.freeze([
     }),
   }),
   Object.freeze({
-    id: "plaid",
-    title: "Prepare the native Plaid connection",
-    dashboard_url: "https://dashboard.plaid.com/team/api",
-    human_boundary: "Inside an approved, version-scoped field plan, the owner confirms the selected Plaid environment and Production access when applicable, then verifies the exact redirect and webhook URLs in their own Plaid dashboard. The client ID and secret go only into hidden prompts.",
-    automated_proof: "The installer generates or reuses an independent protected wrapping key, atomically applies only the three bank-feed Worker secrets, and reads back only those three binding names. It does not open Link or contact a bank.",
-    owner_guidance: ownerGuidance({
-      before_action: "Plaid's official dashboard will open for the selected environment so the exact Brain redirect and webhook URLs can be registered before any application value is entered.",
-      why: "This prepares the native bank feed inside the approved, version-scoped field plan without opening Link or contacting a bank.",
-      minimum_access: "Only the exact redirect and webhook URLs plus the three reviewed bank-feed Worker secret bindings. Do not request another product, scope, or environment for convenience.",
-      browser_help: "After exact approval, the assistant can navigate and fill the two non-secret Brain URLs in the selected Plaid environment.",
-      owner_only: "The owner signs in, completes 2FA, confirms Sandbox or Production access, approves the final dashboard save, and enters each revealed application value directly into the hidden terminal prompt.",
-      privacy: "The assistant must stop before a client ID or secret is revealed and must not read, copy, screenshot, transcribe, or store it.",
-    }),
-  }),
-  Object.freeze({
     id: "passkey",
     title: "Enroll the owner passkey",
     dashboard_url: null,
@@ -202,10 +185,6 @@ export const TECHNICIAN_RUN_STEPS = Object.freeze(TECHNICIAN_STEPS.map((step) =>
 export const DEFERRED_PUBLIC_CONNECTOR_STEPS = Object.freeze([
   "google", "zoom", "imap",
 ]);
-
-export const PLAID_WINDOWS_SECRET_ENTRY_HOLD =
-  "Plaid application-secret entry is held on Windows because this CLI cannot prove that PowerShell hid the typed values. " +
-  "Do not enter them here or move them through environment variables. Use a reviewed non-Windows candidate or wait for a proven native masked Windows bridge.";
 
 function cliLocator(cli) {
   if (!cli?.command || !Array.isArray(cli.args)) return null;
@@ -247,12 +226,42 @@ export function technicianChildEnvironment(base = {}, explicit = {}) {
   return result;
 }
 
+function finalBrainHostname(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw || raw.length > 253 || raw.includes("://") || !/^[a-z0-9.-]+$/i.test(raw)) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = new URL(`https://${raw}`);
+  } catch {
+    return null;
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const labels = hostname.split(".");
+  const validLabels = labels.length >= 2 && labels.every((label) =>
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
+  if (!validLabels || /^\d+(?:\.\d+){3}$/.test(hostname) ||
+      parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port ||
+      parsed.pathname !== "/" || parsed.search || parsed.hash ||
+      hostname !== raw.toLowerCase()) {
+    return null;
+  }
+  return hostname;
+}
+
 function readManifestSummary(manifestPath, deps = {}) {
   const exists = deps.existsSync || existsSync;
   const read = deps.readFileSync || readFileSync;
   const absolute = resolve(manifestPath);
   if (!exists(absolute)) {
-    return { path: absolute, exists: false, final_hostname: null, enabled_connectors: [] };
+    return {
+      path: absolute,
+      exists: false,
+      final_hostname: null,
+      final_hostname_invalid: false,
+      enabled_connectors: [],
+    };
   }
   let manifest;
   try {
@@ -262,126 +271,17 @@ function readManifestSummary(manifestPath, deps = {}) {
   }
   const enabled = ["google_drive", "gmail", "calendar", "zoom", "imap"]
     .filter((name) => manifest?.corpora?.[name]?.enabled === true);
-  const feed = manifest?.corpora?.bank_feed || {};
-  const rawDomain = typeof manifest?.brain?.domain === "string"
+  const declaredDomain = typeof manifest?.brain?.domain === "string"
     ? manifest.brain.domain.trim()
     : "";
-  let finalHostname = null;
-  try {
-    const parsed = new URL(`https://${rawDomain}`);
-    if (rawDomain && !rawDomain.includes("://") && parsed.protocol === "https:" &&
-        !parsed.username && !parsed.password &&
-        !parsed.port && parsed.pathname === "/" && !parsed.search && !parsed.hash) {
-      finalHostname = parsed.hostname.toLowerCase();
-    }
-  } catch { /* invalid or incomplete hostname remains visibly unsettled */ }
-  const redirectUri = finalHostname ? bankFeedRedirectUri(finalHostname) : null;
-  const webhookUri = finalHostname ? plaidWebhookUri(finalHostname) : null;
+  const finalHostname = finalBrainHostname(declaredDomain);
   return {
     path: absolute,
     exists: true,
     final_hostname: finalHostname,
+    final_hostname_invalid: Boolean(declaredDomain && !finalHostname),
     enabled_connectors: enabled,
-    bank_feed: {
-      enabled: feed.enabled === true,
-      provider: typeof feed.provider === "string" ? feed.provider.trim().toLowerCase() : null,
-      environment: typeof feed.environment === "string" ? feed.environment.trim().toLowerCase() : null,
-      endpoint_override: ["api_base", "link_sdk_url", "link_global"].some((name) =>
-        Object.hasOwn(feed, name)),
-      redirect_uri: redirectUri,
-      webhook_uri: webhookUri,
-      redirect_recorded: Boolean(redirectUri &&
-        Array.isArray(feed.registered_redirect_uris) &&
-        feed.registered_redirect_uris.includes(redirectUri)),
-      webhook_recorded: Boolean(webhookUri &&
-        Array.isArray(feed.registered_webhook_uris) &&
-        feed.registered_webhook_uris.includes(webhookUri)),
-    },
   };
-}
-
-function assertPlaidTechnicianPreflight(summary, flags, isTTY, platformName) {
-  const feed = summary.bank_feed;
-  const allowed = new Set([
-    "run", "confirm-environment", "confirm-redirect", "confirm-webhook",
-    "confirm-production-access", "confirm-single-setup-machine",
-  ]);
-  const unexpected = Object.keys(flags).filter((name) => !allowed.has(name));
-  if (unexpected.length) {
-    throw new Error(`the Plaid step does not use --${unexpected[0]}`);
-  }
-  if (!feed.enabled) {
-    throw new Error("the native bank feed must be explicitly enabled in the approved field-plan manifest before Plaid setup");
-  }
-  if (feed.provider !== "plaid") {
-    throw new Error("the Plaid technician step requires corpora.bank_feed.provider to be explicitly set to plaid");
-  }
-  if (feed.endpoint_override) {
-    throw new Error("the native Plaid profile does not accept api_base, link_sdk_url, or link_global overrides; remove them before entering credentials");
-  }
-  if (!["sandbox", "production"].includes(feed.environment)) {
-    throw new Error("corpora.bank_feed.environment must explicitly select sandbox or production before Plaid setup");
-  }
-  if (!summary.final_hostname) {
-    throw new Error("the final Brain address is still open. Deploy and settle brain.domain before registering Plaid URLs.");
-  }
-  if (!feed.redirect_recorded || !feed.webhook_recorded) {
-    throw new Error(
-      `record these exact URLs in the selected Plaid environment and in the manifest before entering credentials:\n` +
-        `  redirect: ${feed.redirect_uri}\n` +
-        `  webhook: ${feed.webhook_uri}`,
-    );
-  }
-  const confirmedEnvironment = String(flags["confirm-environment"] || "").trim().toLowerCase();
-  if (confirmedEnvironment !== feed.environment) {
-    throw new Error(`--confirm-environment must exactly match the manifest's ${feed.environment} Plaid environment`);
-  }
-  if (String(flags["confirm-redirect"] || "").trim() !== feed.redirect_uri) {
-    throw new Error(`--confirm-redirect must exactly match ${feed.redirect_uri}`);
-  }
-  if (String(flags["confirm-webhook"] || "").trim() !== feed.webhook_uri) {
-    throw new Error(`--confirm-webhook must exactly match ${feed.webhook_uri}`);
-  }
-  if (feed.environment === "production" && flags["confirm-production-access"] !== true) {
-    throw new Error(
-      "Production credentials may be entered only after the owner verifies Plaid Dashboard shows Production access; rerun with --confirm-production-access after that check",
-    );
-  }
-  if (flags["confirm-production-access"] !== undefined &&
-      flags["confirm-production-access"] !== true) {
-    throw new Error("--confirm-production-access is a switch and does not take a value");
-  }
-  if (feed.environment !== "production" && flags["confirm-production-access"] === true) {
-    throw new Error("--confirm-production-access applies only to the Production environment; omit it for Sandbox");
-  }
-  if (flags["confirm-single-setup-machine"] !== true) {
-    throw new Error(
-      "Plaid first-time secret setup has no remote cross-machine lock. Run one supervised owner session on one nominated computer and confirm it with --confirm-single-setup-machine.",
-    );
-  }
-  if (platformName === "win32") {
-    throw new Error(PLAID_WINDOWS_SECRET_ENTRY_HOLD);
-  }
-  if (!isTTY) {
-    throw new Error(
-      "Plaid application values can be entered only in a direct interactive terminal controlled by the owner. Open that terminal and rerun the same command.",
-    );
-  }
-}
-
-/** Pure local Plaid refusal boundary. It must pass before Cloudflare sign-in starts. */
-export function plaidTechnicianPreflight(manifestPath, {
-  flags = {},
-  manifestDeps = {},
-  isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
-  platformName = process.platform,
-} = {}) {
-  const summary = readManifestSummary(manifestPath, manifestDeps);
-  if (!summary.exists) {
-    throw new Error("the install record is not ready yet. The Cloudflare step creates it, and then this step can continue.");
-  }
-  assertPlaidTechnicianPreflight(summary, flags, isTTY, platformName);
-  return summary;
 }
 
 export function technicianPlan(manifestPath, deps = {}) {
@@ -405,7 +305,7 @@ export function technicianPlan(manifestPath, deps = {}) {
     manifest,
     cli,
     refresh,
-    warning: "This plan prepares the workflow. The Plaid step is limited to an approved, version-scoped field plan while general bank invitations remain held. Live proof arrives during the account, connector, webhook, mailbox, and physical passkey checks.",
+    warning: "This plan prepares the workflow. Live proof arrives during the account, connector, webhook, mailbox, and physical passkey checks.",
     assistance: {
       primary_surface: "claude_code",
       opening: "I can handle the technical navigation and forms while you stay in control of your accounts. I will pause only for private approvals and explain each one first.",
@@ -449,8 +349,14 @@ export function technicianPlan(manifestPath, deps = {}) {
     interaction: TECHNICIAN_INTERACTION_POLICY,
     prerequisites: TECHNICIAN_PREREQUISITES,
     coverage: {
+      bank_connections: {
+        state: "held_outside_ordinary_onboarding",
+        credentials_needed_here: false,
+        owner_message: "Bank connections are not part of ordinary onboarding yet. They are still being tested. You did nothing wrong, and there is no bank password, verification code, or Plaid setup key to enter here. An already approved pilot keeps its complete existing bank setup. If any piece is missing, setup stops before changing a credential and explains the separately reviewed next step.",
+      },
       guided_steps: TECHNICIAN_RUN_STEPS.filter((step) => !DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step)),
       not_guided_in_this_release: [
+        "Plaid connector ceremony",
         "Google connector ceremony",
         "QuickBooks connector ceremony",
         "Zoom connector ceremony",
@@ -462,7 +368,7 @@ export function technicianPlan(manifestPath, deps = {}) {
         "HubSpot connector ceremony",
         "watched-folder scheduling ceremony",
       ],
-      note: "Plaid application-secret setup is guided but remains held and field-unproven. The sources listed here may have separate connector commands or backlog work, but this technician plan does not claim to guide or prove them.",
+      note: "These sources may have separate connector commands or backlog work, but this technician plan does not claim to guide or prove them.",
     },
     rules: [
       "Run one step at a time and rerun the same step after an interruption.",
@@ -479,14 +385,13 @@ export function technicianPlan(manifestPath, deps = {}) {
       "The owner handles login, 2FA, consent, billing, and physical-device prompts.",
       "An agent explains the passkey ceremony but never runs or captures brain invite because its output contains the private one-time link.",
       "Enroll the first passkey only after the final Brain hostname is fixed.",
-      "Run the Plaid ceremony only inside a named, version-scoped disposable-candidate plan or a separately approved production pilot while general invitations remain held.",
     ],
     steps: TECHNICIAN_STEPS.map((step, index) => {
       let state = "not_checked";
       if (step.id === "tools") state = "ready_to_start";
       if (step.id === "cloudflare" && !manifest.exists) state = "ready_after_local_tools";
       if (step.id === "cloudflare" && manifest.exists) state = "represented_by_install_record";
-      if (["smoke", "google", "zoom", "imap", "plaid", "passkey", "verify"].includes(step.id) && !manifest.exists) {
+      if (["smoke", "google", "zoom", "imap", "passkey", "verify"].includes(step.id) && !manifest.exists) {
         state = "waiting_for_install_record";
       }
       if (step.id === "smoke" && manifest.exists) state = "ready_for_owner_approval";
@@ -500,31 +405,20 @@ export function technicianPlan(manifestPath, deps = {}) {
       if (step.id === "imap" && manifest.exists && !manifest.enabled_connectors.includes("imap")) {
         state = "requires_manifest_enablement";
       }
-      if (step.id === "plaid" && manifest.exists) {
-        if (!manifest.bank_feed.enabled) state = "requires_manifest_enablement";
-        else if (manifest.bank_feed.provider !== "plaid") state = "requires_native_plaid_provider";
-        else if (manifest.bank_feed.endpoint_override) state = "requires_endpoint_cleanup";
-        else if (!["sandbox", "production"].includes(manifest.bank_feed.environment)) {
-          state = "requires_environment_selection";
-        }
-        else if (!manifest.final_hostname) state = "waiting_for_final_hostname";
-        else if (!manifest.bank_feed.redirect_recorded || !manifest.bank_feed.webhook_recorded) {
-          state = "requires_provider_dashboard_registration";
-        } else state = "ready_for_owner_confirmation";
-        if (platformName === "win32") state = "held_windows_masked_input_unproven";
-      }
-      if (step.id === "passkey" && manifest.exists && !manifest.final_hostname) {
+      if (step.id === "passkey" && manifest.exists && manifest.final_hostname_invalid) {
+        state = "invalid_final_hostname";
+      } else if (step.id === "passkey" && manifest.exists && !manifest.final_hostname) {
         state = "waiting_for_final_hostname";
       }
       if (DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step.id)) {
         state = "deferred_from_public_first_install";
       }
-      const ownerOnly = ["plaid", "passkey"].includes(step.id);
+      const ownerOnly = step.id === "passkey";
       const agentAfterOwnerApproval = step.id === "cloudflare" && !manifest.exists;
       const ownerCli = cli || Object.freeze({ command: "<brain-cli>", args: Object.freeze([]) });
       const ownerArgs = step.id === "passkey"
         ? ["invite", manifest.path]
-        : plaidTechnicianArgs(manifest.path, manifest.bank_feed);
+        : ["technician", manifest.path, "--run", step.id];
       const approvedAgentArgs = [
         "technician", manifest.path, "--run", "cloudflare",
         "--browser-sign-in",
@@ -539,7 +433,7 @@ export function technicianPlan(manifestPath, deps = {}) {
         ...step,
         command: DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step.id) || ownerOnly || step.id === "cloudflare"
           ? null
-          : technicianDisplayCommand(step.id, manifest.path, cli, platformName, manifest.bank_feed),
+          : technicianDisplayCommand(step.id, manifest.path, cli, platformName),
         state,
         ...(ownerOnly
           ? {
@@ -598,31 +492,12 @@ export function technicianPlan(manifestPath, deps = {}) {
   };
 }
 
-function plaidTechnicianArgs(manifestPath, bankFeed = {}) {
-  const args = [
-    "technician", manifestPath, "--run", "plaid",
-    "--confirm-environment", bankFeed?.environment || "<sandbox-or-production>",
-    "--confirm-redirect", bankFeed?.redirect_uri || "<exact-redirect-url>",
-    "--confirm-webhook", bankFeed?.webhook_uri || "<exact-webhook-url>",
-    "--confirm-single-setup-machine",
-  ];
-  if (bankFeed?.environment === "production") args.push("--confirm-production-access");
-  return args;
-}
-
-export function technicianDisplayCommand(
-  step,
-  manifestPath,
-  cli = null,
-  platformName = process.platform,
-  bankFeed = {},
-) {
+export function technicianDisplayCommand(step, manifestPath, cli = null, platformName = process.platform) {
   const path = resolve(manifestPath);
   const locator = cli || Object.freeze({ command: "<brain-cli>", args: Object.freeze([]) });
   if (step === "google") return exactCommand(locator, ["technician", path, "--run", "google"], platformName);
   if (step === "imap") return exactCommand(locator, ["technician", path, "--run", "imap", "--host", "<imap-host>", "--user", "<email-address>"], platformName);
   if (step === "passkey") return exactCommand(locator, ["technician", path, "--run", "passkey", "--confirm-host", "<final-hostname>"], platformName);
-  if (step === "plaid") return exactCommand(locator, plaidTechnicianArgs(path, bankFeed), platformName);
   return exactCommand(locator, ["technician", path, "--run", step], platformName);
 }
 
@@ -641,6 +516,8 @@ export function renderTechnicianPlan(plan) {
     "The owner takes over for login, 2FA, consent, billing, credentials, and physical passkey prompts.",
     "Sensitive values stay in provider pages or hidden terminal prompts.",
     "Local configuration writes are named before approval. Setup can use --no-connect when the owner wants AI-tool files left unchanged.",
+    plan.warning,
+    plan.coverage.bank_connections.owner_message,
     "",
     "Before setup can create anything:",
     ...plan.prerequisites.map((item) => `- ${item.requirement}`),
@@ -745,7 +622,6 @@ function childCommands(step, manifestPath, flags, scriptPath) {
       if (flags.source) args.push("--source", String(flags.source));
       return [command(...args)];
     }
-    case "plaid": return [];
     case "passkey": return [command("invite", path)];
     case "verify": return [
       command("doctor", path),
@@ -796,10 +672,6 @@ export async function runTechnicianStep({
   nodePath = process.execPath,
   manifestDeps = {},
   runInstallSmoke = null,
-  runPlaidSetup = null,
-  assertContextUnchanged = () => true,
-  announce = null,
-  isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
   platformName = process.platform,
 } = {}) {
   if (!TECHNICIAN_RUN_STEPS.includes(step)) {
@@ -833,6 +705,11 @@ export async function runTechnicianStep({
     }
   }
   if (step === "passkey") {
+    if (summary.final_hostname_invalid) {
+      throw new Error(
+        "brain.domain must be one final hostname with no scheme, port, path, credentials, query, or fragment before passkey enrollment.",
+      );
+    }
     if (!summary.final_hostname) {
       throw new Error("the final Brain address is still open. Choose brain.domain first so the passkey is enrolled on its permanent address.");
     }
@@ -841,10 +718,6 @@ export async function runTechnicianStep({
       throw new Error(`passkey enrollment is ready after --confirm-host exactly matches ${summary.final_hostname}`);
     }
   }
-  if (step === "plaid") {
-    assertPlaidTechnicianPreflight(summary, flags, isTTY, platformName);
-  }
-
   const secretBuffers = [];
   const explicitEnv = {};
   let childEnv = null;
@@ -852,9 +725,8 @@ export async function runTechnicianStep({
     if (step === "google") {
       if (typeof readHidden !== "function") throw new Error("the Google step needs a secure interactive terminal");
       const clientId = await hiddenValue(readHidden, "  Google OAuth client ID (hidden): ", "Google OAuth client ID");
-      secretBuffers.push(clientId);
       const clientSecret = await hiddenValue(readHidden, "  Google OAuth client secret, if issued (hidden; Enter for none): ", "Google OAuth client secret", { optional: true });
-      secretBuffers.push(clientSecret);
+      secretBuffers.push(clientId, clientSecret);
       explicitEnv.GOOGLE_CLIENT_ID = bufferText(clientId);
       if (clientSecret.length) explicitEnv.GOOGLE_CLIENT_SECRET = bufferText(clientSecret);
     }
@@ -870,45 +742,6 @@ export async function runTechnicianStep({
         secretBuffers.push(value);
         explicitEnv[name] = bufferText(value);
       }
-    }
-
-    if (step === "plaid") {
-      if (typeof readHidden !== "function" || typeof runPlaidSetup !== "function") {
-        throw new Error("the Plaid step needs the reviewed secure interactive setup boundary");
-      }
-      await assertContextUnchanged();
-      if (typeof announce === "function") {
-        announce(
-          `Plaid ${summary.bank_feed.environment} is selected. The exact redirect and signed-webhook URLs are recorded. ` +
-            "This step changes only three Worker secrets and will not open Plaid Link or contact a bank.",
-        );
-        announce(
-          "The owner enters the Plaid application values at the next two hidden prompts. They are not placed in the command, shell history, plan, or support note.",
-        );
-      }
-      const clientId = await hiddenValue(readHidden, "  Plaid client ID (hidden): ", "Plaid client ID");
-      secretBuffers.push(clientId);
-      const clientSecret = await hiddenValue(readHidden, "  Plaid secret for the selected environment (hidden): ", "Plaid secret");
-      secretBuffers.push(clientSecret);
-      const proof = await runPlaidSetup({
-        manifestPath: summary.path,
-        environment: summary.bank_feed.environment,
-        redirectUri: summary.bank_feed.redirect_uri,
-        webhookUri: summary.bank_feed.webhook_uri,
-        assertContextUnchanged,
-        clientId,
-        clientSecret,
-      });
-      return {
-        step,
-        completed: true,
-        commands_run: 0,
-        proof_level: "worker_secret_name_readback",
-        proof,
-        coordination_boundary: "single_supervised_owner_machine",
-        remote_first_setup_compare_and_swap: false,
-        next: ["enroll_owner_passkey", "brain_connect_bank"],
-      };
     }
 
     if (step === "cloudflare") {

@@ -4,9 +4,29 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.6
+## 0.4.7
 
-Candidate only. This version has not been released.
+Candidate only. This version has not been released. Its versioned README URLs
+are deliberately unavailable until a separate release approval and immutable
+asset publication.
+
+- **Eligible local file imports keep a verifiable link to their exact
+  original.** The ordinary single-record local-file path records a private
+  fingerprint and byte length together with its current document revision. If
+  that record arrives with conflicting original evidence, the Brain stops
+  instead of silently replacing its history. Other ingest producers and
+  ambiguous multi-record exports remain unbound, so this does not yet prevent
+  every new provenance gap or repair an older one. The repair preview stays
+  read-only until it can prove the complete chain from the original through the
+  search result and its citation.
+
+- **Ordinary setup will not surprise you with a bank-credential request.** Bank
+  application credentials remain outside normal setup and technician steps. An
+  already approved pilot with a complete existing bank setup keeps it unchanged.
+  If any piece is missing, setup stops before changing other credentials and
+  explains that a separate reviewed setup is needed. The health check cannot
+  call the signed webhook ready unless the exact Brain webhook address was
+  already recorded. General bank invitations remain held.
 
 - **The provenance recovery preview stays read-only until it can prove the
   exact repair result.** `brain provenance-repair <manifest> --source <name>`
@@ -74,9 +94,6 @@ Candidate only. This version has not been released.
   to confirm the exact account says Workers Paid, because its narrow sign-in
   cannot read billing status and should never pretend otherwise.
 
-For a brain whose search index fell behind and stayed behind, this is the one
-that stops the waiting. Nothing here changes what your brain holds.
-
 - **Your own Claude Code or Codex can now add and correct information in your
   Brain.** Setup previously connected the local tool without selecting its
   profile, so it silently defaulted to read-only. Local installs now use Owner
@@ -112,32 +129,12 @@ that stops the waiting. Nothing here changes what your brain holds.
   cross-computer resume, and deployed-resource matches remain explicitly
   unproven instead of being guessed from self-declared versions or counts.
 
-- **A large backlog is rebuilt in hours instead of days.** When your index is
-  incomplete and the queue of waiting work is large, the update now re-embeds
-  that queue in one bulk pass rather than draining it a hundred rows at a time.
-  On a corpus of about 400,000 pieces that is roughly an hour and a half instead
-  of a week. Only the waiting queue is re-embedded, never your whole corpus, so
-  nothing you already paid to index is paid for twice.
-
-- **A rebuild that was interrupted before it started can be started again.**
-  Previously an attempt that never actually ran still counted as spent, and the
-  brain quietly went back to the slow path for good, with nothing said.
-
-- **The update no longer stops itself part way through a long rebuild.** If you
-  released stuck work while the rebuild was running, which is what the product
-  tells you to do, the update treated its own progress as a fault and quit.
-
 - **Closing a laptop no longer makes an index rebuild look stalled.** The
   fifteen-minute no-movement check now counts only time the updater could keep
   observing. Waking the computer continues from the durable rebuild instead of
   treating the sleep interval as proof of a stuck index. The separate six-hour
   wall-clock safety limit still applies, and a stopped update still keeps the
   Brain's writes paused until the same update command is run again.
-
-- **When a rebuild finishes and some vectors are still missing, the advice is
-  now safe.** It used to point at a command that rebuilds the entire corpus and
-  bills you for every piece again. It now names what is missing and points at
-  the one source that needs it.
 
 - **When a paused rebuild still finds an index mismatch, the advice is now
   runnable.** It used to point at reindex even though a paused Brain refuses
@@ -175,6 +172,33 @@ that stops the waiting. Nothing here changes what your brain holds.
   check, a page cannot be read, or the safety budget is reached, it says the
   report is incomplete and does not publish partial counts as proof that
   everything is fine.
+
+## 0.4.6
+
+Candidate only. This version has not been released.
+
+For a brain whose search index fell behind and stayed behind, this is the one
+that stops the waiting. Nothing here changes what your brain holds.
+
+- **A large backlog is rebuilt in hours instead of days.** When your index is
+  incomplete and the queue of waiting work is large, the update now re-embeds
+  that queue in one bulk pass rather than draining it a hundred rows at a time.
+  On a corpus of about 400,000 pieces that is roughly an hour and a half instead
+  of a week. Only the waiting queue is re-embedded, never your whole corpus, so
+  nothing you already paid to index is paid for twice.
+
+- **A rebuild that was interrupted before it started can be started again.**
+  Previously an attempt that never actually ran still counted as spent, and the
+  brain quietly went back to the slow path for good, with nothing said.
+
+- **The update no longer stops itself part way through a long rebuild.** If you
+  released stuck work while the rebuild was running, which is what the product
+  tells you to do, the update treated its own progress as a fault and quit.
+
+- **When a rebuild finishes and some vectors are still missing, the advice is
+  now safe.** It used to point at a command that rebuilds the entire corpus and
+  bills you for every piece again. It now names what is missing and points at
+  the one source that needs it.
 
 ## 0.4.5
 

@@ -51,15 +51,7 @@ import {
   SOURCE_FAILURE_EVIDENCE_VERSION,
 } from "./worker/src/lib/source-receipt.js";
 import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
-import {
-  BANK_ACCESS_WRAPPING_KEY_SECRET,
-} from "./operations/bank-access-wrapping-key.mjs";
-import {
-  PLAID_WORKER_SECRET_NAMES,
-  preflightPlaidWorkerSecretCustody,
-  resolvePlaidWorkerProofBase,
-  setupPlaidWorkerSecrets,
-} from "./operations/plaid-technician-setup.mjs";
+import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import {
   financialPictureRequestFromFlags,
   parseFinancialPictureArgv,
@@ -218,8 +210,6 @@ import {
 import { deriveRagProxyKey } from "./operations/rag-proxy-key.mjs";
 import { deriveSessionSigningKey } from "./operations/session-signing-key.mjs";
 import {
-  PLAID_WINDOWS_SECRET_ENTRY_HOLD,
-  plaidTechnicianPreflight,
   renderTechnicianPlan,
   renderTechnicianStepBriefing,
   runTechnicianStep,
@@ -2362,6 +2352,12 @@ export const WORKER_PROVIDER_SECRET_NAMES = Object.freeze([
   "BANK_FEED_SECRET",
 ]);
 
+const HELD_BANK_FEED_SECRET_NAMES = Object.freeze([
+  "BANK_FEED_CLIENT_ID",
+  "BANK_FEED_SECRET",
+  BANK_ACCESS_WRAPPING_KEY_SECRET,
+]);
+
 export function optionalWorkerSecretNames(m) {
   // Never harvest unrelated credentials merely because they happen to be in
   // the operator's shell. A standard D1 + Workers AI install needs only its
@@ -2372,24 +2368,23 @@ export function optionalWorkerSecretNames(m) {
   const answerModel = String(
     m.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   );
-  // The bank feed's provider credentials and independent wrapping key are
-  // eligible exactly when the manifest turns the feed on. The provider pair's
-  // allowlist is what stops reconciliation deleting live access. The wrapping
-  // key stays outside deletion management. These names participate in
-  // preservation and completeness checks here, but only the reviewed
-  // owner-terminal ceremony can write them.
+  // An enabled bank feed allows already-present provider credentials and its
+  // independent wrapping key to remain on the Worker. This is a preservation
+  // allowlist only: generic `brain secrets` and setup must never source or
+  // replace these values from the process environment while credential setup
+  // remains held.
   const bankFeed = m.corpora?.bank_feed?.enabled === true;
   return Object.freeze([
     ...(storage === "supabase" ? ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] : []),
     ...(m.retrieval?.rerank === true || !answerModel.startsWith("@cf/")
       ? ["ANTHROPIC_API_KEY"]
       : []),
-    ...(bankFeed ? ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET", BANK_ACCESS_WRAPPING_KEY_SECRET] : []),
+    ...(bankFeed ? HELD_BANK_FEED_SECRET_NAMES : []),
   ]);
 }
 
 async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
-  required = [], provided = [], workerSecretsMayHaveChanged = false,
+  required = [],
 } = {}) {
   const path = `/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`;
   let current;
@@ -2407,19 +2402,13 @@ async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
   }
   const allowed = new Set(optional);
   const present = new Set(current.map((binding) => binding.name));
-  const available = new Set([...present, ...provided]);
-  const absent = required.filter((name) => !available.has(name));
+  const absent = required.filter((name) => !present.has(name));
   if (absent.length) {
-    const provider = String(m.corpora?.bank_feed?.provider || "").trim().toLowerCase();
-    const mutationState = workerSecretsMayHaveChanged
-      ? "The Brain's core access secrets may already have been updated, but no bank-feed secret was written by this command. "
-      : "No Worker secret was changed. ";
-    const next = provider === "plaid"
-      ? "Run the owner-only `brain technician <manifest> --run plaid` command printed by the read-only technician plan, then rerun `brain secrets`."
-      : "This custom bank provider has no reviewed credential ceremony and remains held.";
     die(
       `the enabled bank feed is missing required Worker secrets: ${absent.join(", ")}. ` +
-        mutationState + next,
+        "Bank credential setup remains held and is not available through `brain secrets`, " +
+        "`brain setup`, or the generic technician workflow. Complete it only through a " +
+        "separately reviewed owner-custody process. No local or Worker secret was changed.",
     );
   }
   const unwanted = WORKER_PROVIDER_SECRET_NAMES.filter((name) =>
@@ -2464,6 +2453,21 @@ export async function cmdSecrets(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
 
+  // Bank application values have no reviewed generic entry path in this
+  // release. Refuse their mere presence before durable-key planning,
+  // .gitignore changes, account lookup, inventory cleanup, or any Worker write.
+  // Do not validate or echo a value: its presence is the unsafe condition.
+  const ambientBankSecrets = HELD_BANK_FEED_SECRET_NAMES.filter((name) =>
+    Object.hasOwn(process.env, name));
+  if (ambientBankSecrets.length) {
+    die(
+      `${ambientBankSecrets.join(", ")} ${ambientBankSecrets.length === 1 ? "is" : "are"} not accepted ` +
+        "from environment variables or by `brain secrets`. Bank credential setup remains held " +
+        "and requires a separately reviewed owner-custody process. Unset the bank variable(s) " +
+        "and rerun. No local or Worker secret was changed.",
+    );
+  }
+
   // What a D1 install actually reads. The worker embeds through the AI binding,
   // so there is no database credential to set: the brain's storage is D1 and
   // Vectorize inside the client's own account, reachable only by their worker.
@@ -2472,18 +2476,6 @@ export async function cmdSecrets(manifestPath, options = {}) {
   // it is set, any UI proxy has to carry the admin key, which can drain.
   const needed = ["ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY"];
   const optional = optionalWorkerSecretNames(m);
-  const suppliedBankNames = PLAID_WORKER_SECRET_NAMES.filter((name) =>
-    typeof process.env[name] === "string" && process.env[name] !== "");
-  if (suppliedBankNames.length) {
-    const nativePlaid = String(m.corpora?.bank_feed?.provider || "").trim().toLowerCase() === "plaid";
-    die(
-      "bank-feed credentials and the independent wrapping key are not accepted from environment variables or by `brain secrets`. " +
-        "No Worker secret was changed. Remove those bank-feed variables. " +
-        (nativePlaid
-          ? "Then use the owner-only `brain technician <manifest> --run plaid` command printed by the read-only technician plan."
-          : "This custom bank provider has no reviewed credential ceremony and remains held."),
-    );
-  }
   const explicitAdminKey = Object.hasOwn(options, "explicitAdminKey")
     ? options.explicitAdminKey
     : (process.env.ADMIN_KEY || null);
@@ -2527,7 +2519,8 @@ export async function cmdSecrets(manifestPath, options = {}) {
 
   const provided = [
     ...(adminKey ? needed : []),
-    ...optional.filter((name) => !PLAID_WORKER_SECRET_NAMES.includes(name) && process.env[name]),
+    ...optional.filter((name) =>
+      !HELD_BANK_FEED_SECRET_NAMES.includes(name) && process.env[name]),
   ];
   const missing = adminKey ? [] : needed;
 
@@ -2542,6 +2535,16 @@ export async function cmdSecrets(manifestPath, options = {}) {
   }
 
   const acct = await resolveAccount(m);
+
+  // For an approved feed that is already configured, routine core-key repair
+  // may preserve the three bank bindings but may never manufacture them. Read
+  // the exact Worker inventory before any local or remote mutation. A partial
+  // bank setup therefore stops before ADMIN_KEY or its derived keys rotate.
+  await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
+    required: m.corpora?.bank_feed?.enabled === true
+      ? HELD_BANK_FEED_SECRET_NAMES
+      : [],
+  });
 
   // A crash between staging and replacement can leave the key module's exact
   // temporary or rollback basename behind. Put every private key basename in
@@ -2578,15 +2581,6 @@ export async function cmdSecrets(manifestPath, options = {}) {
       );
     }
   }
-
-  const suppliedOptional = optional.filter((name) =>
-    !PLAID_WORKER_SECRET_NAMES.includes(name) && process.env[name]);
-  // Preserve the longstanding cleanup-before-rotation boundary. Bank
-  // completeness is checked separately after the core access keys are live so
-  // a fresh, pre-enabled Plaid manifest can reach the authenticated ceremony.
-  await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
-    provided: suppliedOptional,
-  });
 
   for (const name of provided) {
     const value = name === "ADMIN_KEY"
@@ -2711,12 +2705,6 @@ export async function cmdSecrets(manifestPath, options = {}) {
       continue;
     }
     ok(`secret ${name} set`);
-  }
-  if (m.corpora?.bank_feed?.enabled === true) {
-    await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
-      required: ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET", BANK_ACCESS_WRAPPING_KEY_SECRET],
-      workerSecretsMayHaveChanged: provided.length > 0,
-    });
   }
   // ADMIN_KEY absent means every authenticated route stays shut. Optional
   // Postgres or model secrets may have been written successfully, but that is
@@ -6890,7 +6878,7 @@ function assertSourceName(name) {
  * filename", which is intended.
  */
 export const VALUE_FLAGS = new Set([
-  "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "confirm-environment", "confirm-redirect", "confirm-webhook", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
+  "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
   "corpus-contract", "approve-removals", "only", "skip",
   "approve",
@@ -20444,12 +20432,27 @@ async function cmdCheckInteractive(manifestPath) {
  * environment, so agent shells never need to receive credentials.
  */
 export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
+  const step = flags.run ? String(flags.run).trim().toLowerCase() : null;
+  // This was a candidate entrypoint. Catch its former full flag set before the
+  // generic unknown-flag check so an owner following older guidance receives
+  // the current held explanation without any manifest, credential, or network
+  // access.
+  if (step === "plaid") {
+    const error = new Fatal(
+      "Bank connections are not part of ordinary onboarding yet. You did nothing wrong, " +
+        "and there is no bank password, verification code, or Plaid setup key to enter here. " +
+        "Plaid application-credential setup remains held. This command did not read the install " +
+        "record, request a credential, open a browser, contact a provider, or change anything. " +
+        "An already approved pilot may preserve its complete existing bank setup. If any piece " +
+        "is missing, use only the separately reviewed owner-custody setup.",
+    );
+    error.code = "SAFETY_REVIEW_REQUIRED";
+    throw error;
+  }
   assertKnownFlags(
     flags,
     [
       "json", "run", "host", "user", "port", "source", "scopes", "confirm-host",
-      "confirm-environment", "confirm-redirect", "confirm-webhook", "confirm-production-access",
-      "confirm-single-setup-machine",
       "browser-sign-in", "name", "slug", "cloudflare-account", "cloudflare-account-id",
       "workers-paid-confirmed", "no-connect",
     ],
@@ -20462,27 +20465,13 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
     ...(options.manifestDeps || {}),
     cli,
   });
-  const step = flags.run ? String(flags.run).trim().toLowerCase() : null;
   if (!step) {
     if (flags.json) console.log(JSON.stringify(plan, null, 2));
     else console.log(renderCliCommands(renderTechnicianPlan(plan)));
     return plan;
   }
   if (flags.json) die("--json is read-only and cannot be combined with --run");
-  const isTTY = options.isTTY ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const platformName = options.platformName ?? process.platform;
-  if (step === "plaid") {
-    try {
-      plaidTechnicianPreflight(manifestPath, {
-        flags,
-        manifestDeps: options.manifestDeps || {},
-        isTTY,
-        platformName,
-      });
-    } catch (error) {
-      die(String(error?.message || error));
-    }
-  }
 
   // The direct invite command owns the passkey explanation so the owner sees
   // it immediately before the one-time link is minted. Every other ceremony
@@ -20502,129 +20491,22 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
       if (!optional && bytes.length === 0) throw new Error(`${noun} cannot be empty`);
       return Buffer.from(bytes);
     },
-    windowsRefusal: step === "plaid" ? PLAID_WINDOWS_SECRET_ENTRY_HOLD : null,
   }));
   try {
-    const run = async () => {
-      let runPlaidSetup = options.runPlaidSetup || null;
-      let technicianManifestDeps = options.manifestDeps || {};
-      let assertContextUnchanged = options.assertContextUnchanged || (() => true);
-      if (step === "plaid" && !runPlaidSetup) {
-        // Resolve and bind the exact owner account before asking for provider
-        // values. An account-selection failure must never come after secret
-        // entry when it can be found safely first.
-        let pin;
-        try {
-          pin = pinUpdateManifest(manifestPath);
-        } catch {
-          throw new Error(
-            "The install record could not be pinned safely for Plaid setup. No credential prompt or Worker change was opened.",
-          );
-        }
-        assertContextUnchanged = ({ mutationMayHaveStarted = false } = {}) => {
-          try {
-            revalidateUpdateManifest(pin, "Plaid application-secret setup");
-          } catch {
-            if (mutationMayHaveStarted) {
-              throw new Error(
-                "The install record changed after the Cloudflare secret update began. Cloudflare may already have changed. " +
-                  "The protected wrapping key was kept. Review the install record, then rerun this exact ceremony with the same provider values.",
-              );
-            }
-            throw new Error(
-              "The install record changed before the Cloudflare secret update began. No Worker secret was changed by this run. " +
-                "Review the install record, then restart this ceremony; a protected local wrapping key, if already saved, will be reused.",
-            );
-          }
-          return true;
-        };
-        await assertContextUnchanged();
-        const m = pin.manifest;
-        const account = await resolveAccount(m);
-        await assertContextUnchanged();
-        const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
-        const proofBase = await resolvePlaidWorkerProofBase({
-          accountId: account.id,
-          scriptName,
-          apiRequest: cf,
-        });
-        await assertContextUnchanged();
-        const adminKey = resolveAdminKey(pin.target, {
-          read: () => pin.raw,
-          ignoreEnvironment: true,
-        });
-        if (!adminKey) {
-          throw new Error(
-            "The deployed Brain's durable admin key is unavailable, so its existing wrapping-key state cannot be proved safely. " +
-              "No credential prompt or Worker change was opened.",
-          );
-        }
-        const remoteWrappingKeyProof = async () => {
-          await assertContextUnchanged();
-          const response = await http(`${proofBase}/api/bank-feed/recovery-key-proof`, {
-            method: "POST",
-            headers: { "X-Admin-Key": adminKey },
-          }, { timeoutMs: 3_000, what: "the bank wrapping-key proof" });
-          if (!response.ok) throw new Error("the deployed Brain refused the wrapping-key proof");
-          return response.json();
-        };
-        const wrappingKeyOptions = {
-          onProofWait: () => info(
-            "Cloudflare and the deployed Brain are settling the wrapping-key proof. This can take up to one minute.",
-          ),
-          ...(options.wrappingKeyOptions || {}),
-        };
-        await preflightPlaidWorkerSecretCustody({
-          accountId: account.id,
-          scriptName,
-          apiRequest: cf,
-          remoteWrappingKeyProof,
-          assertContextUnchanged,
-          wrappingKeyOptions,
-        });
-        technicianManifestDeps = {
-          ...technicianManifestDeps,
-          existsSync: () => true,
-          readFileSync: () => pin.raw,
-        };
-        runPlaidSetup = ({ clientId, clientSecret }) => setupPlaidWorkerSecrets({
-          accountId: account.id,
-          scriptName,
-          clientId,
-          clientSecret,
-          apiRequest: cf,
-          remoteWrappingKeyProof,
-          assertContextUnchanged,
-          wrappingKeyOptions,
-        });
-      }
-      return runTechnicianStep({
-        step,
-        manifestPath,
-        flags,
-        scriptPath,
-        readHidden,
-        baseEnv: options.baseEnv || process.env,
-        spawn: options.spawn || spawnSync,
-        nodePath,
-        manifestDeps: technicianManifestDeps,
-        isTTY,
-        platformName,
-        announce: options.announce || ((message) => info(message)),
-        runPlaidSetup,
-        assertContextUnchanged,
-      });
-    };
-    const receipt = step === "plaid" && !options.runPlaidSetup
-      ? await (options.withManifestControl || withManifestCloudflareControl)(manifestPath, run)
-      : await run();
+    const receipt = await runTechnicianStep({
+      step,
+      manifestPath,
+      flags,
+      scriptPath,
+      readHidden,
+      baseEnv: options.baseEnv || process.env,
+      spawn: options.spawn || spawnSync,
+      nodePath,
+      manifestDeps: options.manifestDeps || {},
+      platformName,
+    });
     ok(`${step} technician step completed`);
-    if (step === "plaid") {
-      info("No bank was contacted and no Plaid Link session was opened.");
-      info("Next, enroll the owner's passkey on the final Brain hostname. Then run `brain connect bank <manifest>` with the owner present.");
-    } else {
-      info("rerun `brain technician <manifest>` to see the full plan; live proof still comes from the final field checklist");
-    }
+    info("rerun `brain technician <manifest>` to see the full plan; live proof still comes from the final field checklist");
     return receipt;
   } catch (error) {
     die(String(error?.message || error));

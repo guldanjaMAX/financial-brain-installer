@@ -24,6 +24,18 @@ The native command is an acceptance entrypoint, not permission to invite a
 customer. Use it first on the named disposable candidate under the approved
 field plan, then on the separately approved production pilot.
 
+Application-credential setup is also held. Generic `brain setup`, `brain
+secrets`, and technician workflows do not accept or write
+`BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, or
+`BANK_FEED_WRAPPING_KEY_V2`. Routine setup preserves an approved,
+already-configured candidate's complete existing set, but all three names must
+be present before a routine core-key rotation can begin. If any is missing,
+stop without changing a local or Worker secret and use only a separately
+reviewed owner-custody setup.
+Recording return and webhook URIs in a manifest is non-secret evidence of work
+already completed in the matching Plaid environment. It does not perform that
+held setup or justify automatically renewing a Plaid deferral for a new release.
+
 1. Deploy the exact packaged version and named Plaid environment to an approved
    disposable Brain. Read back its version, schema, required secret names and
    configuration without exposing secret values. Verify the registered redirect
@@ -48,98 +60,6 @@ field plan, then on the separately approved production pilot.
    architecture. Complete a separately approved production pilot before broad
    invitations. Do not ask owners to share passwords, tokens or bank statements
    in support messages.
-
-## Candidate application-secret ceremony
-
-The standard technician workflow now contains a held `plaid` step. This is a
-candidate implementation and does not close any live field gate. Before it
-accepts a secret, it requires the manifest to select the native Plaid provider,
-the exact Sandbox or Production environment, a final Brain hostname, and these
-two exact values recorded as saved in the same Plaid environment:
-
-```text
-https://<brain.domain>/app/connect/bank
-https://<brain.domain>/api/webhooks/plaid
-```
-
-The first belongs in `registered_redirect_uris`; the second belongs in
-`registered_webhook_uris`. For Production, the owner must also confirm during
-that run that Plaid Dashboard shows Production access. This is an explicit
-owner-reviewed gate, not an API claim inferred from possession of credentials.
-
-The owner enters the Plaid client ID and environment-specific secret into two
-hidden terminal prompts. Neither is accepted through argv, ambient environment,
-chat, browser control, a screenshot, or a support note. The installer generates
-an independent `BANK_FEED_WRAPPING_KEY_V2`, commits and reads it back through
-the existing protected local credential-store machinery, and reuses it on a
-retry. macOS uses Keychain, Windows uses a DPAPI CurrentUser encrypted file, and
-Linux uses an atomic mode-0600 file.
-
-The plan's exact command must include `--confirm-single-setup-machine`. That
-confirmation records that one nominated owner computer is running one
-supervised ceremony. A private per-Worker lock prevents overlapping runs on the
-same computer during custody checks and update phases. There is no authoritative
-remote compare-and-swap for a fresh first setup, so two computers could still
-race after both observe an absent binding. This limitation keeps general Plaid
-setup held. Never run the ceremony concurrently from another computer or
-terminal.
-
-Windows is also held at the secret-entry boundary. The shared terminal reader
-has a documented real PowerShell case where input echoed even though raw mode
-reported success. The ceremony refuses before Cloudflare control or either
-prompt on Windows. Do not bypass that refusal with environment values. A native
-masked Windows bridge and physical acceptance evidence remain required.
-
-If the Worker already has `BANK_FEED_WRAPPING_KEY_V2` but this machine has no
-matching protected local record, the ceremony stops without generating or
-writing anything. Recover the owner's existing key custody first. Replacing it
-blindly could make retained encrypted bank access references unreadable.
-
-Before either hidden prompt, the ceremony checks exact Cloudflare binding
-metadata and the deployed Worker's wrapping-key fingerprint. The authenticated
-proof address is derived from the resolved Cloudflare account, Worker name, and
-that account's workers.dev subdomain. It does not trust `brain.domain`, and the
-request refuses redirects. The exact Worker's workers.dev route must be enabled
-even when the public Brain uses a custom hostname. If it is unavailable, fix
-Cloudflare route access and rerun `brain deploy`; the ceremony does not enable a
-route while credentials are in scope. If an existing remote key cannot be
-proved equal to the protected local key, setup stops before writing.
-
-For an existing key, one matching response is not enough. The fingerprint must
-remain equal across the bounded propagation window before the patch, then match
-again after the patch. This catches a recent control-plane change while an old
-runtime is still serving the prior key. It is not a remote compare-and-swap. If
-another session may have just changed the wrapping key, stop and recover or
-settle that exact custody instead of relying on the timer.
-
-Cloudflare's script `secrets-bulk` operation applies exactly
-`BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, and
-`BANK_FEED_WRAPPING_KEY_V2` in one atomic patch. The step then performs an exact
-metadata read of each of those three bindings and returns no value. Omitted
-Worker secrets remain unchanged. The deployed fingerprint is then polled for a
-bounded maximum of one minute. A failed or ambiguous response keeps the
-protected wrapping key as desired state and tells the owner to rerun the same
-ceremony with the same provider values on the nominated computer. A manifest
-change after the patch is reported as potentially committed rather than as a
-no-change result.
-
-`brain secrets` does not accept any of these three bank-feed values from the
-environment. The custom bank-provider model has no reviewed credential ceremony
-and remains held; it must not be routed through this native Plaid step.
-
-If a fresh Worker was deployed from a field-plan manifest that already enables
-the bank feed, `brain secrets` first preserves its normal provider cleanup and
-installs the durable core admin, read-only proxy, and passkey-session keys. It
-then pauses at the missing bank-secret gate and points to the owner-only Plaid
-ceremony. No bank-feed value is written on that path. This ordering keeps the
-authenticated wrapping-key proof reachable without restoring the retired
-environment-variable setup path.
-
-Success proves only protected application-secret setup on that Worker. It does
-not open Link, contact a bank, prove a webhook delivery, or open invitations.
-The reviewed next order is owner passkey enrollment, then `brain connect bank`
-with the account holder present, followed by every disposable-candidate and
-production-pilot acceptance event above.
 
 ## Account and business boundaries
 

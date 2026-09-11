@@ -13,9 +13,11 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This checkout is an unreleased hardening candidate based on the public 0.4.6
-package. Changes in this checkout are not an available customer update. Check
-the guided page for the current release status before installing.
+This checkout is the unreleased 0.4.7 candidate. No 0.4.7 customer release or
+immutable release asset exists. The versioned URLs in the candidate examples
+below are intentionally unavailable placeholders for release review. Do not
+run or share those commands as customer installation instructions. Check the
+guided page for the current release status before installing anything.
 
 The guided install path is at `financialbrain.ai/install`. It uses one immutable
 release asset and installs into a folder owned by your user account, so it needs
@@ -40,7 +42,8 @@ MCP discovery, and configuration checks instead.
 Mac or Linux:
 
 ```bash
-npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.6/brain-installer-0.4.6.tgz"
+# Unavailable 0.4.7 candidate placeholder. Do not run until the public channel names this release.
+npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.7/brain-installer-0.4.7.tgz"
 # Optional: makes the shorter `brain` examples work in this Terminal window.
 export PATH="$HOME/.financial-brain/bin:$PATH"
 ```
@@ -48,7 +51,8 @@ export PATH="$HOME/.financial-brain/bin:$PATH"
 Windows PowerShell:
 
 ```powershell
-npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.6/brain-installer-0.4.6.tgz"
+# Unavailable 0.4.7 candidate placeholder. Do not run until the public channel names this release.
+npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.7/brain-installer-0.4.7.tgz"
 # Optional: makes the shorter `brain` examples work in this PowerShell window.
 $env:Path = "$env:LOCALAPPDATA\FinancialBrain;$env:Path"
 ```
@@ -108,23 +112,24 @@ synthetic setup, folder, connector, migration, search, owner-action, access, and
 technician scenarios. The final receipt separates automatic proof from the
 remaining live Cloudflare, provider, and physical-device checks.
 
-For an install day, `brain technician <manifest>` prints the nine-step read-only
+For an install day, `brain technician <manifest>` prints the eight-step read-only
 plan. Add `--json` when a local coding agent is guiding the session. Run one
 reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zoom`,
-`imap`, `plaid`, `passkey`, or `verify`. The Plaid step remains limited to an
-approved, version-scoped field plan while general bank invitations are held.
-Its exact command is marked owner-only and refuses outside a direct interactive
-terminal before either provider value is requested. It requires one nominated
-owner computer and the plan's `--confirm-single-setup-machine` flag because the
-private lock is local and no remote first-setup compare-and-swap exists. Do not
-run the ceremony concurrently on another computer. `brain secrets` refuses
-bank-feed environment values, and custom-provider credential setup remains
-held. Plaid secret entry also remains held on Windows until a native masked
-input bridge is implemented and physically proven; the current terminal reader
-cannot prove that PowerShell suppressed echo.
-The owner still handles login, 2FA, OAuth consent, Production-access review,
-and the physical passkey gesture. Tokens and app secrets go only into hidden
-terminal prompts or provider pages. The complete guide is
+`imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
+and the physical passkey gesture. For the supported Google, Zoom, and IMAP
+steps, tokens and app secrets go only into hidden terminal prompts or provider
+pages.
+
+**Bank connections are not part of ordinary onboarding yet.** They are still
+being tested. You did nothing wrong, and there is no bank password,
+verification code, or Plaid setup key to enter here. Ordinary onboarding leaves
+bank connections off and the technician will never ask you to paste those
+values into chat or a normal command. If this Brain is an already approved
+pilot, its complete existing bank setup is left unchanged. If any saved piece
+is missing, setup stops before changing a credential and explains the
+separately reviewed next step.
+
+The complete guide is
 [onboarding/09-technician-setup-and-rehearsal.md](onboarding/09-technician-setup-and-rehearsal.md).
 Claude Code explains each provider, purpose, minimum permission, and next
 owner action before anything opens. When browser control is available, it can

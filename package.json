@@ -1,6 +1,6 @@
 {
   "name": "brain-installer",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "private": true,
   "description": "Provision and manage a client-owned retrieval brain inside their own Cloudflare account",
   "type": "module",
@@ -11,6 +11,7 @@
     "brain": "./brain.mjs"
   },
   "scripts": {
+    "field:prepare": "node scripts/field-prepare.mjs",
     "rehearse:hiccups": "node scripts/customer-hiccup-lab.mjs",
     "rehearse:onboarding": "node scripts/onboarding-sandbox.mjs",
     "privacy:history": "node scripts/scan-git-history-privacy.mjs --ref HEAD --require-clean",

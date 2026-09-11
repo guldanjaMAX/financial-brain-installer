@@ -161,6 +161,23 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The 0.4.1/schema35 candidate retains UPDATE-001 through UPDATE-024 and every original F/N finding, and adds UPDATE-025 (bank freshness must never report a failed or unfetched refresh as current) and UPDATE-026 (Windows release evidence must come from a verified package on a proven runtime). Three entries are `verified` on reviewed field evidence from one real installation that completed the full 0.4.0 update on 2026-09-07: UPDATE-010, UPDATE-014 and UPDATE-026, each closed by a document under docs/release-evidence/ that maps the acceptance clause by clause to what was observed and states what it does not prove. Eight carry a written 0.4.1 deferral. UPDATE-012 needs a physical Windows ARM64 host that does not exist and 0.4.1 does not claim that runtime. UPDATE-022 and the six Plaid incidents UPDATE-017 through UPDATE-021 and UPDATE-025 each need a live Plaid Item against a real institution, their acceptance text excludes sandbox and CI receipts, and no live Item exists while general bank invitations stay closed; those deferrals hold only while the invitations do. The remaining fifteen block release writes. Nothing in this candidate weakens the gate: no deferral cause was added, no acceptance criterion was rewritten, and the release workflow still refuses to publish while any incident blocks. Earlier 0.3.7 disposable rehearsals do not automatically clear this changed candidate. Current named-profile OAuth uses its reviewed encrypted backend; the explicit legacy TOML helper keeps its separate compatible pin. Preflight detects environment and executable traps but does not read credentials, authorize an account, or prove a current named-profile login.
+The unreleased 0.4.7/schema43 field candidate carries 39 stable incident rows.
+Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
+and UPDATE-032. Their evidence documents remain attached to the exact rows in
+`update-incidents.json`. The other 35 block release writes. No 0.4.6 deferral
+was renewed for this candidate. UPDATE-012 still needs a reviewed Windows ARM64
+support decision or its required physical proof. UPDATE-017 through UPDATE-022
+and UPDATE-025 still need their required real-provider evidence while bank
+credential setup and general invitations remain held. Schema 43 can bind
+eligible single-record local file ingests to their exact raw originals. Other
+ingest producers and ambiguous multi-record exports remain unbound, and
+retrospective provenance repair remains unaccepted. Nothing in this candidate
+weakens the gate: no acceptance criterion was rewritten, and the release
+workflow still refuses to publish while any incident blocks. Earlier candidate
+rehearsals do not automatically clear changed code. Current named-profile OAuth
+uses its reviewed encrypted backend; the explicit legacy TOML helper keeps its
+separate compatible pin. Preflight detects environment and executable traps but
+does not read credentials, authorize an account, or prove a current named-profile
+login.
 
 Source and package Windows DPAPI gates, frontend bundle parity, and zero-findings public-history scanning remain mandatory alongside the shared-package matrix. Windows hosted CI does not prove the physical Windows ARM64 owner journey.

@@ -14,6 +14,7 @@ const manifestTemplate = json("templates/brain.manifest.json");
 const changelog = read("CHANGELOG.md");
 const readme = read("README.md");
 const version = packageJson.version;
+const escapedVersion = version.replaceAll(".", "\\.");
 
 assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable semantic version");
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
@@ -25,7 +26,14 @@ assert.equal(manifestTemplate.brain?.version, version, "manifest template versio
 // matches the package, so it is pinned here with everything else.
 const workerVersion = read("worker/src/lib/version.js").match(/WORKER_VERSION = "([^"]+)"/)?.[1];
 assert.equal(workerVersion, version, "worker source version drifted from the package");
-assert.match(changelog, new RegExp(`^## ${version.replaceAll(".", "\\.")}$`, "m"), "changelog has no current-version heading");
+assert.match(changelog, new RegExp(`^## ${escapedVersion}$`, "m"), "changelog has no current-version heading");
+
+assert.match(readme, new RegExp(
+  `This checkout is the unreleased ${escapedVersion} candidate\\.[\\s\\S]*?` +
+  `No ${escapedVersion} customer release or\\s+immutable release asset exists\\.[\\s\\S]*?` +
+  "intentionally unavailable placeholders[\\s\\S]*?Do not\\s+run or share those commands",
+  "i",
+), "README must dynamically warn that the current-version candidate URLs are unavailable and must not be shared");
 
 const releaseLinks = [...readme.matchAll(
   /releases\/download\/v(\d+\.\d+\.\d+)\/brain-installer-(\d+\.\d+\.\d+)\.tgz/g,
@@ -72,7 +80,7 @@ assert.doesNotMatch(unavailableOutput, /up to date/i,
 const stableOutput = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
 }));
-assert.match(stableOutput, new RegExp(`public stable release channel confirms this brain is current at ${version.replaceAll(".", "\\.")}`),
+assert.match(stableOutput, new RegExp(`public stable release channel confirms this brain is current at ${escapedVersion}`),
   "only exact stable-channel evidence may call the installed version current");
 
 let discoveredWithoutArgument = false;
