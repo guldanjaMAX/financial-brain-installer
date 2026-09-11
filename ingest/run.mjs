@@ -1001,7 +1001,6 @@ export function localOriginalsForAssessment(root, {
   }
 
   const policyFiles = new Map();
-  const policySubtrees = [];
   for (const skipped of walked.skipped) {
     if (skipped.adjudication !== "source_policy") continue;
     let locator;
@@ -1011,9 +1010,10 @@ export function localOriginalsForAssessment(root, {
       continue;
     }
     if (skipped.scope === "file") {
+      // The parent directory enumeration observed this exact file before the
+      // policy fence refused its contents. That is enough to preserve an exact
+      // exclusion without claiming anything about the bytes.
       policyFiles.set(locator, localAssessmentMarker(locator, "unavailable", "source_policy_excluded"));
-    } else if (skipped.scope === "subtree") {
-      policySubtrees.push(locator);
     }
   }
 
@@ -1023,9 +1023,9 @@ export function localOriginalsForAssessment(root, {
     unrepresentableLocatorCount === 0;
   const policyMarkerFor = (locator) => {
     if (policyFiles.has(locator)) return policyFiles.get(locator);
-    if (policySubtrees.some((prefix) => locator === prefix || locator.startsWith(`${prefix}/`))) {
-      return localAssessmentMarker(locator, "unavailable", "source_policy_excluded");
-    }
+    // A policy-skipped subtree was not enumerated. Its marker proves only that
+    // the directory boundary was excluded, not that a requested descendant
+    // exists. Descendants therefore remain unresolved and block assessment.
     return null;
   };
 

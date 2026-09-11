@@ -442,14 +442,14 @@ const put = (root, rel, content) => {
   }
 }
 
-/* Source-policy exclusions are explicit exclusions, not guessed absence. */
+/* An exactly enumerated policy file is an exclusion, not guessed absence. */
 {
   const root = makeRoot("source-policy");
   try {
-    put(root, "restricted/item.txt", "Synthetic policy-excluded content.");
+    put(root, "restricted-item.txt", "Synthetic policy-excluded content.");
     const internal = await collectPrivateLocalProvenanceAssessment({
       root,
-      relativeLocators: ["restricted/item.txt"],
+      relativeLocators: ["restricted-item.txt"],
       privatePrefixes: ["restricted"],
     });
     assert.equal(internal.assessment.assessment_complete, true);
@@ -460,13 +460,36 @@ const put = (root, rel, content) => {
     const target = formatPrivateDiscoveryObservationTarget(internal.private_observations[0], {
       position: 0,
       locator_kind: "source_relative_path",
-      locator: "restricted/item.txt",
+      locator: "restricted-item.txt",
       original_id: SEALED_ORIGINAL_ID,
     });
     assert.equal(target.outcome, "adjudicated_exclusion");
     assert.equal(target.reason_code, "source_policy_excluded");
     assert.equal(target.original_content_sha256, null);
     assert.equal(target.original_byte_count, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/* A skipped subtree cannot prove that any requested descendant exists. */
+{
+  const root = makeRoot("source-policy-subtree");
+  try {
+    put(root, "restricted/item.txt", "Synthetic content below an untraversed policy boundary.");
+    const internal = await collectPrivateLocalProvenanceAssessment({
+      root,
+      relativeLocators: ["restricted/item.txt"],
+      privatePrefixes: ["restricted"],
+    });
+    assert.equal(internal.assessment.assessment_complete, false);
+    assert.equal(internal.assessment.target_resolution.complete, false);
+    assert.equal(internal.assessment.target_resolution.missing_count, 1);
+    assert(internal.assessment.blockers.includes("exact_target_resolution_incomplete"));
+    assert(internal.assessment.blockers.includes("original_unavailable"));
+    assert.equal(internal.assessment.originals[0].outcome, "gap");
+    assert.equal(internal.assessment.originals[0].reason_code, "original_unavailable");
+    assert.deepEqual(internal.private_observations, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
