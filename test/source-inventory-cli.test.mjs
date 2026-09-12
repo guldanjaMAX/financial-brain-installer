@@ -16,6 +16,16 @@ const SNAPSHOT = `sha256:${"a".repeat(64)}`;
 const RECOVERY_SNAPSHOT = `sha256:${"b".repeat(64)}`;
 const AS_OF = "2026-09-10T12:00:00.000Z";
 const OWNER_PROOF = "fixture-owner-proof";
+const SAFE_GMAIL_FAILURE = Object.freeze({
+  version: 1,
+  operation_class: "gmail_message_read",
+  http_status: 400,
+  provider_reason: "failed_precondition",
+  checkpoint_readback: "verified",
+  checkpoint_done: 55,
+  checkpoint_skipped: 3,
+  cursor_preservation: "absent_preserved",
+});
 
 const escapeForRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -45,7 +55,7 @@ const recoverySummary = (overrides = {}) => ({
   ...overrides,
 });
 
-function sourceRow(name) {
+function sourceRow(name, overrides = {}) {
   return {
     source_id: name,
     name,
@@ -59,22 +69,24 @@ function sourceRow(name) {
     provenance: { status: "complete", missing_subfields: [] },
     recovery_plan: { status: "no_candidates", candidate_documents: 0 },
     receipt: { status: "ready" },
+    last_failure: null,
     freshness: { state: "ok" },
+    ...overrides,
   };
 }
 
-function inventoryPage({ source, cursor = null, truncated = false }) {
+function inventoryPage({ source, cursor = null, truncated = false, row = null, total = 2 }) {
   return {
-    contract_version: 2,
+    contract_version: 3,
     kind: "source_inventory",
     complete: !truncated,
-    total: 2,
+    total,
     returned: 1,
     truncated,
     cursor,
     as_of: AS_OF,
-    snapshot: { id: SNAPSHOT, as_of: AS_OF, stable: true, total: 2 },
-    sources: [sourceRow(source)],
+    snapshot: { id: SNAPSHOT, as_of: AS_OF, stable: true, total },
+    sources: [row ?? sourceRow(source)],
     recovery_plan_summary: recoverySummary(),
     limitations: { entity_year_coverage: "not_available" },
   };
@@ -83,7 +95,7 @@ function inventoryPage({ source, cursor = null, truncated = false }) {
 function recoveryPage() {
   const recordId = `hmac-sha256:${"c".repeat(64)}`;
   return {
-    contract_version: 2,
+    contract_version: 3,
     kind: "source_recovery_plan",
     complete: true,
     total: 1,
@@ -183,6 +195,60 @@ test("source inventory CLI uses only the internal durable credential and collect
     assert.doesNotMatch(output, new RegExp(OWNER_PROOF));
     assert.equal(JSON.parse(output).snapshot.id, SNAPSHOT);
   });
+});
+
+test("source inventory CLI exposes only validated Gmail failure evidence in JSON and concise human output", async () => {
+  const gmail = sourceRow("gmail", {
+    kind: "gmail",
+    connector: { kind: "gmail", provider: "google", provider_identity_status: "supported" },
+    receipt: {
+      status: "error",
+      latest_run: { outcome: "failed", metrics_version: 1, docs_failed: 1 },
+    },
+    last_failure: SAFE_GMAIL_FAILURE,
+    freshness: { state: "broken" },
+  });
+  const page = inventoryPage({ source: "gmail", row: gmail, truncated: false, total: 1 });
+
+  await withManifest(async (manifest) => {
+    const baseOptions = {
+      resolveAdminKey() { return OWNER_PROOF; },
+      fetchImpl: async () => new Response(JSON.stringify(page), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    };
+    const { value, output } = await captureLogs(() => cmdSources(manifest, {
+      ...baseOptions,
+      flags: {},
+    }));
+    assert.deepEqual(value.sources[0].last_failure, SAFE_GMAIL_FAILURE);
+    assert.match(output, /last connector failure/);
+    assert.match(output, /Gmail message read; HTTP 400; provider failed_precondition/);
+    assert.match(output, /checkpoint 55 processed \/ 3 skipped; cursor absent and preserved/);
+    assert.doesNotMatch(output, /provider_message|message-id|cursor-value|secret/i);
+
+    const jsonResult = await captureLogs(() => cmdSources(manifest, {
+      ...baseOptions,
+      flags: { json: true },
+    }));
+    assert.deepEqual(JSON.parse(jsonResult.output).sources[0].last_failure, SAFE_GMAIL_FAILURE);
+  });
+
+  const privatePage = structuredClone(page);
+  privatePage.sources[0].last_failure.provider_message =
+    "SYNTHETIC_PRIVATE_PROVIDER_MESSAGE /private/message-id cursor-value secret";
+  await assert.rejects(
+    collectSourceInventoryPages(async () => new Response(JSON.stringify(privatePage), { status: 200 })),
+    /invalid connector failure evidence/,
+  );
+
+  const oldContractPage = structuredClone(page);
+  oldContractPage.contract_version = 2;
+  await assert.rejects(
+    collectSourceInventoryPages(async () => new Response(JSON.stringify(oldContractPage), { status: 200 })),
+    /unsupported source-inventory receipt/,
+  );
 });
 
 test("source recovery CLI returns one bounded preview page with no control-plane ceremony", async () => {

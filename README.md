@@ -295,10 +295,16 @@ domain, and returns one stable, complete source snapshot. It reports registered
 source identity, a safe connector/provider label, zone, masked scope and cursor
 receipts, first and last ingest evidence, complete-history-through, physical
 and logical document counts, readable and unreadable counts, extraction method,
-OCR state, derivation lineage, and exact missing provenance fields. It never
-returns the raw sync cursor, configured root values, document title, URI,
-provider id, or document id. It does not infer an entity, owner, tax year, or
-whether an empty document was a scan.
+OCR state, derivation lineage, exact missing provenance fields, and the latest
+validated Gmail failure receipt when one exists. That receipt is limited to a
+closed operation category, HTTP status, canonical provider reason, aggregate
+checkpoint counts, and cursor-preservation state. It never returns a provider
+message, raw sync cursor or cursor value, configured root values, document
+title, URI, provider id, document id, path, content, or secret. It does not infer
+an entity, owner, tax year, or whether an empty document was a scan.
+This is source-inventory contract v3. Inventory and recovery cursors are bound
+to that version; a v2 response or cursor is refused instead of being
+misinterpreted.
 
 To inspect the exact records behind the recovery counts, request one bounded
 preview page:

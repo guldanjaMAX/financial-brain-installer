@@ -1665,8 +1665,8 @@ const zeroChunkExpectedReturn = {
     http_status: 400,
     provider_reason: "failed_precondition",
     checkpoint_readback: "verified",
-    checkpoint_done: 108300,
-    checkpoint_skipped: 11647,
+    checkpoint_done: 55,
+    checkpoint_skipped: 3,
     cursor_preservation: "absent_preserved",
   };
   const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {

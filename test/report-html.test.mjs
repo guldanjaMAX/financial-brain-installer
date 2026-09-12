@@ -261,7 +261,8 @@ const failing = renderReportHtml({
   acceptance: {
     counts: { pass: 9, fail: 2, warn: 1, skip: 0 },
     passed: false,
-    stoppedAtTier: 4,
+    firstFailedTier: 4,
+    stoppedAtTier: null,
     results: [
       { tier: 1, name: "health responds", status: "pass", detail: "version 0.2.0" },
       { tier: 3, name: "probe coverage", status: "warn", detail: "1/2 probes returned sources" },

@@ -471,7 +471,18 @@ mode returns bounded opaque record identities and exact provenance/OCR reason
 codes for planning only. Both modes are private, stable-snapshot contracts and
 fail on observed corpus drift. Neither inventory mode can write, OCR, reingest,
 infer an entity or period, expose a raw locator, or alter the existing MCP tool
-set. `/zones` keeps its existing aggregate semantics and authorization boundary.
+set. A source row's `last_failure` is either `null` or the latest Gmail error's
+revalidated closed receipt: fixed operation class, HTTP status, canonical
+provider reason, aggregate checkpoint counts/readback state, and
+cursor-preservation category. Raw provider messages, IDs, paths, cursor values,
+content, and secrets never cross this boundary. `/zones` keeps its existing
+aggregate semantics and authorization boundary.
+
+The required row key makes this source-inventory contract v3, including both
+inventory and recovery cursors. Version mismatch is a refusal, not a partial
+parse. A schema-39 database receives one narrowly matched compatibility query
+that substitutes `NULL` for the not-yet-created `failure_evidence` column;
+other D1 errors cannot enter that fallback.
 
 The legacy CLI `provenance-repair` schema 1 contract is inventory-only. Its
 preview still binds one exact source, manifest and source configuration,

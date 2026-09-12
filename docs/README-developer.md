@@ -1065,6 +1065,21 @@ the next page returns `source_inventory_changed` instead of combining moments.
 The CLI collects every source page before printing JSON and refuses incomplete,
 duplicated, unordered, or privacy-invalid output.
 
+Each inventory row includes `last_failure`. It is `null` unless the newest run
+has a Gmail failure receipt that passes the closed source-failure validator.
+The only permitted fields are the fixed operation class, HTTP status, canonical
+provider reason, aggregate checkpoint counts/readback state, and the
+cursor-preservation category. Raw provider messages, IDs, paths, cursor values,
+content, and secrets are neither selected for this receipt nor rendered by the
+CLI. Invalid stored evidence fails closed to `null`; invalid response evidence
+is rejected by the CLI.
+
+Adding the required `last_failure` row key advances the shared inventory and
+recovery response/cursor contract to v3. The Worker rejects v2 cursors and the
+CLI rejects v2 responses. On schema 39, the inventory performs one exact
+missing-`failure_evidence` fallback that projects `last_failure: null`; every
+other query failure is rethrown and becomes the ordinary unavailable response.
+
 `mode: "recovery"` returns one bounded record-candidate page. Stable opaque
 document digests permit a later before/after comparison without revealing raw
 document ids, provider locators, paths, titles, URIs, or metadata. Candidate

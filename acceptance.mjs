@@ -496,7 +496,10 @@ export class Acceptance {
     // failures, because there the question is "is this brain proven".
     this.tolerateStaleSources = tolerateStaleSources === true;
     this.results = [];
+    // The first failed tier and an intentional early stop are different facts.
+    // Tier 2+ failures stay recorded while the independent later tiers run.
     this.tierFailed = null;
+    this.stoppedAtTier = null;
     // Capabilities the run could not exercise at all. A skip inside a tier is
     // a detail; a whole capability going untested changes what "passed" means,
     // so the summary carries it and the verdict has to say it.
@@ -913,7 +916,10 @@ export class Acceptance {
     await this.tierReach();
     // Everything downstream reads the brain, so a broken tier 1 makes the rest
     // noise rather than signal.
-    if (this.tierFailed === 1) return this.summary();
+    if (this.tierFailed === 1) {
+      this.stoppedAtTier = 1;
+      return this.summary();
+    }
     await this.tierData();
     await this.tierRetrieval(probes);
     await this.tierSafety();
@@ -928,7 +934,8 @@ export class Acceptance {
       results: this.results,
       counts,
       passed: counts.fail === 0,
-      stoppedAtTier: this.tierFailed,
+      firstFailedTier: this.tierFailed,
+      stoppedAtTier: this.stoppedAtTier,
       untested: [...this.untested],
     };
   }

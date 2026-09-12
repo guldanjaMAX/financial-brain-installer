@@ -54,13 +54,14 @@ function sourceRow(candidateCount = 1, receipt = null) {
         outcome: "completed",
       },
     },
+    last_failure: null,
     freshness: { state: "ok" },
   };
 }
 
 function inventory({ asOf = AS_OF, snapshot = SOURCE_SNAPSHOT, candidateCount = 1, receipt = null } = {}) {
   return {
-    contract_version: 2,
+    contract_version: 3,
     kind: "source_inventory",
     complete: true,
     total: 1,
@@ -101,7 +102,7 @@ function recovery({
   truncated = false,
 } = {}) {
   return {
-    contract_version: 2,
+    contract_version: 3,
     kind: "source_recovery_plan",
     complete: !truncated,
     total: candidates.length,

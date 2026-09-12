@@ -137,6 +137,15 @@ stored corpus is absent. Keep stored-data presence separate from receipt and
 freshness bookkeeping. Prioritize findings by likely answer impact, not raw
 count.
 
+Treat a failed or stale source as a scoped finding. Continue the independent
+read-only Optimize checks for other sources and for the local CLI, technician
+skill, MCP registrations, storage, indexes, zones, and grants. Positive evidence
+from available sources remains usable, but never treat the failed source as
+proof that its stored corpus is absent or its history is complete. Qualify every
+conclusion that depends on it as unproven. Only a whole-Brain access failure may
+prevent the remote checks that require that access, and it must not prevent
+independent local checks.
+
 Use the records and metadata already present. Compare provenance, effective and
 modified dates, source receipts with stored counts, extraction gaps, conflicting
 values, superseded evidence, duplicate document families, and whose voice each

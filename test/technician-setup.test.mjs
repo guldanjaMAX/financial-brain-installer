@@ -160,6 +160,13 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute, /duplicate-document count is an efficiency finding/i);
   assert.match(optimizeRoute, /missing connector receipt does not mean.*stored corpus is absent/is);
   assert.match(optimizeRoute,
+    /failed or stale source as a scoped finding.*Continue the independent\s+read-only Optimize checks/is);
+  assert.match(optimizeRoute,
+    /Positive evidence\s+from available sources remains usable.*never treat the failed source as\s+proof that its stored corpus is absent or its history is complete/is);
+  assert.match(optimizeRoute, /conclusion that depends on it as unproven/i);
+  assert.match(optimizeRoute,
+    /whole-Brain access failure may\s+prevent the remote checks.*must not prevent\s+independent local checks/is);
+  assert.match(optimizeRoute,
     new RegExp(renderedCommand("brain financial-picture <manifest> --json"), "i"));
   assert.match(optimizeRoute, /records as an interview map/i);
   assert.match(optimizeRoute, /Never infer or auto-confirm ownership/i);

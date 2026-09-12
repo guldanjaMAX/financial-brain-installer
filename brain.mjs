@@ -48,6 +48,7 @@ import { restampFirstPartySourceProvenance } from "./worker/src/lib/provenance-r
 import {
   canonicalGoogleProviderReason,
   GMAIL_FAILURE_OPERATION_CLASSES,
+  normalizeSourceFailureEvidence,
   SOURCE_FAILURE_EVIDENCE_VERSION,
 } from "./worker/src/lib/source-receipt.js";
 import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
@@ -7905,7 +7906,7 @@ function sourceInventoryBaseUrl(m) {
 
 function validateSourceInventoryPage(body) {
   if (!body || typeof body !== "object" || Array.isArray(body) ||
-      body.contract_version !== 2 || body.kind !== "source_inventory") {
+      body.contract_version !== 3 || body.kind !== "source_inventory") {
     throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an unsupported source-inventory receipt");
   }
   if (!Number.isSafeInteger(body.total) || body.total < 0 ||
@@ -7929,7 +7930,7 @@ function validateSourceInventoryPage(body) {
   }
   const exactRowFields = [
     "configuration", "connector", "freshness", "kind", "name", "provenance", "readability",
-    "receipt", "recovery_plan", "registered", "source_id", "storage", "zone",
+    "last_failure", "receipt", "recovery_plan", "registered", "source_id", "storage", "zone",
   ].sort().join(",");
   for (const row of body.sources) {
     if (!row || typeof row !== "object" || Array.isArray(row) ||
@@ -7941,6 +7942,22 @@ function validateSourceInventoryPage(body) {
         !row.storage || !row.readability || !row.freshness ||
         (row.registered ? !row.receipt : row.receipt !== null)) {
       throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source row");
+    }
+    if (row.last_failure !== null) {
+      const latestRun = row.receipt?.latest_run ?? null;
+      try {
+        normalizeSourceFailureEvidence(row.last_failure, {
+          status: latestRun?.outcome === "failed" ? "error" : "ready",
+          kind: row.kind,
+          metricsVersion: latestRun?.metrics_version ?? null,
+          measuredDocsFailed: latestRun?.metrics_version === 1 ? latestRun.docs_failed : null,
+        });
+      } catch {
+        throw new SourceInventoryClientError(
+          "inventory_contract_invalid",
+          "the Brain returned invalid connector failure evidence",
+        );
+      }
     }
     assertSourceInventoryPrivacy(row, "source");
   }
@@ -7970,7 +7987,7 @@ function assertSourceInventoryPrivacy(value, root = "inventory") {
 
 function validateSourceRecoveryPage(body) {
   if (!body || typeof body !== "object" || Array.isArray(body) ||
-      body.contract_version !== 2 || body.kind !== "source_recovery_plan") {
+      body.contract_version !== 3 || body.kind !== "source_recovery_plan") {
     throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an unsupported source-recovery receipt");
   }
   if (!Number.isSafeInteger(body.total) || body.total < 0 ||
@@ -8251,6 +8268,34 @@ function sourceInventoryFailure(json, error) {
   die(message);
 }
 
+const SOURCE_FAILURE_OPERATION_LABELS = Object.freeze({
+  gmail_profile_read: "Gmail profile read",
+  gmail_history_list: "Gmail history list",
+  gmail_message_list: "Gmail message list",
+  gmail_policy_read: "Gmail policy read",
+  gmail_message_read: "Gmail message read",
+  gmail_unknown: "Gmail operation",
+});
+
+const SOURCE_FAILURE_CURSOR_LABELS = Object.freeze({
+  present_preserved: "cursor present and preserved",
+  absent_preserved: "cursor absent and preserved",
+  changed: "cursor changed",
+  unverified: "cursor preservation unverified",
+});
+
+function renderSourceLastFailure(failure) {
+  const operation = SOURCE_FAILURE_OPERATION_LABELS[failure.operation_class];
+  const http = failure.http_status === null ? "HTTP status unavailable" : `HTTP ${failure.http_status}`;
+  const provider = failure.provider_reason === null
+    ? "provider reason unavailable"
+    : `provider ${failure.provider_reason}`;
+  const checkpoint = failure.checkpoint_readback === "verified"
+    ? `checkpoint ${num(failure.checkpoint_done)} processed / ${num(failure.checkpoint_skipped)} skipped`
+    : "checkpoint unverified";
+  return `${operation}; ${http}; ${provider}; ${checkpoint}; ${SOURCE_FAILURE_CURSOR_LABELS[failure.cursor_preservation]}`;
+}
+
 export async function cmdSources(manifestPath, options = {}) {
   const argv = options.argv ?? process.argv;
   const flags = options.flags ?? parseFlags(argv.slice(4));
@@ -8376,6 +8421,13 @@ export async function cmdSources(manifestPath, options = {}) {
           `  ${row.name.padEnd(nameWidth)}  ${row.kind.padEnd(kindWidth)}  ${String(row.zone || "unassigned").padEnd(12)}  ` +
             `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${row.freshness.state}`,
         );
+      }
+      const failures = inventory.sources.filter((row) => row.last_failure !== null);
+      if (failures.length) {
+        console.log(`\n  ${c.bold("last connector failure")}`);
+        for (const row of failures) {
+          console.log(`    ${row.name}: ${renderSourceLastFailure(row.last_failure)}`);
+        }
       }
     }
     console.log("");
