@@ -50,6 +50,7 @@ if (SCENARIO) {
   if (!userRoot) throw new Error("BRAIN_HEALTH_VERIFY_USER_ROOT is required");
   os.homedir = () => userRoot;
   syncBuiltinESMExports();
+  let documentRequests = 0;
 
   globalThis.fetch = async (input, options = {}) => {
     const url = requestUrl(input);
@@ -80,6 +81,21 @@ if (SCENARIO) {
     if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/documents") {
       if (new Headers(options.headers).get("X-Admin-Key") !== FIXTURE_ADMIN) {
         return json({ error: "fixture unauthorized" }, 401);
+      }
+      documentRequests++;
+      if ((SCENARIO === "health-documents-timeout-once" && documentRequests === 1) ||
+          (SCENARIO === "health-documents-timeout-twice" && documentRequests <= 2)) {
+        // A translated timeout must never echo even the inert credential used
+        // by this isolated fixture.
+        const error = new Error(`fixture timeout while using ${new Headers(options.headers).get("X-Admin-Key")}`);
+        error.name = "TimeoutError";
+        throw error;
+      }
+      if (SCENARIO === "health-documents-nonretryable-then-healthy" && documentRequests === 1) {
+        throw new Error("fixture permanent transport refusal");
+      }
+      if (SCENARIO === "health-documents-http-then-healthy" && documentRequests === 1) {
+        return json({ error: "fixture temporary-looking HTTP response" }, 503);
       }
       if (SCENARIO === "health-documents-unreachable") {
         return json({ error: "fixture documents unavailable" }, 503);
@@ -324,6 +340,32 @@ if (SCENARIO) {
     healthy.code === 0 && /documents endpoint 200/.test(healthy.output) &&
       /vector index is query-ready/.test(healthy.output), healthy.output);
 
+  const timeoutThenHealthy = runScenario("health-documents-timeout-once", "health", { adminKey: true });
+  check("health retries one retryable documents transport timeout and then verifies normally",
+    timeoutThenHealthy.code === 0 && /still checking once more/i.test(timeoutThenHealthy.output) &&
+      /documents endpoint 200/.test(timeoutThenHealthy.output) &&
+      /vector index is query-ready/.test(timeoutThenHealthy.output),
+    timeoutThenHealthy.output);
+
+  const twoTimeouts = runScenario("health-documents-timeout-twice", "health", { adminKey: true });
+  check("health stops after one documents transport retry",
+    twoTimeouts.code === 1 && /still checking once more/i.test(twoTimeouts.output) &&
+      /private readiness check timed out after 60s/i.test(twoTimeouts.output) &&
+      !/documents endpoint 200|vector index is query-ready/i.test(twoTimeouts.output),
+    twoTimeouts.output);
+
+  const nonretryable = runScenario("health-documents-nonretryable-then-healthy", "health", { adminKey: true });
+  check("health does not retry a nonretryable documents transport failure",
+    nonretryable.code === 1 && /fixture permanent transport refusal/i.test(nonretryable.output) &&
+      !/still checking once more|documents endpoint 200|vector index is query-ready/i.test(nonretryable.output),
+    nonretryable.output);
+
+  const httpFailure = runScenario("health-documents-http-then-healthy", "health", { adminKey: true });
+  check("health does not retry an HTTP documents failure",
+    httpFailure.code === 1 && /documents endpoint 503/i.test(httpFailure.output) &&
+      !/still checking once more|documents endpoint 200|vector index is query-ready/i.test(httpFailure.output),
+    httpFailure.output);
+
   const incompletePublic = runScenario("health-public-incomplete", "health", { adminKey: true });
   check("health rejects a 200 public response that cannot prove an exact Worker state",
     incompletePublic.code === 1 && /did not return one exact Worker version and writer state/i.test(incompletePublic.output) &&
@@ -468,7 +510,11 @@ if (SCENARIO) {
       /D1 is reachable/.test(optionalWarnings.output) && /Workers is reachable/.test(optionalWarnings.output),
     optionalWarnings.output);
 
-  const outputs = [missingKey, documentsDown, invalidDocuments, healthy, d1Down, optionalWarnings]
+  const outputs = [
+    missingKey, documentsDown, invalidDocuments, healthy,
+    timeoutThenHealthy, twoTimeouts, nonretryable, httpFailure,
+    d1Down, optionalWarnings,
+  ]
     .map((result) => result.output).join("\n");
   check("fixtures never expose even their inert credential labels",
     !outputs.includes(FIXTURE_ADMIN) && !outputs.includes(FIXTURE_TOKEN), outputs);
