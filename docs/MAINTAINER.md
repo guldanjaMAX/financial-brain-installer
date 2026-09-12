@@ -241,11 +241,14 @@ tests use synthetic loopback APIs and no owner browser profile. Packed reinstall
 tests run through the verified npm CLI provided by `npm test` or
 `npm run audit:regressions`; do not replace it with a Windows shell wrapper.
 
-There are three separate claims:
+There are four separate claims:
 
 - Offline tests prove shared deterministic behavior.
 - Disposable field gates prove real provider behavior without touching an
   owner install.
+- A supervised existing-owner-install pilot, run only after its applicable
+  disposable recovery and exact-resource teardown pass, proves update and
+  recovery behavior for that one install.
 - An install's private release evaluation proves that install's retrieval and
   refusal behavior against its promised corpus.
 
@@ -269,6 +272,9 @@ does not change the six-job packaged-product CI requirement above; the runner is
 source-only and excluded from the package. Its `--plan` mode remains local and
 no-write. Windows CI exercises the explicit unsupported-platform refusal only;
 it is not Windows execution evidence for the helper, seeder, or recovery drill.
+Run this disposable campaign on its reviewed macOS host. Do not create a
+release-audit deferral merely for the source-only helper's Windows refusal;
+physical Windows packaged-product proof remains an independent release gate.
 macOS execution also fails closed on any extended ACL in the selected receipt
 directory or its marker, temporary, and final files; the helper checks empty
 created files before writing receipt bytes and never edits caller-owned ACLs.
@@ -309,10 +315,18 @@ and package. The disposable plan still reports no provider activity.
    [UPDATE-AUDIT.md](./UPDATE-AUDIT.md). Stable incident IDs and dispositions stay
    in update-incidents.json; only reviewed, applicable evidence can close them.
    Earlier candidate receipts do not automatically cover changed executable code.
-3. Complete the applicable disposable upgrade/recovery and physical owner
-   ceremonies separately. Record actual executable, architecture, package hash,
-   versions, source boundaries, pause state, and retrieval proof. Hosted Windows
-   CI does not establish Windows ARM64 physical runtime acceptance.
+   The deterministic regression audit must pass before a provider campaign.
+   The final `audit:updates --release` command may remain held solely because
+   field evidence is still missing while that evidence is collected. A
+   deferral is release adjudication, not field-action permission.
+3. After the exact package is sealed, clean-profile physical-platform evidence
+   and disposable upgrade/recovery may proceed as independent lanes. Complete
+   the applicable disposable recovery and verify exact-resource teardown before
+   any supervised existing-owner-install pilot. Record actual executable,
+   architecture, package hash, versions, source boundaries, pause state, and
+   retrieval proof. The v0.2.1 permanent-hostname/provider checklist is not an
+   update-pilot contract; review a dedicated private v0.4.8 runbook first.
+   Hosted Windows CI does not establish Windows ARM64 physical runtime acceptance.
 4. Integrate the reviewed candidate into main. Tag the exact reviewed source,
    preserving its identity and history. Do not move or recreate a release tag.
    The tag invokes .github/workflows/release.yml, which calls the same CI gate

@@ -93,6 +93,7 @@ const MAX_BOOTSTRAP_ROUNDS = 20_000;
 const BOOTSTRAP_POLL_MS = 3_000;
 const MAX_BOOTSTRAP_OBSERVATION_ROUNDS = 20;
 const BOOTSTRAP_OBSERVATION_POLL_MS = 1_000;
+export const RECOVERY_WRANGLER_VERSION = "4.131.1";
 const RECOVERY_BOOTSTRAP_PROOF_CHUNKS = 3_201;
 const RECOVERY_BOOTSTRAP_INTERRUPTION_RECEIPT =
   ".brain-recovery-bootstrap-interruption-v1.json";
@@ -2446,7 +2447,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
   async function ensureWrapperVersion(binding) {
     if (wrapperVersionProven) return;
     const version = await wrangler(binding, ["--version"], { text: true });
-    if (!/(?:^|\s)4\.\d+\.\d+(?:\s|$)/.test(String(version).trim())) {
+    if (String(version).trim() !== RECOVERY_WRANGLER_VERSION) {
       refuse("RECOVERY_WRANGLER_VERSION_UNSUPPORTED");
     }
     wrapperVersionProven = true;

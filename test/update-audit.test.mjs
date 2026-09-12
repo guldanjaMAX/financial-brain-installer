@@ -25,6 +25,11 @@ assert.equal(assertSourceInventoryV3ReleaseVersion("0.5.0"), "0.5.0");
 const auditSource = readFileSync(new URL("../scripts/audit-updates.mjs", import.meta.url), "utf8");
 assert.match(auditSource, /if \(mode === "--release"\) assertSourceInventoryV3ReleaseVersion\(version\)/,
   "the package-version reuse guard must run in the enforcing release mode");
+const releaseGate = readFileSync(new URL("../docs/RELEASE-GATE.md", import.meta.url), "utf8");
+assert.match(releaseGate, /Nothing is tagged or published until every \*\*prepublication\*\* requirement/,
+  "the release gate must distinguish proof required before publication");
+assert.match(releaseGate, /After publication, before any served-guide or update-channel promotion/,
+  "asset and served-guide verification must remain an explicit postpublication promotion gate");
 validateIncidents(cases);
 assert.ok(cases.some((c) => c.id === "UPDATE-002"), "the frozen-fence incident must not disappear from the registry");
 for (let n = 17; n <= 22; n++) {

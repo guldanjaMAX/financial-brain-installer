@@ -4,8 +4,12 @@
 not choose. So the question a release has to answer is not "do the tests pass"
 but "does an update finish on a brain shaped like the ones that exist".
 
-Nothing is tagged until every line below is true, and the receipt is pasted
-into the release PR.
+Nothing is tagged or published until every **prepublication** requirement below
+is true and the receipt is pasted into the release PR. Sections 3 and 10 also
+name checks that can exist only after a release asset has been published. No
+release is promoted through a served guide or update channel, or approved for
+live use, until those **postpublication** checks are true. A postpublication
+failure blocks promotion; it does not retroactively excuse the publication.
 
 ## 1. The suite
 
@@ -37,12 +41,15 @@ published release can update them, and the schema guard refuses them.
 A third leg from the oldest published tarball is worth running occasionally,
 not every release.
 
-## 3. The bytes under test are the bytes published
+## 3. Candidate bytes are sealed before publication; published bytes are then verified
 
-Hash the candidate tarball, hash the asset downloaded from the finished GitHub
-release, and compare. Both machines did this independently on 2026-09-03 and it
-is the property that makes the whole receipt mean anything: without it the
-receipt describes a build nobody will ever install.
+**Prepublication:** hash the candidate tarball and bind the test receipt to that
+digest before any tag or release write. **Postpublication:** download the asset
+from the finished GitHub release, hash it independently, and compare it with the
+sealed candidate before any guide or update-channel promotion. Both machines did
+this independently on 2026-09-03. It is the property that makes the whole
+receipt mean anything: without it the receipt describes a build nobody will
+ever install.
 
 ## 4. The receipt says what it did NOT cover
 
@@ -124,9 +131,12 @@ steady state ~100 rows/min, one batch per confirmation.
 ## 9. Cadence
 
 - Every push: section 1.
-- Every release candidate, one command, about 90 minutes: sections 3, 5 (Mac),
-  2 (floor and n-1, poisoned, with the delete row asserted present), 6, and the
-  harness self-checks, with section 7 refreshed.
+- Every release candidate, one command, about 90 minutes: the prepublication
+  half of section 3, section 5 (Mac), section 2 (floor and n-1, poisoned, with
+  the delete row asserted present), section 6, and the harness self-checks,
+  with section 7 refreshed.
+- After publication, before any served-guide or update-channel promotion: the
+  postpublication half of section 3, then section 10.
 - Every Worker change and at least weekly: section 5 (Windows), the settled
   leg with the outbox proven empty by row count, and a strand-then-rerun
   recovery leg. A first-run update on a brain with rows mid-submission takes
@@ -166,16 +176,18 @@ steady state ~100 rows/min, one batch per confirmation.
 - **The bench account is on Workers Paid and holds no live brain.** Until the partner's
   preview brain moves off it, it is on the protected list by name.
 
-## 10. The repoint is verified by reading what is served
+## 10. Postpublication promotion is verified by reading what is served
 
 Moving the pin is not the same as having moved it. On 2026-09-03 `repoint-kit.sh`
 updated the install guide, reported "guide pins: v0.3.5", passed its own check,
 and left the UPDATE guide telling clients to download the previous release. The
 only thing that caught it was fetching the live document and looking.
 
-So: after any repoint, fetch every served guide and assert the version in the
-document, then follow its download link and hash what comes back against the
-tested tarball. Trust the artifact, never the script's report of itself.
+So: after publication and before declaring a repoint complete, fetch every
+served guide and assert the version in the document, then follow its download
+link and hash what comes back against the tested tarball. Any mismatch blocks
+guide and update-channel promotion and live use. Trust the artifact, never the
+script's report of itself.
 
 ## 11. The incident gate is scoped to the version being cut
 

@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const IS_WINDOWS = process.platform === "win32";
-const WRANGLER_PACKAGE = "wrangler@4.127.1";
+const WRANGLER_PACKAGE = "wrangler@4.131.1";
 const FULL_PROFILE = Object.freeze([
   "full-suite",
   "frontend-test",
@@ -626,10 +626,17 @@ function safeCode(error, fallback) {
   return value.replace(/^_+|_+$/g, "").slice(0, 80) || fallback;
 }
 
-const FIELD_GATES = Object.freeze([
-  Object.freeze({ id: "physical_windows_install", title: "Clean Windows owner profile", proof: "Install the exact tarball in a standard user profile, run the package-local command, complete the 25-round DPAPI gate, then interrupt and resume once." }),
+const DISPOSABLE_FIELD_GATES = Object.freeze([
   Object.freeze({ id: "disposable_cloudflare", title: "Disposable Cloudflare Brain", proof: "With separate approval, prove browser OAuth, exact account choice, D1 and Vectorize creation through schema 46, fixed public smoke, one interrupted migration, vector backlog and drain, then confirm cleanup." }),
   Object.freeze({ id: "v048_disposable_bootstrap_resume", title: "v0.4.8 disposable bootstrap interruption and resume", proof: "On the separately approved exact synthetic source and empty target, seed exactly 3,201 fictional one-chunk records, stop only after independently verified durable non-final bootstrap progress, rerun from the identical epoch and cursor, prove final D1, FTS, and Vectorize parity, then complete separately approved exact-resource teardown. Local tests and this checklist are not that proof." }),
+]);
+
+const OWNER_PILOT_GATES = Object.freeze([
+  Object.freeze({ id: "supervised_owner_install_pilot", title: "Supervised existing-owner-install pilot", proof: "Only after the applicable disposable recovery campaign passes and exact-resource absence is verified, bind the exact package, fresh read-only baseline, reviewed stop and rollback plan, recovery owner, and separate approval for one existing owner Brain. A dedicated v0.4.8 private update runbook and evidence contract must be reviewed first; the v0.2.1 permanent-hostname provider checklist is not update proof. Stop on any changed identity, unexpected write, failed receipt, non-declining backlog, or rollback uncertainty. This does not authorize release or customer rollout." }),
+]);
+
+const INDEPENDENT_RELEASE_FIELD_GATES = Object.freeze([
+  Object.freeze({ id: "physical_windows_install", title: "Clean Windows owner profile", proof: "Install the exact tarball in a standard user profile, run the package-local command, complete the 25-round DPAPI gate, then interrupt and resume once. This packaged-product lane does not execute the POSIX-only v0.4.8 receipt helper." }),
   Object.freeze({ id: "physical_passkeys", title: "Permanent-host passkey ceremony", proof: "Two people use two authenticator types each. Prove enroll, logout and login, second device, revoke with immediate session denial, recovery, and last-owner refusal." }),
   Object.freeze({ id: "plaid_sandbox", title: "Plaid Sandbox through the deployed Brain", proof: "Only after separately approved owner-custody setup and complete binding readback, complete owner Link, assign every masked account, sync history and pagination, change one transaction, prove webhook plus scheduled fallback, update mode, response-loss replay, and confirmed removal." }),
   Object.freeze({ id: "quickbooks_sandbox", title: "QuickBooks Online Sandbox", proof: "Complete Intuit consent, company identity and same-company reconnect, wrong-company refusal, refresh, pagination, changed record, outage retry, retrieval, disconnect retention, and a separate forget preview." }),
@@ -637,11 +644,33 @@ const FIELD_GATES = Object.freeze([
   Object.freeze({ id: "bank_exports", title: "Real bank-export normalization", proof: "With explicit approval, import reviewed low-sensitivity CSV and OFX or QFX exports from two institutions, compare counts and totals, then inspect provenance and every skipped row." }),
 ]);
 
+const FIELD_GATE_PHASES = Object.freeze([
+  Object.freeze({
+    title: "Lane A: disposable provider and recovery proof",
+    introduction: "These synthetic gates may begin after the common prerequisites. The v0.4.8 recovery campaign runs on its reviewed macOS host because its private receipt helper has no verified Windows DACL path.",
+    gates: DISPOSABLE_FIELD_GATES,
+  }),
+  Object.freeze({
+    title: "Dependent gate: supervised existing-owner-install pilot",
+    introduction: "This gate begins only after the applicable Lane A recovery receipt passes and teardown proves the exact disposable resources absent. It does not depend on Lane B, but still needs a dedicated v0.4.8 private runbook, baseline, rollback review, and approval.",
+    gates: OWNER_PILOT_GATES,
+  }),
+  Object.freeze({
+    title: "Lane B: independent release evidence",
+    introduction: "These gates may proceed independently after the common prerequisites. Before publication, each applicable incident must close on reviewed evidence or carry a permitted exact-version deferral. A deferral never authorizes a field action.",
+    gates: INDEPENDENT_RELEASE_FIELD_GATES,
+  }),
+]);
+
+const ORDERED_FIELD_GATES = Object.freeze(
+  FIELD_GATE_PHASES.flatMap((phase) => phase.gates),
+);
+
 export function renderFieldChecklist(receipt) {
   const source = receipt.source || {};
   const artifact = receipt.package || {};
   const stop = receipt.status === "source_preparation_passed"
-    ? "The offline preparation passed. Continue only with the separately approved human gates below."
+    ? "The offline preparation passed. Continue only with the separately approved field evidence lanes below."
     : "Stop before live testing. Resolve the offline failure or complete the full default profile first.";
   const lines = [
     "# Financial Brain human field checklist",
@@ -666,18 +695,24 @@ export function renderFieldChecklist(receipt) {
     "- [ ] The exact commit, tree, tarball byte count, and SHA-256 above match the reviewed candidate.",
     "- [ ] field-prepare-receipt.json exists and its exact status is source_preparation_passed.",
     "- [ ] Every default credential-free step in that receipt is passed.",
-    "- [ ] The owner is present for login, 2FA, consent, billing, and passkey gestures.",
+    "- [ ] The deterministic incident regression audit passed. The release audit may remain held only because field evidence is still missing; that hold still blocks publication.",
+    "- [ ] The owner is present for every login, 2FA, consent, billing, passkey, or existing-install action that this specific gate requires.",
     "- [ ] Credentials stay in owner-controlled hidden prompts. They are not pasted into chat, argv, logs, screenshots, receipts, or manifests.",
     "- [ ] The approved test uses disposable or low-sensitivity data and names its cleanup owner.",
     "",
-    "## Human and provider gates",
+    "## Field evidence lanes",
+    "",
+    "The sections below encode dependencies, not broad approval. Lane A and Lane B may run in parallel after the common prerequisites. The dependent owner pilot may start only after the applicable Lane A recovery and exact teardown pass; it does not depend on Lane B.",
     "",
   ];
-  for (const gate of FIELD_GATES) {
-    lines.push(`- [ ] **${gate.title}.** ${gate.proof}`);
+  for (const phase of FIELD_GATE_PHASES) {
+    lines.push(`### ${phase.title}`, "", phase.introduction, "");
+    for (const gate of phase.gates) {
+      lines.push(`- [ ] **${gate.title}.** ${gate.proof}`);
+    }
+    lines.push("");
   }
   lines.push(
-    "",
     "## Safe planning commands",
     "",
     "These commands print local plans or templates. They do not perform the live action:",
@@ -728,7 +763,10 @@ function baseReceipt(options, plan) {
       failure_code: null,
       network_scope: step.network_scope,
     })),
-    human_field_gates: FIELD_GATES.map((gate) => ({ id: gate.id, status: "pending_human_proof" })),
+    human_field_gates: ORDERED_FIELD_GATES.map((gate) => ({
+      id: gate.id,
+      status: "pending_human_proof",
+    })),
   };
 }
 

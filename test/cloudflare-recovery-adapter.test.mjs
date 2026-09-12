@@ -25,6 +25,7 @@ import {
   RECOVERY_DURABLE_TABLES,
   RECOVERY_EXPORT_TABLES,
   RECOVERY_FIELD_GATE_STOP_STAGES,
+  RECOVERY_WRANGLER_VERSION,
   createCloudflareRecoveryFieldGateAdapters,
   normalizeRecoveryBootstrapObservation,
   normalizedInstallStateExport,
@@ -842,6 +843,7 @@ function providerHarness({
   sourceInstallStateMissing = false,
   splitTargetDeployment = false,
   targetVersionId = pausedWorkerVersionId,
+  wranglerVersion = RECOVERY_WRANGLER_VERSION,
 } = {}) {
   let agentActionReceipts = initialAgentActionReceipts;
   let targetRestored = initialTargetRestored;
@@ -927,13 +929,13 @@ function providerHarness({
       sensitiveBuffers.push(stderr);
       return { status: 0, stdout, stderr };
     };
-    if (args[0] === "--version") return ok("4.99.0\n");
+    if (args[0] === "--version") return ok(`${wranglerVersion}\n`);
     for (const flag of [
       "--experimental-provision=false",
       "--experimental-auto-create=false",
     ]) assert.equal(args.includes(flag), true);
-    // Wrangler 4.73 rejects this obsolete flag before executing even a
-    // read-only JSON command. The pinned local wrapper already prevents any
+    // The reviewed Wrangler release rejects this obsolete flag before
+    // executing even a read-only JSON command. The pinned local wrapper prevents any
     // package or skill installation path.
     assert.equal(args.includes("--install-skills=false"), false);
 
@@ -1063,7 +1065,7 @@ function providerHarness({
       return ok();
     }
     if (args[0] === "d1" && args[1] === "export") {
-      // Wrangler 4.73 removed --skip-confirmation from d1 export. Export has no
+      // Wrangler removed --skip-confirmation from d1 export. Export has no
       // confirmation option, while restore continues to use d1 execute --yes.
       assert.equal(args.includes("--skip-confirmation"), false);
       const output = args[args.indexOf("--output") + 1];
@@ -1617,6 +1619,21 @@ try {
   const stageContext = (stage, completed = [], attempt = 1) => ({ stage, attempt,
     planFingerprint: initialized.plan.plan_fingerprint,
     targetResourceFingerprint: initialized.plan.target_resource_fingerprint, completed });
+  assert.equal(RECOVERY_WRANGLER_VERSION, "4.131.1");
+  for (const wranglerVersion of ["4.130.0", "4.131.0"]) {
+    const staleWranglerHarness = providerHarness({ wranglerVersion });
+    const staleWranglerGate = createCloudflareRecoveryFieldGateAdapters(
+      approvedAdapterConfig,
+      staleWranglerHarness.dependencies,
+    );
+    await assert.rejects(
+      staleWranglerGate.adapters.export_d1(stageContext("export_d1")),
+      (error) => error.code === "RECOVERY_WRANGLER_VERSION_UNSUPPORTED",
+    );
+    assert.deepEqual(staleWranglerHarness.wranglerCalls.map((call) => call.args), [["--version"]]);
+    assert.equal(staleWranglerHarness.adminReads, 0);
+    assert.equal(staleWranglerHarness.fetchCalls.length, 0);
+  }
   async function bankRecoveryRun() {
     const bank = await recoveryBankFixture();
     const harness = providerHarness({ bankFixture: bank, initialTargetRestored: true });

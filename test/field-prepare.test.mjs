@@ -319,7 +319,89 @@ test("the generated checklist keeps offline proof separate from human field gate
   assert.match(checklist, /Plaid Sandbox through the deployed Brain/);
   assert.match(checklist, /QuickBooks Online Sandbox/);
   assert.match(checklist, /does not prove Cloudflare/i);
+  assert.match(checklist, /release audit may remain held only because field evidence is still missing/i);
+  assert.match(checklist, /A deferral never authorizes a field action/);
+  assert.match(checklist, /POSIX-only v0\.4\.8 receipt helper/);
+  const disposableLane = checklist.indexOf("Lane A: disposable provider and recovery proof");
+  const ownerPilotLane = checklist.indexOf("Dependent gate: supervised existing-owner-install pilot");
+  const releaseLane = checklist.indexOf("Lane B: independent release evidence");
+  assert.equal(disposableLane > 0 && ownerPilotLane > disposableLane && releaseLane > ownerPilotLane, true);
+  assert.match(checklist.slice(ownerPilotLane, releaseLane),
+    /only after the applicable disposable recovery campaign passes and exact-resource absence is verified/i);
+  assert.match(checklist.slice(ownerPilotLane, releaseLane),
+    /v0\.2\.1 permanent-hostname provider checklist is not update proof/i);
   assert.doesNotMatch(checklist, /--execute|--live/);
+});
+
+test("execution receipts preserve stable grouped human field gate IDs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-field-receipt-order-"));
+  const output = join(directory, "output");
+  try {
+    const source = {
+      head_sha: "a".repeat(40),
+      tree_sha: "b".repeat(40),
+      package_name: "brain-installer",
+      package_version: "0.4.8",
+      package_json_sha256: "c".repeat(64),
+      package_lock_sha256: "d".repeat(64),
+    };
+    const result = await runFieldPrepare(
+      parseFieldPrepareArgs(["--only", "plaid-fake", "--output", output]),
+      {
+        readSourceIdentity() { return source; },
+        runCommand() { return { ok: true, status: 0 }; },
+      },
+    );
+    assert.equal(result.receipt.tooling.wrangler_package, "wrangler@4.131.1");
+    assert.deepEqual(
+      result.receipt.human_field_gates,
+      [
+        "disposable_cloudflare",
+        "v048_disposable_bootstrap_resume",
+        "supervised_owner_install_pilot",
+        "physical_windows_install",
+        "physical_passkeys",
+        "plaid_sandbox",
+        "quickbooks_sandbox",
+        "watched_folder",
+        "bank_exports",
+      ].map((id) => ({ id, status: "pending_human_proof" })),
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("field plan contracts keep disposable proof ahead of an existing-owner pilot", () => {
+  const readPlan = (path) => {
+    const result = spawnSync(process.execPath, [join(ROOT, path), "--plan"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH || "/usr/bin:/bin" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+
+  const genericDisposable = readPlan("test/live/disposable-cloudflare-v021-field-gate.mjs");
+  assert.match(genericDisposable.ordering_boundary,
+    /not replace the v0\.4\.8 disposable recovery campaign/i);
+  assert.match(genericDisposable.release_audit_boundary,
+    /A deferral never authorizes the campaign or publication/);
+
+  const v048Seed = readPlan("test/live/v048-disposable-vector-seed.mjs");
+  assert.equal(v048Seed.campaign_role, "seed_only_before_disposable_recovery");
+  assert.equal(v048Seed.execution_host, "reviewed_macos_posix_host");
+  assert.match(v048Seed.prerequisites.join("\n"), /current-user-only DACL proof/);
+
+  const ownerPilotPlan = readFileSync(
+    join(ROOT, "docs/release-evidence/v0.4.8-candidate-release-evidence-plan.md"),
+    "utf8",
+  );
+  assert.match(ownerPilotPlan,
+    /Only after the applicable disposable recovery campaign passes and its exact\s+resource absence is verified/);
+  assert.match(ownerPilotPlan, /dedicated private v0\.4\.8\s+owner-update runbook and evidence contract/);
+  assert.match(ownerPilotPlan, /v0\.2\.1 permanent-hostname\/provider checklist does not prove this update pilot/);
 });
 
 test("plan mode verifies candidate identity without running a planned step", async () => {

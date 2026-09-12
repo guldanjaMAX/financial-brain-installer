@@ -199,9 +199,16 @@ Before preview, prepare all of these locally and out of band:
 - the target manifest's `operations.recovery_artifact_key_secret` Keychain
   locator, containing an independent version-1 32-byte recovery artifact key;
 - an executable Wrangler wrapper in an owner-controlled, non-writable-by-others
-  directory that reads its Cloudflare token from Keychain at execution time;
+  directory that reads its Cloudflare token from Keychain at execution time and
+  reports the reviewed exact Wrangler version `4.131.1`;
 - an owner-only directory for the encrypted recovery artifact and a complete
   private release evaluation golden set.
+
+The runtime version response is an attestation from the already trusted,
+hash-approved wrapper, not independent package provenance. Before approving a
+campaign, inspect the exact approved wrapper bytes and verify that they invoke
+the immutable `wrangler@4.131.1` package. A wrapper that cannot establish that
+chain keeps the campaign held.
 
 The held v0.4.8 disposable campaign also uses the source-only
 `test/live/v048-disposable-vector-seed.mjs` runner from the exact frozen source
@@ -508,7 +515,8 @@ first rebuild attempt that finds the active version is refused. A leftover
 and private state before removing that lock manually.
 
 Passing deterministic tests is not a production recovery claim. No v0.4.8
-provider or field run has occurred. The remaining live release gate is to
+provider or field run has occurred. The remaining live gate in this recovery
+lane is to
 provision the disposable resources out of band, seed the exact fictional source
 under its own approval, refresh the manual no-route/no-custom-domain review and
 both pinned version claims, pause source writes for the approved export window,
@@ -517,6 +525,16 @@ above, including the private mid-bootstrap interruption and resume proof,
 followed by independent Cloudflare confirmation that source resources and
 production routes did not change. Disposal of the test resources is a separate
 operator action; this adapter has no destroy command.
+
+A passed recovery receipt plus verified exact-resource absence is a prerequisite
+for, not authorization of, a supervised existing-owner-install pilot. That
+pilot still requires its own exact-package binding, fresh read-only baseline,
+reviewed stop and rollback plan, recovery owner, and explicit approval. Physical
+platform, provider, incident-adjudication, publication, and postpublication
+verification gates remain separate.
+The v0.2.1 permanent-hostname/provider checklist is not owner-update proof. A
+dedicated private v0.4.8 runbook and evidence contract must be reviewed before
+that pilot can be proposed.
 
 Cloudflare documents the current export and import commands in
 [Import and export data](https://developers.cloudflare.com/d1/best-practices/import-export-data/)
