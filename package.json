@@ -15,6 +15,7 @@
     "rehearse:hiccups": "node scripts/customer-hiccup-lab.mjs",
     "rehearse:onboarding": "node scripts/onboarding-sandbox.mjs",
     "privacy:history": "node scripts/scan-git-history-privacy.mjs --ref HEAD --require-clean",
+    "privacy:history:field": "node scripts/scan-git-history-privacy.mjs --ref HEAD --require-clean --allow-stale-dispositions-for-local-field-prep",
     "privacy:history:remote": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "privacy:history:strict": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "test": "node scripts/run-test-chain.mjs",
