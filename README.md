@@ -562,6 +562,10 @@ source IDs, URLs, content, credentials, or raw provider errors. The ordinary
 dry run remains the detailed owner-terminal view. A complete aggregate preview
 exits zero; a bounded, incomplete, or failed one still prints the same safe JSON
 shape and exits nonzero so automation cannot mistake partial coverage for proof.
+A Drive preview does not read the Brain inventory, so it reports
+Brain-dependent send, unchanged, and removal-effect counts as `null` and exits
+incomplete instead of turning missing comparison evidence into zero. Provider
+observation and skip counts remain available.
 
 Then drop `--dry-run` to load it for real. Large loads are resumable: if it is
 interrupted, run the same command again and it continues from where it stopped.

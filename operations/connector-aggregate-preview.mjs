@@ -50,7 +50,9 @@ export const CONNECTOR_AGGREGATE_PREVIEW_FAILURE_CODES = Object.freeze([
   "PREVIEW_BOUNDED",
   "PROVIDER_SCOPE_INCOMPLETE",
   "SOURCE_COVERAGE_INCOMPLETE",
+  "BRAIN_EFFECT_UNKNOWN",
   "INVALID_REQUEST",
+  "MANIFEST_UNAVAILABLE",
   "AUTH_REQUIRED",
   "PERMISSION_DENIED",
   "RATE_LIMITED",
@@ -60,6 +62,7 @@ export const CONNECTOR_AGGREGATE_PREVIEW_FAILURE_CODES = Object.freeze([
 ]);
 
 const SOURCE_SET = new Set(CONNECTOR_AGGREGATE_PREVIEW_SOURCES);
+const RECEIPT_SOURCE_SET = new Set([...CONNECTOR_AGGREGATE_PREVIEW_SOURCES, "unknown"]);
 const STATUS_SET = new Set(CONNECTOR_AGGREGATE_PREVIEW_STATUSES);
 const SCOPE_SET = new Set(CONNECTOR_AGGREGATE_PREVIEW_SCOPES);
 const FAILURE_CODE_SET = new Set(CONNECTOR_AGGREGATE_PREVIEW_FAILURE_CODES);
@@ -153,7 +156,7 @@ export function assertConnectorAggregatePreviewReceipt(receipt) {
       receipt.dry_run !== true || receipt.aggregate_only !== true) {
     throw new TypeError("aggregate preview receipt identity is invalid");
   }
-  if (!SOURCE_SET.has(receipt.source)) throw new TypeError("aggregate preview source is invalid");
+  if (!RECEIPT_SOURCE_SET.has(receipt.source)) throw new TypeError("aggregate preview source is invalid");
   if (!STATUS_SET.has(receipt.status)) throw new TypeError("aggregate preview status is invalid");
   if (!SCOPE_SET.has(receipt.scope)) throw new TypeError("aggregate preview scope is invalid");
 
@@ -188,6 +191,13 @@ export function assertConnectorAggregatePreviewReceipt(receipt) {
   if (units.every((value) => value !== null) && units[1] + units[2] !== units[0]) {
     throw new TypeError("aggregate preview coverage units do not add up");
   }
+  if (receipt.status === "complete" && [
+    ...Object.values(receipt.counts),
+    ...removalValues,
+    ...units,
+  ].some((value) => value === null)) {
+    throw new TypeError("a complete aggregate preview cannot contain unknown counts");
+  }
 
   if (receipt.failure === null) {
     if (receipt.status !== "complete" || receipt.coverage.complete !== true || receipt.coverage.bounded) {
@@ -201,6 +211,10 @@ export function assertConnectorAggregatePreviewReceipt(receipt) {
     if (receipt.status === "complete" || receipt.coverage.complete) {
       throw new TypeError("an incomplete aggregate preview must carry non-complete status and coverage");
     }
+  }
+  if (receipt.source === "unknown" &&
+      (receipt.status !== "failed" || receipt.failure?.code !== "INVALID_REQUEST")) {
+    throw new TypeError("an unknown aggregate preview source is valid only for an invalid request");
   }
   return receipt;
 }
@@ -282,13 +296,17 @@ export function connectorAggregatePreviewRequestFailure(source) {
   return emptyFailureReceipt(source, "INVALID_REQUEST", false);
 }
 
+export function connectorAggregatePreviewManifestFailure(source) {
+  return emptyFailureReceipt(source, "MANIFEST_UNAVAILABLE", false);
+}
+
 export function connectorAggregatePreviewFailure(source, error) {
   const status = Number(error?.providerStatus ?? error?.status);
   const errorCode = String(error?.code || error?.cause?.code || "").toUpperCase();
   const errorName = String(error?.name || "");
   let code = "PREVIEW_FAILED";
   let retryable = false;
-  if (error?.needsReauth === true || status === 401) {
+  if (error?.needsReauth === true || error?.needsReconsent === true || status === 401) {
     code = "AUTH_REQUIRED";
   } else if (status === 403) {
     code = "PERMISSION_DENIED";

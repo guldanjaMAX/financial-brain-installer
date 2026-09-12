@@ -168,6 +168,7 @@ import {
   aggregateConnectorPreviewRequested,
   aggregateRemovalCandidateCounts,
   connectorAggregatePreviewFailure,
+  connectorAggregatePreviewManifestFailure,
   connectorAggregatePreviewRequestFailure,
   connectorAggregatePreviewReceipt,
   renderConnectorAggregatePreview,
@@ -363,6 +364,31 @@ function aggregateConnectorPreviewMode(flags, source) {
     }
     die(error.message);
   }
+}
+
+/**
+ * Detect any aggregate-shaped request from raw argv without parsing another
+ * flag or touching the manifest. Unknown or malformed source syntax stays
+ * inside this privacy boundary and receives a generic invalid-request receipt;
+ * it never falls back to a path-bearing human error or support note.
+ */
+function aggregateConnectorPreviewRawIntent(argv = []) {
+  const selected = argv.some((argument) =>
+    argument === "--aggregate-json" || String(argument).startsWith("--aggregate-json="));
+  if (!selected) return Object.freeze({ selected: false, source: null, exactFlag: false });
+  let source = null;
+  for (let index = 0; index < argv.length; index++) {
+    if (argv[index] !== "--from") continue;
+    const value = argv[index + 1];
+    source = value && !String(value).startsWith("--")
+      ? String(value).trim().toLowerCase()
+      : null;
+  }
+  return Object.freeze({
+    selected: true,
+    source: ["drive", "calendar"].includes(source) ? source : "unknown",
+    exactFlag: argv.includes("--aggregate-json"),
+  });
 }
 
 function emitConnectorAggregatePreview(receipt, options = {}) {
@@ -9292,10 +9318,35 @@ async function cmdForget(manifestPath) {
  * reason, and those reasons are kept in the state file.
  */
 async function cmdIngest(manifestPath) {
-  const { m } = loadManifest(manifestPath);
-  const flags = parseFlags(process.argv.slice(4));
-  if (flags["aggregate-json"] !== undefined) {
-    aggregateConnectorPreviewMode(flags, String(flags.from || "").toLowerCase());
+  const rawArguments = process.argv.slice(3);
+  const flagArguments = process.argv.slice(4);
+  const aggregateIntent = aggregateConnectorPreviewRawIntent(rawArguments);
+  let flags;
+  let m;
+
+  if (aggregateIntent.selected) {
+    try {
+      flags = parseFlags(flagArguments);
+    } catch {
+      throw new JsonFatal(connectorAggregatePreviewRequestFailure(aggregateIntent.source));
+    }
+    const parsedSource = String(flags.from || "").toLowerCase();
+    if (!aggregateIntent.exactFlag || aggregateIntent.source === "unknown" ||
+        flags["aggregate-json"] === undefined || parsedSource !== aggregateIntent.source) {
+      throw new JsonFatal(connectorAggregatePreviewRequestFailure(aggregateIntent.source));
+    }
+    aggregateConnectorPreviewMode(flags, parsedSource);
+    try {
+      ({ m } = loadManifest(manifestPath));
+    } catch {
+      throw new JsonFatal(connectorAggregatePreviewManifestFailure(aggregateIntent.source));
+    }
+  } else {
+    ({ m } = loadManifest(manifestPath));
+    flags = parseFlags(flagArguments);
+    if (flags["aggregate-json"] !== undefined) {
+      aggregateConnectorPreviewMode(flags, String(flags.from || "").toLowerCase());
+    }
   }
   // Remote sources reuse everything below the envelope: splitting, batching,
   // the credential gate, resume state and the skip report. Only the producer
@@ -10755,6 +10806,21 @@ async function cmdIngestCalendarRun(
       const sourceCoverageIncomplete = result.summary.skipped > 0;
       const providerCoverageIncomplete = aggregateFailures.length > 0 || result.summary.needs_reconsent === true;
       const complete = !sourceCoverageIncomplete && !providerCoverageIncomplete;
+      const classifiedProviderFailures = result.calendars
+        .filter((calendar) => calendar.error)
+        .map((calendar) => connectorAggregatePreviewFailure("calendar", calendar.error).failure);
+      const failurePriority = [
+        "AUTH_REQUIRED",
+        "PERMISSION_DENIED",
+        "RATE_LIMITED",
+        "NETWORK_UNAVAILABLE",
+        "PROVIDER_UNAVAILABLE",
+      ];
+      const typedProviderFailure = result.summary.needs_reconsent === true
+        ? { code: "AUTH_REQUIRED", retryable: false }
+        : failurePriority
+            .map((code) => classifiedProviderFailures.find((failure) => failure.code === code))
+            .find(Boolean) || null;
       const receipt = connectorAggregatePreviewReceipt({
         source: "calendar",
         status: complete ? "complete" : "incomplete",
@@ -10777,7 +10843,7 @@ async function cmdIngestCalendarRun(
         failure: complete
           ? null
           : providerCoverageIncomplete
-            ? { code: "PROVIDER_SCOPE_INCOMPLETE", retryable: true }
+            ? typedProviderFailure || { code: "PROVIDER_SCOPE_INCOMPLETE", retryable: true }
             : { code: "SOURCE_COVERAGE_INCOMPLETE", retryable: false },
       });
       if (!complete) throw new JsonFatal(receipt);
@@ -13173,11 +13239,22 @@ const cmdIngestRemoteRun = async (
     if (dry) {
       // A preview has no authenticated inventory, but still reports every
       // observed category. It cannot delete or advance a cursor.
-      aggregateRemovals = aggregateRemovalCandidateCounts({
+      const observedRemovalCandidates = aggregateRemovalCandidateCounts({
         sourcePolicy: excludedUids,
         sourceDeleted: sourceDeletedUids,
         intentionalSkip: intentionalRemovalUids,
       });
+      // A full provider walk cannot discover families that still exist in D1
+      // but vanished from Drive. Ordinary dry-run deliberately has no Brain
+      // credential, so preserve the provider-observed categories while making
+      // the missing source-deletion comparison explicit instead of a false 0.
+      aggregateRemovals = aggregatePreview && !incremental
+        ? Object.freeze({
+            source_policy: observedRemovalCandidates.source_policy,
+            source_deleted: null,
+            intentional_skip: observedRemovalCandidates.intentional_skip,
+          })
+        : observedRemovalCandidates;
       if (!aggregatePreview) {
         await applyDriveRemovals({
           uids: excludedUids, base, adminKey, state, dryRun: true, label: "source policy",
@@ -14026,16 +14103,20 @@ const cmdIngestRemoteRun = async (
     if (aggregatePreview) {
       const bounded = Number.isFinite(limit);
       const sourceCoverageIncomplete = coverageGaps > 0 || localRefused > 0 || tally.refused > 0 || tally.failed > 0;
-      const complete = !bounded && !sourceCoverageIncomplete;
-      const removalTotal = Object.values(aggregateRemovals).reduce((sum, value) => sum + value, 0);
+      const brainEffectsUnknown = which === "drive";
+      const complete = !bounded && !sourceCoverageIncomplete && !brainEffectsUnknown;
+      const removalValues = Object.values(aggregateRemovals);
+      const removalTotal = !brainEffectsUnknown && removalValues.every(Number.isSafeInteger)
+        ? removalValues.reduce((sum, value) => sum + value, 0)
+        : null;
       const receipt = connectorAggregatePreviewReceipt({
         source: which,
         status: complete ? "complete" : "incomplete",
         scope: aggregateScope,
         counts: {
           observed: scanned,
-          would_send: prepared,
-          unchanged,
+          would_send: brainEffectsUnknown ? null : prepared,
+          unchanged: brainEffectsUnknown ? null : unchanged,
           skipped: skips.length,
           removal_candidates: removalTotal,
         },
@@ -14047,11 +14128,13 @@ const cmdIngestRemoteRun = async (
           units_succeeded: 1,
           units_failed: 0,
         },
-        failure: bounded
-          ? { code: "PREVIEW_BOUNDED", retryable: false }
-          : sourceCoverageIncomplete
-            ? { code: "SOURCE_COVERAGE_INCOMPLETE", retryable: false }
-            : null,
+        failure: brainEffectsUnknown
+          ? { code: "BRAIN_EFFECT_UNKNOWN", retryable: false }
+          : bounded
+            ? { code: "PREVIEW_BOUNDED", retryable: false }
+            : sourceCoverageIncomplete
+              ? { code: "SOURCE_COVERAGE_INCOMPLETE", retryable: false }
+              : null,
       });
       if (!complete) throw new JsonFatal(receipt);
       return emitConnectorAggregatePreview(receipt, options);
@@ -23103,9 +23186,20 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
   if (typeof run !== "function") throw new TypeError("a CLI command function is required");
   const argv = options.argv ?? process.argv;
-  const aggregateConnectorPreview = String(command || "") === "ingest" && argv.includes("--aggregate-json");
-  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(String(command || "")) || aggregateConnectorPreview) {
+  const aggregateIntent = String(command || "") === "ingest"
+    ? aggregateConnectorPreviewRawIntent(argv)
+    : { selected: false, source: null };
+  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(String(command || ""))) {
     return Promise.resolve().then(run);
+  }
+  if (aggregateIntent.selected) {
+    return Promise.resolve().then(run).catch((error) => {
+      if (error instanceof JsonFatal) throw error;
+      if (aggregateIntent.source === "unknown") {
+        throw new JsonFatal(connectorAggregatePreviewRequestFailure("unknown"));
+      }
+      throw new JsonFatal(connectorAggregatePreviewFailure(aggregateIntent.source, error));
+    });
   }
   const withWrangler = options.withWranglerSession ?? withWranglerSessionIfNeeded;
   return withWrangler(run, options.wranglerOptions || {});
@@ -23245,6 +23339,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   and Calendar also take --aggregate-json only with --dry-run. That explicit mode
   writes one versioned counts-only JSON receipt and no item details; complete exits
   zero, while bounded, incomplete, or failed previews return JSON and exit nonzero.
+  A Drive provider-only preview marks Brain-dependent effect counts unknown.
   It is
   resumable: re-run the same command to continue an interrupted load. A large
   Drive, Gmail, or IMAP cleanup stops first and prints the exact

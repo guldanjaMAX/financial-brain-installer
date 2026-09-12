@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   cmdIngestCalendar,
   cmdIngestRemote,
   credentialScannerFingerprint,
+  driveConnectorConfig,
+  drivePolicyFingerprint,
   runCliCommandWithCredentialBoundary,
 } from "../brain.mjs";
 import {
@@ -18,6 +22,9 @@ import {
   connectorAggregatePreviewReceipt,
   renderConnectorAggregatePreview,
 } from "../operations/connector-aggregate-preview.mjs";
+
+const CLI = fileURLToPath(new URL("../brain.mjs", import.meta.url));
+const ISOLATE_SUPPORT_ROOT = new URL("./fixtures/isolate-support-root.mjs", import.meta.url).href;
 
 const PRIVATE = Object.freeze({
   filename: "Acquisition targets 2027.xlsx",
@@ -84,6 +91,24 @@ function parseOnlyJsonObject(output) {
   return parsed;
 }
 
+function installedAggregateCli(args, userRoot) {
+  const env = {
+    PATH: process.env.PATH || "",
+    BRAIN_NO_WRANGLER_LOGIN: "1",
+    BRAIN_TEST_USER_ROOT: userRoot,
+    NODE_NO_WARNINGS: "1",
+    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+    ...(process.env.ComSpec ? { ComSpec: process.env.ComSpec } : {}),
+    ...(process.env.PATHEXT ? { PATHEXT: process.env.PATHEXT } : {}),
+  };
+  return spawnSync(process.execPath, ["--import", ISOLATE_SUPPORT_ROOT, CLI, ...args], {
+    cwd: userRoot,
+    env,
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+}
+
 function ingestLib(state) {
   return async () => ({
     loadState: () => state,
@@ -121,6 +146,7 @@ function driveFixture({ includeCredential = false } = {}) {
   ];
   return {
     startPageToken: async () => "provider-cursor-private-value",
+    listChanges: async () => ({ changed: [], removed: [], nextToken: "provider-next-private-value" }),
     listRootedFiles: async function* () {
       for (const file of files) yield file;
     },
@@ -216,9 +242,16 @@ test("aggregate receipt schema is exact and candidate identities never survive c
     }),
     /removal total/,
   );
+  assert.throws(
+    () => assertConnectorAggregatePreviewReceipt({
+      ...receipt,
+      counts: { ...receipt.counts, unchanged: null },
+    }),
+    /complete aggregate preview cannot contain unknown counts/,
+  );
 });
 
-test("Drive aggregate mode emits one counts-only JSON object and writes no state or receipt", async () => {
+test("full Drive aggregate mode refuses stale local state as Brain-effect proof", async () => {
   const fixture = sandboxFixture();
   const state = {
     version: 1,
@@ -246,29 +279,84 @@ test("Drive aggregate mode emits one counts-only JSON object and writes no state
         postSourceReceipt: async () => { receipts++; throw new Error("must not post receipt"); },
       },
     ));
-    assert.equal(captured.error, null, captured.error?.message);
+    assert.ok(captured.error?.payload);
+    assert.equal(captured.stdout, "");
     assert.equal(captured.stderr, "");
-    const receipt = parseOnlyJsonObject(captured.stdout);
-    assert.deepEqual(receipt, captured.value);
+    const rendered = renderConnectorAggregatePreview(captured.error.payload);
+    const receipt = parseOnlyJsonObject(rendered);
     assert.deepEqual(receipt.counts, {
       observed: 4,
-      would_send: 1,
-      unchanged: 1,
+      would_send: null,
+      unchanged: null,
       skipped: 2,
-      removal_candidates: 2,
+      removal_candidates: null,
     });
     assert.deepEqual(receipt.removal_candidates, {
       source_policy: 1,
-      source_deleted: 0,
+      source_deleted: null,
       intentional_skip: 1,
     });
-    assert.equal(receipt.status, "complete");
-    assert.equal(receipt.coverage.complete, true);
-    assertNoPrivateSurface(captured.stdout);
+    assert.equal(receipt.status, "incomplete");
+    assert.equal(receipt.coverage.complete, false);
+    assert.equal(receipt.failure.code, "BRAIN_EFFECT_UNKNOWN");
+    assertNoPrivateSurface(rendered);
     assert.equal(brainBoundaryCalls, 0);
     assert.equal(receipts, 0);
     assert.equal(existsSync(join(fixture.root, ".brain-ingest-drive.json")), false);
     assert.equal(readFileSync(fixture.manifestPath, "utf8"), "{}\n");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("incremental Drive aggregate mode also refuses local state as Brain-effect proof", async () => {
+  const fixture = sandboxFixture();
+  const manifest = {
+    corpora: { google_drive: { root_folder_ids: ["private-root-folder-id"] } },
+    safety: { private_path_prefixes: ["Executive", "Private"] },
+  };
+  const policy = driveConnectorConfig(manifest, fixture.manifestPath);
+  const state = {
+    version: 1,
+    done: { "drive:stale-local-family": "private-stale-revision" },
+    skipped: {},
+    sync_token: "private-saved-change-token",
+    drive_policy_fingerprint: drivePolicyFingerprint(policy, true, false),
+    drive_last_full_sweep_at: new Date().toISOString(),
+    credential_scanner_fingerprint: credentialScannerFingerprint(true),
+  };
+  try {
+    const captured = await captureStreams(() => cmdIngestRemote(
+      manifest,
+      fixture.manifestPath,
+      { from: "drive", "dry-run": true, "aggregate-json": true },
+      {
+        googleDrive: driveFixture(),
+        getAccessToken: async () => "private-provider-access-token",
+        ingestLib: ingestLib(state),
+        resolveAccount: async () => { throw new Error("must not resolve account"); },
+        resolveBaseUrl: async () => { throw new Error("must not resolve Brain URL"); },
+        resolveAdminKey: () => { throw new Error("must not resolve admin key"); },
+        postSourceReceipt: async () => { throw new Error("must not post receipt"); },
+      },
+    ));
+    assert.ok(captured.error?.payload);
+    assert.equal(captured.stdout, "");
+    assert.equal(captured.stderr, "");
+    const rendered = renderConnectorAggregatePreview(captured.error.payload);
+    const receipt = parseOnlyJsonObject(rendered);
+    assert.equal(receipt.scope, "incremental");
+    assert.equal(receipt.status, "incomplete");
+    assert.deepEqual(receipt.counts, {
+      observed: 0,
+      would_send: null,
+      unchanged: null,
+      skipped: 0,
+      removal_candidates: null,
+    });
+    assert.equal(receipt.failure.code, "BRAIN_EFFECT_UNKNOWN");
+    assertNoPrivateSurface(rendered);
+    assert.equal(existsSync(join(fixture.root, ".brain-ingest-drive.json")), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -372,6 +460,38 @@ test("aggregate failure paths expose only closed codes and stay silent until the
     assert.equal(noBoundary.error?.payload?.failure?.code, "PROVIDER_SCOPE_INCOMPLETE");
     assertNoPrivateSurface(renderConnectorAggregatePreview(noBoundary.error.payload));
 
+    for (const typedFailure of [
+      { status: 401, needsReconsent: true, expected: "AUTH_REQUIRED" },
+      { status: 403, needsReconsent: false, expected: "PERMISSION_DENIED" },
+    ]) {
+      const typedResult = calendarResult({ failed: true });
+      typedResult.calendars[0].error = {
+        message: PRIVATE.providerError,
+        status: typedFailure.status,
+        needsReconsent: typedFailure.needsReconsent,
+      };
+      typedResult.summary.needs_reconsent = typedFailure.needsReconsent;
+      const typed = await captureStreams(() => cmdIngestCalendar(
+        { calendar: { calendars: ["private-calendar-id"] } },
+        fixture.manifestPath,
+        { from: "calendar", "dry-run": true, "aggregate-json": true },
+        {
+          getAccessToken: async () => "private-provider-access-token",
+          loadCalendarState: () => ({}),
+          saveCalendarState: () => { throw new Error("must not save"); },
+          googleCalendar: {
+            syncAll: async () => typedResult,
+            ingestEnvelopes: async () => { throw new Error("must not send"); },
+          },
+        },
+      ));
+      assert.equal(typed.stdout, "");
+      assert.equal(typed.stderr, "");
+      assert.equal(typed.error?.payload?.failure?.code, typedFailure.expected);
+      assert.equal(typed.error?.payload?.failure?.retryable, false);
+      assertNoPrivateSurface(renderConnectorAggregatePreview(typed.error.payload));
+    }
+
     const providerError = Object.assign(new Error(PRIVATE.providerError), {
       status: 403,
       providerReason: PRIVATE.providerError,
@@ -417,7 +537,7 @@ test("aggregate failure paths expose only closed codes and stay silent until the
     assert.equal(credentialGap.stdout, "");
     assert.equal(credentialGap.stderr, "");
     assert.equal(credentialGap.error?.payload?.status, "incomplete");
-    assert.equal(credentialGap.error?.payload?.failure?.code, "SOURCE_COVERAGE_INCOMPLETE");
+    assert.equal(credentialGap.error?.payload?.failure?.code, "BRAIN_EFFECT_UNKNOWN");
     assertNoPrivateSurface(renderConnectorAggregatePreview(credentialGap.error.payload));
 
     const bounded = await captureStreams(() => cmdIngestRemote(
@@ -434,7 +554,7 @@ test("aggregate failure paths expose only closed codes and stay silent until the
     assert.equal(bounded.stderr, "");
     assert.equal(bounded.error?.payload?.status, "incomplete");
     assert.equal(bounded.error?.payload?.coverage?.bounded, true);
-    assert.equal(bounded.error?.payload?.failure?.code, "PREVIEW_BOUNDED");
+    assert.equal(bounded.error?.payload?.failure?.code, "BRAIN_EFFECT_UNKNOWN");
     assertNoPrivateSurface(renderConnectorAggregatePreview(bounded.error.payload));
 
     const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
@@ -499,6 +619,83 @@ test("invalid aggregate arguments return a safe machine failure before connector
     assert.equal(existsSync(join(fixture.root, ".brain-ingest-calendar.json")), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("CLI preflight failures are one sanitized JSON object and never create support state", () => {
+  const userRoot = mkdtempSync(join(tmpdir(), "brain-aggregate-cli-"));
+  const missingManifest = join(userRoot, `${PRIVATE.documentId}-missing.manifest.json`);
+  const malformedManifest = join(userRoot, `${PRIVATE.sourceId}-malformed.manifest.json`);
+  const parseGuardManifest = join(userRoot, "parse-guard.manifest.json");
+  writeFileSync(
+    malformedManifest,
+    `{"private":"${PRIVATE.providerError}","credential":"${PRIVATE.credential}"`,
+    { mode: 0o600 },
+  );
+  writeFileSync(parseGuardManifest, "{}\n", { mode: 0o600 });
+
+  const cases = [
+    {
+      label: "missing manifest",
+      source: "drive",
+      failureCode: "MANIFEST_UNAVAILABLE",
+      path: missingManifest,
+      args: ["ingest", missingManifest, "--from", "drive", "--dry-run", "--aggregate-json"],
+    },
+    {
+      label: "malformed manifest",
+      source: "calendar",
+      failureCode: "MANIFEST_UNAVAILABLE",
+      path: malformedManifest,
+      args: ["ingest", malformedManifest, "--from", "calendar", "--dry-run", "--aggregate-json"],
+    },
+    {
+      label: "malformed flags",
+      source: "drive",
+      failureCode: "INVALID_REQUEST",
+      path: parseGuardManifest,
+      args: ["ingest", parseGuardManifest, "--from", "drive", "--dry-run", "--aggregate-json", "--limit"],
+    },
+    {
+      label: "invalid source",
+      source: "unknown",
+      failureCode: "INVALID_REQUEST",
+      path: missingManifest,
+      args: ["ingest", missingManifest, "--from", "gmail", "--dry-run", "--aggregate-json"],
+    },
+    {
+      label: "missing source",
+      source: "unknown",
+      failureCode: "INVALID_REQUEST",
+      path: missingManifest,
+      args: ["ingest", missingManifest, "--dry-run", "--aggregate-json"],
+    },
+    {
+      label: "aggregate flag with a value",
+      source: "drive",
+      failureCode: "INVALID_REQUEST",
+      path: missingManifest,
+      args: ["ingest", missingManifest, "--from", "drive", "--dry-run", "--aggregate-json=yes"],
+    },
+  ];
+
+  try {
+    for (const scenario of cases) {
+      const result = installedAggregateCli(scenario.args, userRoot);
+      assert.equal(result.signal, null, `${scenario.label} timed out or was killed`);
+      assert.equal(result.status, 1, `${scenario.label} must exit nonzero`);
+      assert.equal(result.stderr, "", `${scenario.label} must keep stderr empty`);
+      const receipt = parseOnlyJsonObject(result.stdout);
+      assert.equal(receipt.source, scenario.source);
+      assert.equal(receipt.status, "failed");
+      assert.equal(receipt.failure.code, scenario.failureCode);
+      assertNoPrivateSurface(`${result.stdout}${result.stderr}`);
+      assert.equal(result.stdout.includes(scenario.path), false, `${scenario.label} leaked its local path`);
+      assert.equal(existsSync(join(userRoot, ".brain", "support")), false,
+        `${scenario.label} created a support journal`);
+    }
+  } finally {
+    rmSync(userRoot, { recursive: true, force: true });
   }
 });
 

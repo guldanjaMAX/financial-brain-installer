@@ -216,7 +216,13 @@ field for a filename, title, event subject, document or source ID, URL, content,
 credential, or provider message. Anticipated failures are reduced to closed
 codes and exit nonzero without writing source state, source receipts, or support
 journal events. The dispatcher also bypasses the Cloudflare credential session
-for this provider-only read. The ordinary owner-terminal dry run remains detailed.
+for this provider-only read. Aggregate-shaped argv is detected before general
+flag parsing or manifest loading, so their path-bearing failures use the same
+closed JSON channel. The ordinary owner-terminal dry run remains detailed.
+Because a Drive provider walk has no authenticated D1 inventory, its
+Brain-dependent send/unchanged/removal-effect fields are null and its receipt is
+incomplete in both full and incremental scope; local resume state is never
+promoted into proof of stored truth.
 
 The authenticated HTTP batch route preserves one receipt per input document.
 For D1 it reads prior rows for unique document identities in one batch preflight,

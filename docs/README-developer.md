@@ -317,7 +317,21 @@ anticipated complete and failure paths. Normal `--dry-run` output is unchanged.
 Calendar refuses `--limit` in this mode; a limited Drive preview is labeled
 incomplete and exits nonzero. A recognized aggregate request with an invalid
 flag combination fails with the same schema and the closed `INVALID_REQUEST`
-code, without creating a support-journal entry.
+code, without creating a support-journal entry. If the raw aggregate request
+does not identify Drive or Calendar, `source` is `unknown`; that value is valid
+only on a failed `INVALID_REQUEST` receipt and prevents manifest access.
+
+The provider-only boundary deliberately does not resolve the Brain admin
+credential or read D1 inventory. A Drive walk therefore knows how many provider
+items it observed and skipped, but cannot promote local resume state into proof
+that a family still exists in D1 or determine the exact removal effect. Every
+Drive aggregate receipt returns `would_send`, `unchanged`, and
+`counts.removal_candidates` as `null`, sets status to `incomplete`, and uses the
+non-retryable `BRAIN_EFFECT_UNKNOWN` code. On full walks,
+`removal_candidates.source_deleted` is also `null` because provider-only
+enumeration cannot see stored families that vanished. This is an honest preview
+boundary, not an empty effect plan. A future inventory-backed mode requires a
+separate review.
 
 The version 1 receipt has exact top-level fields:
 
@@ -354,12 +368,15 @@ The version 1 receipt has exact top-level fields:
 ```
 
 Counts may be `null` only when a failed preview stopped before they could be
-proved. `status` is `complete`, `incomplete`, or `failed`; `scope` is `full`,
+proved or when the provider-only preview cannot prove Brain effects. `status`
+is `complete`, `incomplete`, or `failed`; `scope` is `full`,
 `incremental`, `mixed`, or `unknown`. A non-complete receipt carries only a
 closed failure code and a retryable boolean, never provider text. Complete is
 exit 0. Incomplete and failed are exit 1 and still emit the exact JSON schema.
 Unknown fields, mismatched totals, or a receipt that calls bounded or failed
-coverage complete are rejected before output.
+coverage complete are rejected before output. Calendar auth and permission
+failures use `AUTH_REQUIRED` and `PERMISSION_DENIED`; generic partial provider
+scope remains `PROVIDER_SCOPE_INCOMPLETE`.
 
 ---
 
