@@ -2181,6 +2181,10 @@ try {
   assert.equal(drillHarness.evalCalls, 1);
   assert.equal(existsSync(join(drillArtifactDirectory, ".brain-recovery-field-gate.lock")), false);
 
+  // Native Windows is deliberately refused until the aggregate receipt helper
+  // can prove a current-user-only DACL. POSIX lanes own the durable receipt
+  // lifecycle proof; ordinary cross-platform recovery continues below.
+  if (process.platform !== "win32") {
   // The v0.4.8-only field hook stops inside rebuild after independently
   // proving one non-final 3,201-row bootstrap cut. The failed stage is
   // retryable, the process lock is gone, and no cursor value enters either
@@ -2565,6 +2569,9 @@ try {
     existsSync(join(bootstrapArtifactDirectory, ".brain-recovery-field-gate.lock")),
     false,
   );
+  } else {
+    console.log("SKIP  durable bootstrap receipt lifecycle requires supported POSIX receipt primitives");
+  }
 
   const bootstrapFailureScenario = (name, harnessOptions) => {
     const plan = join(sandbox, `.brain-recovery-${name}-plan.json`);
@@ -2610,6 +2617,7 @@ try {
     };
   };
 
+  if (process.platform !== "win32") {
   // The guard exists before the first mutating POST. A lost response after
   // provider submission leaves an explicit ambiguous state, and a restart
   // cannot issue another POST or promote the Worker.
@@ -2686,6 +2694,7 @@ try {
     shapeScenario.artifacts,
     ".brain-recovery-bootstrap-interruption-v1.pending.json",
   )), true);
+  }
 
   // Corpus size is not a hidden mode bit. An ordinary 3,201-chunk recovery
   // that never requested the field-proof control can retry its own provider
