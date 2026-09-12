@@ -491,6 +491,9 @@ const expected = [
   "operations/provenance-target-repair.mjs",
   "operations/provenance-target-cli.mjs",
   "operations/provenance-source-assessment.mjs",
+  // Fixed fictional field fixture. It has no corpus/path/credential input or
+  // live transport and emits only an aggregate plan or D1-count receipt.
+  "operations/disposable-recovery-seeder.mjs",
   // Reviewed read-only Optimize inventory client. It accepts no literal key,
   // validates HTTPS before resolving the protected credential, refuses
   // redirects, and sends only bounded exact filters to the Brain data plane.
