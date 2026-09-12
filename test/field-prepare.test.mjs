@@ -35,7 +35,8 @@ const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
 test("the default profile contains every credential-free preparation gate", () => {
   const options = parseFieldPrepareArgs([]);
-  const ids = buildStepPlan(options).map((step) => step.id);
+  const plan = buildStepPlan(options);
+  const ids = plan.map((step) => step.id);
   assert.deepEqual(ids, [
     "source-identity", "full-suite", "frontend-test", "frontend-build",
     "hiccup-lab", "plaid-fake",
@@ -43,6 +44,8 @@ test("the default profile contains every credential-free preparation gate", () =
     "history-privacy", "dependency-audit", "package-build", "clean-prefix-smoke",
     "source-identity-final", "private-home-cleanup",
   ]);
+  const historyPrivacy = plan.find((step) => step.id === "history-privacy");
+  assert.deepEqual(historyPrivacy.args, ["run", "privacy:history:field"]);
 });
 
 test("fast and selected profiles cannot become accidental full proof", () => {
