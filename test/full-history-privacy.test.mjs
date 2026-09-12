@@ -163,6 +163,112 @@ test("strict release review never allowlists privacy or revoked credentials", ()
     schema_version: 1,
     approved_candidates: approved,
   }).passes, false);
+  const localFieldResult = evaluateStrictRelease(candidateOnly, {
+    schema_version: 1,
+    approved_candidates: approved,
+  }, { allowStaleDispositions: true });
+  assert.equal(localFieldResult.passes, true);
+  assert.equal(localFieldResult.stale_disposition_count, 1);
+  assert.equal(localFieldResult.stale_dispositions_tolerated, true);
+
+  assert.equal(evaluateStrictRelease(report, {
+    schema_version: 1,
+    approved_candidates: approved,
+  }, { allowStaleDispositions: true }).passes, false,
+  "local field tolerance must not allow privacy or unapproved findings");
+});
+
+test("stale dispositions are tolerated only by the exact local field-preparation invocation", () => {
+  const scanner = join(root, "scripts/scan-git-history-privacy.mjs");
+  const dispositions = join(sandbox, "stale-dispositions.json");
+  writeFileSync(dispositions, `${JSON.stringify({
+    schema_version: 1,
+    approved_candidates: [{
+      object_id: "0".repeat(40),
+      category: "env_assignment",
+      disposition: "synthetic_fixture",
+    }],
+  })}\n`);
+  const baseArgs = [
+    scanner,
+    "--repo", sandbox,
+    "--ref", "HEAD~2",
+    "--require-clean",
+    "--credential-dispositions", dispositions,
+  ];
+
+  const ordinaryStrict = spawnSync(process.execPath, baseArgs, { encoding: "utf8" });
+  assert.equal(ordinaryStrict.status, 1, ordinaryStrict.stdout || ordinaryStrict.stderr);
+  assert.match(ordinaryStrict.stderr, /1 stale credential disposition/);
+
+  const unscopedTolerance = spawnSync(process.execPath, [
+    ...baseArgs,
+    "--allow-stale-dispositions-for-local-field-prep",
+  ], { encoding: "utf8" });
+  assert.equal(unscopedTolerance.status, 1, unscopedTolerance.stdout || unscopedTolerance.stderr);
+  assert.match(unscopedTolerance.stderr, /restricted to exact local HEAD field preparation/);
+
+  const wrongRefTolerance = spawnSync(process.execPath, [
+    ...baseArgs,
+    "--allow-stale-dispositions-for-local-field-prep",
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, BRAIN_FIELD_PREPARE: "1" },
+  });
+  assert.equal(wrongRefTolerance.status, 1, wrongRefTolerance.stdout || wrongRefTolerance.stderr);
+  assert.match(wrongRefTolerance.stderr, /restricted to exact local HEAD field preparation/);
+
+  const remoteTolerance = spawnSync(process.execPath, [
+    scanner,
+    "--repo", sandbox,
+    "--remote", "origin",
+    "--ref", "HEAD",
+    "--require-clean",
+    "--credential-dispositions", dispositions,
+    "--allow-stale-dispositions-for-local-field-prep",
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, BRAIN_FIELD_PREPARE: "1" },
+  });
+  assert.equal(remoteTolerance.status, 1, remoteTolerance.stdout || remoteTolerance.stderr);
+  assert.match(remoteTolerance.stderr, /restricted to exact local HEAD field preparation/);
+
+  const activeFindings = spawnSync(process.execPath, [
+    scanner,
+    "--repo", sandbox,
+    "--ref", "HEAD",
+    "--require-clean",
+    "--credential-dispositions", dispositions,
+    "--allow-stale-dispositions-for-local-field-prep",
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, BRAIN_FIELD_PREPARE: "1" },
+  });
+  assert.equal(activeFindings.status, 1, activeFindings.stdout || activeFindings.stderr);
+  assert.match(activeFindings.stderr, /[1-9][0-9]* blocking object/,
+    "field tolerance must still fail active privacy and unapproved findings");
+
+  const cleanContainer = mkdtempSync(join(tmpdir(), "brain-history-clean-head-"));
+  const cleanCheckout = join(cleanContainer, "work");
+  gitAt(sandbox, ["worktree", "add", "--detach", cleanCheckout, "HEAD~2"]);
+  try {
+    const scopedTolerance = spawnSync(process.execPath, [
+      scanner,
+      "--repo", cleanCheckout,
+      "--ref", "HEAD",
+      "--require-clean",
+      "--credential-dispositions", dispositions,
+      "--allow-stale-dispositions-for-local-field-prep",
+    ], {
+      encoding: "utf8",
+      env: { ...process.env, BRAIN_FIELD_PREPARE: "1" },
+    });
+    assert.equal(scopedTolerance.status, 0, scopedTolerance.stderr || scopedTolerance.stdout);
+    assert.match(scopedTolerance.stdout, /local field-preparation gate found no blocking objects/);
+  } finally {
+    gitAt(sandbox, ["worktree", "remove", "--force", cleanCheckout]);
+    rmSync(cleanContainer, { recursive: true, force: true });
+  }
 });
 
 test("zero-finding policy rejects even a reviewable synthetic candidate", () => {
@@ -253,6 +359,11 @@ test("predecessor incident metadata stays sanitized but is not an active gate", 
     assert.doesNotMatch(scripts[name], /history-baseline|public-refs|credential-dispositions/);
   }
   assert.match(scripts["privacy:history"], /--ref HEAD/);
+  assert.match(scripts["privacy:history:field"], /--ref HEAD/);
+  assert.match(scripts["privacy:history:field"], /--require-clean/);
+  assert.match(scripts["privacy:history:field"], /--allow-stale-dispositions-for-local-field-prep/);
+  assert.doesNotMatch(scripts["privacy:history:field"],
+    /--remote|--baseline|--record-baseline|--require-zero-findings/);
   assert.match(scripts["privacy:history:remote"], /--remote origin/);
   assert.match(scripts["privacy:history:remote"], /--ref HEAD/);
 });
