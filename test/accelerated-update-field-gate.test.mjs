@@ -14,6 +14,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1382,6 +1383,45 @@ test("write, file-fsync, rename, and directory-fsync failures preserve a valid a
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });
     }
+  }
+});
+
+test("a short final receipt write preserves the durable marker and execution lock", async () => {
+  const fixture = setupFixture();
+  const state = { phase: "baseline", sessions: 0, updateCalls: 0, calls: [], canaryTitle: null };
+  const dependencies = dependenciesFor(fixture, state);
+  try {
+    const prepared = await prepareAcceleratedUpdateFieldGate(optionsFor(fixture.directory, "prepare"), dependencies);
+    privateWrite(join(fixture.directory, "seed.json"), `${JSON.stringify(syntheticSeedReceipt(prepared), null, 2)}\n`);
+    state.phase = "seeded";
+    dependencies.finalizeReceipt = (reservation, receipt) => finalizeReservedAggregateReceipt(
+      reservation,
+      receipt,
+      {
+        writeBytes(descriptor, bytes) {
+          assert.equal(bytes.length > 1, true);
+          const prefixLength = bytes.length - 1;
+          assert.equal(writeSync(descriptor, bytes, 0, prefixLength, 0), prefixLength);
+        },
+      },
+    );
+    await assert.rejects(
+      () => executeAcceleratedUpdateFieldGate(
+        optionsFor(fixture.directory, "execute", prepared.plan_fingerprint),
+        dependencies,
+      ),
+      /receipt_finalization_invalid/,
+    );
+    assert.equal(state.updateCalls, 1);
+    const visible = JSON.parse(readFileSync(join(fixture.directory, "result.json"), "utf8"));
+    assert.equal(visible.status, "execution_in_progress_or_interrupted_target_requires_review");
+    assert.doesNotMatch(
+      JSON.stringify(visible),
+      new RegExp(`${PRIVATE_SENTINEL}|${ADMIN_SENTINEL}|${SLUG}|${D1_ID}|${ACCOUNT}`),
+    );
+    assert.equal(existsSync(join(fixture.directory, ".accelerated-update-field-gate.lock")), true);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
   }
 });
 
