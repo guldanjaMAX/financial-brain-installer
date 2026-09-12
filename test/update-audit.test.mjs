@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions, regressionEnvironment,
   verifiedNpmCliPath, assertUndeferrableRegistered, assertEvidenceDocuments, UNDEFERRABLE_INCIDENTS,
   DEFERRAL_CAUSES, assertSourceInventoryV3ReleaseVersion,
-  SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION } from "../scripts/audit-updates.mjs";
+  SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, DEFAULT_REGRESSION_TIMEOUT_MS,
+  CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS } from "../scripts/audit-updates.mjs";
 
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
@@ -183,12 +184,35 @@ for (const item of cases.filter((i) => i.deferral)) {
 assert.ok(releaseBlockers(cases, packageVersion).length > 0,
   "0.4.0 still has real blockers; scoping the gate must not be mistaken for clearing it");
 const calls = [];
-const results = runRegressions([{ tests: ["test/first.mjs", "test/second.mjs", "test/first.mjs"] }], (path) => {
-  calls.push(path);
+const results = runRegressions([{ tests: ["test/first.mjs", "test/second.mjs", "test/first.mjs"] }], (path, timeout) => {
+  calls.push({ path, timeout });
   return { status: path.includes("first") ? 1 : 0 };
 });
 assert.equal(calls.length, 2, "failure must not skip the next independent test; shared tests run once");
+assert.deepEqual(calls.map((call) => call.path), ["test/first.mjs", "test/second.mjs"]);
+assert.deepEqual(calls.map((call) => call.timeout), [DEFAULT_REGRESSION_TIMEOUT_MS, DEFAULT_REGRESSION_TIMEOUT_MS],
+  "ordinary regressions retain the five-minute bound");
 assert.deepEqual(results.map((r) => r.passed), [false, true]);
+const timeoutSelections = [];
+runRegressions([{ tests: [
+  "test/cloudflare-recovery-adapter.test.mjs",
+  "test/cloudflare-recovery-adapter-extra.test.mjs",
+] }], (path, timeout) => {
+  timeoutSelections.push({ path, timeout });
+  return { status: 0 };
+});
+assert.deepEqual(timeoutSelections, [
+  {
+    path: "test/cloudflare-recovery-adapter.test.mjs",
+    timeout: CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS,
+  },
+  {
+    path: "test/cloudflare-recovery-adapter-extra.test.mjs",
+    timeout: DEFAULT_REGRESSION_TIMEOUT_MS,
+  },
+], "only the exact heavy adapter proof gets the reviewed ten-minute bound");
+assert.equal(DEFAULT_REGRESSION_TIMEOUT_MS, 300_000);
+assert.equal(CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS, 600_000);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: null, signal: "SIGTERM" }))[0].passed, false);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"], testPlatform: "win32" }], () => { throw new Error("must not run on this host"); }, "darwin")[0].skipped, true);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: 0, error: new Error("synthetic timeout") }))[0].passed, false);

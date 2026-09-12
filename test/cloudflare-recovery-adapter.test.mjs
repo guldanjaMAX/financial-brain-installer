@@ -2585,6 +2585,15 @@ try {
   assert.equal(invalidStopHarness.adminReads, 0);
 
   // The mid-bootstrap hook is a separate, plan-bound synthetic field action.
+  // Native Windows cannot run the macOS Keychain-bound field hook. Keep that
+  // boundary explicit there; Linux still exercises the synthetic lifecycle and
+  // must not turn its completed evidence into approved macOS field proof.
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "win32" }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_REQUIRES_MACOS_KEYCHAIN",
+    "the special field hook remains unreachable on Windows",
+  );
+  if (process.platform !== "win32") {
   // A copied flag against the ordinary recovery fixture is refused before any
   // provider command or admin-key read, even when all ordinary approvals exist.
   const testCandidateSha = "c".repeat(40);
@@ -4296,6 +4305,18 @@ try {
   assert.equal(existsSync(completedResumeAuthorizationPath), true);
   assert.equal(existsSync(completedPromotionAuthorizationPath), true);
 
+  // The field hook is intentionally macOS-only. Cross-platform lanes still
+  // exercise the synthetic interruption lifecycle above, but their locked
+  // Wrangler receipt truthfully records linux or win32. A completed campaign
+  // from that non-field host must never unblock ordinary recovery as though it
+  // were the approved macOS campaign.
+  if (lockedWranglerRuntime.host.platform !== "darwin") {
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate(fieldBaseConfig, { platform: "darwin" }),
+      (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID",
+      "a completed non-macOS test runtime cannot become ordinary field proof",
+    );
+  } else {
   const ordinaryCompletedPreview = previewCloudflareRecoveryFieldGate(
     fieldBaseConfig,
     { platform: "darwin" },
@@ -4387,6 +4408,8 @@ try {
     fetch: fieldHarness.fetchCalls.length,
   }, beforeBothCheckpointRefusal);
   unlinkSync(interruptionCheckpointPath);
+  }
+  }
 
   const drillPlanPath = join(sandbox, ".brain-recovery-drill-plan.json");
   const drillStatePath = join(sandbox, ".brain-recovery-drill-state.json");
