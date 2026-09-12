@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -17,12 +18,15 @@ import {
   assertDirectPlanEntrypoint,
   assertNoLiveCommand,
   buildNpmInvocation,
+  buildFieldGates,
   buildStepPlan,
   buildWindowsBatchInvocation,
   canonicalSourceRoot,
   createCredentialFreeProviderEnvironment,
   createPlanEnvironment,
   createSafeEnvironment,
+  currentD1SchemaVersion,
+  FULL_FIELD_PREPARATION_STEPS,
   parseFieldPrepareArgs,
   readSourceIdentity,
   renderFieldChecklist,
@@ -37,6 +41,7 @@ test("the default profile contains every credential-free preparation gate", () =
   const options = parseFieldPrepareArgs([]);
   const plan = buildStepPlan(options);
   const ids = plan.map((step) => step.id);
+  assert.deepEqual(FULL_FIELD_PREPARATION_STEPS.map((step) => step.id), ids);
   assert.deepEqual(ids, [
     "source-identity", "full-suite", "frontend-test", "frontend-build",
     "hiccup-lab", "plaid-fake",
@@ -279,10 +284,39 @@ test("the generated checklist keeps offline proof separate from human field gate
   });
   assert.match(checklist, /Clean Windows owner profile/);
   assert.match(checklist, /Disposable Cloudflare Brain/);
+  assert.match(checklist, /Accelerated synthetic lifecycle update/);
+  assert.match(checklist, /accelerated-update-field-gate\.mjs --plan/);
   assert.match(checklist, /Plaid Sandbox through the deployed Brain/);
   assert.match(checklist, /QuickBooks Online Sandbox/);
   assert.match(checklist, /does not prove Cloudflare/i);
   assert.doesNotMatch(checklist, /--execute|--live/);
+});
+
+test("the field checklist schema is derived from the complete contiguous migration set", () => {
+  const names = readdirSync(join(ROOT, "migrations", "d1"))
+    .filter((name) => name.endsWith(".sql"));
+  const expected = Math.max(...names.map((name) => Number(name.slice(0, 4))));
+  assert.equal(currentD1SchemaVersion(ROOT), expected);
+  const disposable = buildFieldGates().find((gate) => gate.id === "disposable_cloudflare");
+  assert.match(disposable.proof, new RegExp(`schema ${expected}(?:\\D|$)`));
+
+  const injected = buildFieldGates(currentD1SchemaVersion("/fixture", {
+    readDirectory: () => [
+      "0003_three.sql", "0001_one.sql", "0002_two.sql", "README.md",
+    ],
+  })).find((gate) => gate.id === "disposable_cloudflare");
+  assert.match(injected.proof, /schema 3(?:\D|$)/);
+  assert.doesNotMatch(injected.proof, new RegExp(`schema ${expected}(?:\\D|$)`));
+
+  assert.throws(() => currentD1SchemaVersion("/fixture", {
+    readDirectory: () => ["0001_one.sql", "0003_three.sql"],
+  }), /d1_migration_sequence_not_contiguous/);
+  assert.throws(() => currentD1SchemaVersion("/fixture", {
+    readDirectory: () => ["0001_one.sql", "0001_duplicate.sql"],
+  }), /d1_migration_version_duplicate/);
+  assert.throws(() => currentD1SchemaVersion("/fixture", {
+    readDirectory: () => ["0001_one.sql", "0002-BAD.sql"],
+  }), /d1_migration_filename_refused/);
 });
 
 test("plan mode verifies candidate identity without running a planned step", async () => {

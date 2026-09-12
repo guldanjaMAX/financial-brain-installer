@@ -67,6 +67,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/provenance-source-assessment.test.mjs",
   "node --no-warnings --test worker/test/source-original-binding.test.mjs",
   "node --no-warnings --test worker/test/source-original-observation.test.mjs",
+  "node --no-warnings test/accelerated-update-field-gate.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -221,6 +222,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/cloudflare-account-bootstrap.test.mjs",
   "node --no-warnings test/cloudflare-oauth-session.test.mjs",
   "node --no-warnings test/field-prepare.test.mjs",
+  "node --no-warnings test/accelerated-update-field-gate.test.mjs",
   "node --no-warnings test/full-history-privacy.test.mjs",
   "node --no-warnings test/gmail-incremental-policy.test.mjs",
   "node --no-warnings test/linkedin-export.test.mjs",

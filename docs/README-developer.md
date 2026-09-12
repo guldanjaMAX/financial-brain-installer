@@ -1304,6 +1304,39 @@ then prints an aggregate-only receipt. Preserve the sanitized receipt under
 Vectorize index, and temporary admin-key item. The harness refuses ordinary
 client manifests and never accepts or prints a private corpus.
 
+`test/live/accelerated-update-field-gate.mjs` is the narrower opt-in lifecycle
+proof for the bulk residue path inside `brain update`. Its `--plan` mode reads
+nothing and performs no write. `--prepare` consumes the exact mode-0600 tarball
+and aggregate receipt made by a full field preparation, installs that artifact
+offline into a new isolated prefix, derives the terminal schema and accelerated
+limits from the installed files, and binds a clean live baseline to an approval
+fingerprint. It accepts only a dedicated, connector-free synthetic manifest and
+explicitly named, already-provisioned Worker, D1, Vectorize, and workers.dev
+targets. It uses the installed package's exact named OS-keyring OAuth profile;
+ambient provider credentials are refused.
+
+With schedules disabled, an operator separately seeds the fingerprinted target
+with the candidate-derived trigger count of fictional one-chunk documents and
+writes the exact aggregate-only seed receipt. `--execute` rechecks the seed and
+all target pins, invokes the installed `brain update` wrapper exactly once, and
+fails if the CLI did not positively report verified writer quiescence. Success
+requires direct D1 proof of exactly one residue re-projection event, the exact
+full-page and final-page batch ledger, installed migration checksum parity,
+exactly one verified upgrade run, restored cron and active health, D1/Vectorize
+count parity, and one synthetic write-drain-retrieval canary. That canary may
+make up to 12 bounded direct drain calls, and its receipt records the exact call
+count; it is distinct from the forbidden direct residue bootstrap or residue
+drain. CLI output and raw provider responses stay in memory. Receipts contain
+only hashes, versions, counts, timings, and booleans, never paths, target
+identifiers, credential locators, document identifiers, queries, titles, or
+content. The harness never provisions, deletes, or retries the update. Any
+ambiguity preserves the target for review; cleanup is always a separate
+supervised action.
+
+The human field checklist derives its D1 schema number from the complete
+contiguous `migrations/d1` filename set. A missing, duplicate, or malformed
+number refuses checklist generation instead of preserving a stale literal.
+
 `brain eval <manifest>` uses the `smoke` profile by default. It is diagnostic,
 not certification. `brain eval <manifest> --profile release` fails before
 reading the admin key or contacting the brain unless the private suite has at

@@ -16,6 +16,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -251,6 +252,15 @@ export function buildStepPlan(options) {
     }),
   ]);
 }
+
+// Export the exact receipt contract instead of making downstream field gates
+// duplicate a list that can drift as the full offline profile evolves.
+export const FULL_FIELD_PREPARATION_STEPS = Object.freeze(
+  buildStepPlan(Object.freeze({ mode: "full", only: Object.freeze([]) }))
+    .map(({ id, title, proof, network_scope }) => Object.freeze({
+      id, title, proof, network_scope,
+    })),
+);
 
 const ALLOWED_ENVIRONMENT = Object.freeze([
   "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC",
@@ -613,17 +623,40 @@ function safeCode(error, fallback) {
   return value.replace(/^_+|_+$/g, "").slice(0, 80) || fallback;
 }
 
-const FIELD_GATES = Object.freeze([
-  Object.freeze({ id: "physical_windows_install", title: "Clean Windows owner profile", proof: "Install the exact tarball in a standard user profile, run the package-local command, complete the 25-round DPAPI gate, then interrupt and resume once." }),
-  Object.freeze({ id: "disposable_cloudflare", title: "Disposable Cloudflare Brain", proof: "With separate approval, prove browser OAuth, exact account choice, D1 and Vectorize creation, schema 43, fixed public smoke, one interrupted migration, vector backlog and drain, then confirm cleanup." }),
-  Object.freeze({ id: "physical_passkeys", title: "Permanent-host passkey ceremony", proof: "Two people use two authenticator types each. Prove enroll, logout and login, second device, revoke with immediate session denial, recovery, and last-owner refusal." }),
-  Object.freeze({ id: "plaid_sandbox", title: "Plaid Sandbox through the deployed Brain", proof: "Only after separately approved owner-custody setup and complete binding readback, complete owner Link, assign every masked account, sync history and pagination, change one transaction, prove webhook plus scheduled fallback, update mode, response-loss replay, and confirmed removal." }),
-  Object.freeze({ id: "quickbooks_sandbox", title: "QuickBooks Online Sandbox", proof: "Complete Intuit consent, company identity and same-company reconnect, wrong-company refusal, refresh, pagination, changed record, outage retry, retrieval, disconnect retention, and a separate forget preview." }),
-  Object.freeze({ id: "watched_folder", title: "Watched-folder lifecycle", proof: "On the target computer add, edit, and remove a low-sensitivity file, then rename or disconnect the approved test folder and prove the Brain reports the gap without mass deletion." }),
-  Object.freeze({ id: "bank_exports", title: "Real bank-export normalization", proof: "With explicit approval, import reviewed low-sensitivity CSV and OFX or QFX exports from two institutions, compare counts and totals, then inspect provenance and every skipped row." }),
-]);
+export function currentD1SchemaVersion(root = ROOT, { readDirectory = readdirSync } = {}) {
+  const directory = join(resolve(root), "migrations", "d1");
+  const sqlFiles = readDirectory(directory).filter((name) => String(name).endsWith(".sql"));
+  if (sqlFiles.length === 0) throw new Error("d1_migration_set_empty");
+  const versions = sqlFiles.map((name) => {
+    const match = /^(\d{4})_[a-z0-9_]+\.sql$/.exec(String(name));
+    if (!match) throw new Error("d1_migration_filename_refused");
+    return Number(match[1]);
+  }).sort((left, right) => left - right);
+  if (new Set(versions).size !== versions.length) throw new Error("d1_migration_version_duplicate");
+  if (versions[0] !== 1 || versions.some((version, index) => version !== index + 1)) {
+    throw new Error("d1_migration_sequence_not_contiguous");
+  }
+  return versions.at(-1);
+}
+
+export function buildFieldGates(schemaVersion = currentD1SchemaVersion()) {
+  if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
+    throw new Error("d1_schema_version_invalid");
+  }
+  return Object.freeze([
+    Object.freeze({ id: "physical_windows_install", title: "Clean Windows owner profile", proof: "Install the exact tarball in a standard user profile, run the package-local command, complete the 25-round DPAPI gate, then interrupt and resume once." }),
+    Object.freeze({ id: "disposable_cloudflare", title: "Disposable Cloudflare Brain", proof: `With separate approval, prove browser OAuth, exact account choice, D1 and Vectorize creation, schema ${schemaVersion}, fixed public smoke, one interrupted migration, vector backlog and drain, then confirm cleanup.` }),
+    Object.freeze({ id: "accelerated_lifecycle_update", title: "Accelerated synthetic lifecycle update", proof: "With separate approval, point the dedicated synthetic-only gate at an already-provisioned target. Prove the real `brain update` entrypoint serves paused-for-upgrade, opens residue-only re-projection, returns to active, commits the exact candidate version, and writes only aggregate evidence. The harness never provisions or removes resources; cleanup stays supervised." }),
+    Object.freeze({ id: "physical_passkeys", title: "Permanent-host passkey ceremony", proof: "Two people use two authenticator types each. Prove enroll, logout and login, second device, revoke with immediate session denial, recovery, and last-owner refusal." }),
+    Object.freeze({ id: "plaid_sandbox", title: "Plaid Sandbox through the deployed Brain", proof: "Only after separately approved owner-custody setup and complete binding readback, complete owner Link, assign every masked account, sync history and pagination, change one transaction, prove webhook plus scheduled fallback, update mode, response-loss replay, and confirmed removal." }),
+    Object.freeze({ id: "quickbooks_sandbox", title: "QuickBooks Online Sandbox", proof: "Complete Intuit consent, company identity and same-company reconnect, wrong-company refusal, refresh, pagination, changed record, outage retry, retrieval, disconnect retention, and a separate forget preview." }),
+    Object.freeze({ id: "watched_folder", title: "Watched-folder lifecycle", proof: "On the target computer add, edit, and remove a low-sensitivity file, then rename or disconnect the approved test folder and prove the Brain reports the gap without mass deletion." }),
+    Object.freeze({ id: "bank_exports", title: "Real bank-export normalization", proof: "With explicit approval, import reviewed low-sensitivity CSV and OFX or QFX exports from two institutions, compare counts and totals, then inspect provenance and every skipped row." }),
+  ]);
+}
 
 export function renderFieldChecklist(receipt) {
+  const fieldGates = buildFieldGates();
   const source = receipt.source || {};
   const artifact = receipt.package || {};
   const stop = receipt.status === "source_preparation_passed"
@@ -659,7 +692,7 @@ export function renderFieldChecklist(receipt) {
     "## Human and provider gates",
     "",
   ];
-  for (const gate of FIELD_GATES) {
+  for (const gate of fieldGates) {
     lines.push(`- [ ] **${gate.title}.** ${gate.proof}`);
   }
   lines.push(
@@ -670,6 +703,7 @@ export function renderFieldChecklist(receipt) {
     "",
     "```bash",
     "node test/live/disposable-cloudflare-v021-field-gate.mjs --plan",
+    "node test/live/accelerated-update-field-gate.mjs --plan",
     "node test/live/passkey-permanent-hostname-acceptance.mjs --plan",
     "node test/live/supervised-permanent-hostname-v021-field-gate.mjs --plan",
     "```",
@@ -681,6 +715,7 @@ export function renderFieldChecklist(receipt) {
 }
 
 function baseReceipt(options, plan) {
+  const fieldGates = buildFieldGates();
   return {
     schema_version: 1,
     run_id: randomUUID(),
@@ -713,7 +748,7 @@ function baseReceipt(options, plan) {
       failure_code: null,
       network_scope: step.network_scope,
     })),
-    human_field_gates: FIELD_GATES.map((gate) => ({ id: gate.id, status: "pending_human_proof" })),
+    human_field_gates: fieldGates.map((gate) => ({ id: gate.id, status: "pending_human_proof" })),
   };
 }
 
