@@ -2955,10 +2955,29 @@ export async function cmdHealth(manifestPath, {
   // after the old 16-second window, then accepted the same Keychain value. Give
   // Cloudflare up to roughly a minute before calling the value wrong.
   const attempts = 15;
+  const documentsUrl = `${base}/api/admin/brain/documents`;
+  let documentsTransportRetryAvailable = true;
+  const requestDocuments = async () => {
+    try {
+      return await request(documentsUrl, {
+        headers: { "X-Admin-Key": key },
+      }, { timeoutMs: HTTP_TIMEOUT_MS, what: "the private readiness check" });
+    } catch (error) {
+      // This GET is authenticated but read-only and idempotent, so one lost
+      // transport attempt is safe to repeat. Keep the retry outside response
+      // handling: HTTP, authentication, JSON, and receipt-contract failures
+      // must still stop on their first observed response.
+      if (!documentsTransportRetryAvailable || error?.retryable !== true) throw error;
+      documentsTransportRetryAvailable = false;
+      info("the private readiness check took longer than expected; still checking once more");
+      await wait(2_000);
+      return request(documentsUrl, {
+        headers: { "X-Admin-Key": key },
+      }, { timeoutMs: HTTP_TIMEOUT_MS, what: "the private readiness check" });
+    }
+  };
   for (let i = 1; i <= attempts; i++) {
-    const docs = await request(`${base}/api/admin/brain/documents`, {
-      headers: { "X-Admin-Key": key },
-    });
+    const docs = await requestDocuments();
     const dbody = await docs.text();
     if (docs.ok) {
       let inventory;
