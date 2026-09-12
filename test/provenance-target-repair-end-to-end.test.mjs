@@ -288,9 +288,10 @@ function orchestratorHarness(fixture, install) {
         package_fingerprint: candidateRuntimePackageFingerprint,
       };
     },
-    lstat: async (path) => {
+    lstat: async (path, options) => {
       requireLease("private.file-lstat");
-      return lstatSync(path);
+      assert.deepEqual(options, { bigint: true });
+      return lstatSync(path, options);
     },
     realpath: async (path) => {
       requireLease("private.file-realpath");

@@ -55,6 +55,8 @@ const WINDOWS_ABSOLUTE_RE = /^[A-Za-z]:\//;
 const MAX_LOCATOR_BYTES = 2_048;
 const MAX_QUERY_BYTES = 4_096;
 const MAX_ROOT_BYTES = 8_192;
+const MAX_FILESYSTEM_ID = 18_446_744_073_709_551_615n;
+const MAX_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const encoder = new TextEncoder();
 
 const WORKER_BOUNDED_SCOPE = Object.freeze({
@@ -165,12 +167,19 @@ function normalizedRootIdentity(value) {
   const realpath = boundedText(value.realpath, "resolved source root", MAX_ROOT_BYTES);
   const absolute = (candidate) => candidate.startsWith("/") ||
     /^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith("\\\\");
+  const canonicalFilesystemInteger = (candidate) => {
+    if (Number.isSafeInteger(candidate) && candidate >= 0) return candidate;
+    if (typeof candidate !== "string" || !/^[1-9][0-9]{15,19}$/.test(candidate)) return null;
+    const integer = BigInt(candidate);
+    return integer > MAX_SAFE_INTEGER_BIGINT && integer <= MAX_FILESYSTEM_ID ? candidate : null;
+  };
+  const device = canonicalFilesystemInteger(value.device);
+  const inode = canonicalFilesystemInteger(value.inode);
   if (!absolute(path) || !absolute(realpath) ||
-      !Number.isSafeInteger(value.device) || value.device < 0 ||
-      !Number.isSafeInteger(value.inode) || value.inode < 0) {
+      device === null || inode === null) {
     throw new TypeError("target repair source-root identity is invalid");
   }
-  return Object.freeze({ path, realpath, device: value.device, inode: value.inode });
+  return Object.freeze({ path, realpath, device, inode });
 }
 
 function normalizedSource(value) {

@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  buildNpmCliInvocation,
+  resolveNpmCliPath,
+} from "../operations/npm-cli-runtime.mjs";
+
+import {
   provenanceTargetDependencies,
   provenanceTargetRuntimePackageFiles,
   provenanceTargetRuntimePackageFingerprint,
@@ -468,10 +473,14 @@ test("real Brain adapter refuses widened target, OCR, family, drain, and generat
 });
 
 test("runtime inventory exactly matches the local npm pack and rejects nested symlinks", (t) => {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const packed = spawnSync(npm, ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+  const npmCli = resolveNpmCliPath();
+  const invocation = buildNpmCliInvocation(npmCli, [
+    "pack", "--dry-run", "--json", "--ignore-scripts",
+  ]);
+  const packed = spawnSync(invocation.command, invocation.args, {
     cwd: ROOT,
     encoding: "utf8",
+    shell: invocation.shell,
     timeout: 60_000,
   });
   assert.equal(packed.status, 0, packed.stderr || packed.stdout);

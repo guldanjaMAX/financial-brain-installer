@@ -9200,7 +9200,7 @@ export function provenanceTargetDependencies(options = {}) {
   return Object.freeze({
     acquireSourceLease,
     verifyCandidateRuntime,
-    lstat: options.lstat ?? ((path) => lstatSync(path)),
+    lstat: options.lstat ?? ((path, statOptions) => lstatSync(path, statOptions)),
     realpath: options.realpath ?? ((path) => realpathSync(path)),
     readFile: options.readFile ?? ((path) => readFileSync(path)),
     resolveDurableAdminAccess,

@@ -8,6 +8,11 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import {
+  buildNpmCliInvocation,
+  resolveNpmCliPath,
+} from "../operations/npm-cli-runtime.mjs";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FRONTEND = join(ROOT, "frontend");
 const REVIEWED_BUNDLE = join(ROOT, "worker", "src", "lib", "app-assets.js");
@@ -47,11 +52,13 @@ function buildEnvironment(sandbox) {
 }
 
 function runBuild(frontend, environment) {
-  const command = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = spawnSync(command, ["--prefix", frontend, "run", "build"], {
+  const npmCli = resolveNpmCliPath();
+  const invocation = buildNpmCliInvocation(npmCli, ["--prefix", frontend, "run", "build"]);
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: ROOT,
     encoding: "utf8",
     env: environment,
+    shell: invocation.shell,
     timeout: 120_000,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);

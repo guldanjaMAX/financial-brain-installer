@@ -277,8 +277,9 @@ jobs:
           echo "verified $ARTIFACT_NAME at sha256:$EXPECTED_SHA256"
 
       # The operator runs preflight from the installed release, not from a
-      # source checkout. Extract both scripts from the one shared artifact so
-      # every matrix job proves those exact bytes were actually packaged.
+      # source checkout. Extract both scripts and their manifest-selector helper
+      # from the one shared artifact so every matrix job proves those exact
+      # bytes were actually packaged.
       - name: extract preflight from exact package
         shell: bash
         run: |
@@ -289,10 +290,12 @@ jobs:
           fi
           mkdir -p .packaged-preflight
           tar -xzf "$tarball" -C .packaged-preflight \
-            package/tools/preflight.sh package/tools/preflight.ps1
+            package/tools/preflight.sh package/tools/preflight.ps1 \
+            package/operations/installed-manifest.mjs
           test -f .packaged-preflight/package/tools/preflight.sh
           test -f .packaged-preflight/package/tools/preflight.ps1
-          echo "both packaged preflight scripts extracted from $(basename "$tarball")"
+          test -f .packaged-preflight/package/operations/installed-manifest.mjs
+          echo "packaged preflight scripts and manifest selector extracted from $(basename "$tarball")"
 
       # --ignore-scripts is what the client is told to run, so CI runs the same
       # thing. If a dependency needs a postinstall script, better to find out
@@ -591,8 +594,9 @@ jobs:
           echo "verified $ARTIFACT_NAME at sha256:$EXPECTED_SHA256"
 
       # The operator runs preflight from the installed release, not from a
-      # source checkout. Extract both scripts from the one shared artifact so
-      # every matrix job proves those exact bytes were actually packaged.
+      # source checkout. Extract both scripts and their manifest-selector helper
+      # from the one shared artifact so every matrix job proves those exact
+      # bytes were actually packaged.
       - name: extract preflight from exact package
         shell: bash
         run: |
@@ -603,10 +607,12 @@ jobs:
           fi
           mkdir -p .packaged-preflight
           tar -xzf "$tarball" -C .packaged-preflight \
-            package/tools/preflight.sh package/tools/preflight.ps1
+            package/tools/preflight.sh package/tools/preflight.ps1 \
+            package/operations/installed-manifest.mjs
           test -f .packaged-preflight/package/tools/preflight.sh
           test -f .packaged-preflight/package/tools/preflight.ps1
-          echo "both packaged preflight scripts extracted from $(basename "$tarball")"
+          test -f .packaged-preflight/package/operations/installed-manifest.mjs
+          echo "packaged preflight scripts and manifest selector extracted from $(basename "$tarball")"
 
       - name: release workflow cannot bypass this CI gate
         run: node scripts/test-release-workflow-contract.mjs
@@ -696,11 +702,21 @@ jobs:
         shell: powershell
         run: |
           $shim = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\node-21" -Force
-          Set-Content "$shim\node.cmd" "@echo off`r`necho v21.9.0"
+          @'
+          @echo off
+          if "%~1"=="-v" (
+            echo v21.9.0
+            exit /b 0
+          )
+          > "%~dp0unexpected-node-use" echo unexpected
+          exit /b 97
+          '@ | Set-Content -Encoding Ascii "$shim\node.cmd"
+          $unexpectedNodeUse = Join-Path $shim 'unexpected-node-use'
           $env:Path = "$shim;$env:Path"
           $out = powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $out
+          if (Test-Path $unexpectedNodeUse) { Write-Host "::error::preflight reused unsupported Node after its version check"; exit 1 }
           if ($out -notmatch 'STOP.*node v21\.9\.0 is too old; the installer needs 22 or newer') { Write-Host "::error::preflight accepted unsupported Node 21"; exit 1 }
           if ($code -ne 1) { Write-Host "::error::unsupported Node must exit 1, got $code"; exit 1 }
           Write-Host "TRAP 5 DETECTED, exit 1 as required"

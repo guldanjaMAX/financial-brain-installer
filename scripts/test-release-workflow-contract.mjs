@@ -101,9 +101,11 @@ assert.ok(matrixDownloadIndex > 0 && matrixHashIndex > matrixDownloadIndex &&
   matrixPreflightExtractIndex > matrixHashIndex && matrixInstallIndex > matrixPreflightExtractIndex &&
   matrixPackageInstallIndex > matrixInstallIndex,
 "the matrix must hash the downloaded package and extract its preflight before any install");
-assert.match(testJob, /tar -xzf "\$tarball" -C \.packaged-preflight[\s\S]*?package\/tools\/preflight\.sh package\/tools\/preflight\.ps1/);
+assert.match(testJob, /tar -xzf "\$tarball" -C \.packaged-preflight[\s\S]*?package\/tools\/preflight\.sh package\/tools\/preflight\.ps1 \\\n\s+package\/operations\/installed-manifest\.mjs/);
 const matrixPreflightExtract = testJob.slice(matrixPreflightExtractIndex, matrixInstallIndex);
 assert.match(matrixPreflightExtract, /basename "\$tarball"/);
+assert.match(matrixPreflightExtract, /test -f \.packaged-preflight\/package\/operations\/installed-manifest\.mjs/,
+  "the exact-package preflight must include the helper both scripts execute");
 assert.doesNotMatch(matrixPreflightExtract, /\$ARTIFACT_NAME/,
   "the extraction step must use variables exported to later steps rather than a prior step-local variable");
 assert.match(testJob, /- name: packaged preflight runs and prints \(Windows\)[\s\S]*?\.packaged-preflight\\package\\tools\\preflight\.ps1/);
@@ -114,8 +116,8 @@ assert.match(testJob, /- name: Windows PowerShell user-prefix command works[\s\S
 assert.match(preflightTrapJob, /trap 4: an empty earlier Wrangler directory cannot mask a later session/);
 assert.match(preflightTrapJob, /New-Item -ItemType Directory -Force -Path \(Join-Path \$env:APPDATA 'xdg\.config\\\.wrangler\\config'\)[\s\S]*?Set-Content \(Join-Path \$session 'default\.toml'\)[\s\S]*?ok\\s\+wrangler session found/,
   "Windows CI must prove an empty earlier Wrangler directory cannot hide a later session file");
-assert.match(preflightTrapJob, /trap 5: Node 21 is below the supported minimum[\s\S]*?node\.cmd[\s\S]*?installer needs 22 or newer/,
-  "Windows CI must refuse Node 21 rather than only testing supported runtimes");
+assert.match(preflightTrapJob, /trap 5: Node 21 is below the supported minimum[\s\S]*?if "%~1"=="-v"[\s\S]*?unexpected-node-use[\s\S]*?node\.cmd[\s\S]*?Test-Path \$unexpectedNodeUse[\s\S]*?installer needs 22 or newer/,
+  "Windows CI must refuse Node 21 and prove the unsupported runtime is not reused");
 
 const gateIndex = release.indexOf("  gate:");
 const publicContractIndex = release.indexOf("  public-contract-install:");
