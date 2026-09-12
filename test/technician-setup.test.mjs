@@ -784,6 +784,7 @@ test("the child environment strips ambient credentials and unrelated application
   const env = technicianChildEnvironment({
     PATH: "/safe/bin",
     HOME: "/safe/home",
+    CODEX_HOME: "/safe/codex-home",
     LANG: "en_US.UTF-8",
     BRAIN_WORKERS_PAID_ACCOUNT_ID: paidAccountId,
     CLOUDFLARE_API_TOKEN: "must-not-cross",
@@ -796,6 +797,7 @@ test("the child environment strips ambient credentials and unrelated application
   assert.deepEqual(env, {
     PATH: "/safe/bin",
     HOME: "/safe/home",
+    CODEX_HOME: "/safe/codex-home",
     LANG: "en_US.UTF-8",
     BRAIN_WORKERS_PAID_ACCOUNT_ID: paidAccountId,
   });

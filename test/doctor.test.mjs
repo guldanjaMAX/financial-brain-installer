@@ -256,6 +256,91 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   check("nothing resembling a token or secret reaches the rendered output",
     !/ya29\.|refresh_token|client_secret|[A-Za-z0-9_-]{40,}/.test(rendered), rendered);
 }
+
+/* ---- an existing Brain may be checked from Codex without weakening install ---- */
+{
+  const signedOutClaudeWithSignedInCodex = (command, args) => {
+    if (command === "npx" && args.includes(WRANGLER_PACKAGE)) {
+      return { ok: true, out: "wrangler 4.127.1" };
+    }
+    if (command === "claude" && args[0] === "--version") {
+      return { ok: true, out: "2.1.63 (Claude Code)" };
+    }
+    if (command === "claude" && args.join(" ") === "auth status") {
+      return { ok: false, out: "signed out" };
+    }
+    if (command === "codex" && args[0] === "--version") {
+      return { ok: true, out: "codex-cli 0.153.4" };
+    }
+    if (command === "codex" && args.join(" ") === "login status") {
+      return { ok: true, out: "fixture authentication detail must stay private" };
+    }
+    return { ok: false, out: "fixture command unavailable" };
+  };
+  const common = {
+    skipCloudflare: true,
+    googleStorageStatus: { exists: false, description: "fixture secure storage" },
+    localRun: signedOutClaudeWithSignedInCodex,
+    networkCheck: async () => ({ name: "Network", status: OK, detail: "fixture reachable" }),
+    platformName: "darwin",
+    environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+    cliPath: "/fixture/brain.mjs",
+    statfsImpl: () => ({ bavail: 3n * 1024n * 1024n, bsize: 1024n }),
+    getEffectiveUserId: () => 501,
+  };
+
+  const existingBrain = await runAll({
+    ...common,
+    allowCodexForExistingBrain: true,
+  });
+  const existingClaude = existingBrain.find((item) => item.name === "Claude Code");
+  check("signed-out Claude is advisory when Codex can guide an existing-Brain check",
+    existingClaude?.status === WARN &&
+      /Codex is signed in for this existing Brain check/i.test(existingClaude.detail) &&
+      /read-only checks can continue/i.test(existingClaude.fix) &&
+      summarize(existingBrain).fatal === 0,
+    JSON.stringify(existingBrain));
+
+  const freshSetup = await runAll(common);
+  check("the same signed-out Claude remains blocking for fresh setup",
+    freshSetup.find((item) => item.name === "Claude Code")?.status === FAIL &&
+      summarize(freshSetup).fatal === 1,
+    JSON.stringify(freshSetup));
+
+  const noCodex = await runAll({
+    ...common,
+    allowCodexForExistingBrain: true,
+    localRun: (command, args) => command === "codex"
+      ? { ok: false, out: "not found", missing: true }
+      : signedOutClaudeWithSignedInCodex(command, args),
+  });
+  check("an existing-Brain check still stops when neither supported assistant is ready",
+    noCodex.find((item) => item.name === "Claude Code")?.status === FAIL &&
+      noCodex.find((item) => item.name === "Codex")?.status === WARN &&
+      summarize(noCodex).fatal === 1,
+    JSON.stringify(noCodex));
+
+  const privateAuthOutput = "private-auth-state-must-not-render";
+  const signedOutCodex = await runAll({
+    ...common,
+    allowCodexForExistingBrain: true,
+    localRun: (command, args) => {
+      if (command === "codex" && args.join(" ") === "login status") {
+        return { ok: false, out: privateAuthOutput };
+      }
+      return signedOutClaudeWithSignedInCodex(command, args);
+    },
+  });
+  const serializedSignedOut = JSON.stringify(signedOutCodex);
+  check("installed but signed-out Codex cannot relax the existing-Brain Claude gate",
+    signedOutCodex.find((item) => item.name === "Claude Code")?.status === FAIL &&
+      signedOutCodex.find((item) => item.name === "Codex")?.status === WARN &&
+      /installed but not signed in/i.test(
+        signedOutCodex.find((item) => item.name === "Codex")?.detail || "") &&
+      summarize(signedOutCodex).fatal === 1 &&
+      !serializedSignedOut.includes(privateAuthOutput),
+    serializedSignedOut);
+}
 {
   const k = process.env.ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;

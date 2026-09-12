@@ -127,6 +127,23 @@ function usableBindingValue(value) {
   return Boolean(text) && text.length <= 128 && !PLACEHOLDER.test(text);
 }
 
+/**
+ * True only after the standard Cloudflare resource identities have been
+ * written back to the manifest. A parseable template is not an installed
+ * Brain: its placeholder bindings must keep fresh-install prerequisites strict.
+ */
+export function manifestHasProvisionedResourceBindings(manifest) {
+  const cloudflare = manifest?.infrastructure?.cloudflare;
+  const d1Id = String(cloudflare?.d1_database_id || "");
+  return (cloudflare?.storage ?? "d1") === "d1" &&
+    /^[a-f0-9]{32}$/i.test(String(cloudflare?.account_id || "")) &&
+    (/^[a-f0-9]{32}$/i.test(d1Id) || /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(d1Id)) &&
+    SAFE_WORKER.test(String(manifest?.brain?.worker_name || "")) &&
+    SAFE_WORKER.test(String(cloudflare?.vectorize_index || "")) &&
+    usableBindingValue(cloudflare?.d1_database_id) &&
+    usableBindingValue(cloudflare?.vectorize_index);
+}
+
 function sameFile(left, right) {
   return Boolean(left && right) && left.dev === right.dev && left.ino === right.ino &&
     left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
@@ -179,21 +196,14 @@ function inspectManifest(manifest, manifestPath, productVersion, options) {
     safeFile = JSON.stringify(parsed) === JSON.stringify(manifest);
   } catch { /* represented by closed evidence below */ }
 
-  const cloudflare = parsed?.infrastructure?.cloudflare;
   const manifestVersionValid = parsed?.manifest_version === 1;
   const clientIdentityValid = SAFE_SLUG.test(String(parsed?.client?.slug || "")) &&
     typeof parsed?.client?.display_name === "string" && parsed.client.display_name.trim().length > 0;
   const domainValid = safeHttpsDomain(parsed?.brain?.domain);
-  const workerBindingPresent = SAFE_WORKER.test(String(parsed?.brain?.worker_name || ""));
-  const d1Id = String(cloudflare?.d1_database_id || "");
-  const d1BindingPresent = (cloudflare?.storage ?? "d1") === "d1" &&
-    /^[a-f0-9]{32}$/i.test(String(cloudflare?.account_id || "")) &&
-    (/^[a-f0-9]{32}$/i.test(d1Id) || /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(d1Id)) &&
-    SAFE_WORKER.test(String(cloudflare?.vectorize_index || "")) &&
-    usableBindingValue(cloudflare?.d1_database_id) && usableBindingValue(cloudflare?.vectorize_index);
+  const resourceBindingPresent = manifestHasProvisionedResourceBindings(parsed);
   const versionMatches = parsed?.brain?.version === productVersion;
   const ready = safeFile && manifestVersionValid && clientIdentityValid && domainValid &&
-    workerBindingPresent && d1BindingPresent && versionMatches;
+    resourceBindingPresent && versionMatches;
   return {
     parsed,
     fingerprint,
@@ -204,7 +214,7 @@ function inspectManifest(manifest, manifestPath, productVersion, options) {
         safe_exact_file: safeFile,
         manifest_identity_fields_valid: manifestVersionValid && clientIdentityValid,
         deployed_address_valid: domainValid,
-        resource_binding_declared: workerBindingPresent && d1BindingPresent,
+        resource_binding_declared: resourceBindingPresent,
         cli_version_matches_manifest: versionMatches,
       },
       next_step: ready ? NEXT.none : NEXT.recover_manifest,

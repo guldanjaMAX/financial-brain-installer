@@ -717,14 +717,32 @@ export function checkWindowsCredentialProtection({
   };
 }
 
-export function checkCodex() {
-  const r = run("codex", ["--version"], {
+export function checkCodex({
+  runCommand = run,
+  environment = process.env,
+} = {}) {
+  const childEnvironment = localToolEnvironment(environment);
+  const r = runCommand("codex", ["--version"], {
     timeout: 30_000,
     inheritEnv: false,
-    env: localToolEnvironment(),
+    env: childEnvironment,
   });
-  if (r.ok) return check("Codex", OK, (r.out.trim().split("\n")[0] || "present").slice(0, 40));
-  return check("Codex", WARN, "not found on PATH", "Optional. Install it if the client uses Codex; setup wires up whichever is present.");
+  if (!r.ok) {
+    return check("Codex", WARN, "not found on PATH", "Optional. Install it if the client uses Codex; setup wires up whichever is present.");
+  }
+  const version = (r.out.trim().split("\n")[0] || "present").slice(0, 40);
+  const auth = runCommand("codex", ["login", "status"], {
+    timeout: 30_000,
+    inheritEnv: false,
+    env: childEnvironment,
+  });
+  if (auth.ok) return check("Codex", OK, `${version}; signed in`);
+  return check(
+    "Codex",
+    WARN,
+    `${version}; installed but not signed in`,
+    "Run `codex login` in an interactive terminal, complete the official sign-in, and rerun `brain doctor`."
+  );
 }
 
 export function checkAnthropicKey() {
@@ -1235,6 +1253,7 @@ export async function runAll({
   googleStorageStatus,
   cloudflareToken,
   requireClaudeCode = true,
+  allowCodexForExistingBrain = false,
   localRun = run,
   networkCheck = checkNetwork,
   skipCloudflare = false,
@@ -1281,9 +1300,26 @@ export async function runAll({
     }
   }
   push(checkAnthropicKey());
-  push(checkClaudeCode({ runCommand: localRun, required: requireClaudeCode }));
+  const codex = checkCodex({ runCommand: localRun, environment });
+  const codexCanGuideExistingBrain = allowCodexForExistingBrain && codex.status === OK;
+  let claude = checkClaudeCode({
+    runCommand: localRun,
+    required: requireClaudeCode && !codexCanGuideExistingBrain,
+    platformName,
+    environment,
+  });
+  if (codexCanGuideExistingBrain && claude.status !== OK) {
+    claude = {
+      ...claude,
+      detail: `${claude.detail}; Codex is signed in for this existing Brain check`,
+      fix:
+        "Codex is signed in, so this existing Brain's read-only checks can continue. " +
+        "Sign in to Claude Code only if the owner also wants to use this Brain from Claude Code.",
+    };
+  }
+  push(claude);
   if (process.platform === "win32") push(checkWindowsCredentialProtection());
-  push(checkCodex());
+  push(codex);
   push(checkGoogleConnection(googleStorageStatus));
   return out;
 }

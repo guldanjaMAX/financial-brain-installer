@@ -755,6 +755,14 @@ brain diagnose ./brain.manifest.json  # what is missing or stored incorrectly
 brain secrets ./brain.manifest.json   # exact durable ADMIN_KEY rotation command
 ```
 
+Fresh setup and `brain tools` require signed-in Claude Code. Once a manifest
+contains its provisioned Cloudflare resource identities, `brain doctor
+<manifest>` may continue its read-only checks when `codex login status` proves
+Codex is signed in, while reporting missing or signed-out Claude Code as an
+optional local-client gap. This does not prove or repair Claude Code, its skill,
+or its MCP registration. If neither supported client is signed in, doctor still
+stops.
+
 `brain diagnose` is read-only and safe to rerun. On a large corpus it fixes one
 chunk high-water mark and checks bounded keyset pages, so no individual page has
 to scan the whole database. The report says `not verified` instead of zero when
