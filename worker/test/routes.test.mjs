@@ -3435,6 +3435,57 @@ function mkForgetEnv({
       d1Writes.some(sql => /vector_drain_lease_owner = \?1/.test(sql)),
     JSON.stringify({ writes: d1Writes.length }));
 
+  const supportedContractStatuses = [];
+  for (const contract of ["1", "2", "3"]) {
+    const supported = await worker.fetch(new Request(
+      "https://b.example/api/admin/brain/bootstrap",
+      {
+        method: "POST",
+        headers: {
+          "X-Admin-Key": "k",
+          "content-type": "application/json",
+          "x-bootstrap-contract": contract,
+        },
+        body: "{}",
+      },
+    ), env, {});
+    supportedContractStatuses.push([contract, supported.status]);
+  }
+  check("the bootstrap route accepts only the three exact supported receipt contracts",
+    supportedContractStatuses.every(([, status]) => status === 200),
+    JSON.stringify(supportedContractStatuses));
+
+  let unsupportedContractCalls = 0;
+  const unsupportedContractEnv = {
+    ...env,
+    DB: { prepare: () => { unsupportedContractCalls++; throw new Error("unsupported contract touched D1"); } },
+    AI: { run: async () => { unsupportedContractCalls++; throw new Error("unsupported contract touched AI"); } },
+    VECTORIZE: {
+      describe: async () => { unsupportedContractCalls++; throw new Error("unsupported contract touched Vectorize"); },
+      upsert: async () => { unsupportedContractCalls++; throw new Error("unsupported contract touched Vectorize"); },
+    },
+  };
+  const unsupportedContractStatuses = [];
+  for (const contract of ["4", "3.1", "Infinity", "03", "0x3"]) {
+    const unsupported = await worker.fetch(new Request(
+      "https://b.example/api/admin/brain/bootstrap",
+      {
+        method: "POST",
+        headers: {
+          "X-Admin-Key": "k",
+          "content-type": "application/json",
+          "x-bootstrap-contract": contract,
+        },
+        body: "{}",
+      },
+    ), unsupportedContractEnv, {});
+    unsupportedContractStatuses.push([contract, unsupported.status]);
+  }
+  check("unknown bootstrap receipt contracts refuse before D1, AI, or Vectorize access",
+    unsupportedContractStatuses.every(([, status]) => status === 400) &&
+      unsupportedContractCalls === 0,
+    JSON.stringify({ unsupportedContractStatuses, unsupportedContractCalls }));
+
   const busyEnv = {
     ...env,
     DB: {

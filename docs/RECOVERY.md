@@ -55,9 +55,10 @@ The reviewed order is fixed:
    becomes explicit reauthorization state; no unsupported key version or
    actionable legacy rewrap work may remain.
 7. While the reviewed compatibility Worker is deployed in
-   `paused-for-upgrade` mode, drive the schema-35 `/api/admin/brain/bootstrap`
-   contract until every D1 chunk has one query-visible vector, all durable batch
-   receipts are confirmed, the outbox and submitted counts are zero, and no
+   `paused-for-upgrade` mode, drive the current `bootstrap-v2`
+   `/api/admin/brain/bootstrap` contract until every D1 chunk has one
+   query-visible vector, all durable batch receipts are confirmed, the outbox
+   and submitted counts are zero, and no
    vector failed. A retry resumes the saved epoch, cursor, and batch history and
    never calls reindex to reset them. After exact inventory and provider-count
    proof, deploy only the pre-reviewed immutable active Worker version and prove
@@ -202,6 +203,30 @@ Before preview, prepare all of these locally and out of band:
 - an owner-only directory for the encrypted recovery artifact and a complete
   private release evaluation golden set.
 
+The held v0.4.8 disposable campaign also uses the source-only
+`test/live/v048-disposable-vector-seed.mjs` runner from the exact frozen source
+commit. It is not in the npm package. Its `--plan` mode is local and no-write;
+its separately approved execution sends the fixed ingest and drain requests
+itself, while the unpacked exact package supplies the production admin-key
+resolver. A private hash-only binding must name the exact source commit, runner,
+package archive SHA-256 and byte count, source and unpacked-package content
+fingerprint, manifest, and canonical corpus. The command therefore requires
+`--binding`, `--package-archive`, and a caller-selected new absolute `--receipt`
+path in an owner-only directory outside every checkout and unpacked package. It
+writes exactly 3,201 fictional one-chunk documents. See
+the [v0.4.8 disposable field plan](./release-evidence/v0.4.8-disposable-vector-field-plan.md).
+Execution of the private-receipt helper and seeder is POSIX-only. This campaign
+requires macOS because the adapter resolves credentials through Keychain. Native
+Windows is refused before receipt reservation, credential access, or provider
+calls because the helper cannot yet verify a current-user-only DACL. The
+seeder's local no-write `--plan` mode remains available.
+On macOS the selected parent and every empty marker or temporary file must have
+no extended ACL. The helper verifies that before writing any receipt byte and
+rechecks each durable receipt through final readback; it refuses rather than
+changing a caller-owned ACL.
+The field adapter applies the same ACL-free check to the artifact directory
+before it creates its lock or permits any credential, Wrangler, or HTTP action.
+
 The decrypted SQL stream never carries live derived-index coordination. The
 adapter exports the reviewed `install_state` row separately from the raw
 provider tables and forces the ephemeral drain lease owner/expiry and projection
@@ -307,7 +332,7 @@ The normalized row is then hashed together with the remaining durable table
 export, so a retry cannot reuse a recovery artifact poisoned by an
 invocation-local lease, mutation fence, or old provider receipt. Older exact
 migration prefixes remain offline-inspectable, but the live field runner
-requires both source and restored target to match exact schema 35 before any
+requires both source and restored target to match exact schema 46 before any
 current bootstrap operation.
 
 The preview is local only. It reads and fingerprints those files but does not
@@ -368,7 +393,62 @@ identical approved command to continue. Because the named stage is already in
 the durable completed prefix, the rerun does not execute its external effect or
 stop there again. Omitting the option runs every remaining stage normally.
 
-One disposable target can exercise all four checkpoint boundaries in order:
+`--stop-after-bootstrap-progress after-first-durable-progress` is the narrower
+v0.4.8 mid-stage control. It is accepted only on `run`. The adapter first binds
+the private recovery journal to the exact 3,201-chunk field-proof campaign and
+paired `rebuild_vectorize` stage control. That obligation is written before the
+state machine runs, cannot be added after rebuilding begins, and is not inferred
+from corpus size. The adapter then binds an opening aggregate observation for a
+restored corpus of exactly 3,201 chunks. Before the first bootstrap POST, it
+durably reserves both the private interruption output and its `.pending.json`
+sibling. After a non-final
+`bootstrap-v2` response has confirmed real progress,
+it independently re-observes the same epoch, the advanced cursor hash, durable
+batch and outbox aggregates, D1 and FTS counts, provider vector count, paused
+Worker, and unchanged restored corpus. It then durably writes
+`.brain-recovery-bootstrap-interruption-v1.json`, releases the field-gate lock
+through the normal cleanup path, reports only
+`RECOVERY_FIELD_GATE_INTENTIONAL_BOOTSTRAP_INTERRUPTION`, and exits nonzero.
+Finalization removes the pending marker only after exact readback and directory
+durability. A surviving pending marker is ambiguous and blocks every later
+bootstrap POST.
+
+Re-run the identical approved command with the same option. Before it permits
+new bootstrap work, the adapter requires the interruption receipt and exact
+aggregate state to be unchanged, then writes
+`.brain-recovery-bootstrap-resume-v1.json` bound to the first receipt's hash.
+Both files remain mode `0600` in the owner-only artifact directory on the
+required macOS/POSIX host. Native Windows execution is unsupported until the
+helper has reviewed current-user-only DACL proof. They contain private plan and
+target fingerprints and must never be published. The files are durable private
+evidence, not a public-receipt sanitizer. The resume output and its pending
+sibling are likewise reserved before any resumed bootstrap POST; uncertain
+finalization remains fail-closed.
+
+Every later retry that finds the final resume receipt re-observes the live
+epoch and private cursor hash before another bootstrap POST. If the exact
+3,201-row projection is already verified, the adapter reconciles it read-only
+and does not replay the POST. If all four batches are confirmed but the
+projection is still pending on provider aggregate visibility, only that exact
+same-epoch, same-cursor, empty-outbox cut may continue. The adapter requests
+bootstrap receipt contract 3 so the verification poll preserves the completed
+epoch and its four ledger rows for independent observation. Ordinary bootstrap
+contracts still rebase completed history. A retry after an applied promotion
+with a lost local response must prove the same completed ledger again before
+the journal can record the two receipt hashes.
+
+The bootstrap control is accepted only when paired with
+`--stop-after-stage rebuild_vectorize`. Omitting either control from any of the
+three invocations is refused before another recovery stage can run. The
+mid-bootstrap stop fires first. On the identical rerun, the resume boundary is
+proven before work continues, then the paired stage control stops after the
+completed rebuild and active promotion. The next identical rerun recognizes
+that completed stage and proceeds to health and evaluation. The completed
+rebuild evidence stores both private receipt SHA-256 values in the journal, so
+missing or replaced files remain detectable even after the stage is complete.
+
+One disposable target can exercise all four stage boundaries plus the distinct
+mid-bootstrap boundary in order:
 
 1. Run with `--stop-after-stage export_d1` and require the intentional nonzero
    exit. Confirm status now names `verify_export`.
@@ -377,11 +457,18 @@ One disposable target can exercise all four checkpoint boundaries in order:
 3. Re-run with `--stop-after-stage reconcile_security`. It proves the recovered
    bank wrapping key and clears all legacy bank-reference work before stopping.
    Confirm status names `rebuild_vectorize`.
-4. Re-run with `--stop-after-stage rebuild_vectorize`. It resumes after the
-   import, completes the vector rebuild, then stops. Confirm status names
-   `verify_health`.
-5. Re-run that exact fourth command. The rebuild is already checkpointed, so the
-   run continues through health and release evaluation without rebuilding it.
+4. Re-run with both
+   `--stop-after-bootstrap-progress after-first-durable-progress` and
+   `--stop-after-stage rebuild_vectorize`. It stops only after the private
+   mid-bootstrap proof is durable. Confirm the intentional bootstrap
+   interruption and retain the private receipt.
+5. Re-run that exact fourth command. It proves the unchanged resume boundary,
+   completes the vector rebuild and active promotion, then stops at the stage
+   checkpoint. Confirm status names `verify_health` and retain the private
+   resume receipt.
+6. Re-run that exact fourth command again. The rebuild is already checkpointed,
+   so the run continues through health and release evaluation without
+   rebuilding it.
 
 Changing only this stop boundary does not authorize another resource or write.
 The same manifests, target execution claim, wrapper, private golden bytes,
@@ -404,8 +491,15 @@ directory.
 
 Interrupted runs resume from the persisted stage. A retry after import accepts
 only an exact completed target or the original empty target. Any partial or
-ambiguous target stops for review. The vector rebuild resumes from schema-35
-durable bootstrap receipts while the paused version remains deployed. If the
+ambiguous target stops for review. The vector rebuild resumes from durable
+`bootstrap-v2` receipts while the paused version remains deployed. Before it
+creates the resume receipt, the first retry requires the interruption-time
+epoch, cursor, batch, and outbox aggregates unchanged. After that receipt exists,
+later retries allow only same-epoch, same-cursor monotonic progress, or the exact
+four-confirmed-batch provider-lag and verified terminal cuts. A missing,
+replaced, malformed, or mismatched receipt, regression, foreign batch geometry,
+changed corpus or mode, or either surviving `.pending.json` marker fails closed.
+If the
 active-version deployment succeeded but its local response was lost, a retry
 accepts the already-active target only after exact corpus, vector inventory,
 outbox, provider count, immutable version, binding, and active-mode proof. A
@@ -413,11 +507,13 @@ first rebuild attempt that finds the active version is refused. A leftover
 `.brain-recovery-field-gate.lock` is also fail-closed; inspect the prior process
 and private state before removing that lock manually.
 
-Passing deterministic tests is not a production recovery claim. The remaining
-live release gate is to provision the disposable resources out of band, refresh
-the manual no-route/no-custom-domain review and both pinned version claims, pause
-source writes for the approved export window, and complete one full run. That
-run must exercise the four deterministic post-checkpoint stops above,
+Passing deterministic tests is not a production recovery claim. No v0.4.8
+provider or field run has occurred. The remaining live release gate is to
+provision the disposable resources out of band, seed the exact fictional source
+under its own approval, refresh the manual no-route/no-custom-domain review and
+both pinned version claims, pause source writes for the approved export window,
+and complete one full run. That run must exercise the five intentional stops
+above, including the private mid-bootstrap interruption and resume proof,
 followed by independent Cloudflare confirmation that source resources and
 production routes did not change. Disposal of the test resources is a separate
 operator action; this adapter has no destroy command.

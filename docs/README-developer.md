@@ -6,7 +6,7 @@ Nothing runs on our infrastructure. Normal setup uses an owner-approved named
 Cloudflare browser profile in the owner's operating-system credential store; it
 does not create or copy an API token.
 
-**Status: unreleased 0.4.8/schema45 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.8/schema46 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
@@ -175,6 +175,41 @@ Worker versions and manually reviewed empty routes, and exact Keychain-backed
 Wrangler wrapper and private release golden bytes. See
 `docs/RECOVERY.md` for the private artifact rules and remaining live field
 gate.
+
+The held v0.4.8 field candidate adds a supervised disposable-only recovery
+control:
+`--stop-after-bootstrap-progress after-first-durable-progress`. It can stop
+after verified, durable, non-final `bootstrap-v2` progress and then require the
+same epoch, cursor hash, aggregate ledger, corpus, target, and paused Worker on
+the identical approved rerun before more work. This control is accepted only
+when every invocation also keeps `--stop-after-stage rebuild_vectorize`; once a
+proof marker exists, omitting either option is refused before recovery resumes.
+The private recovery journal records this field-proof obligation before its
+state machine starts and stores both receipt hashes with completed rebuild
+evidence, so deleting the files cannot silently turn the drill into an ordinary
+recovery. The interruption and resume proofs are separate mode-`0600` files in
+the owner-only artifact directory. Every retry with an existing resume receipt
+rechecks the live epoch and cursor before another bootstrap POST. Receipt
+contract 3 preserves the exact completed epoch and four-row ledger through a
+provider-count lag; an already verified lost response is reconciled without a
+replay, and an active retry after an ambiguous promotion must prove that ledger
+again before completion is journaled.
+`operations/private-aggregate-receipt.mjs` supplies the durable private-file
+boundary but does not sanitize arbitrary JSON. Each proof reserves its final
+path and `.pending.json` sibling before the related bootstrap POST. A surviving
+pending marker is ambiguous and blocks continuation. Deterministic tests for
+this control are offline implementation evidence only. No v0.4.8 provider or
+field execution has occurred.
+The helper and field execution are POSIX-only, and this exact recovery campaign
+requires macOS Keychain. Native Windows refuses before receipt reservation,
+credential access, or provider calls because current-user-only DACL privacy is
+not verified. Windows CI covers that explicit refusal, not Windows execution of
+the receipt or recovery drill.
+On macOS the helper also rejects an extended ACL on the parent, marker,
+temporary, or final file. It performs that check on each empty created file
+before writing any private byte and rechecks the durable files through readback.
+The recovery adapter also refuses an ACL on its artifact directory before lock
+creation, state mutation, credential access, Wrangler, or HTTP.
 
 Run `node brain.mjs` with no arguments for the full command list.
 
@@ -1407,6 +1442,43 @@ then prints an aggregate-only receipt. Preserve the sanitized receipt under
 Vectorize index, and temporary admin-key item. The harness refuses ordinary
 client manifests and never accepts or prints a private corpus.
 
+`test/live/v048-disposable-vector-seed.mjs` is a source-only runner for the held
+v0.4.8 recovery campaign. It is deliberately outside `npm test` and outside the
+published package. The only safe planning command listed here is local and
+no-write:
+
+```bash
+node test/live/v048-disposable-vector-seed.mjs --plan
+```
+
+The separately approved execution accepts no source or content input and sends
+the fixed ingest and drain requests itself. The unpacked exact v0.4.8 package
+supplies the production admin-key resolver. A private `--binding` file binds the
+clean exact source commit, runner SHA-256, archive SHA-256 and byte count,
+source and unpacked-package content fingerprint, manifest SHA-256, and fixed
+corpus SHA-256. The command also requires `--package-archive`. Only after all
+local bindings pass does it reserve both a caller-selected absolute `--receipt`
+and its `.pending.json` sibling in an owner-only directory outside every
+checkout and package. Both markers are revalidated after opening health, around
+credential resolution, before every request, and before finalization. Only then
+may it use the credential or call the provider. It writes
+exactly 3,201 fictional one-chunk documents in 65 bounded batches and drains
+the ordinary source outbox. Opening and closing health must identify Brain
+`v048-field-proof` at schema 46. Final inventory must mark both document and
+chunk counts exact and report every document, chunk, and projection count as
+exactly 3,201. That private receipt proves only Worker-reported source
+readiness. Independent Vectorize control-plane parity, recovery, teardown,
+release, and customer use remain separate gates. A partial seed is not
+resumable, and any uncertain receipt finalization blocks rerun. See the
+[v0.4.8 disposable field plan](release-evidence/v0.4.8-disposable-vector-field-plan.md)
+for the approval and cleanup boundaries. No such field run has occurred.
+The current private-receipt implementation executes only on POSIX systems, and
+this exact field campaign requires macOS Keychain. Native Windows execution is
+refused before receipt reservation, credential access, or provider calls because
+mode bits do not prove a current-user-only DACL and this helper has no verified
+DACL check. On macOS, an extended ACL on the selected directory or any receipt
+file is refused before use. `--plan` remains a local no-write command.
+
 `brain eval <manifest>` uses the `smoke` profile by default. It is diagnostic,
 not certification. `brain eval <manifest> --profile release` fails before
 reading the admin key or contacting the brain unless the private suite has at
@@ -1453,7 +1525,10 @@ and the store tests use mocks, so no test had ever executed a migration file.
 The published package includes the reviewed eval runtime, configuration, and
 blank golden-set template. Private baselines and client golden question files
 are excluded. `package.json` uses an allowlist rather than a denylist so private
-evaluation data cannot be included by accident.
+evaluation data cannot be included by accident. The packaged recovery adapter
+also includes its reviewed private-receipt helper. The source-only v0.4.8
+seeder and the deterministic tests for it and the receipt helper remain
+excluded under `test/`.
 
 `brain eval --artifacts <new-directory>` writes a sanitized internal v1 report
 set with opaque case IDs. The directory and files are owner-only, are never

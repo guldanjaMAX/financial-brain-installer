@@ -49,6 +49,8 @@ eval/eval.config.local.json
 .brain-recovery-*.sql
 .brain-recovery-*.sql.tmp-*
 .brain-recovery-*.lock
+# Durable aggregate receipts stage private JSON under this fixed helper name.
+.private-aggregate-receipt-*.tmp
 
 # Adjacent fallback admin-key files contain the Brain's live authentication
 # secret. Atomic writes briefly create the matching residue beside them.

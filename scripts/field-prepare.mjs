@@ -192,7 +192,8 @@ export function assertNoLiveCommand(step) {
   const forbidden = [
     "--live", "--execute", "brain.mjs setup", "brain.mjs deploy",
     "brain.mjs provision", "d1-release-field-gate.mjs",
-    "disposable-cloudflare-v021-field-gate.mjs", ".manifest.json",
+    "disposable-cloudflare-v021-field-gate.mjs",
+    "v048-disposable-vector-seed.mjs", ".manifest.json",
   ];
   for (const value of forbidden) {
     if (text.includes(value)) throw new Error(`unsafe field preparation command contains ${value}`);
@@ -628,6 +629,7 @@ function safeCode(error, fallback) {
 const FIELD_GATES = Object.freeze([
   Object.freeze({ id: "physical_windows_install", title: "Clean Windows owner profile", proof: "Install the exact tarball in a standard user profile, run the package-local command, complete the 25-round DPAPI gate, then interrupt and resume once." }),
   Object.freeze({ id: "disposable_cloudflare", title: "Disposable Cloudflare Brain", proof: "With separate approval, prove browser OAuth, exact account choice, D1 and Vectorize creation through schema 46, fixed public smoke, one interrupted migration, vector backlog and drain, then confirm cleanup." }),
+  Object.freeze({ id: "v048_disposable_bootstrap_resume", title: "v0.4.8 disposable bootstrap interruption and resume", proof: "On the separately approved exact synthetic source and empty target, seed exactly 3,201 fictional one-chunk records, stop only after independently verified durable non-final bootstrap progress, rerun from the identical epoch and cursor, prove final D1, FTS, and Vectorize parity, then complete separately approved exact-resource teardown. Local tests and this checklist are not that proof." }),
   Object.freeze({ id: "physical_passkeys", title: "Permanent-host passkey ceremony", proof: "Two people use two authenticator types each. Prove enroll, logout and login, second device, revoke with immediate session denial, recovery, and last-owner refusal." }),
   Object.freeze({ id: "plaid_sandbox", title: "Plaid Sandbox through the deployed Brain", proof: "Only after separately approved owner-custody setup and complete binding readback, complete owner Link, assign every masked account, sync history and pagination, change one transaction, prove webhook plus scheduled fallback, update mode, response-loss replay, and confirmed removal." }),
   Object.freeze({ id: "quickbooks_sandbox", title: "QuickBooks Online Sandbox", proof: "Complete Intuit consent, company identity and same-company reconnect, wrong-company refusal, refresh, pagination, changed record, outage retry, retrieval, disconnect retention, and a separate forget preview." }),
@@ -682,6 +684,7 @@ export function renderFieldChecklist(receipt) {
     "",
     "```bash",
     "node test/live/disposable-cloudflare-v021-field-gate.mjs --plan",
+    "node test/live/v048-disposable-vector-seed.mjs --plan",
     "node test/live/passkey-permanent-hostname-acceptance.mjs --plan",
     "node test/live/supervised-permanent-hostname-v021-field-gate.mjs --plan",
     "```",

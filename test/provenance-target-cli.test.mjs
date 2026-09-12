@@ -342,6 +342,7 @@ function acceptedReceipt(request, operation, family, {
     original_id: ORIGINAL_ID,
     target_set_hash: request.target_set_hash,
     target_count: 1,
+    resolves_observation_hash: request.targets[0].resolves_observation_hash,
     accepted_observation_hash: acceptedHash,
     resolution_hash: hashId({ accepted: "resolution" }),
     activation_hash: hashId({ accepted: "activation" }),

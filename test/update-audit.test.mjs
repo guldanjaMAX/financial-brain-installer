@@ -6,11 +6,13 @@ import { tmpdir } from "node:os";
 import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions, regressionEnvironment,
   verifiedNpmCliPath, assertUndeferrableRegistered, assertEvidenceDocuments, UNDEFERRABLE_INCIDENTS,
   DEFERRAL_CAUSES, assertSourceInventoryV3ReleaseVersion,
-  SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION } from "../scripts/audit-updates.mjs";
+  SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, REGRESSION_TIMEOUT_MS } from "../scripts/audit-updates.mjs";
 
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 assert.equal(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, "0.4.8");
+assert.equal(REGRESSION_TIMEOUT_MS, 600_000,
+  "slow supported runners need headroom without removing the finite per-command hang bound");
 assert.equal(assertSourceInventoryV3ReleaseVersion(packageVersion), packageVersion,
   "the held candidate must use a non-colliding source-inventory identity");
 assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.6"), /already-live package 0\.4\.6/);

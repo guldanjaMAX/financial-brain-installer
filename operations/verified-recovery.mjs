@@ -74,6 +74,13 @@ const STATE_KEYS = new Set([
 ]);
 const COMPLETED_KEYS = new Set(["id", "completed_at", "evidence"]);
 const FAILURE_KEYS = new Set(["stage", "code", "at", "cause", "detail"]);
+const FIELD_PROOF_KEYS = new Set([
+  "schema_version", "kind", "expected_chunks", "paired_stop_stage", "bound_at",
+]);
+const REBUILD_BOOTSTRAP_PROOF_KEYS = Object.freeze([
+  "bootstrap_interruption_receipt_sha256",
+  "bootstrap_resume_receipt_sha256",
+]);
 
 function fail(message) {
   throw new Error(message);
@@ -515,6 +522,11 @@ function completedEvidence(completed, stage) {
 
 function validateStageEvidence(stage, input, plan, completed) {
   const expected = evidenceKeys(stage);
+  const hasBootstrapProof = stage === "rebuild_vectorize" &&
+    REBUILD_BOOTSTRAP_PROOF_KEYS.some((key) => Object.hasOwn(input || {}, key));
+  if (hasBootstrapProof) {
+    for (const key of REBUILD_BOOTSTRAP_PROOF_KEYS) expected.add(key);
+  }
   if (!expected.size || !exactKeys(input, expected)) fail(`verified recovery ${stage} evidence is invalid`);
   const evidence = structuredClone(input);
   if (stage === "export_d1") {
@@ -583,6 +595,16 @@ function validateStageEvidence(stage, input, plan, completed) {
     nonNegativeInteger(evidence.vector_count, "recovery vector count");
     nonNegativeInteger(evidence.pending_outbox, "recovery vector backlog");
     nonNegativeInteger(evidence.failed_vectors, "recovery failed vector count");
+    if (hasBootstrapProof) {
+      hashValue(
+        evidence.bootstrap_interruption_receipt_sha256,
+        "recovery bootstrap interruption receipt",
+      );
+      hashValue(
+        evidence.bootstrap_resume_receipt_sha256,
+        "recovery bootstrap resume receipt",
+      );
+    }
     if (evidence.chunk_count !== restored?.chunk_count ||
         evidence.vector_count !== evidence.chunk_count || evidence.pending_outbox !== 0 ||
         evidence.failed_vectors !== 0) {
@@ -639,9 +661,24 @@ function validateStageEvidence(stage, input, plan, completed) {
 /** Validate state as a strict prefix of the reviewed stage sequence. */
 export function validateVerifiedRecoveryState(input, planInput) {
   const plan = validateVerifiedRecoveryPlan(planInput);
-  if (!exactKeys(input, STATE_KEYS) || input.schema_version !== VERIFIED_RECOVERY_STATE_VERSION ||
+  const expectedStateKeys = new Set(STATE_KEYS);
+  if (Object.hasOwn(input || {}, "field_proof")) expectedStateKeys.add("field_proof");
+  if (!exactKeys(input, expectedStateKeys) ||
+      input.schema_version !== VERIFIED_RECOVERY_STATE_VERSION ||
       input.plan_fingerprint !== plan.plan_fingerprint || !Array.isArray(input.completed)) {
     fail("verified recovery state shape or plan binding is invalid");
+  }
+  let fieldProof = null;
+  if (Object.hasOwn(input, "field_proof")) {
+    if (!exactKeys(input.field_proof, FIELD_PROOF_KEYS) ||
+        input.field_proof.schema_version !== 1 ||
+        input.field_proof.kind !== "v048_disposable_bootstrap_interruption" ||
+        input.field_proof.expected_chunks !== 3_201 ||
+        input.field_proof.paired_stop_stage !== "rebuild_vectorize") {
+      fail("verified recovery field proof binding is invalid");
+    }
+    const boundAt = isoTimestamp(input.field_proof.bound_at, "verified recovery field proof time");
+    fieldProof = Object.freeze({ ...structuredClone(input.field_proof), bound_at: boundAt });
   }
   isoTimestamp(input.created_at, "verified recovery state created_at");
   isoTimestamp(input.updated_at, "verified recovery state updated_at");
@@ -654,6 +691,14 @@ export function validateVerifiedRecoveryState(input, planInput) {
     const completedAt = isoTimestamp(entry.completed_at, "verified recovery completion time");
     const evidence = validateStageEvidence(entry.id, entry.evidence, plan, completed);
     completed.push(Object.freeze({ id: entry.id, completed_at: completedAt, evidence }));
+  }
+  const completedRebuild = completed.find((entry) => entry.id === "rebuild_vectorize")?.evidence;
+  const completedRebuildHasProof = Boolean(completedRebuild) &&
+    REBUILD_BOOTSTRAP_PROOF_KEYS.every((key) => Object.hasOwn(completedRebuild, key));
+  if ((fieldProof && completedRebuild &&
+        (!completedRebuildHasProof || completedRebuild.chunk_count !== fieldProof.expected_chunks)) ||
+      (!fieldProof && completedRebuildHasProof)) {
+    fail("verified recovery field proof state and rebuild evidence do not match");
   }
   const next = STAGE_IDS[completed.length] ?? null;
   const status = String(input.status ?? "");
@@ -693,8 +738,37 @@ export function validateVerifiedRecoveryState(input, planInput) {
   }
   return Object.freeze({
     ...structuredClone(input),
+    ...(fieldProof ? { field_proof: fieldProof } : {}),
     completed: Object.freeze(completed),
   });
+}
+
+/**
+ * Persistently opt one recovery journal into the exact v0.4.8 interruption
+ * campaign before its first rebuild attempt. Ordinary recovery states remain
+ * unchanged and cannot be mistaken for field-proof runs by corpus size alone.
+ */
+export function bindVerifiedRecoveryFieldProof(stateInput, planInput, options = {}) {
+  const plan = validateVerifiedRecoveryPlan(planInput);
+  const state = validateVerifiedRecoveryState(stateInput, plan);
+  if (state.field_proof) return state;
+  if (state.status === "complete" ||
+      state.completed.some((entry) => entry.id === "rebuild_vectorize") ||
+      (state.current_stage === "rebuild_vectorize" && state.attempt > 0)) {
+    fail("verified recovery field proof cannot be bound after rebuild begins");
+  }
+  const timestamp = nowIso(options);
+  return validateVerifiedRecoveryState({
+    ...structuredClone(state),
+    field_proof: {
+      schema_version: 1,
+      kind: "v048_disposable_bootstrap_interruption",
+      expected_chunks: 3_201,
+      paired_stop_stage: "rebuild_vectorize",
+      bound_at: timestamp,
+    },
+    updated_at: timestamp,
+  }, plan);
 }
 
 function markStageRunning(state, options = {}) {

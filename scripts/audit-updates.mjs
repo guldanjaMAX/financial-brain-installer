@@ -8,6 +8,13 @@ export { verifiedNpmCliPath } from "../operations/npm-cli-runtime.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 
+// The recovery adapter deliberately exercises a large, cryptographically
+// bound fixture. Hosted macOS observations ranged from roughly four to seven
+// minutes, so five minutes was not a meaningful hang boundary under normal
+// runner variance. Ten minutes retains a finite fail-closed bound while giving
+// the supported Windows and macOS lanes enough headroom to finish the proof.
+export const REGRESSION_TIMEOUT_MS = 600_000;
+
 // A RELEASE MAY DECLARE ITS SCOPE. IT MAY NOT DECLARE ITSELF EXEMPT.
 //
 // Requiring every incident ever opened to carry field evidence before ANY
@@ -221,7 +228,7 @@ export function regressionEnvironment(env = process.env) {
 }
 
 export function runRegressions(cases, run = (path) => spawnSync(process.execPath,
-  ["--no-warnings", path], { cwd: root, env: regressionEnvironment(), stdio: "inherit", timeout: 300_000 }), platform = process.platform) {
+  ["--no-warnings", path], { cwd: root, env: regressionEnvironment(), stdio: "inherit", timeout: REGRESSION_TIMEOUT_MS }), platform = process.platform) {
   const results = [];
   for (const path of new Set(cases.flatMap((item) => item.tests))) {
     const runnable = cases.some((item) => item.tests.includes(path) && (!item.testPlatform || item.testPlatform === platform));
