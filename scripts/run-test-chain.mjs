@@ -71,6 +71,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/source-original-result-family.test.mjs",
   "node --no-warnings --test worker/test/source-original-accepted-resolution.test.mjs",
   "node --no-warnings --test worker/test/source-original-observation.test.mjs",
+  "node --no-warnings --test test/provenance-target-repair.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -302,6 +303,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/source-original-result-family.test.mjs",
   "node --no-warnings --test worker/test/source-original-accepted-resolution.test.mjs",
   "node --no-warnings --test worker/test/source-original-observation.test.mjs",
+  "node --no-warnings --test test/provenance-target-repair.test.mjs",
 ]);
 
 export function parseTestCommand(command) {
