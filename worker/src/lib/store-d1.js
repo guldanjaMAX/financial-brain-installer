@@ -3560,7 +3560,12 @@ const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `
   run_rollup AS (
     SELECT source,
            MIN(started_at) AS first_run_started_at,
+           -- A bounded run may successfully ingest every item it attempted
+           -- without proving a whole-source walk. Keep that operational
+           -- success distinct from the latest-run and history-completeness
+           -- fields below, while never advancing it past measured loss.
            MAX(CASE WHEN finished_at IS NOT NULL AND error IS NULL AND refusal_reason IS NULL
+                         AND COALESCE(docs_refused,0)=0 AND COALESCE(docs_failed,0)=0
                     THEN finished_at END) AS last_successful_run_at
       FROM sync_runs
      GROUP BY source
@@ -3648,6 +3653,9 @@ const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `
            WHEN r.finished_at IS NULL THEN 'in_progress'
            WHEN r.error IS NOT NULL THEN 'failed'
            WHEN r.refusal_reason IS NOT NULL THEN 'refused'
+           WHEN COALESCE(r.walk_complete,0)<>1
+             OR COALESCE(r.docs_refused,0)>0
+             OR COALESCE(r.docs_failed,0)>0 THEN 'partial'
            ELSE 'completed'
          END AS run_outcome,
          CASE WHEN r.error IS NULL THEN 0 ELSE 1 END AS run_had_error,
