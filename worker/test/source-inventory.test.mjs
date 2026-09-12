@@ -430,6 +430,110 @@ test("source inventory pages are complete, stable, supported, and read-only", as
   assert.ok(seen.prepared.every((sql) => !/^\s*(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b/i.test(sql)));
 });
 
+test("latest run truth keeps bounded ingest success separate from whole-source completeness", async () => {
+  const db = migratedDb("run-truth");
+  const privateSentinel = "SYNTHETIC_PRIVATE_OLD_RUN /private/source/path secret-account@example.invalid";
+  const lastComplete = "2026-09-07T00:01:00.000Z";
+  const latestFinished = "2026-09-09T00:01:00.000Z";
+  const cases = [
+    {
+      source: "bounded_clean", kind: "upload", lane: "manual", walkComplete: 0, refused: 0, failed: 0,
+      outcome: "partial", lastSuccessful: latestFinished, completeThrough: lastComplete,
+      history: "needs_attention",
+    },
+    {
+      source: "refused_gap", kind: "gmail", lane: "sweep", walkComplete: 1, refused: 1, failed: 0,
+      outcome: "partial", lastSuccessful: lastComplete, completeThrough: lastComplete,
+      history: "needs_attention",
+    },
+    {
+      source: "failed_gap", kind: "drive", lane: "sweep", walkComplete: 1, refused: 0, failed: 1,
+      outcome: "partial", lastSuccessful: lastComplete, completeThrough: lastComplete,
+      history: "needs_attention",
+    },
+    {
+      source: "incremental_clean", kind: "drive", lane: "incremental", walkComplete: 1, refused: 0, failed: 0,
+      outcome: "completed", lastSuccessful: latestFinished, completeThrough: lastComplete,
+      history: "complete",
+    },
+    {
+      source: "full_clean", kind: "drive", lane: "sweep", walkComplete: 1, refused: 0, failed: 0,
+      outcome: "completed", lastSuccessful: latestFinished, completeThrough: latestFinished,
+      history: "complete", confirmedFrom: "2020-01-01T00:00:00.000Z", confirmedThrough: latestFinished,
+    },
+  ];
+  const insertSource = db.prepare(
+    `INSERT INTO sources
+       (name,kind,status,created_at,last_ingest_at,document_count,last_complete_sweep_at)
+     VALUES (?,?,'ready','2026-09-01T00:00:00.000Z',?,0,?)`,
+  );
+  const insertRun = db.prepare(
+    `INSERT INTO sync_runs
+       (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+        docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+        confirmed_from,confirmed_through,error)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+
+  for (const shape of cases) {
+    insertSource.run(shape.source, shape.kind, latestFinished, shape.completeThrough);
+    insertRun.run(
+      `${shape.source}-private-old-failure`, shape.source, "sweep",
+      Date.parse("2026-09-06T00:00:00.000Z"), Date.parse("2026-09-06T00:01:00.000Z"),
+      0, 0, 0, 0, 0, 0, 0, 1, null, null, privateSentinel,
+    );
+    insertRun.run(
+      `${shape.source}-clean`, shape.source, "sweep",
+      Date.parse("2026-09-07T00:00:00.000Z"), Date.parse(lastComplete),
+      1, 2, 1, 0, 1, 0, 0, 1,
+      "2020-01-01T00:00:00.000Z", lastComplete, null,
+    );
+    insertRun.run(
+      `${shape.source}-latest`, shape.source, shape.lane,
+      Date.parse("2026-09-09T00:00:00.000Z"), Date.parse(latestFinished),
+      shape.walkComplete, 3, 1, 0, 1, shape.refused, shape.failed, 1,
+      shape.confirmedFrom || null, shape.confirmedThrough || null, null,
+    );
+  }
+
+  const { env, seen } = d1Env(db, "run-truth");
+  const changesBefore = db.prepare("SELECT total_changes() AS n").get().n;
+  const response = await call(env, post({ limit: 10 }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(response.status, 200, await response.clone().text());
+  const inventory = await response.json();
+  assert.deepEqual(
+    inventory.sources.map((source) => source.source_id),
+    ["bounded_clean", "failed_gap", "full_clean", "incremental_clean", "refused_gap"],
+  );
+
+  for (const shape of cases) {
+    const source = inventory.sources.find((candidate) => candidate.source_id === shape.source);
+    assert.equal(source.receipt.latest_run.outcome, shape.outcome, shape.source);
+    assert.equal(source.receipt.last_successful_run_at, shape.lastSuccessful, shape.source);
+    assert.equal(source.receipt.complete_history_through, shape.completeThrough, shape.source);
+    assert.equal(source.freshness.coverage.history.state, shape.history, shape.source);
+    assert.deepEqual(source.freshness.coverage.confirmed_range, {
+      from: shape.confirmedFrom || null,
+      through: shape.confirmedThrough || null,
+    }, shape.source);
+    assert.equal(source.receipt.latest_run.docs_refused, shape.refused, shape.source);
+    assert.equal(source.receipt.latest_run.docs_failed, shape.failed, shape.source);
+  }
+  assert.equal(
+    inventory.sources.find((source) => source.source_id === "bounded_clean")
+      .freshness.coverage.counts.seen,
+    null,
+    "a bounded successful ingest must not expose its counters as a measured whole-source walk",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(inventory),
+    /SYNTHETIC_PRIVATE_OLD_RUN|private\/source\/path|secret-account/i,
+  );
+  assert.equal(db.prepare("SELECT total_changes() AS n").get().n, changesBefore);
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+});
+
 test("source inventory suppresses stored Gmail failure evidence that fails the closed privacy contract", async () => {
   const db = migratedDb();
   await addInventoryFixture(db);
