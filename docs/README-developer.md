@@ -289,8 +289,9 @@ fields and private fingerprint inputs. A nondefault model or price-contract
 drift is unpriced instead of borrowing the default model's range. The daily cap
 is included only when the manifest actually configures it; absence is null with
 `daily_spend_cap_source: "not_configured"` and keeps the plan incomplete.
-`estimated_fits_configured_cap` compares the estimated high value with the full
-configured cap only. Because the high value is not a guaranteed upper bound and
+`estimated_fits_configured_cap` compares the unrounded estimated high value with
+the full configured cap only, so display rounding cannot create a positive fit.
+Because the high value is not a guaranteed upper bound and
 the cap is shared with other model calls, remaining daily headroom and actual
 affordability remain explicit unknowns. A SHA-256 plan fingerprint binds the
 private root identity, exact model, versioned pricing basis, relevant policy,

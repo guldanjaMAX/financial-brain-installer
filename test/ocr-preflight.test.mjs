@@ -252,6 +252,13 @@ test("configured-cap comparison is separate from unknown shared headroom and act
   assert.equal(estimatedFit.estimate.remaining_shared_daily_budget_state, "unknown");
   assert.equal(estimatedFit.estimate.actual_affordability, "unknown");
   assert.equal(estimatedFit.pricing_basis.high_is_guaranteed_upper_bound, false);
+  const roundedEdge = build({ cap: 0.0015, observations: [scan(2)] });
+  assert.equal(roundedEdge.estimate.usd_high, 0.0015,
+    "the owner-facing estimate keeps its existing four-decimal display value");
+  assert.equal(roundedEdge.estimate.estimated_fits_configured_cap, false,
+    "the cap comparison must use the unrounded $0.00152 high bracket");
+  assert.equal(build({ cap: 0.00152, observations: [scan(2)] })
+    .estimate.estimated_fits_configured_cap, true);
   assert.equal(build({ cap: 100, observations: [scan(1), scan(null)] })
     .estimate.estimated_fits_configured_cap, null);
 });
@@ -396,6 +403,22 @@ test("an exact nondefault model is bound but remains unpriced and cap-unknown", 
   assert.equal(receipt.estimate.remaining_shared_daily_budget_usd, null);
   assert.equal(receipt.estimate.actual_affordability, "unknown");
   assertNoPrivateSurface(receipt);
+  assert.throws(
+    () => assertOcrPreflightReceipt({
+      ...receipt,
+      estimate: {
+        ...receipt.estimate,
+        basis: "known_cap_eligible_pages_lower_bound",
+        pages: 5,
+        usd_low: 0,
+        usd_high: 0,
+        minutes_low: 0,
+        minutes_high: 0,
+      },
+    }),
+    /unpriced OCR model must keep its estimate unavailable/,
+    "a nondefault unpriced model cannot smuggle a zero-valued estimate through validation",
+  );
 });
 
 test("receipt validation rejects cost, cap, and effect claims that escape the reviewed basis", () => {
@@ -468,6 +491,22 @@ test("pricing contract drift is explicit and cannot reuse a stale priced range",
   assert.equal(receipt.status, "incomplete");
   assert.equal(receipt.estimate.basis, "unavailable");
   assert.equal(receipt.estimate.estimated_fits_configured_cap, null);
+  assert.throws(
+    () => assertOcrPreflightReceipt({
+      ...receipt,
+      estimate: {
+        ...receipt.estimate,
+        basis: "known_cap_eligible_pages_lower_bound",
+        pages: 2,
+        usd_low: 0,
+        usd_high: 0,
+        minutes_low: 0,
+        minutes_high: 0,
+      },
+    }),
+    /unpriced OCR model must keep its estimate unavailable/,
+    "a pricing-contract mismatch cannot smuggle a zero-valued estimate through validation",
+  );
 });
 
 test("the plan fingerprint changes with the exact OCR model and pricing basis", async () => {

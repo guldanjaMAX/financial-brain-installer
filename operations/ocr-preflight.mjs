@@ -398,11 +398,18 @@ function emptyUnknownCounts(value = 0) {
   };
 }
 
-function estimateFromPricingBasis(pages, pricingBasis) {
-  const at = (suffix) => (
+function rawUsdFromPricingBasis(pages, pricingBasis, suffix) {
+  if (pricingBasis?.status !== "estimated_range") {
+    throw new TypeError("an unpriced OCR model cannot produce a numeric estimate");
+  }
+  return (
     pages * pricingBasis[`input_tokens_per_page_${suffix}`] * pricingBasis.input_usd_per_m +
     pages * pricingBasis[`output_tokens_per_page_${suffix}`] * pricingBasis.output_usd_per_m
   ) / 1_000_000;
+}
+
+function estimateFromPricingBasis(pages, pricingBasis) {
+  const at = (suffix) => rawUsdFromPricingBasis(pages, pricingBasis, suffix);
   return {
     pages,
     usd_low: +at("low").toFixed(4),
@@ -526,7 +533,10 @@ export function ocrPreflightReceipt({
     : normalizedCost(estimateCost, capEligiblePages, pricingBasis);
   const estimatedFitsConfiguredCap = !estimateComplete || !policy.daily_spend_cap_configured
     ? null
-    : estimated.usd_high <= policy.daily_spend_cap_usd;
+    // Compare the unrounded planning bracket. The displayed range keeps the
+    // existing four-decimal format, but rounding it down must never turn a cap
+    // that is slightly too small into a positive fit result.
+    : rawUsdFromPricingBasis(capEligiblePages, pricingBasis, "high") <= policy.daily_spend_cap_usd;
   const receipt = {
     schema_version: OCR_PREFLIGHT_SCHEMA_VERSION,
     kind: OCR_PREFLIGHT_KIND,
@@ -805,6 +815,9 @@ export function assertOcrPreflightReceipt(receipt) {
   } else if (pricingAmounts.some((value) => value !== null)) {
     throw new TypeError("an unpriced OCR model cannot carry a numeric pricing range");
   }
+  if (!pricingAvailable && receipt.estimate.basis !== "unavailable") {
+    throw new TypeError("an unpriced OCR model must keep its estimate unavailable");
+  }
   if (receipt.policy.max_pages_per_document < 1) {
     throw new TypeError("OCR preflight requires a positive per-document page cap");
   }
@@ -884,7 +897,8 @@ export function assertOcrPreflightReceipt(receipt) {
   }
   const expectedFitsConfiguredCap = !expectedEstimateComplete || !receipt.policy.daily_spend_cap_configured
     ? null
-    : receipt.estimate.usd_high <= receipt.policy.daily_spend_cap_usd;
+    : rawUsdFromPricingBasis(receipt.estimate.pages, receipt.pricing_basis, "high") <=
+      receipt.policy.daily_spend_cap_usd;
   if (receipt.estimate.estimated_fits_configured_cap !== expectedFitsConfiguredCap ||
       receipt.estimate.remaining_shared_daily_budget_usd !== null) {
     throw new TypeError("OCR preflight configured-cap comparison or unknown live headroom is invalid");
