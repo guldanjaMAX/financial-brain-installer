@@ -491,6 +491,11 @@ const expected = [
   "operations/provenance-target-repair.mjs",
   "operations/provenance-target-cli.mjs",
   "operations/provenance-source-assessment.mjs",
+  // Aggregate-only local OCR planner. Reviewed 2026-09-12 for filename, path,
+  // content, parser-error, hash, credential, and root-identity disclosure. Its
+  // exact schema contains only counts, policy values, ranges, typed unknowns,
+  // and false action flags; the module owns no I/O or external capability.
+  "operations/ocr-preflight.mjs",
   // Reviewed read-only Optimize inventory client. It accepts no literal key,
   // validates HTTPS before resolving the protected credential, refuses
   // redirects, and sends only bounded exact filters to the Brain data plane.

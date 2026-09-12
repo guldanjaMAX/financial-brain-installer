@@ -271,6 +271,30 @@ document. `documents.text_source` and `text_reliable` carry the OCR provenance
 through retrieval and citations. Local synthetic scans prove this contract;
 real typed, fax-quality, and handwritten scans remain a private field gate.
 
+`brain ocr-preflight <manifest> --path <folder> --json` is the no-model planning
+boundary for that local PDF path. `ingest/extract.mjs` forwards the PDF parser's
+closed `observation`, and `ingest/run.mjs#prepare` retains its structured
+scan-only state and authoritative page count even when the human ingest result
+is a skip. The command calls the real walker and preparer with `ocr: null`, does
+not load ingest state, and is exempt from the process-wide Wrangler session.
+It imports the existing `estimateOcrCost` lazily and sends only content-free
+observations into `operations/ocr-preflight.mjs`.
+
+The schema-v1 receipt is exact and aggregate-only. It separates known affected
+pages from unknown page counts, pages admitted or omitted by the per-document
+limit, and filesystem traversal gaps from a proved zero. Cost/time values are
+either the complete range, a named known-page lower bound, or null. The daily
+cap is included only when the manifest actually configures it; absence is null
+with `daily_spend_cap_source: "not_configured"` and keeps the plan incomplete.
+`affordability` is closed over the high estimate and is unknown whenever page
+coverage or the cap is incomplete. A SHA-256 plan fingerprint binds the private
+root identity, relevant policy, private-prefix policy, PDF byte receipts,
+observations, and walk skips without returning those private inputs. The
+receipt has explicit false flags for OCR, network, credential, Brain,
+checkpoint, cursor, ingest-state, and filesystem writes. Failed commands print
+only a fixed failure code through `JsonFatal`, so neither raw paths nor parser
+errors enter output or the support journal.
+
 Every corpus write also carries the exact `metadata.provenance_receipt` v1
 object: `version`, `status`, `reason`, and sorted unique `root_ids`. `complete`
 means only that lineage and text-origin fields were recorded. It says nothing
