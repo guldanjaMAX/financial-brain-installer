@@ -676,12 +676,22 @@ jobs:
         shell: powershell
         run: |
           $shim = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\node-21" -Force
-          Set-Content "$shim\node.cmd" "@echo off`r`necho v21.9.0"
+          @'
+          @echo off
+          if "%~1"=="-v" (
+            echo v21.9.0
+            exit /b 0
+          )
+          > "%~dp0unexpected-node-use" echo unexpected
+          exit /b 97
+          '@ | Set-Content -Encoding Ascii "$shim\node.cmd"
+          $unexpectedNodeUse = Join-Path $shim 'unexpected-node-use'
           $env:Path = "$shim;$env:Path"
           $raw = & powershell -NoProfile -File .\.packaged-preflight\package\tools\preflight.ps1 2>&1
           $code = $LASTEXITCODE
           $out = $raw | Out-String
           Write-Host $out
+          if (Test-Path $unexpectedNodeUse) { Write-Host "::error::preflight reused unsupported Node after its version check"; exit 1 }
           if ($out -notmatch 'STOP.*node v21\.9\.0 is too old; the installer needs 22 or newer') { Write-Host "::error::preflight accepted unsupported Node 21"; exit 1 }
           if ($code -ne 1) { Write-Host "::error::unsupported Node must exit 1, got $code"; exit 1 }
           Write-Host "TRAP 5 DETECTED, exit 1 as required"

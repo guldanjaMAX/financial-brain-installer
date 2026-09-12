@@ -114,8 +114,8 @@ assert.match(testJob, /- name: Windows PowerShell user-prefix command works[\s\S
 assert.match(preflightTrapJob, /trap 4: an empty earlier Wrangler directory cannot mask a later session/);
 assert.match(preflightTrapJob, /New-Item -ItemType Directory -Force -Path \(Join-Path \$env:APPDATA 'xdg\.config\\\.wrangler\\config'\)[\s\S]*?Set-Content \(Join-Path \$session 'default\.toml'\)[\s\S]*?ok\\s\+wrangler session found/,
   "Windows CI must prove an empty earlier Wrangler directory cannot hide a later session file");
-assert.match(preflightTrapJob, /trap 5: Node 21 is below the supported minimum[\s\S]*?node\.cmd[\s\S]*?installer needs 22 or newer/,
-  "Windows CI must refuse Node 21 rather than only testing supported runtimes");
+assert.match(preflightTrapJob, /trap 5: Node 21 is below the supported minimum[\s\S]*?if "%~1"=="-v"[\s\S]*?unexpected-node-use[\s\S]*?node\.cmd[\s\S]*?Test-Path \$unexpectedNodeUse[\s\S]*?installer needs 22 or newer/,
+  "Windows CI must refuse Node 21 and prove the unsupported runtime is not reused");
 
 const gateIndex = release.indexOf("  gate:");
 const publicContractIndex = release.indexOf("  public-contract-install:");

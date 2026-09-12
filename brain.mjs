@@ -9200,7 +9200,10 @@ export function provenanceTargetDependencies(options = {}) {
   return Object.freeze({
     acquireSourceLease,
     verifyCandidateRuntime,
-    lstat: options.lstat ?? ((path) => lstatSync(path)),
+    // NTFS file IDs may exceed Number.MAX_SAFE_INTEGER. Preserve the exact
+    // device and inode values so the lease-first identity check cannot accept
+    // two different filesystem objects after numeric rounding.
+    lstat: options.lstat ?? ((path) => lstatSync(path, { bigint: true })),
     realpath: options.realpath ?? ((path) => realpathSync(path)),
     readFile: options.readFile ?? ((path) => readFileSync(path)),
     resolveDurableAdminAccess,

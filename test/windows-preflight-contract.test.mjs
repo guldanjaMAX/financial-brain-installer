@@ -54,6 +54,15 @@ test("Windows preflight honors the private installed manifest and package-local 
   assert.match(script, /Join-Path \$packagePrefix "brain\.cmd"/);
 });
 
+test("Windows preflight never reuses missing or unsupported Node for manifest selection", () => {
+  assert.match(script, /\$nodeSupported = \$false/);
+  assert.match(script, /else \{ \$nodeSupported = \$true \}/);
+  assert.match(
+    script,
+    /\$nodePath = \$node\.Source[\s\S]*?if \(-not \$nodeSupported\) \{[\s\S]*?saved Brain location check was skipped for now[\s\S]*?\} else \{[\s\S]*?& \$nodePath \$pointerHelper --preflight-locator/,
+  );
+});
+
 test("elevated Windows CI proves the production refusal without bypassing it", () => {
   for (const workflow of workflows) {
     assert.match(workflow, /control: the elevated CI machine is stopped for exactly that reason/);
@@ -66,6 +75,9 @@ test("elevated Windows CI proves the production refusal without bypassing it", (
     assert.match(workflow, /PowerShell 7 proves the native unpackaged-process branch/);
     assert.match(workflow, /POWERSHELL 7 NATIVE PACKAGE CHECK PASSED/);
     assert.match(workflow, /trap 2: an app-package data path remains fail-closed/);
+    assert.match(workflow, /if "%~1"=="-v"/);
+    assert.match(workflow, /unexpected-node-use/);
+    assert.match(workflow, /Test-Path \$unexpectedNodeUse/);
     assert.doesNotMatch(workflow, /SKIP_(?:ADMIN|MACHINE)|ALLOW_(?:ADMIN|ELEVATED)/);
   }
 });

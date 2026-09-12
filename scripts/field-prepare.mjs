@@ -546,21 +546,34 @@ function assertPlanSourceIdentity(options, source) {
 export function makeOutputDirectory(requested, { temporaryRoot = tmpdir() } = {}) {
   if (requested) {
     const output = resolve(requested);
-    const relativeToRoot = relative(ROOT, output);
-    const insideRoot = relativeToRoot === "" || (
-      relativeToRoot !== ".." &&
-      !relativeToRoot.startsWith(`..${sep}`) &&
-      !isAbsolute(relativeToRoot)
+    const lexicalRelativeToRoot = relative(ROOT, output);
+    const lexicallyInsideRoot = lexicalRelativeToRoot === "" || (
+      lexicalRelativeToRoot !== ".." &&
+      !lexicalRelativeToRoot.startsWith(`..${sep}`) &&
+      !isAbsolute(lexicalRelativeToRoot)
     );
-    if (insideRoot) {
+    if (lexicallyInsideRoot) {
       throw new Error("custom_output_inside_source_checkout_refused");
     }
-    if (existsSync(output)) throw new Error("output directory already exists");
     const parent = dirname(output);
     const parentInfo = lstatSync(parent);
     if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) {
       throw new Error("output parent must be a real directory");
     }
+    // Resolve the complete existing parent chain before comparing it with the
+    // checkout. A lexical path outside ROOT can still enter it through an
+    // earlier directory symlink or Windows junction.
+    const canonicalOutput = join(realpathSync(parent), basename(output));
+    const relativeToRoot = relative(realpathSync(ROOT), canonicalOutput);
+    const canonicallyInsideRoot = relativeToRoot === "" || (
+      relativeToRoot !== ".." &&
+      !relativeToRoot.startsWith(`..${sep}`) &&
+      !isAbsolute(relativeToRoot)
+    );
+    if (canonicallyInsideRoot) {
+      throw new Error("custom_output_inside_source_checkout_refused");
+    }
+    if (existsSync(output)) throw new Error("output directory already exists");
     mkdirSync(output, { mode: 0o700 });
     if (!IS_WINDOWS) chmodSync(output, 0o700);
     return output;

@@ -121,12 +121,19 @@ function absolutePath(value, label) {
   return value;
 }
 
-function safeInteger(value, label) {
-  const number = typeof value === "bigint" ? Number(value) : value;
-  if (!Number.isSafeInteger(number) || number < 0) {
+const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n;
+
+function exactFilesystemInteger(value, label) {
+  if (typeof value === "bigint") {
+    if (value < 0n || value > MAX_UNSIGNED_64) {
+      throw new TypeError(`${label} is unavailable`);
+    }
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString(10);
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
     throw new TypeError(`${label} is unavailable`);
   }
-  return number;
+  return value;
 }
 
 async function directIdentity(path, expectedType, dependencies, assertOwned = async () => {}) {
@@ -148,10 +155,10 @@ async function directIdentity(path, expectedType, dependencies, assertOwned = as
   const secondMatches = expectedType === "file"
     ? second?.isFile?.() === true
     : second?.isDirectory?.() === true;
-  const firstDevice = safeInteger(first?.dev, `${expectedType} device`);
-  const firstInode = safeInteger(first?.ino, `${expectedType} inode`);
-  const secondDevice = safeInteger(second?.dev, `resolved ${expectedType} device`);
-  const secondInode = safeInteger(second?.ino, `resolved ${expectedType} inode`);
+  const firstDevice = exactFilesystemInteger(first?.dev, `${expectedType} device`);
+  const firstInode = exactFilesystemInteger(first?.ino, `${expectedType} inode`);
+  const secondDevice = exactFilesystemInteger(second?.dev, `resolved ${expectedType} device`);
+  const secondInode = exactFilesystemInteger(second?.ino, `resolved ${expectedType} inode`);
   if (!secondMatches || second?.isSymbolicLink?.() === true ||
       firstDevice !== secondDevice || firstInode !== secondInode) {
     throw new TypeError(`${expectedType} identity changed during realpath validation`);

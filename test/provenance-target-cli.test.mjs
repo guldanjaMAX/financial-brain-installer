@@ -400,7 +400,12 @@ function fixtureDependencies(options = {}) {
     lstat: async (path) => {
       state.events.push(`lstat:${path === MANIFEST_PATH ? "manifest" : "root"}`);
       if (path === MANIFEST_PATH) return stat("file", 1, 11, state.manifestSymlink === true);
-      if (path === ROOT) return stat("directory", 2, 22, state.rootSymlink === true);
+      if (path === ROOT) return stat(
+        "directory",
+        state.rootDevice ?? 2,
+        state.rootInode ?? 22,
+        state.rootSymlink === true,
+      );
       throw new Error("unexpected synthetic path");
     },
     realpath: async (path) => path,
@@ -726,5 +731,61 @@ await assert.rejects(
 assert.deepEqual(symlinkFixture.state.mutations, []);
 assert.equal(symlinkFixture.state.events[0], "lease.acquire");
 assert.equal(symlinkFixture.state.events.at(-1), "lease.release");
+
+/* NTFS device and file IDs remain exact when they exceed JavaScript's safe number range. */
+const wideIdentityFixture = fixtureDependencies({
+  state: {
+    rootDevice: 9_007_199_254_740_993n,
+    rootInode: 18_446_744_073_709_551_615n,
+  },
+});
+const wideIdentityPreview = await previewProvenanceTargetRepair(
+  invocation(),
+  wideIdentityFixture.dependencies,
+);
+assert.deepEqual(wideIdentityPreview.privateContext.privatePlan.input.rootIdentity, {
+  path: ROOT,
+  realpath: ROOT,
+  device: "9007199254740993",
+  inode: "18446744073709551615",
+});
+assert.deepEqual(wideIdentityFixture.state.mutations, []);
+const wideIdentityReceipt = await applyProvenanceTargetRepair(
+  invocation(wideIdentityPreview.publicPlan.approval_id),
+  wideIdentityFixture.dependencies,
+);
+assert.equal(wideIdentityReceipt.complete, true);
+
+/* A neighboring wide NTFS file ID invalidates the exact prior approval. */
+const changedWideIdentityFixture = fixtureDependencies({
+  state: {
+    rootDevice: 9_007_199_254_740_993n,
+    rootInode: 18_446_744_073_709_551_615n,
+  },
+});
+const changedWideIdentityPreview = await previewProvenanceTargetRepair(
+  invocation(),
+  changedWideIdentityFixture.dependencies,
+);
+changedWideIdentityFixture.state.rootInode = 18_446_744_073_709_551_614n;
+await assert.rejects(
+  applyProvenanceTargetRepair(
+    invocation(changedWideIdentityPreview.publicPlan.approval_id),
+    changedWideIdentityFixture.dependencies,
+  ),
+  (error) => error instanceof ProvenanceTargetCliError &&
+    error.stage === "approval_recheck" && error.receipt.complete === false,
+);
+assert.deepEqual(changedWideIdentityFixture.state.mutations, []);
+
+/* Invalid signed or wider-than-NTFS identities fail before any mutation. */
+for (const rootInode of [-1n, 18_446_744_073_709_551_616n]) {
+  const invalidIdentityFixture = fixtureDependencies({ state: { rootInode } });
+  await assert.rejects(
+    previewProvenanceTargetRepair(invocation(), invalidIdentityFixture.dependencies),
+    /directory inode is unavailable/,
+  );
+  assert.deepEqual(invalidIdentityFixture.state.mutations, []);
+}
 
 console.log("provenance target CLI orchestration tests passed");

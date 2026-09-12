@@ -105,14 +105,14 @@ checkout, run `npm run rehearse:onboarding`. It opens the real owner-workspace
 bundle with synthetic data and an unmistakable local-only banner. No account,
 credential, manifest, or deployment is used.
 
-On Windows, use
-[the checked-in owner rehearsal launcher](onboarding/11-windows-onboarding-rehearsal.md)
-instead of starting the physical walkthrough through `npm.cmd`. The launcher
-verifies the technician-supplied SHA, clean repository root, non-administrator
-PowerShell, and Node.js 22+, then starts Node directly. The first run may
-download one additional small set of public frontend packages and can be quiet
-for several minutes. Do not email the `.ps1` file or paste its body; use the
-copy in the exact reviewed checkout.
+On Windows, use the sealed ZIP and matching `release.json` from
+[the Windows onboarding rehearsal](onboarding/11-windows-onboarding-rehearsal.md)
+instead of sending a repository link, bare SHA, guide, or script. The sealed
+instructions have Claude Code obtain the exact reviewed checkout and use its
+checked-in launcher. The launcher verifies the recorded SHA, clean repository
+root, non-administrator PowerShell, and Node.js 22+, then starts Node directly.
+The first run may download one additional small set of public frontend packages
+and can be quiet for several minutes.
 
 The bounded headless contract is
 `npm run rehearse:onboarding -- --smoke --no-open`. It builds the same bundle,

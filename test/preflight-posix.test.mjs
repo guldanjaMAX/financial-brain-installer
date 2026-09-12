@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,7 @@ function executable(path, body) {
 
 function runPreflight({
   nodeVersion = "v22.0.0",
+  refuseNodePrograms = false,
   brainCopies = 0,
   installedCliOutsidePath = false,
   manifests = 0,
@@ -30,6 +31,7 @@ function runPreflight({
   try {
     const home = join(fixture, "home");
     const bin = join(fixture, "bin");
+    const unexpectedNpmUse = join(fixture, "unexpected-npm-use");
     mkdirSync(home);
     mkdirSync(bin);
     executable(join(bin, "uname"), "printf '%s\\n' 'Darwin'");
@@ -53,13 +55,23 @@ function runPreflight({
       writeFileSync(join(config, "default.toml"), "fixture session marker only\n");
     }
 
-    const actualNode = process.execPath.replace(/'/g, `'"'"'`);
-    executable(join(bin, "node"), `
+    if (nodeVersion !== null) {
+      const actualNode = process.execPath.replace(/'/g, `'"'"'`);
+      const nonVersionCommand = refuseNodePrograms
+        ? "printf '%s\\n' 'unexpected unsupported Node invocation' >&2; exit 97"
+        : `exec '${actualNode}' "$@"`;
+      executable(join(bin, "node"), `
 case "$1" in
   -v) printf '%s\\n' '${nodeVersion}' ;;
-  *) exec '${actualNode}' "$@" ;;
+  *) ${nonVersionCommand} ;;
 esac`);
+    }
+    const refuseNpmPrograms = refuseNodePrograms || nodeVersion === null;
     executable(join(bin, "npm"), `
+if [ '${refuseNpmPrograms ? "yes" : "no"}' = 'yes' ]; then
+  : > "$PREFLIGHT_NPM_MARKER"
+  exit 98
+fi
 case "$1" in
   -v) printf '%s\\n' '10.0.0' ;;
   config) printf '%s\\n' '/fixture-prefix' ;;
@@ -109,27 +121,41 @@ esac`);
       LANG: "C.UTF-8",
       HOME: home,
       PATH: [...brainDirs, bin, "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
+      PREFLIGHT_NPM_MARKER: unexpectedNpmUse,
       ...(wranglerSession === "xdg" ? { XDG_CONFIG_HOME: join(fixture, "xdg config") } : {}),
     };
     delete env.CLOUDFLARE_API_TOKEN;
     delete env.CLOUDFLARE_API_KEY;
     if (wranglerSession !== "xdg") delete env.XDG_CONFIG_HOME;
 
-    return spawnSync("/bin/bash", [PREFLIGHT], {
+    const result = spawnSync("/bin/bash", [PREFLIGHT], {
       cwd: ROOT,
       env,
       encoding: "utf8",
       timeout: 10_000,
     });
+    return { ...result, unexpectedNpmUse: existsSync(unexpectedNpmUse) };
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
 }
 
 test("POSIX preflight rejects Node 21 and accepts Node 22", { skip: process.platform === "win32" }, () => {
-  const oldNode = runPreflight({ nodeVersion: "v21.9.0" });
+  const oldNode = runPreflight({ nodeVersion: "v21.9.0", refuseNodePrograms: true });
   assert.equal(oldNode.status, 1);
   assert.match(oldNode.stdout, /node v21\.9\.0 is too old; the installer needs 22 or newer/);
+  assert.match(oldNode.stdout, /saved Brain location check was skipped for now/i);
+  assert.doesNotMatch(oldNode.stdout, /manifest selector could not run/i);
+  assert.doesNotMatch(oldNode.stderr, /unexpected unsupported Node invocation/i);
+  assert.equal(oldNode.unexpectedNpmUse, false);
+
+  const missingNode = runPreflight({ nodeVersion: null });
+  assert.equal(missingNode.status, 1);
+  assert.match(missingNode.stdout, /node is not installed/);
+  assert.match(missingNode.stdout, /saved Brain location check was skipped for now/i);
+  assert.doesNotMatch(missingNode.stdout, /manifest selector could not run/i);
+  assert.doesNotMatch(missingNode.stderr, /node.*(?:not found|No such file)/i);
+  assert.equal(missingNode.unexpectedNpmUse, false);
 
   const supportedNode = runPreflight({ nodeVersion: "v22.0.0" });
   assert.equal(supportedNode.status, 0, supportedNode.stderr || supportedNode.stdout);

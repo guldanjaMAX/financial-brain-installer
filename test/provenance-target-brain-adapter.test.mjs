@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -468,8 +468,19 @@ test("real Brain adapter refuses widened target, OCR, family, drain, and generat
 });
 
 test("runtime inventory exactly matches the local npm pack and rejects nested symlinks", (t) => {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const packed = spawnSync(npm, ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+  const adjacentNpmCli = join(
+    dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js",
+  );
+  const npmCli = [process.env.npm_execpath, adjacentNpmCli]
+    .find((candidate) => candidate && existsSync(candidate));
+  if (!npmCli && process.platform === "win32") {
+    throw new Error("npm CLI is unavailable; run this focused test through npm test");
+  }
+  const command = npmCli ? process.execPath : "npm";
+  const packed = spawnSync(command, [
+    ...(npmCli ? [npmCli] : []),
+    "pack", "--dry-run", "--json", "--ignore-scripts",
+  ], {
     cwd: ROOT,
     encoding: "utf8",
     timeout: 60_000,

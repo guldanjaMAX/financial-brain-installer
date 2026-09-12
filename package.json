@@ -12,6 +12,7 @@
   },
   "scripts": {
     "field:prepare": "node scripts/field-prepare.mjs",
+    "rehearsal:kit": "node scripts/build-windows-onboarding-kit.mjs",
     "rehearse:hiccups": "node scripts/customer-hiccup-lab.mjs",
     "rehearse:onboarding": "node scripts/onboarding-sandbox.mjs",
     "privacy:history": "node scripts/scan-git-history-privacy.mjs --ref HEAD --require-clean",

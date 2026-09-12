@@ -290,7 +290,7 @@ function orchestratorHarness(fixture, install) {
     },
     lstat: async (path) => {
       requireLease("private.file-lstat");
-      return lstatSync(path);
+      return lstatSync(path, { bigint: true });
     },
     realpath: async (path) => {
       requireLease("private.file-realpath");

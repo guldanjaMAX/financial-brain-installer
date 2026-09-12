@@ -591,6 +591,7 @@ const expected = [
   "privacy/credential-dispositions.json",
   "privacy/history-baseline.json",
   "privacy/public-refs.json",
+  "scripts/build-windows-onboarding-kit.mjs",
   "scripts/build-worker-bank-export.mjs",
   "scripts/build-worker-upload-extract.mjs",
   "scripts/field-prepare.mjs",

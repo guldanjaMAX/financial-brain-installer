@@ -4,18 +4,23 @@
 ok(){ printf "  ok    %s\n" "$1"; }
 warn(){ printf "  WARN  %s\n" "$1"; WARNED=$((WARNED+1)); }
 stop(){ printf "  STOP  %s\n" "$1"; STOPPED=$((STOPPED+1)); }
-WARNED=0; STOPPED=0; FRESH=0; NOMANIFEST=0
+WARNED=0; STOPPED=0; FRESH=0; NOMANIFEST=0; NODE_SUPPORTED=0
 echo "Financial Brain preflight  -  $(date '+%Y-%m-%d %H:%M')"
 echo
 
 echo "MACHINE"
 printf "  os              %s %s\n" "$(uname -s)" "$(uname -r)"
 if command -v node >/dev/null 2>&1; then
-  NV=$(node -v); NMAJ=${NV#v}; NMAJ=${NMAJ%%.*}
-  printf "  node            %s (%s)\n" "$NV" "$(command -v node)"
-  [ "$NMAJ" -ge 22 ] 2>/dev/null || stop "node $NV is too old; the installer needs 22 or newer"
+  NODE_BIN=$(command -v node)
+  NV=$("$NODE_BIN" -v); NMAJ=${NV#v}; NMAJ=${NMAJ%%.*}
+  printf "  node            %s (%s)\n" "$NV" "$NODE_BIN"
+  if [ "$NMAJ" -ge 22 ] 2>/dev/null; then NODE_SUPPORTED=1
+  else stop "node $NV is too old; the installer needs 22 or newer"; fi
 else stop "node is not installed"; fi
-command -v npm >/dev/null 2>&1 && printf "  npm             %s\n" "$(npm -v 2>/dev/null)" || stop "npm is not installed"
+if command -v npm >/dev/null 2>&1; then
+  if [ "$NODE_SUPPORTED" -eq 1 ]; then printf "  npm             %s\n" "$(npm -v 2>/dev/null)"
+  else printf "  npm             found (version check waits for Node 22 or newer)\n"; fi
+else stop "npm is not installed"; fi
 if [ "$(id -u 2>/dev/null)" = "0" ]; then
   stop "this shell is running as root; close it and use a normal Terminal without sudo"
 else
@@ -69,7 +74,7 @@ else
   stop "$N copies of 'brain' on PATH; the first one wins and it may not be the one you updated"
   printf "%s\n" "$COPIES" | sed 's/^/          /'
 fi
-if command -v npm >/dev/null 2>&1; then
+if [ "$NODE_SUPPORTED" -eq 1 ] && command -v npm >/dev/null 2>&1; then
   PFX=$(npm config get prefix 2>/dev/null)
   printf "  npm prefix      %s\n" "$PFX"
   [ -n "$COPIES" ] && case "$COPIES" in "$PFX"*) : ;; *) warn "the CLI is NOT under the npm prefix; a plain 'npm i -g' will install somewhere else and leave the old one running" ;; esac
@@ -112,7 +117,7 @@ echo
 echo "RELEASE"
 LATEST=$(curl -s -m 15 https://api.github.com/repos/guldanjaMAX/financial-brain-installer/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
 [ -n "$LATEST" ] && ok "current release is $LATEST" || warn "could not read the current release"
-if [ "$N" -ge 1 ] && command -v npm >/dev/null 2>&1; then
+if [ "$NODE_SUPPORTED" -eq 1 ] && [ "$N" -ge 1 ] && command -v npm >/dev/null 2>&1; then
   INST=$(npm ls -g --depth=0 2>/dev/null | sed -n 's/.*brain-installer@\([0-9.]*\).*/\1/p' | head -1)
   [ -n "$INST" ] && { printf "  installed       %s\n" "$INST"; [ "v$INST" = "$LATEST" ] || warn "installed $INST is not the current release $LATEST"; }
 fi
@@ -120,21 +125,24 @@ echo
 
 echo "MANIFESTS"
 POINTER_HELPER="$SCRIPT_DIR/../operations/installed-manifest.mjs"
-SELECTED_MANIFEST=$(node "$POINTER_HELPER" --preflight-locator 2>/dev/null)
-POINTER_STATUS=$?
-if [ "$POINTER_STATUS" -eq 0 ]; then
-  MF=$SELECTED_MANIFEST
-  MN=1
-  ok "using the saved installed manifest: $MF"
-elif [ "$POINTER_STATUS" -eq 2 ]; then
-  MF=$(find "$HOME" -maxdepth 4 -name brain.manifest.json -not -path "*/node_modules/*" -not -path "*/templates/*" -not -path "*/.*/*" 2>/dev/null)
-  MN=$(printf "%s" "$MF" | grep -c .)
-elif [ "$POINTER_STATUS" -eq 3 ]; then
-  MF=""; MN=0
-  stop "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"
+POINTER_STATUS=4; MF=""; MN=0
+if [ "$NODE_SUPPORTED" -ne 1 ]; then
+  warn "the saved Brain location check was skipped for now. Install or select Node 22 or newer, then run this check again"
 else
-  MF=""; MN=0
-  stop "the installed Brain manifest selector could not run; use the exact installed package before choosing a manifest"
+  SELECTED_MANIFEST=$("$NODE_BIN" "$POINTER_HELPER" --preflight-locator 2>/dev/null)
+  POINTER_STATUS=$?
+  if [ "$POINTER_STATUS" -eq 0 ]; then
+    MF=$SELECTED_MANIFEST
+    MN=1
+    ok "using the saved installed manifest: $MF"
+  elif [ "$POINTER_STATUS" -eq 2 ]; then
+    MF=$(find "$HOME" -maxdepth 4 -name brain.manifest.json -not -path "*/node_modules/*" -not -path "*/templates/*" -not -path "*/.*/*" 2>/dev/null)
+    MN=$(printf "%s" "$MF" | grep -c .)
+  elif [ "$POINTER_STATUS" -eq 3 ]; then
+    stop "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"
+  else
+    stop "the installed Brain manifest selector could not run; use the exact installed package before choosing a manifest"
+  fi
 fi
 if [ "$POINTER_STATUS" -eq 2 ] && [ "$MN" -eq 0 ]; then NOMANIFEST=1; ok "no manifest yet (expected before a first install)"
 elif [ "$POINTER_STATUS" -eq 2 ] && [ "$MN" -eq 1 ]; then

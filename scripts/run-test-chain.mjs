@@ -76,6 +76,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/source-original-result-family.test.mjs",
   "node --no-warnings --test worker/test/source-original-accepted-resolution.test.mjs",
   "node --no-warnings --test worker/test/source-original-observation.test.mjs",
+  "node --test test/windows-onboarding-kit.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -115,6 +116,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/cloudflare-token-prompt.test.mjs",
   "node test/technician-setup.test.mjs",
   "node test/onboarding-sandbox.test.mjs",
+  "node --test test/windows-onboarding-kit.test.mjs",
   "node test/cloudflare-token-store.test.mjs",
   "node test/drain-throughput.test.mjs",
   "node --no-warnings test/vector-fence-recovery.test.mjs",

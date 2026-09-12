@@ -47,8 +47,20 @@ function buildEnvironment(sandbox) {
 }
 
 function runBuild(frontend, environment) {
-  const command = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = spawnSync(command, ["--prefix", frontend, "run", "build"], {
+  const adjacentNpmCli = join(
+    dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js",
+  );
+  const npmCli = [process.env.npm_execpath, adjacentNpmCli]
+    .find((candidate) => candidate && existsSync(candidate));
+  if (!npmCli && process.platform === "win32") {
+    throw new Error("npm CLI is unavailable; run this focused test through npm test");
+  }
+  const command = npmCli ? process.execPath : "npm";
+  const args = [
+    ...(npmCli ? [npmCli] : []),
+    "--prefix", frontend, "run", "build",
+  ];
+  const result = spawnSync(command, args, {
     cwd: ROOT,
     encoding: "utf8",
     env: environment,

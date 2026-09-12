@@ -76,14 +76,21 @@ if (-not $env:LOCALAPPDATA) {
     Stop_ "the LOCALAPPDATA drive could not be checked: $($_.Exception.Message)"
   }
 }
+$nodeSupported = $false
+$nodePath = $null
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
-  $nv = (& node -v); Write-Host "  node            $nv ($($node.Source))"
+  $nodePath = $node.Source
+  $nv = (& $nodePath -v); Write-Host "  node            $nv ($nodePath)"
   $maj = [int](($nv -replace '^v','') -split '\.')[0]
   if ($maj -lt 22) { Stop_ "node $nv is too old; the installer needs 22 or newer" }
+  else { $nodeSupported = $true }
 } else { Stop_ "node is not installed" }
-if (Get-Command npm.cmd -ErrorAction SilentlyContinue) { Write-Host ("  npm             " + (& npm.cmd -v)) }
-else { Stop_ "npm.cmd not found" }
+$npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+if ($npm) {
+  if ($nodeSupported) { Write-Host ("  npm             " + (& $npm.Source -v)) }
+  else { Write-Host "  npm             found (version check waits for Node 22 or newer)" }
+} else { Stop_ "npm.cmd not found" }
 Write-Host ""
 
 Write-Host "WINDOWS TRAPS"
@@ -185,20 +192,24 @@ Write-Host ""
 Write-Host "MANIFESTS"
 $packageRoot = Split-Path $PSScriptRoot -Parent
 $pointerHelper = Join-Path $packageRoot "operations\installed-manifest.mjs"
-$selectedManifest = @(& node $pointerHelper --preflight-locator 2>$null)
-$pointerStatus = $LASTEXITCODE
-if ($pointerStatus -eq 0 -and $selectedManifest.Count -eq 1) {
-  $mf = @([pscustomobject]@{ FullName = $selectedManifest[0] })
-  Ok "using the saved installed manifest: $($mf[0].FullName)"
-} elseif ($pointerStatus -eq 2) {
-  $mf = @(Get-ChildItem -Path $HOME -Recurse -Depth 4 -Filter brain.manifest.json -ErrorAction SilentlyContinue |
-          Where-Object { $_.FullName -notmatch 'node_modules|templates' })
-} elseif ($pointerStatus -eq 3) {
-  $mf = @()
-  Stop_ "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"
+$pointerStatus = 4
+$mf = @()
+if (-not $nodeSupported) {
+  Warn "the saved Brain location check was skipped for now. Install or select Node 22 or newer, then run this check again"
 } else {
-  $mf = @()
-  Stop_ "the installed Brain manifest selector could not run; use the exact installed package before choosing a manifest"
+  $selectedManifest = @(& $nodePath $pointerHelper --preflight-locator 2>$null)
+  $pointerStatus = $LASTEXITCODE
+  if ($pointerStatus -eq 0 -and $selectedManifest.Count -eq 1) {
+    $mf = @([pscustomobject]@{ FullName = $selectedManifest[0] })
+    Ok "using the saved installed manifest: $($mf[0].FullName)"
+  } elseif ($pointerStatus -eq 2) {
+    $mf = @(Get-ChildItem -Path $HOME -Recurse -Depth 4 -Filter brain.manifest.json -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch 'node_modules|templates' })
+  } elseif ($pointerStatus -eq 3) {
+    Stop_ "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"
+  } else {
+    Stop_ "the installed Brain manifest selector could not run; use the exact installed package before choosing a manifest"
+  }
 }
 if ($pointerStatus -eq 2 -and $mf.Count -eq 0) { $script:NoManifest = $true; Ok "no manifest yet (expected before a first install)" }
 elseif ($pointerStatus -eq 2 -and $mf.Count -eq 1) {

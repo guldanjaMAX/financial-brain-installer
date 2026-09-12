@@ -5,21 +5,63 @@ It opens the real owner workspace with invented records. It does not install a
 Brain, contact Cloudflare, connect an account, read a credential, or use a real
 passkey.
 
-The technician supplies two things before the test:
+The technician supplies two generated files before the test:
 
-- the reviewed repository or pull-request link;
-- the exact commit SHA that passed the automated Windows checks.
+- the content-addressed sealed rehearsal ZIP;
+- its adjacent `release.json` receipt.
+
+## Prepare a generic handoff kit
+
+The kit contains only deterministic instructions and a synthetic-rehearsal
+manifest. It contains no executable checkout, customer name, customer data,
+credential, manifest, or live-system authority. Run the read-only plan first
+from a clean, non-shallow checkout of the exact candidate:
+
+```bash
+node scripts/build-windows-onboarding-kit.mjs --plan --json --expect-sha <exact-40-character-lowercase-SHA>
+```
+
+That command performs no write and creates no output. A draft can be prepared
+in a new directory outside the checkout, but its receipt remains
+`ready_to_send: false` and must not be shared as a ready kit:
+
+```bash
+npm run rehearsal:kit -- --draft --expect-sha <exact-40-character-lowercase-SHA> --output <new-directory-outside-checkout>
+```
+
+Only the production sealing form can set `ready_to_send: true`. It reads one
+GitHub Actions `ci` push run through `gh` and refuses unless that run belongs to
+the exact SHA, completed successfully, and contains successful public-history,
+exact-package, preflight-trap, and Windows, macOS, and Ubuntu Node 22 and 24
+jobs. It also binds the tested package artifact digest from that same run:
+
+```bash
+npm run rehearsal:kit -- --ci-run <github-actions-run-id> --expect-sha <exact-40-character-lowercase-SHA> --output <new-directory-outside-checkout>
+```
+
+Keep the generated `release.json` beside its content-addressed ZIP. The receipt
+binds the archive, repository, exact source and tree, launcher digest, CI run and
+jobs, tested package digest, seven-day handoff window, loopback-only purpose,
+and pending physical-Windows result. Never substitute an older ZIP or receipt.
+The ZIP still directs Claude Code to obtain a fresh detached checkout and use
+the checked-in launcher below; it never replaces or embeds that launcher.
 
 Do not guess the SHA, switch to `main`, or substitute the public installer. If
 the public release feed is held, the rehearsal can continue but a real install
 cannot.
 
-Send the repository link, exact SHA, and this guide. Do not email the `.ps1`
-file as an attachment or paste its contents into a message. Mail systems and
-security tools may block script attachments, and copied script bodies can gain
-line breaks. The reviewed checkout already contains the exact launcher.
+Send only the sealed ZIP and its matching `release.json`. Do not substitute a
+repository link, a bare SHA, this maintainer guide, a `.ps1` attachment, or a
+copied script body for that pair. The sealed instructions already bind the
+reviewed repository, exact SHA, and checked-in launcher without putting
+executable code in the handoff archive.
 
-## Paste this into Claude Code on the Windows computer
+## Maintainer reference: sealed Claude Code instructions
+
+The builder above generates the recipient instructions from code and tests
+their safety-critical phrases. This section is a maintainer reference, not an
+alternate handoff. Do not paste it or send it in place of the sealed ZIP and
+receipt.
 
 ````text
 Help me test the Financial Brain owner experience on this Windows computer.

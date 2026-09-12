@@ -165,9 +165,11 @@ function normalizedRootIdentity(value) {
   const realpath = boundedText(value.realpath, "resolved source root", MAX_ROOT_BYTES);
   const absolute = (candidate) => candidate.startsWith("/") ||
     /^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith("\\\\");
+  const exactFilesystemInteger = (candidate) => Number.isSafeInteger(candidate) && candidate >= 0 ||
+    typeof candidate === "string" && /^(?:0|[1-9][0-9]{0,19})$/.test(candidate) &&
+      BigInt(candidate) <= 18_446_744_073_709_551_615n;
   if (!absolute(path) || !absolute(realpath) ||
-      !Number.isSafeInteger(value.device) || value.device < 0 ||
-      !Number.isSafeInteger(value.inode) || value.inode < 0) {
+      !exactFilesystemInteger(value.device) || !exactFilesystemInteger(value.inode)) {
     throw new TypeError("target repair source-root identity is invalid");
   }
   return Object.freeze({ path, realpath, device: value.device, inode: value.inode });

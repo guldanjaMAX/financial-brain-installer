@@ -19,6 +19,14 @@ describe("Financial Map review clarity", () => {
     expect(state.message).toContain("ask the installer");
   });
 
+  it("never presents a bare HTTP detail as Financial Map guidance", () => {
+    const state = financialMapReadFailure(new ApiError(500, { detail: "HTTP 500" }));
+
+    expect(state.kind).toBe("unavailable");
+    expect(state.message).toContain("could not confirm what happened");
+    expect(state.message).not.toContain("HTTP 500");
+  });
+
   it("recognises only the exact authoritative reviewed map as active", () => {
     const review = {
       expected_sequence: 7,

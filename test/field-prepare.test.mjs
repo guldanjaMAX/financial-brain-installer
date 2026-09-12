@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -88,6 +89,14 @@ test("default field-preparation output is outside the source checkout", () => {
     const explicitOutput = join(temporaryRoot, "explicit-output");
     assert.equal(makeOutputDirectory(explicitOutput), explicitOutput);
     assert.equal(existsSync(explicitOutput), true);
+
+    const checkoutAlias = join(temporaryRoot, "checkout-alias");
+    symlinkSync(ROOT, checkoutAlias, process.platform === "win32" ? "junction" : "dir");
+    assert.throws(
+      () => makeOutputDirectory(join(checkoutAlias, "onboarding", "kit-output")),
+      /custom_output_inside_source_checkout_refused/,
+    );
+    assert.equal(existsSync(join(ROOT, "onboarding", "kit-output")), false);
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }

@@ -40,3 +40,10 @@ test/fixtures/v0.2.0-brain.manifest.json text eol=lf
 # This fixture is hashed against the exact MCP runtime published in v0.4.0
 # through v0.4.5. Keep those evidence bytes stable on Windows checkouts too.
 test/fixtures/published-v0.4.0-brain-mcp.mjs text eol=lf
+
+# The sealed Windows rehearsal receipt hashes these exact worktree files. A
+# normal Git-for-Windows checkout must reproduce the same bytes sealed on
+# macOS or Linux, especially the launcher hash that the recipient verifies.
+package.json text eol=lf
+package-lock.json text eol=lf
+onboarding/start-windows-rehearsal.ps1 text eol=lf

@@ -18,11 +18,12 @@ From a source checkout on macOS or Linux:
 npm run rehearse:onboarding
 ```
 
-On Windows, use the checked-in launcher and exact-SHA procedure in
-[the Windows onboarding rehearsal](./11-windows-onboarding-rehearsal.md). Do
-not email the script as an attachment or paste its body into a message. The
-reviewed checkout supplies it, and its one-line invocation avoids copy-wrapped
-script bodies and the `npm.cmd` stop prompt.
+On Windows, the technician first produces the sealed ZIP and matching
+`release.json` described in
+[the Windows onboarding rehearsal](./11-windows-onboarding-rehearsal.md). Its
+instructions obtain the exact reviewed checkout and use the checked-in
+launcher. Do not substitute a repository link, bare SHA, pasted guide, or
+emailed script attachment for that sealed pair.
 
 The rehearsal installs only the local UI test dependencies when needed, builds
 the real owner-workspace bundle, starts a loopback-only fixture, and opens a
@@ -47,7 +48,7 @@ credential store is read, and no account is contacted.
 This proves local layout, navigation, API response handling, access-surface
 separation, and empty-versus-unavailable language. It does not prove Cloudflare,
 Google consent, a real mailbox, Zoom delivery, or a physical passkey ceremony.
-For a physical Windows owner test, use the pasteable, no-account instructions in
+For a physical Windows owner test, use only the sealed, no-account handoff in
 [the Windows onboarding rehearsal](./11-windows-onboarding-rehearsal.md).
 
 ## Rehearse the customer hiccups

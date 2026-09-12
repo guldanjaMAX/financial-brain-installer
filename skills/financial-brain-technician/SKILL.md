@@ -619,6 +619,44 @@ to keep rewriting it. This repair never changes Brain records, sources,
 providers, access, zones, passkeys, devices, cloud resources, or the CLI
 executable.
 
+## Route a sealed synthetic Windows rehearsal first
+
+When the owner supplies a ZIP with an adjacent `release.json`, inspect the
+receipt before entering any installed-Brain workflow. If `artifact_kind` is
+`financial_brain_windows_onboarding_rehearsal`, this route replaces **Start
+here** and the private install-kit check below:
+
+1. Explain that this opens an invented, local owner experience so the owner can
+   test the walkthrough. It does not install or inspect their Brain. Do not run
+   `brain --version`, `brain tools`, the packaged preflight, setup, update,
+   provisioning, or any connector command for this route.
+2. Require schema version 1, `status: sealed_for_supervised_rehearsal`,
+   `ready_to_send: true`, `ready_for_live_accounts: false`, purpose
+   `synthetic_local_owner_experience_only`, physical Windows execution
+   `pending`, and loopback origin exactly `http://127.0.0.1:4176`. Stop if the
+   receipt is expired or any boundary allows customer data, credentials, or a
+   live action.
+3. Verify that the adjacent ZIP has the exact filename, byte count, and SHA-256
+   in `archive`. Require the exact public Financial Brain repository, one
+   40-character source SHA, a successful exact-SHA `ci` push run, and the
+   checked-in launcher path `onboarding/start-windows-rehearsal.ps1`. This
+   rehearsal ZIP is not the tested npm package, so do not compare its digest to
+   an installed package and do not require an intended hostname.
+4. Inspect the ZIP before extracting it. It must contain only
+   `REHEARSAL-MANIFEST.json` and `RUN-WITH-CLAUDE-CODE.txt` beneath one folder.
+   Verify the inner manifest path, bytes, and SHA-256 from the receipt, and
+   require its source, launcher, CI, expiry, and safety boundaries to match the
+   outer receipt. Extract only into a new empty local folder.
+5. Follow `RUN-WITH-CLAUDE-CODE.txt` exactly. Handle its repository, detached
+   checkout, hash checks, launcher, and local browser steps for the owner. Ask
+   the owner only for the small choices and feedback named there. Stop at the
+   first mismatch. Never request a credential, real passkey, provider login,
+   live account, or customer record.
+
+If the receipt has another artifact kind, continue below and apply that kit's
+own contract. Never infer an install-kit contract from the filename
+`release.json` alone.
+
 ## Start here
 
 For a fresh install, checkup, connector, passkey, or handoff request, continue
@@ -662,7 +700,9 @@ must stop before resource creation.
 2. Run `brain --version` and the packaged read-only preflight. Use the full
    installed command path from the install page if `brain` is not on PATH.
    Stop on any preflight `STOP` line.
-3. If a private test kit was supplied, read its `release.json`. Stop if
+3. If a private install test kit was supplied, read its `release.json`. The
+   sealed synthetic Windows rehearsal route above must never reach this step.
+   Stop if
    `ready_to_send` is not `true`, its version or archive digest differs from the
    installed package, or its intended hostname is empty. A test kit is helpful
    for a supervised client handoff, but is not required for a fresh install.
