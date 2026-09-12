@@ -259,7 +259,7 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
 
 /* ---- an existing Brain may be checked from Codex without weakening install ---- */
 {
-  const signedOutClaudeWithCodex = (command, args) => {
+  const signedOutClaudeWithSignedInCodex = (command, args) => {
     if (command === "npx" && args.includes(WRANGLER_PACKAGE)) {
       return { ok: true, out: "wrangler 4.127.1" };
     }
@@ -272,12 +272,15 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
     if (command === "codex" && args[0] === "--version") {
       return { ok: true, out: "codex-cli 0.153.4" };
     }
+    if (command === "codex" && args.join(" ") === "login status") {
+      return { ok: true, out: "fixture authentication detail must stay private" };
+    }
     return { ok: false, out: "fixture command unavailable" };
   };
   const common = {
     skipCloudflare: true,
     googleStorageStatus: { exists: false, description: "fixture secure storage" },
-    localRun: signedOutClaudeWithCodex,
+    localRun: signedOutClaudeWithSignedInCodex,
     networkCheck: async () => ({ name: "Network", status: OK, detail: "fixture reachable" }),
     platformName: "darwin",
     environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
@@ -293,7 +296,7 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   const existingClaude = existingBrain.find((item) => item.name === "Claude Code");
   check("signed-out Claude is advisory when Codex can guide an existing-Brain check",
     existingClaude?.status === WARN &&
-      /Codex is available for this existing Brain check/i.test(existingClaude.detail) &&
+      /Codex is signed in for this existing Brain check/i.test(existingClaude.detail) &&
       /read-only checks can continue/i.test(existingClaude.fix) &&
       summarize(existingBrain).fatal === 0,
     JSON.stringify(existingBrain));
@@ -309,13 +312,34 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
     allowCodexForExistingBrain: true,
     localRun: (command, args) => command === "codex"
       ? { ok: false, out: "not found", missing: true }
-      : signedOutClaudeWithCodex(command, args),
+      : signedOutClaudeWithSignedInCodex(command, args),
   });
   check("an existing-Brain check still stops when neither supported assistant is ready",
     noCodex.find((item) => item.name === "Claude Code")?.status === FAIL &&
       noCodex.find((item) => item.name === "Codex")?.status === WARN &&
       summarize(noCodex).fatal === 1,
     JSON.stringify(noCodex));
+
+  const privateAuthOutput = "private-auth-state-must-not-render";
+  const signedOutCodex = await runAll({
+    ...common,
+    allowCodexForExistingBrain: true,
+    localRun: (command, args) => {
+      if (command === "codex" && args.join(" ") === "login status") {
+        return { ok: false, out: privateAuthOutput };
+      }
+      return signedOutClaudeWithSignedInCodex(command, args);
+    },
+  });
+  const serializedSignedOut = JSON.stringify(signedOutCodex);
+  check("installed but signed-out Codex cannot relax the existing-Brain Claude gate",
+    signedOutCodex.find((item) => item.name === "Claude Code")?.status === FAIL &&
+      signedOutCodex.find((item) => item.name === "Codex")?.status === WARN &&
+      /installed but not signed in/i.test(
+        signedOutCodex.find((item) => item.name === "Codex")?.detail || "") &&
+      summarize(signedOutCodex).fatal === 1 &&
+      !serializedSignedOut.includes(privateAuthOutput),
+    serializedSignedOut);
 }
 {
   const k = process.env.ANTHROPIC_API_KEY;

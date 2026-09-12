@@ -244,7 +244,10 @@ import {
   discoverInstalledManifest,
   rememberInstalledManifest,
 } from "./operations/installed-manifest.mjs";
-import { auditMachineContinuity } from "./operations/machine-continuity.mjs";
+import {
+  auditMachineContinuity,
+  manifestHasProvisionedResourceBindings,
+} from "./operations/machine-continuity.mjs";
 import { readUpdateStatus } from "./worker/src/lib/update-status.js";
 import { evaluateProfileCoverage, formatProfileFailures } from "./eval/profile.mjs";
 import {
@@ -15541,10 +15544,11 @@ export async function cmdDoctor(manifestPath, options = {}) {
   let existingBrain = false;
   if (manifestPath && existsSync(manifestPath)) {
     try {
-      const cloudflare = loadManifest(manifestPath).m?.infrastructure?.cloudflare;
+      const manifest = loadManifest(manifestPath).m;
+      const cloudflare = manifest?.infrastructure?.cloudflare;
       accountId = cloudflare?.account_id;
       cloudflareAuthProfile = cloudflare?.auth_profile;
-      existingBrain = true;
+      existingBrain = manifestHasProvisionedResourceBindings(manifest);
     } catch { /* doctor must work without a valid manifest */ }
   }
 
@@ -15562,8 +15566,8 @@ export async function cmdDoctor(manifestPath, options = {}) {
       cloudflareAuthProfile,
       cloudflareToken: activeCloudflareToken(),
       // Claude Code remains mandatory for fresh setup and `brain tools`.
-      // Once a valid install record exists, Codex can guide these read-only
-      // checks without making an unrelated Claude sign-in a false health stop.
+      // Once provisioned resource identities exist, signed-in Codex can guide
+      // these read-only checks without making Claude a false health stop.
       allowCodexForExistingBrain:
         options.allowCodexForExistingBrain ?? existingBrain,
       onResult: (x) => {

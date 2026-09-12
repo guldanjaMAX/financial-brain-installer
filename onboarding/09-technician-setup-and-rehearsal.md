@@ -264,10 +264,12 @@ It stops on the first failure and does not mark anything complete. Record a
 connector as live-proven only after its exact acceptance event occurs.
 
 Fresh setup and the local-tools step still require signed-in Claude Code. For a
-valid existing Brain, however, an available Codex client can guide this read-only
-verification. In that case doctor reports missing or signed-out Claude Code as
-an optional local-client gap and continues. If neither supported client is
-available, or a real health or source check fails, verification still stops.
+manifest with provisioned Cloudflare resource identities, however, a Codex
+client whose `codex login status` succeeds can guide this read-only verification.
+In that case doctor reports missing or signed-out Claude Code as an optional
+local-client gap and continues. A parseable pre-provision manifest or installed
+but signed-out Codex does not relax the gate. If neither supported client is
+signed in, or a real health or source check fails, verification still stops.
 
 These enrolled-device checks are part of the explicit handoff ceremony. They
 are not part of Optimize. Optimize may report whether the current CLI, skill,

@@ -613,12 +613,14 @@ must stop before resource creation.
 - For an existing-Brain checkup, start with `brain doctor <manifest>`. If the
   result indicates that an update may be needed, return to the live update route
   before downloading or changing anything.
-- A valid existing Brain may continue its read-only doctor and handoff checks
-  from Codex when Codex is available. In that narrow case, a missing or signed-out
-  Claude Code is an advisory local-client gap, not a Brain-health failure. Report
-  that Claude Code is not ready, but continue to health and source evidence.
-  Fresh setup and `brain tools` still require signed-in Claude Code, and no local
-  skill or MCP repair is implied or authorized by the read-only check.
+- A manifest with provisioned Cloudflare resource identities may continue its
+  read-only doctor and handoff checks from Codex only when `codex login status`
+  succeeds. In that narrow case, a missing or signed-out Claude Code is an
+  advisory local-client gap, not a Brain-health failure. Report that Claude Code
+  is not ready, but continue to health and source evidence. A pre-provision
+  manifest or signed-out Codex does not relax the gate. Fresh setup and `brain
+  tools` still require signed-in Claude Code, and no local skill or MCP repair is
+  implied or authorized by the read-only check.
 - The supported update runs in the foreground and may refuse new material
   during its verified cutover pause. Let documented waits finish. Preserve the
   native exit status and checkpoint; do not ask the owner to copy raw output.

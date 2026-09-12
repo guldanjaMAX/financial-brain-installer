@@ -207,6 +207,7 @@ const SAFE_ENV_NAMES = Object.freeze([
   "LANG", "LC_ALL", "TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR",
   "SSH_AUTH_SOCK", "DISPLAY", "WAYLAND_DISPLAY", "XDG_CONFIG_HOME",
   "LOCALAPPDATA", "APPDATA", "USERPROFILE", "SYSTEMROOT", "COMSPEC", "PATHEXT",
+  "CODEX_HOME",
   "BRAIN_GOOGLE_TOKEN_STORE", "BRAIN_IMAP_CREDENTIAL_STORE",
   // Non-secret, exact-account proof for an explicitly approved unattended
   // setup. The child still refuses a missing or different verified account id.
