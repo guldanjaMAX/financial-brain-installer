@@ -69,8 +69,13 @@ list. The usual starting order is:
    current goals.
 3. Messages and shared files.
 4. The client's main drive, then Dropbox, Box, or another file system they use.
-5. Plaid or another financial source when the approved financial picture needs it.
-6. Older history after the first useful result is proven.
+5. Older history after the first useful result is proven.
+
+Bank feeds remain outside ordinary onboarding. Do not open Plaid Link or
+ask the owner for a bank password, verification code, or setup key. Preserve a
+complete existing setup only for an already approved pilot. A missing or new
+bank setup requires its own reviewed, version-scoped field plan and is recorded
+as `not configured` or `unknown`, never worked around during onboarding.
 
 Record why any client needs a different order:
 

@@ -4,11 +4,42 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.7
+## 0.4.8
 
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
+
+- **Two computers can no longer create competing provenance histories for the
+  same original.** Each new observation now names the exact prior observation
+  seen by its reviewed plan, and the Brain compares that head atomically. The
+  first writer wins; another computer with an older preview stops before
+  reingest, family cleanup, or vector drain. A later owner exclusion, gap, or
+  failure also removes an older accepted resolution from current status and
+  prevents stale reactivation. Exact lost-response replay stays safe, and
+  verified recovery preserves the same ordering without restoring local
+  activation.
+
+- **One owner-selected local original can now be repaired through an exact,
+  proof-gated lane.** Add `--target <source-relative-file>` to
+  `brain provenance-repair <manifest> --source <name>` to preview one eligible
+  file from the manifest's registered local upload source. The command never
+  guesses a target, enables OCR, advances a source cursor or receipt, performs
+  a source-wide removal, or claims whole-source completeness. Apply needs the
+  preview's exact approval hash, reacquires the source lease, and repeats the
+  complete private history and state checks before it changes anything. It
+  reingests that one native-readable record, reconciles only its exact family,
+  drains the shared vector outbox, records and verifies the schema-44 family,
+  then records and verifies the schema-45 accepted resolution. The preview
+  explains that exact-family stale siblings may be removed, the shared drain
+  may process unrelated queued work, embeddings may be created, and the four
+  proof operations run eight private retrieval probes that can create ordinary
+  aggregate usage records. If the exact accepted observation already exists,
+  a fresh preview offers a re-verification-only approval: it repeats the four
+  proof operations but skips discovery, reingest, family cleanup, and the
+  shared vector drain. That makes a lost response, stale activation, or
+  verified recovery retry safe without duplicating accepted history. This
+  remains a held candidate and has not run on a customer Brain.
 
 - **Eligible local file imports keep a verifiable link to their exact
   original.** The ordinary single-record local-file path records a private
@@ -16,9 +47,9 @@ asset publication.
   that record arrives with conflicting original evidence, the Brain stops
   instead of silently replacing its history. Other ingest producers and
   ambiguous multi-record exports remain unbound, so this does not yet prevent
-  every new provenance gap or repair an older one. The repair preview stays
-  read-only until it can prove the complete chain from the original through the
-  search result and its citation.
+  every new provenance gap or repair every older one. The no-target repair
+  preview stays read-only. The separate one-target lane above must prove the
+  complete chain from the original through the search result and its citation.
 
 - **Ordinary setup will not surprise you with a bank-credential request.** Bank
   application credentials remain outside normal setup and technician steps. An
@@ -40,12 +71,12 @@ asset publication.
   verification does not: the recovered Brain must rerun the proof and create a
   fresh local activation. Every successful accepted-resolution response states
   `whole_source_complete: false`. The ordinary
-  `result_family` mode remains non-authorizing, legacy
-  `provenance-repair --apply` remains disabled, and this does not run OCR,
-  reingest, deletion, deployment, or customer execution.
+  `result_family` mode remains non-authorizing, the legacy no-target
+  `provenance-repair --apply` remains disabled, and the route itself does not
+  run OCR, reingest, deletion, deployment, or customer execution.
 
-- **The provenance recovery preview stays read-only until it can prove the
-  exact repair result.** `brain provenance-repair <manifest> --source <name>`
+- **The no-target provenance recovery preview stays read-only.** `brain
+  provenance-repair <manifest> --source <name>`
   shows a state-bound inventory for one manifest-declared local folder, Drive,
   Gmail, or Calendar source. Its schema-1 `--apply` path is unavailable and
   stops before reading the manifest, credentials, network, scheduler, or
@@ -81,8 +112,9 @@ asset publication.
   They do not run OCR or repair. The required failure field advances the shared
   inventory/recovery response and cursor contract to v3; v2 is refused, while
   schema 39 remains readable with the new evidence explicitly unknown. Because
-  0.4.6 is already live, the enforcing release audit blocks this contract from
-  shipping under that version and requires 0.4.7 or newer.
+  0.4.6 is already live and the earlier held 0.4.7 candidate consumed its
+  evidence identity without being tagged or released, the enforcing release
+  audit refuses both older identities and requires 0.4.8 or newer.
 - **Optimize can now inventory the stored financial picture without changing
   it.** The new `brain financial-picture <manifest> --json` command reads one
   bounded D1 snapshot of exact entity, period, masked-account, books, tax,

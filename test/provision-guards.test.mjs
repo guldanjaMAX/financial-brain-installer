@@ -804,7 +804,7 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   check("allows a Windows home folder", bad("C:\\Users\\evtra\\brain-install") === null);
 
   /* ---- 6f: a value-taking flag given bare must be refused at parse time ---- */
-  for (const f of ["path", "limit", "from", "manifest", "port", "source"])
+  for (const f of ["path", "limit", "from", "manifest", "port", "source", "target"])
     check(`--${f} is known to need a value`, VALUE_FLAGS.has(f));
   check("--report is deliberately NOT in the set (bare means the default name)", !VALUE_FLAGS.has("report"));
 }

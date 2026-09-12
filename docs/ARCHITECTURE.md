@@ -583,6 +583,36 @@ and empty local acceptance state. The recovered deployment must rerun the
 one-target proof and append a fresh local activation before the resolution is
 current there.
 
+Migration 0046 closes the remaining cross-machine history race without a
+mutable head row. `source_original_observations` adds an immutable chain
+version and prior-observation hash. Each normal insert must name the latest
+same-original row observed by its reviewed plan, while the first row names
+empty history. D1 checks that predecessor inside the insert transaction and a
+partial unique index prevents two schema-46 successors from sharing it.
+Schema-42 through schema-45 rows remain a version-zero prefix for upgrade and
+recovery compatibility. A schema-45 accepted row may resolve an earlier
+non-immediate gap because that was legal when it was recorded. Recovery retains
+such a row as historical evidence, but it is not current under schema 46 and
+cannot be reactivated while its accepted observation fails the current-head and
+immediate-predecessor checks.
+
+Accepted admission treats the resolved gap as its predecessor. Exact replay or
+recovery reactivation instead requires the accepted observation itself to
+remain the current head. The current-acceptance view also requires the accepted
+row to be the latest same-original sequence, so a later gap, failure, or
+adjudicated exclusion demotes it without deleting evidence. Recovery validates
+the immediate-predecessor chain before closing its import marker. Sequence,
+not `recorded_at`, is authoritative because different computers do not share a
+clock.
+
+The stable `observation_hash` remains an event-receipt digest over the original
+schema-42 canonical fields. It is not a self-authenticating chain digest and it
+does not cover `predecessor_observation_hash`. Schema 46 binds the chain through
+append-only D1 rows, transactional predecessor checks, and recovery-close
+validation; authenticated whole-artifact recovery protects those row bytes in
+transit and at rest. A future receipt-contract version may include the edge in
+its digest without changing the meaning of existing receipts.
+
 This dynamic SQL currentness is scoped to a fixed retrieval contract and
 supported Worker, D1, and outbox-mediated mutations. Direct FTS maintenance,
 out-of-band Vectorize writes, or a retrieval-code deployment can change ranked
@@ -592,8 +622,58 @@ relied on.
 
 Every accepted-resolution receipt remains
 `whole_source_complete: false`. Schema 45 does not wire the legacy
-`provenance-repair --apply` command, which remains disabled, and does not grant
-authority for OCR, reingest, deletion, deployment, or customer execution.
+no-target `provenance-repair --apply` command, which remains disabled, and does
+not grant authority for OCR, source-wide reingest, source-wide deletion,
+deployment, or customer execution.
+
+The held candidate adds a separate exact-target orchestrator for
+`provenance-repair --target`. It accepts one owner-supplied source-relative
+locator only for the manifest's enabled `corpora.local_folder` and a registered
+upload source. It refuses target inference, multiple extraction records,
+unreliable or incomplete text, and every OCR path. The orchestrator derives its
+private retrieval query from the prepared native text and never sends that
+query, the locator, the local root, original hashes, document identities, or
+sealed internal receipts to public output.
+
+Both preview and apply obtain the existing source-ingest lease before any
+private manifest-content, source-file, credential, network, or Brain-state
+access. Under the lease they recompute the canonical manifest and source
+configuration, root identity, original bytes, local extraction, package runtime
+fingerprint, active product and schema 46 or newer, vector readiness, complete authenticated
+source inventory, and complete authenticated observation history. The history
+walk uses one stable snapshot and is bracketed by a fresh inventory read so a
+previous accepted resolution or a concurrent new gap cannot be hidden by a
+partial page. Every mutation and retry asserts that the same lease is still
+owned. The lease is held through final verification and released on every exit.
+
+A pure sealed target plan is design evidence only. It cannot advertise apply
+authority. Only the packaged orchestrator can attach current executor proof
+after all of the leased checks pass and produce a public state-bound approval
+hash. Apply reacquires the lease and rebuilds that proof before comparing the
+hash. It sends one prepared single-record ingest envelope, reconciles stale
+members only within that original's exact structural family, and never updates
+a source receipt, source cursor, or source-wide removal plan.
+
+The mutation sequence is fixed: exact-target ingest, exact-family reconcile,
+shared vector drain, schema-44 `result_family` record, schema-44
+`result_family` verify, schema-45 `accepted_resolution` record, then schema-45
+`accepted_resolution` verify. Every response is validated as a closed receipt
+before the next step. The accepted record is impossible before the portable
+family has both been stored and freshly verified. Replay is idempotent only for
+the exact same state; stale or mismatched receipts, recovery without local
+activation, lease loss, response drift, or a changed family fail closed and
+require a new preview. After recovery, portable history remains but the old
+approval and local activation do not. A new leased run must establish fresh
+deployment-local proof before reactivation.
+
+This lane has deliberately visible side effects. Exact-family reconciliation
+can remove stale siblings only from the selected family. The global drain can
+process unrelated work already present in the shared outbox. Reingest and drain
+can create embeddings. The result-family record and verify plus
+accepted-resolution record and verify each perform two private production
+retrieval calls, for eight probes total, and may create ordinary aggregate
+usage records. None of those effects widens the receipt beyond one original or
+establishes whole-source completeness.
 
 The new-computer continuity report composes that same authenticated source
 inventory with local-only observations. It reads the exact manifest, durable

@@ -45,6 +45,15 @@ test("the machine-only preflight does not pretend to prove account or billing st
   assert.doesNotMatch(script, /Workers Paid (?:is|plan is) (?:active|verified)/i);
 });
 
+test("Windows preflight honors the private installed manifest and package-local CLI", () => {
+  assert.match(script, /operations\\installed-manifest\.mjs/);
+  assert.match(script, /--preflight-locator/);
+  assert.match(script, /using the saved installed manifest/);
+  assert.match(script, /saved installed Brain location is unsafe, unreadable, or missing/);
+  assert.match(script, /installed CLI is available at/);
+  assert.match(script, /Join-Path \$packagePrefix "brain\.cmd"/);
+});
+
 test("elevated Windows CI proves the production refusal without bypassing it", () => {
   for (const workflow of workflows) {
     assert.match(workflow, /control: the elevated CI machine is stopped for exactly that reason/);

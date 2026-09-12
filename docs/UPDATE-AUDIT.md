@@ -161,7 +161,12 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The unreleased 0.4.7/schema43 field candidate carries 39 stable incident rows.
+The unreleased 0.4.8/schema45 field candidate carries 39 stable incident rows.
+The earlier held 0.4.7 candidate was never tagged, published, or offered as a
+customer update. Its identity and planning record remain historical and are not
+reused as proof for the changed 0.4.8 bytes. The
+[current 0.4.8 evidence plan](release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+remains unbound to a final SHA and records no field execution.
 Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
 and UPDATE-032. Their evidence documents remain attached to the exact rows in
 `update-incidents.json`. The other 35 block release writes. No 0.4.6 deferral
@@ -169,9 +174,15 @@ was renewed for this candidate. UPDATE-012 still needs a reviewed Windows ARM64
 support decision or its required physical proof. UPDATE-017 through UPDATE-022
 and UPDATE-025 still need their required real-provider evidence while bank
 credential setup and general invitations remain held. Schema 43 can bind
-eligible single-record local file ingests to their exact raw originals. Other
-ingest producers and ambiguous multi-record exports remain unbound, and
-retrospective provenance repair remains unaccepted. Nothing in this candidate
+eligible single-record local file ingests to their exact raw originals. Schema
+45 can admit a narrowly bounded accepted-resolution proof for one exact
+original after its unresolved observation, raw binding, complete result family,
+zero outbox, Vectorize parity, deterministic owner retrieval, and matching
+citation pass together. Other ingest producers and ambiguous multi-record
+exports remain unbound, and the legacy whole-source provenance repair remains
+unaccepted. Every narrow receipt states `whole_source_complete: false` and does
+not authorize OCR, reingest, deletion, deployment, or customer execution.
+Nothing in this candidate
 weakens the gate: no acceptance criterion was rewritten, and the release
 workflow still refuses to publish while any incident blocks. Earlier candidate
 rehearsals do not automatically clear changed code. Current named-profile OAuth

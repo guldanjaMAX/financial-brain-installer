@@ -50,7 +50,7 @@ const alternation = guidanceSource.match(/const COMMAND = \/\\bbrain\(\?=\\s\+\(
 assert.ok(alternation, "operations/cli-guidance.mjs no longer exposes a readable command alternation");
 const SUBCOMMANDS = alternation.split("|");
 const bareCommand = new RegExp(String.raw`\bbrain\s+(?:${alternation})\b`);
-for (const covered of ["setup", "doctor", "update", "drain", "support", "technician", "eval", "grants", "forget", "mcp-config", "assistant-repair", "machine-continuity", "tools"]) {
+for (const covered of ["setup", "doctor", "update", "drain", "support", "technician", "eval", "grants", "forget", "mcp-config", "assistant-repair", "machine-continuity", "provenance-repair", "tools"]) {
   assert.ok(SUBCOMMANDS.includes(covered), `the renderer stopped covering \`brain ${covered}\``);
 }
 

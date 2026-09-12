@@ -18,6 +18,10 @@ function executable(path, body) {
 function runPreflight({
   nodeVersion = "v22.0.0",
   brainCopies = 0,
+  installedCliOutsidePath = false,
+  manifests = 0,
+  rememberedManifest = false,
+  unsafeRememberedManifest = false,
   wranglerSession = null,
   elevated = false,
   freeKib = 3 * 1024 * 1024,
@@ -49,7 +53,12 @@ function runPreflight({
       writeFileSync(join(config, "default.toml"), "fixture session marker only\n");
     }
 
-    executable(join(bin, "node"), `printf '%s\\n' '${nodeVersion}'`);
+    const actualNode = process.execPath.replace(/'/g, `'"'"'`);
+    executable(join(bin, "node"), `
+case "$1" in
+  -v) printf '%s\\n' '${nodeVersion}' ;;
+  *) exec '${actualNode}' "$@" ;;
+esac`);
     executable(join(bin, "npm"), `
 case "$1" in
   -v) printf '%s\\n' '10.0.0' ;;
@@ -68,6 +77,32 @@ esac`);
       mkdirSync(dir);
       executable(join(dir, "brain"), "exit 0");
       brainDirs.push(dir);
+    }
+    if (installedCliOutsidePath) {
+      const installedBin = join(home, ".npm-global", "bin");
+      mkdirSync(installedBin, { recursive: true });
+      executable(join(installedBin, "brain"), "exit 0");
+    }
+
+    const manifestPaths = [];
+    for (let i = 0; i < manifests; i++) {
+      const directory = join(home, `owner-${i + 1}`);
+      mkdirSync(directory);
+      const manifest = join(directory, "brain.manifest.json");
+      writeFileSync(manifest, "{}\n");
+      manifestPaths.push(manifest);
+    }
+    if (rememberedManifest) {
+      assert.ok(manifestPaths.length > 0, "a remembered fixture needs a manifest");
+      const state = join(home, ".financial-brain", "state");
+      mkdirSync(state, { recursive: true, mode: 0o700 });
+      chmodSync(state, 0o700);
+      const pointer = join(state, "installed-manifest.json");
+      writeFileSync(pointer, `${JSON.stringify({
+        schema_version: 1,
+        manifest_path: manifestPaths[0],
+      })}\n`, { mode: 0o600 });
+      chmodSync(pointer, unsafeRememberedManifest ? 0o644 : 0o600);
     }
 
     const env = {
@@ -131,6 +166,33 @@ test("POSIX preflight finds every Brain CLI on PATH", { skip: process.platform =
   assert.match(result.stdout, /STOP\s+2 copies of 'brain' on PATH/);
   assert.match(result.stdout, /brain-1\/brain/);
   assert.match(result.stdout, /brain-2\/brain/);
+});
+
+test("POSIX preflight recognizes the installed per-user CLI when PATH has not inherited it", { skip: process.platform === "win32" }, () => {
+  const result = runPreflight({ installedCliOutsidePath: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /installed CLI is available at .*\.npm-global\/bin\/brain/i);
+  assert.doesNotMatch(result.stdout, /no installed Brain CLI was found/i);
+});
+
+test("POSIX preflight gives the private installed-manifest pointer priority over unrelated manifests", { skip: process.platform === "win32" }, () => {
+  const ambiguous = runPreflight({ manifests: 3 });
+  assert.equal(ambiguous.status, 1);
+  assert.match(ambiguous.stdout, /STOP\s+3 manifests found/i);
+
+  const selected = runPreflight({ manifests: 3, rememberedManifest: true });
+  assert.equal(selected.status, 0, selected.stderr || selected.stdout);
+  assert.match(selected.stdout, /ok\s+using the saved installed manifest:/i);
+  assert.doesNotMatch(selected.stdout, /manifests found; the wrong one will be picked/i);
+
+  const unsafe = runPreflight({
+    manifests: 1,
+    rememberedManifest: true,
+    unsafeRememberedManifest: true,
+  });
+  assert.equal(unsafe.status, 1);
+  assert.match(unsafe.stdout, /STOP\s+the saved installed Brain location is unsafe, unreadable, or missing/i);
+  assert.doesNotMatch(unsafe.stdout, /ok\s+one manifest:/i);
 });
 
 test("POSIX preflight follows Wrangler session precedence without directory masking", { skip: process.platform === "win32" }, () => {

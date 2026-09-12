@@ -2,13 +2,21 @@ import { useState } from "react";
 import { ApiError } from "../lib/api";
 import { enroll, signIn, passkeysSupported } from "../lib/passkey";
 
-const REHEARSAL_PASSKEY_NOTICE = "Passkey creation is intentionally unavailable in this local rehearsal. No passkey was enrolled in a Brain, and nothing changed. To create a real passkey, use the private setup link from your technician at your Brain's normal web address.";
+export type EnrollmentKind = "owner" | "document";
+
+function rehearsalPasskeyNotice(kind: EnrollmentKind | null): string {
+  return kind === "document"
+    ? "Shared-access passkey creation is intentionally unavailable in this local rehearsal. No passkey or document access was created, and nothing changed. A real recipient uses the private shared-access link from the Brain owner at that Brain's normal web address."
+    : "Passkey creation is intentionally unavailable in this local rehearsal. No passkey was enrolled in a Brain, and nothing changed. To create a real passkey, use the private setup link from your technician at your Brain's normal web address.";
+}
 
 export function gatePasskeyFailure(error: unknown, {
   enrolling,
+  enrollmentKind = null,
   rehearsal,
 }: {
   enrolling: boolean;
+  enrollmentKind?: EnrollmentKind | null;
   rehearsal: boolean;
 }): { message: string; unavailable: boolean } {
   if (!(error instanceof ApiError) || error.status !== 404) {
@@ -19,13 +27,15 @@ export function gatePasskeyFailure(error: unknown, {
   }
   if (rehearsal) {
     return {
-      message: REHEARSAL_PASSKEY_NOTICE,
+      message: rehearsalPasskeyNotice(enrollmentKind),
       unavailable: true,
     };
   }
   return {
     message: enrolling
-      ? "This private setup link could not start or finish passkey creation. No passkey was enrolled in this Brain, and nothing changed here. Ask your installer for a fresh private setup link, then open it at your Brain's normal web address."
+      ? enrollmentKind === "document"
+        ? "This private shared-access link could not start or finish passkey creation. No passkey was created, no document was opened, and nothing changed here. Ask the Brain owner for a fresh private shared-access link, then open it at this Brain's normal web address."
+        : "This private setup link could not start or finish passkey creation. No passkey was enrolled in this Brain, and nothing changed here. Ask your installer for a fresh private setup link, then open it at your Brain's normal web address."
       : "Passkey sign-in is unavailable at this address. Nothing changed. Open your Brain at its normal web address and try again. If you are already there, ask your installer to check that the Brain is up to date.",
     unavailable: true,
   };
@@ -42,16 +52,18 @@ function isLocalRehearsalPage(): boolean {
  * message. It has to answer "what is this and why should I tap" before it
  * asks for anything, which is why the copy leads and the button follows.
  */
-export function Gate({ owner, inviteCode, notice, onIn }: {
+export function Gate({ owner, inviteCode, enrollmentKind, notice, onIn }: {
   owner: string;
   inviteCode: string | null;
+  enrollmentKind: EnrollmentKind | null;
   notice?: string | null;
   onIn: () => void;
 }) {
   const enrolling = Boolean(inviteCode);
+  const documentEnrollment = enrolling && enrollmentKind === "document";
   const rehearsal = isLocalRehearsalPage();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(() => rehearsal ? REHEARSAL_PASSKEY_NOTICE : null);
+  const [error, setError] = useState<string | null>(() => rehearsal ? rehearsalPasskeyNotice(enrollmentKind) : null);
   const [unavailable, setUnavailable] = useState(rehearsal);
   const possessive = owner ? (/s$/i.test(owner) ? `${owner}'` : `${owner}'s`) : "Your";
   const hostname = typeof location === "undefined" ? "this Brain's address" : location.hostname;
@@ -59,13 +71,16 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
   // addressed formally, and "Dana, your brain is ready" reads like a person
   // wrote it where "Dana Okonkwo's brain is ready" reads like a database did.
   const firstName = owner.trim().split(/\s+/)[0] || "";
+  const enrollmentButton = documentEnrollment
+    ? "Create my passkey for shared access"
+    : "Create my owner passkey";
 
   async function go() {
     setError(null);
     setBusy(true);
     try {
       if (enrolling) {
-        await enroll(inviteCode!);
+        await enroll(inviteCode!, enrollmentKind || "owner");
         history.replaceState(null, "", "/app");
       } else {
         await signIn();
@@ -75,7 +90,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
       // Surface the real reason. "Something went wrong" on a security screen
       // is how someone decides the product is broken rather than that they
       // cancelled their device's passkey prompt.
-      const failure = gatePasskeyFailure(e, { enrolling, rehearsal });
+      const failure = gatePasskeyFailure(e, { enrolling, enrollmentKind, rehearsal });
       setError(failure.message);
       setUnavailable(failure.unavailable);
     } finally {
@@ -90,14 +105,18 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
 
         <div className="bg-card border border-line rounded-2xl p-7 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
           <h1 className="text-[26px] leading-tight tracking-tight font-semibold">
-            {enrolling
+            {documentEnrollment
+              ? "Set up your shared document access"
+              : enrolling
               ? firstName ? `${firstName}, your brain is ready` : "Your brain is ready"
-              : firstName ? `Welcome back, ${firstName}` : "Welcome back"}
+              : "Welcome back"}
           </h1>
           <p className="text-ink-soft mt-3 leading-relaxed">
-            {enrolling
+            {documentEnrollment
+              ? "The Brain owner invited you to a private workspace containing only the exact documents they chose. You will not get owner controls or anything else in this Brain."
+              : enrolling
               ? "A private place to ask about the material connected to your Brain. Each answer shows its sources and calls out coverage it cannot prove."
-              : "Sign in to ask your brain a question."}
+              : "Sign in to continue to the part of this Brain your passkey can access."}
           </p>
 
           {notice && (
@@ -114,36 +133,44 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
           {enrolling ? (
             <div role="note" className="mt-6 rounded-xl border border-line bg-paper/60 p-4">
               <h2 className="text-[15px] font-semibold">
-                {rehearsal ? "What happens on the real setup page" : "Here is what happens next"}
+                {rehearsal
+                  ? documentEnrollment ? "What happens on the real shared-access page" : "What happens on the real setup page"
+                  : "Here is what happens next"}
               </h2>
               <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
                 {rehearsal
-                  ? "This rehearsal explains the real passkey step, but it never opens a secure device window or creates a passkey."
+                  ? documentEnrollment
+                    ? "This rehearsal explains the real shared-access passkey step, but it never opens a secure device window, creates a passkey, or shares a document."
+                    : "This rehearsal explains the real passkey step, but it never opens a secure device window or creates a passkey."
                   : "What will happen remains in your control. Nothing opens until you choose the button below."}
               </p>
               <ol className="mt-3 space-y-2.5">
                 <li className="flex gap-2.5 text-[14.5px] leading-6">
                   <span className="text-accent font-semibold" aria-hidden="true">1</span>
-                  <span>{rehearsal ? "On the real setup page, choose " : "Choose "}<strong>Create my owner passkey</strong>{rehearsal ? "." : " below."}</span>
+                  <span>{rehearsal ? "On the real page, choose " : "Choose "}<strong>{enrollmentButton}</strong>{rehearsal ? "." : " below."}</span>
                 </li>
                 <li className="flex gap-2.5 text-[14.5px] leading-6">
                   <span className="text-accent font-semibold" aria-hidden="true">2</span>
                   <span>
-                    Your device will open its secure passkey window. Follow that window using
+                    {rehearsal ? "On the real page, your device" : "Your device"} will open its secure passkey window. Follow that window using
                     Face ID, Touch ID, a fingerprint, a security key, your device PIN, or screen
                     lock. First check that this page is at <strong>{hostname}</strong>.
                   </span>
                 </li>
               </ol>
               <p className="mt-3 text-[13.5px] leading-relaxed text-ink-soft">
-                This verifies that you are the owner and protects your private owner area without
-                another password. Your biometric data and device PIN never go to Financial Brain.
+                {documentEnrollment
+                  ? "Your passkey proves that you control the device completing this invitation. It protects only this shared-document workspace and does not make you an owner of the Brain. "
+                  : "This verifies that you are the owner and protects your private owner area without another password. "}
+                Your biometric data and device PIN never go to Financial Brain.
                 Financial Brain and your Claude or Codex guide cannot see or store your passkey,
                 Face ID, fingerprint, or device PIN. The private passkey stays with your device or
-                passkey provider. The Brain keeps only the public sign-in record needed to recognize you.
+                passkey provider. The Brain keeps only the public sign-in record needed to recognize that passkey.
               </p>
               <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
-                This passkey step does not connect files, messages, accounts, or other device data.
+                {documentEnrollment
+                  ? "This passkey step does not connect your files, messages, accounts, or other device data. It unlocks only the exact shared documents already chosen by the Brain owner. "
+                  : "This passkey step does not connect files, messages, accounts, or other device data. "}
                 If the address or secure window looks unexpected, choose Cancel. Nothing is enrolled.
                 Canceling the device prompt does not use it, so you can try again before this private
                 link expires.
@@ -169,8 +196,8 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
                 : unavailable
                   ? "Passkey setup unavailable here"
                   : enrolling
-                    ? "Create my owner passkey"
-                    : "Continue to my passkey"}
+                    ? enrollmentButton
+                    : "Continue with a passkey"}
             </button>
           ) : (
             <p className="mt-7 text-sm text-ink-soft">
@@ -181,7 +208,7 @@ export function Gate({ owner, inviteCode, notice, onIn }: {
 
           {enrolling && (
             <p className="mt-3 text-[13px] text-ink-soft">
-              {rehearsal ? "On the real setup page, this usually" : "Usually"} takes about ten seconds. The private link expires 15 minutes after it was
+              {rehearsal ? "On the real page, this usually" : "Usually"} takes about ten seconds. The private link expires 15 minutes after it was
               created and works once. You stay in control of the secure device window, and your
               passkey may sync through your chosen passkey provider.
             </p>

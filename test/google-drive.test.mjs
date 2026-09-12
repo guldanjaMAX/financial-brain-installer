@@ -1,5 +1,5 @@
 import {
-  api, listFiles, listRootedFiles, listChanges, startPageToken, triage, toEnvelope, DriveError, EXPORTS,
+  api, listFiles, listRootedFiles, listRootedFilesPreview, listChanges, startPageToken, triage, toEnvelope, DriveError, EXPORTS,
   updateFolderIndex, folderPathFor, exclusionReason, driveVersion, classifyScopedAbsence, FOLDER_MIME, EXPORT_LIMIT,
 } from "../connectors/google-drive.mjs";
 import { toEnvelope as gmailToEnvelope } from "../connectors/gmail.mjs";
@@ -468,6 +468,44 @@ const workbookBytes = (sheets) => {
   check("root provenance names the exact reviewed root on every file",
     files.find((file) => file.id === "inside-shared").scope_root_ids.join(",") === "shared-root" &&
       files.find((file) => file.id === "inside-nested").scope_root_ids.join(",") === "root-a");
+}
+{
+  const calls = [];
+  const fetchImpl = async (input) => {
+    const url = new URL(input);
+    calls.push(url);
+    const id = decodeURIComponent(url.pathname.split("/").pop());
+    if (url.pathname !== "/drive/v3/files") {
+      return json({ id, name: `private-${id}`, mimeType: FOLDER_MIME });
+    }
+    const q = url.searchParams.get("q") || "";
+    if (q.includes("'root-a' in parents")) {
+      return json({
+        files: [
+          { id: "file-a", name: "private-a.txt", mimeType: "text/plain", parents: ["root-a"] },
+          { id: "file-b", name: "private-b.txt", mimeType: "text/plain", parents: ["root-a"] },
+        ],
+        nextPageToken: "private-next-page",
+      });
+    }
+    return json({ files: [{ id: "must-not-walk", name: "private-c.txt" }] });
+  };
+  const files = [];
+  for await (const file of listRootedFilesPreview(tok, {
+    rootFolderIds: ["root-b", "root-a"],
+    limit: 2,
+    opts: { fetchImpl, sleep: async () => {} },
+  })) files.push(file);
+  const metadataCalls = calls.filter((url) => url.pathname !== "/drive/v3/files");
+  const listingCalls = calls.filter((url) => url.pathname === "/drive/v3/files");
+  check("bounded preview validates every configured root before it samples content",
+    metadataCalls.length === 2 && metadataCalls.some((url) => url.pathname.endsWith("/root-a")) &&
+      metadataCalls.some((url) => url.pathname.endsWith("/root-b")),
+    calls.map((url) => url.pathname).join(","));
+  check("bounded preview stops provider traversal at its exact limit",
+    files.length === 2 && listingCalls.length === 1 &&
+      listingCalls[0].searchParams.get("pageToken") === null,
+    `${files.length} yielded / ${listingCalls.length} listing call(s)`);
 }
 {
   let error = null;

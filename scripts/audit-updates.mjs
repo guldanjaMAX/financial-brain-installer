@@ -178,9 +178,9 @@ export function releaseAdjudication(cases, version) {
   };
 }
 
-export const SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION = "0.4.7";
+export const SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION = "0.4.8";
 
-/** Prevent the v3 inventory contract from reusing an already-published package identity. */
+/** Prevent the v3 inventory contract from reusing a published or retired candidate identity. */
 export function assertSourceInventoryV3ReleaseVersion(version) {
   const parse = (value) => {
     const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value));
@@ -194,6 +194,13 @@ export function assertSourceInventoryV3ReleaseVersion(version) {
     if (candidate[index] < minimum[index]) break;
   }
   if (candidate.every((part, index) => part === minimum[index])) return version;
+  if (version === "0.4.7") {
+    throw new Error(
+      "source inventory contract v3 cannot reuse retired held candidate identity 0.4.7; " +
+      "that candidate was never public or live, but its identity remains bound to its earlier evidence; " +
+      `the package version must be ${SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION} or newer`,
+    );
+  }
   throw new Error(
     `source inventory contract v3 cannot ship under already-live package ${version}; ` +
     `the package version must be ${SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION} or newer`,

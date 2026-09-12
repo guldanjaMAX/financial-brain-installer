@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GRANT_VIEWS, GrantWorkspace, OWNER_VIEWS, OwnerHeader, OwnerWorkspace,
-  initialOwnerView, ownerViewRequiresEntity, ownerViewScopeGate, visibleView,
+  enrollmentInviteFromHash, initialOwnerView, ownerViewRequiresEntity, ownerViewScopeGate, visibleView,
 } from "./App";
 import { Gate } from "./components/Gate";
 import { FinanceScopeProvider } from "./components/FinanceScope";
@@ -172,9 +172,24 @@ describe("principal workspace routing", () => {
 });
 
 describe("passkey enrollment welcome", () => {
+  it("keeps owner and document-recipient invitation classes explicit and fails closed", () => {
+    expect(enrollmentInviteFromHash("#enroll=owner_fixture_invite_1234")).toEqual({
+      code: "owner_fixture_invite_1234",
+      kind: "owner",
+    });
+    expect(enrollmentInviteFromHash("#document-enroll=doc_fixture_invite_1234")).toEqual({
+      code: "doc_fixture_invite_1234",
+      kind: "document",
+    });
+    expect(enrollmentInviteFromHash("#enroll=doc_fixture_invite_1234")).toBeNull();
+    expect(enrollmentInviteFromHash("#document-enroll=owner_fixture_invite_1234")).toBeNull();
+    expect(enrollmentInviteFromHash("#enroll=owner_fixture_invite_1234&document-enroll=doc_fixture_invite_1234")).toBeNull();
+    expect(enrollmentInviteFromHash("#support-enroll=doc_fixture_invite_1234")).toBeNull();
+  });
+
   it("explains the secure device window and privacy boundary before offering enrollment", () => {
     const html = renderToStaticMarkup(
-      <Gate owner="Morgan Example" inviteCode="synthetic-invite" onIn={() => undefined} />,
+      <Gate owner="Morgan Example" inviteCode="synthetic-invite" enrollmentKind="owner" onIn={() => undefined} />,
     );
     expect(html).toContain("Here is what happens next");
     expect(html).toContain("Create my owner passkey");

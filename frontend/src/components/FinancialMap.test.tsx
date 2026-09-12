@@ -162,4 +162,26 @@ describe("Financial Map review clarity", () => {
     expect(html).toContain("did not activate or change anything");
     expect(html).toContain("no passkey window opened");
   });
+
+  it("stops the synthetic rehearsal correction path before an unavailable assistant", () => {
+    vi.stubGlobal("location", { hostname: "127.0.0.1", search: "?state=financial-map&view=financial-map" });
+    const html = renderToStaticMarkup(
+      <FinancialMapCorrectionChoice
+        requested
+        confirmationInProgress={false}
+        confirmationUnresolved={false}
+        onRequest={() => undefined}
+        onContinue={() => undefined}
+        onReadLatest={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Correction path found");
+    expect(html).toContain("not connected to your Claude Code or Codex Owner assistant");
+    expect(html).toContain("cannot create or read a fresh Financial Map preview");
+    expect(html).toContain("Note what felt wrong for your technician instead");
+    expect(html).toContain("Keep reviewing this synthetic preview");
+    expect(html).not.toContain("Copy request");
+    expect(html).not.toContain("Read latest map");
+  });
 });

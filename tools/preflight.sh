@@ -38,7 +38,31 @@ echo "THE BRAIN CLI"
 COPIES=$(type -a -P brain 2>/dev/null | sort -u)
 N=$(printf "%s" "$COPIES" | grep -c . )
 if [ "$N" -eq 0 ]; then
-  FRESH=1; warn "no 'brain' on PATH (fine before a first install; call it by full path otherwise)"
+  # The script may be called by its full installed path precisely because the
+  # current shell has not inherited the npm prefix yet. Prefer the CLI beside
+  # this exact installed package, then the two supported per-user prefixes.
+  PACKAGE_PREFIX=$(dirname "$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")")
+  PACKAGE_CLI="$PACKAGE_PREFIX/bin/brain"
+  LOCAL_CLI=""
+  if [ -x "$PACKAGE_CLI" ]; then
+    LOCAL_CLI=$PACKAGE_CLI
+  else
+    for CANDIDATE in "$HOME/.financial-brain/bin/brain" "$HOME/.npm-global/bin/brain"; do
+      if [ -x "$CANDIDATE" ]; then
+        if [ -n "$LOCAL_CLI" ] && [ "$LOCAL_CLI" != "$CANDIDATE" ]; then
+          stop "more than one installed Brain CLI exists outside PATH; use the exact package path and repair PATH before continuing"
+          LOCAL_CLI=""
+          break
+        fi
+        LOCAL_CLI=$CANDIDATE
+      fi
+    done
+  fi
+  if [ -n "$LOCAL_CLI" ]; then
+    warn "'brain' is not on PATH, but the installed CLI is available at $LOCAL_CLI; use that full path in this shell"
+  elif [ "$STOPPED" -eq 0 ]; then
+    FRESH=1; warn "no installed Brain CLI was found (expected before a first install)"
+  fi
 elif [ "$N" -eq 1 ]; then
   ok "resolves to $COPIES"
 else
@@ -95,11 +119,28 @@ fi
 echo
 
 echo "MANIFESTS"
-MF=$(find "$HOME" -maxdepth 4 -name brain.manifest.json -not -path "*/node_modules/*" -not -path "*/templates/*" -not -path "*/.*/*" 2>/dev/null)
-MN=$(printf "%s" "$MF" | grep -c .)
-if [ "$MN" -eq 0 ]; then NOMANIFEST=1; ok "no manifest yet (expected before a first install)"
-elif [ "$MN" -eq 1 ]; then
+POINTER_HELPER="$SCRIPT_DIR/../operations/installed-manifest.mjs"
+SELECTED_MANIFEST=$(node "$POINTER_HELPER" --preflight-locator 2>/dev/null)
+POINTER_STATUS=$?
+if [ "$POINTER_STATUS" -eq 0 ]; then
+  MF=$SELECTED_MANIFEST
+  MN=1
+  ok "using the saved installed manifest: $MF"
+elif [ "$POINTER_STATUS" -eq 2 ]; then
+  MF=$(find "$HOME" -maxdepth 4 -name brain.manifest.json -not -path "*/node_modules/*" -not -path "*/templates/*" -not -path "*/.*/*" 2>/dev/null)
+  MN=$(printf "%s" "$MF" | grep -c .)
+elif [ "$POINTER_STATUS" -eq 3 ]; then
+  MF=""; MN=0
+  stop "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"
+else
+  MF=""; MN=0
+  stop "the installed Brain manifest selector could not run; use the exact installed package before choosing a manifest"
+fi
+if [ "$POINTER_STATUS" -eq 2 ] && [ "$MN" -eq 0 ]; then NOMANIFEST=1; ok "no manifest yet (expected before a first install)"
+elif [ "$POINTER_STATUS" -eq 2 ] && [ "$MN" -eq 1 ]; then
   ok "one manifest: $MF"
+fi
+if [ "$MN" -eq 1 ] && [ "$POINTER_STATUS" -ne 3 ]; then
   DOM=$(grep -o '"domain": *"[^"]*"' "$MF" 2>/dev/null | head -1 | cut -d'"' -f4)
   if [ -n "$DOM" ]; then
     H=$(curl -s -m 15 "https://$DOM/health" 2>/dev/null)
@@ -112,7 +153,7 @@ elif [ "$MN" -eq 1 ]; then
       *) warn "brain at $DOM reports status=$ST" ;;
     esac
   fi
-else
+elif [ "$POINTER_STATUS" -eq 2 ] && [ "$MN" -gt 1 ]; then
   stop "$MN manifests found; the wrong one will be picked. Ask which folder is theirs."
   printf "%s\n" "$MF" | sed 's/^/          /'
 fi

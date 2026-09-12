@@ -109,10 +109,10 @@ function orderedIndex(text, expression, after, label) {
   return offset + relative;
 }
 
-function assertMapFirstSequence(text, label) {
+function assertMapOpeningSequence(text, label) {
   let cursor = -1;
   cursor = orderedIndex(text,
-    /What would you most\s+like your Financial Brain to help you understand or keep current\?/i,
+    /What would you\s+most\s+like\s+your\s+Financial Brain to help you understand or keep current\?/i,
     cursor, label);
   cursor = orderedIndex(text, /This sends no Financial Map\s+snapshot and changes nothing\./i, cursor, label);
   cursor = orderedIndex(text,
@@ -141,11 +141,55 @@ function assertMapFirstSequence(text, label) {
   const skill = readFileSync(new URL("../skills/financial-brain-technician/SKILL.md", import.meta.url), "utf8");
   const workspace = readFileSync(new URL("../operations/claude-workspace.mjs", import.meta.url), "utf8");
 
-  assertMapFirstSequence(instructions, "MCP runtime guidance");
-  assertMapFirstSequence(skill, "technician skill");
-  assertMapFirstSequence(workspace, "Claude workspace contract");
+  assertMapOpeningSequence(instructions, "MCP runtime guidance");
+  assertMapOpeningSequence(skill, "technician skill");
+  assertMapOpeningSequence(workspace, "Claude workspace contract");
+  for (const [label, text] of [
+    ["MCP runtime guidance", instructions],
+    ["technician skill", skill],
+    ["Claude workspace contract", workspace],
+  ]) {
+    assert.match(text,
+      /one total owner-question budget per (?:owner-facing Optimize )?response across\s+the optional goal, evidence clarification, and zoning/i,
+      label);
+    assert.match(text,
+      /material evidence conflict,\s+(?:then )?a\s+whole-source zoning decision, then\s+the\s+optional goal/i,
+      label);
+    assert.match(text,
+      /Skip\s+the goal whenever a material evidence conflict or any\s+zoning decision is\s+(?:already )?pending/i,
+      label);
+    assert.match(text, /records do not determine\s+the choice/i, label);
+    assert.match(text,
+      /source label, connector kind, document count, or plausible\s+guess is\s+not enough/i,
+      label);
+    assert.match(text,
+      /Without (?:that|supporting) evidence, (?:do not|never) propose or recommend a\s+zone/i,
+      label);
+    assert.match(text,
+      /material evidence conflict has higher priority,\s+(?:ask only that evidence question and\s+)?defer\s+(?:the\s+)?zoning(?:\s+choice)?\s+to\s+the\s+next response/i,
+      label);
+    assert.match(text,
+      /Do not run Golden Questions, a Golden evaluation, a canned refusal exercise, a\s+known-answer control question/i,
+      label);
+    assert.match(text,
+      /Never claim an MCP or other Optimize check ran without its actual receipt[\s\S]{0,180}?never call Optimize complete while any planned check is not run/i,
+      label);
+    assert.match(text,
+      /gpt-5\.6-luna.*medium reasoning[\s\S]{0,180}?gpt-5\.6-terra.*low reasoning/i,
+      label);
+    assert.match(text, /synthetic behavioral\s+evidence only, not live Brain proof/i, label);
+    assert.match(text,
+      /Do not pin [`]?gpt-5\.6-sol[`]? or infer Optimize\s+completeness from model choice/i,
+      label);
+    assert.match(text,
+      /Each interview response asks only (?:that|its) one adaptive map question and combines it\s+with no goal, evidence-clarification, or zoning question/i,
+      label);
+    assert.doesNotMatch(text,
+      /one total owner-question budget for the complete Optimize run/i,
+      label);
+  }
   assert.match(instructions, /keep the audit read-only/i);
-  assert.match(instructions, /first audit evidence after that goal/i);
+  assert.match(instructions, /first audit evidence after that opening decision, whether the goal was asked or skipped/i);
   assert.match(instructions, /Immediately before calling brain_financial_map with mode=read/i);
   assert.match(instructions, /optional guided, session-only Owner Financial Map interview/i);
   assert.match(instructions, /Do not start the interview automatically/i);

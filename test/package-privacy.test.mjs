@@ -485,6 +485,11 @@ const expected = [
   // install, repair, provider refresh, scheduler change, or Brain mutation.
   "operations/machine-continuity.mjs",
   "operations/provenance-repair.mjs",
+  // One-owner-selected-original provenance lane. The pure contract has no
+  // credential or I/O authority; the orchestrator keeps every private value
+  // behind the leased, authenticated boundary and prints a closed receipt.
+  "operations/provenance-target-repair.mjs",
+  "operations/provenance-target-cli.mjs",
   "operations/provenance-source-assessment.mjs",
   // Reviewed read-only Optimize inventory client. It accepts no literal key,
   // validates HTTPS before resolving the protected credential, refuses
@@ -566,6 +571,7 @@ const expected = [
   "migrations/d1/0043_source_original_result_bindings.sql",
   "migrations/d1/0044_source_original_result_family_receipts.sql",
   "migrations/d1/0045_source_original_accepted_resolutions.sql",
+  "migrations/d1/0046_source_original_observation_authority_chain.sql",
   "operations/bank-access-wrapping-key.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
@@ -830,7 +836,8 @@ for (const path of privateScanPaths) {
 
 // A packlist can name every file and still hide a broken relative import or a
 // skill that cannot be installed from the packed tree. Build and unpack the
-// actual tarball, import the recovery adapter, then install the reviewed skill
+// actual tarball, import the recovery adapter and both target-repair modules,
+// then install the reviewed skill
 // for Claude Code by default and for Codex only when its config tree already
 // exists. Compare every readback with the packed source. These probes invoke
 // no CLI entry point or network.
@@ -866,6 +873,18 @@ if (packageProbeDirectory) try {
       "operations",
       "cloudflare-recovery-adapter.mjs",
     );
+    const targetRepairPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "provenance-target-repair.mjs",
+    );
+    const targetCliPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "provenance-target-cli.mjs",
+    );
     const skillModulePath = join(packageProbeDirectory, "package", "operations", "claude-skill.mjs");
     const skillSourcePath = join(
       packageProbeDirectory,
@@ -884,14 +903,14 @@ if (packageProbeDirectory) try {
       ? spawnSync(process.execPath, [
           "--input-type=module",
           "--eval",
-          "const {pathToFileURL}=await import('node:url');await import(pathToFileURL(process.env.PACK_IMPORT_PATH).href)",
+          "const {pathToFileURL}=await import('node:url');for(const path of JSON.parse(process.env.PACK_IMPORT_PATHS))await import(pathToFileURL(path).href)",
         ], {
           encoding: "utf-8",
           env: {
             PATH: process.env.PATH || "",
             ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
             ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
-            PACK_IMPORT_PATH: adapterPath,
+            PACK_IMPORT_PATHS: JSON.stringify([adapterPath, targetRepairPath, targetCliPath]),
           },
           timeout: 60_000,
         })

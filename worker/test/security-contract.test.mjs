@@ -90,7 +90,14 @@ test("document grant creation is exact, bounded, default-deny, and idempotent", 
     assert.equal(replay.body.scope_rule, "exact_document_ids_only");
     assert.equal(replay.body.entity_slug, ENTITY);
     assert.deepEqual(replay.body.document_ids, ["upload:allowed-document"]);
-    assert.match(replay.body.enrollment_url || "", /#enroll=/);
+    assert.match(replay.body.enrollment_url || "", /\/app#document-enroll=doc_[A-Za-z0-9_-]{32}$/);
+    assert.equal(replay.body.enrollment_url.includes(replay.body.grant_id), false);
+    assert.equal(replay.body.enrollment_url.includes(ENTITY), false);
+    assert.equal(replay.body.enrollment_url.includes("allowed-document"), false);
+    const documentCode = replay.body.enrollment_url.split("#document-enroll=")[1];
+    const documentOptions = await json(await fixture.post("/auth/register/options", { code: documentCode }));
+    assert.equal(documentOptions.response.status, 200);
+    assert.equal(documentOptions.body.user_name, "shared document access");
     assert.equal(fixture.first("SELECT count(*) AS n FROM document_access_grants").n, 1);
     assert.equal(fixture.first("SELECT count(*) AS n FROM document_access_documents").n, 1);
     assert.equal(fixture.first("SELECT count(*) AS n FROM document_access_requests WHERE action='create'").n, 1);

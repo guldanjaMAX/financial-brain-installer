@@ -341,6 +341,20 @@ test("the packet makes high-volume source onboarding and optimize proof explicit
   assert.match(all, /Activation is a separate owner choice/i);
 });
 
+test("ordinary onboarding keeps the held bank boundary consistent", () => {
+  const runbook = documents["TECHNICIAN-RUNBOOK.md"];
+  const scorecard = onboardingScorecard;
+  for (const guidance of [runbook, scorecard]) {
+    assert.match(guidance, /Bank feeds? (?:remain|are) (?:outside|not) ordinary onboarding/i);
+    assert.match(guidance, /do not open Plaid Link/i);
+    assert.match(guidance, /bank password, verification code, or setup key/i);
+    assert.match(guidance, /already approved pilot/i);
+    assert.match(guidance, /reviewed, version-scoped field plan/i);
+  }
+  assert.doesNotMatch(runbook, /Plaid or another financial source:\*\* let the owner complete Link/i);
+  assert.doesNotMatch(scorecard, /^\d+\. Plaid or another financial source/m);
+});
+
 test("the privacy draft has source-specific consent and retention prompts", () => {
   const draft = documents["DATA-PROTECTION-DRAFT.md"];
   for (const phrase of [

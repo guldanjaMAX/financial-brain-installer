@@ -44,6 +44,9 @@ packages. This is separate from repository preparation. It uses no account
 credential and can be quiet for several minutes while it installs and builds.
 Leave PowerShell open and wait until the local address appears.
 
+Do not run `npm ci`, `npm install`, or any other npm command yourself. The
+checked-in launcher handles the local UI preparation it needs.
+
 Do not run setup, provision, deploy, update, connect, ingest, OCR, repair, reindex, drain, forget, zone, grant, invite, or any live Cloudflare or provider command. Do not ask for a token, password, login, consent, billing approval, or real passkey. Do not work around a refusal.
 
 When the browser opens, guide me through the synthetic screens one at a time. Ask what feels clear, confusing, too technical, or surprising. Pay special attention to the first passkey explanation, healthy-empty versus unavailable wording, partial data, conflicts, retries, guest access, and the Owner Financial Map review. When I am done, have me close the browser tab, return to the same PowerShell window, and press Control-C once. The launcher runs Node directly after preparation, so the ready rehearsal does not stop through the `npm.cmd` batch shim. If an older command does show `Terminate batch job (Y/N)?`, explain that `Y` stops it and `N` leaves it running; do not leave me guessing.

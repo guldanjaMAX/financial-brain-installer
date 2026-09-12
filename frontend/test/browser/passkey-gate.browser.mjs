@@ -75,6 +75,52 @@ try {
 
   await page.close();
 
+  const documentPage = await harness.newPage({ viewport: { width: 390, height: 844 } });
+  await documentPage.addInitScript(() => {
+    window.__passkeyPromptCalls = 0;
+    Object.defineProperty(window, "PublicKeyCredential", {
+      configurable: true,
+      value: function SyntheticPublicKeyCredential() {},
+    });
+    Object.defineProperty(navigator, "credentials", {
+      configurable: true,
+      value: {
+        create: async () => {
+          window.__passkeyPromptCalls += 1;
+          return null;
+        },
+      },
+    });
+  });
+  await documentPage.route("**/auth/register/options", route => route.fulfill({
+    json: {
+      challenge: "c3ludGhldGljLWNoYWxsZW5nZQ",
+      rp: { id: "127.0.0.1", name: "Synthetic Brain" },
+      user_name: "shared document access",
+    },
+  }));
+  await documentPage.goto(new URL("/test/browser/fixtures/passkey-gate.html?kind=document", harness.origin).href);
+  await documentPage.getByRole("heading", { name: "Set up your shared document access", exact: true }).waitFor();
+  const documentText = await documentPage.locator("body").innerText();
+  check("the mobile recipient sees exact-document scope before the secure prompt",
+    documentText.includes("only the exact documents they chose")
+    && documentText.includes("will not get owner controls or anything else in this Brain")
+    && documentText.includes("does not make you an owner of the Brain")
+    && !documentText.includes("your brain is ready")
+    && !documentText.includes("This verifies that you are the owner"));
+  check("opening a document invitation does not invoke WebAuthn",
+    await documentPage.evaluate(() => window.__passkeyPromptCalls) === 0);
+  check("the document-recipient page has no mobile horizontal overflow",
+    await documentPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await documentPage.screenshot({ path: path.join(output, "passkey-gate-document-mobile.png"), fullPage: true });
+
+  await documentPage.getByRole("button", { name: "Create my passkey for shared access", exact: true }).click();
+  await documentPage.waitForFunction(() => window.__passkeyPromptCalls === 1);
+  check("the document-recipient prompt starts only after its explicit click",
+    await documentPage.evaluate(() => window.__passkeyPromptCalls) === 1);
+  await documentPage.getByRole("alert").getByText(/Create my passkey for shared access/).waitFor();
+  await documentPage.close();
+
   const unavailablePage = await harness.newPage({ viewport: { width: 390, height: 844 } });
   await unavailablePage.addInitScript(() => {
     window.__passkeyPromptCalls = 0;

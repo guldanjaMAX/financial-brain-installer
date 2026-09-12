@@ -13,11 +13,16 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This checkout is the unreleased 0.4.7 candidate. No 0.4.7 customer release or
-immutable release asset exists. The versioned URLs in the candidate examples
-below are intentionally unavailable placeholders for release review. Do not
-run or share those commands as customer installation instructions. Check the
-guided page for the current release status before installing anything.
+This checkout is the unreleased 0.4.8 candidate. No 0.4.8 customer release or
+immutable release asset exists. The earlier held 0.4.7 candidate was never
+tagged, published, or offered as a customer update; its identity is retired so
+its evidence cannot be confused with this changed candidate. The versioned URLs
+in the candidate examples below are intentionally unavailable placeholders for
+release review. Do not run or share those commands as customer installation
+instructions. Check the guided page for the current release status before
+installing anything. The held candidate's proof boundary and remaining gates
+are recorded in the
+[0.4.8 evidence plan](docs/release-evidence/v0.4.8-candidate-release-evidence-plan.md).
 
 The guided install path is at `financialbrain.ai/install`. It uses one immutable
 release asset and installs into a folder owned by your user account, so it needs
@@ -42,8 +47,8 @@ MCP discovery, and configuration checks instead.
 Mac or Linux:
 
 ```bash
-# Unavailable 0.4.7 candidate placeholder. Do not run until the public channel names this release.
-npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.7/brain-installer-0.4.7.tgz"
+# Unavailable 0.4.8 candidate placeholder. Do not run until the public channel names this release.
+npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.8/brain-installer-0.4.8.tgz"
 # Optional: makes the shorter `brain` examples work in this Terminal window.
 export PATH="$HOME/.financial-brain/bin:$PATH"
 ```
@@ -51,8 +56,8 @@ export PATH="$HOME/.financial-brain/bin:$PATH"
 Windows PowerShell:
 
 ```powershell
-# Unavailable 0.4.7 candidate placeholder. Do not run until the public channel names this release.
-npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.7/brain-installer-0.4.7.tgz"
+# Unavailable 0.4.8 candidate placeholder. Do not run until the public channel names this release.
+npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.8/brain-installer-0.4.8.tgz"
 # Optional: makes the shorter `brain` examples work in this PowerShell window.
 $env:Path = "$env:LOCALAPPDATA\FinancialBrain;$env:Path"
 ```
@@ -214,9 +219,19 @@ the owner the final click.
 The owner remains the administrator of their Brain. Deletion and access
 changes stay in explicit owner controls instead of becoming silent chat tools.
 
+Optimize asks at most one owner question per response. An installed-Brain
+discovery choice uses that same response budget. Within the audit, a material
+evidence conflict comes first, then a pending whole-source zoning choice, then
+the optional opening goal; a pending conflict or zoning choice skips the goal.
+When records cannot support a zone recommendation, Optimize states the
+whole-source choices and consequences and lets the owner choose instead of
+guessing. Routine Optimize compares actual records, receipts, and provenance;
+it does not run Golden Questions or a known-answer exercise by default.
+
 The Owner Financial Map is the denominator for later financial-completeness
-work. Immediately after the owner's opening goal, Optimize reads whether that
-map is current, stale, or not established and reports its unresolved gaps.
+work. Immediately after that opening decision, whether the goal was asked or
+skipped, Optimize reads whether the map is current, stale, or not established
+and reports its unresolved gaps.
 Before the private read, it explains that no map snapshot will be sent, nothing
 will change, and the assistant may still show an approval prompt for the read.
 Before any financial-completeness conclusion, it offers an optional guided,
@@ -419,6 +434,26 @@ activation do not. A recovered Brain must repeat the exact verification and
 record a new local activation before that resolution is current there. Every
 receipt remains bounded to the one target and reports
 `whole_source_complete: false`.
+
+Migration 0046 makes the per-original observation sequence an optimistic,
+append-only authority chain. Every new non-accepted observation names the
+exact previous observation, or explicit empty history, that its reviewed plan
+saw. D1 compares that predecessor while inserting, so two computers cannot
+both extend the same head. Accepted admission similarly requires either the
+gap it resolves to remain the head or, for exact replay and recovery
+reactivation, its accepted observation to remain the head. Any later gap,
+failure, or adjudicated exclusion immediately removes the older activation
+from the current-acceptance view. Exact lost-response replay remains
+idempotent; a request based on older history returns a conflict and performs no
+reingest, family reconciliation, or vector drain.
+
+The public one-target CLI handles that retry. A fresh preview recognizes the
+exact historical gap and accepted observation, binds current local bytes,
+runtime, source inventory, and schema-46 authority history into a new owner approval, and
+then runs only schema-44 record/verify and schema-45 record/verify. It does not
+repeat discovery, reingest the original, reconcile its family, or drain the
+shared vector queue. This is also the safe retry after an accepted-resolution
+record committed but its response was lost.
 
 Database currentness is scoped to the fixed retrieval contract and supported
 Worker, D1, and outbox-mediated writes. Direct FTS maintenance, an out-of-band

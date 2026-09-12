@@ -23,6 +23,7 @@ import {
   createCredentialFreeProviderEnvironment,
   createPlanEnvironment,
   createSafeEnvironment,
+  makeOutputDirectory,
   parseFieldPrepareArgs,
   readSourceIdentity,
   renderFieldChecklist,
@@ -72,6 +73,24 @@ test("fast and selected profiles cannot become accidental full proof", () => {
   assert.throws(() => parseFieldPrepareArgs(["--only", "cloudflare-live"]), /unknown/);
   assert.throws(() => parseFieldPrepareArgs(["--only", ","]), /at least one/);
   assert.throws(() => parseFieldPrepareArgs(["--json"]), /only with --plan/);
+});
+
+test("default field-preparation output is outside the source checkout", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "brain-field-output-parent-"));
+  try {
+    const output = makeOutputDirectory(null, { temporaryRoot });
+    assert.ok(output.startsWith(`${temporaryRoot}/`) || output.startsWith(`${temporaryRoot}\\`));
+    assert.equal(existsSync(join(ROOT, ".field-prepare")), false);
+    assert.throws(
+      () => makeOutputDirectory(join(ROOT, ".field-prepare", "explicit-run")),
+      /custom_output_inside_source_checkout_refused/,
+    );
+    const explicitOutput = join(temporaryRoot, "explicit-output");
+    assert.equal(makeOutputDirectory(explicitOutput), explicitOutput);
+    assert.equal(existsSync(explicitOutput), true);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("every child environment drops credentials and customer-home access", () => {
@@ -279,6 +298,7 @@ test("the generated checklist keeps offline proof separate from human field gate
   });
   assert.match(checklist, /Clean Windows owner profile/);
   assert.match(checklist, /Disposable Cloudflare Brain/);
+  assert.match(checklist, /schema 46/);
   assert.match(checklist, /Plaid Sandbox through the deployed Brain/);
   assert.match(checklist, /QuickBooks Online Sandbox/);
   assert.match(checklist, /does not prove Cloudflare/i);

@@ -17,6 +17,7 @@ export const passkeysSupported = (): boolean =>
   typeof window !== "undefined" && !!window.PublicKeyCredential;
 
 type RegisterOptions = { challenge: string; rp: { id: string; name: string }; user_name: string };
+type EnrollmentKind = "owner" | "document";
 export type AssertionOptions = {
   challenge: string;
   rp_id: string;
@@ -38,8 +39,11 @@ export class PasskeyCeremonyCancelledError extends Error {
 
 /** Create a passkey. `code` is the one-time invite; omit it to add a device
  *  from an already signed-in session. */
-export async function enroll(code?: string): Promise<void> {
+export async function enroll(code?: string, kind: EnrollmentKind = "owner"): Promise<void> {
   const options = await api<RegisterOptions>("/auth/register/options", code ? { code } : {});
+  const action = kind === "document"
+    ? "Create my passkey for shared access"
+    : "Create my owner passkey";
   let credential: PublicKeyCredential | null;
   try {
     credential = (await navigator.credentials.create({
@@ -59,11 +63,11 @@ export async function enroll(code?: string): Promise<void> {
       },
     })) as PublicKeyCredential | null;
   } catch (error) {
-    throw explainCeremonyFailure(error, options.rp.id, "enroll");
+    throw explainCeremonyFailure(error, options.rp.id, "enroll", kind);
   }
   if (!credential) {
     throw new Error(
-      "No passkey was created. Nothing was enrolled. You can choose Create my owner passkey and try again while this private link is valid.",
+      `No passkey was created. Nothing was enrolled. You can choose ${action} and try again while this private link is valid.`,
     );
   }
   const response = credential.response as AuthenticatorAttestationResponse;
@@ -88,14 +92,18 @@ function explainCeremonyFailure(
   error: unknown,
   rpId: string,
   purpose: "enroll" | "sign_in" | "confirm_map" = "sign_in",
+  enrollmentKind: EnrollmentKind = "owner",
 ): Error {
   const name = (error as { name?: string })?.name || "Error";
   const suffix = ` (${name})`;
+  const enrollmentAction = enrollmentKind === "document"
+    ? "Create my passkey for shared access"
+    : "Create my owner passkey";
   if (name === "NotAllowedError") {
     if (purpose === "enroll") {
       return new Error(
         `No passkey was created for ${rpId}. The secure window may have been canceled or timed out. ` +
-        `Nothing was enrolled. You can choose Create my owner passkey and try again while this private link is valid.` + suffix,
+        `Nothing was enrolled. You can choose ${enrollmentAction} and try again while this private link is valid.` + suffix,
       );
     }
     if (purpose === "confirm_map") {
@@ -117,7 +125,9 @@ function explainCeremonyFailure(
   }
   if (name === "InvalidStateError") {
     return new Error(purpose === "enroll"
-      ? `This device already has an owner passkey for ${rpId}. Open the Brain at its normal address and sign in with it.` + suffix
+      ? enrollmentKind === "document"
+        ? `This device could not create another shared-access passkey for ${rpId}. Open the Brain at its normal address and sign in with an existing passkey, or ask the Brain owner for a fresh link.` + suffix
+        : `This device already has an owner passkey for ${rpId}. Open the Brain at its normal address and sign in with it.` + suffix
       : `This device already has a passkey for ${rpId}.` + suffix);
   }
   if (name === "NotSupportedError" || name === "AbortError") {

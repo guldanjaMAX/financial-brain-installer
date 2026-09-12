@@ -76,10 +76,11 @@ owner's Cloudflare Worker
   Brain and its separately stored admin key.
 
 The current candidate adds immutable raw-original binding for eligible
-single-record local file ingests, read-only source and financial-picture
-inventories, explicit owner-profile AI write access, machine-continuity checks,
-and a separately previewed repair for missing technician skill or MCP wiring.
-Other ingest producers remain unbound, retrospective provenance repair remains
+single-record local file ingests, a one-original accepted-resolution evidence
+gate, read-only source and financial-picture inventories, explicit
+owner-profile AI write access, machine-continuity checks, and a separately
+previewed repair for missing technician skill or MCP wiring. Other ingest
+producers remain unbound, the legacy whole-source provenance repair remains
 read-only, and ordinary bank credential setup remains held. The earlier
 current-status, replay, projection, recovery, and release-safety guarantees stay
 in force. `CHANGELOG.md` is the authoritative owner-facing list.
@@ -252,12 +253,17 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.7/schema43 field candidate remains held. At this freeze its
+The current 0.4.8/schema46 field candidate remains held. The earlier 0.4.7
+candidate was never tagged, published, or offered as a customer update; its
+identity is retired so its evidence cannot be mistaken for evidence from these
+changed bytes. At this freeze the current candidate's
 39-row audit has 35 unresolved incidents, no renewed deferrals, and four rows
 closed on reviewed evidence. A tag requests the release workflow; it never
 bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
-around a failed workflow.
+around a failed workflow. The
+[0.4.8 candidate evidence plan](./release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+is planning only until a reviewed change binds it to the final candidate SHA.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest
    changelog heading, README archive URLs, and current-version checks aligned.

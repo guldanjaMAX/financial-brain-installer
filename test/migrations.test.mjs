@@ -203,6 +203,14 @@ for (const t of [
     installColumns.has("source_original_retrieval_generation") &&
       verificationColumns.has("retrieval_generation"));
 }
+{
+  const observationColumns = new Set(db.prepare(
+    "PRAGMA table_info(source_original_observations)",
+  ).all().map((row) => row.name));
+  check("0046 adds append-only per-original authority predecessor bindings",
+    observationColumns.has("authority_chain_version") &&
+      observationColumns.has("predecessor_observation_hash"));
+}
 for (const object of [
   "idx_source_original_result_family_members_revision",
   "idx_source_original_result_family_receipts_original_sequence",
@@ -264,8 +272,24 @@ for (const object of [
   "source_original_accepted_resolution_recovery_close_validate",
   "source_original_accepted_resolution_recovery_state_validate_insert",
   "source_original_observation_accepted_admission_required",
+  "idx_source_original_observation_authority_predecessor",
+  "source_original_observation_authority_head_insert",
+  "source_original_accepted_resolution_authority_head_insert",
+  "source_original_observation_authority_recovery_close_validate",
 ]) {
   check(`${object} exists`, names.has(object));
+}
+{
+  const currentAcceptedSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='view' AND name='source_original_current_accepted_resolutions'",
+  ).get()?.sql || "";
+  const admissionCommitSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='source_original_accepted_resolution_admission_commit'",
+  ).get()?.sql || "";
+  check("0046 current accepted authority joins observations inside the tenant",
+    /accepted\.tenant_id\s*=\s*resolution\.tenant_id/i.test(currentAcceptedSql));
+  check("0046 accepted observation replay lookup remains inside the tenant",
+    /accepted\.tenant_id\s*=\s*NEW\.tenant_id/i.test(admissionCommitSql));
 }
 for (const t of ["chunks_ai", "chunks_ad", "chunks_au"]) {
   check(`trigger ${t} exists`, names.has(t), "MISSING — keyword search would silently return nothing forever");

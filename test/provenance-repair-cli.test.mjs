@@ -6,10 +6,13 @@ import test from "node:test";
 
 import {
   ProvenanceRepairIncompleteError,
+  cmdProvenanceRepairInteractive,
+  cmdProvenanceTargetRepair,
   cmdWhatsnew,
   cmdProvenanceRepair,
   collectSourceRecoveryPages,
   inspectProvenanceRepairReadiness,
+  provenanceTargetRuntimePackageFingerprint,
   runCliCommandWithCredentialBoundary,
 } from "../brain.mjs";
 import { inspectGoogleTokenStorage, saveTokens } from "../connectors/google-auth.mjs";
@@ -18,6 +21,10 @@ import {
   provenanceRepairReadback,
   provenanceRepairRemoteGeneration,
 } from "../operations/provenance-repair.mjs";
+import {
+  ProvenanceTargetCliError,
+  parseProvenanceTargetRepairArgv,
+} from "../operations/provenance-target-cli.mjs";
 
 const AS_OF = "2026-09-10T12:00:00.000Z";
 const LATER = "2026-09-10T12:05:00.000Z";
@@ -331,6 +338,9 @@ test("public whatsnew copy matches the fail-closed provenance repair command", a
   assert.match(currentEntry, /stays read-only/i);
   assert.match(currentEntry, /schema-1 `--apply` path is unavailable/i);
   assert.match(currentEntry, /Nothing is changed and zero candidates are reported fixed/i);
+  assert.match(currentEntry, /Add `--target <source-relative-file>`/i);
+  assert.match(currentEntry, /schema-44 family[\s\S]*schema-45 accepted resolution/i);
+  assert.match(currentEntry, /eight private retrieval probes/i);
   assert.doesNotMatch(currentEntry, /runs the ordinary source ingest|reset and no limit|candidate is called fixed/i);
 
   await assert.rejects(
@@ -637,4 +647,137 @@ test("reconnecting a different Google credential invalidates the approved plan e
     });
     assert.notEqual(approved.plan_id, afterReconnect.plan_id);
   });
+});
+
+test("one-target runtime fingerprint is stable by file set and changes with exact package bytes", () => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-provenance-runtime-"));
+  try {
+    writeFileSync(join(directory, "first.mjs"), "export const first = 1;\n");
+    writeFileSync(join(directory, "second.json"), "{\"second\":2}\n");
+    const first = provenanceTargetRuntimePackageFingerprint({
+      root: directory,
+      files: ["second.json", "first.mjs"],
+    });
+    const reordered = provenanceTargetRuntimePackageFingerprint({
+      root: directory,
+      files: ["first.mjs", "second.json"],
+    });
+    assert.equal(first, reordered);
+    assert.match(first, /^[a-f0-9]{64}$/);
+
+    writeFileSync(join(directory, "second.json"), "{\"second\":3}\n");
+    const changed = provenanceTargetRuntimePackageFingerprint({
+      root: directory,
+      files: ["first.mjs", "second.json"],
+    });
+    assert.notEqual(first, changed);
+    assert.throws(
+      () => provenanceTargetRuntimePackageFingerprint({ root: directory, files: ["../outside"] }),
+      /unsafe path/,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("interactive provenance command routes --target through the strict private lane", async () => {
+  const privateTarget = "tax/2025/private-return.txt";
+  const publicPlan = {
+    schema_version: 1,
+    operation: "provenance-target-repair",
+    mode: "preview",
+    read_only: true,
+    source: { id: "client_docs", kind: "upload" },
+    target_count: 1,
+    approval_id: "a".repeat(64),
+  };
+  let received = null;
+  const targetCli = {
+    ProvenanceTargetCliError,
+    parseProvenanceTargetRepairArgv,
+    previewProvenanceTargetRepair: async (input, dependencies) => {
+      received = { input, dependencies };
+      return {
+        publicPlan,
+        privateContext: { privatePlan: { privateTarget } },
+      };
+    },
+    applyProvenanceTargetRepair: async () => {
+      throw new Error("apply must not run");
+    },
+    renderProvenanceTargetRepairPlan: () => "private-safe preview",
+    renderProvenanceTargetRepairReceipt: () => "private-safe receipt",
+  };
+  const dependencies = Object.freeze({ fixture: true });
+  const manifest = join("relative", "brain.manifest.json");
+  const { value, output } = await captureLogs(() => cmdProvenanceRepairInteractive(manifest, {
+    argv: [
+      process.execPath,
+      "brain.mjs",
+      "provenance-repair",
+      manifest,
+      "--source",
+      "client_docs",
+      "--target",
+      privateTarget,
+      "--json",
+    ],
+    targetCli,
+    targetDependencies: dependencies,
+    runtimeFingerprint: () => "b".repeat(64),
+  }));
+  assert.deepEqual(value, publicPlan);
+  assert.equal(received.dependencies, dependencies);
+  assert.equal(received.input.manifestPath, join(process.cwd(), manifest));
+  assert.equal(received.input.source, "client_docs");
+  assert.equal(received.input.target, privateTarget);
+  assert.equal(received.input.candidateRuntimePackageFingerprint, "b".repeat(64));
+  assert.doesNotMatch(output, /private-return/);
+  assert.deepEqual(JSON.parse(output), publicPlan);
+});
+
+test("one-target command converts a private apply failure into an owner-safe incomplete receipt", async () => {
+  const privateMarker = "private-cause-that-must-never-print";
+  const targetCli = {
+    ProvenanceTargetCliError,
+    parseProvenanceTargetRepairArgv,
+    previewProvenanceTargetRepair: async () => {
+      throw new Error("preview must not run");
+    },
+    applyProvenanceTargetRepair: async () => {
+      throw new ProvenanceTargetCliError(
+        "exact_original_ingest",
+        "client_docs",
+        ["discovery_recorded"],
+        new Error(privateMarker),
+      );
+    },
+    renderProvenanceTargetRepairPlan: () => "unused",
+    renderProvenanceTargetRepairReceipt: (receipt) =>
+      `One-file provenance repair stopped safely at ${receipt.failed_stage}. No success was claimed.`,
+  };
+  await assert.rejects(
+    () => cmdProvenanceTargetRepair([
+      "brain.manifest.json",
+      "--source",
+      "client_docs",
+      "--target",
+      "tax/2025/private-return.txt",
+      "--apply",
+      "--approve",
+      "c".repeat(64),
+    ], {
+      targetCli,
+      targetDependencies: {},
+      runtimeFingerprint: () => "d".repeat(64),
+    }),
+    (error) => {
+      assert(error instanceof ProvenanceRepairIncompleteError);
+      assert.equal(error.receipt.failed_stage, "exact_original_ingest");
+      assert.deepEqual(error.receipt.completed_stages, ["discovery_recorded"]);
+      assert.doesNotMatch(error.message, new RegExp(privateMarker));
+      assert.doesNotMatch(JSON.stringify(error.receipt), /private-return/);
+      return true;
+    },
+  );
 });

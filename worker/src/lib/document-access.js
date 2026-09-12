@@ -97,7 +97,10 @@ async function enrollmentCode(env, requestId, grantId) {
   const signature = await crypto.subtle.sign(
     "HMAC", key, new TextEncoder().encode(`document-enrollment\0${requestId}\0${grantId}`),
   );
-  return b64u(new Uint8Array(signature)).slice(0, 32);
+  // The non-secret class prefix is part of the hashed one-time code. The owner
+  // app can therefore choose the document-recipient explanation before opening
+  // WebAuthn, while moving the opaque code to an owner fragment fails closed.
+  return `doc_${b64u(new Uint8Array(signature)).slice(0, 32)}`;
 }
 
 async function inviteReceipt(env, requestId, grantId) {

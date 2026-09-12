@@ -13,6 +13,7 @@ import {
 } from "./source-original-result-family.js";
 
 export const SOURCE_ORIGINAL_ACCEPTED_RESOLUTION_CONTRACT_VERSION = 1;
+const SOURCE_ORIGINAL_AUTHORITY_SCHEMA_VERSION = 46;
 
 const encoder = new TextEncoder();
 
@@ -120,10 +121,11 @@ async function readHistory(env, observation) {
               accepted_observation_hash,result_document_count,result_document_set_hash,
               family_receipt_hash,admission_verification_hash,resolution_hash,admitted_at
          FROM source_original_accepted_resolutions
-        WHERE source=?1 AND original_id=?2
-          AND (resolves_observation_hash=?3 OR accepted_observation_hash=?4)
+        WHERE tenant_id=?1 AND source=?2 AND original_id=?3
+          AND (resolves_observation_hash=?4 OR accepted_observation_hash=?5)
         ORDER BY sequence LIMIT 3`,
     ).bind(
+      observation.tenant_id,
       observation.source,
       observation.original_id,
       observation.resolves_observation_hash,
@@ -136,10 +138,13 @@ async function readHistory(env, observation) {
               original_byte_count,page_count,page_count_state,result_document_count,
               result_document_set_hash,resolves_observation_hash,observation_hash,recorded_at
          FROM source_original_observations
-        WHERE (source=?1 AND original_id=?2 AND observation_hash=?3)
-           OR (run_id=?4 AND original_id=?2)
+        WHERE tenant_id=?1 AND (
+              (source=?2 AND original_id=?3 AND observation_hash=?4)
+           OR (run_id=?5 AND original_id=?3)
+        )
         ORDER BY sequence LIMIT 3`,
     ).bind(
+      observation.tenant_id,
       observation.source,
       observation.original_id,
       observation.observation_hash,
@@ -214,6 +219,56 @@ async function exactHistory(env, observation, proof) {
     admittedAt: Number(resolution.admitted_at),
     admissionVerificationHash: String(resolution.admission_verification_hash),
   };
+}
+
+async function requireAuthorityHead(env, observation, { portableHistory }) {
+  const [schemaResult, headResult] = await env.DB.batch([
+    env.DB.prepare(
+      "SELECT schema_version FROM install_state WHERE id=1 LIMIT 2",
+    ),
+    env.DB.prepare(
+      `SELECT head.sequence,head.observation_hash,head.outcome,
+              head.resolves_observation_hash,head.original_content_sha256,
+              head.original_byte_count,
+              (SELECT prior.observation_hash
+                 FROM source_original_observations prior
+                WHERE prior.tenant_id=head.tenant_id
+                  AND prior.source=head.source
+                  AND prior.original_id=head.original_id
+                  AND prior.sequence<head.sequence
+                ORDER BY prior.sequence DESC LIMIT 1) AS immediate_predecessor_hash
+         FROM source_original_observations head
+        WHERE head.tenant_id=?1 AND head.source=?2 AND head.original_id=?3
+        ORDER BY head.sequence DESC LIMIT 1`,
+    ).bind(observation.tenant_id, observation.source, observation.original_id),
+  ]);
+  const schemaRows = rowsOf(schemaResult);
+  const heads = rowsOf(headResult);
+  if (schemaRows.length !== 1 ||
+      Number(schemaRows[0].schema_version) < SOURCE_ORIGINAL_AUTHORITY_SCHEMA_VERSION) {
+    refuse(
+      "source_original_authority_schema_upgrade_required",
+      "source-original accepted resolutions require schema 46 or newer",
+    );
+  }
+  const head = heads.length === 1 ? heads[0] : null;
+  const expectedHash = portableHistory
+    ? observation.observation_hash
+    : observation.resolves_observation_hash;
+  const valid = head?.observation_hash === expectedHash && (portableHistory
+    ? head.outcome === "accepted" &&
+      head.resolves_observation_hash === observation.resolves_observation_hash &&
+      head.immediate_predecessor_hash === observation.resolves_observation_hash
+    : ["gap", "failed"].includes(head?.outcome) &&
+      head.original_content_sha256 === observation.original_content_sha256 &&
+      Number(head.original_byte_count) === observation.original_byte_count);
+  if (!valid) {
+    refuse(
+      "source_original_accepted_resolution_history_advanced",
+      "source-original history advanced after the reviewed acceptance",
+    );
+  }
+  return head;
 }
 
 function admissionStatement(env, {
@@ -302,6 +357,7 @@ export async function recordSourceOriginalAcceptedResolution(
 ) {
   let history = await exactHistory(env, observation, proof);
   const hadPortableHistory = history !== null;
+  await requireAuthorityHead(env, observation, { portableHistory: hadPortableHistory });
   const resolutionHash = history?.resolutionHash || await newResolutionHash(observation, proof);
   const activatedAt = now;
   const recordedAt = history?.admittedAt ?? now;
@@ -350,6 +406,7 @@ export async function recordSourceOriginalAcceptedResolution(
   }
 
   history = await exactHistory(env, observation, proof);
+  await requireAuthorityHead(env, observation, { portableHistory: history !== null });
   const exactProofStored = await sourceOriginalResultFamilyProofStored(env, proof);
   const exactCurrent = history && exactProofStored
     ? await currentActivation(env, history.resolutionHash, proof.verification.verification_hash)
@@ -373,6 +430,7 @@ export async function recordSourceOriginalAcceptedResolution(
 /** Verify current authority without creating a verification or activation. */
 export async function verifySourceOriginalAcceptedResolution(env, { observation, proof }) {
   const history = await exactHistory(env, observation, proof);
+  await requireAuthorityHead(env, observation, { portableHistory: history !== null });
   const current = history && await sourceOriginalResultFamilyProofStored(env, proof)
     ? await currentActivation(env, history.resolutionHash, proof.verification.verification_hash)
     : null;

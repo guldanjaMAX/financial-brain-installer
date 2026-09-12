@@ -31,6 +31,7 @@ const target = (originalId, patch = {}) => ({
   page_count: 2,
   page_count_state: "authoritative",
   resolves_observation_hash: null,
+  predecessor_observation_hash: null,
   ...patch,
 });
 
@@ -361,6 +362,10 @@ test("stable private identities, append-only lineage, and direct verification fa
   response = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, {
     ...discoveryRequest,
     run_id: "no_op_gap_run",
+    targets: [{
+      ...discoveryRequest.targets[0],
+      predecessor_observation_hash: gapHash,
+    }],
   }, ADMIN);
   const repeatedGap = await body(response);
   assert.equal(response.status, 200, JSON.stringify(repeatedGap));
@@ -493,11 +498,12 @@ test("stable private identities, append-only lineage, and direct verification fa
        (contract_version,tenant_id,source,original_id,locator_kind,run_id,plan_id,
         source_snapshot_id,target_set_hash,target_count,observation_stage,outcome,reason_code,
         text_state,original_content_sha256,original_byte_count,page_count,page_count_state,
-        result_document_count,result_document_set_hash,resolves_observation_hash,observation_hash,recorded_at)
+        result_document_count,result_document_set_hash,resolves_observation_hash,observation_hash,recorded_at,
+        authority_chain_version,predecessor_observation_hash)
      SELECT contract_version,tenant_id,source,?,locator_kind,run_id,plan_id,
         source_snapshot_id,target_set_hash,target_count,observation_stage,outcome,reason_code,
         text_state,original_content_sha256,original_byte_count,page_count,page_count_state,
-        result_document_count,result_document_set_hash,resolves_observation_hash,?,recorded_at
+        result_document_count,result_document_set_hash,resolves_observation_hash,?,recorded_at,1,NULL
        FROM source_original_observations WHERE run_id='discovery_run'`,
     `hmac-sha256:${"b".repeat(64)}`,
     `sha256:${"c".repeat(64)}`,
@@ -714,5 +720,63 @@ test("record mode honors the upgrade pause while read-only seal remains availabl
   }, ADMIN);
   assert.equal(record.status, 503);
   assert.equal((await body(record)).code, "corpus_writes_paused");
+  assert.equal(fixture.first("SELECT COUNT(*) AS n FROM source_original_observations").n, 0);
+});
+
+test("the schema-46 Worker keeps schema-45 inventory readable but refuses authority writes", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  fixture.raw("INSERT INTO source_original_id_key_state VALUES ('primary',?)", "a".repeat(64));
+  fixture.raw(
+    "INSERT INTO sources (name,kind,status,created_at) VALUES ('localdocs','upload','ready','2026-09-11T00:00:00Z')",
+  );
+  fixture.raw("UPDATE install_state SET schema_version=45 WHERE id=1");
+
+  const sealResponse = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, {
+    contract_version: 1,
+    mode: "seal",
+    source: "localdocs",
+    plan_id: PLAN_ID,
+    source_snapshot_id: SNAPSHOT_ID,
+    targets: [{ locator_kind: "source_relative_path", locator: LOCATOR }],
+  }, ADMIN);
+  const sealed = await body(sealResponse);
+  assert.equal(sealResponse.status, 200, JSON.stringify(sealed));
+
+  const inventoryResponse = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, {
+    contract_version: 1,
+    mode: "inventory",
+    source: "localdocs",
+  }, ADMIN);
+  const inventory = await body(inventoryResponse);
+  assert.equal(inventoryResponse.status, 200, JSON.stringify(inventory));
+  assert.equal(inventory.total, 0);
+  assert.equal(
+    fixture.seen.sql.some((sql) =>
+      sql.includes("0 AS authority_chain_version,NULL AS predecessor_observation_hash")),
+    true,
+    "pre-migration inventory must not read columns that schemas 44/45 do not have",
+  );
+
+  const request = {
+    contract_version: 1,
+    mode: "record",
+    source: "localdocs",
+    run_id: "schema45_refusal",
+    plan_id: PLAN_ID,
+    source_snapshot_id: SNAPSHOT_ID,
+    target_set_hash: sealed.target_set_hash,
+    targets: [target(sealed.targets[0].original_id)],
+  };
+  for (const mode of ["record", "verify"]) {
+    const response = await fixture.post(
+      SOURCE_ORIGINAL_OBSERVATION_PATH,
+      { ...request, mode },
+      ADMIN,
+    );
+    const value = await body(response);
+    assert.equal(response.status, 409, JSON.stringify(value));
+    assert.equal(value.code, "source_original_authority_schema_upgrade_required");
+  }
   assert.equal(fixture.first("SELECT COUNT(*) AS n FROM source_original_observations").n, 0);
 });

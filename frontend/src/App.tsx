@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, api, type Me } from "./lib/api";
-import { Gate } from "./components/Gate";
+import { Gate, type EnrollmentKind } from "./components/Gate";
 import { Ask, ScopedAsk } from "./components/Ask";
 import { Settings } from "./components/Settings";
 import { Home } from "./components/Home";
@@ -15,10 +15,27 @@ import { FinancialMap } from "./components/FinancialMap";
 import { Attention } from "./components/ui";
 import { grantWorkspaceConfirmed } from "./lib/security";
 
-// The invite arrives as /app#enroll=<code>. It lives in the fragment on
-// purpose: a fragment is never sent to the server in a request line and never
-// lands in an access log or a referrer header.
-const inviteCode = (typeof location === "undefined" ? null : (location.hash.match(/enroll=([A-Za-z0-9_-]+)/) || [])[1]) || null;
+export type EnrollmentInvite = Readonly<{ code: string; kind: EnrollmentKind }>;
+
+/**
+ * Owner and exact-document invitations have separate, non-secret fragment
+ * names. The document code also carries an opaque `doc_` class prefix that is
+ * part of the one-time secret stored by the Brain. Moving a code to the other
+ * fragment therefore fails closed instead of changing the explanation shown
+ * before WebAuthn.
+ */
+export function enrollmentInviteFromHash(hash: string): EnrollmentInvite | null {
+  const params = new URLSearchParams(String(hash || "").replace(/^#/, ""));
+  const ownerCodes = params.getAll("enroll");
+  const documentCodes = params.getAll("document-enroll");
+  if (ownerCodes.length + documentCodes.length !== 1) return null;
+
+  const kind: EnrollmentKind = documentCodes.length === 1 ? "document" : "owner";
+  const code = (kind === "document" ? documentCodes[0] : ownerCodes[0]) || "";
+  if (!/^[A-Za-z0-9_-]{16,256}$/.test(code)) return null;
+  if ((kind === "document") !== code.startsWith("doc_")) return null;
+  return Object.freeze({ code, kind });
+}
 
 // The owner's name comes from the server-rendered shell, not from /api/app/me.
 // A signed-out visitor cannot call that endpoint, and the FIRST screen a client
@@ -68,6 +85,12 @@ export function visibleView(kind: "owner" | "grant", requested: View): View {
 }
 
 export function App() {
+  // The one-time code stays in the fragment: it is never sent in the page
+  // request, an access log, or a referrer header. Re-read it on render so the
+  // history replacement after enrollment also removes its UI classification.
+  const enrollmentInvite = typeof location === "undefined"
+    ? null
+    : enrollmentInviteFromHash(location.hash || "");
   const [me, setMe] = useState<Me | null>(null);
   const [view, setView] = useState<View>(initialOwnerView);
   const [ready, setReady] = useState(false);
@@ -95,7 +118,15 @@ export function App() {
   if (!ready) return null;
 
   if (!me?.signed_in) {
-    return <Gate owner={me?.owner || shellOwner} inviteCode={inviteCode} notice={authNotice} onIn={refresh} />;
+    return (
+      <Gate
+        owner={me?.owner || shellOwner}
+        inviteCode={enrollmentInvite?.code || null}
+        enrollmentKind={enrollmentInvite?.kind || null}
+        notice={authNotice}
+        onIn={refresh}
+      />
+    );
   }
 
   if (me.principal?.kind === "grant") {

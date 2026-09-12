@@ -6,16 +6,19 @@ Nothing runs on our infrastructure. Normal setup uses an owner-approved named
 Cloudflare browser profile in the owner's operating-system credential store; it
 does not create or copy an API token.
 
-**Status: unreleased 0.4.7/schema43 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.8/schema45 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
-binding for eligible single-record local file ingests, and restart-safe
-migrations are covered by local product and contract suites. Local proof is not
-field proof. At this freeze the
+binding for eligible single-record local file ingests, bounded one-original
+accepted-resolution evidence, and restart-safe migrations are covered by local
+product and contract suites. Local proof is not field proof. At this freeze the
 39-row release audit has 35 unresolved incidents, no renewed deferrals, and four
-rows closed on reviewed evidence. No public 0.4.7 asset or customer update
-exists. See "What is not built," `CONNECTOR-BACKLOG.md`, and the candidate
-evidence plan before promising anything to anyone.
+rows closed on reviewed evidence. No public 0.4.8 asset or customer update
+exists. The earlier held 0.4.7 candidate was never tagged or published, and its
+identity is retired rather than reused for these changed bytes. See "What is
+not built," `CONNECTOR-BACKLOG.md`, and the
+[0.4.8 candidate evidence plan](release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+before promising anything to anyone.
 
 Engineering changes follow [the code, test, documentation, and tracking
 standard](./ENGINEERING-STANDARDS.md). Architecturally significant choices are
@@ -299,7 +302,8 @@ file-id, path-prefix and filename-part exclusions before downloading content.
 An excluded document already present in the brain is removed rather than left
 stranded. Gmail has no folder path and does not use these rules.
 
-Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, and the
+Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
+`--dry-run --json` for a bounded aggregate assistant preview, and the
 exact-plan acknowledgement `--approve-removals <fingerprint>` when a Drive,
 Gmail, IMAP, or local-folder cleanup exceeds its routine safety limits.
 
@@ -348,9 +352,18 @@ restart it after a rotation.
 ```bash
 node brain.mjs connect google --scopes drive,gmail
 node brain.mjs ingest ./acme.manifest.json --from drive --dry-run
+node brain.mjs ingest ./acme.manifest.json --from drive --dry-run --limit 25 --json
 node brain.mjs ingest ./acme.manifest.json --from drive
 node brain.mjs ingest ./acme.manifest.json --from gmail
 ```
+
+The ordinary Drive dry run is for a person reviewing individual files and may
+name files or paths. An assistant must add `--json`: that path validates every
+reviewed root, reads at most 25 Drive entries by default (and refuses a limit
+over 100), emits only aggregate counts, performs no OCR, sends no Brain
+documents or receipts, and writes no checkpoint or cursor. Its
+`scope_complete: false` receipt is a sample, never deletion or completeness
+evidence.
 
 Every mutating local-folder, Drive, Gmail, and Calendar ingest takes a
 nonblocking per-source owner lease under `~/.brain/locks` before it reads
@@ -1039,9 +1052,21 @@ Optimize also reads `POST /api/admin/brain/financial-map/read`. Migration 0041
 starts with no map history and never promotes existing structured rows by
 backfill. The response calls those rows possible mentions, exposes current,
 stale, or not-established map state, and returns the complete unresolved-item
-list. This is the first audit evidence after the owner's opening goal. Before
-the read, the host explains that it sends no map snapshot and changes nothing,
-even if the assistant displays an approval prompt for the private read. Before
+list. Each owner-facing Optimize response has one question budget. An
+installed-Brain discovery choice consumes that response's budget. Within the
+audit, the budget is shared by material evidence clarification, whole-source
+zoning, and the optional opening goal, in that priority order. A pending
+evidence conflict or zoning choice skips the goal. An unsupported zoning
+recommendation is forbidden: the host states the whole-source choices and
+consequences, says the evidence does not choose among them, and uses the one
+question only when zoning is the highest-priority blocker. Routine Optimize
+compares actual records, receipts, and provenance; Golden Questions, Golden
+evaluation, canned refusal exercises, known-answer controls, and owner-prepared
+test content are separate optional testing tools rather than defaults. This map
+read is the first audit evidence after that opening decision, whether the goal
+was asked or skipped. Before the read, the host explains that it sends no map
+snapshot and changes nothing, even if the assistant displays an approval prompt
+for the private read. Before
 any financial-completeness conclusion, the host offers the optional guided,
 session-only interview and asks one short question at a time if the owner
 accepts. The interview submits nothing and changes nothing. If the owner
@@ -1056,6 +1081,15 @@ receipt. Activation is a separate owner passkey ceremony with no admin-key or
 MCP fallback. It appends a sealed linear snapshot and changes no existing
 financial or source record. See `docs/OWNER-WORKSPACE-API.md` for the closed
 snapshot contract.
+
+Optimize never promotes a planned, absent, or unrun MCP probe into an observed
+check. The host reports an absent, failed, refused, or not-run MCP check as that
+exact state and cannot call Optimize complete while any planned check is not
+run. The current synthetic behavioral floor for routine Optimize is
+`gpt-5.6-luna` at medium reasoning, with `gpt-5.6-terra` at low reasoning as the
+fallback or escalation for harder evidence conflicts. That is synthetic
+behavioral evidence only, not live Brain proof. Do not pin `gpt-5.6-sol` or
+infer completeness from the selected model.
 
 The default request mode returns stable source-id pages. The source set and
 all aggregates are read from one bounded D1 statement, hashed with an as-of
@@ -1161,8 +1195,10 @@ The schema-43 D1 trigger and Worker rejection still block every accepted
 outcome because the complete acceptance chain is not implemented. Missing rows, deletion, replacement bytes, refused or unavailable
 originals, and changed or incomplete document families remain unresolved. The
 route always states that its target set is bounded and that whole-source
-completeness is false. No CLI currently turns this evidence contract into OCR,
-reingest, repair, or deletion authority.
+completeness is false. The legacy no-target CLI never turns this evidence
+contract into OCR, reingest, repair, or deletion authority. The separate exact
+one-target lane described below can reingest only an owner-selected eligible
+original after a new state-bound preview and approval.
 
 Migration 0044 adds the non-authorizing result-family receipt on the same
 private endpoint. Use an explicit operation even though omission defaults to
@@ -1250,10 +1286,72 @@ generation fence. Rerun the full `accepted_resolution` proof before relying on
 an accepted result after any of those boundary changes.
 
 Successful receipts remain scoped to one original and state
-`whole_source_complete: false`. This evidence gate does not enable the legacy
-`provenance-repair --apply` command and does not run OCR, reingest, deletion,
-deployment, or customer execution. Ordinary `result_family` responses continue
-to report `accepted_outcome_authorized: false`.
+`whole_source_complete: false`. The schema-45 route itself does not run OCR,
+reingest, deletion, deployment, or customer execution. Ordinary
+`result_family` responses continue to report
+`accepted_outcome_authorized: false`.
+
+Migration 0046 makes every new observation an optimistic append against the
+latest same-original D1 sequence. Normal `record` targets supply
+`predecessor_observation_hash`, using `null` only for an observed empty
+history. The Worker stores chain version 1 and D1 atomically refuses a stale
+predecessor. Exact record replay succeeds only while that same observation is
+still the head. Accepted admission expects the resolved gap as head for a new
+resolution, or the accepted observation as head for exact replay and recovery
+reactivation. A newer exclusion, gap, or failure therefore demotes and blocks
+the old acceptance. Recovery accepts legacy version-zero rows as a prefix and
+checks every schema-46 immediate predecessor before its marker closes. A
+schema-45 version-zero accepted row that resolved an earlier non-immediate gap
+remains restorable historical evidence, but it is noncurrent under schema 46
+and reactivation returns `history_advanced`.
+
+`observation_hash` continues to digest the event receipt fields from the
+schema-42 contract. It is not a self-authenticating chain hash and does not
+include the predecessor edge. The authenticated whole recovery artifact and
+the independent recovery-close predecessor checks bind the portable version-one
+chain. A future receipt-contract version may digest that edge; schema 46 keeps
+existing observation hashes stable.
+
+`brain provenance-repair <manifest> --source <name> --target
+<source-relative-file>` is a separate exact one-original lane in this held
+candidate. The owner must choose the source and exact source-relative file. The
+CLI never guesses a target from a candidate, filename, search result, entity,
+or inferred gap. The source must be the manifest's enabled
+`corpora.local_folder`, registered in the Brain as an upload source, and the
+file must resolve to exactly one complete, reliably extracted
+`native_readable` record. Multi-record exports, incomplete extraction, scans,
+and every OCR-dependent target stop. OCR is explicitly off for both preview and
+apply.
+
+Preview acquires the source lease before reading the private manifest, source
+file, saved credential, or Brain state. Under that lease it reads the complete
+authenticated source and observation history, prepares the exact one-file
+ingest envelope, checks the current schema-46 Brain and vector state, and seals
+a state-bound plan. It releases the lease without changing Brain data,
+configuration, source receipts, cursors, or removals. Public output excludes the
+local root, locator, private retrieval query, content hashes, document IDs,
+sealed receipt internals, and private plan IDs.
+
+Apply requires the exact approval hash from that preview. It reacquires the
+lease, repeats every private check, and refuses if the file, manifest, source
+configuration, complete observation history, Brain release, schema, queue, or
+vector state has drifted. It then performs one exact target reingest with OCR
+off, reconciles only that target's structural family, drains the shared vector
+outbox, records and verifies the schema-44 `result_family`, records the
+schema-45 `accepted_resolution`, and verifies it again. Schema 44 must be
+recorded and verified before schema 45 is attempted. A missing response field,
+unexpected status, stale or mismatched receipt, lease loss, replay conflict, or
+failed final verification stops without claiming success.
+
+The preview explains the real effects before approval. Exact-family
+reconciliation may remove stale siblings belonging only to the selected
+original. The shared drain may process unrelated work already queued in this
+Brain. Reingest and drain create embeddings, and the two schema-44 plus two
+schema-45 proof operations run eight private retrieval probes in total. Those
+probes can create ordinary aggregate usage records. The lane never advances a
+source-wide receipt or cursor, never performs source-wide removal, and never
+claims that the source is complete. It does not change zones, grants, passkeys,
+devices, providers, Cloudflare resources, or deployment state.
 
 `brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
 local handoff lane. Its only accepted scopes are `technician-skill`,

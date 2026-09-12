@@ -315,6 +315,24 @@ try {
   }
 
   {
+    const { page } = await fresh();
+    const create = page.getByRole("button", { name: "Create exact document access", exact: true });
+    check("disabled guest access names the missing recipient",
+      await create.isDisabled()
+      && (await create.getAttribute("aria-describedby")) === "document-access-create-help"
+      && (await page.locator("#document-access-create-help").innerText()).includes("enter who this guest access is for"));
+    await page.getByLabel("Who is this for?").fill("Current recipient");
+    check("disabled guest access then names the missing exact document",
+      await create.isDisabled()
+      && (await page.locator("#document-access-create-help").innerText()).includes("find and select at least one exact document"));
+    await searchAndSelect(page);
+    check("guest access enables only after recipient and exact document are present",
+      await create.isEnabled()
+      && await page.locator("#document-access-create-help").count() === 0);
+    await page.close();
+  }
+
+  {
     const { page, state } = await fresh({ holdSearch: true });
     await page.getByLabel("Find evidence to share").fill("alpha evidence");
     await page.getByRole("button", { name: "Find", exact: true }).click();

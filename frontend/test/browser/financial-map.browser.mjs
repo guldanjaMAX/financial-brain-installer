@@ -95,6 +95,7 @@ async function fresh({
   cancel = false,
   loseFirstActivationResponse = false,
   activationConflict = null,
+  rehearsal = false,
 } = {}) {
   const page = await harness.newPage({ viewport: { width: 1440, height: 1000 } });
   await page.addInitScript(({ cancelPrompt }) => {
@@ -179,7 +180,9 @@ async function fresh({
     }
     throw new Error(`Unexpected Financial Map endpoint ${endpoint}`);
   });
-  await page.goto(new URL("/test/browser/fixtures/financial-map.html", harness.origin).href);
+  const fixtureUrl = new URL("/test/browser/fixtures/financial-map.html", harness.origin);
+  if (rehearsal) fixtureUrl.searchParams.set("state", "financial-map");
+  await page.goto(fixtureUrl.href);
   await page.getByRole("heading", { name: "Financial Map", exact: true }).waitFor();
   await page.getByText("Form 1120-S", { exact: true }).waitFor();
   return { page, state };
@@ -292,6 +295,27 @@ try {
       text.includes("No account, book, tax, payroll, source, or ledger record was changed"));
     check("successful confirmation persists no selector, receipt, or clipboard value",
       await page.evaluate(() => localStorage.length === 0 && sessionStorage.length === 0 && window.__clipboardCalls === 0));
+    await page.close();
+  }
+
+  {
+    const { page, state } = await fresh({ rehearsal: true });
+    await page.getByRole("button", { name: "Something is wrong", exact: true }).click();
+    await page.getByRole("heading", { name: "Correction path found", exact: true }).waitFor();
+    const text = await page.locator("body").innerText();
+    check("the local rehearsal correction path names its unavailable assistant and safe next action",
+      text.includes("not connected to your Claude Code or Codex Owner assistant")
+      && text.includes("Note what felt wrong for your technician instead")
+      && await page.getByRole("button", { name: "Copy request", exact: true }).count() === 0
+      && await page.getByRole("button", { name: "Read latest map", exact: true }).count() === 0);
+    check("the local rehearsal correction path performs no clipboard, passkey, or Brain action",
+      await page.evaluate(() => window.__clipboardCalls === 0 && window.__passkeyPromptCalls === 0)
+      && state.reviews === 1 && state.options === 0 && state.activations.length === 0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await renderSettled(page);
+    check("the local rehearsal correction path has no mobile horizontal overflow",
+      await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({ path: path.join(output, "financial-map-rehearsal-correction-mobile.png"), fullPage: true });
     await page.close();
   }
 

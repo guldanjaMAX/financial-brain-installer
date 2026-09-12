@@ -175,6 +175,13 @@ try {
     argv: [malicious],
     env: { SECRET: malicious },
     path: malicious,
+    root: malicious,
+    locator: malicious,
+    retrievalQuery: malicious,
+    originalContentSha256: malicious,
+    documentIds: [maliciousUuid],
+    sealedPlanId: maliciousUuid,
+    privatePlanId: maliciousUuid,
     url: malicious,
     remoteId: maliciousUuid,
     content: malicious,
@@ -198,6 +205,12 @@ try {
     error_code: "EXTRACTION_FAILED",
     fingerprint: productRelativeFingerprint("ingest/run.mjs#extract-document"),
   });
+  for (const privateField of [
+    "root", "locator", "retrievalQuery", "originalContentSha256",
+    "documentIds", "sealedPlanId", "privatePlanId",
+  ]) {
+    assert.equal(Object.hasOwn(previewed, privateField), false, `${privateField} crossed the journal boundary`);
+  }
 
   const recorded = recordSupportEvent(eventInput, options(root));
   assert.deepEqual(recorded, previewed);

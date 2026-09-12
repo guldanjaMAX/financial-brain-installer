@@ -264,10 +264,12 @@ is assigned and tested.
    Use Google Drive, Dropbox, a locally synced Box folder, or another reviewed
    export according to what the client uses. Keep connector readiness separate
    from the completeness of the authorized file history.
-5. **Plaid or another financial source:** let the owner complete Link and choose
-   the accounts. Accept the source only after current data and its available
-   history have separate live receipts. Keep account-to-entity assignment and
-   disconnect verification in the private owner record.
+5. **Bank feeds remain outside ordinary onboarding:** do not open Plaid Link or
+   ask for a bank password, verification code, or setup key. Preserve a complete
+   existing bank setup only for an already approved pilot. If any required piece
+   is missing, stop and use a separately reviewed, version-scoped field plan.
+   A future approved pilot must keep current-data proof, history proof,
+   account-to-entity assignment, and disconnect verification separate.
 
 The [client onboarding scorecard](../10-client-onboarding-scorecard.md) is the
 shared install record. It uses aggregate counts and receipt IDs, never message

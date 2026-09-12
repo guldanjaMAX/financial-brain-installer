@@ -16,16 +16,16 @@ function Resolve-Directory([string]$Path) {
     $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
     return [System.IO.Path]::GetFullPath($resolved).TrimEnd([char[]]@('\', '/'))
   } catch {
-    Stop-Rehearsal "the reviewed repository folder could not be verified"
+    Stop-Rehearsal "the reviewed repository folder could not be verified. Close this window, open a new normal PowerShell window in a fresh reviewed checkout, and try the one supplied command again"
   }
 }
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-  Stop-Rehearsal "this launcher is only for a Windows PowerShell rehearsal"
+  Stop-Rehearsal "this launcher is only for a Windows PowerShell rehearsal. Run the supplied Windows rehearsal on the intended Windows computer"
 }
 
 if ($ExpectedSha -cnotmatch '^[0-9a-f]{40}$') {
-  Stop-Rehearsal "the technician's exact 40-character lowercase commit SHA is required"
+  Stop-Rehearsal "the technician's exact 40-character lowercase commit SHA is required. Ask your technician to resend the exact SHA, then replace only the placeholder in the supplied command"
 }
 
 try {
@@ -33,7 +33,7 @@ try {
   $principal = New-Object Security.Principal.WindowsPrincipal($identity)
   $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 } catch {
-  Stop-Rehearsal "Windows could not verify that this is a normal, non-administrator PowerShell window"
+  Stop-Rehearsal "Windows could not verify that this is a normal, non-administrator PowerShell window. Close it, open PowerShell normally from the Start menu, and try the one supplied command again"
 }
 if ($isAdministrator) {
   Stop-Rehearsal "this PowerShell window is running as Administrator. Close it and open PowerShell normally from the Start menu"
@@ -47,23 +47,23 @@ if (-not [System.String]::Equals($currentDirectory, $repositoryRoot, [System.Str
 
 $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
 if (-not $git) {
-  Stop-Rehearsal "Git is not available in this PowerShell window"
+  Stop-Rehearsal "Git is not available in this PowerShell window. Install Git for Windows, then open a new normal PowerShell window and start again in a new empty folder"
 }
 
 $gitRootOutput = @(& $git.Source rev-parse --show-toplevel 2>$null)
 $gitRootExit = $LASTEXITCODE
 if ($gitRootExit -ne 0 -or $gitRootOutput.Count -ne 1) {
-  Stop-Rehearsal "the current folder is not one reviewed Git checkout"
+  Stop-Rehearsal "the current folder is not one reviewed Git checkout. Open a new normal PowerShell window in the top-level folder of the fresh reviewed checkout and run the one supplied command there"
 }
 $gitRoot = Resolve-Directory ([string]$gitRootOutput[0])
 if (-not [System.String]::Equals($gitRoot, $repositoryRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-  Stop-Rehearsal "the launcher file and current Git checkout do not have the same repository root"
+  Stop-Rehearsal "the launcher file and current Git checkout do not have the same repository root. Use the launcher already inside the fresh reviewed checkout and run it from that checkout's top-level folder"
 }
 
 $actualShaOutput = @(& $git.Source rev-parse HEAD 2>$null)
 $actualShaExit = $LASTEXITCODE
 if ($actualShaExit -ne 0 -or $actualShaOutput.Count -ne 1 -or ([string]$actualShaOutput[0]).Trim() -cne $ExpectedSha) {
-  Stop-Rehearsal "this checkout is not the exact commit supplied by the technician"
+  Stop-Rehearsal "this checkout is not the exact commit supplied by the technician. Stop here, ask the technician to confirm the repository link and exact SHA, and use a new clean checkout of that commit"
 }
 
 $dirty = @(& $git.Source status --porcelain=v1 --untracked-files=all 2>$null)
@@ -79,12 +79,12 @@ if (-not $node) {
 $nodeVersionOutput = @(& $node.Source -p "process.versions.node" 2>$null)
 $nodeVersionExit = $LASTEXITCODE
 if ($nodeVersionExit -ne 0 -or $nodeVersionOutput.Count -ne 1) {
-  Stop-Rehearsal "the Node.js version could not be verified"
+  Stop-Rehearsal "the Node.js version could not be verified. Install Node.js 22 or newer, then open a new normal PowerShell window and try again"
 }
 try {
   $nodeVersion = [System.Version]([string]$nodeVersionOutput[0])
 } catch {
-  Stop-Rehearsal "the Node.js version could not be verified"
+  Stop-Rehearsal "the Node.js version could not be verified. Install Node.js 22 or newer, then open a new normal PowerShell window and try again"
 }
 if ($nodeVersion.Major -lt 22) {
   Stop-Rehearsal "Node.js $nodeVersion is too old. This rehearsal needs Node.js 22 or newer"
@@ -92,7 +92,7 @@ if ($nodeVersion.Major -lt 22) {
 
 $rehearsal = Join-Path $repositoryRoot "scripts\onboarding-sandbox.mjs"
 if (-not (Test-Path -LiteralPath $rehearsal -PathType Leaf)) {
-  Stop-Rehearsal "the reviewed local rehearsal program is missing from this checkout"
+  Stop-Rehearsal "the reviewed local rehearsal program is missing from this checkout. Stop here and ask the technician for a fresh reviewed repository link and exact SHA"
 }
 
 Write-Host ""
@@ -101,6 +101,7 @@ Write-Host "  Exact reviewed commit: confirmed"
 Write-Host "  Normal non-administrator PowerShell: confirmed"
 Write-Host "  Local-only synthetic data: confirmed"
 Write-Host ""
+Write-Host "Do not run npm ci or any npm command yourself. This launcher handles its own local UI preparation."
 Write-Host "The first run may download one additional small set of public UI packages."
 Write-Host "That preparation uses no account credential and can be quiet for several minutes."
 Write-Host "Please leave this window open until the local address appears."

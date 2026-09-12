@@ -10,7 +10,7 @@ import {
   COVERAGE_DIMENSIONS, accessZonePresentation, coverageCaveat, coverageFacts, coveragePresentation,
 } from "../lib/source-coverage";
 import {
-  Attention, Chip, Critical, NextStep, Note, Row, Section, TruthNote,
+  Attention, Badge, Chip, Critical, NextStep, Note, Row, Section, TruthNote,
 } from "./ui";
 import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
 import { OwnerActivity } from "./OwnerActivity";
@@ -166,6 +166,7 @@ type AttentionItem = {
   move?: "yours" | "waiting";
   waitingOn?: string | null;
   consequence?: string | null;
+  issueLabel?: string;
   destination: HomeDestination;
 };
 
@@ -214,6 +215,7 @@ export function AttentionList({ snapshot, entities, scopeName, onNavigate }: {
         detail: `${entityLabel(entities, document.entity_slug)} · This copy could not be read${document.unreadable_reason ? `: ${document.unreadable_reason}` : ""}.`,
         state: "PROBLEM",
         move: "yours",
+        issueLabel: "Unreadable copy",
         destination: "review",
       });
     });
@@ -257,6 +259,7 @@ export function AttentionList({ snapshot, entities, scopeName, onNavigate }: {
             ) : null}
           </span>
           <span className="flex items-center gap-2 flex-wrap shrink-0">
+            {item.issueLabel && <Badge tone="warn">{item.issueLabel}</Badge>}
             <Chip state={item.state} />
             {onNavigate && (
               <button
@@ -568,9 +571,24 @@ function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatu
   );
 }
 
-function SourceChip({ state }: { state: string }) {
+export function sourceIssueLabel(state: string): string | null {
+  if (state === "stale") return "Source out of date";
+  if (state === "broken") return "Source not working";
+  if (state === "never_synced") return "Source never checked";
+  if (state === "unregistered") return "Source not registered";
+  return null;
+}
+
+export function SourceChip({ state }: { state: string }) {
   const outcome = sourceOutcome(state);
-  return outcome ? <Chip state={outcome} /> : null;
+  if (!outcome) return null;
+  const issue = sourceIssueLabel(state);
+  return (
+    <span className="flex items-center gap-2 flex-wrap justify-end">
+      {issue && <Badge tone="warn">{issue}</Badge>}
+      <Chip state={outcome} />
+    </span>
+  );
 }
 
 const dayPhrase = (days: number) =>

@@ -12,6 +12,7 @@ const FILES = readdirSync(MIGRATIONS)
   .filter((name) => /^\d{4}_.+\.sql$/.test(name))
   .sort();
 const MIGRATION_45 = FILES.find((name) => name.startsWith("0045_"));
+const MIGRATION_46 = FILES.find((name) => name.startsWith("0046_"));
 
 function apply(db, file) {
   const source = readFileSync(join(MIGRATIONS, file), "utf8");
@@ -93,6 +94,21 @@ const INSERT_OBSERVATION = `
      @reason_code,@text_state,@original_content_sha256,@original_byte_count,@page_count,
      @page_count_state,@result_document_count,@result_document_set_hash,
      @resolves_observation_hash,@observation_hash,@recorded_at)`;
+
+const INSERT_CHAIN_OBSERVATION = `
+  INSERT INTO source_original_observations
+    (contract_version,tenant_id,source,original_id,locator_kind,run_id,plan_id,
+     source_snapshot_id,target_set_hash,target_count,observation_stage,outcome,
+     reason_code,text_state,original_content_sha256,original_byte_count,page_count,
+     page_count_state,result_document_count,result_document_set_hash,
+     resolves_observation_hash,observation_hash,recorded_at,
+     authority_chain_version,predecessor_observation_hash)
+  VALUES
+    (@contract_version,@tenant_id,@source,@original_id,@locator_kind,@run_id,@plan_id,
+     @source_snapshot_id,@target_set_hash,@target_count,@observation_stage,@outcome,
+     @reason_code,@text_state,@original_content_sha256,@original_byte_count,@page_count,
+     @page_count_state,@result_document_count,@result_document_set_hash,
+     @resolves_observation_hash,@observation_hash,@recorded_at,1,@predecessor_observation_hash)`;
 
 const INSERT_ADMISSION = `
   INSERT INTO source_original_accepted_resolution_admissions
@@ -394,6 +410,12 @@ function readyFixture({ verification = true, nonFamily = false } = {}) {
   return db;
 }
 
+function upgradeTo46(db) {
+  assert.ok(MIGRATION_46, "the schema-46 migration exists");
+  apply(db, MIGRATION_46);
+  db.prepare("UPDATE install_state SET schema_version=46 WHERE id=1").run();
+}
+
 function counts(db) {
   return {
     admissions: db.prepare("SELECT count(*) AS n FROM source_original_accepted_resolution_admissions").get().n,
@@ -402,6 +424,18 @@ function counts(db) {
     accepted: db.prepare("SELECT count(*) AS n FROM source_original_observations WHERE outcome='accepted'").get().n,
     current: db.prepare("SELECT count(*) AS n FROM source_original_current_accepted_resolutions").get().n,
   };
+}
+
+function copyRows(source, target, table) {
+  const order = table === "source_original_observations" ? " ORDER BY sequence" : "";
+  const rows = source.prepare(`SELECT * FROM ${table}${order}`).all();
+  for (const row of rows) {
+    const columns = Object.keys(row);
+    target.prepare(
+      `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
+    ).run(...columns.map((column) => row[column]));
+  }
+  return rows.length;
 }
 
 test("0045 keeps accepted writes blocked across every restartable statement boundary", async () => {
@@ -1396,4 +1430,247 @@ test("0045 recovery close refuses incomplete or deployment-local accepted state"
       db.close();
     }
   });
+});
+
+test("0046 serializes two empty-history writers at one append-only authority head", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    applyThrough(db, 46);
+    installState(db);
+    db.prepare("UPDATE install_state SET schema_version=46 WHERE id=1").run();
+
+    const winner = priorObservation({
+      run_id: "machine_a_discovery",
+      plan_id: hex("a"),
+      target_set_hash: digest("a"),
+      observation_hash: digest("a"),
+      recorded_at: 100,
+      predecessor_observation_hash: null,
+    });
+    const loser = priorObservation({
+      run_id: "machine_b_discovery",
+      plan_id: hex("b"),
+      target_set_hash: digest("b"),
+      observation_hash: digest("b"),
+      recorded_at: 1,
+      predecessor_observation_hash: null,
+    });
+    db.prepare(INSERT_CHAIN_OBSERVATION).run(winner);
+    assert.throws(
+      () => db.prepare(INSERT_CHAIN_OBSERVATION).run(loser),
+      /history advanced/,
+      "the later D1 transaction loses even when its wall clock is earlier",
+    );
+    assert.deepEqual(db.prepare(
+      `SELECT run_id,authority_chain_version,predecessor_observation_hash
+         FROM source_original_observations`,
+    ).all().map((row) => ({ ...row })), [{
+      run_id: "machine_a_discovery",
+      authority_chain_version: 1,
+      predecessor_observation_hash: null,
+    }]);
+  } finally {
+    db.close();
+  }
+});
+
+test("0046 makes a newer adjudicated exclusion supersede accepted authority and block reactivation", () => {
+  const db = readyFixture();
+  try {
+    upgradeTo46(db);
+    db.prepare(INSERT_ADMISSION).run(admission());
+    assert.equal(counts(db).current, 1);
+    assert.deepEqual({ ...db.prepare(
+      `SELECT authority_chain_version,predecessor_observation_hash
+         FROM source_original_observations WHERE outcome='accepted'`,
+    ).get() }, {
+      authority_chain_version: 1,
+      predecessor_observation_hash: FIXTURE.prior_observation_hash,
+    });
+
+    db.prepare(INSERT_CHAIN_OBSERVATION).run(priorObservation({
+      run_id: "owner_exclusion",
+      plan_id: hex("7"),
+      target_set_hash: digest("7"),
+      observation_stage: "repair",
+      outcome: "adjudicated_exclusion",
+      reason_code: "source_policy_excluded",
+      text_state: "unsupported",
+      result_document_count: 1,
+      result_document_set_hash: FIXTURE.accepted_result_set_hash,
+      observation_hash: digest("7"),
+      recorded_at: 5,
+      predecessor_observation_hash: FIXTURE.accepted_observation_hash,
+    }));
+    assert.equal(counts(db).current, 0,
+      "sequence, not the deliberately older recorded_at value, supersedes acceptance");
+    assert.throws(
+      () => db.prepare(INSERT_ADMISSION).run(admission({
+        activation_hash: digest("8"),
+        activated_at: 21,
+      })),
+      /history advanced/,
+      "portable accepted history cannot reactivate past a newer exclusion",
+    );
+    assert.deepEqual(counts(db), {
+      admissions: 0,
+      resolutions: 1,
+      activations: 1,
+      accepted: 1,
+      current: 0,
+    });
+    assert.equal(db.prepare(
+      "SELECT count(*) AS n FROM source_original_observations",
+    ).get().n, 3);
+  } finally {
+    db.close();
+  }
+});
+
+test("0046 restores non-immediate schema-45 acceptance as noncurrent history but rejects that edge for v1", async (t) => {
+  const interveningHash = digest("6");
+  const intervening = priorObservation({
+    run_id: "intervening_schema45_observation",
+    plan_id: hex("7"),
+    target_set_hash: digest("7"),
+    observation_hash: interveningHash,
+    recorded_at: 15,
+  });
+
+  await t.test("populated 45 to 46 export and import preserves legacy history without reviving it", () => {
+    const source = readyFixture();
+    const target = new DatabaseSync(":memory:");
+    try {
+      source.prepare(INSERT_OBSERVATION).run(intervening);
+      source.prepare(INSERT_ADMISSION).run(admission());
+      assert.equal(counts(source).current, 1,
+        "schema 45 legally accepted an earlier non-immediate gap");
+      upgradeTo46(source);
+      assert.equal(counts(source).current, 0,
+        "the upgraded current view must not authorize legacy non-immediate history");
+
+      applyThrough(target, 46);
+      installState(target);
+      target.prepare("UPDATE install_state SET schema_version=46 WHERE id=1").run();
+      target.prepare(
+        `INSERT INTO source_original_result_family_recovery_state (id,mode)
+         VALUES (1,'verified_recovery_import')`,
+      ).run();
+      for (const table of [
+        "documents",
+        "chunks",
+        "source_original_result_bindings",
+        "source_original_observations",
+        "source_original_result_family_members",
+        "source_original_result_family_receipts",
+        "source_original_accepted_resolutions",
+      ]) copyRows(source, target, table);
+      target.prepare(
+        `DELETE FROM source_original_result_family_recovery_state
+          WHERE id=1 AND mode='verified_recovery_import'`,
+      ).run();
+
+      assert.deepEqual(counts(target), {
+        admissions: 0,
+        resolutions: 1,
+        activations: 0,
+        accepted: 1,
+        current: 0,
+      });
+      assert.deepEqual(target.prepare(
+        `SELECT outcome,authority_chain_version,predecessor_observation_hash
+           FROM source_original_observations ORDER BY sequence`,
+      ).all().map((row) => ({ ...row })), [
+        { outcome: "gap", authority_chain_version: 0, predecessor_observation_hash: null },
+        { outcome: "gap", authority_chain_version: 0, predecessor_observation_hash: null },
+        { outcome: "accepted", authority_chain_version: 0, predecessor_observation_hash: null },
+      ]);
+
+      const targetVerificationHash = digest("9");
+      insertVerification(target, {
+        verification_hash: targetVerificationHash,
+        vector_readiness_hash: digest("a"),
+        retrieval_probe_id: probeId("b"),
+        retrieval_result_hash: digest("c"),
+        citation_set_hash: digest("d"),
+        verified_at: 30,
+      });
+      assert.throws(
+        () => target.prepare(INSERT_ADMISSION).run(admission({
+          verification_hash: targetVerificationHash,
+          activation_hash: digest("e"),
+          activated_at: 31,
+        })),
+        /history advanced/,
+        "legacy non-immediate acceptance must never regain local authority",
+      );
+      assert.deepEqual(counts(target), {
+        admissions: 0,
+        resolutions: 1,
+        activations: 0,
+        accepted: 1,
+        current: 0,
+      });
+    } finally {
+      source.close();
+      target.close();
+    }
+  });
+
+  await t.test("a v1 accepted row must still resolve its immediate predecessor", () => {
+    const target = new DatabaseSync(":memory:");
+    try {
+      applyThrough(target, 46);
+      installState(target);
+      target.prepare("UPDATE install_state SET schema_version=46 WHERE id=1").run();
+      target.prepare(
+        `INSERT INTO source_original_result_family_recovery_state (id,mode)
+         VALUES (1,'verified_recovery_import')`,
+      ).run();
+      insertCurrentFamily(target);
+      target.prepare(INSERT_OBSERVATION).run(priorObservation());
+      target.prepare(INSERT_OBSERVATION).run(intervening);
+      target.prepare(INSERT_CHAIN_OBSERVATION).run(acceptedObservation({
+        predecessor_observation_hash: interveningHash,
+      }));
+      insertPortableFamily(target);
+      target.prepare(INSERT_RESOLUTION).run(resolutionParams());
+
+      assert.throws(
+        () => target.prepare(
+          "DELETE FROM source_original_result_family_recovery_state WHERE id=1",
+        ).run(),
+        /does not resolve the immediate authority predecessor/,
+      );
+      assert.equal(target.prepare(
+        "SELECT count(*) AS n FROM source_original_result_family_recovery_state",
+      ).get().n, 1, "malformed v1 history leaves the recovery fence active");
+    } finally {
+      target.close();
+    }
+  });
+});
+
+test("0046 resumes from every statement boundary without reopening accepted writes", async () => {
+  assert.ok(MIGRATION_46, "the schema-46 migration exists");
+  const statements = splitStatements(readFileSync(join(MIGRATIONS, MIGRATION_46), "utf8"));
+  for (let cut = 0; cut <= statements.length; cut++) {
+    const db = readyFixture();
+    try {
+      for (const statement of statements.slice(0, cut)) db.exec(statement);
+      await runRestartSafeMigrationStatements(statements, queryFor(db));
+      await runRestartSafeMigrationStatements(statements, queryFor(db));
+      db.prepare("UPDATE install_state SET schema_version=46 WHERE id=1").run();
+      const columns = new Set(db.prepare(
+        "PRAGMA table_info(source_original_observations)",
+      ).all().map((row) => row.name));
+      assert.equal(columns.has("authority_chain_version"), true);
+      assert.equal(columns.has("predecessor_observation_hash"), true);
+      db.prepare(INSERT_ADMISSION).run(admission());
+      assert.equal(counts(db).current, 1,
+        `accepted authority works after restart boundary ${cut}/${statements.length}`);
+    } finally {
+      db.close();
+    }
+  }
 });

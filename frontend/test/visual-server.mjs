@@ -1,12 +1,18 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { extname, join } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ownerThinkResponse } from "./rehearsal-responses.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(HERE, "..", "dist");
 const PORT = Number(process.env.BRAIN_VISUAL_PORT || 4177);
+const rehearsalState = {
+  disconnectedConnections: new Set(),
+  createdEntities: new Map(),
+  entityRequests: new Map(),
+  deviceNicknames: new Map(),
+};
 
 const entities = [
   { entity_slug: "household", legal_name: "Rivera Household", label: "Household", kind: "household", status: "active", relationship: "owned", counterparty: false, fixed: true },
@@ -236,14 +242,14 @@ function emptyCash() {
 }
 
 function snapshotFor(sections, entitySlug, scenario) {
-  const empty = scenario === "empty";
+  const empty = scenario === "empty" || scenario === "zero-entities";
   const unavailable = scenario === "degraded"
     ? new Set(["obligations", "cash", "reconciliations"])
     : scenario === "partial"
       ? new Set(["obligations"])
       : new Set();
   const values = {
-    entities: scenario === "zero-entities" ? [] : entities,
+    entities: scenario === "zero-entities" ? [...rehearsalState.createdEntities.values()] : entities,
     accounts: empty ? [] : filterRows(accounts, entitySlug),
     documents: empty ? [] : filterRows(documents, entitySlug),
     deadlines: empty ? [] : filterRows(deadlines, entitySlug),
@@ -279,7 +285,7 @@ function snapshotFor(sections, entitySlug, scenario) {
   return result;
 }
 
-const server = createServer(async (request, response) => {
+export const visualFixtureServer = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://127.0.0.1:${PORT}`);
   const scenario = scenarioFor(request);
   if (scenario === "loading" && url.pathname.startsWith("/api/")) {
@@ -301,9 +307,110 @@ const server = createServer(async (request, response) => {
     return sendJson(response, {
       signed_in: true, owner: "Owner", brain: "Financial Brain",
       principal: { kind: "owner", grant_id: null },
-      devices: [{ credential_id: "device", nickname: "Primary device", created_at: Date.now() - 86400000 * 20, last_used_at: Date.now() - 60000 }],
-      connections: [{ client_id: "app", name: "Claude", can_write: false, connected_at: Date.now() - 86400000 * 4, last_used_at: Date.now() - 3600000 }],
+      devices: [{ credential_id: "device", nickname: rehearsalState.deviceNicknames.get(scenario) || "Primary device", created_at: Date.now() - 86400000 * 20, last_used_at: Date.now() - 60000 }],
+      connections: rehearsalState.disconnectedConnections.has(scenario)
+        ? []
+        : [{ client_id: "app", name: "Claude remote connector (Librarian)", can_write: false, connected_at: Date.now() - 86400000 * 4, last_used_at: Date.now() - 3600000 }],
     });
+  }
+  if (url.pathname === "/api/owner/entities/create") {
+    const body = await jsonBody(request);
+    const allowedKinds = new Set(["person", "household", "business", "trust", "property", "investment"]);
+    if (scenario !== "zero-entities") {
+      return sendJson(response, {
+        error: "rehearsal_scenario_mismatch",
+        detail: "Use the No financial entities yet rehearsal to try this synthetic action. Nothing changed.",
+      }, 409);
+    }
+    if (typeof body.request_id !== "string" || !body.request_id
+      || typeof body.entity_slug !== "string" || !body.entity_slug
+      || typeof body.legal_name !== "string" || !body.legal_name.trim()
+      || !allowedKinds.has(body.kind)) {
+      return sendJson(response, {
+        error: "invalid_synthetic_entity",
+        detail: "Enter an exact name, choose one type, review it, and try the synthetic action again. Nothing changed.",
+      }, 422);
+    }
+    const signature = JSON.stringify({
+      entity_slug: body.entity_slug,
+      legal_name: body.legal_name,
+      kind: body.kind,
+    });
+    const priorRequest = rehearsalState.entityRequests.get(body.request_id);
+    if (priorRequest && priorRequest !== signature) {
+      return sendJson(response, {
+        error: "idempotency_conflict",
+        detail: "This synthetic request was already used for a different reviewed entity. Nothing changed.",
+      }, 409);
+    }
+    const existing = rehearsalState.createdEntities.get(body.entity_slug);
+    if (existing && (existing.legal_name !== body.legal_name || existing.kind !== body.kind)) {
+      return sendJson(response, {
+        error: "entity_already_exists",
+        code: "entity_already_exists",
+        detail: "That synthetic entity identifier is already in use. Nothing changed.",
+      }, 409);
+    }
+    const replayed = Boolean(priorRequest);
+    const changed = !existing;
+    const entity = existing || {
+      entity_slug: body.entity_slug,
+      legal_name: body.legal_name,
+      label: body.legal_name,
+      kind: body.kind,
+      status: "active",
+      relationship: "owned",
+      counterparty: false,
+      fixed: false,
+    };
+    rehearsalState.entityRequests.set(body.request_id, signature);
+    rehearsalState.createdEntities.set(body.entity_slug, entity);
+    return sendJson(response, {
+      request_id: body.request_id,
+      entity_scope: { entity_slug: body.entity_slug },
+      entity: {
+        entity_slug: entity.entity_slug,
+        legal_name: entity.legal_name,
+        kind: entity.kind,
+      },
+      changed,
+      replayed,
+    }, replayed ? 200 : 201);
+  }
+  if (url.pathname === "/api/app/devices/rename") {
+    const body = await jsonBody(request);
+    if (body.credential_id !== "device" || typeof body.nickname !== "string") {
+      return sendJson(response, {
+        error: "synthetic_device_not_found",
+        detail: "Choose the visible synthetic device and try again. No real device can be changed here.",
+      }, 404);
+    }
+    const nickname = body.nickname.trim() || "unnamed device";
+    rehearsalState.deviceNicknames.set(scenario, nickname);
+    return sendJson(response, {
+      renamed: true,
+      credential_id: "device",
+      nickname,
+    });
+  }
+  if (url.pathname === "/api/app/devices/revoke") {
+    await jsonBody(request);
+    return sendJson(response, {
+      removed: false,
+      reason: "This rehearsal keeps its only synthetic owner passkey so you can continue. In a real Brain, add and verify another owner passkey before removing the last one.",
+    });
+  }
+  if (url.pathname === "/api/app/connections/revoke") {
+    const body = await jsonBody(request);
+    if (body.client_id !== "app") {
+      return sendJson(response, {
+        error: "synthetic_connection_not_found",
+        detail: "Choose the visible synthetic app and try again. No real app can be disconnected here.",
+      }, 404);
+    }
+    const changed = !rehearsalState.disconnectedConnections.has(scenario);
+    rehearsalState.disconnectedConnections.add(scenario);
+    return sendJson(response, { revoked: true, client_id: "app", changed });
   }
   if (url.pathname === "/api/owner/financial-map/review") {
     if (scenario === "degraded") {
@@ -361,7 +468,7 @@ const server = createServer(async (request, response) => {
     return sendJson(response, {
       status: "active", grant_id: "dg_created", subject_label: body.subject_label, entity_slug: body.entity_slug,
       document_ids: body.document_ids, expires_at: null, created_at: Date.now(), invite_state: "active",
-      enrollment_url: "http://127.0.0.1/app#enroll=fixture-private", enrollment_expires_at: Date.now() + 900000,
+      enrollment_url: "http://127.0.0.1/app#document-enroll=doc_fixture-private", enrollment_expires_at: Date.now() + 900000,
       scope_rule: "exact_document_ids_only", replayed: scenario === "idempotent",
     });
   }
@@ -369,7 +476,7 @@ const server = createServer(async (request, response) => {
     const body = await jsonBody(request);
     if (scenario === "conflict") return sendJson(response, { error: "conflict", code: "idempotency_conflict" }, 409);
     if (scenario === "forbidden") return sendJson(response, { error: "forbidden", code: "owner_required" }, 403);
-    return sendJson(response, { status: "active", grant_id: body.grant_id, invite_state: "active", enrollment_url: "http://127.0.0.1/app#enroll=fixture-reissued", enrollment_expires_at: Date.now() + 900000, replayed: scenario === "idempotent" });
+    return sendJson(response, { status: "active", grant_id: body.grant_id, invite_state: "active", enrollment_url: "http://127.0.0.1/app#document-enroll=doc_fixture-reissued", enrollment_expires_at: Date.now() + 900000, replayed: scenario === "idempotent" });
   }
   if (url.pathname === "/api/app/document-access/revoke") {
     const body = await jsonBody(request);
@@ -460,6 +567,27 @@ const server = createServer(async (request, response) => {
   if (url.pathname === "/api/bank-feed/status") {
     return sendJson(response, { configured: true, connections: [{ item_ref: "bank", institution_label: "Desert Bank", status: "healthy", connected_at: "2026-07-01T00:00:00Z", last_synced_at: "2026-08-29T06:00:00Z" }], needs_attention: [] });
   }
+  if (url.pathname === "/api/bank-feed/disconnect") {
+    await jsonBody(request);
+    return sendJson(response, {
+      error: "This local rehearsal keeps its synthetic bank connected so you can continue. Nothing was disconnected. On a real Brain, this control stops future bank reads while keeping the history already stored.",
+      code: "rehearsal_stop",
+    }, 409);
+  }
+  if (url.pathname === "/api/app/signout") {
+    await jsonBody(request);
+    return sendJson(response, {
+      error: "This local rehearsal keeps its synthetic session open so you can continue. Nothing was signed out. When you finish, close this browser tab, return to PowerShell, and press Control-C once.",
+      code: "rehearsal_stop",
+    }, 409);
+  }
+  if (url.pathname === "/api/app/signout-all") {
+    await jsonBody(request);
+    return sendJson(response, {
+      error: "This local rehearsal keeps its synthetic sessions open so you can continue. Nothing was signed out or disconnected. On a real Brain, this control ends every device session and remote AI connection.",
+      code: "rehearsal_stop",
+    }, 409);
+  }
   if (url.pathname === "/api/rag/unified") {
     const body = await jsonBody(request);
     if (scenario.startsWith("grant")) {
@@ -488,6 +616,14 @@ const server = createServer(async (request, response) => {
         : ownerThinkResponse(scenario, body.entity_slug));
   }
 
+  if (url.pathname === "/app/connect/bank") {
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bank rehearsal boundary</title>
+      <style>:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171a24;background:#f4f5f8}*{box-sizing:border-box}body{margin:0}.flag{padding:9px 16px;background:#fff0d9;color:#6f3c00;border-bottom:1px solid #e9be73;text-align:center;font-size:12px;font-weight:800;letter-spacing:.06em}.wrap{max-width:640px;margin:0 auto;padding:48px 20px}.card{background:#fff;border:1px solid #dfe2ea;border-radius:20px;padding:26px}.card h1{font-size:28px;line-height:1.15;margin:0 0 14px}.card p{color:#5f6675;line-height:1.6}.card a{color:#334fc0}</style>
+      <body><div class="flag">LOCAL REHEARSAL · SYNTHETIC DATA · SCENARIO: Owner creates guest access · NO ACCOUNTS CONNECTED</div><main class="wrap"><section class="card"><h1>Bank controls are unavailable in this rehearsal</h1><p>This page uses invented data. No bank is connected, no provider was contacted, and no account choice or credential was requested.</p><p>Bank feeds remain outside ordinary onboarding. An already approved pilot uses a separate reviewed plan on the Brain's normal HTTPS address.</p><p><a href="/app?state=owner-access&amp;view=access">Back to the synthetic Access screen</a></p></section></main></body></html>`);
+    return;
+  }
+
   const requested = url.pathname === "/" || url.pathname === "/app" ? "index.html" : url.pathname.replace(/^\//, "");
   const file = join(DIST, requested);
   try {
@@ -501,6 +637,13 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`Financial Brain visual server listening on http://127.0.0.1:${PORT}`);
-});
+const IS_MAIN = (() => {
+  try { return resolve(process.argv[1] || "") === fileURLToPath(import.meta.url); }
+  catch { return false; }
+})();
+
+if (IS_MAIN) {
+  visualFixtureServer.listen(PORT, "127.0.0.1", () => {
+    console.log(`Financial Brain visual server listening on http://127.0.0.1:${PORT}`);
+  });
+}

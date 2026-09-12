@@ -241,15 +241,43 @@ portable resolution, every portable resolution to have its matching prior
 unresolved observation and family receipt, and all local-only acceptance tables
 to be empty.
 
+Schema 46 carries the authority-chain version and predecessor on each portable
+observation row. Legacy schema-42 through schema-45 rows may appear only as a
+version-zero prefix. Before the import marker closes, every version-one row
+must point to the immediately preceding same-original sequence, and every
+version-one accepted observation must immediately follow the gap or failure it
+resolves. Schema 45 legally allowed a version-zero accepted row to resolve an
+earlier non-immediate gap. Recovery preserves that row as historical evidence,
+but the schema-46 current view keeps it noncurrent and the head check refuses
+reactivation with `history_advanced`. A restored later exclusion likewise
+remains the head and blocks reactivating an older accepted resolution. No
+deployment-local activation is restored or inferred from that history.
+
+`observation_hash` is the digest of the event receipt fields established by the
+schema-42 contract. It is not a self-authenticating chain hash and does not
+digest the schema-46 predecessor edge. The authenticated whole recovery
+artifact protects the exported row bytes, while the separate recovery-close
+validator proves each version-one predecessor against D1 sequence. A future
+receipt contract may bind the edge directly, but schema 46 does not reinterpret
+or invalidate existing observation digests.
+
 A restored accepted resolution is therefore not current verification for the
 target deployment. After the recovered Vectorize projection is rebuilt, the
-full-admin-only `accepted_resolution` mode must rerun the exact one-target
-schema-44 family, Vectorize, and production owner retrieval proof and record a
-fresh local activation. Until that succeeds, verification reports the
-resolution as requiring reactivation. The portable history never establishes
-whole-source completeness, and recovery does not enable the legacy
-`provenance-repair --apply` command or authorize OCR, reingest, deletion,
-deployment, or customer execution.
+old preview approval is invalid and the exact target must be previewed again
+under a new source lease. The full-admin-only recovery sequence is fixed:
+record the current schema-44 `result_family`, verify that schema-44 receipt,
+record the schema-45 `accepted_resolution`, then verify schema 45. Every stage
+reruns or validates the exact one-target family, Vectorize, and production owner
+retrieval proof. The record operation creates the fresh local verification and
+activation; verify alone cannot recreate either. Until the complete sequence
+succeeds, verification reports the resolution as requiring reactivation.
+
+The portable history never establishes whole-source completeness. Recovery
+does not enable the legacy no-target `provenance-repair --apply` command or
+authorize OCR, source-wide reingest, source-wide deletion, deployment, or
+customer execution. The exact-target lane may reingest only the newly previewed
+native-readable original, reconcile only that original's family, and must keep
+source receipts, cursors, and source-wide removal state untouched.
 
 The exact verified artifact also anchors a versioned bank security proof in the
 private recovery journal. Each ordered pair of hashes commits the row identity

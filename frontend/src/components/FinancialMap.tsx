@@ -41,6 +41,12 @@ type ActivationAttempt = {
 const ENTITY_FIELDS = ["kind", "status", "holds", "ownership", "tax_class", "relationship", "parent"];
 const ACCOUNT_FIELDS = ["entity_assignment", "kind", "balance_role", "currency", "status"];
 
+function isLocalRehearsalPage(): boolean {
+  if (typeof location === "undefined") return false;
+  const loopback = location.hostname === "localhost" || location.hostname === "127.0.0.1" || location.hostname === "::1";
+  return loopback && new URLSearchParams(location.search || "").has("state");
+}
+
 function responseMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError && typeof error.body.detail === "string") return error.body.detail;
   return error instanceof Error ? error.message : fallback;
@@ -678,9 +684,35 @@ export function FinancialMapCorrectionChoice({
 }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const prompt = financialMapAssistantPrompt("correct");
+  const rehearsal = isLocalRehearsalPage();
   const copyPrompt = async () => {
     setCopyState(await copyFinancialMapAssistantPrompt("correct") ? "copied" : "failed");
   };
+
+  if (requested && rehearsal) {
+    return (
+      <div role="status" className="mt-5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-4 text-amber-950">
+        <h3 className="text-[14px] font-semibold">Correction path found</h3>
+        <p className="mt-1.5 text-[13.5px] leading-relaxed">
+          This local rehearsal is not connected to your Claude Code or Codex Owner assistant, so it
+          cannot create or read a fresh Financial Map preview. Do not open another tool or paste a
+          request for this synthetic screen. Note what felt wrong for your technician instead.
+        </p>
+        <p className="mt-2 text-[12.5px] leading-relaxed">
+          On a real Brain, an already connected Owner assistant can guide one short correction at a
+          time and ask for separate approval before submitting a new preview. Nothing changed here,
+          and no passkey window opened.
+        </p>
+        <button
+          type="button"
+          onClick={onContinue}
+          className="mt-3 rounded-lg border border-amber-400 bg-white px-3 py-2 text-[13px] font-semibold text-amber-950 hover:bg-amber-100"
+        >
+          Keep reviewing this synthetic preview
+        </button>
+      </div>
+    );
+  }
 
   if (requested) {
     return (

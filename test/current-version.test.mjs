@@ -15,6 +15,8 @@ const changelog = read("CHANGELOG.md");
 const readme = read("README.md");
 const version = packageJson.version;
 const escapedVersion = version.replaceAll(".", "\\.");
+const currentEvidencePlan = read(`docs/release-evidence/v${version}-candidate-release-evidence-plan.md`);
+const retiredEvidencePlan = read("docs/release-evidence/v0.4.7-candidate-release-evidence-plan.md");
 
 assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable semantic version");
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
@@ -27,6 +29,14 @@ assert.equal(manifestTemplate.brain?.version, version, "manifest template versio
 const workerVersion = read("worker/src/lib/version.js").match(/WORKER_VERSION = "([^"]+)"/)?.[1];
 assert.equal(workerVersion, version, "worker source version drifted from the package");
 assert.match(changelog, new RegExp(`^## ${escapedVersion}$`, "m"), "changelog has no current-version heading");
+assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate release evidence plan$`, "m"),
+  "current candidate has no version-matched evidence plan");
+assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
+  "the current plan must not imply final-SHA or field proof before either exists");
+assert.match(retiredEvidencePlan, /Status: superseded planning record; no field execution occurred/,
+  "the consumed 0.4.7 planning identity must remain explicitly superseded and unexecuted");
+assert.match(retiredEvidencePlan, /Superseded by: \[v0\.4\.8 candidate release evidence plan\]/,
+  "the retired candidate must point to the current evidence lineage");
 
 assert.match(readme, new RegExp(
   `This checkout is the unreleased ${escapedVersion} candidate\\.[\\s\\S]*?` +
@@ -34,6 +44,9 @@ assert.match(readme, new RegExp(
   "intentionally unavailable placeholders[\\s\\S]*?Do not\\s+run or share those commands",
   "i",
 ), "README must dynamically warn that the current-version candidate URLs are unavailable and must not be shared");
+assert.match(readme,
+  /earlier held 0\.4\.7 candidate was never[\s\S]*?tagged, published, or offered as a customer update; its identity is retired/i,
+  "README must distinguish a retired held candidate identity from a public release");
 
 const releaseLinks = [...readme.matchAll(
   /releases\/download\/v(\d+\.\d+\.\d+)\/brain-installer-(\d+\.\d+\.\d+)\.tgz/g,

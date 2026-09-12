@@ -71,9 +71,20 @@ change anything.
    read-only contract. Do not search repositories, release history, planning
    notes, or the web to decide whether Optimize exists when that contract is
    available and agrees with the installed CLI.
-2. Open with exactly one goal question and no setup quiz: "What would you most
-   like your Financial Brain to help you understand or keep current?" Let the
-   owner answer, say "not sure," or skip it. Then say in ordinary owner
+2. Use one total owner-question budget per owner-facing Optimize response across
+   the optional goal, evidence clarification, and zoning, outside an owner-chosen
+   guided Financial Map interview. First resolve the installed Brain quietly.
+   If that requires an owner choice, use this
+   response's one question for that choice and defer every audit blocker.
+   Otherwise ask only the highest-priority pending blocker, in this order: a
+   material evidence conflict, a whole-source zoning decision, then the
+   optional goal. Skip the goal whenever a material evidence conflict or any
+   zoning decision is pending. Only when neither is pending and the owner has
+   not already stated a goal may you ask: "What would you most like your
+   Financial Brain to help you understand or keep current?" Let the owner
+   answer, say "not sure," or skip it. Asking it consumes this response's
+   budget even when the owner skips. Once the response asks one question, state
+   and defer every other blocker instead of asking another. Then say in ordinary owner
    language: "I can check your Brain without changing its data, settings,
    access, or indexes. I will run the read-only checks and report what I find.
    If a CLI check fails, it may save a private support note on this computer so
@@ -82,9 +93,12 @@ change anything.
    workflow "shipped." Those are internal implementation details, not part of
    the owner's experience.
 3. Resolve the installed `brain` executable and remembered manifest quietly
-   using the packaged discovery path. A normal successful lookup gets no status
-   story. If there is no unambiguous Brain to check, state the one concrete
-   blocker in plain language and ask for only the smallest owner choice needed.
+   using the packaged discovery path before asking the goal question. A normal
+   successful lookup gets no status story. If there is no unambiguous Brain to
+   check, state the one concrete blocker in plain language. Ask for the smallest
+   owner choice only when this response's one-question budget remains; otherwise stop
+   without disguising a second question as a suggestion, confirmation, or
+   zoning choice.
 4. The owner's request already authorizes the contract's read-only checks. Do
    not ask for a second approval. It does not authorize a repair, update,
    reindex, drain, refresh, zone change, grant change, connector action, or any
@@ -94,7 +108,8 @@ change anything.
    filenames, version-search history, or tool activity unless the owner asks.
 
 Make the Owner Financial Map state the first audit evidence after that opening
-question. Immediately before calling `brain_financial_map` with `mode: "read"`,
+decision, whether the optional goal was asked or skipped. Immediately before
+calling `brain_financial_map` with `mode: "read"`,
 say: "I'm about to read your current Financial Map. This sends no Financial Map
 snapshot and changes nothing. Your assistant may still show an approval prompt
 because it is authorizing a private read from your Brain." Do not let a normal
@@ -111,15 +126,26 @@ checks and report that completeness remains unproven. If the owner chooses the
 interview, ask one short adaptive question at a time. The interview itself is
 read-only and creates only a conversational working draft; it does not submit a
 preview, activate a map, confirm ledger rows, or authorize any other write.
+Each interview response asks only that one adaptive map question and combines it
+with no goal, evidence-clarification, or zoning question.
 
-The default owner report begins, "Optimize complete. I made no changes to your
-Brain, data, settings, access, or indexes." If a CLI check failed, add that it
-may have saved a private local support note and that nothing was uploaded.
-Immediately add, "Optimize checked this computer's Brain skill and MCP
-connection but installed nothing and changed no settings." Say whether each is
-ready, missing, stale, or unproven. Keep the rest to at most three short sections:
+Track every planned check as **observed**, **named unavailable or refused from
+an actual receipt**, or **not run**. Never describe a not-run check as checked,
+passed, unavailable, or complete. Only after every planned check actually ran
+and produced one of the first two states may the owner report begin, "Optimize complete. I made no changes to your
+Brain, data, settings, access, or indexes." Otherwise begin, "Optimize stopped before every check could run. I made no
+changes to your Brain, data, settings, access, or indexes," and name what was
+not run. If a CLI check failed, add that it may have saved a private local support note
+and that nothing was uploaded. Say, "Optimize checked this computer's Brain skill and MCP
+connection but installed nothing and changed no
+settings," only when both checks actually ran. Otherwise say exactly which one
+was not run. For each observed check, say whether it is ready, missing, stale,
+or unproven. Keep the rest to at most three short sections:
 **Working**, **Needs attention**, and **Need from you**. Lead with
-what the Brain can currently be trusted to do.
+what the Brain can currently be trusted to do. List every material blocker, but
+use **Need from you** to ask only the one highest-priority question allowed by
+this response's shared question budget. State that lower-priority decisions are
+deferred.
 Do not print the numbered fifteen-check table unless the owner asks for the
 check details. Separate these findings instead of collapsing them into a wall
 of failures:
@@ -149,10 +175,13 @@ independent local checks.
 Use the records and metadata already present. Compare provenance, effective and
 modified dates, source receipts with stored counts, extraction gaps, conflicting
 values, superseded evidence, duplicate document families, and whose voice each
-claim represents. Resolve every ambiguity that those records can resolve. Ask
-at most one additional small, specific owner question outside an owner-chosen
-guided map interview, and only when a material ambiguity remains after that
-evidence review.
+claim represents. Resolve every ambiguity that those records can resolve. Do
+not ask more than one owner question in the response outside an owner-chosen
+guided map interview. Ask an evidence clarification only when a material
+ambiguity remains after that review and it is the highest-priority pending
+blocker. It uses the same per-response question budget as the optional goal and
+zoning; it is not an additional question. Never split the goal, clarification,
+and zoning into separate question budgets.
 
 For the Financial Picture stage, run the read-only
 `brain financial-picture <manifest> --json` inventory. Use its exact entity,
@@ -165,10 +194,10 @@ entity-to-account scope, a tax period, or a supersession target from a name or
 raw identifier. Treat `owner_stated` plus `confirmed` as a stored assertion, not
 proof of who performed a confirmation ceremony. The inventory requires current
 owner confirmation because the schema has no owner-actor receipt for these
-mappings. If one additional owner question is needed outside the guided map
-interview, choose it from a material blocking gap or conflict that the cited
+mappings. If the one owner question for this response should be an evidence
+clarification, choose it from a material blocking gap or conflict that the cited
 provenance cannot resolve, and name the evidence that made the question
-necessary.
+necessary. Otherwise report the gap without asking another question.
 
 An owner's interview answer does not authorize a write. Keep any correction,
 mapping confirmation, supersession, OCR, reingest, or reconciliation ruling
@@ -181,25 +210,54 @@ documents or structured records into owner-confirmed truth. A map that cannot
 establish the denominator does not mean the owner has no other entities or
 accounts.
 
-Do not run a Golden evaluation, create a canned refusal exercise, or require the
-owner to prepare test questions. Those remain optional, separate testing tools,
+Do not run Golden Questions, a Golden evaluation, a canned refusal exercise, a
+known-answer control question, or require the owner to prepare test content.
+Those remain optional, separate testing tools,
 never Optimize prerequisites. Do check whether THIS computer has the reviewed
 Financial Brain technician skill and whether its existing Claude Code MCP entry
 matches the read-only output of `brain mcp-config <manifest>`. Verify the MCP
 runtime through exact executable and argument comparison plus protocol
 initialization, connection status, and expected tool discovery. Do not ask a
-known-answer content question for MCP proof. Do not run `brain tools` during Optimize
+known-answer content question for MCP proof. If configuration or protocol
+discovery is absent, fails, is refused, or is not run, report that exact state.
+Never claim an MCP or other Optimize check ran without its actual receipt.
+Report an absent, failed, refused, or not-run MCP check as that exact state, and
+never call Optimize complete while any planned check is not run. Do not run `brain tools` during Optimize
 because it writes the technician skill and local setup files, and do not run `brain mcp-config --apply`.
 
 Make zoning a normal Optimize checkpoint. Run read-only `brain zone <manifest>`
-and `brain grants <manifest>`, list every unzoned source, explain that zoning
-applies to the whole source, and propose the safest exact source-to-zone mapping.
+and `brain grants <manifest>`, list every unzoned source, and explain that zoning
+applies to the whole source. Recommend an exact source-to-zone mapping only when
+source-specific evidence establishes the boundary for the entire source. The
+observed source scope and purpose, existing allowed zones, and an owner-confirmed
+Financial Map or prior owner statement must support that exact choice; cite the
+evidence. A source label, connector kind, document count, or plausible guess is
+not enough. Without supporting evidence, never propose or recommend a zone.
+State the available whole-source choices, including leaving the source unzoned,
+explain each consequence, and say that the records do not determine the choice.
+When zoning is the highest-priority blocker, ask the owner to choose among those
+whole-source options; that question uses this response's one question budget.
+When a material evidence conflict has higher priority, defer the zoning choice
+to the next response.
 Unzoned sources with no grants are sharing-readiness
 work, not evidence that somebody currently has access. Do not apply a mapping during the audit. After
-the report, show the exact mapping and affected counts. Only if the owner
-explicitly approves that mapping, run `brain zone --source ... --zone ...` one
+the report, show an exact mapping and affected counts only when it is either an
+evidence-backed recommendation or the owner's selected choice. Label which one
+it is. Only if the owner separately and explicitly approves that mapping, run
+`brain zone --source ... --zone ...` one
 source at a time, repeat its bounded projection pass when the receipt says work
 remains, then verify zones and grants again.
+
+Never claim that zoning, grants, MCP, sources, storage, indexing, or any other
+check ran unless its actual command or tool returned an observed receipt in this
+Optimize run. A plan, remembered result, inferred state, or missing output is
+not a performed check.
+
+When model selection is available, use `gpt-5.6-luna` at medium reasoning for
+routine Optimize. Use `gpt-5.6-terra` at low reasoning as the fallback or
+escalation for harder evidence conflicts. This floor has synthetic behavioral
+evidence only, not live Brain proof. Do not pin `gpt-5.6-sol` or infer Optimize
+completeness from model choice.
 
 If a prior Optimize report is available, say what improved, regressed, or stayed
 unproven. If none is available, call this the first baseline without creating a
@@ -279,6 +337,71 @@ unrelated skill files byte for byte. A repair may change only an absent entry or
 one that exact installer ownership proves it owns. If readback fails, restore the
 prior installer-owned state. If that restoration cannot be proved, report the
 repair as incomplete instead of calling it fixed.
+
+## Offer one exact provenance repair only after Optimize
+
+Finish and show the read-only Optimize report first. A provenance gap in that
+report is not approval to repair it. Confirm that the exact installed stable
+release advertises the one-target provenance lane before naming or running it.
+The held 0.4.8 candidate is not a customer release and must not be used on a
+customer Brain.
+
+When a supported release is available, offer this lane only for one exact file
+the owner chooses from the manifest's enabled local folder source:
+
+```bash
+brain provenance-repair "/absolute/path/to/brain.manifest.json" --source <name> --target <source-relative-file>
+```
+
+Never infer or guess the target from a gap, filename, search result, entity, or
+document content. The source must be registered as an upload source. The file
+must resolve to one complete `native_readable` record with reliable extraction.
+OCR stays off. Stop on a scan, partial or failed extraction, password-protected
+file, unsupported format, empty result, multi-record export, or ambiguous
+target.
+
+The preview obtains the source lease before reading the private manifest,
+source file, saved credential, or Brain state. It checks the complete source
+inventory and observation history, the exact local bytes and extraction, and
+the current schema and vector state. Explain that preview leaves no lasting
+Brain or configuration change and that its public output hides the local root,
+file locator, private query, hashes, document IDs, and sealed internal receipts.
+
+Before asking for approval, read the preview's workflow and explain its effects
+in ordinary language. For `exact_original_repair`:
+
+- one exact native-readable file will be reingested with OCR off;
+- stale siblings may be removed only from that file's exact result family;
+- the shared vector drain may also process unrelated work already queued;
+- reingest and drain may create embeddings; and
+- the four proof operations run eight private retrieval probes in total and
+  may create ordinary aggregate usage records.
+
+For `accepted_resolution_reverification`, explain instead that the exact
+accepted observation already exists. The run repeats only schema-44 record and
+verify plus schema-45 record and verify. It still runs eight private retrieval
+probes and may create ordinary aggregate usage records, but it does not record
+a discovery gap, reingest the file, remove family members, or drain the shared
+vector queue. Use this fresh approval after a lost response, stale activation,
+or verified recovery. Never reuse the earlier approval hash.
+
+Also say what it will not do: it will not advance a source-wide receipt or
+cursor, perform source-wide removal, claim that the source is complete, change
+zones or access, inspect devices, start a passkey ceremony, alter providers, or
+change Cloudflare deployment state.
+
+Ask for separate explicit approval of the exact preview hash. A generic request
+to fix provenance is not that approval. Apply must reacquire the lease and
+recheck all private state. For `exact_original_repair`, its order is exact-target
+ingest, exact-family reconcile, global vector drain, schema-44 `result_family`
+record, schema-44 verify, schema-45 `accepted_resolution` record, and schema-45
+verify. For `accepted_resolution_reverification`, only the final four proof
+operations run. Do not skip the schema-44 record or verification even if old
+evidence exists. Stop on
+lease loss, stale history, changed bytes, an unexpected response, a mismatched
+receipt, recovery without fresh local activation, or any failed verification.
+Never report success unless the final schema-45 verify says the one exact
+resolution is current and still states `whole_source_complete: false`.
 
 ## Route an update request first
 

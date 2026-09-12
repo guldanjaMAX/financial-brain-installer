@@ -86,6 +86,26 @@ async function ingestLib() {
 async function ingestOcrLib() {
   return await import("./ingest/ocr.mjs");
 }
+
+/**
+ * The one-target provenance executor imports the real extraction stack. Keep it
+ * lazy for the same reason as ingestLib(): `brain doctor` must still be able to
+ * explain a fresh machine whose optional document dependencies are not ready.
+ */
+async function provenanceTargetCliLib() {
+  try {
+    return await import("./operations/provenance-target-cli.mjs");
+  } catch (error) {
+    if (error?.code === "ERR_MODULE_NOT_FOUND") {
+      die(
+        "the ingest dependencies are not installed. From the brain-installer folder run:\n" +
+          "        npm ci --ignore-scripts\n" +
+          "      then re-run this command."
+      );
+    }
+    throw error;
+  }
+}
 import { authorize, fetchConnectedAccountEmail, inspectGoogleTokenStorage, loadTokens, loadTokensReadOnly, saveTokens, createTokenProvider, tokenStorageDescription, tokenStorageStatus, SCOPES, DEFAULT_PORT, openBrowser } from "./connectors/google-auth.mjs";
 import {
   redact as redactConfirmedSecrets,
@@ -138,6 +158,7 @@ import { quotePowerShellArgument, quotePosixArgument } from "./operations/comman
 export { brainCliPrefix, renderCliCommands } from "./operations/cli-guidance.mjs";
 import { readAdminKeyFile, validateAdminKeyValue } from "./operations/admin-key-file.mjs";
 import {
+  acquireSourceIngestLock,
   canonicalSourceIngestStatePath,
   SourceIngestLockError,
   withSourceIngestLock,
@@ -3799,7 +3820,7 @@ export async function cmdMigrate(manifestPath, options = {}) {
   // migrate is `vectorDrainPauseCompleted`: setup/update set it once the
   // paused deployment and the full grace are behind them. Unverified is loud,
   // not fatal, because a transport blip must not block every update.
-  const writerQuiescenceMigrations = new Set([10, 11, 12, 13, 33, 44]);
+  const writerQuiescenceMigrations = new Set([10, 11, 12, 13, 33, 44, 46]);
   const cutoverAuthorized = options.vectorDrainQuiesced === true ||
     options.vectorDrainPauseCompleted === true;
   if ((m.infrastructure?.cloudflare?.storage || "d1") === "d1" &&
@@ -6910,7 +6931,7 @@ export const VALUE_FLAGS = new Set([
   "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
   "corpus-contract", "approve-removals", "only", "skip",
-  "approve",
+  "approve", "target",
   "can", "zones", "exclude-zones", "until", "as", "subject",
   // brain import bank. `--file` with no value must die saying so rather than
   // being read as a boolean and then reported as "needs --file".
@@ -8255,7 +8276,40 @@ function sourceInventoryAccess(manifestPath, m, options = {}) {
     headers.delete("X-Admin-Key");
     return authenticatedRequest(target, { ...init, headers }, requestOptions);
   };
-  return { base, authenticatedRequest, managedSourceRequest, requestPage };
+  // These two closures let the exact-target executor reuse the established
+  // idempotent retry contracts without ever receiving or returning the saved
+  // administrator key itself. The source lease is rechecked before the first
+  // credential read and again by every retry inside each helper.
+  const requestBatch = ({ docs, assertOwned = null, ...requestOptions } = {}) => {
+    assertOwned?.();
+    return requestIngestBatch({
+      ...requestOptions,
+      base,
+      adminKey: credential(),
+      docs,
+      assertOwned,
+      fetchImpl,
+    });
+  };
+  const reconcileFamilies = ({ families, assertOwned = null, ...requestOptions } = {}) => {
+    assertOwned?.();
+    return reconcileDocumentFamilies({
+      ...requestOptions,
+      families,
+      base,
+      adminKey: credential(),
+      assertOwned,
+      fetchImpl,
+    });
+  };
+  return {
+    base,
+    authenticatedRequest,
+    managedSourceRequest,
+    requestPage,
+    requestBatch,
+    reconcileFamilies,
+  };
 }
 
 function sourceInventoryFailure(json, error) {
@@ -8448,6 +8502,245 @@ export async function cmdSources(manifestPath, options = {}) {
 
 /* ---------------------------------------------- provenance-repair */
 
+function safeProvenancePackagePath(value) {
+  const name = String(value || "").replace(/^\.\//u, "").replace(/\/+$/u, "");
+  const parts = name.split("/");
+  if (!name || isAbsolute(name) || name.includes("\\") ||
+      parts.some((part) => !part || part === "." || part === "..")) {
+    throw new TypeError("the provenance runtime package contains an unsafe path");
+  }
+  return name;
+}
+
+function directProvenancePackageEntry(packageRoot, name, { lstat, realpath }) {
+  let candidate = packageRoot;
+  for (const part of name.split("/")) {
+    candidate = join(candidate, part);
+    const partState = lstat(candidate);
+    if (partState.isSymbolicLink()) {
+      throw new TypeError("the provenance runtime package contains a symbolic link");
+    }
+  }
+  const canonical = realpath(candidate);
+  const fromRoot = relative(packageRoot, canonical);
+  if (!fromRoot || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) ||
+      isAbsolute(fromRoot)) {
+    throw new TypeError("the provenance runtime package entry escapes its package root");
+  }
+  return { candidate: canonical, state: lstat(canonical) };
+}
+
+function provenancePackageExportFiles(value, found = []) {
+  if (typeof value === "string") {
+    if (value.startsWith("./") && !value.includes("*")) found.push(value.slice(2));
+    return found;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) provenancePackageExportFiles(entry, found);
+    return found;
+  }
+  if (value && typeof value === "object") {
+    for (const entry of Object.values(value)) provenancePackageExportFiles(entry, found);
+  }
+  return found;
+}
+
+/**
+ * Enumerate every first-party file npm is instructed to ship, plus every file
+ * in each bundled production dependency. This is an approval-time local byte
+ * snapshot, not a release signature. Its purpose is to make a preview stale if
+ * any executable package byte changes before apply.
+ */
+export function provenanceTargetRuntimePackageFiles({
+  root = HERE,
+  files = null,
+  lstat = lstatSync,
+  realpath = realpathSync,
+  readFile = readFileSync,
+  readdir = readdirSync,
+} = {}) {
+  const packageRoot = realpath(resolve(root));
+  let roots;
+  if (files !== null) {
+    if (!Array.isArray(files) || !files.length) {
+      throw new TypeError("the provenance runtime package file override is empty");
+    }
+    roots = files;
+  } else {
+    const manifestPath = join(packageRoot, "package.json");
+    const manifestState = lstat(manifestPath);
+    if (!manifestState.isFile() || manifestState.isSymbolicLink()) {
+      throw new TypeError("the provenance runtime package manifest is not one direct file");
+    }
+    let manifest;
+    try {
+      manifest = JSON.parse(Buffer.from(readFile(manifestPath)).toString("utf8"));
+    } catch {
+      throw new TypeError("the provenance runtime package manifest is invalid");
+    }
+    if (!Array.isArray(manifest.files) || !manifest.files.length ||
+        !Array.isArray(manifest.bundleDependencies)) {
+      throw new TypeError("the provenance runtime package allowlist is incomplete");
+    }
+    const binFiles = typeof manifest.bin === "string"
+      ? [manifest.bin]
+      : manifest.bin && typeof manifest.bin === "object" && !Array.isArray(manifest.bin)
+        ? Object.values(manifest.bin)
+        : [];
+    const rootMetadata = readdir(packageRoot, { withFileTypes: true })
+      .filter((entry) => entry.isFile?.() === true &&
+        /^(?:readme|licen[cs]e|copying|notice)(?:\.|$)/iu.test(String(entry.name)))
+      .map((entry) => String(entry.name));
+    roots = [
+      "package.json",
+      ...manifest.files,
+      ...(typeof manifest.main === "string" ? [manifest.main] : []),
+      ...binFiles,
+      ...provenancePackageExportFiles(manifest.exports),
+      ...rootMetadata,
+      ...manifest.bundleDependencies.map((name) => `node_modules/${name}`),
+    ];
+  }
+
+  const selected = new Set();
+  const walk = (rawName) => {
+    const name = safeProvenancePackagePath(rawName);
+    const { candidate, state } = directProvenancePackageEntry(packageRoot, name, {
+      lstat,
+      realpath,
+    });
+    if (state.isFile()) {
+      selected.add(name);
+      return;
+    }
+    if (!state.isDirectory()) {
+      throw new TypeError("the provenance runtime package contains a special file");
+    }
+    const entries = readdir(candidate, { withFileTypes: true })
+      .map((entry) => String(entry.name))
+      .sort();
+    for (const entry of entries) {
+      if (!entry || entry.includes("/") || entry.includes("\\") ||
+          /[\u0000-\u001f\u007f]/u.test(entry)) {
+        throw new TypeError("the provenance runtime package contains an unsafe entry name");
+      }
+      walk(posix.join(name, entry));
+    }
+  };
+  for (const rootName of new Set(roots.map(safeProvenancePackagePath))) walk(rootName);
+  if (!selected.size) throw new TypeError("the provenance runtime package inventory is empty");
+  return Object.freeze([...selected].sort());
+}
+
+export function provenanceTargetRuntimePackageFingerprint(options = {}) {
+  const root = options.root ?? HERE;
+  const lstat = options.lstat ?? lstatSync;
+  const realpath = options.realpath ?? realpathSync;
+  const readFile = options.readFile ?? readFileSync;
+  const packageRoot = realpath(resolve(root));
+  const selected = provenanceTargetRuntimePackageFiles({
+    ...options,
+    root: packageRoot,
+    lstat,
+    realpath,
+    readFile,
+  });
+  const digest = createHash("sha256");
+  for (const name of selected) {
+    const { candidate, state } = directProvenancePackageEntry(packageRoot, name, {
+      lstat,
+      realpath,
+    });
+    if (!state.isFile()) {
+      throw new TypeError("the provenance runtime package inventory changed during hashing");
+    }
+    const bytes = readFile(candidate);
+    if (!(Buffer.isBuffer(bytes) || bytes instanceof Uint8Array || typeof bytes === "string")) {
+      throw new TypeError("the provenance runtime package reader returned invalid bytes");
+    }
+    const buffer = Buffer.from(bytes);
+    digest.update(name, "utf8");
+    digest.update("\0");
+    digest.update(String(buffer.byteLength), "utf8");
+    digest.update("\0");
+    digest.update(buffer);
+    digest.update("\0");
+  }
+  return digest.digest("hex");
+}
+
+const PROVENANCE_TARGET_OBSERVATION_PATH = "/api/admin/brain/source-original-observations";
+const PROVENANCE_TARGET_OBSERVATION_PAGE_SIZE = 10;
+const PROVENANCE_TARGET_OBSERVATION_MAX_ROWS = 250_000;
+const PROVENANCE_TARGET_DRAIN_MAX_ROUNDS = 400;
+const PROVENANCE_TARGET_CODE_RE = /^[a-z0-9_]{1,64}$/;
+
+function provenanceTargetWorkerError(label, response) {
+  const code = PROVENANCE_TARGET_CODE_RE.test(String(response?.body?.code || ""))
+    ? response.body.code
+    : "request_refused";
+  const error = new Error(`${label} was refused (HTTP ${response?.status || "unknown"}; ${code})`);
+  error.code = code;
+  error.retryable = isRetryableHttpStatus(response?.status);
+  return error;
+}
+
+function requireProvenanceTargetAdminState(capability, states) {
+  const state = states.get(capability);
+  if (!state) throw new TypeError("the provenance target administrator capability is invalid");
+  return state;
+}
+
+async function provenanceTargetCapabilityJson(state, path, {
+  method = "POST",
+  body = undefined,
+  timeoutMs = 60_000,
+  what = "the provenance target request",
+  assertOwned,
+} = {}) {
+  if (typeof assertOwned !== "function") {
+    throw new TypeError("the provenance target request requires its source lease guard");
+  }
+  await assertOwned();
+  const response = await state.managedSourceRequest(`${state.base}${path}`, {
+    method,
+    ...(body === undefined ? {} : {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  }, { timeoutMs, what });
+  await assertOwned();
+  let raw;
+  try {
+    raw = await response.text();
+  } catch (error) {
+    await assertOwned();
+    throw error;
+  }
+  await assertOwned();
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch { /* validated by the caller */ }
+  return Object.freeze({
+    ok: response.ok,
+    status: response.status,
+    body: parsed,
+  });
+}
+
+function requireProvenanceTargetJson(response, label) {
+  if (!response?.ok) throw provenanceTargetWorkerError(label, response);
+  if (!response.body || typeof response.body !== "object" || Array.isArray(response.body)) {
+    throw new Error(`${label} returned no valid JSON receipt`);
+  }
+  return response.body;
+}
+
+async function provenanceTargetGuardedWait(milliseconds, assertOwned, sleep) {
+  await assertOwned();
+  await sleep(milliseconds);
+  await assertOwned();
+}
+
 function canonicalProvenanceValue(value) {
   if (Array.isArray(value)) return value.map(canonicalProvenanceValue);
   if (!value || typeof value !== "object") return value;
@@ -8459,6 +8752,474 @@ function canonicalProvenanceValue(value) {
 const fingerprintProvenanceValue = (value) => createHash("sha256")
   .update(JSON.stringify(canonicalProvenanceValue(value)))
   .digest("hex");
+
+/**
+ * Bind the pure one-target orchestrator to the installed CLI's real filesystem
+ * and authenticated Worker boundaries. The returned capability object never
+ * contains a literal administrator credential.
+ */
+export function provenanceTargetDependencies(options = {}) {
+  const adminStates = new WeakMap();
+  const sleep = options.sleep ?? ((milliseconds) =>
+    new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+  const now = options.now ?? Date.now;
+  const callHttp = options.http ?? http;
+  const runtimeFingerprint = options.runtimeFingerprint ?? provenanceTargetRuntimePackageFingerprint;
+  const acquireLock = options.acquireSourceIngestLock ?? acquireSourceIngestLock;
+  const inventoryAccess = options.sourceInventoryAccess ?? sourceInventoryAccess;
+
+  const acquireSourceLease = ({ manifestPath, source }) => {
+    const lock = acquireLock({
+      manifestPath,
+      sourceName: source,
+      ...sourceIngestLockRuntimeOptions(options),
+    });
+    return Object.freeze({
+      fingerprint: createHash("sha256").update(String(lock.path)).digest("hex"),
+      // Keep these synchronous. Existing ingest retry helpers deliberately call
+      // their lease guard synchronously before issuing a repeated mutation.
+      assertOwned: () => lock.assertOwned(),
+      release: () => lock.release(),
+    });
+  };
+
+  const verifyCandidateRuntime = async ({
+    productVersion,
+    candidateRuntimePackageFingerprint,
+    assertOwned,
+  }) => {
+    await assertOwned();
+    const observed = runtimeFingerprint(options.runtimeFingerprintOptions || {});
+    await assertOwned();
+    return Object.freeze({
+      verified: productVersion === PRODUCT_VERSION &&
+        observed === candidateRuntimePackageFingerprint,
+      product_version: PRODUCT_VERSION,
+      package_fingerprint: observed,
+    });
+  };
+
+  const resolveDurableAdminAccess = async ({ manifest, manifestPath, assertOwned }) => {
+    await assertOwned();
+    const access = inventoryAccess(manifestPath, manifest, {
+      ...(options.resolveAdminKey ? { resolveAdminKey: options.resolveAdminKey } : {}),
+      ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    });
+    await assertOwned();
+    if (!access || typeof access !== "object" || typeof access.base !== "string" ||
+        typeof access.managedSourceRequest !== "function" ||
+        typeof access.requestPage !== "function" ||
+        typeof access.requestBatch !== "function" ||
+        typeof access.reconcileFamilies !== "function") {
+      throw new TypeError("the durable administrator capability is incomplete");
+    }
+    const capability = Object.freeze({ kind: "durable_owner_admin_capability" });
+    adminStates.set(capability, {
+      base: access.base,
+      managedSourceRequest: access.managedSourceRequest,
+      requestPage: access.requestPage,
+      requestBatch: access.requestBatch,
+      reconcileFamilies: access.reconcileFamilies,
+      healthBinding: null,
+    });
+    return capability;
+  };
+
+  const readWorkerHealth = async ({ adminAccess, assertOwned }) => {
+    const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    await assertOwned();
+    const response = await callHttp(`${state.base}/health`, {}, {
+      timeoutMs: 30_000,
+      what: "the provenance target health check",
+      ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    });
+    await assertOwned();
+    let raw;
+    try {
+      raw = await response.text();
+    } catch (error) {
+      await assertOwned();
+      throw error;
+    }
+    await assertOwned();
+    let body = null;
+    try { body = JSON.parse(raw); } catch { /* validated below */ }
+    if (!response.ok || !body || typeof body !== "object" || Array.isArray(body) ||
+        body.ok !== true || body.status !== "ok" || body.accepting_documents !== true ||
+        body.vector_drain_mode !== "active" || body.vector_writer_protocol !== "lease-v1" ||
+        typeof body.version !== "string" || !body.version ||
+        body.version_mismatch === true || body.configured_version !== undefined ||
+        !Number.isSafeInteger(body.schema_version) || body.schema_version < 46) {
+      throw new Error("the public Brain health receipt is not one active schema-46-or-newer generation");
+    }
+    state.healthBinding = Object.freeze({
+      version: body.version,
+      vector_drain_mode: body.vector_drain_mode,
+      schema_version: body.schema_version,
+    });
+    return Object.freeze({
+      ok: true,
+      active: true,
+      accepting_documents: true,
+      product_version: body.version,
+      schema_version: body.schema_version,
+    });
+  };
+
+  const readVectorReadiness = async ({ adminAccess, assertOwned }) => {
+    const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    if (!state.healthBinding) {
+      throw new TypeError("authenticated readiness cannot precede its public generation binding");
+    }
+    const response = await provenanceTargetCapabilityJson(
+      state,
+      "/api/admin/brain/documents",
+      {
+        method: "GET",
+        timeoutMs: 30_000,
+        what: "the authenticated provenance target readiness check",
+        assertOwned,
+      },
+    );
+    const body = requireProvenanceTargetJson(response, "the authenticated readiness check");
+    const backlog = body.vector_backlog;
+    const readiness = body.vector_readiness;
+    const count = (value) => Number.isSafeInteger(value) && value >= 0;
+    if (body.version !== state.healthBinding.version ||
+        body.vector_drain_mode !== state.healthBinding.vector_drain_mode ||
+        body.vector_drain_mode !== "active" || body.backend !== "d1" ||
+        !Array.isArray(body.rows) || !backlog || typeof backlog !== "object" ||
+        Array.isArray(backlog) || Object.hasOwn(backlog, "error") ||
+        !count(backlog.pending) || !count(backlog.upserts) || !count(backlog.deletes) ||
+        !count(backlog.submitted) || backlog.upserts + backlog.deletes !== backlog.pending ||
+        backlog.submitted > backlog.pending || !readiness || typeof readiness !== "object" ||
+        Array.isArray(readiness) || Object.hasOwn(readiness, "error") ||
+        typeof readiness.ready !== "boolean" || !count(readiness.expected_vectors) ||
+        !count(readiness.actual_vectors) || !count(readiness.pending) ||
+        !count(readiness.submitted) || readiness.pending !== backlog.pending ||
+        readiness.submitted !== backlog.submitted || readiness.submitted > readiness.pending) {
+      throw new Error("authenticated readiness does not match the public active Worker generation");
+    }
+    return readiness;
+  };
+
+  const readSourceInventory = async ({ source: _source, adminAccess, assertOwned }) => {
+    const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    const guardedPage = async (payload) => {
+      await assertOwned();
+      const response = await state.requestPage(payload);
+      await assertOwned();
+      let raw;
+      try {
+        raw = await response.text();
+      } catch (error) {
+        await assertOwned();
+        throw error;
+      }
+      await assertOwned();
+      return {
+        ok: response.ok,
+        status: response.status,
+        text: async () => raw,
+      };
+    };
+    return collectSourceInventoryPages(guardedPage);
+  };
+
+  const readObservationInventory = async ({ source, adminAccess, assertOwned }) => {
+    const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    let afterSequence = 0;
+    let snapshotId = null;
+    let total = null;
+    let scope = null;
+    let scopeFingerprint = null;
+    const observations = [];
+    const sequences = new Set();
+    const maxPages = Math.ceil(PROVENANCE_TARGET_OBSERVATION_MAX_ROWS /
+      PROVENANCE_TARGET_OBSERVATION_PAGE_SIZE) + 1;
+    for (let pageNumber = 0; pageNumber < maxPages; pageNumber++) {
+      const request = {
+        contract_version: 1,
+        mode: "inventory",
+        source,
+        limit: PROVENANCE_TARGET_OBSERVATION_PAGE_SIZE,
+        ...(afterSequence ? { after_sequence: afterSequence, snapshot_id: snapshotId } : {}),
+      };
+      const response = await provenanceTargetCapabilityJson(
+        state,
+        PROVENANCE_TARGET_OBSERVATION_PATH,
+        {
+          body: request,
+          timeoutMs: 60_000,
+          what: "the complete provenance target history",
+          assertOwned,
+        },
+      );
+      const body = requireProvenanceTargetJson(response, "the provenance target history");
+      const bodyScopeFingerprint = JSON.stringify(canonicalProvenanceValue(body.scope));
+      if (body.contract_version !== 1 || body.mode !== "inventory" || body.source !== source ||
+          !/^sha256:[a-f0-9]{64}$/.test(String(body.snapshot_id || "")) ||
+          !Number.isSafeInteger(body.returned) || body.returned < 0 ||
+          !Number.isSafeInteger(body.total) || body.total < 0 ||
+          body.total > PROVENANCE_TARGET_OBSERVATION_MAX_ROWS ||
+          !Array.isArray(body.observations) || body.returned !== body.observations.length ||
+          typeof body.page_complete !== "boolean" || !body.scope ||
+          body.scope.whole_source_complete !== false) {
+        throw new Error("the provenance target history returned an invalid page receipt");
+      }
+      if (snapshotId === null) {
+        snapshotId = body.snapshot_id;
+        total = body.total;
+        scope = body.scope;
+        scopeFingerprint = bodyScopeFingerprint;
+      } else if (body.snapshot_id !== snapshotId || body.total !== total ||
+          bodyScopeFingerprint !== scopeFingerprint) {
+        throw new Error("the provenance target history changed during its complete read");
+      }
+      let previous = afterSequence;
+      for (const observation of body.observations) {
+        const sequence = observation?.sequence;
+        if (!Number.isSafeInteger(sequence) || sequence <= previous ||
+            sequences.has(sequence) || observation?.source !== source) {
+          throw new Error("the provenance target history returned duplicate or unordered observations");
+        }
+        previous = sequence;
+        sequences.add(sequence);
+        observations.push(observation);
+      }
+      if (observations.length > total) {
+        throw new Error("the provenance target history exceeded its stable total");
+      }
+      if (body.page_complete) {
+        if (body.next_after_sequence !== null || observations.length !== total) {
+          throw new Error("the provenance target history ended before its stable total");
+        }
+        return Object.freeze({
+          contract_version: 1,
+          mode: "inventory",
+          source,
+          snapshot_id: snapshotId,
+          returned: observations.length,
+          total,
+          page_complete: true,
+          next_after_sequence: null,
+          observations: Object.freeze([...observations]),
+          scope,
+        });
+      }
+      if (!body.observations.length ||
+          body.next_after_sequence !== body.observations.at(-1)?.sequence ||
+          body.next_after_sequence <= afterSequence) {
+        throw new Error("the provenance target history cursor did not advance");
+      }
+      afterSequence = body.next_after_sequence;
+    }
+    throw new Error("the provenance target history exceeded its bounded complete-read limit");
+  };
+
+  const prepareOriginal = async ({
+    root,
+    locator,
+    sourceName,
+    privatePrefixes,
+    ocr,
+    allowStructuralSplit,
+    assertOwned,
+  }) => {
+    if (ocr !== null || allowStructuralSplit !== true || !Array.isArray(privatePrefixes)) {
+      throw new TypeError("the exact original preparation boundary is invalid");
+    }
+    await assertOwned();
+    const library = await (options.ingestLib ?? ingestLib)();
+    await assertOwned();
+    const listed = library.localOriginalsForAssessment(root, {
+      relativeLocators: [locator],
+      privatePrefixes,
+    });
+    await assertOwned();
+    const originals = listed?.originals;
+    if (listed?.traversal_complete !== true || listed?.target_resolution_complete !== true ||
+        listed?.target_count !== 1 || !Array.isArray(originals) || originals.length !== 1 ||
+        originals[0]?._assessmentLocator !== locator) {
+      throw new Error("the exact original could not be re-resolved through one complete source walk");
+    }
+    const prepared = await library.prepare(originals[0], { sourceName, ocr: null });
+    await assertOwned();
+    return prepared;
+  };
+
+  const ingestPrepared = async ({ envelopes, adminAccess, assertOwned }) => {
+    const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    if (!Array.isArray(envelopes) || !envelopes.length) {
+      throw new TypeError("the exact target ingest has no prepared envelopes");
+    }
+    const library = await (options.ingestLib ?? ingestLib)();
+    const groups = library.batches(envelopes.map((envelope) => ({ envelope })));
+    if (!groups.length || groups.flat().length !== envelopes.length) {
+      throw new Error("the exact target ingest could not form bounded ordered batches");
+    }
+    const results = [];
+    for (const group of groups) {
+      await assertOwned();
+      const { res, raw } = await state.requestBatch({
+        docs: group.map((item) => item.envelope),
+        assertOwned,
+        sleep: async (milliseconds) =>
+          provenanceTargetGuardedWait(milliseconds, assertOwned, sleep),
+        onRetry: () => {},
+      });
+      await assertOwned();
+      let body = null;
+      try { body = JSON.parse(raw); } catch { /* validated below */ }
+      if (!res.ok) {
+        throw provenanceTargetWorkerError("the exact target ingest", {
+          status: res.status,
+          body,
+        });
+      }
+      try {
+        results.push(...validateBatchReceipt(body, group));
+      } catch {
+        throw new Error("the exact target ingest returned an invalid per-document receipt");
+      }
+    }
+    const counters = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+    for (const result of results) {
+      if (!Object.hasOwn(counters, result.status)) {
+        throw new Error("the exact target ingest returned an unsupported result status");
+      }
+      counters[result.status] += 1;
+    }
+    return Object.freeze({ ...counters, results: Object.freeze(results) });
+  };
+
+  const reconcileFamily = async ({ family, adminAccess, assertOwned }) => {
+    const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    if (!family || family.scope !== "exact_structural_family" ||
+        !Array.isArray(family.keep_doc_uids) || !family.keep_doc_uids.length) {
+      throw new TypeError("the exact structural family plan is invalid");
+    }
+    await assertOwned();
+    const removed = await state.reconcileFamilies({
+      families: [{
+        base_doc_uid: family.base_doc_uid,
+        keep_doc_uids: family.keep_doc_uids,
+      }],
+      assertOwned,
+      sleep: async (milliseconds) =>
+        provenanceTargetGuardedWait(milliseconds, assertOwned, sleep),
+      onRetry: () => {},
+    });
+    await assertOwned();
+    if (!Number.isSafeInteger(removed) || removed < 0) {
+      throw new Error("the exact structural family cleanup returned no valid count");
+    }
+    return Object.freeze({
+      complete: true,
+      scope: family.scope,
+      source: family.source,
+      base_doc_uid: family.base_doc_uid,
+      keep_doc_uids: family.keep_doc_uids,
+      removed_count: removed,
+    });
+  };
+
+  const drainVectorOutbox = async ({ scope, adminAccess, assertOwned }) => {
+    if (scope !== "global") throw new TypeError("the exact repair requires the global vector drain");
+    const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    const started = now();
+    const maxDurationMs = Number.isSafeInteger(options.maxDrainDurationMs)
+      ? Math.min(MANUAL_DRAIN_MAX_MS, Math.max(1_000, options.maxDrainDurationMs))
+      : MANUAL_DRAIN_MAX_MS;
+    const deadline = started + maxDurationMs;
+    let remaining = null;
+    let rounds = 0;
+    let expectedVectors = null;
+    let actualVectors = null;
+    for (let round = 1; round <= PROVENANCE_TARGET_DRAIN_MAX_ROUNDS; round++) {
+      if (now() >= deadline) break;
+      rounds = round;
+      const response = await provenanceTargetCapabilityJson(state, "/api/admin/brain/drain", {
+        method: "POST",
+        timeoutMs: Math.max(1_000, Math.min(180_000, deadline - now())),
+        what: "the exact repair vector drain",
+        assertOwned,
+      });
+      if (response.status === 409) {
+        const busy = validateDrainBusyReceipt(response.body);
+        remaining = busy.remaining;
+        const delayMs = Math.min(busy.retryAfterSeconds * 1_000, Math.max(0, deadline - now()));
+        if (delayMs <= 0) break;
+        await provenanceTargetGuardedWait(delayMs, assertOwned, sleep);
+        continue;
+      }
+      const body = requireProvenanceTargetJson(response, "the exact repair vector drain");
+      const receipt = validateDrainReceipt(body);
+      remaining = receipt.remaining;
+      expectedVectors = Number.isSafeInteger(body.expected_vectors) ? body.expected_vectors : null;
+      actualVectors = Number.isSafeInteger(body.actual_vectors) ? body.actual_vectors : null;
+      if (remaining === 0) break;
+      if (receipt.waiting > 0) {
+        const delayMs = Math.min(3_000, Math.max(0, deadline - now()));
+        if (delayMs <= 0) break;
+        await provenanceTargetGuardedWait(delayMs, assertOwned, sleep);
+      }
+    }
+    if (remaining !== 0 && now() >= deadline) {
+      throw new Error("the exact repair vector drain reached its wall-clock safety limit");
+    }
+    assertDrainComplete({
+      remaining,
+      rounds,
+      maxRounds: PROVENANCE_TARGET_DRAIN_MAX_ROUNDS,
+      expectedVectors,
+      actualVectors,
+    });
+    // Rebind public generation and authenticated readiness after the mutation.
+    // Queue depth alone is not proof that Vectorize can serve the exact corpus.
+    await readWorkerHealth({ adminAccess, assertOwned });
+    const readiness = await readVectorReadiness({ adminAccess, assertOwned });
+    return Object.freeze({ complete: true, readiness });
+  };
+
+  const sourceOriginalRequest = async ({ request, adminAccess, assertOwned }) => {
+    const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    const response = await provenanceTargetCapabilityJson(
+      state,
+      PROVENANCE_TARGET_OBSERVATION_PATH,
+      {
+        body: request,
+        timeoutMs: 180_000,
+        what: "the exact provenance proof request",
+        assertOwned,
+      },
+    );
+    return requireProvenanceTargetJson(response, "the exact provenance proof request");
+  };
+
+  return Object.freeze({
+    acquireSourceLease,
+    verifyCandidateRuntime,
+    lstat: options.lstat ?? ((path) => lstatSync(path)),
+    realpath: options.realpath ?? ((path) => realpathSync(path)),
+    readFile: options.readFile ?? ((path) => readFileSync(path)),
+    resolveDurableAdminAccess,
+    readWorkerHealth,
+    readVectorReadiness,
+    readSourceInventory,
+    prepareOriginal,
+    sealTargets: sourceOriginalRequest,
+    readObservationInventory,
+    recordDiscovery: sourceOriginalRequest,
+    ingestPrepared,
+    reconcileFamily,
+    drainVectorOutbox,
+    recordResultFamily: sourceOriginalRequest,
+    verifyResultFamily: sourceOriginalRequest,
+    recordAcceptedResolution: sourceOriginalRequest,
+    verifyAcceptedResolution: sourceOriginalRequest,
+  });
+}
 
 async function readProvenanceRepairRemoteState(manifestPath, m, source, options = {}) {
   if (options.readRemoteState) {
@@ -8950,8 +9711,110 @@ export async function cmdProvenanceRepair(manifestPath, options = {}) {
   return receipt;
 }
 
-async function cmdProvenanceRepairInteractive(manifestPath) {
-  return cmdProvenanceRepair(manifestPath, { flags: parseFlags(process.argv.slice(3)) });
+function provenanceTargetPublicFailure(source, stage = "preview_checks") {
+  return Object.freeze({
+    schema_version: 1,
+    operation: "provenance-target-repair",
+    mode: "preview_or_apply",
+    status: "incomplete",
+    complete: false,
+    source: Object.freeze({ id: source, kind: "upload" }),
+    target_count: 1,
+    failed_stage: stage,
+    completed_stages: Object.freeze([]),
+    whole_source_complete: false,
+  });
+}
+
+/**
+ * Run the schema-45 one-target lane without passing its private locator through
+ * the legacy whole-source flag parser or ever printing it back to the owner.
+ */
+export async function cmdProvenanceTargetRepair(argv = process.argv.slice(3), options = {}) {
+  let targetCli;
+  let parsed;
+  try {
+    targetCli = options.targetCli ?? await provenanceTargetCliLib();
+    parsed = targetCli.parseProvenanceTargetRepairArgv(argv);
+  } catch (error) {
+    if (error instanceof Fatal) throw error;
+    die(
+      `the one-file provenance repair options are invalid: ${String(error?.message || error)}. ` +
+        "Nothing was read or changed.",
+    );
+  }
+
+  let runtimePackageFingerprint;
+  try {
+    runtimePackageFingerprint = (options.runtimeFingerprint ??
+      provenanceTargetRuntimePackageFingerprint)(options.runtimeFingerprintOptions || {});
+  } catch {
+    throw new ProvenanceRepairIncompleteError(
+      "The one-file provenance preview could not verify this installed candidate package. " +
+        "Nothing was read from the source or changed.",
+      provenanceTargetPublicFailure(parsed.source, "candidate_runtime"),
+    );
+  }
+
+  const input = Object.freeze({
+    manifestPath: resolve(parsed.manifest),
+    source: parsed.source,
+    target: parsed.target,
+    productVersion: PRODUCT_VERSION,
+    candidateRuntimePackageFingerprint: runtimePackageFingerprint,
+    ...(parsed.approve ? { approvalId: parsed.approve } : {}),
+  });
+  const dependencies = options.targetDependencies ?? provenanceTargetDependencies(
+    options.targetDependencyOptions || {},
+  );
+
+  try {
+    if (parsed.apply) {
+      const receipt = await targetCli.applyProvenanceTargetRepair(input, dependencies);
+      say(targetCli.renderProvenanceTargetRepairReceipt(receipt));
+      return receipt;
+    }
+    const preview = await targetCli.previewProvenanceTargetRepair(input, dependencies);
+    if (parsed.json) console.log(JSON.stringify(preview.publicPlan, null, 2));
+    else say(targetCli.renderProvenanceTargetRepairPlan(preview.privateContext.privatePlan));
+    return preview.publicPlan;
+  } catch (error) {
+    const targetError = error instanceof targetCli.ProvenanceTargetCliError;
+    const receipt = targetError
+      ? error.receipt
+      : provenanceTargetPublicFailure(parsed.source, parsed.apply ? "approval_recheck" : "preview_checks");
+    if (parsed.json) {
+      throw new JsonFatal({
+        ok: false,
+        kind: "provenance_target_repair",
+        error: {
+          code: "PROVENANCE_TARGET_REPAIR_INCOMPLETE",
+          message: "The read-only one-file provenance preview could not complete. Nothing changed.",
+        },
+        receipt,
+      });
+    }
+    const message = targetError
+      ? targetCli.renderProvenanceTargetRepairReceipt(receipt)
+      : parsed.apply
+        ? "One-file provenance repair stopped before its complete proof. It is incomplete and did not claim success. Run a new read-only preview before retrying."
+        : "The read-only one-file provenance preview could not complete its exact readiness checks. Nothing changed. Repair the prerequisite and run the preview again.";
+    throw new ProvenanceRepairIncompleteError(message, receipt);
+  }
+}
+
+export async function cmdProvenanceRepairInteractive(manifestPath, options = {}) {
+  const argv = options.argv ?? process.argv;
+  const commandArguments = argv.slice(3);
+  const targetLane = commandArguments.some((argument) => {
+    const token = String(argument);
+    return token === "--target" || token.startsWith("--target=");
+  });
+  if (targetLane) return cmdProvenanceTargetRepair(commandArguments, options);
+  return cmdProvenanceRepair(manifestPath, {
+    ...options,
+    flags: options.flags ?? parseFlags(commandArguments),
+  });
 }
 
 /**
@@ -12524,6 +13387,17 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
 
   const sourceName = assertSourceName(flags.source === true || !flags.source ? which : flags.source);
   const dry = !!flags["dry-run"];
+  const assistantJson = flags.json !== undefined;
+  if (assistantJson && (flags.json !== true || which !== "drive" || !dry)) {
+    throw new JsonFatal({
+      schema_version: 1,
+      operation: "drive.bounded_preview",
+      status: "refused",
+      error_code: "invalid_arguments",
+      read_only: true,
+      effects: { brain_documents_sent: 0, brain_receipts_written: 0, checkpoint_written: false },
+    });
+  }
   // Drive and Gmail share their canonical state identity with the source
   // lease. IMAP is outside this provenance-repair lease change, so preserve
   // its historical path spelling (notably /var versus /private/var on macOS).
@@ -12535,22 +13409,35 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
     manifestPath,
     flags,
     options,
-    { which, sourceName, dry, removalApproval, statePath, assertLockOwned },
+    { which, sourceName, dry, assistantJson, removalApproval, statePath, assertLockOwned },
   );
   // A dry run writes neither resume state nor source receipts, so it cannot
   // race the durable writer. Every real Drive or Gmail path, including brain
   // load and provenance repair, takes the same cross-platform owner lease
   // before credentials or network. IMAP is outside provenance repair and keeps
   // its existing boundary in this change.
-  if (dry || !["drive", "gmail"].includes(which)) return run();
-  return runMutatingSourceIngest({
-    manifestPath,
-    sourceName,
-    statePath,
-    sharedRecord: "provider:google",
-    dryRun: false,
-    options,
-  }, run);
+  try {
+    if (dry || !["drive", "gmail"].includes(which)) return await run();
+    return await runMutatingSourceIngest({
+      manifestPath,
+      sourceName,
+      statePath,
+      sharedRecord: "provider:google",
+      dryRun: false,
+      options,
+    }, run);
+  } catch (error) {
+    if (!assistantJson || error instanceof JsonFatal) throw error;
+    throw new JsonFatal({
+      schema_version: 1,
+      operation: "drive.bounded_preview",
+      status: "unavailable",
+      error_code: "drive_preview_unavailable",
+      read_only: true,
+      retry_safe: true,
+      effects: { brain_documents_sent: 0, brain_receipts_written: 0, checkpoint_written: false },
+    });
+  }
 }
 
 const cmdIngestRemoteRun = async (
@@ -12558,7 +13445,7 @@ const cmdIngestRemoteRun = async (
   manifestPath,
   flags,
   options,
-  { which, sourceName, dry, removalApproval, statePath, assertLockOwned = null },
+  { which, sourceName, dry, assistantJson = false, removalApproval, statePath, assertLockOwned = null },
 ) => {
   // A deployed connector talks to the brain's authenticated data-plane route.
   // The Cloudflare control token is an install/deploy credential, not something
@@ -12621,7 +13508,7 @@ const cmdIngestRemoteRun = async (
     const { estimateOcrCost, describeOcrCost } = await ingestOcrLib();
     info(`OCR is ON, model ${ocrCfg.model}, up to ${ocrCfg.maxPages} page(s) per document.`);
     info(`  cost per 100 scanned pages: ${describeOcrCost(estimateOcrCost(100))}`);
-  } else if (ocrCfg.enabled && dry) {
+  } else if (ocrCfg.enabled && dry && !assistantJson) {
     info("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
   }
 
@@ -12653,8 +13540,9 @@ const cmdIngestRemoteRun = async (
   const scannerOn = m.safety?.credential_scanner?.enabled !== false;
   const scannerFingerprint = credentialScannerFingerprint(scannerOn);
   const scannerPolicyChanged = state.credential_scanner_fingerprint !== scannerFingerprint;
-  const limit = flags.limit ? Number(flags.limit) : Infinity;
+  const limit = flags.limit ? Number(flags.limit) : (assistantJson ? 25 : Infinity);
   if (flags.limit && (!Number.isInteger(limit) || limit < 1)) die("--limit must be a positive whole number.");
+  if (assistantJson && limit > 100) die("the assistant Drive preview limit must be between 1 and 100");
   let sourcePolicy = null;
   let policyFingerprint = null;
   let driveDecision = null;
@@ -12707,6 +13595,10 @@ const cmdIngestRemoteRun = async (
     saveState(statePath, state);
   }
   let lane = incremental ? "incremental" : "sweep";
+  if (assistantJson) {
+    incremental = false;
+    lane = "bounded_preview";
+  }
   const runId = `sync_${randomBytes(16).toString("hex")}`;
   const runStartedAt = new Date().toISOString();
   let runOpened = false;
@@ -12851,20 +13743,22 @@ const cmdIngestRemoteRun = async (
   }
 
   if (which === "drive") {
-    const drive = await import("./connectors/google-drive.mjs");
+    const drive = options.drive ?? await import("./connectors/google-drive.mjs");
     const sourceDeletedUids = [];
-    if (!incremental && state.sync_token) info(`${driveDecision.reason}; using a full Drive comparison`);
-    if (sourcePolicy.excludeFileIds.length) info(`${sourcePolicy.excludeFileIds.length} reviewed Drive file-id exclusion(s) enforced`);
-    if (sourcePolicy.excludePaths.length) info(`${sourcePolicy.excludePaths.length} Drive path exclusion(s) enforced`);
-    if (sourcePolicy.privatePrefixes.length) info(`private path prefixes enforced in Drive: ${sourcePolicy.privatePrefixes.join(", ")}`);
+    if (!assistantJson && !incremental && state.sync_token) info(`${driveDecision.reason}; using a full Drive comparison`);
+    if (!assistantJson && sourcePolicy.excludeFileIds.length) info(`${sourcePolicy.excludeFileIds.length} reviewed Drive file-id exclusion(s) enforced`);
+    if (!assistantJson && sourcePolicy.excludePaths.length) info(`${sourcePolicy.excludePaths.length} Drive path exclusion(s) enforced`);
+    if (!assistantJson && sourcePolicy.privatePrefixes.length) info(`private path prefixes enforced in Drive: ${sourcePolicy.privatePrefixes.join(", ")}`);
     // Taken BEFORE the walk. Taken after, anything changed during the walk
     // would be missed forever, because the next run starts from a token that
     // already claims to include it.
     let nextSync = null;
-    try {
-      nextSync = await drive.startPageToken(getToken);
-    } catch (e) {
-      warn(`could not get a change token, so the next run will be a full walk: ${e.message.slice(0, 100)}`);
+    if (!assistantJson) {
+      try {
+        nextSync = await drive.startPageToken(getToken);
+      } catch (e) {
+        warn(`could not get a change token, so the next run will be a full walk: ${e.message.slice(0, 100)}`);
+      }
     }
 
     let files = [];
@@ -12902,9 +13796,11 @@ const cmdIngestRemoteRun = async (
       }
     }
     if (!incremental) {
-      info(`full walk of ${sourcePolicy.rootFolderIds.length} reviewed Drive root folder(s)`);
-      for await (const f of drive.listRootedFiles(getToken, {
+      if (!assistantJson) info(`full walk of ${sourcePolicy.rootFolderIds.length} reviewed Drive root folder(s)`);
+      const listing = assistantJson ? drive.listRootedFilesPreview : drive.listRootedFiles;
+      for await (const f of listing(getToken, {
         rootFolderIds: sourcePolicy.rootFolderIds,
+        ...(assistantJson ? { limit } : {}),
       })) {
         files.push(f);
         if (files.length >= limit) break;
@@ -13042,7 +13938,7 @@ const cmdIngestRemoteRun = async (
         skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: f.id,
       };
-      if (scanned % 200 === 0) process.stdout.write(`\r  scanned ${scanned}...   `);
+      if (!assistantJson && scanned % 200 === 0) process.stdout.write(`\r  scanned ${scanned}...   `);
       return {
         hash: r.version, envelopes, rel: f.name, stateKey: key,
         deferState: true, familyPlan,
@@ -13058,15 +13954,17 @@ const cmdIngestRemoteRun = async (
     if (dry) {
       // A preview has no authenticated inventory, but still reports every
       // observed category. It cannot delete or advance a cursor.
-      await applyDriveRemovals({
-        uids: excludedUids, base, adminKey, state, dryRun: true, label: "source policy",
-      });
-      await applyDriveRemovals({
-        uids: sourceDeletedUids, base, adminKey, state, dryRun: true, label: "Drive deletion",
-      });
-      await applyDriveRemovals({
-        uids: intentionalRemovalUids, base, adminKey, state, dryRun: true, label: "intentional source skip",
-      });
+      if (!assistantJson) {
+        await applyDriveRemovals({
+          uids: excludedUids, base, adminKey, state, dryRun: true, label: "source policy",
+        });
+        await applyDriveRemovals({
+          uids: sourceDeletedUids, base, adminKey, state, dryRun: true, label: "Drive deletion",
+        });
+        await applyDriveRemovals({
+          uids: intentionalRemovalUids, base, adminKey, state, dryRun: true, label: "intentional source skip",
+        });
+      }
       intentionalRemovalUids.length = 0;
     } else {
       // The pre-ingest inventory keeps the safety denominator stable and also
@@ -13159,6 +14057,18 @@ const cmdIngestRemoteRun = async (
         }
       }
       intentionalRemovalUids.length = 0;
+    }
+    if (assistantJson) {
+      const receipt = drive.driveAssistantPreviewSummary({
+        limit,
+        configuredRootCount: sourcePolicy.rootFolderIds.length,
+        scanned,
+        wouldSend: prepared,
+        unchanged,
+        skipped: skips.length,
+      });
+      console.log(JSON.stringify(receipt, null, 2));
+      return receipt;
     }
     // NOT saved yet. Advancing the cursor before the batches it covers have
     // been accepted means a mid-send failure permanently skips those documents:
@@ -23026,6 +23936,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            enabled, connected source, one report at the end
     brain ingest     <manifest> --path <dir>  load a folder into the brain
     brain ingest     <manifest> --from drive  load from a connected remote source
+                                           add --dry-run --json for one bounded,
+                                           aggregate-only assistant preview
     brain ingest     <manifest> --from gmail  sync connected Gmail (--dry-run to preview)
     brain ingest     <manifest> --from calendar  sync Google Calendar (--dry-run to preview)
     brain ingest     <manifest> --from imap  sync a connected IMAP mailbox (--dry-run to preview)
@@ -23047,6 +23959,12 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain provenance-repair <manifest> --source <name>  read-only whole-source provenance recovery preview
                                            schema 1 is inventory-only; repair apply requires a future
                                            candidate-resolution ledger and is intentionally unavailable
+    brain provenance-repair <manifest> --source <name> --target <relative-file>
+                                           read-only preview for one exact native-readable local original;
+                                           hides the private locator and keeps OCR off
+    brain provenance-repair <manifest> --source <name> --target <relative-file> --apply --approve <id>
+                                           apply only the freshly approved schema-45 one-target plan,
+                                           then verify its exact cited result family and accepted resolution
     brain schedule   <manifest> --install  install unattended Drive refresh on macOS
     brain schedule   <manifest> --install --folder  install unattended refresh of the watched
                                            local folder declared in corpora.local_folder (macOS)

@@ -2156,11 +2156,11 @@ try {
     (error) => error.code === "RECOVERY_D1_RESOURCE_AMBIGUOUS",
   );
 
-  // Schema 43 has the reviewed vector protocol, but the current Worker reads
-  // schema-44 result-family state on every ingest. It must be updated before export;
+  // Schema 44 has the reviewed result-family protocol, but the current Worker
+  // reads schema-45 accepted-resolution state. It must be updated before export;
   // restoring the older prefix would otherwise produce a healthy-looking brain
   // whose next ordinary write fails.
-  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 43 });
+  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 44 });
   const prefixSourceGate = createCloudflareRecoveryFieldGateAdapters(
     approvedAdapterConfig,
     prefixSourceHarness.dependencies,
@@ -2748,9 +2748,9 @@ try {
   }
 
   // Active health is the last cheap proof that the promoted Worker and restored
-  // database still belong to the same release. A schema-43 time-travel restore
-  // between resumable stages must not pass as an active schema-44 brain.
-  for (const schemaVersion of [undefined, 43]) {
+  // database still belong to the same release. A schema-44 time-travel restore
+  // between resumable stages must not pass as an active schema-45 brain.
+  for (const schemaVersion of [undefined, 44]) {
     const staleSchemaHarness = providerHarness({
       targetVersionId: activeWorkerVersionId,
       initialTargetRestored: true,

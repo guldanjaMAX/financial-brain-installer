@@ -34,6 +34,7 @@ import {
 export const SOURCE_ORIGINAL_OBSERVATION_PATH = "/api/admin/brain/source-original-observations";
 export const SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION = 1;
 export const SOURCE_ORIGINAL_OBSERVATION_MAX_TARGETS = 10;
+export const SOURCE_ORIGINAL_AUTHORITY_SCHEMA_VERSION = 46;
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_DOCUMENTS_PER_ORIGINAL = 256;
@@ -186,7 +187,7 @@ function normalizedLocatorTarget(value, { recorded = false } = {}) {
   const fields = recorded
     ? [...base, "observation_stage", "outcome", "reason_code", "text_state",
       "original_content_sha256", "original_byte_count", "page_count", "page_count_state",
-      "resolves_observation_hash"]
+      "resolves_observation_hash", "predecessor_observation_hash"]
     : base.slice(0, 2);
   if (!exactObject(value, fields)) {
     refuse("source_original_invalid_target", "each target must use the exact bounded target contract");
@@ -230,6 +231,13 @@ function normalizedLocatorTarget(value, { recorded = false } = {}) {
   } else if (resolves !== null) {
     refuse("source_original_invalid_resolution", "only an accepted repair may resolve a prior observation");
   }
+  if (value.predecessor_observation_hash !== null &&
+      !SHA_ID_RE.test(value.predecessor_observation_hash)) {
+    refuse(
+      "source_original_invalid_authority_predecessor",
+      "predecessor_observation_hash must name the exact prior observation or be null for empty history",
+    );
+  }
   return {
     ...target,
     original_id: value.original_id,
@@ -242,6 +250,7 @@ function normalizedLocatorTarget(value, { recorded = false } = {}) {
     page_count: value.page_count,
     page_count_state: value.page_count_state,
     resolves_observation_hash: resolves,
+    predecessor_observation_hash: value.predecessor_observation_hash,
   };
 }
 
@@ -658,24 +667,100 @@ export function sourceOriginalObservationReceiptFields(value) {
   };
 }
 
+// This stable schema-42 digest identifies the observation event. It is not a
+// self-authenticating chain hash: schema 46 binds predecessor edges through
+// append-only columns, transactional D1 checks, and authenticated recovery
+// validation without changing historical observation hashes.
 export async function sourceOriginalObservationHash(receipt) {
   return sha256Id(canonical(sourceOriginalObservationReceiptFields(receipt)));
 }
 
 const observationHash = sourceOriginalObservationHash;
 
-const RECEIPT_COLUMNS = `sequence,contract_version,tenant_id,source,original_id,locator_kind,
+const RECEIPT_BASE_COLUMNS = `sequence,contract_version,tenant_id,source,original_id,locator_kind,
   run_id,plan_id,source_snapshot_id,target_set_hash,target_count,observation_stage,outcome,
   reason_code,text_state,original_content_sha256,original_byte_count,page_count,page_count_state,
   result_document_count,result_document_set_hash,resolves_observation_hash,observation_hash,recorded_at`;
+const RECEIPT_COLUMNS = `${RECEIPT_BASE_COLUMNS},
+  authority_chain_version,predecessor_observation_hash`;
+const LEGACY_RECEIPT_COLUMNS = `${RECEIPT_BASE_COLUMNS},
+  0 AS authority_chain_version,NULL AS predecessor_observation_hash`;
+
+async function authoritySchemaVersion(env) {
+  const state = await env.DB.prepare(
+    "SELECT schema_version FROM install_state WHERE id=1 LIMIT 2",
+  ).all();
+  const rows = rowsOf(state);
+  return rows.length === 1 && Number.isSafeInteger(Number(rows[0].schema_version))
+    ? Number(rows[0].schema_version)
+    : null;
+}
+
+async function requireAuthoritySchema(env) {
+  if (await authoritySchemaVersion(env) < SOURCE_ORIGINAL_AUTHORITY_SCHEMA_VERSION) {
+    throw new ObservationRequestError(
+      409,
+      "source_original_authority_schema_upgrade_required",
+      "source-original writes require schema 46 or newer",
+    );
+  }
+}
+
+async function observationHeads(env, receipts) {
+  if (!receipts.length) return new Map();
+  const results = await env.DB.batch(receipts.map((receipt) => env.DB.prepare(
+    `SELECT sequence,observation_hash,outcome
+       FROM source_original_observations
+      WHERE tenant_id=?1 AND source=?2 AND original_id=?3
+      ORDER BY sequence DESC LIMIT 1`,
+  ).bind(receipt.tenant_id, receipt.source, receipt.original_id)));
+  if (!Array.isArray(results) || results.length !== receipts.length) {
+    throw new ObservationRequestError(
+      503,
+      "source_original_observation_database_unavailable",
+      "observation authority head is unavailable",
+    );
+  }
+  return new Map(receipts.map((receipt, index) => {
+    const rows = rowsOf(results[index]);
+    if (rows.length > 1) {
+      throw new ObservationRequestError(
+        503,
+        "source_original_observation_corrupt",
+        "observation authority head is ambiguous",
+      );
+    }
+    return [receipt.original_id, rows[0] || null];
+  }));
+}
+
+async function requireObservationHeads(env, receipts, expectedHash) {
+  const heads = await observationHeads(env, receipts);
+  for (const receipt of receipts) {
+    const expected = expectedHash(receipt);
+    const actual = heads.get(receipt.original_id)?.observation_hash ?? null;
+    if (actual !== expected) {
+      throw new ObservationRequestError(
+        409,
+        "source_original_observation_history_advanced",
+        "source-original history advanced after the reviewed snapshot",
+      );
+    }
+  }
+}
 
 async function repairLineageValid(env, receipt) {
   if (receipt.observation_stage !== "repair" || receipt.outcome !== "accepted") return true;
   if (!receipt.original_content_sha256 || !SHA_ID_RE.test(receipt.resolves_observation_hash)) return false;
   const result = await env.DB.prepare(
     `SELECT ${RECEIPT_COLUMNS} FROM source_original_observations
-      WHERE source=?1 AND original_id=?2 AND observation_hash=?3 LIMIT 2`,
-  ).bind(receipt.source, receipt.original_id, receipt.resolves_observation_hash).all();
+      WHERE tenant_id=?1 AND source=?2 AND original_id=?3 AND observation_hash=?4 LIMIT 2`,
+  ).bind(
+    receipt.tenant_id,
+    receipt.source,
+    receipt.original_id,
+    receipt.resolves_observation_hash,
+  ).all();
   const rows = rowsOf(result);
   if (rows.length !== 1) return false;
   const prior = rows[0];
@@ -713,6 +798,10 @@ function publicReceipt(row) {
       : String(row.resolves_observation_hash),
     observation_hash: String(row.observation_hash),
     recorded_at: Number(row.recorded_at),
+    authority_chain_version: Number(row.authority_chain_version),
+    predecessor_observation_hash: row.predecessor_observation_hash === null
+      ? null
+      : String(row.predecessor_observation_hash),
   };
 }
 
@@ -764,6 +853,7 @@ async function handleRecord(env, body) {
   if (env.VECTOR_DRAIN_MODE === "paused-for-upgrade") {
     throw new ObservationRequestError(503, "corpus_writes_paused", "brain writes are paused for a verified upgrade or rollback");
   }
+  await requireAuthoritySchema(env);
   const binding = commonBinding(body, { recorded: true });
   await requireUploadSource(env, binding.source);
   const sealed = await sealedTargets(env, binding);
@@ -815,7 +905,13 @@ async function handleRecord(env, body) {
     if (!await repairLineageValid(env, receipt)) {
       refuse("source_original_source_changed", "accepted repair does not resolve a prior gap for the same original bytes", 409);
     }
-    receipts.push({ ...receipt, observation_hash: await observationHash(receipt), recorded_at: recordedAt });
+    receipts.push({
+      ...receipt,
+      observation_hash: await observationHash(receipt),
+      recorded_at: recordedAt,
+      authority_chain_version: 1,
+      predecessor_observation_hash: target.predecessor_observation_hash,
+    });
   }
 
   const priorResult = await env.DB.prepare(
@@ -842,7 +938,10 @@ async function handleRecord(env, body) {
   }
   const prior = new Map(priorRows.map((row) => [String(row.original_id), row]));
   if (receipts.some((receipt) => prior.has(receipt.original_id) &&
-      prior.get(receipt.original_id).observation_hash !== receipt.observation_hash)) {
+      (prior.get(receipt.original_id).observation_hash !== receipt.observation_hash ||
+       Number(prior.get(receipt.original_id).authority_chain_version) !== 1 ||
+       prior.get(receipt.original_id).predecessor_observation_hash !==
+         receipt.predecessor_observation_hash))) {
     refuse("source_original_observation_conflict", "an immutable observation already exists for this run and original", 409);
   }
 
@@ -850,6 +949,13 @@ async function handleRecord(env, body) {
   // retries therefore skip rows already proven identical instead of relying
   // on conflict handling at the insert statement.
   const pendingReceipts = receipts.filter((receipt) => !prior.has(receipt.original_id));
+  await requireObservationHeads(
+    env,
+    receipts,
+    (receipt) => prior.has(receipt.original_id)
+      ? receipt.observation_hash
+      : receipt.predecessor_observation_hash,
+  );
   let batchFailed = false;
   try {
     if (pendingReceipts.length) await env.DB.batch(pendingReceipts.map((receipt) => env.DB.prepare(
@@ -857,8 +963,9 @@ async function handleRecord(env, body) {
          (contract_version,tenant_id,source,original_id,locator_kind,run_id,plan_id,
           source_snapshot_id,target_set_hash,target_count,observation_stage,outcome,reason_code,
           text_state,original_content_sha256,original_byte_count,page_count,page_count_state,
-          result_document_count,result_document_set_hash,resolves_observation_hash,observation_hash,recorded_at)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)`,
+          result_document_count,result_document_set_hash,resolves_observation_hash,observation_hash,recorded_at,
+          authority_chain_version,predecessor_observation_hash)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)`,
     ).bind(
       receipt.contract_version, receipt.tenant_id, receipt.source, receipt.original_id,
       receipt.locator_kind, receipt.run_id, receipt.plan_id, receipt.source_snapshot_id,
@@ -867,6 +974,7 @@ async function handleRecord(env, body) {
       receipt.original_byte_count, receipt.page_count, receipt.page_count_state,
       receipt.result_document_count, receipt.result_document_set_hash,
       receipt.resolves_observation_hash, receipt.observation_hash, receipt.recorded_at,
+      receipt.authority_chain_version, receipt.predecessor_observation_hash,
     )));
   } catch {
     // Another identical request may have won the race. Only a complete,
@@ -890,12 +998,29 @@ async function handleRecord(env, body) {
   }
   const readback = new Map(readbackRows.map((row) => [String(row.original_id), row]));
   if (!exactReadback) {
+    if (batchFailed) {
+      await requireObservationHeads(
+        env,
+        pendingReceipts,
+        (receipt) => receipt.predecessor_observation_hash,
+      );
+    }
     if (batchFailed && readbackRows.length < receipts.length &&
         readbackRows.every((row) => expected.has(String(row.original_id)))) {
       throw new ObservationRequestError(503, "source_original_record_unavailable", "observation batch was not recorded");
     }
     refuse("source_original_observation_conflict", "exact observation readback did not match", 409);
   }
+  if (readbackRows.some((row) => Number(row.authority_chain_version) !== 1 ||
+      row.predecessor_observation_hash !== expected.get(String(row.original_id))
+        ?.predecessor_observation_hash)) {
+    throw new ObservationRequestError(
+      503,
+      "source_original_observation_corrupt",
+      "stored observation authority binding failed exact readback",
+    );
+  }
+  await requireObservationHeads(env, receipts, (receipt) => receipt.observation_hash);
   return respond({
     contract_version: SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION,
     mode: "record",
@@ -919,6 +1044,9 @@ async function handleAcceptedResolution(env, body, dependencies) {
       "brain writes are paused for a verified upgrade or rollback",
     );
   }
+  // During the paused Worker-first rollout, schemas 44 and 45 do not have the
+  // authority-chain columns yet. Refuse before any proof read can query them.
+  await requireAuthoritySchema(env);
   await requireUploadSource(env, binding.source);
   const sealed = await sealedTargets(env, binding);
   const target = binding.targets[0];
@@ -1026,6 +1154,13 @@ async function handleInventory(env, body) {
   }
   const source = normalizedSource(body.source);
   await loadSourceOriginalSigningKey(env);
+  // Inventory remains readable while the paused release Worker is serving a
+  // schema-44/45 Brain. Legacy rows are an explicit version-zero prefix; writes
+  // and accepted authority still require the completed schema-46 migration.
+  const receiptColumns = await authoritySchemaVersion(env) >=
+    SOURCE_ORIGINAL_AUTHORITY_SCHEMA_VERSION
+    ? RECEIPT_COLUMNS
+    : LEGACY_RECEIPT_COLUMNS;
   const after = body.after_sequence === undefined ? 0 : body.after_sequence;
   const limit = body.limit === undefined ? SOURCE_ORIGINAL_OBSERVATION_MAX_TARGETS : body.limit;
   if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) ||
@@ -1049,7 +1184,7 @@ async function handleInventory(env, body) {
     refuse("source_original_inventory_changed", "observation inventory changed; restart at the first page", 409);
   }
   const result = await env.DB.prepare(
-    `SELECT ${RECEIPT_COLUMNS} FROM source_original_observations
+    `SELECT ${receiptColumns} FROM source_original_observations
       WHERE source=?1 AND sequence>?2 AND sequence<=?3 ORDER BY sequence LIMIT ?4`,
   ).bind(source, after, Number(marker?.max_sequence || 0), limit + 1).all();
   const rows = rowsOf(result);
@@ -1079,6 +1214,7 @@ async function handleVerify(env, body) {
   if (!exactObject(body, fields) || !RUN_RE.test(body.run_id)) {
     refuse("source_original_invalid_request", "verify request does not match the exact contract");
   }
+  await requireAuthoritySchema(env);
   const binding = commonBinding(body, { recorded: true });
   await requireUploadSource(env, binding.source);
   const sealed = await sealedTargets(env, binding);
@@ -1120,6 +1256,8 @@ async function handleVerify(env, body) {
         // successful repair of the prior original.
         status = "source_changed";
       } else if (target.locator_kind !== row.locator_kind ||
+          Number(row.authority_chain_version) !== 1 ||
+          target.predecessor_observation_hash !== row.predecessor_observation_hash ||
           target.observation_stage !== row.observation_stage ||
           target.outcome !== row.outcome || target.reason_code !== row.reason_code ||
           target.text_state !== row.text_state ||

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FinanceScopeProvider } from "./FinanceScope";
-import { AttentionList, Home } from "./Home";
+import { AttentionList, Home, SourceChip } from "./Home";
 import type { FinSnapshot } from "../lib/api";
 
 describe("home composition", () => {
@@ -33,5 +33,27 @@ describe("home composition", () => {
     );
     expect(html).toContain("Open This Year");
     expect(html).toContain("Open Add &amp; Review");
+  });
+
+  it("names unreadable documents and stale sources instead of relying on the generic problem state", () => {
+    const snapshot = {
+      ledger_installed: true,
+      deadlines: [],
+      exceptions: [],
+      documents: [{
+        fin_doc_uid: "doc-1", entity_slug: "mesa", title: "Receipt scan",
+        readable: false, unreadable_reason: "image too dark", availability: "have_it",
+      }],
+      reconciliations: [],
+    } as unknown as FinSnapshot;
+    const documents = renderToStaticMarkup(
+      <AttentionList snapshot={snapshot} entities={[]} scopeName="Mesa Coffee" />,
+    );
+    const source = renderToStaticMarkup(<SourceChip state="stale" />);
+
+    expect(documents).toContain("Unreadable copy");
+    expect(documents).toContain("This copy could not be read");
+    expect(source).toContain("Source out of date");
+    expect(source).toContain("Problem");
   });
 });

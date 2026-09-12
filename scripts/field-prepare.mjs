@@ -543,7 +543,7 @@ function assertPlanSourceIdentity(options, source) {
   return source;
 }
 
-function makeOutputDirectory(requested) {
+export function makeOutputDirectory(requested, { temporaryRoot = tmpdir() } = {}) {
   if (requested) {
     const output = resolve(requested);
     const relativeToRoot = relative(ROOT, output);
@@ -552,9 +552,7 @@ function makeOutputDirectory(requested) {
       !relativeToRoot.startsWith(`..${sep}`) &&
       !isAbsolute(relativeToRoot)
     );
-    const insidePrivateRoot = relativeToRoot === ".field-prepare" ||
-      relativeToRoot.startsWith(`.field-prepare${sep}`);
-    if (insideRoot && !insidePrivateRoot) {
+    if (insideRoot) {
       throw new Error("custom_output_inside_source_checkout_refused");
     }
     if (existsSync(output)) throw new Error("output directory already exists");
@@ -567,14 +565,15 @@ function makeOutputDirectory(requested) {
     if (!IS_WINDOWS) chmodSync(output, 0o700);
     return output;
   }
-  const base = join(ROOT, ".field-prepare");
-  mkdirSync(base, { recursive: true, mode: 0o700 });
+  // Output created before the opening identity check makes an unignored
+  // in-checkout default invalidate the very clean tree it is meant to prove.
+  // Keep the default in a new owner-only OS temporary directory instead.
+  const base = resolve(temporaryRoot);
   const baseInfo = lstatSync(base);
   if (!baseInfo.isDirectory() || baseInfo.isSymbolicLink()) {
     throw new Error("private field preparation root is unsafe");
   }
-  if (!IS_WINDOWS) chmodSync(base, 0o700);
-  const output = mkdtempSync(join(base, "run-"));
+  const output = mkdtempSync(join(base, "brain-field-prepare-output-"));
   if (!IS_WINDOWS) chmodSync(output, 0o700);
   return output;
 }
@@ -615,7 +614,7 @@ function safeCode(error, fallback) {
 
 const FIELD_GATES = Object.freeze([
   Object.freeze({ id: "physical_windows_install", title: "Clean Windows owner profile", proof: "Install the exact tarball in a standard user profile, run the package-local command, complete the 25-round DPAPI gate, then interrupt and resume once." }),
-  Object.freeze({ id: "disposable_cloudflare", title: "Disposable Cloudflare Brain", proof: "With separate approval, prove browser OAuth, exact account choice, D1 and Vectorize creation, schema 43, fixed public smoke, one interrupted migration, vector backlog and drain, then confirm cleanup." }),
+  Object.freeze({ id: "disposable_cloudflare", title: "Disposable Cloudflare Brain", proof: "With separate approval, prove browser OAuth, exact account choice, D1 and Vectorize creation through schema 46, fixed public smoke, one interrupted migration, vector backlog and drain, then confirm cleanup." }),
   Object.freeze({ id: "physical_passkeys", title: "Permanent-host passkey ceremony", proof: "Two people use two authenticator types each. Prove enroll, logout and login, second device, revoke with immediate session denial, recovery, and last-owner refusal." }),
   Object.freeze({ id: "plaid_sandbox", title: "Plaid Sandbox through the deployed Brain", proof: "Only after separately approved owner-custody setup and complete binding readback, complete owner Link, assign every masked account, sync history and pagination, change one transaction, prove webhook plus scheduled fallback, update mode, response-loss replay, and confirmed removal." }),
   Object.freeze({ id: "quickbooks_sandbox", title: "QuickBooks Online Sandbox", proof: "Complete Intuit consent, company identity and same-company reconnect, wrong-company refusal, refresh, pagination, changed record, outage retry, retrieval, disconnect retention, and a separate forget preview." }),
@@ -779,7 +778,7 @@ Default execution runs the complete offline profile. It does not run a provider 
   --fast                 shorter iteration profile; never release-ready
   --only <id[,id...]>    run selected checks; never release-ready
   --expect-sha <sha>     refuse any other exact source commit
-  --output <new-dir>     execution only: write private artifacts to a new directory
+  --output <new-dir>     execution only: write private artifacts to a new directory outside this checkout
   --plan                 direct Node only: verify source without executing or writing output
   --json                 with --plan, make success and refusal machine-readable
 

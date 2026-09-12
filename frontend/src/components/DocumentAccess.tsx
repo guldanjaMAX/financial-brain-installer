@@ -32,6 +32,18 @@ type ActionLock = {
   finish: (operation: number) => void;
 };
 
+export function documentAccessCreateBlocker({ scope, subject, selectedCount }: {
+  scope: string | null;
+  subject: string;
+  selectedCount: number;
+}): string | null {
+  if (!scope) return "First choose one owner-confirmed financial entity above.";
+  if (!subject.trim()) return "Next, enter who this guest access is for.";
+  if (selectedCount === 0) return "Next, find and select at least one exact document for this person.";
+  if (selectedCount > 100) return "Choose no more than 100 exact documents for one access link.";
+  return null;
+}
+
 export function DocumentAccess() {
   const { scope, activeLabel, entities } = useFinanceScope();
   const [status, setStatus] = useState<DocumentAccessStatus | null>(null);
@@ -248,6 +260,11 @@ function ScopedGrantEditor({
   const draftRevision = useRef(0);
   const searchOperation = useRef(0);
   const createOperation = useRef(0);
+  const createBlocker = documentAccessCreateBlocker({
+    scope,
+    subject,
+    selectedCount: selected.length,
+  });
 
   useEffect(() => {
     active.current = true;
@@ -396,10 +413,16 @@ function ScopedGrantEditor({
       {selected.length > 0 && <p className="mt-3 text-[13px] text-ink-soft">{selected.length} exact {selected.length === 1 ? "document" : "documents"} selected.</p>}
       {actionError && <div className="mt-3"><Attention>{actionError}</Attention></div>}
       {message && <div className="mt-3"><Note>{message}</Note></div>}
+      {createBlocker && (
+        <p id="document-access-create-help" className="mt-3 text-[13px] leading-relaxed text-ink-soft">
+          {createBlocker}
+        </p>
+      )}
       <button
         className="mt-4 rounded-xl bg-ink px-4 py-2.5 text-white text-[13.5px] disabled:opacity-45"
         onClick={create}
-        disabled={actionLock.busy || !scope || !subject.trim() || selected.length === 0 || selected.length > 100}
+        disabled={actionLock.busy || Boolean(createBlocker)}
+        aria-describedby={createBlocker ? "document-access-create-help" : undefined}
       >
         {actionLock.busy ? "Saving" : "Create exact document access"}
       </button>

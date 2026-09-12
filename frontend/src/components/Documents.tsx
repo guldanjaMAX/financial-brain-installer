@@ -197,6 +197,7 @@ function DocumentRegister() {
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2 flex-wrap">
                     <span className="text-[14.5px] font-medium">{document.title}</span>
+                    {!document.readable && <Badge tone="warn">Unreadable copy</Badge>}
                     {document.restricted && <Badge tone="muted">Restriction noted</Badge>}
                   </span>
                   <span className="block text-[13px] text-ink-soft mt-0.5">

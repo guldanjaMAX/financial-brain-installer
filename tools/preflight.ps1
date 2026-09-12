@@ -115,7 +115,21 @@ foreach ($n in @('brain','brain.cmd')) {
   if ($c) { $copies += ($c | ForEach-Object { $_.Source }) }
 }
 $copies = $copies | Where-Object { $_ } | Sort-Object -Unique
-if ($copies.Count -eq 0) { $script:Fresh = $true; Warn "no 'brain' on PATH (fine before a first install; call it by full path otherwise)" }
+if ($copies.Count -eq 0) {
+  $packageRoot = Split-Path $PSScriptRoot -Parent
+  $packagePrefix = Split-Path (Split-Path $packageRoot -Parent) -Parent
+  $packageCli = Join-Path $packagePrefix "brain.cmd"
+  $knownCandidates = @($packageCli, "$env:LOCALAPPDATA\FinancialBrain\brain.cmd") |
+    Where-Object { $_ -and (Test-Path $_ -PathType Leaf) } | Sort-Object -Unique
+  if ($knownCandidates.Count -eq 1) {
+    Warn "'brain' is not on PATH, but the installed CLI is available at $($knownCandidates[0]); use that full path in this PowerShell window"
+  } elseif ($knownCandidates.Count -gt 1) {
+    Stop_ "more than one installed Brain CLI exists outside PATH; use the exact package path and repair PATH before continuing"
+  } else {
+    $script:Fresh = $true
+    Warn "no installed Brain CLI was found (expected before a first install)"
+  }
+}
 elseif ($copies.Count -eq 1) { Ok "resolves to $($copies[0])" }
 else {
   Stop_ "$($copies.Count) copies of the CLI are visible; the first wins and it may not be the one you updated"
@@ -169,11 +183,28 @@ try {
 Write-Host ""
 
 Write-Host "MANIFESTS"
-$mf = @(Get-ChildItem -Path $HOME -Recurse -Depth 4 -Filter brain.manifest.json -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch 'node_modules|templates' })
-if ($mf.Count -eq 0) { $script:NoManifest = $true; Ok "no manifest yet (expected before a first install)" }
-elseif ($mf.Count -eq 1) {
+$packageRoot = Split-Path $PSScriptRoot -Parent
+$pointerHelper = Join-Path $packageRoot "operations\installed-manifest.mjs"
+$selectedManifest = @(& node $pointerHelper --preflight-locator 2>$null)
+$pointerStatus = $LASTEXITCODE
+if ($pointerStatus -eq 0 -and $selectedManifest.Count -eq 1) {
+  $mf = @([pscustomobject]@{ FullName = $selectedManifest[0] })
+  Ok "using the saved installed manifest: $($mf[0].FullName)"
+} elseif ($pointerStatus -eq 2) {
+  $mf = @(Get-ChildItem -Path $HOME -Recurse -Depth 4 -Filter brain.manifest.json -ErrorAction SilentlyContinue |
+          Where-Object { $_.FullName -notmatch 'node_modules|templates' })
+} elseif ($pointerStatus -eq 3) {
+  $mf = @()
+  Stop_ "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"
+} else {
+  $mf = @()
+  Stop_ "the installed Brain manifest selector could not run; use the exact installed package before choosing a manifest"
+}
+if ($pointerStatus -eq 2 -and $mf.Count -eq 0) { $script:NoManifest = $true; Ok "no manifest yet (expected before a first install)" }
+elseif ($pointerStatus -eq 2 -and $mf.Count -eq 1) {
   Ok "one manifest: $($mf[0].FullName)"
+}
+if ($mf.Count -eq 1 -and $pointerStatus -ne 3) {
   try {
     $m = Get-Content $mf[0].FullName -Raw | ConvertFrom-Json
     $dom = $m.brain.domain
@@ -184,7 +215,7 @@ elseif ($mf.Count -eq 1) {
       else { Warn "brain at $dom reports status=$($h.status)" }
     }
   } catch { Warn "could not read the manifest or reach its brain" }
-} else {
+} elseif ($pointerStatus -eq 2 -and $mf.Count -gt 1) {
   Stop_ "$($mf.Count) manifests found; the wrong one will be picked. Ask which folder is theirs."
   $mf | ForEach-Object { Write-Host "          $($_.FullName)" }
 }

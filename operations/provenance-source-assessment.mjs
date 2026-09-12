@@ -177,6 +177,7 @@ function privateObservation(observation, handle, ordinal, assessmentComplete) {
     reason_code: publicPart.reason_code,
     text_state: publicPart.text_state,
     text_reliable: publicPart.text_reliable ?? null,
+    extraction_complete: publicPart.extraction_complete ?? null,
     original_content_sha256: contentHash,
     original_byte_count: byteCount,
     page_count: publicPart.page_count ?? null,

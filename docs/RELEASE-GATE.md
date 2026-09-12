@@ -14,9 +14,10 @@ Full `npm test`, `EXIT=0`, on the exact commit being tagged. The log goes in
 receipts with it on 2026-09-03.
 
 Source-inventory contract v3 may not reuse the already-published 0.4.6 package
-identity. The enforcing `scripts/audit-updates.mjs --release` path requires
-0.4.7 or newer before any release write. Advisory and local test modes remain
-usable while the candidate version is deliberately held.
+identity or the retired identity of the held, never-published 0.4.7 candidate.
+The enforcing `scripts/audit-updates.mjs --release` path requires 0.4.8 or
+newer before any release write. Advisory and local test modes remain usable
+while the candidate version is deliberately held.
 
 ## 2. The update rehearsal, on a real brain
 

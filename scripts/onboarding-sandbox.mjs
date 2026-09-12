@@ -37,12 +37,14 @@ export const SANDBOX_SCENARIOS = Object.freeze([
   { id: "financial-map", label: "Owner Financial Map review", proof: "Complete synthetic map, prior changes, unresolved items, and passkey context" },
   { id: "document-journey", label: "Document processing journey", proof: "Teaching view of accepted, stored, projected, and query-visible states" },
   { id: "signin", label: "First passkey screen", proof: "Visual rehearsal only, no physical ceremony" },
+  { id: "document-enrollment", label: "Document-only recipient passkey", proof: "Recipient sees the exact-document boundary before any passkey prompt" },
   { id: "empty", label: "Healthy empty Brain", proof: "Shows the difference between empty and unavailable" },
   { id: "zero-entities", label: "No financial entities yet", proof: "Owner can add one reviewed entity without guessing or combining records" },
   { id: "partial", label: "Partial financial evidence", proof: "One section unavailable while the rest remains usable" },
   { id: "degraded", label: "Degraded services", proof: "Unavailable data stays explicit and never becomes zero" },
   { id: "conflict", label: "Conflicting owner action", proof: "A stale decision or reused request ID refuses safely" },
   { id: "idempotent", label: "Lost-response retry", proof: "The same action receipt replays without a second change" },
+  { id: "owner-access", label: "Owner creates guest access", proof: "Starts in Access with every real-install requirement explained before the owner shares exact documents" },
   { id: "grant", label: "Exact-document guest", proof: "Guest navigation exposes only Documents and Explore" },
   { id: "grant-unavailable", label: "Guest search degraded", proof: "No unauthorized result and no false healthy-empty answer" },
 ]);
@@ -103,10 +105,10 @@ export function documentJourneyHtml({ searchParams } = {}) {
     }).join("");
     return `<article class="stage" data-stage="${esc(stage.id)}" data-outcome="${esc(outcome)}"><div class="step">${index + 1}</div><div class="stage-copy"><div class="stage-top"><h2>${esc(stage.label)}</h2><span class="status ${esc(outcome)}">${esc(outcome)}</span></div><p>${esc(stage.description)}</p><div class="choices" aria-label="Choose a teaching state for ${esc(stage.label)}">${choices}</div></div></article>`;
   }).join('<div class="arrow" aria-hidden="true">↓</div>');
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Synthetic document journey</title>
+  return injectRehearsalBanner(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Synthetic document journey</title>
   <style>
   :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171a24;background:#f4f5f8}*{box-sizing:border-box}body{margin:0}.wrap{max-width:880px;margin:0 auto;padding:40px 20px 72px}.flag{display:inline-flex;padding:8px 12px;border-radius:999px;background:#fff0d9;color:#784000;font-size:12px;font-weight:850;letter-spacing:.07em}.hero{margin:18px 0 24px;background:#12141a;color:#fff;border-radius:24px;padding:30px;box-shadow:0 20px 60px #17204a20}.hero h1{font-size:clamp(30px,6vw,48px);letter-spacing:-.035em;margin:0 0 12px}.hero p{color:#c8cedc;line-height:1.6;margin:0;max-width:710px}.boundary{margin:0 0 24px;padding:16px 18px;border:1px solid #efc474;background:#fff9ec;border-radius:16px;line-height:1.5}.stage{display:flex;gap:16px;background:#fff;border:1px solid #dfe2ea;border-radius:18px;padding:20px}.step{display:grid;place-items:center;flex:0 0 34px;height:34px;border-radius:10px;background:#ebefff;color:#334fc0;font-weight:850}.stage-copy{min-width:0;flex:1}.stage-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.stage h2{font-size:21px;margin:2px 0 8px}.stage p{color:#5f6675;line-height:1.55;margin:0}.status{border-radius:999px;padding:5px 9px;font-size:12px;font-weight:800;text-transform:capitalize}.status.ready{background:#dff6e8;color:#17663a}.status.pending{background:#fff0d9;color:#7a4300}.status.unavailable{background:#fee5e5;color:#8b2626}.choices{display:flex;flex-wrap:wrap;gap:7px;margin-top:15px}.choice{padding:7px 10px;border:1px solid #d8dce7;border-radius:9px;color:#464e60;text-decoration:none;font-size:13px;text-transform:capitalize}.choice:hover,.choice:focus-visible{border-color:#6680ed;outline:none}.choice.active{border-color:#6680ed;background:#eef1ff;color:#263f9e;font-weight:750}.arrow{text-align:center;color:#99a0af;font-size:20px;height:28px;line-height:28px}.foot{margin-top:24px;color:#62697a;font-size:14px;line-height:1.55}.home{color:#334fc0}@media(max-width:520px){.wrap{padding:24px 14px 48px}.hero{padding:24px 20px;border-radius:20px}.stage{padding:17px 15px}.stage-top{align-items:flex-start}.choices{gap:6px}}
-  </style><body><main class="wrap"><span class="flag">TEACHING ONLY · SYNTHETIC DATA · NO LIVE SYSTEM CHECKED</span><section class="hero"><h1>How one document becomes searchable</h1><p>These are four separate checkpoints. Accepted is not the same as stored, stored is not the same as projected, and projected is not the same as query-visible.</p></section><div class="boundary"><strong>Proof boundary:</strong> every status on this page is invented for rehearsal. None of these cards proves that a provider, a Brain, or a document is live. Use the controls to rehearse each checkpoint as ready, pending, or unavailable.</div><section aria-label="Synthetic document processing stages">${cards}</section><p class="foot"><a class="home" href="/">Back to all rehearsal scenarios</a>. Changing a teaching state makes no request to a provider or Brain, stores nothing, and never opens a passkey prompt.</p></main></body></html>`;
+  </style><body><main class="wrap"><span class="flag">TEACHING ONLY · SYNTHETIC DATA · NO LIVE SYSTEM CHECKED</span><section class="hero"><h1>How one document becomes searchable</h1><p>These are four separate checkpoints. Accepted is not the same as stored, stored is not the same as projected, and projected is not the same as query-visible.</p></section><div class="boundary"><strong>Proof boundary:</strong> every status on this page is invented for rehearsal. None of these cards proves that a provider, a Brain, or a document is live. Use the controls to rehearse each checkpoint as ready, pending, or unavailable.</div><section aria-label="Synthetic document processing stages">${cards}</section><p class="foot"><a class="home" href="/">Back to all rehearsal scenarios</a>. Changing a teaching state makes no request to a provider or Brain, stores nothing, and never opens a passkey prompt.</p></main></body></html>`, "document-journey");
 }
 
 function esc(value) {
@@ -117,8 +119,14 @@ function esc(value) {
 
 export function onboardingGuideHtml({ appOrigin }) {
   const cards = SANDBOX_SCENARIOS.map((scenario, index) => {
-    const fragment = scenario.id === "signin" ? "#enroll=local-rehearsal-only" : "";
-    const view = scenario.id === "financial-map" ? "&view=financial-map" : "";
+    const fragment = scenario.id === "signin"
+      ? "#enroll=local-rehearsal-only"
+      : scenario.id === "document-enrollment"
+        ? "#document-enroll=doc_local-rehearsal-only"
+        : "";
+    const view = scenario.id === "financial-map"
+      ? "&view=financial-map"
+      : scenario.id === "owner-access" ? "&view=access" : "";
     const href = scenario.id === "document-journey"
       ? `${appOrigin}/document-journey`
       : `${appOrigin}/app?state=${encodeURIComponent(scenario.id)}${view}${fragment}`;
@@ -130,8 +138,9 @@ export function onboardingGuideHtml({ appOrigin }) {
   </style><body><main class="wrap"><span class="flag">LOCAL REHEARSAL · SYNTHETIC DATA</span><section class="hero"><h1>See the Brain before connecting anything.</h1><p>This launches the actual owner-workspace bundle with invented records. Click through every important state safely. Nothing is deployed, no account is contacted, and no credential is requested.</p></section><div class="notice"><strong>Proof boundary:</strong> this proves layout, navigation, response contracts, and error handling. It does not prove Cloudflare, OAuth consent, a real mailbox, Zoom delivery, or a physical passkey.</div><section class="grid">${cards}</section><p class="foot">Close this terminal or press Control-C when finished. The sandbox keeps no user data and stops with the terminal.</p></main></body></html>`;
 }
 
-export function injectRehearsalBanner(html) {
-  const banner = '<div role="status" style="position:sticky;top:0;z-index:9999;padding:9px 16px;background:#fff0d9;color:#6f3c00;border-bottom:1px solid #e9be73;text-align:center;font:700 12px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;letter-spacing:.06em">LOCAL REHEARSAL · SYNTHETIC DATA · NO ACCOUNTS CONNECTED</div>';
+export function injectRehearsalBanner(html, scenarioId = "populated") {
+  const scenario = SANDBOX_SCENARIOS.find(({ id }) => id === scenarioId) || SANDBOX_SCENARIOS[0];
+  const banner = `<div role="status" style="position:sticky;top:0;z-index:9999;padding:9px 16px;background:#fff0d9;color:#6f3c00;border-bottom:1px solid #e9be73;text-align:center;font:700 12px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;letter-spacing:.06em">LOCAL REHEARSAL · SYNTHETIC DATA · SCENARIO: ${esc(scenario.label)} · NO ACCOUNTS CONNECTED</div>`;
   return String(html).replace("<body>", `<body>${banner}`);
 }
 
@@ -244,8 +253,9 @@ async function waitForFixture(origin, child) {
 
 async function proxyToFixture(request, response, fixtureOrigin, publicOrigin) {
   const incomingUrl = new URL(request.url || "/", publicOrigin);
-  const scenario = sandboxScenarioFromReferer(request.headers.referer, publicOrigin);
-  if (incomingUrl.pathname === "/api/app/me" && scenario === "signin") {
+  const scenario = incomingUrl.searchParams.get("state")
+    || sandboxScenarioFromReferer(request.headers.referer, publicOrigin);
+  if (incomingUrl.pathname === "/api/app/me" && ["signin", "document-enrollment"].includes(scenario)) {
     response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     response.end(JSON.stringify({ signed_in: false, owner: "Owner", brain: "Financial Brain rehearsal" }));
     return;
@@ -263,7 +273,7 @@ async function proxyToFixture(request, response, fixtureOrigin, publicOrigin) {
   const responseHeaders = Object.fromEntries(upstream.headers.entries());
   let bytes = Buffer.from(await upstream.arrayBuffer());
   if (incomingUrl.pathname === "/app" && (upstream.headers.get("content-type") || "").includes("text/html")) {
-    bytes = Buffer.from(injectRehearsalBanner(bytes.toString("utf8")), "utf8");
+    bytes = Buffer.from(injectRehearsalBanner(bytes.toString("utf8"), scenario), "utf8");
     delete responseHeaders["content-length"];
   }
   response.writeHead(upstream.status, responseHeaders);
@@ -408,7 +418,7 @@ export async function verifyOnboardingSmoke(origin, { fetchRequest = fetch } = {
   const appResponse = await smokeFetch(fetchRequest, `${origin}/app?state=populated`, { smokeCode: "app_unavailable" });
   if (!appResponse.ok) throw smokeFailure("app_unavailable");
   const app = await appResponse.text();
-  if (!app.includes("LOCAL REHEARSAL · SYNTHETIC DATA · NO ACCOUNTS CONNECTED") || !app.includes('id="root"')) {
+  if (!app.includes("LOCAL REHEARSAL · SYNTHETIC DATA · SCENARIO: Normal owner workspace · NO ACCOUNTS CONNECTED") || !app.includes('id="root"')) {
     throw smokeFailure("app_contract_failed");
   }
 

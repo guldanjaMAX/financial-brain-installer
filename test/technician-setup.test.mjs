@@ -138,15 +138,27 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.ok(setupRouteStart > passkeyRouteStart, "passkey routing must run before the setup-oriented plan");
   const optimizeRoute = content.slice(optimizeRouteStart, updateRouteStart);
   assert.match(optimizeRoute, /included\s+owner feature/i);
-  const openingGoal = /What would you most\s+like your Financial Brain to help you understand or keep current\?/g;
+  const openingGoal = /What would you\s+most\s+like\s+your\s+Financial Brain to help you understand or keep current\?/g;
   assert.equal([...optimizeRoute.matchAll(openingGoal)].length, 1,
-    "Optimize must open with exactly one plain-language goal question");
+    "Optimize must retain one optional plain-language goal question");
+  assert.match(optimizeRoute,
+    /one total owner-question budget per owner-facing Optimize response across\s+the optional goal, evidence clarification, and zoning/i);
+  assert.match(optimizeRoute,
+    /If that requires an owner choice, use this\s+response's one question.*defer every audit blocker/is);
+  assert.match(optimizeRoute,
+    /Otherwise ask only the highest-priority pending blocker, in this order: a\s+material evidence conflict, a whole-source zoning decision, then the\s+optional goal/i);
+  assert.match(optimizeRoute,
+    /Skip the goal whenever a material evidence conflict or any\s+zoning decision is pending/i);
+  assert.match(optimizeRoute,
+    /Once the response asks one question, state\s+and defer every other blocker instead of asking another/i);
+  assert.match(optimizeRoute, /Never split the goal,\s+clarification,\s+and zoning into separate question budgets/i);
+  assert.doesNotMatch(optimizeRoute, /at most one additional.*owner question/is);
   const openingGoalIndex = optimizeRoute.search(openingGoal);
   const mapReadDisclosureIndex = optimizeRoute.search(/This sends no Financial Map\s+snapshot and changes nothing\./);
   const financialPictureIndex = optimizeRoute.indexOf(renderCliCommands("brain financial-picture <manifest> --json"));
   assert.ok(openingGoalIndex >= 0 && mapReadDisclosureIndex > openingGoalIndex &&
     financialPictureIndex > mapReadDisclosureIndex,
-  "Optimize must ask the goal, explain and read map state, then inventory the financial picture");
+  "Optimize must define the optional goal, explain and read map state, then inventory the financial picture");
   assert.match(optimizeRoute, /I can check your Brain without changing\s+it/i);
   assert.match(optimizeRoute, /Do not narrate\s+skill selection, source-code inspection, PATH archaeology, release research/is);
   assert.match(optimizeRoute, /request already authorizes the contract's read-only checks/i);
@@ -175,7 +187,8 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute, /Unzoned sources with no grants are sharing-readiness\s+work, not evidence that somebody currently has access/i);
   assert.match(optimizeRoute, /Leave passkeys\s+and enrolled devices out of Optimize/i);
   assert.match(optimizeRoute, /brain_financial_map.*mode: "read"/is);
-  assert.match(optimizeRoute, /immediately before calling `brain_financial_map` with `mode: "read"`/i);
+  assert.match(optimizeRoute,
+    /immediately before\s+calling `brain_financial_map` with `mode: "read"`/i);
   assert.match(optimizeRoute, /assistant may still show an approval prompt.*authorizing a private read/is);
   assert.match(optimizeRoute, /possible mention until the owner confirms/i);
   assert.match(optimizeRoute,
@@ -195,15 +208,56 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute,
     new RegExp("do not run `" + renderedCommand("brain mcp-config --apply") + "`", "i"));
   assert.match(optimizeRoute, /especially after a move to a new computer/i);
-  assert.match(optimizeRoute, /Do not run a Golden evaluation, create a canned refusal exercise/i);
+  assert.match(optimizeRoute,
+    /Do not run Golden Questions, a Golden evaluation, a canned refusal exercise, a\s+known-answer control question/i);
   assert.match(optimizeRoute, /Do not ask a\s+known-answer content question for MCP proof/i);
   assert.match(optimizeRoute, /protocol\s+initialization, connection status, and expected tool discovery/i);
   assert.match(optimizeRoute, /zoning\s+applies to the whole source/i);
-  assert.match(optimizeRoute, /Only if the owner\s+explicitly approves that mapping/i);
+  assert.match(optimizeRoute,
+    /Recommend an exact source-to-zone mapping only when\s+source-specific evidence establishes the boundary for the entire source/is);
+  assert.match(optimizeRoute,
+    /observed source scope and purpose.*existing allowed zones.*owner-confirmed\s+Financial Map or prior owner statement.*cite the\s+evidence/is);
+  assert.match(optimizeRoute,
+    /Without supporting evidence, never propose or recommend a zone/i);
+  assert.match(optimizeRoute,
+    /available whole-source choices, including leaving the source unzoned.*records do not determine the choice/is);
+  assert.match(optimizeRoute,
+    /When zoning is the highest-priority blocker, ask the owner to choose among those\s+whole-source options.*one question budget/is);
+  assert.match(optimizeRoute,
+    /When a material evidence conflict has higher priority, defer the zoning choice\s+to the next response/i);
+  assert.match(optimizeRoute,
+    /exact mapping and affected counts only when it is either an\s+evidence-backed recommendation or the owner's selected choice/i);
+  assert.match(optimizeRoute, /Label which one\s+it is/i);
+  assert.match(optimizeRoute, /Only if the owner separately and explicitly approves that mapping/i);
+  assert.match(optimizeRoute,
+    /Never claim that zoning, grants, MCP, sources, storage, indexing.*check ran unless its actual command or tool returned an observed receipt/is);
+  assert.match(optimizeRoute,
+    /Never describe a not-run check as checked,\s+passed, unavailable, or complete/i);
+  assert.match(optimizeRoute,
+    /Never claim an MCP or other Optimize check ran without its actual receipt[\s\S]{0,180}?never call Optimize complete while any planned check is not run/i);
+  assert.match(optimizeRoute, /Optimize stopped before every check could run/i);
+  assert.match(optimizeRoute,
+    /gpt-5\.6-luna.*medium reasoning[\s\S]{0,180}?gpt-5\.6-terra.*low reasoning/i);
+  assert.match(optimizeRoute, /synthetic behavioral\s+evidence only, not live Brain proof/i);
+  assert.match(optimizeRoute,
+    /Do not pin `gpt-5\.6-sol` or infer Optimize\s+completeness from model choice/i);
   assert.match(optimizeRoute, /repeat its bounded projection pass/i);
   assert.match(optimizeRoute, /what improved, regressed, or stayed\s+unproven/i);
   assert.match(optimizeRoute, /estimate the affected scope, likely cost, expected answer impact/i);
   assert.match(optimizeRoute, /Prioritize findings by likely answer impact, not raw\s+count/i);
+  assert.match(optimizeRoute, /Finish and show the read-only Optimize report first/i);
+  assert.match(optimizeRoute, /Never infer or guess the target/i);
+  assert.match(optimizeRoute, /one complete `native_readable` record/i);
+  assert.match(optimizeRoute, /OCR stays off/i);
+  assert.match(optimizeRoute, /source lease before reading the private manifest/i);
+  assert.match(optimizeRoute, /complete source\s+inventory and observation history/i);
+  assert.match(optimizeRoute, /eight private retrieval probes in total/i);
+  assert.match(optimizeRoute,
+    /schema-44 `result_family`\s+record, schema-44\s+verify, schema-45 `accepted_resolution` record, and schema-45\s+verify/i);
+  assert.match(optimizeRoute, /`accepted_resolution_reverification`/);
+  assert.match(optimizeRoute, /does not record\s+a discovery gap, reingest the file, remove family members, or drain the shared\s+vector queue/i);
+  assert.match(optimizeRoute, /Never reuse the earlier approval hash/i);
+  assert.match(optimizeRoute, /held 0\.4\.8 candidate is not a customer release/i);
   assert.doesNotMatch(optimizeRoute, /planned owner-facing workflow|lucky|qualif(?:y|ies|ied) for access/i);
   assert.ok(releaseManifest > updateRouteStart && releaseManifest < agentPlaybook,
     "the held release feed must be the first live update decision");
@@ -343,13 +397,23 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.match(content, /restore prior installer-owned state if readback fails/i);
   assert.match(content, /Do not invent a command.*CLI replacement separate/is);
   assert.match(content, /does not run passkey enrollment or device review/i);
-  const workspaceGoal = /What would you most\s+like your Financial Brain to help you understand or keep current\?/g;
+  const workspaceGoal = /What would you\s+most\s+like\s+your\s+Financial Brain to help you understand or keep current\?/g;
   assert.equal([...content.matchAll(workspaceGoal)].length, 1,
-    "the workspace guide must open Optimize with exactly one goal question");
+    "the workspace guide must retain one optional goal question");
+  assert.match(content,
+    /one total owner-question budget per response across the optional goal, evidence clarification, and zoning/i);
+  assert.match(content,
+    /If discovery needs a choice, use this response's one question there and defer every audit blocker/i);
+  assert.match(content,
+    /Ask only the highest-priority pending blocker: a material evidence conflict, then a whole-source zoning decision, then the optional goal/i);
+  assert.match(content,
+    /Skip the goal whenever a material evidence conflict or any zoning decision is pending/i);
+  assert.match(content, /Once one question is asked, state and defer every other blocker/i);
+  assert.match(content, /Never split goal, clarification, and zoning into separate question budgets/i);
   const workspaceGoalIndex = content.search(workspaceGoal);
   const workspaceMapDisclosureIndex = content.search(/This sends no Financial Map\s+snapshot and changes nothing\./);
   assert.ok(workspaceMapDisclosureIndex > workspaceGoalIndex,
-    "the workspace guide must explain the private map read after the goal question");
+    "the workspace guide must explain the private map read after the opening decision contract");
   assert.match(content, /brain_financial_map.*mode: "read".*approval prompt.*private read/is);
   assert.match(content,
     /Before any financial completeness conclusion, offer the guided read-only interview.*one short adaptive question/is);
@@ -357,6 +421,23 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.match(content, /separate explicit owner approval before preview mode/i);
   assert.match(content, /Activation requires another separate owner decision.*fresh passkey ceremony/is);
   assert.match(content, /MCP cannot activate it/i);
+  assert.match(content,
+    /For zoning, recommend a mapping only when source-specific evidence supports the whole source/i);
+  assert.match(content,
+    /Without that evidence, do not propose or recommend a zone\. State the available whole-source choices and consequences, including leaving it unzoned.*records do not determine the choice/is);
+  assert.match(content,
+    /If zoning is the highest-priority blocker, ask the owner to choose with the response's one question/i);
+  assert.match(content,
+    /If a material evidence conflict has higher priority, defer zoning to the next response/i);
+  assert.match(content,
+    /Do not run Golden Questions, a Golden evaluation, a canned refusal exercise, a known-answer control question/i);
+  assert.match(content,
+    /Never claim an MCP or other Optimize check ran without its actual receipt[\s\S]{0,180}?never call Optimize complete while any planned check is not run/i);
+  assert.match(content,
+    /gpt-5\.6-luna.*medium reasoning[\s\S]{0,180}?gpt-5\.6-terra.*low reasoning/i);
+  assert.match(content, /synthetic behavioral\s+evidence only, not live Brain proof/i);
+  assert.match(content,
+    /Do not pin gpt-5\.6-sol or infer Optimize completeness from model choice/i);
   assert.doesNotMatch(content, /CLOUDFLARE_API_TOKEN|ADMIN_KEY|client_secret|app_password/);
   // POSIX mode bits can prove the owner-only file mode directly. Windows does
   // not represent its inherited user-profile ACL in stat().mode and reports
