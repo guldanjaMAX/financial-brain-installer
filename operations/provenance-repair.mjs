@@ -19,6 +19,21 @@ export const PROVENANCE_REPAIR_SOURCE_KINDS = Object.freeze([
 
 export const PROVENANCE_REPAIR_SCHEMA_VERSION = 1;
 
+const MAX_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+const MAX_FILESYSTEM_ID = (1n << 64n) - 1n;
+
+/** Keep native filesystem identity exact without putting BigInt into JSON. */
+export function canonicalProvenanceFilesystemInteger(value, label = "filesystem identity") {
+  let integer;
+  if (typeof value === "bigint") integer = value;
+  else if (Number.isSafeInteger(value) && value >= 0) integer = BigInt(value);
+  else throw new TypeError(`${label} is unavailable`);
+  if (integer < 0n || integer > MAX_FILESYSTEM_ID) {
+    throw new TypeError(`${label} is unavailable`);
+  }
+  return integer <= MAX_SAFE_INTEGER_BIGINT ? Number(integer) : integer.toString(10);
+}
+
 /**
  * Schema 1 can inventory recovery candidates, but it has no durable
  * candidate-resolution ledger. In particular, it cannot distinguish a

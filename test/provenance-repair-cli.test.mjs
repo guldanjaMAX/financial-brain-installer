@@ -17,6 +17,7 @@ import {
 } from "../brain.mjs";
 import { inspectGoogleTokenStorage, saveTokens } from "../connectors/google-auth.mjs";
 import {
+  canonicalProvenanceFilesystemInteger,
   provenanceRepairPlan,
   provenanceRepairReadback,
   provenanceRepairRemoteGeneration,
@@ -34,6 +35,82 @@ const CANDIDATE_A = `hmac-sha256:${"c".repeat(64)}`;
 const CANDIDATE_B = `hmac-sha256:${"d".repeat(64)}`;
 const MANIFEST_HASH = "1".repeat(64);
 const CONFIG_HASH = "2".repeat(64);
+
+test("legacy source readiness keeps wide Windows filesystem identities exact", async () => {
+  assert.equal(canonicalProvenanceFilesystemInteger(41n, "device"), 41);
+  assert.equal(
+    canonicalProvenanceFilesystemInteger(9007199254740993n, "device"),
+    "9007199254740993",
+  );
+  assert.equal(
+    canonicalProvenanceFilesystemInteger(18446744073709551615n, "inode"),
+    "18446744073709551615",
+  );
+  assert.throws(
+    () => canonicalProvenanceFilesystemInteger(Number.MAX_SAFE_INTEGER + 1, "inode"),
+    /inode is unavailable/,
+  );
+  assert.throws(
+    () => canonicalProvenanceFilesystemInteger(18446744073709551616n, "inode"),
+    /inode is unavailable/,
+  );
+
+  const readiness = (device, inode, onInspect = () => {}) => inspectProvenanceRepairReadiness({
+    m: {
+      corpora: {
+        local_folder: {
+          enabled: true,
+          source: "documents",
+          path: "/fixture/source",
+        },
+      },
+    },
+    manifestPath: "/fixture/brain.manifest.json",
+    source: "documents",
+    kind: "upload",
+    options: {
+      platform: "win32",
+      inspectLocalPath: (path, statOptions) => {
+        onInspect(path, statOptions);
+        return {
+          dev: device,
+          ino: inode,
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+        };
+      },
+      resolveLocalPath: (value) => value,
+      assertLocalPathReadable: () => {},
+    },
+  });
+  let inspected = false;
+  const first = await readiness(
+    9007199254740992n,
+    18446744073709551614n,
+    (path, statOptions) => {
+      inspected = true;
+      assert.equal(path, "/fixture/source");
+      assert.deepEqual(statOptions, { bigint: true });
+    },
+  );
+  const nextDevice = await readiness(9007199254740993n, 18446744073709551614n);
+  const nextInode = await readiness(9007199254740992n, 18446744073709551615n);
+  assert.match(first.sourceConfigFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(inspected, true);
+  assert.doesNotThrow(() => JSON.stringify(first));
+  assert.notEqual(first.sourceConfigFingerprint, nextDevice.sourceConfigFingerprint);
+  assert.notEqual(first.sourceConfigFingerprint, nextInode.sourceConfigFingerprint);
+
+  const safeBigInts = await readiness(41n, 73n);
+  const safeNumbers = await readiness(41, 73);
+  assert.equal(safeBigInts.sourceConfigFingerprint, safeNumbers.sourceConfigFingerprint);
+
+  for (const invalid of [-1n, 18446744073709551616n]) {
+    const blocked = await readiness(41n, invalid);
+    assert.match(blocked.readiness.blockers.join(" "), /not safely readable/);
+    assert.equal(blocked.readiness.source, "unavailable");
+  }
+});
 
 function sourceRow(candidateCount = 1, receipt = null) {
   return {
