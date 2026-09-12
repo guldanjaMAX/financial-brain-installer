@@ -257,6 +257,23 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   // so recovery must carry the ledger together with the current document
   // revision and binding-pointer columns.
   "source_original_result_bindings",
+  // Schema 44: the exact chunk members are staged before the portable family
+  // header seals them. Restore both after schema-43 raw bindings so every
+  // referenced revision and binding already exists. Schema 45's accepted
+  // resolution is portable history and follows that family header. The
+  // verification, activation, and admission tables are part of the reviewed
+  // schema inventory, but their rows bind one deployment or one live write
+  // transaction and are deliberately excluded from recovery content.
+  "source_original_result_family_members",
+  "source_original_result_family_receipts",
+  "source_original_accepted_resolutions",
+  "source_original_result_family_verifications",
+  "source_original_accepted_resolution_activations",
+  "source_original_accepted_resolution_admissions",
+  // Empty outside one schema-first recovery import. The schema inventory keeps
+  // the control table explicit, but its rows are never exported; source and
+  // target probes require it empty while the artifact opens and closes it.
+  "source_original_result_family_recovery_state",
 ]);
 
 /**
@@ -280,6 +297,10 @@ export const RECOVERY_EXPORT_TABLES = Object.freeze(
       table !== "agent_action_receipts" &&
       table !== "owner_financial_map_inventory_state" &&
       table !== "owner_financial_map_previews" &&
+      table !== "source_original_result_family_verifications" &&
+      table !== "source_original_accepted_resolution_activations" &&
+      table !== "source_original_accepted_resolution_admissions" &&
+      table !== "source_original_result_family_recovery_state" &&
       table !== "bank_feed_link_sessions" &&
       table !== "oauth_clients" && table !== "oauth_codes" && table !== "oauth_tokens"),
 );
@@ -319,6 +340,8 @@ const OUTBOX_SQL =
   "SELECT COUNT(*) AS pending_outbox, " +
   "COALESCE(SUM(CASE WHEN attempts > 0 AND last_error IS NOT NULL THEN 1 ELSE 0 END),0) AS failed_vectors " +
   "FROM vector_outbox";
+const RESULT_FAMILY_RECOVERY_STATE_SQL =
+  "SELECT COUNT(*) AS active_imports FROM source_original_result_family_recovery_state";
 const AGENT_ACTION_RECEIPTS_SQL =
   "SELECT COUNT(*) AS agent_action_receipts FROM agent_action_receipts";
 const INSTALL_STATE_BASE_COLUMNS = Object.freeze([
@@ -353,6 +376,10 @@ const INSTALL_STATE_ZERO_NORMALIZED_COLUMNS = Object.freeze([
   // queue itself so corpus fingerprints remain stable across safe retries.
   "outbox_generation",
   "vector_projection_bootstrap_base_count",
+  // Accepted result-family verifications bind the source deployment's complete
+  // retrieval response. A recovered target must start a new local generation
+  // and prove it after the portable corpus has been restored.
+  "source_original_retrieval_generation",
 ]);
 // The minimum schema carrying the reviewed vector recovery protocol. Historical
 // additive prefixes after this floor remain available to offline artifact and
@@ -480,6 +507,17 @@ const SCHEMA_42_TABLES = Object.freeze([
   "source_original_observations",
 ]);
 const SCHEMA_43_TABLES = Object.freeze(["source_original_result_bindings"]);
+const SCHEMA_44_TABLES = Object.freeze([
+  "source_original_result_family_members",
+  "source_original_result_family_receipts",
+  "source_original_result_family_verifications",
+  "source_original_result_family_recovery_state",
+]);
+const SCHEMA_45_TABLES = Object.freeze([
+  "source_original_accepted_resolution_admissions",
+  "source_original_accepted_resolutions",
+  "source_original_accepted_resolution_activations",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -501,7 +539,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_28_TABLES, ...SCHEMA_30_TABLES, ...SCHEMA_31_TABLES,
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
-     ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES].includes(table)
+     ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
+     ...SCHEMA_45_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1040,6 +1079,7 @@ function expectedInstallStateColumns(migrations) {
     ...(latest >= 13 ? INSTALL_STATE_BOOTSTRAP_V2_COLUMNS : []),
     ...(latest >= 14 ? ["session_generation"] : []),
     ...(latest >= 36 ? ["vector_projection_residue_epoch"] : []),
+    ...(latest >= 45 ? ["source_original_retrieval_generation"] : []),
   ]);
 }
 
@@ -1306,7 +1346,9 @@ function expectedRecoveryTables(migrations) {
     (latest >= 37 || !SCHEMA_37_TABLES.includes(table)) &&
     (latest >= 41 || !SCHEMA_41_TABLES.includes(table)) &&
     (latest >= 42 || !SCHEMA_42_TABLES.includes(table)) &&
-    (latest >= 43 || !SCHEMA_43_TABLES.includes(table)));
+    (latest >= 43 || !SCHEMA_43_TABLES.includes(table)) &&
+    (latest >= 44 || !SCHEMA_44_TABLES.includes(table)) &&
+    (latest >= 45 || !SCHEMA_45_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(migrations, { excludeBankItems = false } = {}) {
@@ -2184,6 +2226,19 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     return validateMigrationContract(rows);
   }
 
+  async function assertResultFamilyRecoveryStateEmpty(binding, migrations) {
+    if (Number(migrations?.at(-1)?.version || 0) < 44) return true;
+    const rows = await d1Rows(binding, RESULT_FAMILY_RECOVERY_STATE_SQL);
+    if (rows.length !== 1 ||
+        nonNegativeInteger(
+          rows[0]?.active_imports,
+          "RECOVERY_RESULT_FAMILY_IMPORT_STATE_INVALID",
+        ) !== 0) {
+      refuse("RECOVERY_RESULT_FAMILY_IMPORT_STATE_ACTIVE");
+    }
+    return true;
+  }
+
   async function requireCurrentRecoverySchema(
     binding,
     code = "RECOVERY_TARGET_UPGRADE_REQUIRED",
@@ -2214,6 +2269,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     if (verifyFtsIntegrity) await d1Rows(binding, FTS_INTEGRITY_SQL);
     const migrationRows = await d1Rows(binding, MIGRATION_CONTRACT_SQL);
     const checkedMigrations = validateMigrationContract(migrationRows);
+    await assertResultFamilyRecoveryStateEmpty(binding, checkedMigrations);
     assertExpectedTables(await d1Rows(binding, TABLE_INVENTORY_SQL), checkedMigrations);
     const schemaRows = normalizeSchemaRows(await d1Rows(binding, LOGICAL_SCHEMA_SQL));
     const aggregateRows = await d1Rows(binding, AGGREGATE_SQL);
@@ -2264,6 +2320,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     let normalizedInstallState = null;
     try {
       const migrations = await remoteMigrationContract(binding);
+      await assertResultFamilyRecoveryStateEmpty(binding, migrations);
       normalizedInstallState = await normalizedInstallStateExport(
         binding,
         migrations,
@@ -2338,7 +2395,17 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         writeSync(output, bytes);
         bytes.fill(0);
       }
+      const restoresPortableFamilyHistory = Number(migrations.at(-1)?.version || 0) >= 44;
       writeSync(output, normalizedInstallState);
+      if (restoresPortableFamilyHistory) {
+        const openFamilyHistoryImport = Buffer.from(
+          `INSERT INTO "source_original_result_family_recovery_state" ("id","mode") ` +
+          `VALUES (1,'verified_recovery_import');\n`,
+          "utf8",
+        );
+        writeSync(output, openFamilyHistoryImport);
+        openFamilyHistoryImport.fill(0);
+      }
       const checkedData = assertArtifactFile(dataPartial, {
         maxBytes: plan.artifact.max_single_import_bytes,
         allowEmpty: true,
@@ -2355,6 +2422,18 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         writeSync(output, block, 0, read);
       }
       block.fill(0);
+      if (restoresPortableFamilyHistory) {
+        const closeFamilyHistoryImport = Buffer.from(
+          `\nDELETE FROM "source_original_result_family_recovery_state" ` +
+          `WHERE "id"=1 AND "mode"='verified_recovery_import';\n` +
+          `INSERT INTO "source_original_result_family_recovery_state" ("id","mode") ` +
+          `SELECT 2,'verified_recovery_import' WHERE EXISTS (` +
+          `SELECT 1 FROM "source_original_result_family_recovery_state");\n`,
+          "utf8",
+        );
+        writeSync(output, closeFamilyHistoryImport);
+        closeFamilyHistoryImport.fill(0);
+      }
       const afterDataDescriptor = fstatSync(input);
       const afterDataPath = lstatSync(dataPartial);
       if (!sameFile(openedData, afterDataDescriptor) || !sameFile(openedData, afterDataPath) ||
@@ -2636,6 +2715,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         pins.binding.source,
         "RECOVERY_SOURCE_UPGRADE_REQUIRED",
       );
+      await assertResultFamilyRecoveryStateEmpty(pins.binding.source, migrations);
       assertExpectedTables(await d1Rows(pins.binding.source, TABLE_INVENTORY_SQL), migrations);
       const dataPartial = join(pins.artifacts.path, ".brain-recovery-export.sql.tmp-data");
       const combinedPartial = join(pins.artifacts.path, ".brain-recovery-export.sql.tmp-combined");

@@ -360,7 +360,26 @@ function declarationsOf(sql) {
   };
 }
 
-const DECLARED = new Map(PENDING.map((m) => [m.version, declarationsOf(m.sql)]));
+const finalDeclaredObjects = new Set();
+for (const migration of PENDING) {
+  for (const statement of splitStatements(migration.sql)) {
+    const created = statement.match(
+      /^\s*CREATE\s+(?:UNIQUE\s+)?(?:VIRTUAL\s+)?(?:TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/i,
+    );
+    if (created) finalDeclaredObjects.add(created[1]);
+    const dropped = statement.match(
+      /^\s*DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_]+)/i,
+    );
+    if (dropped) finalDeclaredObjects.delete(dropped[1]);
+  }
+}
+const DECLARED = new Map(PENDING.map((m) => {
+  const declarations = declarationsOf(m.sql);
+  return [m.version, {
+    ...declarations,
+    objects: declarations.objects.filter((object) => finalDeclaredObjects.has(object.name)),
+  }];
+}));
 
 check("every pending migration declares something this file can look for",
   [...DECLARED.values()].every((d) => d.objects.length + d.columns.length > 0),
@@ -761,9 +780,9 @@ const projectionOf = (db) => probe(() => db.prepare(
 
   await migrate(db);
   const migrated = projectionOf(db);
-  // cmdMigrate's ON CONFLICT touches client_slug, schema_version and
-  // gate_version only. Widening it would reset a mid-recovery fence on every
-  // upgrade and re-create this failure by hand.
+  // cmdMigrate's ON CONFLICT advances the independent retrieval generation in
+  // addition to client/schema/gate identity. It still leaves the Vectorize
+  // bootstrap fields untouched, preserving the mid-recovery fence.
   check(`the 22 -> ${HEAD_MAX} walk leaves the stranded projection fence byte-identical`,
     migrated.status === before.status && migrated.epoch === before.epoch &&
       migrated.cursor === before.cursor && migrated.high_water === before.high_water &&
@@ -852,10 +871,28 @@ const projectionOf = (db) => probe(() => db.prepare(
 // own statements are swallowed on the way to the database. That is exactly the
 // state a migration that ran and had no effect would leave behind, and it is
 // the state a ledger-only assertion cannot see.
+const STATEMENT_OWNERS = new Map();
+for (const migration of PENDING) {
+  for (const statement of splitStatements(migration.sql)) {
+    const text = statement.trim();
+    const owners = STATEMENT_OWNERS.get(text) || new Set();
+    owners.add(migration.version);
+    STATEMENT_OWNERS.set(text, owners);
+  }
+}
+
 function statementsOf(versions) {
   const set = new Set();
   for (const migration of PENDING.filter((m) => versions.has(m.version))) {
-    for (const statement of splitStatements(migration.sql)) set.add(statement.trim());
+    for (const statement of splitStatements(migration.sql)) {
+      const text = statement.trim();
+      const owners = STATEMENT_OWNERS.get(text);
+      // A shared idempotent guard is not uniquely owned by either migration.
+      // Swallow it only when every migration that contains it is being
+      // neutered; otherwise a single-file mutation would also alter a later
+      // migration and falsely attribute that failure to the selected file.
+      if ([...owners].every((version) => versions.has(version))) set.add(text);
+    }
   }
   return set;
 }
@@ -872,8 +909,12 @@ function statementsOf(versions) {
       seen.set(text, migration.version);
     }
   }
-  check("no statement text is shared between pending migrations, so single-migration neutering is exact",
-    collisions.length === 0, JSON.stringify(collisions));
+  const unsafeCollisions = [...STATEMENT_OWNERS.entries()]
+    .filter(([, owners]) => owners.size > 1)
+    .map(([text]) => text)
+    .filter((text) => !/^DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW)\s+IF\s+EXISTS\b/i.test(text));
+  check("shared migration statements are only idempotent drop guards and single-migration neutering stays exact",
+    unsafeCollisions.length === 0, JSON.stringify({ collisions, unsafeCollisions }));
 }
 
 // Neutering a migration that a later one builds on makes the WALK itself throw
@@ -929,7 +970,7 @@ function statementsMatching(predicate) {
   const finalizerRefusal = results.find((r) => r.name === "the walk itself could not complete");
   check("and it fails on real state instead of trusting the migration ledger alone",
     (ledgerChecks.length === 2 && ledgerChecks.every((r) => r.ok)) ||
-      /owner_financial_map_key_state/.test(finalizerRefusal?.detail || ""),
+      /owner_financial_map_key_state|source_original_retrieval_generation/.test(finalizerRefusal?.detail || ""),
     JSON.stringify(finalizerRefusal || ledgerChecks));
 
   const silent = [];

@@ -7,6 +7,7 @@ import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, matchesEntityAnchors,
   queryEntityAnchors,
 } from "../src/lib/query-intent.js";
+import { sourceOriginalChunkReceiptHash } from "../src/lib/source-original-chunk.js";
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + d)); if (!c) fail++; };
 
@@ -784,6 +785,22 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
   check("and a vector is queued", batched[1]._sql.includes("vector_outbox"));
   check("reports what it queued", out.queued === 1);
   check("empty input writes nothing", (await upsertChunks(env, [])).written === 0);
+
+  const boundRevision = `rev-v1:${"a".repeat(64)}`;
+  await upsertChunks(env, [{
+    chunk_uid: "c2", doc_uid: "d2", chunk_ix: 0,
+    text: "[Exact title]\n\nbody", source: "drive", title: "Exact title",
+    bound_document_revision_id: boundRevision,
+  }]);
+  const boundWrite = batched.at(-2);
+  check("a raw-bound chunk carries its exact revision id", boundWrite._args.at(-2) === boundRevision);
+  check("a raw-bound chunk carries the exact title-prefixed text commitment",
+    boundWrite._args.at(-1) === await sourceOriginalChunkReceiptHash({
+      document_revision_id: boundRevision,
+      chunk_ix: 0,
+      title: "Exact title",
+      text: "[Exact title]\n\nbody",
+    }));
 }
 
 /* ---- large chunk sets preserve recovery across our internal transaction slices ---- */

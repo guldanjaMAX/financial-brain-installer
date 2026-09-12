@@ -60,7 +60,14 @@ test("closed vocabulary matches the local assessment states and authoritative pa
     SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.raw_original_result_binding,
     "available_for_bound_current_revisions",
   );
-  assert.equal(SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.accepted_result_family_receipt, "unavailable");
+  assert.equal(
+    SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.accepted_result_family_receipt,
+    "available_non_authorizing",
+  );
+  assert.equal(
+    SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.accepted_resolution,
+    "available_for_one_exact_current_result_family",
+  );
 });
 
 test("recovery preserves the identity domain and an unresolved observation exactly", async (t) => {
@@ -222,6 +229,8 @@ test("stable private identities, append-only lineage, and direct verification fa
   const sealed = await body(response);
   assert.match(sealed.targets[0].original_id, /^hmac-sha256:[a-f0-9]{64}$/);
   assert.equal(sealed.scope.whole_source_complete, false);
+  assert.equal(sealed.scope.accepted_outcomes_supported, false);
+  assert.equal(sealed.scope.repair_verification_supported, false);
   assert.equal(JSON.stringify(sealed).includes(LOCATOR), false);
   assert.equal(fixture.first("SELECT total_changes() AS n").n, changesBeforeSeal);
 
@@ -397,7 +406,7 @@ test("stable private identities, append-only lineage, and direct verification fa
         result_document_count,result_document_set_hash,observation_hash,?,recorded_at
        FROM source_original_observations WHERE sequence=1`,
     `sha256:${"9".repeat(64)}`,
-  ), /future result-family receipt and retrieval proof/);
+  ), /atomic schema-45 admission/);
 
   response = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, {
     ...verifyDiscovery,

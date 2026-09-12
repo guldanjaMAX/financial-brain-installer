@@ -524,11 +524,76 @@ incomplete result family therefore remains unresolved. Every observation
 receipt says `whole_source_complete: false`; this contract neither enumerates
 a source nor authorizes OCR or ingest.
 
-The next stacked gate must be database-enforced and bind the original to every
-current document revision plus the exact chunk set, including title prefixes.
-It must then prove target outbox zero, global vector readiness, deterministic
-private retrieval, and citation to that same family. Schema 43 alone cannot
-authorize an accepted observation.
+Migration 0044 adds a two-phase, non-authorizing proof. Each raw-bound chunk
+stores a Worker-computed digest over its exact revision ID, chunk index, title,
+and stored text after title prefixing. A portable seal then binds the
+all-and-only current logical family, with structural parts required to be a
+complete contiguous set. The portable tables contain only opaque revision IDs
+and hashes, not locators, document IDs, titles, text, queries, or citations.
+
+A second deployment-local seal reads Vectorize before D1, binds the exact
+outbox generation and mutation fence, requires target and global outbox zero
+and corpus-wide vector-count parity, and runs the production owner retrieval
+path twice without reranking. Both ranked results and citations must be
+identical, and the top result and citation must resolve to the sealed family.
+The final D1 insert rechecks the family and readiness state so a concurrent
+corpus mutation fails closed.
+
+Recovery restores portable members before their family header, but excludes
+the deployment-local verification because recovery rebuilds Vectorize. A new
+verification is required against the recovered projection. Historical headers
+use a narrow import marker that can open only before any recovery data exists.
+The artifact closes and checks that marker after import, while immutable
+schema-43 binding validation remains active throughout. Schema 44 itself
+remains non-authorizing. Ordinary observation recording and `result_family`
+cannot create an accepted observation; the schema supplies evidence, not
+repair authority or whole-source completeness.
+
+Migration 0045 adds a separate accepted-resolution admission protocol on the
+full-admin-only `POST /api/admin/brain/source-original-observations` endpoint.
+The Worker accepts
+`mode: "accepted_resolution"` for exactly one sealed target, with explicit
+`record` and read-only `verify` operations. Each operation rebuilds the exact
+schema-44 family proof and reruns the deployment-local Vectorize and production
+owner retrieval checks. The gate never treats a historical family header or
+verification row as proof that the present corpus is unchanged.
+
+Initial admission requires the exact portable family header and members to
+have already been written by ordinary `result_family` `record`. That prior
+receipt is still non-authorizing; accepted-resolution consumes it but cannot
+create it implicitly.
+
+For `record`, the Worker submits the prior unresolved observation, exact raw
+hash and byte count, family receipt, fresh verification receipt, and proposed
+accepted observation in one D1 batch. An ephemeral admission table and its
+triggers recheck the install-state generation and mutation fence, current
+bindings, current family and chunk digests, global and target outbox emptiness,
+and exact verification hash inside the write transaction. The trigger then
+appends the portable resolution, deployment-local activation, and accepted
+observation as one atomic admission. Stale proof, concurrent writes, conflicting
+replay, or direct accepted-observation insertion fails closed.
+
+The portable resolution records historical acceptance lineage. Currentness is
+a separate deployment-local property that requires a matching activation and
+verification plus the same live family, queue, generation, mutation, and
+projection checks. Recovery exports the portable resolution but excludes
+admissions, activations, and result-family verifications. Its import marker
+closes only after proving an exact accepted-observation-to-resolution bijection
+and empty local acceptance state. The recovered deployment must rerun the
+one-target proof and append a fresh local activation before the resolution is
+current there.
+
+This dynamic SQL currentness is scoped to a fixed retrieval contract and
+supported Worker, D1, and outbox-mediated mutations. Direct FTS maintenance,
+out-of-band Vectorize writes, or a retrieval-code deployment can change ranked
+results outside the D1 generation counter. Crossing one of those boundaries
+requires rerunning the full accepted-resolution proof before the result is
+relied on.
+
+Every accepted-resolution receipt remains
+`whole_source_complete: false`. Schema 45 does not wire the legacy
+`provenance-repair --apply` command, which remains disabled, and does not grant
+authority for OCR, reingest, deletion, deployment, or customer execution.
 
 The new-computer continuity report composes that same authenticated source
 inventory with local-only observations. It reads the exact manifest, durable

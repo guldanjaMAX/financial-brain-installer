@@ -28,6 +28,22 @@ asset publication.
   call the signed webhook ready unless the exact Brain webhook address was
   already recorded. General bank invitations remain held.
 
+- **One exact original can now enter a guarded accepted-resolution evidence
+  chain.** The full-admin-only source-original observation route adds
+  `mode: "accepted_resolution"` for exactly one sealed target. Record and
+  read-only verify both rerun the exact result-family, Vectorize, and production
+  owner retrieval proof. Initial admission requires the exact family receipt
+  to have been stored first by ordinary non-authorizing `result_family`
+  record. Accepted-resolution record then atomically binds the prior unresolved
+  observation, original bytes, that family receipt, fresh verification, and
+  accepted observation. Portable history survives recovery, but current
+  verification does not: the recovered Brain must rerun the proof and create a
+  fresh local activation. Every successful accepted-resolution response states
+  `whole_source_complete: false`. The ordinary
+  `result_family` mode remains non-authorizing, legacy
+  `provenance-repair --apply` remains disabled, and this does not run OCR,
+  reingest, deletion, deployment, or customer execution.
+
 - **The provenance recovery preview stays read-only until it can prove the
   exact repair result.** `brain provenance-repair <manifest> --source <name>`
   shows a state-bound inventory for one manifest-declared local folder, Drive,
@@ -35,7 +51,22 @@ asset publication.
   stops before reading the manifest, credentials, network, scheduler, or
   source. Nothing is changed and zero candidates are reported fixed. The
   preview never advertises an apply command; every candidate stays unresolved
-  until a later schema can bind the exact result family and retrieval evidence.
+  through that CLI. The separate schema-45 route above can admit only one exact
+  sealed target after fresh family and retrieval proof.
+
+- **A private result-family proof can now seal exact stored chunks and test
+  retrieval without authorizing repair.** For one explicitly named local
+  original, schema 44 binds every current document revision and title-prefixed
+  chunk, requires a fully drained and count-matched vector index, repeats the
+  production owner retrieval path, and proves the top citation belongs to that
+  family. Private locators, queries, document IDs, titles, and text do not enter
+  the durable proof. Portable family evidence survives recovery, while the
+  deployment-local retrieval check must be repeated after Vectorize is rebuilt.
+  Historical seals restore only inside an empty-target marker that the verified
+  artifact closes and checks before the recovery can advance.
+  Ordinary `result_family` remains non-authorizing. The separate schema-45 gate
+  can consume the proof for one exact sealed target, but this still does not
+  authorize OCR, reingest, deletion, or a whole-source completeness claim.
 
 - **Optimize can now read exact source and provenance receipts without a
   Cloudflare sign-in.** `brain sources <manifest> --json` uses the Brain's saved
