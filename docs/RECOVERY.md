@@ -379,6 +379,61 @@ identical approved command to continue. Because the named stage is already in
 the durable completed prefix, the rerun does not execute its external effect or
 stop there again. Omitting the option runs every remaining stage normally.
 
+The separate mid-bootstrap interruption is not an ordinary recovery option.
+It exists only for the exact synthetic v0.4.8 disposable field identity named
+in `docs/release-evidence/v0.4.8-disposable-vector-field-plan.md`. A preview must
+also receive the fixed test mode, the candidate SHA, the owner-only complete
+`field-prepare-receipt.json`, and the exact owner-only npm archive recorded by
+that receipt. Before any provider command or credential read, the adapter
+compares every regular archive member byte-for-byte with the package root that
+is executing, verifies the exact migration member set, and binds that inventory
+to a seventh, plan-specific interruption approval. A copied flag, renamed
+manifest, different receipt, different package byte, different source lock
+file, or ordinary/customer identity fails locally.
+
+The hook remains armed only while the exact paused Worker is deployed and the
+verified restore contains at least 6,001 documents and 6,001 chunks. This
+minimum is deliberate: the real bootstrap admits up to three 1,000-row batches
+per call, so a smaller documented fixture cannot guarantee a non-final cut
+after at least 3,001 durable admissions. Before the first POST, a private fixed
+aggregate read proves the normalized opening state: epoch 1, base count zero,
+protocol and cursor both `NULL`, zero batch rows, zero outbox work, zero
+provider vectors, and unchanged D1/FTS aggregates. It waits
+for a persisted non-final `bootstrap-v2` receipt and aggregate observation with
+at least 3,001 actual epoch batch-row admissions. It then writes and fsyncs one
+private checkpoint containing the epoch, aggregate counts, and only the SHA-256
+of the nonempty private cursor. It raises
+`RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_INTERRUPTION` through the normal adapter
+failure path, so the recovery state remains retryable and the field lock is
+released. No active-version promotion can occur before that stop.
+
+Resume requires the same plan, state, manifests, artifact, wrapper, golden,
+receipt, npm archive, exact `wrangler 4.127.1` runtime, six recovery approvals,
+and seventh interruption approval. Before the first resumed bootstrap POST,
+the observer must prove the same paused target, epoch, ordinal cut, corpus,
+high-water mark, durable ledger, and private cursor digest. That exact proof is
+fsynced as a bound resume authorization before the POST. If a later POST commits
+but its response is lost, a retry may accept only monotonic same-epoch progress
+from the checkpoint. Confirmation may progress while the cursor remains at the
+same exact private value after all rows have been admitted.
+
+Paused complete parity is separately fsynced as a promotion authorization
+before the exact reviewed active version is deployed. That marker permits a
+retry to reconcile that exact version after a lost deploy response; it never
+permits an unrelated active version or active promotion before parity. A
+changed target, substituted cursor at the same ordinal, regressed ledger,
+stalled receipt, orphaned authorization marker, or past-midpoint state without
+the matching promotion proof is refused. The active checkpoint remains
+available through later health/evaluation retries and is renamed to a private
+completed receipt only after the whole verified recovery passes. A retry of an
+already-complete durable state performs that local retirement without provider
+or credential access. Any live checkpoint, resume marker, or promotion marker
+blocks ordinary recovery until the completed receipt establishes retirement.
+The completed receipt is evidence only; it does not authorize reuse of the test
+fault on another campaign. A machine/process loss can also leave the separate
+field-gate lock; resume in that case remains blocked until a separately reviewed
+stale-lock reconciliation, rather than automatic lock removal.
+
 One disposable target can exercise all four checkpoint boundaries in order:
 
 1. Run with `--stop-after-stage export_d1` and require the intentional nonzero

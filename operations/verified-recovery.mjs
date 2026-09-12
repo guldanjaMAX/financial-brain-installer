@@ -372,6 +372,10 @@ export function inspectVerifiedRecoveryManifestBindings(
   const ephemeral = (loaded, contract) => Object.freeze({
     ...contract.identity,
     clientSlug: contract.slug,
+    clientDisplayName: boundedIdentity(
+      loaded.manifest.client?.display_name,
+      "recovery client display name",
+    ),
     productVersion: contract.version,
     adminKeySecret: loaded.manifest.operations?.admin_key_secret === undefined
       ? null

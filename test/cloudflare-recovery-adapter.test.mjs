@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -16,12 +17,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
   CloudflareRecoveryAdapterError,
   RECOVERY_DURABLE_TABLES,
   RECOVERY_EXPORT_TABLES,
   RECOVERY_FIELD_GATE_STOP_STAGES,
+  RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_CODE,
+  RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
   createCloudflareRecoveryFieldGateAdapters,
   normalizedInstallStateExport,
   parseCloudflareRecoveryCliArguments,
@@ -100,6 +104,9 @@ const statePath = join(sandbox, ".brain-recovery-state.json");
 const artifactDirectory = join(sandbox, "private-artifacts");
 const wrapperPath = join(sandbox, "wrangler-owner-wrapper");
 const goldenPath = join(sandbox, "brain.golden.json");
+const fieldPreparationDirectory = join(sandbox, "private-v048-field-preparation");
+const fieldReceiptPath = join(fieldPreparationDirectory, "field-prepare-receipt.json");
+const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.8.tgz");
 const privateSentinel = "fixture-private-question-and-provider-output";
 const fixtureAdminKey = "fixture-private-admin-key-value";
 const fixtureRecoveryArtifactKey = `v1.${Buffer.alloc(32, 19).toString("base64url")}`;
@@ -166,9 +173,185 @@ const targetManifest = {
   },
 };
 
+const syntheticFieldSourceResource =
+  "brain-test-v048-field-source-recovery-gate-a48f1101";
+const syntheticFieldTargetResource =
+  "brain-test-v048-field-target-recovery-gate-a48f1102";
+const syntheticFieldSourceManifest = {
+  ...structuredClone(sourceManifest),
+  client: { slug: "v048-field-proof", display_name: "Synthetic Field Gate v0.4.8" },
+  brain: {
+    version: "0.4.8",
+    worker_name: syntheticFieldSourceResource,
+    domain: `${syntheticFieldSourceResource}.fixture.workers.dev`,
+  },
+  infrastructure: {
+    cloudflare: {
+      ...sourceManifest.infrastructure.cloudflare,
+      account_id: "fixture-v048-field-source-account",
+      d1_database_name: syntheticFieldSourceResource,
+      d1_database_id: "fixture-v048-field-source-database-id",
+      vectorize_index: syntheticFieldSourceResource,
+    },
+  },
+  operations: {
+    admin_key_secret: `keychain://${syntheticFieldSourceResource}/owner`,
+  },
+};
+const syntheticFieldTargetManifest = {
+  ...structuredClone(syntheticFieldSourceManifest),
+  brain: {
+    ...syntheticFieldSourceManifest.brain,
+    worker_name: syntheticFieldTargetResource,
+    domain: `${syntheticFieldTargetResource}.fixture.workers.dev`,
+  },
+  infrastructure: {
+    cloudflare: {
+      ...syntheticFieldSourceManifest.infrastructure.cloudflare,
+      account_id: "fixture-v048-field-target-account",
+      d1_database_name: syntheticFieldTargetResource,
+      d1_database_id: "fixture-v048-field-target-database-id",
+      vectorize_index: syntheticFieldTargetResource,
+    },
+  },
+  operations: {
+    admin_key_secret: `keychain://${syntheticFieldTargetResource}/owner`,
+    recovery_artifact_key_secret: `keychain://${syntheticFieldTargetResource}/artifact-v1`,
+    recovery_field_gate: structuredClone(targetManifest.operations.recovery_field_gate),
+  },
+};
+
 function writePrivateJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   if (process.platform !== "win32") chmodSync(path, 0o600);
+}
+
+const fullFieldPreparationSteps = Object.freeze([
+  "source-identity", "full-suite", "frontend-test", "frontend-build", "hiccup-lab",
+  "plaid-fake", "d1-auth-atomicity", "passkey-protocol", "package-privacy",
+  "history-privacy", "dependency-audit", "package-build", "clean-prefix-smoke",
+  "source-identity-final", "private-home-cleanup",
+]);
+const humanFieldGates = Object.freeze([
+  "physical_windows_install", "disposable_cloudflare", "physical_passkeys",
+  "plaid_sandbox", "quickbooks_sandbox", "watched_folder", "bank_exports",
+]);
+
+function npmPackageFixture(destination) {
+  const npmCli = process.env.npm_execpath;
+  const command = npmCli ? process.execPath : process.platform === "win32" ? "npm.cmd" : "npm";
+  const args = [
+    ...(npmCli ? [npmCli] : []),
+    "pack", "--ignore-scripts", "--json", "--pack-destination", destination,
+  ];
+  const packed = spawnSync(command, args, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+  });
+  assert.equal(packed.status, 0, "focused recovery test must build its exact local npm package");
+  const metadata = JSON.parse(packed.stdout);
+  assert.equal(metadata.length, 1);
+  assert.equal(metadata[0].filename, "brain-installer-0.4.8.tgz");
+  assert.equal(metadata[0].entryCount, metadata[0].files.length);
+  return Object.freeze({
+    bytes: readFileSync(join(destination, metadata[0].filename)),
+    fileCount: metadata[0].files.length,
+  });
+}
+
+function packageWithMutatedMember(packageBytes, wantedPath) {
+  const archive = gunzipSync(packageBytes);
+  for (let offset = 0; offset + 512 <= archive.length;) {
+    const header = archive.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const text = (start, length) => header.subarray(start, start + length)
+      .toString("utf8").replace(/\0.*$/s, "");
+    const name = text(0, 100);
+    const prefix = text(345, 155);
+    const path = prefix ? `${prefix}/${name}` : name;
+    const size = Number.parseInt(text(124, 12).trim(), 8);
+    assert.equal(Number.isSafeInteger(size), true);
+    const contentStart = offset + 512;
+    if (path === `package/${wantedPath}`) {
+      assert.ok(size > 0);
+      archive[contentStart] ^= 1;
+      return gzipSync(archive, { level: 1 });
+    }
+    offset = contentStart + Math.ceil(size / 512) * 512;
+  }
+  assert.fail(`package member missing from fixture: ${wantedPath}`);
+}
+
+function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCount, {
+  runId = "11111111-1111-4111-8111-111111111111",
+} = {}) {
+  return {
+    schema_version: 1,
+    run_id: runId,
+    generated_at: "2026-09-11T13:00:00.000Z",
+    completed_at: "2026-09-11T13:30:00.000Z",
+    status: "source_preparation_passed",
+    profile: "full",
+    scope: "source_preparation_only",
+    proof_level: "offline_synthetic_only",
+    ready_for_live_accounts: false,
+    live_field_gates_run: false,
+    customer_data_read: false,
+    customer_manifests_read: false,
+    credential_stores_read: false,
+    live_accounts_contacted: false,
+    external_network_allowed: false,
+    tooling: {
+      wrangler_package: "wrangler@4.127.1",
+      wrangler_resolution: "locked_local_dev_dependency",
+    },
+    source: {
+      head_sha: candidateSha,
+      tree_sha: "b".repeat(40),
+      package_name: "brain-installer",
+      package_version: "0.4.8",
+      package_alignment: {
+        aligned: true,
+        package_lock_name: "brain-installer",
+        package_lock_version: "0.4.8",
+        package_lock_root_name: "brain-installer",
+        package_lock_root_version: "0.4.8",
+      },
+      package_json_sha256: hash(readFileSync(join(process.cwd(), "package.json"))),
+      package_lock_sha256: hash(readFileSync(join(process.cwd(), "package-lock.json"))),
+      working_tree_clean: true,
+      shallow_repository: false,
+      diff_check_clean: true,
+      identity_stable_during_check: true,
+      end_clean: true,
+    },
+    package: {
+      filename: "brain-installer-0.4.8.tgz",
+      bytes: packageBytes.length,
+      sha256: hash(packageBytes),
+      file_count: packageFileCount,
+    },
+    steps: fullFieldPreparationSteps.map((id) => ({
+      id,
+      title: `Synthetic ${id}`,
+      status: "passed",
+      proof: `Synthetic proof for ${id}`,
+      duration_ms: 1,
+      exit_code: null,
+      failure_code: null,
+      network_scope: id === "d1-auth-atomicity"
+        ? "loopback_only"
+        : ["source-identity", "source-identity-final", "private-home-cleanup"].includes(id)
+          ? "local_only"
+          : "local_only_offline_enforced",
+    })),
+    human_field_gates: humanFieldGates.map((id) => ({
+      id,
+      status: "pending_human_proof",
+    })),
+  };
 }
 
 function canonical(value) {
@@ -455,9 +638,10 @@ async function recoveryBankFixture() {
   return fixture;
 }
 
-function snapshotForChunkCount(chunkCount) {
+function snapshotForCounts(documentCount, chunkCount) {
   const aggregate = {
     ...aggregateTemplate,
+    documents: String(documentCount),
     chunks: String(chunkCount),
     chunks_fts: String(chunkCount),
     chunks_id_max: String(chunkCount),
@@ -466,9 +650,14 @@ function snapshotForChunkCount(chunkCount) {
   return Object.freeze({
     ...expectedSnapshot,
     aggregate_fingerprint: hash(canonical(aggregate)),
+    document_count: documentCount,
     chunk_count: chunkCount,
     fts_count: chunkCount,
   });
+}
+
+function snapshotForChunkCount(chunkCount) {
+  return snapshotForCounts(expectedSnapshot.document_count, chunkCount);
 }
 
 // Exercise the normalization projection against real SQLite, not only the
@@ -744,6 +933,7 @@ function providerHarness({
   redirectInventory = false,
   extraTargetSecret = false,
   extraTargetBinding = false,
+  failEvalOnce = false,
   failBootstrapOnce = false,
   failBootstrapAfterProgressOnce = false,
   failPromotionAfterApplyOnce = false,
@@ -751,6 +941,7 @@ function providerHarness({
   healthProtocolOverride = null,
   healthTransform = (health) => health,
   initialAgentActionReceipts = 0,
+  initialBootstrapConfirmed = null,
   initialTargetRestored = false,
   initialVectorCount = 0,
   missingVectorCount = false,
@@ -771,10 +962,16 @@ function providerHarness({
   // so a new additive migration never breaks these fixtures (found 13 -> 14).
   sourceMigrationVersion = appliedMigrations.at(-1).version,
   targetChunkCount = 5,
+  targetDocumentCount = 3,
+  sourceChunkCount = targetChunkCount,
+  sourceDocumentCount = targetDocumentCount,
   targetMigrationVersion = appliedMigrations.at(-1).version,
   sourceInstallStateMissing = false,
   splitTargetDeployment = false,
   targetVersionId = pausedWorkerVersionId,
+  wranglerVersion = "4.127.1",
+  sourceManifestFixture = sourceManifest,
+  targetManifestFixture = targetManifest,
 } = {}) {
   let agentActionReceipts = initialAgentActionReceipts;
   let targetRestored = initialTargetRestored;
@@ -782,11 +979,15 @@ function providerHarness({
   let outbox = 0;
   let bootstrapRequired = initialTargetRestored && initialVectorCount < targetChunkCount;
   let bootstrapEpoch = 1;
-  let bootstrapCursor = null;
-  let bootstrapConfirmed = initialVectorCount;
+  let bootstrapConfirmed = initialBootstrapConfirmed ?? initialVectorCount;
+  let bootstrapCursor = bootstrapConfirmed > 0
+    ? `fixture:chunk#${String(Math.max(0, bootstrapConfirmed - 1)).padStart(8, "0")}`
+    : null;
+  let bootstrapProtocol = bootstrapConfirmed > 0 ? "bootstrap-v2" : null;
   let currentTargetVersionId = targetVersionId;
   let corpusMutated = false;
   let evalCalls = 0;
+  let evalFailuresRemaining = failEvalOnce ? 1 : 0;
   let adminReads = 0;
   let importCalls = 0;
   let bootstrapFailuresRemaining = failBootstrapOnce ? 1 : 0;
@@ -795,18 +996,27 @@ function providerHarness({
   let readinessLagRemaining = readinessLagAfterBootstrap ? 1 : 0;
   let promotionFailuresRemaining = failPromotionAfterApplyOnce ? 1 : 0;
   let bootstrapCalls = 0;
+  let holdBootstrapProgressOnce = false;
+  let mutateBootstrapCursorWithoutOrdinalOnce = null;
+  let mutateBootstrapHighWaterWithoutOrdinalOnce = null;
+  let observedBootstrapHighWaterPosition = targetChunkCount;
+  let observedBootstrapBaseCount = 0;
+  let observedBootstrapBatchRows = null;
   let promotionCalls = 0;
   let sleepCalls = 0;
   let normalizedLeaseSelections = 0;
   const wranglerCalls = [];
   const fetchCalls = [];
+  const observerSnapshots = [];
+  const openingSnapshots = [];
   const sensitiveBuffers = [];
+  const sourceSnapshot = snapshotForCounts(sourceDocumentCount, sourceChunkCount);
 
-  const bindingForAccount = (accountId) => accountId === sourceManifest.infrastructure.cloudflare.account_id
-    ? sourceManifest.infrastructure.cloudflare
-    : targetManifest.infrastructure.cloudflare;
+  const bindingForAccount = (accountId) => accountId === sourceManifestFixture.infrastructure.cloudflare.account_id
+    ? sourceManifestFixture.infrastructure.cloudflare
+    : targetManifestFixture.infrastructure.cloudflare;
   const migrationVersionForAccount = (accountId) =>
-    accountId === sourceManifest.infrastructure.cloudflare.account_id
+    accountId === sourceManifestFixture.infrastructure.cloudflare.account_id
       ? sourceMigrationVersion
       : targetMigrationVersion;
   const mapTables = new Set([
@@ -845,8 +1055,8 @@ function providerHarness({
     assert.equal(Object.keys(env).some((name) => /SUPABASE|ANTHROPIC/.test(name)), false);
     assert.equal(env.WRANGLER_LOG_SANITIZE, "true");
     assert.equal(env.WRANGLER_LOG, "log");
-    assert.equal(env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id ||
-      env.CLOUDFLARE_ACCOUNT_ID === targetManifest.infrastructure.cloudflare.account_id, true);
+    assert.equal(env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id ||
+      env.CLOUDFLARE_ACCOUNT_ID === targetManifestFixture.infrastructure.cloudflare.account_id, true);
     writeFileSync(join(env.WRANGLER_LOG_PATH, "fixture.log"), "aggregate-only fixture log\n", { mode: 0o600 });
 
     const ok = (payload = "") => {
@@ -855,7 +1065,7 @@ function providerHarness({
       sensitiveBuffers.push(stderr);
       return { status: 0, stdout, stderr };
     };
-    if (args[0] === "--version") return ok("4.99.0\n");
+    if (args[0] === "--version") return ok(`${wranglerVersion}\n`);
     for (const flag of [
       "--experimental-provision=false",
       "--experimental-auto-create=false",
@@ -868,7 +1078,7 @@ function providerHarness({
     const cloudflare = bindingForAccount(env.CLOUDFLARE_ACCOUNT_ID);
     if (args[0] === "d1" && args[1] === "list") {
       const row = { name: cloudflare.d1_database_name, uuid: cloudflare.d1_database_id };
-      return ok(ambiguousSourceD1 && env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id
+      return ok(ambiguousSourceD1 && env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id
         ? [row, { ...row }]
         : [row]);
     }
@@ -876,7 +1086,7 @@ function providerHarness({
       return ok([{ name: cloudflare.vectorize_index, config: { dimensions: 768, metric: "cosine" } }]);
     }
     if (args[0] === "vectorize" && args[1] === "info") {
-      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
+      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
       return ok({
         dimensions: 768,
         ...(!isSource && missingVectorCount
@@ -885,7 +1095,7 @@ function providerHarness({
       });
     }
     if (args[0] === "deployments" && args[1] === "status") {
-      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
+      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
       if (!isSource && splitTargetDeployment) {
         return ok({ versions: [
           { version_id: pausedWorkerVersionId, percentage: 50 },
@@ -898,8 +1108,8 @@ function providerHarness({
       }] });
     }
     if (args[0] === "versions" && args[1] === "view") {
-      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
-      const manifest = isSource ? sourceManifest : targetManifest;
+      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
+      const manifest = isSource ? sourceManifestFixture : targetManifestFixture;
       const requestedVersionId = args[2];
       const targetMode = requestedVersionId === pausedWorkerVersionId
         ? pausedVersionMode
@@ -973,9 +1183,9 @@ function providerHarness({
     if (args[0] === "versions" && args[1] === "deploy") {
       assert.deepEqual(args.slice(0, 6), [
         "versions", "deploy", `${activeWorkerVersionId}@100%`,
-        "--name", targetManifest.brain.worker_name, "-y",
+        "--name", targetManifestFixture.brain.worker_name, "-y",
       ]);
-      assert.equal(env.CLOUDFLARE_ACCOUNT_ID, targetManifest.infrastructure.cloudflare.account_id);
+      assert.equal(env.CLOUDFLARE_ACCOUNT_ID, targetManifestFixture.infrastructure.cloudflare.account_id);
       promotionCalls++;
       if (!promotionNoop) currentTargetVersionId = activeWorkerVersionId;
       if (promotionFailuresRemaining > 0) {
@@ -1032,13 +1242,98 @@ function providerHarness({
       targetRestored = true;
       bootstrapRequired = true;
       bootstrapConfirmed = 0;
+      bootstrapCursor = null;
+      bootstrapProtocol = null;
       vectorCount = 0;
       return ok();
     }
     if (args[0] === "d1" && args[1] === "execute" && args.includes("--command")) {
       const sql = args[args.indexOf("--command") + 1];
       let rows;
-      if (/user_table_count/.test(sql)) {
+      if (/protocol_is_null[\s\S]+cursor_is_null[\s\S]+projection_fence_clear/.test(sql)) {
+        openingSnapshots.push(Object.freeze({
+          bootstrapCalls,
+          confirmed: bootstrapConfirmed,
+          epoch: bootstrapEpoch,
+          protocol: bootstrapProtocol,
+        }));
+        rows = [{
+          projection_status: bootstrapRequired ? "bootstrap_required" : "verified",
+          epoch: bootstrapEpoch,
+          base_count: observedBootstrapBaseCount,
+          protocol_is_null: Number(bootstrapProtocol === null),
+          cursor_is_null: Number(bootstrapCursor === null),
+          high_water_set: Number(targetChunkCount > 0),
+          high_water_position: observedBootstrapHighWaterPosition,
+          high_water_matches_max: 1,
+          documents: targetDocumentCount,
+          chunks: targetChunkCount,
+          fts: targetChunkCount,
+          batches: bootstrapConfirmed === 0 ? 0 : Math.ceil(bootstrapConfirmed / bootstrapPageSize),
+          batch_rows: observedBootstrapBatchRows ?? bootstrapConfirmed,
+          outbox: 0,
+          projection_fence_clear: 1,
+        }];
+      } else if (/^WITH observer_state AS \(/.test(sql)) {
+        observerSnapshots.push(Object.freeze({
+          bootstrapCalls,
+          confirmed: bootstrapConfirmed,
+          epoch: bootstrapEpoch,
+        }));
+        const durableBatchRows = observedBootstrapBatchRows ?? bootstrapConfirmed;
+        const confirmedBatches = durableBatchRows === 0
+          ? 0
+          : Math.ceil(durableBatchRows / bootstrapPageSize);
+        rows = [{
+          projection_status: bootstrapRequired ? "bootstrap_required" : "verified",
+          bootstrap_protocol: bootstrapProtocol,
+          epoch: bootstrapEpoch,
+          base_count: observedBootstrapBaseCount,
+          cursor_set: Number(bootstrapConfirmed > 0),
+          high_water_set: Number(targetChunkCount > 0),
+          cursor_position: bootstrapConfirmed,
+          high_water_position: observedBootstrapHighWaterPosition,
+          cursor_valid: 1,
+          high_water_valid: 1,
+          cursor_not_after_high_water: 1,
+          high_water_matches_max: 1,
+          cursor_matches_batch_end: 1,
+          documents: targetDocumentCount,
+          chunks: targetChunkCount,
+          fts: targetChunkCount,
+          all_batches: confirmedBatches,
+          current_batches: confirmedBatches,
+          queued_batches: 0,
+          submitted_batches: 0,
+          confirmed_batches: confirmedBatches,
+          failed_batches: 0,
+          batch_rows_total: durableBatchRows,
+          queued_batch_rows: 0,
+          submitted_batch_rows: 0,
+          confirmed_batch_rows: durableBatchRows,
+          batch_start_position: observedBootstrapBaseCount,
+          batch_end_position: bootstrapConfirmed,
+          batch_sequence_valid: 1,
+          batch_chain_breaks: 0,
+          batch_row_mismatches: 0,
+          foreign_batches: 0,
+          outbox_pending: 0,
+          outbox_queued: 0,
+          outbox_submitted: 0,
+          outbox_failed: 0,
+          outbox_retrying: 0,
+          foreign_outbox: 0,
+          non_upsert_outbox: 0,
+          projection_fence_pending: 0,
+        }];
+      } else if (/vector_projection_bootstrap_epoch AS epoch,[\s\S]+vector_projection_bootstrap_cursor AS cursor_value/.test(sql)) {
+        rows = [{
+          epoch: bootstrapEpoch,
+          base_count: observedBootstrapBaseCount,
+          protocol: bootstrapProtocol,
+          cursor_value: bootstrapCursor,
+        }];
+      } else if (/user_table_count/.test(sql)) {
         rows = [{ user_table_count: targetRestored
           ? durableTablesForVersion(targetMigrationVersion).length + 1
           : 0 }];
@@ -1051,18 +1346,18 @@ function providerHarness({
       } else if (/PRAGMA quick_check/.test(sql)) {
         rows = [{ quick_check: "ok" }];
       } else if (/COUNT\(\*\) AS active_imports FROM source_original_result_family_recovery_state/.test(sql)) {
-        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
+        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
         rows = [{ active_imports: isSource
           ? (sourceFamilyRecoveryStateActive ? 1 : 0)
           : (targetFamilyRecoveryStateActive ? 1 : 0) }];
       } else if (/SELECT version,name,checksum/.test(sql)) {
-        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
+        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
         const latest = isSource ? sourceMigrationVersion : targetMigrationVersion;
         rows = appliedMigrations.filter((row) => row.version <= latest);
       } else if (/PRAGMA table_info\(install_state\)/.test(sql)) {
         rows = installStateColumns.map(([name, type], cid) => ({ cid, name, type }));
       } else if (/^SELECT[\s\S]+FROM install_state ORDER BY id$/.test(sql)) {
-        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
+        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
         assert.match(sql, /NULL AS "vector_drain_lease_owner"/);
         assert.match(sql, /NULL AS "vector_drain_lease_expires_at"/);
         assert.match(sql, /0 AS "outbox_generation"/);
@@ -1116,19 +1411,23 @@ function providerHarness({
           sql,
           /CAST\(\(SELECT 0\) AS TEXT\) AS "vector_bootstrap_batches"/,
         );
-        const aggregate = env.CLOUDFLARE_ACCOUNT_ID === targetManifest.infrastructure.cloudflare.account_id &&
-            targetRestored
-          ? {
+        const isTarget = env.CLOUDFLARE_ACCOUNT_ID ===
+          targetManifestFixture.infrastructure.cloudflare.account_id;
+        const documentCount = isTarget && targetRestored
+          ? targetDocumentCount
+          : sourceDocumentCount;
+        const chunkCount = isTarget && targetRestored ? targetChunkCount : sourceChunkCount;
+        const aggregate = {
               ...aggregateTemplate,
-              chunks: String(targetChunkCount),
-              chunks_fts: String(targetChunkCount),
-              chunks_id_max: String(targetChunkCount),
-              chunks_text_bytes: String(targetChunkCount * 100),
+              documents: String(documentCount),
+              chunks: String(chunkCount),
+              chunks_fts: String(chunkCount),
+              chunks_id_max: String(chunkCount),
+              chunks_text_bytes: String(chunkCount * 100),
               ...(corpusMutated
-                ? { chunks_text_bytes: String(targetChunkCount * 100 + 1) }
+                ? { chunks_text_bytes: String(chunkCount * 100 + 1) }
                 : {}),
-            }
-          : aggregateTemplate;
+            };
         rows = [{
           ...aggregate,
           vector_outbox: String(outbox),
@@ -1169,7 +1468,8 @@ function providerHarness({
       // fixture previously hid a recovery failure before any D1 restore.
       const mode = currentTargetVersionId === pausedWorkerVersionId ? "paused-for-upgrade" : "active";
       const healthResponse = await Worker.fetch(new Request(String(url)), {
-        BRAIN_NAME: "fixture-brain", BRAIN_VERSION: "0.1.12",
+        BRAIN_NAME: targetManifestFixture.client.slug,
+        BRAIN_VERSION: targetManifestFixture.brain.version,
         VECTOR_DRAIN_MODE: mode,
         DB: { prepare() { throw new Error("recovery health fixture touched D1"); } },
       }, {});
@@ -1181,11 +1481,12 @@ function providerHarness({
       // it, and drop the drift fields, to the body a real 0.1.12 Worker serves.
       delete health.configured_version;
       delete health.version_mismatch;
-      health.version = "0.1.12";
+      health.brain = targetManifestFixture.client.slug;
+      health.version = targetManifestFixture.brain.version;
       return response(healthTransform({
         ...health,
         ...(mode === "active"
-          ? { schema_version: migrationVersionForAccount(targetManifest.infrastructure.cloudflare.account_id) }
+          ? { schema_version: migrationVersionForAccount(targetManifestFixture.infrastructure.cloudflare.account_id) }
           : {}),
         vector_drain_mode: healthModeOverride ?? health.vector_drain_mode,
         vector_writer_protocol: healthProtocolOverride ?? health.vector_writer_protocol,
@@ -1196,6 +1497,7 @@ function providerHarness({
       assert.equal(currentTargetVersionId, pausedWorkerVersionId);
       assert.equal(options.body, undefined);
       bootstrapCalls++;
+      bootstrapProtocol = "bootstrap-v2";
       if (bootstrapFailuresRemaining > 0) {
         bootstrapFailuresRemaining--;
         throw new TypeError("synthetic interrupted bootstrap");
@@ -1209,7 +1511,8 @@ function providerHarness({
           retry_after_seconds: 2,
         }), 409);
       }
-      if (bootstrapRequired && bootstrapConfirmed < targetChunkCount) {
+      if (bootstrapRequired && bootstrapConfirmed < targetChunkCount &&
+          !holdBootstrapProgressOnce) {
         bootstrapConfirmed = Math.min(
           targetChunkCount,
           bootstrapConfirmed + bootstrapPageSize,
@@ -1217,6 +1520,17 @@ function providerHarness({
         vectorCount = bootstrapConfirmed;
         bootstrapCursor = `fixture:chunk#${String(Math.max(0, bootstrapConfirmed - 1)).padStart(8, "0")}`;
       }
+      if (mutateBootstrapCursorWithoutOrdinalOnce !== null) {
+        bootstrapCursor = mutateBootstrapCursorWithoutOrdinalOnce;
+        mutateBootstrapCursorWithoutOrdinalOnce = null;
+        vectorCount = Math.min(targetChunkCount, Math.max(vectorCount, bootstrapConfirmed + 1));
+      }
+      if (mutateBootstrapHighWaterWithoutOrdinalOnce !== null) {
+        observedBootstrapHighWaterPosition = mutateBootstrapHighWaterWithoutOrdinalOnce;
+        mutateBootstrapHighWaterWithoutOrdinalOnce = null;
+        vectorCount = Math.min(targetChunkCount, Math.max(vectorCount, bootstrapConfirmed + 1));
+      }
+      holdBootstrapProgressOnce = false;
       if (postProgressBootstrapFailuresRemaining > 0 && bootstrapConfirmed > 0) {
         postProgressBootstrapFailuresRemaining--;
         throw new TypeError("synthetic interruption after durable bootstrap progress");
@@ -1254,7 +1568,7 @@ function providerHarness({
         return response(bankProofTransform({ ...emptyBankProof, count: 0,
           fingerprint: hash(canonical(emptyBankProof)), next_offset: null }));
       }
-      const isSource = parsedUrl.hostname === sourceManifest.brain.domain;
+      const isSource = parsedUrl.hostname === sourceManifestFixture.brain.domain;
       return response({
         configured: true,
         key_version: 2,
@@ -1334,7 +1648,7 @@ function providerHarness({
         assert.match(text, /CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts/);
         assert.equal(text.includes(privateSentinel), false);
         if (inspectCombinedArtifact) await inspectCombinedArtifact(text);
-        return expectedSnapshot;
+        return sourceSnapshot;
       },
       runEval: async ({ args, env, input }) => {
         evalCalls++;
@@ -1345,6 +1659,10 @@ function providerHarness({
         assert.equal(args.includes("--profile"), true);
         assert.equal(args[args.indexOf("--profile") + 1], "release");
         if (deploymentChangesDuringEval) currentTargetVersionId = "fixture-unreviewed-version-id";
+        if (evalFailuresRemaining > 0) {
+          evalFailuresRemaining--;
+          return { status: 1 };
+        }
         return { status: 0 };
       },
       sleep: async () => { sleepCalls++; },
@@ -1364,12 +1682,34 @@ function providerHarness({
     get sleepCalls() { return sleepCalls; },
     get wranglerCalls() { return wranglerCalls; },
     get fetchCalls() { return fetchCalls; },
+    get observerSnapshots() { return observerSnapshots; },
+    get openingSnapshots() { return openingSnapshots; },
     get sensitiveBuffers() { return sensitiveBuffers; },
     get normalizedLeaseSelections() { return normalizedLeaseSelections; },
     get bootstrapEpoch() { return bootstrapEpoch; },
     get bootstrapCursor() { return bootstrapCursor; },
     get sourceLeaseMarker() { return sourceDrainLease ? "fixture-live-drain-owner" : null; },
     mutateNonBank() { corpusMutated = true; },
+    failNextBootstrapAfterProgress() { postProgressBootstrapFailuresRemaining++; },
+    holdNextBootstrapProgress() { holdBootstrapProgressOnce = true; },
+    mutateNextBootstrapCursorWithoutOrdinal(value) {
+      holdBootstrapProgressOnce = true;
+      mutateBootstrapCursorWithoutOrdinalOnce = value;
+    },
+    mutateNextBootstrapHighWaterWithoutOrdinal(value) {
+      holdBootstrapProgressOnce = true;
+      mutateBootstrapHighWaterWithoutOrdinalOnce = value;
+    },
+    setBootstrapCursor(value) { bootstrapCursor = value; },
+    setBootstrapVectorCount(value) { vectorCount = value; },
+    setObservedBootstrapHighWaterPosition(value) {
+      observedBootstrapHighWaterPosition = value;
+    },
+    setObservedBootstrapLedger({ baseCount, batchRows }) {
+      observedBootstrapBaseCount = baseCount;
+      observedBootstrapBatchRows = batchRows;
+    },
+    setTargetVersionId(value) { currentTargetVersionId = value; },
   };
 }
 
@@ -1634,6 +1974,49 @@ try {
   ]);
   assert.equal(parsedStop.stopAfterStage, "restore_d1");
   assert.equal(parsedStop.approveGolden, preview.golden_approval_fingerprint);
+  const parsedTestInterruption = parseCloudflareRecoveryCliArguments([
+    "run",
+    "--source-manifest", sourceManifestPath,
+    "--target-manifest", targetManifestPath,
+    "--plan", planPath,
+    "--state", statePath,
+    "--artifact-directory", artifactDirectory,
+    "--wrangler-wrapper", wrapperPath,
+    "--golden", goldenPath,
+    "--approve-plan", initialized.plan.plan_fingerprint,
+    "--approve-disposable-target", initialized.plan.target_resource_fingerprint,
+    "--approve-target-execution", preview.target_execution_approval_fingerprint,
+    "--approve-source-export-blocking", preview.source_export_blocking_approval_fingerprint,
+    "--approve-wrapper", preview.wrapper_approval_fingerprint,
+    "--approve-golden", preview.golden_approval_fingerprint,
+    "--test-interrupt-mid-bootstrap", RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+    "--test-bootstrap-candidate-sha", "c".repeat(40),
+    "--test-bootstrap-field-receipt", fieldReceiptPath,
+    "--test-bootstrap-package", fieldPackagePath,
+    "--approve-test-bootstrap-interruption", "d".repeat(64),
+  ]);
+  assert.equal(
+    parsedTestInterruption.testInterruptMidBootstrap,
+    RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+  );
+  assert.equal(parsedTestInterruption.testBootstrapCandidateSha, "c".repeat(40));
+  assert.equal(parsedTestInterruption.testBootstrapFieldReceiptPath, fieldReceiptPath);
+  assert.equal(parsedTestInterruption.testBootstrapPackagePath, fieldPackagePath);
+  assert.equal(parsedTestInterruption.approveTestBootstrapInterruption, "d".repeat(64));
+  assert.throws(
+    () => parseCloudflareRecoveryCliArguments([
+      "preview",
+      "--source-manifest", sourceManifestPath,
+      "--target-manifest", targetManifestPath,
+      "--plan", planPath,
+      "--state", statePath,
+      "--artifact-directory", artifactDirectory,
+      "--wrangler-wrapper", wrapperPath,
+      "--golden", goldenPath,
+      "--test-interrupt-mid-bootstrap", RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+    ]),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_ARGUMENTS_INVALID",
+  );
   assert.throws(
     () => parseCloudflareRecoveryCliArguments([
       "preview",
@@ -1748,6 +2131,758 @@ try {
   );
   assert.equal(invalidStopHarness.wranglerCalls.length, 0);
   assert.equal(invalidStopHarness.adminReads, 0);
+
+  // The mid-bootstrap hook is a separate, plan-bound synthetic field action.
+  // A copied flag against the ordinary recovery fixture is refused before any
+  // provider command or admin-key read, even when all ordinary approvals exist.
+  const testCandidateSha = "c".repeat(40);
+  mkdirSync(fieldPreparationDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(fieldPreparationDirectory, 0o700);
+  const fieldPackage = npmPackageFixture(fieldPreparationDirectory);
+  const fieldPackageBytes = fieldPackage.bytes;
+  if (process.platform !== "win32") chmodSync(fieldPackagePath, 0o600);
+  writePrivateJson(
+    fieldReceiptPath,
+    fullFieldPreparationReceipt(testCandidateSha, fieldPackageBytes, fieldPackage.fileCount),
+  );
+  const copiedFlagHarness = providerHarness();
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...baseConfig,
+      approvePlan: initialized.plan.plan_fingerprint,
+      approveDisposableTarget: initialized.plan.target_resource_fingerprint,
+      approveTargetExecution: preview.target_execution_approval_fingerprint,
+      approveSourceExportBlocking: preview.source_export_blocking_approval_fingerprint,
+      approveWrapper: preview.wrapper_approval_fingerprint,
+      approveGolden: preview.golden_approval_fingerprint,
+      testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+      testBootstrapCandidateSha: testCandidateSha,
+      testBootstrapFieldReceiptPath: fieldReceiptPath,
+      testBootstrapPackagePath: fieldPackagePath,
+      approveTestBootstrapInterruption: "e".repeat(64),
+    }, {
+      ...copiedFlagHarness.dependencies,
+      observeBootstrapInterruptionPoint: async () => assert.fail("observer must remain unreachable"),
+    }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_IDENTITY_INVALID",
+  );
+  assert.equal(copiedFlagHarness.wranglerCalls.length, 0);
+  assert.equal(copiedFlagHarness.adminReads, 0);
+  assert.equal(copiedFlagHarness.fetchCalls.length, 0);
+
+  const fieldSourceManifestPath = join(sandbox, "v048-field-source.manifest.json");
+  const fieldTargetManifestPath = join(sandbox, "v048-field-target.manifest.json");
+  const fieldPlanPath = join(sandbox, ".brain-v048-field-plan.json");
+  const fieldStatePath = join(sandbox, ".brain-v048-field-state.json");
+  const fieldArtifactDirectory = join(sandbox, "private-v048-field-artifacts");
+  writePrivateJson(fieldSourceManifestPath, syntheticFieldSourceManifest);
+  writePrivateJson(fieldTargetManifestPath, syntheticFieldTargetManifest);
+  mkdirSync(fieldArtifactDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(fieldArtifactDirectory, 0o700);
+  const fieldInitialized = initializeVerifiedRecovery(
+    fieldSourceManifestPath,
+    fieldTargetManifestPath,
+    fieldPlanPath,
+    fieldStatePath,
+    { now: new Date("2026-09-11T14:00:00.000Z") },
+  );
+  const fieldBaseConfig = {
+    sourceManifestPath: fieldSourceManifestPath,
+    targetManifestPath: fieldTargetManifestPath,
+    planPath: fieldPlanPath,
+    statePath: fieldStatePath,
+    artifactDirectory: fieldArtifactDirectory,
+    wranglerWrapperPath: wrapperPath,
+    goldenPath,
+  };
+  const fieldPreview = previewCloudflareRecoveryFieldGate({
+    ...fieldBaseConfig,
+    testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+    testBootstrapCandidateSha: testCandidateSha,
+    testBootstrapFieldReceiptPath: fieldReceiptPath,
+    testBootstrapPackagePath: fieldPackagePath,
+  }, { platform: "darwin" });
+  assert.equal(
+    fieldPreview.test_bootstrap_interruption.mode,
+    RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+  );
+  assert.equal(fieldPreview.test_bootstrap_interruption.candidate_sha, testCandidateSha);
+  assert.equal(
+    fieldPreview.test_bootstrap_interruption.package_sha256,
+    hash(fieldPackageBytes),
+  );
+  assert.equal(
+    fieldPreview.test_bootstrap_interruption.field_receipt_sha256,
+    hash(readFileSync(fieldReceiptPath)),
+  );
+  assert.match(fieldPreview.test_bootstrap_interruption.approval_fingerprint, /^[0-9a-f]{64}$/);
+  const approvedFieldConfig = Object.freeze({
+    ...fieldBaseConfig,
+    approvePlan: fieldInitialized.plan.plan_fingerprint,
+    approveDisposableTarget: fieldInitialized.plan.target_resource_fingerprint,
+    approveTargetExecution: fieldPreview.target_execution_approval_fingerprint,
+    approveSourceExportBlocking: fieldPreview.source_export_blocking_approval_fingerprint,
+    approveWrapper: fieldPreview.wrapper_approval_fingerprint,
+    approveGolden: fieldPreview.golden_approval_fingerprint,
+    testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+    testBootstrapCandidateSha: testCandidateSha,
+    testBootstrapFieldReceiptPath: fieldReceiptPath,
+    testBootstrapPackagePath: fieldPackagePath,
+    approveTestBootstrapInterruption:
+      fieldPreview.test_bootstrap_interruption.approval_fingerprint,
+  });
+
+  const undersizedFieldHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const undersizedFieldGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, undersizedFieldHarness.dependencies);
+  await assert.rejects(
+    undersizedFieldGate.adapters.rebuild_vectorize({
+      stage: "rebuild_vectorize",
+      attempt: 1,
+      planFingerprint: fieldInitialized.plan.plan_fingerprint,
+      targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+      completed: [{ id: "verify_d1", evidence: expectedSnapshot }],
+    }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_SCALE_INVALID",
+  );
+  assert.equal(undersizedFieldHarness.wranglerCalls.length, 0);
+  assert.equal(undersizedFieldHarness.adminReads, 0);
+  assert.equal(undersizedFieldHarness.fetchCalls.length, 0);
+
+  const largeFieldSnapshot = snapshotForCounts(7_202, 7_202);
+  const wrongWranglerHarness = providerHarness({
+    initialTargetRestored: true,
+    sourceChunkCount: 7_202,
+    sourceDocumentCount: 7_202,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 7_202,
+    wranglerVersion: "4.99.0",
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const wrongWranglerGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, wrongWranglerHarness.dependencies);
+  await assert.rejects(
+    wrongWranglerGate.adapters.rebuild_vectorize({
+      stage: "rebuild_vectorize",
+      attempt: 1,
+      planFingerprint: fieldInitialized.plan.plan_fingerprint,
+      targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+      completed: [{ id: "verify_d1", evidence: largeFieldSnapshot }],
+    }),
+    (error) => error.code === "RECOVERY_WRANGLER_VERSION_UNSUPPORTED",
+  );
+  assert.equal(wrongWranglerHarness.wranglerCalls.length, 1);
+  assert.equal(wrongWranglerHarness.adminReads, 0);
+  assert.equal(wrongWranglerHarness.fetchCalls.length, 0);
+  assert.equal(wrongWranglerHarness.promotionCalls, 0);
+
+  const preexistingBootstrapHarness = providerHarness({
+    bootstrapPageSize: 3_000,
+    initialBootstrapConfirmed: 3_000,
+    initialTargetRestored: true,
+    initialVectorCount: 0,
+    sourceChunkCount: 7_202,
+    sourceDocumentCount: 7_202,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 7_202,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const preexistingBootstrapGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, preexistingBootstrapHarness.dependencies);
+  await assert.rejects(
+    preexistingBootstrapGate.adapters.rebuild_vectorize({
+      stage: "rebuild_vectorize",
+      attempt: 1,
+      planFingerprint: fieldInitialized.plan.plan_fingerprint,
+      targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+      completed: [{ id: "verify_d1", evidence: largeFieldSnapshot }],
+    }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_OPENING_INVALID",
+  );
+  assert.equal(preexistingBootstrapHarness.bootstrapCalls, 0);
+  assert.equal(preexistingBootstrapHarness.adminReads, 0);
+  assert.equal(preexistingBootstrapHarness.promotionCalls, 0);
+
+  // A receipt can name the right candidate and carry a self-consistent archive
+  // hash while the archive's adapter bytes differ from the code actually
+  // executing. Full member-by-member binding rejects that package locally.
+  const mismatchedRuntimeDirectory = join(sandbox, "private-v048-runtime-mismatch");
+  const mismatchedRuntimeReceiptPath = join(
+    mismatchedRuntimeDirectory,
+    "field-prepare-receipt.json",
+  );
+  const mismatchedRuntimePackagePath = join(
+    mismatchedRuntimeDirectory,
+    "brain-installer-0.4.8.tgz",
+  );
+  mkdirSync(mismatchedRuntimeDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(mismatchedRuntimeDirectory, 0o700);
+  const mismatchedRuntimePackage = packageWithMutatedMember(
+    fieldPackageBytes,
+    "operations/cloudflare-recovery-adapter.mjs",
+  );
+  writeFileSync(mismatchedRuntimePackagePath, mismatchedRuntimePackage, { mode: 0o600 });
+  if (process.platform !== "win32") chmodSync(mismatchedRuntimePackagePath, 0o600);
+  writePrivateJson(
+    mismatchedRuntimeReceiptPath,
+    fullFieldPreparationReceipt(
+      testCandidateSha,
+      mismatchedRuntimePackage,
+      fieldPackage.fileCount,
+      { runId: "33333333-3333-4333-8333-333333333333" },
+    ),
+  );
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate({
+      ...fieldBaseConfig,
+      testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+      testBootstrapCandidateSha: testCandidateSha,
+      testBootstrapFieldReceiptPath: mismatchedRuntimeReceiptPath,
+      testBootstrapPackagePath: mismatchedRuntimePackagePath,
+    }, { platform: "darwin" }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+  );
+
+  // Missing/wrong approval, missing evidence, and a wrong-but-well-formed
+  // caller SHA all stop before credentials or provider access. The SHA is an
+  // expectation only; it cannot override the independently loaded receipt.
+  for (const [label, overrides, omitApproval, expectedCodes] of [
+    ["missing approval", {}, true, ["RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_ARGUMENTS_INVALID"]],
+    ["wrong approval", { approveTestBootstrapInterruption: "0".repeat(64) }, false,
+      ["RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_APPROVAL_MISMATCH"]],
+    ["missing package evidence", { testBootstrapPackagePath: undefined }, false,
+      ["RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_ARGUMENTS_INVALID"]],
+    ["wrong well-formed candidate SHA", { testBootstrapCandidateSha: "d".repeat(40) }, false,
+      ["RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CANDIDATE_MISMATCH"]],
+  ]) {
+    const harness = providerHarness({
+      sourceManifestFixture: syntheticFieldSourceManifest,
+      targetManifestFixture: syntheticFieldTargetManifest,
+    });
+    const config = { ...approvedFieldConfig, ...overrides };
+    if (omitApproval) delete config.approveTestBootstrapInterruption;
+    await assert.rejects(
+      runCloudflareRecoveryFieldGate(config, harness.dependencies),
+      (error) => expectedCodes.includes(error.code),
+      label,
+    );
+    assert.equal(harness.wranglerCalls.length, 0, label);
+    assert.equal(harness.adminReads, 0, label);
+    assert.equal(harness.fetchCalls.length, 0, label);
+  }
+
+  // Even the same candidate/package/plan needs the approval for this exact
+  // field-preparation receipt. A copied approval cannot authorize a later run.
+  const replayReceiptDirectory = join(sandbox, "private-v048-field-preparation-replay");
+  const replayReceiptPath = join(replayReceiptDirectory, "field-prepare-receipt.json");
+  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.8.tgz");
+  mkdirSync(replayReceiptDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(replayReceiptDirectory, 0o700);
+  writeFileSync(replayPackagePath, fieldPackageBytes, { mode: 0o600 });
+  if (process.platform !== "win32") chmodSync(replayPackagePath, 0o600);
+  writePrivateJson(replayReceiptPath, fullFieldPreparationReceipt(
+    testCandidateSha,
+    fieldPackageBytes,
+    fieldPackage.fileCount,
+    { runId: "22222222-2222-4222-8222-222222222222" },
+  ));
+  const replayReceiptHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...approvedFieldConfig,
+      testBootstrapFieldReceiptPath: replayReceiptPath,
+      testBootstrapPackagePath: replayPackagePath,
+    }, replayReceiptHarness.dependencies),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_APPROVAL_MISMATCH",
+  );
+  assert.equal(replayReceiptHarness.wranglerCalls.length, 0);
+  assert.equal(replayReceiptHarness.adminReads, 0);
+  assert.equal(replayReceiptHarness.fetchCalls.length, 0);
+
+  // The same approval cannot be replayed against a second plan, even when the
+  // exact synthetic manifests and candidate SHA are unchanged.
+  const replayPlanPath = join(sandbox, ".brain-v048-field-replay-plan.json");
+  const replayStatePath = join(sandbox, ".brain-v048-field-replay-state.json");
+  const replayArtifactDirectory = join(sandbox, "private-v048-field-replay-artifacts");
+  mkdirSync(replayArtifactDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(replayArtifactDirectory, 0o700);
+  const replayInitialized = initializeVerifiedRecovery(
+    fieldSourceManifestPath,
+    fieldTargetManifestPath,
+    replayPlanPath,
+    replayStatePath,
+    { now: new Date("2026-09-11T14:01:00.000Z") },
+  );
+  const replayBase = {
+    ...fieldBaseConfig,
+    planPath: replayPlanPath,
+    statePath: replayStatePath,
+    artifactDirectory: replayArtifactDirectory,
+  };
+  const replayPreview = previewCloudflareRecoveryFieldGate(replayBase, { platform: "darwin" });
+  const replayHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...replayBase,
+      approvePlan: replayInitialized.plan.plan_fingerprint,
+      approveDisposableTarget: replayInitialized.plan.target_resource_fingerprint,
+      approveTargetExecution: replayPreview.target_execution_approval_fingerprint,
+      approveSourceExportBlocking: replayPreview.source_export_blocking_approval_fingerprint,
+      approveWrapper: replayPreview.wrapper_approval_fingerprint,
+      approveGolden: replayPreview.golden_approval_fingerprint,
+      testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+      testBootstrapCandidateSha: testCandidateSha,
+      testBootstrapFieldReceiptPath: fieldReceiptPath,
+      testBootstrapPackagePath: fieldPackagePath,
+      approveTestBootstrapInterruption:
+        fieldPreview.test_bootstrap_interruption.approval_fingerprint,
+    }, replayHarness.dependencies),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_APPROVAL_MISMATCH",
+  );
+  assert.equal(replayHarness.wranglerCalls.length, 0);
+  assert.equal(replayHarness.adminReads, 0);
+  assert.equal(replayHarness.fetchCalls.length, 0);
+
+  const fieldHarness = providerHarness({
+    bootstrapPageSize: 3_000,
+    failEvalOnce: true,
+    failPromotionAfterApplyOnce: true,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 7_202,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const fieldDependencies = fieldHarness.dependencies;
+  const interruptedField = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(interruptedField.ok, false);
+  assert.equal(interruptedField.cause, RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_CODE);
+  assert.equal(interruptedField.state.current_stage, "rebuild_vectorize");
+  assert.equal(interruptedField.state.stage_status, "failed");
+  assert.equal(interruptedField.state.attempt, 1);
+  assert.deepEqual(interruptedField.state.completed.map((entry) => entry.id), [
+    "export_d1", "verify_export", "prove_target_clean", "restore_d1",
+    "verify_d1", "reconcile_security",
+  ]);
+  assert.equal(fieldHarness.bootstrapCalls, 2);
+  assert.equal(fieldHarness.bootstrapConfirmed, 6_000);
+  assert.equal(fieldHarness.bootstrapEpoch, 1);
+  assert.equal(fieldHarness.bootstrapCursor, "fixture:chunk#00005999");
+  assert.equal(fieldHarness.promotionCalls, 0);
+  assert.equal(fieldHarness.currentTargetVersionId, pausedWorkerVersionId);
+  assert.deepEqual(fieldHarness.openingSnapshots, [0, 0].map((bootstrapCalls) => ({
+    bootstrapCalls,
+    confirmed: 0,
+    epoch: 1,
+    protocol: null,
+  })));
+  assert.deepEqual(fieldHarness.observerSnapshots, [1, 1, 2, 2]
+    .map((bootstrapCalls) => ({
+      bootstrapCalls,
+      confirmed: bootstrapCalls * 3_000,
+      epoch: 1,
+    })));
+  assert.equal(
+    existsSync(join(fieldArtifactDirectory, ".brain-recovery-field-gate.lock")),
+    false,
+  );
+  const interruptionCheckpointPath = join(
+    fieldArtifactDirectory,
+    ".brain-recovery-test-bootstrap-interruption-v1.json",
+  );
+  assert.equal(existsSync(interruptionCheckpointPath), true);
+  const checkpointText = readFileSync(interruptionCheckpointPath, "utf8");
+  assert.equal(checkpointText.includes("fixture:chunk#"), false);
+  assert.equal(checkpointText.includes(privateSentinel), false);
+  const checkpointReceipt = JSON.parse(checkpointText);
+  assert.equal(checkpointReceipt.schema_version, 3);
+  assert.equal(checkpointReceipt.plan_fingerprint, fieldInitialized.plan.plan_fingerprint);
+  assert.equal(checkpointReceipt.candidate_sha, testCandidateSha);
+  assert.equal(checkpointReceipt.field_receipt_sha256, hash(readFileSync(fieldReceiptPath)));
+  assert.equal(checkpointReceipt.package_sha256, hash(fieldPackageBytes));
+  assert.equal(checkpointReceipt.package_file_count, fieldPackage.fileCount);
+  assert.match(checkpointReceipt.execution_inventory_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    checkpointReceipt.private_cursor_sha256,
+    hash("fixture:chunk#00005999"),
+  );
+  assert.equal(
+    checkpointReceipt.interruption_approval_fingerprint,
+    fieldPreview.test_bootstrap_interruption.approval_fingerprint,
+  );
+  assert.equal(checkpointReceipt.observation.epoch, 1);
+  assert.equal(checkpointReceipt.observation.cursor_position, 6_000);
+  assert.equal(checkpointReceipt.observation.confirmed, 6_000);
+  assert.equal(checkpointReceipt.observation.batch_rows, 6_000);
+  assert.equal(checkpointReceipt.observation.ready_to_interrupt, true);
+
+  // A power loss can occur after the checkpoint directory is fsynced but
+  // before the generic runner changes its already-durable running state to
+  // failed. Only that exact running/running shape is resumable. A looser
+  // running/pending state is refused locally without touching the provider or
+  // either keychain locator.
+  const crashWindowState = {
+    ...structuredClone(interruptedField.state),
+    status: "running",
+    stage_status: "running",
+    failure: null,
+    updated_at: "2026-09-11T14:02:00.000Z",
+  };
+  writePrivateJson(fieldStatePath, {
+    ...crashWindowState,
+    stage_status: "pending",
+  });
+  const beforeInvalidCrashState = {
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  };
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate(approvedFieldConfig, fieldDependencies),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_STATE_INVALID",
+  );
+  assert.deepEqual({
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  }, beforeInvalidCrashState);
+  writePrivateJson(fieldStatePath, crashWindowState);
+
+  // A copied state/checkpoint cannot resume through an out-of-band active
+  // promotion. The special path requires the exact paused version on every
+  // attempt and never sends another bootstrap request in this state. Reaching
+  // that exact remote check also proves the crash-window state was accepted.
+  fieldHarness.setTargetVersionId(activeWorkerVersionId);
+  const activeBypass = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(activeBypass.ok, false);
+  assert.equal(activeBypass.cause, "RECOVERY_TARGET_EXECUTION_CHANGED");
+  assert.equal(activeBypass.state.attempt, 2);
+  assert.equal(fieldHarness.bootstrapCalls, 2);
+  assert.equal(fieldHarness.promotionCalls, 0);
+  fieldHarness.setTargetVersionId(pausedWorkerVersionId);
+
+  // The ordinal can remain unchanged while the underlying private cursor is
+  // replaced. Its private digest is what binds the exact resume cut.
+  fieldHarness.setBootstrapCursor("fixture:chunk#same-ordinal-but-different-private-cursor");
+  const adminReadsBeforeCursorMismatch = fieldHarness.adminReads;
+  const cursorMismatch = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(cursorMismatch.ok, false);
+  assert.equal(cursorMismatch.cause, "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_MISMATCH");
+  assert.equal(fieldHarness.bootstrapCalls, 2);
+  assert.equal(fieldHarness.promotionCalls, 0);
+  assert.equal(fieldHarness.adminReads, adminReadsBeforeCursorMismatch,
+    "checkpoint mismatch is refused before the Brain admin key is read");
+  assert.deepEqual(fieldHarness.observerSnapshots.slice(4, 6), [
+    { bootstrapCalls: 2, confirmed: 6_000, epoch: 1 },
+    { bootstrapCalls: 2, confirmed: 6_000, epoch: 1 },
+  ], "private cursor mismatch is observed before any new bootstrap request");
+  fieldHarness.setBootstrapCursor("fixture:chunk#00005999");
+
+  // A same-epoch ledger rewrite cannot replace admitted batch history with a
+  // larger base_count while preserving the same raw cursor. The remote cut is
+  // exact only when durable rows, confirmed rows, total confirmation, and
+  // provider visibility are all monotonic from the fsynced checkpoint.
+  fieldHarness.setObservedBootstrapLedger({ baseCount: 3_000, batchRows: 3_000 });
+  const adminReadsBeforeLedgerMismatch = fieldHarness.adminReads;
+  const ledgerMismatch = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(ledgerMismatch.ok, false);
+  assert.equal(
+    ledgerMismatch.cause,
+    "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_MISMATCH",
+  );
+  assert.equal(fieldHarness.bootstrapCalls, 2);
+  assert.equal(fieldHarness.adminReads, adminReadsBeforeLedgerMismatch);
+  assert.equal(fieldHarness.promotionCalls, 0);
+  fieldHarness.setObservedBootstrapLedger({ baseCount: 0, batchRows: null });
+
+  // A 200 response can move non-ordinal progress while leaving the cursor
+  // ordinal unchanged. Replacing the opaque cursor at that same ordinal must
+  // still fail the first post-resume bracket; a changed vector count cannot
+  // make the private checkpoint digest optional.
+  fieldHarness.mutateNextBootstrapCursorWithoutOrdinal(
+    "fixture:chunk#same-ordinal-after-bootstrap-200",
+  );
+  const postResponseCursorMismatch = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(postResponseCursorMismatch.ok, false);
+  assert.equal(
+    postResponseCursorMismatch.cause,
+    "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_MISMATCH",
+  );
+  assert.equal(fieldHarness.bootstrapCalls, 3);
+  assert.equal(fieldHarness.bootstrapConfirmed, 6_000);
+  assert.equal(fieldHarness.promotionCalls, 0);
+  assert.deepEqual(fieldHarness.observerSnapshots.slice(8, 12), [
+    { bootstrapCalls: 2, confirmed: 6_000, epoch: 1 },
+    { bootstrapCalls: 2, confirmed: 6_000, epoch: 1 },
+    { bootstrapCalls: 3, confirmed: 6_000, epoch: 1 },
+    { bootstrapCalls: 3, confirmed: 6_000, epoch: 1 },
+  ], "same-ordinal private cursor replacement is rejected after the 200 response");
+  const resumeAuthorizationPath = join(
+    fieldArtifactDirectory,
+    ".brain-recovery-test-bootstrap-resume-authorized-v1.json",
+  );
+  assert.equal(existsSync(resumeAuthorizationPath), true);
+  const resumeAuthorizationText = readFileSync(resumeAuthorizationPath, "utf8");
+  assert.equal(resumeAuthorizationText.includes("fixture:chunk#"), false);
+  assert.equal(resumeAuthorizationText.includes(privateSentinel), false);
+
+  // Losing the active checkpoint filename cannot make ordinary recovery ignore
+  // a still-live phase authorization. Only the completed checkpoint receipt
+  // unblocks an ordinary future invocation.
+  const activeCheckpointBytes = readFileSync(interruptionCheckpointPath);
+  unlinkSync(interruptionCheckpointPath);
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate(fieldBaseConfig, { platform: "darwin" }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
+  );
+  writeFileSync(interruptionCheckpointPath, activeCheckpointBytes, { flag: "wx", mode: 0o600 });
+  if (process.platform !== "win32") chmodSync(interruptionCheckpointPath, 0o600);
+  fieldHarness.setBootstrapCursor("fixture:chunk#00005999");
+  fieldHarness.setBootstrapVectorCount(6_000);
+
+  // The high-water ordinal is immutable across every resumed observation, not
+  // just the pre-POST comparison. A 200 response followed by a changed D1
+  // high-water is rejected by the observer/continuity boundary before any
+  // active-mode promotion.
+  fieldHarness.mutateNextBootstrapHighWaterWithoutOrdinal(7_201);
+  const postResponseHighWaterMismatch = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(postResponseHighWaterMismatch.ok, false);
+  assert.equal(
+    postResponseHighWaterMismatch.cause,
+    "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_OBSERVER_FAILED",
+  );
+  assert.equal(fieldHarness.bootstrapCalls, 4);
+  assert.equal(fieldHarness.bootstrapConfirmed, 6_000);
+  assert.equal(fieldHarness.promotionCalls, 0);
+  assert.deepEqual(fieldHarness.observerSnapshots.slice(12, 16), [
+    { bootstrapCalls: 3, confirmed: 6_000, epoch: 1 },
+    { bootstrapCalls: 3, confirmed: 6_000, epoch: 1 },
+    { bootstrapCalls: 3, confirmed: 6_000, epoch: 1 },
+    { bootstrapCalls: 4, confirmed: 6_000, epoch: 1 },
+  ], "post-response high-water drift is observed and refused");
+  fieldHarness.setObservedBootstrapHighWaterPosition(7_202);
+  fieldHarness.setBootstrapVectorCount(6_000);
+
+  // The first POST after a valid resume comparison must move monotonically
+  // beyond the checkpoint. An unchanged receipt is not accepted as success or
+  // allowed to reach active-mode promotion.
+  fieldHarness.holdNextBootstrapProgress();
+  const stalledResume = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(stalledResume.ok, false);
+  assert.equal(stalledResume.cause, "RECOVERY_BOOTSTRAP_STALLED");
+  assert.equal(fieldHarness.bootstrapCalls, 5);
+  assert.equal(fieldHarness.bootstrapConfirmed, 6_000);
+  assert.equal(fieldHarness.promotionCalls, 0);
+  assert.equal(existsSync(interruptionCheckpointPath), true);
+
+  // Once the exact checkpoint cut has been fsynced as resume-authorized, a
+  // later POST may commit remotely and lose its response. The next attempt may
+  // accept only monotonic same-epoch progress from that checkpoint; it must not
+  // be trapped demanding the original cursor forever.
+  fieldHarness.failNextBootstrapAfterProgress();
+  const lostBootstrapResponse = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(lostBootstrapResponse.ok, false);
+  assert.equal(lostBootstrapResponse.cause, "RECOVERY_DATA_PLANE_REQUEST_FAILED");
+  assert.equal(lostBootstrapResponse.state.current_stage, "rebuild_vectorize");
+  assert.equal(fieldHarness.bootstrapCalls, 6);
+  assert.equal(fieldHarness.bootstrapConfirmed, 7_202);
+  assert.equal(fieldHarness.currentTargetVersionId, pausedWorkerVersionId);
+  assert.equal(fieldHarness.promotionCalls, 0);
+  assert.equal(existsSync(interruptionCheckpointPath), true);
+
+  const lostPromotionField = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(lostPromotionField.ok, false);
+  assert.equal(lostPromotionField.cause, "RECOVERY_WRANGLER_CALL_FAILED");
+  assert.equal(lostPromotionField.state.current_stage, "rebuild_vectorize");
+  assert.equal(lostPromotionField.state.stage_status, "failed");
+  const promotionAuthorizationPath = join(
+    fieldArtifactDirectory,
+    ".brain-recovery-test-bootstrap-promotion-authorized-v1.json",
+  );
+  assert.equal(existsSync(promotionAuthorizationPath), true);
+  const promotionAuthorizationText = readFileSync(promotionAuthorizationPath, "utf8");
+  assert.equal(promotionAuthorizationText.includes("fixture:chunk#"), false);
+  assert.equal(promotionAuthorizationText.includes(privateSentinel), false);
+  assert.equal(existsSync(interruptionCheckpointPath), true);
+  assert.equal(fieldHarness.currentTargetVersionId, activeWorkerVersionId,
+    "the exact reviewed promotion applied before its response was lost");
+  assert.equal(fieldHarness.promotionCalls, 1);
+
+  // The fsynced promotion authorization distinguishes that lost response from
+  // the out-of-band active bypass rejected above. Resume reconciles exact
+  // active evidence, sends no second bootstrap POST or deploy, and continues
+  // through health/eval before retiring the interruption checkpoint.
+  const laterStageFailure = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(laterStageFailure.ok, false);
+  assert.equal(laterStageFailure.cause, "RECOVERY_RELEASE_EVAL_FAILED");
+  assert.equal(laterStageFailure.state.current_stage, "verify_eval");
+  assert.equal(laterStageFailure.state.stage_status, "failed");
+  assert.equal(laterStageFailure.state.completed.at(-2).id, "rebuild_vectorize");
+  assert.equal(laterStageFailure.state.completed.at(-1).id, "verify_health");
+  assert.equal(existsSync(interruptionCheckpointPath), true,
+    "later-stage failure keeps the campaign checkpoint retryable");
+  assert.equal(fieldHarness.bootstrapCalls, 7);
+  assert.equal(fieldHarness.promotionCalls, 1);
+
+  const completedField = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(completedField.ok, true);
+  assert.equal(completedField.status.status, "complete");
+  assert.deepEqual(fieldHarness.observerSnapshots.slice(22, 25), [
+    { bootstrapCalls: 6, confirmed: 7_202, epoch: 1 },
+    { bootstrapCalls: 6, confirmed: 7_202, epoch: 1 },
+    { bootstrapCalls: 6, confirmed: 7_202, epoch: 1 },
+  ], "monotonic remote progress is bracketed before retrying a lost bootstrap response");
+  assert.deepEqual(fieldHarness.observerSnapshots.slice(25, 27), [
+    { bootstrapCalls: 7, confirmed: 7_202, epoch: 1 },
+    { bootstrapCalls: 7, confirmed: 7_202, epoch: 1 },
+  ], "the reconciled complete receipt is bracketed against the checkpoint");
+  assert.deepEqual(fieldHarness.observerSnapshots.slice(27, 29), [
+    { bootstrapCalls: 7, confirmed: 7_202, epoch: 1 },
+    { bootstrapCalls: 7, confirmed: 7_202, epoch: 1 },
+  ], "paused parity is bracketed before promotion authorization is fsynced");
+  assert.equal(fieldHarness.bootstrapCalls, 7);
+  assert.equal(fieldHarness.bootstrapEpoch, 1);
+  assert.equal(fieldHarness.bootstrapCursor, "fixture:chunk#00007201");
+  assert.equal(fieldHarness.promotionCalls, 1);
+  assert.equal(fieldHarness.currentTargetVersionId, activeWorkerVersionId);
+  assert.equal(
+    existsSync(join(fieldArtifactDirectory, ".brain-recovery-field-gate.lock")),
+    false,
+  );
+  assert.equal(existsSync(interruptionCheckpointPath), false);
+  const completedInterruptionCheckpointPath = join(
+    fieldArtifactDirectory,
+    ".brain-recovery-test-bootstrap-interruption-v1.completed.json",
+  );
+  assert.equal(existsSync(completedInterruptionCheckpointPath), true);
+
+  // Model the narrow crash after the verified runner durably records complete
+  // but before the active interruption checkpoint is renamed. A bound special
+  // retry must perform only the local retirement; it must not touch Wrangler,
+  // the Brain admin key, the data plane, bootstrap, or promotion again.
+  const completedCheckpointBytes = readFileSync(completedInterruptionCheckpointPath);
+  unlinkSync(completedInterruptionCheckpointPath);
+  writeFileSync(interruptionCheckpointPath, completedCheckpointBytes, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  if (process.platform !== "win32") chmodSync(interruptionCheckpointPath, 0o600);
+  const beforeCompleteStateRetirement = {
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+    bootstrap: fieldHarness.bootstrapCalls,
+    promotion: fieldHarness.promotionCalls,
+  };
+  const completeStateRetirement = await runCloudflareRecoveryFieldGate(
+    approvedFieldConfig,
+    fieldDependencies,
+  );
+  assert.equal(completeStateRetirement.ok, true);
+  assert.equal(completeStateRetirement.status.status, "complete");
+  assert.deepEqual({
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+    bootstrap: fieldHarness.bootstrapCalls,
+    promotion: fieldHarness.promotionCalls,
+  }, beforeCompleteStateRetirement);
+  assert.equal(existsSync(interruptionCheckpointPath), false);
+  assert.equal(existsSync(completedInterruptionCheckpointPath), true);
+
+  const ordinaryCompletedPreview = previewCloudflareRecoveryFieldGate(
+    fieldBaseConfig,
+    { platform: "darwin" },
+  );
+  assert.equal(ordinaryCompletedPreview.status, "complete");
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate({
+      ...fieldBaseConfig,
+      testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+      testBootstrapCandidateSha: testCandidateSha,
+      testBootstrapFieldReceiptPath: fieldReceiptPath,
+      testBootstrapPackagePath: fieldPackagePath,
+    }, { platform: "darwin" }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_CONSUMED",
+    "a completed/past-midpoint state cannot claim a newly requested interruption",
+  );
+
+  // A stale active filename appearing beside the consumed marker cannot revive
+  // a completed test authorization. The completed marker is terminal before
+  // any provider or keychain read, regardless of active-checkpoint residue.
+  writeFileSync(
+    interruptionCheckpointPath,
+    readFileSync(completedInterruptionCheckpointPath),
+    { flag: "wx", mode: 0o600 },
+  );
+  if (process.platform !== "win32") chmodSync(interruptionCheckpointPath, 0o600);
+  const beforeBothCheckpointRefusal = {
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  };
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate(approvedFieldConfig, fieldDependencies),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_CONSUMED",
+  );
+  assert.deepEqual({
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  }, beforeBothCheckpointRefusal);
+  unlinkSync(interruptionCheckpointPath);
 
   const drillPlanPath = join(sandbox, ".brain-recovery-drill-plan.json");
   const drillStatePath = join(sandbox, ".brain-recovery-drill-state.json");
