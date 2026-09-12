@@ -105,6 +105,15 @@ Cloudflare account. Before an OCR-enabled load, show the owner the estimated
 page count, cost range, time range, and daily spend cap. Machine-read text is
 marked as OCR, and an unusable reading is refused.
 
+For a local folder, collect that evidence with `brain ocr-preflight <manifest>
+--path <folder> --json`. It is a read-only, aggregate-only interview aid, not an
+OCR run or approval. Explain that it reads PDF structure locally and performs
+no model, network, credential, Brain, checkpoint, cursor, or state write. Review
+the affected document/page counts, pages outside the per-document cap,
+cost/time range, configured daily cap, affordability verdict, and every typed
+unknown with the owner. If the cap is not configured or any relevant page or
+scope remains unknown, do not present the plan as ready to run.
+
 Do not label every empty or failed extraction as a scan. If the system cannot
 prove that a file is scan-only, its reading state remains unknown. Scan-only
 material remains unreadable while OCR is off.

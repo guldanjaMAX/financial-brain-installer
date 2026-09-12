@@ -768,6 +768,29 @@ It is **off by default**, because it spends money on your account, once per
 scanned page. Turn it on with `safety.ocr.enabled` in the manifest. Before a run
 the installer prints what the pages will cost and how long they will take.
 
+Before enabling it, an owner or technician can inspect a local folder without
+spending anything:
+
+```bash
+brain ocr-preflight ./brain.manifest.json --path "/path/to/documents" --json
+```
+
+This command reads local PDF structure only. It returns one aggregate JSON
+receipt with the number of scan-only documents, authoritative affected pages,
+pages inside and outside the per-document limit, the existing OCR cost and time
+range, and the manifest's configured daily spend cap. It does not show file
+names, paths, content, document hashes, or parser errors. A missing daily cap remains
+`null` with source `not_configured`; it is never replaced with a guessed value.
+`affordability` is `within_cap` only when the complete high estimate fits under
+that configured cap. Unknown pages or incomplete traversal make it `unknown`.
+
+A complete zero is reported as zero. If a folder, document, or page count could
+not be inspected, the estimate stays unavailable or is explicitly a known-page
+lower bound instead. The receipt includes a state-bound plan fingerprint for a
+future approval check, but this command does not approve or run OCR. It reads no
+owner credential or ingest checkpoint, makes no network request, and writes no
+Brain record, cursor, state file, manifest, or source file.
+
 ---
 
 ## Undo

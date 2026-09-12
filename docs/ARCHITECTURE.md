@@ -165,6 +165,26 @@ list or walk
   -> advance a remote cursor only after the run is complete
 ```
 
+Local OCR planning stops before the mutating half of this lifecycle. `brain
+ocr-preflight <manifest> --path <folder> --json` runs the same link-refusing
+walker and PDF extraction boundary with an explicit null OCR callback. The PDF
+extractor's closed observation now survives `extract()` and `prepare()` even
+when a scan is refused for having no text layer, preserving its authoritative
+page count without parsing human error prose. The operation module receives
+only these content-free observations and produces an exact aggregate schema.
+It reports known scan-only documents/pages, per-document-cap eligibility,
+cost/time ranges from the shared estimator, the manifest cap and a conservative
+affordability verdict, and typed uninspectable cases. Traversal gaps cannot read
+as zero, and adjudicated source-policy or external-junction subtrees do not read
+as in-scope gaps.
+
+The command is outside the process-wide Wrangler credential session and never
+loads the admin key, source state, checkpoints, or cursors. It has no network,
+OCR, receipt, or write call. A state-bound SHA-256 fingerprint commits to the
+private root identity, PDF byte receipts, policy, observations, and skip set;
+only that fingerprint and aggregates leave the boundary. It is groundwork for
+a later approval flow, not authorization to perform OCR.
+
 `ingest/outcome.mjs` is the shared source-level result contract. Only
 `completed` is success-shaped. `partial`, `unavailable`, `retryable`, and
 `refused` carry distinct flags, and a dry run carries no ingestion outcome.
@@ -267,7 +287,7 @@ without exposing source identifiers.
 | iPhone backup | Built against a synthetic unencrypted backup; an Apple-written backup remains a field gate |
 | Zoom | Built as a transcript webhook; a paid real-account meeting remains a field gate |
 | Bank exports and hosted feed | Built into the shared financial ledger; real-statement and real-feed reconciliation remain field gates |
-| OCR for scanned PDFs | Built, optional, and provenance-marked; local synthetic scans pass and private real scans remain a field gate |
+| OCR for scanned PDFs | Built, optional, and provenance-marked; aggregate local preflight is read-only and synthetic-tested, while private real scans remain a field gate |
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |
 | Microsoft 365 and Dropbox | Built behind field gates for mail and files, cursor resume, tombstones, and scheduling; no real tenant or account has completed acceptance |
 | QuickBooks Online and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |

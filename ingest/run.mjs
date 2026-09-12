@@ -1577,12 +1577,28 @@ export async function prepare(file, { sourceName, ocr = null }) {
     // the cheapest command and nothing bills the owner without being asked.
     ocr,
   });
+  // Keep the extractor's closed, content-free observation even when the
+  // document itself is refused. Scanned PDFs intentionally return no text,
+  // so dropping this beside the human skip reason erased the authoritative
+  // page count that a read-only OCR plan needs. This object contains no path,
+  // filename, extracted text, or raw parser error.
+  const observation = originalObservationFromExtraction(got, { format: ext });
   if (got.error || got.text == null) {
-    return { hash, skip: { path: file.rel, reason: got.error || "extraction produced nothing" } };
+    return {
+      hash,
+      observation,
+      skip: { path: file.rel, reason: got.error || "extraction produced nothing" },
+    };
   }
 
   const q = textQuality(got.text);
-  if (!q.ok) return { hash, skip: { path: file.rel, reason: q.reason, metrics: q.metrics } };
+  if (!q.ok) {
+    return {
+      hash,
+      observation,
+      skip: { path: file.rel, reason: q.reason, metrics: q.metrics },
+    };
+  }
 
   // A format that extracted something but wants to flag it (a mostly-image PDF,
   // a truncated sheet) is reported alongside the document, not instead of it.
@@ -1610,6 +1626,7 @@ export async function prepare(file, { sourceName, ocr = null }) {
 
   return {
     hash,
+    observation,
     envelope: {
       source_type: sourceName,
       source_id: localSourceLocator,
