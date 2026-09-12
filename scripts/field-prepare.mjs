@@ -128,7 +128,8 @@ const STEP_CATALOG = Object.freeze({
   ),
   "history-privacy": npmStep(
     "history-privacy", "Local source-history privacy",
-    ["run", "privacy:history"], "Exact local HEAD history has zero privacy findings.",
+    ["run", "privacy:history:field"],
+    "Exact local HEAD has no privacy, revoked-credential, or unreviewed credential findings.",
   ),
   "dependency-audit": npmStep(
     "dependency-audit", "Offline dependency audit",
