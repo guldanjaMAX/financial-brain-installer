@@ -195,12 +195,15 @@ Before preview, prepare all of these locally and out of band:
   gate requires D1 storage;
 - a fresh manual Cloudflare review that the target Worker has no routes and no
   custom domains. Record the immutable paused version as
-  `paused_worker_version_id`, the immutable active version as
-  `active_worker_version_id`, their identical reviewed script hash as
-  `worker_script_etag`, the empty route lists, and review timestamp in the target manifest's
-  `operations.recovery_field_gate`. The adapter pins and inspects both versions
-  on every target stage, but route inventory is a manually reviewed assertion
-  because Wrangler does not expose it through this adapter;
+  `paused_worker_version_id` with its independent opaque
+  `paused_worker_script_etag`, and the immutable active version as
+  `active_worker_version_id` with its independent opaque
+  `active_worker_script_etag`. Provider etags are pinned for drift detection;
+  they are not compared across versions and are not treated as package or code
+  digests. Record the empty route lists and review timestamp in the target
+  manifest's `operations.recovery_field_gate`. The adapter pins and inspects
+  both versions on every target stage, but route inventory is a manually
+  reviewed assertion because Wrangler does not expose it through this adapter;
 - the target manifest's `operations.admin_key_secret` Keychain locator, with
   the disposable target key already stored there;
 - the source manifest's `operations.admin_key_secret` Keychain locator when the

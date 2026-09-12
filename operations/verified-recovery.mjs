@@ -44,9 +44,13 @@ const MAX_MANIFEST_BYTES = 5 * 1024 * 1024;
 const MAX_CONTROL_FILE_BYTES = 1024 * 1024;
 const MAX_SINGLE_D1_IMPORT_BYTES = 5 * 1024 * 1024 * 1024;
 const SHA256_RE = /^[0-9a-f]{64}$/;
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$/;
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 const RESOURCE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{1,127}$/;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,40}$/;
+const DISPOSABLE_RECOVERY_FIXTURE_SHA256 =
+  "7e8325d3014102e3509fd2f5dcc7ac78aded99dffac18c899e1dd2611cfba6c8";
+const DISPOSABLE_RECOVERY_DOCUMENTS = 6_001;
 
 export const VERIFIED_RECOVERY_STAGES = Object.freeze([
   Object.freeze({ id: "export_d1", effect: "local_sensitive_write" }),
@@ -71,6 +75,22 @@ const PLAN_KEYS = new Set([
 const STATE_KEYS = new Set([
   "schema_version", "plan_fingerprint", "status", "current_stage",
   "stage_status", "attempt", "completed", "failure", "created_at", "updated_at",
+]);
+const FIELD_PROOF_KEYS = new Set([
+  "schema_version", "kind", "candidate_sha", "package_sha256",
+  "field_receipt_sha256", "deployment_receipt_sha256", "seed_receipt_sha256", "fixture_sha256",
+  "seed_d1_content_fingerprint", "expected_documents", "expected_chunks",
+  "expected_fts", "seed_replay_unchanged_documents", "paired_stop_stage", "bound_at",
+]);
+const FIELD_PROOF_BINDING_KEYS = new Set(
+  [...FIELD_PROOF_KEYS].filter((key) => key !== "bound_at"),
+);
+const REBUILD_FIELD_PROOF_KEYS = Object.freeze([
+  "deployment_receipt_sha256",
+  "seed_receipt_sha256",
+  "bootstrap_interruption_checkpoint_sha256",
+  "bootstrap_resume_authorization_sha256",
+  "bootstrap_promotion_authorization_sha256",
 ]);
 const COMPLETED_KEYS = new Set(["id", "completed_at", "evidence"]);
 const FAILURE_KEYS = new Set(["stage", "code", "at", "cause", "detail"]);
@@ -240,15 +260,46 @@ function recoveryResourceContract(manifest, label) {
     `${label} Worker`,
   );
   const domain = safeDomain(manifest.brain?.domain, `${label} brain domain`);
+  const chunkSize = Number(manifest.retrieval?.chunk_size ?? 1500);
+  const chunkOverlap = Number(manifest.retrieval?.chunk_overlap ?? 300);
+  const dailyLlmCapUsd = Number(manifest.safety?.daily_llm_spend_cap_usd ?? 10);
   const runtime = Object.freeze({
     client_slug: slug,
     product_version: version,
     embedding_model: String(manifest.retrieval?.embed_model || "@cf/baai/bge-base-en-v1.5"),
     embedding_dimensions: Number(manifest.retrieval?.embed_dimensions ?? 768),
+    chunk_size: String(chunkSize),
+    chunk_overlap: String(chunkOverlap),
+    daily_llm_cap_usd: String(dailyLlmCapUsd),
+    answer_model: String(
+      manifest.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    ),
+    credential_scanner: manifest.safety?.credential_scanner?.enabled === false ? "off" : "on",
+    ocr_enabled: manifest.safety?.ocr?.enabled === true ? "1" : "0",
+    ocr_model: String(
+      manifest.safety?.ocr?.model || "@cf/google/gemma-4-26b-a4b-it",
+    ),
   });
   if (!runtime.embedding_model || runtime.embedding_model.length > 256 ||
       CONTROL_RE.test(runtime.embedding_model) || runtime.embedding_dimensions !== 768) {
     fail(`${label} recovery manifest has an incompatible embedding contract`);
+  }
+  if (!Number.isSafeInteger(chunkSize) || chunkSize < 256 || chunkSize > 1800 ||
+      !Number.isSafeInteger(chunkOverlap) || chunkOverlap < 0 || chunkOverlap > 900 ||
+      chunkOverlap >= chunkSize) {
+    fail(`${label} recovery manifest has an incompatible chunking contract`);
+  }
+  if (!Number.isFinite(dailyLlmCapUsd) || dailyLlmCapUsd < 0 ||
+      !/^\d+(?:\.\d+)?$/.test(runtime.daily_llm_cap_usd)) {
+    fail(`${label} recovery manifest has an incompatible daily LLM cap`);
+  }
+  for (const [value, name] of [
+    [runtime.answer_model, "answer model"],
+    [runtime.ocr_model, "OCR model"],
+  ]) {
+    if (!value || value.length > 256 || CONTROL_RE.test(value)) {
+      fail(`${label} recovery manifest has an incompatible ${name}`);
+    }
   }
   const identity = Object.freeze({
     accountId, databaseId, databaseName, vectorizeIndex, workerName, domain,
@@ -377,6 +428,20 @@ export function inspectVerifiedRecoveryManifestBindings(
       "recovery client display name",
     ),
     productVersion: contract.version,
+    embeddingModel: contract.runtime.embedding_model,
+    embeddingDimensions: contract.runtime.embedding_dimensions,
+    chunkSize: contract.runtime.chunk_size,
+    chunkOverlap: contract.runtime.chunk_overlap,
+    dailyLlmCapUsd: contract.runtime.daily_llm_cap_usd,
+    answerModel: contract.runtime.answer_model,
+    credentialScanner: contract.runtime.credential_scanner,
+    ocrEnabled: contract.runtime.ocr_enabled,
+    ocrModel: contract.runtime.ocr_model,
+    enabledCorpora: Object.freeze(Object.entries(loaded.manifest.corpora || {})
+      .filter(([, value]) => value?.enabled === true)
+      .map(([name]) => name)
+      .sort()),
+    bankFeedEnabled: loaded.manifest.corpora?.bank_feed?.enabled === true,
     adminKeySecret: loaded.manifest.operations?.admin_key_secret === undefined
       ? null
       : boundedIdentity(
@@ -483,7 +548,7 @@ function initialRecoveryState(plan, options = {}) {
   });
 }
 
-function evidenceKeys(stage) {
+function evidenceKeys(stage, fieldProof = null) {
   const shapes = {
     export_d1: ["artifact_sha256", "artifact_bytes"],
     verify_export: [
@@ -506,7 +571,10 @@ function evidenceKeys(stage) {
       "bank_protected", "bank_reauthorization_required",
       "bank_legacy_rewrap_required", "bank_unsupported_key_versions",
     ],
-    rebuild_vectorize: ["chunk_count", "vector_count", "pending_outbox", "failed_vectors"],
+    rebuild_vectorize: [
+      "chunk_count", "vector_count", "pending_outbox", "failed_vectors",
+      ...(fieldProof ? REBUILD_FIELD_PROOF_KEYS : []),
+    ],
     verify_health: ["status", "failure_count", "vector_backlog"],
     verify_eval: ["profile", "status", "critical_failures", "unauthorized_retrievals"],
   };
@@ -517,8 +585,40 @@ function completedEvidence(completed, stage) {
   return completed.find((entry) => entry.id === stage)?.evidence ?? null;
 }
 
-function validateStageEvidence(stage, input, plan, completed) {
-  const expected = evidenceKeys(stage);
+function validateRecoveryFieldProof(input, completed) {
+  if (!exactKeys(input, FIELD_PROOF_KEYS) || input.schema_version !== 1 ||
+      input.kind !== "v048_disposable_recovery_seed_bridge" ||
+      !COMMIT_SHA_RE.test(String(input.candidate_sha ?? "")) ||
+      input.fixture_sha256 !== DISPOSABLE_RECOVERY_FIXTURE_SHA256 ||
+      input.expected_documents !== DISPOSABLE_RECOVERY_DOCUMENTS ||
+      !Number.isSafeInteger(input.expected_chunks) ||
+      input.expected_chunks < DISPOSABLE_RECOVERY_DOCUMENTS ||
+      input.expected_fts !== input.expected_chunks ||
+      input.seed_replay_unchanged_documents !== DISPOSABLE_RECOVERY_DOCUMENTS ||
+      input.paired_stop_stage !== "rebuild_vectorize") {
+    fail("verified recovery field proof binding is invalid");
+  }
+  for (const key of [
+    "package_sha256", "field_receipt_sha256", "deployment_receipt_sha256",
+    "seed_receipt_sha256",
+    "seed_d1_content_fingerprint",
+  ]) {
+    hashValue(input[key], `verified recovery field proof ${key}`);
+  }
+  const boundAt = isoTimestamp(input.bound_at, "verified recovery field proof bound_at");
+  const verifiedExport = completedEvidence(completed, "verify_export");
+  if (!verifiedExport ||
+      verifiedExport.content_fingerprint !== input.seed_d1_content_fingerprint ||
+      verifiedExport.document_count !== input.expected_documents ||
+      verifiedExport.chunk_count !== input.expected_chunks ||
+      verifiedExport.fts_count !== input.expected_fts) {
+    fail("verified recovery field proof does not match the verified D1 export");
+  }
+  return Object.freeze({ ...structuredClone(input), bound_at: boundAt });
+}
+
+function validateStageEvidence(stage, input, plan, completed, fieldProof = null) {
+  const expected = evidenceKeys(stage, fieldProof);
   if (!expected.size || !exactKeys(input, expected)) fail(`verified recovery ${stage} evidence is invalid`);
   const evidence = structuredClone(input);
   if (stage === "export_d1") {
@@ -587,6 +687,16 @@ function validateStageEvidence(stage, input, plan, completed) {
     nonNegativeInteger(evidence.vector_count, "recovery vector count");
     nonNegativeInteger(evidence.pending_outbox, "recovery vector backlog");
     nonNegativeInteger(evidence.failed_vectors, "recovery failed vector count");
+    if (fieldProof) {
+      for (const key of REBUILD_FIELD_PROOF_KEYS) {
+        hashValue(evidence[key], `verified recovery rebuild ${key}`);
+      }
+      if (evidence.deployment_receipt_sha256 !== fieldProof.deployment_receipt_sha256 ||
+          evidence.seed_receipt_sha256 !== fieldProof.seed_receipt_sha256 ||
+          evidence.chunk_count !== fieldProof.expected_chunks) {
+        fail("verified recovery rebuild proof does not match its field proof binding");
+      }
+    }
     if (evidence.chunk_count !== restored?.chunk_count ||
         evidence.vector_count !== evidence.chunk_count || evidence.pending_outbox !== 0 ||
         evidence.failed_vectors !== 0) {
@@ -643,7 +753,11 @@ function validateStageEvidence(stage, input, plan, completed) {
 /** Validate state as a strict prefix of the reviewed stage sequence. */
 export function validateVerifiedRecoveryState(input, planInput) {
   const plan = validateVerifiedRecoveryPlan(planInput);
-  if (!exactKeys(input, STATE_KEYS) || input.schema_version !== VERIFIED_RECOVERY_STATE_VERSION ||
+  const hasFieldProof = Object.hasOwn(input || {}, "field_proof");
+  const expectedStateKeys = new Set(STATE_KEYS);
+  if (hasFieldProof) expectedStateKeys.add("field_proof");
+  if (!exactKeys(input, expectedStateKeys) ||
+      input.schema_version !== VERIFIED_RECOVERY_STATE_VERSION ||
       input.plan_fingerprint !== plan.plan_fingerprint || !Array.isArray(input.completed)) {
     fail("verified recovery state shape or plan binding is invalid");
   }
@@ -656,9 +770,18 @@ export function validateVerifiedRecoveryState(input, planInput) {
       fail("verified recovery completed stages are not an exact prefix");
     }
     const completedAt = isoTimestamp(entry.completed_at, "verified recovery completion time");
-    const evidence = validateStageEvidence(entry.id, entry.evidence, plan, completed);
+    const evidence = validateStageEvidence(
+      entry.id,
+      entry.evidence,
+      plan,
+      completed,
+      hasFieldProof ? input.field_proof : null,
+    );
     completed.push(Object.freeze({ id: entry.id, completed_at: completedAt, evidence }));
   }
+  const fieldProof = hasFieldProof
+    ? validateRecoveryFieldProof(input.field_proof, completed)
+    : null;
   const next = STAGE_IDS[completed.length] ?? null;
   const status = String(input.status ?? "");
   const stageStatus = input.stage_status;
@@ -697,8 +820,55 @@ export function validateVerifiedRecoveryState(input, planInput) {
   }
   return Object.freeze({
     ...structuredClone(input),
+    ...(fieldProof ? { field_proof: fieldProof } : {}),
     completed: Object.freeze(completed),
   });
+}
+
+/**
+ * Bind one recovery journal to the reviewed v0.4.8 disposable seed campaign.
+ *
+ * The proof can only be added after the normalized export has been verified
+ * and before the first Vectorize rebuild attempt. A replay may omit
+ * `bound_at`; in that case the already-bound timestamp is reused so only an
+ * otherwise canonically identical proof is idempotent.
+ */
+export function bindVerifiedRecoveryFieldProof(
+  stateInput,
+  planInput,
+  proofInput,
+  options = {},
+) {
+  const plan = validateVerifiedRecoveryPlan(planInput);
+  const state = validateVerifiedRecoveryState(stateInput, plan);
+  const proofHasBoundAt = exactKeys(proofInput, FIELD_PROOF_KEYS);
+  const proofNeedsBoundAt = exactKeys(proofInput, FIELD_PROOF_BINDING_KEYS);
+  if (!proofHasBoundAt && !proofNeedsBoundAt) {
+    fail("verified recovery field proof binding is invalid");
+  }
+  const boundAt = proofHasBoundAt
+    ? isoTimestamp(proofInput.bound_at, "verified recovery field proof bound_at")
+    : state.field_proof?.bound_at ?? nowIso(options);
+  const proposed = validateRecoveryFieldProof({
+    ...structuredClone(proofInput),
+    bound_at: boundAt,
+  }, state.completed);
+  if (state.field_proof) {
+    if (canonical(state.field_proof) !== canonical(proposed)) {
+      fail("verified recovery field proof is already bound to different evidence");
+    }
+    return state;
+  }
+  if (state.status === "complete" ||
+      state.completed.some((entry) => entry.id === "rebuild_vectorize") ||
+      (state.current_stage === "rebuild_vectorize" && state.attempt > 0)) {
+    fail("verified recovery field proof cannot be bound after rebuild begins");
+  }
+  return validateVerifiedRecoveryState({
+    ...structuredClone(state),
+    field_proof: structuredClone(proposed),
+    updated_at: boundAt,
+  }, plan);
 }
 
 function markStageRunning(state, options = {}) {
@@ -742,7 +912,13 @@ function markStageFailed(state, options = {}) {
 
 function markStageComplete(state, evidence, plan, options = {}) {
   const timestamp = nowIso(options);
-  const checked = validateStageEvidence(state.current_stage, evidence, plan, state.completed);
+  const checked = validateStageEvidence(
+    state.current_stage,
+    evidence,
+    plan,
+    state.completed,
+    state.field_proof ?? null,
+  );
   const completed = [
     ...state.completed.map((entry) => structuredClone(entry)),
     { id: state.current_stage, completed_at: timestamp, evidence: structuredClone(checked) },

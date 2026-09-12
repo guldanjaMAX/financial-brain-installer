@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -27,6 +28,9 @@ import {
   RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_CODE,
   RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
   createCloudflareRecoveryFieldGateAdapters,
+  assertDisposableRecoveryFieldCampaignIdentity,
+  inspectDisposableRecoveryDeploymentPreparation,
+  inspectDisposableRecoverySeedPreparation,
   normalizedInstallStateExport,
   parseCloudflareRecoveryCliArguments,
   previewCloudflareRecoveryFieldGate,
@@ -36,8 +40,21 @@ import {
   verifyRecoverySqlArtifact,
 } from "../operations/cloudflare-recovery-adapter.mjs";
 import {
+  DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME,
+  assertDisposableRecoveryDeploymentReceipt,
+} from "../operations/disposable-recovery-deployment-receipt.mjs";
+import {
+  DISPOSABLE_RECOVERY_FIXTURE_SHA256,
+  DISPOSABLE_RECOVERY_SEED_BATCHES,
+  DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+  assertDisposableRecoverySeedReceipt,
+} from "../operations/disposable-recovery-seeder.mjs";
+import { readPrivateAggregateReceipt } from "../operations/private-aggregate-receipt.mjs";
+import {
   initializeVerifiedRecovery,
+  inspectVerifiedRecoveryManifestBindings,
   loadVerifiedRecoveryState,
+  writeVerifiedRecoveryState,
 } from "../operations/verified-recovery.mjs";
 import { withDecryptedRecoveryArtifact } from "../operations/recovery-artifact-crypto.mjs";
 import {
@@ -53,7 +70,7 @@ import Worker from "../worker/src/index.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET, encryptAccessReference } from "../worker/src/lib/bank-feed.js";
 import { resolveNpmCacheContentRoot } from "../scripts/field-prepare.mjs";
 
-const sandbox = mkdtempSync(join(tmpdir(), "brain-cloudflare-recovery-adapter-"));
+const sandbox = realpathSync(mkdtempSync(join(tmpdir(), "brain-cloudflare-recovery-adapter-")));
 if (process.platform !== "win32") chmodSync(sandbox, 0o700);
 
 // Schema 34's source inventory is durable schema, but its rows are a derived
@@ -116,6 +133,14 @@ const goldenPath = join(sandbox, "brain.golden.json");
 const fieldPreparationDirectory = join(sandbox, "private-v048-field-preparation");
 const fieldReceiptPath = join(fieldPreparationDirectory, "field-prepare-receipt.json");
 const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.8.tgz");
+const fieldDeploymentReceiptPath = join(
+  fieldPreparationDirectory,
+  DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME,
+);
+const fieldSeedReceiptPath = join(
+  fieldPreparationDirectory,
+  "v048-disposable-seed-receipt.json",
+);
 const privateSentinel = "fixture-private-question-and-provider-output";
 const fixtureAdminKey = "fixture-private-admin-key-value";
 const fixtureRecoveryArtifactKey = `v1.${Buffer.alloc(32, 19).toString("base64url")}`;
@@ -131,8 +156,12 @@ let lockedWranglerRuntime = inspectLockedWranglerRuntime(process.cwd());
 const sourceWorkerVersionId = "fixture-source-version-id";
 const pausedWorkerVersionId = "fixture-paused-version-id";
 const activeWorkerVersionId = "fixture-active-version-id";
-const workerScriptEtag = "a".repeat(64);
+const pausedWorkerScriptEtag = "a".repeat(64);
+const activeWorkerScriptEtag = "c".repeat(64);
 const sourceWorkerScriptEtag = "b".repeat(64);
+const fieldSourceWorkerVersionId = "10000000-0000-4000-8000-000000000001";
+const fieldPausedWorkerVersionId = "20000000-0000-4000-8000-000000000002";
+const fieldActiveWorkerVersionId = "30000000-0000-4000-8000-000000000003";
 
 const sourceManifest = {
   manifest_version: 1,
@@ -181,8 +210,9 @@ const targetManifest = {
     recovery_artifact_key_secret: "keychain://fixture-brain-recovery/artifact-v1",
     recovery_field_gate: {
       paused_worker_version_id: pausedWorkerVersionId,
+      paused_worker_script_etag: pausedWorkerScriptEtag,
       active_worker_version_id: activeWorkerVersionId,
-      worker_script_etag: workerScriptEtag,
+      active_worker_script_etag: activeWorkerScriptEtag,
       routes: [],
       custom_domains: [],
       reviewed_at: "2026-08-25T11:55:00.000Z",
@@ -234,7 +264,6 @@ const syntheticFieldTargetManifest = {
   operations: {
     admin_key_secret: `keychain://${syntheticFieldTargetResource}/owner`,
     recovery_artifact_key_secret: `keychain://${syntheticFieldTargetResource}/artifact-v1`,
-    recovery_field_gate: structuredClone(targetManifest.operations.recovery_field_gate),
   },
 };
 
@@ -566,6 +595,200 @@ const aggregateTemplate = aggregateFromSql(
 );
 const deterministicDataExport = "-- deterministic data-only fixture\n";
 const deterministicDataFingerprint = hash(normalizedInstallStateSql + deterministicDataExport);
+
+function fullDisposableDeploymentReceipt(binding) {
+  const sourceScriptEtag = "source-etag-v048";
+  const pausedScriptEtag = "target-paused-etag-v048";
+  const activeScriptEtag = "target-active-etag-v048";
+  const version = (mode, versionId, scriptEtag, bindingHash, withoutModeHash) => ({
+    version_id: versionId,
+    mode,
+    script_etag: scriptEtag,
+    bindings_sha256: bindingHash,
+    bindings_without_mode_sha256: withoutModeHash,
+    code_exact: true,
+    bindings_exact: true,
+    resources_exact: true,
+    compatibility_date: "2026-01-01",
+    handlers: ["fetch", "scheduled"],
+  });
+  const resource = (fingerprint) => ({
+    resource_fingerprint: fingerprint,
+    worker_exists: true,
+    d1_exists: true,
+    vectorize_exists: true,
+    d1_name_and_id_exact: true,
+    vectorize_name_exact: true,
+    vector_dimensions: 768,
+    vector_metric: "cosine",
+    workers_dev_enabled: true,
+    routes_count: 0,
+    custom_domains_count: 0,
+    provider_readback: true,
+  });
+  const sourceVersion = version(
+    "active", fieldSourceWorkerVersionId, sourceScriptEtag,
+    "1".repeat(64), "2".repeat(64),
+  );
+  const pausedVersion = version(
+    "paused-for-upgrade", fieldPausedWorkerVersionId, pausedScriptEtag,
+    "3".repeat(64), "4".repeat(64),
+  );
+  const activeVersion = version(
+    "active", fieldActiveWorkerVersionId, activeScriptEtag,
+    "5".repeat(64), "4".repeat(64),
+  );
+  const receipt = {
+    schema_version: 1,
+    protocol: "v048-disposable-recovery-deployment-v1",
+    status: "passed",
+    completed_at: "2026-09-11T13:40:00.000Z",
+    campaign: {
+      release: "0.4.8",
+      client_slug: "v048-field-proof",
+      source_resource: syntheticFieldSourceResource,
+      target_resource: syntheticFieldTargetResource,
+    },
+    binding,
+    source: {
+      resource_fingerprint: binding.source_resource_fingerprint,
+      active_version: sourceVersion,
+      active_traffic_percent: 100,
+      resource_contract: resource(binding.source_resource_fingerprint),
+    },
+    target: {
+      resource_fingerprint: binding.target_resource_fingerprint,
+      initially_paused: true,
+      paused_version: pausedVersion,
+      active_version: activeVersion,
+      paused_traffic_percent: 100,
+      active_not_promoted: true,
+      resource_contract: resource(binding.target_resource_fingerprint),
+    },
+    execution: {
+      provider_calls: 12,
+      fresh_wrapper_copy_per_call: true,
+      copied_package_source_per_call: true,
+      materialized_runtime_per_call: true,
+      revalidated_before_and_after_each_call: true,
+      package_execution_inventory_sha256: binding.execution_inventory_sha256,
+      wrangler_wrapper_sha256: binding.wrangler_wrapper_sha256,
+      wrangler_runtime_inventory_sha256: binding.wrangler_runtime_inventory_sha256,
+      wrangler_entrypoint_sha256: binding.wrangler_entrypoint_sha256,
+      node_executable_sha256: binding.node_executable_sha256,
+    },
+    proof_boundary: {
+      aggregate_only: true,
+      synthetic_disposable_only: true,
+      exact_package_proven: true,
+      exact_provider_readback_proven: true,
+      source_active_proven: true,
+      target_paused_proven: true,
+      target_active_uploaded_not_promoted_proven: true,
+      routes_and_custom_domains_empty_proven: true,
+      recovery_run: false,
+      teardown_run: false,
+      release_authorized: false,
+      customer_data_read: false,
+    },
+  };
+  assertDisposableRecoveryDeploymentReceipt(receipt);
+  return receipt;
+}
+
+function fullDisposableSeedReceipt(binding, {
+  chunks = 7_202,
+  contentFingerprint = deterministicDataFingerprint,
+} = {}) {
+  const receipt = {
+    schema_version: 3,
+    protocol: "disposable-recovery-seed-v1",
+    status: "passed",
+    completed_at: "2026-09-11T13:45:00.000Z",
+    data_class: "deterministic_fictional_synthetic_only",
+    binding,
+    deployment: {
+      deployment_receipt_sha256: binding.deployment_receipt_sha256,
+      source_resource_fingerprint: binding.source_resource_fingerprint,
+      source_active_version_id: binding.source_active_version_id,
+      source_script_etag: binding.source_script_etag,
+      source_active_traffic_percent: 100,
+      target_resource_fingerprint: binding.target_resource_fingerprint,
+      target_paused_version_id: binding.target_paused_version_id,
+      target_paused_script_etag: binding.target_paused_script_etag,
+      target_active_version_id: binding.target_active_version_id,
+      target_active_script_etag: binding.target_active_script_etag,
+      target_paused_traffic_percent: 100,
+      target_active_not_promoted: true,
+      provider_readback: true,
+    },
+    fixture: {
+      sha256: DISPOSABLE_RECOVERY_FIXTURE_SHA256,
+      documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      batches: DISPOSABLE_RECOVERY_SEED_BATCHES,
+      maximum_batch_documents: 50,
+    },
+    ingest: {
+      accepted_documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      created_documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      unchanged_documents: 0,
+      updated_documents: 0,
+      refused_documents: 0,
+      failed_documents: 0,
+    },
+    verification_replay: {
+      batches: DISPOSABLE_RECOVERY_SEED_BATCHES,
+      unchanged_documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      exact_identity_and_content_replay: true,
+    },
+    opening_d1: {
+      documents: 0,
+      chunks: 0,
+      fts: 0,
+      pending_outbox: 0,
+      failed_vectors: 0,
+      independently_verified_empty: true,
+    },
+    d1: {
+      worker_version: "0.4.8",
+      documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      chunks,
+      fts: chunks,
+      minimum_chunks: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      document_counts_exact: true,
+      chunk_counts_exact: true,
+      minimum_chunk_count_met: true,
+      pending_outbox: 0,
+      failed_vectors: 0,
+      content_fingerprint: contentFingerprint,
+      content_fingerprint_source: "direct_d1_normalized_export",
+    },
+    projection: {
+      vectorize_vectors: chunks,
+      vector_dimensions: 768,
+      vector_metric: "cosine",
+      quarantined_vectors: 0,
+      independent_control_plane: true,
+    },
+    evaluation: {
+      supported_case_cited: true,
+      unsupported_case_refused: true,
+    },
+    proof_boundary: {
+      external_source_input: false,
+      aggregate_only: true,
+      authenticated_d1_inventory_verified: true,
+      direct_d1_opening_empty_verified: true,
+      worker_vector_readiness_verified: true,
+      direct_d1_content_fingerprint_verified: true,
+      vectorize_proven: true,
+      retrieval_proven: true,
+      recovery_proven: false,
+    },
+  };
+  assert.equal(assertDisposableRecoverySeedReceipt(receipt), true);
+  return receipt;
+}
 const historicalFamilyDataExport = `INSERT INTO "sources"
   ("name","kind","status","created_at")
   VALUES ('localdocs','upload','ready','2026-09-11T00:00:00Z');
@@ -980,7 +1203,7 @@ function response(body, status = 200, headers = {}) {
 
 function providerHarness({
   ambiguousSourceD1 = false,
-  activeScriptEtag = workerScriptEtag,
+  activeScriptEtag = null,
   activeVersionMode = null,
   bankKeyProofMismatch = false,
   bankFixture = null,
@@ -1008,7 +1231,8 @@ function providerHarness({
   initialVectorCount = 0,
   missingVectorCount = false,
   pausedVersionMode = "paused-for-upgrade",
-  pausedScriptEtag = workerScriptEtag,
+  pausedScriptEtag = null,
+  plainTextOverrides = {},
   promotionNoop = false,
   readinessLagAfterBootstrap = false,
   recoveryArtifactKey = fixtureRecoveryArtifactKey,
@@ -1029,12 +1253,27 @@ function providerHarness({
   sourceDocumentCount = targetDocumentCount,
   targetMigrationVersion = appliedMigrations.at(-1).version,
   sourceInstallStateMissing = false,
+  sourceScriptEtagOverride = null,
+  sourceVersionId = null,
   splitTargetDeployment = false,
-  targetVersionId = pausedWorkerVersionId,
+  targetVersionId = null,
   wranglerVersion = "4.127.1",
   sourceManifestFixture = sourceManifest,
   targetManifestFixture = targetManifest,
 } = {}) {
+  const fieldCampaign = sourceManifestFixture.client?.slug === "v048-field-proof";
+  const sourceVersion = sourceVersionId ??
+    (fieldCampaign ? fieldSourceWorkerVersionId : sourceWorkerVersionId);
+  const pausedVersion = fieldCampaign ? fieldPausedWorkerVersionId : pausedWorkerVersionId;
+  const activeVersion = fieldCampaign ? fieldActiveWorkerVersionId : activeWorkerVersionId;
+  const campaignPausedScriptEtag = fieldCampaign
+    ? "target-paused-etag-v048"
+    : pausedWorkerScriptEtag;
+  const effectiveSourceScriptEtag = sourceScriptEtagOverride ??
+    (fieldCampaign ? "source-etag-v048" : sourceWorkerScriptEtag);
+  const effectivePausedScriptEtag = pausedScriptEtag ?? campaignPausedScriptEtag;
+  const effectiveActiveScriptEtag = activeScriptEtag ??
+    (fieldCampaign ? "target-active-etag-v048" : activeWorkerScriptEtag);
   let agentActionReceipts = initialAgentActionReceipts;
   let targetRestored = initialTargetRestored;
   let vectorCount = initialVectorCount;
@@ -1046,7 +1285,7 @@ function providerHarness({
     ? `fixture:chunk#${String(Math.max(0, bootstrapConfirmed - 1)).padStart(8, "0")}`
     : null;
   let bootstrapProtocol = bootstrapConfirmed > 0 ? "bootstrap-v2" : null;
-  let currentTargetVersionId = targetVersionId;
+  let currentTargetVersionId = targetVersionId ?? pausedVersion;
   let corpusMutated = false;
   let evalCalls = 0;
   let evalFailuresRemaining = failEvalOnce ? 1 : 0;
@@ -1178,12 +1417,12 @@ function providerHarness({
       const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
       if (!isSource && splitTargetDeployment) {
         return ok({ versions: [
-          { version_id: pausedWorkerVersionId, percentage: 50 },
-          { version_id: activeWorkerVersionId, percentage: 50 },
+          { version_id: pausedVersion, percentage: 50 },
+          { version_id: activeVersion, percentage: 50 },
         ] });
       }
       return ok({ versions: [{
-        version_id: isSource ? sourceWorkerVersionId : currentTargetVersionId,
+        version_id: isSource ? sourceVersion : currentTargetVersionId,
         percentage: 100,
       }] });
     }
@@ -1191,16 +1430,16 @@ function providerHarness({
       const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
       const manifest = isSource ? sourceManifestFixture : targetManifestFixture;
       const requestedVersionId = args[2];
-      const targetMode = requestedVersionId === pausedWorkerVersionId
+      const targetMode = requestedVersionId === pausedVersion
         ? pausedVersionMode
-        : requestedVersionId === activeWorkerVersionId
+        : requestedVersionId === activeVersion
           ? activeVersionMode
           : null;
       const scriptEtag = isSource
-        ? sourceWorkerScriptEtag
-        : requestedVersionId === pausedWorkerVersionId
-          ? pausedScriptEtag
-          : activeScriptEtag;
+        ? effectiveSourceScriptEtag
+        : requestedVersionId === pausedVersion
+          ? effectivePausedScriptEtag
+          : effectiveActiveScriptEtag;
       return ok({
         id: requestedVersionId,
         resources: {
@@ -1225,17 +1464,35 @@ function providerHarness({
             { type: "vectorize", name: "VECTORIZE", index_name: cloudflare.vectorize_index },
             { type: "plain_text", name: "STORAGE", text: "d1" },
             { type: "plain_text", name: "BRAIN_NAME", text: manifest.client.slug },
-            { type: "plain_text", name: "BRAIN_OWNER", text: manifest.client.display_name },
+            { type: "plain_text", name: "BRAIN_OWNER",
+              text: plainTextOverrides.BRAIN_OWNER ?? manifest.client.display_name },
             { type: "plain_text", name: "BRAIN_VERSION", text: manifest.brain.version },
-            { type: "plain_text", name: "CHUNK_SIZE", text: "1500" },
-            { type: "plain_text", name: "CHUNK_OVERLAP", text: "300" },
-            { type: "plain_text", name: "DAILY_LLM_CAP_USD", text: "10" },
+            { type: "plain_text", name: "CHUNK_SIZE",
+              text: plainTextOverrides.CHUNK_SIZE ?? "1500" },
+            { type: "plain_text", name: "CHUNK_OVERLAP",
+              text: plainTextOverrides.CHUNK_OVERLAP ?? "300" },
+            { type: "plain_text", name: "DAILY_LLM_CAP_USD",
+              text: plainTextOverrides.DAILY_LLM_CAP_USD ?? "10" },
             {
               type: "plain_text",
               name: "ANSWER_MODEL",
-              text: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+              text: plainTextOverrides.ANSWER_MODEL ??
+                "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
             },
-            { type: "plain_text", name: "CREDENTIAL_SCANNER", text: "on" },
+            { type: "plain_text", name: "CREDENTIAL_SCANNER",
+              text: plainTextOverrides.CREDENTIAL_SCANNER ?? "on" },
+            {
+              type: "plain_text",
+              name: "OCR_ENABLED",
+              text: plainTextOverrides.OCR_ENABLED ??
+                (manifest.safety?.ocr?.enabled === true ? "1" : "0"),
+            },
+            {
+              type: "plain_text",
+              name: "OCR_MODEL",
+              text: plainTextOverrides.OCR_MODEL ??
+                (manifest.safety?.ocr?.model || "@cf/google/gemma-4-26b-a4b-it"),
+            },
             { type: "secret_text", name: "ADMIN_KEY" },
             { type: "secret_text", name: "RAG_PROXY_KEY" },
             { type: "secret_text", name: "SESSION_SIGNING_KEY" },
@@ -1262,12 +1519,12 @@ function providerHarness({
     }
     if (args[0] === "versions" && args[1] === "deploy") {
       assert.deepEqual(args.slice(0, 6), [
-        "versions", "deploy", `${activeWorkerVersionId}@100%`,
+        "versions", "deploy", `${activeVersion}@100%`,
         "--name", targetManifestFixture.brain.worker_name, "-y",
       ]);
       assert.equal(env.CLOUDFLARE_ACCOUNT_ID, targetManifestFixture.infrastructure.cloudflare.account_id);
       promotionCalls++;
-      if (!promotionNoop) currentTargetVersionId = activeWorkerVersionId;
+      if (!promotionNoop) currentTargetVersionId = activeVersion;
       if (promotionFailuresRemaining > 0) {
         promotionFailuresRemaining--;
         return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("synthetic lost promotion response") };
@@ -1546,7 +1803,7 @@ function providerHarness({
       // Exercise the deployed handler's contract: paused HTTP health is 200,
       // but ok and accepting_documents are both false. A hand-written ok:true
       // fixture previously hid a recovery failure before any D1 restore.
-      const mode = currentTargetVersionId === pausedWorkerVersionId ? "paused-for-upgrade" : "active";
+      const mode = currentTargetVersionId === pausedVersion ? "paused-for-upgrade" : "active";
       const healthResponse = await Worker.fetch(new Request(String(url)), {
         BRAIN_NAME: targetManifestFixture.client.slug,
         BRAIN_VERSION: targetManifestFixture.brain.version,
@@ -1574,7 +1831,7 @@ function providerHarness({
     }
     if (path === "/api/admin/brain/bootstrap") {
       assert.equal(options.headers["X-Admin-Key"], fixtureAdminKey);
-      assert.equal(currentTargetVersionId, pausedWorkerVersionId);
+      assert.equal(currentTargetVersionId, pausedVersion);
       assert.equal(options.body, undefined);
       bootstrapCalls++;
       bootstrapProtocol = "bootstrap-v2";
@@ -1833,10 +2090,15 @@ try {
     readFileSync(join(process.cwd(), "manifest.schema.json"), "utf8"),
   ).properties.operations.properties.recovery_field_gate;
   assert.deepEqual(recoveryFieldGateSchema.required, [
-    "paused_worker_version_id", "active_worker_version_id", "worker_script_etag",
-    "routes", "custom_domains", "reviewed_at",
+    "paused_worker_version_id", "paused_worker_script_etag",
+    "active_worker_version_id", "active_worker_script_etag", "routes",
+    "custom_domains", "reviewed_at",
   ]);
   assert.equal(recoveryFieldGateSchema.additionalProperties, false);
+  assert.equal(
+    Object.hasOwn(recoveryFieldGateSchema.properties, "worker_script_etag"),
+    false,
+  );
 
   writePrivateJson(sourceManifestPath, sourceManifest);
   writePrivateJson(targetManifestPath, targetManifest);
@@ -1874,6 +2136,10 @@ try {
   );
   assert.match(preview.wrapper_approval_fingerprint, /^[0-9a-f]{64}$/);
   assert.equal(preview.golden_approval_fingerprint, hash(readFileSync(goldenPath)));
+  assert.notEqual(
+    targetManifest.operations.recovery_field_gate.paused_worker_script_etag,
+    targetManifest.operations.recovery_field_gate.active_worker_script_etag,
+  );
   assert.deepEqual(RECOVERY_FIELD_GATE_STOP_STAGES, [
     "export_d1", "restore_d1", "reconcile_security", "rebuild_vectorize",
   ]);
@@ -1887,6 +2153,37 @@ try {
     approveWrapper: preview.wrapper_approval_fingerprint,
     approveGolden: preview.golden_approval_fingerprint,
   });
+
+  const legacyTargetManifestPath = join(sandbox, "legacy-one-etag-target.manifest.json");
+  const legacyPlanPath = join(sandbox, ".legacy-one-etag-plan.json");
+  const legacyStatePath = join(sandbox, ".legacy-one-etag-state.json");
+  const legacyTargetManifest = structuredClone(targetManifest);
+  legacyTargetManifest.operations.recovery_field_gate = {
+    paused_worker_version_id: pausedWorkerVersionId,
+    active_worker_version_id: activeWorkerVersionId,
+    worker_script_etag: pausedWorkerScriptEtag,
+    routes: [],
+    custom_domains: [],
+    reviewed_at: "2026-08-25T11:55:00.000Z",
+  };
+  writePrivateJson(legacyTargetManifestPath, legacyTargetManifest);
+  initializeVerifiedRecovery(
+    sourceManifestPath,
+    legacyTargetManifestPath,
+    legacyPlanPath,
+    legacyStatePath,
+    { now: new Date("2026-08-25T12:00:00.000Z") },
+  );
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate({
+      ...baseConfig,
+      targetManifestPath: legacyTargetManifestPath,
+      planPath: legacyPlanPath,
+      statePath: legacyStatePath,
+    }, { platform: "darwin" }),
+    (error) => error.code === "RECOVERY_TARGET_EXECUTION_UNREVIEWED",
+    "the legacy single-etag isolation shape is refused before provider access",
+  );
 
   const stageContext = (stage, completed = [], attempt = 1) => ({ stage, attempt,
     planFingerprint: initialized.plan.plan_fingerprint,
@@ -2135,10 +2432,13 @@ try {
     "--approve-source-export-blocking", preview.source_export_blocking_approval_fingerprint,
     "--approve-wrapper", preview.wrapper_approval_fingerprint,
     "--approve-golden", preview.golden_approval_fingerprint,
+    "--field-deployment-receipt", fieldDeploymentReceiptPath,
     "--test-interrupt-mid-bootstrap", RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
     "--test-bootstrap-candidate-sha", "c".repeat(40),
     "--test-bootstrap-field-receipt", fieldReceiptPath,
     "--test-bootstrap-package", fieldPackagePath,
+    "--test-bootstrap-deployment-receipt", fieldDeploymentReceiptPath,
+    "--test-bootstrap-seed-receipt", fieldSeedReceiptPath,
     "--approve-test-bootstrap-interruption", "d".repeat(64),
   ]);
   assert.equal(
@@ -2146,8 +2446,14 @@ try {
     RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
   );
   assert.equal(parsedTestInterruption.testBootstrapCandidateSha, "c".repeat(40));
+  assert.equal(parsedTestInterruption.fieldDeploymentReceiptPath, fieldDeploymentReceiptPath);
   assert.equal(parsedTestInterruption.testBootstrapFieldReceiptPath, fieldReceiptPath);
   assert.equal(parsedTestInterruption.testBootstrapPackagePath, fieldPackagePath);
+  assert.equal(
+    parsedTestInterruption.testBootstrapDeploymentReceiptPath,
+    fieldDeploymentReceiptPath,
+  );
+  assert.equal(parsedTestInterruption.testBootstrapSeedReceiptPath, fieldSeedReceiptPath);
   assert.equal(parsedTestInterruption.approveTestBootstrapInterruption, "d".repeat(64));
   assert.throws(
     () => parseCloudflareRecoveryCliArguments([
@@ -2362,6 +2668,8 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: fieldReceiptPath,
       testBootstrapPackagePath: fieldPackagePath,
+      testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+      testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
       approveTestBootstrapInterruption: "e".repeat(64),
     }, {
       ...copiedFlagHarness.dependencies,
@@ -2389,6 +2697,84 @@ try {
     fieldStatePath,
     { now: new Date("2026-09-11T14:00:00.000Z") },
   );
+  const exactFieldManifestBindings = inspectVerifiedRecoveryManifestBindings(
+    fieldInitialized.plan,
+    fieldSourceManifestPath,
+    fieldTargetManifestPath,
+  );
+  assert.equal(
+    assertDisposableRecoveryFieldCampaignIdentity(exactFieldManifestBindings),
+    true,
+  );
+  for (const [label, mutate] of [
+    ["source admin-key locator", (value) => { value.source.adminKeySecret += "-other"; }],
+    ["target admin-key locator", (value) => { value.target.adminKeySecret += "-other"; }],
+    ["target artifact-key locator", (value) => {
+      value.target.recoveryArtifactKeySecret += "-other";
+    }],
+    ["source artifact-key locator", (value) => {
+      value.source.recoveryArtifactKeySecret = value.target.recoveryArtifactKeySecret;
+    }],
+    ["source OCR mode", (value) => { value.source.ocrEnabled = "1"; }],
+    ["target OCR model", (value) => { value.target.ocrModel = "@cf/example/other"; }],
+    ["source connector enablement", (value) => {
+      value.source.enabledCorpora = ["google_drive"];
+    }],
+    ["target bank enablement", (value) => { value.target.bankFeedEnabled = true; }],
+    ["mutable manifest isolation", (value) => {
+      value.target.recoveryFieldGate = { active_worker_version_id: "unreviewed" };
+    }],
+  ]) {
+    const changed = structuredClone(exactFieldManifestBindings);
+    mutate(changed);
+    assert.throws(
+      () => assertDisposableRecoveryFieldCampaignIdentity(changed),
+      (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_IDENTITY_INVALID",
+      label,
+    );
+  }
+  assert.throws(
+    () => inspectDisposableRecoveryDeploymentPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+      sourceManifestPath,
+      targetManifestPath,
+      plan: initialized.plan,
+    }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_IDENTITY_INVALID",
+    "deployment preparation must reject non-campaign manifests before provider creation",
+  );
+  const deploymentPreparation = inspectDisposableRecoveryDeploymentPreparation({
+    candidateSha: testCandidateSha,
+    fieldReceiptPath,
+    packagePath: fieldPackagePath,
+    wranglerWrapperPath: wrapperPath,
+    sourceManifestPath: fieldSourceManifestPath,
+    targetManifestPath: fieldTargetManifestPath,
+    plan: fieldInitialized.plan,
+  });
+  writePrivateJson(
+    fieldDeploymentReceiptPath,
+    fullDisposableDeploymentReceipt(deploymentPreparation.binding),
+  );
+  const seedPreparation = inspectDisposableRecoverySeedPreparation({
+    candidateSha: testCandidateSha,
+    fieldReceiptPath,
+    deploymentReceiptPath: fieldDeploymentReceiptPath,
+    packagePath: fieldPackagePath,
+    wranglerWrapperPath: wrapperPath,
+    plan: fieldInitialized.plan,
+  });
+  writePrivateJson(
+    fieldSeedReceiptPath,
+    fullDisposableSeedReceipt(seedPreparation.binding),
+  );
+  assert.equal(
+    readPrivateAggregateReceipt(fieldSeedReceiptPath).value.d1.documents,
+    6_001,
+  );
   const fieldBaseConfig = {
     sourceManifestPath: fieldSourceManifestPath,
     targetManifestPath: fieldTargetManifestPath,
@@ -2397,7 +2783,160 @@ try {
     artifactDirectory: fieldArtifactDirectory,
     wranglerWrapperPath: wrapperPath,
     goldenPath,
+    fieldDeploymentReceiptPath,
   };
+  const ordinaryFieldPreview = previewCloudflareRecoveryFieldGate(
+    fieldBaseConfig,
+    { platform: "darwin" },
+  );
+  // A receipt-backed ordinary stage must pin the source deployment even when
+  // the later fault-hook bundle is not active. Version or opaque-etag drift is
+  // refused before export and before any disposable-target mutation.
+  for (const [label, drift] of [
+    ["source version", {
+      sourceVersionId: "40000000-0000-4000-8000-000000000004",
+    }],
+    ["source opaque etag", { sourceScriptEtagOverride: "source-etag-drifted" }],
+  ]) {
+    const sourceDriftHarness = providerHarness({
+      ...drift,
+      sourceManifestFixture: syntheticFieldSourceManifest,
+      targetManifestFixture: syntheticFieldTargetManifest,
+    });
+    const sourceDriftGate = createCloudflareRecoveryFieldGateAdapters({
+      ...fieldBaseConfig,
+      approvePlan: fieldInitialized.plan.plan_fingerprint,
+      approveDisposableTarget: fieldInitialized.plan.target_resource_fingerprint,
+      approveTargetExecution: ordinaryFieldPreview.target_execution_approval_fingerprint,
+      approveSourceExportBlocking:
+        ordinaryFieldPreview.source_export_blocking_approval_fingerprint,
+      approveWrapper: ordinaryFieldPreview.wrapper_approval_fingerprint,
+      approveGolden: ordinaryFieldPreview.golden_approval_fingerprint,
+      plan: fieldInitialized.plan,
+      state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+    }, sourceDriftHarness.dependencies);
+    await assert.rejects(
+      sourceDriftGate.adapters.export_d1({
+        stage: "export_d1",
+        attempt: 1,
+        planFingerprint: fieldInitialized.plan.plan_fingerprint,
+        targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+        completed: [],
+      }),
+      (error) => error.code === "RECOVERY_WORKER_CODE_INVALID",
+      `${label} drift must invalidate ordinary receipt-backed export`,
+    );
+    assert.equal(sourceDriftHarness.importCalls, 0, label);
+    assert.equal(sourceDriftHarness.bootstrapCalls, 0, label);
+    assert.equal(sourceDriftHarness.promotionCalls, 0, label);
+    assert.equal(sourceDriftHarness.adminReads, 0, label);
+    assert.equal(sourceDriftHarness.fetchCalls.length, 0, label);
+    assert.equal(sourceDriftHarness.wranglerCalls.some((call) =>
+      call.env.CLOUDFLARE_ACCOUNT_ID ===
+        syntheticFieldTargetManifest.infrastructure.cloudflare.account_id), false, label);
+    assert.equal(sourceDriftHarness.wranglerCalls.some((call) =>
+      call.args[0] === "d1" && call.args[1] === "export"), false, label);
+  }
+  const fieldHarness = providerHarness({
+    bootstrapPageSize: 3_000,
+    failEvalOnce: true,
+    failPromotionAfterApplyOnce: true,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 6_001,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const fieldDependencies = fieldHarness.dependencies;
+  const fieldRequestConfig = Object.freeze({
+    ...fieldBaseConfig,
+    testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+    testBootstrapCandidateSha: testCandidateSha,
+    testBootstrapFieldReceiptPath: fieldReceiptPath,
+    testBootstrapPackagePath: fieldPackagePath,
+    testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+    testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
+  });
+  let stagedFieldError = null;
+  let stagedFieldResult = null;
+  try {
+    stagedFieldResult = await runCloudflareRecoveryFieldGate({
+      ...fieldBaseConfig,
+      approvePlan: fieldInitialized.plan.plan_fingerprint,
+      approveDisposableTarget: fieldInitialized.plan.target_resource_fingerprint,
+      approveTargetExecution: ordinaryFieldPreview.target_execution_approval_fingerprint,
+      approveSourceExportBlocking:
+        ordinaryFieldPreview.source_export_blocking_approval_fingerprint,
+      approveWrapper: ordinaryFieldPreview.wrapper_approval_fingerprint,
+      approveGolden: ordinaryFieldPreview.golden_approval_fingerprint,
+      stopAfterStage: "reconcile_security",
+    }, fieldDependencies);
+  } catch (error) {
+    stagedFieldError = error;
+  }
+  assert.equal(
+    stagedFieldError?.code ?? stagedFieldResult?.cause,
+    "RECOVERY_FIELD_GATE_INTENTIONAL_INTERRUPTION",
+  );
+  const stagedFieldState = loadVerifiedRecoveryState(
+    fieldStatePath,
+    fieldInitialized.plan,
+  );
+  assert.equal(stagedFieldState.current_stage, "rebuild_vectorize");
+  assert.equal(stagedFieldState.attempt, 0);
+  assert.deepEqual(stagedFieldState.completed.map((entry) => entry.id), [
+    "export_d1", "verify_export", "prove_target_clean", "restore_d1",
+    "verify_d1", "reconcile_security",
+  ]);
+  const verifyD1ResumeState = {
+    ...structuredClone(stagedFieldState),
+    status: "running",
+    current_stage: "verify_d1",
+    stage_status: "pending",
+    attempt: 0,
+    completed: structuredClone(stagedFieldState.completed.slice(0, 4)),
+    failure: null,
+  };
+  for (const [stage, resumeState, drift] of [
+    ["verify_d1", verifyD1ResumeState, {
+      sourceVersionId: "40000000-0000-4000-8000-000000000004",
+    }],
+    ["rebuild_vectorize", stagedFieldState, {
+      sourceScriptEtagOverride: "source-etag-drifted-on-resume",
+    }],
+  ]) {
+    writeVerifiedRecoveryState(fieldStatePath, resumeState, fieldInitialized.plan);
+    const resumedSourceDriftHarness = providerHarness({
+      ...drift,
+      initialTargetRestored: true,
+      targetChunkCount: 7_202,
+      targetDocumentCount: 6_001,
+      sourceManifestFixture: syntheticFieldSourceManifest,
+      targetManifestFixture: syntheticFieldTargetManifest,
+    });
+    await assert.rejects(
+      runCloudflareRecoveryFieldGate({
+        ...fieldBaseConfig,
+        approvePlan: fieldInitialized.plan.plan_fingerprint,
+        approveDisposableTarget: fieldInitialized.plan.target_resource_fingerprint,
+        approveTargetExecution: ordinaryFieldPreview.target_execution_approval_fingerprint,
+        approveSourceExportBlocking:
+          ordinaryFieldPreview.source_export_blocking_approval_fingerprint,
+        approveWrapper: ordinaryFieldPreview.wrapper_approval_fingerprint,
+        approveGolden: ordinaryFieldPreview.golden_approval_fingerprint,
+      }, resumedSourceDriftHarness.dependencies),
+      (error) => error.code === "RECOVERY_WORKER_CODE_INVALID",
+      `${stage} resume must rebind the receipt-pinned source before target access`,
+    );
+    assert.equal(resumedSourceDriftHarness.importCalls, 0, stage);
+    assert.equal(resumedSourceDriftHarness.bootstrapCalls, 0, stage);
+    assert.equal(resumedSourceDriftHarness.promotionCalls, 0, stage);
+    assert.equal(resumedSourceDriftHarness.adminReads, 0, stage);
+    assert.equal(resumedSourceDriftHarness.fetchCalls.length, 0, stage);
+    assert.equal(resumedSourceDriftHarness.wranglerCalls.some((call) =>
+      call.env.CLOUDFLARE_ACCOUNT_ID ===
+        syntheticFieldTargetManifest.infrastructure.cloudflare.account_id), false, stage);
+  }
+  writeVerifiedRecoveryState(fieldStatePath, stagedFieldState, fieldInitialized.plan);
   const prefixedWrapperHarness = providerHarness({
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
@@ -2417,6 +2956,8 @@ try {
         testBootstrapCandidateSha: testCandidateSha,
         testBootstrapFieldReceiptPath: fieldReceiptPath,
         testBootstrapPackagePath: fieldPackagePath,
+        testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+        testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
       }, prefixedWrapperHarness.dependencies),
       (error) => error.code ===
         "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRAPPER_CONTRACT_INVALID",
@@ -2429,13 +2970,10 @@ try {
     writeFileSync(wrapperPath, wrapperScript);
     if (process.platform !== "win32") chmodSync(wrapperPath, 0o700);
   }
-  const fieldPreview = previewCloudflareRecoveryFieldGate({
-    ...fieldBaseConfig,
-    testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
-    testBootstrapCandidateSha: testCandidateSha,
-    testBootstrapFieldReceiptPath: fieldReceiptPath,
-    testBootstrapPackagePath: fieldPackagePath,
-  }, { platform: "darwin" });
+  const fieldPreview = previewCloudflareRecoveryFieldGate(
+    fieldRequestConfig,
+    { platform: "darwin" },
+  );
   assert.equal(
     fieldPreview.test_bootstrap_interruption.mode,
     RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
@@ -2462,9 +3000,177 @@ try {
     testBootstrapCandidateSha: testCandidateSha,
     testBootstrapFieldReceiptPath: fieldReceiptPath,
     testBootstrapPackagePath: fieldPackagePath,
+    testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+    testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     approveTestBootstrapInterruption:
       fieldPreview.test_bootstrap_interruption.approval_fingerprint,
   });
+
+  const fieldExportContext = Object.freeze({
+    stage: "export_d1",
+    attempt: 1,
+    planFingerprint: fieldInitialized.plan.plan_fingerprint,
+    targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+    completed: Object.freeze([]),
+  });
+  for (const [name, value] of Object.entries({
+    CHUNK_SIZE: "1499",
+    CHUNK_OVERLAP: "299",
+    DAILY_LLM_CAP_USD: "9.5",
+    BRAIN_OWNER: "Synthetic Field Gate altered owner",
+    ANSWER_MODEL: "@cf/example/altered-answer-model",
+    CREDENTIAL_SCANNER: "off",
+    OCR_ENABLED: "1",
+    OCR_MODEL: "@cf/example/altered-ocr-model",
+  })) {
+    const mismatchHarness = providerHarness({
+      plainTextOverrides: { [name]: value },
+      sourceManifestFixture: syntheticFieldSourceManifest,
+      targetManifestFixture: syntheticFieldTargetManifest,
+    });
+    const mismatchGate = createCloudflareRecoveryFieldGateAdapters({
+      ...approvedFieldConfig,
+      plan: fieldInitialized.plan,
+      state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+    }, mismatchHarness.dependencies);
+    await assert.rejects(
+      mismatchGate.adapters.export_d1(fieldExportContext),
+      (error) => error.code === "RECOVERY_WORKER_BINDINGS_INVALID",
+      `fixed campaign must reject a mismatched ${name} readback`,
+    );
+    assert.equal(mismatchHarness.adminReads, 0, name);
+    assert.equal(mismatchHarness.fetchCalls.length, 0, name);
+    assert.equal(mismatchHarness.wranglerCalls.some((call) =>
+      call.args[0] === "d1" && call.args[1] === "export"), false, name);
+  }
+  const optionalSecretHarness = providerHarness({
+    zoomSecretGroup: true,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const optionalSecretGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, optionalSecretHarness.dependencies);
+  await assert.rejects(
+    optionalSecretGate.adapters.export_d1(fieldExportContext),
+    (error) => error.code === "RECOVERY_WORKER_BINDINGS_INVALID",
+    "the fictional campaign refuses even generally supported optional connector secrets",
+  );
+  assert.equal(optionalSecretHarness.adminReads, 0);
+  assert.equal(optionalSecretHarness.fetchCalls.length, 0);
+  assert.equal(optionalSecretHarness.wranglerCalls.some((call) =>
+    call.args[0] === "d1" && call.args[1] === "export"), false);
+
+  // A durable deployment pending sibling means a provider mutation may have
+  // crossed its response boundary. It blocks the adapter before Wrangler,
+  // Keychain, or the Brain data plane can be touched.
+  const fieldDeploymentPendingPath = fieldDeploymentReceiptPath
+    .replace(/\.json$/u, ".pending.json");
+  writePrivateJson(fieldDeploymentPendingPath, {
+    schema_version: 1,
+    kind: "v048_disposable_recovery_deployment_pending",
+    status: "execution_in_progress",
+  });
+  const pendingDeploymentHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate(approvedFieldConfig, pendingDeploymentHarness.dependencies),
+    (error) => error.code === "RECOVERY_TARGET_EXECUTION_UNREVIEWED",
+  );
+  assert.equal(pendingDeploymentHarness.wranglerCalls.length, 0);
+  assert.equal(pendingDeploymentHarness.adminReads, 0);
+  assert.equal(pendingDeploymentHarness.fetchCalls.length, 0);
+  unlinkSync(fieldDeploymentPendingPath);
+
+  // A durable pending sibling means the seed runner may have crossed a live
+  // boundary without finalizing. It blocks the adapter before Wrangler,
+  // Keychain, or the Brain data plane can be touched.
+  const fieldSeedPendingPath = fieldSeedReceiptPath.replace(/\.json$/u, ".pending.json");
+  writePrivateJson(fieldSeedPendingPath, {
+    schema_version: 1,
+    kind: "v048_disposable_recovery_seed_pending",
+    status: "execution_in_progress",
+  });
+  const pendingSeedHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate(approvedFieldConfig, pendingSeedHarness.dependencies),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+  );
+  assert.equal(pendingSeedHarness.wranglerCalls.length, 0);
+  assert.equal(pendingSeedHarness.adminReads, 0);
+  assert.equal(pendingSeedHarness.fetchCalls.length, 0);
+  unlinkSync(fieldSeedPendingPath);
+
+  // The old 3,201-document contract is invalid receipt evidence, even when all
+  // candidate/package/runtime hashes remain correct.
+  const validFieldSeedReceipt = JSON.parse(readFileSync(fieldSeedReceiptPath, "utf8"));
+  const staleFieldSeedReceipt = structuredClone(validFieldSeedReceipt);
+  staleFieldSeedReceipt.fixture.documents = 3_201;
+  staleFieldSeedReceipt.ingest.accepted_documents = 3_201;
+  staleFieldSeedReceipt.ingest.created_documents = 3_201;
+  staleFieldSeedReceipt.verification_replay.unchanged_documents = 3_201;
+  staleFieldSeedReceipt.d1.documents = 3_201;
+  writePrivateJson(fieldSeedReceiptPath, staleFieldSeedReceipt);
+  const staleSeedHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate(approvedFieldConfig, staleSeedHarness.dependencies),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+  );
+  assert.equal(staleSeedHarness.wranglerCalls.length, 0);
+  assert.equal(staleSeedHarness.adminReads, 0);
+  assert.equal(staleSeedHarness.fetchCalls.length, 0);
+  writePrivateJson(fieldSeedReceiptPath, validFieldSeedReceipt);
+
+  // A well-formed but substituted direct-D1 hash gets its own exact approval,
+  // then still fails the fresh source/artifact equality check before any
+  // target bootstrap or promotion and before the journal is bound.
+  const wrongFingerprintSeedReceipt = structuredClone(validFieldSeedReceipt);
+  wrongFingerprintSeedReceipt.d1.content_fingerprint = "f".repeat(64);
+  writePrivateJson(fieldSeedReceiptPath, wrongFingerprintSeedReceipt);
+  const wrongFingerprintPreview = previewCloudflareRecoveryFieldGate({
+    ...fieldBaseConfig,
+    testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+    testBootstrapCandidateSha: testCandidateSha,
+    testBootstrapFieldReceiptPath: fieldReceiptPath,
+    testBootstrapPackagePath: fieldPackagePath,
+    testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+    testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
+  }, { platform: "darwin" });
+  const wrongFingerprintHarness = providerHarness({
+    targetChunkCount: 7_202,
+    targetDocumentCount: 6_001,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...approvedFieldConfig,
+      approveTestBootstrapInterruption:
+        wrongFingerprintPreview.test_bootstrap_interruption.approval_fingerprint,
+    }, wrongFingerprintHarness.dependencies),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_SEED_MISMATCH",
+  );
+  assert.equal(wrongFingerprintHarness.bootstrapCalls, 0);
+  assert.equal(wrongFingerprintHarness.promotionCalls, 0);
+  assert.equal(wrongFingerprintHarness.adminReads, 0);
+  assert.equal(
+    Object.hasOwn(
+      loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+      "field_proof",
+    ),
+    false,
+  );
+  writePrivateJson(fieldSeedReceiptPath, validFieldSeedReceipt);
 
   // The receipt and approval bind the clean, cache-integrity-derived runtime.
   // Replacing either the entrypoint or a transitive package with changed bytes
@@ -2565,13 +3271,13 @@ try {
   assert.equal(undersizedFieldHarness.adminReads, 0);
   assert.equal(undersizedFieldHarness.fetchCalls.length, 0);
 
-  const largeFieldSnapshot = snapshotForCounts(7_202, 7_202);
+  const largeFieldSnapshot = snapshotForCounts(6_001, 7_202);
   const wrapperSwapHarness = providerHarness({
     initialTargetRestored: true,
     sourceChunkCount: 7_202,
-    sourceDocumentCount: 7_202,
+    sourceDocumentCount: 6_001,
     targetChunkCount: 7_202,
-    targetDocumentCount: 7_202,
+    targetDocumentCount: 6_001,
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
   });
@@ -2611,9 +3317,9 @@ try {
   const wrapperMidCallHarness = providerHarness({
     initialTargetRestored: true,
     sourceChunkCount: 7_202,
-    sourceDocumentCount: 7_202,
+    sourceDocumentCount: 6_001,
     targetChunkCount: 7_202,
-    targetDocumentCount: 7_202,
+    targetDocumentCount: 6_001,
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
   });
@@ -2655,9 +3361,9 @@ try {
   const callRuntimeSwapHarness = providerHarness({
     initialTargetRestored: true,
     sourceChunkCount: 7_202,
-    sourceDocumentCount: 7_202,
+    sourceDocumentCount: 6_001,
     targetChunkCount: 7_202,
-    targetDocumentCount: 7_202,
+    targetDocumentCount: 6_001,
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
   });
@@ -2696,9 +3402,9 @@ try {
   const wrongWranglerHarness = providerHarness({
     initialTargetRestored: true,
     sourceChunkCount: 7_202,
-    sourceDocumentCount: 7_202,
+    sourceDocumentCount: 6_001,
     targetChunkCount: 7_202,
-    targetDocumentCount: 7_202,
+    targetDocumentCount: 6_001,
     wranglerVersion: "4.99.0",
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
@@ -2729,9 +3435,9 @@ try {
     initialTargetRestored: true,
     initialVectorCount: 0,
     sourceChunkCount: 7_202,
-    sourceDocumentCount: 7_202,
+    sourceDocumentCount: 6_001,
     targetChunkCount: 7_202,
-    targetDocumentCount: 7_202,
+    targetDocumentCount: 6_001,
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
   });
@@ -2794,6 +3500,8 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: mismatchedRuntimeReceiptPath,
       testBootstrapPackagePath: mismatchedRuntimePackagePath,
+      testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+      testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     }, { platform: "darwin" }),
     (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
   );
@@ -2836,6 +3544,8 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: omittedRuntimeReceiptPath,
       testBootstrapPackagePath: omittedRuntimePackagePath,
+      testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+      testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     }, { platform: "darwin" }),
     (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
     "the packed execution inventory must include the locked runtime verifier",
@@ -2874,6 +3584,14 @@ try {
   const replayReceiptDirectory = join(sandbox, "private-v048-field-preparation-replay");
   const replayReceiptPath = join(replayReceiptDirectory, "field-prepare-receipt.json");
   const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.8.tgz");
+  const replayDeploymentReceiptPath = join(
+    replayReceiptDirectory,
+    DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME,
+  );
+  const replaySeedReceiptPath = join(
+    replayReceiptDirectory,
+    "v048-disposable-seed-receipt.json",
+  );
   mkdirSync(replayReceiptDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(replayReceiptDirectory, 0o700);
   materializeLockedWranglerRuntime(
@@ -2888,6 +3606,31 @@ try {
     fieldPackage.fileCount,
     { runId: "22222222-2222-4222-8222-222222222222" },
   ));
+  const replayDeploymentPreparation = inspectDisposableRecoveryDeploymentPreparation({
+    candidateSha: testCandidateSha,
+    fieldReceiptPath: replayReceiptPath,
+    packagePath: replayPackagePath,
+    wranglerWrapperPath: wrapperPath,
+    sourceManifestPath: fieldSourceManifestPath,
+    targetManifestPath: fieldTargetManifestPath,
+    plan: fieldInitialized.plan,
+  });
+  writePrivateJson(
+    replayDeploymentReceiptPath,
+    fullDisposableDeploymentReceipt(replayDeploymentPreparation.binding),
+  );
+  const replaySeedPreparation = inspectDisposableRecoverySeedPreparation({
+    candidateSha: testCandidateSha,
+    fieldReceiptPath: replayReceiptPath,
+    deploymentReceiptPath: replayDeploymentReceiptPath,
+    packagePath: replayPackagePath,
+    wranglerWrapperPath: wrapperPath,
+    plan: fieldInitialized.plan,
+  });
+  writePrivateJson(
+    replaySeedReceiptPath,
+    fullDisposableSeedReceipt(replaySeedPreparation.binding),
+  );
   const replayReceiptHarness = providerHarness({
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
@@ -2895,10 +3638,16 @@ try {
   await assert.rejects(
     runCloudflareRecoveryFieldGate({
       ...approvedFieldConfig,
+      fieldDeploymentReceiptPath: replayDeploymentReceiptPath,
       testBootstrapFieldReceiptPath: replayReceiptPath,
       testBootstrapPackagePath: replayPackagePath,
+      testBootstrapDeploymentReceiptPath: replayDeploymentReceiptPath,
+      testBootstrapSeedReceiptPath: replaySeedReceiptPath,
     }, replayReceiptHarness.dependencies),
-    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_APPROVAL_MISMATCH",
+    (error) => [
+      "RECOVERY_FIELD_GATE_APPROVAL_MISMATCH",
+      "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_APPROVAL_MISMATCH",
+    ].includes(error.code),
   );
   assert.equal(replayReceiptHarness.wranglerCalls.length, 0);
   assert.equal(replayReceiptHarness.adminReads, 0);
@@ -2924,43 +3673,117 @@ try {
     statePath: replayStatePath,
     artifactDirectory: replayArtifactDirectory,
   };
-  const replayPreview = previewCloudflareRecoveryFieldGate(replayBase, { platform: "darwin" });
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate({
+      ...replayBase,
+      testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+      testBootstrapCandidateSha: testCandidateSha,
+      testBootstrapFieldReceiptPath: fieldReceiptPath,
+      testBootstrapPackagePath: fieldPackagePath,
+      testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+      testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
+    }, { platform: "darwin" }),
+    (error) => error.code === "RECOVERY_TARGET_EXECUTION_UNREVIEWED",
+    "a deployment receipt from another plan cannot establish isolation",
+  );
+  const replayPlanDeploymentPreparation = inspectDisposableRecoveryDeploymentPreparation({
+    candidateSha: testCandidateSha,
+    fieldReceiptPath: replayReceiptPath,
+    packagePath: replayPackagePath,
+    wranglerWrapperPath: wrapperPath,
+    sourceManifestPath: fieldSourceManifestPath,
+    targetManifestPath: fieldTargetManifestPath,
+    plan: replayInitialized.plan,
+  });
+  writePrivateJson(
+    replayDeploymentReceiptPath,
+    fullDisposableDeploymentReceipt(replayPlanDeploymentPreparation.binding),
+  );
+  const replayPlanSeedPreparation = inspectDisposableRecoverySeedPreparation({
+    candidateSha: testCandidateSha,
+    fieldReceiptPath: replayReceiptPath,
+    deploymentReceiptPath: replayDeploymentReceiptPath,
+    packagePath: replayPackagePath,
+    wranglerWrapperPath: wrapperPath,
+    plan: replayInitialized.plan,
+  });
+  writePrivateJson(
+    replaySeedReceiptPath,
+    fullDisposableSeedReceipt(replayPlanSeedPreparation.binding),
+  );
+  const replayRequestConfig = Object.freeze({
+    ...replayBase,
+    fieldDeploymentReceiptPath: replayDeploymentReceiptPath,
+    testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+    testBootstrapCandidateSha: testCandidateSha,
+    testBootstrapFieldReceiptPath: replayReceiptPath,
+    testBootstrapPackagePath: replayPackagePath,
+    testBootstrapDeploymentReceiptPath: replayDeploymentReceiptPath,
+    testBootstrapSeedReceiptPath: replaySeedReceiptPath,
+  });
+  const replayIsolationConfig = Object.freeze({
+    ...replayBase,
+    fieldDeploymentReceiptPath: replayDeploymentReceiptPath,
+  });
+  const replayStagePreview = previewCloudflareRecoveryFieldGate(
+    replayIsolationConfig,
+    { platform: "darwin" },
+  );
   const replayHarness = providerHarness({
+    targetChunkCount: 7_202,
+    targetDocumentCount: 6_001,
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
   });
+  let stagedReplayError = null;
+  try {
+    await runCloudflareRecoveryFieldGate({
+      ...replayIsolationConfig,
+      approvePlan: replayInitialized.plan.plan_fingerprint,
+      approveDisposableTarget: replayInitialized.plan.target_resource_fingerprint,
+      approveTargetExecution: replayStagePreview.target_execution_approval_fingerprint,
+      approveSourceExportBlocking:
+        replayStagePreview.source_export_blocking_approval_fingerprint,
+      approveWrapper: replayStagePreview.wrapper_approval_fingerprint,
+      approveGolden: replayStagePreview.golden_approval_fingerprint,
+      stopAfterStage: "reconcile_security",
+    }, replayHarness.dependencies);
+  } catch (error) {
+    stagedReplayError = error;
+  }
+  assert.equal(
+    stagedReplayError?.code,
+    "RECOVERY_FIELD_GATE_INTENTIONAL_INTERRUPTION",
+  );
+  const replayPreview = previewCloudflareRecoveryFieldGate(
+    replayRequestConfig,
+    { platform: "darwin" },
+  );
+  const replayCallsBeforeCrossPlanRefusal = {
+    wrangler: replayHarness.wranglerCalls.length,
+    admin: replayHarness.adminReads,
+    fetch: replayHarness.fetchCalls.length,
+  };
   await assert.rejects(
     runCloudflareRecoveryFieldGate({
-      ...replayBase,
+      ...replayRequestConfig,
       approvePlan: replayInitialized.plan.plan_fingerprint,
       approveDisposableTarget: replayInitialized.plan.target_resource_fingerprint,
       approveTargetExecution: replayPreview.target_execution_approval_fingerprint,
       approveSourceExportBlocking: replayPreview.source_export_blocking_approval_fingerprint,
       approveWrapper: replayPreview.wrapper_approval_fingerprint,
       approveGolden: replayPreview.golden_approval_fingerprint,
-      testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
-      testBootstrapCandidateSha: testCandidateSha,
-      testBootstrapFieldReceiptPath: fieldReceiptPath,
-      testBootstrapPackagePath: fieldPackagePath,
       approveTestBootstrapInterruption:
         fieldPreview.test_bootstrap_interruption.approval_fingerprint,
     }, replayHarness.dependencies),
     (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_APPROVAL_MISMATCH",
   );
-  assert.equal(replayHarness.wranglerCalls.length, 0);
-  assert.equal(replayHarness.adminReads, 0);
-  assert.equal(replayHarness.fetchCalls.length, 0);
+  assert.deepEqual({
+    wrangler: replayHarness.wranglerCalls.length,
+    admin: replayHarness.adminReads,
+    fetch: replayHarness.fetchCalls.length,
+  }, replayCallsBeforeCrossPlanRefusal);
 
-  const fieldHarness = providerHarness({
-    bootstrapPageSize: 3_000,
-    failEvalOnce: true,
-    failPromotionAfterApplyOnce: true,
-    targetChunkCount: 7_202,
-    targetDocumentCount: 7_202,
-    sourceManifestFixture: syntheticFieldSourceManifest,
-    targetManifestFixture: syntheticFieldTargetManifest,
-  });
-  const fieldDependencies = fieldHarness.dependencies;
   const interruptedField = await runCloudflareRecoveryFieldGate(
     approvedFieldConfig,
     fieldDependencies,
@@ -2979,7 +3802,7 @@ try {
   assert.equal(fieldHarness.bootstrapEpoch, 1);
   assert.equal(fieldHarness.bootstrapCursor, "fixture:chunk#00005999");
   assert.equal(fieldHarness.promotionCalls, 0);
-  assert.equal(fieldHarness.currentTargetVersionId, pausedWorkerVersionId);
+  assert.equal(fieldHarness.currentTargetVersionId, fieldPausedWorkerVersionId);
   assert.deepEqual(fieldHarness.openingSnapshots, [0, 0].map((bootstrapCalls) => ({
     bootstrapCalls,
     confirmed: 0,
@@ -3009,13 +3832,30 @@ try {
   assert.equal(checkpointText.includes("fixture:chunk#"), false);
   assert.equal(checkpointText.includes(privateSentinel), false);
   const checkpointReceipt = JSON.parse(checkpointText);
-  assert.equal(checkpointReceipt.schema_version, 5);
+  assert.equal(checkpointReceipt.schema_version, 6);
   assert.equal(checkpointReceipt.plan_fingerprint, fieldInitialized.plan.plan_fingerprint);
   assert.equal(checkpointReceipt.candidate_sha, testCandidateSha);
   assert.equal(checkpointReceipt.field_receipt_sha256, hash(readFileSync(fieldReceiptPath)));
   assert.equal(checkpointReceipt.package_sha256, hash(fieldPackageBytes));
   assert.equal(checkpointReceipt.package_file_count, fieldPackage.fileCount);
   assert.match(checkpointReceipt.execution_inventory_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    checkpointReceipt.seed_receipt_sha256,
+    hash(readFileSync(fieldSeedReceiptPath)),
+  );
+  assert.equal(
+    checkpointReceipt.seed_fixture_sha256,
+    DISPOSABLE_RECOVERY_FIXTURE_SHA256,
+  );
+  assert.equal(
+    checkpointReceipt.seed_d1_content_fingerprint,
+    deterministicDataFingerprint,
+  );
+  assert.equal(checkpointReceipt.seed_document_count, 6_001);
+  assert.equal(checkpointReceipt.seed_chunk_count, 7_202);
+  assert.equal(checkpointReceipt.seed_fts_count, 7_202);
+  assert.equal(checkpointReceipt.seed_vector_count, 7_202);
+  assert.equal(checkpointReceipt.seed_replay_unchanged_documents, 6_001);
   assert.equal(
     checkpointReceipt.wrangler_runtime_schema_version,
     lockedWranglerRuntime.schemaVersion,
@@ -3100,7 +3940,7 @@ try {
   // promotion. The special path requires the exact paused version on every
   // attempt and never sends another bootstrap request in this state. Reaching
   // that exact remote check also proves the crash-window state was accepted.
-  fieldHarness.setTargetVersionId(activeWorkerVersionId);
+  fieldHarness.setTargetVersionId(fieldActiveWorkerVersionId);
   const activeBypass = await runCloudflareRecoveryFieldGate(
     approvedFieldConfig,
     fieldDependencies,
@@ -3110,7 +3950,7 @@ try {
   assert.equal(activeBypass.state.attempt, 2);
   assert.equal(fieldHarness.bootstrapCalls, 2);
   assert.equal(fieldHarness.promotionCalls, 0);
-  fieldHarness.setTargetVersionId(pausedWorkerVersionId);
+  fieldHarness.setTargetVersionId(fieldPausedWorkerVersionId);
 
   // The ordinal can remain unchanged while the underlying private cursor is
   // replaced. Its private digest is what binds the exact resume cut.
@@ -3234,6 +4074,8 @@ try {
         testBootstrapCandidateSha: testCandidateSha,
         testBootstrapFieldReceiptPath: fieldReceiptPath,
         testBootstrapPackagePath: fieldPackagePath,
+        testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+        testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
       }, { platform: "darwin" }),
       (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_INVALID",
       "malformed or cross-plan completion cannot consume this campaign",
@@ -3304,7 +4146,7 @@ try {
   assert.equal(lostBootstrapResponse.state.current_stage, "rebuild_vectorize");
   assert.equal(fieldHarness.bootstrapCalls, 6);
   assert.equal(fieldHarness.bootstrapConfirmed, 7_202);
-  assert.equal(fieldHarness.currentTargetVersionId, pausedWorkerVersionId);
+  assert.equal(fieldHarness.currentTargetVersionId, fieldPausedWorkerVersionId);
   assert.equal(fieldHarness.promotionCalls, 0);
   assert.equal(existsSync(interruptionCheckpointPath), true);
 
@@ -3325,7 +4167,7 @@ try {
   assert.equal(promotionAuthorizationText.includes("fixture:chunk#"), false);
   assert.equal(promotionAuthorizationText.includes(privateSentinel), false);
   assert.equal(existsSync(interruptionCheckpointPath), true);
-  assert.equal(fieldHarness.currentTargetVersionId, activeWorkerVersionId,
+  assert.equal(fieldHarness.currentTargetVersionId, fieldActiveWorkerVersionId,
     "the exact reviewed promotion applied before its response was lost");
   assert.equal(fieldHarness.promotionCalls, 1);
   const promotionPinGate = createCloudflareRecoveryFieldGateAdapters({
@@ -3396,7 +4238,7 @@ try {
   assert.equal(fieldHarness.bootstrapEpoch, 1);
   assert.equal(fieldHarness.bootstrapCursor, "fixture:chunk#00007201");
   assert.equal(fieldHarness.promotionCalls, 1);
-  assert.equal(fieldHarness.currentTargetVersionId, activeWorkerVersionId);
+  assert.equal(fieldHarness.currentTargetVersionId, fieldActiveWorkerVersionId);
   assert.equal(
     existsSync(join(fieldArtifactDirectory, ".brain-recovery-field-gate.lock")),
     false,
@@ -3514,6 +4356,8 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: fieldReceiptPath,
       testBootstrapPackagePath: fieldPackagePath,
+      testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
+      testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     }, { platform: "darwin" }),
     (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_CONSUMED",
     "a completed/past-midpoint state cannot claim a newly requested interruption",
@@ -4170,7 +5014,7 @@ try {
   );
 
   const mismatchedCodeHarness = providerHarness({
-    activeScriptEtag: "c".repeat(64),
+    activeScriptEtag: "d".repeat(64),
   });
   const mismatchedCodeGate = createCloudflareRecoveryFieldGateAdapters(
     approvedAdapterConfig,

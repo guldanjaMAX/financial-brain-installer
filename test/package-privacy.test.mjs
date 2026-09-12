@@ -494,6 +494,25 @@ const expected = [
   // Fixed fictional field fixture. It has no corpus/path/credential input or
   // live transport and emits only an aggregate plan or D1-count receipt.
   "operations/disposable-recovery-seeder.mjs",
+  // Strict private receipt validator for the fixed synthetic deployment. It
+  // stores only hashes, counts, opaque provider version identities, and
+  // reviewed resource-contract booleans; it owns no provider transport.
+  "operations/disposable-recovery-deployment-receipt.mjs",
+  // Provider-neutral fixed-campaign orchestration core. It is not executable
+  // without an injected adapter and reserves owner-only ambiguity markers
+  // before that adapter can be created.
+  "operations/disposable-recovery-field-deploy.mjs",
+  // Exact 6,001-document field transport. It accepts no corpus/source selector,
+  // reserves an owner-only pending receipt before credential/provider work,
+  // and uses only the locked runtime plus manifest-bound disposable source.
+  "operations/disposable-recovery-field-seed.mjs",
+  // Owner-only aggregate field receipts. The helper reserves both final and
+  // pending paths before any live action, pins inode/owner/mode, and refuses
+  // ambiguous replacement or durability state.
+  "operations/private-aggregate-receipt.mjs",
+  // Shared byte contract for a normalized install-state prefix plus one direct
+  // D1 data export. It owns no credential, provider, or command transport.
+  "operations/recovery-content-fingerprint.mjs",
   // Aggregate-only local OCR planner. Reviewed 2026-09-12 for filename, path,
   // content, parser-error, hash, credential, and root-identity disclosure. Its
   // exact schema contains only counts, policy/model/pricing values, ranges,

@@ -21,8 +21,10 @@ import { join } from "node:path";
 import {
   VERIFIED_RECOVERY_STAGES,
   assertVerifiedRecoveryManifestBindings,
+  bindVerifiedRecoveryFieldProof,
   buildVerifiedRecoveryPlan,
   initializeVerifiedRecovery,
+  inspectVerifiedRecoveryManifestBindings,
   loadVerifiedRecoveryPlan,
   loadVerifiedRecoveryState,
   parseVerifiedRecoveryCliArguments,
@@ -71,6 +73,17 @@ const sourceManifest = {
   retrieval: {
     embed_model: "@cf/baai/bge-base-en-v1.5",
     embed_dimensions: 768,
+    chunk_size: 1500,
+    chunk_overlap: 300,
+    answer_model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  },
+  safety: {
+    daily_llm_spend_cap_usd: 10,
+    credential_scanner: { enabled: true },
+    ocr: {
+      enabled: false,
+      model: "@cf/google/gemma-4-26b-a4b-it",
+    },
   },
   _private_fixture: sentinel,
 };
@@ -119,6 +132,33 @@ const artifactHash = "a".repeat(64);
 const schemaHash = "b".repeat(64);
 const aggregateHash = "c".repeat(64);
 const contentHash = "d".repeat(64);
+const fieldContentHash = "1".repeat(64);
+const fieldFixtureHash = "7e8325d3014102e3509fd2f5dcc7ac78aded99dffac18c899e1dd2611cfba6c8";
+const fieldExpectedDocuments = 6_001;
+const fieldExpectedChunks = 6_113;
+const fieldProofInput = Object.freeze({
+  schema_version: 1,
+  kind: "v048_disposable_recovery_seed_bridge",
+  candidate_sha: "1".repeat(40),
+  package_sha256: "2".repeat(64),
+  field_receipt_sha256: "3".repeat(64),
+  deployment_receipt_sha256: "8".repeat(64),
+  seed_receipt_sha256: "4".repeat(64),
+  fixture_sha256: fieldFixtureHash,
+  seed_d1_content_fingerprint: fieldContentHash,
+  expected_documents: fieldExpectedDocuments,
+  expected_chunks: fieldExpectedChunks,
+  expected_fts: fieldExpectedChunks,
+  seed_replay_unchanged_documents: fieldExpectedDocuments,
+  paired_stop_stage: "rebuild_vectorize",
+});
+const fieldRebuildProof = Object.freeze({
+  deployment_receipt_sha256: fieldProofInput.deployment_receipt_sha256,
+  seed_receipt_sha256: fieldProofInput.seed_receipt_sha256,
+  bootstrap_interruption_checkpoint_sha256: "5".repeat(64),
+  bootstrap_resume_authorization_sha256: "6".repeat(64),
+  bootstrap_promotion_authorization_sha256: "7".repeat(64),
+});
 const bankSecurityProof = { protocol: "bank-security-v1", reconciliation_at: "2026-08-25T12:00:00.000Z", rows: [] };
 const bankSecurityHash = createHash("sha256").update(JSON.stringify(bankSecurityProof)).digest("hex");
 assert.equal(validateBankRecoveryProof(bankSecurityProof), bankSecurityProof);
@@ -241,6 +281,24 @@ try {
     assertVerifiedRecoveryManifestBindings(plan, sourcePath, targetPath),
     true,
   );
+  const exactManifestBindings = inspectVerifiedRecoveryManifestBindings(
+    plan,
+    sourcePath,
+    targetPath,
+  );
+  for (const binding of [exactManifestBindings.source, exactManifestBindings.target]) {
+    assert.equal(binding.clientSlug, "fixture-brain");
+    assert.equal(binding.productVersion, "0.1.12");
+    assert.equal(binding.embeddingModel, "@cf/baai/bge-base-en-v1.5");
+    assert.equal(binding.embeddingDimensions, 768);
+    assert.equal(binding.chunkSize, "1500");
+    assert.equal(binding.chunkOverlap, "300");
+    assert.equal(binding.dailyLlmCapUsd, "10");
+    assert.equal(binding.answerModel, "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    assert.equal(binding.credentialScanner, "on");
+    assert.equal(binding.ocrEnabled, "0");
+    assert.equal(binding.ocrModel, "@cf/google/gemma-4-26b-a4b-it");
+  }
 
   const planText = JSON.stringify(plan);
   for (const forbidden of [
@@ -304,6 +362,22 @@ try {
     value.brain.version = "0.1.13";
   });
   assert.throws(() => buildVerifiedRecoveryPlan(sourcePath, differentRuntime), /exact runtime contract/);
+
+  for (const mutate of [
+    (value) => { value.retrieval.chunk_size = 1499; },
+    (value) => { value.retrieval.chunk_overlap = 299; },
+    (value) => { value.safety.daily_llm_spend_cap_usd = 9.5; },
+    (value) => { value.retrieval.answer_model = "@cf/meta/fixture-answer-model"; },
+    (value) => { value.safety.credential_scanner.enabled = false; },
+    (value) => { value.safety.ocr.enabled = true; },
+    (value) => { value.safety.ocr.model = "@cf/google/fixture-ocr-model"; },
+  ]) {
+    const mismatchedRuntime = manifestVariant(targetManifest, mutate);
+    assert.throws(
+      () => buildVerifiedRecoveryPlan(sourcePath, mismatchedRuntime),
+      /exact runtime contract/,
+    );
+  }
 
   const wrongBackend = manifestVariant(targetManifest, (value) => {
     value.infrastructure.cloudflare.storage = "supabase";
@@ -604,6 +678,294 @@ try {
   assert.equal(vectorMismatch.ok, false);
   assert.equal(vectorMismatch.errorCode, "RECOVERY_REBUILD_VECTORIZE_FAILED");
   assert.equal(vectorMismatch.state.completed.some((entry) => entry.id === "verify_health"), false);
+
+  // The v0.4.8 disposable field campaign is an explicit state opt-in. Its
+  // 6,001-document seed receipt must match the already-verified D1 export
+  // before the first Vectorize rebuild attempt, while ordinary journals keep
+  // their original shape and evidence contract.
+  assert.equal(Object.hasOwn(initialState, "field_proof"), false);
+  const ordinaryInitialBytes = JSON.stringify(initialState);
+  assert.throws(
+    () => bindVerifiedRecoveryFieldProof(
+      initialState,
+      initialized.plan,
+      fieldProofInput,
+      { now: new Date("2026-08-25T16:30:00.000Z") },
+    ),
+    /does not match the verified D1 export/,
+  );
+
+  const fieldEvidenceOverrides = {
+    verify_export: {
+      content_fingerprint: fieldContentHash,
+      document_count: fieldExpectedDocuments,
+      chunk_count: fieldExpectedChunks,
+      fts_count: fieldExpectedChunks,
+    },
+    verify_d1: {
+      content_fingerprint: fieldContentHash,
+      non_bank_content_fingerprint: fieldContentHash,
+      document_count: fieldExpectedDocuments,
+      chunk_count: fieldExpectedChunks,
+      fts_count: fieldExpectedChunks,
+    },
+    reconcile_security: {
+      content_fingerprint: fieldContentHash,
+      document_count: fieldExpectedDocuments,
+      chunk_count: fieldExpectedChunks,
+      fts_count: fieldExpectedChunks,
+    },
+  };
+  let fieldReadyState = initialState;
+  await assert.rejects(
+    runVerifiedRecovery(
+      initialized.plan,
+      initialState,
+      goodAdapters([], fieldEvidenceOverrides),
+      {
+        clock: clock(Date.parse("2026-08-25T17:00:00.000Z")),
+        revalidateManifests: async () => true,
+        persistState: async (state) => { fieldReadyState = state; },
+        afterStageCheckpoint: async (stage) => {
+          if (stage === "reconcile_security") throw new Error("fixture field checkpoint");
+        },
+      },
+    ),
+    /fixture field checkpoint/,
+  );
+  assert.equal(fieldReadyState.current_stage, "rebuild_vectorize");
+  assert.equal(fieldReadyState.stage_status, "pending");
+  assert.equal(fieldReadyState.attempt, 0);
+  assert.equal(fieldReadyState.completed.at(-1).id, "reconcile_security");
+
+  const boundAt = "2026-08-25T18:00:00.000Z";
+  const fieldBound = bindVerifiedRecoveryFieldProof(
+    fieldReadyState,
+    initialized.plan,
+    fieldProofInput,
+    { now: new Date(boundAt) },
+  );
+  assert.deepEqual(fieldBound.field_proof, { ...fieldProofInput, bound_at: boundAt });
+  assert.equal(fieldBound.updated_at, boundAt);
+  assert.equal(JSON.stringify(initialState), ordinaryInitialBytes);
+  assert.equal(Object.hasOwn(initialState, "field_proof"), false);
+  assert.deepEqual(validateVerifiedRecoveryState(fieldBound, initialized.plan), fieldBound);
+
+  const fieldStatePath = join(sandbox, ".brain-recovery-field-state.json");
+  writeVerifiedRecoveryState(fieldStatePath, fieldBound, initialized.plan);
+  assert.deepEqual(loadVerifiedRecoveryState(fieldStatePath, initialized.plan), fieldBound);
+
+  // Rebinding is only idempotent for the same canonical proof. Omitting the
+  // generated timestamp reuses the durable original rather than changing it.
+  assert.deepEqual(
+    bindVerifiedRecoveryFieldProof(
+      fieldBound,
+      initialized.plan,
+      fieldProofInput,
+      { now: new Date("2026-08-25T19:00:00.000Z") },
+    ),
+    fieldBound,
+  );
+  assert.deepEqual(
+    bindVerifiedRecoveryFieldProof(
+      fieldBound,
+      initialized.plan,
+      fieldBound.field_proof,
+      { now: new Date("2026-08-25T19:00:00.000Z") },
+    ),
+    fieldBound,
+  );
+  assert.throws(
+    () => bindVerifiedRecoveryFieldProof(fieldBound, initialized.plan, {
+      ...fieldProofInput,
+      candidate_sha: "8".repeat(40),
+    }),
+    /already bound to different evidence/,
+  );
+  assert.throws(
+    () => bindVerifiedRecoveryFieldProof(fieldBound, initialized.plan, {
+      ...fieldBound.field_proof,
+      bound_at: "2026-08-25T18:00:01.000Z",
+    }),
+    /already bound to different evidence/,
+  );
+
+  const attemptedUnboundState = validateVerifiedRecoveryState({
+    ...structuredClone(fieldReadyState),
+    status: "running",
+    stage_status: "running",
+    attempt: 1,
+    updated_at: "2026-08-25T18:30:00.000Z",
+  }, initialized.plan);
+  assert.throws(
+    () => bindVerifiedRecoveryFieldProof(attemptedUnboundState, initialized.plan, fieldProofInput),
+    /cannot be bound after rebuild begins/,
+  );
+
+  for (const mutate of [
+    (proof) => { delete proof.package_sha256; },
+    (proof) => { delete proof.deployment_receipt_sha256; },
+    (proof) => { proof.unreviewed = true; },
+    (proof) => { proof.kind = "v048_disposable_bootstrap_interruption"; },
+    (proof) => { proof.candidate_sha = "a".repeat(64); },
+    (proof) => { proof.fixture_sha256 = "9".repeat(64); },
+    (proof) => { proof.expected_documents = 3_201; },
+    (proof) => { proof.expected_chunks = 6_000; proof.expected_fts = 6_000; },
+    (proof) => { proof.expected_fts++; },
+    (proof) => { proof.seed_replay_unchanged_documents = 3_201; },
+    (proof) => { proof.bound_at = "2026-08-25"; },
+    (proof) => { proof.seed_d1_content_fingerprint = "not-a-hash"; },
+  ]) {
+    const invalid = structuredClone(fieldBound);
+    mutate(invalid.field_proof);
+    assert.throws(() => validateVerifiedRecoveryState(invalid, initialized.plan));
+  }
+  for (const mutate of [
+    (state) => { state.completed[1].evidence.document_count++; },
+    (state) => { state.completed[1].evidence.chunk_count++; },
+    (state) => { state.completed[1].evidence.fts_count++; },
+    (state) => { state.completed[1].evidence.content_fingerprint = "9".repeat(64); },
+  ]) {
+    const invalid = structuredClone(fieldBound);
+    mutate(invalid);
+    assert.throws(() => validateVerifiedRecoveryState(invalid, initialized.plan));
+  }
+
+  const missingFieldRebuildProof = await runVerifiedRecovery(
+    initialized.plan,
+    fieldBound,
+    goodAdapters([], {
+      rebuild_vectorize: {
+        chunk_count: fieldExpectedChunks,
+        vector_count: fieldExpectedChunks,
+      },
+    }),
+    {
+      clock: clock(Date.parse("2026-08-25T20:00:00.000Z")),
+      revalidateManifests: async () => true,
+    },
+  );
+  assert.equal(missingFieldRebuildProof.ok, false);
+  assert.equal(missingFieldRebuildProof.errorCode, "RECOVERY_REBUILD_VECTORIZE_FAILED");
+
+  const partialFieldRebuildProof = await runVerifiedRecovery(
+    initialized.plan,
+    fieldBound,
+    goodAdapters([], {
+      rebuild_vectorize: {
+        chunk_count: fieldExpectedChunks,
+        vector_count: fieldExpectedChunks,
+        seed_receipt_sha256: fieldProofInput.seed_receipt_sha256,
+      },
+    }),
+    {
+      clock: clock(Date.parse("2026-08-25T20:30:00.000Z")),
+      revalidateManifests: async () => true,
+    },
+  );
+  assert.equal(partialFieldRebuildProof.ok, false);
+  assert.equal(partialFieldRebuildProof.errorCode, "RECOVERY_REBUILD_VECTORIZE_FAILED");
+
+  const mismatchedFieldRebuildProof = await runVerifiedRecovery(
+    initialized.plan,
+    fieldBound,
+    goodAdapters([], {
+      rebuild_vectorize: {
+        chunk_count: fieldExpectedChunks,
+        vector_count: fieldExpectedChunks,
+        ...fieldRebuildProof,
+        seed_receipt_sha256: "8".repeat(64),
+      },
+    }),
+    {
+      clock: clock(Date.parse("2026-08-25T21:00:00.000Z")),
+      revalidateManifests: async () => true,
+    },
+  );
+  assert.equal(mismatchedFieldRebuildProof.ok, false);
+  assert.equal(mismatchedFieldRebuildProof.errorCode, "RECOVERY_REBUILD_VECTORIZE_FAILED");
+
+  const fieldCompleted = await runVerifiedRecovery(
+    initialized.plan,
+    fieldBound,
+    goodAdapters([], {
+      rebuild_vectorize: {
+        chunk_count: fieldExpectedChunks,
+        vector_count: fieldExpectedChunks,
+        ...fieldRebuildProof,
+      },
+    }),
+    {
+      clock: clock(Date.parse("2026-08-25T21:30:00.000Z")),
+      revalidateManifests: async () => true,
+    },
+  );
+  assert.equal(fieldCompleted.ok, true);
+  assert.equal(fieldCompleted.state.status, "complete");
+  assert.deepEqual(
+    fieldCompleted.state.completed.find((entry) => entry.id === "rebuild_vectorize").evidence,
+    {
+      chunk_count: fieldExpectedChunks,
+      vector_count: fieldExpectedChunks,
+      pending_outbox: 0,
+      failed_vectors: 0,
+      ...fieldRebuildProof,
+    },
+  );
+  assert.deepEqual(
+    bindVerifiedRecoveryFieldProof(
+      fieldCompleted.state,
+      initialized.plan,
+      fieldProofInput,
+    ),
+    fieldCompleted.state,
+  );
+
+  for (const mutate of [
+    (state) => { delete state.completed[6].evidence.bootstrap_resume_authorization_sha256; },
+    (state) => { state.completed[6].evidence.deployment_receipt_sha256 = "invalid"; },
+    (state) => { state.completed[6].evidence.bootstrap_promotion_authorization_sha256 = "invalid"; },
+    (state) => { state.completed[6].evidence.seed_receipt_sha256 = "8".repeat(64); },
+    (state) => { delete state.field_proof; },
+  ]) {
+    const invalid = structuredClone(fieldCompleted.state);
+    mutate(invalid);
+    assert.throws(() => validateVerifiedRecoveryState(invalid, initialized.plan));
+  }
+
+  const ordinaryWithFieldEvidence = structuredClone(completed.state);
+  Object.assign(
+    ordinaryWithFieldEvidence.completed.find((entry) => entry.id === "rebuild_vectorize").evidence,
+    fieldRebuildProof,
+  );
+  assert.throws(
+    () => validateVerifiedRecoveryState(ordinaryWithFieldEvidence, initialized.plan),
+    /rebuild_vectorize evidence is invalid/,
+  );
+
+  const unboundFieldCompleted = await runVerifiedRecovery(
+    initialized.plan,
+    fieldReadyState,
+    goodAdapters([], {
+      rebuild_vectorize: {
+        chunk_count: fieldExpectedChunks,
+        vector_count: fieldExpectedChunks,
+      },
+    }),
+    {
+      clock: clock(Date.parse("2026-08-25T22:00:00.000Z")),
+      revalidateManifests: async () => true,
+    },
+  );
+  assert.equal(unboundFieldCompleted.ok, true);
+  assert.throws(
+    () => bindVerifiedRecoveryFieldProof(
+      unboundFieldCompleted.state,
+      initialized.plan,
+      fieldProofInput,
+    ),
+    /cannot be bound after rebuild begins/,
+  );
 
   assert.throws(
     () => validateVerifiedRecoveryState({
