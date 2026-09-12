@@ -42,8 +42,8 @@ export const SANDBOX_SCENARIOS = Object.freeze([
   { id: "zero-entities", label: "No financial entities yet", proof: "Owner can add one reviewed entity without guessing or combining records" },
   { id: "partial", label: "Partial financial evidence", proof: "One section unavailable while the rest remains usable" },
   { id: "degraded", label: "Degraded services", proof: "Unavailable data stays explicit and never becomes zero" },
-  { id: "conflict", label: "Conflicting owner action", proof: "A stale decision or reused request ID refuses safely" },
-  { id: "idempotent", label: "Lost-response retry", proof: "The same action receipt replays without a second change" },
+  { id: "conflict", label: "When a save is out of date", proof: "See the Brain stop, keep everything unchanged, and tell you how to refresh before trying again" },
+  { id: "idempotent", label: "If a save confirmation goes missing", proof: "See why trying the same save again shows the original result without doing it twice" },
   { id: "owner-access", label: "Owner creates guest access", proof: "Starts in Access with every real-install requirement explained before the owner shares exact documents" },
   { id: "grant", label: "Exact-document guest", proof: "Guest navigation exposes only Documents and Explore" },
   { id: "grant-unavailable", label: "Guest search degraded", proof: "No unauthorized result and no false healthy-empty answer" },
@@ -135,7 +135,7 @@ export function onboardingGuideHtml({ appOrigin }) {
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Financial Brain local rehearsal</title>
   <style>
   :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#161923;background:#f4f5f8}*{box-sizing:border-box}body{margin:0}.wrap{max-width:920px;margin:0 auto;padding:48px 20px 72px}.flag{display:inline-flex;padding:7px 11px;border-radius:999px;background:#fff0d9;color:#7d4300;font-size:12px;font-weight:800;letter-spacing:.08em}.hero{background:#12141a;color:white;border-radius:24px;padding:32px;margin:18px 0 24px;box-shadow:0 20px 60px #17204a20}.hero h1{font-size:clamp(30px,6vw,52px);letter-spacing:-.04em;margin:0 0 12px}.hero p{color:#c2c8d8;line-height:1.6;max-width:700px;margin:0}.notice{border:1px solid #f0c67e;background:#fff9ec;border-radius:16px;padding:16px 18px;line-height:1.5;margin-bottom:24px}.grid{display:grid;gap:12px}.card{display:flex;gap:14px;align-items:flex-start;text-decoration:none;color:inherit;background:white;border:1px solid #dfe2ea;border-radius:16px;padding:18px;transition:.15s}.card:hover{transform:translateY(-1px);border-color:#6680ed;box-shadow:0 10px 30px #17204a12}.card span{display:grid;place-items:center;min-width:30px;height:30px;border-radius:9px;background:#ebefff;color:#334fc0;font-weight:800}.card strong{display:block;margin:2px 0 5px}.card p{margin:0;color:#62697a;line-height:1.45}.foot{color:#62697a;font-size:14px;line-height:1.5;margin-top:24px}
-  </style><body><main class="wrap"><span class="flag">LOCAL REHEARSAL · SYNTHETIC DATA</span><section class="hero"><h1>See the Brain before connecting anything.</h1><p>This launches the actual owner-workspace bundle with invented records. Click through every important state safely. Nothing is deployed, no account is contacted, and no credential is requested.</p></section><div class="notice"><strong>Proof boundary:</strong> this proves layout, navigation, response contracts, and error handling. It does not prove Cloudflare, OAuth consent, a real mailbox, Zoom delivery, or a physical passkey.</div><section class="grid">${cards}</section><p class="foot">Close this terminal or press Control-C when finished. The sandbox keeps no user data and stops with the terminal.</p></main></body></html>`;
+  </style><body><main class="wrap"><span class="flag">LOCAL REHEARSAL · SYNTHETIC DATA</span><section class="hero"><h1>See the Brain before connecting anything.</h1><p>This launches the actual owner-workspace bundle with invented records. Click through every important state safely. Nothing is deployed, no account is contacted, and no credential is requested.</p></section><div class="notice"><strong>Proof boundary:</strong> this proves layout, navigation, response contracts, and error handling. It does not prove Cloudflare, OAuth consent, a real mailbox, Zoom delivery, or a physical passkey.</div><section class="grid">${cards}</section><p class="foot"><strong>If this browser tab closes:</strong> open <a href="${esc(appOrigin)}/">${esc(appOrigin)}/</a> again while the original terminal stays open. Do not rerun the launcher. When you are completely finished, close the tab and press Control-C once in that terminal. The sandbox keeps no user data and stops with the terminal.</p></main></body></html>`;
 }
 
 export function injectRehearsalBanner(html, scenarioId = "populated") {
@@ -376,6 +376,7 @@ export async function startOnboardingSandbox({
     console.log(`  ${publicOrigin}/`);
     console.log("");
     console.log("LOCAL REHEARSAL ONLY: synthetic data, no deployment, no accounts, no real passkey proof.");
+    console.log(`If the browser closes, open ${publicOrigin}/ again. Do not rerun the launcher while this terminal is open.`);
     if (platform === "win32") {
       console.log("When finished, close the browser tab, return to PowerShell, and press Control-C once.");
     } else {
