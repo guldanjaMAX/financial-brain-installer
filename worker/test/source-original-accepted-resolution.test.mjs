@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {
+  bindPrivateProvenanceTargetRepairSeal,
+  formatPrivateProvenanceTargetSealRequest,
+  preparePrivateProvenanceTargetRepair,
+  publicProvenanceTargetRepairPlan,
+  selectPrivateProvenanceTargetDiscoveryReceipt,
+  validatePrivateProvenanceAcceptedResolutionResponse,
+  validatePrivateProvenanceResultFamilyResponse,
+} from "../../operations/provenance-target-repair.mjs";
 import { createProductFixture } from "./product-contract-fixture.mjs";
 import { hashSourceOriginalResultBinding } from "../src/lib/source-original-binding.js";
 import { sourceOriginalChunkReceiptHash } from "../src/lib/source-original-chunk.js";
@@ -933,4 +942,295 @@ test("portable accepted history requires a fresh local record after verification
   const finalVerify = await body(finalVerifyResponse);
   assert.equal(finalVerifyResponse.status, 200, JSON.stringify(finalVerify));
   assert.equal(finalVerify.status, "accepted_resolution_current");
+});
+
+test("one-target repair contract rehearses schema-44 admission and recovery end to end", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  fixture.raw(
+    "INSERT INTO sources (name,kind,status,created_at) VALUES (?,?,?,?)",
+    SOURCE, "upload", "ready", "2026-09-11T00:00:00Z",
+  );
+  fixture.raw(
+    "INSERT INTO source_original_id_key_state (tenant_id,signing_salt) VALUES ('primary',?)",
+    "a".repeat(64),
+  );
+
+  const draft = preparePrivateProvenanceTargetRepair({
+    productVersion: "0.4.7",
+    candidateRuntimePackageFingerprint: "6".repeat(64),
+    manifestFingerprint: "7".repeat(64),
+    sourceConfigFingerprint: "8".repeat(64),
+    rootIdentity: {
+      path: "/synthetic/private/source",
+      realpath: "/synthetic/private/source",
+      device: 41,
+      inode: 73,
+    },
+    source: { id: SOURCE, kind: "upload", registered: true },
+    sourceSnapshotId: SNAPSHOT_ID,
+    locator: LOCATOR,
+    original: {
+      original_content_sha256: CONTENT_SHA,
+      original_byte_count: ORIGINAL_BYTES,
+      text_state: "native_readable",
+      text_reliable: true,
+      extraction_complete: true,
+      page_count: 1,
+      page_count_state: "authoritative",
+      multi_record: false,
+    },
+    priorGap: null,
+    discoveryRequired: true,
+    history: {
+      checked: true,
+      conflict: false,
+      accepted_resolution_exists: false,
+      unresolved_gap_count: 0,
+    },
+    retrievalQuery: QUERY,
+    ocr: { enabled: false, attempted: false },
+  });
+  const sealResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    formatPrivateProvenanceTargetSealRequest(draft),
+    ADMIN,
+  );
+  const seal = await body(sealResponse);
+  assert.equal(sealResponse.status, 200, JSON.stringify(seal));
+  assert.equal(seal.scope.whole_source_complete, false);
+
+  const privatePlan = bindPrivateProvenanceTargetRepairSeal(draft, seal);
+  const publicPlan = publicProvenanceTargetRepairPlan(privatePlan);
+  assert.deepEqual(publicPlan.ocr, { enabled: false, attempted: false });
+  assert.equal(publicPlan.target_count, 1);
+  assert.equal(publicPlan.boundaries.whole_source_complete, false);
+  assert.equal(publicPlan.review_binding_id, privatePlan.review_binding_id);
+  assert.equal(publicPlan.boundaries.reingest_represented, false);
+  assert.equal(publicPlan.boundaries.reingest_authorized, false);
+  assert.equal(publicPlan.boundaries.document_mutation_authorized, false);
+  assert.equal(publicPlan.boundaries.future_executor_requires_family_shape_assessment, true);
+  assert.equal(publicPlan.can_apply, false);
+  assert.equal(publicPlan.executor_available, false);
+
+  const sealedOriginalId = privatePlan.seal.targets[0].original_id;
+  const discoveryRequest = {
+    contract_version: 1,
+    mode: "record",
+    source: SOURCE,
+    run_id: privatePlan.run_ids.discovery,
+    plan_id: privatePlan.plan_id,
+    source_snapshot_id: SNAPSHOT_ID,
+    target_set_hash: privatePlan.seal.target_set_hash,
+    targets: [{
+      ...acceptedTarget(sealedOriginalId, null),
+      observation_stage: "discovery",
+      outcome: "gap",
+      reason_code: "provenance_unassessed",
+    }],
+  };
+  const discoveryResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    discoveryRequest,
+    ADMIN,
+  );
+  const discovery = await body(discoveryResponse);
+  assert.equal(discoveryResponse.status, 200, JSON.stringify(discovery));
+  assert.equal(discovery.scope.whole_source_complete, false);
+  const selectedDiscovery = selectPrivateProvenanceTargetDiscoveryReceipt(
+    privatePlan,
+    discovery,
+  );
+  assert.equal(selectedDiscovery.outcome, "gap");
+  const discoveryReceipt = discovery;
+
+  // This direct insert is a synthetic raw-bound family fixture. It represents
+  // no reingest executor or authorization and keeps OCR disabled and unattempted.
+  await seedBoundAcceptedFamily(fixture, sealedOriginalId);
+  const acceptedFixtureRequest = (operation) => ({
+    contract_version: 1,
+    mode: "accepted_resolution",
+    operation,
+    source: SOURCE,
+    run_id: privatePlan.run_ids.accepted_resolution,
+    plan_id: privatePlan.plan_id,
+    source_snapshot_id: SNAPSHOT_ID,
+    target_set_hash: privatePlan.seal.target_set_hash,
+    targets: [acceptedTarget(
+      sealedOriginalId,
+      selectedDiscovery.observation_hash,
+    )],
+    retrieval_query: QUERY,
+  });
+  const prematureResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    acceptedFixtureRequest("record"),
+    ADMIN,
+  );
+  const premature = await body(prematureResponse);
+  assert.equal(prematureResponse.status, 409, JSON.stringify(premature));
+  assert.equal(premature.code, "source_original_result_family_receipt_missing");
+  assert.equal(fixture.first(
+    "SELECT COUNT(*) AS n FROM source_original_result_family_receipts",
+  ).n, 0, "accepted resolution cannot manufacture the portable schema-44 receipt");
+  assert.deepEqual(acceptedCounts(fixture), {
+    admissions: 0,
+    resolutions: 0,
+    activations: 0,
+    current: 0,
+    observations: 1,
+  });
+
+  const resultFamilyFixtureRequest = (operation) => ({
+    contract_version: 1,
+    mode: "result_family",
+    operation,
+    source: SOURCE,
+    locator_kind: "source_relative_path",
+    locator: LOCATOR,
+    original_content_sha256: CONTENT_SHA,
+    original_byte_count: ORIGINAL_BYTES,
+    retrieval_query: QUERY,
+  });
+  const familyRecordResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    resultFamilyFixtureRequest("record"),
+    ADMIN,
+  );
+  const familyRecordBody = await body(familyRecordResponse);
+  assert.equal(familyRecordResponse.status, 200, JSON.stringify(familyRecordBody));
+  const familyRecord = validatePrivateProvenanceResultFamilyResponse(
+    privatePlan,
+    familyRecordBody,
+    { operation: "record" },
+  );
+  assert.equal(familyRecord.recorded, true);
+  assert.equal(familyRecord.accepted_outcome_authorized, false);
+  assert.equal(familyRecord.document_count, 1);
+  assert.equal(familyRecord.chunk_count, 1);
+
+  const familyVerifyResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    resultFamilyFixtureRequest("verify"),
+    ADMIN,
+  );
+  const familyVerifyBody = await body(familyVerifyResponse);
+  assert.equal(familyVerifyResponse.status, 200, JSON.stringify(familyVerifyBody));
+  const familyVerify = validatePrivateProvenanceResultFamilyResponse(
+    privatePlan,
+    familyVerifyBody,
+    { operation: "verify", recordReceipt: familyRecord },
+  );
+  assert.equal(familyVerify.accepted_outcome_authorized, false);
+
+  const acceptedValidation = {
+    discoveryReceipt,
+    resultFamilyReceipt: familyRecord,
+  };
+  const acceptedResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    acceptedFixtureRequest("record"),
+    ADMIN,
+  );
+  const acceptedBody = await body(acceptedResponse);
+  assert.equal(acceptedResponse.status, 200, JSON.stringify(acceptedBody));
+  const accepted = validatePrivateProvenanceAcceptedResolutionResponse(
+    privatePlan,
+    acceptedBody,
+    {
+      operation: "record",
+      ...acceptedValidation,
+    },
+  );
+  assert.equal(accepted.status, "accepted_resolution_current");
+  assert.equal(accepted.scope.whole_source_complete, false);
+
+  const verifyOptions = {
+    operation: "verify",
+    ...acceptedValidation,
+  };
+  const verifyResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    acceptedFixtureRequest("verify"),
+    ADMIN,
+  );
+  const verifyBody = await body(verifyResponse);
+  assert.equal(verifyResponse.status, 200, JSON.stringify(verifyBody));
+  const verified = validatePrivateProvenanceAcceptedResolutionResponse(
+    privatePlan,
+    verifyBody,
+    {
+      ...verifyOptions,
+      recordReceipt: accepted,
+    },
+  );
+  assert.equal(verified.status, "accepted_resolution_current");
+  assert.equal(verified.scope.whole_source_complete, false);
+
+  // Recovery preserves portable observations, family receipt, and resolution,
+  // while deployment-local verification and activation must be rebuilt.
+  fixture.raw("DROP TRIGGER source_original_accepted_resolution_activation_no_delete");
+  fixture.raw("DROP TRIGGER source_original_result_family_verification_no_delete");
+  fixture.raw("DELETE FROM source_original_accepted_resolution_activations");
+  fixture.raw("DELETE FROM source_original_result_family_verifications");
+  assert.deepEqual(acceptedCounts(fixture), {
+    admissions: 0,
+    resolutions: 1,
+    activations: 0,
+    current: 0,
+    observations: 2,
+  });
+
+  const staleVerifyResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    acceptedFixtureRequest("verify"),
+    ADMIN,
+  );
+  const staleVerify = await body(staleVerifyResponse);
+  assert.equal(staleVerifyResponse.status, 409, JSON.stringify(staleVerify));
+  assert.equal(
+    staleVerify.code,
+    "source_original_accepted_resolution_reverification_required",
+  );
+  assert.equal(fixture.first(
+    "SELECT COUNT(*) AS n FROM source_original_result_family_verifications",
+  ).n, 0, "verify cannot recreate deployment-local proof");
+
+  const reactivateResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    acceptedFixtureRequest("record"),
+    ADMIN,
+  );
+  const reactivateBody = await body(reactivateResponse);
+  assert.equal(reactivateResponse.status, 200, JSON.stringify(reactivateBody));
+  const reactivated = validatePrivateProvenanceAcceptedResolutionResponse(
+    privatePlan,
+    reactivateBody,
+    {
+      operation: "record",
+      ...acceptedValidation,
+    },
+  );
+  assert.equal(reactivated.status, "accepted_resolution_current");
+  assert.equal(reactivated.reactivated, true);
+  assert.equal(reactivated.resolution_hash, accepted.resolution_hash);
+  assert.equal(reactivated.scope.whole_source_complete, false);
+
+  const finalVerifyResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    acceptedFixtureRequest("verify"),
+    ADMIN,
+  );
+  const finalVerifyBody = await body(finalVerifyResponse);
+  assert.equal(finalVerifyResponse.status, 200, JSON.stringify(finalVerifyBody));
+  const finalVerify = validatePrivateProvenanceAcceptedResolutionResponse(
+    privatePlan,
+    finalVerifyBody,
+    {
+      ...verifyOptions,
+      recordReceipt: reactivated,
+    },
+  );
+  assert.equal(finalVerify.status, "accepted_resolution_current");
+  assert.equal(finalVerify.scope.whole_source_complete, false);
 });

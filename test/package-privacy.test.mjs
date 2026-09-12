@@ -639,6 +639,9 @@ const expected = [
   "operations/whatsapp-drain-scheduler.mjs",
   "operations/installed-manifest.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
+  // Pure non-executable one-target review contract. Reviewed for private locator,
+  // query, original identity, fingerprint, and authenticated receipt disclosure.
+  "operations/provenance-target-repair.mjs",
   "operations/verified-recovery.mjs",
   "operations/windows-dpapi.ps1",
   "operations/windows-dpapi-bridge.mjs",
