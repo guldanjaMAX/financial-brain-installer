@@ -167,6 +167,26 @@ async function seedUnexpectedBoundRevision(fixture, originalId) {
   );
 }
 
+function seedNonFamilyResult(fixture) {
+  fixture.raw(
+    "INSERT INTO sources (name,kind,status,created_at) VALUES (?,?,?,?)",
+    "otherdocs", "drive", "ready", "2026-09-11T00:00:00Z",
+  );
+  fixture.raw(
+    `INSERT INTO documents
+       (doc_uid,source,source_id,title,uri,ingested_at,content_hash,meta,text_source,text_reliable)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    "otherdocs:lower", "otherdocs", "lower", "Lower ranked result",
+    "https://example.invalid/lower", 2, "other-document-hash", "{}", "native", 1,
+  );
+  fixture.raw(
+    `INSERT INTO chunks (chunk_uid,doc_uid,chunk_ix,text,source,title,vector_id)
+     VALUES (?,?,?,?,?,?,?)`,
+    "otherdocs:lower#0", "otherdocs:lower", 0, "Lower ranked result body.",
+    "otherdocs", "Lower ranked result", "otherdocs:lower#0",
+  );
+}
+
 function publicPair(patch = {}) {
   const result = {
     chunk_uid: CHUNK_UID,
@@ -213,6 +233,21 @@ function publicPair(patch = {}) {
     },
   };
 }
+
+test("paused result_family validates a malformed record before reporting pause state", async () => {
+  await assert.rejects(
+    handleSourceOriginalResultFamily(
+      { VECTOR_DRAIN_MODE: "paused-for-upgrade" },
+      { contract_version: 1, mode: "result_family", operation: "record" },
+      {
+        retrieve: async () => { throw new Error("unreachable retrieval"); },
+        readBindingReadiness: async () => { throw new Error("unreachable binding read"); },
+      },
+    ),
+    (error) => error instanceof SourceOriginalResultFamilyError &&
+      error.code === "source_original_result_family_invalid_request",
+  );
+});
 
 test("full-admin result_family records one exact private proof and replays idempotently", async (t) => {
   const fixture = await createProductFixture();
@@ -284,14 +319,26 @@ test("result_family replay rejects a low-level chunk source relabel", async (t) 
   const firstResponse = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, request(), ADMIN);
   assert.equal(firstResponse.status, 200, JSON.stringify(await json(firstResponse)));
 
-  fixture.raw("UPDATE documents SET title='Relabeled document' WHERE doc_uid=?", `${SOURCE}:${LOCATOR}`);
-  const titleReplayResponse = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, request(), ADMIN);
-  const titleReplay = await json(titleReplayResponse);
-  assert.equal(titleReplayResponse.status, 409, JSON.stringify(titleReplay));
-  assert.equal(titleReplay.code, "source_original_result_family_chunk_mismatch");
-  fixture.raw("UPDATE documents SET title=? WHERE doc_uid=?", TITLE, `${SOURCE}:${LOCATOR}`);
+  assert.throws(
+    () => fixture.raw(
+      "UPDATE documents SET title='Relabeled document' WHERE doc_uid=?",
+      `${SOURCE}:${LOCATOR}`,
+    ),
+    /sealed source-original document evidence cannot be revised or revived/,
+    "schema 45 stops a sealed document relabel before stale proof can be replayed",
+  );
+  assert.equal(
+    fixture.first("SELECT title FROM documents WHERE doc_uid=?", `${SOURCE}:${LOCATOR}`).title,
+    TITLE,
+  );
 
   fixture.raw("DROP TRIGGER chunks_source_original_receipt_no_stale_update");
+  assert.throws(
+    () => fixture.raw("UPDATE chunks SET source='other' WHERE chunk_uid=?", CHUNK_UID),
+    /sealed source-original chunk receipt cannot be revived/,
+    "schema 45 independently freezes every retrieval-visible field in a sealed family",
+  );
+  fixture.raw("DROP TRIGGER chunks_source_original_sealed_receipt_no_revival_update");
   fixture.raw("UPDATE chunks SET source='other' WHERE chunk_uid=?", CHUNK_UID);
   const replayResponse = await fixture.post(SOURCE_ORIGINAL_OBSERVATION_PATH, request(), ADMIN);
   const replay = await json(replayResponse);
@@ -360,6 +407,76 @@ test("two production probes must be identical and retrieval failures write nothi
   assert.equal(fixture.first("SELECT COUNT(*) AS n FROM source_original_result_family_members").n, 0);
   assert.equal(fixture.first("SELECT COUNT(*) AS n FROM source_original_result_family_receipts").n, 0);
   assert.equal(fixture.first("SELECT COUNT(*) AS n FROM source_original_result_family_verifications").n, 0);
+});
+
+test("a non-family retrieval mutation between family snapshot and probes fails closed", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  await seedBoundFamily(fixture);
+  seedNonFamilyResult(fixture);
+  let readinessCalls = 0;
+  const readiness = {
+    ready: true,
+    expected_vectors: 2,
+    actual_vectors: 2,
+    pending: 0,
+    submitted: 0,
+    outbox_generation: 0,
+    mutation_id: null,
+    mutation_submitted_at: null,
+    projection_status: "verified",
+    bootstrap_epoch: 0,
+  };
+  const lowerResult = publicPair({
+    chunk_uid: "otherdocs:lower#0",
+    doc_uid: "otherdocs:lower",
+    source_id: "lower",
+    ref_key: "lower",
+    source: "otherdocs",
+    source_kind: "drive",
+    title: "Lower ranked result",
+    snippet: "Lower ranked result body.",
+    uri: "https://example.invalid/lower-changed",
+    score: 0.5,
+  });
+  lowerResult.citation = {
+    ...lowerResult.citation,
+    n: 2,
+    title: "Lower ranked result",
+    source: "otherdocs",
+    source_kind: "drive",
+    ref: "lower",
+  };
+
+  await assert.rejects(
+    handleSourceOriginalResultFamily(fixture.env, request(), {
+      retrieve: async () => ({
+        degraded: false,
+        retrieval_scope: "owner",
+        access: { principal: "owner" },
+        ignored_filters: [],
+        results: [publicPair(), lowerResult],
+      }),
+      readBindingReadiness: sourceOriginalResultBindingReadiness,
+      readVectorReadiness: async () => {
+        readinessCalls += 1;
+        fixture.raw(
+          "UPDATE documents SET uri=? WHERE doc_uid='otherdocs:lower'",
+          "https://example.invalid/lower-changed",
+        );
+        return readiness;
+      },
+    }),
+    (error) => error instanceof SourceOriginalResultFamilyError &&
+      error.code === "source_original_result_family_retrieval_changed",
+  );
+  assert.equal(readinessCalls, 1);
+  assert.equal(fixture.first(
+    "SELECT COUNT(*) AS n FROM source_original_result_family_receipts",
+  ).n, 0);
+  assert.equal(fixture.first(
+    "SELECT COUNT(*) AS n FROM source_original_result_family_verifications",
+  ).n, 0);
 });
 
 test("result_family fails closed for a degraded production retrieval", async (t) => {

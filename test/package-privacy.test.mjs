@@ -560,6 +560,7 @@ const expected = [
   "migrations/d1/0042_source_original_observations.sql",
   "migrations/d1/0043_source_original_result_bindings.sql",
   "migrations/d1/0044_source_original_result_family_receipts.sql",
+  "migrations/d1/0045_source_original_accepted_resolutions.sql",
   "operations/bank-access-wrapping-key.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
@@ -667,6 +668,7 @@ const expected = [
   "worker/src/lib/source-original-binding.js",
   "worker/src/lib/source-original-chunk.js",
   "worker/src/lib/source-original-result-family.js",
+  "worker/src/lib/source-original-accepted-resolution.js",
   "worker/src/lib/tax-evidence-scope.js",
   "worker/src/lib/fin-api.js",
   // Reviewed owner/admin-only D1 inventory. SELECT statements only, bounded

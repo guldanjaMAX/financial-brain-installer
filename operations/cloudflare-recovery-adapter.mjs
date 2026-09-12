@@ -259,12 +259,17 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "source_original_result_bindings",
   // Schema 44: the exact chunk members are staged before the portable family
   // header seals them. Restore both after schema-43 raw bindings so every
-  // referenced revision and binding already exists. The verification table is
-  // part of the reviewed schema inventory, but its rows bind one deployment's
-  // Vectorize projection and are deliberately excluded from recovery content.
+  // referenced revision and binding already exists. Schema 45's accepted
+  // resolution is portable history and follows that family header. The
+  // verification, activation, and admission tables are part of the reviewed
+  // schema inventory, but their rows bind one deployment or one live write
+  // transaction and are deliberately excluded from recovery content.
   "source_original_result_family_members",
   "source_original_result_family_receipts",
+  "source_original_accepted_resolutions",
   "source_original_result_family_verifications",
+  "source_original_accepted_resolution_activations",
+  "source_original_accepted_resolution_admissions",
   // Empty outside one schema-first recovery import. The schema inventory keeps
   // the control table explicit, but its rows are never exported; source and
   // target probes require it empty while the artifact opens and closes it.
@@ -293,6 +298,8 @@ export const RECOVERY_EXPORT_TABLES = Object.freeze(
       table !== "owner_financial_map_inventory_state" &&
       table !== "owner_financial_map_previews" &&
       table !== "source_original_result_family_verifications" &&
+      table !== "source_original_accepted_resolution_activations" &&
+      table !== "source_original_accepted_resolution_admissions" &&
       table !== "source_original_result_family_recovery_state" &&
       table !== "bank_feed_link_sessions" &&
       table !== "oauth_clients" && table !== "oauth_codes" && table !== "oauth_tokens"),
@@ -369,6 +376,10 @@ const INSTALL_STATE_ZERO_NORMALIZED_COLUMNS = Object.freeze([
   // queue itself so corpus fingerprints remain stable across safe retries.
   "outbox_generation",
   "vector_projection_bootstrap_base_count",
+  // Accepted result-family verifications bind the source deployment's complete
+  // retrieval response. A recovered target must start a new local generation
+  // and prove it after the portable corpus has been restored.
+  "source_original_retrieval_generation",
 ]);
 // The minimum schema carrying the reviewed vector recovery protocol. Historical
 // additive prefixes after this floor remain available to offline artifact and
@@ -502,6 +513,11 @@ const SCHEMA_44_TABLES = Object.freeze([
   "source_original_result_family_verifications",
   "source_original_result_family_recovery_state",
 ]);
+const SCHEMA_45_TABLES = Object.freeze([
+  "source_original_accepted_resolution_admissions",
+  "source_original_accepted_resolutions",
+  "source_original_accepted_resolution_activations",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -523,7 +539,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_28_TABLES, ...SCHEMA_30_TABLES, ...SCHEMA_31_TABLES,
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
-     ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES].includes(table)
+     ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
+     ...SCHEMA_45_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1062,6 +1079,7 @@ function expectedInstallStateColumns(migrations) {
     ...(latest >= 13 ? INSTALL_STATE_BOOTSTRAP_V2_COLUMNS : []),
     ...(latest >= 14 ? ["session_generation"] : []),
     ...(latest >= 36 ? ["vector_projection_residue_epoch"] : []),
+    ...(latest >= 45 ? ["source_original_retrieval_generation"] : []),
   ]);
 }
 
@@ -1329,7 +1347,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 41 || !SCHEMA_41_TABLES.includes(table)) &&
     (latest >= 42 || !SCHEMA_42_TABLES.includes(table)) &&
     (latest >= 43 || !SCHEMA_43_TABLES.includes(table)) &&
-    (latest >= 44 || !SCHEMA_44_TABLES.includes(table)));
+    (latest >= 44 || !SCHEMA_44_TABLES.includes(table)) &&
+    (latest >= 45 || !SCHEMA_45_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(migrations, { excludeBankItems = false } = {}) {

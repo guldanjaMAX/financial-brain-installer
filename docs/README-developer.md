@@ -1198,9 +1198,54 @@ the write transaction.
 Neither the locator nor the raw query is returned or persisted. Durable proof
 rows also exclude document IDs, chunk IDs, titles, text, answers, and citation
 references. The response explicitly reports
-`accepted_outcome_authorized: false`. The schema-43 accepted trigger and Worker
-rejection remain in force, so schema 44 cannot authorize accepted repair, OCR,
-reingest, deletion, or a whole-source claim.
+`accepted_outcome_authorized: false`. Ordinary `result_family` and observation
+recording remain non-authorizing, so schema 44 alone cannot authorize an
+accepted observation, OCR, reingest, deletion, or a whole-source claim.
+
+Migration 0045 adds `mode: "accepted_resolution"` to the same full-admin-only
+`POST /api/admin/brain/source-original-observations` endpoint. It accepts
+exactly one sealed target and requires an explicit
+`operation: "record"` or `operation: "verify"`. The request supplies the same
+private exact-original and retrieval inputs used to build the schema-44 proof,
+plus the prior unresolved observation it resolves. Both operations reseal the
+all-and-only current result family and rerun the deployment-local Vectorize and
+production owner retrieval verification. Cached proof is not enough.
+
+The exact portable family must first be persisted through ordinary
+`mode: "result_family"`, `operation: "record"`. Accepted-resolution admission
+requires that preexisting non-authorizing family header and its members; it
+never creates them implicitly.
+
+`record` uses one guarded D1 batch to bind the prior unresolved observation,
+exact original hash and byte count, family receipt, fresh verification receipt,
+and accepted observation atomically. The D1 admission trigger repeats the
+current family, chunk, binding, install-state, outbox, generation, and mutation
+checks inside the write transaction. Exact replay creates no duplicate history;
+conflicting replay and any observed drift fail without a partial admission.
+`verify` performs the same fresh proof without writing and returns current only
+when the exact portable resolution also has a matching activation for the
+current deployment-local verification.
+
+Recovery exports the portable accepted-resolution history after its observation,
+binding, and family dependencies. It excludes in-flight admissions,
+deployment-local verifications, and resolution activations. The recovery marker
+can close only when the portable accepted observations and resolutions form an
+exact bijection and all local-only acceptance state is empty. The restored
+history is therefore not current acceptance proof. After Vectorize is rebuilt,
+the exact target must pass `accepted_resolution` `record` again to add a fresh
+local verification and activation.
+
+The SQL currentness views cover the fixed retrieval contract plus mutations
+performed through supported Worker, D1, and outbox paths. Direct FTS repair,
+out-of-band Vectorize mutation, and retrieval-code deployment sit outside that
+generation fence. Rerun the full `accepted_resolution` proof before relying on
+an accepted result after any of those boundary changes.
+
+Successful receipts remain scoped to one original and state
+`whole_source_complete: false`. This evidence gate does not enable the legacy
+`provenance-repair --apply` command and does not run OCR, reingest, deletion,
+deployment, or customer execution. Ordinary `result_family` responses continue
+to report `accepted_outcome_authorized: false`.
 
 `brain assistant-repair <manifest> --only <scopes>` is the matching post-audit
 local handoff lane. Its only accepted scopes are `technician-skill`,

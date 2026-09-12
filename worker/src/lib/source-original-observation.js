@@ -21,9 +21,15 @@ import {
 } from "./source-original-binding.js";
 import { backendOf, D1 } from "./store.js";
 import {
+  buildSourceOriginalResultFamilyProof,
   handleSourceOriginalResultFamily,
   SourceOriginalResultFamilyError,
 } from "./source-original-result-family.js";
+import {
+  recordSourceOriginalAcceptedResolution,
+  SourceOriginalAcceptedResolutionError,
+  verifySourceOriginalAcceptedResolution,
+} from "./source-original-accepted-resolution.js";
 
 export const SOURCE_ORIGINAL_OBSERVATION_PATH = "/api/admin/brain/source-original-observations";
 export const SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION = 1;
@@ -84,6 +90,7 @@ export const SOURCE_ORIGINAL_OBSERVATION_VOCABULARY = Object.freeze({
   recordable_outcomes: Object.freeze(["gap", "adjudicated_exclusion", "failed"]),
   raw_original_result_binding: "available_for_bound_current_revisions",
   accepted_result_family_receipt: "available_non_authorizing",
+  accepted_resolution: "available_for_one_exact_current_result_family",
 });
 
 const STAGES = new Set(OBSERVATION_STAGES);
@@ -266,6 +273,71 @@ function commonBinding(body, { recorded = false } = {}) {
     source_snapshot_id: body.source_snapshot_id,
     target_set_hash: body.target_set_hash,
     targets: normalizedTargets(body.targets, { recorded }),
+  };
+}
+
+function acceptedResolutionBinding(body) {
+  const fields = [
+    "contract_version", "mode", "operation", "source", "run_id", "plan_id",
+    "source_snapshot_id", "target_set_hash", "targets", "retrieval_query",
+  ];
+  if (!exactObject(body, fields) ||
+      body.contract_version !== SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION ||
+      body.mode !== "accepted_resolution" || !RUN_RE.test(body.run_id)) {
+    refuse("source_original_accepted_resolution_invalid_request", "accepted_resolution request does not match the exact contract");
+  }
+  const operation = body.operation;
+  if (!["record", "verify"].includes(operation)) {
+    refuse("source_original_accepted_resolution_invalid_operation", "accepted_resolution operation must be record or verify");
+  }
+  if (!Array.isArray(body.targets) || body.targets.length !== 1) {
+    refuse("source_original_accepted_resolution_target_count", "accepted_resolution requires exactly one sealed target");
+  }
+  const value = body.targets[0];
+  const targetFields = [
+    "locator_kind", "locator", "original_id", "text_state",
+    "original_content_sha256", "original_byte_count", "page_count",
+    "page_count_state", "resolves_observation_hash",
+  ];
+  if (!exactObject(value, targetFields) || value.locator_kind !== "source_relative_path" ||
+      !ORIGINAL_ID_RE.test(value.original_id) ||
+      !["native_readable", "ocr_reliable"].includes(value.text_state) ||
+      !SHA_RE.test(value.original_content_sha256) ||
+      !Number.isSafeInteger(value.original_byte_count) || value.original_byte_count < 0 ||
+      !["authoritative", "not_applicable"].includes(value.page_count_state) ||
+      (value.page_count_state === "authoritative" &&
+        (!Number.isSafeInteger(value.page_count) || value.page_count < 1 || value.page_count > 10000)) ||
+      (value.page_count_state === "not_applicable" && value.page_count !== null) ||
+      !SHA_ID_RE.test(value.resolves_observation_hash)) {
+    refuse("source_original_accepted_resolution_invalid_target", "accepted_resolution target does not match the exact accepted-repair contract");
+  }
+  const source = normalizedSource(body.source);
+  if (!SHA_RE.test(body.plan_id) || !SHA_ID_RE.test(body.source_snapshot_id) ||
+      !SHA_ID_RE.test(body.target_set_hash)) {
+    refuse("source_original_invalid_binding", "plan or snapshot binding is invalid");
+  }
+  return {
+    operation,
+    source,
+    run_id: body.run_id,
+    plan_id: body.plan_id,
+    source_snapshot_id: body.source_snapshot_id,
+    target_set_hash: body.target_set_hash,
+    retrieval_query: body.retrieval_query,
+    targets: [{
+      locator_kind: value.locator_kind,
+      locator: normalizedLocator(value.locator),
+      original_id: value.original_id,
+      observation_stage: "repair",
+      outcome: "accepted",
+      reason_code: "accepted_provenance_verified",
+      text_state: value.text_state,
+      original_content_sha256: value.original_content_sha256,
+      original_byte_count: value.original_byte_count,
+      page_count: value.page_count,
+      page_count_state: value.page_count_state,
+      resolves_observation_hash: value.resolves_observation_hash,
+    }],
   };
 }
 
@@ -558,7 +630,7 @@ export async function sourceOriginalResultBindingReadiness(env, {
   });
 }
 
-function receiptFields(value) {
+export function sourceOriginalObservationReceiptFields(value) {
   return {
     contract_version: Number(value.contract_version),
     tenant_id: String(value.tenant_id),
@@ -586,9 +658,11 @@ function receiptFields(value) {
   };
 }
 
-async function observationHash(receipt) {
-  return sha256Id(canonical(receiptFields(receipt)));
+export async function sourceOriginalObservationHash(receipt) {
+  return sha256Id(canonical(sourceOriginalObservationReceiptFields(receipt)));
 }
+
+const observationHash = sourceOriginalObservationHash;
 
 const RECEIPT_COLUMNS = `sequence,contract_version,tenant_id,source,original_id,locator_kind,
   run_id,plan_id,source_snapshot_id,target_set_hash,target_count,observation_stage,outcome,
@@ -651,6 +725,17 @@ function boundedScope() {
     repair_verification_supported: false,
     raw_original_result_family_receipt: "available_non_authorizing",
     meaning: "Evidence applies only to the explicitly sealed originals; it is not a whole-source enumeration.",
+  };
+}
+
+function acceptedResolutionScope() {
+  return {
+    ...boundedScope(),
+    kind: "single_target_accepted_resolution",
+    maximum_targets: 1,
+    accepted_outcomes_supported: true,
+    accepted_resolution_mode: "one_exact_current_result_family",
+    repair_verification_supported: true,
   };
 }
 
@@ -825,6 +910,114 @@ async function handleRecord(env, body) {
   });
 }
 
+async function handleAcceptedResolution(env, body, dependencies) {
+  const binding = acceptedResolutionBinding(body);
+  if (binding.operation === "record" && env.VECTOR_DRAIN_MODE === "paused-for-upgrade") {
+    throw new ObservationRequestError(
+      503,
+      "corpus_writes_paused",
+      "brain writes are paused for a verified upgrade or rollback",
+    );
+  }
+  await requireUploadSource(env, binding.source);
+  const sealed = await sealedTargets(env, binding);
+  const target = binding.targets[0];
+  if (sealed.targetSetHash !== binding.target_set_hash ||
+      sealed.targets.length !== 1 || sealed.targets[0].original_id !== target.original_id) {
+    refuse("source_original_binding_mismatch", "target identity does not match the sealed one-original plan", 409);
+  }
+
+  const before = await currentDocumentSnapshot(env, binding.source, target.locator);
+  if (!await acceptedEvidenceIsValid(target, before)) {
+    refuse("source_original_outcome_unobserved", "accepted outcome does not match exact current document evidence", 409);
+  }
+  const proof = await buildSourceOriginalResultFamilyProof(env, {
+    contract_version: SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION,
+    mode: "result_family",
+    operation: binding.operation,
+    source: binding.source,
+    locator_kind: target.locator_kind,
+    locator: target.locator,
+    original_content_sha256: target.original_content_sha256,
+    original_byte_count: target.original_byte_count,
+    retrieval_query: binding.retrieval_query,
+  }, {
+    ...dependencies,
+    readBindingReadiness: sourceOriginalResultBindingReadiness,
+  });
+  if (proof.originalId !== target.original_id) {
+    refuse("source_original_binding_mismatch", "result-family proof belongs to a different original", 409);
+  }
+
+  // The observation hash and the schema-44 family receipt use different
+  // canonical projections. Re-read the observation projection after the
+  // family/retrieval proof so both views describe the same bounded cut.
+  const snapshot = await currentDocumentSnapshot(env, binding.source, target.locator);
+  if (snapshot.count !== before.count || snapshot.hash !== before.hash ||
+      proof.documentCount !== snapshot.count || !await acceptedEvidenceIsValid(target, snapshot)) {
+    refuse("source_original_result_family_changed", "the exact current result family changed during accepted-resolution proof", 409);
+  }
+  const observation = {
+    contract_version: SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION,
+    tenant_id: SOURCE_ORIGINAL_TENANT_ID,
+    source: binding.source,
+    original_id: target.original_id,
+    locator_kind: target.locator_kind,
+    run_id: binding.run_id,
+    plan_id: binding.plan_id,
+    source_snapshot_id: binding.source_snapshot_id,
+    target_set_hash: binding.target_set_hash,
+    target_count: 1,
+    observation_stage: "repair",
+    outcome: "accepted",
+    reason_code: "accepted_provenance_verified",
+    text_state: target.text_state,
+    original_content_sha256: target.original_content_sha256,
+    original_byte_count: target.original_byte_count,
+    page_count: target.page_count,
+    page_count_state: target.page_count_state,
+    result_document_count: snapshot.count,
+    result_document_set_hash: snapshot.hash,
+    resolves_observation_hash: target.resolves_observation_hash,
+  };
+  if (!await repairLineageValid(env, observation)) {
+    refuse("source_original_source_changed", "accepted repair does not resolve one prior unresolved observation for the same original bytes", 409);
+  }
+  observation.observation_hash = await observationHash(observation);
+
+  const persistence = binding.operation === "record"
+    ? await recordSourceOriginalAcceptedResolution(env, { observation, proof })
+    : await verifySourceOriginalAcceptedResolution(env, { observation, proof });
+  return {
+    contract_version: SOURCE_ORIGINAL_OBSERVATION_CONTRACT_VERSION,
+    mode: "accepted_resolution",
+    operation: binding.operation,
+    source: binding.source,
+    run_id: binding.run_id,
+    original_id: target.original_id,
+    target_set_hash: binding.target_set_hash,
+    target_count: 1,
+    accepted_observation_hash: observation.observation_hash,
+    resolution_hash: persistence.resolution_hash,
+    activation_hash: persistence.activation_hash,
+    family_receipt_hash: proof.familyReceipt.family_receipt_hash,
+    verification_hash: proof.verification.verification_hash,
+    document_count: proof.documentCount,
+    chunk_count: proof.chunkCount,
+    vector_readiness_hash: proof.projection.vector_readiness_hash,
+    retrieval_probe_id: proof.retrievalProbeId,
+    retrieval_status: "deterministic",
+    citation_status: "same_family",
+    status: "accepted_resolution_current",
+    recorded: persistence.recorded,
+    replayed: persistence.replayed,
+    reactivated: persistence.reactivated,
+    accepted_outcome_authorized: true,
+    bounded_target_set_repair_verified: true,
+    scope: acceptedResolutionScope(),
+  };
+}
+
 async function handleInventory(env, body) {
   const fields = ["contract_version", "mode", "source", "after_sequence", "limit", "snapshot_id"];
   if (!exactObject(body, fields, ["contract_version", "mode", "source"]) ||
@@ -920,7 +1113,7 @@ async function handleVerify(env, body) {
       if (!bindingMatches || await observationHash(row) !== row.observation_hash) {
         status = "observation_corrupt";
       } else if (row.outcome === "accepted") {
-        status = "acceptance_chain_unavailable";
+        status = "accepted_resolution_mode_required";
       } else if (target.original_content_sha256 !== row.original_content_sha256) {
         // The HMAC identity is path-stable, so bytes are a separate required
         // fence. Replacement at the same path is a new observation, never a
@@ -992,16 +1185,20 @@ export async function handleSourceOriginalObservation(env, request, dependencies
     if (body.mode === "record") return await handleRecord(env, body);
     if (body.mode === "inventory") return await handleInventory(env, body);
     if (body.mode === "verify") return await handleVerify(env, body);
+    if (body.mode === "accepted_resolution") {
+      return respond(await handleAcceptedResolution(env, body, dependencies));
+    }
     if (body.mode === "result_family") {
       return respond(await handleSourceOriginalResultFamily(env, body, {
         ...dependencies,
         readBindingReadiness: sourceOriginalResultBindingReadiness,
       }));
     }
-    refuse("source_original_mode_unsupported", "mode must be seal, record, inventory, verify, or result_family");
+    refuse("source_original_mode_unsupported", "mode must be seal, record, inventory, verify, result_family, or accepted_resolution");
   } catch (error) {
     if (error instanceof ObservationRequestError || error instanceof SourceOriginalBindingError ||
-        error instanceof SourceOriginalResultFamilyError) {
+        error instanceof SourceOriginalResultFamilyError ||
+        error instanceof SourceOriginalAcceptedResolutionError) {
       return respond({ error: error.message, code: error.code }, error.status);
     }
     return respond({ error: "source original observation is unavailable", code: "source_original_unavailable" }, 503);

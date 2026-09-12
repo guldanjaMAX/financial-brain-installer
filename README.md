@@ -355,7 +355,8 @@ producer binary or a server-side recomputation over uploaded raw bytes. Both
 the schema-43 D1 guard and the Worker still reject every accepted observation,
 and no OCR, backfill, repair, or deployment is implied.
 
-Migration 0044 adds that result-family proof without enabling accepted repair.
+Migration 0044 adds that result-family proof without enabling accepted repair
+through its ordinary `result_family` operation.
 Raw-bound ingests now commit an opaque digest for every exact stored chunk,
 including its title prefix. The private admin route can seal an all-and-only
 current family of up to 256 revisions and 500 chunks, then require target and
@@ -368,10 +369,45 @@ and must be repeated after Vectorize is rebuilt. Historical headers restore
 inside a schema-only marker that can open only on an empty recovery target;
 the artifact closes it and proves it empty before the target can advance.
 
-This is proof substrate only. The schema-43 D1 guard and Worker still reject
-every accepted observation. A stored result-family verification does not
-authorize OCR, reingest, deletion, retrospective repair, or whole-source
-completeness, and it is not a production or release receipt.
+This is proof substrate only. A stored result-family verification does not by
+itself authorize an accepted observation. Ordinary observation recording and
+`result_family` remain non-authorizing. The proof does not authorize OCR,
+reingest, deletion, retrospective repair, or whole-source completeness, and it
+is not a production or release receipt.
+
+Migration 0045 adds a separate, narrow accepted-resolution gate on the same
+full-admin-only `POST /api/admin/brain/source-original-observations` route.
+`mode: "accepted_resolution"` accepts exactly one sealed target and supports
+the explicit `record` and `verify` operations. Both operations rerun the exact
+schema-44 family proof and the deployment-local Vectorize and production owner
+retrieval checks. A stale verification, changed family or chunk, changed queue
+or projection fence, nonzero outbox, replay conflict, or concurrent corpus
+write fails closed.
+
+Before the first accepted-resolution `record`, the exact portable family must
+already have been stored by the ordinary `mode: "result_family"`,
+`operation: "record"` path. Accepted-resolution admission consumes that
+preexisting non-authorizing receipt; it does not create the family header or
+members itself.
+
+`record` admits the prior unresolved observation, exact original byte receipt,
+family receipt, fresh deployment-local verification, and new accepted
+observation atomically through one guarded D1 batch. `verify` is read-only and
+requires the same proof to still be current. Portable accepted-resolution
+history survives verified recovery, but its deployment-local verification and
+activation do not. A recovered Brain must repeat the exact verification and
+record a new local activation before that resolution is current there. Every
+receipt remains bounded to the one target and reports
+`whole_source_complete: false`.
+
+Database currentness is scoped to the fixed retrieval contract and supported
+Worker, D1, and outbox-mediated writes. Direct FTS maintenance, an out-of-band
+Vectorize mutation, or a retrieval-code deployment is a separate boundary and
+requires a fresh `accepted_resolution` proof run before relying on the result.
+
+This route admits evidence only for that exact original. The legacy
+`provenance-repair --apply` path remains disabled, and schema 45 does not run
+OCR, reingest, delete data, deploy anything, or authorize customer execution.
 
 ### Inventory the financial picture
 
