@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 import { strFromU8, unzipSync } from "fflate";
@@ -401,7 +402,7 @@ test("a draft is visibly non-sendable and writes only a new output archive and r
   assert.equal(result.release.tested_package, null);
   assert.equal(result.release.valid_until, null);
   assert.equal(writes.length, 2);
-  assert.equal(writes.some(({ path }) => path.endsWith("/release.json")), true);
+  assert.equal(writes.some(({ path }) => path === join("/outside/new", "release.json")), true);
 });
 
 test("a stale source or failed CI refuses before the output directory is created", async () => {
