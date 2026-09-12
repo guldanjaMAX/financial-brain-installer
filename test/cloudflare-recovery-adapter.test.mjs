@@ -26,6 +26,8 @@ import {
   normalizedInstallStateExport,
   parseCloudflareRecoveryCliArguments,
   previewCloudflareRecoveryFieldGate,
+  recoveryExportTables,
+  recoveryVectorProtocolSupported,
   runCloudflareRecoveryFieldGate,
   verifyRecoverySqlArtifact,
 } from "../operations/cloudflare-recovery-adapter.mjs";
@@ -47,6 +49,27 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("document_source_inventory"), true
 assert.equal(RECOVERY_EXPORT_TABLES.includes("document_source_inventory"), false);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("plaid_sync_leases"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("plaid_sync_leases"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("memory_supersessions"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("memory_supersessions"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_inventory_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_inventory_state"), false);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_key_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_key_state"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_snapshots"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_snapshots"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("owner_financial_map_previews"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("owner_financial_map_previews"), false);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_id_key_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_id_key_state"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_observations"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_observations"), true);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_bindings"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_bindings"), true);
+assert.ok(
+  RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") >
+    RECOVERY_EXPORT_TABLES.indexOf("documents"),
+  "recovery restores current document rows before their immutable binding history",
+);
 
 const sourceManifestPath = join(sandbox, "source.manifest.json");
 const targetManifestPath = join(sandbox, "target.manifest.json");
@@ -152,6 +175,20 @@ function migrationRows() {
 }
 
 const appliedMigrations = migrationRows();
+assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 35)), false);
+assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 36)), true);
+assert.equal(recoveryVectorProtocolSupported(appliedMigrations), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 36)).includes("memory_supersessions"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("memory_supersessions"), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 40)).includes("owner_financial_map_snapshots"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("owner_financial_map_snapshots"), true);
+assert.equal(recoveryExportTables(appliedMigrations).includes("owner_financial_map_previews"), false);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 41)).includes("source_original_id_key_state"), false);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 41)).includes("source_original_observations"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_id_key_state"), true);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_observations"), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 42)).includes("source_original_result_bindings"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_result_bindings"), true);
 const installStateColumns = Object.freeze([
   ["id", "INTEGER"],
   ["client_slug", "TEXT"],
@@ -627,6 +664,25 @@ function providerHarness({
   const bindingForAccount = (accountId) => accountId === sourceManifest.infrastructure.cloudflare.account_id
     ? sourceManifest.infrastructure.cloudflare
     : targetManifest.infrastructure.cloudflare;
+  const migrationVersionForAccount = (accountId) =>
+    accountId === sourceManifest.infrastructure.cloudflare.account_id
+      ? sourceMigrationVersion
+      : targetMigrationVersion;
+  const mapTables = new Set([
+    "owner_financial_map_key_state",
+    "owner_financial_map_inventory_state",
+    "owner_financial_map_previews",
+    "owner_financial_map_snapshots",
+  ]);
+  const sourceOriginalTables = new Set([
+    "source_original_id_key_state",
+    "source_original_observations",
+  ]);
+  const durableTablesForVersion = (version) => RECOVERY_DURABLE_TABLES.filter((name) =>
+    (version >= 37 || name !== "memory_supersessions") &&
+    (version >= 41 || !mapTables.has(name)) &&
+    (version >= 42 || !sourceOriginalTables.has(name)) &&
+    (version >= 43 || name !== "source_original_result_bindings"));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
@@ -783,7 +839,9 @@ function providerHarness({
         .map((value, index) => value === "--table" ? args[index + 1] : null)
         .filter(Boolean);
       const includesBank = exportedTables.includes("bank_feed_items");
-      assert.deepEqual(exportedTables, RECOVERY_EXPORT_TABLES.filter((table) => includesBank || table !== "bank_feed_items"));
+      const present = new Set(durableTablesForVersion(migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID)));
+      assert.deepEqual(exportedTables, RECOVERY_EXPORT_TABLES.filter((table) =>
+        present.has(table) && (includesBank || table !== "bank_feed_items")));
       assert.equal(exportedTables.includes("vector_outbox"), false);
       assert.equal(exportedTables.includes("vector_bootstrap_batches"), false);
       assert.equal(exportedTables.includes("install_state"), false);
@@ -811,7 +869,9 @@ function providerHarness({
       const sql = args[args.indexOf("--command") + 1];
       let rows;
       if (/user_table_count/.test(sql)) {
-        rows = [{ user_table_count: targetRestored ? RECOVERY_DURABLE_TABLES.length + 1 : 0 }];
+        rows = [{ user_table_count: targetRestored
+          ? durableTablesForVersion(targetMigrationVersion).length + 1
+          : 0 }];
       } else if (/pending_outbox/.test(sql)) {
         rows = [{ pending_outbox: outbox, failed_vectors: 0 }];
       } else if (/COUNT\(\*\) AS agent_action_receipts FROM agent_action_receipts/.test(sql)) {
@@ -867,9 +927,13 @@ function providerHarness({
           session_generation: fixtureInstallState.session_generation + 1,
         }];
       } else if (/SELECT name FROM sqlite_schema/.test(sql)) {
-        rows = [...RECOVERY_DURABLE_TABLES].sort().map((name) => ({ name }));
+        rows = durableTablesForVersion(migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID))
+          .sort().map((name) => ({ name }));
       } else if (/SELECT type,name,tbl_name/.test(sql)) {
-        rows = schemaRows;
+        const version = migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID);
+        rows = schemaRows.filter((row) =>
+          (version >= 37 || (row.name !== "memory_supersessions" && row.tbl_name !== "memory_supersessions")) &&
+          (version >= 41 || (!mapTables.has(row.name) && !mapTables.has(row.tbl_name))));
       } else if (/documents_ingested_max/.test(sql)) {
         assert.match(
           sql,
@@ -943,6 +1007,9 @@ function providerHarness({
       health.version = "0.1.12";
       return response(healthTransform({
         ...health,
+        ...(mode === "active"
+          ? { schema_version: migrationVersionForAccount(targetManifest.infrastructure.cloudflare.account_id) }
+          : {}),
         vector_drain_mode: healthModeOverride ?? health.vector_drain_mode,
         vector_writer_protocol: healthProtocolOverride ?? health.vector_writer_protocol,
       }));
@@ -1813,7 +1880,11 @@ try {
     (error) => error.code === "RECOVERY_D1_RESOURCE_AMBIGUOUS",
   );
 
-  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 12 });
+  // Schema 42 has the reviewed vector protocol, but the current Worker reads
+  // schema-43 binding state on every ingest. It must be updated before export;
+  // restoring the older prefix would otherwise produce a healthy-looking brain
+  // whose next ordinary write fails.
+  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 42 });
   const prefixSourceGate = createCloudflareRecoveryFieldGateAdapters(
     approvedAdapterConfig,
     prefixSourceHarness.dependencies,
@@ -2141,10 +2212,10 @@ try {
 
   // A resumed journal can carry an old verify_d1 checkpoint. Recheck the live
   // target schema before any current drain or Vectorize call instead of
-  // assuming the historical checkpoint has the schema-13 writer protocol.
+  // assuming the historical checkpoint is compatible with the current Worker.
   const prefixTargetHarness = providerHarness({
     initialTargetRestored: true,
-    targetMigrationVersion: 12,
+    targetMigrationVersion: 42,
   });
   const prefixTargetGate = createCloudflareRecoveryFieldGateAdapters(
     approvedAdapterConfig,
@@ -2398,6 +2469,39 @@ try {
         assert.equal(h.promotionCalls, 0);
       }
     }
+  }
+
+  // Active health is the last cheap proof that the promoted Worker and restored
+  // database still belong to the same release. A schema-42 time-travel restore
+  // between resumable stages must not pass as an active schema-43 brain.
+  for (const schemaVersion of [undefined, 42]) {
+    const staleSchemaHarness = providerHarness({
+      targetVersionId: activeWorkerVersionId,
+      initialTargetRestored: true,
+      initialVectorCount: 5,
+      healthTransform: (health) => {
+        const changed = { ...health };
+        if (schemaVersion === undefined) delete changed.schema_version;
+        else changed.schema_version = schemaVersion;
+        return changed;
+      },
+    });
+    const staleSchemaGate = createCloudflareRecoveryFieldGateAdapters(
+      approvedAdapterConfig,
+      staleSchemaHarness.dependencies,
+    );
+    await assert.rejects(
+      staleSchemaGate.adapters.verify_health({
+        stage: "verify_health",
+        planFingerprint: initialized.plan.plan_fingerprint,
+        targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
+        completed: [],
+      }),
+      (error) => error.code === "RECOVERY_HEALTH_IDENTITY_MISMATCH",
+      `active ${schemaVersion === undefined ? "missing" : "stale"} schema version`,
+    );
+    assert.equal(staleSchemaHarness.bootstrapCalls, 0);
+    assert.equal(staleSchemaHarness.promotionCalls, 0);
   }
 
   const badHealthModeHarness = providerHarness({ healthModeOverride: "active" });

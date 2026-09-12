@@ -8,8 +8,10 @@ import {
   chooseDbName, assertAdoptable, documentCountOf, ensureMetadataIndex, VECTOR_METADATA_INDEXES,
   driveExclusionIdsOf, driveConnectorConfig, completedDriveFamilyPlans, sourceCursorCanAdvance,
   remoteFamilyOutcomes, assertDriveLimitSafe, assertRemoteLimitSafe, validateBatchReceipt, postSourceReceipt,
-  validateForgetReceipt, assertNoPendingRemovals, credentialRefusalOf, drivePolicyFingerprint,
+  validateForgetReceipt, validateSourceForgetPreview, validateSourceForgetReceipt,
+  assertNoPendingRemovals, credentialRefusalOf, drivePolicyFingerprint,
   driveSyncDecision, listStoredSourceFamilies, credentialScannerFingerprint, postSourceExpectation,
+  postSourceRegistration,
   resolveAdminKey, recordAcceptedDocumentState, addLocalPathAliases, recordLocalSkippedDocumentState,
   ensureCredentialScannerProgress, recordCredentialScannerProgress, hasCredentialScannerProgress,
   commitCredentialScannerProgress, safeIngestDisplay, reportSkips,
@@ -364,8 +366,52 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
     const invalid = await throws(() => validateForgetReceipt(receipt));
     check(`${label} cannot masquerade as a confirmed deletion`, invalid !== null, invalid);
   }
+
+  const sourcePreview = {
+    dry_run: true, documents: 1, chunks: 3, vectors: 3, targets: ["drive:one"],
+    source: "drive", would_unregister_source: true,
+    source_unregistered: false, registry_event_recorded: false,
+  };
+  check("a source forget preview proves registry cleanup before destructive confirmation",
+    validateSourceForgetPreview(sourcePreview, "drive") === sourcePreview);
+  for (const [label, preview] of [
+    ["missing registry capability", { ...sourcePreview, would_unregister_source: undefined }],
+    ["already-mutated preview", { ...sourcePreview, source_unregistered: true }],
+    ["different source preview", { ...sourcePreview, source: "gmail" }],
+  ]) {
+    const invalid = await throws(() => validateSourceForgetPreview(preview, "drive"));
+    check(`${label} cannot authorize a whole-source forget`, invalid !== null, invalid);
+  }
+
+  const sourceReceipt = {
+    ...sourcePreview, dry_run: false, would_unregister_source: undefined,
+    source_unregistered: true, registry_event_recorded: true,
+    operation_id: "fixture-forget-operation",
+  };
+  check("a source forget receipt binds document deletion to registry finalization",
+    validateSourceForgetReceipt(sourceReceipt, "drive") === sourceReceipt);
+  for (const [label, receipt] of [
+    ["missing registry deletion", { ...sourceReceipt, source_unregistered: false }],
+    ["missing audit event", { ...sourceReceipt, registry_event_recorded: false }],
+    ["missing operation identity", { ...sourceReceipt, operation_id: "" }],
+    ["different source receipt", { ...sourceReceipt, source: "gmail" }],
+  ]) {
+    const invalid = await throws(() => validateSourceForgetReceipt(receipt, "drive"));
+    check(`${label} cannot complete a whole-source forget`, invalid !== null, invalid);
+  }
+
   const pendingRemoval = await throws(() => assertNoPendingRemovals({ pending: 2 }, "test removal"));
   check("an unconfirmed cleanup withholds the source cursor", /not advanced/.test(pendingRemoval || ""), pendingRemoval);
+}
+
+{
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("async function cmdForget(");
+  const end = source.indexOf("\n/**\n * brain ingest", start);
+  const boundary = source.slice(start, end);
+  check("brain forget performs no direct Cloudflare D1 mutation after the guarded Worker call",
+    start >= 0 && end > start && !/d1Query\s*\(/.test(boundary), boundary.slice(-500));
 }
 
 /* ---- full-sweep source inventory is authenticated, complete, and paged ---- */
@@ -526,6 +572,50 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   }), { status: 200 })));
   check("a lifecycle acknowledgement for another source or run is not believed",
     /not accepted/.test(wrongIdentity || ""), wrongIdentity);
+
+  let registrationRequest = null;
+  const registration = await postSourceRegistration("https://brain.example", "admin-only", {
+    source: "client-notes", kind: "upload",
+  }, async (url, options, policy) => {
+    registrationRequest = { url, options, policy, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({
+      source: "client-notes", kind: "upload", registered: true,
+      registry_event_recorded: true, operation_id: "register-op-1",
+    }), { status: 200 });
+  });
+  check("manual source registration uses the authenticated paused-write barrier",
+    registration.registered === true &&
+      registrationRequest?.url === "https://brain.example/api/admin/brain/source-register" &&
+      registrationRequest.options.headers["X-Admin-Key"] === "admin-only" &&
+      registrationRequest.policy.timeoutMs === 30_000 &&
+      JSON.stringify(registrationRequest.body) === JSON.stringify({ source: "client-notes", kind: "upload" }),
+    JSON.stringify(registrationRequest));
+  const wrongRegistration = await throws(() => postSourceRegistration("https://brain.example", "admin-only", {
+    source: "client-notes", kind: "upload",
+  }, async () => new Response(JSON.stringify({
+    source: "other", kind: "upload", registered: true,
+    registry_event_recorded: true, operation_id: "register-op-2",
+  }), { status: 200 })));
+  check("a source registration acknowledgement for another identity is not believed",
+    /not accepted/.test(wrongRegistration || ""), wrongRegistration);
+  const missingEventProof = await throws(() => postSourceRegistration(
+    "https://brain.example", "admin-only",
+    { source: "client-notes", kind: "upload" },
+    async () => new Response(JSON.stringify({
+      source: "client-notes", kind: "upload", registered: true,
+    }), { status: 200 }),
+  ));
+  check("a newly registered source needs exact audit-event proof",
+    /not accepted/.test(missingEventProof || ""), missingEventProof);
+  const pausedRegistration = await throws(() => postSourceRegistration("https://brain.example", "admin-only", {
+    source: "client-notes", kind: "upload",
+  }, async () => new Response(JSON.stringify({
+    error: "brain corpus writes are paused for a verified upgrade or rollback",
+    code: "corpus_writes_paused", paused: true,
+  }), { status: 503 })));
+  check("manual source registration surfaces a paused Worker refusal instead of bypassing it",
+    /not accepted \(503\).*paused for a verified upgrade/is.test(pausedRegistration || ""),
+    pausedRegistration);
 
   const expectation = await postSourceExpectation("https://brain.example", "admin-only", {
     source: "drive", kind: "drive", expected_refresh_seconds: 86_400,
@@ -752,8 +842,14 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
     const nxt = src.indexOf("\nasync function ", i + 20);
     return src.slice(i, nxt === -1 ? src.length : nxt);
   };
+  const bodyBetween = (startMarker, endMarker) => {
+    const start = src.indexOf(startMarker);
+    if (start === -1) return null;
+    const end = src.indexOf(endMarker, start + startMarker.length);
+    return src.slice(start, end === -1 ? src.length : end);
+  };
 
-  for (const name of ["cmdEval", "cmdDiagnose", "cmdDrain", "cmdReindex", "cmdHealth", "cmdIngest", "cmdIngestRemote"]) {
+  for (const name of ["cmdEval", "cmdDiagnose", "cmdDrain", "cmdReindex", "cmdHealth"]) {
     const b = bodyOf(name);
     check(`${name} exists`, b !== null);
     if (!b) continue;
@@ -762,6 +858,20 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
       "it resolves the account unconditionally");
     check(`${name} resolves the account only as a fallback`,
       /m\.brain\?\.domain \? null : await resolveAccount\(m\)/.test(b));
+  }
+  const local = bodyBetween("async function cmdIngestLocalRun(", "\nasync function parseForgetResponse");
+  const remote = bodyBetween("const cmdIngestRemoteRun = async (", "\nasync function sendBatches");
+  for (const [name, publicMarker, body] of [
+    ["cmdIngest", "async function cmdIngest(manifestPath)", local],
+    ["cmdIngestRemote", "export async function cmdIngestRemote(", remote],
+  ]) {
+    check(`${name} exists`, src.includes(publicMarker) && body !== null);
+    if (!body) continue;
+    check(`${name} does not demand a Cloudflare token when the manifest has a domain`,
+      !/^\s*const acct = await resolveIngestAccount\(m\);/m.test(body),
+      "it resolves the account unconditionally");
+    check(`${name} resolves the account only as a fallback`,
+      /m\.brain\?\.domain \? null : await resolveIngestAccount\(m\)/.test(body));
   }
   const evalCommand = bodyOf("cmdEval");
   const evalArgumentsStart = src.indexOf("export function evalChildArguments(");
@@ -780,8 +890,6 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   check("domain-based health never dereferences a deliberately absent Cloudflare account",
     /const sub = acct\s*\? await cf/.test(health || ""), String(health).slice(0, 900));
 
-  const remote = bodyOf("cmdIngestRemote");
-  const local = bodyOf("cmdIngest");
   check("an incomplete local walk aborts before any source-truth cleanup",
     /if \(!walkComplete\)[\s\S]*nothing was sent and no prior document was removed/.test(local || ""),
     String(local).slice(0, 1200));

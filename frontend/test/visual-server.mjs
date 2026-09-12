@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ownerThinkResponse } from "./rehearsal-responses.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(HERE, "..", "dist");
@@ -116,6 +117,67 @@ const systemStatus = {
   unavailable: [],
 };
 
+const rehearsalFinancialMap = {
+  population_state: "known_partial",
+  tax_year_horizon: { start: 2025, end: 2026 },
+  filing_units: [{ label: "Rivera household", assessment: "confirmed" }],
+  entities: [{
+    label: "Mesa Coffee", disposition: "included", evidence_state: "linked_current_record",
+    fields: {
+      kind: { assessment: "confirmed", owner_value: "business", current_value: "business", comparison: "matches_current" },
+      status: { assessment: "confirmed", owner_value: "active", current_value: "active", comparison: "matches_current" },
+      holds: { assessment: "confirmed", owner_value: "Coffee shop", current_value: "Coffee shop", comparison: "matches_current" },
+      ownership: { assessment: "confirmed", owner_value: 10000, current_value: 10000, comparison: "matches_current" },
+      tax_class: { assessment: "confirmed", owner_value: "S corporation", current_value: "LLC", comparison: "differs_from_current" },
+      relationship: { assessment: "confirmed", owner_value: "owned", current_value: "owned", comparison: "matches_current" },
+      parent: { assessment: "not_applicable", owner_value: null, current_value: null, comparison: "not_compared" },
+    },
+    tax_years: [2025, 2026].map((tax_year) => ({
+      tax_year, state: "included",
+      filing_units: { assessment: "confirmed", labels: ["Rivera household"] },
+      required_returns: { assessment: "confirmed", items: [{ label: "Form 1120-S", assessment: "confirmed" }] },
+      required_forms: { assessment: "unknown", items: [] },
+      k1_roles: { assessment: "not_applicable", items: [] },
+      books: { assessment: "confirmed", bookkeeping_company: { label: "Rivera Bookkeeping", assessment: "confirmed" } },
+      payroll: { assessment: "confirmed" },
+      expected_sources: { assessment: "confirmed", items: [{ label: "Operating checking 2281", kind: "banking", assessment: "confirmed" }] },
+    })),
+  }],
+  accounts: [{
+    label: "Operating checking 2281", disposition: "included", evidence_state: "linked_current_record",
+    fields: {
+      entity_assignment: { assessment: "confirmed", owner_value: "Mesa Coffee", current_value: "Mesa Coffee", comparison: "matches_current" },
+      kind: { assessment: "confirmed", owner_value: "checking", current_value: "checking", comparison: "matches_current" },
+      balance_role: { assessment: "confirmed", owner_value: "asset", current_value: "asset", comparison: "matches_current" },
+      currency: { assessment: "confirmed", owner_value: "USD", current_value: "USD", comparison: "matches_current" },
+      status: { assessment: "confirmed", owner_value: "active", current_value: "active", comparison: "matches_current" },
+    },
+  }],
+};
+
+function financialMapReview() {
+  return {
+    status: "ready", review_state: "pending", authoritative: false,
+    activation_performed: false, complete: true, truncated: false,
+    review_id: `ofmp_${"b".repeat(64)}`, map_hash: "a".repeat(64),
+    denominator_hash: "c".repeat(64), expected_sequence: 2,
+    created_at: Date.now() - 60_000, expires_at: Date.now() + 60 * 60_000,
+    counts: { entities: 1, accounts: 1, entity_years: 2, filing_units: 1, obligation_items: 6 },
+    complete_preview: rehearsalFinancialMap,
+    prior_comparison: {
+      state: "compared", changed: true, change_count: 1,
+      changes: [{ area: "Entities", subject: "Mesa Coffee", field: "tax class", before: "confirmed; owner: LLC", after: "confirmed; owner: S corporation" }],
+      previous_confirmed_map: rehearsalFinancialMap,
+    },
+    unresolved_count: 2,
+    unresolved_items: [2025, 2026].map((tax_year) => ({
+      kind: "required_forms", state: "unknown", label: "Mesa Coffee",
+      item_label: "State and local filing requirements", tax_year,
+    })),
+    requires: "explicit_owner_passkey_confirmation",
+  };
+}
+
 const ownerActivity = [
   { event_id: "event-access", event_type: "document_grant_created", entity_slug: "mesa-coffee", subject_kind: "document_grant", subject_id: "grant", display_label: "External reviewer document access", occurred_at: "2026-08-29T17:00:00Z" },
   { event_id: "event-target", event_type: "target_set", entity_slug: "mesa-coffee", subject_kind: "target", subject_id: "monthly-revenue", display_label: "Monthly revenue target", occurred_at: "2026-08-29T16:00:00Z" },
@@ -181,7 +243,7 @@ function snapshotFor(sections, entitySlug, scenario) {
       ? new Set(["obligations"])
       : new Set();
   const values = {
-    entities,
+    entities: scenario === "zero-entities" ? [] : entities,
     accounts: empty ? [] : filterRows(accounts, entitySlug),
     documents: empty ? [] : filterRows(documents, entitySlug),
     deadlines: empty ? [] : filterRows(deadlines, entitySlug),
@@ -242,6 +304,32 @@ const server = createServer(async (request, response) => {
       devices: [{ credential_id: "device", nickname: "Primary device", created_at: Date.now() - 86400000 * 20, last_used_at: Date.now() - 60000 }],
       connections: [{ client_id: "app", name: "Claude", can_write: false, connected_at: Date.now() - 86400000 * 4, last_used_at: Date.now() - 3600000 }],
     });
+  }
+  if (url.pathname === "/api/owner/financial-map/review") {
+    if (scenario === "degraded") {
+      return sendJson(response, { error: "unavailable", detail: "The synthetic Financial Map is unavailable in this rehearsal state." }, 503);
+    }
+    if (scenario === "financial-map") return sendJson(response, financialMapReview());
+    const active = scenario !== "empty";
+    return sendJson(response, {
+      status: "no_pending_review", review_state: "none", complete: true, truncated: false,
+      active_map_present: active, active_map_authoritative: active,
+      active_sequence: active ? 1 : null,
+      active_map_hash: active ? "d".repeat(64) : null,
+      active_denominator_hash: active ? "e".repeat(64) : null,
+      active_activated_at: active ? Date.now() - 86_400_000 : null,
+      owner_message: active
+        ? "No Financial Map is waiting for review. The latest confirmed map remains available for future completeness checks."
+        : "No Financial Map is waiting for review. Complete the guided interview and create a fresh preview.",
+    });
+  }
+  if (url.pathname === "/api/owner/financial-map/passkey/options") {
+    return sendJson(response, {
+      error: "rehearsal_stop", detail: "This local rehearsal stops before the real device passkey window. Nothing was confirmed or changed.",
+    }, 503);
+  }
+  if (url.pathname === "/api/owner/financial-map/activate") {
+    return sendJson(response, { error: "rehearsal_stop", detail: "Local rehearsal cannot activate a Financial Map." }, 503);
   }
   if (url.pathname === "/api/app/document-access/documents") {
     if (scenario === "grant-unavailable") return sendJson(response, { error: "unavailable", code: "document_access_unavailable" }, 503);
@@ -397,7 +485,7 @@ const server = createServer(async (request, response) => {
       ? { answer: null, answer_error: "search unavailable", status: "unavailable", degraded: "vector" }
       : scenario === "scope-mismatch"
         ? { answer: "This answer was not safely narrowed.", entity_scope: { entity_slug: null, applied: false }, filter_not_applied: true }
-        : { answer: "Mesa Coffee has one confirmed cash figure as of July 31. [1] The rental account is not included because no confirmed figure is recorded.", entity_scope: { entity_slug: body.entity_slug || null, applied: Boolean(body.entity_slug) }, degraded: body.entity_slug ? "vector" : undefined, degraded_reason: body.entity_slug ? "entity-vector-authority-unindexed" : undefined, confidence: { percent: 86, band: "high", basis: ["Strongest evidence is T1 primary: named like an authoritative record (statement)", "One known account is explicitly missing"] }, citations: [{ n: 1, title: "Mesa Coffee checking, July 2026", source: "drive", ts: "2026-07-31", authority: { tier: "T1", rank: 1, name: "primary", reason: "named like an authoritative record (statement)", eligible: true, authoritative: true } }] });
+        : ownerThinkResponse(scenario, body.entity_slug));
   }
 
   const requested = url.pathname === "/" || url.pathname === "/app" ? "index.html" : url.pathname.replace(/^\//, "");

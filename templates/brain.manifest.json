@@ -18,7 +18,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.6",
+    "version": "0.4.7",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },
@@ -264,11 +264,15 @@
     },
     "bank_feed": {
       "_comment": [
-        "Plaid is the reviewed bank-feed profile. Keep this off until the",
-        "client has a Plaid account, Sandbox credentials have been entered",
-        "through the hidden prompt, the independent bank wrapping key is in",
-        "reviewed owner recovery custody, and the exact return and webhook URLs are",
-        "registered in that Plaid environment. Credentials never go here.",
+        "Plaid is the reviewed bank-feed profile. Keep this off.",
+        "General customer bank invitations remain held. Application-credential setup remains held too.",
+        "Generic brain setup, brain secrets, and technician workflows do not accept or write",
+        "BANK_FEED_CLIENT_ID, BANK_FEED_SECRET, or BANK_FEED_WRAPPING_KEY_V2.",
+        "An approved candidate needs a separately reviewed owner-custody setup with",
+        "all three secret names already present on its Worker. Record only the exact",
+        "non-secret return and webhook URLs already saved in that Plaid environment.",
+        "A native command or these URI fields do not open the gate. Credentials never",
+        "go in this manifest.",
         "The account holder completes Link themselves. This brain requests only",
         "read-only Transactions and never sees bank login credentials. Scheduled",
         "reconciliation remains active because webhooks are not a sole source of truth.",
@@ -279,6 +283,7 @@
       "provider": "plaid",
       "environment": "sandbox",
       "registered_redirect_uris": [],
+      "registered_webhook_uris": [],
       "country_codes": [
         "US"
       ],
@@ -366,15 +371,14 @@
   },
   "testing": {
     "_comment": [
-      "Filled from section 6 of the intake questionnaire, in the CLIENT'S OWN",
-      "WORDS. Do not tidy them into better English: 'why did we stop using",
-      "those guys' retrieves differently than 'vendor termination rationale',",
-      "and theirs is the phrasing that has to work.",
+      "Optional private regression questions. Leave this list empty during setup",
+      "unless the owner chooses to save a real question. Zero prepared questions",
+      "are required for setup, adaptive acceptance, or handoff.",
       "",
-      "These do double duty. The acceptance suite uses them as retrieval probes,",
-      "so a passing install is one that answers THIS client's questions rather",
-      "than generic ones. And they are the kickoff script: the first thing the",
-      "client sees is their own ten questions answered with citations."
+      "When questions are saved, keep the owner's wording and use them as repeatable",
+      "retrieval checks. They supplement the required same-item evidence gate; they",
+      "do not replace proof that one real item was accepted, stored with provenance,",
+      "projected, and query-visible with a citation."
     ],
     "probe_questions": [],
     "things_only_they_know": [],

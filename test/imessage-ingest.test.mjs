@@ -107,6 +107,11 @@ try {
       JSON.stringify(sent.map((d) => d.source_id)));
     check("every document carries source_type imessage, so forget --source imessage scopes to it",
       sent.every((d) => d.source_type === "imessage"), JSON.stringify(sent.map((d) => d.source_type)));
+    check("every native iMessage/SMS session carries its final imessage family identity",
+      sent.every((d) => d.text_source === "native" && d.text_reliable === true &&
+        d.metadata.provenance_receipt.status === "complete" &&
+        JSON.stringify(d.metadata.provenance_receipt.root_ids) === JSON.stringify([`imessage:${d.source_id}`])),
+      JSON.stringify(sent.map((d) => d.metadata.provenance_receipt)));
     check("the SMS thread stays tagged platform sms inside the imessage source",
       sent.find((d) => d.source_id === "IG-B1").metadata.platform === "sms");
     check("the owner's display name speaks for outbound messages",
@@ -118,6 +123,15 @@ try {
     check("the ready receipt carries the document counts",
       fakes.receipts[1].docs_added === 2 && /2 conversation document\(s\) sent/.test(fakes.receipts[1].detail),
       JSON.stringify(fakes.receipts[1]));
+    check("a full local database walk is measured without claiming all-time iMessage history",
+      fakes.receipts[1].walk_complete === true && fakes.receipts[1].complete_sweep === false &&
+      fakes.receipts[1].files_seen === 3 && fakes.receipts[1].docs_refused === 0 &&
+      fakes.receipts[1].docs_failed === 0 &&
+      !("confirmed_range" in fakes.receipts[1]) &&
+      fakes.receipts[1].target_range?.from === "2026-03-02T17:00:00.000Z" &&
+      fakes.receipts[1].target_range?.through === "2026-03-02T18:00:00.000Z" &&
+      /cannot prove deleted, unavailable-device, or all-time provider history/.test(fakes.receipts[1].detail),
+      JSON.stringify(fakes.receipts[1]));
     check("capture state landed beside the manifest under the source's name",
       existsSync(join(sandbox, ".brain-ingest-imessage.json")));
   }
@@ -126,6 +140,10 @@ try {
     const again = await cmdIngestImessage(manifest, manifestPath, { "chat-db": dbPath }, fakes.options);
     check("a second pass is incremental: zero rows re-read, zero documents re-sent",
       again.rows_seen === 0 && fakes.batches.length === 0, JSON.stringify(again));
+    check("an incremental catch-up closes its walk but does not invent a new historical range",
+      fakes.receipts[1].walk_complete === true && fakes.receipts[1].complete_sweep === false &&
+      !("confirmed_range" in fakes.receipts[1]) && !("target_range" in fakes.receipts[1]),
+      JSON.stringify(fakes.receipts[1]));
   }
   {
     const fakes = makeBrainFakes();

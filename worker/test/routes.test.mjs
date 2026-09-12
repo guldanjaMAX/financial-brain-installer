@@ -21,6 +21,9 @@ function mkEnv(rows, {
   outboxRow = null,
   readinessRow = null,
   sourceRows = [],
+  sourceRegistrationEventThrows = false,
+  unchunkedRows = [],
+  ownedEntity = null,
   extra = {},
 } = {}) {
   const seen = { sql: [], binds: [], vectorQueries: [] };
@@ -32,8 +35,13 @@ function mkEnv(rows, {
         seen.sql.push(sql);
         let bound = [];
         return {
-          bind(...b) { bound = b; seen.binds.push(b); return this; },
+          _sql: sql,
+          _args: [],
+          bind(...b) { bound = b; this._args = b; seen.binds.push(b); return this; },
           all: async () => {
+            if (/unchunked-tax-document-candidates/.test(sql)) {
+              return { results: unchunkedRows };
+            }
             if (/SELECT s\.name, s\.kind, s\.zone, s\.status/.test(sql) && /FROM sources s/.test(sql)) {
               return { results: sourceRows };
             }
@@ -46,6 +54,15 @@ function mkEnv(rows, {
             return { results: rows };
           },
           first: async () => {
+            if (/ON CONFLICT\(name\) DO NOTHING[\s\S]*RETURNING name, lower\(trim\(kind\)\) AS kind/.test(sql)) {
+              const existing = sourceRows.find((row) => row.name === bound[0]);
+              return existing ? null : { name: bound[0], kind: bound[1] };
+            }
+            if (/SELECT lower\(trim\(kind\)\) AS kind FROM sources WHERE name=\?1/.test(sql)) {
+              const existing = sourceRows.find((row) => row.name === bound[0]);
+              return existing ? { kind: existing.kind } : null;
+            }
+            if (/FROM fin_entities/.test(sql)) return ownedEntity;
             if (/INSERT INTO sources[\s\S]*RETURNING lower\(trim\(kind\)\) AS kind/.test(sql)) {
               const existing = sourceRows.find((row) => row.name === bound[0]);
               const requested = bound[1] || bound[2];
@@ -79,7 +96,37 @@ function mkEnv(rows, {
           run: async () => ({}),
         };
       },
-      batch: async () => {},
+      batch: async (statements) => {
+        const registrationBatch = Array.isArray(statements) && statements.length === 3 &&
+          /INSERT INTO sources[\s\S]*ON CONFLICT\(name\) DO NOTHING/.test(statements[0]?._sql || "") &&
+          /source_events[\s\S]*'registered'[\s\S]*changes\(\)=1/.test(statements[1]?._sql || "");
+        if (!registrationBatch) return undefined;
+
+        // Model D1 batch atomicity: stage the source insertion, then either
+        // commit both writes or leave the original registry untouched when the
+        // event statement fails.
+        const [source, kind, createdAt] = statements[0]._args;
+        const prior = sourceRows.find((row) => row.name === source) || null;
+        const sourceChanges = prior ? 0 : 1;
+        const stagedRows = sourceRows.map((row) => ({ ...row }));
+        if (!prior) stagedRows.push({ name: source, kind, created_at: createdAt, zone: null });
+        if (sourceRegistrationEventThrows && sourceChanges === 1) {
+          throw new Error("synthetic registered-event write failure");
+        }
+        sourceRows.splice(0, sourceRows.length, ...stagedRows);
+        const eventChanges = sourceChanges;
+        return [
+          { meta: { changes: sourceChanges } },
+          { meta: { changes: eventChanges } },
+          {
+            meta: { changes: 0 },
+            results: [{
+              kind: String((prior || stagedRows.find((row) => row.name === source)).kind).trim().toLowerCase(),
+              registry_event_recorded: eventChanges,
+            }],
+          },
+        ];
+      },
     },
     VECTORIZE: {
       query: async (_embedding, options) => {
@@ -106,6 +153,7 @@ const ROW = {
   chunk_uid: "meeting:123#0", doc_uid: "meeting:123", text: "We agreed to defer the retainer.",
   source: "meeting", source_kind: "zoom", source_id: "123", uri: "meeting://123", title: "Q3 sync", document_date: 1750000000000, client: "Acme", category: "meeting",
   date_reliable: 1, date_source: "fixture:event_date", top_folder: "Clients", platform: "imessage",
+  text_source: "native", text_reliable: 1,
 };
 const call = (env, path) => {
   const url = new URL("https://b.example" + path);
@@ -205,7 +253,36 @@ const call = (env, path) => {
   check("think replaces raw answer-model errors before they reach clients",
     response.status === 200 && body.answer === null &&
       body.answer_error === ANSWER_ERROR_MESSAGES.unavailable &&
+      Array.isArray(body.citations) && body.citations.length === 0 &&
+      Array.isArray(body.results) && body.results.length === 1 &&
       !JSON.stringify(body).includes(rawProviderFailure),
+    JSON.stringify(body).slice(0, 300));
+}
+
+/* A successful provider envelope with no text is still a null answer. The
+   retrieved rows remain useful diagnostics, but none was cited or approved. */
+{
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async () => {
+      providerCalls++;
+      return new Response(JSON.stringify({
+        content: [], model: "claude-fixture", usage: { input_tokens: 1, output_tokens: 0 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: { ANTHROPIC_API_KEY: "fixture-key", ANSWER_MODEL: "claude-fixture" },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("an empty answer-model response keeps candidates but approves no citations",
+    providerCalls === 1 && body.answer === null && body.citations.length === 0 &&
+      body.results.length === 1 && body.results[0].chunk_uid === "meeting:123#0",
     JSON.stringify(body).slice(0, 300));
 }
 
@@ -840,6 +917,476 @@ const call = (env, path) => {
   check("the partial approval identifies the citation mismatch", /every citation/.test(body.evidence_gate?.reason || ""), JSON.stringify(body.evidence_gate));
 }
 
+/* D1 prepends `[title]\n\n` to chunk zero. A filename can be stale or wrong,
+   so the deterministic guard must inspect the native body after that exact
+   product-generated prefix instead of letting the filename overrule the
+   taxpayer printed in the return. */
+{
+  const title = "Example Orchard LLC 2023 tax return Form 1065";
+  const wrongSameFormReturn = {
+    ...ROW,
+    chunk_uid: "drive:misnamed-other-entity-return#0",
+    doc_uid: "drive:misnamed-other-entity-return",
+    source_id: "misnamed-other-entity-return",
+    source: "drive",
+    source_kind: "upload",
+    title,
+    client: "Example Orchard LLC",
+    authority_document_head: `[${title}]\n\nTaxpayer: Example Timber Partners. 2023 Form 1065 partnership return.`,
+    text: "Ordinary business income was a negative amount.",
+  };
+  const { env } = mkEnv([wrongSameFormReturn], {
+    vectorIds: [wrongSameFormReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the filename, form, and year match" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("a D1-injected matching filename cannot override a different taxpayer in the native body",
+    body.answer === "The documents do not answer the question." &&
+      body.citations.length === 0 &&
+      body.evidence_gate?.supported === false,
+    JSON.stringify(body));
+  check("the misnamed same-form return fails the deterministic entity boundary",
+    /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body.evidence_gate));
+}
+
+/* A nearest-neighbor tax hit can carry the right line label and tax year while
+   belonging to a different entity and a different filing. The expected return
+   is present but unreadable, which mirrors the dangerous case where retrieval
+   substitutes a nearby K-1 for an encrypted return. The verifier is
+   deliberately made overconfident here: the deterministic route guard must
+   still refuse the answer. */
+{
+  const wrongK1 = {
+    ...ROW,
+    chunk_uid: "drive:other-entity-k1#0",
+    doc_uid: "drive:other-entity-k1",
+    source_id: "other-entity-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    client: "Example Timber Partners",
+    authority_document_head: "Example Timber Partners. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income (loss) was a negative amount.",
+  };
+  const unreadableReturn = {
+    ...ROW,
+    chunk_uid: "drive:expected-return#0",
+    doc_uid: "drive:expected-return",
+    source_id: "expected-return",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Orchard LLC 2023 Form 1065",
+    client: "Example Orchard LLC",
+    authority_document_head: "Encrypted document. No native tax-return text was extracted.",
+    text: "Encrypted document. No readable tax-return text was extracted.",
+    text_source: "ocr_partial",
+    text_reliable: false,
+  };
+  const { env } = mkEnv([wrongK1, unreadableReturn], {
+    vectorIds: [wrongK1.chunk_uid, unreadableReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label and year match" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("the reproduction includes the expected but unreadable Form 1065",
+    body.results.some((row) => row.title === unreadableReturn.title && row.text_reliable === false),
+    JSON.stringify(body.results));
+  check("a different entity's K-1 cannot answer a named entity's Form 1065 question",
+    body.answer === null &&
+      body.status === "coverage_incomplete" &&
+      body.citations.length === 0 &&
+      body.evidence_gate?.supported === false,
+    JSON.stringify(body));
+  check("the tax refusal identifies the deterministic entity-year-form boundary",
+    /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body.evidence_gate));
+  check("the unreadable expected return blocks a categorical absence claim",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /could not be read reliably/.test(body.notice || "") &&
+      !/documents do not answer/i.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* The owner's ordinary wording used to drop the tax guard entirely because the
+   entity appears before "report on its" rather than immediately before the
+   year. Keep the exact customer phrasing and a zero-chunk expected return so a
+   nearby entity's K-1 can never become the answer. */
+{
+  const brightwoodK1 = {
+    ...ROW,
+    chunk_uid: "drive:brightwood-k1#0",
+    doc_uid: "drive:brightwood-k1",
+    source_id: "brightwood-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Brightwood Holdings 2023 Schedule K-1",
+    client: "Brightwood Holdings",
+    authority_document_head: "Brightwood Holdings. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a positive amount.",
+  };
+  const ocotilloZeroChunk = {
+    doc_uid: "drive:ocotillo-password-protected-1065",
+    source_id: "ocotillo-password-protected-1065",
+    source: "drive",
+    source_kind: "upload",
+    title: "Ocotillo Desert 2023 tax return Form 1065",
+    authority_meta: JSON.stringify({ taxpayer_name: "Ocotillo Desert", tax_year: 2023 }),
+    text_source: "native",
+    text_reliable: true,
+  };
+  const { env } = mkEnv([brightwoodK1], {
+    vectorIds: [brightwoodK1.chunk_uid],
+    unchunkedRows: [ocotilloZeroChunk],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line and year match" }, usage: {} }
+            : { response: "Ocotillo Desert reported a positive ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const ownerQuestion = "What ordinary business income did Ocotillo Desert report on its 2023 Form 1065?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(ownerQuestion)}`)).json();
+  check("the owner's exact tax wording activates the entity-year-form guard",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false,
+    JSON.stringify(body));
+  check("an unreadable Ocotillo 1065 blocks Brightwood's K-1 from answering",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify({ gaps: body.gaps, gate: body.evidence_gate }));
+
+  const payQuestion = "How much tax did Ocotillo Desert pay on its 2023 Form 1065?";
+  const payBody = await (await call(env, `/api/rag/think?q=${encodeURIComponent(payQuestion)}`)).json();
+  check("exact tax-paid wording keeps the same entity-year-form evidence guard",
+    payBody.answer === null && payBody.status === "coverage_incomplete" &&
+      payBody.citations.length === 0 && payBody.evidence_gate?.supported === false,
+    JSON.stringify(payBody));
+  check("tax-paid wording cannot use another entity's K-1 as its answer",
+    payBody.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /tax evidence does not match the requested entity, tax year, and form/.test(payBody.evidence_gate?.reason || ""),
+    JSON.stringify({ gaps: payBody.gaps, gate: payBody.evidence_gate }));
+}
+
+/* A return fact request with year and form but no exact entity is tax intent,
+   not permission to search nearby filings. Refuse before retrieval or either
+   answer model so parser uncertainty cannot become a cross-entity answer. */
+{
+  let aiCalls = 0;
+  const { env } = mkEnv([], {
+    extra: {
+      AI: {
+        run: async () => {
+          aiCalls++;
+          throw new Error("an unresolved tax scope must stop before any model call");
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income was reported on the 2023 Form 1065?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("a partial tax scope refuses before retrieval or answer generation",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.results.length === 0 && aiCalls === 0,
+    JSON.stringify({ body, aiCalls }));
+  check("a partial tax scope explains the exact missing boundary",
+    body.gaps.some((gap) => gap.type === "tax_question_scope_unresolved") &&
+      /exact entity, tax year, and form/i.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* Common owner wording must not silently become a corpus-wide income search.
+   Each question is still missing an exact tax boundary, so prove the route
+   returns before D1, Vectorize, embeddings, or either answer model can run. */
+{
+  let aiCalls = 0;
+  const otherEntityK1 = {
+    ...ROW,
+    chunk_uid: "drive:other-entity-k1#0",
+    doc_uid: "drive:other-entity-k1",
+    source_id: "other-entity-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Other Entity 2023 Schedule K-1",
+    client: "Other Entity",
+    authority_document_head: "Other Entity. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a positive amount.",
+  };
+  const { env, seen } = mkEnv([otherEntityK1], {
+    vectorIds: [otherEntityK1.chunk_uid],
+    extra: {
+      AI: {
+        run: async () => {
+          aiCalls++;
+          throw new Error("a partial tax scope must stop before any model call");
+        },
+      },
+    },
+  });
+  const partialTaxQuestions = [
+    "What ordinary business income did Ocotillo Desert report on its 2023 1065?",
+    "How much did Ocotillo Desert owe on Form 1065?",
+    "What ordinary business income did Example Orchard report?",
+    "What ordinary business income did Example Orchard report on its 2023 return?",
+  ];
+  for (const question of partialTaxQuestions) {
+    const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+    check(`partial tax wording refuses without cross-entity retrieval: ${question}`,
+      body.answer === null && body.status === "coverage_incomplete" &&
+        body.citations.length === 0 && body.results.length === 0 &&
+        body.gaps.some((gap) => gap.type === "tax_question_scope_unresolved"),
+      JSON.stringify(body));
+  }
+  check("partial tax wording stops before D1, Vectorize, and every model call",
+    seen.sql.length === 0 && seen.vectorQueries.length === 0 && aiCalls === 0,
+    JSON.stringify({ sqlCalls: seen.sql.length, vectorCalls: seen.vectorQueries.length, aiCalls }));
+}
+
+/* Even correctly scoped OCR is not a trustworthy tax-number source. This
+   isolates that branch from the cross-entity guard above, with both model
+   passes again made deliberately overconfident. */
+{
+  const unreadableExactReturn = {
+    ...ROW,
+    chunk_uid: "drive:unreliable-exact-return#0",
+    doc_uid: "drive:unreliable-exact-return",
+    source_id: "unreliable-exact-return",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Orchard LLC 2023 Form 1065",
+    client: "Example Orchard LLC",
+    authority_document_head: "Example Orchard LLC. 2023 Form 1065.",
+    text: "OCR produced an uncertain ordinary business income amount.",
+    text_source: "ocr_partial",
+    text_reliable: false,
+  };
+  const { env } = mkEnv([unreadableExactReturn], {
+    vectorIds: [unreadableExactReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the OCR line appears to match" }, usage: {} }
+            : { response: "Example Orchard LLC reported an ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("an overconfident verifier cannot approve tax figures from unreliable OCR",
+    body.answer === null &&
+      body.status === "coverage_incomplete" &&
+      body.evidence_gate?.supported === false &&
+      /not read from a reliable native text layer/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body));
+  check("unreliable exact tax evidence remains a gap rather than becoming absence",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /Unlock the file or provide a readable copy/.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* A password-protected file can leave a durable documents row but no chunks at
+   all. It therefore cannot be returned by keyword or vector search. The
+   document inventory probe must still find an exact title/metadata candidate,
+   without depending on modern entity_slug or content-hash conventions and
+   without turning that private candidate into a result or citation. */
+const zeroChunkTaxQuestion = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+const zeroChunkExpectedReturn = {
+  doc_uid: "drive:legacy-password-protected-return",
+  source_id: "legacy-password-protected-return",
+  source: "drive",
+  source_kind: "upload",
+  title: "Example Orchard LLC 2023 tax return Form 1065",
+  authority_meta: JSON.stringify({
+    taxpayer_name: "Example Orchard LLC",
+    tax_year: 2023,
+  }),
+  text_source: "native",
+  text_reliable: true,
+  // Deliberately no entity_slug, content_hash, chunk_uid, text, or snippet.
+};
+
+{
+  const borrowedK1 = {
+    ...ROW,
+    chunk_uid: "drive:borrowed-k1#0",
+    doc_uid: "drive:borrowed-k1",
+    source_id: "borrowed-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    authority_document_head: "Example Timber Partners. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a negative amount.",
+  };
+  const { env, seen } = mkEnv([borrowedK1], {
+    vectorIds: [borrowedK1.chunk_uid],
+    unchunkedRows: [zeroChunkExpectedReturn],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label matches" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a zero-chunk expected return blocks an overconfident borrowed K-1 answer",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("the zero-chunk probe is bounded and reads no chunk text",
+    seen.sql.some((sql) => /unchunked-tax-document-candidates/.test(sql) &&
+      /NOT EXISTS \(SELECT 1 FROM chunks c/.test(sql) && /LIMIT \?1/.test(sql)),
+    JSON.stringify(seen.sql));
+  check("the document-only candidate never becomes a public result, citation, or identity receipt",
+    !JSON.stringify(body).includes(zeroChunkExpectedReturn.doc_uid) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.source_id) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.title),
+    JSON.stringify(body));
+}
+
+{
+  const { env } = mkEnv([], { unchunkedRows: [zeroChunkExpectedReturn] });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a zero-chunk exact filing blocks a clean absence when search returns nothing",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.confidence === undefined && body.results.length === 0 &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /could not be read reliably/.test(body.notice || ""),
+    JSON.stringify(body));
+  check("the zero-result response does not disclose the candidate title or durable identity",
+    !JSON.stringify(body).includes(zeroChunkExpectedReturn.doc_uid) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.source_id) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.title),
+    JSON.stringify(body));
+}
+
+{
+  const { env, seen } = mkEnv([], {
+    unchunkedRows: [zeroChunkExpectedReturn],
+    ownedEntity: {
+      entity_slug: "example-orchard-llc",
+      legal_name: "Example Orchard LLC",
+      display_label: "Example Orchard LLC",
+      status: "active",
+      relationship: "owned",
+    },
+  });
+  const body = await (await call(
+    env,
+    `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}&entity_slug=example-orchard-llc`,
+  )).json();
+  const inventorySql = seen.sql.find((sql) => /unchunked-tax-document-candidates/.test(sql)) || "";
+  check("an exact business scope still finds a legacy expected return with no entity_slug",
+    body.answer === null && body.citations.length === 0 &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("the zero-chunk recovery probe does not depend on the modern entity projection",
+    inventorySql.length > 0 && !/d\.entity_slug\s*=/.test(inventorySql),
+    inventorySql);
+}
+
+{
+  const unrelatedUnchunked = Array.from({ length: 21 }, (_, index) => ({
+    ...zeroChunkExpectedReturn,
+    doc_uid: `drive:unrelated-zero-${index}`,
+    source_id: `unrelated-zero-${index}`,
+    title: `Unrelated encrypted archive ${index}`,
+    authority_meta: "{}",
+  }));
+  const { env } = mkEnv([], { unchunkedRows: unrelatedUnchunked });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a truncated zero-chunk inventory fails closed without inventing an exact match",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified") &&
+      !body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("truncation details remain aggregate and do not leak candidate identities",
+    !JSON.stringify(body).includes("unrelated-zero-") &&
+      !JSON.stringify(body).includes("Unrelated encrypted archive"),
+    JSON.stringify(body));
+}
+
+{
+  const legacyNeighbor = [{
+    ref_key: "legacy-other-entity-k1",
+    source: "drive",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    snippet: "Schedule K-1 (Form 1065). Ordinary business income was a negative amount.",
+    ts: null,
+    rrf_score: 1,
+  }];
+  const originalFetch = globalThis.fetch;
+  let body;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify(legacyNeighbor), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    const { env } = mkEnv([], {
+      extra: {
+        STORAGE: "supabase",
+        SUPABASE_URL: "https://supabase.example.invalid",
+        SUPABASE_SERVICE_ROLE_KEY: "synthetic-service-role",
+        AI: {
+          run: async (model, input) => {
+            if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+            return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+              ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label matches" }, usage: {} }
+              : { response: "Example Orchard LLC reported a negative amount [1].", usage: {} };
+          },
+        },
+      },
+    });
+    body = await (await call(
+      env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+    )).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("the legacy rollback adapter cannot bypass an exact tax scope by omitting authority metadata",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false &&
+      /tax evidence does not match/.test(body.evidence_gate?.reason || "") &&
+      body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified"),
+    JSON.stringify(body));
+}
+
 /* ---- every material part must be answered or explicitly called unknown ---- */
 {
   const { env } = mkEnv([ROW], {
@@ -988,6 +1535,9 @@ const call = (env, path) => {
       seen.sql.some((sql) => /substr\(family_doc_uid, 1, length\(\?1\) \+ 1\)/.test(sql)),
     JSON.stringify(seen.sql));
   check("the receipt updates freshness and leaves an audit event", seen.sql.some((sql) => /INSERT INTO sources/.test(sql)) && seen.sql.some((sql) => /INSERT INTO source_events/.test(sql)), JSON.stringify(seen.sql));
+  const legacySourceBind = seen.binds.find((values) => values[0] === "drive" && values.length === 5);
+  check("a legacy sweep without measured refused and failed counters cannot advance history completeness",
+    legacySourceBind?.[4] === 0, JSON.stringify(legacySourceBind));
 
   const bad = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
     method: "POST",
@@ -999,7 +1549,7 @@ const call = (env, path) => {
 
 /* ---- one source name cannot be relabelled as another connector kind ---- */
 {
-  const sourceRows = [{ name: "client-mail", kind: "gmail", zone: null }];
+  const sourceRows = [{ name: "client-mail", kind: " GMAIL ", zone: null }];
   const { env, seen } = mkEnv([], { sourceRows });
   const conflict = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
     method: "POST",
@@ -1025,7 +1575,7 @@ const call = (env, path) => {
   check("an omitted kind preserves the source's existing connector identity",
     preserved.status === 200 && preservedBody.kind === "gmail" &&
       !/kind\s*=\s*excluded\.kind/.test(expectationUpdate) &&
-      /WHERE sources\.kind=excluded\.kind/.test(expectationSql || ""),
+      /WHERE lower\(trim\(sources\.kind\)\)=excluded\.kind/.test(expectationSql || ""),
     JSON.stringify({ status: preserved.status, body: preservedBody, sql: expectationSql }));
 }
 
@@ -1106,6 +1656,96 @@ const call = (env, path) => {
   check("an unknown connector lifecycle status is refused", invalid.status === 400, String(invalid.status));
 }
 
+/* ---- Gmail failure evidence is closed, metadata-only, and context-bound ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const safeEvidence = {
+    version: 1,
+    operation_class: "gmail_message_read",
+    http_status: 400,
+    provider_reason: "failed_precondition",
+    checkpoint_readback: "verified",
+    checkpoint_done: 55,
+    checkpoint_skipped: 3,
+    cursor_preservation: "absent_preserved",
+  };
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "gmail", kind: "gmail", status: "error", run_id: "run_gmail_failure_evidence",
+      lane: "sweep", issue_code: "INGEST_FAILED", failure_evidence: safeEvidence,
+      docs_refused: 0, docs_failed: 1,
+      error: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL /private/message-id",
+      detail: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL provider response",
+      provider_message: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL token",
+      refusal_reason: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL refusal path",
+      delete_action: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL",
+    }),
+  }), env, {});
+  const body = await response.json();
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_gmail_failure_evidence" && values.length === 22);
+  let stored = null;
+  try { stored = JSON.parse(runBind?.[21] || "null"); } catch { /* assertion below owns failure */ }
+  check("a Gmail error stores only server-reconstructed closed failure evidence",
+    response.status === 200 && JSON.stringify(body.failure_evidence) === JSON.stringify(safeEvidence) &&
+      JSON.stringify(stored) === JSON.stringify(safeEvidence),
+    JSON.stringify({ status: response.status, body, runBind }));
+  check("raw error, detail, provider message, ids, paths, and tokens never enter durable Gmail failure metadata",
+    !JSON.stringify(seen.binds).includes("SYNTHETIC_PRIVATE_FAILURE_SENTINEL") &&
+      !JSON.stringify(body).includes("SYNTHETIC_PRIVATE_FAILURE_SENTINEL"),
+    JSON.stringify({ body, binds: seen.binds }));
+}
+
+{
+  const valid = {
+    version: 1,
+    operation_class: "gmail_message_read",
+    http_status: 400,
+    provider_reason: "failed_precondition",
+    checkpoint_readback: "verified",
+    checkpoint_done: 12,
+    checkpoint_skipped: 3,
+    cursor_preservation: "present_preserved",
+  };
+  const cases = [
+    ["an extra evidence key", { ...valid, provider_message: "private" }, "error", "gmail"],
+    ["a string HTTP status", { ...valid, http_status: "400" }, "error", "gmail"],
+    ["a raw provider reason", { ...valid, provider_reason: "Precondition check failed." }, "error", "gmail"],
+    ["an unknown operation", { ...valid, operation_class: "gmail_message_private-id" }, "error", "gmail"],
+    ["claimed counts without readback", {
+      ...valid, checkpoint_readback: "unverified", cursor_preservation: "unverified",
+    }, "error", "gmail"],
+    ["failure evidence on a ready receipt", valid, "ready", "gmail"],
+    ["failure evidence on a non-Gmail receipt", valid, "error", "drive"],
+    ["failure evidence without a durable run id", valid, "error", "gmail", true],
+    ["a measured document-operation failure with zero failed documents", valid, "error", "gmail", false,
+      { docs_refused: 0, docs_failed: 0 }],
+  ];
+  const failures = [];
+  for (const [index, [description, evidence, status, kind, omitRunId, counters]] of cases.entries()) {
+    const { env, seen } = mkEnv([]);
+    const runId = `run_invalid_failure_evidence_${index}`;
+    const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify({
+        source: `failure-evidence-${index}`, kind, status,
+        ...(omitRunId ? {} : { run_id: runId }),
+        ...(counters || {}),
+        failure_evidence: evidence,
+      }),
+    }), env, {});
+    if (response.status !== 400 || seen.sql.length !== 0 ||
+        seen.binds.some((values) => values[0] === runId && values.length === 22)) {
+      failures.push({ description, status: response.status, binds: seen.binds });
+    }
+  }
+  check("the Gmail failure-evidence boundary rejects extra fields, raw strings, coercion, and invalid contexts",
+    failures.length === 0, JSON.stringify(failures));
+}
+
 /* ---- a failed sweep can never be recorded as a completed walk ---- */
 {
   const { env, seen } = mkEnv([]);
@@ -1117,14 +1757,235 @@ const call = (env, path) => {
       lane: "sweep", complete_sweep: true, walk_complete: false, error: "walk aborted",
     }),
   }), env, {});
-  const runBind = seen.binds.find((values) => values[0] === "run_failed_sweep" && values.length === 14);
+  const runBind = seen.binds.find((values) => values[0] === "run_failed_sweep" && values.length === 22);
   check("an error receipt cannot turn complete_sweep into walk_complete",
-    response.status === 200 && runBind?.[5] === 0, JSON.stringify(runBind));
+    response.status === 200 && runBind?.[5] === 0 && runBind?.[12] === 0, JSON.stringify(runBind));
+}
+
+/* ---- an inconsistent ready receipt cannot advance durable history proof ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "calendar-inconsistent", kind: "calendar", status: "ready",
+      run_id: "run_inconsistent_sweep", lane: "sweep",
+      complete_sweep: true, walk_complete: false,
+    }),
+  }), env, {});
+  const sourceBind = seen.binds.find((values) =>
+    values[0] === "calendar-inconsistent" && values.length === 5);
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_inconsistent_sweep" && values.length === 22);
+  check("complete_sweep is fail-closed when the same ready receipt did not complete its walk",
+    response.status === 200 && sourceBind?.[4] === 0 && runBind?.[5] === 0 && runBind?.[12] === 0,
+    JSON.stringify({ sourceBind, runBind }));
+}
+
+/* ---- only explicit valid outcome counters become measured telemetry ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "measured-calendar", kind: "calendar", status: "ready",
+      run_id: "run_measured_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 0, docs_failed: 1,
+    }),
+  }), env, {});
+  const sourceBind = seen.binds.find((values) =>
+    values[0] === "measured-calendar" && values.length === 5);
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_measured_sweep" && values.length === 22);
+  check("measured document failures prevent an otherwise complete receipt from advancing history",
+    response.status === 200 && sourceBind?.[4] === 0 && runBind?.[11] === 1 && runBind?.[12] === 1,
+    JSON.stringify({ sourceBind, runBind }));
+
+  const refused = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "refused-calendar", kind: "calendar", status: "ready",
+      run_id: "run_refused_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 1, docs_failed: 0,
+    }),
+  }), env, {});
+  const refusedSourceBind = seen.binds.find((values) =>
+    values[0] === "refused-calendar" && values.length === 5);
+  const refusedRunBind = seen.binds.find((values) =>
+    values[0] === "run_refused_sweep" && values.length === 22);
+  check("measured document refusals prevent an otherwise complete receipt from advancing history",
+    refused.status === 200 && refusedSourceBind?.[4] === 0 &&
+      refusedRunBind?.[10] === 1 && refusedRunBind?.[11] === 0 && refusedRunBind?.[12] === 1,
+    JSON.stringify({ refusedSourceBind, refusedRunBind }));
+
+  const adjudicated = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "adjudicated-drive", kind: "drive", status: "ready",
+      run_id: "run_adjudicated_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 0, docs_failed: 0,
+      detail: "policy_skipped=2; coverage_gaps=0; adjudicated_skips=3",
+    }),
+  }), env, {});
+  const adjudicatedSourceBind = seen.binds.find((values) =>
+    values[0] === "adjudicated-drive" && values.length === 5);
+  const adjudicatedRunBind = seen.binds.find((values) =>
+    values[0] === "run_adjudicated_sweep" && values.length === 22);
+  check("measured policy and adjudicated skips do not block a zero-refusal completed walk",
+    adjudicated.status === 200 && adjudicatedSourceBind?.[4] === 1 &&
+      adjudicatedRunBind?.[5] === 1 && adjudicatedRunBind?.[10] === 0 &&
+      adjudicatedRunBind?.[11] === 0 && adjudicatedRunBind?.[12] === 1,
+    JSON.stringify({ adjudicatedSourceBind, adjudicatedRunBind }));
+
+  const invalid = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "invalid-count", kind: "calendar", status: "ready",
+      run_id: "run_invalid_count", docs_failed: -1,
+    }),
+  }), env, {});
+  check("invalid receipt counters are refused instead of being coerced to clean zeroes",
+    invalid.status === 400 &&
+      !seen.binds.some((values) => values[0] === "run_invalid_count"), String(invalid.status));
+}
+
+/* ---- provenance ranges accept only the connector's explicit wire formats ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "range-contract", kind: "calendar", status: "ready",
+      run_id: "run_range_contract", lane: "sweep",
+      docs_refused: 0, docs_failed: 0,
+      confirmed_range: { from: "2026-03-04", through: "2026-03-05T12:34:56.789Z" },
+      target_range: { from: null, through: "2026-03-06" },
+    }),
+  }), env, {});
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_range_contract" && values.length === 22);
+  check("receipt ranges normalize an exact calendar date and preserve a canonical UTC timestamp",
+    response.status === 200 &&
+      runBind?.[16] === "2026-03-04T00:00:00.000Z" &&
+      runBind?.[17] === "2026-03-05T12:34:56.789Z" &&
+      runBind?.[18] === null && runBind?.[19] === "2026-03-06T00:00:00.000Z",
+    JSON.stringify({ status: response.status, runBind }));
+}
+
+{
+  const invalidRanges = [
+    ["an unknown range key", { from: "2026-03-04", timezone: "UTC" }],
+    ["an ambiguous locale date", { from: "03/04/2026" }],
+    ["a prose date", { from: "March 4, 2026" }],
+    ["an offset timestamp", { from: "2026-03-04T00:00:00-07:00" }],
+    ["a non-canonical UTC timestamp", { from: "2026-03-04T00:00:00Z" }],
+    ["an impossible calendar date", { from: "2026-02-30" }],
+    ["an empty date", { from: "" }],
+    ["a numeric timestamp", { from: 1772582400000 }],
+  ];
+  const failures = [];
+  for (const [index, [description, confirmedRange]] of invalidRanges.entries()) {
+    const { env, seen } = mkEnv([]);
+    const runId = `run_invalid_range_${index}`;
+    const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify({
+        source: "invalid-range", kind: "calendar", status: "ready",
+        run_id: runId, confirmed_range: confirmedRange,
+      }),
+    }), env, {});
+    if (response.status !== 400 || seen.binds.some((values) => values[0] === runId && values.length === 22)) {
+      failures.push({ description, status: response.status, binds: seen.binds });
+    }
+  }
+  check("receipt ranges reject extra fields and ambiguous or non-canonical date values before run evidence is written",
+    failures.length === 0, JSON.stringify(failures));
+}
+
+/* ---- manual source registration stays behind the Worker write barrier ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-notes", kind: "upload" }),
+  }), env, {});
+  const body = await response.json();
+  check("manual source registration goes through the authenticated Worker write barrier",
+    response.status === 200 && body.source === "client-notes" && body.kind === "upload" &&
+      body.registered === true && body.registry_event_recorded === true &&
+      typeof body.operation_id === "string" && body.operation_id.length > 0 &&
+      seen.sql.some((sql) => /source_events[\s\S]*'registered'[\s\S]*changes\(\)=1/.test(sql)),
+    JSON.stringify({ body, sql: seen.sql }));
+}
+{
+  const sourceRows = [];
+  const { env } = mkEnv([], { sourceRows, sourceRegistrationEventThrows: true });
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-notes", kind: "upload" }),
+  }), env, {});
+  check("a registration event failure leaves no committed source row",
+    response.status === 500 && sourceRows.length === 0,
+    JSON.stringify({ status: response.status, sourceRows }));
+}
+{
+  const { env } = mkEnv([], { sourceRows: [{ name: "client-mail", kind: "gmail", zone: null }] });
+  const same = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-mail", kind: "gmail" }),
+  }), env, {});
+  const sameBody = await same.json();
+  check("re-registering the same source identity is an exact no-op receipt",
+    same.status === 200 && sameBody.registered === false && sameBody.kind === "gmail",
+    JSON.stringify(sameBody));
+
+  const conflict = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-mail", kind: "upload" }),
+  }), env, {});
+  const conflictBody = await conflict.json();
+  check("manual registration cannot relabel an existing source connector kind",
+    conflict.status === 409 && conflictBody.code === "source_kind_conflict", JSON.stringify(conflictBody));
+}
+{
+  const invalidBodies = [
+    { source: "Drive %", kind: "drive" },
+    { source: "drive", kind: "unsupported" },
+    { source: "drive", kind: "drive", extra: true },
+  ];
+  const statuses = [];
+  for (const body of invalidBodies) {
+    const { env } = mkEnv([]);
+    statuses.push((await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }), env, {})).status);
+  }
+  const wrongBackend = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "drive", kind: "drive" }),
+  }), { ...mkEnv([]).env, STORAGE: "supabase" }, {});
+  check("invalid or non-D1 source registrations fail closed",
+    statuses.every((status) => status === 400) && wrongBackend.status === 400,
+    JSON.stringify({ statuses, wrongBackend: wrongBackend.status }));
 }
 
 /* ---- source schedules configure freshness without pretending an ingest ran ---- */
 {
-  const { env, seen } = mkEnv([]);
+  const { env, seen } = mkEnv([], { sourceRows: [{ name: "drive", kind: "drive", zone: null }] });
   const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
     method: "POST",
     headers: { "X-Admin-Key": "k", "content-type": "application/json" },
@@ -1144,6 +2005,19 @@ const call = (env, path) => {
     seen.sql.some((sql) => /source_events[\s\S]*'schedule'/.test(sql)) &&
       seen.binds.some((binds) => binds.includes("expected_refresh_seconds=86400")),
     JSON.stringify({ sql: seen.sql, binds: seen.binds }));
+}
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "typo-source", expected_refresh_seconds: 86_400 }),
+  }), env, {});
+  const body = await response.json();
+  check("an omitted-kind freshness update cannot create a guessed source identity",
+    response.status === 404 && body.code === "source_not_registered" &&
+      !seen.sql.some((sql) => /INSERT INTO sources|INSERT INTO source_events/.test(sql)),
+    JSON.stringify({ body, sql: seen.sql }));
 }
 {
   const { env, seen } = mkEnv([]);
@@ -1401,7 +2275,11 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   }]);
   const documentsResponse = await call(env, "/api/admin/brain/documents");
   const b = await documentsResponse.json();
+  check("documents binds the Worker version to the authenticated readiness receipt",
+    b.version === WORKER_VERSION, JSON.stringify(b));
   check("documents names the backend", b.backend === "d1", JSON.stringify(b));
+  check("documents binds active writer mode to the same receipt as readiness",
+    b.vector_drain_mode === "active", JSON.stringify(b));
   check("documents separates source files from stored split parts",
     b.rows[0]?.documents === 2 && b.rows[0]?.logical_documents === 2 && b.rows[0]?.stored_documents === 3, JSON.stringify(b.rows[0]));
   check("and reports vector backlog", b.vector_backlog && "pending" in b.vector_backlog, JSON.stringify(b.vector_backlog));
@@ -1412,6 +2290,14 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   check("private aggregate inventory responses cannot be cached",
     /no-store/.test(documentsResponse.headers.get("cache-control") || ""),
     documentsResponse.headers.get("cache-control") || "missing");
+
+  const pausedDocuments = await call({ ...env, VECTOR_DRAIN_MODE: "paused-for-upgrade" }, "/api/admin/brain/documents");
+  const pausedBody = await pausedDocuments.json();
+  check("paused documents bind the refusal mode to their own readiness receipt",
+    pausedDocuments.status === 200 && pausedBody.version === WORKER_VERSION &&
+      pausedBody.vector_drain_mode === "paused-for-upgrade" &&
+      pausedBody.vector_readiness && typeof pausedBody.vector_readiness.ready === "boolean",
+    JSON.stringify(pausedBody));
 
   const failedDocuments = await call({
     STORAGE: "d1", ADMIN_KEY: "k",
@@ -1479,7 +2365,10 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         doc_uid: b[0], source: b[1], source_id: b[2], title: b[3],
         uri: b[4], document_date: b[5], date_source: b[6], date_reliable: b[7],
         client: b[8], category: b[9], top_folder: b[10], platform: b[11],
-        content_hash: b[13], meta: b[14],
+        ingested_at: b[12], content_hash: b[13], meta: b[14],
+        text_source: b[21], text_reliable: b[22], entity_slug: b[23],
+        provenance_receipt_version: b[25], provenance_receipt_status: b[26],
+        provenance_receipt_reason: b[27], provenance_receipt_digest: b[28],
       });
       written.push(String(b[2]));
       changes = 1;
@@ -1625,6 +2514,49 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
     collision.documents.size === 1 && storedCollisionUid?.source === "a" && storedCollisionUid?.source_id === "b:c" &&
       collision.storedTexts.length === 1 && /Second synthetic body/.test(collision.storedTexts[0]),
     JSON.stringify(storedCollisionUid));
+}
+
+/* Lineage is an ingest contract, not an advisory filename convention. A
+   malformed or rootless derived declaration must fail before it can create a
+   false independent source family. */
+{
+  const single = mkBatchEnv();
+  const response = await post(single.env, "/api/admin/brain/ingest", {
+    ...doc("rootless-derived"),
+    metadata: {
+      evidence_lineage: { version: 1, kind: "derived_record", root_ids: [] },
+    },
+  });
+  const receipt = await response.json();
+  check("single ingest rejects a derived record without source-family roots",
+    response.status === 400 && /root_ids/.test(receipt.error || ""), JSON.stringify(receipt));
+  check("invalid single-ingest lineage performs zero D1 calls or writes",
+    single.calls.remote === 0 && single.calls.submitted_statements === 0 &&
+      single.written.length === 0 && single.storedTexts.length === 0 && single.documents.size === 0,
+    JSON.stringify(single.calls));
+
+  const invalid = mkBatchEnv();
+  const invalidDocs = [
+    { ...doc("unknown-lineage-kind"), metadata: {
+      evidence_lineage: { version: 1, kind: "generated", root_ids: ["upload:source"] },
+    } },
+    { ...doc("unversioned-lineage"), metadata: {
+      evidence_lineage: { kind: "source_record", root_ids: [] },
+    } },
+    { ...doc("lineage-extra-field"), metadata: {
+      evidence_lineage: { version: 1, kind: "source_record", root_ids: [], trusted: true },
+    } },
+  ];
+  const batchReceipt = await (await post(invalid.env, "/api/admin/brain/ingest/batch", {
+    docs: invalidDocs,
+  })).json();
+  check("batch ingest rejects malformed lineage per document",
+    batchReceipt.failed === invalidDocs.length &&
+      batchReceipt.results.every((row) => row.status === "failed"), JSON.stringify(batchReceipt));
+  check("an all-invalid lineage batch performs zero D1 calls or writes",
+    invalid.calls.remote === 0 && invalid.calls.submitted_statements === 0 &&
+      invalid.written.length === 0 && invalid.storedTexts.length === 0 && invalid.documents.size === 0,
+    JSON.stringify(invalid.calls));
 }
 
 /* Date trust is optional, but every supplied claim must be type-safe. A true
@@ -1816,19 +2748,15 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
   }
   const rawReceipt = await response.text();
   const rpcBody = rpcCalls[0]?.body || "";
-  const parsedRpc = JSON.parse(rpcBody || "{}");
-  check("legacy Supabase source_subtype is sanitized before its RPC storage boundary",
-    response.status === 200 &&
-      parsedRpc.p_source_subtype.includes("billing thread") &&
-      parsedRpc.p_source_subtype.includes("[REDACTED:sensitive_payment_url]"));
-  check("legacy Supabase RPC input, receipt, and logs never contain the capability token",
-    rpcCalls.length === 1 &&
+  const parsedReceipt = JSON.parse(rawReceipt || "{}");
+  check("legacy Supabase corpus ingest is explicitly refused because provenance parity is unavailable",
+    response.status === 409 && parsedReceipt.code === "provenance_storage_unsupported");
+  check("the Supabase provenance refusal occurs before any RPC and never leaks the capability token",
+    rpcCalls.length === 0 &&
       !rpcBody.includes(paymentToken) && !rpcBody.includes("invoice.stripe.com") &&
       !rawReceipt.includes(paymentToken) && !observedLogs.join("\n").includes(paymentToken));
-  check("legacy Supabase metadata keys and values are sanitized without dropping useful prose",
-    rpcBody.includes("private lookup [REDACTED:sensitive_payment_url]") &&
-      rpcBody.includes("Follow-up context [REDACTED:sensitive_payment_url]") &&
-      parsedRpc.p_content === "Useful billing context remains searchable.");
+  check("the alternate-store refusal claims no write",
+    /nothing was written/.test(parsedReceipt.error || "") && rpcBody === "");
 }
 
 {
@@ -1981,6 +2909,32 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
     JSON.stringify(body));
 }
 
+/* Bound receipts add identity-key, ledger, and exact-readback work. A request
+   that could cross the invocation query cap after a failed preflight must be
+   refused before its first D1 statement. */
+{
+  const { env, written, calls } = mkBatchEnv();
+  const docs = Array.from({ length: 50 }, (_, index) => ({
+    ...doc(`bound-budget-${index}`, "x".repeat(index < 25 ? 4_000 : 5_200)),
+    source_type: `bound${index}`,
+    source_original_receipt: {
+      version: 1,
+      locator_kind: "source_relative_path",
+      original_content_sha256: String(index).padStart(64, "0"),
+      original_byte_count: 1,
+    },
+  }));
+  const response = await post(env, "/api/admin/brain/ingest/batch", { docs });
+  const body = await response.json();
+  check("a worst-case bound batch is refused at the exact conservative estimate",
+    response.status === 413 && body.estimated_statements === 1_051,
+    JSON.stringify(body));
+  check("the bound query-budget refusal occurs before identity or corpus SQL",
+    calls.remote === 0 && calls.submitted_statements === 0 && written.length === 0,
+    JSON.stringify(calls));
+}
+
+
 /* A document missing required fields is reported, not silently skipped. */
 {
   const { env } = mkBatchEnv();
@@ -2130,9 +3084,15 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
 
 /* ================= forget ================= */
 
-function mkForgetEnv({ vectorThrows = false } = {}) {
+function mkForgetEnv({
+  vectorThrows = false,
+  registered = true,
+  registryProof = true,
+  documentIds = ["meeting:1", "meeting:2"],
+} = {}) {
   const sql = [];
   const deleted = [];
+  const state = { registered, eventRecorded: false };
   const env = {
     STORAGE: "d1", ADMIN_KEY: "k",
     VECTORIZE: {
@@ -2144,46 +3104,105 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
       prepare(q) {
         return {
           bind: (...b) => ({
+            _sql: q,
+            _args: b,
             all: async () => ({
               results: /FROM documents WHERE source/.test(q)
-                ? [{ doc_uid: "meeting:1" }, { doc_uid: "meeting:2" }]
+                ? documentIds.map((doc_uid) => ({ doc_uid }))
                 : /FROM chunks WHERE doc_uid/.test(q)
-                  ? [{ chunk_uid: "meeting:1#0" }, { chunk_uid: "meeting:1#1" }, { chunk_uid: "meeting:2#0" }]
+                  ? b.flatMap((docUid) => docUid === "meeting:1"
+                    ? [{ chunk_uid: "meeting:1#0" }, { chunk_uid: "meeting:1#1" }]
+                    : [{ chunk_uid: `${docUid}#0` }])
                   : /FROM vector_outbox/.test(q)
                     ? b.map((chunkUid, index) => ({
                       chunk_uid: chunkUid, vector_id: chunkUid, generation: index + 1,
                     }))
                   : [],
             }),
-            first: async () => null,
+            first: async () => /SELECT name FROM sources WHERE name=\?1/.test(q) && state.registered
+              ? { name: b[0] }
+              : null,
             run: async () => { sql.push(q); return {}; },
           }),
         };
       },
-      batch: async (stmts) => { sql.push("BATCH:" + stmts.length); },
+      batch: async (stmts) => {
+        sql.push("BATCH:" + stmts.length, ...stmts.map((statement) => statement?._sql || ""));
+        const registryFinalization = stmts.some((statement) =>
+          /source_events[\s\S]*'forget'/.test(statement?._sql || ""));
+        if (!registryFinalization) return stmts.map(() => ({ meta: { changes: 1 } }));
+        const changes = state.registered && registryProof ? 1 : 0;
+        if (changes === 1) {
+          state.eventRecorded = true;
+          state.registered = false;
+        }
+        return stmts.map(() => ({ meta: { changes } }));
+      },
     },
   };
-  return { env, sql, deleted };
+  return { env, sql, deleted, state };
 }
 
 {
   const { env, deleted, sql } = mkForgetEnv();
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
   // Irreversible, so it must be asked for explicitly rather than by default.
-  check("forget DRY RUNS unless confirmed", b.dry_run === true, JSON.stringify(b));
+  check("forget DRY RUNS unless confirmed",
+    b.dry_run === true && b.source === "meeting" &&
+      b.would_unregister_source === true && b.source_unregistered === false,
+    JSON.stringify(b));
   check("and reports what it would remove", b.documents === 2 && b.chunks === 3, JSON.stringify(b));
   check("without deleting any vectors", deleted.length === 0);
   check("or touching the database", !sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
 }
 {
-  const { env, deleted, sql } = mkForgetEnv();
+  const { env, deleted, sql, state } = mkForgetEnv();
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true })).json();
-  check("confirm actually deletes", b.dry_run === false && b.documents === 2, JSON.stringify(b));
+  check("confirm actually deletes",
+    b.dry_run === false && b.documents === 2 && b.source === "meeting" &&
+      b.source_unregistered === true && b.registry_event_recorded === true &&
+      typeof b.operation_id === "string" && b.operation_id.length > 0,
+    JSON.stringify(b));
   check("physical vector cleanup is queued for the one leased writer",
     deleted.length === 0 && b.vectors === 0 && b.vector_cleanup_queued === 3,
     JSON.stringify({ body: b, deleted }));
   check("and D1 rows go first, so a crash leaves it unreachable rather than half-visible",
     sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
+  check("whole-source forget records its audit event and unregisters inside the guarded Worker",
+    state.registered === false && state.eventRecorded === true &&
+      sql.some((q) => /source_events[\s\S]*'forget'[\s\S]*NOT EXISTS[\s\S]*FROM documents WHERE source=\?1/.test(q)) &&
+      sql.some((q) => /DELETE FROM sources[\s\S]*NOT EXISTS[\s\S]*FROM documents WHERE source=\?1/.test(q)),
+    JSON.stringify(sql));
+}
+{
+  const { env, state } = mkForgetEnv({ documentIds: [] });
+  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const body = await response.json();
+  check("an empty registered source is still unregistered by the guarded source forget",
+    response.status === 200 && body.documents === 0 && body.source_unregistered === true &&
+      state.registered === false,
+    JSON.stringify(body));
+}
+{
+  const { env, sql } = mkForgetEnv({ registered: false });
+  const response = await post(env, "/api/admin/brain/forget", { source: "typo", confirm: true });
+  const body = await response.json();
+  check("a source typo is refused before any forget mutation",
+    response.status === 404 && body.code === "source_not_registered" &&
+      !sql.some((q) => /BATCH/.test(q)),
+    JSON.stringify({ body, sql }));
+}
+{
+  // Models an ingest that committed after forget enumerated its targets but
+  // before the final registry transaction. Both guarded statements affect zero
+  // rows, so the live source remains addressable and no audit event is forged.
+  const { env, state } = mkForgetEnv({ registryProof: false });
+  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const body = await response.json();
+  check("a concurrent ingest keeps the source registered and prevents a false forget receipt",
+    response.status === 500 && state.registered === true && state.eventRecorded === false &&
+      !body.source_unregistered && !body.registry_event_recorded,
+    JSON.stringify(body));
 }
 {
   const { env } = mkForgetEnv();
@@ -2281,6 +3300,8 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
     ["/api/admin/brain/ingest/batch", { documents: [] }],
     ["/api/admin/brain/source-receipt", { source: "drive", status: "ready" }],
     ["/api/admin/brain/source-expectation", { source: "drive", expected_interval_hours: 24 }],
+    ["/api/admin/brain/source-register", { source: "drive", kind: "drive" }],
+    ["/api/admin/brain/zones", { source: "drive", zone: "private" }],
     ["/api/admin/brain/forget", { source: "drive", confirm: true }],
     ["/api/admin/brain/reindex", { confirm: true }],
   ];
@@ -3041,6 +4062,41 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
     { source_type: "brand-new-source", source_id: "x", content: "hello" });
   check("nor invent a new source, whose documents would be born unzoned",
     unknown.status === 403, String(unknown.status));
+
+  const receipt = {
+    version: 1,
+    locator_kind: "source_relative_path",
+    original_content_sha256: "1".repeat(64),
+    original_byte_count: 7,
+  };
+  const singleReceiptFixture = scopedEnv();
+  const singleReceipt = await post("/api/admin/brain/ingest", {
+    source_type: "books",
+    source_id: "allowed-receipt.txt",
+    content: "fixture",
+    source_original_receipt: receipt,
+  }, singleReceiptFixture);
+  const batchReceiptFixture = scopedEnv();
+  const batchReceipt = await post("/api/admin/brain/ingest/batch", { docs: [{
+    source_type: "books",
+    source_id: "allowed-batch-receipt.txt",
+    content: "fixture",
+    source_original_receipt: receipt,
+  }] }, batchReceiptFixture);
+  check("a scoped file grant cannot mint single or batch raw-byte receipts",
+    singleReceipt.status === 403 && batchReceipt.status === 403,
+    JSON.stringify({ single: singleReceipt.status, batch: batchReceipt.status }));
+  const receiptSql = [singleReceiptFixture, batchReceiptFixture].flatMap((fixture) =>
+    fixture.seen.sql.filter((sql) =>
+      /source_original_id_key_state|source_original_result_bindings|(?:FROM|INTO|UPDATE) documents/.test(sql)));
+  check("receipt authority is refused before identity-key or corpus SQL",
+    receiptSql.length === 0, receiptSql.join("\n"));
+
+  const ordinaryBooks = await post("/api/admin/brain/ingest", {
+    source_type: "books", source_id: "ordinary-allowed", content: "ordinary fixture",
+  });
+  check("the same file grant remains able to submit an ordinary in-zone document",
+    ordinaryBooks.status !== 403, String(ordinaryBooks.status));
 }
 
 
@@ -3081,6 +4137,25 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
   check("and the refusal carries no findings, samples or titles",
     !("findings" in diagBody) && !("samples" in diagBody),
     JSON.stringify(diagBody).slice(0, 160));
+}
+
+{
+  const env = {
+    STORAGE: "d1",
+    ADMIN_KEY: "k",
+    DB: { prepare() { throw new Error("D1_ERROR: exceeded CPU time limit"); } },
+  };
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/diagnose", {
+    method: "GET", headers: { "X-Admin-Key": "k" },
+  }), env, { waitUntil() {} });
+  const body = await response.json();
+  check("an unobservable diagnosis is a non-success machine receipt",
+    response.status === 503 && body.complete === false && body.verdict === "incomplete" &&
+      body.totals?.documents === null && body.summary?.unavailable === 19,
+    JSON.stringify(body).slice(0, 260));
+  check("an unobservable diagnosis never invents upgrade guidance",
+    !/brain upgrade|schema older/i.test(JSON.stringify(body)),
+    JSON.stringify(body).slice(0, 260));
 }
 
 console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);

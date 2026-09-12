@@ -32,6 +32,37 @@ import { embedText, supabaseRpc } from "./supabase.js";
 import { sanitizeEnvelope, sanitizeSensitiveLinks } from "./secret-scan.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
+import {
+  attachEvidenceLineage, evidenceLineageFor, evidenceLineageRootIds,
+} from "./evidence-lineage.js";
+import {
+  hasStoredProvenanceMarker,
+  normalizeIngestEnvelopeProvenance,
+  provenanceAssessmentMarker,
+  provenanceReceiptTransitionError,
+  storedProvenanceAssessment,
+  TEXT_SOURCES,
+} from "./provenance-receipt.js";
+import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
+import {
+  deriveSourceOriginalId,
+  hashSourceOriginalResultBinding,
+  loadSourceOriginalSigningKey,
+  normalizeSourceOriginalReceipt,
+  SOURCE_ORIGINAL_BINDING_CONTRACT_VERSION,
+  SOURCE_ORIGINAL_TENANT_ID,
+} from "./source-original-binding.js";
+
+export { TEXT_SOURCES } from "./provenance-receipt.js";
+
+export class ProvenanceTransitionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProvenanceTransitionError";
+    this.code = "provenance_transition_refused";
+    this.status = 409;
+  }
+}
 
 export const D1 = "d1";
 export const SUPABASE = "supabase";
@@ -84,16 +115,21 @@ function conservativeChunkCount(content, geometry) {
  *
  * This intentionally assumes every document changed, every unique-document
  * preflight failed after consuming its reads, every source needs its own stats
- * refresh/readback, and every document needs the larger resumable stage. The
- * estimate is therefore above the normal path (50 one-chunk messages submit
- * 352 statements but reserve 550) while still accepting that replay shape.
+ * refresh/readback, and every document needs the larger resumable stage. A
+ * bound receipt reserves three additional per-document statements plus one
+ * request-wide identity-key read. The estimate is therefore above the normal
+ * path while still accepting the ordinary 50-message replay shape.
  */
 export function estimateD1IngestStatements(env, envelopes) {
   const geometry = chunkGeometry(env);
-  return (envelopes || []).reduce((total, envelope) => {
+  let hasSourceOriginalReceipt = false;
+  const perDocument = (envelopes || []).reduce((total, envelope) => {
     const chunks = conservativeChunkCount(envelope?.content, geometry);
-    return total + 9 + (chunks * 2);
+    const bound = envelope?.source_original_receipt != null;
+    if (bound) hasSourceOriginalReceipt = true;
+    return total + (bound ? 12 : 9) + (chunks * 2);
   }, 0);
+  return perDocument + (hasSourceOriginalReceipt ? 1 : 0);
 }
 
 /**
@@ -123,7 +159,15 @@ async function sha256Hex(s) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function prepareD1Envelope(env, envelope) {
+async function prepareD1Envelope(env, submittedEnvelope, {
+  sourceOriginalSigningKey = () => loadSourceOriginalSigningKey(env),
+} = {}) {
+  const envelope = normalizeIngestEnvelopeProvenance(submittedEnvelope);
+  // HTTP routes validate earlier for a useful 400 response, but storage is the
+  // last common mutation boundary for direct first-party callers too. Never
+  // let an internal path persist a malformed provenance claim by accident.
+  const validationError = ingestEnvelopeValidationError(envelope);
+  if (validationError) throw new TypeError(validationError);
   const { source_type, source_id, content, title } = envelope;
   const docUid = `${source_type}:${source_id}`;
   const md = envelope.metadata || {};
@@ -140,21 +184,18 @@ async function prepareD1Envelope(env, envelope) {
   const incomingTopFolder = md.top_folder || null;
   const incomingPlatform = md.platform || null;
   const docDate = envelope.occurred_at ? Date.parse(envelope.occurred_at) : null;
-  // How the text was OBTAINED, as opposed to what it says. Absent means the
-  // file carried its own text layer, which is true of every document written
-  // before OCR existed and of every non-PDF format now. Last write wins here,
-  // unlike client/category: a document that has just been re-extracted from a
-  // real text layer must stop being marked as a scan.
-  const textSource = TEXT_SOURCES.has(envelope.text_source) ? envelope.text_source : "native";
-  const textReliable = textSource === "native"
-    ? envelope.text_reliable !== false
-    : envelope.text_reliable === true;
+  // How the text was OBTAINED, as opposed to what it says. The shared boundary
+  // makes omission explicit as unknown/false. Storage must never turn an
+  // absent producer claim into native/reliable provenance.
+  const textSource = TEXT_SOURCES.has(envelope.text_source) ? envelope.text_source : "unknown";
+  const textReliable = envelope.text_reliable === true && textSource !== "unknown";
   const geometry = chunkGeometry(env);
   // Geometry is part of storage identity. A deploy that corrects chunk size
   // must re-chunk unchanged documents on their next ingest instead of taking
   // the content-only no-op path forever.
   const hash = await sha256Hex(`chunk-v1:${geometry.size}:${geometry.overlap}\0${content}`);
-  return {
+  const provenanceMarker = await provenanceAssessmentMarker(envelope);
+  const prepared = {
     envelope,
     source_type,
     source_id,
@@ -177,14 +218,36 @@ async function prepareD1Envelope(env, envelope) {
     docDate,
     geometry,
     hash,
+    provenanceMarker,
   };
+  const sourceOriginal = sourceOriginalInput(prepared);
+  if (sourceOriginal) {
+    const receipt = normalizeSourceOriginalReceipt(sourceOriginal.source_original_receipt);
+    const signingKey = await sourceOriginalSigningKey();
+    prepared.sourceOriginalIdentity = Object.freeze({
+      locator: sourceOriginal.locator,
+      receipt,
+      original_id: await deriveSourceOriginalId(signingKey, {
+        source: source_type,
+        locator_kind: receipt.locator_kind,
+        locator: sourceOriginal.locator,
+      }),
+    });
+  }
+  return prepared;
 }
 
 /**
- * The only three answers to "where did this text come from".
- * `native` is the default and the state of every pre-OCR document.
+ * Recompute the exact durable content marker for a D1 envelope.
+ *
+ * This is intentionally narrower than exposing the full prepared write. The
+ * conversational owner-note lifecycle uses it only for same-primary
+ * read-after-write verification, so a successful HTTP response cannot be
+ * mistaken for proof that the intended content reached the intended row.
  */
-export const TEXT_SOURCES = new Set(["native", "ocr", "ocr_partial"]);
+export async function expectedD1ContentHash(env, envelope) {
+  return (await prepareD1Envelope(env, envelope)).hash;
+}
 
 function jsonValue(raw, fallback = {}) {
   if (raw && typeof raw === "object") return raw;
@@ -245,9 +308,56 @@ function d1PersistedState(prior, prepared) {
 
   const priorMeta = jsonValue(current.meta);
   const safePriorMeta = sanitizeEnvelope({ metadata: priorMeta }).metadata || {};
-  const targetMeta = mergeJsonPatch(safePriorMeta, prepared.md);
-  const priorMetaChangedBySafety = canonicalJson(priorMeta) !== canonicalJson(safePriorMeta);
-
+  const priorProvenance = storedProvenanceAssessment({
+    ...current,
+    source: prepared.source_type,
+    source_id: prepared.source_id,
+    authority_meta: safePriorMeta,
+  });
+  const transitionError = provenanceReceiptTransitionError(safePriorMeta, prepared.md, {
+    priorTextSource: current.text_source ?? "unknown",
+    priorTextReliable: current.text_reliable,
+    incomingTextSource: prepared.textSource,
+    incomingTextReliable: prepared.textReliable,
+    sameContent: current.content_hash === prepared.hash,
+    priorProvenanceAssessed: hasStoredProvenanceMarker(current, priorProvenance),
+  });
+  if (transitionError) throw new ProvenanceTransitionError(transitionError);
+  // Provenance is an exact versioned unit, not an extensible merge patch.
+  // Remove every prior provenance-bearing field before applying the incoming
+  // unit. Otherwise a legacy family marker or lineage object could survive an
+  // authoritative reingest and make the newly validated receipt false after it
+  // reaches D1.
+  const targetBaseMeta = { ...safePriorMeta };
+  const provenanceKeys = ["provenance_receipt", "evidence_lineage", "family_of", "part_of"];
+  for (const key of provenanceKeys) {
+    delete targetBaseMeta[key];
+  }
+  const targetMeta = mergeJsonPatch(targetBaseMeta, prepared.md);
+  // When a metadata-only revision reasserts the same semantic receipt with a
+  // different object-key order, retain the prior representation. The D1
+  // invalidation trigger is intentionally conservative and compares stored
+  // JSON values, so this prevents a harmless serialization reorder from
+  // demoting an otherwise unchanged receipt.
+  for (const key of provenanceKeys) {
+    if (Object.prototype.hasOwnProperty.call(safePriorMeta, key) &&
+        Object.prototype.hasOwnProperty.call(targetMeta, key) &&
+        canonicalJson(safePriorMeta[key]) === canonicalJson(targetMeta[key])) {
+      targetMeta[key] = safePriorMeta[key];
+    }
+  }
+  const targetProvenance = storedProvenanceAssessment({
+    source: prepared.source_type,
+    source_id: prepared.source_id,
+    text_source: prepared.textSource,
+    text_reliable: prepared.textReliable,
+    authority_meta: targetMeta,
+  });
+  if (!targetProvenance.provenance_assessed ||
+      targetProvenance.provenance_status !== prepared.provenanceMarker.provenance_receipt_status ||
+      targetProvenance.provenance_reason !== prepared.provenanceMarker.provenance_receipt_reason) {
+    throw new TypeError("the persisted provenance unit does not match its validated assessment marker");
+  }
   const incomingDateSource = prepared.envelope.date_source ?? (prepared.docDate ? "provided" : null);
   const forceDateSourceSafety = safeDateSource !== current.date_source;
   const replaceDate = Boolean(prepared.envelope.date_reliable) || current.document_date == null;
@@ -276,6 +386,7 @@ function d1PersistedState(prior, prepared) {
     platform: prepared.hasPlatform ? prepared.incomingPlatform : safePlatform ?? null,
     text_source: prepared.textSource,
     text_reliable: prepared.textReliable ? 1 : 0,
+    ...prepared.provenanceMarker,
     meta: targetMeta,
     // Bind a safe prior value only when an omitted incoming field would
     // otherwise preserve an already-stored capability URL.
@@ -293,8 +404,10 @@ function d1PersistedState(prior, prepared) {
     writeHasCategory: prepared.hasCategory || forceCategorySafety,
     writeHasTopFolder: prepared.hasTopFolder || forceTopFolderSafety,
     writeHasPlatform: prepared.hasPlatform || forcePlatformSafety,
-    writeMeta: priorMetaChangedBySafety ? targetMeta : prepared.md,
-    replaceMeta: priorMetaChangedBySafety,
+    // The full target preserves unrelated metadata but replaces provenance as
+    // one unit, including deletion of stale legacy keys.
+    writeMeta: targetMeta,
+    replaceMeta: true,
   };
 }
 
@@ -315,8 +428,12 @@ function d1MetadataChanged(prior, prepared) {
     // A document that was OCR'd and is now readable from a real text layer (or
     // the reverse) must rewrite even when its text happens to hash the same,
     // or the corpus would keep claiming a provenance that is no longer true.
-    target.text_source !== (prior.text_source ?? "native") ||
-    target.text_reliable !== Number(prior.text_reliable ?? 1) ||
+    target.text_source !== (prior.text_source ?? "unknown") ||
+    target.text_reliable !== Number(prior.text_reliable ?? 0) ||
+    target.provenance_receipt_version !== Number(prior.provenance_receipt_version || 0) ||
+    target.provenance_receipt_status !== (prior.provenance_receipt_status ?? null) ||
+    target.provenance_receipt_reason !== (prior.provenance_receipt_reason ?? null) ||
+    target.provenance_receipt_digest !== (prior.provenance_receipt_digest ?? null) ||
     canonicalJson(target.meta) !== canonicalJson(jsonValue(prior.meta))
   );
 }
@@ -328,6 +445,99 @@ function pendingRevisionMarker(hash) {
   return `pending:${hash}:${revision}`;
 }
 
+function documentRevisionId() {
+  const nonce = new Uint8Array(32);
+  crypto.getRandomValues(nonce);
+  const revision = [...nonce].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `rev-v1:${revision}`;
+}
+
+function sourceOriginalInput(prepared) {
+  const receipt = prepared.envelope.source_original_receipt;
+  if (!receipt) return null;
+  const partOf = prepared.md.part_of;
+  const locator = typeof partOf === "string" ? partOf : prepared.source_id;
+  return { locator, source_original_receipt: receipt };
+}
+
+async function sourceOriginalBindingForRevision(env, prepared, {
+  documentRevisionId: revisionId,
+  documentContentHash = prepared.hash,
+  provenanceReceiptDigest = prepared.provenanceMarker.provenance_receipt_digest,
+} = {}) {
+  const original = prepared.sourceOriginalIdentity;
+  if (!original) return null;
+  const receipt = Object.freeze({
+    contract_version: SOURCE_ORIGINAL_BINDING_CONTRACT_VERSION,
+    tenant_id: SOURCE_ORIGINAL_TENANT_ID,
+    source: prepared.source_type,
+    original_id: original.original_id,
+    locator_kind: original.receipt.locator_kind,
+    document_revision_id: revisionId,
+    document_content_hash: documentContentHash,
+    provenance_receipt_digest: provenanceReceiptDigest,
+    original_content_sha256: original.receipt.original_content_sha256,
+    original_byte_count: original.receipt.original_byte_count,
+  });
+  return Object.freeze({
+    receipt,
+    binding_hash: await hashSourceOriginalResultBinding(receipt),
+  });
+}
+
+function sourceOriginalBindingReadbackSql() {
+  return `(SELECT json_object(
+            'contract_version',bound.contract_version,
+            'tenant_id',bound.tenant_id,
+            'source',bound.source,
+            'original_id',bound.original_id,
+            'locator_kind',bound.locator_kind,
+            'document_revision_id',bound.document_revision_id,
+            'original_content_sha256',bound.original_content_sha256,
+            'original_byte_count',bound.original_byte_count,
+            'document_content_hash',bound.document_content_hash,
+            'provenance_receipt_digest',bound.provenance_receipt_digest,
+            'binding_hash',bound.binding_hash)
+          FROM source_original_result_bindings AS bound
+         WHERE bound.binding_hash=documents.source_original_binding_hash
+           AND bound.document_revision_id=documents.document_revision_id
+           AND bound.source=documents.source
+           AND bound.document_content_hash=documents.content_hash
+           AND bound.provenance_receipt_digest=documents.provenance_receipt_digest
+           AND documents.deleted_at IS NULL
+         LIMIT 1)`;
+}
+
+async function storedSourceOriginalBindingMatches(row, expected) {
+  const stored = jsonValue(row?.bound_binding_receipt, null);
+  if (!stored || stored.binding_hash !== expected.binding_hash) return false;
+  const { binding_hash: storedHash, ...storedReceipt } = stored;
+  try {
+    return storedHash === await hashSourceOriginalResultBinding(storedReceipt) &&
+      canonicalJson(storedReceipt) === canonicalJson(expected.receipt);
+  } catch {
+    return false;
+  }
+}
+
+async function sourceOriginalBindingChanged(env, prior, prepared) {
+  const currentBindingHash = typeof prior?.source_original_binding_hash === "string"
+    ? prior.source_original_binding_hash
+    : null;
+  if (!prepared.sourceOriginalIdentity) return currentBindingHash !== null;
+  if (!/^rev-v1:[a-f0-9]{64}$/.test(String(prior?.document_revision_id || ""))) return true;
+  const expected = await sourceOriginalBindingForRevision(env, prepared, {
+    documentRevisionId: prior.document_revision_id,
+  });
+  return currentBindingHash !== expected.binding_hash ||
+    !await storedSourceOriginalBindingMatches(prior, expected);
+}
+
+async function d1RevisionUnchanged(env, prior, prepared) {
+  if (!prior || prior.content_hash !== prepared.hash || d1MetadataChanged(prior, prepared)) return false;
+  return !await sourceOriginalBindingChanged(env, prior, prepared);
+}
+
 function validDeferredRevision(revision) {
   const hashIsValid = /^[a-f0-9]{64}$/.test(revision?.hash || "");
   const markerPrefix = hashIsValid ? `pending:${revision.hash}:` : "";
@@ -336,13 +546,72 @@ function validDeferredRevision(revision) {
     sourceIsValid &&
     revision.doc_uid.length > revision.source.length + 1 &&
     revision.doc_uid.startsWith(`${revision.source}:`);
+  const revisionIdIsValid = /^rev-v1:[a-f0-9]{64}$/.test(revision?.document_revision_id || "");
+  const provenanceDigestIsValid = /^[a-f0-9]{64}$/.test(
+    revision?.provenance_receipt_digest || "",
+  );
+  const binding = revision?.source_original_binding;
+  const bindingIsValid = binding === null || (
+    binding && typeof binding === "object" && !Array.isArray(binding) &&
+    /^sha256:[a-f0-9]{64}$/.test(binding.binding_hash || "") &&
+    binding.receipt && typeof binding.receipt === "object" && !Array.isArray(binding.receipt) &&
+    binding.receipt.contract_version === SOURCE_ORIGINAL_BINDING_CONTRACT_VERSION &&
+    binding.receipt.tenant_id === SOURCE_ORIGINAL_TENANT_ID &&
+    binding.receipt.source === revision.source &&
+    /^hmac-sha256:[a-f0-9]{64}$/.test(binding.receipt.original_id || "") &&
+    binding.receipt.locator_kind === "source_relative_path" &&
+    binding.receipt.document_revision_id === revision.document_revision_id &&
+    /^[a-f0-9]{64}$/.test(binding.receipt.original_content_sha256 || "") &&
+    Number.isSafeInteger(binding.receipt.original_byte_count) &&
+    binding.receipt.original_byte_count >= 0 &&
+    binding.receipt.document_content_hash === revision.hash &&
+    /^[a-f0-9]{64}$/.test(binding.receipt.provenance_receipt_digest || "")
+  );
   return Boolean(
     docUidIsValid &&
+    revisionIdIsValid &&
+    provenanceDigestIsValid &&
+    bindingIsValid &&
     typeof revision.pending_marker === "string" &&
     revision.pending_marker.startsWith(markerPrefix) &&
     /^[a-f0-9]{32}$/.test(revision.pending_marker.slice(markerPrefix.length)) &&
     Number.isSafeInteger(revision.ingested_at) &&
     revision.ingested_at > 0
+  );
+}
+
+function sourceOriginalBindingInsertStatement(env, revision) {
+  const binding = revision.source_original_binding;
+  if (!binding) return null;
+  const receipt = binding.receipt;
+  return env.DB.prepare(
+    `INSERT INTO source_original_result_bindings
+       (contract_version,tenant_id,source,original_id,locator_kind,
+        document_revision_id,original_content_sha256,original_byte_count,
+        document_content_hash,provenance_receipt_digest,binding_hash,bound_at)
+     SELECT CASE WHEN EXISTS (
+              SELECT 1 FROM documents
+               WHERE doc_uid=?13 AND document_revision_id=?6
+                 AND source=?3 AND content_hash=?9
+                 AND provenance_receipt_digest=?10
+                 AND source_original_binding_hash=?11
+                 AND deleted_at IS NULL
+            ) THEN ?1 ELSE 0 END,
+            ?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12`
+  ).bind(
+    receipt.contract_version,
+    receipt.tenant_id,
+    receipt.source,
+    receipt.original_id,
+    receipt.locator_kind,
+    receipt.document_revision_id,
+    receipt.original_content_sha256,
+    receipt.original_byte_count,
+    receipt.document_content_hash,
+    receipt.provenance_receipt_digest,
+    binding.binding_hash,
+    revision.ingested_at,
+    revision.doc_uid,
   );
 }
 
@@ -360,20 +629,30 @@ function sourceStatsCommitStatement(env, source, revisions) {
     revision.doc_uid,
     revision.pending_marker,
     revision.ingested_at,
+    revision.document_revision_id,
+    revision.provenance_receipt_digest,
+    revision.source_original_binding?.binding_hash ?? null,
   ]));
   return env.DB.prepare(
     `WITH candidates AS (
        SELECT json_extract(value, '$[0]') AS doc_uid,
               json_extract(value, '$[1]') AS pending_marker,
-              CAST(json_extract(value, '$[2]') AS INTEGER) AS ingested_at
+              CAST(json_extract(value, '$[2]') AS INTEGER) AS ingested_at,
+              json_extract(value, '$[3]') AS document_revision_id,
+              json_extract(value, '$[4]') AS provenance_receipt_digest,
+              json_extract(value, '$[5]') AS source_original_binding_hash
        FROM json_each(?2)
      ), committing AS (
        SELECT candidates.ingested_at
        FROM candidates
        JOIN documents
-         ON documents.doc_uid = candidates.doc_uid
+        ON documents.doc_uid = candidates.doc_uid
         AND documents.source = ?1
         AND documents.content_hash = candidates.pending_marker
+        AND documents.document_revision_id = candidates.document_revision_id
+        AND documents.provenance_receipt_digest = candidates.provenance_receipt_digest
+        AND documents.source_original_binding_hash IS candidates.source_original_binding_hash
+        AND documents.deleted_at IS NULL
      ), source_counts AS (
        SELECT COUNT(DISTINCT documents.doc_uid) AS documents,
               COUNT(chunks.chunk_uid) AS chunks
@@ -422,7 +701,7 @@ const d1Backend = {
             ? x.doc_uid.slice(x.source.length + 1)
             : x.doc_uid || x.chunk_uid
         );
-        return {
+        const publicRow = {
           chunk_uid: x.chunk_uid,
           doc_uid: x.doc_uid || null,
           source_id: sourceId,
@@ -451,22 +730,39 @@ const d1Backend = {
           date_source: x.date_source || null,
           // How this evidence was READ. Travels beside how it was DATED,
           // because a reader weighing an answer needs both.
-          text_source: x.text_source || "native",
+          text_source: x.text_source || "unknown",
           text_reliable: x.text_reliable === undefined || x.text_reliable === null
-            ? true
+            ? false
             : x.text_reliable === true || x.text_reliable === 1 || x.text_reliable === "1",
           // Query-time, claim-specific authority is derived from the durable D1
           // row. It is additive public metadata, kept beside date and text
           // provenance so a citation never presents a tier without its reason.
           authority: x.authority || null,
+          // Closed, server-verified origin for conversational owner notes. No
+          // arbitrary document metadata crosses this public boundary.
+          ...(x.write_provenance ? { write_provenance: x.write_provenance } : {}),
+          lineage: x.lineage || evidenceLineageFor(x).lineage,
           score: x.rrf_score,
         };
+        return attachEvidenceLineage(publicRow, { root_ids: evidenceLineageRootIds(x) });
       }),
       degraded: r.degraded,
       degraded_reason: r.degraded_reason ?? null,
       ignored_filters: r.ignored_filters,
       counts: r.counts,
     };
+  },
+
+  async taxDocumentCandidates(env, {
+    entitySlug = null, limit = 20, filters = {}, access = null, scope = null,
+  } = {}) {
+    return d1.unchunkedTaxDocumentCandidates(env, {
+      entitySlug,
+      limit,
+      filters,
+      access,
+      scope,
+    });
   },
 
   async ingest(env, envelope, { deferFinalize = false, prepared = null } = {}) {
@@ -485,15 +781,18 @@ const d1Backend = {
       ? input.prior
       : await env.DB.prepare(
         `SELECT content_hash, title, uri, document_date, date_source, date_reliable,
-                entity_slug, client, category, top_folder, platform, text_source, text_reliable, meta
+                entity_slug, client, category, top_folder, platform, text_source, text_reliable, meta,
+                provenance_receipt_version, provenance_receipt_status,
+                provenance_receipt_reason, provenance_receipt_digest,
+                document_revision_id, source_original_binding_hash,
+                ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
          FROM documents WHERE doc_uid = ?1`
       ).bind(docUid).first();
     // Identical content AND filter identity is a no-op. Folder moves and title
     // changes still have to rewrite chunks because both the embedded header and
     // Vectorize metadata changed. Missing incoming metadata is not a request to
     // erase a richer migration record.
-    const metadataChanged = d1MetadataChanged(prior, input);
-    if (prior && prior.content_hash === hash && !metadataChanged) {
+    if (await d1RevisionUnchanged(env, prior, input)) {
       return { doc_uid: docUid, action: "unchanged", chunks: 0, queued: 0 };
     }
 
@@ -511,12 +810,20 @@ const d1Backend = {
     // even though only one revision's metadata and chunks survived. The random
     // suffix makes ownership of the commit marker revision-specific.
     const pendingHash = pendingRevisionMarker(hash);
+    const revisionId = documentRevisionId();
+    const sourceOriginalBinding = await sourceOriginalBindingForRevision(env, input, {
+      documentRevisionId: revisionId,
+    });
     const documentStatement = env.DB.prepare(
       `INSERT INTO documents (doc_uid, source, source_id, title, uri, document_date,
                               date_source, date_reliable, client, category,
                               top_folder, platform, ingested_at, content_hash, meta,
-                              text_source, text_reliable, entity_slug)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?22,?23,?24)
+                              text_source, text_reliable, entity_slug,
+                              provenance_receipt_version, provenance_receipt_status,
+                              provenance_receipt_reason, provenance_receipt_digest,
+                              document_revision_id, source_original_binding_hash)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?22,?23,?24,
+               ?26,?27,?28,?29,?30,?31)
        ON CONFLICT(doc_uid) DO UPDATE SET
          title=COALESCE(excluded.title, documents.title),
          uri=COALESCE(excluded.uri, documents.uri),
@@ -539,6 +846,12 @@ const d1Backend = {
          -- asserting a reading that has since been redone.
          text_source=excluded.text_source,
          text_reliable=excluded.text_reliable,
+         provenance_receipt_version=excluded.provenance_receipt_version,
+         provenance_receipt_status=excluded.provenance_receipt_status,
+         provenance_receipt_reason=excluded.provenance_receipt_reason,
+         provenance_receipt_digest=excluded.provenance_receipt_digest,
+         document_revision_id=excluded.document_revision_id,
+         source_original_binding_hash=excluded.source_original_binding_hash,
          meta=CASE WHEN ?21 = 1 THEN excluded.meta
                    ELSE json_patch(COALESCE(documents.meta, '{}'), excluded.meta) END`
     )
@@ -559,7 +872,13 @@ const d1Backend = {
         persisted.text_source,
         persisted.text_reliable,
         persisted.writeEntity ?? null,
-        persisted.writeHasEntity ? 1 : 0
+        persisted.writeHasEntity ? 1 : 0,
+        persisted.provenance_receipt_version,
+        persisted.provenance_receipt_status,
+        persisted.provenance_receipt_reason,
+        persisted.provenance_receipt_digest,
+        revisionId,
+        sourceOriginalBinding?.binding_hash ?? null
       );
 
     const header = title ? `[${title}]` : "";
@@ -638,6 +957,9 @@ const d1Backend = {
           hash,
           pending_marker: pendingHash,
           ingested_at: now,
+          document_revision_id: revisionId,
+          provenance_receipt_digest: persisted.provenance_receipt_digest,
+          source_original_binding: sourceOriginalBinding,
         },
       };
     }
@@ -653,18 +975,52 @@ const d1Backend = {
       hash,
       pending_marker: pendingHash,
       ingested_at: now,
+      document_revision_id: revisionId,
+      provenance_receipt_digest: persisted.provenance_receipt_digest,
+      source_original_binding: sourceOriginalBinding,
     };
-    const finalization = await env.DB.batch([
+    const finalizationStatements = [
       sourceStatsCommitStatement(env, source_type, [revision]),
       env.DB.prepare(
         `UPDATE documents SET content_hash = ?2
-         WHERE doc_uid = ?1 AND content_hash = ?3`
-      ).bind(docUid, hash, pendingHash),
-    ]);
+         WHERE doc_uid = ?1 AND content_hash = ?3 AND source = ?4
+           AND document_revision_id = ?5 AND provenance_receipt_digest = ?6
+           AND source_original_binding_hash IS ?7
+           AND deleted_at IS NULL`
+      ).bind(
+        docUid,
+        hash,
+        pendingHash,
+        source_type,
+        revisionId,
+        persisted.provenance_receipt_digest,
+        sourceOriginalBinding?.binding_hash ?? null,
+      ),
+    ];
+    const bindingStatement = sourceOriginalBindingInsertStatement(env, revision);
+    if (bindingStatement) finalizationStatements.push(bindingStatement);
+    const finalization = await env.DB.batch(finalizationStatements);
     const statsCommitted = Number(finalization?.[0]?.meta?.changes) === 1;
     const revisionCommitted = Number(finalization?.[1]?.meta?.changes) === 1;
-    if (!statsCommitted || !revisionCommitted) {
+    const bindingCommitted = !bindingStatement || Number(finalization?.[2]?.meta?.changes) === 1;
+    if (!statsCommitted || !revisionCommitted || !bindingCommitted) {
       throw new Error("ingest revision was superseded before commit; retry this document");
+    }
+
+    if (bindingStatement) {
+      const readback = await env.DB.prepare(
+        `SELECT source,content_hash,provenance_receipt_digest,deleted_at,
+                document_revision_id,source_original_binding_hash,
+                ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
+           FROM documents WHERE doc_uid=?1`
+      ).bind(docUid).first();
+      if (readback?.source !== source_type || readback?.content_hash !== hash ||
+          readback?.provenance_receipt_digest !== sourceOriginalBinding.receipt.provenance_receipt_digest ||
+          readback?.deleted_at != null || readback?.document_revision_id !== revisionId ||
+          readback?.source_original_binding_hash !== sourceOriginalBinding.binding_hash ||
+          !await storedSourceOriginalBindingMatches(readback, sourceOriginalBinding)) {
+        throw new Error("ingest revision binding could not be verified; retry this document");
+      }
     }
 
     return out;
@@ -678,10 +1034,20 @@ const d1Backend = {
    */
   async preflightIngestBatch(env, envelopes) {
     if (!envelopes.length) return [];
-    const prepared = await Promise.all(envelopes.map((envelope) => prepareD1Envelope(env, envelope)));
+    let signingKeyPromise = null;
+    const sourceOriginalSigningKey = () => {
+      signingKeyPromise ||= loadSourceOriginalSigningKey(env);
+      return signingKeyPromise;
+    };
+    const prepared = await Promise.all(envelopes.map((envelope) =>
+      prepareD1Envelope(env, envelope, { sourceOriginalSigningKey })));
     const priorResults = await env.DB.batch(prepared.map((input) => env.DB.prepare(
       `SELECT content_hash, title, uri, document_date, date_source, date_reliable,
-              entity_slug, client, category, top_folder, platform, text_source, text_reliable, meta
+              entity_slug, client, category, top_folder, platform, text_source, text_reliable, meta,
+              provenance_receipt_version, provenance_receipt_status,
+              provenance_receipt_reason, provenance_receipt_digest,
+              document_revision_id, source_original_binding_hash,
+              ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
        FROM documents WHERE doc_uid = ?1`
     ).bind(input.docUid)));
 
@@ -689,17 +1055,17 @@ const d1Backend = {
       throw new Error("D1 batch preflight returned an incomplete result set");
     }
 
-    return prepared.map((input, index) => {
+    return Promise.all(prepared.map(async (input, index) => {
       const rows = priorResults[index]?.results;
       if (!Array.isArray(rows)) throw new Error("D1 batch preflight returned an invalid row set");
       const prior = rows[0] || null;
       const state = { ...input, prior };
       return {
-        unchanged: Boolean(prior && prior.content_hash === input.hash && !d1MetadataChanged(prior, input)),
+        unchanged: await d1RevisionUnchanged(env, prior, input),
         doc_uid: input.docUid,
         prepared: state,
       };
-    });
+    }));
   },
 
   /**
@@ -734,39 +1100,102 @@ const d1Backend = {
       bySource.set(revision.source, group);
     }
 
-    for (const [source, group] of bySource) {
-      try {
-        // One JSON bind carries every marker/timestamp into the statistics CTE.
-        // With at most 50 revisions, this is at most 51 D1 statements and each
-        // statement remains far below the per-statement bind ceiling.
-        const batchResults = await env.DB.batch([
-          sourceStatsCommitStatement(env, source, group),
-          ...group.map((revision) => env.DB.prepare(
-            `UPDATE documents SET content_hash = ?2
-             WHERE doc_uid = ?1 AND content_hash = ?3`
-          ).bind(revision.doc_uid, revision.hash, revision.pending_marker)),
-        ]);
-        if (!Array.isArray(batchResults) || batchResults.length !== group.length + 1) {
-          throw new Error("D1 batch finalization returned an incomplete result set");
+    for (const [source, sourceGroup] of bySource) {
+      // A bound revision adds one immutable-ledger statement after its exact
+      // content-hash CAS. Partition only when that would push one D1
+      // transaction over the established 100-statement slice.
+      const transactionGroups = [];
+      let group = [];
+      let statementCount = 1;
+      for (const revision of sourceGroup) {
+        const weight = revision.source_original_binding ? 2 : 1;
+        if (group.length && statementCount + weight > 100) {
+          transactionGroups.push(group);
+          group = [];
+          statementCount = 1;
         }
+        group.push(revision);
+        statementCount += weight;
+      }
+      if (group.length) transactionGroups.push(group);
 
-        const placeholders = group.map((_, index) => `?${index + 1}`).join(",");
-        const { results } = await env.DB.prepare(
-          `SELECT doc_uid, content_hash FROM documents WHERE doc_uid IN (${placeholders})`
-        ).bind(...group.map((revision) => revision.doc_uid)).all();
-        const committed = new Map((results || []).map((row) => [row.doc_uid, row.content_hash]));
-        const statsCommitted = Number(batchResults[0]?.meta?.changes) === 1;
-        for (let groupIndex = 0; groupIndex < group.length; groupIndex++) {
-          const revision = group[groupIndex];
-          const changedThisMarker = Number(batchResults[groupIndex + 1]?.meta?.changes) === 1;
-          outcomes[revision.index] = statsCommitted && changedThisMarker && committed.get(revision.doc_uid) === revision.hash
-            ? { ok: true }
-            : { ok: false, error: "ingest revision could not be verified; retry this document" };
+      for (const transactionGroup of transactionGroups) {
+        try {
+          // One JSON bind carries every marker/timestamp into the statistics
+          // CTE and every other statement stays revision-specific.
+          const statements = [sourceStatsCommitStatement(env, source, transactionGroup)];
+          const statementIndexes = transactionGroup.map((revision) => {
+            const cas = statements.length;
+            statements.push(env.DB.prepare(
+              `UPDATE documents SET content_hash = ?2
+               WHERE doc_uid = ?1 AND content_hash = ?3 AND source = ?4
+                 AND document_revision_id = ?5 AND provenance_receipt_digest = ?6
+                 AND source_original_binding_hash IS ?7
+                 AND deleted_at IS NULL`
+            ).bind(
+              revision.doc_uid,
+              revision.hash,
+              revision.pending_marker,
+              revision.source,
+              revision.document_revision_id,
+              revision.provenance_receipt_digest,
+              revision.source_original_binding?.binding_hash ?? null,
+            ));
+            const bindingStatement = sourceOriginalBindingInsertStatement(env, revision);
+            const binding = bindingStatement ? statements.length : null;
+            if (bindingStatement) statements.push(bindingStatement);
+            return { cas, binding };
+          });
+          const batchResults = await env.DB.batch(statements);
+          if (!Array.isArray(batchResults) || batchResults.length !== statements.length) {
+            throw new Error("D1 batch finalization returned an incomplete result set");
+          }
+
+          const placeholders = transactionGroup.map((_, index) => `?${index + 1}`).join(",");
+          const { results } = await env.DB.prepare(
+            `SELECT doc_uid, content_hash FROM documents WHERE doc_uid IN (${placeholders})`
+          ).bind(...transactionGroup.map((revision) => revision.doc_uid)).all();
+          const committed = new Map((results || []).map((row) => [row.doc_uid, row.content_hash]));
+          const boundRevisions = transactionGroup.filter((revision) => revision.source_original_binding);
+          const boundReadback = new Map();
+          if (boundRevisions.length) {
+            const boundPlaceholders = boundRevisions.map((_, index) => `?${index + 1}`).join(",");
+            const boundResult = await env.DB.prepare(
+              `SELECT doc_uid,source,content_hash,provenance_receipt_digest,deleted_at,
+                      document_revision_id,source_original_binding_hash,
+                      ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
+                 FROM documents WHERE doc_uid IN (${boundPlaceholders})`
+            ).bind(...boundRevisions.map((revision) => revision.doc_uid)).all();
+            for (const row of boundResult?.results || []) boundReadback.set(row.doc_uid, row);
+          }
+          const statsCommitted = Number(batchResults[0]?.meta?.changes) === 1;
+          for (let groupIndex = 0; groupIndex < transactionGroup.length; groupIndex++) {
+            const revision = transactionGroup[groupIndex];
+            const indexes = statementIndexes[groupIndex];
+            const bindingRow = boundReadback.get(revision.doc_uid);
+            const changedThisMarker = Number(batchResults[indexes.cas]?.meta?.changes) === 1;
+            const bindingCommitted = indexes.binding === null ||
+              Number(batchResults[indexes.binding]?.meta?.changes) === 1;
+            const bindingVerified = !revision.source_original_binding || (
+              bindingRow?.source === revision.source &&
+              bindingRow?.content_hash === revision.hash &&
+              bindingRow?.provenance_receipt_digest ===
+                revision.source_original_binding.receipt.provenance_receipt_digest &&
+              bindingRow?.deleted_at == null &&
+              bindingRow?.document_revision_id === revision.document_revision_id &&
+              bindingRow?.source_original_binding_hash === revision.source_original_binding.binding_hash &&
+              await storedSourceOriginalBindingMatches(bindingRow, revision.source_original_binding)
+            );
+            outcomes[revision.index] = statsCommitted && changedThisMarker && bindingCommitted &&
+              committed.get(revision.doc_uid) === revision.hash && bindingVerified
+              ? { ok: true }
+              : { ok: false, error: "ingest revision could not be verified; retry this document" };
+          }
+        } catch {
+          // Do not quote D1 errors into a per-document receipt. Some platform
+          // errors include bound values; the retry instruction is sufficient
+          // and keeps source identifiers or content out of the response.
         }
-      } catch {
-        // Do not quote D1 errors into a per-document receipt. Some platform
-        // errors include bound values; the retry instruction is sufficient and
-        // keeps source identifiers or content out of the response.
       }
     }
 
@@ -862,6 +1291,7 @@ const supabaseBackend = {
           title: r.title, snippet: String(r.content || "").slice(0, 900),
           ts: r.meeting_date || null, score: null,
           date_reliable: null, date_source: null,
+          text_source: "unknown", text_reliable: false,
           client: r.client_name || null, category: r.category || null,
           top_folder: r.top_folder || null, platform: r.platform || null,
         })),
@@ -882,6 +1312,7 @@ const supabaseBackend = {
         chunk_uid: r.ref_key, ref_key: r.ref_key, source: r.source, title: r.title,
         snippet: r.snippet, ts: r.ts || null, score: r.rrf_score,
         date_reliable: null, date_source: null,
+        text_source: "unknown", text_reliable: false,
         client: r.client || null, category: r.category || null,
         top_folder: r.top_folder || null, platform: r.platform || null,
       })),
@@ -889,15 +1320,19 @@ const supabaseBackend = {
     };
   },
 
+  async taxDocumentCandidates() {
+    // The rollback adapter has no document-level inventory contract. Returning
+    // unknown prevents it from turning a missing chunk result into proof that
+    // an exact tax filing is absent.
+    return { results: [], complete: false, unavailable: true };
+  },
+
   async ingest(env, envelope) {
-    const rows = await supabaseRpc(env, "notes_brain_ingest", {
-      p_source_type: envelope.source_type, p_source_id: String(envelope.source_id),
-      p_content: envelope.content, p_source_subtype: envelope.source_subtype || null,
-      p_occurred_at: envelope.occurred_at || null, p_title: envelope.title || null,
-      p_metadata: envelope.metadata || {}, p_legacy_table: null, p_legacy_id: null,
-    });
-    const row = Array.isArray(rows) ? rows[0] : rows;
-    return { doc_uid: row?.id, action: row?.action, chunks: null, queued: 0, needs_embed: row?.needs_embed };
+    void env;
+    void envelope;
+    throw new Error(
+      "Supabase corpus ingest is refused because its RPC cannot prove normalized provenance parity",
+    );
   },
 
   async stats(env) {

@@ -70,6 +70,23 @@ function stateFor(mode) {
   if (["sweep-query-evidence", "sweep-marker-missing"].includes(mode)) {
     delete state.history_id;
   }
+  if (mode === "resume-precondition-failure") {
+    delete state.history_id;
+    state.done = Object.fromEntries(
+      Array.from({ length: 5 }, (_, index) => [`gmail:checkpoint-prior-${index + 1}`, `prior-v${index + 1}`]),
+    );
+    state.skipped = Object.fromEntries(
+      Array.from({ length: 3 }, (_, index) => [`gmail:checkpoint-skip-${index + 1}`, "prior policy skip"]),
+    );
+  }
+  if (mode === "incremental-precondition-failure") {
+    state.done = Object.fromEntries(
+      Array.from({ length: 5 }, (_, index) => [`gmail:checkpoint-prior-${index + 1}`, `prior-v${index + 1}`]),
+    );
+    state.skipped = Object.fromEntries(
+      Array.from({ length: 3 }, (_, index) => [`gmail:checkpoint-skip-${index + 1}`, "prior policy skip"]),
+    );
+  }
   if (["scanner-v5", "scanner-v5-omitted", "scanner-v5-retained-untracked", "scanner-v5-progress-missing", "scanner-v5-mass-refusal", "scanner-v5-dilution-guard"].includes(mode)) {
     state.done = mode === "scanner-v5-mass-refusal"
       ? Object.fromEntries(massRefusalIds.map((id) => [`gmail:${id}`, `mass-v1-${id}`]))
@@ -167,6 +184,8 @@ function runApprovedCase(mode) {
     check("an incremental promotion is a deliberate policy skip, not missing coverage",
       result.state.history_id === "history-current" &&
       result.evidence.final_receipt?.status === "ready" &&
+      result.evidence.final_receipt?.docs_refused === 0 &&
+      result.evidence.final_receipt?.docs_failed === 0 &&
       /policy_skipped=1; coverage_gaps=0/.test(result.evidence.final_receipt?.detail || ""),
       JSON.stringify(result.evidence.final_receipt));
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
@@ -203,10 +222,26 @@ function runApprovedCase(mode) {
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence)}`);
     check("a credential refusal reports partial coverage without freezing Gmail history",
       result.code === 1 && result.state.history_id === "history-current" &&
-      result.evidence.final_receipt?.status === "error" && /partial coverage/i.test(result.output),
+      result.evidence.final_receipt?.status === "error" &&
+      result.evidence.final_receipt?.docs_refused === 1 &&
+      result.evidence.final_receipt?.docs_failed === 0 &&
+      /partial coverage/i.test(result.output),
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence.final_receipt)}`);
     check("Gmail credential-refusal diagnostics never echo the synthetic credential",
       !result.output.includes(SYNTHETIC_OPENAI_KEY), result.output.slice(-1_200));
+  } finally { rmSync(result.directory, { recursive: true, force: true }); }
+}
+
+{
+  const result = runCase("worker-refusal");
+  try {
+    check("a Worker-refused envelope is counted as refused rather than failed or accepted",
+      result.code === 1 && result.evidence.ingested_ids.join(",") === "worker-refused" &&
+      result.evidence.final_receipt?.status === "error" &&
+      result.evidence.final_receipt?.docs_refused === 1 &&
+      result.evidence.final_receipt?.docs_failed === 0 &&
+      result.evidence.final_receipt?.issue_code === "INPUT_REFUSED",
+      `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence.final_receipt)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
 }
 
@@ -523,8 +558,58 @@ function runApprovedCase(mode) {
     check("a full Gmail sweep without a pre-walk history marker saves work but cannot claim completion",
       result.code === 1 && result.evidence.ingested_ids.join(",") === "sweep-inbox" &&
       !("history_id" in result.state) && result.evidence.final_receipt?.status === "error" &&
-      result.evidence.final_receipt?.issue_code === "INGEST_FAILED",
+      result.evidence.final_receipt?.issue_code === "INGEST_FAILED" &&
+      result.evidence.final_receipt?.docs_failed === 0 &&
+      result.evidence.final_receipt?.failure_evidence?.operation_class === "gmail_profile_read",
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}\n${JSON.stringify(result.evidence)}`);
+  } finally { rmSync(result.directory, { recursive: true, force: true }); }
+}
+
+{
+  const result = runCase("resume-precondition-failure");
+  try {
+    const receipt = result.evidence.final_receipt;
+    check("a mid-walk Gmail provider failure preserves the last accepted batch and withholds the history cursor",
+      result.code === 1 && result.evidence.ingested_ids.length === 50 &&
+      Object.keys(result.state.done).length === 55 && Object.keys(result.state.skipped).length === 3 &&
+      !Object.hasOwn(result.state, "history_id"),
+      `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}`);
+    check("the error receipt records closed provider and checkpoint proof from an exact state-file readback",
+      receipt?.status === "error" && receipt?.issue_code === "INGEST_FAILED" &&
+      receipt?.walk_complete === false && receipt?.files_seen === 52 &&
+      receipt?.docs_added === 50 && receipt?.docs_updated === 0 &&
+      receipt?.docs_unchanged === 0 && receipt?.docs_refused === 0 && receipt?.docs_failed === 1 &&
+      JSON.stringify(receipt?.failure_evidence) === JSON.stringify({
+        version: 1,
+        operation_class: "gmail_message_read",
+        http_status: 400,
+        provider_reason: "failed_precondition",
+        checkpoint_readback: "verified",
+        checkpoint_done: 55,
+        checkpoint_skipped: 3,
+        cursor_preservation: "absent_preserved",
+      }),
+      JSON.stringify(receipt));
+    check("the durable Gmail fixture evidence contains no provider message, remote path, or token",
+      !JSON.stringify(result.evidence).includes("SYNTHETIC_PRIVATE_PROVIDER_SENTINEL") &&
+      !JSON.stringify(result.evidence).includes("fixture-secret") &&
+      !JSON.stringify(receipt).includes("checkpoint-provider-failure"),
+      JSON.stringify(result.evidence));
+  } finally { rmSync(result.directory, { recursive: true, force: true }); }
+}
+
+{
+  const result = runCase("incremental-precondition-failure");
+  try {
+    const receipt = result.evidence.final_receipt;
+    const evidence = receipt?.failure_evidence;
+    check("an incremental Gmail provider failure preserves the exact prior history cursor",
+      result.code === 1 && result.state.history_id === "history-prior" &&
+      receipt?.files_seen === 1 && receipt?.docs_failed === 1 &&
+      evidence?.operation_class === "gmail_message_read" &&
+      evidence?.checkpoint_done === 5 && evidence?.checkpoint_skipped === 3 &&
+      evidence?.cursor_preservation === "present_preserved",
+      `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence.final_receipt)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
 }
 

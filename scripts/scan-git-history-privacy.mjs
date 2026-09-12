@@ -465,7 +465,7 @@ export function compareBaseline(report, baseline) {
   };
 }
 
-export function evaluateStrictRelease(report, dispositions) {
+export function evaluateStrictRelease(report, dispositions, { allowStaleDispositions = false } = {}) {
   if (!dispositions || dispositions.schema_version !== 1 || !Array.isArray(dispositions.approved_candidates)) {
     throw new Error("credential disposition file has an unsupported schema");
   }
@@ -506,10 +506,11 @@ export function evaluateStrictRelease(report, dispositions) {
   }
   const staleDispositions = [...approved].filter((key) => !observedCandidates.has(key));
   return {
-    passes: blockingObjects.size === 0 && staleDispositions.length === 0,
+    passes: blockingObjects.size === 0 && (allowStaleDispositions || staleDispositions.length === 0),
     blocking_object_count: blockingObjects.size,
     approved_candidate_count: approved.size,
     stale_disposition_count: staleDispositions.length,
+    stale_dispositions_tolerated: allowStaleDispositions && staleDispositions.length > 0,
   };
 }
 
@@ -586,6 +587,7 @@ function parseArgs(argv) {
     recordBaseline: null,
     requireClean: false,
     requireZeroFindings: false,
+    allowStaleDispositionsForLocalFieldPrep: false,
     remote: null,
     refManifest: null,
     credentialDispositions: resolve(ROOT, "privacy/credential-dispositions.json"),
@@ -621,6 +623,9 @@ function parseArgs(argv) {
     else if (arg === "--record-baseline") options.recordBaseline = resolve(argv[++index] || "");
     else if (arg === "--require-clean") options.requireClean = true;
     else if (arg === "--require-zero-findings") options.requireZeroFindings = true;
+    else if (arg === "--allow-stale-dispositions-for-local-field-prep") {
+      options.allowStaleDispositionsForLocalFieldPrep = true;
+    }
     else if (arg === "--credential-dispositions") {
       options.credentialDispositions = resolve(argv[++index] || "");
     }
@@ -633,6 +638,17 @@ function parseArgs(argv) {
   if (!["summary", "json"].includes(options.format)) throw new Error("--format must be summary or json");
   if ([options.baseline, options.recordBaseline, options.requireClean, options.requireZeroFindings].filter(Boolean).length > 1) {
     throw new Error("--baseline, --record-baseline, --require-clean, and --require-zero-findings are mutually exclusive");
+  }
+  if (options.allowStaleDispositionsForLocalFieldPrep && (
+    process.env.BRAIN_FIELD_PREPARE !== "1" ||
+    !options.requireClean ||
+    options.remote ||
+    options.refManifest ||
+    options.refPrefixes.length !== 0 ||
+    options.refs.length !== 1 ||
+    options.refs[0] !== "HEAD"
+  )) {
+    throw new Error("stale disposition tolerance is restricted to exact local HEAD field preparation");
   }
   return options;
 }
@@ -655,7 +671,7 @@ export function main(argv = process.argv.slice(2)) {
   try {
     options = parseArgs(argv);
     if (options.help) {
-      console.log("usage: node scripts/scan-git-history-privacy.mjs [--repo PATH] [--remote NAME] [--ref-manifest FILE | --ref-prefix REF | --ref REF] [--format summary|json] [--baseline FILE | --record-baseline FILE | --require-clean | --require-zero-findings] [--credential-dispositions FILE]");
+      console.log("usage: node scripts/scan-git-history-privacy.mjs [--repo PATH] [--remote NAME] [--ref-manifest FILE | --ref-prefix REF | --ref REF] [--format summary|json] [--baseline FILE | --record-baseline FILE | --require-clean | --require-zero-findings] [--credential-dispositions FILE] [--allow-stale-dispositions-for-local-field-prep]");
       return 0;
     }
     const report = scanRepository(options);
@@ -682,14 +698,21 @@ export function main(argv = process.argv.slice(2)) {
     }
     if (options.requireClean) {
       const dispositions = JSON.parse(readFileSync(options.credentialDispositions, "utf8"));
-      const strict = evaluateStrictRelease(report, dispositions);
+      const strict = evaluateStrictRelease(report, dispositions, {
+        allowStaleDispositions: options.allowStaleDispositionsForLocalFieldPrep,
+      });
       if (!strict.passes) {
         console.error(`FAIL  strict release gate found ${strict.blocking_object_count} blocking object(s) and ` +
           `${strict.stale_disposition_count} stale credential disposition(s)`);
         return 1;
       }
-      console.log(`PASS  strict release gate found no privacy or revoked-credential objects and exactly ` +
-        `${strict.approved_candidate_count} reviewed synthetic credential candidate(s)`);
+      if (strict.stale_dispositions_tolerated) {
+        console.log(`PASS  local field-preparation gate found no blocking objects; ` +
+          `${strict.stale_disposition_count} disposition(s) outside exact local HEAD remain subject to the unchanged public-history gate`);
+      } else {
+        console.log(`PASS  strict release gate found no privacy or revoked-credential objects and exactly ` +
+          `${strict.approved_candidate_count} reviewed synthetic credential candidate(s)`);
+      }
     }
     if (options.requireZeroFindings) {
       if (report.finding_objects.length !== 0) {

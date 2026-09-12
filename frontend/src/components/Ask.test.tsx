@@ -5,7 +5,10 @@ import {
   ANSWER_ERROR_MESSAGES, answerText,
 } from "../lib/answer-render.js";
 import { unavailableNotice } from "../lib/retrieval-status.js";
-import { CitationSources, EvidenceGateReason, citationMeta, evidenceGateNote } from "./Ask";
+import {
+  CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE,
+  citationMeta, evidenceGateNote,
+} from "./Ask";
 
 describe("answer messages", () => {
   it("replaces an older Worker's raw provider error with reviewed copy", () => {
@@ -26,6 +29,14 @@ describe("answer messages", () => {
     const notice = unavailableNotice("vector");
     expect(notice).toContain("This does not mean your brain is empty");
     expect(notice).not.toContain("Nothing here means your brain is empty");
+  });
+
+  it("gives a shared-access guest a safe retry and a named human path", () => {
+    expect(SCOPED_SEARCH_UNAVAILABLE).toContain("does not mean the shared documents have no matches");
+    expect(SCOPED_SEARCH_UNAVAILABLE).toContain("Nothing was changed");
+    expect(SCOPED_SEARCH_UNAVAILABLE).toContain("Try again");
+    expect(SCOPED_SEARCH_UNAVAILABLE).toContain("owner who shared this access");
+    expect(SCOPED_SEARCH_UNAVAILABLE).not.toMatch(/HTTP|503|exception/i);
   });
 });
 

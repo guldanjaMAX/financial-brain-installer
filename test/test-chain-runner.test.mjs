@@ -10,6 +10,7 @@ import {
   RUNNER_TEST_COMMAND,
   TEST_COMMANDS,
   exitDisposition,
+  isolatedTestEnvironment,
   parseRunnerOptions,
   parseTestCommand,
   runTestCommands,
@@ -149,6 +150,13 @@ try {
   for (const args of [["--unknown"], ["--continue-on-failure", "--continue-on-failure"], ["positional"]]) {
     assert.throws(() => parseRunnerOptions(args), /unknown test-runner option/);
   }
+
+  const developerEnvironment = { HOME: "/developer", BRAIN_NO_WRANGLER_LOGIN: "" };
+  const childEnvironment = isolatedTestEnvironment(developerEnvironment);
+  assert.equal(childEnvironment.BRAIN_NO_WRANGLER_LOGIN, "1");
+  assert.equal(childEnvironment.HOME, "/developer");
+  assert.equal(developerEnvironment.BRAIN_NO_WRANGLER_LOGIN, "",
+    "test isolation must not mutate the parent process environment");
 
   assert.throws(() => parseTestCommand("node -e process.exit(0)"), /unsupported (?:Node test flag|test module)/);
   assert.throws(() => parseTestCommand("node test/a.test.mjs && node test/b.test.mjs"), /unsupported test module/);

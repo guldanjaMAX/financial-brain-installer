@@ -88,6 +88,7 @@
  */
 
 import { fetchBrainWithAdminKey } from "../components/brain-http.mjs";
+import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 /* --------------------------------------------------------------- constants */
 
@@ -274,6 +275,20 @@ export function normalizeConfig(config = {}) {
     seen.add(c.key);
   }
 
+  let fullSyncSince = null;
+  if (config.fullSyncSince !== null && config.fullSyncSince !== undefined && config.fullSyncSince !== "") {
+    const raw = typeof config.fullSyncSince === "string" ? config.fullSyncSince : "";
+    const utc = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(raw)
+      ? Date.parse(raw)
+      : NaN;
+    const canonical = Number.isFinite(utc) ? new Date(utc).toISOString() : null;
+    const canonicalWithoutMillis = canonical?.replace(/\.000Z$/, "Z") || null;
+    if (!canonical || (raw !== canonical && raw !== canonicalWithoutMillis)) {
+      throw new CalendarApiError("fullSyncSince must be an explicit UTC timestamp such as 2025-01-01T00:00:00.000Z");
+    }
+    fullSyncSince = canonical;
+  }
+
   return {
     calendars,
     // See the header block. Changing this is supported and forces a resync.
@@ -287,7 +302,7 @@ export function normalizeConfig(config = {}) {
     // timeMin on the FULL sync only. Google's own sync sample does exactly
     // this: restrict the initial sync to a window, then let the returned token
     // carry the restriction forward.
-    fullSyncSince: config.fullSyncSince || null,
+    fullSyncSince,
     // Not fingerprinted: page size changes which requests carry which events,
     // never which events exist. Forcing a full resync of every calendar over a
     // page-size tweak would be an expensive surprise for a harmless change.
@@ -836,7 +851,7 @@ export function buildEnvelope(event, { calendar, config } = {}) {
     kind: "upsert",
     source_id,
     event_id: eventId,
-    envelope: {
+    envelope: withFirstPartySourceProvenance({
       source_type: SOURCE_TYPE,
       source_id,
       source_subtype: SOURCE_SUBTYPE,
@@ -878,7 +893,7 @@ export function buildEnvelope(event, { calendar, config } = {}) {
         html_link: event.htmlLink || null,
         updated: event.updated || null,
       },
-    },
+    }, { textSource: "native", textReliable: true }),
   };
 }
 
@@ -1019,6 +1034,10 @@ export async function syncCalendar({
     skipped: [],
     events_seen: 0,
     pages: 0,
+    // A page walk is not yet an authoritative Calendar snapshot. Google
+    // proves the boundary by returning nextSyncToken on the terminal page;
+    // the command layer keeps this distinct from `ok`/walk completion.
+    authoritative_snapshot: false,
     error: null,
     state: { ...prev },
   };
@@ -1081,6 +1100,7 @@ export async function syncCalendar({
   }
 
   result.ok = true;
+  result.authoritative_snapshot = Boolean(listing.nextSyncToken);
   result.state = {
     // Only advance on a token we actually earned. Google omits nextSyncToken on
     // any page that is not the last one.
@@ -1177,17 +1197,27 @@ export async function syncAll({ config = {}, state = {}, getAccessToken, fetchIm
  * by the worker's credential gate with a 422, and a batch that aborts there
  * would drop every later event for a reason that has nothing to do with them.
  */
-export async function ingestEnvelopes({ baseUrl, adminKey, envelopes, fetchImpl = fetch }) {
+export async function ingestEnvelopes({
+  baseUrl,
+  adminKey,
+  envelopes,
+  fetchImpl = fetch,
+  assertOwned = null,
+}) {
   const out = { created: 0, updated: 0, unchanged: 0, refused: [], errors: [], total: envelopes.length };
   for (const envelope of envelopes) {
     let res;
     try {
+      assertOwned?.();
       res = await fetchBrainWithAdminKey(fetchImpl, `${baseUrl.replace(/\/$/, "")}/api/admin/brain/ingest`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(envelope),
       }, () => adminKey);
     } catch (e) {
+      // Lease loss is a terminal writer fence, not a per-event transport
+      // failure. Continuing would let a replaced owner send later events.
+      if (e?.code === "source_ingest_lock_lost") throw e;
       out.errors.push({ source_id: envelope.source_id, error: e.message });
       continue;
     }

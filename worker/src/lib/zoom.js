@@ -36,6 +36,8 @@ import {
   sanitizeEnvelope as sanitizeIngestEnvelope,
 } from "./secret-scan.js";
 import { storeFor, backendOf, D1 } from "./store.js";
+import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
+import { normalizeIngestEnvelopeProvenance } from "./provenance-receipt.js";
 import {
   isSourceKindConflict, resolveSourceKind,
 } from "./source-receipt.js";
@@ -381,7 +383,18 @@ export async function gatedIngest(env, envelope) {
   if (hasSensitiveTransportIdentity(envelope)) {
     return { refused: true, labels: ["sensitive_transport_identity"] };
   }
-  const clean = sanitizeIngestEnvelope(envelope);
+  const clean = normalizeIngestEnvelopeProvenance(sanitizeIngestEnvelope(envelope));
+  const validationError = ingestEnvelopeValidationError(clean);
+  if (validationError) {
+    return { refused: true, labels: ["invalid_ingest_provenance"], error: validationError };
+  }
+  if (backendOf(env) !== D1) {
+    return {
+      refused: true,
+      labels: ["provenance_storage_unsupported"],
+      error: "Zoom ingest requires the provenance-capable D1 backend",
+    };
+  }
   if (env.CREDENTIAL_SCANNER !== "off") {
     const secrets = scanEnvelopeSecrets(clean);
     // Named, never quoted. The refusal has to be actionable without becoming
@@ -435,7 +448,7 @@ export function buildZoomEnvelope({ uuid, meetingId, topic, startTime, duration,
   const occurredAt = startTime && Number.isFinite(Date.parse(startTime))
     ? new Date(startTime).toISOString()
     : null;
-  return {
+  return normalizeIngestEnvelopeProvenance({
     source_type: ZOOM_SOURCE,
     source_id: String(uuid),
     title: topic || "Zoom meeting",
@@ -446,15 +459,22 @@ export function buildZoomEnvelope({ uuid, meetingId, topic, startTime, duration,
     // count as reliable for recency claims.
     date_source: occurredAt ? "zoom:recording_start_time" : null,
     date_reliable: Boolean(occurredAt),
+    text_source: "native",
+    text_reliable: true,
     uri: null,
     metadata: {
       category: "meeting",
       platform: "zoom",
+      evidence_lineage: {
+        version: 1,
+        kind: "source_record",
+        root_ids: [`${ZOOM_SOURCE}:${String(uuid)}`],
+      },
       ...(meetingId ? { zoom_meeting_id: String(meetingId) } : {}),
       ...(Number.isFinite(Number(duration)) ? { duration_minutes: Number(duration) } : {}),
       ...(hostEmail ? { zoom_host_email: String(hostEmail) } : {}),
     },
-  };
+  });
 }
 
 function zoomFailureOutcome(error) {

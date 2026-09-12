@@ -2,16 +2,25 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
 import { createProductFixture, json, seedOwnedEntity } from "./product-contract-fixture.mjs";
 import { makeCredential, signAssertion } from "./webauthn-fixtures.mjs";
 import { handleMcp } from "../src/lib/mcp-endpoint.js";
 import {
-  AGENT_PROFILES, profileFromScope, profileHas,
+  AGENT_PROFILES, CONNECTOR_AGENT_PROFILE_NAMES, LOCAL_OWNER_AGENT_PROFILE,
+  profileFromScope, profileHas,
 } from "../src/lib/agent-authority.js";
 import { handleAgentDeletion } from "../src/lib/agent-action-receipts.js";
 import { forget as forgetDocuments } from "../src/lib/store-d1.js";
+import {
+  REMEMBER_BATCH_LIMITS, REMEMBER_LIMITS, rememberInputSchema, validateLesson,
+  validateRememberReceipt, validateRememberRequest,
+} from "../src/lib/remember-contract.js";
+import {
+  OWNER_NOTES_KIND, OWNER_NOTES_ROUTE, OWNER_NOTES_SOURCE,
+} from "../src/lib/owner-note-contract.js";
 
 const ORIGIN = "https://brain.invalid";
 const RP_ID = "brain.invalid";
@@ -110,18 +119,28 @@ function deletePasskeyAfterPreflight(fixture, credentialId) {
 
 test("named agent profiles are exact, least-privilege bundles", () => {
   assert.deepEqual(Object.keys(AGENT_PROFILES), [
-    "librarian", "structured-contributor", "technician", "break-glass",
+    "librarian", "structured-contributor", "technician", "break-glass", "owner-assistant",
   ]);
+  assert.equal(LOCAL_OWNER_AGENT_PROFILE, "owner-assistant");
   assert.deepEqual(AGENT_PROFILES.librarian.capabilities, ["corpus:read"]);
   assert.equal(profileHas("structured-contributor", "curated:write"), true);
   assert.equal(profileHas("technician", "diagnostics:read"), true);
   assert.equal(profileHas("break-glass", "corpus:delete:preview"), true);
   assert.equal(profileHas("break-glass", "corpus:delete:execute"), false);
+  assert.deepEqual(AGENT_PROFILES[LOCAL_OWNER_AGENT_PROFILE].capabilities, [
+    "corpus:read", "curated:write", "diagnostics:read",
+  ]);
+  assert.equal(profileHas(LOCAL_OWNER_AGENT_PROFILE, "corpus:delete:preview"), false);
+  assert.equal(profileHas(LOCAL_OWNER_AGENT_PROFILE, "corpus:delete:execute"), false);
+  assert.equal(CONNECTOR_AGENT_PROFILE_NAMES.includes(LOCAL_OWNER_AGENT_PROFILE), false,
+    "the local owner assistant must never become a remote bearer-token scope");
+  assert.equal(profileFromScope(LOCAL_OWNER_AGENT_PROFILE), "librarian",
+    "remote OAuth cannot request the local owner-assistant profile");
   assert.equal(profileFromScope("read write"), "librarian", "legacy additive scopes fail to read-only");
   assert.equal(profileFromScope("technician break-glass"), "librarian", "profiles cannot be combined");
 });
 
-async function localMcpTools(profile) {
+async function localMcpToolDefinitions(profile) {
   const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
   const child = spawn(process.execPath, [script], {
     env: {
@@ -140,14 +159,660 @@ async function localMcpTools(profile) {
   const code = await new Promise((resolve) => child.on("close", resolve));
   assert.equal(code, 0, stderr);
   assert.equal(`${stdout}\n${stderr}`.includes("fixture-only-not-a-secret"), false);
-  return JSON.parse(stdout.trim()).result.tools.map((tool) => tool.name);
+  return JSON.parse(stdout.trim()).result.tools;
 }
 
-test("the ordinary local MCP starts read-only and profiles do not print credentials", async () => {
+const localMcpTools = async (profile) =>
+  (await localMcpToolDefinitions(profile)).map((tool) => tool.name);
+
+test("remember arguments are strict, bounded, and use collision-resistant server identities", async () => {
+  const identity = {
+    written_by: "owner_assistant",
+    agent_profile: LOCAL_OWNER_AGENT_PROFILE,
+    recorded_via: "local_mcp",
+  };
+  const valid = (overrides = {}) => ({
+    title: "The owner prefers weekly recaps",
+    body: "The owner directly asked for one concise recap each Friday afternoon.",
+    confidence: "verified",
+    verification: "stated directly by the owner in this conversation",
+    ...overrides,
+  });
+  const ordinary = valid({ tags: [" preference ", "preference", "cadence"] });
+  const checked = await validateLesson(ordinary, identity);
+  assert.equal(checked.ok, true, JSON.stringify(checked.errors));
+  assert.match(checked.value.source_id,
+    /^lesson\/the-owner-prefers-weekly-recaps-[a-f0-9]{64}$/);
+  assert.deepEqual(checked.value.tags, ["preference", "cadence"]);
+  assert.equal((await validateLesson({ ...ordinary }, identity)).value.source_id, checked.value.source_id,
+    "an exact retry must target the same ordinary record");
+  assert.notEqual(
+    (await validateLesson(valid({ body: `${ordinary.body} It begins next week.` }), identity)).value.source_id,
+    checked.value.source_id,
+    "changed content under the same title must create a new record",
+  );
+
+  const sharedPrefix = "a".repeat(60);
+  const longOne = await validateLesson(valid({ title: `${sharedPrefix} first` }), identity);
+  const longTwo = await validateLesson(valid({ title: `${sharedPrefix} second` }), identity);
+  assert.equal(longOne.value.slug, longTwo.value.slug, "the readable prefix is intentionally truncated");
+  assert.notEqual(longOne.value.source_id, longTwo.value.source_id,
+    "titles sharing the complete readable prefix must still have distinct hashes");
+
+  const composed = await validateLesson(valid({ title: "Résumé for José" }), identity);
+  const decomposed = await validateLesson(valid({ title: "Re\u0301sume\u0301 for Jose\u0301" }), identity);
+  assert.equal(composed.value.source_id, decomposed.value.source_id,
+    "canonically equivalent Unicode must produce a retry-stable identity");
+  const unicodeOne = await validateLesson(valid({ title: "客户 Alpha" }), identity);
+  const unicodeTwo = await validateLesson(valid({ title: "顧客 Alpha" }), identity);
+  assert.equal(unicodeOne.value.slug, unicodeTwo.value.slug,
+    "different Unicode titles can share the same ASCII-readable prefix");
+  assert.notEqual(unicodeOne.value.source_id, unicodeTwo.value.source_id,
+    "the full normalized Unicode title must participate in the hash");
+
+  for (const [input, pattern] of [
+    [valid({ slug: "caller-selected" }), /unknown field: slug/i],
+    [valid({ title: "x".repeat(REMEMBER_LIMITS.title + 1) }), /title must be at most/i],
+    [valid({ body: "x".repeat(REMEMBER_LIMITS.bodyMax + 1) }), /body must be at most/i],
+    [valid({ verification: "x".repeat(REMEMBER_LIMITS.verification + 1) }), /verification must be at most/i],
+    [valid({ tags: Array.from({ length: REMEMBER_LIMITS.tags + 1 }, (_, i) => `tag-${i}`) }), /tags must contain at most/i],
+    [valid({ tags: ["safe", { nested: "not a string" }] }), /every tag must be a string/i],
+    [valid({ confidence: { value: "verified" } }), /confidence must be one of/i],
+    [valid({ body: "Monthly revenue is $10,000 and this record gives no date for that figure." }), /date anchor/i],
+  ]) {
+    const refused = await validateLesson(input, identity);
+    assert.equal(refused.ok, false, JSON.stringify(input));
+    assert.match(refused.errors.join("\n"), pattern);
+  }
+  assert.equal((await validateLesson(valid({
+    body: "Monthly revenue is $10,000 as of 2026-09-10, according to the close report.",
+  }), identity)).ok, true, "an explicitly dated changing figure remains recordable");
+
+  const correction = valid({
+    body: "The owner corrected the recap cadence to every second Friday afternoon.",
+    supersedes: "lesson/the-owner-prefers-weekly-recaps",
+  });
+  const first = await validateLesson(correction, identity);
+  const retry = await validateLesson({ ...correction }, identity);
+  const changed = await validateLesson(
+    { ...correction, body: `${correction.body} This starts in October.` }, identity,
+  );
+  assert.match(first.value.source_id,
+    /^lesson\/the-owner-prefers-weekly-recaps-correction-[a-f0-9]{64}$/);
+  assert.notEqual(first.value.source_id, correction.supersedes);
+  assert.equal(retry.value.source_id, first.value.source_id,
+    "a response-loss retry must target the same correction record");
+  assert.notEqual(changed.value.source_id, first.value.source_id,
+    "changed correction content must not overwrite the earlier correction");
+});
+
+test("remember success needs the exact document identity and a known storage action", () => {
+  const envelope = { source_type: OWNER_NOTES_SOURCE, source_id: "lesson/weekly-recaps" };
+  for (const action of ["created", "updated", "unchanged"]) {
+    const receipt = validateRememberReceipt({
+      doc_uid: `${OWNER_NOTES_SOURCE}:lesson/weekly-recaps`,
+      action,
+    }, envelope);
+    assert.deepEqual(receipt.value, {
+      doc_uid: `${OWNER_NOTES_SOURCE}:lesson/weekly-recaps`,
+      action,
+    });
+  }
+  for (const ambiguous of [
+    { ok: true },
+    { doc_uid: `${OWNER_NOTES_SOURCE}:lesson/another-record`, action: "created" },
+    { doc_uid: `${OWNER_NOTES_SOURCE}:lesson/weekly-recaps`, action: "accepted" },
+    [{ doc_uid: `${OWNER_NOTES_SOURCE}:lesson/weekly-recaps`, action: "created" }],
+  ]) {
+    const refused = validateRememberReceipt(ambiguous, envelope);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /do not claim it was saved/i);
+  }
+});
+
+test("remember batches are bounded and every record validates before the first write", async () => {
+  const identity = {
+    written_by: "owner_assistant",
+    agent_profile: LOCAL_OWNER_AGENT_PROFILE,
+    recorded_via: "local_mcp",
+  };
+  const valid = (title) => ({
+    title,
+    body: `The owner directly asked to remember this complete and independently useful detail about ${title}.`,
+    confidence: "verified",
+    verification: "stated directly by the owner in this conversation",
+  });
+  const schema = rememberInputSchema();
+  assert.equal(schema.properties.records.maxItems, REMEMBER_BATCH_LIMITS.records);
+  assert.equal(schema.properties.records.items.additionalProperties, false);
+  assert.deepEqual(schema.anyOf, [
+    { required: ["title", "body", "confidence"] },
+    { required: ["records"] },
+  ]);
+
+  const validBatch = await validateRememberRequest({
+    records: [valid("first detail"), valid("second detail")],
+  }, identity);
+  assert.equal(validBatch.ok, true, JSON.stringify(validBatch.errors));
+  assert.equal(validBatch.batch, true);
+  assert.equal(validBatch.records.length, 2);
+  assert.notEqual(validBatch.records[0].value.source_id, validBatch.records[1].value.source_id);
+
+  const invalidLater = await validateRememberRequest({
+    records: [valid("valid first detail"), { ...valid("invalid second detail"), slug: "caller-id" }],
+  }, identity);
+  assert.equal(invalidLater.ok, false);
+  assert.deepEqual(invalidLater.records, []);
+  assert.match(invalidLater.errors.join("\n"), /record 2: unknown field: slug/i);
+
+  const mixed = await validateRememberRequest({
+    ...valid("single detail"),
+    records: [valid("batch detail")],
+  }, identity);
+  assert.equal(mixed.ok, false);
+  assert.match(mixed.errors.join("\n"), /either one record or records, never both/i);
+
+  const tooMany = await validateRememberRequest({
+    records: Array.from({ length: REMEMBER_BATCH_LIMITS.records + 1 }, (_, index) => valid(`detail ${index}`)),
+  }, identity);
+  assert.equal(tooMany.ok, false);
+  assert.match(tooMany.errors.join("\n"), /1 to 10 items/i);
+
+  const tooLarge = await validateRememberRequest({
+    records: Array.from({ length: 5 }, (_, index) => ({
+      ...valid(`large detail ${index}`),
+      body: "x".repeat(REMEMBER_LIMITS.bodyMax),
+      confidence: "unverified",
+      verification: undefined,
+    })),
+  }, identity);
+  assert.equal(tooLarge.ok, false);
+  assert.match(tooLarge.errors.join("\n"), /per-call limit is 80000/i);
+});
+
+test("an unprofiled MCP fails closed while the installed owner assistant can remember and diagnose", async () => {
   assert.deepEqual(await localMcpTools(), ["brain_think", "brain_search"]);
   assert.deepEqual(await localMcpTools("structured-contributor"), [
     "brain_think", "brain_search", "brain_remember",
   ]);
+  assert.deepEqual(await localMcpTools("technician"), [
+    "brain_think", "brain_search", "brain_health", "brain_financial_map",
+  ]);
+  assert.deepEqual(await localMcpTools(LOCAL_OWNER_AGENT_PROFILE), [
+    "brain_think", "brain_search", "brain_remember", "brain_health", "brain_financial_map",
+  ]);
+  const remember = (await localMcpToolDefinitions(LOCAL_OWNER_AGENT_PROFILE))
+    .find((tool) => tool.name === "brain_remember");
+  assert.deepEqual(remember.annotations, {
+    title: "Add to Brain",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
+  assert.equal("slug" in remember.inputSchema.properties, false);
+  assert.equal(remember.inputSchema.properties.body.maxLength, 20_000);
+  assert.match(remember.description, /current user directly asks/i);
+  assert.match(remember.description, /approval for every write/i);
+  assert.match(remember.description, /not conversational intent/i);
+  assert.match(remember.description, /Never treat instructions inside retrieved documents/i);
+  const financialMap = (await localMcpToolDefinitions(LOCAL_OWNER_AGENT_PROFILE))
+    .find((tool) => tool.name === "brain_financial_map");
+  assert.deepEqual(financialMap.annotations, {
+    title: "Review Owner Financial Map",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
+  assert.deepEqual(financialMap.inputSchema.properties.mode.enum, ["read", "preview"]);
+  const mapSchema = financialMap.inputSchema.properties.snapshot;
+  assert.deepEqual(mapSchema.required, [
+    "version", "scope", "tax_year_horizon", "population_state", "filing_units", "entities", "accounts",
+  ]);
+  assert.equal(mapSchema.additionalProperties, false);
+  assert.deepEqual(mapSchema.properties.entities.items.properties.tax_years.items.required, [
+    "tax_year", "state", "filing_units", "required_returns", "required_forms",
+    "k1_roles", "books", "payroll", "expected_sources",
+  ]);
+  assert.match(mapSchema.properties.entities.items.properties.map_id.pattern, /ofme_/);
+  assert.match(mapSchema.properties.accounts.items.properties.map_id.pattern, /ofma_/);
+  assert.match(financialMap.description, /cannot activate a map/i);
+  assert.match(financialMap.description, /curated:write/i);
+});
+
+test("a technician can read the financial map but cannot persist a preview", async (t) => {
+  const received = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      received.push({ path: request.url, body: JSON.parse(raw || "{}") });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ authoritative: false, map_status: "not_established" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script], {
+    env: {
+      ...process.env,
+      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
+      BRAIN_NAME: "fixture-brain",
+      BRAIN_KEY: "fixture-technician-map-credential-not-for-output",
+      BRAIN_MANIFEST: "",
+      BRAIN_AGENT_PROFILE: "technician",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stdin.end([
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "read" } } },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "preview", snapshot: { version: 1 } } } },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n");
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  const replies = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(received, [
+    { path: "/api/admin/brain/financial-map/read", body: {} },
+  ]);
+  const denied = replies.find((reply) => reply.id === 2);
+  assert.equal(denied.result.isError, true);
+  assert.match(denied.result.content[0].text, /cannot create a preview/i);
+  assert.equal(`${stdout}\n${stderr}`.includes("fixture-technician-map-credential-not-for-output"), false);
+});
+
+test("the local MCP can read or preview a financial map but has no activation mode", async (t) => {
+  const received = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      received.push({ path: request.url, body: JSON.parse(raw || "{}") });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ authoritative: false, map_status: "not_established" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script], {
+    env: {
+      ...process.env,
+      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
+      BRAIN_NAME: "fixture-brain",
+      BRAIN_KEY: "fixture-map-credential-not-for-output",
+      BRAIN_MANIFEST: "",
+      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stdin.end([
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "read" } } },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "preview", snapshot: { version: 1 } } } },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "activate" } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "brain_financial_map", arguments: { mode: "read", token: "do-not-send" } } },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n");
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  const replies = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(received, [
+    { path: "/api/admin/brain/financial-map/read", body: {} },
+    { path: "/api/admin/brain/financial-map/preview", body: { snapshot: { version: 1 } } },
+  ]);
+  assert.equal(replies.find((reply) => reply.id === 3).result.isError, true);
+  assert.equal(replies.find((reply) => reply.id === 4).result.isError, true);
+  assert.equal(`${stdout}\n${stderr}`.includes("fixture-map-credential-not-for-output"), false);
+});
+
+test("the local owner assistant sends a contract-checked write with provenance and an exact receipt", async (t) => {
+  const received = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      const body = JSON.parse(raw);
+      received.push({
+        path: request.url,
+        authorized: request.headers["x-admin-key"] === "fixture-only-not-a-secret",
+        body,
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(body.title === "The owner prefers weekly recaps"
+        ? {
+            doc_uid: `${OWNER_NOTES_SOURCE}:${body.source_id}`,
+            action: "created",
+            confirmed: true,
+            source: { name: OWNER_NOTES_SOURCE, kind: OWNER_NOTES_KIND, status: "ready" },
+            provenance: { label: "Owner assistant on this computer" },
+          }
+        : { ok: true }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const port = server.address().port;
+  const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script], {
+    env: {
+      ...process.env,
+      BRAIN_URL: `http://127.0.0.1:${port}`,
+      BRAIN_NAME: "fixture-brain",
+      BRAIN_KEY: "fixture-only-not-a-secret",
+      BRAIN_MANIFEST: "",
+      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stdin.end([
+    {
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    },
+    { jsonrpc: "2.0", method: "notifications/initialized" },
+    {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "brain_remember",
+        arguments: {
+          title: "The owner prefers weekly recaps",
+          body: "The owner directly asked for one concise recap each Friday afternoon.",
+          confidence: "verified",
+          verification: "stated directly by the owner in this conversation",
+        },
+      },
+    },
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "brain_remember",
+        arguments: {
+          title: "A write without an exact receipt",
+          body: "The storage response does not identify which exact document it accepted or changed.",
+          confidence: "unverified",
+        },
+      },
+    },
+    {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "brain_remember",
+        arguments: {
+          title: "A caller-selected storage identity",
+          body: "This otherwise valid record must not accept a caller-selected storage identity.",
+          confidence: "unverified",
+          slug: "overwrite-something-else",
+        },
+      },
+    },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n");
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  assert.equal(received.length, 2, "the unknown slug must be refused before HTTP ingest");
+  assert.equal(received[0].path, OWNER_NOTES_ROUTE);
+  assert.equal(received[0].authorized, true);
+  assert.equal(received[0].body.source_type, OWNER_NOTES_SOURCE);
+  assert.equal(received[0].body.metadata.written_by, "owner_assistant");
+  assert.equal(received[0].body.metadata.agent_profile, LOCAL_OWNER_AGENT_PROFILE);
+  assert.equal(received[0].body.metadata.recorded_via, "local_mcp");
+  assert.equal("occurred_at" in received[0].body, false,
+    "recording time must not be misrepresented as when the remembered fact happened");
+  const replies = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.equal(replies.length, 4, "the initialized notification must not receive an error response");
+  const initialized = replies.find((reply) => reply.id === 1);
+  assert.match(initialized.result.instructions, /active agent profile is Owner assistant/i);
+  assert.match(initialized.result.instructions, /Do not claim this connection is read-only/i);
+  assert.match(initialized.result.instructions, /current user directly asks/i);
+  assert.match(initialized.result.instructions, /approval for every write/i);
+  assert.match(initialized.result.instructions, /not conversational intent/i);
+  const reply = replies.find((candidate) => candidate.id === 2);
+  const result = JSON.parse(reply.result.content[0].text);
+  assert.deepEqual({ written: result.written, action: result.action }, {
+    written: true,
+    action: "created",
+  });
+  const ambiguous = JSON.parse(replies.find((candidate) => candidate.id === 3).result.content[0].text);
+  assert.equal(ambiguous.written, false);
+  assert.equal(ambiguous.confirmed, false);
+  assert.match(ambiguous.note, /do not claim it was saved/i);
+  const unknown = JSON.parse(replies.find((candidate) => candidate.id === 4).result.content[0].text);
+  assert.equal(unknown.written, false);
+  assert.equal(unknown.refused, true);
+  assert.match(unknown.errors.join("\n"), /unknown field: slug/i);
+  assert.equal(`${stdout}\n${stderr}`.includes("fixture-only-not-a-secret"), false);
+
+  // Update preserves an explicitly configured local contributor profile. Its
+  // capabilities still control the tool menu, but local write provenance is
+  // derived from the authenticated admin-key channel, not caller-selected
+  // profile text, so the preserved registration must remain usable.
+  const contributor = spawn(process.execPath, [script], {
+    env: {
+      ...process.env,
+      BRAIN_URL: `http://127.0.0.1:${port}`,
+      BRAIN_NAME: "fixture-brain",
+      BRAIN_KEY: "fixture-only-not-a-secret",
+      BRAIN_MANIFEST: "",
+      BRAIN_AGENT_PROFILE: "structured-contributor",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let contributorStdout = "";
+  let contributorStderr = "";
+  contributor.stdout.on("data", (chunk) => { contributorStdout += chunk; });
+  contributor.stderr.on("data", (chunk) => { contributorStderr += chunk; });
+  contributor.stdin.end(`${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 5,
+    method: "tools/call",
+    params: {
+      name: "brain_remember",
+      arguments: {
+        title: "The owner prefers weekly recaps",
+        body: "The owner directly asked for one concise recap each Friday afternoon.",
+        confidence: "verified",
+        verification: "stated directly by the owner in this conversation",
+      },
+    },
+  })}\n`);
+  const contributorCode = await new Promise((resolve) => contributor.on("close", resolve));
+  assert.equal(contributorCode, 0, contributorStderr);
+  assert.equal(received.length, 3);
+  assert.equal(received[2].body.metadata.agent_profile, LOCAL_OWNER_AGENT_PROFILE);
+  const contributorReply = JSON.parse(contributorStdout.trim());
+  const contributorResult = JSON.parse(contributorReply.result.content[0].text);
+  assert.equal(contributorResult.written, true);
+  assert.equal(`${contributorStdout}\n${contributorStderr}`.includes("fixture-only-not-a-secret"), false);
+});
+
+test("the local owner assistant writes one approved batch and reports every exact receipt", async (t) => {
+  const received = [];
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      const body = JSON.parse(raw);
+      received.push(body);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        doc_uid: `${OWNER_NOTES_SOURCE}:${body.source_id}`,
+        action: "created",
+        confirmed: true,
+        source: { name: OWNER_NOTES_SOURCE, kind: OWNER_NOTES_KIND, status: "ready" },
+        provenance: { label: "Owner assistant on this computer" },
+      }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const script = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script], {
+    env: {
+      ...process.env,
+      BRAIN_URL: `http://127.0.0.1:${server.address().port}`,
+      BRAIN_KEY: "fixture-only-not-a-secret",
+      BRAIN_MANIFEST: "",
+      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const valid = (title) => ({
+    title,
+    body: `The owner directly asked to remember this complete and independently useful detail about ${title}.`,
+    confidence: "verified",
+    verification: "stated directly by the owner in this conversation",
+  });
+  child.stdin.end([
+    {
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: {
+        name: "brain_remember",
+        arguments: { records: [valid("first approved detail"), valid("second approved detail")] },
+      },
+    },
+    {
+      jsonrpc: "2.0", id: 2, method: "tools/call",
+      params: {
+        name: "brain_remember",
+        arguments: {
+          records: [valid("valid but not written"), { ...valid("invalid later detail"), slug: "caller-id" }],
+        },
+      },
+    },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n");
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, stderr);
+  assert.equal(received.length, 2, "a malformed later record refuses the whole second batch before HTTP");
+  assert.equal(received.every((body) => body.metadata.recorded_via === "local_mcp"), true);
+  const replies = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  const complete = JSON.parse(replies.find((reply) => reply.id === 1).result.content[0].text);
+  assert.deepEqual({
+    written: complete.written,
+    confirmed: complete.confirmed,
+    complete: complete.complete,
+    requested: complete.requested_count,
+    confirmedCount: complete.confirmed_count,
+  }, { written: true, confirmed: true, complete: true, requested: 2, confirmedCount: 2 });
+  assert.deepEqual(complete.records.map((record) => record.action), ["created", "created"]);
+  const refused = JSON.parse(replies.find((reply) => reply.id === 2).result.content[0].text);
+  assert.equal(refused.written, false);
+  assert.equal(refused.refused, true);
+  assert.match(refused.errors.join("\n"), /record 2: unknown field: slug/i);
+  assert.equal(`${stdout}\n${stderr}`.includes("fixture-only-not-a-secret"), false);
+});
+
+test("the remote MCP batch stops on an unconfirmed receipt and names the confirmed prefix", async () => {
+  const writes = [];
+  const deps = {
+    grant: { profile: "structured-contributor" },
+    think: async () => ({}),
+    search: async () => ({ results: [] }),
+    write: async (envelope) => {
+      writes.push(envelope);
+      if (writes.length === 2) return { ok: true };
+      return {
+        doc_uid: `${OWNER_NOTES_SOURCE}:${envelope.source_id}`,
+        action: "created",
+        confirmed: true,
+        source: { name: OWNER_NOTES_SOURCE, kind: OWNER_NOTES_KIND, status: "ready" },
+        provenance: { label: "Approved connector write" },
+      };
+    },
+  };
+  const valid = (title) => ({
+    title,
+    body: `The owner directly asked to remember this complete and independently useful detail about ${title}.`,
+    confidence: "verified",
+    verification: "stated directly by the owner in this conversation",
+  });
+  const response = await (await handleMcp({}, rpc({
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: "remember",
+      arguments: {
+        records: [valid("remote first detail"), valid("remote second detail"), valid("remote third detail")],
+      },
+    },
+  }), new URL(`${ORIGIN}/mcp`), deps)).json();
+  assert.equal(response.result.isError, true);
+  assert.equal(writes.length, 2, "the batch must stop at the first receipt it cannot confirm");
+  const partial = JSON.parse(response.result.content[0].text);
+  assert.deepEqual({
+    complete: partial.complete,
+    requested: partial.requested_count,
+    confirmedCount: partial.confirmed_count,
+    failedRecord: partial.failed_record,
+    status: partial.status,
+  }, {
+    complete: false,
+    requested: 3,
+    confirmedCount: 1,
+    failedRecord: 2,
+    status: "receipt_unconfirmed",
+  });
+  assert.equal(partial.confirmed[0].doc_uid, `${OWNER_NOTES_SOURCE}:${writes[0].source_id}`);
+  assert.match(partial.note, /may have reached storage.*exact retry is idempotent/i);
+});
+
+test("an MCP write carrying a credential is refused by the common ingest scanner", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  const syntheticSecret = `sk-ant-api03-${"A".repeat(95)}`;
+  const deps = {
+    grant: { profile: "structured-contributor" },
+    think: async () => ({}),
+    search: async () => ({ results: [] }),
+    write: async (envelope) => {
+      const response = await fixture.post(
+        "/api/admin/brain/ingest",
+        envelope,
+        { "X-Admin-Key": fixture.env.ADMIN_KEY },
+      );
+      return response.json();
+    },
+  };
+  const result = await (await handleMcp(fixture.env, rpc({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "remember",
+      arguments: {
+        title: "Unsafe credential paste",
+        body: `The owner asked to store this credential, which must be refused: ${syntheticSecret}`,
+        confidence: "unverified",
+      },
+    },
+  }), new URL(`${ORIGIN}/mcp`), deps)).json();
+  assert.equal(result.result.isError, true);
+  const refusal = result.result.content[0].text;
+  assert.match(refusal, /refused.*credential/i);
+  assert.equal(refusal.includes(syntheticSecret), false, "the MCP refusal must not echo the credential");
+  assert.equal(fixture.first("SELECT count(*) AS n FROM documents").n, 0,
+    "a credential-shaped memory must be refused before storage");
 });
 
 test("one MCP call, confirm flags, and prompt text cannot reach deletion", async () => {

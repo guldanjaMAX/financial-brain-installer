@@ -59,12 +59,12 @@ export function OwnerPreferences() {
 
   const defaultEntity = String(preferences?.find((item) => item.preference_key === "default_entity" && !item.entity_slug)?.value || "");
   return (
-    <Section title="Owner preferences" blurb="Choose the business this workspace opens on and how many days of saved owner activity Home shows.">
+    <Section title="Owner preferences" blurb="Choose the entity this workspace opens on and how many days of saved owner activity Home shows.">
       {error && <Attention>{error}</Attention>}
       {message && <Note>{message}</Note>}
       {!preferences && !error && <Note>Reading owner preferences.</Note>}
       <div className="p-4 grid gap-4 sm:grid-cols-2">
-        <label className="text-[12.5px] text-ink-soft">Open on this business
+        <label className="text-[12.5px] text-ink-soft">Open on this entity
           <select
             className="field mt-1"
             value={defaultEntity}

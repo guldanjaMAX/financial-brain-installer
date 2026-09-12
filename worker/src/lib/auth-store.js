@@ -526,6 +526,7 @@ export const ZONE_PROJECTION_REPAIR_BATCH_SIZE = 1000;
 export async function assignZone(env, { source, zone }) {
   try {
     const now = Date.now();
+    const at = new Date(now).toISOString();
     // sources.zone is the authorization authority used by both reads and
     // writes. Keep its small mutation atomic with zone registration, and make
     // the insert conditional so a typo cannot create an orphan zone. Existing
@@ -558,6 +559,16 @@ export async function assignZone(env, { source, zone }) {
              ORDER BY id LIMIT ${ZONE_PROJECTION_REPAIR_BATCH_SIZE}
           )`,
       ).bind(zone, source, zone, source),
+      // A repeated assignment can repair the next 1,000 legacy projections
+      // while sources.zone itself stays unchanged. Record that supported
+      // mutation in the same transaction so a concurrent bounded diagnosis
+      // can invalidate its mixed pages without making row-local zones an
+      // authorization input.
+      env.DB.prepare(
+        `INSERT INTO source_events (source_name,event,at,detail)
+         SELECT ?, 'zone', ?, 'zone assignment and bounded projection repair'
+          WHERE EXISTS (SELECT 1 FROM sources WHERE name = ?)`,
+      ).bind(source, at, source),
       env.DB.prepare(
         `SELECT
            (SELECT COUNT(*) FROM documents WHERE source = ? AND deleted_at IS NULL) AS documents,
@@ -574,7 +585,7 @@ export async function assignZone(env, { source, zone }) {
     }
     const repairedDocuments = Number(results?.[2]?.meta?.changes || 0);
     const repairedChunks = Number(results?.[3]?.meta?.changes || 0);
-    const counts = results?.[4]?.results?.[0] || {};
+    const counts = results?.[5]?.results?.[0] || {};
     const projectionDocuments = Number(counts.projection_documents || 0);
     const projectionChunks = Number(counts.projection_chunks || 0);
     return {

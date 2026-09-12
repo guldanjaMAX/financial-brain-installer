@@ -1,7 +1,7 @@
 # Shared Brain maintainer guide
 
 This is the operating guide for engineers who maintain the shared installer.
-It describes the current 0.2.x product line, how to change and release it safely, and
+It describes the current 0.4.x product line, how to change and release it safely, and
 how to update an owner's existing Brain. It is not an instance handoff. Never
 put an owner's manifest, resource identifiers, source details, private golden
 set, support export, or credentials in this repository.
@@ -75,19 +75,14 @@ owner's Cloudflare Worker
   retrieval, ingest, health, evaluation, drain, and reindex use the deployed
   Brain and its separately stored admin key.
 
-The current candidate keeps the 0.1.14 current-status and message-replay
-guarantees while making exact legacy projection upgrades practical for large
-corpora. It replaces a rough trigger-amplified D1 change count with exact
-chunk-to-vector mapping readback during accelerated bootstrap. The previous
-99-row path remains the conservative active reindex path; the lifecycle-only
-accelerated path requires the verified paused boundary.
-The 0.1.14 line strengthened current-status retrieval so stale records and
-transaction-system evidence cannot silently establish a current client
-relationship. It also makes full message replay exact and fail-closed across
-high-water snapshots, reconciliation, crash recovery, and target inventory
-verification. Version 0.1.13 established the duplicate collapsing, durable
-installed-manifest pointer, guarded recovery, and release-safety foundations.
-`CHANGELOG.md` is the authoritative owner-facing list.
+The current candidate adds immutable raw-original binding for eligible
+single-record local file ingests, read-only source and financial-picture
+inventories, explicit owner-profile AI write access, machine-continuity checks,
+and a separately previewed repair for missing technician skill or MCP wiring.
+Other ingest producers remain unbound, retrospective provenance repair remains
+read-only, and ordinary bank credential setup remains held. The earlier
+current-status, replay, projection, recovery, and release-safety guarantees stay
+in force. `CHANGELOG.md` is the authoritative owner-facing list.
 
 Four append-only migrations make the D1-to-Vectorize protocol durable:
 
@@ -213,6 +208,7 @@ the full release gate.
 Required release checks:
 
 ```bash
+node scripts/field-prepare.mjs --plan --json --expect-sha <reviewed-40-character-SHA>
 npm ci --ignore-scripts
 npm ci --prefix frontend --ignore-scripts
 npm --prefix frontend run test:browser:install
@@ -224,6 +220,17 @@ git diff --check
 npm audit --offline
 npm pack --dry-run --json --ignore-scripts
 ```
+
+The plan command is a no-write candidate-binding check. It reads only local Git
+identity and cleanliness plus `package.json`/`package-lock.json` alignment. It
+runs none of the listed checks, creates no `.field-prepare` output, reads no
+manifest or credential store, and performs no network or live action. Its JSON
+reports the expected and actual commit plus a `candidate_binding` status; a
+different SHA, dirty or shallow checkout, diff-check failure, project `.npmrc`,
+or package/lock mismatch is a refusal. Use that direct Node command for planning:
+starting through npm may read npm configuration or write npm-owned logs before
+this script starts, so the `field:prepare` package script is reserved for the
+later offline execution that writes the private receipt and checklist.
 
 Run `node --check` on every changed JavaScript module. The full GitHub matrix
 must pass on Windows, macOS, and Linux with Node 22 and 24. That is six jobs.
@@ -245,10 +252,12 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.3/schema35 candidate remains held. A tag requests the release
-workflow; it never bypasses CI, unresolved incidents, owner acceptance, or the
-repository's immutable-release setting. Do not create or publish releases by
-hand to work around a failed workflow.
+The current 0.4.7/schema43 field candidate remains held. At this freeze its
+39-row audit has 35 unresolved incidents, no renewed deferrals, and four rows
+closed on reviewed evidence. A tag requests the release workflow; it never
+bypasses CI, unresolved incidents, owner acceptance, or the repository's
+immutable-release setting. Do not create or publish releases by hand to work
+around a failed workflow.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest
    changelog heading, README archive URLs, and current-version checks aligned.
@@ -266,13 +275,17 @@ hand to work around a failed workflow.
    CI does not establish Windows ARM64 physical runtime acceptance.
 4. Integrate the reviewed candidate into main. Tag the exact reviewed source,
    preserving its identity and history. Do not move or recreate a release tag.
-   The tag invokes .github/workflows/release.yml, which calls the same CI gate.
+   The tag invokes .github/workflows/release.yml, which calls the same CI gate
+   plus the reusable current-public-package contract matrix.
 5. CI first requires zero findings in public and candidate Git history, then
    creates one tarball from exact locked dependencies. Every Windows/macOS/Linux
    Node 22/24 job and the Windows planted traps download that immutable artifact
    ID and verify its raw SHA-256. The six jobs also retain frontend bundle parity,
    installed CLI checks and both source and packed Windows DPAPI gates.
-6. Release publication cannot start until that reusable CI succeeds. It checks
+6. Release publication cannot start until reusable CI and the four-runner
+   public package-contract matrix succeed. The latter validates and installs
+   the current sealed field kit; it does not provision Cloudflare, exercise a
+   deployed browser, or replace the separate physical-device gates. CI checks
    tag/event/checkout identity and main ancestry, then audit:updates must pass
    before any release write. A separate one-repository administration-read
    RELEASE_ADMIN_READ_TOKEN proves immutable releases are enabled. Do not place
@@ -420,7 +433,15 @@ improvise that drill against a live target.
 
 ## Credential boundaries
 
-The standard account-scoped Cloudflare token has exactly these permissions:
+Normal owner setup and updates use the Brain's named Cloudflare browser profile
+in the operating-system credential store. The owner signs in, completes 2FA,
+selects the exact account, and approves Cloudflare's consent page. The command
+uses the short-lived access value only for its exact control-plane action and
+clears it afterward. Ordinary fresh setup does not create, reveal, copy, or
+paste an API token.
+
+A scoped Cloudflare token is limited to an explicitly selected automation,
+recovery, or older-manifest path. It has exactly these permissions:
 
 - Workers Scripts Edit
 - D1 Edit
@@ -429,13 +450,22 @@ The standard account-scoped Cloudflare token has exactly these permissions:
 
 Add Workers R2 Storage Edit only if the manifest really provisions R2. Scope
 the token to the intended account, give it an expiry, and revoke it when the
-control-plane work is finished.
+bounded control-plane work is finished.
 
-The supported setup and update flows request the token in a hidden terminal
-prompt. The token must not be placed in source, a manifest, an argument, shell
-history, a support note, a log, or a shared message. Low-level automation must
-use an approved secret-manager-backed launcher that resolves the secret only
-at execution time and passes a minimal environment to the child process.
+The released CLI may request a recovery token only in its hidden terminal
+prompt after the owner explicitly chooses that path. The token must not be
+placed in source, a manifest, an argument, shell history, a support note, a log,
+or a shared message. Low-level automation must use an approved
+secret-manager-backed launcher that resolves the secret only at execution time
+and passes a minimal environment to the child process.
+
+Every setup lane must also pass the same Node, install-drive, and non-elevated
+session checks. Before resource creation, the exact Cloudflare account must be
+verified and the owner must confirm its Workers & Pages > Plans page says Paid.
+For non-interactive setup, `BRAIN_WORKERS_PAID_ACCOUNT_ID` is a non-secret,
+account-bound confirmation supplied by the approved launcher only after that
+owner check. It must exactly match the verified manifest account. A generic yes,
+a missing value, or another account ID is not approval and must stop setup.
 
 The Brain admin key is a different credential. It grants operator access to the
 whole Brain and lives only in the install's declared durable store. Routine
@@ -447,6 +477,12 @@ store.
 Repository permission grants no Cloudflare or corpus permission. A maintainer
 needs a fresh, owner-approved scoped token only for a specific live operation.
 There is no shared master credential and no support backdoor.
+
+Plaid application-credential setup is intentionally absent from generic setup.
+`brain setup`, `brain secrets`, and `brain technician` never accept or write the
+three bank-feed credential bindings. For an approved enabled feed, a complete
+existing binding set is preserved. A missing or partial set refuses before
+provider cleanup, local key mutation, core-key rotation, or any Worker write.
 
 ## Issue-note collection and regression tracking
 

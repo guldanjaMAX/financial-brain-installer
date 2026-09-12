@@ -1,6 +1,6 @@
 {
   "name": "brain-installer",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "private": true,
   "description": "Provision and manage a client-owned retrieval brain inside their own Cloudflare account",
   "type": "module",
@@ -11,9 +11,11 @@
     "brain": "./brain.mjs"
   },
   "scripts": {
+    "field:prepare": "node scripts/field-prepare.mjs",
     "rehearse:hiccups": "node scripts/customer-hiccup-lab.mjs",
     "rehearse:onboarding": "node scripts/onboarding-sandbox.mjs",
     "privacy:history": "node scripts/scan-git-history-privacy.mjs --ref HEAD --require-clean",
+    "privacy:history:field": "node scripts/scan-git-history-privacy.mjs --ref HEAD --require-clean --allow-stale-dispositions-for-local-field-prep",
     "privacy:history:remote": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "privacy:history:strict": "node scripts/scan-git-history-privacy.mjs --remote origin --ref HEAD --require-clean",
     "test": "node scripts/run-test-chain.mjs",
@@ -102,5 +104,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/guldanjaMAX/financial-brain-installer.git"
+  },
+  "devDependencies": {
+    "wrangler": "4.127.1"
   }
 }

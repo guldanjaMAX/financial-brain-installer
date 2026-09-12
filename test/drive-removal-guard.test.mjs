@@ -20,12 +20,14 @@ import {
   remoteFamilySettlement,
   VALUE_FLAGS,
 } from "../brain.mjs";
+import { driveVersion } from "../connectors/google-drive.mjs";
 import { previewSupportJournal } from "../support-journal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "..", "brain.mjs");
 const DRIVE_GUARD_FETCH = pathToFileURL(join(HERE, "fixtures", "drive-removal-guard-fetch.mjs")).href;
 const DRIVE_SCOPE_FETCH = pathToFileURL(join(HERE, "fixtures", "drive-scope-boundary-fetch.mjs")).href;
+const DRIVE_ACTIVE_SKIP_FETCH = pathToFileURL(join(HERE, "fixtures", "drive-active-skip-fetch.mjs")).href;
 
 const CATEGORIES = ["source_policy", "source_deleted", "intentional_skip"];
 
@@ -294,6 +296,133 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 }
 
 /*
+ * A walked non-text file is an adjudicated source skip, not a refused ingest
+ * attempt. A locally detected credential is a refusal. Exercise both in one
+ * real Drive command so the receipt cannot inflate docs_refused with every
+ * source-policy decision while still preserving the credential outcome.
+ */
+{
+  const directory = mkdtempSync(join(tmpdir(), "brain-drive-active-skips-"));
+  const manifestPath = join(directory, "fixture.manifest.json");
+  const statePath = join(directory, ".brain-ingest-drive.json");
+  const evidencePath = join(directory, "active-skip-evidence.json");
+  const userRoot = join(directory, "isolated-user-root");
+  const tokenRoot = join(userRoot, ".brain");
+  const scannerFingerprint = credentialScannerFingerprint(true);
+  const policyFingerprint = drivePolicyFingerprint({
+    rootFolderIds: ["fixture-root"],
+    excludeFileIds: [],
+    excludePaths: [],
+    excludeNameParts: [],
+    privatePrefixes: [],
+  }, true);
+  const migratedFile = {
+    id: "active-migrated", name: "migrated.png", mimeType: "image/png", size: "200",
+    createdTime: "2025-01-01T00:00:00Z", modifiedTime: "2026-08-20T00:00:00Z",
+    md5Checksum: "migrated-current", parents: ["fixture-root"],
+  };
+  const environment = {};
+  for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
+  }
+  Object.assign(environment, {
+    NO_COLOR: "1",
+    BRAIN_GOOGLE_TOKEN_STORE: "file",
+    BRAIN_DRIVE_SKIP_USER_ROOT: userRoot,
+    BRAIN_DRIVE_SKIP_EVIDENCE: evidencePath,
+    BRAIN_DRIVE_SKIP_MODE: "mixed",
+    ADMIN_KEY: "fixture-admin",
+  });
+  const run = (extra = []) => {
+    const result = spawnSync(process.execPath, [
+      "--import", DRIVE_ACTIVE_SKIP_FETCH,
+      CLI, "ingest", manifestPath, "--from", "drive", ...extra,
+    ], { encoding: "utf8", env: environment, timeout: 60_000 });
+    assert.equal(result.error, undefined, String(result.error || ""));
+    assert.equal(result.signal, null, `Drive active-skip CLI was terminated by ${result.signal}`);
+    return {
+      code: result.status,
+      output: String(`${result.stdout || ""}${result.stderr || ""}`).replace(/\x1b\[[0-9;]*m/g, ""),
+    };
+  };
+
+  try {
+    mkdirSync(tokenRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(manifestPath, JSON.stringify({
+      client: { slug: "fixture" },
+      brain: { domain: "fixture.invalid" },
+      infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-db" } },
+      safety: { credential_scanner: { enabled: true }, private_path_prefixes: [] },
+      corpora: { google_drive: { root_folder_ids: ["fixture-root"] } },
+    }));
+    writeFileSync(join(tokenRoot, "google-tokens.json"), JSON.stringify({
+      google: {
+        client_id: "fixture-client",
+        client_secret: null,
+        refresh_token: "fixture-refresh",
+        scopes: ["drive"],
+      },
+    }), { mode: 0o600 });
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      done: {
+        "drive:active-migrated": driveVersion(migratedFile, "Reviewed Root"),
+        "drive:active-stale": "prior-stale-version",
+        "drive:active-sensitive": "prior-sensitive-version",
+        "drive:source-missing": "prior-missing-version",
+      },
+      skipped: {},
+      sync_token: "fixture-prior-cursor",
+      drive_policy_fingerprint: policyFingerprint,
+      credential_scanner_fingerprint: scannerFingerprint,
+      drive_last_full_sweep_at: "2000-01-01T00:00:00.000Z",
+    }), { mode: 0o600 });
+
+    const review = run();
+    assert.equal(review.code, 1, review.output.slice(-1_200));
+    const approval = /--approve-removals ([0-9a-f]{64})/.exec(review.output)?.[1] || null;
+    assert.ok(approval, `Drive active-skip review omitted its exact approval:\n${review.output.slice(-1_200)}`);
+
+    const accepted = run(["--approve-removals", approval]);
+    assert.equal(accepted.code, 0, accepted.output.slice(-1_200));
+    const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    assert.equal(evidence.ingestBatchWrites, 0, "an adjudicated or locally refused file reached Worker ingest");
+    assert.equal(evidence.retainedFamilyReachedForget, false, "an unchanged adjudicated family was removed");
+    assert.equal(evidence.removedFamilies, 3, "the approved typed removals did not converge");
+    assert.deepEqual(evidence.lastFinalReceipt, {
+      status: "error",
+      complete_sweep: false,
+      walk_complete: true,
+      docs_refused: 1,
+      docs_failed: 0,
+      issue_code: "INPUT_REFUSED",
+      detail: null,
+    }, "an adjudicated non-text skip inflated the measured credential-refusal count");
+
+    environment.BRAIN_DRIVE_SKIP_MODE = "adjudicated-only";
+    const adjudicatedReview = run(["--reset"]);
+    assert.equal(adjudicatedReview.code, 1, adjudicatedReview.output.slice(-1_200));
+    const adjudicatedApproval = /--approve-removals ([0-9a-f]{64})/.exec(adjudicatedReview.output)?.[1] || null;
+    assert.ok(adjudicatedApproval,
+      `Drive adjudicated-only review omitted its exact approval:\n${adjudicatedReview.output.slice(-1_200)}`);
+    const adjudicatedAccepted = run(["--reset", "--approve-removals", adjudicatedApproval]);
+    assert.equal(adjudicatedAccepted.code, 0, adjudicatedAccepted.output.slice(-1_200));
+    const adjudicatedEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    assert.deepEqual(adjudicatedEvidence.lastFinalReceipt, {
+      status: "ready",
+      complete_sweep: true,
+      walk_complete: true,
+      docs_refused: 0,
+      docs_failed: 0,
+      issue_code: null,
+      detail: "drive sweep sync completed; skipped=1; policy_skipped=0; coverage_gaps=0; source_resolved=0; adjudicated_skips=1",
+    }, `an adjudicated Drive skip blocked a zero-refusal completed walk:\n${adjudicatedAccepted.output.slice(-1_200)}`);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/*
  * The real CLI path must preserve that ordering across process boundaries.
  * This fixture runs a due full sweep against 101 simulated stored families and
  * an empty Drive listing. It also injects one bounded forget failure so the
@@ -366,7 +495,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const result = spawnSync(process.execPath, [
       "--import", DRIVE_GUARD_FETCH,
       CLI, "ingest", manifestPath, "--from", "drive", ...extra,
-    ], { encoding: "utf8", env: environment, timeout: 30_000 });
+    ], { encoding: "utf8", env: environment, timeout: 60_000 });
     assert.equal(result.error, undefined, String(result.error || ""));
     assert.equal(result.signal, null, `Drive guard CLI was terminated by ${result.signal}`);
     return { code: result.status, output: stripAnsi(`${result.stdout || ""}${result.stderr || ""}`) };

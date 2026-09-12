@@ -10,28 +10,29 @@
  *
  * DESIGN RULES
  *
- * Everything runs against the CLIENT's Cloudflare account using a scoped token
- * the client issued. We never hold their data and the token is revoked at
- * handoff, so this tool must work from a standing start with nothing but that
- * token and a manifest.
+ * Everything runs against the owner's Cloudflare account. Normal fresh setup
+ * uses an owner-approved named browser session stored in the operating-system
+ * credential store. Scoped API tokens exist only for explicit automation,
+ * recovery, and older manifests.
  *
- * The account id is RESOLVED FROM THE TOKEN, never hardcoded and never taken
- * from the manifest as gospel. A token that can see two accounts is ambiguous
- * and must fail loudly rather than provision into the wrong one, because
- * provisioning into the wrong account is the one mistake with no clean undo.
+ * The account id is resolved from the selected Cloudflare control credential,
+ * never hardcoded and never taken from the manifest as gospel. Access that can
+ * see two accounts is ambiguous and must fail loudly rather than provision into
+ * the wrong one, because provisioning into the wrong account has no clean undo.
  *
  * Every step is idempotent: re-running finds existing resources by name and
  * adopts them rather than creating duplicates. An installer you are afraid to
  * re-run is an installer you will not use.
  *
- * The token is read from CLOUDFLARE_API_TOKEN for automation or from a hidden,
- * command-scoped terminal prompt for setup/update. It is never written to the
- * manifest, logged, or passed as a command-line argument where `ps` could read it.
+ * Automation can inject CLOUDFLARE_API_TOKEN, and an explicitly selected
+ * recovery path can use a hidden command-scoped prompt. It is never written to
+ * the manifest, logged, or passed as a command-line argument where `ps` could
+ * read it. Ordinary owner setup creates and reveals no API token.
  */
 
-import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
+import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -43,11 +44,22 @@ import {
   PUBLIC_INSTALL_SMOKE_SOURCE,
   publicInstallSmokeEnvelope,
 } from "./worker/src/lib/install-smoke.js";
-import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
+import { restampFirstPartySourceProvenance } from "./worker/src/lib/provenance-receipt.js";
 import {
-  BANK_ACCESS_WRAPPING_KEY_SECRET,
-  validateBankAccessWrappingKey,
-} from "./operations/bank-access-wrapping-key.mjs";
+  canonicalGoogleProviderReason,
+  GMAIL_FAILURE_OPERATION_CLASSES,
+  normalizeSourceFailureEvidence,
+  SOURCE_FAILURE_EVIDENCE_VERSION,
+} from "./worker/src/lib/source-receipt.js";
+import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
+import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
+import {
+  financialPictureRequestFromFlags,
+  parseFinancialPictureArgv,
+  parseFinancialPictureFlags,
+  renderFinancialPicture,
+  requestFinancialPicture,
+} from "./operations/financial-picture.mjs";
 // The ingest pipeline is loaded LAZILY, inside the commands that use it. It
 // pulls in the PDF/Office dependencies at import time, so a top-level import
 // meant that on a clone without node_modules the very first command, including
@@ -74,7 +86,7 @@ async function ingestLib() {
 async function ingestOcrLib() {
   return await import("./ingest/ocr.mjs");
 }
-import { authorize, fetchConnectedAccountEmail, loadTokens, saveTokens, createTokenProvider, tokenStorageDescription, SCOPES, DEFAULT_PORT, openBrowser } from "./connectors/google-auth.mjs";
+import { authorize, fetchConnectedAccountEmail, inspectGoogleTokenStorage, loadTokens, loadTokensReadOnly, saveTokens, createTokenProvider, tokenStorageDescription, tokenStorageStatus, SCOPES, DEFAULT_PORT, openBrowser } from "./connectors/google-auth.mjs";
 import {
   redact as redactConfirmedSecrets,
   scanEnvelope as scanEnvelopeSecrets,
@@ -83,6 +95,8 @@ import {
 } from "./worker/src/lib/secret-scan.js";
 import {
   cloudflareCliEnvironment,
+  checkInstallDriveFreeSpace,
+  checkInstallPrivilege,
   checkNode,
   checkWindowsCredentialProtection,
   localToolEnvironment,
@@ -129,13 +143,50 @@ import {
   withSourceIngestLock,
 } from "./operations/source-ingest-lock.mjs";
 import { writeClaudeWorkspaceGuide } from "./operations/claude-workspace.mjs";
-import { installTechnicianSkillEverywhere } from "./operations/claude-skill.mjs";
+import {
+  captureTechnicianSkillRepairSnapshot,
+  inspectTechnicianSkillEverywhere,
+  installTechnicianSkillEverywhere,
+  repairTechnicianSkillEverywhere,
+  rollbackTechnicianSkillRepairSnapshot,
+  technicianSkillRepairMatchesApproved,
+  technicianSkillRepairSnapshotIsCurrent,
+} from "./operations/claude-skill.mjs";
+import {
+  LOCAL_ASSISTANT_REPAIR_SCOPES,
+  localAssistantRepairPlan,
+  parseLocalAssistantRepairScopes,
+  renderLocalAssistantRepairPlan,
+} from "./operations/local-assistant-repair.mjs";
+import {
+  provenanceRepairPlan,
+  provenanceRepairReadback,
+  provenanceRepairRemoteGeneration,
+  renderProvenanceRepairPlan,
+} from "./operations/provenance-repair.mjs";
+import {
+  aggregateConnectorPreviewRequested,
+  aggregateRemovalCandidateCounts,
+  connectorAggregatePreviewFailure,
+  connectorAggregatePreviewManifestFailure,
+  connectorAggregatePreviewRequestFailure,
+  connectorAggregatePreviewReceipt,
+  renderConnectorAggregatePreview,
+} from "./operations/connector-aggregate-preview.mjs";
+import {
+  isHtmlDocumentBody,
+  requestZoneAssignmentWithRetry,
+  zoneAssignmentExhaustedMessage,
+  zoneAssignmentRecoveredNotice,
+  zoneAssignmentRetryNotice,
+} from "./operations/zone-assignment-retry.mjs";
 import {
   bootstrapManifestObservation,
   bootstrapStatusFilePath,
   buildBootstrapStatus,
   writeBootstrapStatusFile,
 } from "./operations/bootstrap-status.mjs";
+import { createContinuousObservationClock } from "./operations/continuous-observation-clock.mjs";
 import {
   loadStoredCloudflareToken,
   storeCloudflareToken,
@@ -146,6 +197,7 @@ import {
 import {
   chooseCloudflareAccountPath,
   cloudflareAccountPlan,
+  cloudflareWorkersPlanUrl,
 } from "./operations/cloudflare-account-bootstrap.mjs";
 import {
   CloudflareOAuthSessionError,
@@ -161,6 +213,7 @@ import {
   normalizeCheckSubject,
   renderConfirmations,
   renderReport,
+  renderSetWaitingMessage,
   unavailableZoneReadiness,
   validateConfirmationReceipt,
 } from "./operations/check-run.mjs";
@@ -168,15 +221,20 @@ import { deriveRagProxyKey } from "./operations/rag-proxy-key.mjs";
 import { deriveSessionSigningKey } from "./operations/session-signing-key.mjs";
 import {
   renderTechnicianPlan,
+  renderTechnicianStepBriefing,
   runTechnicianStep,
   technicianPlan,
 } from "./operations/technician-setup.mjs";
-import { guardBrainAdminFetch } from "./components/brain-http.mjs";
+import { fetchBrainWithAdminKey, guardBrainAdminFetch, secureBrainRequestUrl } from "./components/brain-http.mjs";
 import { confidenceLine } from "./worker/src/lib/confidence.js";
 import {
   absenceUnproven, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
   unavailableNotice,
 } from "./worker/src/lib/retrieval-status.js";
+import {
+  LOCAL_OWNER_AGENT_PROFILE,
+  profileHas,
+} from "./worker/src/lib/agent-authority.js";
 import { readWranglerOAuthToken, refreshWranglerSession, WRANGLER_SPEC } from "./operations/wrangler-oauth.mjs";
 import {
   adminKeyPersistencePlan,
@@ -196,6 +254,11 @@ import {
   discoverInstalledManifest,
   rememberInstalledManifest,
 } from "./operations/installed-manifest.mjs";
+import {
+  auditMachineContinuity,
+  manifestHasProvisionedResourceBindings,
+} from "./operations/machine-continuity.mjs";
+import { readUpdateStatus } from "./worker/src/lib/update-status.js";
 import { evaluateProfileCoverage, formatProfileFailures } from "./eval/profile.mjs";
 import {
   corpusContractReadiness,
@@ -282,6 +345,59 @@ const die = (s) => {
   throw new Fatal(s);
 };
 
+function aggregateConnectorPreviewMode(flags, source) {
+  const explicitlySelected = flags["aggregate-json"] !== undefined;
+  try {
+    const requested = aggregateConnectorPreviewRequested(flags, source);
+    if (!requested) return false;
+
+    const common = ["from", "source", "dry-run", "reset", "aggregate-json"];
+    const known = [...common, "limit"];
+    assertKnownFlags(flags, known, `brain ingest --from ${source} --dry-run --aggregate-json`);
+    if (source === "calendar" && flags.limit !== undefined) {
+      die("--limit is not supported by the Calendar aggregate preview; remove it so coverage can be proved complete");
+    }
+    return true;
+  } catch (error) {
+    if (explicitlySelected && ["drive", "calendar"].includes(source)) {
+      throw new JsonFatal(connectorAggregatePreviewRequestFailure(source));
+    }
+    die(error.message);
+  }
+}
+
+/**
+ * Detect any aggregate-shaped request from raw argv without parsing another
+ * flag or touching the manifest. Unknown or malformed source syntax stays
+ * inside this privacy boundary and receives a generic invalid-request receipt;
+ * it never falls back to a path-bearing human error or support note.
+ */
+function aggregateConnectorPreviewRawIntent(argv = []) {
+  const selected = argv.some((argument) =>
+    argument === "--aggregate-json" || String(argument).startsWith("--aggregate-json="));
+  if (!selected) return Object.freeze({ selected: false, source: null, exactFlag: false });
+  let source = null;
+  for (let index = 0; index < argv.length; index++) {
+    if (argv[index] !== "--from") continue;
+    const value = argv[index + 1];
+    source = value && !String(value).startsWith("--")
+      ? String(value).trim().toLowerCase()
+      : null;
+  }
+  return Object.freeze({
+    selected: true,
+    source: ["drive", "calendar"].includes(source) ? source : "unknown",
+    exactFlag: argv.includes("--aggregate-json"),
+  });
+}
+
+function emitConnectorAggregatePreview(receipt, options = {}) {
+  const rendered = renderConnectorAggregatePreview(receipt);
+  const writePreview = options.writeAggregatePreview ?? ((value) => process.stdout.write(value));
+  writePreview(rendered);
+  return receipt;
+}
+
 const SUPPORT_REMOTE_COMMANDS = new Set([
   "check", "deploy", "diagnose", "drain", "health", "migrate", "provision",
   "reindex", "rollback", "secrets", "update", "upgrade", "verify",
@@ -291,8 +407,9 @@ export const PROVIDER_CONNECTOR_IDS = Object.freeze([
 ]);
 let currentSupportCommand = "";
 
-function supportSourceForCommand(command = "") {
+export function supportSourceForCommand(command = "") {
   if (command === "schedule") return "scheduler";
+  if (["financial-picture", "machine-continuity"].includes(command)) return "brain-data-plane";
   if (command === "ingest") {
     const index = process.argv.indexOf("--from");
     const remote = index >= 0 ? process.argv[index + 1] : null;
@@ -406,7 +523,9 @@ export function supportProductRelativeLocation(error, options = {}) {
 
 function recordSupportFailure(error, { unexpected = false } = {}) {
   const command = currentSupportCommand;
-  if (!command || command === "support") return null;
+  // The continuity command promises a filesystem-zero audit, including its
+  // failure path. Do not create a local support journal entry for it.
+  if (!command || command === "support" || command === "machine-continuity") return null;
   const errorCode = supportErrorCode(error, { command, unexpected });
   try {
     const productRelativeLocation = supportProductRelativeLocation(error);
@@ -451,6 +570,11 @@ function activeCloudflareToken() {
   }
   if (Buffer.isBuffer(scoped?.buffer)) return scoped.buffer.toString("ascii");
   return process.env.CLOUDFLARE_API_TOKEN || null;
+}
+
+export function cloudflareAccessUsesBrowserProfile() {
+  const source = cloudflareTokenSession.getStore()?.source;
+  return source === "wrangler-oauth" || source === "wrangler-session";
 }
 
 // Cloudflare rejected the credential mid-run. If it came from this computer's
@@ -668,17 +792,16 @@ export function readHiddenCloudflareToken({ input = process.stdin, output = proc
     input,
     output,
     noun: "Cloudflare token",
-    // This caller has a masked alternative, so on Windows it refuses instead of
-    // asking. A mailbox password has no such alternative and only warns.
+    // This caller has browser sign-in as the ordinary path, so on Windows it
+    // refuses instead of risking an echoed recovery token.
     windowsRefusal:
       "this terminal cannot be trusted to hide Cloudflare token entry.\n" +
       "  Windows PowerShell echoed a live credential at this prompt on 2026-09-08, and\n" +
       "  the process cannot detect when that happens, so it will not ask here.\n" +
       "  A browser sign-in needs no token at all and is the ordinary path.\n" +
-      "  If this install can only use a token, read it in with PowerShell's own masked\n" +
-      "  prompt, Read-Host -AsSecureString, and hand it to this command through the\n" +
-      "  environment rather than typing it here. Close that window when you are done.\n" +
-      "  Automation may inject it through an approved secret manager.",
+      "  Customer token recovery is not available from this Windows command in this release.\n" +
+      "  Do not save a customer token in the user environment.\n" +
+      "  Automation may inject it only through an approved secret manager.",
     insecure:
       "no Cloudflare credential is available and this terminal cannot prompt securely.\n" +
       "  The simplest fix is a browser sign-in, which needs no token at all:\n" +
@@ -759,10 +882,10 @@ export async function withCloudflareToken(action, options = {}) {
 }
 
 /**
- * Use an already available or remembered Cloudflare token without ever
- * prompting. Diagnostics need this distinction: `brain doctor <manifest>`
- * should verify the token setup already stored, but a missing token is itself
- * one of the findings and must not turn a read-only preflight into a ceremony.
+ * Use an already available automation or recovery token without ever prompting.
+ * Diagnostics need this distinction: doctor may inspect a token lane already
+ * selected by an older manifest, but it must never turn a missing optional
+ * token into a fresh-owner credential ceremony.
  */
 export async function withAvailableCloudflareToken(action, options = {}) {
   if (cloudflareTokenAvailable() || !options.accountId) return action();
@@ -881,8 +1004,9 @@ function throwCloudflareTokenFailure() {
       "      and if that is gone it can offer recovery-only hidden token entry.\n" +
       "      Not setup: a brain paused mid-upgrade is finished only by `brain update`, and rerunning the\n" +
       "      install over one pauses it again and leaves it refusing documents.\n" +
-      "      A non-interactive session may pass `--adopt-cloudflare-profile` (or set\n" +
-      "      BRAIN_ADOPT_CLOUDFLARE_PROFILE=1) once the owner has approved the browser sign-in it adopts.\n" +
+      "      A non-interactive update may pass `--adopt-cloudflare-profile` once the owner has\n" +
+      "      approved the browser sign-in it adopts. A fresh Claude-guided setup may pass\n" +
+      "      `--browser-sign-in` with the reviewed account and billing confirmation flags.\n" +
       "      Automation may inject CLOUDFLARE_API_TOKEN through an approved secret manager without putting it in a command.",
   );
   failure.code = "AUTH_REQUIRED";
@@ -982,7 +1106,12 @@ export async function withCloudflareControlCredential(action, options = {}) {
     expectedAccountId: accountId,
     reauthorize,
     prompt: accountPrompt,
-    action: async (session) => cloudflareTokenSession.run(session.token, async () => {
+    action: async (session) => cloudflareTokenSession.run({
+      buffer: session.token,
+      source: "wrangler-oauth",
+      machineReadable: false,
+      announced: true,
+    }, async () => {
       try {
         return await action(Object.freeze({
           method: "wrangler_oauth",
@@ -1191,22 +1320,22 @@ function createSetupManifest(path, m) {
 }
 
 /**
- * Resolve the account from the token itself.
+ * Resolve the account from the current command-scoped Cloudflare approval.
  *
- * If the manifest names an account, it must MATCH one the token can see. A
- * mismatch is a hard stop: it usually means the wrong token, and provisioning
- * a brain into someone else's account is the one error with no clean undo.
+ * If the manifest names an account, it must MATCH one this approval can see. A
+ * mismatch is a hard stop: it usually means the wrong account was authorized,
+ * and provisioning a brain into someone else's account has no clean undo.
  */
 async function resolveAccount(m) {
   const accounts = await cf("/accounts");
-  if (!accounts.length) die("this token cannot see any Cloudflare account.");
+  if (!accounts.length) die("this Cloudflare approval cannot see any account.");
 
   const declared = m.infrastructure?.cloudflare?.account_id;
   if (declared && !declared.startsWith("REQUIRED")) {
     const match = accounts.find((a) => a.id === declared);
     if (!match) {
       die(
-        `the manifest declares account ${declared}, but this token can only see:\n` +
+        `the manifest declares account ${declared}, but this Cloudflare approval can only see:\n` +
           accounts.map((a) => `        ${a.id}  ${a.name}`).join("\n") +
           "\n      Refusing to provision into a different account than the manifest names."
       );
@@ -1216,7 +1345,7 @@ async function resolveAccount(m) {
 
   if (accounts.length > 1) {
     die(
-      "this token can see more than one account and the manifest does not say which:\n" +
+      "this Cloudflare approval can see more than one account and the manifest does not say which:\n" +
         accounts.map((a) => `        ${a.id}  ${a.name}`).join("\n") +
         "\n      Set infrastructure.cloudflare.account_id in the manifest."
     );
@@ -1224,15 +1353,18 @@ async function resolveAccount(m) {
   return accounts[0];
 }
 
-/** Pick a fresh install's account from the hidden scoped token, never Wrangler. */
+/** Pick a fresh install's account from the exact active Cloudflare approval. */
 export async function chooseSetupAccount(prompt, options = {}) {
   const listAccounts = options.listAccounts ?? (() => cf("/accounts"));
   const accounts = await listAccounts();
   if (!Array.isArray(accounts) || accounts.some((account) =>
     !account || typeof account.id !== "string" || typeof account.name !== "string")) {
-    die("Cloudflare returned an invalid account list. Nothing was created.");
+    die(
+      "Cloudflare returned an invalid account list. No Brain or Cloudflare resources were created. " +
+        "If this used browser sign-in, its local profile may remain saved for retry."
+    );
   }
-  if (!accounts.length) die("this token cannot see any Cloudflare account.");
+  if (!accounts.length) die("this Cloudflare approval cannot see any account.");
   if (accounts.length === 1) return accounts[0];
 
   console.log(`\n  ${c.yellow("This permission pass can see several Cloudflare accounts.")}`);
@@ -1243,7 +1375,10 @@ export async function chooseSetupAccount(prompt, options = {}) {
   const chosen = accounts.find((account) => account.id === chosenId);
   if (!chosen) {
     closePrompts();
-    die("that account id is not one this permission pass can see. Nothing was created.");
+    die(
+      "that account id is not one this permission pass can see. No Brain or Cloudflare resources were created. " +
+        "If this used browser sign-in, its local profile may remain saved for retry."
+    );
   }
   return chosen;
 }
@@ -1264,7 +1399,8 @@ export function r2BucketRequested(cfg) {
 async function cmdVerify(manifestPath) {
   const { m } = loadManifest(manifestPath);
   const acct = await resolveAccount(m);
-  ok(`token valid, account "${acct.name}" (${acct.id})`);
+  const browserProfile = cloudflareAccessUsesBrowserProfile();
+  ok(`Cloudflare access confirmed for account "${acct.name}" (${acct.id})`);
 
   // R2 needs separate activation and a card on file, even for the free tier.
   // It is the most common mid-install surprise, so it is checked up front, but
@@ -1280,7 +1416,7 @@ async function cmdVerify(manifestPath) {
     ok("R2 is enabled");
   } catch (e) {
     warn(
-      "R2 is not ready (it may be disabled or outside this token's scope). If this install uses R2,\n" +
+      "R2 is not ready (it may be disabled or outside this Cloudflare access scope). If this install uses R2,\n" +
         "        the owner can enable it in the dashboard; Cloudflare asks for a payment method even on the free tier.\n" +
         `        detail: ${e.message.slice(0, 120)}`
     );
@@ -1292,7 +1428,7 @@ async function cmdVerify(manifestPath) {
   } catch (e) {
     die(
       "D1 is not reachable, so the required database cannot be verified." + "\n" +
-        "      Confirm that the token has D1 access, then re-run `brain verify`." + "\n" +
+        `      Confirm that the ${browserProfile ? "browser sign-in" : "API token"} has D1 access, then re-run \`brain verify\`.` + "\n" +
         `      detail: ${e.message.slice(0, 120)}`
     );
   }
@@ -1313,24 +1449,26 @@ async function cmdVerify(manifestPath) {
     await cf(`/accounts/${acct.id}/vectorize/v2/indexes`);
     ok("Vectorize is reachable");
   } catch (e) {
-    warn(
-      "the API token cannot reach Vectorize. The standard token needs Vectorize: Edit." + "\n" +
-        "      Provision can use wrangler login as a temporary fallback." + "\n" +
+    warn(browserProfile
+      ? "the Cloudflare browser sign-in cannot reach Vectorize. Refresh the browser approval for this Brain.\n" +
         VECTORIZE_REMEDY + "\n" +
         `      detail: ${e.message.slice(0, 120)}`
-    );
+      : "the Cloudflare API token cannot reach Vectorize. The recovery token needs Vectorize: Edit.\n" +
+        "      Provision can use browser sign-in as a temporary fallback.\n" +
+        VECTORIZE_REMEDY + "\n" +
+        `      detail: ${e.message.slice(0, 120)}`);
   }
   return acct;
 }
 
 
 /**
- * Vectorize through the API token, with wrangler as a compatibility fallback.
+ * Vectorize through the selected Cloudflare control credential.
  *
  * The earlier tokens failed because they lacked Vectorize Edit. A user-owned,
  * account-scoped token with that permission created the index and all metadata
- * indexes through the API on 2026-08-23. Wrangler's OAuth session remains a
- * fallback so an older install can still be repaired without deleting resources.
+ * indexes through the API on 2026-08-23. That remains a bounded automation and
+ * recovery lane. A named Wrangler browser session is the normal owner path.
  *
  * CLOUDFLARE_API_TOKEN must be cleared for the child process. Wrangler prefers it
  * when set and will silently authenticate as the wrong identity.
@@ -1668,15 +1806,15 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
     try {
       list = await cf(`/accounts/${acct.id}/vectorize/v2/indexes`);
     } catch (e) {
-      // An older token may lack Vectorize Edit. Fall through to wrangler rather
-      // than stopping an install that can still complete.
+      // A bounded recovery token may lack Vectorize Edit. Fall through to the
+      // named browser session rather than stopping an install that can complete.
       viaApi = false;
-      info("the API token cannot reach Vectorize, trying wrangler's own session");
+      info("the recovery credential cannot reach Vectorize, trying this Brain's named browser session");
       if (!wranglerAvailable(acct.id, cfg.auth_profile || null)) {
         die(
           `Vectorize is unreachable both ways, so the install cannot continue.\n` +
-            `  API token: ${e.message.slice(0, 100)}\n` +
-            "  wrangler:  not logged in.\n\n" +
+            `  recovery credential: ${e.message.slice(0, 100)}\n` +
+            "  named browser sign-in: not available.\n\n" +
             VECTORIZE_REMEDY + "\n  Then re-run provision."
         );
       }
@@ -2024,7 +2162,6 @@ export function bankFeedWorkerVars(m) {
     { type: "plain_text", name: "BANK_FEED_DISPLAY_NAME", text: String(m.client?.display_name || m.client?.slug || "this brain") },
     { type: "plain_text", name: "BANK_FEED_COUNTRIES", text: countries.join(",") },
     { type: "plain_text", name: "BANK_FEED_RECONCILE_MINUTES", text: String(reconcileMinutes) },
-    ...(provider === "custom" ? text("BANK_FEED_ENTITY", feed.entity_slug) : []),
   ];
 }
 
@@ -2281,6 +2418,12 @@ export const WORKER_PROVIDER_SECRET_NAMES = Object.freeze([
   "BANK_FEED_SECRET",
 ]);
 
+const HELD_BANK_FEED_SECRET_NAMES = Object.freeze([
+  "BANK_FEED_CLIENT_ID",
+  "BANK_FEED_SECRET",
+  BANK_ACCESS_WRAPPING_KEY_SECRET,
+]);
+
 export function optionalWorkerSecretNames(m) {
   // Never harvest unrelated credentials merely because they happen to be in
   // the operator's shell. A standard D1 + Workers AI install needs only its
@@ -2291,23 +2434,23 @@ export function optionalWorkerSecretNames(m) {
   const answerModel = String(
     m.retrieval?.answer_model || "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   );
-  // The bank feed's provider credentials and independent wrapping key are
-  // eligible exactly when the manifest turns the feed on. The provider pair's
-  // allowlist is what stops reconciliation deleting live access. The wrapping
-  // key stays outside deletion management and is eligible here only for a
-  // reviewed initial set or replacement.
+  // An enabled bank feed allows already-present provider credentials and its
+  // independent wrapping key to remain on the Worker. This is a preservation
+  // allowlist only: generic `brain secrets` and setup must never source or
+  // replace these values from the process environment while credential setup
+  // remains held.
   const bankFeed = m.corpora?.bank_feed?.enabled === true;
   return Object.freeze([
     ...(storage === "supabase" ? ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] : []),
     ...(m.retrieval?.rerank === true || !answerModel.startsWith("@cf/")
       ? ["ANTHROPIC_API_KEY"]
       : []),
-    ...(bankFeed ? ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET", BANK_ACCESS_WRAPPING_KEY_SECRET] : []),
+    ...(bankFeed ? HELD_BANK_FEED_SECRET_NAMES : []),
   ]);
 }
 
 async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
-  required = [], provided = [],
+  required = [],
 } = {}) {
   const path = `/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`;
   let current;
@@ -2325,13 +2468,13 @@ async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
   }
   const allowed = new Set(optional);
   const present = new Set(current.map((binding) => binding.name));
-  const available = new Set([...present, ...provided]);
-  const absent = required.filter((name) => !available.has(name));
+  const absent = required.filter((name) => !present.has(name));
   if (absent.length) {
     die(
       `the enabled bank feed is missing required Worker secrets: ${absent.join(", ")}. ` +
-        "Supply them through the reviewed credential ceremony, then rerun `brain secrets`. " +
-        "No Worker secret was changed.",
+        "Bank credential setup remains held and is not available through `brain secrets`, " +
+        "`brain setup`, or the generic technician workflow. Complete it only through a " +
+        "separately reviewed owner-custody process. No local or Worker secret was changed.",
     );
   }
   const unwanted = WORKER_PROVIDER_SECRET_NAMES.filter((name) =>
@@ -2376,6 +2519,21 @@ export async function cmdSecrets(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
 
+  // Bank application values have no reviewed generic entry path in this
+  // release. Refuse their mere presence before durable-key planning,
+  // .gitignore changes, account lookup, inventory cleanup, or any Worker write.
+  // Do not validate or echo a value: its presence is the unsafe condition.
+  const ambientBankSecrets = HELD_BANK_FEED_SECRET_NAMES.filter((name) =>
+    Object.hasOwn(process.env, name));
+  if (ambientBankSecrets.length) {
+    die(
+      `${ambientBankSecrets.join(", ")} ${ambientBankSecrets.length === 1 ? "is" : "are"} not accepted ` +
+        "from environment variables or by `brain secrets`. Bank credential setup remains held " +
+        "and requires a separately reviewed owner-custody process. Unset the bank variable(s) " +
+        "and rerun. No local or Worker secret was changed.",
+    );
+  }
+
   // What a D1 install actually reads. The worker embeds through the AI binding,
   // so there is no database credential to set: the brain's storage is D1 and
   // Vectorize inside the client's own account, reachable only by their worker.
@@ -2384,21 +2542,6 @@ export async function cmdSecrets(manifestPath, options = {}) {
   // it is set, any UI proxy has to carry the admin key, which can drain.
   const needed = ["ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY"];
   const optional = optionalWorkerSecretNames(m);
-  if (optional.includes(BANK_ACCESS_WRAPPING_KEY_SECRET) && process.env[BANK_ACCESS_WRAPPING_KEY_SECRET]) {
-    try {
-      validateBankAccessWrappingKey(process.env[BANK_ACCESS_WRAPPING_KEY_SECRET]);
-    } catch (error) {
-      die(`${String(error?.message || error)}. No Worker secret was changed.`);
-    }
-  }
-  const suppliedBankClient = Boolean(process.env.BANK_FEED_CLIENT_ID);
-  const suppliedBankSecret = Boolean(process.env.BANK_FEED_SECRET);
-  if (m.corpora?.bank_feed?.enabled === true && suppliedBankClient !== suppliedBankSecret) {
-    die(
-      "BANK_FEED_CLIENT_ID and BANK_FEED_SECRET must be supplied together so a provider credential " +
-        "cannot be replaced halfway. No Worker secret was changed.",
-    );
-  }
   const explicitAdminKey = Object.hasOwn(options, "explicitAdminKey")
     ? options.explicitAdminKey
     : (process.env.ADMIN_KEY || null);
@@ -2442,7 +2585,8 @@ export async function cmdSecrets(manifestPath, options = {}) {
 
   const provided = [
     ...(adminKey ? needed : []),
-    ...optional.filter((name) => process.env[name]),
+    ...optional.filter((name) =>
+      !HELD_BANK_FEED_SECRET_NAMES.includes(name) && process.env[name]),
   ];
   const missing = adminKey ? [] : needed;
 
@@ -2457,6 +2601,16 @@ export async function cmdSecrets(manifestPath, options = {}) {
   }
 
   const acct = await resolveAccount(m);
+
+  // For an approved feed that is already configured, routine core-key repair
+  // may preserve the three bank bindings but may never manufacture them. Read
+  // the exact Worker inventory before any local or remote mutation. A partial
+  // bank setup therefore stops before ADMIN_KEY or its derived keys rotate.
+  await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
+    required: m.corpora?.bank_feed?.enabled === true
+      ? HELD_BANK_FEED_SECRET_NAMES
+      : [],
+  });
 
   // A crash between staging and replacement can leave the key module's exact
   // temporary or rollback basename behind. Put every private key basename in
@@ -2493,14 +2647,6 @@ export async function cmdSecrets(manifestPath, options = {}) {
       );
     }
   }
-
-  const suppliedOptional = optional.filter((name) => process.env[name]);
-  await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
-    required: m.corpora?.bank_feed?.enabled === true
-      ? ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET", BANK_ACCESS_WRAPPING_KEY_SECRET]
-      : [],
-    provided: suppliedOptional,
-  });
 
   for (const name of provided) {
     const value = name === "ADMIN_KEY"
@@ -2573,9 +2719,11 @@ export async function cmdSecrets(manifestPath, options = {}) {
         info("the declared Keychain item is authoritative; no adjacent .brain-admin-key copy was written");
       }
 
-      // Standalone rotation updates only registrations the owner already chose.
-      // Setup performs the full add path later. Imported unit tests stay inert
-      // unless they inject this seam, so fixtures can never touch real configs.
+      // Standalone rotation only removes retired literal keys from registrations
+      // the owner already chose. Locator-only registrations keep their current
+      // profile and enabled state exactly. Setup performs the explicit add or
+      // profile-upgrade path. Imported unit tests stay inert unless they inject
+      // this seam, so fixtures can never touch real configs.
       const reconcile = Object.hasOwn(options, "reconcileExistingAgents")
         ? options.reconcileExistingAgents
         : (IS_MAIN ? wireAgents : null);
@@ -2586,6 +2734,7 @@ export async function cmdSecrets(manifestPath, options = {}) {
             ...(options.agentOptions || {}),
             account: acct,
             existingOnly: true,
+            rotationOnly: true,
           });
         } catch {
           reconciliation = { wired: [], failures: ["agent-reconciliation"] };
@@ -2656,17 +2805,47 @@ export function healthProbeVerdict({
   attempts = 6,
 }) {
   if (ok) {
-    if (!expectVersion && !expectDrainMode) return "accept";
     let parsed = null;
     try { parsed = JSON.parse(body); } catch { /* not JSON */ }
+    const mode = parsed?.vector_drain_mode;
+    const paused = mode === "paused-for-upgrade";
+    const stateMatches = mode === "active"
+      ? parsed?.ok === true && parsed?.status === "ok" && parsed?.accepting_documents === true
+      : paused
+        ? parsed?.ok === false && parsed?.status === "paused-for-upgrade" &&
+          parsed?.accepting_documents === false
+        : false;
+    const receiptIsExact = parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      typeof parsed.version === "string" && Boolean(parsed.version.trim()) &&
+      parsed.vector_writer_protocol === "lease-v1" && stateMatches;
     const versionMatches = !expectVersion || parsed?.version === expectVersion;
-    const drainModeMatches = !expectDrainMode || (
-      parsed?.vector_writer_protocol === "lease-v1" &&
-      parsed?.vector_drain_mode === expectDrainMode
-    );
-    if (versionMatches && drainModeMatches) return "accept";
+    const drainModeMatches = !expectDrainMode || mode === expectDrainMode;
+    if (receiptIsExact && versionMatches && drainModeMatches) return "accept";
     return attempt < attempts ? "retry" : "fail";
   }
+  return attempt < attempts ? "retry" : "fail";
+}
+
+/**
+ * Bind authenticated readiness to the Worker generation and writer mode that
+ * produced it. A rolling deploy may send /health and /documents to different
+ * generations, so the public receipt alone cannot authorize readiness or the
+ * recovery advice derived from it.
+ *
+ * Returns "accept" | "retry" | "fail".
+ */
+export function documentsReceiptVerdict({
+  inventory,
+  expectVersion = null,
+  expectDrainMode = null,
+  attempt = 1,
+  attempts = 15,
+}) {
+  const versionMatches = typeof expectVersion === "string" && Boolean(expectVersion.trim()) &&
+    inventory?.version === expectVersion;
+  const drainModeMatches = ["active", "paused-for-upgrade"].includes(expectDrainMode) &&
+    inventory?.vector_drain_mode === expectDrainMode;
+  if (versionMatches && drainModeMatches) return "accept";
   return attempt < attempts ? "retry" : "fail";
 }
 
@@ -2675,8 +2854,27 @@ export function healthProbeVerdict({
  * be rebuilt from D1. Excess provider-only rows cannot: their ids no longer
  * exist in D1, so a reindex has nothing it can enumerate and delete.
  */
-function vectorCountMismatchFailure(expected, actual, { prefix = "" } = {}) {
+export function vectorCountMismatchFailure(expected, actual, {
+  prefix = "",
+  pausedForUpgrade = false,
+  updateStalled = false,
+} = {}) {
   const header = `${prefix}Vectorize holds ${actual} vector(s), but D1 requires ${expected}.`;
+  if (pausedForUpgrade) {
+    const direction = actual < expected
+      ? "Semantic search is missing vectors that D1 still requires."
+      : actual > expected
+        ? "Vectorize contains provider-only excess vectors that D1 cannot enumerate or remove; reviewed recovery must recreate and rebind a clean index."
+        : "The count receipt contradicts its mismatch reason.";
+    const next = updateStalled
+      ? "      This mismatch already stopped the paused bootstrap. Keep the Worker paused, save the read-only diagnosis, and report this update failure for reviewed repair before retrying."
+      : "      Run `brain update <manifest>` to resume its durable bootstrap. If the same mismatch returns without progress, keep the Worker paused and report that update failure for reviewed repair.";
+    return header + "\n" +
+      `      ${direction}` + "\n" +
+      "      Reindex and drain are refused while this Brain is paused for an update. Do not clear the pause or try either command by hand." + "\n" +
+      "      Read-only evidence is still available: `brain diagnose <manifest>`" + "\n" +
+      next;
+  }
   if (actual < expected) {
     return header + "\n" +
       "      Semantic search is missing vectors. Diagnose and rebuild the missing projection:" + "\n" +
@@ -2693,11 +2891,14 @@ function vectorCountMismatchFailure(expected, actual, { prefix = "" } = {}) {
     "      The count receipt contradicts its mismatch reason. Run `brain diagnose <manifest>` and keep this brain out of service.";
 }
 
-async function cmdHealth(manifestPath, {
+export async function cmdHealth(manifestPath, {
   expectVersion = null,
   expectDrainMode = null,
   durableAdminKeyOnly = false,
   reachOnly = false,
+  request = http,
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  resolveKey = resolveAdminKey,
 } = {}) {
   const { m } = loadManifest(manifestPath);
   // Cloudflare is OPTIONAL here, deliberately. This command talks to the worker
@@ -2726,9 +2927,9 @@ async function cmdHealth(manifestPath, {
   // conclusion to hand someone mid-deploy. Same lag class as secret
   // propagation, and as a deleted worker still answering 200.
   let res, body;
-  const healthAttempts = 6;
+  const healthAttempts = expectVersion || expectDrainMode ? 6 : 1;
   for (let i = 1; i <= healthAttempts; i++) {
-    res = await http(`${base}/health?cb=${i}`, {}, { timeoutMs: 20_000, what: "the health check" });
+    res = await request(`${base}/health?cb=${i}`, {}, { timeoutMs: 20_000, what: "the health check" });
     body = await res.text();
     // A 200 is NOT proof the new build is live. Cloudflare keeps serving the
     // PREVIOUS worker for a few seconds after a deploy, so breaking on the first
@@ -2759,7 +2960,7 @@ async function cmdHealth(manifestPath, {
           expectDrainMode ? `vector drain mode ${expectDrainMode}` : null,
         ].filter(Boolean).join(" and ");
         info(`/health is still answering ${live || "an unknown version"}/${liveDrainMode || "unknown drain mode"}, waiting for ${expectation}`);
-        await new Promise((r) => setTimeout(r, 5000));
+        await wait(5000);
         continue;
       }
       die(
@@ -2771,16 +2972,37 @@ async function cmdHealth(manifestPath, {
     }
     if (verdict === "retry" && (res.status === 404 || res.status >= 500)) {
       info(`${res.status} on attempt ${i}/${healthAttempts}, waiting for the route to propagate`);
-      await new Promise((r) => setTimeout(r, 5000));
+      await wait(5000);
       continue;
     }
     break;
   }
   if (!res.ok) die(`/health returned ${res.status} after ${healthAttempts} attempts: ${body.slice(0, 200)}`);
-  ok(`/health ${res.status} ${body.slice(0, 160)}`);
-  if (reachOnly) return;
+  let healthReceipt = null;
+  try { healthReceipt = JSON.parse(body); } catch { /* validated below */ }
+  const healthMode = healthReceipt?.vector_drain_mode;
+  const healthPaused = healthMode === "paused-for-upgrade";
+  const healthStateMatches = healthMode === "active"
+    ? healthReceipt?.ok === true && healthReceipt?.status === "ok" &&
+      healthReceipt?.accepting_documents === true
+    : healthPaused
+      ? healthReceipt?.ok === false && healthReceipt?.status === "paused-for-upgrade" &&
+        healthReceipt?.accepting_documents === false
+      : false;
+  if (!healthReceipt || typeof healthReceipt !== "object" || Array.isArray(healthReceipt) ||
+      typeof healthReceipt.version !== "string" || !healthReceipt.version.trim() ||
+      healthReceipt.vector_writer_protocol !== "lease-v1" || !healthStateMatches) {
+    die(
+      "the public health endpoint did not return one exact Worker version and writer state." + "\n" +
+        "      Health cannot combine that response with authenticated readiness evidence."
+    );
+  }
+  info(`public /health ${res.status}; exact version and writer state received, binding it to authenticated inventory`);
+  // Public reachability is not readiness evidence on its own. Bind even a
+  // reach-only probe to the authenticated receipt so two rolling Worker
+  // generations can never be combined into one green result.
 
-  const key = resolveAdminKey(manifestPath, { ignoreEnvironment: durableAdminKeyOnly });
+  const key = resolveKey(manifestPath, { ignoreEnvironment: durableAdminKeyOnly });
   if (!key) {
     die(
       "no admin key is available, so health cannot prove the authenticated documents endpoint." + "\n" +
@@ -2796,10 +3018,29 @@ async function cmdHealth(manifestPath, {
   // after the old 16-second window, then accepted the same Keychain value. Give
   // Cloudflare up to roughly a minute before calling the value wrong.
   const attempts = 15;
+  const documentsUrl = `${base}/api/admin/brain/documents`;
+  let documentsTransportRetryAvailable = true;
+  const requestDocuments = async () => {
+    try {
+      return await request(documentsUrl, {
+        headers: { "X-Admin-Key": key },
+      }, { timeoutMs: HTTP_TIMEOUT_MS, what: "the private readiness check" });
+    } catch (error) {
+      // This GET is authenticated but read-only and idempotent, so one lost
+      // transport attempt is safe to repeat. Keep the retry outside response
+      // handling: HTTP, authentication, JSON, and receipt-contract failures
+      // must still stop on their first observed response.
+      if (!documentsTransportRetryAvailable || error?.retryable !== true) throw error;
+      documentsTransportRetryAvailable = false;
+      info("the private readiness check took longer than expected; still checking once more");
+      await wait(2_000);
+      return request(documentsUrl, {
+        headers: { "X-Admin-Key": key },
+      }, { timeoutMs: HTTP_TIMEOUT_MS, what: "the private readiness check" });
+    }
+  };
   for (let i = 1; i <= attempts; i++) {
-    const docs = await http(`${base}/api/admin/brain/documents`, {
-      headers: { "X-Admin-Key": key },
-    });
+    const docs = await requestDocuments();
     const dbody = await docs.text();
     if (docs.ok) {
       let inventory;
@@ -2816,7 +3057,59 @@ async function cmdHealth(manifestPath, {
           !Array.isArray(inventory.rows)) {
         die(
           `documents endpoint ${docs.status} returned an invalid inventory, so authenticated access was not proven.` + "\n" +
-            "      Re-run `brain health`; if this repeats, the deployed Worker and installer do not match."
+          "      Re-run `brain health`; if this repeats, the deployed Worker and installer do not match."
+        );
+      }
+      const boundVersion = expectVersion || healthReceipt.version;
+      const boundDrainMode = expectDrainMode || healthMode;
+      // Explicit update/setup checks are deploy waiters: the public endpoint
+      // can reach the new Worker one request before this authenticated route.
+      // Ordinary health remains a one-snapshot fail-closed check.
+      const receiptAttempts = (expectVersion || expectDrainMode) ? attempts : 1;
+      const missingVersion = typeof inventory.version !== "string" || !inventory.version.trim();
+      const missingMode = !["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode);
+      if ((missingVersion || missingMode) && i < receiptAttempts) {
+        info(
+          `the authenticated documents receipt cannot yet prove its ${missingVersion ? "Worker version" : "vector writer mode"}; ` +
+            "waiting for the expected Worker generation"
+        );
+        await wait(4000);
+        continue;
+      }
+      if (missingVersion) {
+        die(
+          "the authenticated documents endpoint could not prove its Worker version." + "\n" +
+            "      Health cannot bind this readiness receipt to one deployed Worker generation."
+        );
+      }
+      if (missingMode) {
+        die(
+          "the authenticated documents endpoint could not prove its vector writer mode." + "\n" +
+            "      No readiness or recovery advice is safe from an unbound receipt."
+        );
+      }
+      const receiptVerdict = documentsReceiptVerdict({
+        inventory,
+        expectVersion: boundVersion,
+        expectDrainMode: boundDrainMode,
+        attempt: i,
+        attempts: receiptAttempts,
+      });
+      if (receiptVerdict === "retry") {
+        const expectation = [
+          `version ${boundVersion}`,
+          `vector drain mode ${boundDrainMode}`,
+        ].filter(Boolean).join(" and ");
+        info(`the authenticated documents receipt has not reached ${expectation}; waiting for one Worker generation`);
+        await wait(4000);
+        continue;
+      }
+      if (receiptVerdict === "fail") {
+        die(
+          `the authenticated documents receipt did not match the public Worker's version and writer mode` +
+            `${receiptAttempts > 1 ? ` after ${receiptAttempts} attempts` : ""}.` + "\n" +
+            "      /health and /documents may be serving different Worker generations. Health cannot" + "\n" +
+            "      combine their state, so no readiness or recovery advice was accepted. Keep any update pause in place and retry this verification."
         );
       }
       const actualBackend = inventory.backend.trim().toLowerCase();
@@ -2832,16 +3125,32 @@ async function cmdHealth(manifestPath, {
       if (actualBackend !== expectedBackend) {
         die(
           "the authenticated documents endpoint is serving a different storage backend than this manifest." + "\n" +
-            "      Health cannot pass because this URL may point at an old or misbound brain."
+          "      Health cannot pass because this URL may point at an old or misbound brain."
         );
       }
+      const expectedPausedReachability = reachOnly && expectDrainMode === "paused-for-upgrade";
+      if (healthPaused && !expectedPausedReachability) {
+        die(
+          "this Brain is paused for an update and cannot accept documents." + "\n" +
+            "      Its read-only corpus remains available, but ordinary health cannot pass until" + "\n" +
+            "      `brain update <manifest>` finishes and the writer is active."
+        );
+      }
+      ok(`/health and authenticated inventory agree on ${boundVersion}/${boundDrainMode}`);
       ok(`documents endpoint ${docs.status}; authenticated inventory confirmed`);
+      if (reachOnly) return;
 
       // D1 and Vectorize cannot share a transaction. Both systems can be up
       // while semantic search is behind or stale, so the operation backlog is
       // part of health, not an implementation detail. A 200 with an error or
       // malformed backlog is a failed health check, never proof of zero work.
       if (actualBackend === "d1") {
+        // Bind mode and readiness to this one authenticated Worker response.
+        // A separate /health request may hit another generation while a deploy
+        // is propagating, which must never turn a paused readiness failure into
+        // active-only reindex or drain advice.
+        const vectorDrainMode = inventory.vector_drain_mode;
+        const pausedForUpgrade = vectorDrainMode === "paused-for-upgrade";
         const backlog = inventory.vector_backlog;
         const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
         if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
@@ -2878,16 +3187,19 @@ async function cmdHealth(manifestPath, {
           const oldest = Math.max(0, Math.floor((Date.now() - queuedAt) / 60000));
           if (oldest > 30) {
             die(
-              `${backlog.pending} vector operation(s) are stalled` +
+              `${backlog.pending} vector operation(s) are still processing` +
                 ` (${backlog.upserts} upsert, ${backlog.deletes} delete, ${backlog.submitted} accepted), oldest queued ${oldest} min ago.` + "\n" +
-                "      Older than 30 minutes means the scheduled drain is not keeping up. Upserts are" + "\n" +
-                "      keyword-only; deletes leave stale vectors competing." + "\n" +
+                "      Age alone does not prove a stall. This one snapshot cannot tell whether the" + "\n" +
+                "      queue is moving. If the pending count is falling between checks, indexing is" + "\n" +
+                "      working; leave the scheduled drain running and check again later." + "\n" +
+                "      Upserts remain keyword-only and deletes can leave stale vectors competing until it finishes." + "\n" +
                 "      Do NOT run `brain drain` to hurry it: that takes the same lease the" + "\n" +
                 "      scheduled drain holds, so the two exclude each other rather than adding up," + "\n" +
                 "      and the manual runner is the slower of the two." + "\n" +
-                "      A large backlog is cleared by `brain update`, which rebuilds in bulk." + "\n" +
-                "      If the count never moves at all, that is a stall rather than a queue:" + "\n" +
-                "      check the Worker schedule in the Cloudflare dashboard and report it."
+                "      Do not start `brain update` merely to accelerate a healthy active-mode queue;" + "\n" +
+                "      an update is a version migration that pauses corpus writes." + "\n" +
+                "      Only if repeated checks show no count movement should you inspect the Worker" + "\n" +
+                "      schedule in the Cloudflare dashboard and report the unchanged receipts."
             );
           }
           die(
@@ -2902,7 +3214,14 @@ async function cmdHealth(manifestPath, {
             die(vectorCountMismatchFailure(
               readiness.expected_vectors,
               readiness.actual_vectors,
+              { pausedForUpgrade },
             ));
+          }
+          if (pausedForUpgrade) {
+            die(
+              "Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update." + "\n" +
+                "      Reindex and drain are refused in this state. Run `brain update <manifest>` to resume the durable paused bootstrap."
+            );
           }
           die(
             "Vectorize has accepted work that is not query-visible yet." + "\n" +
@@ -2915,7 +3234,7 @@ async function cmdHealth(manifestPath, {
     }
     if (docs.status === 401 && i < attempts) {
       info(`401 on attempt ${i}/${attempts}, waiting for secret propagation`);
-      await new Promise((r) => setTimeout(r, 4000));
+      await wait(4000);
       continue;
     }
     if (docs.status === 401) {
@@ -3027,6 +3346,101 @@ export async function cmdAsk(manifestPath, options = {}) {
     console.log("");
   }
   return body;
+}
+
+/**
+ * Inventory the exact structured evidence available for a complete financial
+ * picture. This is intentionally a data-plane read: no Cloudflare API token,
+ * D1 REST call, mutation, search inference, or literal credential argument.
+ */
+export async function cmdFinancialPicture(manifestPath, options = {}) {
+  const argv = process.argv.slice(4);
+  const jsonRequested = options.flags?.json === true || manifestPath === "--json" || argv.includes("--json");
+  const jsonFailure = (errorCode, retrySafe = false) => new JsonFatal({
+    schema_version: 1,
+    operation: "financial_picture.inventory",
+    status: "error",
+    error_code: /^[a-z0-9_]+$/.test(String(errorCode || ""))
+      ? String(errorCode)
+      : "financial_picture_failed",
+    read_only: true,
+    mutation_count: 0,
+    retry_safe: retrySafe,
+  });
+  if (!manifestPath || String(manifestPath).startsWith("--")) {
+    if (jsonRequested) throw jsonFailure("invalid_arguments");
+    die("usage: brain financial-picture <manifest> [--json] [--entity <id>] [--year <YYYY>] [--sections <names>] [--provenance-baseline <prior snapshot.as_of>]");
+  }
+  let parsed;
+  try {
+    parsed = options.flags === undefined
+      ? parseFinancialPictureArgv(argv)
+      : parseFinancialPictureFlags(options.flags);
+  } catch (error) {
+    if (jsonRequested) throw jsonFailure("invalid_arguments");
+    die(String(error?.message || error));
+  }
+  let m;
+  try {
+    ({ m } = loadManifest(manifestPath));
+  } catch (error) {
+    if (parsed.json) throw jsonFailure("manifest_unavailable");
+    die(String(error?.message || error));
+  }
+  const resolveCredential = options.resolveAdminKey ?? resolveAdminKey;
+  let receipt;
+  try {
+    const savedDomain = String(m?.brain?.domain || "").trim();
+    if (!savedDomain) {
+      const error = new Error(
+        "this Brain has no saved HTTPS address. Complete the separately reviewed deploy/domain setup first.",
+      );
+      error.code = "brain_domain_required";
+      throw error;
+    }
+    let domainUrl;
+    try {
+      domainUrl = new URL(savedDomain.includes("://") ? savedDomain : `https://${savedDomain}`);
+    } catch {
+      domainUrl = null;
+    }
+    const rawAuthority = savedDomain.includes("://")
+      ? savedDomain.slice(savedDomain.indexOf("://") + 3).split(/[/?#]/, 1)[0]
+      : savedDomain.split(/[/?#]/, 1)[0];
+    const validHostname = domainUrl && domainUrl.hostname.includes(".") &&
+      !/^\d+(?:\.\d+){3}$/.test(domainUrl.hostname) &&
+      domainUrl.hostname.split(".").every((label) =>
+        /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
+    if (!validHostname || domainUrl.protocol !== "https:" || domainUrl.username ||
+        domainUrl.password || rawAuthority.includes(":") || rawAuthority.includes("@") ||
+        domainUrl.pathname !== "/" || domainUrl.search || domainUrl.hash) {
+      const error = new Error(
+        "brain.domain must be one saved HTTPS hostname with no port, path, credentials, query, or fragment.",
+      );
+      error.code = "invalid_brain_address";
+      throw error;
+    }
+    const baseUrl = domainUrl.origin;
+    receipt = await requestFinancialPicture({
+      baseUrl,
+      request: financialPictureRequestFromFlags(parsed),
+      credential: () => resolveCredential(manifestPath, { ignoreEnvironment: true }),
+      fetchImpl: options.fetchImpl ?? fetch,
+    });
+  } catch (error) {
+    if (parsed.json) {
+      const code = error?.code || "financial_picture_failed";
+      const retrySafe = [
+        "financial_picture_transport_failed", "financial_picture_unavailable",
+        "invalid_financial_picture_receipt", "response_origin_refused",
+      ].includes(code);
+      throw jsonFailure(code, retrySafe);
+    }
+    die(String(error?.message || error));
+  }
+  const write = options.write ?? ((line) => console.log(line));
+  write(parsed.json ? JSON.stringify(receipt, null, 2) : renderFinancialPicture(receipt));
+  return receipt;
 }
 
 /* ---------------------------------------------------------- migrations */
@@ -3180,6 +3594,8 @@ function addedColumnDescriptor(statement) {
     type: match[3].toUpperCase(),
     notNull: /\bNOT\s+NULL\b/i.test(tail),
     defaultValue: defaultMatch ? defaultMatch[1] : null,
+    definition: `${match[2]} ${match[3]}${tail}`,
+    hasCheckConstraint: /\bCHECK\s*\(/i.test(tail),
   };
 }
 
@@ -3190,6 +3606,118 @@ function normalizedSqlDefault(value) {
     text = text.slice(1, -1).trim();
   }
   return text;
+}
+
+function tableDefinitionClauses(createSql) {
+  const source = String(createSql || "");
+  const clauses = [];
+  let depth = 0;
+  let start = -1;
+  let quote = null;
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (quote) {
+      if (character === quote) {
+        if (quote !== "]" && next === quote) index++;
+        else quote = null;
+      }
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "[") {
+      quote = "]";
+      continue;
+    }
+    if (character === "-" && next === "-") {
+      index += 2;
+      while (index < source.length && source[index] !== "\n" && source[index] !== "\r") index++;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      index += 2;
+      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) index++;
+      if (index < source.length) index++;
+      continue;
+    }
+    if (character === "(") {
+      depth++;
+      if (depth === 1) start = index + 1;
+      continue;
+    }
+    if (character === ")") {
+      if (depth === 1 && start >= 0) {
+        clauses.push(source.slice(start, index));
+        return clauses;
+      }
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (character === "," && depth === 1 && start >= 0) {
+      clauses.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  return [];
+}
+
+function canonicalSqlTokens(fragment) {
+  const source = String(fragment || "");
+  const tokens = [];
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (/\s/.test(character)) continue;
+    if (character === "-" && next === "-") {
+      index += 2;
+      while (index < source.length && source[index] !== "\n" && source[index] !== "\r") index++;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      index += 2;
+      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) index++;
+      if (index < source.length) index++;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`" || character === "[") {
+      const closing = character === "[" ? "]" : character;
+      let quoted = character;
+      for (index++; index < source.length; index++) {
+        quoted += source[index];
+        if (source[index] !== closing) continue;
+        if (closing !== "]" && source[index + 1] === closing) {
+          quoted += source[++index];
+          continue;
+        }
+        break;
+      }
+      tokens.push(`quoted:${quoted}`);
+      continue;
+    }
+    if (/[A-Za-z0-9_$]/.test(character)) {
+      let end = index + 1;
+      while (end < source.length && /[A-Za-z0-9_$]/.test(source[end])) end++;
+      tokens.push(`word:${source.slice(index, end).toLowerCase()}`);
+      index = end - 1;
+      continue;
+    }
+    tokens.push(`symbol:${character}`);
+  }
+  return tokens;
+}
+
+function exactAddedColumnDefinition(createSql, descriptor) {
+  const expected = canonicalSqlTokens(descriptor.definition);
+  const leadingColumnToken = `word:${descriptor.column.toLowerCase()}`;
+  for (const clause of tableDefinitionClauses(createSql)) {
+    const actual = canonicalSqlTokens(clause);
+    if (actual[0] !== leadingColumnToken) continue;
+    return actual.length === expected.length && actual.every((token, index) => token === expected[index]);
+  }
+  return false;
 }
 
 /**
@@ -3221,9 +3749,19 @@ export async function runRestartSafeMigrationStatements(
       }
       const existing = inspected.results.find((row) => row?.name === descriptor.column);
       if (existing) {
-        const compatible = String(existing.type || "").toUpperCase() === descriptor.type &&
+        let compatible = String(existing.type || "").toUpperCase() === descriptor.type &&
           Number(existing.notnull || 0) === Number(descriptor.notNull) &&
           normalizedSqlDefault(existing.dflt_value) === normalizedSqlDefault(descriptor.defaultValue);
+        if (compatible && descriptor.hasCheckConstraint) {
+          const schema = await queryStatement(
+            `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${descriptor.table}'`,
+          );
+          if (!schema || !Array.isArray(schema.results) || schema.results.length !== 1 ||
+              typeof schema.results[0]?.sql !== "string") {
+            throw new Error(`migration could not inspect ${descriptor.table}.${descriptor.column} definition`);
+          }
+          compatible = exactAddedColumnDefinition(schema.results[0].sql, descriptor);
+        }
         if (!compatible) {
           throw new Error(
             `migration column ${descriptor.table}.${descriptor.column} already exists with an incompatible schema`,
@@ -3424,6 +3962,33 @@ export async function cmdMigrate(manifestPath, options = {}) {
       m.brain?.ring || "stable",
     ]
   );
+  // Migration 0041 leaves its durable signing-key row empty only while a
+  // verified recovery is building schema before importing the source row.
+  // A fresh install has no install_state row during the migration itself, so
+  // seed its independent key after the install singleton exists. This is
+  // restart-safe and never replaces an established key.
+  if (schemaVersion >= 41) {
+    await queryDatabase(
+      acct.id,
+      dbId,
+      `INSERT OR IGNORE INTO owner_financial_map_key_state (tenant_id, signing_salt)
+       VALUES ('primary', lower(hex(randomblob(32))))`,
+    );
+  }
+  // Migration 0042 uses the same recovery-safe pattern for opaque original
+  // identities: recovery imports the source key after schema creation, while
+  // a fresh install seeds one only after install_state exists.
+  if (schemaVersion >= 42) {
+    await queryDatabase(
+      acct.id,
+      dbId,
+      `INSERT INTO source_original_id_key_state (tenant_id, signing_salt)
+       SELECT 'primary', lower(hex(randomblob(32)))
+        WHERE NOT EXISTS (
+          SELECT 1 FROM source_original_id_key_state WHERE tenant_id = 'primary'
+        )`,
+    );
+  }
   if (!silent) ok(`schema at version ${schemaVersion}`);
   return { applied: pending.length, schemaVersion };
 }
@@ -3503,10 +4068,19 @@ export async function cmdCheck(manifestPath, options = {}) {
   const conflicts = report.assessed.filter((item) => item.conflict);
   const resultBase = {
     conflicts: conflicts.length,
+    categories_total: report.coverage.total,
+    categories_completed: report.coverage.completed,
+    categories_with_provisional_evidence: report.coverage.provisional,
+    categories_with_unproven_absence: report.coverage.absence_unproven,
+    categories_unchecked: report.coverage.unchecked,
+    category_checks_complete: report.coverage.complete,
     zones_checked: zoneReadiness.checked === true,
     zones_ready: zoneReadiness.checked === true ? zoneReadiness.ready : null,
   };
   if (!flags.set) return { ...resultBase, wrote: false };
+  if (!report.coverage.complete) {
+    die(renderSetWaitingMessage(report.coverage));
+  }
   if (!conflicts.length) {
     ok("nothing to confirm from the returned records.");
     return { ...resultBase, wrote: false };
@@ -4350,26 +4924,55 @@ export async function runAcceleratedBootstrap({
     throw new TypeError("the accelerated bootstrap clock is invalid");
   }
   const deadline = startedAt + duration;
-  let previous = null;
   let lastRemaining = null;
+  const wallBoundary = `${Math.ceil(duration / 3_600_000)}-hour wall-clock safety limit`;
+  const stopAtWallBoundary = () => die(
+    `the accelerated bootstrap reached its ${wallBoundary} with ${lastRemaining ?? "an unknown number of"} aggregate row(s) remaining.\n` +
+      "      Completed batches are durable. Re-run `brain update <manifest>` to resume; the Worker remains paused.",
+  );
+  const assertWithinWallBoundary = () => {
+    const wallTime = Number(now());
+    if (!Number.isFinite(wallTime) || wallTime < startedAt) {
+      throw new TypeError("the accelerated bootstrap clock is invalid");
+    }
+    if (wallTime >= deadline) stopAtWallBoundary();
+    return wallTime;
+  };
+  const observationClock = createContinuousObservationClock({
+    now,
+    startedAt,
+  });
+  const observedNow = () => observationClock.checkpoint().observedElapsedMs;
+  const observedSleep = async (milliseconds) => {
+    observedNow();
+    await sleep(milliseconds);
+    assertWithinWallBoundary();
+    observedNow();
+  };
+  let previous = null;
   let rounds = 0;
   let lastMovementAt = null;
+  let receiptObservationInterrupted = false;
   let announcedReprojection = false;
   let announcedFence = false;
   let announcedCleanup = false;
 
+  try {
   for (let round = 1; round <= roundLimit; round++) {
-    const roundNow = Number(now());
-    if (!Number.isFinite(roundNow) || roundNow < startedAt || roundNow >= deadline) break;
+    assertWithinWallBoundary();
+    observedNow();
     rounds = round;
     const response = await retryTransient(async (attempt) => {
-      const attemptNow = Number(now());
-      if (!Number.isFinite(attemptNow) || attemptNow < startedAt || attemptNow >= deadline) {
-        const error = new Error("the accelerated bootstrap safety deadline was reached");
-        error.retryable = false;
-        throw error;
+      const attemptNow = assertWithinWallBoundary();
+      observedNow();
+      let beforeError = null;
+      try {
+        await beforeRequest({ round, attempt });
+      } catch (error) {
+        beforeError = error;
       }
-      await beforeRequest({ round, attempt });
+      assertWithinWallBoundary();
+      if (beforeError) throw beforeError;
       let primaryError = null;
       try {
         const result = await request({
@@ -4380,6 +4983,7 @@ export async function runAcceleratedBootstrap({
             deadline - attemptNow,
           )),
         });
+        assertWithinWallBoundary();
         if (!result || typeof result.status !== "number" ||
             typeof result.ok !== "boolean" || typeof result.text !== "function") {
           throw new Error("the accelerated bootstrap returned an invalid HTTP response");
@@ -4392,6 +4996,7 @@ export async function runAcceleratedBootstrap({
           error.retryable = true;
           throw error;
         }
+        assertWithinWallBoundary();
         if (result.status !== 409 && isRetryableHttpStatus(result.status)) {
           const error = new Error("the accelerated bootstrap received a retryable HTTP response");
           error.retryable = true;
@@ -4404,14 +5009,20 @@ export async function runAcceleratedBootstrap({
         primaryError = error;
         throw error;
       } finally {
+        let pinError = null;
         try {
           await afterRequest({ round, attempt });
-        } catch (pinError) {
-          // A post-attempt pin failure is authoritative after a received
-          // receipt. If the transport itself failed, preserve that retryable
-          // error; the next preflight repeats the pin check before any POST.
-          if (!primaryError) throw pinError;
+        } catch (error) {
+          pinError = error;
         }
+        // The raw wall boundary is authoritative even when the request or pin
+        // check also failed. It must be checked after the awaited postflight,
+        // before a response from an expired run can be accepted.
+        assertWithinWallBoundary();
+        // A post-attempt pin failure is authoritative after a received
+        // receipt. If the transport itself failed, preserve that retryable
+        // error; the next preflight repeats the pin check before any POST.
+        if (pinError && !primaryError) throw pinError;
       }
     }, {
       // A poll that embeds a provider-sized batch can meet a 503 or a timeout
@@ -4422,24 +5033,34 @@ export async function runAcceleratedBootstrap({
       delayMs: 2_000,
       maxDelayMs: 60_000,
       shouldRetry: (error) => error?.retryable === true,
-      sleep,
-      onRetry: () => info("the accelerated bootstrap request was interrupted; retrying durable progress"),
+      sleep: observedSleep,
+      onRetry: () => {
+        // No aggregate receipt was observed. Do not reinterpret this transport
+        // gap as proof that the last receipt itself remained unchanged.
+        receiptObservationInterrupted = true;
+        info("the accelerated bootstrap request was interrupted; retrying durable progress");
+      },
     });
+    assertWithinWallBoundary();
 
     if (response.status === 409) {
       const busy = validateAcceleratedBootstrapBusyReceipt(response.body);
       if (lastRemaining !== null && busy.remaining > lastRemaining) {
         die("the accelerated bootstrap busy receipt moved progress backward. Re-run `brain update <manifest>`; the Worker remains paused.");
       }
+      // A busy receipt proves that another bounded request owns this work, but
+      // it does not observe the full aggregate state. Restart the unchanged-
+      // receipt budget when this runner next receives a comparable receipt.
+      receiptObservationInterrupted = true;
       lastRemaining = busy.remaining;
-      const remainingMs = Math.max(0, deadline - Number(now()));
+      const remainingMs = Math.max(0, deadline - assertWithinWallBoundary());
       const delayMs = Math.min(
         busy.retryAfterSeconds * 1_000,
         remainingMs,
       );
       if (delayMs <= 0) break;
       info(`accelerated bootstrap is held by another bounded request; ${busy.remaining} aggregate row(s) remain`);
-      await sleep(delayMs);
+      await observedSleep(delayMs);
       continue;
     }
     if (!response.ok) {
@@ -4463,8 +5084,11 @@ export async function runAcceleratedBootstrap({
     // within the existing deadline; give up only when it stops moving.
     // Movement is any aggregate changing; a receipt identical to the last one
     // for ACCELERATED_BOOTSTRAP_STALL_MS is the only thing that ends the wait.
-    const observedAt = Number(now());
-    if (lastMovementAt === null || bootstrapReceiptMoved(previous, receipt)) lastMovementAt = observedAt;
+    const observedAt = observedNow();
+    if (lastMovementAt === null || receiptObservationInterrupted || bootstrapReceiptMoved(previous, receipt)) {
+      lastMovementAt = observedAt;
+    }
+    receiptObservationInterrupted = false;
     const quietMs = observedAt - lastMovementAt;
     if (quietMs >= ACCELERATED_BOOTSTRAP_STALL_MS) {
       const counters = `${receipt.confirmed}/${receipt.total} confirmed, ${receipt.failed} unconfirmed, ${receipt.submitted} submitted, ${receipt.in_flight_batches} batch(es) in flight`;
@@ -4493,7 +5117,9 @@ export async function runAcceleratedBootstrap({
       // is the sticky fact that a walk ran during THIS run, and it survives the
       // close. Suppressing the message instead would be worse than the bad
       // advice: a re-run does another full poll budget, embeds nothing, and dies
-      // the same way. So this terminates too, with a remedy that is bounded.
+      // the same way. Reindex is not a bounded escape here, even with --source,
+      // because the verified update pause refuses every reindex request. Stop
+      // with the read-only evidence and keep the barrier intact for review.
       const missingAfterResidue = announcedReprojection &&
         Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
         receipt.actual_vectors < receipt.expected_vectors;
@@ -4502,17 +5128,15 @@ export async function runAcceleratedBootstrap({
         die(`${stalledFor}\n` +
           `      The bulk re-projection finished. Vectorize holds ${receipt.actual_vectors} vector(s) and D1 requires ${receipt.expected_vectors}.\n` +
           `      Those ${short} vector(s) were not in the queue this walk re-embedded, so re-running the update cannot add them.\n` +
-          "      Do NOT run `brain reindex <manifest> --yes`. Without --source it queues nothing, arms a rebuild of the\n" +
-          "      WHOLE corpus, and every chunk is embedded again on your own account.\n" +
-          "      Find which source is short, then rebuild only that one:\n" +
-          "      brain diagnose <manifest>\n" +
-          "      brain reindex <manifest> --source <name> --yes\n" +
-          "      The Worker remains paused.");
+          "      Whole-corpus reindex would repay for every chunk, and source-scoped reindex is also refused while this pause holds.\n" +
+          "      Keep the Worker paused. Run `brain diagnose <manifest>` for read-only evidence and report this update failure for reviewed repair.");
       }
       if (Number.isSafeInteger(receipt.expected_vectors) && Number.isSafeInteger(receipt.actual_vectors) &&
           receipt.actual_vectors !== receipt.expected_vectors) {
-        die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors)}\n` +
-          "      Re-running the update cannot change this. The Worker remains paused.");
+        die(`${stalledFor}\n      ${vectorCountMismatchFailure(receipt.expected_vectors, receipt.actual_vectors, {
+          pausedForUpgrade: true,
+          updateStalled: true,
+        })}`);
       }
       die(`${stalledFor} Re-run \`brain update <manifest>\`; the Worker remains paused.`);
     }
@@ -4522,8 +5146,9 @@ export async function runAcceleratedBootstrap({
     // then recommend a rebuild instead of the remedy.
     if (receipt.blocked_on === "quarantine") {
       die(`the vector outbox holds ${receipt.blocked_rows} quarantined row(s) that the paused drain cannot project, so this update cannot finish the vector projection.\n` +
-        "      Release them with POST /api/admin/brain/vector-retry {\"confirm\":true} (admin key), then re-run `brain update <manifest>`.\n" +
-        "      If the index rejects them again, the documents they belong to must be forgotten (`brain forget <manifest>`) before the projection can verify.\n" +
+        "      First ask the technician to preview POST /api/admin/brain/vector-retry {\"confirm\":false}. This read-only receipt names how many rows would be released.\n" +
+        "      Only after the owner reviews that count should the technician repeat the request with {\"confirm\":true}, then re-run `brain update <manifest>`.\n" +
+        "      If the index rejects them again, keep the Worker paused and report this update failure for reviewed repair.\n" +
         "      The Worker remains paused.");
     }
     if (receipt.blocked_on === "fence" && !announcedFence) {
@@ -4545,10 +5170,10 @@ export async function runAcceleratedBootstrap({
       previous = receipt;
       lastRemaining = receipt.remaining;
       onProgress(receipt);
-      const remainingMs = Math.max(0, deadline - Number(now()));
+      const remainingMs = Math.max(0, deadline - assertWithinWallBoundary());
       const delayMs = Math.min(ACCELERATED_BOOTSTRAP_RETRY_WAIT_MS, remainingMs);
       if (delayMs <= 0) break;
-      await sleep(delayMs);
+      await observedSleep(delayMs);
       continue;
     }
     previous = receipt;
@@ -4565,6 +5190,7 @@ export async function runAcceleratedBootstrap({
     info(`${receipt.queued + receipt.submitted} vector operation(s) pending; ${receipt.actual_vectors}/${receipt.expected_vectors} vector(s) query-visible`);
     info(`batch ledger: ${receipt.confirmed}/${receipt.total} legacy vector(s) confirmed; ${receipt.remaining} remain`);
     if (receipt.complete) {
+      assertWithinWallBoundary();
       return validateAcceleratedBootstrapCompletion(Object.freeze({
         epoch: receipt.epoch,
         total: receipt.total,
@@ -4578,20 +5204,21 @@ export async function runAcceleratedBootstrap({
     if (receipt.phase === "waiting" || receipt.phase === "legacy_drain") {
       const delayMs = Math.min(
         ACCELERATED_BOOTSTRAP_POLL_MS,
-        Math.max(0, deadline - Number(now())),
+        Math.max(0, deadline - assertWithinWallBoundary()),
       );
       if (delayMs <= 0) break;
-      await sleep(delayMs);
+      await observedSleep(delayMs);
     }
   }
 
-  const boundary = Number(now()) >= deadline
-    ? `${Math.ceil(duration / 3_600_000)}-hour wall-clock safety limit`
-    : `${roundLimit}-round safety limit`;
+  assertWithinWallBoundary();
   die(
-    `the accelerated bootstrap reached its ${boundary} with ${lastRemaining ?? "an unknown number of"} aggregate row(s) remaining.\n` +
+    `the accelerated bootstrap reached its ${roundLimit}-round safety limit with ${lastRemaining ?? "an unknown number of"} aggregate row(s) remaining.\n` +
       "      Completed batches are durable. Re-run `brain update <manifest>` to resume; the Worker remains paused.",
   );
+  } finally {
+    observationClock.stop();
+  }
 }
 
 /** Run the aggregate-only bootstrap endpoint through the manifest's durable admin key. */
@@ -4783,12 +5410,11 @@ export async function cmdUpgrade(manifestPath, options = {}) {
 
     info(`upgrading ${fromVersion} -> ${toVersion}`);
     let stage = "migration";
-    // True between the paused deployment and the active one. If the run dies in
-    // that window the install stays paused, which is correct (a partially
-    // migrated corpus must not meet live writers) but invisible: seven write
-    // paths including ingest return 503 and nothing says so. One field install
-    // sat like that for eight days and silently accepted no documents.
-    let corpusPausedByThisRun = false;
+    // True from verified paused deployment until active mode is itself verified.
+    // Uploading the active Worker is not enough: during propagation the paused
+    // generation can still answer. If the run dies in that window the install
+    // may stay paused, which is correct but must be explicit to the operator.
+    let corpusPauseMayStillBeServing = false;
     const runStage = async (name, action) => {
       stage = name;
       const context = await assertStageContext(name);
@@ -4814,7 +5440,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           persistDomain: false,
           pauseVectorDrainForUpgrade: true,
         }));
-        corpusPausedByThisRun = true;
+        corpusPauseMayStillBeServing = true;
         await runStage("paused vector-drain health verification", () =>
           verifyHealth(executionPin.target, {
             expectVersion: toVersion,
@@ -4874,7 +5500,6 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           persistDomain: false,
           pauseVectorDrainForUpgrade: false,
         }));
-        corpusPausedByThisRun = false;
         // Cloudflare can keep routing this client to the paused compatibility
         // deployment for a few seconds after the active upload succeeds. Prove
         // the exact active mode is serving before the first corpus mutation;
@@ -4885,6 +5510,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             expectDrainMode: "active",
             reachOnly: true,
           }));
+        corpusPauseMayStillBeServing = false;
       } else {
         await runStage("migration", () => migrate(executionPin.target));
         await runStage("deployment", () => deploy(executionPin.target, { persistDomain: false }));
@@ -4942,14 +5568,23 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       await runStage("verified history commit", () => logRun("verified", null, { required: true }));
     } catch (error) {
       await logRun("failed", `stage:${stage}`);
+      const projectionRecovery = usesD1VectorOutbox
+        ? corpusPauseMayStillBeServing
+          ? "      A D1 restore does not restore Vectorize. Reviewed restore recovery must recreate/rebind\n" +
+            "      a clean index and rebuild it through the verified update path. Reindex and drain are\n" +
+            "      refused while the paused generation may still be serving.\n"
+          : "      A D1 restore does not restore Vectorize. If restore is reviewed and approved, its\n" +
+            "      semantic projection must also be rebuilt and verified before active use. This failure\n" +
+            "      does not claim that reindex or drain are blocked by an update pause.\n"
+        : "      This install does not use the D1 Vectorize outbox cutover, so no paused reindex or drain\n" +
+          "      restriction is being claimed for this failure. Review this backend's restore impact.\n";
       die(
         `update stopped during ${stage}: ${error.message}\n` +
           `      D1 recovery bookmark: ${bookmark}\n` +
-          "      Do not restore it as the first response. A D1 restore discards newer writes and\n" +
-          "      does not restore Vectorize. A restore requires reviewed clean-index recreation/rebind\n" +
-          "      before reindex because provider-only excess vectors cannot be enumerated from D1.\n" +
+          "      Do not restore it as the first response. A D1 restore discards newer writes.\n" +
+          projectionRecovery +
           "      Safe default: fix the reported issue and run brain update again." +
-          (corpusPausedByThisRun
+          (corpusPauseMayStillBeServing
             ? "\n\n" +
               "      THIS BRAIN CANNOT ACCEPT DOCUMENTS RIGHT NOW.\n" +
               "      The update paused its corpus writes before changing the schema and did not\n" +
@@ -4982,7 +5617,7 @@ function rollbackLocalPreflight(manifestPath, bookmarkArg) {
 function printRollbackPreview({ bookmark, databaseId }) {
   warn("rollback preview only: nothing was changed.");
   warn("a D1 restore is DESTRUCTIVE: everything written after this bookmark would be lost.");
-  warn("this restores D1 only. It does not restore Vectorize; provider-only excess vectors can require supervised index recreation before reindex.");
+  warn("this restores D1 only. It does not restore Vectorize; provider-only excess vectors require supervised clean-index recovery, then `brain update <manifest>` rebuilds and proves the projection before active-only reindex or drain.");
   info(`database ${databaseId}, bookmark ${bookmark}`);
   info("After reviewing this recovery, re-run the same command with --yes to perform it.");
   return { confirmed: false, restored: false, databaseId, bookmark };
@@ -5133,7 +5768,8 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
         "D1 was restored, but the semantic projection could not be marked unverified.\n" +
           "      The compatibility Worker remains paused; do not return this brain to use.\n" +
           "      Run `brain update` to forward-migrate the restored schema. Then use supervised recovery\n" +
-          "      to recreate/rebind a clean Vectorize index and every metadata index before reindex, drain, health, and test.",
+          "      to recreate/rebind and rebuild a clean Vectorize index. Ordinary reindex and drain stay\n" +
+          "      refused until that verified update path returns the Worker to active mode.",
       );
     }
     // D1 time travel cannot enumerate Vectorize ids written after the bookmark.
@@ -5152,7 +5788,7 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
   } else {
     warn("D1 was restored, but its upgrade-history marker could not be updated. Record this recovery manually.");
   }
-  warn("the Worker remains paused. Recreate/rebind a clean Vectorize index with every metadata index under supervised recovery, then reindex, drain, health-check, and test before active use.");
+  warn("the Worker remains paused. Recreate/rebind a clean Vectorize index with every metadata index under supervised recovery, then run `brain update <manifest>` to rebuild, prove exact readiness, and return to active mode. Reindex and drain remain refused until active.");
   return {
     confirmed: true,
     restored: true,
@@ -5301,11 +5937,12 @@ export async function cmdTest(manifestPath, options = {}) {
   if (!out.passed) {
     throw new Fatal("acceptance suite FAILED");
   }
-  // The headline is qualified when a whole capability went untested, because
-  // "passed" unqualified is the sentence that reaches the client. Exit
-  // semantics are untouched: untested is not failed.
+  // The headline describes only the automated checks. Optional saved questions
+  // do not block setup or handoff, while any legacy result that skipped the
+  // whole retrieval capability remains visibly qualified.
   const verdict = acceptanceVerdict(out);
   for (const line of verdict.warnings) warn(line);
+  for (const line of verdict.notes || []) info(line);
   ok(verdict.headline);
 }
 
@@ -5319,10 +5956,11 @@ export async function cmdTest(manifestPath, options = {}) {
  * terminal, is the highest perceived-value second in the whole engagement.
  * Before that it is a system they were shown; after it, it is a thing they own.
  *
- * The config contains only a URL, display name, executable path, and absolute
- * manifest locator. brain-mcp reads the current key from the same validated
- * durable storage as every installer command, so rotation never requires a
- * credential in terminal output, shell history, argv, or an MCP config file.
+ * The config contains only a URL, display name, executable path, absolute
+ * manifest locator, and nonsecret local agent profile. brain-mcp reads the
+ * current key from the same validated durable storage as every installer
+ * command, so rotation never requires a credential in terminal output, shell
+ * history, argv, or an MCP config file.
  */
 export function mcpRegistrationDescriptor(manifest, manifestPath, {
   baseUrl,
@@ -5357,6 +5995,7 @@ export function mcpRegistrationDescriptor(manifest, manifestPath, {
       BRAIN_URL: base,
       BRAIN_NAME: name,
       BRAIN_MANIFEST: absoluteManifest,
+      BRAIN_AGENT_PROFILE: LOCAL_OWNER_AGENT_PROFILE,
     }),
   });
 }
@@ -5376,12 +6015,17 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   // already installed or an assistant that arrived afterwards.
   if (flags.apply) {
     const result = await (options.wireAgents ?? wireAgents)(m, manifestPath, options.wireOptions || {});
-    if (result.wired.length) ok(`connected: ${result.wired.join(", ")}`);
+    if (result.wired.length) {
+      ok(`connected with Owner assistant access: ${result.wired.join(", ")}`);
+      say("      It can read, add or correct information, check the connection, and review a financial map. It cannot activate that map, delete records, or change access.");
+    }
     for (const name of result.skipped) info(`${name}: nothing to do`);
     if (result.failures.length) {
       die(
         `could not connect: ${result.failures.join(", ")}.\n` +
-        "      Nothing was left half-written. Run `brain mcp-config <manifest>` without --apply\n" +
+        "      The connection was not reported ready. A prior locator-only connection was preserved\n" +
+        "      whenever that could be verified safely; a retired literal-key entry is never restored.\n" +
+        "      Run `brain mcp-config <manifest>` without --apply\n" +
         "      to see the exact commands and run them yourself."
       );
     }
@@ -5431,6 +6075,13 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
 
   console.log(`\n${c.bold(`Connect ${owner}'s brain to your AI tools`)}\n`);
   console.log(`Your brain lives at ${c.bold(base)}\n`);
+  console.log(
+    "These local connections use Owner assistant access. They can read, add or correct\n" +
+      "information from your conversation, check the connection, and review a financial map.\n" +
+      "They cannot activate that map, delete records, or change who has access. You remain\n" +
+      "the administrator; those higher-risk\n" +
+      "changes stay in explicit owner controls.\n"
+  );
 
   console.log(`${c.bold("Claude Code")}: run this once, then it works in every folder:\n`);
   console.log(
@@ -5480,8 +6131,10 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
       "  Claude: Settings -> Connectors -> Add custom connector -> paste the URL.\n" +
       "  ChatGPT: Settings -> Connectors (or Apps & Connectors) -> Create -> paste the URL.\n" +
       "  Either way the browser opens this brain's own approval page; the owner\n" +
-      "  approves with their passkey. Connectors are read-only and die with\n" +
-      "  Sign out everywhere.\n"
+      "  approves with their passkey. Remote connectors start as Librarian, which is\n" +
+      "  read-only. A connector gets write access only by explicitly requesting the\n" +
+      "  Structured contributor profile and showing that permission for approval.\n" +
+      "  Every connector is revoked by Sign out everywhere.\n"
   );
 
   console.log(
@@ -5502,6 +6155,766 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   }
   console.log("");
 
+}
+
+/* ------------------------------------------------ assistant-repair */
+
+function localConfigFingerprint(snapshot) {
+  const hash = createHash("sha256")
+    .update(snapshot.path)
+    .update(snapshot.exists ? "\0present\0" : "\0absent\0");
+  if (snapshot.exists) {
+    hash.update(snapshot.bytes);
+    hash.update(`\0${snapshot.stat.dev}:${snapshot.stat.ino}:${snapshot.stat.uid}:${snapshot.stat.gid}:${snapshot.stat.mode}:${snapshot.stat.size}`);
+  }
+  return hash.digest("hex");
+}
+
+function sameConfigDirectory(left, right) {
+  return Boolean(left && right) && left.isDirectory() && right.isDirectory() &&
+    !left.isSymbolicLink() && !right.isSymbolicLink() &&
+    left.dev === right.dev && left.ino === right.ino && left.uid === right.uid &&
+    left.gid === right.gid && left.mode === right.mode;
+}
+
+function captureAgentConfigDirectory(path, { allowAbsent = false } = {}) {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink() ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+      throw new Error("unsafe local assistant configuration directory");
+    }
+    return Object.freeze({ path, exists: true, stat, parentPath: null, parentStat: null });
+  } catch (error) {
+    if (!allowAbsent || error?.code !== "ENOENT") throw error;
+    const parentPath = dirname(path);
+    const parentStat = lstatSync(parentPath);
+    if (!parentStat.isDirectory() || parentStat.isSymbolicLink() ||
+        (typeof process.getuid === "function" && parentStat.uid !== process.getuid())) {
+      throw new Error("unsafe parent for local assistant configuration directory");
+    }
+    return Object.freeze({ path, exists: false, stat: null, parentPath, parentStat });
+  }
+}
+
+function localConfigDirectoryFingerprint(snapshot) {
+  const hash = createHash("sha256")
+    .update(snapshot.path)
+    .update(snapshot.exists ? "\0present\0" : "\0absent\0");
+  const stat = snapshot.exists ? snapshot.stat : snapshot.parentStat;
+  hash.update(`${stat.dev}:${stat.ino}:${stat.uid}:${stat.gid}:${stat.mode}`);
+  return hash.digest("hex");
+}
+
+function localSkillRepairItem(observations) {
+  const destinations = [];
+  const writeSet = [];
+  const named = new Set();
+  for (const item of observations) {
+    if (item.will_change) {
+      for (const directory of item.directories || []) {
+        if (directory.exists || named.has(directory.path)) continue;
+        const change = {
+          path: directory.path,
+          action: "create private technician skill directory",
+        };
+        destinations.push(change);
+        writeSet.push(change);
+        named.add(directory.path);
+      }
+    }
+    const file = {
+      path: item.path,
+      action: item.status === "missing"
+        ? "install reviewed skill"
+        : item.status === "installer_owned_outdated"
+          ? "update installer-owned skill"
+          : item.status === "current"
+            ? "already current"
+            : item.status === "custom"
+              ? "preserve customized skill"
+              : "blocked unsafe destination",
+    };
+    destinations.push(file);
+    if (item.will_change) writeSet.push(file);
+  }
+  const unsafe = observations.some((item) => item.status === "unsafe");
+  const custom = observations.some((item) => item.status === "custom");
+  const status = unsafe
+    ? "blocked"
+    : writeSet.length
+      ? "repairable"
+      : custom
+        ? "preserved"
+        : "ready";
+  return {
+    scope: "technician-skill",
+    status,
+    detail: unsafe
+      ? "A skill destination is not a safe regular owner file. It will not be changed."
+      : writeSet.length
+        ? `${writeSet.length} approved local path change(s) would install this release's reviewed guide.`
+        : custom
+          ? "Customized skill content is intentionally preserved. No skill file would change."
+          : "Both reviewed skill copies already match this release exactly.",
+    destinations,
+    write_set: writeSet,
+    rollback: "Each changed skill file is read back exactly. If this scope fails, completed writes are restored to their previewed bytes or removed when they were newly created.",
+    verification: "Read the complete installed file and require an exact match to this release's reviewed technician skill.",
+    state_fingerprint: observations.map((item) =>
+      `${item.root}:${item.path}:${item.status}:${item.state_fingerprint}:${item.desired_fingerprint}`).join("\n"),
+    observations,
+  };
+}
+
+/**
+ * Optimize preview must not execute an assistant merely to discover it. Some
+ * clients write caches and lock files even for `--version`, so presence is
+ * established only from an already configured home or executable metadata.
+ */
+function commandIsPresentOnPath(command, environment = process.env, options = {}) {
+  const platformName = options.platformName ?? process.platform;
+  const pathValue = String(environment?.PATH || environment?.Path || "");
+  const separator = platformName === "win32" ? ";" : delimiter;
+  const extensions = platformName === "win32"
+    ? String(environment?.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+        .split(";").filter(Boolean).map((value) => value.toLowerCase())
+    : [""];
+  for (const rawDirectory of pathValue.split(separator)) {
+    const directory = rawDirectory.trim().replace(/^"|"$/g, "");
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = resolve(directory, platformName === "win32" ? `${command}${extension}` : command);
+      try {
+        const stat = (options.statImpl ?? statSync)(candidate);
+        if (stat.isFile() && (platformName === "win32" || (stat.mode & 0o111) !== 0)) return true;
+      } catch { /* keep looking without opening or executing the client */ }
+    }
+  }
+  return false;
+}
+
+function localAssistantClientIsPresent(scope, environment, options = {}) {
+  const configPath = scope === "codex-mcp"
+    ? codexUserConfigPath(environment, options.codexConfigPath)
+    : claudeUserConfigPath(environment, options.claudeConfigPath);
+  let configured = false;
+  try {
+    const stat = (options.lstatImpl ?? lstatSync)(configPath);
+    configured = stat.isFile() && !stat.isSymbolicLink() &&
+      (typeof process.getuid !== "function" || stat.uid === process.getuid());
+  } catch { /* a missing exact config is not presence */ }
+  return configured || commandIsPresentOnPath(
+    scope === "codex-mcp" ? "codex" : "claude",
+    environment,
+    options,
+  );
+}
+
+function localMcpRepairItem(scope, desired, options = {}) {
+  const isClaude = scope === "claude-code-mcp";
+  const label = isClaude ? "Claude Code" : "Codex";
+  const setting = isClaude ? `mcpServers.${desired.name}` : `mcp_servers.${desired.name}`;
+  const configOptions = {
+    environment: options.environment ?? process.env,
+    claudeConfigPath: options.claudeConfigPath,
+    codexConfigPath: options.codexConfigPath,
+  };
+  const installed = options.installed?.[scope] ??
+    localAssistantClientIsPresent(scope, configOptions.environment, options);
+  const destination = isClaude
+    ? claudeUserConfigPath(configOptions.environment, configOptions.claudeConfigPath)
+    : codexUserConfigPath(configOptions.environment, configOptions.codexConfigPath);
+  if (!installed) {
+    return {
+      scope,
+      status: "not_installed",
+      detail: `${label} is not installed on this computer, so its connection stays outside the write set.`,
+      destinations: [{ path: destination, setting, action: "not applicable" }],
+      write_set: [],
+      rollback: "No configuration is opened or changed when this assistant is not installed.",
+      verification: `Install ${label} first, then run a new read-only preview if the owner wants this connection.`,
+      protocol_discovery_verified: false,
+      state_fingerprint: "assistant-not-installed",
+    };
+  }
+
+  let before;
+  let snapshot;
+  let directorySnapshot;
+  try {
+    before = isClaude
+      ? readClaudeRegistration(desired, configOptions)
+      : readCodexRegistration(desired, configOptions);
+    snapshot = captureAgentConfigFile(before.path, { allowAbsent: true });
+    directorySnapshot = captureAgentConfigDirectory(dirname(before.path), { allowAbsent: true });
+  } catch {
+    return {
+      scope,
+      status: "blocked",
+      detail: `${label}'s local configuration could not be inspected safely. It will not be changed.`,
+      destinations: [{ path: destination, setting, action: "blocked unsafe configuration" }],
+      write_set: [],
+      rollback: "No write is attempted when the existing configuration cannot be read safely.",
+      verification: "Resolve the local configuration safety issue, then generate a new preview.",
+      protocol_discovery_verified: false,
+      state_fingerprint: "unsafe-configuration",
+    };
+  }
+
+  const stateFingerprint = `${localConfigFingerprint(snapshot)}:${localConfigDirectoryFingerprint(directorySnapshot)}`;
+  const actual = normalizedRegistration(before.entry, desired.name);
+  if (actual?.enabled === false) {
+    return {
+      scope,
+      status: "preserved",
+      detail: `${label}'s connection is disabled. This narrow repair preserves that choice.`,
+      destinations: [{ path: before.path, setting, action: "preserve disabled entry" }],
+      write_set: [],
+      rollback: "No write is made to a disabled entry.",
+      verification: "The disabled entry remains byte-for-byte outside this repair's write set.",
+      protocol_discovery_verified: false,
+      state_fingerprint: stateFingerprint,
+    };
+  }
+  if (before.entry && !mcpRegistrationIsExact(before.entry, desired) &&
+      !mcpRegistrationIsInstallerOwned(before.entry, desired)) {
+    return {
+      scope,
+      status: "preserved",
+      detail: `${label}'s connection is customized or belongs to something else. It will not be replaced.`,
+      destinations: [{ path: before.path, setting, action: "preserve customized entry" }],
+      write_set: [],
+      rollback: "No write is made to a customized or unrelated entry.",
+      verification: "The customized entry remains byte-for-byte outside this repair's write set.",
+      protocol_discovery_verified: false,
+      state_fingerprint: stateFingerprint,
+    };
+  }
+
+  const runtimeReady = (options.verifyRuntime ?? options.verifyMcpRuntime ?? verifyMcpRuntime)(desired, {
+    environment: configOptions.environment,
+    ...(options.runtimeOptions || {}),
+  });
+  if (!runtimeReady) {
+    return {
+      scope,
+      status: "blocked",
+      detail: `The packaged Owner assistant runtime did not initialize with exactly brain_think, brain_search, brain_remember, brain_health, and brain_financial_map. No ${label} setting will change.`,
+      destinations: [{ path: before.path, setting, action: "blocked runtime mismatch" }],
+      write_set: [],
+      rollback: "No write is attempted unless the packaged runtime passes first.",
+      verification: "Require protocol initialization and the exact five-tool Owner assistant list before a new preview can be approved.",
+      protocol_discovery_verified: false,
+      state_fingerprint: stateFingerprint,
+    };
+  }
+
+  if (before.entry && mcpRegistrationIsExact(before.entry, desired)) {
+    return {
+      scope,
+      status: "ready",
+      detail: `${label}'s Owner assistant entry and packaged five-tool runtime are already exact.`,
+      destinations: [{ path: before.path, setting, action: "already current" }],
+      write_set: [],
+      rollback: "No write is needed.",
+      verification: "The exact locator, owner-assistant profile, protocol initialization, and five-tool list passed.",
+      protocol_discovery_verified: true,
+      state_fingerprint: stateFingerprint,
+    };
+  }
+
+  const action = before.entry ? "update installer-owned entry" : "add Owner assistant entry";
+  const directoryChange = directorySnapshot.exists ? [] : [{
+    path: directorySnapshot.path,
+    action: "create private assistant config directory",
+  }];
+  const destinations = [
+    ...directoryChange,
+    { path: before.path, setting, action },
+  ];
+  return {
+    scope,
+    status: "repairable",
+    detail: `${label}'s entry is ${before.entry ? "an older installer-owned locator" : "missing"}. Only this named setting would change.`,
+    destinations,
+    write_set: destinations,
+    rollback: "The reconciler snapshots a safe prior locator or absence, changes only this named entry, and restores it if exact readback fails.",
+    verification: "Require the exact locator, owner-assistant profile, protocol initialization, and exactly brain_think, brain_search, brain_remember, brain_health, and brain_financial_map.",
+    protocol_discovery_verified: true,
+    state_fingerprint: stateFingerprint,
+  };
+}
+
+function blockedMcpRepairItem(scope, manifest, options = {}) {
+  const isClaude = scope === "claude-code-mcp";
+  const environment = options.environment ?? process.env;
+  const path = isClaude
+    ? claudeUserConfigPath(environment, options.claudeConfigPath)
+    : codexUserConfigPath(environment, options.codexConfigPath);
+  const name = manifest?.client?.slug || "brain";
+  return {
+    scope,
+    status: "blocked",
+    detail: "The manifest has no permanent brain.domain, so a secret-free exact connection cannot be previewed. No setting will change.",
+    destinations: [{
+      path,
+      setting: isClaude ? `mcpServers.${name}` : `mcp_servers.${name}`,
+      action: "blocked missing permanent Brain URL",
+    }],
+    write_set: [],
+    rollback: "No write is attempted without an exact preview.",
+    verification: "Add or recover the permanent Brain hostname through its separately reviewed path, then create a new preview.",
+    protocol_discovery_verified: false,
+    state_fingerprint: "missing-permanent-brain-url",
+  };
+}
+
+function captureMcpBundleRollback(scope, desired, options = {}, expectedStateFingerprint = null) {
+  const isClaude = scope === "claude-code-mcp";
+  const configOptions = {
+    environment: options.environment ?? process.env,
+    claudeConfigPath: options.claudeConfigPath,
+    codexConfigPath: options.codexConfigPath,
+  };
+  const before = isClaude
+    ? readClaudeRegistration(desired, configOptions)
+    : readCodexRegistration(desired, configOptions);
+  if (before.entry && (!mcpRegistrationIsInstallerOwned(before.entry, desired) ||
+      mcpRegistrationIsExact(before.entry, desired))) {
+    throw new Error(`${scope} no longer matches its previewed repairable state`);
+  }
+  const snapshot = safeLocatorMigrationSnapshot(
+    before,
+    desired,
+    { ...configOptions, rotationOnly: false },
+    isClaude ? "claude-json" : "codex-toml",
+  );
+  if (!snapshot) throw new Error(`${scope} could not be snapshotted safely`);
+  const directorySnapshot = captureAgentConfigDirectory(dirname(snapshot.path), { allowAbsent: true });
+  const stateFingerprint = `${localConfigFingerprint(snapshot)}:${localConfigDirectoryFingerprint(directorySnapshot)}`;
+  if (typeof expectedStateFingerprint !== "string" || stateFingerprint !== expectedStateFingerprint) {
+    throw new Error(`${scope} changed after its approved preview`);
+  }
+  return { scope, desired, configOptions, snapshot, directorySnapshot, createdDirectoryStat: null };
+}
+
+function rollbackMcpBundleRepair(prepared) {
+  const { scope, desired, configOptions, snapshot } = prepared;
+  const isClaude = scope === "claude-code-mcp";
+  let current;
+  let configRestored = false;
+  try {
+    current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+    if (sameCapturedConfigState(snapshot, current)) {
+      configRestored = true;
+    } else {
+      const registration = isClaude
+        ? readClaudeRegistration(desired, configOptions)
+        : readCodexRegistration(desired, configOptions);
+      const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+      if (!sameCapturedConfigState(current, confirmed) ||
+          !mcpRegistrationIsExact(registration.entry, desired)) {
+        return false;
+      }
+      configRestored = restoreAgentConfigFile(snapshot, confirmed);
+    }
+  } catch {
+    return false;
+  }
+  return configRestored;
+}
+
+function rollbackMcpBundleRepairDirectory(prepared) {
+  const { directorySnapshot } = prepared;
+  if (directorySnapshot.exists) {
+    try {
+      const currentDirectory = lstatSync(directorySnapshot.path);
+      return sameConfigDirectory(directorySnapshot.stat, currentDirectory);
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const currentDirectory = lstatSync(directorySnapshot.path);
+    if (!prepared.createdDirectoryStat ||
+        !sameConfigDirectory(prepared.createdDirectoryStat, currentDirectory) ||
+        readdirSync(directorySnapshot.path).length !== 0) {
+      return false;
+    }
+    const currentParent = lstatSync(directorySnapshot.parentPath);
+    if (!sameConfigDirectory(directorySnapshot.parentStat, currentParent)) return false;
+    rmdirSync(directorySnapshot.path);
+    return !existsSync(directorySnapshot.path);
+  } catch (error) {
+    return error?.code === "ENOENT";
+  }
+}
+
+function mcpBundleRollbackIsCurrent(prepared) {
+  try {
+    const current = captureAgentConfigFile(prepared.snapshot.path, { allowAbsent: true });
+    if (!sameCapturedConfigState(prepared.snapshot, current)) return false;
+    if (prepared.directorySnapshot.exists) {
+      return sameConfigDirectory(
+        prepared.directorySnapshot.stat,
+        lstatSync(prepared.directorySnapshot.path),
+      );
+    }
+    if (prepared.createdDirectoryStat) {
+      return sameConfigDirectory(
+        prepared.createdDirectoryStat,
+        lstatSync(prepared.directorySnapshot.path),
+      );
+    }
+    if (existsSync(prepared.directorySnapshot.path)) return false;
+    return sameConfigDirectory(
+      prepared.directorySnapshot.parentStat,
+      lstatSync(prepared.directorySnapshot.parentPath),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function createPreparedMcpConfigDirectory(prepared, transaction = []) {
+  const { directorySnapshot } = prepared;
+  if (directorySnapshot.exists || prepared.createdDirectoryStat) return;
+  if (existsSync(directorySnapshot.path)) {
+    const shared = transaction.find((item) => item.scope === "technician-skill")
+      ?.snapshots?.directories?.find((item) =>
+        item.path === directorySnapshot.path && item.created &&
+        sameConfigDirectory(item.created, lstatSync(directorySnapshot.path))
+      );
+    if (!shared) {
+      throw new Error(`${prepared.scope} config directory changed before its approved creation`);
+    }
+    prepared.createdDirectoryStat = shared.created;
+    return;
+  }
+  if (!sameConfigDirectory(
+    directorySnapshot.parentStat,
+    lstatSync(directorySnapshot.parentPath),
+  )) {
+    throw new Error(`${prepared.scope} config directory changed before its approved creation`);
+  }
+  mkdirSync(directorySnapshot.path, { mode: 0o700 });
+  const created = lstatSync(directorySnapshot.path);
+  prepared.createdDirectoryStat = created;
+  // Windows inherits the owner's profile ACL and does not expose POSIX 0700
+  // semantics through stat.mode. The type, no-link, identity, and parent
+  // checks remain mandatory there; POSIX keeps the exact mode requirement.
+  if (!created.isDirectory() || created.isSymbolicLink() ||
+      (process.platform !== "win32" && (created.mode & 0o777) !== 0o700) ||
+      (typeof process.getuid === "function" && created.uid !== process.getuid())) {
+    throw new Error(`${prepared.scope} private config directory was not created safely`);
+  }
+}
+
+function localAssistantRepairTransactionItemIsCurrent(prepared) {
+  return prepared.scope === "technician-skill"
+    ? technicianSkillRepairSnapshotIsCurrent(prepared.snapshots)
+    : mcpBundleRollbackIsCurrent(prepared);
+}
+
+/** Snapshot the entire selected write set before any part of the bundle changes. */
+function captureLocalAssistantRepairTransaction(context, options = {}) {
+  const prepared = [];
+  for (const item of context.items) {
+    if (!item.write_set.length) continue;
+    if (item.scope === "technician-skill") {
+      prepared.push(Object.freeze({
+        scope: item.scope,
+        snapshots: captureTechnicianSkillRepairSnapshot(item.observations),
+      }));
+    } else {
+      prepared.push(captureMcpBundleRollback(
+        item.scope,
+        context.desired,
+        options.mcpOptions || {},
+        item.state_fingerprint,
+      ));
+    }
+  }
+  if (prepared.some((item) => !localAssistantRepairTransactionItemIsCurrent(item))) {
+    throw new Error("a selected destination changed while the complete write set was being snapshotted");
+  }
+  return Object.freeze(prepared);
+}
+
+/** Roll back every selected destination in reverse order without short-circuiting. */
+function rollbackLocalAssistantRepairTransaction(prepared, options = {}) {
+  const failed = new Set();
+  for (const item of [...prepared].reverse()) {
+    const restored = item.scope === "technician-skill"
+      ? rollbackTechnicianSkillRepairSnapshot(item.snapshots, options.skillOptions || {})
+      : rollbackMcpBundleRepair(item);
+    if (!restored) failed.add(item.scope);
+  }
+  // Config directories are approved writes too. The skill rollback owns any
+  // shared .claude or .codex tree it created; MCP-only roots are removed here.
+  for (const item of [...prepared].reverse()) {
+    if (item.scope !== "technician-skill" &&
+        !rollbackMcpBundleRepairDirectory(item)) {
+      failed.add(item.scope);
+    }
+  }
+  const failedScopes = [...failed];
+  return Object.freeze({ restored: failedScopes.length === 0, failed: Object.freeze(failedScopes) });
+}
+
+async function localAssistantRepairContext(manifestPath, selectedScopes, options = {}) {
+  const { m } = loadManifest(manifestPath);
+  const absoluteManifest = resolve(manifestPath);
+  const manifestFingerprint = createHash("sha256")
+    .update(readFileSync(absoluteManifest))
+    .digest("hex");
+  let desired = null;
+  if (m.brain?.domain) {
+    desired = mcpRegistrationDescriptor(m, absoluteManifest, {
+      baseUrl: `https://${m.brain.domain}`,
+      serverPath: options.mcpOptions?.serverPath,
+      nodePath: options.mcpOptions?.nodePath,
+    });
+  }
+  const items = [];
+  for (const scope of selectedScopes) {
+    if (scope === "technician-skill") {
+      const observations = (options.inspectTechnicianSkills ?? inspectTechnicianSkillEverywhere)(
+        options.skillOptions || {},
+      );
+      items.push(localSkillRepairItem(observations));
+    } else if (!desired) {
+      items.push(blockedMcpRepairItem(scope, m, options.mcpOptions));
+    } else {
+      items.push((options.inspectMcpRepair ?? localMcpRepairItem)(scope, desired, options.mcpOptions || {}));
+    }
+  }
+  const plan = localAssistantRepairPlan({
+    productVersion: PRODUCT_VERSION,
+    manifestFingerprint,
+    selectedScopes,
+    items,
+    desiredDescriptor: selectedScopes.some((scope) => scope.endsWith("-mcp")) ? desired : null,
+  });
+  return { plan, items, manifest: m, manifestFingerprint, desired, absoluteManifest };
+}
+
+/** Build the same state-bound read-only plan the public command displays. */
+export async function buildLocalAssistantRepairPlan(manifestPath, selectedScopes, options = {}) {
+  return (await localAssistantRepairContext(manifestPath, selectedScopes, options)).plan;
+}
+
+export async function cmdAssistantRepair(manifestPath, options = {}) {
+  const flags = options.flags ?? parseFlags(process.argv.slice(3));
+  assertKnownFlags(flags, ["manifest", "only", "apply", "approve", "json"], "brain assistant-repair");
+  let selectedScopes;
+  try {
+    selectedScopes = parseLocalAssistantRepairScopes(flags.only);
+  } catch (error) {
+    die(String(error?.message || error));
+  }
+  const context = await localAssistantRepairContext(manifestPath, selectedScopes, options);
+  const { plan } = context;
+  if (!flags.apply) {
+    if (flags.approve) die("--approve is used only with --apply after the matching read-only preview");
+    if (flags.json) console.log(JSON.stringify(plan, null, 2));
+    else {
+      const shownManifest = commandPath(displayPath(manifestPath));
+      console.log(renderCliCommands(
+        renderLocalAssistantRepairPlan(plan).replace("<manifest>", shownManifest),
+      ));
+    }
+    return plan;
+  }
+  if (flags.json) die("--json is a read-only preview option and cannot be combined with --apply");
+  if (typeof flags.approve !== "string" || flags.approve !== plan.plan_id) {
+    die(
+      "the local repair plan is missing, stale, or different from the approved preview. Nothing changed.\n" +
+      "      Run the same command without --apply and review its new exact write set.",
+    );
+  }
+  if (!plan.can_apply) {
+    die("the approved local repair contains a blocked destination. Nothing changed.");
+  }
+
+  let transaction;
+  try {
+    transaction = captureLocalAssistantRepairTransaction(context, options);
+  } catch (error) {
+    die(
+      `the approved local repair could not snapshot its complete write set safely: ${String(error?.message || error)}\n` +
+      "      Nothing changed. Create and review a new preview before retrying.",
+    );
+  }
+  const preparedByScope = new Map(transaction.map((item) => [item.scope, item]));
+  const results = [];
+  try {
+    for (const item of context.items) {
+      if (!item.write_set.length) {
+        results.push({ scope: item.scope, status: item.status, changed: false });
+        continue;
+      }
+      const currentManifestFingerprint = createHash("sha256")
+        .update(readFileSync(context.absoluteManifest))
+        .digest("hex");
+      if (currentManifestFingerprint !== context.manifestFingerprint) {
+        throw new Error("the manifest changed after the approved plan was recomputed");
+      }
+      const prepared = preparedByScope.get(item.scope);
+      if (prepared && item.scope !== "technician-skill") {
+        // A preceding selected skill repair may already have created this same
+        // explicitly approved assistant root. Adopt only its exact transaction
+        // stat; otherwise create the approved directory here.
+        createPreparedMcpConfigDirectory(prepared, transaction);
+      }
+      if (!prepared || !localAssistantRepairTransactionItemIsCurrent(prepared)) {
+        throw new Error(`${item.scope} changed after the bundle snapshot and before its write`);
+      }
+      if (item.scope === "technician-skill") {
+        const repair = options.repairTechnicianSkills ?? repairTechnicianSkillEverywhere;
+        const receipt = repair({
+          ...(options.skillOptions || {}),
+          observations: item.observations,
+          snapshots: prepared.snapshots,
+        });
+        if (!technicianSkillRepairMatchesApproved(prepared.snapshots)) {
+          throw new Error("the technician skill repair did not pass exact readback");
+        }
+        results.push({ scope: item.scope, status: "repaired", changed: true, receipt });
+        continue;
+      }
+
+      const mcpOptions = options.mcpOptions || {};
+      if (!localAssistantDurableKeyIsReady(
+        context.absoluteManifest,
+        context.manifest,
+        mcpOptions,
+      )) {
+        throw new Error(`${item.scope} could not verify the durable owner key`);
+      }
+      // Broad setup deliberately reconciles through each vendor CLI. This
+      // narrow approved transaction does not: current Claude and Codex clients
+      // can create caches and backup files even for version, add, and readback
+      // calls. An atomic edit of the one previewed source-of-truth file keeps
+      // the complete write set knowable before the first write and rollback exact.
+      const writeRegistration = mcpOptions.writeLocalMcpRegistration ??
+        (({ prepared: target, desired }) => writeLocalMcpRegistration(target, desired));
+      await writeRegistration({
+        scope: item.scope,
+        prepared,
+        desired: context.desired,
+        writeDefault: writeLocalMcpRegistration,
+      });
+      const after = (options.inspectMcpRepair ?? localMcpRepairItem)(
+        item.scope,
+        context.desired,
+        mcpOptions,
+      );
+      if (after.status !== "ready") {
+        throw new Error(`${item.scope} changed but did not pass exact Owner assistant readback`);
+      }
+      const currentConfig = captureAgentConfigFile(prepared.snapshot.path, { allowAbsent: true });
+      if (!currentConfig.exists ||
+          configOutsideTarget(prepared.snapshot, currentConfig.bytes) !== prepared.snapshot.outsideTarget) {
+        throw new Error(`${item.scope} changed configuration outside its previewed setting`);
+      }
+      results.push({ scope: item.scope, status: "repaired", changed: true });
+    }
+    const finalManifestFingerprint = createHash("sha256")
+      .update(readFileSync(context.absoluteManifest))
+      .digest("hex");
+    if (finalManifestFingerprint !== context.manifestFingerprint) {
+      throw new Error("the manifest changed before the approved repair could finish");
+    }
+  } catch (error) {
+    const rollback = rollbackLocalAssistantRepairTransaction(transaction, options);
+    if (!rollback.restored) {
+      die(
+        `the approved local repair stopped: ${String(error?.message || error)}.\n` +
+        `      Automatic bundle rollback could not safely restore: ${rollback.failed.join(", ")}.\n` +
+        "      Stop before retrying and inspect the exact previewed destinations. No Brain or cloud state was changed.",
+      );
+    }
+    die(
+      `the approved local repair stopped: ${String(error?.message || error)}.\n` +
+      "      Every write destination in this approved bundle was restored to its previewed bytes or absence. Nothing remains partially applied.",
+    );
+  }
+
+  ok("the approved local assistant repair finished and every changed item passed exact readback");
+  say("      No Brain records, sources, providers, access, zones, passkeys, devices, cloud resources, or CLI executable changed.");
+  return Object.freeze({
+    operation: "local-assistant-repair",
+    plan_id: plan.plan_id,
+    results: Object.freeze(results.map((result) => Object.freeze(result))),
+    boundaries: plan.boundaries,
+  });
+}
+
+async function cmdAssistantRepairInteractive(manifestPath) {
+  return cmdAssistantRepair(manifestPath, { flags: parseFlags(process.argv.slice(3)) });
+}
+
+/**
+ * One bounded new-computer audit. It deliberately reuses the already-reviewed
+ * local assistant inspection and authenticated source inventory instead of
+ * inventing parallel config or D1 readers. The aggregate report receives only
+ * their closed evidence; raw local locators and source rows never cross it.
+ */
+export async function cmdMachineContinuity(manifestPath, options = {}) {
+  const argv = options.argv ?? process.argv;
+  const flags = options.flags ?? parseFlags(argv.slice(3));
+  assertKnownFlags(flags, ["json"], "brain machine-continuity");
+  if (flags.json !== true) {
+    die("brain machine-continuity is a private machine-readable audit and requires --json");
+  }
+  if (!options.flags) {
+    const tail = argv.slice(4);
+    if (tail.length !== 1 || tail[0] !== "--json") {
+      die("usage: brain machine-continuity <manifest> --json");
+    }
+  }
+  const { m } = loadManifest(manifestPath);
+  let assistantPlan = null;
+  try {
+    assistantPlan = await (options.buildAssistantPlan ?? buildLocalAssistantRepairPlan)(
+      manifestPath,
+      ["technician-skill", "claude-code-mcp", "codex-mcp"],
+      {
+        skillOptions: options.skillOptions,
+        mcpOptions: options.mcpOptions,
+      },
+    );
+  } catch {
+    // A blocked or unsafe local assistant inspection is unproven, never a
+    // reason to omit the rest of the continuity report.
+  }
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const remoteInventoryLoader = options.remoteInventoryLoader ?? (() => cmdSources(manifestPath, {
+    flags: { json: true },
+    silent: true,
+    resolveAdminKey: resolveKey,
+    fetchImpl: options.fetchImpl,
+  }));
+  const report = await auditMachineContinuity({
+    manifest: m,
+    manifestPath,
+    productVersion: PRODUCT_VERSION,
+    assistantPlan,
+    remoteInventoryLoader,
+    providerConfigurationFingerprint,
+    options: {
+      ...(options.auditOptions || {}),
+      resolveAdminKey: resolveKey,
+      // The command is executing from this package module. Preserve that local
+      // proof when an npm/global wrapper is process.argv[1] instead of
+      // falsely requiring the wrapper path itself to equal brain.mjs.
+      runningPackageEntrypointVerified: true,
+    },
+  });
+  if (!options.silent) console.log(JSON.stringify(report, null, 2));
+  return report;
 }
 
 /* ----------------------------------------------------------- sources */
@@ -5553,10 +6966,12 @@ export const VALUE_FLAGS = new Set([
   "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
   "corpus-contract", "approve-removals", "only", "skip",
+  "approve",
   "can", "zones", "exclude-zones", "until", "as", "subject",
   // brain import bank. `--file` with no value must die saying so rather than
   // being read as a boolean and then reported as "needs --file".
   "file", "format", "account", "account-kind", "name", "slug", "institution", "currency", "entity", "entity-label",
+  "year", "period-start", "period-end", "sections", "cursor", "provenance-baseline",
 ]);
 
 /** Read an exact Drive-id exclusion list from either its portable shape or a migration receipt. */
@@ -5742,17 +7157,27 @@ export function ocrPolicy(manifest = {}) {
  * wrong reason into resume state, and the source cursor must stay retryable
  * instead.
  */
-export function makeOcrCallback({ base, adminKey, model, maxPages, onPage = () => {} , httpImpl = http }) {
+export function makeOcrCallback({
+  base,
+  adminKey,
+  model,
+  maxPages,
+  onPage = () => {},
+  httpImpl = http,
+  assertOwned = null,
+}) {
   const call = async (image, { page, totalPages } = {}) => {
     const { OCR_SYSTEM_PROMPT } = await ingestOcrLib();
     let res;
     try {
+      assertOwned?.();
       res = await httpImpl(`${base}/api/admin/brain/ocr`, {
         method: "POST",
         headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
         body: JSON.stringify({ image_base64: image.png_base64, page, prompt: OCR_SYSTEM_PROMPT }),
       }, { what: "the OCR request" });
     } catch (error) {
+      if (error?.code === "source_ingest_lock_lost") throw error;
       const e = new Error(`OCR could not reach the brain: ${error.message}`);
       e.fatal = true;
       throw e;
@@ -5987,6 +7412,57 @@ export function addLocalPathAliases(target, records, field, pathSeparator = sep)
     if (raw !== normalized) target.add(raw);
   }
   return target;
+}
+
+/**
+ * Resolve non-error local walk exclusions into guarded removal candidates.
+ *
+ * A private directory is a current source-policy boundary, so every stored
+ * family beneath it is retracted. An empty file is current source truth too:
+ * its prior searchable revision must not survive. A junction is intentionally
+ * absent from both lists because its external subtree was never enumerated and
+ * must be preserved instead of guessed deleted.
+ */
+export function localWalkRemovalCandidates(walkSkips = [], previouslyKnownKeys = [], pathSeparator = sep) {
+  const normalizedPath = (value) => String(value || "")
+    .split(pathSeparator).join("/").replace(/^\.\//, "").replace(/\/+$/, "");
+  const policyPaths = walkSkips
+    .filter((skip) => skip?.adjudication === "source_policy")
+    .map((skip) => normalizedPath(skip.path))
+    .filter(Boolean);
+  const emptyPaths = new Set(walkSkips
+    .filter((skip) => skip?.adjudication === "empty_content")
+    .map((skip) => normalizedPath(skip.path))
+    .filter(Boolean));
+  const policy = [];
+  const intentional = [];
+  for (const key of previouslyKnownKeys || []) {
+    const normalized = normalizedPath(key);
+    if (!normalized) continue;
+    if (policyPaths.some((path) => normalized === path || normalized.startsWith(`${path}/`))) {
+      policy.push(String(key));
+    } else if (emptyPaths.has(normalized)) {
+      intentional.push(String(key));
+    }
+  }
+  return { policy, intentional };
+}
+
+/**
+ * Keep local source adjudication separate from document ingest outcomes.
+ * Private paths, empty files, and preserved junctions are resolved source
+ * decisions. Unsupported, oversized, or otherwise unresolved files are
+ * refused coverage, as are envelopes the Worker itself refused.
+ */
+export function localReceiptCoverage(tally = {}, skips = []) {
+  const coverageGaps = (skips || []).filter((skip) => skip?.coverage_gap !== false).length;
+  const adjudicatedSkips = (skips || []).length - coverageGaps;
+  const workerRefused = Math.max(0, Number(tally?.refused || 0));
+  return {
+    coverageGaps,
+    adjudicatedSkips,
+    docsRefused: workerRefused + coverageGaps,
+  };
 }
 
 /** Record the current local skip under one portable key, retiring its old alias. */
@@ -6447,129 +7923,1091 @@ async function reportFreshness(m, acct, manifestPath) {
   }
 }
 
-async function cmdSources(manifestPath) {
-  const { m } = loadManifest(manifestPath);
-  const acct = await resolveAccount(m);
-  const dbId = m.infrastructure?.cloudflare?.d1_database_id;
-  if (!dbId) die("no d1_database_id in the manifest. Run `brain provision` first.");
+class SourceInventoryClientError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "SourceInventoryClientError";
+    this.code = code;
+  }
+}
 
-  const flags = parseFlags(process.argv.slice(4));
-
-  // Registering by hand exists because the connectors are still being written.
-  // When an ingest driver lands it registers its own source on first run and
-  // this stays as the escape hatch for a corpus that has no connector.
-  if (flags.add) {
-    const name = assertSourceName(flags.add === true ? null : flags.add);
-    const kind =
-      (flags.kind !== true && flags.kind) ||
-      Object.keys(m.corpora || {}).find((k) => k.replace(/_/g, "-") === name) ||
-      "upload";
-    const now = new Date().toISOString();
-    const res = await d1Query(
-      acct.id,
-      dbId,
-      "INSERT INTO sources (name, kind, status, created_at) VALUES (?,?,'pending',?) ON CONFLICT(name) DO NOTHING",
-      [name, String(kind), now]
+function sourceInventoryBaseUrl(m) {
+  const declared = String(m?.brain?.domain || "").trim();
+  if (!declared) {
+    throw new SourceInventoryClientError(
+      "brain_domain_missing",
+      "this manifest has no saved brain.domain, so the source inventory cannot reach the Brain without Cloudflare account access. " +
+        "Run `brain update <manifest>` once to save the deployed address, then rerun this command. No Cloudflare sign-in was attempted.",
     );
-    if (res?.meta?.changes) {
-      await d1Query(
-        acct.id,
-        dbId,
-        "INSERT INTO source_events (source_name, event, at, detail) VALUES (?,'registered',?,?)",
-        [name, now, `kind=${kind}`]
+  }
+  let candidate;
+  try {
+    candidate = new URL(declared.includes("://") ? declared : `https://${declared}`);
+  } catch {
+    throw new SourceInventoryClientError(
+      "brain_domain_invalid",
+      "brain.domain is not a valid deployed HTTPS hostname. Run `brain doctor <manifest>` before retrying the source inventory.",
+    );
+  }
+  if (candidate.protocol !== "https:" || candidate.username || candidate.password || candidate.port ||
+      candidate.pathname !== "/" || candidate.search || candidate.hash) {
+    throw new SourceInventoryClientError(
+      "brain_domain_invalid",
+      "brain.domain must be one HTTPS hostname with no port, path, sign-in value, query, or fragment.",
+    );
+  }
+  try {
+    return secureBrainRequestUrl(candidate).origin;
+  } catch {
+    throw new SourceInventoryClientError(
+      "brain_domain_invalid",
+      "brain.domain is not a safe deployed HTTPS address. Run `brain doctor <manifest>` before retrying the source inventory.",
+    );
+  }
+}
+
+function validateSourceInventoryPage(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      body.contract_version !== 3 || body.kind !== "source_inventory") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an unsupported source-inventory receipt");
+  }
+  if (!Number.isSafeInteger(body.total) || body.total < 0 ||
+      !Number.isSafeInteger(body.returned) || body.returned < 0 ||
+      !Array.isArray(body.sources) || body.returned !== body.sources.length ||
+      typeof body.truncated !== "boolean" || body.complete !== !body.truncated ||
+      !body.recovery_plan_summary || typeof body.recovery_plan_summary !== "object") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an inconsistent source-inventory page");
+  }
+  if ((body.truncated && (typeof body.cursor !== "string" || !body.cursor)) ||
+      (!body.truncated && body.cursor !== null)) {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-inventory cursor receipt");
+  }
+  const asOfMillis = Date.parse(String(body.as_of || ""));
+  if (!Number.isFinite(asOfMillis) || new Date(asOfMillis).toISOString() !== body.as_of ||
+      !body.snapshot || typeof body.snapshot !== "object" ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(body.snapshot.id || "")) ||
+      body.snapshot.as_of !== body.as_of || body.snapshot.stable !== true ||
+      body.snapshot.total !== body.total) {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-inventory snapshot receipt");
+  }
+  const exactRowFields = [
+    "configuration", "connector", "freshness", "kind", "name", "provenance", "readability",
+    "last_failure", "receipt", "recovery_plan", "registered", "source_id", "storage", "zone",
+  ].sort().join(",");
+  for (const row of body.sources) {
+    if (!row || typeof row !== "object" || Array.isArray(row) ||
+        Object.keys(row).sort().join(",") !== exactRowFields ||
+        typeof row.source_id !== "string" || row.source_id !== row.name ||
+        !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(row.source_id) ||
+        typeof row.kind !== "string" || typeof row.registered !== "boolean" ||
+        !(row.zone === null || typeof row.zone === "string") ||
+        !row.storage || !row.readability || !row.freshness ||
+        (row.registered ? !row.receipt : row.receipt !== null)) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source row");
+    }
+    if (row.last_failure !== null) {
+      const latestRun = row.receipt?.latest_run ?? null;
+      try {
+        normalizeSourceFailureEvidence(row.last_failure, {
+          status: latestRun?.outcome === "failed" ? "error" : "ready",
+          kind: row.kind,
+          metricsVersion: latestRun?.metrics_version ?? null,
+          measuredDocsFailed: latestRun?.metrics_version === 1 ? latestRun.docs_failed : null,
+        });
+      } catch {
+        throw new SourceInventoryClientError(
+          "inventory_contract_invalid",
+          "the Brain returned invalid connector failure evidence",
+        );
+      }
+    }
+    assertSourceInventoryPrivacy(row, "source");
+  }
+  assertSourceInventoryPrivacy(body.recovery_plan_summary, "recovery_plan_summary");
+  return body;
+}
+
+function assertSourceInventoryPrivacy(value, root = "inventory") {
+  const privateOrInvented = [];
+  (function inspect(item, path) {
+    if (Array.isArray(item)) return item.forEach((entry, index) => inspect(entry, `${path}[${index}]`));
+    if (!item || typeof item !== "object") return;
+    for (const [key, child] of Object.entries(item)) {
+      if (/^(?:admin_key|secret|token|credential|entity|entity_slug|tax_year|year|title|uri|doc_uid|raw_source_id|provider_record_id)$/i.test(key)) {
+        privateOrInvented.push(`${path}.${key}`);
+      }
+      inspect(child, `${path}.${key}`);
+    }
+  })(value, root);
+  if (privateOrInvented.length) {
+    throw new SourceInventoryClientError(
+      "inventory_privacy_invalid",
+      "the Brain returned unsupported private, inferred, or raw locator fields",
+    );
+  }
+}
+
+function validateSourceRecoveryPage(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      body.contract_version !== 3 || body.kind !== "source_recovery_plan") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an unsupported source-recovery receipt");
+  }
+  if (!Number.isSafeInteger(body.total) || body.total < 0 ||
+      !Number.isSafeInteger(body.returned) || body.returned < 0 ||
+      !Array.isArray(body.candidates) || body.returned !== body.candidates.length ||
+      typeof body.truncated !== "boolean" || body.complete !== !body.truncated ||
+      !(body.source_filter === null ||
+        (typeof body.source_filter === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.source_filter))) ||
+      !body.recovery_plan_summary || typeof body.recovery_plan_summary !== "object") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an inconsistent source-recovery page");
+  }
+  if ((body.truncated && (typeof body.cursor !== "string" || !body.cursor)) ||
+      (!body.truncated && body.cursor !== null)) {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-recovery cursor receipt");
+  }
+  const asOfMillis = Date.parse(String(body.as_of || ""));
+  if (!Number.isFinite(asOfMillis) || new Date(asOfMillis).toISOString() !== body.as_of ||
+      !body.snapshot || typeof body.snapshot !== "object" ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(body.snapshot.id || "")) ||
+      body.snapshot.as_of !== body.as_of || body.snapshot.stable !== true ||
+      body.snapshot.total !== body.total || body.snapshot.basis !== "corpus_mutation_receipt") {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-recovery snapshot receipt");
+  }
+  const exactCandidateFields = [
+    "ingested_at", "locator", "ocr", "plan", "provenance", "reasons", "record_id",
+    "registered", "source_id", "source_kind", "text", "zone",
+  ].sort().join(",");
+  for (const candidate of body.candidates) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate) ||
+        Object.keys(candidate).sort().join(",") !== exactCandidateFields ||
+        !/^hmac-sha256:[a-f0-9]{64}$/.test(String(candidate.record_id || "")) ||
+        !candidate.locator || candidate.locator.kind !== "opaque_document_digest" ||
+        candidate.locator.value !== candidate.record_id || candidate.locator.reversible !== false ||
+        typeof candidate.source_id !== "string" ||
+        !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(candidate.source_id) ||
+        typeof candidate.source_kind !== "string" || typeof candidate.registered !== "boolean" ||
+        !(candidate.zone === null || typeof candidate.zone === "string") ||
+        !candidate.text || !candidate.ocr || !candidate.provenance || !candidate.plan ||
+        !Array.isArray(candidate.reasons) || !Array.isArray(candidate.provenance.missing_subfields)) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned an invalid source-recovery candidate");
+    }
+  }
+  assertSourceInventoryPrivacy({
+    candidates: body.candidates,
+    recovery_plan_summary: body.recovery_plan_summary,
+  }, "recovery");
+  return body;
+}
+
+/**
+ * Collect a source inventory without ever accepting a partial or mixed
+ * snapshot. `requestPage` is already authenticated by the caller and receives
+ * only the private JSON body.
+ */
+export async function collectSourceInventoryPages(requestPage, { limit = 250 } = {}) {
+  if (typeof requestPage !== "function") throw new TypeError("a source inventory request function is required");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
+    throw new TypeError("source inventory page limit must be an integer from 1 to 250");
+  }
+  let cursor = null;
+  let snapshot = null;
+  let total = null;
+  let limitations = null;
+  let recoveryPlanSummary = null;
+  const sources = [];
+  const ids = new Set();
+  const cursors = new Set();
+  for (let pageNumber = 0; pageNumber <= 40; pageNumber++) {
+    const response = await requestPage({ limit, ...(cursor ? { cursor } : {}) });
+    let body = null;
+    try { body = JSON.parse(await response.text()); } catch { /* handled below */ }
+    if (!response.ok) {
+      const knownCode = typeof body?.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code)
+        ? body.code
+        : "inventory_request_failed";
+      throw new SourceInventoryClientError(
+        knownCode,
+        response.status === 401 || response.status === 403
+          ? "the Brain did not accept this computer's saved owner credential. Run `brain setup <manifest>` to repair it; do not paste a key into the command."
+          : `the Brain could not provide a source inventory (HTTP ${response.status}; ${knownCode})`,
       );
-      ok(`registered source "${name}" (kind ${kind})`);
+    }
+    const page = validateSourceInventoryPage(body);
+    const pageSnapshot = `${page.snapshot.id}|${page.snapshot.as_of}|${page.snapshot.total}`;
+    if (snapshot === null) {
+      snapshot = pageSnapshot;
+      total = page.total;
+      limitations = page.limitations;
+      recoveryPlanSummary = page.recovery_plan_summary;
+    } else if (pageSnapshot !== snapshot || page.total !== total) {
+      throw new SourceInventoryClientError("inventory_snapshot_changed", "the source inventory changed while it was being read; rerun it for one stable snapshot");
+    }
+    if (JSON.stringify(page.recovery_plan_summary) !== JSON.stringify(recoveryPlanSummary)) {
+      throw new SourceInventoryClientError("inventory_snapshot_changed", "the source recovery summary changed while its source snapshot was being read");
+    }
+    for (const row of page.sources) {
+      const prior = sources[sources.length - 1]?.source_id || null;
+      if (ids.has(row.source_id) || (prior !== null && row.source_id <= prior)) {
+        throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned duplicate or unordered source rows");
+      }
+      ids.add(row.source_id);
+      sources.push(row);
+    }
+    if (sources.length > total) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned more source rows than its snapshot total");
+    }
+    if (!page.truncated) {
+      if (sources.length !== total) {
+        throw new SourceInventoryClientError("inventory_incomplete", "the Brain ended its source inventory before every row was returned");
+      }
+      return {
+        ...page,
+        complete: true,
+        total,
+        returned: sources.length,
+        truncated: false,
+        cursor: null,
+        sources,
+        recovery_plan_summary: recoveryPlanSummary,
+        limitations,
+      };
+    }
+    if (page.sources.length === 0 || cursors.has(page.cursor)) {
+      throw new SourceInventoryClientError("inventory_cursor_stalled", "the Brain's source inventory cursor did not advance");
+    }
+    cursors.add(page.cursor);
+    cursor = page.cursor;
+  }
+  throw new SourceInventoryClientError("inventory_page_limit", "the source inventory exceeded its safe pagination bound");
+}
+
+/** Collect every opaque recovery candidate for exactly one source snapshot. */
+export async function collectSourceRecoveryPages(requestPage, { source, limit = 250 } = {}) {
+  if (typeof requestPage !== "function") throw new TypeError("a source recovery request function is required");
+  const sourceId = assertSourceName(source);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
+    throw new TypeError("source recovery page limit must be an integer from 1 to 250");
+  }
+  let cursor = null;
+  let snapshot = null;
+  let total = null;
+  let limitations = null;
+  let stableSummary = null;
+  let firstPage = null;
+  const candidates = [];
+  const ids = new Set();
+  const cursors = new Set();
+  for (let pageNumber = 0; pageNumber < 1000; pageNumber++) {
+    const response = await requestPage({
+      mode: "recovery",
+      source: sourceId,
+      limit,
+      ...(cursor ? { cursor } : {}),
+    });
+    let body = null;
+    try { body = JSON.parse(await response.text()); } catch { /* handled below */ }
+    if (!response.ok) {
+      const knownCode = typeof body?.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code)
+        ? body.code
+        : "inventory_request_failed";
+      throw new SourceInventoryClientError(
+        knownCode,
+        response.status === 401 || response.status === 403
+          ? "the Brain did not accept this computer's saved owner credential. Run `brain setup <manifest>` to repair it; do not paste a key into the command."
+          : `the Brain could not provide a source recovery inventory (HTTP ${response.status}; ${knownCode})`,
+      );
+    }
+    const page = validateSourceRecoveryPage(body);
+    if (page.source_filter !== sourceId) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned recovery candidates for a different source");
+    }
+    const pageSnapshot = `${page.snapshot.id}|${page.snapshot.as_of}|${page.snapshot.total}`;
+    const { page: _page, ...summaryWithoutPage } = page.recovery_plan_summary;
+    if (snapshot === null) {
+      firstPage = page;
+      snapshot = pageSnapshot;
+      total = page.total;
+      limitations = page.limitations;
+      stableSummary = summaryWithoutPage;
+    } else if (pageSnapshot !== snapshot || page.total !== total) {
+      throw new SourceInventoryClientError("inventory_snapshot_changed", "the source recovery inventory changed while it was being read; rerun it for one stable snapshot");
+    }
+    if (JSON.stringify(summaryWithoutPage) !== JSON.stringify(stableSummary) ||
+        JSON.stringify(page.limitations) !== JSON.stringify(limitations)) {
+      throw new SourceInventoryClientError("inventory_snapshot_changed", "the source recovery summary changed while its snapshot was being read");
+    }
+    for (const candidate of page.candidates) {
+      if (ids.has(candidate.record_id)) {
+        throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned a duplicate source-recovery candidate");
+      }
+      ids.add(candidate.record_id);
+      candidates.push(candidate);
+    }
+    if (candidates.length > total) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "the Brain returned more recovery candidates than its snapshot total");
+    }
+    if (!page.truncated) {
+      if (candidates.length !== total) {
+        throw new SourceInventoryClientError("inventory_incomplete", "the Brain ended source recovery before every candidate was returned");
+      }
+      return {
+        ...firstPage,
+        complete: true,
+        total,
+        returned: candidates.length,
+        truncated: false,
+        cursor: null,
+        candidates,
+        limitations,
+      };
+    }
+    if (page.candidates.length === 0 || cursors.has(page.cursor)) {
+      throw new SourceInventoryClientError("inventory_cursor_stalled", "the Brain's source recovery cursor did not advance");
+    }
+    cursors.add(page.cursor);
+    cursor = page.cursor;
+  }
+  throw new SourceInventoryClientError("inventory_page_limit", "source recovery exceeded its safe 250,000-candidate pagination bound");
+}
+
+/** One command-local data-plane boundary. Credentials never cross flags. */
+function sourceInventoryAccess(manifestPath, m, options = {}) {
+  const base = sourceInventoryBaseUrl(m);
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  let durableKey;
+  let credentialRead = false;
+  const credential = () => {
+    if (!credentialRead) {
+      credentialRead = true;
+      durableKey = resolveKey(manifestPath, { ignoreEnvironment: true });
+    }
+    if (!durableKey) {
+      throw new SourceInventoryClientError(
+        "owner_credential_missing",
+        "no saved owner credential was found for this Brain. Run `brain setup <manifest>` to repair it; do not paste a key into the command.",
+      );
+    }
+    return durableKey;
+  };
+  const authenticatedRequest = (target, init = {}, requestOptions = {}) =>
+    fetchBrainWithAdminKey(
+      (safeTarget, safeInit) => http(safeTarget, safeInit, {
+        timeoutMs: requestOptions.timeoutMs ?? 30_000,
+        what: requestOptions.what ?? "the source inventory",
+        fetchImpl,
+      }),
+      target,
+      init,
+      credential,
+    );
+  const requestPage = (payload) => authenticatedRequest(`${base}/api/admin/brain/sources`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const managedSourceRequest = (target, init = {}, requestOptions = {}) => {
+    const headers = new Headers(init.headers || {});
+    headers.delete("X-Admin-Key");
+    return authenticatedRequest(target, { ...init, headers }, requestOptions);
+  };
+  return { base, authenticatedRequest, managedSourceRequest, requestPage };
+}
+
+function sourceInventoryFailure(json, error) {
+  const known = error instanceof SourceInventoryClientError || error instanceof Fatal;
+  const code = error instanceof SourceInventoryClientError ? error.code : known ? "invalid_options" : "source_inventory_unavailable";
+  const message = known
+    ? error.message
+    : "the source inventory could not be completed. No source, credential, or Cloudflare setting was changed.";
+  if (json) {
+    throw new JsonFatal({
+      ok: false,
+      kind: "source_inventory",
+      error: { code, message },
+    });
+  }
+  die(message);
+}
+
+const SOURCE_FAILURE_OPERATION_LABELS = Object.freeze({
+  gmail_profile_read: "Gmail profile read",
+  gmail_history_list: "Gmail history list",
+  gmail_message_list: "Gmail message list",
+  gmail_policy_read: "Gmail policy read",
+  gmail_message_read: "Gmail message read",
+  gmail_unknown: "Gmail operation",
+});
+
+const SOURCE_FAILURE_CURSOR_LABELS = Object.freeze({
+  present_preserved: "cursor present and preserved",
+  absent_preserved: "cursor absent and preserved",
+  changed: "cursor changed",
+  unverified: "cursor preservation unverified",
+});
+
+function renderSourceLastFailure(failure) {
+  const operation = SOURCE_FAILURE_OPERATION_LABELS[failure.operation_class];
+  const http = failure.http_status === null ? "HTTP status unavailable" : `HTTP ${failure.http_status}`;
+  const provider = failure.provider_reason === null
+    ? "provider reason unavailable"
+    : `provider ${failure.provider_reason}`;
+  const checkpoint = failure.checkpoint_readback === "verified"
+    ? `checkpoint ${num(failure.checkpoint_done)} processed / ${num(failure.checkpoint_skipped)} skipped`
+    : "checkpoint unverified";
+  return `${operation}; ${http}; ${provider}; ${checkpoint}; ${SOURCE_FAILURE_CURSOR_LABELS[failure.cursor_preservation]}`;
+}
+
+export async function cmdSources(manifestPath, options = {}) {
+  const argv = options.argv ?? process.argv;
+  const flags = options.flags ?? parseFlags(argv.slice(4));
+  const json = flags.json !== undefined;
+  try {
+    assertKnownFlags(flags, ["json", "add", "cursor", "kind", "limit", "recovery", "refresh", "source"], "brain sources");
+    if (flags.json !== undefined && flags.json !== true) {
+      throw new SourceInventoryClientError("invalid_options", "--json does not take a value");
+    }
+    if (flags.recovery !== undefined && flags.recovery !== true) {
+      throw new SourceInventoryClientError("invalid_options", "--recovery does not take a value");
+    }
+    const recovery = flags.recovery === true;
+    if (recovery && !json) {
+      throw new SourceInventoryClientError("invalid_options", "--recovery is a machine-readable preview and requires --json");
+    }
+    if ((flags.cursor !== undefined || flags.limit !== undefined) && !recovery) {
+      throw new SourceInventoryClientError("invalid_options", "--cursor and --limit are available here only with --json --recovery");
+    }
+    const sourceRegistryWrite = Boolean(flags.add) || flags.refresh !== undefined;
+    if (json && sourceRegistryWrite) {
+      throw new SourceInventoryClientError(
+        "read_only_json_required",
+        "--json is a read-only source inventory and cannot be combined with --add or --refresh",
+      );
+    }
+    if (flags.kind !== undefined && !flags.add) {
+      throw new SourceInventoryClientError("invalid_options", "--kind is valid only with --add <source>");
+    }
+    if (flags.source !== undefined && flags.refresh === undefined && !recovery) {
+      throw new SourceInventoryClientError("invalid_options", "--source is valid here only with --refresh <schedule> or --json --recovery");
+    }
+
+    const { m } = loadManifest(manifestPath);
+    const { base, authenticatedRequest, managedSourceRequest, requestPage } =
+      sourceInventoryAccess(manifestPath, m, options);
+
+    if (flags.add) {
+      const name = assertSourceName(flags.add === true ? null : flags.add);
+      const kind =
+        (flags.kind !== true && flags.kind) ||
+        Object.keys(m.corpora || {}).find((key) => key.replace(/_/g, "-") === name) ||
+        "upload";
+      const registration = await postSourceRegistration(base, "", {
+        source: name,
+        kind: String(kind),
+      }, managedSourceRequest);
+      if (registration.registered) ok(`registered source "${name}" (kind ${kind})`);
+      else info(`source "${name}" is already registered, leaving it alone`);
+    }
+
+    if (flags.refresh !== undefined) {
+      const name = assertSourceName(flags.source === true ? null : flags.source);
+      const spec = String(flags.refresh === true ? "" : flags.refresh).toLowerCase();
+      const seconds = { hourly: 3600, daily: 86400, weekly: 604800, monthly: 2592000, never: null, off: null };
+      if (!(spec in seconds)) {
+        throw new SourceInventoryClientError(
+          "invalid_refresh",
+          "--refresh needs one of: hourly, daily, weekly, monthly, never. `never` clears the expectation.",
+        );
+      }
+      await postSourceExpectation(base, "", {
+        source: name,
+        expected_refresh_seconds: seconds[spec],
+      }, managedSourceRequest);
+      if (seconds[spec] === null) ok(`"${name}" will no longer be reported as stale`);
+      else ok(`"${name}" is expected to refresh ${spec}; it will be reported stale past 1.5x that`);
+    }
+
+    if (recovery) {
+      const limit = flags.limit === undefined ? 100 : Number(flags.limit);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
+        throw new SourceInventoryClientError("invalid_options", "--limit must be an integer from 1 to 250");
+      }
+      if (flags.cursor === true) {
+        throw new SourceInventoryClientError("invalid_options", "--cursor needs the opaque value returned by the previous recovery page");
+      }
+      const source = flags.source === undefined ? null : assertSourceName(flags.source === true ? null : flags.source);
+      const payload = {
+        mode: "recovery",
+        limit,
+        ...(source ? { source } : {}),
+        ...(flags.cursor ? { cursor: String(flags.cursor) } : {}),
+      };
+      const response = await authenticatedRequest(`${base}/api/admin/brain/sources`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      let body = null;
+      try { body = JSON.parse(await response.text()); } catch { /* handled below */ }
+      if (!response.ok) {
+        const code = typeof body?.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code)
+          ? body.code
+          : "inventory_request_failed";
+        throw new SourceInventoryClientError(
+          code,
+          response.status === 401 || response.status === 403
+            ? "the Brain did not accept this computer's saved owner credential. Run `brain setup <manifest>` to repair it; do not paste a key into the command."
+            : `the Brain could not provide a source recovery preview (HTTP ${response.status}; ${code})`,
+        );
+      }
+      const preview = validateSourceRecoveryPage(body);
+      console.log(JSON.stringify(preview, null, 2));
+      return preview;
+    }
+
+    const inventory = await collectSourceInventoryPages(requestPage);
+    if (json) {
+      if (!options.silent) console.log(JSON.stringify(inventory, null, 2));
+      return inventory;
+    }
+
+    if (!inventory.sources.length) {
+      warn("this Brain has no registered or stored sources yet.");
+      info(`add the first one with: brain sources ${manifestPath} --add <name> --kind <drive|gmail|imap|calendar|upload>`);
     } else {
-      info(`source "${name}" is already registered, leaving it alone`);
+      const nameWidth = Math.max(4, ...inventory.sources.map((row) => row.name.length));
+      const kindWidth = Math.max(4, ...inventory.sources.map((row) => row.kind.length));
+      console.log(`\n  ${"name".padEnd(nameWidth)}  ${"kind".padEnd(kindWidth)}  ${"zone".padEnd(12)}  ${"physical".padStart(9)}  ${"readable".padStart(10)}  freshness`);
+      for (const row of inventory.sources) {
+        console.log(
+          `  ${row.name.padEnd(nameWidth)}  ${row.kind.padEnd(kindWidth)}  ${String(row.zone || "unassigned").padEnd(12)}  ` +
+            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${row.freshness.state}`,
+        );
+      }
+      const failures = inventory.sources.filter((row) => row.last_failure !== null);
+      if (failures.length) {
+        console.log(`\n  ${c.bold("last connector failure")}`);
+        for (const row of failures) {
+          console.log(`    ${row.name}: ${renderSourceLastFailure(row.last_failure)}`);
+        }
+      }
     }
+    console.log("");
+    info(`complete D1 snapshot: ${inventory.returned} of ${inventory.total} sources as of ${inventory.as_of}`);
+    info("source names do not prove an entity, tax year, financial reconciliation, or tax completeness; those remain separate checks.");
+    console.log("");
+    return inventory;
+  } catch (error) {
+    sourceInventoryFailure(json, error);
+  }
+}
+
+/* ---------------------------------------------- provenance-repair */
+
+function canonicalProvenanceValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalProvenanceValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, canonicalProvenanceValue(value[key])]),
+  );
+}
+
+const fingerprintProvenanceValue = (value) => createHash("sha256")
+  .update(JSON.stringify(canonicalProvenanceValue(value)))
+  .digest("hex");
+
+async function readProvenanceRepairRemoteState(manifestPath, m, source, options = {}) {
+  if (options.readRemoteState) {
+    const supplied = await options.readRemoteState({ manifestPath, manifest: m, source });
+    const remote = provenanceRepairRemoteGeneration({
+      inventory: supplied?.inventory,
+      recovery: supplied?.recovery,
+      sourceId: source,
+    });
+    return { ...supplied, remote };
+  }
+  const { requestPage } = sourceInventoryAccess(manifestPath, m, options);
+  const inventory = await collectSourceInventoryPages(requestPage);
+  const recovery = await collectSourceRecoveryPages(requestPage, { source });
+  // A second inventory read closes the window around the longer recovery walk.
+  // Its raw snapshot ID changes with time, so compare the canonical semantic
+  // generation instead. Any actual source row or summary change still stops.
+  const confirmedInventory = await collectSourceInventoryPages(requestPage);
+  const before = provenanceRepairRemoteGeneration({ inventory, recovery, sourceId: source });
+  const confirmed = provenanceRepairRemoteGeneration({
+    inventory: confirmedInventory,
+    recovery,
+    sourceId: source,
+  });
+  if (before.inventory_generation !== confirmed.inventory_generation) {
+    throw new SourceInventoryClientError(
+      "inventory_snapshot_changed",
+      "the source inventory changed while its recovery candidates were being read; nothing was approved. Rerun the preview.",
+    );
+  }
+  return { inventory: confirmedInventory, recovery, remote: confirmed };
+}
+
+function schedulerReadinessSummary(status) {
+  return {
+    applicable: true,
+    installed: status.installed === true,
+    loaded: status.loaded === true,
+    running: status.running === true,
+    definition_matches: status.definitionMatches === true,
+    interpreter_present: status.interpreterPresent === true,
+    schedule_error: status.scheduleError ? "present" : null,
+  };
+}
+
+export async function inspectProvenanceRepairReadiness({ m, manifestPath, source, kind, options = {} }) {
+  const blockers = [];
+  let selectedConfig;
+  let sourceStatus = "ready";
+  let credentialStatus = "saved owner credential verified by the private inventory read";
+  let scheduler = { applicable: false };
+
+  if (!m?.corpora || typeof m.corpora !== "object") {
+    blockers.push("the manifest has no corpora configuration");
+  }
+  if (kind === "upload") {
+    const local = m?.corpora?.local_folder || {};
+    selectedConfig = {
+      kind,
+      local_folder: local,
+      credential_scanner: m?.safety?.credential_scanner || null,
+      ocr: m?.safety?.ocr || null,
+      private_path_prefixes: m?.safety?.private_path_prefixes || [],
+    };
+    if (local.enabled !== true) blockers.push("corpora.local_folder is not enabled in this manifest");
+    const declaredSource = String(local.source || "documents");
+    if (declaredSource !== source) {
+      blockers.push(`source ${source} is not the single watched-folder source declared by this manifest`);
+    }
+    const path = typeof local.path === "string" ? local.path : "";
+    if (!path || !isAbsolute(path)) {
+      blockers.push("corpora.local_folder.path is not one absolute folder");
+    } else {
+      try {
+        const identity = lstatSync(path);
+        if (!identity.isDirectory() || identity.isSymbolicLink()) {
+          throw new Error("the declared path is not a direct directory");
+        }
+        accessSync(path, fsConstants.R_OK);
+        selectedConfig.local_identity = {
+          path: resolve(path),
+          realpath: realpathSync(path),
+          device: Number(identity.dev),
+          inode: Number(identity.ino),
+        };
+      } catch {
+        sourceStatus = "unavailable";
+        blockers.push("the declared local folder is not safely readable on this machine");
+      }
+    }
+  } else if (kind === "drive") {
+    if (source !== "drive") blockers.push("this build can safely rewalk only the manifest's canonical Drive source named drive");
+    if (m?.corpora?.google_drive?.enabled !== true) blockers.push("Google Drive is not enabled in this manifest");
+    try {
+      selectedConfig = {
+        kind,
+        drive: driveConnectorConfig(m, manifestPath),
+        declared: m?.corpora?.google_drive || {},
+        credential_scanner: m?.safety?.credential_scanner || null,
+        ocr: m?.safety?.ocr || null,
+      };
+    } catch {
+      selectedConfig = { kind, declared: m?.corpora?.google_drive || {} };
+      blockers.push("the reviewed Drive root or exclusion configuration is missing or cannot be read");
+    }
+  } else if (kind === "gmail") {
+    if (source !== "gmail") blockers.push("this build can safely rewalk only the manifest's canonical Gmail source named gmail");
+    if (m?.corpora?.gmail?.enabled !== true) blockers.push("Gmail is not enabled in this manifest");
+    selectedConfig = {
+      kind,
+      gmail: m?.corpora?.gmail || {},
+      credential_scanner: m?.safety?.credential_scanner || null,
+    };
+  } else if (kind === "calendar") {
+    if (source !== "calendar") blockers.push("this build can safely rewalk only the manifest's canonical Calendar source named calendar");
+    if (m?.corpora?.calendar?.enabled !== true) blockers.push("Google Calendar is not enabled in this manifest");
+    selectedConfig = {
+      kind,
+      corpus: m?.corpora?.calendar || {},
+      calendar: m?.calendar || {},
+      credential_scanner: m?.safety?.credential_scanner || null,
+    };
+  } else {
+    selectedConfig = { kind, unsupported: true };
+    blockers.push(`source kind ${kind} has no supported exact full-rewalk path`);
   }
 
-  // Set (or clear) how often a source is EXPECTED to refresh. Without this
-  // nothing ever has an expectation, so no staleness claim is ever made and the
-  // whole freshness signal stays silent, which is worse than not having it.
-  if (flags.refresh !== undefined) {
-    const name = assertSourceName(flags.source === true ? null : flags.source);
-    const spec = String(flags.refresh === true ? "" : flags.refresh).toLowerCase();
-    const SECONDS = { hourly: 3600, daily: 86400, weekly: 604800, monthly: 2592000, never: null, off: null };
-    if (!(spec in SECONDS)) {
-      die(
-        `--refresh needs one of: hourly, daily, weekly, monthly, never.` + "\n" +
-          `  "never" clears the expectation, and a source with no expectation is never` + "\n" +
-          "  reported as stale, which is the right default for a one-off folder load."
+  if (["drive", "gmail", "calendar"].includes(kind)) {
+    const inspectCredential = options.inspectGoogleCredential ?? inspectGoogleTokenStorage;
+    const credential = inspectCredential(options.googleStorageOptions);
+    const requiredScope = kind === "calendar" ? "calendar" : kind;
+    credentialStatus = credential?.readable && credential?.connected && credential.scopes?.includes(requiredScope)
+      ? `readable saved Google connection with ${requiredScope} scope`
+      : "saved Google connection is not ready";
+    if (!credential?.readable) blockers.push("the saved Google credential cannot be read on this machine");
+    else if (!credential?.connected) blockers.push("the saved Google connection is incomplete");
+    else if (!credential.scopes?.includes(requiredScope)) {
+      blockers.push(`the saved Google connection does not include the ${requiredScope} scope`);
+    }
+    if (!/^[a-f0-9]{64}$/.test(String(credential?.record_fingerprint || ""))) {
+      blockers.push("the exact saved Google connection could not be fingerprinted safely");
+    }
+    selectedConfig.google_credential_readiness = {
+      checked: credential?.checked === true,
+      readable: credential?.readable === true,
+      connected: credential?.connected === true,
+      backend: String(credential?.backend || "unknown"),
+      scopes: Array.isArray(credential?.scopes) ? [...credential.scopes].sort() : [],
+      record_fingerprint: /^[a-f0-9]{64}$/.test(String(credential?.record_fingerprint || ""))
+        ? credential.record_fingerprint
+        : null,
+    };
+  }
+
+  const platform = options.platform ?? process.platform;
+  if (platform === "darwin" && ["upload", "drive"].includes(kind)) {
+    try {
+      const readScheduler = options.readSchedulerStatus ?? (kind === "upload"
+        ? (await import("./operations/folder-scheduler.mjs")).statusFolderScheduler
+        : (await import("./operations/drive-scheduler.mjs")).statusDriveScheduler);
+      scheduler = schedulerReadinessSummary(readScheduler(manifestPath));
+      if (scheduler.loaded || scheduler.running) {
+        blockers.push(
+          `the ${kind === "upload" ? "watched-folder" : "Drive"} scheduler is loaded or running and could contend with this full rewalk; stop it before previewing again`,
+        );
+      }
+      if (scheduler.installed && (!scheduler.definition_matches || !scheduler.interpreter_present || scheduler.schedule_error)) {
+        blockers.push(`the ${kind === "upload" ? "watched-folder" : "Drive"} scheduler is installed but not healthy`);
+      }
+    } catch {
+      scheduler = { applicable: true, status: "unavailable" };
+      blockers.push("the local scheduler state could not be verified safely");
+    }
+  } else if (["upload", "drive"].includes(kind)) {
+    // This release has no Windows or Linux scheduler implementation. An
+    // unattended writer therefore cannot be hidden behind a healthy-looking
+    // status on those platforms. The command-level cross-platform source lease
+    // separately fences every mutating manual, load, and repair invocation.
+    scheduler = {
+      applicable: false,
+      platform,
+      reason: "no supported unattended scheduler exists for this source on this platform",
+    };
+  }
+
+  return {
+    sourceConfigFingerprint: fingerprintProvenanceValue(selectedConfig),
+    readiness: {
+      source: blockers.some((entry) => /folder|manifest|source kind|Drive is not|Gmail is not|Calendar is not/.test(entry))
+        ? sourceStatus === "unavailable" ? "unavailable" : "blocked"
+        : sourceStatus,
+      credential: credentialStatus,
+      scheduler: scheduler.applicable
+        ? scheduler.loaded || scheduler.running ? "active and blocked" : scheduler.status === "unavailable" ? "unavailable" : "not loaded"
+        : "not applicable on this machine/source",
+      scheduler_state: scheduler,
+      blockers,
+    },
+  };
+}
+
+async function provenanceRepairOcrReceipt(m, kind) {
+  const policy = ocrPolicy(m);
+  const applies = ["upload", "drive"].includes(kind);
+  if (!applies) {
+    return {
+      applies: false,
+      enabled: false,
+      configured_enabled: policy.enabled,
+      model: null,
+      max_pages_per_document: null,
+      estimated_100_page_cost: null,
+      detail: "not used by this source path",
+    };
+  }
+  if (!policy.enabled) {
+    return {
+      applies: true,
+      enabled: false,
+      model: policy.model,
+      max_pages_per_document: policy.maxPages,
+      estimated_100_page_cost: null,
+      detail: "off; scan-only or empty-text candidates may remain unresolved",
+    };
+  }
+  const { estimateOcrCost, describeOcrCost } = await ingestOcrLib();
+  const estimate = estimateOcrCost(100);
+  return {
+    applies: true,
+    enabled: true,
+    model: policy.model,
+    max_pages_per_document: policy.maxPages,
+    estimated_100_page_cost: canonicalProvenanceValue(estimate),
+    detail: `on with ${policy.model}, up to ${policy.maxPages} pages per document; ${describeOcrCost(estimate)} per 100 scanned pages. Actual pages and cost are unknown until the rewalk.`,
+  };
+}
+
+async function provenanceRepairContext(manifestPath, source, options = {}) {
+  const absoluteManifest = resolve(manifestPath);
+  const { m } = loadManifest(absoluteManifest);
+  const manifestFingerprint = createHash("sha256").update(readFileSync(absoluteManifest)).digest("hex");
+  const remoteState = await readProvenanceRepairRemoteState(absoluteManifest, m, source, options);
+  const sourceRow = remoteState.remote.source;
+  const inspectReadiness = options.inspectReadiness ?? inspectProvenanceRepairReadiness;
+  const local = await inspectReadiness({
+    m,
+    manifestPath: absoluteManifest,
+    source,
+    kind: sourceRow.kind,
+    options,
+  });
+  const ocr = await provenanceRepairOcrReceipt(m, sourceRow.kind);
+  const rewalk = {
+    scope: "whole_source",
+    mode: "full_rewalk_reingest",
+    reset: true,
+    limit: null,
+    source: source,
+    ingest_path: sourceRow.kind === "upload" ? "local-folder" : sourceRow.kind,
+    removal_approval: "existing separate aggregate gate",
+  };
+  const plan = provenanceRepairPlan({
+    productVersion: PRODUCT_VERSION,
+    manifestFingerprint,
+    sourceConfigFingerprint: local.sourceConfigFingerprint,
+    source: { id: source, kind: sourceRow.kind },
+    remote: remoteState.remote,
+    readiness: local.readiness,
+    rewalk,
+    ocr,
+  });
+  return {
+    absoluteManifest,
+    manifest: m,
+    manifestFingerprint,
+    sourceConfigFingerprint: local.sourceConfigFingerprint,
+    readiness: local.readiness,
+    remoteState,
+    plan,
+  };
+}
+
+async function runApprovedProvenanceRewalk(context, flags, options = {}) {
+  if (options.runSourceRewalk) {
+    return options.runSourceRewalk({
+      manifest: context.manifest,
+      manifestPath: context.absoluteManifest,
+      source: context.plan.source,
+      reset: true,
+      limit: null,
+      removalApproval: flags["approve-removals"] || null,
+    });
+  }
+  const shared = {
+    source: context.plan.source.id,
+    reset: true,
+    ...(flags["approve-removals"] ? { "approve-removals": flags["approve-removals"] } : {}),
+  };
+  if (context.plan.source.kind === "upload") {
+    return cmdIngestLocal(context.manifest, context.absoluteManifest, {
+      ...shared,
+      path: context.manifest.corpora.local_folder.path,
+    });
+  }
+  if (["drive", "gmail"].includes(context.plan.source.kind)) {
+    return cmdIngestRemote(context.manifest, context.absoluteManifest, {
+      ...shared,
+      from: context.plan.source.kind,
+    });
+  }
+  if (context.plan.source.kind === "calendar") {
+    return cmdIngestCalendar(context.manifest, context.absoluteManifest, {
+      ...shared,
+      from: "calendar",
+    });
+  }
+  die(`source kind ${context.plan.source.kind} has no supported provenance rewalk`);
+}
+
+export class ProvenanceRepairIncompleteError extends Fatal {
+  constructor(message, receipt = null) {
+    super(message);
+    this.name = "ProvenanceRepairIncompleteError";
+    this.code = "PROVENANCE_REPAIR_INCOMPLETE";
+    this.receipt = receipt;
+  }
+}
+
+export async function buildProvenanceRepairPlan(manifestPath, source, options = {}) {
+  return (await provenanceRepairContext(manifestPath, source, options)).plan;
+}
+
+export async function cmdProvenanceRepair(manifestPath, options = {}) {
+  const flags = options.flags ?? parseFlags(process.argv.slice(3));
+  assertKnownFlags(
+    flags,
+    ["manifest", "source", "apply", "approve", "approve-removals", "json"],
+    "brain provenance-repair",
+  );
+  if (flags.apply !== undefined && flags.apply !== true) die("--apply does not take a value");
+  if (flags.json !== undefined && flags.json !== true) die("--json does not take a value");
+  const source = assertSourceName(flags.source === true ? null : flags.source);
+  if (!flags.apply && flags.approve) die("--approve is used only with --apply after the matching read-only preview");
+  if (!flags.apply && flags["approve-removals"]) {
+    die("--approve-removals is used only with --apply after the existing source-removal gate prints its exact fingerprint");
+  }
+  if (flags.apply && flags.json) die("--json is a read-only preview option and cannot be combined with --apply");
+
+  // Schema 1 has no durable candidate-resolution ledger. Reject before
+  // reading the manifest, remote state, credentials, readiness, or source so
+  // a legacy approval can never reach the whole-source mutation path.
+  if (flags.apply) {
+    throw new ProvenanceRepairIncompleteError(
+      "Provenance repair apply is unavailable: schema 1 cannot distinguish a repaired candidate from deletion, replacement, refusal, or skip. Nothing was read or changed. Run the read-only preview for inventory only.",
+      {
+        schema_version: 1,
+        operation: "provenance-repair",
+        status: "apply_schema_unsupported",
+        complete: false,
+        required_schema_version: 2,
+        fixed_candidate_ids: [],
+        fixed_count: 0,
+      },
+    );
+  }
+
+  const context = await provenanceRepairContext(manifestPath, source, options);
+  const { plan } = context;
+  if (!flags.apply) {
+    if (flags.json) console.log(JSON.stringify(plan, null, 2));
+    else {
+      const command = renderCliCommands(
+        `brain provenance-repair ${commandPath(displayPath(context.absoluteManifest))} --source ${source} --apply --approve ${plan.plan_id}`,
+      );
+      console.log(renderProvenanceRepairPlan(plan, command));
+    }
+    return plan;
+  }
+  if (typeof flags.approve !== "string" || flags.approve !== plan.plan_id) {
+    die(
+      "the provenance repair plan is missing, stale, or different from the approved preview. Nothing changed.\n" +
+        "      Run the same command without --apply and review the new whole-source plan.",
+    );
+  }
+  if (!plan.can_apply) {
+    die(`the approved provenance repair cannot run: ${plan.blockers.join("; ")}. Nothing changed.`);
+  }
+  if (flags["approve-removals"] !== undefined &&
+      (typeof flags["approve-removals"] !== "string" || !/^[a-f0-9]{64}$/.test(flags["approve-removals"]))) {
+    die("--approve-removals needs the exact lowercase 64-character fingerprint printed by the stopped source rewalk");
+  }
+
+  let rewalkResult;
+  try {
+    rewalkResult = await runApprovedProvenanceRewalk(context, flags, options);
+  } catch (error) {
+    if (error instanceof DriveRemovalReviewRequired) {
+      throw new ProvenanceRepairIncompleteError(
+        "The approved full-source rewalk reached the existing removal safety gate and stopped for a separate owner decision. " +
+          "Some source records may already have been refreshed, but no provenance-repair success is claimed.\n" +
+          String(error.message || error),
+        { status: "safety_review_required", complete: false, fixed_candidate_ids: [] },
       );
     }
-    await d1Query(acct.id, dbId, "UPDATE sources SET expected_refresh_seconds = ? WHERE name = ?", [SECONDS[spec], name]);
-    if (SECONDS[spec] === null) ok(`"${name}" will no longer be reported as stale`);
-    else ok(`"${name}" is expected to refresh ${spec}; it will be reported stale past 1.5x that`);
-  }
-
-  const rows = await readSources(acct.id, dbId);
-  const base = await resolveBase(m, acct);
-  const live = await liveSourceCounts(base, resolveAdminKey(manifestPath));
-
-  if (!rows.length) {
-    warn("no named sources registered in this install.");
-    info(`register one with: brain sources ${manifestPath} --add <name> --kind <drive|gmail|imap|calendar|upload>`);
-  } else {
-    const w = (key, min) => Math.max(min, ...rows.map((r) => String(r[key] || "").length));
-    const wName = w("name", 4);
-    const wKind = w("kind", 4);
-    const wStat = w("status", 6);
-    console.log(
-      `\n  ${"name".padEnd(wName)}  ${"kind".padEnd(wKind)}  ${"status".padEnd(wStat)}  ${"documents".padStart(11)}  last ingest`
+    throw new ProvenanceRepairIncompleteError(
+      `The approved full-source rewalk stopped before exact recovery readback. Some source records may have changed, but no provenance candidate is called fixed: ${String(error?.message || error)}`,
+      { status: "rewalk_failed", complete: false, fixed_candidate_ids: [] },
     );
-    for (const r of rows) {
-      // Compare DOCUMENTS to documents. The store also reports a chunk count,
-      // which is always larger, and comparing against that showed drift on every
-      // healthy install.
-      const liveRow = live?.get(r.name);
-      const shown = documentCountOf(liveRow);
-      const drift =
-        shown !== undefined && Number(shown) !== Number(r.document_count)
-          ? c.yellow(`  (store says ${num(shown)})`)
-          : "";
-      const chunks = liveRow?.chunks !== undefined ? c.dim(`  ${num(liveRow.chunks)} chunks`) : "";
-      console.log(
-        `  ${r.name.padEnd(wName)}  ${String(r.kind).padEnd(wKind)}  ${String(r.status).padEnd(wStat)}  ${num(r.document_count).padStart(11)}  ${r.last_ingest_at ? r.last_ingest_at.slice(0, 19) : c.dim("never")}${drift}${chunks}`
-      );
-    }
   }
 
-  // Freshness, stated per source. This is the half that was invisible: a source
-  // nobody re-reads looks exactly like a source with nothing new in it.
-  await reportFreshness(m, acct, manifestPath).catch(() => {});
-
-  if (!live) {
-    console.log(
-      `\n  ${c.dim("counts above are the registry's own last receipt. Repair the manifest's durable")}`
+  const manifestFingerprintAfter = createHash("sha256")
+    .update(readFileSync(context.absoluteManifest))
+    .digest("hex");
+  const inspectReadiness = options.inspectReadiness ?? inspectProvenanceRepairReadiness;
+  const localAfter = await inspectReadiness({
+    m: context.manifest,
+    manifestPath: context.absoluteManifest,
+    source,
+    kind: plan.source.kind,
+    options,
+  });
+  if (manifestFingerprintAfter !== context.manifestFingerprint ||
+      localAfter.sourceConfigFingerprint !== context.sourceConfigFingerprint ||
+      localAfter.readiness.scheduler_state?.loaded === true ||
+      localAfter.readiness.scheduler_state?.running === true) {
+    throw new ProvenanceRepairIncompleteError(
+      "The manifest, selected source configuration, or scheduler state changed during the rewalk. No provenance candidate is called fixed without a new preview.",
+      { status: "local_state_changed", complete: false, fixed_candidate_ids: [] },
     );
-    console.log(`  ${c.dim("admin-key storage to cross-check them against what the brain actually holds.")}`);
-  } else {
-    // Everything ingested before this feature existed, or by a path that never
-    // registered itself, lands here. It is the honest version of the listing:
-    // these documents exist, and `brain forget` cannot take them back out.
-    const orphans = [...live.entries()].filter(([k]) => !rows.some((r) => r.name === k));
-    if (orphans.length) {
-      console.log(renderCliCommands(`\n  ${c.yellow("in the store but not registered")}, so \`brain forget\` cannot remove them:`));
-      for (const [k, v] of orphans) console.log(`    ${k.padEnd(16)} ${num(documentCountOf(v)).padStart(9)} documents`);
-    }
   }
 
-  const events = await d1Query(
-    acct.id,
-    dbId,
-    "SELECT source_name, event, at, documents FROM source_events ORDER BY at DESC LIMIT 5"
-  ).catch(() => null);
-  const evs = events?.results || [];
-  if (evs.length) {
-    console.log("\n  recent source events:");
-    for (const e of evs) {
-      const n = e.documents === null || e.documents === undefined ? "" : `  ${num(e.documents)} documents`;
-      const mark = e.event === "forget" ? c.yellow("forget") : e.event;
-      console.log(`    ${e.at.slice(0, 19)}  ${String(mark).padEnd(18)} ${e.source_name}${n}`);
-    }
+  let afterState;
+  try {
+    afterState = await readProvenanceRepairRemoteState(
+      context.absoluteManifest,
+      context.manifest,
+      source,
+      options,
+    );
+  } catch (error) {
+    throw new ProvenanceRepairIncompleteError(
+      `The source rewalk returned, but its exact source receipt and recovery readback could not be verified. No provenance candidate is called fixed: ${String(error?.message || error)}`,
+      { status: "readback_unavailable", complete: false, fixed_candidate_ids: [] },
+    );
   }
-  console.log("");
+  const comparison = provenanceRepairReadback({
+    before: context.remoteState.remote,
+    after: afterState.remote,
+  });
+  const receipt = Object.freeze({
+    schema_version: 1,
+    operation: "provenance-repair",
+    plan_id: plan.plan_id,
+    source: plan.source,
+    status: comparison.status,
+    complete: comparison.complete,
+    source_receipt: afterState.remote.source.receipt,
+    recovery_observation: afterState.remote.observations.source_recovery,
+    fixed_candidate_ids: comparison.fixed_candidate_ids,
+    fixed_count: comparison.fixed_count,
+    remaining_candidate_ids: comparison.remaining_candidate_ids,
+    remaining_count: comparison.remaining_count,
+    new_candidate_ids: comparison.new_candidate_ids,
+    new_count: comparison.new_count,
+    meaning: comparison.meaning,
+    rewalk: {
+      completed: true,
+      reset: true,
+      limit: null,
+      counts: rewalkResult && typeof rewalkResult === "object"
+        ? Object.fromEntries(
+            ["created", "updated", "unchanged", "refused", "scanned", "skipped", "removed", "removalPending"]
+              .filter((key) => Number.isFinite(Number(rewalkResult[key])))
+              .map((key) => [key, Number(rewalkResult[key])]),
+          )
+        : {},
+    },
+  });
+  if (!comparison.complete) {
+    throw new ProvenanceRepairIncompleteError(
+      `The full-source rewalk and receipt were verified, but recovery is ${comparison.status}: ` +
+        `${comparison.fixed_count} approved candidate(s) are actually gone, ${comparison.remaining_count} remain, and ${comparison.new_count} are newly observed. ` +
+        "No complete provenance-repair success is claimed.",
+      receipt,
+    );
+  }
+  ok(`provenance recovery verified for source "${source}": ${comparison.fixed_count} approved candidate(s) are no longer present`);
+  info("the proof is the new completed full-source receipt plus a fresh exact recovery readback; no legacy metadata was relabelled");
+  return receipt;
+}
+
+async function cmdProvenanceRepairInteractive(manifestPath) {
+  return cmdProvenanceRepair(manifestPath, { flags: parseFlags(process.argv.slice(3)) });
 }
 
 /**
@@ -6596,55 +9034,56 @@ async function purgeDocuments(base, adminKey, name) {
       "the worker could not be addressed (no URL or no ADMIN_KEY), so the store was edited directly"
     );
   } else {
-    const res = await http(`${base}/api/admin/brain/forget`, {
+    const requestWorkerForget = (confirm) => http(`${base}/api/admin/brain/forget`, {
       method: "POST",
       headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-      // confirm:true is REQUIRED. The route dry-runs by default, so omitting it
-      // returns a perfectly well-formed receipt having deleted nothing, which is
-      // exactly the "reported success, removed nothing" failure this function
-      // spends fifty lines guarding against everywhere else.
-      body: JSON.stringify({ source: name, confirm: true }),
-    }).catch((e) => ({ ok: false, status: 0, netError: e.message }));
+      body: JSON.stringify({ source: name, confirm }),
+    });
 
-    if (res.ok) {
-      // A 200 is NOT proof of removal. Cloudflare Access interstitials, SSO
-      // login pages and misrouted requests all answer 200 with HTML, and the
-      // previous version parsed that into {} and reported a successful purge.
-      // Only a well-formed receipt naming how many rows went counts as done.
+    // Prove the deployed Worker owns BOTH halves before authorizing either one.
+    // An older route can remove documents but cannot unregister the source
+    // behind the pause barrier. Discovering that after confirm:true would leave
+    // a half-finished destructive operation, so the read-only preview is the
+    // compatibility handshake.
+    const preview = await requestWorkerForget(false)
+      .catch((e) => ({ ok: false, status: 0, netError: e.message }));
+    if (preview.ok) {
+      const rawPreview = await preview.text().catch(() => "");
+      let previewBody = null;
+      try { previewBody = JSON.parse(rawPreview); } catch { /* validated below */ }
+      try {
+        validateSourceForgetPreview(previewBody, name);
+      } catch (error) {
+        die(
+          `the worker's read-only forget preview did not prove guarded registry cleanup: ${error.message}\n` +
+            "      Nothing was removed. Update the Worker, then rerun the same `brain forget` command."
+        );
+      }
+
+      const res = await requestWorkerForget(true)
+        .catch((e) => ({ ok: false, status: 0, netError: e.message }));
+      if (!res.ok) {
+        const detail = typeof res.text === "function" ? await res.text().catch(() => "") : "";
+        die(
+          `the guarded worker forget returned ${res.status || "a network error"}: ${String(detail || res.netError || "").slice(0, 200)}\n` +
+            "      The source remains registered unless an exact finalization receipt says otherwise."
+        );
+      }
+      // A 200 is not proof of removal. Access interstitials and misrouted
+      // requests can answer 200 with HTML, so require the exact document and
+      // registry receipt from the same guarded route.
       const raw = await res.text().catch(() => "");
       let body = null;
+      try { body = JSON.parse(raw); } catch { /* validated below */ }
       try {
-        body = JSON.parse(raw);
-      } catch {
-        /* handled below */
-      }
-      // The D1 route reports `documents`; the older Supabase-era route reported
-      // `removed`. Accept either, but never invent one.
-      const removed =
-        body && typeof body.documents === "number"
-          ? body.documents
-          : body && typeof body.removed === "number"
-            ? body.removed
-            : null;
-      // A route that dry-ran deleted nothing, whatever else it said.
-      if (body && body.dry_run === true) {
+        validateSourceForgetReceipt(body, name);
+      } catch (error) {
         die(
-          "the worker ran a DRY RUN and removed nothing. This build of brain.mjs is older than\n" +
-            "      the worker it is talking to. Update the installer, then rerun the same\n" +
-            "      `brain forget` command. The raw credential-header workaround is intentionally disabled."
+          `the worker returned 200 but not an exact source-forget receipt: ${error.message}\n` +
+            "      Do not treat the source name as free. Run `brain sources` before retrying."
         );
       }
-      if (removed === null) {
-        const looksLikeHtml = /^\s*</.test(raw);
-        die(
-          `the worker returned 200 but not a removal receipt, so nothing is confirmed removed.\n` +
-            (looksLikeHtml
-              ? "      The response is HTML, which usually means an Access or SSO interstitial\n" +
-                "      answered instead of the worker. Check that the route is not behind Access.\n"
-              : `      Expected JSON with a numeric "removed". Got: ${raw.slice(0, 120)}\n`) +
-            "      The source has been left registered so it can be removed once this is fixed."
-        );
-      }
+      const removed = Number(body.documents);
       const queued = Number(body?.vector_cleanup_queued || 0);
       if (queued > 0) {
         warnings.push(
@@ -6653,23 +9092,21 @@ async function purgeDocuments(base, adminKey, name) {
         );
       }
       if (body?.vector_error) warnings.push(`vector cleanup reported: ${String(body.vector_error).slice(0, 180)}`);
-      return { channel: "worker route", removed, warnings };
+      return { channel: "worker route", removed, sourceUnregistered: true, warnings };
     }
-    // 404/405 means this worker has no such route, which is expected on an
-    // older install and is the one case worth falling through on. Anything
-    // else is a real failure and must not be downgraded into a weaker path:
-    // a 500 from the worker says the removal was attempted and went wrong,
-    // and retrying it through a different door is how you delete twice.
-    if (res.status && res.status !== 404 && res.status !== 405) {
-      const detail = await res.text().catch(() => "");
+    // 404/405 means this worker has no forget route and no mutation was
+    // attempted. Any other preview failure is a real boundary failure and must
+    // not be downgraded into a second write path.
+    if (preview.status && preview.status !== 404 && preview.status !== 405) {
+      const detail = typeof preview.text === "function" ? await preview.text().catch(() => "") : "";
       die(
-        `the worker's forget route returned ${res.status}: ${String(detail).slice(0, 200)}\n` +
+        `the worker's forget preview returned ${preview.status}: ${String(detail).slice(0, 200)}\n` +
           "      Nothing was removed."
       );
     }
     warnings.push(
-      res.netError
-        ? `the worker at ${base} could not be reached (${res.netError}), so the store was edited directly`
+      preview.netError
+        ? `the worker at ${base} could not be reached (${preview.netError}), so the store was edited directly`
         : "this worker has no /api/admin/brain/forget route, so the store was edited directly"
     );
   }
@@ -6746,7 +9183,7 @@ async function purgeDocuments(base, adminKey, name) {
     );
   }
 
-  return { channel: "direct store access", removed: before, warnings };
+  return { channel: "direct store access", removed: before, sourceUnregistered: false, warnings };
 }
 
 async function cmdForget(manifestPath) {
@@ -6855,17 +9292,13 @@ async function cmdForget(manifestPath) {
     );
   }
 
-  // The event is written BEFORE the registry row is deleted, so a failure
-  // between the two leaves the source visible and retryable rather than
-  // silently gone. Same reason upgrade_runs records the failures.
-  await d1Query(
-    acct.id,
-    dbId,
-    "INSERT INTO source_events (source_name, event, at, documents, detail) VALUES (?,'forget',?,?,?)",
-    [name, new Date().toISOString(), removed, `channel=${out.channel}`]
-  ).catch(() => {});
-
-  await d1Query(acct.id, dbId, "DELETE FROM sources WHERE name = ?", [name]);
+  if (out.sourceUnregistered !== true) {
+    die(
+      `the documents were removed via ${out.channel}, but that path cannot finalize the source registry\n` +
+        "      behind the Worker's pause barrier. The registry row was deliberately retained.\n" +
+        "      Update the Worker, verify `brain health`, then rerun this exact source forget."
+    );
+  }
   ok(`registry row for "${name}" removed, the name is free to reuse`);
 
   for (const wmsg of out.warnings) warn(wmsg);
@@ -6885,8 +9318,36 @@ async function cmdForget(manifestPath) {
  * reason, and those reasons are kept in the state file.
  */
 async function cmdIngest(manifestPath) {
-  const { m } = loadManifest(manifestPath);
-  const flags = parseFlags(process.argv.slice(4));
+  const rawArguments = process.argv.slice(3);
+  const flagArguments = process.argv.slice(4);
+  const aggregateIntent = aggregateConnectorPreviewRawIntent(rawArguments);
+  let flags;
+  let m;
+
+  if (aggregateIntent.selected) {
+    try {
+      flags = parseFlags(flagArguments);
+    } catch {
+      throw new JsonFatal(connectorAggregatePreviewRequestFailure(aggregateIntent.source));
+    }
+    const parsedSource = String(flags.from || "").toLowerCase();
+    if (!aggregateIntent.exactFlag || aggregateIntent.source === "unknown" ||
+        flags["aggregate-json"] === undefined || parsedSource !== aggregateIntent.source) {
+      throw new JsonFatal(connectorAggregatePreviewRequestFailure(aggregateIntent.source));
+    }
+    aggregateConnectorPreviewMode(flags, parsedSource);
+    try {
+      ({ m } = loadManifest(manifestPath));
+    } catch {
+      throw new JsonFatal(connectorAggregatePreviewManifestFailure(aggregateIntent.source));
+    }
+  } else {
+    ({ m } = loadManifest(manifestPath));
+    flags = parseFlags(flagArguments);
+    if (flags["aggregate-json"] !== undefined) {
+      aggregateConnectorPreviewMode(flags, String(flags.from || "").toLowerCase());
+    }
+  }
   // Remote sources reuse everything below the envelope: splitting, batching,
   // the credential gate, resume state and the skip report. Only the producer
   // differs. Calendar is the one exception: its connector already carries
@@ -6921,7 +9382,63 @@ async function cmdIngest(manifestPath) {
  * other per-source ingest already is, and keeps `brain load` running the SAME
  * walker an operator runs by hand rather than a second copy that could drift.
  */
-export async function cmdIngestLocal(m, manifestPath, flags) {
+function sourceIngestLockRuntimeOptions(options = {}) {
+  const configured = options.sourceIngestLockOptions || {};
+  return {
+    ...(Object.hasOwn(configured, "home") ? { home: configured.home } : {}),
+    ...(Object.hasOwn(configured, "platform") ? { platform: configured.platform } : {}),
+  };
+}
+
+/**
+ * One command-level lease boundary for every source writer that can be called
+ * directly, through `brain load`, or by provenance repair. The caller resolves
+ * source identity first, then this function acquires the source lease and any
+ * shared credential-record lease before credentials, network, resume-state
+ * reads, or receipts. Dry runs never enter either lock.
+ */
+async function runMutatingSourceIngest({
+  manifestPath,
+  sourceName,
+  statePath,
+  sharedRecord = null,
+  dryRun,
+  options = {},
+}, task) {
+  if (typeof task !== "function") throw new TypeError("a source ingest task is required");
+  if (dryRun) return task(null);
+  const lockTask = options.withSourceIngestLock ?? withSourceIngestLock;
+  const runtimeOptions = sourceIngestLockRuntimeOptions(options);
+  try {
+    return await lockTask(
+      {
+        manifestPath,
+        sourceName,
+        statePath,
+        ...runtimeOptions,
+      },
+      ({ assertOwned: assertSourceOwned }) => {
+        if (!sharedRecord) return task(assertSourceOwned);
+        // Every source writer takes its adjacent-state lease first. Google
+        // sources then take the one per-user credential-record lease in the
+        // same order as the generic provider writers, so different sources
+        // cannot race a legacy migration or deadlock on opposite lock orders.
+        return lockTask(
+          { sourceName, sharedRecord, ...runtimeOptions },
+          ({ assertOwned: assertRecordOwned }) => task(() => {
+            assertSourceOwned();
+            assertRecordOwned();
+          }),
+        );
+      },
+    );
+  } catch (error) {
+    if (error instanceof SourceIngestLockError) die(error.message);
+    throw error;
+  }
+}
+
+function localIngestContext(m, manifestPath, flags) {
   // A local folder now reconciles its own deletions, so it has the same
   // approval gate Drive does. It stays invalid on every OTHER remote source,
   // which is checked in cmdIngestRemote.
@@ -6943,7 +9460,6 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     );
   }
   if (!existsSync(root)) die(`no such folder: ${root}`);
-  const { walk, prepare, batchStream, splitOversized, loadState, saveState, removedSinceLastRun } = await ingestLib();
 
   const sourceExplicit = typeof flags.source === "string" && flags.source.trim() !== "";
   // A manifest that names a source for this folder is the answer, not "upload".
@@ -6972,6 +9488,58 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   const sourceName = assertSourceName(
     flags.source === true ? null : flags.source || declaredSource || "upload"
   );
+  return {
+    localRemovalApproval,
+    root,
+    sourceExplicit,
+    declaredSource,
+    sourceName,
+    dry: !!flags["dry-run"],
+    statePath: canonicalSourceIngestStatePath({ manifestPath, sourceName }),
+  };
+}
+
+export async function cmdIngestLocal(m, manifestPath, flags, options = {}) {
+  const context = localIngestContext(m, manifestPath, flags);
+  return runMutatingSourceIngest({
+    manifestPath,
+    sourceName: context.sourceName,
+    statePath: context.statePath,
+    dryRun: context.dry,
+    options,
+  }, (assertLockOwned) => cmdIngestLocalRun(
+    m,
+    manifestPath,
+    flags,
+    context,
+    options,
+    assertLockOwned,
+  ));
+}
+
+async function cmdIngestLocalRun(m, manifestPath, flags, context, options, assertLockOwned) {
+  const {
+    localRemovalApproval,
+    root,
+    sourceExplicit,
+    declaredSource,
+    sourceName,
+    dry,
+    statePath,
+  } = context;
+  const {
+    walk,
+    prepare,
+    batchStream,
+    splitOversized,
+    loadState,
+    saveState: persistState,
+    removedSinceLastRun,
+  } = await (options.ingestLib ?? ingestLib)();
+  const saveState = (path, value) => {
+    assertLockOwned?.();
+    return persistState(path, value);
+  };
   // Say where these documents are going BEFORE sending them, not after.
   //
   // This sentence already existed, buried inside the branch that only runs when
@@ -6990,18 +9558,23 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   // A dry run sends nothing, so it must not demand credentials it will never
   // use. Requiring a Cloudflare token to preview what WOULD be loaded turns the
   // safest command in the tool into one of the hardest to reach.
-  const dry = !!flags["dry-run"];
-  const acct = dry ? null : m.brain?.domain ? null : await resolveAccount(m);
-  const base = dry ? null : await resolveBaseUrl(m, acct);
-  const adminKey = dry ? null : resolveAdminKey(manifestPath);
+  const resolveIngestAccount = options.resolveAccount ?? resolveAccount;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const acct = dry ? null : m.brain?.domain ? null : await resolveIngestAccount(m);
+  const base = dry ? null : await resolveBase(m, acct);
+  const adminKey = dry ? null : resolveKey(manifestPath);
   if (!adminKey && !flags["dry-run"]) {
     die(
       "no durable admin key was found. Re-run `brain setup <manifest>` to generate and persist one; " +
-        "do not paste the key into a shell command."
+      "do not paste the key into a shell command."
     );
   }
-
-  const statePath = join(dirname(resolve(manifestPath)), `.brain-ingest-${sourceName}.json`);
+  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const recordSourceReceipt = (receipt) => {
+    assertLockOwned?.();
+    return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
+  };
   const savedState = loadState(statePath);
   const state = flags.reset
     ? { version: 1, done: {}, skipped: {}, ...(savedState.removed ? { removed: savedState.removed } : {}) }
@@ -7042,6 +9615,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   let ocrPages = 0;
   const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
     base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
+    assertOwned: assertLockOwned,
     onPage: ({ page, totalPages }) => {
       ocrPages++;
       // Per PAGE, not per file. A forty-page scan is forty model calls and
@@ -7078,17 +9652,13 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
 
   const skips = [...walkSkips];
   const notes = [];
-  const intentionalRemovalKeys = new Set();
-  const normalizedPrivatePaths = walkSkips
-    .filter((skip) => skip.reason === "matched a private path prefix from the manifest")
-    .map((skip) => String(skip.path).split(sep).join("/").replace(/^\.\//, "").replace(/\/$/, ""));
-  const privateRemovalKeys = [...previouslyKnownKeys].filter((key) => normalizedPrivatePaths.some(
-    (path) => key === path || key.startsWith(`${path}/`)
-  ));
-  const privateRemovalSet = new Set(privateRemovalKeys);
+  const adjudicatedRemovals = localWalkRemovalCandidates(walkSkips, previouslyKnownKeys);
+  const privateRemovalKeys = adjudicatedRemovals.policy;
+  const intentionalRemovalKeys = new Set(adjudicatedRemovals.intentional);
+  const adjudicatedRemovalSet = new Set([...privateRemovalKeys, ...intentionalRemovalKeys]);
   const candidateLocalKeys = new Set(files.map((file) => String(file.rel).split(sep).join("/")));
   const missingScannerKeys = [...previouslyKnownKeys].filter(
-    (key) => !candidateLocalKeys.has(key) && !privateRemovalSet.has(key)
+    (key) => !candidateLocalKeys.has(key) && !adjudicatedRemovalSet.has(key)
   );
   if (!dry && scannerPolicyChanged && missingScannerKeys.length) {
     die(
@@ -7098,7 +9668,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   }
   const limitedLocalKeys = new Set(limited.map((file) => String(file.rel).split(sep).join("/")));
   const limitedMissesPrior = [...previouslyKnownKeys].some(
-    (key) => candidateLocalKeys.has(key) && !privateRemovalSet.has(key) && !limitedLocalKeys.has(key)
+    (key) => candidateLocalKeys.has(key) && !adjudicatedRemovalSet.has(key) && !limitedLocalKeys.has(key)
   );
   if (!dry && scannerPolicyChanged && limitedMissesPrior) {
     die(
@@ -7145,7 +9715,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   const vanishedRemovalKeys = flags.limit
     ? []
     : removedSinceLastRun(previouslyKnownKeys, protectedLocalSkipKeys)
-      .filter((key) => !privateRemovalSet.has(key));
+      .filter((key) => !adjudicatedRemovalSet.has(key));
   const scannerRescanSkips = [];
   let unchanged = 0;
   let split = 0;
@@ -7311,7 +9881,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   const sourceRunStartedAt = new Date().toISOString();
   let sourceRunClosed = false;
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
-  await postSourceReceipt(base, adminKey, {
+  await recordSourceReceipt({
     source: sourceName,
     kind: "upload",
     status: "indexing",
@@ -7346,6 +9916,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     try {
       t = await sendBatches({
         base, adminKey, groups: [group], state, statePath, skips, quiet: true,
+        saveState, assertOwned: assertLockOwned,
         onResult: (item, result) => {
           const key = item.familyPlan?.stateKey;
           if (!key) return;
@@ -7383,7 +9954,14 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     const reconciliation = outcome.completed.map(
       (plan) => ({ base_doc_uid: plan.base_doc_uid, keep_doc_uids: plan.keep_doc_uids }),
     );
-    if (reconciliation.length) await reconcileDocumentFamilies({ families: reconciliation, base, adminKey });
+    if (reconciliation.length) {
+      await reconcileDocumentFamilies({
+        families: reconciliation,
+        base,
+        adminKey,
+        assertOwned: assertLockOwned,
+      });
+    }
     for (const plan of outcome.completed) {
       recordAcceptedDocumentState(state, { ...plan, protectedSkipKeys: protectedLocalSkipKeys });
     }
@@ -7446,6 +10024,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   const localRemoval = await applyDriveRemovals({
     uids: localTruthTargets,
     base, adminKey, state, dryRun: false, label: "local source truth",
+    assertOwned: assertLockOwned,
   });
   saveState(statePath, state);
 
@@ -7454,6 +10033,7 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   if (vanishedTargets.length) {
     vanishedRemoval = await applyDriveRemovals({
       uids: vanishedTargets, base, adminKey, state, dryRun: false, label: "Drive deletion",
+      assertOwned: assertLockOwned,
     });
     saveState(statePath, state);
     if (vanishedRemoval.applied) ok(`${vanishedRemoval.applied} document(s) removed because their file is gone from the folder`);
@@ -7487,9 +10067,10 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     }
   }
 
+  const localCoverage = localReceiptCoverage(tally, skips);
   if (scannerRescanSkips.length) {
     saveState(statePath, state);
-    await postSourceReceipt(base, adminKey, {
+    await recordSourceReceipt({
       source: sourceName,
       kind: "upload",
       status: "error",
@@ -7502,8 +10083,11 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
       docs_added: tally.created,
       docs_updated: tally.updated,
       docs_unchanged: unchanged + tally.unchanged,
+      docs_refused: localCoverage.docsRefused,
+      docs_failed: tally.failed + scannerRescanSkips.length,
       error: `${scannerRescanSkips.length} previously-indexed file(s) could not be rechecked by the current credential scanner`,
-      detail: `local folder ingest stopped during credential recheck; skipped=${skips.length}`,
+      detail: `local folder ingest stopped during credential recheck; skipped=${skips.length}; ` +
+        `coverage_gaps=${localCoverage.coverageGaps}; adjudicated_skips=${localCoverage.adjudicatedSkips}`,
     });
     sourceRunClosed = true;
     die(
@@ -7516,7 +10100,10 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
   saveState(statePath, state);
 
   const finalStatus = tally.failed ? "error" : "ready";
-  await postSourceReceipt(base, adminKey, {
+  const localCoverageGaps = localCoverage.coverageGaps;
+  const adjudicatedSkips = localCoverage.adjudicatedSkips;
+  const localWalkComplete = !flags.limit && walkComplete;
+  await recordSourceReceipt({
     source: sourceName,
     kind: "upload",
     status: finalStatus,
@@ -7524,13 +10111,16 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     lane: "manual",
     started_at: sourceRunStartedAt,
     completed_at: new Date().toISOString(),
-    complete_sweep: tally.failed === 0 && tally.refused === 0 && skips.length === 0,
-    walk_complete: tally.failed === 0,
+    complete_sweep: localWalkComplete && tally.failed === 0 && tally.refused === 0 && localCoverageGaps === 0,
+    walk_complete: localWalkComplete,
     files_seen: scanned,
     docs_added: tally.created,
     docs_updated: tally.updated,
     docs_unchanged: unchanged + tally.unchanged,
-    detail: `local folder ingest ${finalStatus === "ready" ? "completed" : "completed with document failures"}; skipped=${skips.length}`,
+    docs_refused: localCoverage.docsRefused,
+    docs_failed: tally.failed,
+    detail: `local folder ingest ${finalStatus === "ready" ? "completed" : "completed with document failures"}; ` +
+      `coverage_gaps=${localCoverageGaps}; adjudicated_skips=${adjudicatedSkips}`,
     ...(tally.failed ? { error: `${tally.failed} document(s) failed` } : {}),
   });
   sourceRunClosed = true;
@@ -7576,9 +10166,10 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
     // transport, reconciliation, or the final acceptance check aborts. The
     // original failure remains authoritative even if this best-effort receipt
     // cannot be written.
-    if (!sourceRunClosed) {
+    if (!sourceRunClosed && error?.code !== "source_ingest_lock_lost") {
+      assertLockOwned?.();
       try {
-        await postSourceReceipt(base, adminKey, {
+        await recordSourceReceipt({
           source: sourceName,
           kind: "upload",
           status: "error",
@@ -7604,11 +10195,10 @@ export async function cmdIngestLocal(m, manifestPath, flags) {
 }
 
 /** A destructive response is trusted only when it proves it is the forget API. */
-export function validateForgetReceipt(body) {
+function validateForgetBody(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new Error("the forget response is not a JSON object");
   }
-  if (body.dry_run !== false) throw new Error("the forget response did not confirm a real deletion");
   for (const field of ["documents", "chunks", "vectors"]) {
     if (!Number.isFinite(Number(body[field])) || Number(body[field]) < 0) {
       throw new Error(`the forget response has no valid ${field} count`);
@@ -7623,6 +10213,35 @@ export function validateForgetReceipt(body) {
   }
   if (Number(body.documents) !== body.targets.length) {
     throw new Error("the forget response document count does not match its acknowledged targets");
+  }
+  return body;
+}
+
+export function validateForgetReceipt(body) {
+  validateForgetBody(body);
+  if (body.dry_run !== false) throw new Error("the forget response did not confirm a real deletion");
+  return body;
+}
+
+/** A whole-source preview must prove that confirmation includes registry cleanup. */
+export function validateSourceForgetPreview(body, source) {
+  validateForgetBody(body);
+  if (body.dry_run !== true) throw new Error("the source forget preview is not a dry run");
+  if (body.source !== source) throw new Error("the source forget preview names a different source");
+  if (body.would_unregister_source !== true || body.source_unregistered !== false ||
+      body.registry_event_recorded !== false) {
+    throw new Error("the source forget preview does not include guarded registry cleanup");
+  }
+  return body;
+}
+
+/** A whole-source receipt binds document removal to the exact registry finalization. */
+export function validateSourceForgetReceipt(body, source) {
+  validateForgetReceipt(body);
+  if (body.source !== source) throw new Error("the source forget receipt names a different source");
+  if (body.source_unregistered !== true || body.registry_event_recorded !== true ||
+      typeof body.operation_id !== "string" || !body.operation_id.trim()) {
+    throw new Error("the source forget receipt does not prove guarded registry cleanup");
   }
   return body;
 }
@@ -7876,6 +10495,7 @@ export async function postSourceReceipt(base, adminKey, receipt, request = http,
   maxDelayMs = 30_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onRetry = () => {},
+  assertOwned = null,
 } = {}) {
   const url = `${base}/api/admin/brain/source-receipt`;
   let res, raw;
@@ -7883,6 +10503,9 @@ export async function postSourceReceipt(base, adminKey, receipt, request = http,
     ({ res, raw } = await retryTransient(async () => {
       let response;
       try {
+        // A lost response can outlive the source lease. Recheck before every
+        // retry so an older writer cannot overwrite its successor's receipt.
+        assertOwned?.();
         response = await request(url, {
           method: "POST",
           headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
@@ -7932,17 +10555,53 @@ export async function postSourceReceipt(base, adminKey, receipt, request = http,
   return body;
 }
 
+/** Register one source through the installed Worker's paused-write barrier. */
+export async function postSourceRegistration(base, adminKey, {
+  source,
+  kind,
+}, request = http) {
+  const normalizedSource = assertSourceName(source);
+  const normalizedKind = String(kind || "").trim().toLowerCase();
+  if (!normalizedKind) die("source registration needs a connector kind.");
+  const res = await request(`${base}/api/admin/brain/source-register`, {
+    method: "POST",
+    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ source: normalizedSource, kind: normalizedKind }),
+  }, { timeoutMs: 30_000, what: "the source registration" });
+  const raw = await res.text();
+  let body = null;
+  try { body = JSON.parse(raw); } catch { /* checked below */ }
+  const exactNewRegistration = body?.registered !== true ||
+    (body?.registry_event_recorded === true &&
+      typeof body?.operation_id === "string" && body.operation_id.length > 0);
+  if (!res.ok || !body || body.source !== normalizedSource ||
+      body.kind !== normalizedKind || typeof body.registered !== "boolean" ||
+      !exactNewRegistration) {
+    throw new Error(
+      `source registration was not accepted (${res.status}): ${body?.error || raw.slice(0, 160) || "invalid response"}`
+    );
+  }
+  return body;
+}
+
 /** Set or clear the freshness expectation owned by an installed scheduler. */
 export async function postSourceExpectation(base, adminKey, {
   source,
-  kind = "drive",
+  kind = null,
   expected_refresh_seconds,
 }, request = http) {
   const normalizedSource = assertSourceName(source);
+  const normalizedKind = typeof kind === "string" && kind.trim()
+    ? kind.trim().toLowerCase()
+    : null;
   const res = await request(`${base}/api/admin/brain/source-expectation`, {
     method: "POST",
     headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-    body: JSON.stringify({ source: normalizedSource, kind, expected_refresh_seconds }),
+    body: JSON.stringify({
+      source: normalizedSource,
+      ...(normalizedKind ? { kind: normalizedKind } : {}),
+      expected_refresh_seconds,
+    }),
   }, { timeoutMs: 30_000, what: "the source freshness expectation" });
   const raw = await res.text();
   let body = null;
@@ -8019,8 +10678,47 @@ function saveCalendarState(path, state) {
  * write new code only for what is actually new (the sync-token state file).
  */
 export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
-  const sourceName = assertSourceName(flags.source === true || !flags.source ? "calendar" : flags.source);
+  const aggregatePreview = aggregateConnectorPreviewMode(flags, "calendar");
+  let sourceName;
+  try {
+    sourceName = assertSourceName(flags.source === true || !flags.source ? "calendar" : flags.source);
+  } catch (error) {
+    if (aggregatePreview) throw new JsonFatal(connectorAggregatePreviewRequestFailure("calendar"));
+    throw error;
+  }
   const dry = !!flags["dry-run"];
+  const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName });
+  try {
+    return await runMutatingSourceIngest({
+      manifestPath,
+      sourceName,
+      statePath,
+      sharedRecord: "provider:google",
+      dryRun: dry,
+      options,
+    }, (assertLockOwned) => cmdIngestCalendarRun(
+      m,
+      manifestPath,
+      flags,
+      options,
+      { sourceName, dry, statePath, assertLockOwned, aggregatePreview },
+    ));
+  } catch (error) {
+    if (!aggregatePreview || error instanceof JsonFatal) throw error;
+    throw new JsonFatal(connectorAggregatePreviewFailure("calendar", error));
+  }
+}
+
+async function cmdIngestCalendarRun(
+  m,
+  manifestPath,
+  flags,
+  options,
+  { sourceName, dry, statePath, assertLockOwned, aggregatePreview },
+) {
+  const humanInfo = aggregatePreview ? () => {} : info;
+  const humanWarn = aggregatePreview ? () => {} : warn;
+  const humanOk = aggregatePreview ? () => {} : ok;
   const resolveIngestAccount = options.resolveAccount ?? resolveAccount;
   const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
   const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
@@ -8035,33 +10733,45 @@ export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
   }
 
   const { syncAll, ingestEnvelopes } = options.googleCalendar ?? await import("./connectors/google-calendar.mjs");
-  const getToken = options.getAccessToken ?? googleAuth("calendar");
+  const getToken = options.getAccessToken ?? googleAuth("calendar", {
+    storageOptions: options.googleStorageOptions,
+    loadStore: dry
+      ? options.loadGoogleTokensReadOnly ?? loadTokensReadOnly
+      : options.loadGoogleTokens ?? loadTokens,
+  });
   const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const recordSourceReceipt = (receipt) => {
+    assertLockOwned?.();
+    return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
+  };
   const removeDocs = options.applyDriveRemovals ?? applyDriveRemovals;
   const loadState = options.loadCalendarState ?? loadCalendarState;
-  const saveState = options.saveCalendarState ?? saveCalendarState;
-  const statePath = join(dirname(resolve(manifestPath)), `.brain-ingest-${sourceName}.json`);
+  const persistState = options.saveCalendarState ?? saveCalendarState;
+  const saveState = (path, value) => {
+    assertLockOwned?.();
+    return persistState(path, value);
+  };
   const state = flags.reset ? {} : loadState(statePath);
 
   const config = m.calendar || {};
   const calendarLabel = (config.calendars?.length ? config.calendars : ["primary"])
     .map((c) => (typeof c === "string" ? c : c.id)).join(", ");
-  info(`syncing calendar(s): ${calendarLabel}`);
+  humanInfo(`syncing calendar(s): ${calendarLabel}`);
 
   const result = await syncAll({
     config, state, getAccessToken: getToken,
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
   });
 
-  info(
+  humanInfo(
     `${result.summary.events_seen} event(s) seen across ${result.summary.calendars_ok}/${result.calendars.length} calendar(s); ` +
       `${result.documents.length} to upsert, ${result.deletions.length} cancelled, ${result.summary.skipped} skipped`
   );
   for (const cal of result.calendars) {
-    if (cal.error) warn(`${cal.calendar_key}: ${cal.error.message}`);
+    if (cal.error) humanWarn(`${cal.calendar_key}: ${cal.error.message}`);
   }
   if (result.summary.needs_reconsent) {
-    warn(
+    humanWarn(
       "Google refused the calendar refresh token (it is dead: revoked, expired from six months of " +
         "non-use, or the OAuth app is still in Testing and issued a seven-day token). Reconnect with " +
         "`brain connect google --scopes drive,gmail,calendar` before running this again. " +
@@ -8071,14 +10781,73 @@ export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
 
   if (dry) {
     const previewFailures = result.calendars.filter((calendar) => calendar.error);
+    const aggregateFailures = result.calendars.filter((calendar) =>
+      calendar.ok !== true || calendar.error || calendar.authoritative_snapshot !== true);
     const previewSummary = `dry run: ${result.documents.length} event(s) would be sent, ${result.deletions.length} cancellation(s) would be removed`;
-    if (previewFailures.length) warn(`Calendar preview incomplete: ${previewSummary}`);
-    else ok(previewSummary);
-    if (result.documents.length) {
+    if (previewFailures.length) humanWarn(`Calendar preview incomplete: ${previewSummary}`);
+    else humanOk(previewSummary);
+    if (!aggregatePreview && result.documents.length) {
       console.log("\n  first few that WOULD be sent:");
       for (const envelope of result.documents.slice(0, 5)) {
         console.log(`    ${envelope.title}  (${envelope.occurred_at || "no date"})`);
       }
+    }
+    if (aggregatePreview) {
+      const modes = new Set(result.calendars
+        .filter((calendar) => calendar.ok === true)
+        .map((calendar) => calendar.mode)
+        .filter((mode) => mode === "full" || mode === "incremental"));
+      const scope = modes.size === 1 ? [...modes][0] : modes.size > 1 ? "mixed" : "unknown";
+      const succeeded = result.calendars.filter((calendar) =>
+        calendar.ok === true && !calendar.error && calendar.authoritative_snapshot === true).length;
+      const removals = aggregateRemovalCandidateCounts({
+        sourceDeleted: result.deletions.map((deletion) => deletion.source_id),
+      });
+      const sourceCoverageIncomplete = result.summary.skipped > 0;
+      const providerCoverageIncomplete = aggregateFailures.length > 0 || result.summary.needs_reconsent === true;
+      const complete = !sourceCoverageIncomplete && !providerCoverageIncomplete;
+      const classifiedProviderFailures = result.calendars
+        .filter((calendar) => calendar.error)
+        .map((calendar) => connectorAggregatePreviewFailure("calendar", calendar.error).failure);
+      const failurePriority = [
+        "AUTH_REQUIRED",
+        "PERMISSION_DENIED",
+        "RATE_LIMITED",
+        "NETWORK_UNAVAILABLE",
+        "PROVIDER_UNAVAILABLE",
+      ];
+      const typedProviderFailure = result.summary.needs_reconsent === true
+        ? { code: "AUTH_REQUIRED", retryable: false }
+        : failurePriority
+            .map((code) => classifiedProviderFailures.find((failure) => failure.code === code))
+            .find(Boolean) || null;
+      const receipt = connectorAggregatePreviewReceipt({
+        source: "calendar",
+        status: complete ? "complete" : "incomplete",
+        scope,
+        counts: {
+          observed: result.summary.events_seen,
+          would_send: result.documents.length,
+          unchanged: 0,
+          skipped: result.summary.skipped,
+          removal_candidates: Object.values(removals).reduce((sum, value) => sum + value, 0),
+        },
+        removalCandidates: removals,
+        coverage: {
+          complete,
+          bounded: false,
+          units_total: result.calendars.length,
+          units_succeeded: succeeded,
+          units_failed: result.calendars.length - succeeded,
+        },
+        failure: complete
+          ? null
+          : providerCoverageIncomplete
+            ? typedProviderFailure || { code: "PROVIDER_SCOPE_INCOMPLETE", retryable: true }
+            : { code: "SOURCE_COVERAGE_INCOMPLETE", retryable: false },
+      });
+      if (!complete) throw new JsonFatal(receipt);
+      return emitConnectorAggregatePreview(receipt, options);
     }
     if (previewFailures.length) {
       die(
@@ -8099,7 +10868,7 @@ export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
 
   const runId = `sync_${randomBytes(16).toString("hex")}`;
   const startedAt = new Date().toISOString();
-  await postReceipt(base, adminKey, {
+  await recordSourceReceipt({
     source: sourceName, kind: "calendar", status: "indexing",
     run_id: runId, lane: "manual", started_at: startedAt,
     detail: `calendar sync started: ${calendarLabel}`,
@@ -8111,11 +10880,18 @@ export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
   // `brain forget --source`, and custom `--source` names all describe the
   // same documents. Gmail, Drive, and the message commands follow this same
   // boundary rule.
-  const sourceEnvelopes = result.documents.map((envelope) => ({
-    ...envelope,
-    source_type: sourceName,
-  }));
-  const sent = await ingestEnvelopes({ baseUrl: base, adminKey, envelopes: sourceEnvelopes });
+  const sourceEnvelopes = result.documents.map((envelope) =>
+    restampFirstPartySourceProvenance(envelope, {
+      sourceType: sourceName,
+      textSource: envelope.text_source,
+      textReliable: envelope.text_reliable,
+    }));
+  const sent = await ingestEnvelopes({
+    baseUrl: base,
+    adminKey,
+    envelopes: sourceEnvelopes,
+    assertOwned: assertLockOwned,
+  });
 
   let removed = 0;
   let removalPending = 0;
@@ -8123,6 +10899,7 @@ export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
     const uids = result.deletions.map((d) => `${sourceName}:${d.source_id}`);
     const removal = await removeDocs({
       uids, base, adminKey, state: { done: {}, removed: {} }, dryRun: false, label: "calendar cancellation",
+      assertOwned: assertLockOwned,
     });
     removed = removal.applied;
     removalPending = removal.pending;
@@ -8137,35 +10914,60 @@ export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
   // idempotent and is the only safe retry boundary.
   const deliveryIncomplete = sent.errors.length > 0 || sent.refused.length > 0 || removalPending > 0;
   if (deliveryIncomplete) {
-    warn("Calendar sync state was not advanced because not every event and cancellation was accepted. Re-running retries the same Google window.");
+    humanWarn("Calendar sync state was not advanced because not every event and cancellation was accepted. Re-running retries the same Google window.");
   } else {
     saveState(statePath, result.state);
   }
 
-  const finalStatus = deliveryIncomplete || result.summary.needs_reconsent ? "error" : "ready";
+  const walkComplete = result.ok;
+  const fullTraversal = result.calendars.every((calendar) => calendar.ok && calendar.mode === "full");
+  // Pagination reaching its end proves a walk. Google's terminal
+  // nextSyncToken separately proves the authoritative snapshot boundary and
+  // supplies deletion continuity for later incremental runs.
+  const authoritativeSnapshot = result.calendars.every((calendar) =>
+    calendar.ok && calendar.authoritative_snapshot === true);
+  const completeSweep = walkComplete && !deliveryIncomplete && result.summary.skipped === 0 &&
+    fullTraversal && authoritativeSnapshot;
+  const completedAt = new Date().toISOString();
+  const configuredFrom = config.fullSyncSince || null;
+  const finalStatus = walkComplete && !deliveryIncomplete ? "ready" : "error";
   const incompleteReason = [
     sent.errors.length ? `${sent.errors.length} event send(s) failed` : null,
     sent.refused.length ? `${sent.refused.length} event(s) were refused` : null,
     removalPending ? `${removalPending} cancellation removal(s) remain pending` : null,
     result.summary.needs_reconsent ? "one or more calendars need Google reconsent" : null,
+    result.summary.calendars_failed ? `${result.summary.calendars_failed} calendar(s) could not be traversed` : null,
   ].filter(Boolean).join("; ");
-  await postReceipt(base, adminKey, {
+  await recordSourceReceipt({
     source: sourceName, kind: "calendar", status: finalStatus,
-    run_id: runId, lane: "manual", started_at: startedAt, completed_at: new Date().toISOString(),
+    run_id: runId, lane: "manual", started_at: startedAt, completed_at: completedAt,
+    files_seen: result.summary.events_seen,
     docs_added: sent.created, docs_updated: sent.updated, docs_unchanged: sent.unchanged,
+    docs_refused: sent.refused.length + result.summary.skipped,
+    docs_failed: sent.errors.length,
+    walk_complete: walkComplete,
+    complete_sweep: completeSweep,
+    ...(completeSweep ? {
+      confirmed_range: { from: configuredFrom, through: null },
+      target_range: { from: configuredFrom, through: null },
+    } : {}),
     detail: `calendar sync: ${sent.created} created, ${sent.updated} updated, ${sent.unchanged} unchanged, ` +
-      `${sent.refused.length} refused, ${sent.errors.length} failed, ${removed} removed, ${removalPending} removal(s) pending`,
+      `${sent.refused.length} refused, ${sent.errors.length} failed, ${result.summary.skipped} intentionally non-searchable, ` +
+      `${removed} removed, ${removalPending} removal(s) pending; ` +
+      (completeSweep
+        ? "every configured calendar completed a full traversal and returned an authoritative sync token"
+        : "this run did not prove the configured history in full"),
     ...(finalStatus === "error" ? { error: incompleteReason || "calendar sync incomplete" } : {}),
   });
 
   const calendarSummary = `${sent.created} created, ${sent.updated} updated, ${sent.unchanged} unchanged, ${removed} cancellation(s) removed`;
-  if (finalStatus === "ready") ok(calendarSummary);
-  else warn(`Calendar sync incomplete: ${calendarSummary}`);
+  if (finalStatus === "ready") humanOk(calendarSummary);
+  else humanWarn(`Calendar sync incomplete: ${calendarSummary}`);
   if (sent.refused.length) {
-    warn(`${sent.refused.length} event(s) refused by the credential gate (a live credential was pasted into an event)`);
+    humanWarn(`${sent.refused.length} event(s) refused by the credential gate (a live credential was pasted into an event)`);
   }
-  if (sent.errors.length) warn(`${sent.errors.length} event(s) failed to send and will be retried on the next run`);
-  if (removalPending) warn(`${removalPending} cancellation removal(s) remain pending and will be retried on the next run`);
+  if (sent.errors.length) humanWarn(`${sent.errors.length} event(s) failed to send and will be retried on the next run`);
+  if (removalPending) humanWarn(`${removalPending} cancellation removal(s) remain pending and will be retried on the next run`);
   return { result, sent, removed, removalPending };
 }
 
@@ -8243,7 +11045,11 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
       // The session envelope's generic "message" source_type becomes THIS
       // load's name, so `brain forget --source imessage` scopes to exactly
       // these documents and `brain sources` counts them under their source.
-      .map((envelope) => ({ ...envelope, source_type: sourceName }))
+      .map((envelope) => restampFirstPartySourceProvenance(envelope, {
+        sourceType: sourceName,
+        textSource: envelope.text_source,
+        textReliable: envelope.text_reliable,
+      }))
       .flatMap((envelope) => splitOversized(envelope))
       .map((envelope) => ({ envelope }));
     for (const group of batches(docs)) {
@@ -8325,14 +11131,38 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
     return { ...result, bounded: !!flags.limit, would_send: result.documents_would_send };
   }
 
-  const bounded = !!flags.limit;
-  if (bounded) warn(`--limit ${flags.limit} bounded this capture pass, so it is NOT a complete source load`);
+  const bounded = !!flags.limit || result.caught_up !== true;
+  if (flags.limit) warn(`--limit ${flags.limit} bounded this capture pass, so it is NOT a complete source load`);
+  else if (bounded) warn("the capture stopped before it reached the current end of the Messages database, so it is NOT a complete source load");
+
+  const rowRefusals = skipped.no_text + skipped.no_timestamp + skipped.no_guid;
+  const walkComplete = !flushOnly && !flags.limit && result.caught_up === true;
+  // Reaching the end of the selected Mac's chat.db proves that local walk,
+  // not all-time iMessage history. Messages can have been deleted, retained
+  // only on another device, or represented only by unavailable attachments;
+  // Apple exposes no authoritative history/deletion inventory here.
+  const localRangeComplete = walkComplete && result.started_watermark === 0;
+  const measuredRange = localRangeComplete && (result.first_row_at || result.last_row_at)
+    ? { from: result.first_row_at, through: result.last_row_at }
+    : null;
 
   await postReceipt(base, adminKey, {
     source: sourceName, kind: "imessage", status: "ready",
     run_id: runId, lane: "manual", started_at: startedAt, completed_at: new Date().toISOString(),
+    files_seen: result.rows_seen,
     docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
-    detail: `iMessage capture: ${summary}; ${tally.refused} refused`,
+    docs_refused: tally.refused + rowRefusals, docs_failed: tally.failed,
+    walk_complete: walkComplete, complete_sweep: false,
+    // This is an observed local-database span, not a confirmed provider
+    // history range: deleted messages and messages retained only on another
+    // device are not visible to chat.db.
+    ...(measuredRange ? { target_range: measuredRange } : {}),
+    detail: `iMessage capture: ${summary}; ${tally.refused} credential-refused; ` +
+      (walkComplete
+        ? "the selected local database was fully enumerated"
+        : "the selected local database was not fully enumerated") +
+      (rowRefusals ? `; ${rowRefusals} row(s) remain deliberately non-searchable` : "") +
+      "; local chat.db cannot prove deleted, unavailable-device, or all-time provider history",
     ...(tally.refused ? { refusal_reason: `${tally.refused} conversation document(s) refused by the credential gate` } : {}),
   });
 
@@ -8343,6 +11173,7 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   if (tally.refused) {
     warn(`${tally.refused} conversation document(s) refused by the credential gate (a live credential was texted)`);
   }
+  warn("iMessage can prove only the selected Mac's local Messages database. Load a reviewed iPhone backup or export separately when older, deleted, or attachment-only history matters.");
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   return messageIngestionResult({ ...result, bounded }, tally);
 }
@@ -8406,7 +11237,11 @@ export async function cmdIngestWhatsapp(m, manifestPath, flags, options = {}) {
       // The session envelope's generic "message" source_type becomes THIS
       // load's name, so `brain forget --source whatsapp` scopes to exactly
       // these documents and `brain sources` counts them under their source.
-      .map((envelope) => ({ ...envelope, source_type: sourceName }))
+      .map((envelope) => restampFirstPartySourceProvenance(envelope, {
+        sourceType: sourceName,
+        textSource: envelope.text_source,
+        textReliable: envelope.text_reliable,
+      }))
       .flatMap((envelope) => splitOversized(envelope))
       .map((envelope) => ({ envelope }));
     for (const group of batches(docs)) {
@@ -8485,14 +11320,32 @@ export async function cmdIngestWhatsapp(m, manifestPath, flags, options = {}) {
     return { ...result, bounded: !!flags.limit, would_send: result.documents_would_send };
   }
 
-  const bounded = !!flags.limit;
-  if (bounded) warn(`--limit ${flags.limit} bounded this drain pass, so it is NOT a complete source load`);
+  const bounded = !!flags.limit || result.caught_up !== true;
+  if (flags.limit) warn(`--limit ${flags.limit} bounded this drain pass, so it is NOT a complete source load`);
+  else if (bounded) warn("the drain stopped before it reached the current end of the local outbox, so it is NOT a complete local outbox traversal");
+
+  const rowRefusals = skipped.media_only + skipped.no_text + skipped.no_identity + skipped.no_timestamp;
+  const walkComplete = !flushOnly && !flags.limit && result.caught_up === true;
+  const localRangeComplete = walkComplete && result.started_watermark === 0;
+  const measuredRange = localRangeComplete && (result.first_row_at || result.last_row_at)
+    ? { from: result.first_row_at, through: result.last_row_at }
+    : null;
 
   await postReceipt(base, adminKey, {
     source: sourceName, kind: "whatsapp", status: "ready",
     run_id: runId, lane: "manual", started_at: startedAt, completed_at: new Date().toISOString(),
+    files_seen: result.rows_seen,
     docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
-    detail: `WhatsApp drain: ${summary}; ${tally.refused} refused`,
+    docs_refused: tally.refused + rowRefusals, docs_failed: tally.failed,
+    walk_complete: walkComplete,
+    complete_sweep: false,
+    // The outbox span starts only when phone linkage began and has no
+    // authoritative deletion/history API behind it, so it is never promoted
+    // to a confirmed provider range.
+    ...(measuredRange ? { target_range: measuredRange } : {}),
+    detail: `WhatsApp drain: ${summary}; ${tally.refused} credential-refused; ` +
+      (walkComplete ? "the local outbox was fully enumerated" : "the local outbox was not fully enumerated") +
+      "; phone linkage can omit older history, so this receipt never claims all-time WhatsApp coverage",
     ...(tally.refused ? { refusal_reason: `${tally.refused} conversation document(s) refused by the credential gate` } : {}),
   });
 
@@ -8503,6 +11356,7 @@ export async function cmdIngestWhatsapp(m, manifestPath, flags, options = {}) {
   if (tally.refused) {
     warn(`${tally.refused} conversation document(s) refused by the credential gate (a live credential was messaged)`);
   }
+  warn("WhatsApp can prove only the local outbox captured since phone linkage. Load an export separately for any earlier history you need in the Brain.");
   if (result.rows_out_of_order) {
     // History-sync chunks arrive on concurrent connections, so an older
     // message can carry a newer outbox position. Sorting fixes it inside a
@@ -8611,7 +11465,11 @@ export async function cmdIngestIphoneBackup(m, manifestPath, flags, options = {}
       // The session envelope's generic "message" source_type becomes THIS
       // load's name, so `brain forget --source iphone-backup` scopes to
       // exactly these documents and nothing else.
-      .map((envelope) => ({ ...envelope, source_type: sourceName }))
+      .map((envelope) => restampFirstPartySourceProvenance(envelope, {
+        sourceType: sourceName,
+        textSource: envelope.text_source,
+        textReliable: envelope.text_reliable,
+      }))
       .flatMap((envelope) => splitOversized(envelope))
       .map((envelope) => ({ envelope }));
     for (const group of batches(docs)) {
@@ -8692,13 +11550,25 @@ export async function cmdIngestIphoneBackup(m, manifestPath, flags, options = {}
   const bounded = !!flags.limit || !!result.truncated;
   if (bounded) warn(`--limit stopped or bounded this load; it is NOT a complete history of the backup`);
 
+  const rowRefusals = skipped.no_text + skipped.no_timestamp + skipped.no_guid;
+  const walkComplete = !bounded;
+  const measuredRange = walkComplete && (result.earliest || result.latest)
+    ? { from: result.earliest, through: result.latest }
+    : null;
+  const confirmedRange = measuredRange && rowRefusals === 0 && tally.refused === 0 && tally.failed === 0
+    ? measuredRange
+    : null;
+
   await postReceipt(base, adminKey, {
     source: sourceName, kind: "iphone-backup", status: "ready",
     run_id: runId, lane: "manual", started_at: startedAt, completed_at: new Date().toISOString(),
-    complete_sweep: !bounded && tally.refused === 0 && tally.failed === 0,
-    walk_complete: !bounded && tally.refused === 0 && tally.failed === 0,
+    complete_sweep: walkComplete && rowRefusals === 0 && tally.refused === 0 && tally.failed === 0,
+    walk_complete: walkComplete,
     files_seen: result.rows_seen,
     docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
+    docs_refused: tally.refused + rowRefusals, docs_failed: tally.failed,
+    ...(confirmedRange ? { confirmed_range: confirmedRange } : {}),
+    ...(measuredRange ? { target_range: measuredRange } : {}),
     detail: `iPhone backup one-time history load (snapshot, not live capture): ${summary}; ${tally.refused} refused`,
     ...(tally.refused ? { refusal_reason: `${tally.refused} conversation document(s) refused by the credential gate` } : {}),
   });
@@ -8892,13 +11762,36 @@ export function uploadFoldersOf(corpus) {
  * now. Reporting them as one status is how "we loaded everything" gets said
  * about a source whose token died last Tuesday.
  */
-export function defaultLoadProbes() {
+export function defaultLoadProbes(options = {}) {
   let googleCache = null;
   const google = () => {
     if (googleCache) return googleCache;
     try {
-      const store = loadTokens()?.google;
-      googleCache = { present: !!store?.refresh_token, scopes: Array.isArray(store?.scopes) ? store.scopes : [] };
+      if (options.googleCredentialMetadataOnly) {
+        // A mutating `brain load` plans before any per-source lease exists. It
+        // may inspect only storage metadata here; the source leg opens and
+        // validates the real credential after both of its leases are held.
+        const inspectStatus = options.googleTokenStorageStatus ?? tokenStorageStatus;
+        const status = inspectStatus(options.googleStorageOptions);
+        googleCache = {
+          present: status?.exists === true,
+          scopes: [],
+          scopeUnknown: status?.exists === true,
+          ...(status?.error ? { error: status.error } : {}),
+        };
+      } else {
+        // Read-only planning must not use loadTokens(), whose normal successful
+        // read migrates a legacy Windows/macOS credential store.
+        const inspectCredential = options.inspectGoogleCredential ?? inspectGoogleTokenStorage;
+        const credential = inspectCredential(options.googleStorageOptions);
+        googleCache = {
+          present: credential?.connected === true,
+          scopes: Array.isArray(credential?.scopes) ? credential.scopes : [],
+          ...(credential?.checked === true && credential?.readable !== true
+            ? { error: credential?.reason || "the stored credential could not be read" }
+            : {}),
+        };
+      }
     } catch (error) {
       googleCache = { present: false, scopes: [], error: String(error?.message || error) };
     }
@@ -8910,6 +11803,7 @@ export function defaultLoadProbes() {
       return { connected: false, reason: `the stored Google connection could not be read: ${state.error}`, fix: connectHint };
     }
     if (!state.present) return { connected: false, reason: "no Google account is connected on this machine", fix: connectHint };
+    if (state.scopeUnknown) return { connected: true };
     if (!state.scopes.includes(scope)) {
       return {
         connected: false,
@@ -9150,7 +12044,13 @@ export function loadSourceRegistry(commands = {}) {
  */
 export async function planLoad({ m, manifestPath, flags = {}, registry, probes, platform, commands, options = {} }) {
   const table = registry || loadSourceRegistry(commands);
-  const probeTable = { ...defaultLoadProbes(), ...(probes || {}) };
+  const probeTable = {
+    ...defaultLoadProbes({
+      ...options,
+      googleCredentialMetadataOnly: !flags["dry-run"],
+    }),
+    ...(probes || {}),
+  };
   const declared = Object.keys(m?.corpora || {}).filter((key) => !key.startsWith("_"));
   const only = flags.only ? String(flags.only).split(",").map(normalizeLoadKey).filter(Boolean) : null;
   const skip = flags.skip ? String(flags.skip).split(",").map(normalizeLoadKey).filter(Boolean) : [];
@@ -9697,11 +12597,78 @@ const GMAIL_FETCH_CONCURRENCY = (() => {
   return Number.isInteger(raw) ? Math.min(32, Math.max(1, raw)) : 8;
 })();
 
-async function cmdIngestRemote(m, manifestPath, flags) {
+const GMAIL_FAILURE_OPERATIONS = new Set(GMAIL_FAILURE_OPERATION_CLASSES);
+const GMAIL_DOCUMENT_FAILURE_OPERATIONS = new Set([
+  "gmail_policy_read",
+  "gmail_message_read",
+]);
+const isPlainJsonRecord = (value) => value !== null && typeof value === "object" &&
+  !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+
+function readGmailCheckpointState(statePath, { missingIsEmpty = false } = {}) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(statePath, "utf8"));
+  } catch (error) {
+    if (missingIsEmpty && error?.code === "ENOENT") {
+      return { verified: true, done: 0, skipped: 0, cursorPresent: false, cursor: null };
+    }
+    return { verified: false };
+  }
+  if (!isPlainJsonRecord(parsed) || !isPlainJsonRecord(parsed.done) || !isPlainJsonRecord(parsed.skipped)) {
+    return { verified: false };
+  }
+  const cursorPresent = Object.hasOwn(parsed, "history_id");
+  if (cursorPresent && (typeof parsed.history_id !== "string" || !parsed.history_id.trim())) {
+    return { verified: false };
+  }
+  return {
+    verified: true,
+    done: Object.keys(parsed.done).length,
+    skipped: Object.keys(parsed.skipped).length,
+    cursorPresent,
+    // Kept only in process for exact comparison. It is never returned, sent,
+    // logged, hashed, or persisted as failure evidence.
+    cursor: cursorPresent ? parsed.history_id : null,
+  };
+}
+
+/** Build the closed Gmail failure proof sent to the Worker. */
+export function gmailFailureEvidence(error, statePath, beforeState) {
+  const afterState = readGmailCheckpointState(statePath);
+  const readbackVerified = beforeState?.verified === true && afterState.verified === true;
+  let cursorPreservation = "unverified";
+  if (readbackVerified) {
+    cursorPreservation = beforeState.cursorPresent === afterState.cursorPresent &&
+      beforeState.cursor === afterState.cursor
+      ? beforeState.cursorPresent ? "present_preserved" : "absent_preserved"
+      : "changed";
+  }
+  const providerStatus = error?.providerStatus;
+  const httpStatus = typeof providerStatus === "number" && Number.isSafeInteger(providerStatus) &&
+    providerStatus >= 100 && providerStatus <= 599
+    ? providerStatus
+    : null;
+  return {
+    version: SOURCE_FAILURE_EVIDENCE_VERSION,
+    operation_class: GMAIL_FAILURE_OPERATIONS.has(error?.operationClass)
+      ? error.operationClass
+      : "gmail_unknown",
+    http_status: httpStatus,
+    provider_reason: httpStatus === null ? null : canonicalGoogleProviderReason(error?.providerReason),
+    checkpoint_readback: readbackVerified ? "verified" : "unverified",
+    checkpoint_done: readbackVerified ? afterState.done : null,
+    checkpoint_skipped: readbackVerified ? afterState.skipped : null,
+    cursor_preservation: cursorPreservation,
+  };
+}
+
+export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
   const which = String(flags.from).toLowerCase();
   if (!["drive", "gmail", "imap"].includes(which)) {
     die(`--from ${which} is not a source. Available: drive, gmail, imap.`);
   }
+  const aggregatePreview = aggregateConnectorPreviewMode(flags, which);
 
   const removalApproval = flags["approve-removals"];
   if (removalApproval !== undefined) {
@@ -9714,29 +12681,45 @@ async function cmdIngestRemote(m, manifestPath, flags) {
     }
   }
 
-  const sourceName = assertSourceName(flags.source === true || !flags.source ? which : flags.source);
+  let sourceName;
+  try {
+    sourceName = assertSourceName(flags.source === true || !flags.source ? which : flags.source);
+  } catch (error) {
+    if (aggregatePreview) throw new JsonFatal(connectorAggregatePreviewRequestFailure(which));
+    throw error;
+  }
   const dry = !!flags["dry-run"];
-  const lockedStatePath = which === "gmail" && !dry
+  // Drive and Gmail share their canonical state identity with the source
+  // lease. IMAP is outside this provenance-repair lease change, so preserve
+  // its historical path spelling (notably /var versus /private/var on macOS).
+  const statePath = ["drive", "gmail"].includes(which)
     ? canonicalSourceIngestStatePath({ manifestPath, sourceName })
-    : null;
+    : join(dirname(resolve(manifestPath)), `.brain-ingest-${sourceName}.json`);
   const run = (assertLockOwned = null) => cmdIngestRemoteRun(
     m,
     manifestPath,
     flags,
-    { which, sourceName, dry, removalApproval, lockedStatePath, assertLockOwned },
+    options,
+    { which, sourceName, dry, removalApproval, statePath, assertLockOwned, aggregatePreview },
   );
   // A dry run writes neither resume state nor source receipts, so it cannot
-  // race the durable writer. Every real Gmail path, including brain load,
-  // takes the same cross-platform owner lease before credentials or network.
-  if (which !== "gmail" || dry) return run();
+  // race the durable writer. Every real Drive or Gmail path, including brain
+  // load and provenance repair, takes the same cross-platform owner lease
+  // before credentials or network. IMAP is outside provenance repair and keeps
+  // its existing boundary in this change.
   try {
-    return await withSourceIngestLock(
-      { manifestPath, sourceName, statePath: lockedStatePath },
-      ({ assertOwned }) => run(assertOwned),
-    );
+    if (dry || !["drive", "gmail"].includes(which)) return await run();
+    return await runMutatingSourceIngest({
+      manifestPath,
+      sourceName,
+      statePath,
+      sharedRecord: "provider:google",
+      dryRun: false,
+      options,
+    }, run);
   } catch (error) {
-    if (error instanceof SourceIngestLockError) die(error.message);
-    throw error;
+    if (!aggregatePreview || error instanceof JsonFatal) throw error;
+    throw new JsonFatal(connectorAggregatePreviewFailure(which, error));
   }
 }
 
@@ -9744,16 +12727,29 @@ const cmdIngestRemoteRun = async (
   m,
   manifestPath,
   flags,
-  { which, sourceName, dry, removalApproval, lockedStatePath = null, assertLockOwned = null },
+  options,
+  { which, sourceName, dry, removalApproval, statePath, assertLockOwned = null, aggregatePreview = false },
 ) => {
+  const humanInfo = aggregatePreview ? () => {} : info;
+  const humanWarn = aggregatePreview ? () => {} : warn;
+  const humanOk = aggregatePreview ? () => {} : ok;
+  const humanProgress = aggregatePreview ? () => {} : (value) => process.stdout.write(value);
   // A deployed connector talks to the brain's authenticated data-plane route.
   // The Cloudflare control token is an install/deploy credential, not something
   // a daily Drive or Gmail refresh should retain forever. A dry run talks only
   // to Google, so it resolves neither Cloudflare nor the brain's admin secret.
-  const acct = dry ? null : m.brain?.domain ? null : await resolveAccount(m);
-  const base = dry ? null : await resolveBaseUrl(m, acct);
-  const adminKey = dry ? null : resolveAdminKey(manifestPath);
+  const resolveIngestAccount = options.resolveAccount ?? resolveAccount;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const acct = dry ? null : m.brain?.domain ? null : await resolveIngestAccount(m);
+  const base = dry ? null : await resolveBase(m, acct);
+  const adminKey = dry ? null : resolveKey(manifestPath);
   if (!adminKey && !dry) die("no admin key found: not in the environment, and no .brain-admin-key file next to the manifest.");
+  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const recordSourceReceipt = (receipt) => {
+    assertLockOwned?.();
+    return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
+  };
 
   const {
     batchStream,
@@ -9761,7 +12757,7 @@ const cmdIngestRemoteRun = async (
     loadState,
     saveState: persistState,
     prefetch,
-  } = await ingestLib();
+  } = await (options.ingestLib ?? ingestLib)();
   const saveState = (path, value) => {
     assertLockOwned?.();
     return persistState(path, value);
@@ -9769,7 +12765,14 @@ const cmdIngestRemoteRun = async (
   // IMAP holds its own mailbox credential and never touches the Google store.
   // Resolving googleAuth unconditionally would refuse an IMAP sync on a machine
   // that has deliberately never connected Google, which is most of them.
-  const getToken = which === "imap" ? null : googleAuth(which === "gmail" ? "gmail" : "drive");
+  const getToken = which === "imap"
+    ? null
+    : options.getAccessToken ?? googleAuth(which === "gmail" ? "gmail" : "drive", {
+      storageOptions: options.googleStorageOptions,
+      loadStore: dry
+        ? options.loadGoogleTokensReadOnly ?? loadTokensReadOnly
+        : options.loadGoogleTokens ?? loadTokens,
+    });
   // OCR, and what it will cost, decided ONCE per run and stated out loud
   // before the first page is sent. The estimate lands while the owner can
   // still say no; a bill that appears afterwards is not a choice they were
@@ -9779,24 +12782,30 @@ const cmdIngestRemoteRun = async (
   let ocrPages = 0;
   const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
     base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
+    assertOwned: assertLockOwned,
     onPage: ({ page, totalPages }) => {
       ocrPages++;
       // Per PAGE, not per file. A forty-page scan is forty model calls and
       // over a minute of waiting; without this the run looks hung and the
       // first client to see it kills it.
-      info(`  OCR page ${page}${totalPages ? ` of ${totalPages}` : ""} (${ocrPages} page(s) read so far this run)`);
+      humanInfo(`  OCR page ${page}${totalPages ? ` of ${totalPages}` : ""} (${ocrPages} page(s) read so far this run)`);
     },
   });
   if (ocrCfg.enabled && !dry) {
     const { estimateOcrCost, describeOcrCost } = await ingestOcrLib();
-    info(`OCR is ON, model ${ocrCfg.model}, up to ${ocrCfg.maxPages} page(s) per document.`);
-    info(`  cost per 100 scanned pages: ${describeOcrCost(estimateOcrCost(100))}`);
+    humanInfo(`OCR is ON, model ${ocrCfg.model}, up to ${ocrCfg.maxPages} page(s) per document.`);
+    humanInfo(`  cost per 100 scanned pages: ${describeOcrCost(estimateOcrCost(100))}`);
   } else if (ocrCfg.enabled && dry) {
-    info("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
+    humanInfo("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
   }
 
-  const statePath = lockedStatePath || join(dirname(resolve(manifestPath)), `.brain-ingest-${sourceName}.json`);
   const savedState = loadState(statePath);
+  // Capture only enough in-memory state to prove the post-failure file kept
+  // the prior Gmail cursor. The cursor itself never crosses the process
+  // boundary and the final readback reports only counts and a comparison.
+  const gmailCheckpointBefore = which === "gmail"
+    ? readGmailCheckpointState(statePath, { missingIsEmpty: true })
+    : null;
   const state = flags.reset
     ? {
         version: 1,
@@ -9887,6 +12896,7 @@ const cmdIngestRemoteRun = async (
   // folder must never cancel one unreadable message's coverage gap.
   let folderPolicySkipped = 0;
   let sourceResolvedSkipped = 0;
+  let adjudicatedSkipped = 0;
   let localRefused = 0;
   // Only missing policy evidence blocks a Gmail history window. Deterministic
   // exclusions and credential refusals remain visible, but retrying that same
@@ -9894,6 +12904,7 @@ const cmdIngestRemoteRun = async (
   let gmailLabelGaps = 0;
   let gmailHistoryMarkerMissing = 0;
   let gmailPendingRemovalGaps = 0;
+  let gmailOperationalFailure = null;
   let imapSnapshotGaps = 0;
   // A scanner migration is complete only when every previously accepted item
   // was either rechecked or deliberately removed. A transient unreadable item
@@ -9912,6 +12923,12 @@ const cmdIngestRemoteRun = async (
   const rejectedFamilyParts = new Map();
   const intentionalRemovalUids = [];
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+  let aggregateScope = "unknown";
+  let aggregateRemovals = Object.freeze({
+    source_policy: 0,
+    source_deleted: 0,
+    intentional_skip: 0,
+  });
 
   const addTally = (part) => {
     for (const key of Object.keys(tally)) tally[key] += Number(part?.[key] || 0);
@@ -9974,7 +12991,7 @@ const cmdIngestRemoteRun = async (
         families: settlement.reconciliations, base, adminKey,
         assertOwned: assertLockOwned,
       });
-      if (staleParts) ok(`${staleParts} obsolete split-document part(s) removed`);
+      if (staleParts) humanOk(`${staleParts} obsolete split-document part(s) removed`);
     }
     intentionalRemovalUids.push(...settlement.intentionalRemovalUids);
     for (const plan of outcome.completed) {
@@ -9994,7 +13011,7 @@ const cmdIngestRemoteRun = async (
       rejectedFamilyParts.delete(plan.stateKey);
     }
     if (outcome.completed.length || outcome.incomplete.length) saveState(statePath, state);
-    process.stdout.write(
+    humanProgress(
       `\r  batch ${batchNo}  loaded ${tally.created + tally.updated}  refused ${tally.refused}  failed ${tally.failed}   `
     );
   };
@@ -10002,7 +13019,7 @@ const cmdIngestRemoteRun = async (
   try {
   if (!dry) {
     assertLockOwned?.();
-    await postSourceReceipt(base, adminKey, {
+    await recordSourceReceipt({
       source: sourceName, kind: which, status: "indexing", run_id: runId,
       lane, started_at: runStartedAt, detail: `${which} ${lane} sync started`,
     });
@@ -10014,12 +13031,12 @@ const cmdIngestRemoteRun = async (
   }
 
   if (which === "drive") {
-    const drive = await import("./connectors/google-drive.mjs");
+    const drive = options.googleDrive ?? await import("./connectors/google-drive.mjs");
     const sourceDeletedUids = [];
-    if (!incremental && state.sync_token) info(`${driveDecision.reason}; using a full Drive comparison`);
-    if (sourcePolicy.excludeFileIds.length) info(`${sourcePolicy.excludeFileIds.length} reviewed Drive file-id exclusion(s) enforced`);
-    if (sourcePolicy.excludePaths.length) info(`${sourcePolicy.excludePaths.length} Drive path exclusion(s) enforced`);
-    if (sourcePolicy.privatePrefixes.length) info(`private path prefixes enforced in Drive: ${sourcePolicy.privatePrefixes.join(", ")}`);
+    if (!incremental && state.sync_token) humanInfo(`${driveDecision.reason}; using a full Drive comparison`);
+    if (sourcePolicy.excludeFileIds.length) humanInfo(`${sourcePolicy.excludeFileIds.length} reviewed Drive file-id exclusion(s) enforced`);
+    if (sourcePolicy.excludePaths.length) humanInfo(`${sourcePolicy.excludePaths.length} Drive path exclusion(s) enforced`);
+    if (sourcePolicy.privatePrefixes.length) humanInfo(`private path prefixes enforced in Drive: ${sourcePolicy.privatePrefixes.join(", ")}`);
     // Taken BEFORE the walk. Taken after, anything changed during the walk
     // would be missed forever, because the next run starts from a token that
     // already claims to include it.
@@ -10027,18 +13044,18 @@ const cmdIngestRemoteRun = async (
     try {
       nextSync = await drive.startPageToken(getToken);
     } catch (e) {
-      warn(`could not get a change token, so the next run will be a full walk: ${e.message.slice(0, 100)}`);
+      humanWarn(`could not get a change token, so the next run will be a full walk: ${e.message.slice(0, 100)}`);
     }
 
     let files = [];
     if (incremental) {
-      info("incremental sync from the saved change token");
+      humanInfo("incremental sync from the saved change token");
       let ch = null;
       try {
         ch = await drive.listChanges(getToken, state.sync_token);
       } catch (error) {
         if (error?.status !== 410) throw error;
-        warn("the saved Drive change token is no longer usable, so this run is rebuilding source truth with a full comparison");
+        humanWarn("the saved Drive change token is no longer usable, so this run is rebuilding source truth with a full comparison");
         incremental = false;
         lane = "sweep";
       }
@@ -10057,7 +13074,7 @@ const cmdIngestRemoteRun = async (
         // therefore turns this into a rooted comparison before content bytes
         // can be read. This also expands changed folders through descendants.
         if (ch.changed.length) {
-          warn("Drive reported changed items, so this run is using a rooted full comparison before reading content");
+          humanWarn("Drive reported changed items, so this run is using a rooted full comparison before reading content");
           incremental = false;
           lane = "sweep";
           files = [];
@@ -10065,7 +13082,7 @@ const cmdIngestRemoteRun = async (
       }
     }
     if (!incremental) {
-      info(`full walk of ${sourcePolicy.rootFolderIds.length} reviewed Drive root folder(s)`);
+      humanInfo(`full walk of ${sourcePolicy.rootFolderIds.length} reviewed Drive root folder(s)`);
       for await (const f of drive.listRootedFiles(getToken, {
         rootFolderIds: sourcePolicy.rootFolderIds,
       })) {
@@ -10073,6 +13090,7 @@ const cmdIngestRemoteRun = async (
         if (files.length >= limit) break;
       }
     }
+    aggregateScope = incremental ? "incremental" : "full";
 
     const pendingDriveAtStart = Object.keys(state.removed || {}).filter(
       (uid) => uid.startsWith(`${sourceName}:`)
@@ -10154,6 +13172,7 @@ const cmdIngestRemoteRun = async (
         const skip = { path: displayPath || f.name || f.id, id: f.id, reason: excluded };
         state.skipped[key] = excluded;
         excludedUids.push(key);
+        policySkipped++;
         return { skip };
       }
 
@@ -10181,6 +13200,8 @@ const cmdIngestRemoteRun = async (
       if (r.skip) {
         state.skipped[key] = r.skip.reason;
         intentionalRemovalUids.push(key);
+        if (r.skip.code === "source_deleted") sourceResolvedSkipped++;
+        else if (["shortcut_not_followed", "non_text_media"].includes(r.skip.code)) adjudicatedSkipped++;
         return { skip: r.skip };
       }
       const envelope = sanitizeIngestEnvelope(r.envelope);
@@ -10188,6 +13209,7 @@ const cmdIngestRemoteRun = async (
       if (refusal) {
         const skip = { path: safeIngestDisplay(envelope.title, f.name, f.id), id: f.id, reason: refusal.reason };
         state.skipped[key] = refusal.reason;
+        localRefused++;
         intentionalRemovalUids.push(key);
         return { skip };
       }
@@ -10201,7 +13223,7 @@ const cmdIngestRemoteRun = async (
         skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: f.id,
       };
-      if (scanned % 200 === 0) process.stdout.write(`\r  scanned ${scanned}...   `);
+      if (scanned % 200 === 0) humanProgress(`\r  scanned ${scanned}...   `);
       return {
         hash: r.version, envelopes, rel: f.name, stateKey: key,
         deferState: true, familyPlan,
@@ -10217,15 +13239,33 @@ const cmdIngestRemoteRun = async (
     if (dry) {
       // A preview has no authenticated inventory, but still reports every
       // observed category. It cannot delete or advance a cursor.
-      await applyDriveRemovals({
-        uids: excludedUids, base, adminKey, state, dryRun: true, label: "source policy",
+      const observedRemovalCandidates = aggregateRemovalCandidateCounts({
+        sourcePolicy: excludedUids,
+        sourceDeleted: sourceDeletedUids,
+        intentionalSkip: intentionalRemovalUids,
       });
-      await applyDriveRemovals({
-        uids: sourceDeletedUids, base, adminKey, state, dryRun: true, label: "Drive deletion",
-      });
-      await applyDriveRemovals({
-        uids: intentionalRemovalUids, base, adminKey, state, dryRun: true, label: "intentional source skip",
-      });
+      // A full provider walk cannot discover families that still exist in D1
+      // but vanished from Drive. Ordinary dry-run deliberately has no Brain
+      // credential, so preserve the provider-observed categories while making
+      // the missing source-deletion comparison explicit instead of a false 0.
+      aggregateRemovals = aggregatePreview && !incremental
+        ? Object.freeze({
+            source_policy: observedRemovalCandidates.source_policy,
+            source_deleted: null,
+            intentional_skip: observedRemovalCandidates.intentional_skip,
+          })
+        : observedRemovalCandidates;
+      if (!aggregatePreview) {
+        await applyDriveRemovals({
+          uids: excludedUids, base, adminKey, state, dryRun: true, label: "source policy",
+        });
+        await applyDriveRemovals({
+          uids: sourceDeletedUids, base, adminKey, state, dryRun: true, label: "Drive deletion",
+        });
+        await applyDriveRemovals({
+          uids: intentionalRemovalUids, base, adminKey, state, dryRun: true, label: "intentional source skip",
+        });
+      }
       intentionalRemovalUids.length = 0;
     } else {
       // The pre-ingest inventory keeps the safety denominator stable and also
@@ -10280,7 +13320,7 @@ const cmdIngestRemoteRun = async (
       if (driveRemovalPlan.total) {
         const percent = (driveRemovalPlan.ratio * 100).toFixed(1);
         const disposition = driveRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-        info(`Drive cleanup plan ${disposition}: ${driveRemovalPlan.total} of ${driveRemovalPlan.stored} stored documents (${percent}%)`);
+        humanInfo(`Drive cleanup plan ${disposition}: ${driveRemovalPlan.total} of ${driveRemovalPlan.stored} stored documents (${percent}%)`);
       }
 
       const categories = [
@@ -10291,8 +13331,9 @@ const cmdIngestRemoteRun = async (
       for (const [category, label, success] of categories) {
         const result = await applyDriveRemovals({
           uids: driveRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
+          assertOwned: assertLockOwned,
         });
-        if (result.applied) ok(`${result.applied} ${success}`);
+        if (result.applied) humanOk(`${result.applied} ${success}`);
         if (driveRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (driveRemovalPlan.total) {
@@ -10350,25 +13391,26 @@ const cmdIngestRemoteRun = async (
     const capturePrewalkHistory = async () => {
       try {
         nextHistory = await gmail.currentHistoryId(getToken);
-      } catch {
+      } catch (error) {
         // The data can still be streamed and saved resumably, but a full sweep
         // cannot declare completion without a marker captured before the walk.
         // A marker captured after it could skip mail that arrived mid-sweep.
         gmailHistoryMarkerMissing = 1;
+        gmailOperationalFailure = error;
       }
     };
 
     if (incremental) {
       const h = await gmail.listHistory(getToken, state.history_id);
       if (h.expired) {
-        warn("the saved Gmail history id is too old to answer from, so this is a full pass");
+        humanWarn("the saved Gmail history id is too old to answer from, so this is a full pass");
         incremental = false;
         lane = "sweep";
         authoritativeSnapshot = true;
         await capturePrewalkHistory();
         ids = gmail.listMessages(getToken, { max: limit });
       } else {
-        info(`incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s)`);
+        humanInfo(`incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s)`);
         gmailDeletedUids.push(...h.deletedIds.map((id) => `${sourceName}:${id}`));
         nextHistory = h.historyId || nextHistory;
         gmailHistoryMarkerMissing = nextHistory ? 0 : 1;
@@ -10396,7 +13438,7 @@ const cmdIngestRemoteRun = async (
             skips.push(policy.skip);
           }
           if (!dry) saveState(statePath, state);
-          warn(
+          humanWarn(
             `${gmailLabelGaps} Gmail message(s) had no trustworthy label classification, so this history window was refused before any message or removal was sent`,
           );
           ids = [];
@@ -10460,7 +13502,7 @@ const cmdIngestRemoteRun = async (
       // pass may recheck thousands of already-accepted messages before it
       // reaches new mail; printing only for newly prepared documents made a
       // healthy run look frozen during that whole recovery window.
-      if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
+      if (scanned % 200 === 0) humanProgress(`\r  fetched ${scanned}...   `);
       const key = `${sourceName}:${id}`;
       gmailActiveUids.add(key);
       if (r.skip) {
@@ -10642,7 +13684,7 @@ const cmdIngestRemoteRun = async (
         if (gmailRemovalPlan.total) {
           const percent = (gmailRemovalPlan.ratio * 100).toFixed(1);
           const disposition = gmailRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-          info(`Gmail cleanup plan ${disposition}: ${gmailRemovalPlan.total} of ${gmailRemovalPlan.stored} stored documents (${percent}%)`);
+          humanInfo(`Gmail cleanup plan ${disposition}: ${gmailRemovalPlan.total} of ${gmailRemovalPlan.stored} stored documents (${percent}%)`);
         }
         const categories = [
           ["source_policy", "Gmail source policy", "message(s) removed to enforce the Gmail source policy"],
@@ -10654,7 +13696,7 @@ const cmdIngestRemoteRun = async (
             uids: gmailRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
             assertOwned: assertLockOwned,
           });
-          if (result.applied) ok(`${result.applied} ${success}`);
+          if (result.applied) humanOk(`${result.applied} ${success}`);
           if (gmailRemovalPlan.targets[category].length) saveState(statePath, state);
         }
         if (gmailRemovalPlan.total) {
@@ -10744,18 +13786,18 @@ const cmdIngestRemoteRun = async (
       // confidently ignorant of it; a folder told the wrong reason sends the
       // operator looking for the wrong problem.
       const mailFolders = folders.length - containers.length;
-      info(`${mailFolders} mail folder(s) on this mailbox; reading ${included.length}: ${included.map((f) => f.name).join(", ") || "none"}`);
+      humanInfo(`${mailFolders} mail folder(s) on this mailbox; reading ${included.length}: ${included.map((f) => f.name).join(", ") || "none"}`);
       if (skippedRoles.length) {
         // These are folders, not message-level skips. Preserve their count for
         // the receipt without subtracting them from message coverage below.
         folderPolicySkipped += skippedRoles.length;
-        info(`  not read, by policy: ${skippedRoles.map((f) => `${f.name} (${f.role})`).join(", ")}`);
+        humanInfo(`  not read, by policy: ${skippedRoles.map((f) => `${f.name} (${f.role})`).join(", ")}`);
       }
       if (unlisted.length) {
         // These were identified. Saying they "could not be classified" would be
         // false, and it is the more alarming of the two readings. An Archive
         // folder in particular can hold years of a client's real mail.
-        warn(
+        humanWarn(
           `${unlisted.length} folder(s) were identified but are NOT read, because no rule includes them: ` +
             `${unlisted.map((f) => `${f.name} (${f.role})`).join(", ")}\n` +
             "      Only inbox and sent are read by default. If one of these holds mail you need, that needs a rule."
@@ -10765,7 +13807,7 @@ const cmdIngestRemoteRun = async (
         // Not guessed at. A name table is localized and provider-specific, and
         // guessing "junk" on a folder that is really a client's invoice archive
         // loses it; guessing the other way reads their spam.
-        warn(
+        humanWarn(
           `${unclassified.length} folder(s) could not be identified and were NOT read: ${unclassified.map((f) => f.name).join(", ")}\n` +
             "      A folder whose purpose cannot be worked out is left alone rather than guessed at. There is no\n" +
             "      manifest setting that includes one yet: if one of these holds mail you need, that needs a rule."
@@ -10774,7 +13816,7 @@ const cmdIngestRemoteRun = async (
       if (containers.length) {
         // Not mail folders. Reported so the count above adds up, and NOT as a
         // problem, because they never held a message.
-        info(`  ${containers.length} name(s) are folder containers that hold no mail and cannot be opened: ${containers.map((f) => f.name).join(", ")}`);
+        humanInfo(`  ${containers.length} name(s) are folder containers that hold no mail and cannot be opened: ${containers.map((f) => f.name).join(", ")}`);
       }
       if (!included.length) {
         die("no readable folder was found on this mailbox. Nothing was changed.");
@@ -10793,8 +13835,8 @@ const cmdIngestRemoteRun = async (
         });
         // Never silent. A resync that just happens is indistinguishable from a
         // bug, and this is the same posture as the Gmail history-expiry warning.
-        if (decision.resynced) warn(`${folder.name}: ${decision.reason}`);
-        else if (decision.reason) info(`${folder.name}: ${decision.reason}`);
+        if (decision.resynced) humanWarn(`${folder.name}: ${decision.reason}`);
+        else if (decision.reason) humanInfo(`${folder.name}: ${decision.reason}`);
 
         let highest = decision.resynced ? 0 : (saved?.last_uid ?? 0);
         const prepareImap = async (message) => {
@@ -10853,7 +13895,7 @@ const cmdIngestRemoteRun = async (
             return { skip };
           }
           const envelopes = splitOversized(envelope);
-          if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
+          if (scanned % 200 === 0) humanProgress(`\r  fetched ${scanned}...   `);
           return {
             hash: r.version, envelopes, rel: key, stateKey: key, deferState: true,
             familyPlan: {
@@ -10960,7 +14002,7 @@ const cmdIngestRemoteRun = async (
       ]);
       if (ambiguousSnapshot) {
         for (const uid of unmatchedStoredUids) imapSnapshotGapUids.add(uid);
-        warn(
+        humanWarn(
           `${unmatchedStoredUids.length} stored IMAP document(s) could not be matched while ` +
           `${imapUnidentifiedSkips} current message(s) lacked stable identity; no absence-based removal was attempted`
         );
@@ -10996,7 +14038,7 @@ const cmdIngestRemoteRun = async (
       if (imapRemovalPlan.total) {
         const percent = (imapRemovalPlan.ratio * 100).toFixed(1);
         const disposition = imapRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-        info(`IMAP cleanup plan ${disposition}: ${imapRemovalPlan.total} of ${imapRemovalPlan.stored} stored documents (${percent}%)`);
+        humanInfo(`IMAP cleanup plan ${disposition}: ${imapRemovalPlan.total} of ${imapRemovalPlan.stored} stored documents (${percent}%)`);
       }
       const categories = [
         ["source_policy", "IMAP source policy", "message(s) removed to enforce the IMAP source policy"],
@@ -11007,7 +14049,7 @@ const cmdIngestRemoteRun = async (
         const result = await applyDriveRemovals({
           uids: imapRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
         });
-        if (result.applied) ok(`${result.applied} ${success}`);
+        if (result.applied) humanOk(`${result.applied} ${success}`);
         if (imapRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (imapRemovalPlan.total) {
@@ -11050,16 +14092,55 @@ const cmdIngestRemoteRun = async (
       deleteKeysOnScannerCommit: ["imap_removal_safety_baseline"],
     };
   }
-  process.stdout.write("\r");
+  humanProgress("\r");
 
-  info(`${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ${unchanged} unchanged; ${skips.length} skipped`);
+  humanInfo(`${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ${unchanged} unchanged; ${skips.length} skipped`);
 
-  const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped) +
+  const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
   if (dry) {
-    ok("dry run, nothing was sent");
-    await reportSkips(skips);
+    if (aggregatePreview) {
+      const bounded = Number.isFinite(limit);
+      const sourceCoverageIncomplete = coverageGaps > 0 || localRefused > 0 || tally.refused > 0 || tally.failed > 0;
+      const brainEffectsUnknown = which === "drive";
+      const complete = !bounded && !sourceCoverageIncomplete && !brainEffectsUnknown;
+      const removalValues = Object.values(aggregateRemovals);
+      const removalTotal = !brainEffectsUnknown && removalValues.every(Number.isSafeInteger)
+        ? removalValues.reduce((sum, value) => sum + value, 0)
+        : null;
+      const receipt = connectorAggregatePreviewReceipt({
+        source: which,
+        status: complete ? "complete" : "incomplete",
+        scope: aggregateScope,
+        counts: {
+          observed: scanned,
+          would_send: brainEffectsUnknown ? null : prepared,
+          unchanged: brainEffectsUnknown ? null : unchanged,
+          skipped: skips.length,
+          removal_candidates: removalTotal,
+        },
+        removalCandidates: aggregateRemovals,
+        coverage: {
+          complete,
+          bounded,
+          units_total: 1,
+          units_succeeded: 1,
+          units_failed: 0,
+        },
+        failure: brainEffectsUnknown
+          ? { code: "BRAIN_EFFECT_UNKNOWN", retryable: false }
+          : bounded
+            ? { code: "PREVIEW_BOUNDED", retryable: false }
+            : sourceCoverageIncomplete
+              ? { code: "SOURCE_COVERAGE_INCOMPLETE", retryable: false }
+              : null,
+      });
+      if (!complete) throw new JsonFatal(receipt);
+      return emitConnectorAggregatePreview(receipt, options);
+    }
+    humanOk("dry run, nothing was sent");
+    if (!aggregatePreview) await reportSkips(skips);
     return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length };
   }
 
@@ -11087,7 +14168,7 @@ const cmdIngestRemoteRun = async (
       : which === "imap" && imapSnapshotGaps
         ? `${imapSnapshotGaps} IMAP source snapshot gap(s) remained unresolved`
         : `${tally.failed} document(s) failed`;
-    warn(`${reason}, so the source cursor was NOT advanced; the next run will retry them`);
+    humanWarn(`${reason}, so the source cursor was NOT advanced; the next run will retry them`);
   }
   // A non-policy skip remains visible as incomplete coverage. Gmail still
   // advances past deterministic credential, parse and quality outcomes so one
@@ -11098,33 +14179,46 @@ const cmdIngestRemoteRun = async (
   const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0;
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
-  await postSourceReceipt(base, adminKey, {
+  await recordSourceReceipt({
     source: sourceName, kind: which, status: finalStatus, run_id: runId,
     lane, started_at: runStartedAt, completed_at: new Date().toISOString(),
-    complete_sweep: ["drive", "gmail", "imap"].includes(which) && !incremental,
-    walk_complete: !hasRemoteGap,
+    complete_sweep: ["drive", "gmail", "imap"].includes(which) && !incremental && !hasRemoteGap,
+    // Reaching this terminal path means the provider enumeration itself
+    // finished. Refused/failed documents and unresolved coverage remain
+    // separate measured outcomes and still block complete_sweep.
+    walk_complete: true,
     files_seen: scanned,
     docs_added: tally.created,
     docs_updated: tally.updated,
     docs_unchanged: unchanged + tally.unchanged,
+    // Outcome counters measure document attempts. Deliberate source-policy and
+    // adjudicated skips stay in detail; they are not ingest refusals.
+    docs_refused: totalRefused,
+    docs_failed: tally.failed,
     // One shape or the other, never both: a receipt carrying a human detail AND
     // an issue code invites a reader to believe the happier of the two.
     ...(hasRemoteGap
-      ? { issue_code: totalRefused > 0 ? "INPUT_REFUSED" : "INGEST_FAILED" }
+      ? {
+          issue_code: totalRefused > 0 ? "INPUT_REFUSED" : "INGEST_FAILED",
+          ...(which === "gmail" && gmailOperationalFailure
+            ? { failure_evidence: gmailFailureEvidence(gmailOperationalFailure, statePath, gmailCheckpointBefore) }
+            : {}),
+        }
       : {
           detail: `${which} ${lane} sync completed; skipped=${skips.length}; ` +
-            `policy_skipped=${policySkipped}; coverage_gaps=${coverageGaps}` +
+            `policy_skipped=${policySkipped}; coverage_gaps=${coverageGaps}; ` +
+            `source_resolved=${sourceResolvedSkipped}; adjudicated_skips=${adjudicatedSkipped}` +
             (which === "imap" ? `; folder_policy_skipped=${folderPolicySkipped}` : ""),
         }),
   });
   runClosed = true;
 
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
-  if (tally.failed) info(summary);
-  else ok(summary);
-  if (totalRefused) warn(`${totalRefused} document(s) refused for carrying live credentials.`);
-  await reportSkips(skips);
-  info(`progress saved to ${relative(process.cwd(), statePath)}`);
+  if (tally.failed) humanInfo(summary);
+  else humanOk(summary);
+  if (totalRefused) humanWarn(`${totalRefused} document(s) refused for carrying live credentials.`);
+  if (!aggregatePreview) await reportSkips(skips);
+  humanInfo(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
   await reportBacklog(manifestPath);
   if (which === "gmail" && hasRemoteGap) {
@@ -11158,15 +14252,29 @@ const cmdIngestRemoteRun = async (
       assertLockOwned?.();
       try {
         const reviewRequired = error instanceof DriveRemovalReviewRequired;
-        await postSourceReceipt(base, adminKey, {
+        // The outcome counters measure document attempts. A failed Gmail
+        // policy or content read identifies exactly one document that was
+        // observed but could not be processed. Source-level operations such as
+        // profile and history listing do not invent a document count; their
+        // incomplete walk and closed operation evidence remain the proof.
+        const connectorDocumentFailures = which === "gmail" &&
+          GMAIL_DOCUMENT_FAILURE_OPERATIONS.has(error?.operationClass) ? 1 : 0;
+        await recordSourceReceipt({
           source: sourceName, kind: which, status: "error", run_id: runId,
           lane, started_at: runStartedAt, completed_at: new Date().toISOString(),
-          walk_complete: false, files_seen: scanned,
+          walk_complete: false, files_seen: scanned + connectorDocumentFailures,
+          docs_added: tally.created,
+          docs_updated: tally.updated,
+          docs_unchanged: unchanged + tally.unchanged,
+          docs_refused: tally.refused + localRefused,
+          docs_failed: tally.failed + connectorDocumentFailures,
           ...(reviewRequired
             ? { issue_code: "SAFETY_REVIEW_REQUIRED" }
             : {
-                error: String(error?.message || error).replace(/\s+/g, " ").slice(0, 500),
-                detail: `${which} ${lane} sync aborted before its cursor could advance`,
+                issue_code: supportErrorCode(error, { command: "ingest" }),
+                ...(which === "gmail"
+                  ? { failure_evidence: gmailFailureEvidence(error, statePath, gmailCheckpointBefore) }
+                  : {}),
               }),
         });
         runClosed = true;
@@ -11199,6 +14307,7 @@ async function sendBatches({
         base,
         adminKey,
         docs: group.map((g) => g.envelope),
+        assertOwned,
         onRetry: (_error, attempt, attempts) => info(
           `the ingest batch connection was interrupted. Retrying ${attempt}/${attempts - 1}; ` +
             "an accepted copy is safe and will be reported as unchanged."
@@ -11367,9 +14476,34 @@ export async function cmdConnect(target, options = {}) {
     );
   }
 
+  const lockTask = options.withSourceIngestLock ?? withSourceIngestLock;
+  try {
+    return await lockTask(
+      {
+        sourceName: "google",
+        sharedRecord: "provider:google",
+        ...sourceIngestLockRuntimeOptions(options),
+      },
+      ({ assertOwned }) => cmdConnectGoogle(flags, options, assertOwned),
+    );
+  } catch (error) {
+    if (error instanceof SourceIngestLockError) die(error.message);
+    throw error;
+  }
+}
+
+async function cmdConnectGoogle(flags, options = {}, assertLockOwned = null) {
   const names = String(flags.scopes === true || !flags.scopes ? "drive" : flags.scopes).split(",").map((x) => x.trim()).filter(Boolean);
   const unknown = names.filter((n) => !SCOPES[n]);
   if (unknown.length) die(`unknown scope(s): ${unknown.join(", ")}. Choose from: ${Object.keys(SCOPES).join(", ")}`);
+
+  const environment = options.env ?? process.env;
+  const googleStorageOptions = options.googleStorageOptions;
+  const loadGoogleTokens = options.loadGoogleTokens ?? loadTokens;
+  const saveGoogleTokens = options.saveGoogleTokens ?? saveTokens;
+  const authorizeGoogle = options.authorizeGoogle ?? authorize;
+  const identifyGoogleAccount = options.fetchConnectedAccountEmail ?? fetchConnectedAccountEmail;
+  const describeGoogleStorage = options.tokenStorageDescription ?? tokenStorageDescription;
 
   // Adding a scope to an EXISTING connection must not demand credentials this
   // machine already holds. The stored connection carries the client id and
@@ -11379,11 +14513,12 @@ export async function cmdConnect(target, options = {}) {
   // named the fix and the fix could not run. Reuse what is stored, and fall
   // back to the environment only for a first connection.
   const priorGoogle = (() => {
-    try { return loadTokens().google || null; } catch { return null; }
+    assertLockOwned?.();
+    try { return loadGoogleTokens(googleStorageOptions).google || null; } catch { return null; }
   })();
-  const clientId = process.env.GOOGLE_CLIENT_ID || priorGoogle?.client_id;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET || priorGoogle?.client_secret;
-  if (clientId && !process.env.GOOGLE_CLIENT_ID) {
+  const clientId = environment.GOOGLE_CLIENT_ID || priorGoogle?.client_id;
+  const clientSecret = environment.GOOGLE_CLIENT_SECRET || priorGoogle?.client_secret;
+  if (clientId && !environment.GOOGLE_CLIENT_ID) {
     info("reusing the Google client already stored on this machine; no credential was re-entered.");
   }
   if (!clientId) {
@@ -11406,7 +14541,7 @@ export async function cmdConnect(target, options = {}) {
 
   const port = flags.port ? parseInt(flags.port, 10) : DEFAULT_PORT;
   info(`requesting: ${names.join(", ")}`);
-  const tokens = await authorize({
+  const tokens = await authorizeGoogle({
     clientId,
     clientSecret,
     scopes: names.map((n) => SCOPES[n]),
@@ -11419,7 +14554,8 @@ export async function cmdConnect(target, options = {}) {
   // with the scopes just granted (userinfo needs a scope this product never
   // requests), stored nowhere, and fail-soft: no echo failure may break a
   // connect that succeeded.
-  const connectedAccount = await fetchConnectedAccountEmail(tokens.access_token, names).catch(() => null);
+  assertLockOwned?.();
+  const connectedAccount = await identifyGoogleAccount(tokens.access_token, names).catch(() => null);
   if (connectedAccount) {
     ok(`Connected Google account: ${connectedAccount}`);
     info("if that is not the account you meant, run this command again and pick the right one on the consent screen.");
@@ -11429,7 +14565,8 @@ export async function cmdConnect(target, options = {}) {
     info("(could not read which account consented; the consent screen was the only check)");
   }
 
-  const store = loadTokens();
+  assertLockOwned?.();
+  const store = loadGoogleTokens(googleStorageOptions);
   store.google = {
     client_id: clientId,
     client_secret: clientSecret || null,
@@ -11437,8 +14574,10 @@ export async function cmdConnect(target, options = {}) {
     scopes: names,
     connected_at: new Date().toISOString(),
   };
-  saveTokens(store);
-  ok(`connected. Token stored in ${tokenStorageDescription()} (on this machine only)`);
+  assertLockOwned?.();
+  saveGoogleTokens(store, googleStorageOptions);
+  assertLockOwned?.();
+  ok(`connected. Token stored in ${describeGoogleStorage(googleStorageOptions)} (on this machine only)`);
   info(`now run: brain ingest <manifest> --from ${names[0]}`);
 }
 
@@ -12204,8 +15343,8 @@ export async function cmdDisconnectZoom(manifestPath, flags = {}, options = {}) 
 }
 
 /** The token provider for a stored Google connection, or a clear refusal. */
-function googleAuth(needed) {
-  const store = loadTokens().google;
+function googleAuth(needed, { storageOptions, loadStore = loadTokens } = {}) {
+  const store = loadStore(storageOptions).google;
   if (!store?.refresh_token) {
     die("no Google connection on this machine. Run `brain connect google --scopes drive,gmail` first.");
   }
@@ -12412,7 +15551,7 @@ export async function cmdDoctorRepair(manifestPath, options = {}) {
     if (!confirmed) {
       warn("rollback preview only: nothing was changed.");
       info(`Re-run with --yes to restore D1 to bookmark ${bookmark}, captured just before this migration.`);
-      info("This restores D1 only; Vectorize needs supervised recreation before reindex, same as `brain rollback`.");
+      info("This restores D1 only; Vectorize needs supervised clean-index recovery followed by `brain update <manifest>`. Reindex and drain remain refused until that update returns active mode.");
       return { paused: true, previewed: "rollback", bookmark };
     }
     return runRollback(manifestPath, bookmark, { confirmed: true });
@@ -12717,11 +15856,14 @@ async function buildChecksumDriftCheck(manifestPath, options = {}) {
 export async function cmdDoctor(manifestPath, options = {}) {
   let accountId;
   let cloudflareAuthProfile;
+  let existingBrain = false;
   if (manifestPath && existsSync(manifestPath)) {
     try {
-      const cloudflare = loadManifest(manifestPath).m?.infrastructure?.cloudflare;
+      const manifest = loadManifest(manifestPath).m;
+      const cloudflare = manifest?.infrastructure?.cloudflare;
       accountId = cloudflare?.account_id;
       cloudflareAuthProfile = cloudflare?.auth_profile;
+      existingBrain = manifestHasProvisionedResourceBindings(manifest);
     } catch { /* doctor must work without a valid manifest */ }
   }
 
@@ -12738,6 +15880,11 @@ export async function cmdDoctor(manifestPath, options = {}) {
       accountId,
       cloudflareAuthProfile,
       cloudflareToken: activeCloudflareToken(),
+      // Claude Code remains mandatory for fresh setup and `brain tools`.
+      // Once provisioned resource identities exist, signed-in Codex can guide
+      // these read-only checks without making Claude a false health stop.
+      allowCodexForExistingBrain:
+        options.allowCodexForExistingBrain ?? existingBrain,
       onResult: (x) => {
         const mark = x.status === D_OK ? c.green("ok  ") : x.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
         console.log(`  ${mark}  ${x.name.padEnd(18)}  ${x.detail}`);
@@ -13139,8 +16286,8 @@ export async function captureSetupD1Bookmark(manifestPath, options = {}) {
  *
  * The step ORDER here is not cosmetic. A clean-room rehearsal established that
  * secrets must come after deploy because a secret is set on an existing worker
- * script. Vectorize uses the scoped API token and only falls back to wrangler's
- * own session for older tokens.
+ * script. Vectorize uses the selected Cloudflare control path. Normal owner
+ * setup uses the named browser session; API tokens are automation or recovery only.
  *
  * Every step is idempotent and the manifest is written after each, so an
  * interrupted setup is resumed by re-running the same command.
@@ -13232,7 +16379,11 @@ export async function cmdSetup(manifestPath, options = {}) {
   const flags = options.flags ?? parseFlags(process.argv.slice(3));
   assertKnownFlags(
     flags,
-    ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token", "adopt-cloudflare-profile"],
+    [
+      "manifest", "path", "no-connect", "cloudflare-account", "cloudflare-account-id",
+      "cloudflare-token", "browser-sign-in", "workers-paid-confirmed", "adopt-cloudflare-profile",
+      "name", "slug",
+    ],
     "brain setup",
   );
   const accountPath = String(options.cloudflareAccountPath ?? flags["cloudflare-account"] ?? "").trim().toLowerCase();
@@ -13291,15 +16442,26 @@ export async function cmdSetup(manifestPath, options = {}) {
     ok(`resuming from ${relative(process.cwd(), target)}`);
   } else {
     console.log(`\n  ${c.bold("Step 2 of 6")}  about this install\n`);
-    const display = await prompt("What is this brain for? (a person or a company)", "My Brain");
-    const slug = (await prompt(
-      "Short name, lowercase, no spaces (names the worker and the database)",
-      defaultSlugFor(display)
-    )).toLowerCase();
+    const display = typeof flags.name === "string"
+      ? flags.name.trim()
+      : await prompt("What is this brain for? (a person or a company)", "My Brain");
+    if (!display) die("--name must be the person or company this Brain is for");
+    const slug = (typeof flags.slug === "string"
+      ? flags.slug.trim()
+      : await prompt(
+        "Short name, lowercase, no spaces (names the worker and the database)",
+        defaultSlugFor(display)
+      )).toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{1,40}$/.test(slug)) {
+      die(`"${slug}" cannot name a worker. Use 2 to 41 lowercase letters, numbers, and hyphens.`);
+    }
 
     const account = await chooseSetupAccount(prompt, {
       listAccounts: options.listCloudflareAccounts,
     });
+    if (typeof options.confirmSelectedAccount === "function") {
+      await options.confirmSelectedAccount(account);
+    }
     const tmpl = buildSetupManifest({
       display,
       slug,
@@ -13559,6 +16721,8 @@ export async function cmdSetup(manifestPath, options = {}) {
     info(`connect a machine later with: brain mcp-config ${shownTarget}`);
   } else {
     console.log(`\n  ${c.bold("Step 5 of 6")}  connecting it to your AI tools\n`);
+    info("This adds or updates the Brain MCP entry in installed Claude Code and Codex clients.");
+    info("It writes no literal Brain credential. Use --no-connect before setup if these local config files should stay unchanged.");
     const connectAgents = options.wireAgents ?? wireAgents;
     wiring = await connectAgents(m, target, {
       ...(options.agentOptions || {}),
@@ -13651,32 +16815,34 @@ export async function cmdSetup(manifestPath, options = {}) {
     console.log(renderCliCommands(`    brain mcp-config ${shownTarget}\n`));
   }
 
-  const probeWarning = emptyProbeQuestionsWarning(m, shownTarget);
-  if (probeWarning) {
+  const probeNotice = optionalProbeQuestionsNotice(m);
+  if (probeNotice) {
     console.log("");
-    for (const line of probeWarning) warn(line);
+    for (const line of probeNotice) info(line);
     console.log("");
   }
 }
 
 /**
- * Lines warning that an install carries no probe questions, or null when it
- * has real ones. Without probes the acceptance suite skips its retrieval tier
- * and can pass without anyone asking the brain a single question, so setup —
- * the moment someone is present who can still collect the questions — says so
- * loudly instead of leaving it to be discovered on the report.
+ * Setup notice for an install with no saved owner questions, or null when it
+ * has them. The notice prevents optional regression work from becoming owner
+ * homework while keeping the separate handoff evidence gate explicit.
  */
-export function emptyProbeQuestionsWarning(manifest, manifestPath = "brain.manifest.json") {
+export function optionalProbeQuestionsNotice(manifest) {
   const probes = manifest?.testing?.probe_questions;
   if (Array.isArray(probes) && probes.some((q) => String(q || "").trim())) return null;
   return [
-    "testing.probe_questions is EMPTY. The acceptance suite will skip its whole",
-    "retrieval tier, so nothing will ever prove this brain answers the owner's",
-    "questions — a test run can read green without anyone asking it anything.",
-    `Fill testing.probe_questions in ${manifestPath} with the owner's own`,
-    `questions from the intake, then run: brain test ${manifestPath}`,
+    "No owner-authored regression questions are saved yet. That is normal:",
+    "zero are required for setup, adaptive acceptance, or handoff.",
+    "Before handoff, prove one approved low-sensitivity item as accepted, stored",
+    "with provenance, projected, and query-visible with a citation. Add saved",
+    "owner questions later only if repeatable regression checks would be useful.",
   ];
 }
+
+// Kept for callers that imported the earlier helper name. Its return value is
+// now the calm optional-question notice above, never an owner-homework warning.
+export const emptyProbeQuestionsWarning = optionalProbeQuestionsNotice;
 
 /** Keep install-account custody separate from edits to the operator's machine. */
 export function shouldSkipSetupConnections(flags = {}, options = {}) {
@@ -13737,9 +16903,122 @@ function normalizedRegistration(entry, name = null) {
   };
 }
 
+function registrationHasOnlyInstallerFields(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const direct = new Set(["name", "enabled", "type", "command", "args", "env", "env_vars", "cwd"]);
+  const wrapped = new Set(["name", "enabled", "disabled_reason", "transport"]);
+  const transport = new Set(["type", "command", "args", "env", "env_vars", "cwd"]);
+  if (entry.transport !== undefined) {
+    return entry.transport && typeof entry.transport === "object" && !Array.isArray(entry.transport) &&
+      Object.keys(entry).every((key) => wrapped.has(key)) &&
+      Object.keys(entry.transport).every((key) => transport.has(key));
+  }
+  return Object.keys(entry).every((key) => direct.has(key));
+}
+
+// The published v0.4.0-v0.4.5 packages all carried this exact MCP runtime.
+// Package metadata and a familiar install path are not ownership proof on
+// their own because either can coexist with owner-modified executable bytes.
+const PRIOR_INSTALLER_MCP_RUNTIME_SHA256 = Object.freeze({
+  "0.4.0": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.1": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.2": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.3": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.4": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+  "0.4.5": "7de0808beebd990df4affb5e146baf6c5f484ff379471dbe1392affed742e47a",
+});
+const PRIOR_INSTALLER_MCP_VERSIONS = new Set(Object.keys(PRIOR_INSTALLER_MCP_RUNTIME_SHA256));
+
+function priorInstallerPackageRoot(runtimePath) {
+  if (typeof runtimePath !== "string" || !isAbsolute(runtimePath) ||
+      basename(runtimePath) !== "brain-mcp.mjs" || basename(dirname(runtimePath)) !== "components") {
+    return null;
+  }
+  const packageRoot = dirname(dirname(resolve(runtimePath)));
+  const nodeModules = dirname(packageRoot);
+  if (basename(packageRoot) !== "brain-installer" || basename(nodeModules) !== "node_modules") {
+    return null;
+  }
+  const container = dirname(nodeModules);
+  const prefix = basename(container).toLowerCase() === "lib" ? dirname(container) : container;
+  if (![".financial-brain", "financialbrain"].includes(basename(prefix).toLowerCase())) {
+    return null;
+  }
+  return packageRoot;
+}
+
+function recognizedPriorInstallerRuntime(runtimePath) {
+  const packageRoot = priorInstallerPackageRoot(runtimePath);
+  if (!packageRoot) return false;
+  try {
+    const packageRootStat = lstatSync(packageRoot);
+    const runtimeStat = lstatSync(runtimePath);
+    const canonicalRuntime = resolve(realpathSync(runtimePath));
+    if (!packageRootStat.isDirectory() || packageRootStat.isSymbolicLink() ||
+        !runtimeStat.isFile() || runtimeStat.isSymbolicLink() || runtimeStat.nlink !== 1 ||
+        runtimeStat.size > 16 * 1024 * 1024 ||
+        (typeof process.getuid === "function" &&
+          (packageRootStat.uid !== process.getuid() || runtimeStat.uid !== process.getuid())) ||
+        !priorInstallerPackageRoot(canonicalRuntime)) {
+      return false;
+    }
+    const runtimeFd = openSync(runtimePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    let runtimeBytes;
+    try {
+      const openedRuntime = fstatSync(runtimeFd);
+      if (!sameOpenedFile(runtimeStat, openedRuntime)) return false;
+      runtimeBytes = readFileSync(runtimeFd);
+      if (runtimeBytes.length !== openedRuntime.size) return false;
+    } finally {
+      closeSync(runtimeFd);
+    }
+    const packagePath = join(packageRoot, "package.json");
+    const before = lstatSync(packagePath);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 64 * 1024 ||
+        (typeof process.getuid === "function" && before.uid !== process.getuid())) {
+      return false;
+    }
+    const fd = openSync(packagePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    try {
+      const opened = fstatSync(fd);
+      if (!sameOpenedFile(before, opened)) return false;
+      const bytes = readFileSync(fd);
+      if (bytes.length !== opened.size) return false;
+      const pkg = JSON.parse(bytes.toString("utf8"));
+      if (pkg?.name !== "brain-installer" || !PRIOR_INSTALLER_MCP_VERSIONS.has(pkg.version)) {
+        return false;
+      }
+      return createHash("sha256").update(runtimeBytes).digest("hex") ===
+        PRIOR_INSTALLER_MCP_RUNTIME_SHA256[pkg.version];
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+function recognizedInstallerNodeCommand(command, desiredCommand, priorRuntime) {
+  if (command === "node") return true;
+  const samePath = (left, right) => {
+    const a = resolve(left);
+    const b = resolve(right);
+    return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+  };
+  if (typeof command !== "string" || !command || !isAbsolute(command)) return false;
+  if (samePath(command, desiredCommand)) return true;
+  if (!priorRuntime || !["node", "node.exe"].includes(basename(command).toLowerCase())) return false;
+  try {
+    const stat = statSync(command);
+    return stat.isFile() && (process.platform === "win32" || (stat.mode & 0o111) !== 0);
+  } catch {
+    return false;
+  }
+}
+
 export function mcpRegistrationIsExact(entry, desired) {
   const actual = normalizedRegistration(entry, desired.name);
-  return Boolean(actual) &&
+  return Boolean(actual) && registrationHasOnlyInstallerFields(entry) &&
     actual.name === desired.name &&
     actual.enabled !== false &&
     actual.type === "stdio" &&
@@ -13769,12 +17048,28 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
   const envKeys = Object.keys(actual?.env || {}).sort();
   const safeTransition = transitionName === "BRAIN_KEY" ||
     (transitionName && /^x+$/.test(actual.env[transitionName] || ""));
-  const manifestOwned = sameManifest && (
-    sameStringMap(actual.env, desired.env) ||
-    (safeTransition && sameStringMap(actual.env, {
+  const { BRAIN_AGENT_PROFILE: _desiredProfile, ...oldLocatorEnv } = desired.env;
+  // Earlier v0.4 installer-owned registrations carried this exact locator map
+  // but no profile. Accept only that one-field historical shape as migratable.
+  // A deliberately selected profile, any extra environment value, or any
+  // other missing field remains an unrelated registration and is preserved.
+  const oldLocatorOwned = !Object.hasOwn(actual?.env || {}, "BRAIN_AGENT_PROFILE") &&
+    sameStringMap(actual.env, oldLocatorEnv);
+  const transitionOwned = safeTransition && (
+    sameStringMap(actual.env, {
       ...desired.env,
       [transitionName]: actual.env[transitionName],
-    }))
+    }) ||
+    (!Object.hasOwn(actual?.env || {}, "BRAIN_AGENT_PROFILE") &&
+      sameStringMap(actual.env, {
+        ...oldLocatorEnv,
+        [transitionName]: actual.env[transitionName],
+      }))
+  );
+  const manifestOwned = sameManifest && (
+    sameStringMap(actual.env, desired.env) ||
+    oldLocatorOwned ||
+    transitionOwned
   );
   const exactLegacyTarget = transitionName &&
     !Object.hasOwn(actual?.env || {}, "BRAIN_MANIFEST") &&
@@ -13783,37 +17078,52 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
     actual?.env?.BRAIN_URL === desired.env.BRAIN_URL &&
     actual?.env?.BRAIN_NAME === desired.name &&
     (transitionName === "BRAIN_KEY" || /^x+$/.test(actual.env[transitionName] || ""));
-  const installerNode = actual?.command === "node" || samePath(actual?.command, desired.command);
-  return Boolean(actual) &&
+  const currentRuntime = actual?.args?.length === 1 && samePath(actual.args[0], desired.args[0]);
+  const priorRuntimeIdentity = !transitionName && sameManifest &&
+    (sameStringMap(actual?.env, desired.env) || oldLocatorOwned);
+  const priorRuntime = actual?.args?.length === 1 && !currentRuntime && priorRuntimeIdentity &&
+    recognizedPriorInstallerRuntime(actual.args[0]);
+  const installerNode = recognizedInstallerNodeCommand(
+    actual?.command,
+    desired.command,
+    priorRuntime,
+  );
+  return Boolean(actual) && registrationHasOnlyInstallerFields(entry) &&
     actual.name === desired.name &&
+    actual.enabled !== false &&
     actual.type === "stdio" &&
     installerNode &&
     actual.args.length === 1 &&
     basename(String(actual.args[0])) === "brain-mcp.mjs" &&
-    samePath(actual.args[0], desired.args[0]) &&
+    (currentRuntime || priorRuntime) &&
     actual.envVars.length === 0 &&
     actual.cwd === null &&
     actual.env.BRAIN_NAME === desired.name &&
     actual.env.BRAIN_URL === desired.env.BRAIN_URL &&
-    (manifestOwned || exactLegacyTarget);
+    Boolean(manifestOwned || exactLegacyTarget);
 }
 
 /**
- * Launch the exact locator-only descriptor and complete one offline MCP
- * initialize exchange. This catches a missing Node executable, import failure,
- * broken server syntax, or incompatible stdio framing before setup says wired.
+ * Launch the exact locator-only descriptor and complete an offline MCP
+ * initialize plus tool-list exchange. This catches a missing Node executable,
+ * import failure, broken server syntax, incompatible stdio framing, or a
+ * profile that silently lost its promised tools before setup says wired.
  */
 export function verifyMcpRuntime(desired, options = {}) {
   if (!desired || desired.type !== "stdio" || !isAbsolute(desired.command) ||
       !Array.isArray(desired.args) || !desired.args.length) return false;
   const spawn = options.spawn ?? spawnSync;
   const environment = localToolEnvironment(options.environment ?? process.env, desired.env);
-  const request = JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "brain-installer", version: PRODUCT_VERSION } },
-  }) + "\n";
+  const request = [
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "brain-installer", version: PRODUCT_VERSION } },
+    },
+    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n";
   let result;
   try {
     result = spawn(desired.command, desired.args, {
@@ -13832,9 +17142,23 @@ export function verifyMcpRuntime(desired, options = {}) {
   if (result?.error || result?.status !== 0) return false;
   try {
     const replies = String(result.stdout || "").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    const reply = replies.find((value) => value?.id === 1);
-    return reply?.jsonrpc === "2.0" && reply?.result?.serverInfo?.name === desired.env.BRAIN_NAME &&
-      typeof reply.result.serverInfo.version === "string";
+    const initialized = replies.find((value) => value?.id === 1);
+    const listed = replies.find((value) => value?.id === 2);
+    const expectedTools = ["brain_think", "brain_search"];
+    const profile = desired.env.BRAIN_AGENT_PROFILE;
+    if (profileHas(profile, "curated:write")) expectedTools.push("brain_remember");
+    if (profileHas(profile, "diagnostics:read")) expectedTools.push("brain_health");
+    if (profileHas(profile, "diagnostics:read")) expectedTools.push("brain_financial_map");
+    const actualTools = Array.isArray(listed?.result?.tools)
+      ? listed.result.tools.map((tool) => tool?.name)
+      : [];
+    const actualToolSet = new Set(actualTools);
+    return initialized?.jsonrpc === "2.0" &&
+      initialized?.result?.serverInfo?.name === desired.env.BRAIN_NAME &&
+      typeof initialized.result.serverInfo.version === "string" &&
+      actualTools.length === expectedTools.length &&
+      actualToolSet.size === expectedTools.length &&
+      expectedTools.every((name) => actualToolSet.has(name));
   } catch {
     return false;
   }
@@ -14014,7 +17338,10 @@ function readClaudeRegistration(desired, options) {
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       throw new Error("foreign Claude config");
     }
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    const source = readFileSync(path, "utf8");
+    const structure = parseLosslessJsonStructure(source);
+    if (structure.type !== "object") throw new Error("invalid Claude config");
+    const parsed = JSON.parse(source);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("invalid Claude config");
     }
@@ -14046,6 +17373,696 @@ function claudeAddArgs(desired, { json = false } = {}) {
   return args;
 }
 
+/**
+ * Capture one local assistant config without creating a second on-disk copy.
+ * A safe locator migration may use this in-memory snapshot to put an
+ * exact, previously working locator back if the assistant CLI cannot complete
+ * and verify its rewrite.
+ */
+function captureAgentConfigFile(path, { allowAbsent = false } = {}) {
+  let before;
+  try {
+    before = lstatSync(path);
+  } catch (error) {
+    if (allowAbsent && error?.code === "ENOENT") {
+      return Object.freeze({ path, exists: false, bytes: null, stat: null });
+    }
+    throw error;
+  }
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
+      before.size > 16 * 1024 * 1024 ||
+      (typeof process.getuid === "function" && before.uid !== process.getuid())) {
+    throw new Error("unsafe local assistant configuration");
+  }
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
+  const fd = openSync(path, flags);
+  try {
+    const opened = fstatSync(fd);
+    if (!sameOpenedFile(before, opened)) {
+      throw new Error("local assistant configuration changed while it was read");
+    }
+    const bytes = readFileSync(fd);
+    if (bytes.length !== opened.size) {
+      throw new Error("local assistant configuration changed while it was read");
+    }
+    return Object.freeze({ path, exists: true, bytes, stat: opened });
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Parse JSON structure while retaining source ranges. JSON.parse is allowed to
+ * inspect Claude's file, but it must never be used to reserialize unrelated
+ * owner settings because JavaScript cannot represent every JSON integer
+ * losslessly. Duplicate object keys are rejected instead of being hidden by
+ * last-value-wins parsing.
+ */
+function parseLosslessJsonStructure(source) {
+  let index = 0;
+  const skipWhitespace = () => {
+    while (index < source.length && /[\t\n\r ]/.test(source[index])) index++;
+  };
+  const parseString = () => {
+    const start = index;
+    if (source[index++] !== '"') throw new Error("invalid JSON string");
+    while (index < source.length) {
+      const character = source[index++];
+      if (character === '"') {
+        const raw = source.slice(start, index);
+        return { type: "string", start, end: index, value: JSON.parse(raw) };
+      }
+      if (character === "\\") {
+        if (index >= source.length) throw new Error("invalid JSON escape");
+        index++;
+      } else if (character.charCodeAt(0) < 0x20) {
+        throw new Error("invalid JSON control character");
+      }
+    }
+    throw new Error("unterminated JSON string");
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    const start = index;
+    if (source[index] === "{") {
+      index++;
+      const node = { type: "object", start, open: start, members: [], end: null, close: null };
+      const keys = new Set();
+      let previousComma = null;
+      skipWhitespace();
+      if (source[index] === "}") {
+        node.close = index++;
+        node.end = index;
+        return node;
+      }
+      while (index < source.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key.value)) throw new Error("duplicate JSON object key");
+        keys.add(key.value);
+        skipWhitespace();
+        if (source[index++] !== ":") throw new Error("invalid JSON object member");
+        const value = parseValue();
+        const member = {
+          key: key.value,
+          keyStart: key.start,
+          valueStart: value.start,
+          valueEnd: value.end,
+          value,
+          commaBefore: previousComma,
+          commaAfter: null,
+        };
+        node.members.push(member);
+        skipWhitespace();
+        if (source[index] === ",") {
+          member.commaAfter = index;
+          previousComma = index;
+          index++;
+          continue;
+        }
+        if (source[index] !== "}") throw new Error("invalid JSON object delimiter");
+        node.close = index++;
+        node.end = index;
+        return node;
+      }
+      throw new Error("unterminated JSON object");
+    }
+    if (source[index] === "[") {
+      index++;
+      const values = [];
+      skipWhitespace();
+      if (source[index] === "]") return { type: "array", start, end: ++index, values };
+      while (index < source.length) {
+        values.push(parseValue());
+        skipWhitespace();
+        if (source[index] === ",") {
+          index++;
+          continue;
+        }
+        if (source[index] !== "]") throw new Error("invalid JSON array delimiter");
+        return { type: "array", start, end: ++index, values };
+      }
+      throw new Error("unterminated JSON array");
+    }
+    if (source[index] === '"') return parseString();
+    for (const literal of ["true", "false", "null"]) {
+      if (source.startsWith(literal, index)) {
+        index += literal.length;
+        return { type: "literal", start, end: index };
+      }
+    }
+    const number = source.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (!number) throw new Error("invalid JSON value");
+    index += number[0].length;
+    return { type: "number", start, end: index };
+  };
+  const root = parseValue();
+  skipWhitespace();
+  if (index !== source.length) throw new Error("trailing JSON content");
+  return root;
+}
+
+function jsonObjectMember(node, key) {
+  return node?.type === "object" ? node.members.find((member) => member.key === key) : null;
+}
+
+function removeJsonMember(source, member) {
+  if (member.commaAfter !== null) {
+    return source.slice(0, member.keyStart) + source.slice(member.commaAfter + 1);
+  }
+  if (member.commaBefore !== null) {
+    return source.slice(0, member.commaBefore) + source.slice(member.valueEnd);
+  }
+  return source.slice(0, member.keyStart) + source.slice(member.valueEnd);
+}
+
+function claudeConfigOutsideTarget(bytes, name) {
+  if (bytes === null) return "{}";
+  const source = bytes.toString("utf8");
+  if (!Buffer.from(source, "utf8").equals(bytes)) {
+    throw new Error("Claude configuration is not valid UTF-8");
+  }
+  const root = parseLosslessJsonStructure(source);
+  if (root.type !== "object") {
+    throw new Error("invalid Claude configuration");
+  }
+  if (root.members.length === 0) return "{}";
+  const servers = jsonObjectMember(root, "mcpServers");
+  if (!servers) return source;
+  if (servers.value.type !== "object") throw new Error("invalid Claude MCP configuration");
+  const target = jsonObjectMember(servers.value, name);
+  // An empty container and a container holding only the selected registration
+  // are structural parts of that registration. Removing the complete member
+  // makes an add to a previously absent file compare byte-for-byte outside it.
+  if (servers.value.members.length === 0 ||
+      (target && servers.value.members.length === 1)) {
+    if (root.members.length === 1) return "{}";
+    return removeJsonMember(source, servers);
+  }
+  return target ? removeJsonMember(source, target) : source;
+}
+
+function tomlContentBeforeComment(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index];
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "#") return line.slice(0, index);
+  }
+  return line;
+}
+
+function parseTomlKeyPath(raw) {
+  const source = String(raw).trim();
+  const parts = [];
+  let index = 0;
+  while (index < source.length) {
+    while (/\s/.test(source[index] || "")) index++;
+    if (index >= source.length) break;
+    let value = "";
+    if (source[index] === '"') {
+      const start = index++;
+      let escaped = false;
+      while (index < source.length) {
+        const character = source[index++];
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') break;
+      }
+      value = JSON.parse(source.slice(start, index));
+    } else if (source[index] === "'") {
+      const end = source.indexOf("'", ++index);
+      if (end < 0) throw new Error("unterminated TOML key");
+      value = source.slice(index, end);
+      index = end + 1;
+    } else {
+      const match = source.slice(index).match(/^[A-Za-z0-9_-]+/);
+      if (!match) throw new Error("unsupported TOML key");
+      value = match[0];
+      index += match[0].length;
+    }
+    parts.push(value);
+    while (/\s/.test(source[index] || "")) index++;
+    if (index >= source.length) break;
+    if (source[index++] !== ".") throw new Error("unsupported TOML key path");
+  }
+  if (!parts.length) throw new Error("empty TOML key");
+  return parts;
+}
+
+function tomlAssignment(line) {
+  const content = tomlContentBeforeComment(line);
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < content.length; index++) {
+    const character = content[index];
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "=") {
+      return {
+        path: parseTomlKeyPath(content.slice(0, index)),
+        value: content.slice(index + 1).trim(),
+      };
+    }
+  }
+  return null;
+}
+
+function codexConfigAnalysis(source, name) {
+  const mainPath = ["mcp_servers", name];
+  const envPath = ["mcp_servers", name, "env"];
+  const main = {};
+  const env = {};
+  const ranges = [];
+  let currentSection = [];
+  let currentTarget = null;
+  let currentTargetStart = null;
+  let foundMain = 0;
+  let foundEnv = 0;
+  let unsupportedTarget = false;
+  let offset = 0;
+  const closeRange = (end) => {
+    if (currentTargetStart !== null) ranges.push({ start: currentTargetStart, end });
+    currentTargetStart = null;
+    currentTarget = null;
+  };
+  for (const segment of source.match(/[^\r\n]*(?:\r\n|\n|\r|$)/g) || []) {
+    if (!segment) continue;
+    const line = segment.replace(/[\r\n]+$/, "");
+    const content = tomlContentBeforeComment(line).trim();
+    const arrayHeader = content.match(/^\[\[(.*)]]$/);
+    const tableHeader = !arrayHeader && content.match(/^\[(.*)]$/);
+    if (arrayHeader || tableHeader) {
+      closeRange(offset);
+      try {
+        currentSection = parseTomlKeyPath((arrayHeader || tableHeader)[1]);
+      } catch {
+        currentSection = [];
+        if (/mcp_servers/i.test(content) && content.includes(name)) unsupportedTarget = true;
+      }
+      const targetsName = currentSection[0] === "mcp_servers" && currentSection[1] === name;
+      if (targetsName) {
+        if (arrayHeader ||
+            (currentSection.length !== 2 &&
+              !(currentSection.length === 3 && currentSection[2] === "env"))) {
+          unsupportedTarget = true;
+        } else {
+          currentTarget = currentSection.length === 2 ? "main" : "env";
+          currentTargetStart = offset;
+          if (currentTarget === "main") foundMain++;
+          else foundEnv++;
+          if (foundMain > 1 || foundEnv > 1) unsupportedTarget = true;
+        }
+      }
+      offset += segment.length;
+      continue;
+    }
+    if (!content) {
+      offset += segment.length;
+      continue;
+    }
+    let assignment = null;
+    try {
+      assignment = tomlAssignment(line);
+    } catch {
+      if (currentTarget || (/mcp_servers/i.test(content) && content.includes(name))) {
+        unsupportedTarget = true;
+      }
+    }
+    if (!assignment) {
+      if (currentTarget) unsupportedTarget = true;
+      offset += segment.length;
+      continue;
+    }
+    const fullPath = [...currentSection, ...assignment.path];
+    const targetsName = fullPath[0] === "mcp_servers" && fullPath[1] === name;
+    if (targetsName) {
+      const supported = currentTarget && assignment.path.length === 1 &&
+        ((currentTarget === "main" && fullPath.length === 3) ||
+          (currentTarget === "env" && fullPath.length === 4));
+      if (!supported) {
+        unsupportedTarget = true;
+      } else {
+        const target = currentTarget === "main" ? main : env;
+        const key = assignment.path[0];
+        if (Object.hasOwn(target, key)) unsupportedTarget = true;
+        else {
+          try {
+            target[key] = parseCanonicalTomlValue(assignment.value);
+          } catch {
+            unsupportedTarget = true;
+          }
+        }
+      }
+    } else if (currentTarget) {
+      unsupportedTarget = true;
+    }
+    offset += segment.length;
+  }
+  closeRange(source.length);
+  if (foundEnv && !foundMain) unsupportedTarget = true;
+  return { main, env, ranges, foundMain: foundMain > 0, foundEnv: foundEnv > 0, unsupportedTarget };
+}
+
+function removeCodexTargetRanges(source, ranges) {
+  let out = source;
+  for (const range of [...ranges].sort((left, right) => right.start - left.start)) {
+    out = out.slice(0, range.start) + out.slice(range.end);
+  }
+  return out;
+}
+
+function codexConfigOutsideTarget(bytes, name) {
+  if (bytes === null) return "";
+  const source = bytes.toString("utf8");
+  if (!Buffer.from(source, "utf8").equals(bytes)) {
+    throw new Error("Codex configuration is not valid UTF-8");
+  }
+  const analysis = codexConfigAnalysis(source, name);
+  if (analysis.unsupportedTarget) throw new Error("unsupported Codex MCP TOML");
+  // A single final line ending may be the syntax separator required to append
+  // the selected table. Treat only that delimiter as part of the target write;
+  // every other byte outside the selected tables remains exact.
+  return removeCodexTargetRanges(source, analysis.ranges).replace(/(?:\r\n|\n|\r)$/, "");
+}
+
+function configOutsideTarget(snapshot, bytes) {
+  if (snapshot.format === "claude-json") {
+    return claudeConfigOutsideTarget(bytes, snapshot.name);
+  }
+  if (snapshot.format === "codex-toml") {
+    return codexConfigOutsideTarget(bytes, snapshot.name);
+  }
+  throw new Error("unknown local assistant configuration format");
+}
+
+function sameCapturedConfigState(left, right) {
+  if (!left || !right || left.exists !== right.exists) return false;
+  if (!left.exists) return true;
+  return sameOpenedFile(left.stat, right.stat) && left.bytes.equals(right.bytes);
+}
+
+/**
+ * Restore exact prior bytes only when every non-target setting still matches
+ * the pre-run snapshot. The replacement is written and flushed beside the
+ * config, then renamed atomically after one final current-state check.
+ */
+function restoreAgentConfigFile(snapshot, current) {
+  if (!snapshot || !current) return false;
+  try {
+    if (configOutsideTarget(snapshot, current.bytes) !== snapshot.outsideTarget) return false;
+  } catch {
+    return false;
+  }
+  if (!snapshot.exists) {
+    if (!current.exists) return true;
+    try {
+      const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+      if (!sameCapturedConfigState(current, confirmed) ||
+          configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
+        return false;
+      }
+      unlinkSync(snapshot.path);
+      return !captureAgentConfigFile(snapshot.path, { allowAbsent: true }).exists;
+    } catch {
+      return false;
+    }
+  }
+  if (!Buffer.isBuffer(snapshot.bytes)) return false;
+  if (current.exists && current.bytes.equals(snapshot.bytes) &&
+      (current.stat.mode & 0o7777) === (snapshot.stat.mode & 0o7777)) {
+    return true;
+  }
+
+  const mode = snapshot.stat.mode & 0o7777;
+  const temporary = `${snapshot.path}.${process.pid}.${randomBytes(12).toString("hex")}.rollback`;
+  let fd = null;
+  let created = false;
+  try {
+    fd = openSync(
+      temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW || 0),
+      mode,
+    );
+    created = true;
+    if (writeSync(fd, snapshot.bytes, 0, snapshot.bytes.length, 0) !== snapshot.bytes.length) {
+      throw new Error("short local assistant configuration rollback write");
+    }
+    fchmodSync(fd, mode);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+
+    const confirmed = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+    if (!sameCapturedConfigState(current, confirmed) ||
+        configOutsideTarget(snapshot, confirmed.bytes) !== snapshot.outsideTarget) {
+      throw new Error("local assistant configuration changed before rollback");
+    }
+    renameSync(temporary, snapshot.path);
+    created = false;
+  } catch {
+    if (fd !== null) closeSync(fd);
+    if (created) {
+      try { unlinkSync(temporary); } catch { /* no rollback temporary remains */ }
+    }
+    return false;
+  }
+
+  try {
+    const restored = captureAgentConfigFile(snapshot.path);
+    return restored.bytes.equals(snapshot.bytes) &&
+      (restored.stat.mode & 0o7777) === mode;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A missing entry and the exact locator-only registration shipped before Owner
+ * assistant are eligible for rollback. A historical literal-key registration
+ * is never snapshotted or reconstructed.
+ */
+function safeLocatorMigrationSnapshot(before, desired, options, format) {
+  if (options.rotationOnly || !before?.path) return null;
+  if (!before.entry) {
+    const file = captureAgentConfigFile(before.path, { allowAbsent: true });
+    return Object.freeze({
+      ...file,
+      format,
+      name: desired.name,
+      outsideTarget: format === "claude-json"
+        ? claudeConfigOutsideTarget(file.bytes, desired.name)
+        : codexConfigOutsideTarget(file.bytes, desired.name),
+    });
+  }
+  const actual = normalizedRegistration(before.entry, desired.name);
+  const { BRAIN_AGENT_PROFILE: _profile, ...oldLocatorEnv } = desired.env;
+  const safeLocatorEnv = sameStringMap(actual?.env, desired.env) ||
+    sameStringMap(actual?.env, oldLocatorEnv);
+  if (!actual || actual.enabled === false ||
+      !safeLocatorEnv ||
+      CLAUDE_LEGACY_KEY_NAMES.some((key) => Object.hasOwn(actual.env, key)) ||
+      !mcpRegistrationIsInstallerOwned(before.entry, desired)) {
+    return null;
+  }
+  const file = captureAgentConfigFile(before.path);
+  return Object.freeze({
+    ...file,
+    format,
+    name: desired.name,
+    outsideTarget: format === "claude-json"
+      ? claudeConfigOutsideTarget(file.bytes, desired.name)
+      : codexConfigOutsideTarget(file.bytes, desired.name),
+  });
+}
+
+function exactMcpRegistration(desired) {
+  return {
+    type: "stdio",
+    command: desired.command,
+    args: [...desired.args],
+    env: { ...desired.env },
+  };
+}
+
+function claudeConfigWithExactRegistration(snapshot, desired) {
+  const source = snapshot.exists ? snapshot.bytes.toString("utf8") : "{}";
+  if (!Buffer.from(source, "utf8").equals(snapshot.exists ? snapshot.bytes : Buffer.from("{}"))) {
+    throw new Error("Claude configuration is not valid UTF-8");
+  }
+  const root = parseLosslessJsonStructure(source);
+  if (root.type !== "object") throw new Error("invalid Claude configuration");
+  const encoded = JSON.stringify(exactMcpRegistration(desired));
+  const servers = jsonObjectMember(root, "mcpServers");
+  let next;
+  if (!servers) {
+    const member = `${JSON.stringify("mcpServers")}:${JSON.stringify({
+      [desired.name]: exactMcpRegistration(desired),
+    })}${root.members.length ? "," : ""}`;
+    next = source.slice(0, root.open + 1) + member + source.slice(root.open + 1);
+  } else {
+    if (servers.value.type !== "object") throw new Error("invalid Claude MCP configuration");
+    const target = jsonObjectMember(servers.value, desired.name);
+    if (target) {
+      next = source.slice(0, target.valueStart) + encoded + source.slice(target.valueEnd);
+    } else {
+      const member = `${JSON.stringify(desired.name)}:${encoded}${servers.value.members.length ? "," : ""}`;
+      next = source.slice(0, servers.value.open + 1) + member + source.slice(servers.value.open + 1);
+    }
+  }
+  parseLosslessJsonStructure(next);
+  return Buffer.from(next, "utf8");
+}
+
+function codexConfigWithExactRegistration(snapshot, desired) {
+  const original = snapshot.exists ? snapshot.bytes.toString("utf8") : "";
+  if (snapshot.exists && !Buffer.from(original, "utf8").equals(snapshot.bytes)) {
+    throw new Error("Codex configuration is not valid UTF-8");
+  }
+  const analysis = codexConfigAnalysis(original, desired.name);
+  if (analysis.unsupportedTarget) throw new Error("unsupported Codex MCP TOML");
+  let source = removeCodexTargetRanges(original, analysis.ranges);
+  if (source && !/[\r\n]$/.test(source)) source += "\n";
+  const env = Object.entries(desired.env)
+    .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`)
+    .join("");
+  return Buffer.from(
+    `${source}[mcp_servers.${desired.name}]\n` +
+      `command = ${JSON.stringify(desired.command)}\n` +
+      `args = ${JSON.stringify(desired.args)}\n\n` +
+      `[mcp_servers.${desired.name}.env]\n${env}`,
+    "utf8",
+  );
+}
+
+/** Replace one already previewed assistant config and no other filesystem path. */
+function atomicReplaceAgentConfig(prepared, bytes) {
+  const { snapshot, directorySnapshot } = prepared || {};
+  if (!snapshot || !directorySnapshot || !Buffer.isBuffer(bytes) || bytes.length > 16 * 1024 * 1024) {
+    throw new Error("invalid local assistant configuration write");
+  }
+  if (configOutsideTarget(snapshot, bytes) !== snapshot.outsideTarget) {
+    throw new Error("candidate local assistant configuration changes an unapproved setting");
+  }
+  const parent = dirname(snapshot.path);
+  if (!directorySnapshot.exists) {
+    if (!prepared.createdDirectoryStat || !sameConfigDirectory(
+      prepared.createdDirectoryStat,
+      lstatSync(parent),
+    )) {
+      throw new Error("local assistant configuration directory changed before its approved creation");
+    }
+  } else {
+    const parentStat = lstatSync(parent);
+    if (!sameConfigDirectory(directorySnapshot.stat, parentStat)) {
+      throw new Error("unsafe local assistant configuration directory");
+    }
+  }
+  const mode = snapshot.exists ? snapshot.stat.mode & 0o7777 : 0o600;
+  const temporary = join(parent, `.${basename(snapshot.path)}.${process.pid}.${randomBytes(12).toString("hex")}.write`);
+  let fd = null;
+  let created = false;
+  try {
+    fd = openSync(
+      temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW || 0),
+      mode,
+    );
+    created = true;
+    if (writeSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) {
+      throw new Error("short local assistant configuration write");
+    }
+    fchmodSync(fd, mode);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+
+    const current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+    if (!sameCapturedConfigState(snapshot, current)) {
+      throw new Error("local assistant configuration changed before its approved write");
+    }
+    renameSync(temporary, snapshot.path);
+    created = false;
+    const after = captureAgentConfigFile(snapshot.path);
+    // As with the containing directory, Windows relies on the verified owner
+    // profile ACL. POSIX must still read back the exact approved file mode.
+    if (!after.bytes.equals(bytes) ||
+        (process.platform !== "win32" && (after.stat.mode & 0o7777) !== mode)) {
+      throw new Error("local assistant configuration did not pass exact readback");
+    }
+    return after;
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (created) {
+      try { unlinkSync(temporary); } catch { /* no temporary is intentionally retained */ }
+    }
+  }
+}
+
+function writeLocalMcpRegistration(prepared, desired) {
+  const bytes = prepared.scope === "claude-code-mcp"
+    ? claudeConfigWithExactRegistration(prepared.snapshot, desired)
+    : codexConfigWithExactRegistration(prepared.snapshot, desired);
+  return atomicReplaceAgentConfig(prepared, bytes);
+}
+
+function localAssistantDurableKeyIsReady(manifestPath, manifest, options = {}) {
+  try {
+    const environment = options.environment ?? process.env;
+    const persistenceOptions = {
+      platform: options.platform ?? process.platform,
+      username: options.username ?? environment.USERNAME ?? environment.USER,
+      environment,
+      ...(options.persistenceOptions || {}),
+    };
+    const makePlan = options.adminKeyPersistencePlan ?? adminKeyPersistencePlan;
+    const readDurable = options.readAdminKeyDurably ?? readAdminKeyDurably;
+    return Boolean(readDurable(makePlan(manifestPath, manifest, persistenceOptions), persistenceOptions));
+  } catch {
+    return false;
+  }
+}
+
+function failedAgentReconciliation(reason, snapshot) {
+  if (!snapshot) return { status: "failed", reason };
+  let current = null;
+  try {
+    current = captureAgentConfigFile(snapshot.path, { allowAbsent: true });
+  } catch {
+    return { status: "failed", reason, previousPreserved: false };
+  }
+  const previousPreserved = restoreAgentConfigFile(snapshot, current);
+  return { status: "failed", reason, previousPreserved };
+}
+
 function reconcileClaudeRegistration(desired, options) {
   const runner = options.runCommand;
   const before = readClaudeRegistration(desired, options);
@@ -14055,49 +18072,60 @@ function reconcileClaudeRegistration(desired, options) {
     return { status: "failed", reason: "name-collision" };
   }
 
-  if (before.entry) {
-    neutralizeClaudeLegacyKey(desired, before);
-    runAgentCli(runner, options.environment, "claude", [
-      "mcp", "remove", "--scope", "user", desired.name,
-    ]);
-    const removed = readClaudeRegistration(desired, options);
-    if (removed.entry) return { status: "failed", reason: "remove-failed" };
-  }
+  const rollbackSnapshot = safeLocatorMigrationSnapshot(
+    before,
+    desired,
+    options,
+    "claude-json",
+  );
 
-  runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired));
-  let after = readClaudeRegistration(desired, options);
-  if (mcpRegistrationIsExact(after.entry, desired)) {
-    return { status: before.entry ? "updated" : "added" };
-  }
+  try {
+    if (before.entry) {
+      neutralizeClaudeLegacyKey(desired, before);
+      runAgentCli(runner, options.environment, "claude", [
+        "mcp", "remove", "--scope", "user", desired.name,
+      ]);
+      const removed = readClaudeRegistration(desired, options);
+      if (removed.entry) return failedAgentReconciliation("remove-failed", rollbackSnapshot);
+    }
 
-  // A second secret-free CLI path recovers from a version-specific add parser
-  // failure. Never reconstruct a removed legacy entry containing a literal key.
-  if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
-    runAgentCli(runner, options.environment, "claude", [
-      "mcp", "remove", "--scope", "user", desired.name,
-    ]);
-    after = readClaudeRegistration(desired, options);
-  }
-  if (!after.entry) {
-    runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired, { json: true }));
-    after = readClaudeRegistration(desired, options);
+    runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired));
+    let after = readClaudeRegistration(desired, options);
     if (mcpRegistrationIsExact(after.entry, desired)) {
       return { status: before.entry ? "updated" : "added" };
     }
-  }
 
-  // If a partial installer-owned entry was created, remove only that entry.
-  // An unrelated concurrent replacement is preserved untouched.
-  if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
-    runAgentCli(runner, options.environment, "claude", [
-      "mcp", "remove", "--scope", "user", desired.name,
-    ]);
+    // A second secret-free CLI path recovers from a version-specific add parser
+    // failure. Never reconstruct a removed legacy entry containing a literal key.
+    if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
+      runAgentCli(runner, options.environment, "claude", [
+        "mcp", "remove", "--scope", "user", desired.name,
+      ]);
+      after = readClaudeRegistration(desired, options);
+    }
+    if (!after.entry) {
+      runAgentCli(runner, options.environment, "claude", claudeAddArgs(desired, { json: true }));
+      after = readClaudeRegistration(desired, options);
+      if (mcpRegistrationIsExact(after.entry, desired)) {
+        return { status: before.entry ? "updated" : "added" };
+      }
+    }
+
+    // If a partial installer-owned entry was created, remove only that entry.
+    // An unrelated concurrent replacement is preserved untouched.
+    if (after.entry && mcpRegistrationIsInstallerOwned(after.entry, desired)) {
+      runAgentCli(runner, options.environment, "claude", [
+        "mcp", "remove", "--scope", "user", desired.name,
+      ]);
+    }
+    const final = readClaudeRegistration(desired, options);
+    return failedAgentReconciliation(
+      final.entry ? "verification-mismatch" : "registration-absent",
+      rollbackSnapshot,
+    );
+  } catch {
+    return failedAgentReconciliation("unsafe-config", rollbackSnapshot);
   }
-  const final = readClaudeRegistration(desired, options);
-  return {
-    status: "failed",
-    reason: final.entry ? "verification-mismatch" : "registration-absent",
-  };
 }
 
 function verifyCodexRegistrationRedacted(desired, options) {
@@ -14127,6 +18155,19 @@ function codexUserConfigPath(environment, explicitPath) {
   return resolve(root, "config.toml");
 }
 
+function codexClientIsPresent(environment, options = {}) {
+  if (options.includeCodex === true) return true;
+  const root = dirname(codexUserConfigPath(environment, options.codexConfigPath));
+  try {
+    const stat = (options.lstatImpl ?? lstatSync)(root);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseCanonicalTomlValue(source) {
   const raw = String(source).trim();
   if (raw === "true") return true;
@@ -14147,46 +18188,20 @@ function readCodexRegistration(desired, options) {
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       throw new Error("foreign Codex config");
     }
-    const mainName = `mcp_servers.${desired.name}`;
-    const envName = `${mainName}.env`;
-    const main = {};
-    const env = {};
-    let section = null;
-    let foundMain = false;
-    let foundEnv = false;
-    for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
-      const header = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
-      if (header) {
-        section = header[1];
-        if (section === mainName) {
-          if (foundMain) throw new Error("duplicate Codex MCP table");
-          foundMain = true;
-        } else if (section === envName) {
-          if (foundEnv) throw new Error("duplicate Codex MCP env table");
-          foundEnv = true;
-        }
-        continue;
-      }
-      if (section !== mainName && section !== envName) continue;
-      if (!line.trim() || /^\s*#/.test(line)) continue;
-      const assignment = line.match(/^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(.+?)\s*$/);
-      if (!assignment) throw new Error("unsupported Codex MCP TOML");
-      const target = section === envName ? env : main;
-      if (Object.hasOwn(target, assignment[1])) throw new Error("duplicate Codex MCP value");
-      target[assignment[1]] = parseCanonicalTomlValue(assignment[2]);
+    const source = readFileSync(path, "utf8");
+    const analysis = codexConfigAnalysis(source, desired.name);
+    if (analysis.unsupportedTarget) {
+      return { path, entry: { name: desired.name, __unsupported_toml: true } };
     }
-    if (!foundMain) return { path, entry: null };
+    if (!analysis.foundMain) return { path, entry: null };
+    const main = analysis.main;
     return {
       path,
       entry: {
         name: desired.name,
-        enabled: main.enabled,
-        type: "stdio",
-        command: main.command,
-        args: Array.isArray(main.args) ? main.args : [],
-        env,
-        env_vars: Array.isArray(main.env_vars) ? main.env_vars : [],
-        cwd: main.cwd ?? null,
+        ...main,
+        type: main.type || "stdio",
+        env: analysis.env,
       },
     };
   } catch {
@@ -14215,63 +18230,133 @@ function reconcileCodexRegistration(desired, options) {
     return { status: "failed", reason: "name-collision" };
   }
 
-  runAgentCli(options.runCommand, options.environment, "codex", codexAddArgs(desired));
-  const localAfter = readCodexRegistration(desired, options);
-  if (!mcpRegistrationIsExact(localAfter.entry, desired)) {
-    return { status: "failed", reason: "verification-mismatch" };
+  const rollbackSnapshot = safeLocatorMigrationSnapshot(
+    before,
+    desired,
+    options,
+    "codex-toml",
+  );
+
+  try {
+    runAgentCli(options.runCommand, options.environment, "codex", codexAddArgs(desired));
+    const localAfter = readCodexRegistration(desired, options);
+    if (!mcpRegistrationIsExact(localAfter.entry, desired)) {
+      return failedAgentReconciliation("verification-mismatch", rollbackSnapshot);
+    }
+    // The human readback redacts env values. Exact values come from a second
+    // strict read of Codex's source-of-truth config, so no legacy key can enter a
+    // child stdout pipe and no name-only output can make this pass.
+    const visible = verifyCodexRegistrationRedacted(desired, options);
+    const after = readCodexRegistration(desired, options);
+    if (visible && mcpRegistrationIsExact(after.entry, desired)) {
+      return { status: before.entry ? "updated" : "added" };
+    }
+    return failedAgentReconciliation("verification-mismatch", rollbackSnapshot);
+  } catch {
+    return failedAgentReconciliation("unsafe-config", rollbackSnapshot);
   }
-  // The human readback redacts env values. Exact values come from a second
-  // strict read of Codex's source-of-truth config, so no legacy key can enter a
-  // child stdout pipe and no name-only output can make this pass.
-  const visible = verifyCodexRegistrationRedacted(desired, options);
-  const after = readCodexRegistration(desired, options);
-  if (visible && mcpRegistrationIsExact(after.entry, desired)) {
-    return { status: before.entry ? "updated" : "added" };
+}
+
+/** A key rotation only needs to replace historical literal-key registrations. */
+function registrationNeedsCredentialMigration(entry, name) {
+  const actual = normalizedRegistration(entry, name);
+  return Boolean(actual) &&
+    actual.enabled !== false &&
+    CLAUDE_LEGACY_KEY_NAMES.some((key) => Object.hasOwn(actual.env, key));
+}
+
+/** Keep the registration's current authority while removing its retired key. */
+function rotationDescriptorForRegistration(desired, entry) {
+  const actual = normalizedRegistration(entry, desired.name);
+  const env = { ...desired.env };
+  if (Object.hasOwn(actual?.env || {}, "BRAIN_AGENT_PROFILE")) {
+    env.BRAIN_AGENT_PROFILE = actual.env.BRAIN_AGENT_PROFILE;
+  } else {
+    delete env.BRAIN_AGENT_PROFILE;
   }
-  return { status: "failed", reason: "verification-mismatch" };
+  return Object.freeze({
+    ...desired,
+    env: Object.freeze(env),
+  });
 }
 
 /**
  * Register or reconcile the brain with installed CLI agents.
  *
- * Every success is an exact readback of command, args, and the three nonsecret
+ * Every success is an exact readback of command, args, and the four nonsecret
  * environment values. No name-only or add-exit-code shortcut is accepted.
  */
 export async function wireAgents(m, manifestPath, options = {}) {
   const environment = options.environment ?? process.env;
   const runner = options.runCommand ?? run;
   const existingOnly = options.existingOnly === true;
+  const rotationOnly = existingOnly && options.rotationOnly === true;
+  const ownerAssistantMigrationOnly = existingOnly &&
+    options.ownerAssistantMigrationOnly === true;
+  const requestedTargets = options.targets ?? ["claude-code-mcp", "codex-mcp"];
+  if (!Array.isArray(requestedTargets) || !requestedTargets.length ||
+      requestedTargets.some((target) => !["claude-code-mcp", "codex-mcp"].includes(target)) ||
+      new Set(requestedTargets).size !== requestedTargets.length) {
+    throw new TypeError("MCP targets must be a unique nonempty selection of claude-code-mcp and codex-mcp");
+  }
+  const claudeSelected = requestedTargets.includes("claude-code-mcp");
+  const codexSelected = requestedTargets.includes("codex-mcp");
   const failures = [];
   const wired = [];
   const skipped = [];
+  const preserved = [];
   const name = m?.client?.slug || "brain";
-  const claudeInstalled = runAgentCli(runner, environment, "claude", ["--version"]).ok;
-  const codexInstalled = runAgentCli(runner, environment, "codex", ["--version"]).ok;
+  const claudeInstalled = claudeSelected &&
+    runAgentCli(runner, environment, "claude", ["--version"]).ok;
+  const codexPresent = codexSelected && codexClientIsPresent(environment, options);
+  const codexInstalled = codexPresent && runAgentCli(runner, environment, "codex", ["--version"]).ok;
 
-  if (!claudeInstalled) {
+  if (claudeSelected && !claudeInstalled) {
     info("Claude Code is not installed, skipping");
     skipped.push("Claude Code");
   }
-  if (!codexInstalled) {
+  if (codexSelected && !codexPresent) {
+    info("Codex has no existing owner configuration, skipping");
+    skipped.push("Codex");
+  } else if (codexSelected && !codexInstalled) {
     info("Codex is not installed, skipping");
     skipped.push("Codex");
   }
-  if (!claudeInstalled && !codexInstalled) return { wired, failures, skipped };
+  if ((!claudeSelected || !claudeInstalled) && (!codexSelected || !codexInstalled)) {
+    return { wired, failures, skipped, preserved };
+  }
 
   // A standalone rotation must not need another network lookup when the owner
   // has not chosen either registration. Inspect only local state first, and
   // resolve the URL/key only when there is an existing target to reconcile.
+  let claudeExisting = null;
+  let codexExisting = null;
+  let reconcileClaude = claudeInstalled;
+  let reconcileCodex = codexInstalled;
   if (existingOnly) {
-    let anyExisting = false;
+    let anyTarget = false;
     if (claudeInstalled) {
       try {
         const current = readClaudeRegistration({ name }, {
           environment,
           claudeConfigPath: options.claudeConfigPath,
         });
-        anyExisting ||= Boolean(current.entry);
-        if (!current.entry) skipped.push("Claude Code");
+        claudeExisting = current.entry;
+        const actual = normalizedRegistration(current.entry, name);
+        const preserveForOwnerMigration = ownerAssistantMigrationOnly && Boolean(actual) && (
+          actual.enabled === false ||
+          (Object.hasOwn(actual.env, "BRAIN_AGENT_PROFILE") &&
+            actual.env.BRAIN_AGENT_PROFILE !== LOCAL_OWNER_AGENT_PROFILE)
+        );
+        reconcileClaude = Boolean(current.entry) && !preserveForOwnerMigration &&
+          (!rotationOnly || registrationNeedsCredentialMigration(current.entry, name));
+        anyTarget ||= reconcileClaude;
+        if (!reconcileClaude) {
+          skipped.push("Claude Code");
+          if (preserveForOwnerMigration) preserved.push("Claude Code");
+        }
       } catch {
+        reconcileClaude = false;
         failures.push("Claude Code");
       }
     }
@@ -14281,13 +18366,26 @@ export async function wireAgents(m, manifestPath, options = {}) {
           environment,
           codexConfigPath: options.codexConfigPath,
         });
-        anyExisting ||= Boolean(current.entry);
-        if (!current.entry) skipped.push("Codex");
+        codexExisting = current.entry;
+        const actual = normalizedRegistration(current.entry, name);
+        const preserveForOwnerMigration = ownerAssistantMigrationOnly && Boolean(actual) && (
+          actual.enabled === false ||
+          (Object.hasOwn(actual.env, "BRAIN_AGENT_PROFILE") &&
+            actual.env.BRAIN_AGENT_PROFILE !== LOCAL_OWNER_AGENT_PROFILE)
+        );
+        reconcileCodex = Boolean(current.entry) && !preserveForOwnerMigration &&
+          (!rotationOnly || registrationNeedsCredentialMigration(current.entry, name));
+        anyTarget ||= reconcileCodex;
+        if (!reconcileCodex) {
+          skipped.push("Codex");
+          if (preserveForOwnerMigration) preserved.push("Codex");
+        }
       } catch {
+        reconcileCodex = false;
         failures.push("Codex");
       }
     }
-    if (failures.length || !anyExisting) return { wired, failures, skipped };
+    if (failures.length || !anyTarget) return { wired, failures, skipped, preserved };
   }
 
   let base = options.baseUrl || null;
@@ -14297,7 +18395,7 @@ export async function wireAgents(m, manifestPath, options = {}) {
   }
   if (!base) {
     warn("could not determine the brain URL, so AI tool registrations were not changed");
-    return { wired, failures: ["url"], skipped: [] };
+    return { wired, failures: ["url"], skipped: [], preserved };
   }
 
   try {
@@ -14313,7 +18411,7 @@ export async function wireAgents(m, manifestPath, options = {}) {
     if (!readDurable(plan, persistenceOptions)) throw new Error("missing durable key");
   } catch {
     warn("the durable admin key could not be verified, so AI tool registrations were not changed");
-    return { wired, failures: ["durable-key"], skipped: [] };
+    return { wired, failures: ["durable-key"], skipped: [], preserved };
   }
 
   const desired = mcpRegistrationDescriptor(m, manifestPath, {
@@ -14321,29 +18419,51 @@ export async function wireAgents(m, manifestPath, options = {}) {
     serverPath: options.serverPath,
     nodePath: options.nodePath,
   });
+  const claudeDesired = rotationOnly
+    ? rotationDescriptorForRegistration(desired, claudeExisting)
+    : desired;
+  const codexDesired = rotationOnly
+    ? rotationDescriptorForRegistration(desired, codexExisting)
+    : desired;
   const verifyRuntime = options.verifyMcpRuntime ?? verifyMcpRuntime;
-  if (!verifyRuntime(desired, { environment, ...(options.runtimeOptions || {}) })) {
-    warn(
-      "the MCP server did not complete its local initialize handshake, so no AI tool registration was changed"
-    );
-    return { wired, failures: ["MCP runtime"], skipped };
+  const runtimeDescriptors = [
+    ...(reconcileClaude ? [claudeDesired] : []),
+    ...(reconcileCodex ? [codexDesired] : []),
+  ];
+  const verifiedRuntimeShapes = new Set();
+  for (const runtimeDescriptor of runtimeDescriptors) {
+    const runtimeShape = JSON.stringify(runtimeDescriptor.env);
+    if (verifiedRuntimeShapes.has(runtimeShape)) continue;
+    verifiedRuntimeShapes.add(runtimeShape);
+    if (!verifyRuntime(runtimeDescriptor, { environment, ...(options.runtimeOptions || {}) })) {
+      warn(
+        "the MCP server did not complete its local initialize handshake, so no AI tool registration was changed"
+      );
+      return { wired, failures: ["MCP runtime"], skipped, preserved };
+    }
   }
   const reconcileOptions = {
     environment,
     existingOnly,
+    rotationOnly,
+    ownerAssistantMigrationOnly,
     runCommand: runner,
     claudeConfigPath: options.claudeConfigPath,
     codexConfigPath: options.codexConfigPath,
   };
-  if (claudeInstalled) {
+  if (reconcileClaude) {
     let result;
     try {
-      result = reconcileClaudeRegistration(desired, reconcileOptions);
+      result = reconcileClaudeRegistration(claudeDesired, reconcileOptions);
     } catch {
       result = { status: "failed", reason: "unsafe-config" };
     }
     if (["verified", "updated", "added"].includes(result.status)) {
-      ok(`Claude Code: "${desired.name}" registered with a durable credential locator`);
+      ok(rotationOnly
+        ? `Claude Code: "${desired.name}" registration updated without changing its access profile`
+        : ownerAssistantMigrationOnly
+          ? `Claude Code: existing "${desired.name}" registration upgraded and verified with Owner assistant access`
+          : `Claude Code: "${desired.name}" registered with Owner assistant access`);
       wired.push("Claude Code");
     } else if (result.status === "skipped") {
       skipped.push("Claude Code");
@@ -14356,10 +18476,14 @@ export async function wireAgents(m, manifestPath, options = {}) {
     }
   }
 
-  if (codexInstalled) {
-    const result = reconcileCodexRegistration(desired, reconcileOptions);
+  if (reconcileCodex) {
+    const result = reconcileCodexRegistration(codexDesired, reconcileOptions);
     if (["verified", "updated", "added"].includes(result.status)) {
-      ok(`Codex: "${desired.name}" registered with a durable credential locator`);
+      ok(rotationOnly
+        ? `Codex: "${desired.name}" registration updated without changing its access profile`
+        : ownerAssistantMigrationOnly
+          ? `Codex: existing "${desired.name}" registration upgraded and verified with Owner assistant access`
+          : `Codex: "${desired.name}" registered with Owner assistant access`);
       wired.push("Codex");
     } else if (result.status === "skipped") {
       skipped.push("Codex");
@@ -14372,7 +18496,7 @@ export async function wireAgents(m, manifestPath, options = {}) {
     }
   }
 
-  return { wired, failures, skipped };
+  return { wired, failures, skipped, preserved };
 }
 
 
@@ -14498,7 +18622,7 @@ export function summariseResponseBody(raw) {
     const message = parsed?.error || parsed?.message || parsed?.errors?.[0]?.message;
     return message ? String(message).slice(0, 200) : text.slice(0, 200);
   } catch { /* not JSON: fall through */ }
-  if (/^\s*<(?:!doctype|html|head|body)\b/i.test(text)) {
+  if (isHtmlDocumentBody(text)) {
     return "the reply was a web page, not this brain. That usually means the address " +
       "is not serving the worker yet, or a proxy answered instead of it";
   }
@@ -14626,10 +18750,15 @@ export async function requestIngestBatch({
   fetchImpl = fetch,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onRetry = () => {},
+  assertOwned = null,
 } = {}) {
   const url = `${base}/api/admin/brain/ingest/batch`;
   try {
     return await retryTransient(async () => {
+      // A timed-out first POST may have committed after this source lease was
+      // replaced. Recheck before every retry so the former owner cannot start
+      // another mutation after a successor takes responsibility for the state.
+      assertOwned?.();
       const res = await http(url, {
         method: "POST",
         headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
@@ -14680,23 +18809,67 @@ export async function requestIngestBatch({
  * they are running against what is installed, because "am I on the new one" is
  * the first question an upgrade raises.
  */
-async function cmdWhatsnew(manifestPath) {
+export async function cmdWhatsnew(manifestPath, {
+  readStatus = readUpdateStatus,
+  discoverManifest = discoverInstalledManifest,
+  installedManifestOptions = {},
+} = {}) {
   console.log("");
   let installed = null;
-  if (manifestPath && existsSync(manifestPath)) {
+  let resolvedManifestPath = null;
+  try {
+    resolvedManifestPath = discoverManifest(manifestPath, installedManifestOptions)?.path || null;
+  } catch { /* the changelog is worth showing regardless */ }
+  if (resolvedManifestPath && existsSync(resolvedManifestPath)) {
     try {
-      const { m } = loadManifest(manifestPath);
+      const { m } = loadManifest(resolvedManifestPath);
       installed = m.brain?.version || null;
     } catch { /* the changelog is worth showing regardless */ }
   }
-  if (installed && installed !== PRODUCT_VERSION) {
-    warn(
-      `this brain is recorded at ${installed}, and you have ${PRODUCT_VERSION} installed.\n` +
-        `        Bring it up to date with: brain upgrade ${relative(process.cwd(), manifestPath)}`
-    );
+  if (installed) {
+    let release;
+    try {
+      release = await readStatus({ installedVersion: installed });
+    } catch {
+      release = { status: "unavailable" };
+    }
+    if (installed !== PRODUCT_VERSION) {
+      info(
+        `this brain records ${installed}; this local CLI package is ${PRODUCT_VERSION}. ` +
+          "That local mismatch does not prove a public update is approved."
+      );
+    }
+    if (release?.status === "up_to_date" && release.latest_version === installed) {
+      ok(`the public stable release channel confirms this brain is current at ${installed}`);
+    } else if (release?.status === "update_available" &&
+        typeof release.latest_version === "string") {
+      warn(
+        `a reviewed stable update from ${installed} to ${release.latest_version} is available.\n` +
+          "        Review https://financialbrain.ai/update before approving any change."
+      );
+    } else if (release?.status === "ahead") {
+      warn(
+        `this brain records ${installed}, which is ahead of the public stable release channel.\n` +
+          "        It cannot be called up to date from public release evidence. Review https://financialbrain.ai/update."
+      );
+    } else if (release?.status === "release_held" || release?.status === "release_candidate") {
+      warn(
+        `this brain records ${installed}, but the public release channel is ${release.status === "release_held" ? "held" : "candidate-only"}.\n` +
+          "        No update is currently approved, and this command cannot claim the brain is current.\n" +
+          "        Review https://financialbrain.ai/update for the current gate."
+      );
+    } else {
+      warn(
+        `this brain records ${installed}, but the public release status could not be verified.\n` +
+          "        Unavailable is not current. Review https://financialbrain.ai/update and retry later."
+      );
+    }
     console.log("");
-  } else if (installed) {
-    ok(`up to date, running ${PRODUCT_VERSION}`);
+  } else {
+    warn(
+      "no installed Brain manifest could be read, so public release status could not be compared.\n" +
+        "        Run brain whatsnew <full path to brain.manifest.json> to check this Brain."
+    );
     console.log("");
   }
 
@@ -14814,10 +18987,13 @@ async function reportBacklog(manifestPath) {
  */
 /** Render a diagnosis for a human. Exported so it can be exercised without a network. */
 export function renderDiagnosis(r, renderOptions = {}) {
+  const diagnosticCount = (value) => Number.isSafeInteger(value) && value >= 0
+    ? num(value).padStart(12)
+    : "not verified".padStart(12);
   console.log(`\n  ${c.bold("what is in the brain")}`);
-  console.log(`    ${num(r.totals.documents).padStart(9)}  documents`);
-  console.log(`    ${num(r.totals.chunks).padStart(9)}  chunks`);
-  console.log(`    ${num(r.totals.sources).padStart(9)}  sources`);
+  console.log(`    ${diagnosticCount(r?.totals?.documents)}  documents`);
+  console.log(`    ${diagnosticCount(r?.totals?.chunks)}  chunks`);
+  console.log(`    ${diagnosticCount(r?.totals?.sources)}  sources`);
 
   const AREAS = [
     ["coverage", "is anything missing"],
@@ -14848,11 +19024,26 @@ export function renderDiagnosis(r, renderOptions = {}) {
   // second pass finds nothing left to substitute.
   const okVerdict = (line) => ok(renderCliCommands(line, renderOptions));
   const warnVerdict = (line) => warn(renderCliCommands(line, renderOptions));
+  const unobservable = (r.findings || []).filter((finding) => finding.observable === false).length;
   console.log("");
-  if (r.verdict === "healthy") {
+  if (r.verdict === "incomplete" || r.complete !== true) {
+    warnVerdict(
+      "diagnosis is incomplete because the diagnostic did not finish, so this report cannot say the brain is clear." +
+        (s.crit ? ` It did confirm ${s.crit} problem(s), and more may remain.` : "") + "\n" +
+        "        Counts marked not verified are not zero. Fix the unavailable check above, then run `brain diagnose <manifest>` again."
+    );
+  } else if (r.verdict === "healthy" && unobservable) {
+    warnVerdict(
+      `the completed core checks found no problem. ${unobservable} optional measurement(s) were not observable at this scale,` + "\n" +
+        "        so this is not a claim that every efficiency check ran."
+    );
+  } else if (r.verdict === "healthy") {
     okVerdict("nothing is missing, nothing is stored wrong, and nothing is being wasted.");
   } else if (r.verdict === "usable_with_gaps") {
-    warnVerdict(`the brain works, with ${s.warn} thing(s) worth fixing. Nothing here makes an answer wrong.`);
+    warnVerdict(
+      `the brain is usable, with ${s.warn} gap(s) worth fixing. Some gaps can make answers incomplete.` + "\n" +
+        "        Read each finding before relying on the brain for a complete picture."
+    );
   } else {
     warnVerdict(
       `${s.crit} problem(s) that WILL make answers wrong or incomplete, and ${s.warn} worth fixing.` + "\n" +
@@ -14860,6 +19051,29 @@ export function renderDiagnosis(r, renderOptions = {}) {
     );
   }
   return r;
+}
+
+/** Accept only a complete, count-bearing diagnostic receipt as trustworthy. */
+export function diagnosisReceiptVerdict(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) {
+    return { ok: false, reason: "the diagnostic response is not a JSON object" };
+  }
+  if (r.complete !== true || r.verdict === "incomplete" ||
+      (Array.isArray(r.unavailable_checks) && r.unavailable_checks.length > 0)) {
+    return { ok: false, reason: "one or more diagnostic checks could not run" };
+  }
+  if (!Array.isArray(r.findings) || !r.summary || typeof r.summary !== "object") {
+    return { ok: false, reason: "the diagnostic response is missing its findings or summary" };
+  }
+  for (const field of ["documents", "chunks", "sources"]) {
+    if (!Number.isSafeInteger(r?.totals?.[field]) || r.totals[field] < 0) {
+      return { ok: false, reason: `the diagnostic response has no trustworthy ${field} count` };
+    }
+  }
+  if (!["healthy", "usable_with_gaps", "problems"].includes(r.verdict)) {
+    return { ok: false, reason: "the diagnostic response has an unknown verdict" };
+  }
+  return { ok: true, reason: null };
 }
 
 /**
@@ -14871,7 +19085,8 @@ export function renderDiagnosis(r, renderOptions = {}) {
  * without an action just moves the problem.
  */
 /**
- * Run the acceptance test for THIS brain, on the owner's own questions.
+ * Run the automated acceptance checks for this brain. Optional saved owner
+ * questions extend the run with private regression checks when present.
  *
  * Two things a client could not do before this existed. They could not run the
  * quality test at all, because the harness was a development tool that never
@@ -15010,8 +19225,9 @@ async function cmdEval(manifestPath) {
     }
     ok(`wrote ${relative(process.cwd(), goldenPath)}`);
     console.log(renderCliCommands(
-      "\n  Fill it in, and do it in this order, because the order is what makes the\n" +
-      "  result mean anything:\n\n" +
+      "\n  This is an optional private regression suite. It is not required for\n" +
+      "  setup, adaptive acceptance, or handoff. If you choose to build it, use\n" +
+      "  this order so the result means something:\n\n" +
       `    1. Write the questions FIRST, from memory, without opening your files.\n` +
       `       A question written while reading a document borrows its wording, and\n` +
       `       the brain then finds it by matching words instead of meaning. That\n` +
@@ -15163,8 +19379,16 @@ async function cmdDiagnose(manifestPath) {
 
   const res = await http(`${base}/api/admin/brain/diagnose`, { headers: { "X-Admin-Key": adminKey } },
     { timeoutMs: 120_000, what: "the diagnostic" });
-  if (!res.ok) die(`diagnose failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
-  const r = await res.json();
+  const raw = await res.text();
+  let r = null;
+  try { r = JSON.parse(raw); } catch { /* handled below */ }
+  const receipt = diagnosisReceiptVerdict(r);
+  if (!receipt.ok && r?.verdict === "incomplete") {
+    renderDiagnosis(r);
+    die(`diagnose could not establish a trustworthy result: ${receipt.reason}.`);
+  }
+  if (!res.ok) die(`diagnose failed (${res.status}): ${raw.slice(0, 200)}`);
+  if (!receipt.ok) die(`diagnose returned HTTP success without a trustworthy receipt: ${receipt.reason}.`);
 
   renderDiagnosis(r);
   return r;
@@ -15303,6 +19527,37 @@ export function assertDrainComplete({
     }
   }
   return { remaining, rounds };
+}
+
+/**
+ * Keep the command result explicit about scope: `drained` is work confirmed by
+ * this invocation, while `actual_vectors` is the total currently query-visible.
+ * Older callers keep their existing fields and can adopt the additive names.
+ */
+export function buildCompletedDrainResult({
+  drained,
+  submitted,
+  remaining,
+  expectedVectors = null,
+  actualVectors = null,
+} = {}) {
+  return {
+    drained,
+    submitted,
+    remaining,
+    confirmed_this_run: drained,
+    expected_vectors: Number.isSafeInteger(expectedVectors) ? expectedVectors : null,
+    actual_vectors: Number.isSafeInteger(actualVectors) ? actualVectors : null,
+    vector_ready: true,
+  };
+}
+
+/** Render the completion receipt without mistaking a no-op run for an empty index. */
+export function renderCompletedDrainResult(result) {
+  const total = Number.isSafeInteger(result?.actual_vectors)
+    ? `${result.actual_vectors} total query-visible vector(s)`
+    : "total query-visible vector count unavailable";
+  return `vector index is query-ready (${total}; ${result.confirmed_this_run} newly confirmed this run)`;
 }
 
 async function cmdReindex(manifestPath) {
@@ -15486,11 +19741,17 @@ async function cmdDrain(manifestPath, options = {}) {
     remaining = receipt.remaining;
     const mins = (now() - started) / 60000;
     const rate = mins > 0.05 ? Math.round(drained / mins) : null;
-    info(
-      `${drained} query-visible, ${submitted} accepted, ${remaining} to go` +
-        (rate ? `, ~${rate}/min` : "") +
-        (rate && remaining ? `, about ${Math.max(1, Math.ceil(remaining / rate))} min left` : "")
-    );
+    const progress = [
+      Number.isSafeInteger(actualVectors)
+        ? `${actualVectors} total query-visible vector(s)`
+        : "total query-visible vector count unavailable",
+      `${drained} newly confirmed this run`,
+      `${submitted} accepted this run`,
+      `${remaining} to go`,
+    ];
+    if (rate) progress.push(`~${rate}/min`);
+    if (rate && remaining) progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
+    info(progress.join("; "));
     if (remaining === 0) break;
     if (receipt.waiting > 0) {
       // Vectorize V2 processes changesets asynchronously. Poll slowly enough to
@@ -15509,8 +19770,15 @@ async function cmdDrain(manifestPath, options = {}) {
     );
   }
   assertDrainComplete({ remaining, rounds, maxRounds, expectedVectors, actualVectors });
-  ok(`vector index is query-ready (${drained} confirmed)`);
-  return { drained, submitted, remaining };
+  const result = buildCompletedDrainResult({
+    drained,
+    submitted,
+    remaining,
+    expectedVectors,
+    actualVectors,
+  });
+  ok(renderCompletedDrainResult(result));
+  return result;
 }
 
 function supportCommandOperation(label, operation) {
@@ -16101,6 +20369,45 @@ export function setupManifestTarget(manifestPath, flags = {}) {
   return positional || flagged || "./brain.manifest.json";
 }
 
+/** Keep automation and recovery setup behind the same non-negotiable machine gates. */
+export async function setupLocalPreflightChecks({
+  tokenPath = false,
+  skipConnections = false,
+  doctor = doctorRunAll,
+  nodeCheck = checkNode,
+  driveCheck = checkInstallDriveFreeSpace,
+  privilegeCheck = checkInstallPrivilege,
+  platformName = process.platform,
+  environment = process.env,
+  cliPath = fileURLToPath(import.meta.url),
+  statfsImpl,
+  getEffectiveUserId,
+  runCommand,
+} = {}) {
+  if (!tokenPath) {
+    return doctor({
+      skipCloudflare: true,
+      requireClaudeCode: !skipConnections,
+      platformName,
+      environment,
+      cliPath,
+      statfsImpl,
+      getEffectiveUserId,
+      ...(runCommand ? { localRun: runCommand } : {}),
+    });
+  }
+  return [
+    nodeCheck(),
+    driveCheck({ platformName, environment, cliPath, statfsImpl }),
+    privilegeCheck({
+      platformName,
+      environment,
+      ...(runCommand ? { runCommand } : {}),
+      getEffectiveUserId,
+    }),
+  ];
+}
+
 /** Open the owner-facing Cloudflare prerequisite before Wrangler asks for access. */
 export async function prepareCloudflareAccountCeremony(options = {}) {
   const prompt = options.askFn ?? ask;
@@ -16115,15 +20422,130 @@ export async function prepareCloudflareAccountCeremony(options = {}) {
   const opened = (options.openBrowserImpl ?? openBrowser)(plan.start_url, options.openBrowserOptions || {});
   if (opened) write("  Cloudflare opened in your browser. The installer is waiting here.");
   else write(`  Open this Cloudflare page in your browser: ${plan.start_url}`);
+  write("  Sign-in verifies the exact account first. The installer will then open that account's plan page before creating anything.");
   await prompt("Press Enter after the Cloudflare account is ready", "");
   return plan;
+}
+
+/**
+ * Bind the separate Workers Paid proof to the exact account Cloudflare returned.
+ *
+ * The narrow browser session cannot read billing. Interactive owners confirm on
+ * the account-specific dashboard page. An unattended launcher must carry the
+ * same non-secret account id in BRAIN_WORKERS_PAID_ACCOUNT_ID; a generic yes is
+ * deliberately insufficient because it could refer to another reachable
+ * account.
+ */
+export async function confirmCloudflareWorkersPaidAccount(account, options = {}) {
+  const accountId = String(account?.id || "").trim().toLowerCase();
+  const accountName = String(account?.name || "").trim();
+  if (!/^[a-f0-9]{32}$/.test(accountId) || !accountName || /[\u0000-\u001f\u007f]/.test(accountName)) {
+    die("setup could not bind the Workers Paid check to one verified Cloudflare account. Nothing was created.");
+  }
+
+  const write = options.write ?? ((line) => console.log(line));
+  const plansUrl = cloudflareWorkersPlanUrl(accountId);
+  write("");
+  write(`  Workers Paid check for Cloudflare account \"${accountName}\" (${accountId})`);
+  const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (interactive) {
+    const opened = (options.openBrowserImpl ?? openBrowser)(plansUrl, options.openBrowserOptions || {});
+    if (opened) write("  That exact account's Workers & Pages plan page opened in your browser.");
+    else write(`  Open this exact account's Workers & Pages plan page: ${plansUrl}`);
+    write("  The installer can verify the account and product access, but its narrow sign-in cannot read billing status.");
+  }
+  if (!interactive) {
+    const confirmedAccountId = String(
+      (options.environment ?? process.env).BRAIN_WORKERS_PAID_ACCOUNT_ID || "",
+    ).trim().toLowerCase();
+    if (confirmedAccountId !== accountId) {
+      die(
+        "unattended setup stopped before creating any Cloudflare resource. " +
+          "After the owner confirms Workers & Pages > Plans says Paid for the exact manifest account, " +
+          "the approved launcher may set BRAIN_WORKERS_PAID_ACCOUNT_ID to that account id. " +
+          "A missing or different account id is not approval.",
+      );
+    }
+    write("  The unattended Workers Paid confirmation matches the exact verified account. No Cloudflare resource has been created yet.");
+    return Object.freeze({ account_id: accountId, confirmation: "account_bound_automation" });
+  }
+
+  const prompt = options.askFn ?? ask;
+  const paid = String(await prompt(
+    `Confirm account \"${accountName}\" (${accountId}) shows Workers & Pages > Plans > Paid. Type PAID to continue, or leave blank to stop`,
+    "",
+  )).trim().toUpperCase();
+  if (paid !== "PAID") {
+    die(
+      "setup stopped before creating any Cloudflare resource. Confirm the exact account above shows Workers & Pages > Plans > Paid, then rerun the same setup command. " +
+        "Any plan change, payment, or billing approval belongs to the owner in Cloudflare.",
+    );
+  }
+  write("  Workers Paid confirmed by the owner for the exact verified account. No Cloudflare resource has been created yet.");
+  return Object.freeze({ account_id: accountId, confirmation: "owner_dashboard" });
+}
+
+/**
+ * Workers Paid cannot be read through the install's deliberately narrow OAuth
+ * scopes. Stop before provisioning and obtain an explicit by-eye confirmation
+ * for the exact account the OAuth preflight just proved. A Claude-run shell has
+ * no TTY, so its confirmation is carried by a boolean flag only after the
+ * owner has reviewed the dashboard. No billing action happens here.
+ */
+export async function confirmWorkersPaidForSetup(account, options = {}) {
+  const exact = account && typeof account === "object" ? account : {};
+  const accountId = String(exact.id || "").trim().toLowerCase();
+  const accountName = String(exact.name || "the selected Cloudflare account").trim();
+  if (!/^[a-f0-9]{32}$/.test(accountId)) {
+    const error = new Error("setup cannot confirm Workers Paid until the exact Cloudflare account is verified");
+    error.code = "CLOUDFLARE_ACCOUNT_SELECTION_REQUIRED";
+    throw error;
+  }
+  const write = options.write ?? ((line) => console.log(line));
+  write("");
+  write(`  Cloudflare account verified: ${accountName}`);
+  write("  Financial Brain needs the Workers Paid plan, currently about $5 per month, on this exact account.");
+  write("  Check: Cloudflare dashboard > Workers & Pages > Plans");
+  if (options.confirmed === true) {
+    write("  The owner's Workers Paid confirmation was supplied for this exact account. No billing setting was changed.");
+    write("");
+    return Object.freeze({ account_id: accountId, confirmed: true, source: "owner_flag" });
+  }
+  if (options.interactive !== true || typeof options.askFn !== "function") {
+    const error = new Error(
+      "Workers Paid has not been confirmed for the verified Cloudflare account. " +
+      "No Brain or Cloudflare resources were created; the local browser sign-in may remain saved for retry. " +
+      "Have the owner check Workers & Pages > Plans, then rerun with --workers-paid-confirmed."
+    );
+    error.code = "WORKERS_PAID_CONFIRMATION_REQUIRED";
+    throw error;
+  }
+  const answer = String(await options.askFn(
+    "Is Workers Paid active on the verified account above? (y/n)",
+    "n",
+  )).trim().toLowerCase();
+  if (answer !== "y" && answer !== "yes") {
+    const error = new Error(
+      "Workers Paid was not confirmed. No Brain or Cloudflare resources were created; " +
+        "the local browser sign-in may remain saved for retry. Setup can resume after the plan is ready."
+    );
+    error.code = "WORKERS_PAID_CONFIRMATION_REQUIRED";
+    throw error;
+  }
+  write("  Workers Paid confirmed by the owner. No billing setting was changed.");
+  write("");
+  return Object.freeze({ account_id: accountId, confirmed: true, source: "owner_prompt" });
 }
 
 async function cmdSetupInteractive(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
   assertKnownFlags(
     flags,
-    ["manifest", "path", "no-connect", "cloudflare-account", "cloudflare-token", "adopt-cloudflare-profile"],
+    [
+      "manifest", "path", "no-connect", "cloudflare-account", "cloudflare-account-id",
+      "cloudflare-token", "browser-sign-in", "workers-paid-confirmed", "adopt-cloudflare-profile",
+      "name", "slug",
+    ],
     "brain setup",
   );
   const target = setupManifestTarget(manifestPath, flags);
@@ -16131,15 +20553,65 @@ async function cmdSetupInteractive(manifestPath) {
   if (flags["cloudflare-token"] && flags["cloudflare-token"] !== true) {
     die("--cloudflare-token is a recovery switch. Do not put a token after it; the next prompt hides what you type.");
   }
+  const browserSignIn = flags["browser-sign-in"] === true;
+  if (flags["browser-sign-in"] && flags["browser-sign-in"] !== true) {
+    die("--browser-sign-in is an approval switch and does not take a value");
+  }
+  const workersPaidConfirmed = flags["workers-paid-confirmed"] === true;
+  if (flags["workers-paid-confirmed"] && flags["workers-paid-confirmed"] !== true) {
+    die("--workers-paid-confirmed is a confirmation switch and does not take a value");
+  }
+  if (forceToken && browserSignIn) {
+    die("choose either fresh browser sign-in or recovery-token access, not both");
+  }
+  const suppliedDisplayName = typeof flags.name === "string" ? flags.name.trim() : null;
+  if (flags.name !== undefined && !suppliedDisplayName) {
+    die("--name must be followed by the person or company this Brain is for");
+  }
+  const suppliedSlug = typeof flags.slug === "string" ? flags.slug.trim().toLowerCase() : null;
+  if (flags.slug !== undefined && (!suppliedSlug || !/^[a-z0-9][a-z0-9-]{1,40}$/.test(suppliedSlug))) {
+    die("--slug must be 2 to 41 lowercase letters, numbers, and hyphens");
+  }
   const resumed = existsSync(target);
   const manifest = resumed ? loadManifest(target).m : null;
-  const accountId = manifest?.infrastructure?.cloudflare?.account_id || null;
+  if (browserSignIn && resumed) {
+    die("--browser-sign-in is for a fresh setup. For an older manifest, use --adopt-cloudflare-profile after the owner approves adoption.");
+  }
+  const suppliedAccountId = typeof flags["cloudflare-account-id"] === "string"
+    ? flags["cloudflare-account-id"].trim().toLowerCase()
+    : null;
+  if (suppliedAccountId && !/^[a-f0-9]{32}$/.test(suppliedAccountId)) {
+    die("--cloudflare-account-id must be the exact 32-character account id shown by Cloudflare");
+  }
+  const savedAccountId = manifest?.infrastructure?.cloudflare?.account_id || null;
+  if (suppliedAccountId && savedAccountId && suppliedAccountId !== String(savedAccountId).toLowerCase()) {
+    die("--cloudflare-account-id does not match the account already bound to this Brain");
+  }
+  const accountId = savedAccountId || suppliedAccountId;
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   // The outer legacy Wrangler-session adapter may already hold a token. That
   // keeps older manifests working, but it must not override a fresh or saved
   // install-specific OAuth profile. Only an explicitly injected automation
   // token selects this lane here.
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  if (browserSignIn && automationToken) {
+    die(
+      "fresh browser sign-in was requested, but this session also supplied recovery-token access. " +
+        "Nothing was changed. Rerun the browser-sign-in flow without recovery-token access so its " +
+        "account and Workers Paid confirmations cannot be bypassed."
+    );
+  }
+  // A fresh non-interactive install has no credential ceremony it can safely
+  // perform unless the owner explicitly approved browser sign-in or supplied
+  // the automation/recovery lane. Refuse before machine checks so a missing
+  // credential never causes an unrelated external network probe.
+  if (!resumed && !interactive && !browserSignIn && !forceToken && !automationToken) {
+    die(
+      "Cloudflare browser sign-in needs an owner-controlled terminal on this computer. " +
+        "Nothing was changed. Open Terminal or PowerShell and rerun the same command. " +
+        "Automation may use an approved secret manager."
+    );
+  }
   // A resumed install with no saved profile is the pre-field manifest shape,
   // and `resumed && !authProfile` below would pin it to the token lane for the
   // rest of its life. Offer the one-time browser sign-in that ends that, and
@@ -16158,59 +20630,83 @@ async function cmdSetupInteractive(manifestPath) {
   if (accountPath && !["create", "existing"].includes(accountPath)) {
     die("--cloudflare-account accepts create or existing");
   }
-
-  let localPreflightChecks = null;
-  if (!tokenPath) {
-    localPreflightChecks = await doctorRunAll({
-      skipCloudflare: true,
-      requireClaudeCode: !shouldSkipSetupConnections(flags),
-    });
-    const fatal = localPreflightChecks.filter((check) => check.status === D_FAIL);
-    if (fatal.length) {
-      console.log(renderCliCommands(`\n  ${c.bold("brain setup")}  ${c.dim("nothing to a working brain")}\n`));
-      console.log(`  ${c.bold("Step 1 of 6")}  checking this machine\n`);
-      for (const check of localPreflightChecks) {
-        const mark = check.status === D_OK ? c.green("ok  ") : check.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
-        console.log(`    ${mark}  ${check.name}  ${c.dim(check.detail)}`);
-      }
-      console.log("");
-      for (const check of fatal) console.log(`  ${c.red(check.name)}\n    ${renderCliCommands(check.fix).split("\n").join("\n    ")}\n`);
-      closePrompts();
-      die("setup cannot continue until the blocking items above are fixed. Re-run when they are.");
-    }
+  if (!interactive && browserSignIn && (
+    !accountPath || !suppliedAccountId || !workersPaidConfirmed || !suppliedDisplayName || !suppliedSlug
+  )) {
+    die(
+      "Claude-guided browser sign-in needs the owner's reviewed non-secret choices before it starts. " +
+      "After the owner confirms the exact account and Workers Paid plan, rerun with " +
+      "--browser-sign-in --name \"Person or company\" --slug <short-name> " +
+      "--cloudflare-account <create|existing> " +
+      "--cloudflare-account-id <32-character-id> --workers-paid-confirmed. Nothing was changed."
+    );
   }
-  if (!resumed && !tokenPath && interactive) {
+
+  // The automation/recovery token lane cannot bypass the machine gates. It
+  // does not need the browser/network checks here, but it still must never
+  // create resources from an elevated shell or a nearly full install drive.
+  const localPreflightChecks = await setupLocalPreflightChecks({
+    tokenPath,
+    skipConnections: shouldSkipSetupConnections(flags),
+  });
+  const fatal = localPreflightChecks.filter((check) => check.status === D_FAIL);
+  if (fatal.length) {
+    console.log(renderCliCommands(`\n  ${c.bold("brain setup")}  ${c.dim("nothing to a working brain")}\n`));
+    console.log(`  ${c.bold("Step 1 of 6")}  checking this machine\n`);
+    for (const check of localPreflightChecks) {
+      const mark = check.status === D_OK ? c.green("ok  ") : check.status === D_WARN ? c.yellow("warn") : c.red("FAIL");
+      console.log(`    ${mark}  ${check.name}  ${c.dim(check.detail)}`);
+    }
+    console.log("");
+    for (const check of fatal) console.log(`  ${c.red(check.name)}\n    ${renderCliCommands(check.fix).split("\n").join("\n    ")}\n`);
+    closePrompts();
+    die("setup cannot continue until the blocking items above are fixed. Re-run when they are.");
+  }
+  if (!resumed && interactive) {
     const ceremony = await prepareCloudflareAccountCeremony({ accountPath, askFn: ask });
     accountPath = ceremony.path;
   }
   return withCloudflareControlCredential(
-    (session) => cmdSetup(manifestPath, {
-      flags,
-      cloudflareAccountPath: accountPath,
-      cloudflareAuthProfile: session.profile || authProfile,
-      ...(localPreflightChecks ? {
-        preflightChecks: [
-          ...localPreflightChecks,
-          ...(session.method === "wrangler_oauth" ? [
-            {
-              name: "Cloudflare sign-in",
-              status: D_OK,
-              detail: "the named browser sign-in reached the exact selected account through the protected credential store",
-            },
-            {
-              name: "Vectorize",
-              status: D_OK,
-              detail: "the selected account passed the read-only Vectorize access check",
-            },
-          ] : [{
-            name: "Cloudflare recovery",
-            status: D_WARN,
-            detail: "setup is using the recovery-only hidden token path for this run",
-          }]),
-        ],
-      } : {}),
-      ...(session.account ? { listCloudflareAccounts: async () => [session.account] } : {}),
-    }),
+    async (session) => {
+      // OAuth returns the exact selected account. The token lane must resolve
+      // the same account from the manifest, or choose it before any setup write.
+      // Only then can the separate owner-visible billing proof be meaningful.
+      const selectedAccount = session.account || (manifest
+        ? await resolveAccount(manifest)
+        : await chooseSetupAccount(ask));
+      await confirmCloudflareWorkersPaidAccount(selectedAccount, {
+        interactive,
+        askFn: ask,
+        environment: process.env,
+      });
+      return cmdSetup(manifestPath, {
+        flags,
+        cloudflareAccountPath: accountPath,
+        cloudflareAuthProfile: session.profile || authProfile,
+        ...(localPreflightChecks ? {
+          preflightChecks: [
+            ...localPreflightChecks,
+            ...(session.method === "wrangler_oauth" ? [
+              {
+                name: "Cloudflare sign-in",
+                status: D_OK,
+                detail: "the named browser sign-in reached the exact selected account through the protected credential store",
+              },
+              {
+                name: "Vectorize",
+                status: D_OK,
+                detail: "the selected account passed the read-only Vectorize access check",
+              },
+            ] : [{
+              name: "Cloudflare recovery",
+              status: D_WARN,
+              detail: "setup is using the recovery-only hidden token path for this run",
+            }]),
+          ],
+        } : {}),
+        listCloudflareAccounts: async () => [selectedAccount],
+      });
+    },
     {
       manifestPath: target,
       accountId,
@@ -16220,7 +20716,7 @@ async function cmdSetupInteractive(manifestPath) {
       reauthorizeOAuth: !resumed && !tokenPath,
       allowBrowserReauth: resumed && interactive,
       allowTokenRecovery: interactive,
-      interactive,
+      interactive: interactive || browserSignIn,
       askFn: ask,
     },
   );
@@ -16262,9 +20758,30 @@ async function cmdCheckInteractive(manifestPath) {
  * environment, so agent shells never need to receive credentials.
  */
 export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
+  const step = flags.run ? String(flags.run).trim().toLowerCase() : null;
+  // This was a candidate entrypoint. Catch its former full flag set before the
+  // generic unknown-flag check so an owner following older guidance receives
+  // the current held explanation without any manifest, credential, or network
+  // access.
+  if (step === "plaid") {
+    const error = new Fatal(
+      "Bank connections are not part of ordinary onboarding yet. You did nothing wrong, " +
+        "and there is no bank password, verification code, or Plaid setup key to enter here. " +
+        "Plaid application-credential setup remains held. This command did not read the install " +
+        "record, request a credential, open a browser, contact a provider, or change anything. " +
+        "An already approved pilot may preserve its complete existing bank setup. If any piece " +
+        "is missing, use only the separately reviewed owner-custody setup.",
+    );
+    error.code = "SAFETY_REVIEW_REQUIRED";
+    throw error;
+  }
   assertKnownFlags(
     flags,
-    ["json", "run", "host", "user", "port", "source", "scopes", "confirm-host"],
+    [
+      "json", "run", "host", "user", "port", "source", "scopes", "confirm-host",
+      "browser-sign-in", "name", "slug", "cloudflare-account", "cloudflare-account-id",
+      "workers-paid-confirmed", "no-connect",
+    ],
     "brain technician",
   );
   const scriptPath = options.scriptPath || fileURLToPath(import.meta.url);
@@ -16274,13 +20791,22 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
     ...(options.manifestDeps || {}),
     cli,
   });
-  const step = flags.run ? String(flags.run).trim().toLowerCase() : null;
   if (!step) {
     if (flags.json) console.log(JSON.stringify(plan, null, 2));
     else console.log(renderCliCommands(renderTechnicianPlan(plan)));
     return plan;
   }
   if (flags.json) die("--json is read-only and cannot be combined with --run");
+  const platformName = options.platformName ?? process.platform;
+
+  // The direct invite command owns the passkey explanation so the owner sees
+  // it immediately before the one-time link is minted. Every other ceremony
+  // is introduced here before a provider page, hidden prompt, or child command
+  // can appear.
+  if (step !== "passkey") {
+    const writeBriefing = options.writeBriefing || ((text) => console.log(renderCliCommands(text)));
+    writeBriefing(renderTechnicianStepBriefing(step));
+  }
 
   const readHidden = options.readHidden || (({ prompt, noun, optional }) => readHiddenInput({
     prompt,
@@ -16303,6 +20829,7 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
       spawn: options.spawn || spawnSync,
       nodePath,
       manifestDeps: options.manifestDeps || {},
+      platformName,
     });
     ok(`${step} technician step completed`);
     info("rerun `brain technician <manifest>` to see the full plan; live proof still comes from the final field checklist");
@@ -16396,12 +20923,20 @@ export async function cmdLocalTools(options = {}) {
   const json = options.json === true;
   const handoff = options.handoff === true;
   const deepDpapi = options.deepDpapi === true;
+  const requireDoctor = options.requireDoctor === true;
   const cloudflareAccountPath = String(options.cloudflareAccountPath || "").trim().toLowerCase() || null;
   if (cloudflareAccountPath && !["create", "existing"].includes(cloudflareAccountPath)) {
     die("--cloudflare-account accepts create or existing");
   }
   const shouldWriteStatus = options.writeStatus === true;
   const targetManifest = resolve(options.manifestPath || "./brain.manifest.json");
+  if (!json) {
+    console.log(
+      "\n  This command prepares local tools. It installs or updates the reviewed Financial Brain\n" +
+      "  technician skill for Claude Code, plus Codex when it is already present, records bootstrap status\n" +
+      "  when requested, and may add the Brain CLI folder to your PATH. It does not configure MCP.\n"
+    );
+  }
   let claudePath = { status: "not_applicable" };
   if (platformName === "win32") {
     claudePath = (options.persistClaudePath ?? persistWindowsClaudePath)({
@@ -16419,6 +20954,18 @@ export async function cmdLocalTools(options = {}) {
     existsImpl: options.existsImpl,
   });
   const node = checkNode();
+  const installDrive = checkInstallDriveFreeSpace({
+    platformName,
+    environment,
+    cliPath: options.brainCliPath || fileURLToPath(import.meta.url),
+    statfsImpl: options.statfsImpl,
+  });
+  const installSession = checkInstallPrivilege({
+    platformName,
+    environment,
+    runCommand,
+    getEffectiveUserId: options.getEffectiveUserId,
+  });
   const wrangler = checkWrangler(runCommand);
   const dpapi = platformName === "win32"
     ? checkWindowsCredentialProtection({
@@ -16428,8 +20975,8 @@ export async function cmdLocalTools(options = {}) {
       })
     : { name: "Windows credential protection", status: D_OK, detail: "not applicable", rounds: 0 };
   const visibleChecks = platformName === "win32"
-    ? [node, claude, wrangler, dpapi]
-    : [node, claude, wrangler];
+    ? [node, installDrive, installSession, claude, wrangler, dpapi]
+    : [node, installDrive, installSession, claude, wrangler];
   if (!json) console.log(`\n  ${c.bold("Financial Brain local tools")}\n`);
   for (const item of visibleChecks) {
     if (json) continue;
@@ -16447,7 +20994,15 @@ export async function cmdLocalTools(options = {}) {
     productVersion: PRODUCT_VERSION,
     manifest,
     cli,
-    checks: { node, claude, claude_path: claudePath, wrangler, dpapi },
+    checks: {
+      node,
+      install_drive: installDrive,
+      install_session: installSession,
+      claude,
+      claude_path: claudePath,
+      wrangler,
+      dpapi,
+    },
     skill,
     claudeDoctor,
     deepDpapi,
@@ -16470,10 +21025,10 @@ export async function cmdLocalTools(options = {}) {
     die("the required local tools are not ready. Fix those items and rerun `brain tools`.");
   }
 
-  // Codex reads the same skill format from ~/.codex/skills, so the one reviewed
-  // file serves both assistants. Install into each: which one the owner
-  // actually opens is not predictable from here, and a missing guide in the
-  // tool they chose looks like the product simply does not have one.
+  // Claude Code is the current install surface. Codex reads the same skill
+  // format, so refresh it too when its existing config directory proves it is
+  // already present. Do not create a surprise ~/.codex tree on a Claude-only
+  // computer.
   const skillOptions = options.claudeSkillOptions || { environment: process.env };
   const installEverywhere = options.installTechnicianSkills ?? installTechnicianSkillEverywhere;
   const skillResults = options.installClaudeSkill
@@ -16498,7 +21053,9 @@ export async function cmdLocalTools(options = {}) {
       if (r.status === "failed") warn(`${label} skill not installed: ${r.error}`);
       else ok(`${label} skill /financial-brain-technician ${r.status}`);
     }
-    info("In either tool, type `/financial-brain-technician` to begin the guided plan.");
+    info(skillResults.some((result) => result.root === ".codex" && result.status !== "failed")
+      ? "In Claude Code or Codex, open the Financial Brain technician skill to begin the guided plan."
+      : "In Claude Code, type `/financial-brain-technician` to begin the guided plan.");
   }
 
   // Persist the CLI's own bin directory before anything else can go wrong,
@@ -16520,6 +21077,24 @@ export async function cmdLocalTools(options = {}) {
     if (!json) {
       warn("Claude Code's full installation doctor needs an interactive terminal and was not run here.");
       info("Run `claude doctor` in Terminal before the owner handoff.");
+    }
+    if (requireDoctor) {
+      const base = makeStatus(technicianSkill, claudeDoctor);
+      const status = persistStatus({
+        ...base,
+        status: "action_required",
+        issue_code: "CLAUDE_DOCTOR_REQUIRES_INTERACTIVE_TERMINAL",
+        retry_safe: true,
+        requires_human: true,
+        next_action: "Run this same technician tools step in a directly controlled Terminal or PowerShell window so Claude Code's installation doctor can finish.",
+        recovery: "The safe local skill and PATH preparation remain in place. No Cloudflare provisioning action was started.",
+      });
+      if (json) throw new JsonFatal(status);
+      die(
+        "the technician tools step is not complete because Claude Code's installation doctor needs a directly controlled interactive terminal.\n" +
+          "      Run the same `brain technician <manifest> --run tools` step in Terminal or PowerShell, then return here.\n" +
+          "      No Cloudflare provisioning action was started."
+      );
     }
   } else {
     console.log(`\n  ${c.bold("Claude Code installation doctor")}\n`);
@@ -16657,7 +21232,7 @@ export async function cmdLocalTools(options = {}) {
 
 async function cmdLocalToolsInteractive(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
-  assertKnownFlags(flags, ["json", "handoff", "deep-dpapi", "cloudflare-account"], "brain tools");
+  assertKnownFlags(flags, ["json", "handoff", "deep-dpapi", "cloudflare-account", "require-doctor"], "brain tools");
   if (flags.json && flags.handoff) die("--json and --handoff are separate bootstrap modes");
   const target = typeof manifestPath === "string" && !manifestPath.startsWith("--")
     ? manifestPath
@@ -16667,6 +21242,7 @@ async function cmdLocalToolsInteractive(manifestPath) {
     json: flags.json === true,
     handoff: flags.handoff === true,
     deepDpapi: flags["deep-dpapi"] === true,
+    requireDoctor: flags["require-doctor"] === true,
     cloudflareAccountPath: flags["cloudflare-account"],
     writeStatus: true,
   });
@@ -16777,15 +21353,32 @@ async function cmdZone(manifestPath) {
   if (!adminKey) die("no durable admin key was found. Run `brain setup <manifest>` first.");
   const source = typeof flags.source === "string" ? flags.source.trim() : "";
   const zone = typeof flags.zone === "string" ? flags.zone.trim() : "";
-  const response = await http(`${base}/api/admin/brain/zones`, {
-    method: source || zone ? "POST" : "GET",
+  const isAssignment = Boolean(source || zone);
+  const makeRequest = () => http(`${base}/api/admin/brain/zones`, {
+    method: isAssignment ? "POST" : "GET",
     headers: {
       "X-Admin-Key": adminKey,
-      ...(source || zone ? { "Content-Type": "application/json" } : {}),
+      ...(isAssignment ? { "Content-Type": "application/json" } : {}),
     },
-    ...(source || zone ? { body: JSON.stringify({ source, zone }) } : {}),
+    ...(isAssignment ? { body: JSON.stringify({ source, zone }) } : {}),
   }, { timeoutMs: 60_000, what: "the zone assignment" });
-  if (!response.ok) die(`zone command failed (${response.status}): ${summariseResponseBody(await response.text())}`);
+  const requestResult = await requestZoneAssignmentWithRetry(makeRequest, {
+    source,
+    zone,
+    onRetry: (notice) => warn(zoneAssignmentRetryNotice({ source, zone, ...notice })),
+  });
+  const { response } = requestResult;
+  if (!response.ok) {
+    const raw = requestResult.raw === null ? await response.text() : requestResult.raw;
+    const detail = summariseResponseBody(raw);
+    if (requestResult.exhausted) {
+      die(zoneAssignmentExhaustedMessage({ source, zone, status: response.status, detail }));
+    }
+    die(`zone command failed (${response.status}): ${detail}`);
+  }
+  if (requestResult.recovered) {
+    ok(zoneAssignmentRecoveredNotice({ source, zone, retries: requestResult.retries }));
+  }
   const result = await response.json();
   if (result.zones) {
     if (!result.zones.length) info("Nothing is loaded yet, so there are no zones.");
@@ -16820,6 +21413,10 @@ async function cmdInvite(manifestPath) {
   const base = await resolveBaseUrl(m, acct);
   const adminKey = resolveAdminKey(manifestPath);
   if (!adminKey) die("no durable admin key was found. Repair it with `brain setup <manifest>` or `brain secrets <manifest>`.");
+  // This is printed before the invite write and therefore before the owner can
+  // reach a browser or device prompt. The secure window should never appear as
+  // an unexplained surprise.
+  console.log(renderTechnicianStepBriefing("passkey"));
   const res = await http(`${base}/api/admin/auth/invite`, {
     method: "POST",
     headers: { "X-Admin-Key": adminKey },
@@ -16829,10 +21426,17 @@ async function cmdInvite(manifestPath) {
   ok("one-time enrollment link minted (valid 15 minutes, single use)");
   console.log(`\n  ${invite.url}\n`);
   console.log(
-    "  Send it to the owner however you already talk (text it, AirDrop it). They open\n" +
-    "  it on THEIR device, tap once, Face ID or fingerprint — that is the whole setup.\n" +
-    `  Passkeys bind to ${invite.rp_id} exactly; changing the brain's domain later\n` +
-    "  requires re-enrollment, so settle the domain before the first invite.\n"
+    "  This link is private. Keep it in an owner-controlled terminal or move it only\n" +
+    "  to the owner's intended device over a channel they control. Opening it does not\n" +
+    "  create a passkey. The page explains the step and waits for the owner to choose\n" +
+    "  Create my owner passkey before any device prompt opens.\n\n" +
+    "  The device may then ask for Face ID, Touch ID, a fingerprint, a security key,\n" +
+    "  or its PIN. The owner completes that system step. Biometric data, the PIN, and\n" +
+    "  the private passkey stay with the device or passkey provider; the Brain stores\n" +
+    "  only public verification data. Canceling the prompt does not use this link, so\n" +
+    "  the owner can retry before it expires.\n\n" +
+    `  The passkey binds to ${invite.rp_id} exactly and may sync through the owner's\n` +
+    "  passkey provider. Changing the Brain's domain requires re-enrollment.\n"
   );
   return invite;
 }
@@ -17019,6 +21623,131 @@ const UPDATE_SKILL_REFRESH_WARNING =
   "Keep using https://financialbrain.ai/update/agent.md in this session. " +
   "Do not rerun brain update for this local guide warning.";
 
+const UPDATE_AGENT_REFRESH_WARNING =
+  "The Brain software update is verified, but an existing local AI connection could not be upgraded and verified safely. " +
+  "It was not reported as ready. Run `brain mcp-config <manifest> --apply` to repair that connection. " +
+  "The update did not add a missing connection or change a disabled or custom access profile.";
+
+function safelyReportUpdateResult(reporter, message) {
+  try {
+    reporter(message);
+  } catch {
+    // A terminal reporter cannot change the truth of the completed update.
+    try { warn(message); } catch { /* best-effort terminal reporting */ }
+  }
+}
+
+/**
+ * Upgrade only local registrations this installer can prove it already owns.
+ * Missing registrations are not added, and explicit authority choices are
+ * preserved. wireAgents performs the runtime handshake and exact readback.
+ */
+export async function refreshOwnerAssistantConnectionsAfterUpdate(
+  manifest,
+  manifestPath,
+  options = {},
+) {
+  const reconcile = options.reconcileExistingOwnerAgents ?? wireAgents;
+  const reportOk = options.reportOk ?? ok;
+  const reportInfo = options.reportInfo ?? info;
+  const reportWarning = options.reportWarning ?? warn;
+  let result;
+  try {
+    result = await reconcile(manifest, manifestPath, {
+      ...(options.agentOptions || {}),
+      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      existingOnly: true,
+      rotationOnly: false,
+      ownerAssistantMigrationOnly: true,
+    });
+  } catch {
+    result = { wired: [], skipped: [], preserved: [], failures: ["agent-reconciliation"] };
+  }
+
+  const wired = Array.isArray(result) ? result : (result?.wired || []);
+  const skipped = Array.isArray(result) ? [] : (result?.skipped || []);
+  const preserved = Array.isArray(result) ? [] : (result?.preserved || []);
+  const failures = Array.isArray(result) ? [] : (result?.failures || []);
+
+  if (wired.length) {
+    safelyReportUpdateResult(
+      reportOk,
+      `${wired.join(" and ")} can now use Owner assistant access for this Brain, and the connection was verified`,
+    );
+    safelyReportUpdateResult(
+      reportInfo,
+      "Owner assistant can read, add or correct information, check the connection, and review a financial map. " +
+        "Keep normal per-call approvals enabled in Claude Code or Codex before each durable write. " +
+        "It cannot activate the financial map, delete records, or change access. The owner remains the administrator.",
+    );
+  }
+  if (preserved.length) {
+    const preservedSubject = preserved.join(" and ");
+    safelyReportUpdateResult(
+      reportInfo,
+      `${preservedSubject} ${preserved.length === 1 ? "has" : "have"} a disabled connection or an explicit custom access profile, so update left ${preserved.length === 1 ? "it" : "them"} exactly as chosen.`,
+    );
+  }
+  if (!wired.length && !failures.length) {
+    safelyReportUpdateResult(
+      reportInfo,
+      "No existing installer-managed Claude Code or Codex connection needed an Owner assistant upgrade. " +
+        "Update did not add a missing connection.",
+    );
+  } else if (skipped.length > preserved.length) {
+    safelyReportUpdateResult(
+      reportInfo,
+      "Update did not add any missing Claude Code or Codex connection. It only changes a connection the installer already owns.",
+    );
+  }
+  if (failures.length) safelyReportUpdateResult(reportWarning, UPDATE_AGENT_REFRESH_WARNING);
+
+  return {
+    status: failures.length ? (wired.length ? "partial" : "warning") : "ready",
+    wired,
+    skipped,
+    preserved,
+    failures,
+  };
+}
+
+/** Refresh a marker-owned CLAUDE.md, but never create or claim one on update. */
+export function refreshClaudeWorkspaceGuideAfterUpdate(manifestPath, options = {}) {
+  const writeGuide = options.writeClaudeWorkspaceGuide ?? writeClaudeWorkspaceGuide;
+  const reportOk = options.reportOk ?? ok;
+  const reportInfo = options.reportInfo ?? info;
+  const reportWarning = options.reportWarning ?? warn;
+  let result;
+  try {
+    result = writeGuide(manifestPath, {
+      brainCliPath: options.brainCliPath || fileURLToPath(import.meta.url),
+      nodePath: options.nodePath || process.execPath,
+      existingOnly: true,
+    });
+  } catch {
+    safelyReportUpdateResult(
+      reportWarning,
+      "The Brain software update is verified, but its existing managed CLAUDE.md could not be refreshed safely. " +
+        "No unrelated CLAUDE.md was replaced. The Brain and AI connection do not need to be updated again.",
+    );
+    return { status: "warning" };
+  }
+
+  if (result?.status === "written") {
+    safelyReportUpdateResult(
+      reportOk,
+      "existing Financial Brain CLAUDE.md refreshed with the Owner assistant write and approval guidance",
+    );
+  } else if (result?.status === "preserved_unrelated_existing_file" ||
+      result?.status === "preserved_unsafe_existing_file") {
+    safelyReportUpdateResult(
+      reportInfo,
+      "The existing CLAUDE.md is not a safely managed Financial Brain guide, so update left it unchanged.",
+    );
+  }
+  return result;
+}
+
 function updateSkillAgentLabel(root) {
   if (root === ".claude") return "Claude Code";
   if (root === ".codex") return "Codex";
@@ -17117,6 +21846,17 @@ export async function cmdUpdate(manifestPath, options = {}) {
   const pin = pinUpdateManifest(installed.path);
   const binding = manifestCloudflareControlBinding(pin.target);
   const runControl = options.withCloudflareControl ?? withCloudflareControlCredential;
+  const reconcileOwnerAgents = Object.hasOwn(options, "reconcileExistingOwnerAgents")
+    ? options.reconcileExistingOwnerAgents
+    : (IS_MAIN ? wireAgents : null);
+  const updateWorkspaceGuide = Object.hasOwn(options, "writeClaudeWorkspaceGuideAfterUpdate")
+    ? options.writeClaudeWorkspaceGuideAfterUpdate
+    : (IS_MAIN ? writeClaudeWorkspaceGuide : null);
+  const resolveUpdateAgentBaseUrl = options.resolveUpdateAgentBaseUrl ?? resolveBaseUrl;
+  let updatedManifest = null;
+  let updatedBaseUrl = null;
+  let ownerAgentPreparationFailed = false;
+  let ownerAgentRefreshResult = null;
   const upgradeResult = await runControl(async () => {
     revalidateUpdateManifest(pin, "update verification");
     await (options.cmdVerify ?? cmdVerify)(pin.target);
@@ -17139,6 +21879,17 @@ export async function cmdUpdate(manifestPath, options = {}) {
         );
       }
     }
+    if (reconcileOwnerAgents) {
+      try {
+        updatedManifest = loadManifest(pin.target).m;
+        updatedBaseUrl = await resolveUpdateAgentBaseUrl(
+          updatedManifest,
+          binding.accountId ? { id: binding.accountId } : null,
+        );
+      } catch {
+        ownerAgentPreparationFailed = true;
+      }
+    }
     return upgradeResult;
   }, {
     ...options,
@@ -17151,6 +21902,34 @@ export async function cmdUpdate(manifestPath, options = {}) {
     interactive,
     askFn: options.askFn ?? ask,
   });
+
+  if (reconcileOwnerAgents) {
+    if (ownerAgentPreparationFailed || !updatedManifest || !updatedBaseUrl) {
+      safelyReportUpdateResult(options.reportAgentRefreshWarning ?? warn, UPDATE_AGENT_REFRESH_WARNING);
+    } else {
+      ownerAgentRefreshResult = await refreshOwnerAssistantConnectionsAfterUpdate(updatedManifest, pin.target, {
+        reconcileExistingOwnerAgents: reconcileOwnerAgents,
+        agentOptions: options.updateAgentOptions,
+        baseUrl: updatedBaseUrl,
+        reportOk: options.reportAgentRefreshOk,
+        reportInfo: options.reportAgentRefreshInfo,
+        reportWarning: options.reportAgentRefreshWarning,
+      });
+    }
+  }
+
+  // Write-capable guidance is refreshed only after this exact Claude Code
+  // registration has passed runtime, tool-list, and config readback proof.
+  if (updateWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Claude Code")) {
+    refreshClaudeWorkspaceGuideAfterUpdate(pin.target, {
+      writeClaudeWorkspaceGuide: updateWorkspaceGuide,
+      brainCliPath: options.brainCliPath,
+      nodePath: options.nodePath,
+      reportOk: options.reportWorkspaceGuideRefreshOk,
+      reportInfo: options.reportWorkspaceGuideRefreshInfo,
+      reportWarning: options.reportWorkspaceGuideRefreshWarning,
+    });
+  }
 
   try {
     cloudflareTokenSession.run(CLOUDFLARE_CREDENTIAL_SUPPRESSED, () =>
@@ -17202,10 +21981,10 @@ const DOCTOR_FLAGS = ["repair", "rollback", "repair-checksum", "yes"];
  * path (resume or restore a mid-migration pause). `brain doctor <manifest>
  * --repair-checksum [--yes]` is the DIFFERENT path for an applied migration
  * whose file content has since changed — see diagnoseChecksumDrift's own
- * comment for why the two must not be conflated. All three need a Cloudflare
- * token (they read D1 and, once confirmed, mutate it) so each is wrapped in
- * withCloudflareToken exactly like `brain update` and `brain setup` already
- * are. Only one of the three may be requested at a time.
+ * comment for why the two must not be conflated. All three need Cloudflare
+ * control access (they read D1 and, once confirmed, mutate it), so each uses
+ * the same named browser or explicit recovery boundary as update and setup.
+ * Only one of the three may be requested at a time.
  */
 async function dispatchDoctor(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
@@ -18057,7 +22836,10 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   const { m } = loadManifest(manifestPath);
   const feed = m?.corpora?.bank_feed || {};
   if (feed.enabled !== true) {
-    die("corpora.bank_feed.enabled is not true in this manifest. Enable the Plaid bank feed before opening its owner page.");
+    die(
+      "corpora.bank_feed.enabled is not true in this manifest. General Plaid bank invitations remain held. " +
+      "Enable the native feed only inside a named, version-scoped disposable-candidate field plan."
+    );
   }
   if (manifestBankFeedProvider(feed) !== "plaid") {
     die("brain connect bank currently opens the reviewed Plaid owner flow. Set corpora.bank_feed.provider to plaid first.");
@@ -18131,7 +22913,7 @@ export async function cmdImportBank(m, manifestPath, flags = {}, options = {}) {
     "usage: brain import bank <manifest> --file <statement.ofx|.qfx|.csv>\n" +
     "  Optional: --dry-run to see what WOULD land and send nothing,\n" +
     "            --format ofx|qfx|csv when the file's extension does not say,\n" +
-    "            --entity <slug> to file it under a business other than \"primary\",\n" +
+    "            --entity <slug> is required to name the business that owns these records,\n" +
     "            --account <slug> --institution <name> --account-kind <checking|savings|card|...>\n" +
     "            --currency <ISO code> for a CSV, which carries none of that itself";
   if (!filePath || filePath === true) die(`brain import bank needs --file <path>.\n      ${usage}`);
@@ -18192,6 +22974,13 @@ export async function cmdImportBank(m, manifestPath, flags = {}, options = {}) {
   }
 
   const dry = !!flags["dry-run"];
+  const entitySlug = flags.entity === true ? null : (flags.entity ? String(flags.entity) : null);
+  if (!dry && !entitySlug) {
+    die("brain import bank needs --entity <slug>. No primary business is assumed for financial records.");
+  }
+  if (entitySlug && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(entitySlug)) {
+    die("--entity takes a short lowercase name: letters, digits, - and _, up to 64 characters");
+  }
   info(`read ${basename(filePath)}: ${envelope.format.toUpperCase()} bank export`);
   info(`sign convention: ${envelope.signConvention}`);
   let totalReadable = 0;
@@ -18270,7 +23059,7 @@ export async function cmdImportBank(m, manifestPath, flags = {}, options = {}) {
     headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
     body: JSON.stringify({
       envelope,
-      entity_slug: flags.entity === true ? undefined : flags.entity,
+      entity_slug: entitySlug,
       entity_label: flags["entity-label"] === true ? undefined : flags["entity-label"],
     }),
   }, { fetchImpl: options.fetchImpl ?? fetch, what: "the bank import" });
@@ -18328,6 +23117,7 @@ const commands = {
   init: cmdInit,
   setup: cmdSetupInteractive,
   ask: cmdAsk,
+  "financial-picture": cmdFinancialPicture,
   doctor: dispatchDoctor,
   whatsnew: cmdWhatsnew,
   verify: (path) => withManifestCloudflareControl(path, () => cmdVerify(path)),
@@ -18337,6 +23127,9 @@ const commands = {
   health: cmdHealth,
   test: cmdTest,
   "mcp-config": cmdMcpConfig,
+  "assistant-repair": cmdAssistantRepairInteractive,
+  "machine-continuity": cmdMachineContinuity,
+  "provenance-repair": cmdProvenanceRepairInteractive,
   migrate: (path) => withManifestCloudflareControl(path, () => cmdMigrate(path)),
   ingest: cmdIngest,
   import: cmdImport,
@@ -18344,7 +23137,7 @@ const commands = {
   connect: cmdConnect,
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
-  sources: (path) => withManifestCloudflareControl(path, () => cmdSources(path)),
+  sources: cmdSources,
   forget: (path) => withManifestCloudflareControl(path, () => cmdForget(path)),
   drain: cmdDrain,
   reindex: cmdReindex,
@@ -18376,6 +23169,42 @@ const VERSION_ARGUMENTS = new Set(["--version", "-v", "version"]);
 const helpRequested = HELP_ARGUMENTS.has(cmd);
 const versionRequested = VERSION_ARGUMENTS.has(cmd);
 
+// These commands own a narrower data-plane or machine-local credential
+// boundary. Reading a Wrangler OAuth token at the process entry point would
+// cross that boundary before their own manifest/domain checks can fail closed,
+// and a stale Wrangler session can launch `wrangler whoami` while refreshing.
+// Keep this one set beside the actual dispatcher wrapper so tests exercise the
+// same decision the installed CLI uses.
+const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
+  "sources",
+  "financial-picture",
+  "machine-continuity",
+  "provenance-repair",
+  "assistant-repair",
+]);
+
+export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
+  if (typeof run !== "function") throw new TypeError("a CLI command function is required");
+  const argv = options.argv ?? process.argv;
+  const aggregateIntent = String(command || "") === "ingest"
+    ? aggregateConnectorPreviewRawIntent(argv)
+    : { selected: false, source: null };
+  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(String(command || ""))) {
+    return Promise.resolve().then(run);
+  }
+  if (aggregateIntent.selected) {
+    return Promise.resolve().then(run).catch((error) => {
+      if (error instanceof JsonFatal) throw error;
+      if (aggregateIntent.source === "unknown") {
+        throw new JsonFatal(connectorAggregatePreviewRequestFailure("unknown"));
+      }
+      throw new JsonFatal(connectorAggregatePreviewFailure(aggregateIntent.source, error));
+    });
+  }
+  const withWrangler = options.withWranglerSession ?? withWranglerSessionIfNeeded;
+  return withWrangler(run, options.wranglerOptions || {});
+}
+
 if (IS_MAIN && versionRequested) {
   console.log(PRODUCT_VERSION);
   process.exit(0);
@@ -18393,14 +23222,25 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            no machine checks. --name, --slug and --account
                                            make it ask nothing. Use it if setup stopped before
                                            it got to write one.
-    brain setup      [manifest]            nothing to a working brain, one command
+    brain setup      [manifest]            nothing to a working brain, one command; connects installed
+                                           AI tools after the owner approves the disclosed local config
     brain setup      [manifest] --cloudflare-account create  guide a first Cloudflare account
     brain setup      [manifest] --cloudflare-account existing  use an account the owner already has
+    brain setup      [manifest] --browser-sign-in --cloudflare-account existing
+                                           owner-approved Claude-guided browser sign-in; also pass --name,
+                                           --slug, --cloudflare-account-id and --workers-paid-confirmed
     brain setup      [manifest] --cloudflare-token  recovery-only hidden API-token entry
     brain setup      [manifest] --no-connect  same, without touching THIS computer's AI tool config
     brain ask        <manifest>            ask a private question in this terminal
+    brain financial-picture <manifest>     read-only exact financial evidence inventory;
+                                           --json for Optimize, exact entity/year/period filters,
+                                           and optional prior as-of provenance baseline
+    brain machine-continuity <manifest> --json  read-only new-computer audit of the saved
+                                           Brain, local connectors, schedules, checkpoints,
+                                           technician skill, and Claude Code/Codex MCP wiring
     brain doctor     [manifest]            check this machine has everything it needs
-    brain tools      [manifest]            verify local tools and write machine-readable bootstrap status
+    brain tools      [manifest]            prepare local tools: install the reviewed technician skill,
+                                           check PATH, and write machine-readable bootstrap status
     brain tools      [manifest] --handoff  open Claude Code in the owner workspace with that status
     brain tools      [manifest] --json     print the same stable status for an agent or test
     brain verify     <manifest>            check the saved Cloudflare access and exact account
@@ -18415,30 +23255,32 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain check      <manifest>            read-only provenance conflicts and access-zone readiness;
                                            --set records only the owner's explicit answers;
                                            --subject NAME overrides the manifest owner
-    brain eval       <manifest>            score YOUR questions; add --corpus-contract for source coverage
-    brain eval       <manifest> --golden-20  build the 20-question set in a guided session, then score it
+    brain eval       <manifest>            score an optional private question suite; add --corpus-contract for source coverage
+    brain eval       <manifest> --golden-20  optionally build a 20-question private regression set, then score it
     brain token      <manifest>            describe browser sign-in and legacy recovery-token custody
     brain technician <manifest>            read-only account setup plan; --run <step> launches one safe ceremony
     brain grant      <manifest> --name "X" --can ask,file   give one person scoped access; prints the token once
     brain grants     <manifest>            who has access; --revoke <id> ends one
     brain zone       <manifest>            what is in which zone; --source X --zone Y to set one
-    brain invite     <manifest>            one-tap passkey enrollment link for the owner (Face ID, 15 min)
+    brain invite     <manifest>            15-minute owner passkey link; explains the secure device window first
     brain devices    <manifest>            enrolled passkeys; --revoke <credential id> removes one
-    brain test       <manifest>            full acceptance suite (5 tiers)
+    brain test       <manifest>            automated acceptance checks; saved owner questions run when present
     brain connect google --scopes drive,gmail,calendar  authorise the client's own Google account
     brain connect imessage <manifest>      verify Full Disk Access, load history, capture live (Mac only)
     brain connect whatsapp <manifest> --accept-risk  pair a linked device and capture live (Mac only, opt-in)
     brain connect zoom     <manifest>      Zoom cloud-recording transcripts (needs a paid Zoom seat)
     brain connect imap     <manifest>      any IMAP mailbox (Yahoo, Fastmail, iCloud, a host): app
                                            password entered hidden, proven by a real read first
-    brain connect bank     <manifest>      open the owner-only Plaid Link and masked account assignment page
+    brain connect bank     <manifest>      held field-plan entrypoint for owner-only Plaid Link and masked account assignment
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end
     brain ingest     <manifest> --path <dir>  load a folder into the brain
-    brain ingest     <manifest> --from drive  load from a connected remote source
+    brain ingest     <manifest> --from drive  load from a connected remote source;
+                                           --dry-run --aggregate-json emits counts-only JSON
     brain ingest     <manifest> --from gmail  sync connected Gmail (--dry-run to preview)
-    brain ingest     <manifest> --from calendar  sync Google Calendar (--dry-run to preview)
+    brain ingest     <manifest> --from calendar  sync Google Calendar (--dry-run to preview;
+                                           add --aggregate-json for counts-only JSON)
     brain ingest     <manifest> --from imap  sync a connected IMAP mailbox (--dry-run to preview)
     brain ingest     <manifest> --from imessage  one incremental Messages capture pass (Mac only)
     brain ingest     <manifest> --from whatsapp  one drain of the WhatsApp capture outbox
@@ -18451,6 +23293,13 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain mcp-config <manifest>            config to connect the client's AI tools
     brain mcp-config <manifest> --apply    connect them for real: registers the brain with
                                            Claude Code and Codex, whichever are installed
+    brain assistant-repair <manifest> --only <scopes>  read-only exact local skill/MCP repair preview
+    brain assistant-repair <manifest> --only <scopes> --apply --approve <plan-id>
+                                           apply one approved state-bound bundle; scopes are
+                                           technician-skill,claude-code-mcp,codex-mcp
+    brain provenance-repair <manifest> --source <name>  read-only whole-source provenance recovery preview
+                                           schema 1 is inventory-only; repair apply requires a future
+                                           candidate-resolution ledger and is intentionally unavailable
     brain schedule   <manifest> --install  install unattended Drive refresh on macOS
     brain schedule   <manifest> --install --folder  install unattended refresh of the watched
                                            local folder declared in corpora.local_folder (macOS)
@@ -18466,7 +23315,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
     brain whatsnew   [manifest]            what changed in this version, and are you on it
     brain status     <manifest>            versions, pending migrations, upgrade history
-    brain sources    <manifest>            named ingest sources, counts, last ingest
+    brain sources    <manifest>            complete read-only D1 source inventory; --json for Optimize
+    brain sources    <manifest> --json --recovery  one bounded provenance and OCR recovery preview page
     brain forget     <manifest>            remove one named source (destructive)
     brain upgrade    <manifest>            snapshot, migrate, deploy, verify
     brain doctor     <manifest> --repair   diagnose a brain stuck mid-upgrade (--yes to resume)
@@ -18485,7 +23335,12 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            Dropbox or HubSpot OAuth connection
     brain support    --clear --yes         clear private local issue notes
 
-  brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
+  brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. Drive
+  and Calendar also take --aggregate-json only with --dry-run. That explicit mode
+  writes one versioned counts-only JSON receipt and no item details; complete exits
+  zero, while bounded, incomplete, or failed previews return JSON and exit nonzero.
+  A Drive provider-only preview marks Brain-dependent effect counts unknown.
+  It is
   resumable: re-run the same command to continue an interrupted load. A large
   Drive, Gmail, or IMAP cleanup stops first and prints the exact
   --approve-removals fingerprint.
@@ -18509,9 +23364,19 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   direction was verified against a balance or taken on trust from the format.
   Re-importing the same file updates the same rows rather than adding a copy.
 
-  brain sources takes --add <name> [--kind <drive|gmail|imap|calendar|upload>] to register one,
-  and --source <name> --refresh <hourly|daily|weekly|monthly|never> to say how often it
-  should refresh. A source with no expectation is never reported as stale.
+  brain sources reads every registered or stored source through the saved Brain
+  domain and owner credential. brain sources <manifest> --json returns a stable,
+  complete machine-readable snapshot without Cloudflare sign-in or a control-plane
+  token. It reports source, masked configuration receipts, physical and logical
+  storage, readability, provenance, freshness, and a recovery-plan summary. It
+  never guesses an entity, year, scan-only state, or missing provider fact.
+  Add --recovery for one read-only page of opaque record ids that need provenance
+  or OCR review. Use its returned --cursor value for the next stable page, and
+  optionally --source <name> to narrow the preview. It never runs OCR, reingest,
+  repair, or any other write. Use --add <name>
+  [--kind <drive|gmail|imap|calendar|upload>] to register one, and --source <name>
+  --refresh <hourly|daily|weekly|monthly|never> to say how often it should refresh.
+  A source with no expectation is never reported as stale.
   brain forget needs --source <name>, and --yes before it removes anything. Without
   --yes it prints exactly what would go and stops.
 
@@ -18532,7 +23397,7 @@ if (IS_MAIN) {
 
   // Wrapped so a client who signed in with `wrangler login` never has to mint
   // or paste a token. Scoped to this one invocation.
-  withWranglerSessionIfNeeded(() => commands[cmd](manifestPath)).catch((e) => {
+  runCliCommandWithCredentialBoundary(cmd, () => commands[cmd](manifestPath)).catch((e) => {
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a

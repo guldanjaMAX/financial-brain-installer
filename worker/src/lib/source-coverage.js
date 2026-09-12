@@ -68,10 +68,18 @@ export function sourceCoverageFromEvidence(source, {
 } = {}) {
   const documents = finiteCount(source?.documents) || 0;
   const runClosed = latestRun?.finished_at !== null && latestRun?.finished_at !== undefined;
-  // Older receipts coerce omitted counters to zero. Only a clean, complete
-  // walk proves those values were actually measured rather than defaulted.
+  // Older receipts coerce omitted counters to zero. A completed walk proves
+  // the original accepted counters were measured. metrics_version separately
+  // proves that refused and failed were supplied rather than schema defaults.
   const runMeasured = runClosed &&
-    (latestRun?.walk_complete === true || Number(latestRun?.walk_complete) === 1) &&
+    (latestRun?.walk_complete === true || Number(latestRun?.walk_complete) === 1);
+  const outcomeCountsMeasured = runMeasured && Number(latestRun?.metrics_version || 0) >= 1;
+  const refused = outcomeCountsMeasured ? finiteCount(latestRun?.docs_refused) : null;
+  const failed = outcomeCountsMeasured ? finiteCount(latestRun?.docs_failed) : null;
+  // A connector's claimed range is confirmation only when that exact receipt
+  // measured every outcome and lost none. Otherwise a refusal inside the range
+  // could be misdescribed as material that is missing only outside it.
+  const rangeConfirmed = refused === 0 && failed === 0 &&
     !latestRun?.error && !latestRun?.refusal_reason;
   const added = runMeasured ? finiteCount(latestRun?.docs_added) : null;
   const updated = runMeasured ? finiteCount(latestRun?.docs_updated) : null;
@@ -90,14 +98,20 @@ export function sourceCoverageFromEvidence(source, {
     meaning_search: Object.freeze({
       state: pending === null ? "unknown" : pending > 0 ? "projecting" : "ready",
     }),
-    confirmed_range: Object.freeze({ from: null, through: null }),
-    target_range: Object.freeze({ from: null, through: null }),
+    confirmed_range: Object.freeze({
+      from: rangeConfirmed ? timestamp(latestRun?.confirmed_from) : null,
+      through: rangeConfirmed ? timestamp(latestRun?.confirmed_through) : null,
+    }),
+    target_range: Object.freeze({
+      from: timestamp(latestRun?.target_from),
+      through: timestamp(latestRun?.target_through),
+    }),
     current_window: null,
     counts: Object.freeze({
       seen: runMeasured ? finiteCount(latestRun?.files_seen) : null,
       accepted,
-      refused: runMeasured ? finiteCount(latestRun?.docs_refused) : null,
-      failed: runMeasured ? finiteCount(latestRun?.docs_failed) : null,
+      refused,
+      failed,
     }),
     last_progress_at: timestamp(source?.indexing_started_at) || timestamp(source?.last_ingest_at),
     projection_pending: pending,

@@ -93,6 +93,21 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
   check("the conservative budget preserves the 50-message replay shape",
     messageEstimate === 550 && messageEstimate <= D1_INGEST_STATEMENT_BUDGET,
     `${messageEstimate}/${D1_INGEST_STATEMENT_BUDGET}`);
+  const boundWorstCase = Array.from({ length: 50 }, (_, index) => ({
+    source_type: `bound${index}`,
+    source_id: `receipt-${index}`,
+    content: "x".repeat(index < 25 ? 4_000 : 5_200),
+    source_original_receipt: {
+      version: 1,
+      locator_kind: "source_relative_path",
+      original_content_sha256: String(index).padStart(64, "0"),
+      original_byte_count: 1,
+    },
+  }));
+  const boundEstimate = estimateD1IngestStatements({}, boundWorstCase);
+  check("bound batches reserve fallback reads, ledger work, readback, and one shared key load",
+    boundEstimate === 1_051 && boundEstimate > D1_INGEST_STATEMENT_BUDGET,
+    `${boundEstimate}/${D1_INGEST_STATEMENT_BUDGET}`);
   const wideEstimate = estimateD1IngestStatements({}, [{ content: "x".repeat(900_000) }]);
   check("a byte-valid 900KB document exceeds the pre-write statement budget",
     wideEstimate > D1_INGEST_STATEMENT_BUDGET, `${wideEstimate}/${D1_INGEST_STATEMENT_BUDGET}`);
@@ -213,6 +228,9 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
         date_reliable: binds[7], client: binds[8], category: binds[9],
         top_folder: binds[10], platform: binds[11], ingested_at: binds[12],
         content_hash: binds[13], meta: binds[14],
+        text_source: binds[21], text_reliable: binds[22], entity_slug: binds[23],
+        provenance_receipt_version: binds[25], provenance_receipt_status: binds[26],
+        provenance_receipt_reason: binds[27], provenance_receipt_digest: binds[28],
       };
       rows.document = rows.document
         ? { ...rows.document, ...incoming }
