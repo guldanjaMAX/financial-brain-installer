@@ -484,6 +484,10 @@ const expected = [
   // bounded counts and booleans, and static next-step copy; it performs no
   // install, repair, provider refresh, scheduler change, or Brain mutation.
   "operations/machine-continuity.mjs",
+  // Generic counts-only connector-preview contract. Reviewed 2026-09-11:
+  // exact allowlisted fields, closed failure codes, no record identity or
+  // provider message fields, and no credential or external-write capability.
+  "operations/connector-aggregate-preview.mjs",
   "operations/provenance-repair.mjs",
   "operations/provenance-source-assessment.mjs",
   // Reviewed read-only Optimize inventory client. It accepts no literal key,
