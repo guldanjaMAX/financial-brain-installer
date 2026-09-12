@@ -2279,6 +2279,15 @@ try {
   assert.equal(invalidStopHarness.adminReads, 0);
 
   // The mid-bootstrap hook is a separate, plan-bound synthetic field action.
+  // Native Windows cannot run the macOS Keychain-bound field hook. Keep that
+  // boundary explicit there; Linux still exercises the synthetic lifecycle and
+  // must not turn its completed evidence into approved macOS field proof.
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "win32" }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_REQUIRES_MACOS_KEYCHAIN",
+    "the special field hook remains unreachable on Windows",
+  );
+  if (process.platform !== "win32") {
   // A copied flag against the ordinary recovery fixture is refused before any
   // provider command or admin-key read, even when all ordinary approvals exist.
   const testCandidateSha = "c".repeat(40);
@@ -3555,6 +3564,7 @@ try {
     fetch: fieldHarness.fetchCalls.length,
   }, beforeBothCheckpointRefusal);
   unlinkSync(interruptionCheckpointPath);
+  }
   }
 
   const drillPlanPath = join(sandbox, ".brain-recovery-drill-plan.json");
