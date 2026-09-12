@@ -17,6 +17,7 @@ function executable(path, body) {
 
 function runPreflight({
   nodeVersion = "v22.0.0",
+  nodeVersionExitCode = 0,
   refuseNodePrograms = false,
   brainCopies = 0,
   installedCliOutsidePath = false,
@@ -62,7 +63,7 @@ function runPreflight({
         : `exec '${actualNode}' "$@"`;
       executable(join(bin, "node"), `
 case "$1" in
-  -v) printf '%s\\n' '${nodeVersion}' ;;
+  -v) printf '%s\\n' '${nodeVersion}'; exit ${nodeVersionExitCode} ;;
   *) ${nonVersionCommand} ;;
 esac`);
     }
@@ -141,18 +142,48 @@ esac`);
 }
 
 test("POSIX preflight rejects Node 21 and accepts Node 22", { skip: process.platform === "win32" }, () => {
-  const oldNode = runPreflight({ nodeVersion: "v21.9.0", refuseNodePrograms: true });
+  const oldNode = runPreflight({
+    nodeVersion: "v21.9.0",
+    refuseNodePrograms: true,
+    manifests: 3,
+  });
   assert.equal(oldNode.status, 1);
   assert.match(oldNode.stdout, /node v21\.9\.0 is too old; the installer needs 22 or newer/);
   assert.match(oldNode.stdout, /saved Brain location check was skipped for now/i);
+  assert.doesNotMatch(oldNode.stdout, /manifests found; the wrong one will be picked/i);
   assert.doesNotMatch(oldNode.stdout, /manifest selector could not run/i);
   assert.doesNotMatch(oldNode.stderr, /unexpected unsupported Node invocation/i);
   assert.equal(oldNode.unexpectedNpmUse, false);
 
-  const missingNode = runPreflight({ nodeVersion: null });
+  const malformedNode = runPreflight({
+    nodeVersion: "version unknown",
+    refuseNodePrograms: true,
+    manifests: 3,
+  });
+  assert.equal(malformedNode.status, 1);
+  assert.match(malformedNode.stdout, /node version could not be read/i);
+  assert.match(malformedNode.stdout, /saved Brain location check was skipped for now/i);
+  assert.doesNotMatch(malformedNode.stdout, /manifests found; the wrong one will be picked/i);
+  assert.doesNotMatch(malformedNode.stderr, /unexpected unsupported Node invocation/i);
+  assert.equal(malformedNode.unexpectedNpmUse, false);
+
+  const failedVersionCheck = runPreflight({
+    nodeVersion: "v22.0.0",
+    nodeVersionExitCode: 97,
+    refuseNodePrograms: true,
+    manifests: 3,
+  });
+  assert.equal(failedVersionCheck.status, 1);
+  assert.match(failedVersionCheck.stdout, /node version could not be read/i);
+  assert.doesNotMatch(failedVersionCheck.stdout, /manifests found; the wrong one will be picked/i);
+  assert.doesNotMatch(failedVersionCheck.stderr, /unexpected unsupported Node invocation/i);
+  assert.equal(failedVersionCheck.unexpectedNpmUse, false);
+
+  const missingNode = runPreflight({ nodeVersion: null, manifests: 3 });
   assert.equal(missingNode.status, 1);
   assert.match(missingNode.stdout, /node is not installed/);
   assert.match(missingNode.stdout, /saved Brain location check was skipped for now/i);
+  assert.doesNotMatch(missingNode.stdout, /manifests found; the wrong one will be picked/i);
   assert.doesNotMatch(missingNode.stdout, /manifest selector could not run/i);
   assert.doesNotMatch(missingNode.stderr, /node.*(?:not found|No such file)/i);
   assert.equal(missingNode.unexpectedNpmUse, false);

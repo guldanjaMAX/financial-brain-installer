@@ -44,6 +44,8 @@ const ORIGINAL_ID_RE = /^hmac-sha256:[a-f0-9]{64}$/;
 const RUN_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_QUERY_BYTES = 768;
 const MAX_DOCUMENTS = 256;
+const MAX_FILESYSTEM_ID = 18_446_744_073_709_551_615n;
+const MAX_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const encoder = new TextEncoder();
 
 const APPLY_STAGES = Object.freeze([
@@ -121,26 +123,24 @@ function absolutePath(value, label) {
   return value;
 }
 
-const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n;
-
-function exactFilesystemInteger(value, label) {
-  if (typeof value === "bigint") {
-    if (value < 0n || value > MAX_UNSIGNED_64) {
-      throw new TypeError(`${label} is unavailable`);
-    }
-    return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString(10);
-  }
-  if (!Number.isSafeInteger(value) || value < 0) {
+function canonicalFilesystemInteger(value, label) {
+  let integer;
+  if (typeof value === "bigint") integer = value;
+  else if (Number.isSafeInteger(value) && value >= 0) integer = BigInt(value);
+  else {
     throw new TypeError(`${label} is unavailable`);
   }
-  return value;
+  if (integer < 0n || integer > MAX_FILESYSTEM_ID) {
+    throw new TypeError(`${label} is unavailable`);
+  }
+  return integer <= MAX_SAFE_INTEGER_BIGINT ? Number(integer) : integer.toString(10);
 }
 
 async function directIdentity(path, expectedType, dependencies, assertOwned = async () => {}) {
   const lstat = requiredCallback(dependencies, "lstat");
   const realpath = requiredCallback(dependencies, "realpath");
   await assertOwned();
-  const first = await lstat(path);
+  const first = await lstat(path, { bigint: true });
   const typeMatches = expectedType === "file"
     ? first?.isFile?.() === true
     : first?.isDirectory?.() === true;
@@ -150,15 +150,15 @@ async function directIdentity(path, expectedType, dependencies, assertOwned = as
   await assertOwned();
   const resolved = absolutePath(await realpath(path), `resolved ${expectedType}`);
   await assertOwned();
-  const second = await lstat(resolved);
+  const second = await lstat(resolved, { bigint: true });
   await assertOwned();
   const secondMatches = expectedType === "file"
     ? second?.isFile?.() === true
     : second?.isDirectory?.() === true;
-  const firstDevice = exactFilesystemInteger(first?.dev, `${expectedType} device`);
-  const firstInode = exactFilesystemInteger(first?.ino, `${expectedType} inode`);
-  const secondDevice = exactFilesystemInteger(second?.dev, `resolved ${expectedType} device`);
-  const secondInode = exactFilesystemInteger(second?.ino, `resolved ${expectedType} inode`);
+  const firstDevice = canonicalFilesystemInteger(first?.dev, `${expectedType} device`);
+  const firstInode = canonicalFilesystemInteger(first?.ino, `${expectedType} inode`);
+  const secondDevice = canonicalFilesystemInteger(second?.dev, `resolved ${expectedType} device`);
+  const secondInode = canonicalFilesystemInteger(second?.ino, `resolved ${expectedType} inode`);
   if (!secondMatches || second?.isSymbolicLink?.() === true ||
       firstDevice !== secondDevice || firstInode !== secondInode) {
     throw new TypeError(`${expectedType} identity changed during realpath validation`);

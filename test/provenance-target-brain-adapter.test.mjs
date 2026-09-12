@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  buildNpmCliInvocation,
+  resolveNpmCliPath,
+} from "../operations/npm-cli-runtime.mjs";
+
+import {
   provenanceTargetDependencies,
   provenanceTargetRuntimePackageFiles,
   provenanceTargetRuntimePackageFingerprint,
@@ -468,21 +473,14 @@ test("real Brain adapter refuses widened target, OCR, family, drain, and generat
 });
 
 test("runtime inventory exactly matches the local npm pack and rejects nested symlinks", (t) => {
-  const adjacentNpmCli = join(
-    dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js",
-  );
-  const npmCli = [process.env.npm_execpath, adjacentNpmCli]
-    .find((candidate) => candidate && existsSync(candidate));
-  if (!npmCli && process.platform === "win32") {
-    throw new Error("npm CLI is unavailable; run this focused test through npm test");
-  }
-  const command = npmCli ? process.execPath : "npm";
-  const packed = spawnSync(command, [
-    ...(npmCli ? [npmCli] : []),
+  const npmCli = resolveNpmCliPath();
+  const invocation = buildNpmCliInvocation(npmCli, [
     "pack", "--dry-run", "--json", "--ignore-scripts",
-  ], {
+  ]);
+  const packed = spawnSync(invocation.command, invocation.args, {
     cwd: ROOT,
     encoding: "utf8",
+    shell: invocation.shell,
     timeout: 60_000,
   });
   assert.equal(packed.status, 0, packed.stderr || packed.stdout);

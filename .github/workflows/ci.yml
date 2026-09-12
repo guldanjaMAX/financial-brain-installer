@@ -277,8 +277,9 @@ jobs:
           echo "verified $ARTIFACT_NAME at sha256:$EXPECTED_SHA256"
 
       # The operator runs preflight from the installed release, not from a
-      # source checkout. Extract both scripts from the one shared artifact so
-      # every matrix job proves those exact bytes were actually packaged.
+      # source checkout. Extract both scripts and their manifest-selector helper
+      # from the one shared artifact so every matrix job proves those exact
+      # bytes were actually packaged.
       - name: extract preflight from exact package
         shell: bash
         run: |
@@ -289,10 +290,12 @@ jobs:
           fi
           mkdir -p .packaged-preflight
           tar -xzf "$tarball" -C .packaged-preflight \
-            package/tools/preflight.sh package/tools/preflight.ps1
+            package/tools/preflight.sh package/tools/preflight.ps1 \
+            package/operations/installed-manifest.mjs
           test -f .packaged-preflight/package/tools/preflight.sh
           test -f .packaged-preflight/package/tools/preflight.ps1
-          echo "both packaged preflight scripts extracted from $(basename "$tarball")"
+          test -f .packaged-preflight/package/operations/installed-manifest.mjs
+          echo "packaged preflight scripts and manifest selector extracted from $(basename "$tarball")"
 
       # --ignore-scripts is what the client is told to run, so CI runs the same
       # thing. If a dependency needs a postinstall script, better to find out
@@ -591,8 +594,9 @@ jobs:
           echo "verified $ARTIFACT_NAME at sha256:$EXPECTED_SHA256"
 
       # The operator runs preflight from the installed release, not from a
-      # source checkout. Extract both scripts from the one shared artifact so
-      # every matrix job proves those exact bytes were actually packaged.
+      # source checkout. Extract both scripts and their manifest-selector helper
+      # from the one shared artifact so every matrix job proves those exact
+      # bytes were actually packaged.
       - name: extract preflight from exact package
         shell: bash
         run: |
@@ -603,10 +607,12 @@ jobs:
           fi
           mkdir -p .packaged-preflight
           tar -xzf "$tarball" -C .packaged-preflight \
-            package/tools/preflight.sh package/tools/preflight.ps1
+            package/tools/preflight.sh package/tools/preflight.ps1 \
+            package/operations/installed-manifest.mjs
           test -f .packaged-preflight/package/tools/preflight.sh
           test -f .packaged-preflight/package/tools/preflight.ps1
-          echo "both packaged preflight scripts extracted from $(basename "$tarball")"
+          test -f .packaged-preflight/package/operations/installed-manifest.mjs
+          echo "packaged preflight scripts and manifest selector extracted from $(basename "$tarball")"
 
       - name: release workflow cannot bypass this CI gate
         run: node scripts/test-release-workflow-contract.mjs

@@ -77,14 +77,26 @@ if (-not $env:LOCALAPPDATA) {
   }
 }
 $nodeSupported = $false
-$nodePath = $null
-$node = Get-Command node -ErrorAction SilentlyContinue
+$nodeExecutable = $null
+# Windows PowerShell can return both .cmd and .exe applications for one name.
+# Preserve its command-resolution order, but invoke exactly the first candidate.
+$node = @(Get-Command node -CommandType Application -ErrorAction SilentlyContinue)[0]
 if ($node) {
-  $nodePath = $node.Source
-  $nv = (& $nodePath -v); Write-Host "  node            $nv ($nodePath)"
-  $maj = [int](($nv -replace '^v','') -split '\.')[0]
-  if ($maj -lt 22) { Stop_ "node $nv is too old; the installer needs 22 or newer" }
-  else { $nodeSupported = $true }
+  $nodeExecutable = $node.Source
+  $nodeOutput = @(& $nodeExecutable -v 2>$null)
+  $nodeExit = $LASTEXITCODE
+  $nv = if ($nodeOutput.Count -eq 1) { [string]$nodeOutput[0] } else { "" }
+  Write-Host "  node            $(if ($nv) { $nv } else { 'unknown' }) ($nodeExecutable)"
+  $versionMatch = [regex]::Match($nv, '^v([0-9]+)\.[0-9]+\.[0-9]+(?:[-+].*)?$')
+  [int]$maj = 0
+  if ($nodeExit -ne 0 -or -not $versionMatch.Success -or
+      -not [int]::TryParse($versionMatch.Groups[1].Value, [ref]$maj)) {
+    Stop_ "node version could not be read; the installer needs Node 22 or newer"
+  } elseif ($maj -lt 22) {
+    Stop_ "node $nv is too old; the installer needs 22 or newer"
+  } else {
+    $nodeSupported = $true
+  }
 } else { Stop_ "node is not installed" }
 $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
 if ($npm) {
@@ -197,7 +209,7 @@ $mf = @()
 if (-not $nodeSupported) {
   Warn "the saved Brain location check was skipped for now. Install or select Node 22 or newer, then run this check again"
 } else {
-  $selectedManifest = @(& $nodePath $pointerHelper --preflight-locator 2>$null)
+  $selectedManifest = @(& $nodeExecutable $pointerHelper --preflight-locator 2>$null)
   $pointerStatus = $LASTEXITCODE
   if ($pointerStatus -eq 0 -and $selectedManifest.Count -eq 1) {
     $mf = @([pscustomobject]@{ FullName = $selectedManifest[0] })

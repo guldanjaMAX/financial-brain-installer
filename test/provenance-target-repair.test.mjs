@@ -169,6 +169,26 @@ for (const invalid of [
 const draft = preparePrivateProvenanceTargetRepair(existingInput);
 const duplicateDraft = preparePrivateProvenanceTargetRepair(clone(existingInput));
 assert.equal(draft.plan_id, duplicateDraft.plan_id);
+
+const largeInodeInput = clone(existingInput);
+largeInodeInput.rootIdentity.inode = "18446744073709551615";
+const largeInodeDraft = preparePrivateProvenanceTargetRepair(largeInodeInput);
+assert.equal(largeInodeDraft.input.rootIdentity.inode, "18446744073709551615");
+assert.notEqual(largeInodeDraft.plan_id, draft.plan_id);
+for (const invalidInode of [
+  "73",
+  "09007199254740992",
+  "18446744073709551616",
+  9_007_199_254_740_992,
+  9_007_199_254_740_992n,
+]) {
+  const invalidIdentity = clone(existingInput);
+  invalidIdentity.rootIdentity.inode = invalidInode;
+  assert.throws(
+    () => preparePrivateProvenanceTargetRepair(invalidIdentity),
+    /source-root identity is invalid/,
+  );
+}
 assert.equal(draft.run_ids.discovery, `ptrd_${draft.plan_id}`);
 assert.equal(draft.run_ids.accepted_resolution, `ptra_${draft.plan_id}`);
 assert.notEqual(draft.run_ids.discovery, draft.run_ids.accepted_resolution);

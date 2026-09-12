@@ -54,13 +54,30 @@ test("Windows preflight honors the private installed manifest and package-local 
   assert.match(script, /Join-Path \$packagePrefix "brain\.cmd"/);
 });
 
-test("Windows preflight never reuses missing or unsupported Node for manifest selection", () => {
+test("Windows preflight never reuses missing, malformed, or unsupported Node for manifest selection", () => {
   assert.match(script, /\$nodeSupported = \$false/);
-  assert.match(script, /else \{ \$nodeSupported = \$true \}/);
   assert.match(
     script,
-    /\$nodePath = \$node\.Source[\s\S]*?if \(-not \$nodeSupported\) \{[\s\S]*?saved Brain location check was skipped for now[\s\S]*?\} else \{[\s\S]*?& \$nodePath \$pointerHelper --preflight-locator/,
+    /\$node = @\(Get-Command node -CommandType Application -ErrorAction SilentlyContinue\)\[0\]/,
   );
+  assert.match(script, /\$nodeExecutable = \$node\.Source/);
+  assert.match(script, /versionMatch = \[regex\]::Match/);
+  assert.match(script, /else \{\s*\$nodeSupported = \$true\s*\}/);
+  assert.match(
+    script,
+    /if \(-not \$nodeSupported\) \{[\s\S]*?saved Brain location check was skipped for now[\s\S]*?\} else \{[\s\S]*?& \$nodeExecutable \$pointerHelper --preflight-locator/,
+  );
+  assert.doesNotMatch(script, /& node \$pointerHelper/);
+});
+
+test("both workflows extract the packaged manifest selector with both preflight scripts", () => {
+  for (const workflow of workflows) {
+    assert.equal(workflow.match(/package\/operations\/installed-manifest\.mjs/g)?.length, 4);
+    assert.equal(
+      workflow.match(/test -f \.packaged-preflight\/package\/operations\/installed-manifest\.mjs/g)?.length,
+      2,
+    );
+  }
 });
 
 test("elevated Windows CI proves the production refusal without bypassing it", () => {

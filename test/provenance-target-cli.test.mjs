@@ -397,15 +397,25 @@ function fixtureDependencies(options = {}) {
         release: async () => state.events.push("lease.release"),
       };
     },
-    lstat: async (path) => {
+    lstat: async (path, options) => {
       state.events.push(`lstat:${path === MANIFEST_PATH ? "manifest" : "root"}`);
-      if (path === MANIFEST_PATH) return stat("file", 1, 11, state.manifestSymlink === true);
-      if (path === ROOT) return stat(
-        "directory",
-        state.rootDevice ?? 2,
-        state.rootInode ?? 22,
-        state.rootSymlink === true,
-      );
+      assert.deepEqual(options, { bigint: true });
+      if (path === MANIFEST_PATH) {
+        return stat(
+          "file",
+          state.manifestDevice ?? 1,
+          state.manifestInode ?? 11,
+          state.manifestSymlink === true,
+        );
+      }
+      if (path === ROOT) {
+        return stat(
+          "directory",
+          state.rootDevice ?? 2,
+          state.rootInode ?? 22,
+          state.rootSymlink === true,
+        );
+      }
       throw new Error("unexpected synthetic path");
     },
     realpath: async (path) => path,
@@ -562,6 +572,19 @@ assert.equal(
 assert.ok(preview.privateContext, "private ephemeral context remains available to the caller");
 assert.equal(Object.keys(preview).includes("privateContext"), false,
   "private context is deliberately non-enumerable");
+
+/* BigIntStats identities retain exact large Windows file IDs as decimal strings. */
+const largeInode = 18_446_744_073_709_551_615n;
+const largeIdentityFixture = fixtureDependencies({ state: { rootInode: largeInode } });
+const largeIdentityPreview = await previewProvenanceTargetRepair(
+  invocation(),
+  largeIdentityFixture.dependencies,
+);
+assert.equal(
+  largeIdentityPreview.privateContext.privatePlan.input.rootIdentity.inode,
+  largeInode.toString(10),
+);
+assert.doesNotThrow(() => JSON.stringify(largeIdentityPreview.privateContext.privatePlan));
 
 /* A package change during lazy preparation refuses before approval or mutation. */
 const changedRuntimeFixture = fixtureDependencies({

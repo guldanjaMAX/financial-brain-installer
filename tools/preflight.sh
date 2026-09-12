@@ -4,18 +4,24 @@
 ok(){ printf "  ok    %s\n" "$1"; }
 warn(){ printf "  WARN  %s\n" "$1"; WARNED=$((WARNED+1)); }
 stop(){ printf "  STOP  %s\n" "$1"; STOPPED=$((STOPPED+1)); }
-WARNED=0; STOPPED=0; FRESH=0; NOMANIFEST=0; NODE_SUPPORTED=0
+WARNED=0; STOPPED=0; FRESH=0; NOMANIFEST=0; NODE_SUPPORTED=0; NODE_EXECUTABLE=""
 echo "Financial Brain preflight  -  $(date '+%Y-%m-%d %H:%M')"
 echo
 
 echo "MACHINE"
 printf "  os              %s %s\n" "$(uname -s)" "$(uname -r)"
-if command -v node >/dev/null 2>&1; then
-  NODE_BIN=$(command -v node)
-  NV=$("$NODE_BIN" -v); NMAJ=${NV#v}; NMAJ=${NMAJ%%.*}
-  printf "  node            %s (%s)\n" "$NV" "$NODE_BIN"
-  if [ "$NMAJ" -ge 22 ] 2>/dev/null; then NODE_SUPPORTED=1
-  else stop "node $NV is too old; the installer needs 22 or newer"; fi
+if NODE_EXECUTABLE=$(command -v node 2>/dev/null) && [ -n "$NODE_EXECUTABLE" ]; then
+  NV=$("$NODE_EXECUTABLE" -v 2>/dev/null)
+  NODE_VERSION_STATUS=$?
+  printf "  node            %s (%s)\n" "${NV:-unknown}" "$NODE_EXECUTABLE"
+  if [ "$NODE_VERSION_STATUS" -eq 0 ] &&
+      [[ "$NV" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
+    NMAJ=${BASH_REMATCH[1]}
+    if [ "$NMAJ" -ge 22 ] 2>/dev/null; then NODE_SUPPORTED=1
+    else stop "node $NV is too old; the installer needs 22 or newer"; fi
+  else
+    stop "node version could not be read; the installer needs Node 22 or newer"
+  fi
 else stop "node is not installed"; fi
 if command -v npm >/dev/null 2>&1; then
   if [ "$NODE_SUPPORTED" -eq 1 ]; then printf "  npm             %s\n" "$(npm -v 2>/dev/null)"
@@ -129,7 +135,7 @@ POINTER_STATUS=4; MF=""; MN=0
 if [ "$NODE_SUPPORTED" -ne 1 ]; then
   warn "the saved Brain location check was skipped for now. Install or select Node 22 or newer, then run this check again"
 else
-  SELECTED_MANIFEST=$("$NODE_BIN" "$POINTER_HELPER" --preflight-locator 2>/dev/null)
+  SELECTED_MANIFEST=$("$NODE_EXECUTABLE" "$POINTER_HELPER" --preflight-locator 2>/dev/null)
   POINTER_STATUS=$?
   if [ "$POINTER_STATUS" -eq 0 ]; then
     MF=$SELECTED_MANIFEST

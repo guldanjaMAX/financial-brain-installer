@@ -8,6 +8,11 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import {
+  buildNpmCliInvocation,
+  resolveNpmCliPath,
+} from "../operations/npm-cli-runtime.mjs";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FRONTEND = join(ROOT, "frontend");
 const REVIEWED_BUNDLE = join(ROOT, "worker", "src", "lib", "app-assets.js");
@@ -47,23 +52,13 @@ function buildEnvironment(sandbox) {
 }
 
 function runBuild(frontend, environment) {
-  const adjacentNpmCli = join(
-    dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js",
-  );
-  const npmCli = [process.env.npm_execpath, adjacentNpmCli]
-    .find((candidate) => candidate && existsSync(candidate));
-  if (!npmCli && process.platform === "win32") {
-    throw new Error("npm CLI is unavailable; run this focused test through npm test");
-  }
-  const command = npmCli ? process.execPath : "npm";
-  const args = [
-    ...(npmCli ? [npmCli] : []),
-    "--prefix", frontend, "run", "build",
-  ];
-  const result = spawnSync(command, args, {
+  const npmCli = resolveNpmCliPath();
+  const invocation = buildNpmCliInvocation(npmCli, ["--prefix", frontend, "run", "build"]);
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: ROOT,
     encoding: "utf8",
     env: environment,
+    shell: invocation.shell,
     timeout: 120_000,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
