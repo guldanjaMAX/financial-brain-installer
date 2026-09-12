@@ -61,8 +61,10 @@ import {
   requestFinancialPicture,
 } from "./operations/financial-picture.mjs";
 import {
+  OCR_PREFLIGHT_DEFAULT_MODEL,
   ocrPreflightFailureReceipt,
   ocrPreflightPolicy,
+  ocrPreflightPricingBasis,
   ocrPreflightReceipt,
   ocrPreflightRequest,
   ocrPreflightWalkEvidence,
@@ -7112,7 +7114,7 @@ export function ocrPolicy(manifest = {}) {
   const cfg = manifest?.safety?.ocr || {};
   return {
     enabled: cfg.enabled === true,
-    model: typeof cfg.model === "string" && cfg.model.trim() ? cfg.model.trim() : "@cf/google/gemma-4-26b-a4b-it",
+    model: typeof cfg.model === "string" && cfg.model.trim() ? cfg.model.trim() : OCR_PREFLIGHT_DEFAULT_MODEL,
     maxPages: Number.isFinite(cfg.max_pages_per_document) && cfg.max_pages_per_document > 0
       ? Math.floor(cfg.max_pages_per_document)
       : 40,
@@ -10151,12 +10153,13 @@ function ocrPreflightRootSnapshot(path) {
   });
 }
 
-function ocrPreflightPlanFingerprint({ root, policy, privatePrefixes, files, skips }) {
+function ocrPreflightPlanFingerprint({ root, policy, pricingBasis, privatePrefixes, files, skips }) {
   const hash = createHash("sha256");
   hash.update("financial-brain:local-ocr-preflight:v1\0");
   hash.update(JSON.stringify({
     root,
     policy,
+    pricing_basis: pricingBasis,
     private_prefixes: [...privatePrefixes].sort(),
   }));
   for (const file of [...files].sort((left, right) => left.locator.localeCompare(right.locator))) {
@@ -10213,9 +10216,12 @@ export async function cmdOcrPreflight(manifestPath, options = {}) {
 
   let localIngest;
   let estimateCost;
+  let pricingBasis;
   try {
     localIngest = await (options.ingestLib ?? (() => import("./ingest/run.mjs")))();
-    ({ estimateOcrCost: estimateCost } = await (options.ocrLib ?? ingestOcrLib)());
+    const ocrModule = await (options.ocrLib ?? ingestOcrLib)();
+    ({ estimateOcrCost: estimateCost } = ocrModule);
+    pricingBasis = ocrPreflightPricingBasis(policy.ocr_model, ocrModule?.OCR_PRICE);
     if (typeof localIngest?.walk !== "function" || typeof localIngest?.prepare !== "function" ||
         typeof estimateCost !== "function") {
       throw new TypeError("OCR preflight dependencies are incomplete");
@@ -10288,6 +10294,7 @@ export async function cmdOcrPreflight(manifestPath, options = {}) {
     const planFingerprint = ocrPreflightPlanFingerprint({
       root: rootAfter,
       policy,
+      pricingBasis,
       privatePrefixes,
       files: fileBindings,
       skips: skipBindings,
@@ -10298,6 +10305,7 @@ export async function cmdOcrPreflight(manifestPath, options = {}) {
       walkComplete: walked.complete,
       scopeItems: walkEvidence.scope_items,
       policy,
+      pricingBasis,
       estimateCost,
     });
   } catch {
@@ -24137,8 +24145,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            enabled, connected source, one report at the end
     brain ocr-preflight <manifest> --path <dir> --json
                                            read-only aggregate scanned-PDF plan: affected and
-                                           cap-eligible pages, cost/time range, daily cap, unknowns;
-                                           no OCR, credential, network, Brain, or local-state write
+                                           cap-eligible pages, priced-model estimate, daily cap,
+                                           shared-budget and local file-provider unknowns; no OCR,
+                                           app HTTP/key-store, Brain, or local-state write
     brain ingest     <manifest> --path <dir>  load a folder into the brain
     brain ingest     <manifest> --from drive  load from a connected remote source
                                            add --dry-run --json for one bounded,

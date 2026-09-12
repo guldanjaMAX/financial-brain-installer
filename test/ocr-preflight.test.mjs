@@ -11,13 +11,15 @@ import {
   runCliCommandWithCredentialBoundary,
 } from "../brain.mjs";
 import { register } from "../ingest/extract.mjs";
-import { estimateOcrCost } from "../ingest/ocr.mjs";
+import { estimateOcrCost, OCR_PRICE } from "../ingest/ocr.mjs";
 import { prepare } from "../ingest/run.mjs";
 import { scanPdf, textPdf } from "./fixtures/scan-pdf.mjs";
 import {
   assertOcrPreflightReceipt,
+  OCR_PREFLIGHT_DEFAULT_MODEL,
   ocrPreflightFailureReceipt,
   ocrPreflightPolicy,
+  ocrPreflightPricingBasis,
   ocrPreflightReceipt,
   ocrPreflightWalkEvidence,
   parseOcrPreflightArgv,
@@ -57,12 +59,13 @@ const native = () => ({
   title: PRIVATE.title,
 });
 
-const policy = (cap = 10) => ocrPreflightPolicy({
+const policy = (cap = 10, model = OCR_PREFLIGHT_DEFAULT_MODEL) => ocrPreflightPolicy({
   safety: {
     daily_llm_spend_cap_usd: cap,
-    ocr: { enabled: false, max_pages_per_document: 40 },
+    ocr: { enabled: false, model, max_pages_per_document: 40 },
   },
 });
+const pricing = (value = policy()) => ocrPreflightPricingBasis(value.ocr_model, OCR_PRICE);
 
 function assertNoPrivateSurface(value) {
   const surface = typeof value === "string" ? value : JSON.stringify(value);
@@ -70,16 +73,6 @@ function assertNoPrivateSurface(value) {
     assert.equal(surface.includes(forbidden), false, `private fixture escaped: ${forbidden}`);
   }
   assert.doesNotMatch(surface, /access_token|tax return|adjusted gross income/i);
-}
-
-function fixedEstimate(pages, { low = 1, high = 3 } = {}) {
-  return {
-    pages,
-    usd_low: pages ? low : 0,
-    usd_high: pages ? high : 0,
-    minutes_low: pages ? 2 : 0,
-    minutes_high: pages ? 6 : 0,
-  };
 }
 
 function treeSnapshot(root) {
@@ -97,6 +90,7 @@ function treeSnapshot(root) {
 }
 
 test("complete OCR preflight preserves authoritative scan pages and reuses the cost range", () => {
+  const reviewedPolicy = policy(2.5);
   const receipt = ocrPreflightReceipt({
     planFingerprint: PLAN_FINGERPRINT,
     observations: [scan(7), scan(51), native(), {
@@ -107,7 +101,8 @@ test("complete OCR preflight preserves authoritative scan pages and reuses the c
     }],
     walkComplete: true,
     scopeItems: 0,
-    policy: policy(2.5),
+    policy: reviewedPolicy,
+    pricingBasis: pricing(reviewedPolicy),
     estimateCost: estimateOcrCost,
   });
 
@@ -135,9 +130,18 @@ test("complete OCR preflight preserves authoritative scan pages and reuses the c
     ...estimateOcrCost(47),
     basis: "all_cap_eligible_pages",
     complete: true,
-    affordability: "within_cap",
+    estimated_fits_configured_cap: true,
+    remaining_shared_daily_budget_usd: null,
+    remaining_shared_daily_budget_state: "unknown",
+    actual_affordability: "unknown",
   });
   assert.deepEqual(Object.values(receipt.actions), [false, false, false, false, false, false, false, false]);
+  assert.deepEqual(Object.values(receipt.local_file_read_effects),
+    ["unknown", "unknown", "unknown", "unknown"]);
+  assert.equal(receipt.policy.ocr_model, OCR_PREFLIGHT_DEFAULT_MODEL);
+  assert.equal(receipt.pricing_basis.model, OCR_PREFLIGHT_DEFAULT_MODEL);
+  assert.equal(receipt.pricing_basis.status, "estimated_range");
+  assert.equal(receipt.pricing_basis.high_is_guaranteed_upper_bound, false);
   assertNoPrivateSurface(receipt);
   assertNoPrivateSurface(renderOcrPreflightReceipt(receipt));
   assert.throws(
@@ -147,6 +151,7 @@ test("complete OCR preflight preserves authoritative scan pages and reuses the c
 });
 
 test("unknown pages and uninspectable documents stay typed and make a known estimate only a lower bound", () => {
+  const reviewedPolicy = policy(100);
   const receipt = ocrPreflightReceipt({
     planFingerprint: PLAN_FINGERPRINT,
     observations: [
@@ -160,7 +165,8 @@ test("unknown pages and uninspectable documents stay typed and make a known esti
     ],
     walkComplete: false,
     scopeItems: 2,
-    policy: policy(100),
+    policy: reviewedPolicy,
+    pricingBasis: pricing(reviewedPolicy),
     estimateCost: estimateOcrCost,
   });
 
@@ -182,62 +188,79 @@ test("unknown pages and uninspectable documents stay typed and make a known esti
   assert.equal(receipt.estimate.basis, "known_cap_eligible_pages_lower_bound");
   assert.equal(receipt.estimate.pages, 8);
   assert.equal(receipt.estimate.complete, false);
-  assert.equal(receipt.estimate.affordability, "unknown");
+  assert.equal(receipt.estimate.estimated_fits_configured_cap, null);
+  assert.equal(receipt.estimate.actual_affordability, "unknown");
   assertNoPrivateSurface(receipt);
 });
 
 test("a complete zero is numeric while truncated zero remains unavailable", () => {
+  const zeroPolicy = policy(0);
   const complete = ocrPreflightReceipt({
     planFingerprint: PLAN_FINGERPRINT,
     observations: [native()],
     walkComplete: true,
     scopeItems: 0,
-    policy: policy(0),
+    policy: zeroPolicy,
+    pricingBasis: pricing(zeroPolicy),
     estimateCost: estimateOcrCost,
   });
   assert.equal(complete.status, "complete");
   assert.equal(complete.estimate.basis, "all_cap_eligible_pages");
   assert.equal(complete.estimate.pages, 0);
   assert.equal(complete.estimate.usd_high, 0);
-  assert.equal(complete.estimate.affordability, "within_cap");
+  assert.equal(complete.estimate.estimated_fits_configured_cap, true);
+  assert.equal(complete.estimate.actual_affordability, "unknown");
 
+  const incompletePolicy = policy(10);
   const incomplete = ocrPreflightReceipt({
     planFingerprint: PLAN_FINGERPRINT,
     observations: [],
     walkComplete: false,
     scopeItems: 1,
-    policy: policy(10),
+    policy: incompletePolicy,
+    pricingBasis: pricing(incompletePolicy),
     estimateCost: estimateOcrCost,
   });
   assert.equal(incomplete.status, "incomplete");
   assert.equal(incomplete.pages.cap_eligible_known, 0);
   assert.equal(incomplete.estimate.basis, "unavailable");
   assert.equal(incomplete.estimate.pages, null);
-  assert.equal(incomplete.estimate.affordability, "unknown");
+  assert.equal(incomplete.estimate.estimated_fits_configured_cap, null);
+  assert.equal(incomplete.estimate.actual_affordability, "unknown");
 });
 
-test("affordability is closed over the high estimate and never overclaims incomplete coverage", () => {
-  const build = ({ cap, observations = [scan(1)], walkComplete = true, scopeItems = 0, range }) =>
-    ocrPreflightReceipt({
+test("configured-cap comparison is separate from unknown shared headroom and actual affordability", () => {
+  const build = ({ cap, observations = [scan(1)], walkComplete = true, scopeItems = 0 }) => {
+    const reviewedPolicy = policy(cap);
+    return ocrPreflightReceipt({
       planFingerprint: PLAN_FINGERPRINT,
       observations,
       walkComplete,
       scopeItems,
-      policy: policy(cap),
-      estimateCost: (pages) => fixedEstimate(pages, range),
+      policy: reviewedPolicy,
+      pricingBasis: pricing(reviewedPolicy),
+      estimateCost: estimateOcrCost,
     });
+  };
 
-  assert.equal(build({ cap: 0 }).estimate.affordability, "may_exceed_cap");
-  assert.equal(build({ cap: 2 }).estimate.affordability, "may_exceed_cap",
+  assert.equal(build({ cap: 0 }).estimate.estimated_fits_configured_cap, false);
+  assert.equal(build({ cap: 0.0007 }).estimate.estimated_fits_configured_cap, false,
     "a cap between the low and high estimate is not promised sufficient");
-  assert.equal(build({ cap: 3 }).estimate.affordability, "within_cap");
-  assert.equal(build({ cap: 100, observations: [scan(1), scan(null)] }).estimate.affordability, "unknown");
+  const estimatedFit = build({ cap: 0.0008 });
+  assert.equal(estimatedFit.estimate.estimated_fits_configured_cap, true);
+  assert.equal(estimatedFit.estimate.remaining_shared_daily_budget_usd, null);
+  assert.equal(estimatedFit.estimate.remaining_shared_daily_budget_state, "unknown");
+  assert.equal(estimatedFit.estimate.actual_affordability, "unknown");
+  assert.equal(estimatedFit.pricing_basis.high_is_guaranteed_upper_bound, false);
+  assert.equal(build({ cap: 100, observations: [scan(1), scan(null)] })
+    .estimate.estimated_fits_configured_cap, null);
 });
 
 test("an absent daily cap stays explicitly unconfigured rather than receiving an invented value", () => {
   const noCapPolicy = ocrPreflightPolicy({ safety: { ocr: { enabled: false } } });
   assert.deepEqual(noCapPolicy, {
     ocr_enabled: false,
+    ocr_model: OCR_PREFLIGHT_DEFAULT_MODEL,
     max_pages_per_document: 40,
     daily_spend_cap_usd: null,
     daily_spend_cap_configured: false,
@@ -249,13 +272,15 @@ test("an absent daily cap stays explicitly unconfigured rather than receiving an
     walkComplete: true,
     scopeItems: 0,
     policy: noCapPolicy,
+    pricingBasis: pricing(noCapPolicy),
     estimateCost: estimateOcrCost,
   });
   assert.equal(receipt.coverage.filesystem_scope_complete, true);
   assert.equal(receipt.estimate.complete, true);
   assert.equal(receipt.coverage.plan_complete, false);
   assert.equal(receipt.status, "incomplete");
-  assert.equal(receipt.estimate.affordability, "unknown");
+  assert.equal(receipt.estimate.estimated_fits_configured_cap, null);
+  assert.equal(receipt.estimate.actual_affordability, "unknown");
 });
 
 test("walk evidence ignores adjudicated external junctions and strips private paths and errors", () => {
@@ -289,12 +314,14 @@ test("walk evidence ignores adjudicated external junctions and strips private pa
     coverage_gap: false,
     adjudication: "preserve_external_subtree",
   }]);
+  const junctionPolicy = policy(10);
   const receipt = ocrPreflightReceipt({
     planFingerprint: PLAN_FINGERPRINT,
     observations: junctionOnly.observations,
     walkComplete: true,
     scopeItems: junctionOnly.scope_items,
-    policy: policy(10),
+    policy: junctionPolicy,
+    pricingBasis: pricing(junctionPolicy),
     estimateCost: estimateOcrCost,
   });
   assert.equal(receipt.status, "complete");
@@ -319,6 +346,10 @@ test("request, policy, and failure contracts fail closed without echoing input",
     () => ocrPreflightPolicy({ safety: { daily_llm_spend_cap_usd: -1 } }),
     /finite non-negative/,
   );
+  assert.throws(
+    () => ocrPreflightPolicy({ safety: { ocr: { model: PRIVATE.credential } } }),
+    /exact Cloudflare/,
+  );
   const failed = ocrPreflightFailureReceipt("SOURCE_UNAVAILABLE");
   assert.equal(failed.status, "failed");
   assert.equal(failed.failure.code, "SOURCE_UNAVAILABLE");
@@ -331,6 +362,153 @@ test("request, policy, and failure contracts fail closed without echoing input",
     }),
     /fields outside/,
   );
+});
+
+test("an exact nondefault model is bound but remains unpriced and cap-unknown", async () => {
+  const customModel = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+  const customPolicy = policy(100, customModel);
+  const customPricing = ocrPreflightPricingBasis(customPolicy.ocr_model, OCR_PRICE);
+  assert.equal(customPricing.model, customModel);
+  assert.equal(customPricing.status, "unpriced_model");
+  assert.deepEqual(
+    Object.entries(customPricing)
+      .filter(([key]) => key.endsWith("_per_m") || key.includes("_per_page_"))
+      .map(([, value]) => value),
+    [null, null, null, null, null, null, null, null],
+  );
+
+  const receipt = ocrPreflightReceipt({
+    planFingerprint: PLAN_FINGERPRINT,
+    observations: [scan(5)],
+    walkComplete: true,
+    scopeItems: 0,
+    policy: customPolicy,
+    pricingBasis: customPricing,
+    estimateCost: () => { throw new Error("an unpriced model must not invoke the default estimator"); },
+  });
+  assert.equal(receipt.status, "incomplete");
+  assert.equal(receipt.coverage.plan_complete, false);
+  assert.equal(receipt.pricing_basis.status, "unpriced_model");
+  assert.equal(receipt.estimate.basis, "unavailable");
+  assert.equal(receipt.estimate.usd_low, null);
+  assert.equal(receipt.estimate.usd_high, null);
+  assert.equal(receipt.estimate.estimated_fits_configured_cap, null);
+  assert.equal(receipt.estimate.remaining_shared_daily_budget_usd, null);
+  assert.equal(receipt.estimate.actual_affordability, "unknown");
+  assertNoPrivateSurface(receipt);
+});
+
+test("receipt validation rejects cost, cap, and effect claims that escape the reviewed basis", () => {
+  const reviewedPolicy = policy(1);
+  const receipt = ocrPreflightReceipt({
+    planFingerprint: PLAN_FINGERPRINT,
+    observations: [scan(5)],
+    walkComplete: true,
+    scopeItems: 0,
+    policy: reviewedPolicy,
+    pricingBasis: pricing(reviewedPolicy),
+    estimateCost: estimateOcrCost,
+  });
+  assert.throws(
+    () => assertOcrPreflightReceipt({
+      ...receipt,
+      estimate: { ...receipt.estimate, usd_high: receipt.estimate.usd_high + 1 },
+    }),
+    /versioned pricing basis/,
+  );
+  assert.throws(
+    () => assertOcrPreflightReceipt({
+      ...receipt,
+      estimate: { ...receipt.estimate, actual_affordability: "within_cap" },
+    }),
+    /cannot claim live shared-budget/,
+  );
+  assert.throws(
+    () => assertOcrPreflightReceipt({
+      ...receipt,
+      local_file_read_effects: { ...receipt.local_file_read_effects, file_provider_hydration: false },
+    }),
+    /must remain unknown/,
+  );
+  assert.throws(
+    () => ocrPreflightReceipt({
+      planFingerprint: PLAN_FINGERPRINT,
+      observations: [scan(5)],
+      walkComplete: true,
+      scopeItems: 0,
+      policy: reviewedPolicy,
+      pricingBasis: pricing(reviewedPolicy),
+      estimateCost: (pages) => {
+        const estimate = estimateOcrCost(pages);
+        return { ...estimate, usd_high: estimate.usd_high + 1 };
+      },
+    }),
+    /versioned pricing basis/,
+  );
+});
+
+test("pricing contract drift is explicit and cannot reuse a stale priced range", () => {
+  const reviewedPolicy = policy(10);
+  const changedPrice = {
+    ...OCR_PRICE,
+    input_tokens_per_page: [OCR_PRICE.input_tokens_per_page[0], 4_001],
+  };
+  const changed = ocrPreflightPricingBasis(reviewedPolicy.ocr_model, changedPrice);
+  assert.equal(changed.status, "pricing_contract_mismatch");
+  assert.equal(changed.input_usd_per_m, null);
+  const receipt = ocrPreflightReceipt({
+    planFingerprint: PLAN_FINGERPRINT,
+    observations: [scan(2)],
+    walkComplete: true,
+    scopeItems: 0,
+    policy: reviewedPolicy,
+    pricingBasis: changed,
+    estimateCost: () => { throw new Error("a drifted pricing contract must not be estimated"); },
+  });
+  assert.equal(receipt.status, "incomplete");
+  assert.equal(receipt.estimate.basis, "unavailable");
+  assert.equal(receipt.estimate.estimated_fits_configured_cap, null);
+});
+
+test("the plan fingerprint changes with the exact OCR model and pricing basis", async () => {
+  const sourceRoot = mkdtempSync(join(tmpdir(), "brain-ocr-model-binding-"));
+  const fakeManifestPath = join(sourceRoot, "outside-source-manifest.json");
+  const run = async (model, ocrPrice = OCR_PRICE) => cmdOcrPreflight(fakeManifestPath, {
+    flags: { path: sourceRoot, json: true },
+    readManifest: () => ({
+      safety: {
+        daily_llm_spend_cap_usd: 10,
+        ocr: { enabled: false, model, max_pages_per_document: 40 },
+      },
+    }),
+    ingestLib: async () => ({
+      walk: () => ({
+        complete: true,
+        files: [{ name: "synthetic.pdf", rel: "synthetic.pdf" }],
+        skipped: [],
+      }),
+      prepare: async () => ({ hash: "d".repeat(64), observation: scan(3) }),
+    }),
+    ocrLib: async () => ({ estimateOcrCost, OCR_PRICE: ocrPrice }),
+    write: () => {},
+  });
+  try {
+    const defaultPlan = await run(OCR_PREFLIGHT_DEFAULT_MODEL);
+    const customPlan = await run("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    const driftedPlan = await run(OCR_PREFLIGHT_DEFAULT_MODEL, {
+      ...OCR_PRICE,
+      output_tokens_per_page: [401, OCR_PRICE.output_tokens_per_page[1]],
+    });
+    assert.notEqual(defaultPlan.plan_fingerprint, customPlan.plan_fingerprint);
+    assert.notEqual(defaultPlan.plan_fingerprint, driftedPlan.plan_fingerprint);
+    assert.equal(defaultPlan.status, "complete");
+    assert.equal(customPlan.status, "incomplete");
+    assert.equal(customPlan.pricing_basis.status, "unpriced_model");
+    assert.equal(driftedPlan.status, "incomplete");
+    assert.equal(driftedPlan.pricing_basis.status, "pricing_contract_mismatch");
+  } finally {
+    rmSync(sourceRoot, { recursive: true, force: true });
+  }
 });
 
 test("prepare retains the structured scan observation while its private skip stays separate", async () => {
@@ -374,7 +552,7 @@ test("prepare retains the structured scan observation while its private skip sta
   }
 });
 
-test("CLI path performs no OCR, credential, network, Brain, checkpoint, cursor, state, or filesystem write", async () => {
+test("CLI path performs no OCR, app HTTP, key-store, Brain, checkpoint, cursor, state, or app filesystem write", async () => {
   const fixture = mkdtempSync(join(tmpdir(), "brain-ocr-preflight-cli-"));
   const sourceRoot = join(fixture, "source");
   const manifestPath = join(fixture, "brain.manifest.json");
@@ -421,16 +599,25 @@ test("CLI path performs no OCR, credential, network, Brain, checkpoint, cursor, 
           return { observation: scan(20), skip: { path: PRIVATE.path, reason: PRIVATE.error } };
         },
       }),
-      ocrLib: async () => ({ estimateOcrCost }),
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
     });
     assert.equal(prepareCalls, 1);
     assert.equal(forbiddenBoundaryCalls, 0);
     assert.equal(receipt.actions.ocr_performed, false);
+    assert.equal(receipt.actions.application_http_request_performed, false);
+    assert.equal(receipt.actions.application_key_store_accessed, false);
+    assert.equal(receipt.actions.application_filesystem_write_performed, false);
     assert.equal(receipt.actions.checkpoint_write_performed, false);
     assert.equal(receipt.actions.cursor_write_performed, false);
     assert.equal(receipt.actions.ingest_state_write_performed, false);
     assert.equal(receipt.pages.affected_known, 20);
     assert.equal(receipt.pages.cap_eligible_known, 12);
+    assert.deepEqual(receipt.local_file_read_effects, {
+      file_provider_hydration: "unknown",
+      file_provider_network_access: "unknown",
+      file_provider_credential_use: "unknown",
+      file_provider_filesystem_mutation: "unknown",
+    });
     assert.deepEqual(JSON.parse(output), receipt);
     assert.equal(output.endsWith("\n"), true);
     assertNoPrivateSurface(output);
@@ -440,7 +627,7 @@ test("CLI path performs no OCR, credential, network, Brain, checkpoint, cursor, 
   }
 });
 
-test("real synthetic scanned PDFs produce authoritative pages without OCR or filesystem mutation", async () => {
+test("materialized synthetic PDFs produce authoritative pages without OCR or application filesystem mutation", async () => {
   const fixture = mkdtempSync(join(tmpdir(), "brain-ocr-preflight-real-"));
   const sourceRoot = join(fixture, "source");
   const manifestPath = join(fixture, "brain.manifest.json");
@@ -509,12 +696,13 @@ test("installed CLI emits only JSON and its failure path creates no support jour
   const manifestPath = join(fixture, "brain.manifest.json");
   mkdirSync(sourceRoot);
   writeFileSync(join(sourceRoot, "Northwind private synthetic scan.pdf"), scanPdf({ pages: 2 }));
-  writeFileSync(manifestPath, JSON.stringify({
+  const validManifest = JSON.stringify({
     safety: {
       daily_llm_spend_cap_usd: 10,
       ocr: { enabled: false, max_pages_per_document: 40 },
     },
-  }) + "\n", { mode: 0o600 });
+  }) + "\n";
+  writeFileSync(manifestPath, validManifest, { mode: 0o600 });
   const env = {
     PATH: process.env.PATH || "",
     BRAIN_TEST_USER_ROOT: fixture,
@@ -550,6 +738,24 @@ test("installed CLI emits only JSON and its failure path creates no support jour
     assert.equal(receipt.pages.affected_known, 2);
     assertNoPrivateSurface(result.stdout);
     assert.deepEqual(treeSnapshot(fixture), before);
+
+    writeFileSync(manifestPath, JSON.stringify({
+      safety: {
+        daily_llm_spend_cap_usd: 10,
+        ocr: { enabled: false, model: PRIVATE.credential, max_pages_per_document: 40 },
+      },
+    }) + "\n");
+    const beforePrivatePolicyFailure = treeSnapshot(fixture);
+    const privatePolicyFailure = run();
+    assert.equal(privatePolicyFailure.status, 1);
+    assert.equal(privatePolicyFailure.stderr, "");
+    const privatePolicyReceipt = JSON.parse(privatePolicyFailure.stdout);
+    assert.equal(privatePolicyReceipt.status, "failed");
+    assert.equal(privatePolicyReceipt.failure.code, "MANIFEST_POLICY_INVALID");
+    assertNoPrivateSurface(privatePolicyFailure.stdout);
+    assert.deepEqual(treeSnapshot(fixture), beforePrivatePolicyFailure,
+      "a private invalid model produced only the fixed JSON failure and no write");
+    writeFileSync(manifestPath, validManifest);
 
     const failed = run("--unexpected-private-flag");
     assert.equal(failed.status, 1);

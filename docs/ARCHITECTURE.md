@@ -173,17 +173,24 @@ when a scan is refused for having no text layer, preserving its authoritative
 page count without parsing human error prose. The operation module receives
 only these content-free observations and produces an exact aggregate schema.
 It reports known scan-only documents/pages, per-document-cap eligibility,
-cost/time ranges from the shared estimator, the manifest cap and a conservative
-affordability verdict, and typed uninspectable cases. Traversal gaps cannot read
-as zero, and adjudicated source-policy or external-junction subtrees do not read
-as in-scope gaps.
+cost/time ranges for the exact reviewed default model, the manifest cap, the
+estimated full-cap comparison, and typed uninspectable cases. A nondefault model
+or pricing-contract mismatch is unpriced rather than estimated at the default
+model's rate. Remaining shared daily budget and actual affordability are unknown
+because this local command deliberately does not ask the Brain for today's model
+spend. Traversal gaps cannot read as zero, and adjudicated source-policy or
+external-junction subtrees do not read as in-scope gaps.
 
 The command is outside the process-wide Wrangler credential session and never
-loads the admin key, source state, checkpoints, or cursors. It has no network,
-OCR, receipt, or write call. A state-bound SHA-256 fingerprint commits to the
-private root identity, PDF byte receipts, policy, observations, and skip set;
-only that fingerprint and aggregates leave the boundary. It is groundwork for
-a later approval flow, not authorization to perform OCR.
+loads the admin key, source state, checkpoints, or cursors. It has no OCR,
+application HTTP, application key-store, receipt, or application-controlled
+write call. Reading a cloud-synced local file may cause its operating-system file
+provider to hydrate it. Provider network, credential, and filesystem effects are
+therefore explicit unknowns. A state-bound SHA-256 fingerprint commits to the
+private root identity, PDF byte receipts, exact OCR model, versioned pricing
+basis, policy, observations, and skip set; only that fingerprint and aggregates
+leave the boundary. It is groundwork for a later approval flow, not
+authorization to perform OCR.
 
 `ingest/outcome.mjs` is the shared source-level result contract. Only
 `completed` is success-shaped. `partial`, `unavailable`, `retryable`, and

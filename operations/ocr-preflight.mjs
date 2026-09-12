@@ -1,16 +1,30 @@
 /**
  * Aggregate-only planning contract for local scanned-PDF OCR.
  *
- * This module deliberately owns no filesystem, credential, network, Brain, or
- * model capability. The CLI gives it content-free extraction observations and
- * it returns only counts and ranges. Exact keys are versioned so a future
- * caller cannot accidentally add a filename, path, parser error, or document
- * content to machine-readable output.
+ * This policy module deliberately owns no filesystem, key-store, HTTP, Brain,
+ * or model capability. The CLI gives it content-free extraction observations
+ * from local reads and it returns only counts and ranges. Operating-system file
+ * provider effects from those reads remain unknown. Exact keys are versioned
+ * so a future caller cannot accidentally add a filename, path, parser error,
+ * or document content to machine-readable output.
  */
 
 export const OCR_PREFLIGHT_SCHEMA_VERSION = 1;
 export const OCR_PREFLIGHT_KIND = "local_ocr_preflight";
 export const OCR_PREFLIGHT_DEFAULT_MAX_PAGES_PER_DOCUMENT = 40;
+export const OCR_PREFLIGHT_DEFAULT_MODEL = "@cf/google/gemma-4-26b-a4b-it";
+export const OCR_PREFLIGHT_PRICING_BASIS_VERSION = 1;
+
+const OCR_PREFLIGHT_PRICED_RANGE = Object.freeze({
+  input_usd_per_m: 0.1,
+  output_usd_per_m: 0.3,
+  input_tokens_per_page_low: 2_000,
+  input_tokens_per_page_high: 4_000,
+  output_tokens_per_page_low: 400,
+  output_tokens_per_page_high: 1_200,
+  seconds_per_page_low: 1,
+  seconds_per_page_high: 3,
+});
 
 export const OCR_PREFLIGHT_FAILURE_CODES = Object.freeze([
   "INVALID_REQUEST",
@@ -31,11 +45,13 @@ const TOP_LEVEL_KEYS = Object.freeze([
   "status",
   "coverage",
   "policy",
+  "pricing_basis",
   "affected_documents",
   "pages",
   "estimate",
   "unknown_or_uninspectable",
   "actions",
+  "local_file_read_effects",
   "failure",
 ]);
 const COVERAGE_KEYS = Object.freeze([
@@ -48,10 +64,25 @@ const COVERAGE_KEYS = Object.freeze([
 ]);
 const POLICY_KEYS = Object.freeze([
   "ocr_enabled",
+  "ocr_model",
   "max_pages_per_document",
   "daily_spend_cap_usd",
   "daily_spend_cap_configured",
   "daily_spend_cap_source",
+]);
+const PRICING_BASIS_KEYS = Object.freeze([
+  "version",
+  "model",
+  "status",
+  "high_is_guaranteed_upper_bound",
+  "input_usd_per_m",
+  "output_usd_per_m",
+  "input_tokens_per_page_low",
+  "input_tokens_per_page_high",
+  "output_tokens_per_page_low",
+  "output_tokens_per_page_high",
+  "seconds_per_page_low",
+  "seconds_per_page_high",
 ]);
 const AFFECTED_KEYS = Object.freeze([
   "scan_only",
@@ -71,7 +102,10 @@ const ESTIMATE_KEYS = Object.freeze([
   "minutes_low",
   "minutes_high",
   "complete",
-  "affordability",
+  "estimated_fits_configured_cap",
+  "remaining_shared_daily_budget_usd",
+  "remaining_shared_daily_budget_state",
+  "actual_affordability",
 ]);
 const UNKNOWN_KEYS = Object.freeze([
   "scan_only_page_count_unknown",
@@ -84,13 +118,19 @@ const UNKNOWN_KEYS = Object.freeze([
 ]);
 const ACTION_KEYS = Object.freeze([
   "ocr_performed",
-  "network_accessed",
-  "credential_accessed",
+  "application_http_request_performed",
+  "application_key_store_accessed",
   "brain_write_performed",
   "checkpoint_write_performed",
   "cursor_write_performed",
   "ingest_state_write_performed",
-  "filesystem_write_performed",
+  "application_filesystem_write_performed",
+]);
+const LOCAL_FILE_READ_EFFECT_KEYS = Object.freeze([
+  "file_provider_hydration",
+  "file_provider_network_access",
+  "file_provider_credential_use",
+  "file_provider_filesystem_mutation",
 ]);
 const FAILURE_KEYS = Object.freeze(["code"]);
 
@@ -101,9 +141,16 @@ const ESTIMATE_BASIS_SET = new Set([
   "known_cap_eligible_pages_lower_bound",
   "unavailable",
 ]);
-const AFFORDABILITY_SET = new Set(["within_cap", "may_exceed_cap", "unknown"]);
 const DAILY_CAP_SOURCE_SET = new Set(["manifest", "not_configured", "unavailable"]);
+const PRICING_STATUS_SET = new Set([
+  "estimated_range",
+  "unpriced_model",
+  "pricing_contract_mismatch",
+  "unavailable",
+]);
+const UNKNOWN_STATE = "unknown";
 const PLAN_FINGERPRINT_RE = /^sha256:[a-f0-9]{64}$/u;
+const CLOUDFLARE_MODEL_RE = /^@cf\/[a-z0-9][a-z0-9._-]{0,63}\/[a-z0-9][a-z0-9._-]{0,127}$/u;
 const INSPECTED_STATES = new Set([
   "native_readable",
   "ocr_reliable",
@@ -152,11 +199,13 @@ function addCount(left, right, label) {
 function freezeReceipt(receipt) {
   Object.freeze(receipt.coverage);
   Object.freeze(receipt.policy);
+  Object.freeze(receipt.pricing_basis);
   Object.freeze(receipt.affected_documents);
   Object.freeze(receipt.pages);
   Object.freeze(receipt.estimate);
   Object.freeze(receipt.unknown_or_uninspectable);
   Object.freeze(receipt.actions);
+  Object.freeze(receipt.local_file_read_effects);
   if (receipt.failure) Object.freeze(receipt.failure);
   return Object.freeze(receipt);
 }
@@ -211,6 +260,15 @@ export function ocrPreflightPolicy(manifest = {}) {
   if (ocr.enabled !== undefined && typeof ocr.enabled !== "boolean") {
     throw new TypeError("safety.ocr.enabled must be boolean");
   }
+  if (ocr.model !== undefined && typeof ocr.model !== "string") {
+    throw new TypeError("safety.ocr.model must be a string");
+  }
+  const model = typeof ocr.model === "string" && ocr.model.trim()
+    ? ocr.model.trim()
+    : OCR_PREFLIGHT_DEFAULT_MODEL;
+  if (!CLOUDFLARE_MODEL_RE.test(model)) {
+    throw new TypeError("safety.ocr.model must be one exact Cloudflare @cf/<publisher>/<model> identifier");
+  }
   const configuredMax = ocr.max_pages_per_document;
   const maxPages = configuredMax === undefined
     ? OCR_PREFLIGHT_DEFAULT_MAX_PAGES_PER_DOCUMENT
@@ -224,11 +282,63 @@ export function ocrPreflightPolicy(manifest = {}) {
   }
   return Object.freeze({
     ocr_enabled: ocr.enabled === true,
+    ocr_model: model,
     max_pages_per_document: maxPages,
     daily_spend_cap_usd: dailyCap ?? null,
     daily_spend_cap_configured: dailyCap !== undefined,
     daily_spend_cap_source: dailyCap === undefined ? "not_configured" : "manifest",
   });
+}
+
+function pricingRangeMatches(price) {
+  return price && typeof price === "object" && !Array.isArray(price) &&
+    price.input_usd_per_m === OCR_PREFLIGHT_PRICED_RANGE.input_usd_per_m &&
+    price.output_usd_per_m === OCR_PREFLIGHT_PRICED_RANGE.output_usd_per_m &&
+    Array.isArray(price.input_tokens_per_page) &&
+    price.input_tokens_per_page.length === 2 &&
+    price.input_tokens_per_page[0] === OCR_PREFLIGHT_PRICED_RANGE.input_tokens_per_page_low &&
+    price.input_tokens_per_page[1] === OCR_PREFLIGHT_PRICED_RANGE.input_tokens_per_page_high &&
+    Array.isArray(price.output_tokens_per_page) &&
+    price.output_tokens_per_page.length === 2 &&
+    price.output_tokens_per_page[0] === OCR_PREFLIGHT_PRICED_RANGE.output_tokens_per_page_low &&
+    price.output_tokens_per_page[1] === OCR_PREFLIGHT_PRICED_RANGE.output_tokens_per_page_high &&
+    Array.isArray(price.seconds_per_page) &&
+    price.seconds_per_page.length === 2 &&
+    price.seconds_per_page[0] === OCR_PREFLIGHT_PRICED_RANGE.seconds_per_page_low &&
+    price.seconds_per_page[1] === OCR_PREFLIGHT_PRICED_RANGE.seconds_per_page_high;
+}
+
+/** Bind the exact model and the reviewed, explicitly non-guaranteed price range. */
+export function ocrPreflightPricingBasis(model, price = null) {
+  if (typeof model !== "string" || !CLOUDFLARE_MODEL_RE.test(model)) {
+    throw new TypeError("OCR preflight pricing requires one exact Cloudflare model identifier");
+  }
+  const defaultModel = model === OCR_PREFLIGHT_DEFAULT_MODEL;
+  const status = !defaultModel
+    ? "unpriced_model"
+    : pricingRangeMatches(price)
+      ? "estimated_range"
+      : "pricing_contract_mismatch";
+  const priced = status === "estimated_range";
+  return Object.freeze({
+    version: OCR_PREFLIGHT_PRICING_BASIS_VERSION,
+    model,
+    status,
+    // Cloudflare does not publish an image-token ceiling for this model. The
+    // upper estimate is a planning bracket, never a guaranteed spend bound.
+    high_is_guaranteed_upper_bound: false,
+    ...Object.fromEntries(Object.keys(OCR_PREFLIGHT_PRICED_RANGE)
+      .map((key) => [key, priced ? OCR_PREFLIGHT_PRICED_RANGE[key] : null])),
+  });
+}
+
+function unknownLocalFileReadEffects() {
+  return {
+    file_provider_hydration: UNKNOWN_STATE,
+    file_provider_network_access: UNKNOWN_STATE,
+    file_provider_credential_use: UNKNOWN_STATE,
+    file_provider_filesystem_mutation: UNKNOWN_STATE,
+  };
 }
 
 /**
@@ -288,7 +398,21 @@ function emptyUnknownCounts(value = 0) {
   };
 }
 
-function normalizedCost(estimateCost, pages) {
+function estimateFromPricingBasis(pages, pricingBasis) {
+  const at = (suffix) => (
+    pages * pricingBasis[`input_tokens_per_page_${suffix}`] * pricingBasis.input_usd_per_m +
+    pages * pricingBasis[`output_tokens_per_page_${suffix}`] * pricingBasis.output_usd_per_m
+  ) / 1_000_000;
+  return {
+    pages,
+    usd_low: +at("low").toFixed(4),
+    usd_high: +at("high").toFixed(4),
+    minutes_low: +((pages * pricingBasis.seconds_per_page_low) / 60).toFixed(1),
+    minutes_high: +((pages * pricingBasis.seconds_per_page_high) / 60).toFixed(1),
+  };
+}
+
+function normalizedCost(estimateCost, pages, pricingBasis) {
   if (typeof estimateCost !== "function") throw new TypeError("an OCR cost estimator is required");
   const estimate = estimateCost(pages);
   if (!estimate || typeof estimate !== "object" || estimate.pages !== pages) {
@@ -300,6 +424,11 @@ function normalizedCost(estimateCost, pages) {
   if (estimate.usd_low > estimate.usd_high || estimate.minutes_low > estimate.minutes_high) {
     throw new TypeError("the OCR cost estimate range is inverted");
   }
+  const bound = estimateFromPricingBasis(pages, pricingBasis);
+  if (["pages", "usd_low", "usd_high", "minutes_low", "minutes_high"]
+    .some((key) => estimate[key] !== bound[key])) {
+    throw new TypeError("the OCR cost estimate does not match its versioned pricing basis");
+  }
   return estimate;
 }
 
@@ -310,6 +439,7 @@ export function ocrPreflightReceipt({
   walkComplete,
   scopeItems = 0,
   policy,
+  pricingBasis,
   estimateCost,
 } = {}) {
   if (!Array.isArray(observations)) throw new TypeError("OCR observations must be an array");
@@ -319,6 +449,7 @@ export function ocrPreflightReceipt({
   }
   assertCount(scopeItems, "scopeItems");
   assertExactKeys(policy, POLICY_KEYS, "OCR preflight policy");
+  assertExactKeys(pricingBasis, PRICING_BASIS_KEYS, "OCR preflight pricing basis");
 
   let observed = 0;
   let inspected = 0;
@@ -380,18 +511,22 @@ export function ocrPreflightReceipt({
     0,
   );
   const evidenceComplete = filesystemScopeComplete && unknownTotal === 0;
-  const planComplete = evidenceComplete && policy.daily_spend_cap_configured;
-  const basis = evidenceComplete
-    ? "all_cap_eligible_pages"
-    : capEligiblePages > 0
-      ? "known_cap_eligible_pages_lower_bound"
-      : "unavailable";
-  const estimated = basis === "unavailable" ? null : normalizedCost(estimateCost, capEligiblePages);
-  const affordability = !evidenceComplete || !policy.daily_spend_cap_configured
-    ? "unknown"
-    : estimated.usd_high <= policy.daily_spend_cap_usd
-      ? "within_cap"
-      : "may_exceed_cap";
+  const pricingAvailable = pricingBasis.status === "estimated_range";
+  const estimateComplete = evidenceComplete && pricingAvailable;
+  const planComplete = estimateComplete && policy.daily_spend_cap_configured;
+  const basis = !pricingAvailable
+    ? "unavailable"
+    : evidenceComplete
+      ? "all_cap_eligible_pages"
+      : capEligiblePages > 0
+        ? "known_cap_eligible_pages_lower_bound"
+        : "unavailable";
+  const estimated = basis === "unavailable"
+    ? null
+    : normalizedCost(estimateCost, capEligiblePages, pricingBasis);
+  const estimatedFitsConfiguredCap = !estimateComplete || !policy.daily_spend_cap_configured
+    ? null
+    : estimated.usd_high <= policy.daily_spend_cap_usd;
   const receipt = {
     schema_version: OCR_PREFLIGHT_SCHEMA_VERSION,
     kind: OCR_PREFLIGHT_KIND,
@@ -409,6 +544,7 @@ export function ocrPreflightReceipt({
       scope_items_uninspectable: scopeItems,
     },
     policy: { ...policy },
+    pricing_basis: { ...pricingBasis },
     affected_documents: {
       scan_only: affected,
       with_authoritative_page_count: withPages,
@@ -426,20 +562,27 @@ export function ocrPreflightReceipt({
       usd_high: estimated?.usd_high ?? null,
       minutes_low: estimated?.minutes_low ?? null,
       minutes_high: estimated?.minutes_high ?? null,
-      complete: evidenceComplete,
-      affordability,
+      complete: estimateComplete,
+      estimated_fits_configured_cap: estimatedFitsConfiguredCap,
+      // This command intentionally performs no Brain read. The spend cap is
+      // shared with other model calls, so current headroom and whether this run
+      // would actually finish under it remain unknown.
+      remaining_shared_daily_budget_usd: null,
+      remaining_shared_daily_budget_state: UNKNOWN_STATE,
+      actual_affordability: UNKNOWN_STATE,
     },
     unknown_or_uninspectable: unknowns,
     actions: {
       ocr_performed: false,
-      network_accessed: false,
-      credential_accessed: false,
+      application_http_request_performed: false,
+      application_key_store_accessed: false,
       brain_write_performed: false,
       checkpoint_write_performed: false,
       cursor_write_performed: false,
       ingest_state_write_performed: false,
-      filesystem_write_performed: false,
+      application_filesystem_write_performed: false,
     },
+    local_file_read_effects: unknownLocalFileReadEffects(),
     failure: null,
   };
   assertOcrPreflightReceipt(receipt);
@@ -468,10 +611,18 @@ export function ocrPreflightFailureReceipt(code) {
     },
     policy: {
       ocr_enabled: null,
+      ocr_model: null,
       max_pages_per_document: null,
       daily_spend_cap_usd: null,
       daily_spend_cap_configured: null,
       daily_spend_cap_source: "unavailable",
+    },
+    pricing_basis: {
+      version: OCR_PREFLIGHT_PRICING_BASIS_VERSION,
+      model: null,
+      status: "unavailable",
+      high_is_guaranteed_upper_bound: false,
+      ...Object.fromEntries(Object.keys(OCR_PREFLIGHT_PRICED_RANGE).map((key) => [key, null])),
     },
     affected_documents: {
       scan_only: null,
@@ -491,19 +642,23 @@ export function ocrPreflightFailureReceipt(code) {
       minutes_low: null,
       minutes_high: null,
       complete: false,
-      affordability: "unknown",
+      estimated_fits_configured_cap: null,
+      remaining_shared_daily_budget_usd: null,
+      remaining_shared_daily_budget_state: UNKNOWN_STATE,
+      actual_affordability: UNKNOWN_STATE,
     },
     unknown_or_uninspectable: nullUnknowns,
     actions: {
       ocr_performed: false,
-      network_accessed: false,
-      credential_accessed: false,
+      application_http_request_performed: false,
+      application_key_store_accessed: false,
       brain_write_performed: false,
       checkpoint_write_performed: false,
       cursor_write_performed: false,
       ingest_state_write_performed: false,
-      filesystem_write_performed: false,
+      application_filesystem_write_performed: false,
     },
+    local_file_read_effects: unknownLocalFileReadEffects(),
     failure: { code },
   };
   assertOcrPreflightReceipt(receipt);
@@ -520,11 +675,13 @@ export function assertOcrPreflightReceipt(receipt) {
   if (!STATUS_SET.has(receipt.status)) throw new TypeError("OCR preflight status is invalid");
   assertExactKeys(receipt.coverage, COVERAGE_KEYS, "OCR preflight coverage");
   assertExactKeys(receipt.policy, POLICY_KEYS, "OCR preflight policy");
+  assertExactKeys(receipt.pricing_basis, PRICING_BASIS_KEYS, "OCR preflight pricing basis");
   assertExactKeys(receipt.affected_documents, AFFECTED_KEYS, "OCR preflight affected documents");
   assertExactKeys(receipt.pages, PAGE_KEYS, "OCR preflight pages");
   assertExactKeys(receipt.estimate, ESTIMATE_KEYS, "OCR preflight estimate");
   assertExactKeys(receipt.unknown_or_uninspectable, UNKNOWN_KEYS, "OCR preflight unknowns");
   assertExactKeys(receipt.actions, ACTION_KEYS, "OCR preflight actions");
+  assertExactKeys(receipt.local_file_read_effects, LOCAL_FILE_READ_EFFECT_KEYS, "OCR preflight local file read effects");
 
   for (const key of ["filesystem_scope_complete", "plan_complete"]) {
     if (typeof receipt.coverage[key] !== "boolean") throw new TypeError(`coverage.${key} must be boolean`);
@@ -538,7 +695,6 @@ export function assertOcrPreflightReceipt(receipt) {
     assertCount(value, `unknown_or_uninspectable.${key}`, { nullable: true });
   }
   if (!ESTIMATE_BASIS_SET.has(receipt.estimate.basis) ||
-      !AFFORDABILITY_SET.has(receipt.estimate.affordability) ||
       typeof receipt.estimate.complete !== "boolean") {
     throw new TypeError("OCR preflight estimate identity is invalid");
   }
@@ -546,11 +702,24 @@ export function assertOcrPreflightReceipt(receipt) {
   for (const key of ["usd_low", "usd_high", "minutes_low", "minutes_high"]) {
     assertAmount(receipt.estimate[key], `estimate.${key}`, { nullable: true });
   }
+  if (receipt.estimate.estimated_fits_configured_cap !== null &&
+      typeof receipt.estimate.estimated_fits_configured_cap !== "boolean") {
+    throw new TypeError("estimate.estimated_fits_configured_cap must be boolean or null");
+  }
+  assertAmount(receipt.estimate.remaining_shared_daily_budget_usd,
+    "estimate.remaining_shared_daily_budget_usd", { nullable: true });
+  if (receipt.estimate.remaining_shared_daily_budget_state !== UNKNOWN_STATE ||
+      receipt.estimate.actual_affordability !== UNKNOWN_STATE) {
+    throw new TypeError("OCR preflight cannot claim live shared-budget headroom or actual affordability");
+  }
   if (!DAILY_CAP_SOURCE_SET.has(receipt.policy.daily_spend_cap_source)) {
     throw new TypeError("OCR preflight daily cap source is invalid");
   }
   if (receipt.policy.ocr_enabled !== null && typeof receipt.policy.ocr_enabled !== "boolean") {
     throw new TypeError("OCR preflight OCR policy flag is invalid");
+  }
+  if (receipt.policy.ocr_model !== null && !CLOUDFLARE_MODEL_RE.test(receipt.policy.ocr_model)) {
+    throw new TypeError("OCR preflight policy model is invalid");
   }
   if (receipt.policy.daily_spend_cap_configured !== null &&
       typeof receipt.policy.daily_spend_cap_configured !== "boolean") {
@@ -561,6 +730,19 @@ export function assertOcrPreflightReceipt(receipt) {
   if (Object.values(receipt.actions).some((value) => value !== false)) {
     throw new TypeError("OCR preflight may not report or perform an action");
   }
+  if (Object.values(receipt.local_file_read_effects).some((value) => value !== UNKNOWN_STATE)) {
+    throw new TypeError("local file-provider effects must remain unknown");
+  }
+  if (receipt.pricing_basis.version !== OCR_PREFLIGHT_PRICING_BASIS_VERSION ||
+      !PRICING_STATUS_SET.has(receipt.pricing_basis.status) ||
+      receipt.pricing_basis.high_is_guaranteed_upper_bound !== false) {
+    throw new TypeError("OCR preflight pricing basis identity is invalid");
+  }
+  const pricingAmounts = Object.keys(OCR_PREFLIGHT_PRICED_RANGE)
+    .map((key) => receipt.pricing_basis[key]);
+  for (const [index, value] of pricingAmounts.entries()) {
+    assertAmount(value, `pricing_basis.${Object.keys(OCR_PREFLIGHT_PRICED_RANGE)[index]}`, { nullable: true });
+  }
 
   if (receipt.status === "failed") {
     assertExactKeys(receipt.failure, FAILURE_KEYS, "OCR preflight failure");
@@ -569,6 +751,7 @@ export function assertOcrPreflightReceipt(receipt) {
       ...COVERAGE_KEYS.slice(2).map((key) => receipt.coverage[key]),
       receipt.policy.max_pages_per_document,
       receipt.policy.daily_spend_cap_usd,
+      ...pricingAmounts,
       ...Object.values(receipt.affected_documents),
       ...Object.values(receipt.pages),
       receipt.estimate.pages,
@@ -576,14 +759,17 @@ export function assertOcrPreflightReceipt(receipt) {
       receipt.estimate.usd_high,
       receipt.estimate.minutes_low,
       receipt.estimate.minutes_high,
+      receipt.estimate.remaining_shared_daily_budget_usd,
       ...Object.values(receipt.unknown_or_uninspectable),
     ];
     if (numeric.some((value) => value !== null) || receipt.plan_fingerprint !== null ||
         receipt.policy.ocr_enabled !== null ||
+        receipt.policy.ocr_model !== null ||
         receipt.policy.daily_spend_cap_configured !== null ||
         receipt.policy.daily_spend_cap_source !== "unavailable" ||
+        receipt.pricing_basis.model !== null || receipt.pricing_basis.status !== "unavailable" ||
         receipt.estimate.basis !== "unavailable" || receipt.estimate.complete ||
-        receipt.estimate.affordability !== "unknown" ||
+        receipt.estimate.estimated_fits_configured_cap !== null ||
         receipt.coverage.filesystem_scope_complete || receipt.coverage.plan_complete) {
       throw new TypeError("a failed OCR preflight cannot claim observed facts");
     }
@@ -594,10 +780,30 @@ export function assertOcrPreflightReceipt(receipt) {
   if (!PLAN_FINGERPRINT_RE.test(String(receipt.plan_fingerprint || ""))) {
     throw new TypeError("OCR preflight plan fingerprint is invalid");
   }
-  if (receipt.policy.ocr_enabled === null || receipt.policy.max_pages_per_document === null ||
+  if (receipt.policy.ocr_enabled === null || receipt.policy.ocr_model === null ||
+      receipt.policy.max_pages_per_document === null ||
       receipt.policy.daily_spend_cap_configured === null ||
       receipt.policy.daily_spend_cap_source === "unavailable") {
     throw new TypeError("a completed OCR preflight attempt requires a complete policy");
+  }
+  if (receipt.pricing_basis.model !== receipt.policy.ocr_model ||
+      receipt.pricing_basis.status === "unavailable") {
+    throw new TypeError("OCR preflight pricing must bind the exact policy model");
+  }
+  const pricingAvailable = receipt.pricing_basis.status === "estimated_range";
+  const defaultModel = receipt.policy.ocr_model === OCR_PREFLIGHT_DEFAULT_MODEL;
+  if ((defaultModel && !["estimated_range", "pricing_contract_mismatch"].includes(receipt.pricing_basis.status)) ||
+      (!defaultModel && receipt.pricing_basis.status !== "unpriced_model")) {
+    throw new TypeError("OCR preflight pricing status contradicts its exact model");
+  }
+  if (pricingAvailable) {
+    for (const [key, value] of Object.entries(OCR_PREFLIGHT_PRICED_RANGE)) {
+      if (receipt.pricing_basis[key] !== value) {
+        throw new TypeError("OCR preflight pricing range does not match its version");
+      }
+    }
+  } else if (pricingAmounts.some((value) => value !== null)) {
+    throw new TypeError("an unpriced OCR model cannot carry a numeric pricing range");
   }
   if (receipt.policy.max_pages_per_document < 1) {
     throw new TypeError("OCR preflight requires a positive per-document page cap");
@@ -642,9 +848,10 @@ export function assertOcrPreflightReceipt(receipt) {
   }
   const unknownTotal = Object.values(receipt.unknown_or_uninspectable).reduce((sum, value) => sum + value, 0);
   const expectedEvidenceComplete = receipt.coverage.filesystem_scope_complete && unknownTotal === 0;
-  const expectedPlanComplete = expectedEvidenceComplete && receipt.policy.daily_spend_cap_configured;
+  const expectedEstimateComplete = expectedEvidenceComplete && pricingAvailable;
+  const expectedPlanComplete = expectedEstimateComplete && receipt.policy.daily_spend_cap_configured;
   if (receipt.coverage.plan_complete !== expectedPlanComplete ||
-      receipt.estimate.complete !== expectedEvidenceComplete ||
+      receipt.estimate.complete !== expectedEstimateComplete ||
       (receipt.status === "complete") !== expectedPlanComplete) {
     throw new TypeError("OCR preflight completeness claims contradict its unknowns");
   }
@@ -663,20 +870,24 @@ export function assertOcrPreflightReceipt(receipt) {
         receipt.estimate.minutes_low > receipt.estimate.minutes_high) {
       throw new TypeError("OCR preflight estimate range is inverted");
     }
+    const bound = estimateFromPricingBasis(receipt.estimate.pages, receipt.pricing_basis);
+    if (["pages", "usd_low", "usd_high", "minutes_low", "minutes_high"]
+      .some((key) => receipt.estimate[key] !== bound[key])) {
+      throw new TypeError("OCR preflight estimate does not match its versioned pricing basis");
+    }
   }
-  if (expectedEvidenceComplete && receipt.estimate.basis !== "all_cap_eligible_pages") {
+  if (expectedEstimateComplete && receipt.estimate.basis !== "all_cap_eligible_pages") {
     throw new TypeError("a complete OCR preflight must estimate all cap-eligible pages");
   }
-  if (!expectedEvidenceComplete && receipt.estimate.basis === "all_cap_eligible_pages") {
+  if (!expectedEstimateComplete && receipt.estimate.basis === "all_cap_eligible_pages") {
     throw new TypeError("an incomplete OCR preflight cannot claim all pages were estimated");
   }
-  const expectedAffordability = !expectedEvidenceComplete || !receipt.policy.daily_spend_cap_configured
-    ? "unknown"
-    : receipt.estimate.usd_high <= receipt.policy.daily_spend_cap_usd
-      ? "within_cap"
-      : "may_exceed_cap";
-  if (receipt.estimate.affordability !== expectedAffordability) {
-    throw new TypeError("OCR preflight affordability contradicts its range or configured cap");
+  const expectedFitsConfiguredCap = !expectedEstimateComplete || !receipt.policy.daily_spend_cap_configured
+    ? null
+    : receipt.estimate.usd_high <= receipt.policy.daily_spend_cap_usd;
+  if (receipt.estimate.estimated_fits_configured_cap !== expectedFitsConfiguredCap ||
+      receipt.estimate.remaining_shared_daily_budget_usd !== null) {
+    throw new TypeError("OCR preflight configured-cap comparison or unknown live headroom is invalid");
   }
   return receipt;
 }
