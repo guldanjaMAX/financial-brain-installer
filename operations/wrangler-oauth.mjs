@@ -25,9 +25,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { posix, win32 } from "node:path";
 
-// Only the explicit legacy TOML compatibility path uses this version. Current
-// per-install encrypted browser profiles use cloudflare-oauth-session.mjs.
-export const WRANGLER_SPEC = "wrangler@4.73.0";
+// Only the explicit legacy TOML compatibility path uses this entrypoint.
+// Current per-install encrypted browser profiles use
+// cloudflare-oauth-session.mjs. Keep both on the same reviewed release, but
+// force plaintext storage for this one child below so a machine-wide keyring
+// preference cannot migrate or hide the legacy default.toml we must reread.
+export const WRANGLER_SPEC = "wrangler@4.131.1";
 
 /** Every place wrangler is known to keep its config, newest layout first. */
 export function wranglerConfigCandidates(env = process.env, platform = process.platform) {
@@ -88,6 +91,7 @@ export function refreshWranglerSession(options = {}) {
   const keys = ["PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME",
     "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"];
   const env = Object.fromEntries(keys.filter((key) => typeof source[key] === "string").map((key) => [key, source[key]]));
+  env.CLOUDFLARE_AUTH_USE_KEYRING = "false";
   // Wrangler writes `.wrangler/cache` under its own working directory. A child
   // that inherits the caller's directory fails outright from an unwritable one
   // (a Windows shell starts in `C:\Windows\system32`), and the credential is

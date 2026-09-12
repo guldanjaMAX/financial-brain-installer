@@ -35,6 +35,7 @@ if (args.includes("--plan")) {
     mutates_live_resources: true,
     provisions_resources: false,
     removes_resources: false,
+    campaign_role: "standalone_synthetic_provider_smoke",
     allowed_data: "fictional synthetic records only",
     prerequisites: [
       "reviewed candidate checkout",
@@ -48,6 +49,8 @@ if (args.includes("--plan")) {
       "aggregate JSON test receipt saved mode 0600",
       "separate cleanup confirms Worker, D1, Vectorize, route, DNS, and temporary Keychain item are gone",
     ],
+    ordering_boundary: "This smoke does not replace the v0.4.8 disposable recovery campaign. No supervised existing-owner-install pilot is eligible until its applicable disposable recovery and exact-resource teardown pass.",
+    release_audit_boundary: "Missing field evidence may keep the release audit held while this approved campaign runs. A deferral never authorizes the campaign or publication.",
   }, null, 2));
   process.exit(0);
 }

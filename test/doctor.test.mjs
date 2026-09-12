@@ -71,7 +71,7 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   const missingTool = () => ({ ok: false, out: "not found", missing: true });
   const healthyTool = (_command, args) => ({
     ok: true,
-    out: args.includes(WRANGLER_PACKAGE) ? "wrangler 4.127.1" :
+    out: args.includes(WRANGLER_PACKAGE) ? "wrangler 4.131.1" :
       args.includes("status") ? "" : "2.1.63 (Claude Code)",
   });
   check("Claude Code is a blocking owner-install requirement",
@@ -261,7 +261,7 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
 {
   const signedOutClaudeWithSignedInCodex = (command, args) => {
     if (command === "npx" && args.includes(WRANGLER_PACKAGE)) {
-      return { ok: true, out: "wrangler 4.127.1" };
+      return { ok: true, out: "wrangler 4.131.1" };
     }
     if (command === "claude" && args[0] === "--version") {
       return { ok: true, out: "2.1.63 (Claude Code)" };
@@ -471,7 +471,7 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   const healthyTool = (_command, args, options) => {
     calls.push({ args, options });
     if (args.includes("vectorize")) return { ok: true, out: "[]" };
-    if (args.includes(WRANGLER_PACKAGE)) return { ok: true, out: "wrangler 4.127.1" };
+    if (args.includes(WRANGLER_PACKAGE)) return { ok: true, out: "wrangler 4.131.1" };
     if (args.includes("status")) return { ok: true, out: "signed in" };
     return { ok: true, out: "2.1.63 (Claude Code)" };
   };

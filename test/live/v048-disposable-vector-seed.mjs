@@ -1068,13 +1068,26 @@ export async function main(args = process.argv.slice(2), {
       release: RELEASE,
       plan_mode_live_actions: false,
       execution_mutates_live_resources: true,
+      campaign_role: "seed_only_before_disposable_recovery",
       provisions_resources: false,
       removes_resources: false,
       accepts_external_source_or_content: false,
+      execution_host: "reviewed_macos_posix_host",
+      prerequisites: [
+        "exact frozen source commit and immutable v0.4.8 package bound in the owner-only campaign binding",
+        "source preparation and deterministic incident regressions passed",
+        "named disposable source and this seed action separately approved",
+        "native Windows execution unavailable until current-user-only DACL proof exists",
+      ],
       fictional_documents: V048_SEED_DOCUMENT_COUNT,
       ingest_batches: V048_SEED_BATCH_COUNT,
       expected_chunks_per_document: 1,
       receipt: "owner-only aggregate JSON",
+      does_not_prove: [
+        "disposable recovery, active promotion, or teardown",
+        "supervised existing-owner-install pilot",
+        "release readiness",
+      ],
     }, null, 2)}\n`);
     return 0;
   }

@@ -10,6 +10,14 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **The pinned Cloudflare command-line tool no longer brings in a known
+  vulnerable image library.** Current named-profile setup and the older
+  plaintext-session compatibility path now use the same reviewed Wrangler
+  4.131.1 release. A legacy-session refresh forces plaintext storage only for
+  that isolated child process, so it can reread the existing session without
+  weakening the protected named profiles used by normal setup. The candidate
+  remains held until its full package and field evidence is repeated.
+
 - **Two computers can no longer create competing provenance histories for the
   same original.** Each new observation now names the exact prior observation
   seen by its reviewed plan, and the Brain compares that head atomically. The

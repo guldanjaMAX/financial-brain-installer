@@ -31,7 +31,8 @@ assert.equal(workerVersion, version, "worker source version drifted from the pac
 assert.match(changelog, new RegExp(`^## ${escapedVersion}$`, "m"), "changelog has no current-version heading");
 assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate release evidence plan$`, "m"),
   "current candidate has no version-matched evidence plan");
-assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
+assert.match(currentEvidencePlan,
+  /Candidate identity: intentionally unbound in this tracked public plan;[\s\S]*?Field execution: none/,
   "the current plan must not imply final-SHA or field proof before either exists");
 assert.match(retiredEvidencePlan, /Status: superseded planning record; no field execution occurred/,
   "the consumed 0.4.7 planning identity must remain explicitly superseded and unexecuted");

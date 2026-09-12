@@ -445,6 +445,15 @@ fieldTest("plan mode states that it performs no live action", async () => {
   const plan = JSON.parse(output);
   assert.equal(plan.plan_mode_live_actions, false);
   assert.equal(plan.execution_mutates_live_resources, true);
+  assert.equal(plan.campaign_role, "seed_only_before_disposable_recovery");
+  assert.equal(plan.execution_host, "reviewed_macos_posix_host");
+  assert.equal(plan.prerequisites.some((value) => /exact frozen source commit and immutable v0\.4\.8 package/.test(value)), true);
+  assert.equal(plan.prerequisites.some((value) => /native Windows execution unavailable.*DACL proof/.test(value)), true);
+  assert.deepEqual(plan.does_not_prove, [
+    "disposable recovery, active promotion, or teardown",
+    "supervised existing-owner-install pilot",
+    "release readiness",
+  ]);
   assert.equal(Object.hasOwn(plan, "mutates_live_resources"), false);
 });
 

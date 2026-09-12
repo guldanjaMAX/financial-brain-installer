@@ -63,6 +63,14 @@ the deployed owner journey and a separately approved production pilot.
    recovery. D1 holds the documents; Vectorize is derived. A D1 bookmark alone
    is not a tested rollback of both. Never begin with a bookmark restore,
    export a live Brain, clear drain mode manually, or edit applied migrations.
+   Once one exact package is sealed, this disposable lane and clean-profile
+   physical-platform testing may proceed independently. A supervised
+   existing-owner-install pilot is different: it must wait for the applicable
+   disposable recovery receipt and verified exact-resource teardown, then bind
+   its own read-only baseline, stop and rollback plan, recovery owner, and
+   explicit approval. The v0.2.1 permanent-hostname/provider checklist cannot
+   stand in for this update proof; a dedicated private v0.4.8 runbook and
+   evidence contract must be reviewed first.
 8. Attach a reviewed, sanitized evidence file under `docs/` before changing an
    incident to `verified`. Include tested commit, package SHA-256, platform,
    architecture, source/target versions, fixture shape, actual commands and exit
@@ -84,6 +92,12 @@ the deployed owner journey and a separately approved production pilot.
    Verify publication controls before publishing, then verify the immutable
    published tag and asset bytes before URL promotion. A completed publication
    cannot be a prerequisite for the gate that authorizes that publication.
+
+The release audit belongs at step 9. It may remain nonzero solely because field
+evidence is still missing while an approved evidence campaign runs. That never
+authorizes publication. A malformed registry, failed deterministic regression,
+failed release-mechanism gate, or known issue that makes the exact campaign
+unsafe still blocks the campaign itself.
 
 ## Dispositions
 
@@ -110,6 +124,10 @@ the protection binds to an ID and an ID whose text has been hollowed out
 protects nothing. Opening an incident whose acceptance is about the release
 mechanism rather than about a feature? Add its ID to `UNDEFERRABLE_INCIDENTS`
 in the same change; the set does not grow by itself.
+
+A deferral is never permission to run a field campaign, update an owner Brain,
+contact a provider, or publish. It is consulted only when adjudicating one exact
+release after the evidence lanes have reported their results.
 
 Deleting a row, broadening an exception, increasing a timeout, or pointing to
 unrelated passing CI is not closure. Keep an old report's conclusion separate
