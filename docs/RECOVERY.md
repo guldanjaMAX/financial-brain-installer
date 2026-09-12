@@ -139,6 +139,17 @@ resource. Its sole Worker mutation is the exact 100-percent deployment of the
 active immutable version already named in the reviewed target claim, after the
 paused bootstrap has passed exact vector proof. It does not touch Supabase.
 
+`operations/aggregate-field-observer.mjs` is the separate read-only progress
+boundary for a supervised disposable bootstrap. It owns no provider client,
+credential lookup, retry loop, deployment, drain, reindex, or write callback.
+A reviewed adapter supplies a target-identity fingerprint, one fixed
+aggregate-only D1 SELECT, and the Vectorize count. The observer brackets those
+reads, rejects identity or corpus drift, and returns only counts and cursor
+ordinals. Raw cursors, high-water identities, document identities, provider
+responses, errors, and paths cannot enter its receipt. A local observer pass is
+not Cloudflare field proof until the separately approved disposable campaign
+binds those injected reads to the exact target resources.
+
 A normal full D1 export cannot include an FTS5 virtual table. The adapter never
 drops or changes source FTS. It exports data only from the exact reviewed table
 allowlist, prepends the exact checked-in migrations recorded on the source, and
@@ -307,8 +318,8 @@ The normalized row is then hashed together with the remaining durable table
 export, so a retry cannot reuse a recovery artifact poisoned by an
 invocation-local lease, mutation fence, or old provider receipt. Older exact
 migration prefixes remain offline-inspectable, but the live field runner
-requires both source and restored target to match exact schema 35 before any
-current bootstrap operation.
+requires both source and restored target to match the latest packaged migration
+(currently exact schema 46) before any current bootstrap operation.
 
 The preview is local only. It reads and fingerprints those files but does not
 invoke Wrangler, read Keychain, or call either Brain:
@@ -368,6 +379,72 @@ identical approved command to continue. Because the named stage is already in
 the durable completed prefix, the rerun does not execute its external effect or
 stop there again. Omitting the option runs every remaining stage normally.
 
+The separate mid-bootstrap interruption is not an ordinary recovery option.
+It exists only for the exact synthetic v0.4.8 disposable field identity named
+in `docs/release-evidence/v0.4.8-disposable-vector-field-plan.md`. A preview must
+also receive the fixed test mode, the candidate SHA, the owner-only complete
+`field-prepare-receipt.json`, and the exact owner-only npm archive recorded by
+that receipt. Field preparation also reconstructs `wrangler 4.127.1` and its
+complete host-compatible dependency closure from the exact SHA-512 npm cache
+objects named by `package-lock.json`. It refuses a missing or corrupt cache
+object and refuses when those trusted bytes differ from the checkout install
+used by the offline suite. The fixed owner-only runtime directory, entrypoint,
+Node executable, host tuple, package count, file count, byte count, and full
+regular-file inventory are bound into the receipt. Before any provider command
+or credential read, the adapter
+compares every regular archive member byte-for-byte with the package root that
+is executing, verifies the exact migration member set, and binds that inventory
+to a seventh, plan-specific interruption approval. A copied flag, renamed
+manifest, different receipt, different package byte, different source lock
+file, or ordinary/customer identity fails locally.
+
+The hook remains armed only while the exact paused Worker is deployed and the
+verified restore contains at least 6,001 documents and 6,001 chunks. This
+minimum is deliberate: the real bootstrap admits up to three 1,000-row batches
+per call, so a smaller documented fixture cannot guarantee a non-final cut
+after at least 3,001 durable admissions. Before the first POST, a private fixed
+aggregate read proves the normalized opening state: epoch 1, base count zero,
+protocol and cursor both `NULL`, zero batch rows, zero outbox work, zero
+provider vectors, and unchanged D1/FTS aggregates. It waits
+for a persisted non-final `bootstrap-v2` receipt and aggregate observation with
+at least 3,001 actual epoch batch-row admissions. It then writes and fsyncs one
+private checkpoint containing the epoch, aggregate counts, and only the SHA-256
+of the nonempty private cursor. It raises
+`RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_INTERRUPTION` through the normal adapter
+failure path, so the recovery state remains retryable and the field lock is
+released. No active-version promotion can occur before that stop.
+
+Resume requires the same plan, state, manifests, artifact, wrapper, golden,
+receipt, npm archive, exact prepared `wrangler 4.127.1` runtime closure and Node
+executable, six recovery approvals,
+and seventh interruption approval. Before the first resumed bootstrap POST,
+the observer must prove the same paused target, epoch, ordinal cut, corpus,
+high-water mark, durable ledger, and private cursor digest. That exact proof is
+fsynced as a bound resume authorization before the POST. If a later POST commits
+but its response is lost, a retry may accept only monotonic same-epoch progress
+from the checkpoint. Confirmation may progress while the cursor remains at the
+same exact private value after all rows have been admitted.
+
+Paused complete parity is separately fsynced as a promotion authorization
+before the exact reviewed active version is deployed. That marker permits a
+retry to reconcile that exact version after a lost deploy response; it never
+permits an unrelated active version or active promotion before parity. A
+changed target, substituted cursor at the same ordinal, regressed ledger,
+stalled receipt, orphaned authorization marker, or past-midpoint state without
+the matching promotion proof is refused. The active checkpoint remains
+available through later health/evaluation retries and is renamed to a private
+completed receipt only after the whole verified recovery passes. A retry of an
+already-complete durable state performs that local retirement without provider
+or credential access. Every control file is pinned by inode and bytes through
+use; retirement moves the resume and promotion authorizations first and the
+checkpoint last, fsyncing and reading back the same inode and hash after each
+move. Any live checkpoint, resume marker, or promotion marker blocks ordinary
+recovery regardless of a completed filename. Completed receipts are evidence
+only; their existence does not authorize reuse or bypass a live marker. A
+machine/process loss can also leave the separate
+field-gate lock; resume in that case remains blocked until a separately reviewed
+stale-lock reconciliation, rather than automatic lock removal.
+
 One disposable target can exercise all four checkpoint boundaries in order:
 
 1. Run with `--stop-after-stage export_d1` and require the intentional nonzero
@@ -391,12 +468,24 @@ valid but changed golden set is refused before Cloudflare or Keychain access.
 The adapter reopens and fingerprints the wrapper, manifests, golden set, and
 artifact directory before and after every stage. Wrangler receives a narrow
 child environment and transient private log directory, and runs from a private
-copy of the exact approved wrapper. Wrangler logging is sanitized and telemetry
-is disabled. Every command explicitly disables experimental provisioning and
-automatic resource creation; executing the exact local wrapper avoids package
-or skill installation paths. Authenticated HTTPS
+copy of the exact approved wrapper. In the controlled interruption mode, each
+call also copies only the prepared lock-integrity-derived runtime closure into
+that fresh directory, revalidates it before and after the child, and invokes its
+absolute entrypoint with the bound Node executable, global module search
+disabled, and the inventoried synchronous resolution guard preloaded. The guard
+permits Node built-ins and only module files whose canonical path remains inside
+the materialized runtime. There is no `npx`, PATH, repository `node_modules`,
+registry, or fallback resolution. Wrangler logging is sanitized and telemetry
+is disabled.
+Every command explicitly disables experimental provisioning and automatic
+resource creation. Authenticated HTTPS
 requests refuse redirects, contain no private values in URLs, and read the
-target admin key from Keychain only after the target identity is proven.
+target admin key from Keychain only after the target identity is proven. The
+special interruption campaign accepts only a five-line wrapper: a literal
+`/usr/bin/security find-generic-password` lookup with shell-inert account and
+service labels, a non-empty token check, one export, and the exact pinned Node
+exec. Its complete bytes are approval-bound; ambient Cloudflare tokens and
+Wrangler OAuth fallback are not accepted.
 Provider diagnostics, credentials, corpus content, and resource names never
 enter the plan, state, or command output. The encrypted recovery artifact is the
 one necessary durable corpus copy and remains mode `0600` in the owner-only
