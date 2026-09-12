@@ -14,7 +14,7 @@ import {
 } from "../operations/disposable-recovery-seeder.mjs";
 import { createProductFixture } from "../worker/test/product-contract-fixture.mjs";
 
-const EXPECTED_FIXTURE_SHA256 = "d737bbee780900b1fa12c3e020dcdd027f32919d03c64ac75625f00437b83448";
+const EXPECTED_FIXTURE_SHA256 = "7e8325d3014102e3509fd2f5dcc7ac78aded99dffac18c899e1dd2611cfba6c8";
 const FIXED_TIME = "2026-09-12T12:00:00.000Z";
 
 function fakeBatchReceipt(documents, status = "created") {
@@ -46,13 +46,13 @@ function completeInventory(fixture = disposableRecoveryFixture()) {
     vector_drain_mode: "active",
     rows: [{
       source_type: fixture[0].source_type,
-      documents: 3_201,
-      logical_documents: 3_201,
-      stored_documents: 3_201,
+      documents: 6_001,
+      logical_documents: 6_001,
+      stored_documents: 6_001,
       document_counts_exact: true,
-      chunks: 3_201,
+      chunks: 6_001,
       chunk_counts_exact: true,
-      total: 3_201,
+      total: 6_001,
     }],
   };
 }
@@ -60,7 +60,7 @@ function completeInventory(fixture = disposableRecoveryFixture()) {
 test("fixture is fixed, fictional, complete-provenance, and safely batched", () => {
   const fixture = disposableRecoveryFixture();
   assert.equal(fixture.length, DISPOSABLE_RECOVERY_SEED_DOCUMENTS);
-  assert.equal(DISPOSABLE_RECOVERY_SEED_BATCHES, 65);
+  assert.equal(DISPOSABLE_RECOVERY_SEED_BATCHES, 121);
   assert.equal(DISPOSABLE_RECOVERY_SEED_BATCH_SIZE, 50);
   assert.equal(DISPOSABLE_RECOVERY_FIXTURE_SHA256, EXPECTED_FIXTURE_SHA256);
   assert.equal(new Set(fixture.map((document) => document.source_id)).size, fixture.length);
@@ -72,7 +72,7 @@ test("fixture is fixed, fictional, complete-provenance, and safely batched", () 
   assert.doesNotMatch(JSON.stringify(fixture), /@|https?:|[A-Za-z]:\\|\/Users\/|account number|taxpayer|password|token/iu);
 });
 
-test("real Worker and SQLite D1 prove 3,201 actual chunks and an exact unchanged replay", async (t) => {
+test("real Worker and SQLite D1 prove 6,001 actual chunks and an exact unchanged replay", async (t) => {
   const fixture = await createProductFixture();
   t.after(() => fixture.close());
   const headers = { "X-Admin-Key": fixture.env.ADMIN_KEY };
@@ -97,16 +97,16 @@ test("real Worker and SQLite D1 prove 3,201 actual chunks and an exact unchanged
   });
   assert.equal(receipt.status, "passed");
   assert.equal(receipt.completed_at, FIXED_TIME);
-  assert.equal(receipt.ingest.created_documents, 3_201);
-  assert.equal(receipt.verification_replay.unchanged_documents, 3_201);
-  assert.equal(receipt.d1.documents, 3_201);
-  assert.equal(receipt.d1.chunks, 3_201);
+  assert.equal(receipt.ingest.created_documents, 6_001);
+  assert.equal(receipt.verification_replay.unchanged_documents, 6_001);
+  assert.equal(receipt.d1.documents, 6_001);
+  assert.equal(receipt.d1.chunks, 6_001);
   assert.deepEqual({ ...fixture.sqlite.prepare(
     "SELECT COUNT(*) AS documents FROM documents WHERE source = ?",
-  ).get(disposableRecoveryFixture()[0].source_type) }, { documents: 3_201 });
+  ).get(disposableRecoveryFixture()[0].source_type) }, { documents: 6_001 });
   assert.deepEqual({ ...fixture.sqlite.prepare(
     "SELECT COUNT(*) AS chunks FROM chunks WHERE source = ?",
-  ).get(disposableRecoveryFixture()[0].source_type) }, { chunks: 3_201 });
+  ).get(disposableRecoveryFixture()[0].source_type) }, { chunks: 6_001 });
 
   let unexpectedWrite = false;
   await assert.rejects(seedDisposableRecoveryFixture({
@@ -203,7 +203,7 @@ test("result counters and clock failures cannot create a false or leaky receipt"
     readInventory: async () => (++reads === 1 ? emptyInventory() : completeInventory()),
     now: () => { throw new Error("PRIVATE_CLOCK_SENTINEL"); },
   }), (error) => error.code === "clock_invalid" && error.may_have_written === true &&
-    error.safe_to_retry === false && error.confirmed_documents === 3_201 &&
+    error.safe_to_retry === false && error.confirmed_documents === 6_001 &&
     !error.message.includes("PRIVATE_CLOCK_SENTINEL"));
 });
 
@@ -214,7 +214,7 @@ test("CLI exposes a no-write aggregate plan and refuses execution-shaped argumen
   assert.equal(planned.status, 0, planned.stderr);
   const plan = JSON.parse(planned.stdout);
   assert.equal(plan.writes, false);
-  assert.equal(plan.fixture_documents, 3_201);
+  assert.equal(plan.fixture_documents, 6_001);
   assert.equal(plan.fixture_sha256, EXPECTED_FIXTURE_SHA256);
 
   const refused = spawnSync(process.execPath, [

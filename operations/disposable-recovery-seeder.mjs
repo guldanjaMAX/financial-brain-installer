@@ -13,12 +13,12 @@ import { fileURLToPath } from "node:url";
 import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 export const DISPOSABLE_RECOVERY_SEED_PROTOCOL = "disposable-recovery-seed-v1";
-export const DISPOSABLE_RECOVERY_SEED_DOCUMENTS = 3_201;
+export const DISPOSABLE_RECOVERY_SEED_DOCUMENTS = 6_001;
 export const DISPOSABLE_RECOVERY_SEED_BATCH_SIZE = 50;
 export const DISPOSABLE_RECOVERY_SEED_BATCHES = Math.ceil(
   DISPOSABLE_RECOVERY_SEED_DOCUMENTS / DISPOSABLE_RECOVERY_SEED_BATCH_SIZE,
 );
-export const DISPOSABLE_RECOVERY_MINIMUM_D1_CHUNKS = 3_201;
+export const DISPOSABLE_RECOVERY_MINIMUM_D1_CHUNKS = 6_001;
 export const DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION = "0.4.8";
 export const DISPOSABLE_RECOVERY_MARKER = "v048-orchid-ledger-field-marker";
 
@@ -243,7 +243,7 @@ export async function seedDisposableRecoveryFixture(options) {
 
   // A second full pass is intentionally mandatory. Exact unchanged receipts
   // bind the final D1 identities and content hashes to the sealed fixture; a
-  // generated document count or an unrelated 3,201-row corpus cannot pass.
+  // generated document count or an unrelated 6,001-row corpus cannot pass.
   for (let offset = 0; offset < FIXTURE.length; offset += DISPOSABLE_RECOVERY_SEED_BATCH_SIZE) {
     const documents = Object.freeze(FIXTURE.slice(offset, offset + DISPOSABLE_RECOVERY_SEED_BATCH_SIZE));
     const errorState = { ...seededState, ambiguousDocuments: documents.length };
