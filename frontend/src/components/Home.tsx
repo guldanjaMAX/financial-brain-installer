@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type FinSnapshot, type SourceCoverageDetail, type SystemStatus } from "../lib/api";
+import { api, type FinEntity, type FinSnapshot, type SourceCoverageDetail, type SystemStatus } from "../lib/api";
 import { derivePhase, phraseFor, type BrainPhase } from "../lib/phase";
 import {
   accountCoverage, dateLabel, documentOutcome, entityLabel, moneyLabel,
@@ -12,7 +12,7 @@ import {
 import {
   Attention, Badge, Chip, Critical, NextStep, Note, Row, Section, TruthNote,
 } from "./ui";
-import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
+import { FinanceScopeBar, useFinanceScope, type EntityScopeState } from "./FinanceScope";
 import { OwnerActivity } from "./OwnerActivity";
 
 const FIN_SECTIONS = [
@@ -36,8 +36,12 @@ const FIN_LABELS: Record<string, string> = {
  * score, snooze state, or owner model across every collection. */
 export type HomeDestination = "year" | "review";
 
+export function needsFirstFinancialEntity(entityScopeState: EntityScopeState, entities: FinEntity[]): boolean {
+  return entityScopeState === "required" && !entities.some((entity) => !entity.counterparty);
+}
+
 export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestination) => void } = {}) {
-  const { scope, entities, activeLabel } = useFinanceScope();
+  const { scope, entities, activeLabel, entityScopeState } = useFinanceScope();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [systemLoaded, setSystemLoaded] = useState(false);
   const [finance, setFinance] = useState<FinSnapshot | null>(null);
@@ -81,17 +85,24 @@ export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestinatio
   const phase = derivePhase(status);
   const unavailable = finance?.sections_unavailable || [];
   const financeIsEmpty = Boolean(finance?.ledger_installed && financialRecordsEmpty(finance, FIN_SECTIONS));
+  const needsFirstEntity = needsFirstFinancialEntity(entityScopeState, entities);
 
   return (
     <div aria-busy={!systemLoaded || financeBusy}>
-      <FinanceScopeBar />
+      {!needsFirstEntity && <FinanceScopeBar />}
       <header className="max-w-3xl">
         <p className="eyebrow">Owner view</p>
         <h1 className="page-title">What deserves your attention</h1>
         <p className="page-intro">
-          Current records, visible gaps, and the evidence behind each answer for {activeLabel}.
+          {needsFirstEntity
+            ? "Start by listing one exact part of your finances. Nothing will be guessed or combined."
+            : <>Current records, visible gaps, and the evidence behind each answer for {activeLabel}.</>}
         </p>
       </header>
+
+      {needsFirstEntity && (
+        <FirstFinancialEntityPrompt onStart={onNavigate ? () => onNavigate("review") : undefined} />
+      )}
 
       <div className="mt-6 max-w-3xl">
         {systemLoaded ? (
@@ -121,7 +132,7 @@ export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestinatio
         </div>
       )}
 
-      {financeIsEmpty && (
+      {financeIsEmpty && !needsFirstEntity && (
         <div className="mt-5 max-w-3xl">
           <TruthNote>
             No financial record is loaded for {activeLabel}. This is an empty ledger, not a finding that nothing is due, owed, missing, or in conflict.
@@ -129,9 +140,11 @@ export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestinatio
         </div>
       )}
 
-      <div className="mt-7 max-w-3xl">
-        <OwnerActivity />
-      </div>
+      {!needsFirstEntity && (
+        <div className="mt-7 max-w-3xl">
+          <OwnerActivity />
+        </div>
+      )}
 
       {finance?.ledger_installed && !financeIsEmpty && (
         <div className="mt-7 grid gap-7 lg:grid-cols-[minmax(0,1.35fr)_minmax(19rem,0.85fr)] lg:items-start">
@@ -154,6 +167,26 @@ export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestinatio
       )}
 
       {!financeLoaded && <p className="sr-only">Reading current financial records.</p>}
+    </div>
+  );
+}
+
+export function FirstFinancialEntityPrompt({ onStart }: { onStart?: () => void }) {
+  return (
+    <div className="mt-6 max-w-3xl rounded-2xl border border-amber-300 bg-amber-50 px-4 py-4 text-amber-950 sm:px-5">
+      <p className="text-[15px] font-semibold">Start with one part of your finances</p>
+      <p className="mt-1.5 text-[13.5px] leading-relaxed">
+        No person, household, business, trust, property, or investment has been listed yet. Financial Brain will not guess or combine them. Add one exact name, review it, and then decide what records belong to it.
+      </p>
+      {onStart && (
+        <button
+          type="button"
+          onClick={onStart}
+          className="mt-3 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-white hover:opacity-90"
+        >
+          Add my first financial entity
+        </button>
+      )}
     </div>
   );
 }

@@ -283,6 +283,16 @@ jobs:
       - name: owner app tests
         run: npm --prefix frontend test
 
+      # The browser harness serves frontend/dist. Build it on the clean runner
+      # before Playwright starts, while preserving the reviewed Worker parity
+      # check as the authority for the generated asset module.
+      - name: owner app production bundle parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix frontend run build
+          git diff --exit-code -- worker/src/lib/app-assets.js
+
       - name: install owner browser test runtime
         if: ${{ !cancelled() }}
         run: npm --prefix frontend run test:browser:install
@@ -290,16 +300,6 @@ jobs:
       - name: owner scope browser regressions
         if: ${{ !cancelled() }}
         run: npm --prefix frontend run test:browser
-
-      # build-to-worker.mjs must reproduce the reviewed tracked bundle exactly.
-      # A dirty diff means the shipped Worker UI is stale even if React tests
-      # passed against newer source files.
-      - name: owner app production bundle parity
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm --prefix frontend run build
-          git diff --exit-code -- worker/src/lib/app-assets.js
 
       # Fresh random bytes exercise 25 protect/unprotect round trips through one
       # private process-scoped compiled helper, followed by exact captured-identity

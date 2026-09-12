@@ -76,6 +76,7 @@ export function AddReview() {
         <h1 className="page-title">Add &amp; Review</h1>
         <p className="page-intro">
           See records that need a better copy, a human answer, or a decision before they can support a financial answer.
+          To settle conflicting figures, open Conflicting records, review each figure's source and date, choose the one you accept, and select Record ruling. The other figure stays visible.
         </p>
       </header>
 

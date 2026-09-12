@@ -42,7 +42,9 @@ npm run rehearsal:kit -- --ci-run <github-actions-run-id> --expect-sha <exact-40
 Keep the generated `release.json` beside its content-addressed ZIP. The receipt
 binds the archive, repository, exact source and tree, launcher digest, CI run and
 jobs, tested package digest, seven-day handoff window, loopback-only purpose,
-and pending physical-Windows result. Never substitute an older ZIP or receipt.
+and pending physical-Windows result. The receipt labels the launcher digest as
+the checked-in file in the reviewed checkout and records that the launcher is
+not included in the handoff archive. Never substitute an older ZIP or receipt.
 The ZIP still directs Claude Code to obtain a fresh detached checkout and use
 the checked-in launcher below; it never replaces or embeds that launcher.
 
@@ -91,7 +93,7 @@ checked-in launcher handles the local UI preparation it needs.
 
 Do not run setup, provision, deploy, update, connect, ingest, OCR, repair, reindex, drain, forget, zone, grant, invite, or any live Cloudflare or provider command. Do not ask for a token, password, login, consent, billing approval, or real passkey. Do not work around a refusal.
 
-When the browser opens, guide me through the synthetic screens one at a time. Ask what feels clear, confusing, too technical, or surprising. Pay special attention to the first passkey explanation, healthy-empty versus unavailable wording, partial data, conflicts, retries, guest access, and the Owner Financial Map review. When I am done, have me close the browser tab, return to the same PowerShell window, and press Control-C once. The launcher runs Node directly after preparation, so the ready rehearsal does not stop through the `npm.cmd` batch shim. If an older command does show `Terminate batch job (Y/N)?`, explain that `Y` stops it and `N` leaves it running; do not leave me guessing.
+When the browser opens, guide me through the synthetic screens one at a time. Ask what feels clear, confusing, too technical, or surprising. Pay special attention to the first passkey explanation, healthy-empty versus unavailable wording, partial data, conflicts, retries, guest access, and the Owner Financial Map review. If the browser closes, have me open `http://127.0.0.1:4176/` again while the original PowerShell window stays open; do not rerun the launcher. When I am done, have me close the browser tab, return to the same PowerShell window, and press Control-C once. The launcher runs Node directly after preparation, so the ready rehearsal does not stop through the `npm.cmd` batch shim. If an older command does show `Terminate batch job (Y/N)?`, explain that `Y` stops it and `N` leaves it running; do not leave me guessing.
 
 At the end, give me a short feedback note containing only: the exact commit SHA, Windows version, Node version, whether the browser opened automatically, which synthetic screens I reviewed, the three biggest points of confusion, what felt reassuring, and any step where I did not know what to click. Do not include my Windows username, local paths, account names, private data, credentials, or full environment output.
 ````

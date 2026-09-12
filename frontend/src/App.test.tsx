@@ -2,7 +2,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GRANT_VIEWS, GrantWorkspace, OWNER_VIEWS, OwnerHeader, OwnerWorkspace,
-  enrollmentInviteFromHash, initialOwnerView, ownerViewRequiresEntity, ownerViewScopeGate, visibleView,
+  enrollmentInviteFromHash, initialOwnerView, ownerViewRequiresEntity, ownerViewScopeGate,
+  scopeGateRequiresEntity, visibleView,
 } from "./App";
 import { Gate } from "./components/Gate";
 import { FinanceScopeProvider } from "./components/FinanceScope";
@@ -116,6 +117,13 @@ describe("principal workspace routing", () => {
 
   it("waits for inventory, quarantines saved scope, then allows safe fallback reads", () => {
     expect(ownerViewScopeGate("home", false, "checking")).toBe("checking");
+    expect(ownerViewScopeGate("home", false, "required", false)).toBeNull();
+    expect(ownerViewScopeGate("home", false, "required", true)).toBe("choice");
+    expect(ownerViewScopeGate("home", true, "required", true)).toBeNull();
+    expect(ownerViewScopeGate("documents", false, "required", true)).toBe("choice");
+    expect(ownerViewScopeGate("ask", false, "required", true)).toBe("choice");
+    expect(scopeGateRequiresEntity("choice")).toBe(false);
+    expect(scopeGateRequiresEntity("entity")).toBe(true);
     expect(ownerViewScopeGate("documents", false, "unavailable")).toBeNull();
     expect(ownerViewScopeGate("ask", false, "not_installed")).toBeNull();
     expect(ownerViewScopeGate("review", false, "unavailable")).toBe("entity");
