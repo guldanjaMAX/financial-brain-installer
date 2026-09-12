@@ -10,6 +10,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -1490,6 +1491,349 @@ test("a late final-receipt collision refuses before provider access or update", 
   }
 });
 
+test("Windows finalization closes the destination while retaining the staged-file handle", () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-windows-finalization-order-test-")));
+  if (process.platform !== "win32") chmodSync(directory, 0o700);
+  const output = {
+    path: join(directory, "result.json"),
+    parent: { path: directory, info: lstatSync(directory) },
+  };
+  const reservation = reserveAggregateReceipt(output, {
+    schema_version: 1,
+    status: "conservative_marker",
+  });
+  const events = [];
+  try {
+    assert.equal(finalizeReservedAggregateReceipt(
+      reservation,
+      { schema_version: 1, status: "passed_cleanup_required" },
+      {
+        platform: "win32",
+        closeReservation(descriptor) {
+          events.push("close_reservation");
+          closeSync(descriptor);
+        },
+        rename(from, to) {
+          events.push("rename");
+          assert.deepEqual(events, ["close_reservation", "rename"]);
+          assert.equal(reservation.closed, true);
+          assert.equal(reservation.descriptor, undefined);
+          assert.equal(existsSync(to), true);
+          renameSync(from, to);
+        },
+        syncDirectory(_reservation, _code, expectedFinalInfo) {
+          events.push("sync_directory");
+          const current = lstatSync(output.path);
+          assert.equal(current.dev, expectedFinalInfo.dev);
+          assert.equal(current.ino, expectedFinalInfo.ino);
+        },
+        closeTemporary(descriptor) {
+          events.push("close_temporary");
+          assert.deepEqual(events, [
+            "close_reservation", "rename", "sync_directory", "close_temporary",
+          ]);
+          closeSync(descriptor);
+        },
+      },
+    ), true);
+    assert.deepEqual(events, [
+      "close_reservation", "rename", "sync_directory", "close_temporary",
+    ]);
+    assert.equal(reservation.closed, true);
+    assert.equal(reservation.descriptor, undefined);
+    assert.deepEqual(JSON.parse(readFileSync(output.path, "utf8")), {
+      schema_version: 1,
+      status: "passed_cleanup_required",
+    });
+  } finally {
+    if (!reservation.closed) {
+      try { closeSync(reservation.descriptor); } catch { /* Test cleanup only. */ }
+      reservation.closed = true;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a Windows reservation-close failure keeps the durable marker and handle retryable", () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-windows-finalization-close-test-")));
+  if (process.platform !== "win32") chmodSync(directory, 0o700);
+  const output = {
+    path: join(directory, "result.json"),
+    parent: { path: directory, info: lstatSync(directory) },
+  };
+  const reservation = reserveAggregateReceipt(output, {
+    schema_version: 1,
+    status: "conservative_marker",
+  });
+  const originalDescriptor = reservation.descriptor;
+  try {
+    assert.throws(
+      () => finalizeReservedAggregateReceipt(
+        reservation,
+        { status: "first_attempt_must_not_commit" },
+        {
+          platform: "win32",
+          closeReservation(descriptor) {
+            assert.equal(descriptor, originalDescriptor);
+            throw new Error("simulated_reservation_close_failure");
+          },
+        },
+      ),
+      /simulated_reservation_close_failure/,
+    );
+    assert.equal(reservation.closed, false);
+    assert.equal(reservation.descriptor, originalDescriptor);
+    assert.equal(JSON.parse(readFileSync(output.path, "utf8")).status, "conservative_marker");
+
+    assert.equal(finalizeReservedAggregateReceipt(
+      reservation,
+      { status: "retry_completed" },
+      { platform: "win32" },
+    ), true);
+    assert.equal(reservation.closed, true);
+    assert.equal(reservation.descriptor, undefined);
+    assert.equal(JSON.parse(readFileSync(output.path, "utf8")).status, "retry_completed");
+  } finally {
+    if (!reservation.closed) {
+      try { closeSync(reservation.descriptor); } catch { /* Test cleanup only. */ }
+      reservation.closed = true;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Windows post-close validation accepts timestamp finalization but refuses marker tampering", () => {
+  for (const mutation of ["timestamps_only", "content", "identity"]) {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-windows-marker-close-test-")));
+    if (process.platform !== "win32") chmodSync(directory, 0o700);
+    const output = {
+      path: join(directory, "result.json"),
+      parent: { path: directory, info: lstatSync(directory) },
+    };
+    const marker = { schema_version: 1, status: "conservative_marker" };
+    const reservation = reserveAggregateReceipt(output, marker);
+    const originalMarkerPath = join(directory, "original-marker.json");
+    try {
+      const finalize = () => finalizeReservedAggregateReceipt(
+        reservation,
+        { schema_version: 1, status: "passed_cleanup_required" },
+        {
+          platform: "win32",
+          closeReservation(descriptor) {
+            closeSync(descriptor);
+            const postClose = lstatSync(output.path);
+            reservation.info.mtimeMs = postClose.mtimeMs - 10_000;
+            reservation.info.ctimeMs = postClose.ctimeMs - 10_000;
+            assert.notEqual(reservation.info.mtimeMs, postClose.mtimeMs);
+            assert.notEqual(reservation.info.ctimeMs, postClose.ctimeMs);
+            if (mutation === "content") {
+              const tampered = readFileSync(output.path);
+              try {
+                tampered[0] ^= 1;
+                writeFileSync(output.path, tampered, { mode: 0o600 });
+                if (process.platform !== "win32") chmodSync(output.path, 0o600);
+              } finally {
+                tampered.fill(0);
+              }
+            } else if (mutation === "identity") {
+              const exactMarker = readFileSync(output.path);
+              try {
+                renameSync(output.path, originalMarkerPath);
+                writeFileSync(output.path, exactMarker, { mode: 0o600 });
+                if (process.platform !== "win32") chmodSync(output.path, 0o600);
+              } finally {
+                exactMarker.fill(0);
+              }
+            }
+          },
+        },
+      );
+      if (mutation === "timestamps_only") {
+        assert.equal(finalize(), true);
+        assert.equal(JSON.parse(readFileSync(output.path, "utf8")).status, "passed_cleanup_required");
+      } else {
+        assert.throws(finalize, /receipt_reservation_changed/);
+        assert.equal(reservation.closed, true);
+        assert.equal(reservation.descriptor, undefined);
+      }
+    } finally {
+      if (!reservation.closed) {
+        try { closeSync(reservation.descriptor); } catch { /* Test cleanup only. */ }
+        reservation.closed = true;
+      }
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("final receipt readback stays bound to the staged descriptor across a path swap", () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-final-readback-binding-test-")));
+  if (process.platform !== "win32") chmodSync(directory, 0o700);
+  const output = {
+    path: join(directory, "result.json"),
+    parent: { path: directory, info: lstatSync(directory) },
+  };
+  const reservation = reserveAggregateReceipt(output, {
+    schema_version: 1,
+    status: "conservative_marker",
+  });
+  const displaced = join(directory, "displaced-result.json");
+  let swapSucceeded = false;
+  let readFromDescriptor = false;
+  try {
+    const finalize = () => finalizeReservedAggregateReceipt(
+      reservation,
+      { schema_version: 1, status: "passed_cleanup_required" },
+      {
+        platform: process.platform,
+        readBytes(descriptor, target) {
+          assert.equal(Number.isSafeInteger(descriptor), true);
+          let replacement;
+          try {
+            replacement = readFileSync(output.path);
+            try {
+              renameSync(output.path, displaced);
+              writeFileSync(output.path, replacement, { mode: 0o600 });
+              if (process.platform !== "win32") chmodSync(output.path, 0o600);
+              swapSucceeded = true;
+            } catch (error) {
+              if (process.platform !== "win32" ||
+                  !["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw error;
+            }
+            let offset = 0;
+            while (offset < target.length) {
+              const read = readSync(descriptor, target, offset, target.length - offset, offset);
+              assert.ok(read > 0);
+              offset += read;
+            }
+            readFromDescriptor = true;
+            return target;
+          } finally {
+            if (Buffer.isBuffer(replacement)) replacement.fill(0);
+          }
+        },
+      },
+    );
+    let failure;
+    try { assert.equal(finalize(), true); } catch (error) { failure = error; }
+    if (swapSucceeded) {
+      assert.match(failure?.message || "", /receipt_finalization_changed/);
+      assert.equal(existsSync(displaced), true);
+    } else {
+      assert.equal(process.platform, "win32");
+      assert.equal(failure, undefined);
+    }
+    assert.equal(readFromDescriptor, true);
+  } finally {
+    if (!reservation.closed) {
+      try { closeSync(reservation.descriptor); } catch { /* Test cleanup only. */ }
+      reservation.closed = true;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Windows finalization checks the reserved parent again after closing the destination", () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-windows-parent-recheck-test-")));
+  const otherDirectory = realpathSync(mkdtempSync(join(tmpdir(), "brain-windows-parent-other-test-")));
+  if (process.platform !== "win32") {
+    chmodSync(directory, 0o700);
+    chmodSync(otherDirectory, 0o700);
+  }
+  const output = {
+    path: join(directory, "result.json"),
+    parent: { path: directory, info: lstatSync(directory) },
+  };
+  const reservation = reserveAggregateReceipt(output, {
+    schema_version: 1,
+    status: "conservative_marker",
+  });
+  let renameCalls = 0;
+  try {
+    assert.throws(
+      () => finalizeReservedAggregateReceipt(
+        reservation,
+        { status: "must_not_commit" },
+        {
+          platform: "win32",
+          closeReservation(descriptor) {
+            closeSync(descriptor);
+            reservation.parentInfo = lstatSync(otherDirectory);
+          },
+          rename() { renameCalls += 1; },
+        },
+      ),
+      /receipt_reservation_changed/,
+    );
+    assert.equal(renameCalls, 0);
+    assert.equal(reservation.closed, true);
+    assert.equal(reservation.descriptor, undefined);
+    assert.equal(JSON.parse(readFileSync(output.path, "utf8")).status, "conservative_marker");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(otherDirectory, { recursive: true, force: true });
+  }
+});
+
+test("a critical-window parent replacement is refused even when the staged rename completes", () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-windows-parent-window-test-")));
+  if (process.platform !== "win32") chmodSync(directory, 0o700);
+  const moved = `${directory}-moved`;
+  const output = {
+    path: join(directory, "result.json"),
+    parent: { path: directory, info: lstatSync(directory) },
+  };
+  const reservation = reserveAggregateReceipt(output, {
+    schema_version: 1,
+    status: "conservative_marker",
+  });
+  let parentSwapSucceeded = false;
+  try {
+    let failure;
+    try {
+      finalizeReservedAggregateReceipt(
+        reservation,
+        { schema_version: 1, status: "passed_cleanup_required" },
+        {
+          platform: "win32",
+          rename(from, to) {
+            try {
+              renameSync(directory, moved);
+            } catch (error) {
+              if (process.platform !== "win32" ||
+                  !["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw error;
+              renameSync(from, to);
+              return;
+            }
+            parentSwapSucceeded = true;
+            mkdirSync(directory, { mode: 0o700 });
+            if (process.platform !== "win32") chmodSync(directory, 0o700);
+            renameSync(join(moved, basename(from)), to);
+          },
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+    if (parentSwapSucceeded) {
+      assert.match(failure?.message || "", /receipt_parent_changed/);
+      assert.equal(JSON.parse(readFileSync(output.path, "utf8")).status, "passed_cleanup_required");
+      assert.equal(JSON.parse(readFileSync(join(moved, "result.json"), "utf8")).status, "conservative_marker");
+    } else {
+      assert.equal(process.platform, "win32");
+      assert.equal(failure, undefined);
+      assert.equal(JSON.parse(readFileSync(output.path, "utf8")).status, "passed_cleanup_required");
+    }
+  } finally {
+    if (!reservation.closed) {
+      try { closeSync(reservation.descriptor); } catch { /* Test cleanup only. */ }
+      reservation.closed = true;
+    }
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(moved, { recursive: true, force: true });
+  }
+});
+
 test("receipt finalization refuses a replaced result path or parent inode", () => {
   for (const replace of ["path", "parent"]) {
     const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-receipt-reservation-test-")));
@@ -1504,18 +1848,31 @@ test("receipt finalization refuses a replaced result path or parent inode", () =
       status: "conservative_marker",
     });
     try {
+      let parentReplacementDenied = false;
       if (replace === "path") {
         renameSync(output.path, join(directory, "original-marker.json"));
         privateWrite(output.path, "{\"replacement\":true}\n");
       } else {
-        renameSync(directory, moved);
-        mkdirSync(directory, { mode: 0o700 });
-        if (process.platform !== "win32") chmodSync(directory, 0o700);
+        try {
+          renameSync(directory, moved);
+        } catch (error) {
+          if (process.platform !== "win32" ||
+              !["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw error;
+          parentReplacementDenied = true;
+        }
+        if (parentReplacementDenied) {
+          assert.equal(existsSync(output.path), true);
+        } else {
+          mkdirSync(directory, { mode: 0o700 });
+          if (process.platform !== "win32") chmodSync(directory, 0o700);
+        }
       }
-      assert.throws(
-        () => finalizeReservedAggregateReceipt(reservation, { status: "must_not_commit" }),
-        /receipt_reservation_changed/,
-      );
+      if (!parentReplacementDenied) {
+        assert.throws(
+          () => finalizeReservedAggregateReceipt(reservation, { status: "must_not_commit" }),
+          /receipt_reservation_changed/,
+        );
+      }
     } finally {
       try { closeSync(reservation.descriptor); } catch { /* Already closed only on unexpected success. */ }
       reservation.closed = true;
@@ -1610,8 +1967,8 @@ test("prepare binds the clean live baseline and execute proves one durable updat
   }
 });
 
-test("write, file-fsync, rename, and directory-fsync failures preserve a valid aggregate outcome", async () => {
-  for (const stage of ["write", "file_fsync", "rename", "directory_fsync"]) {
+test("write, fsync, reservation-close, rename, and directory-sync failures preserve a valid aggregate outcome", async () => {
+  for (const stage of ["write", "file_fsync", "reservation_close", "rename", "directory_fsync"]) {
     const fixture = setupFixture();
     const state = { phase: "baseline", sessions: 0, updateCalls: 0, calls: [], canaryTitle: null };
     const dependencies = dependenciesFor(fixture, state);
@@ -1626,6 +1983,7 @@ test("write, file-fsync, rename, and directory-fsync failures preserve a valid a
         {
           ...(stage === "write" ? { writeBytes: fail } : {}),
           ...(stage === "file_fsync" ? { syncFile: fail } : {}),
+          ...(stage === "reservation_close" ? { platform: "win32", closeReservation: fail } : {}),
           ...(stage === "rename" ? { rename: fail } : {}),
           ...(stage === "directory_fsync" ? { syncDirectory: fail } : {}),
         },

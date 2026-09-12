@@ -27,6 +27,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -1722,6 +1723,16 @@ function writeDescriptorBytes(descriptor, bytes) {
   }
 }
 
+function readDescriptorBytes(descriptor, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const read = readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+    if (!Number.isSafeInteger(read) || read < 1) refusal("receipt_read_failed");
+    offset += read;
+  }
+  return bytes;
+}
+
 function validateReceiptReservation(reservation, code) {
   if (!reservation || reservation.closed === true || !Number.isSafeInteger(reservation.descriptor)) {
     refusal(code);
@@ -1739,10 +1750,76 @@ function validateReceiptReservation(reservation, code) {
       !sameInode(parent, reservation.parentInfo) ||
       (process.platform !== "win32" && (parent.mode & 0o077) !== 0) ||
       (typeof process.getuid === "function" && parent.uid !== process.getuid()) ||
+      !Number.isSafeInteger(reservation.markerSize) || reservation.markerSize < 1 ||
+      reservation.markerSize > MAX_JSON_BYTES ||
+      !SHA256_PATTERN.test(reservation.markerHash || "") ||
       !current.isFile() || current.isSymbolicLink() || current.nlink !== 1 ||
       (process.platform !== "win32" && (current.mode & 0o077) !== 0) ||
+      current.size !== reservation.markerSize ||
       !sameFile(reservation.info, current) || !sameFile(reservation.info, opened)) refusal(code);
   return true;
+}
+
+function closeReceiptReservationHandle(reservation, closeHandle = closeSync) {
+  if (!reservation || reservation.closed === true || !Number.isSafeInteger(reservation.descriptor)) {
+    refusal("receipt_reservation_changed");
+  }
+  const descriptor = reservation.descriptor;
+  closeHandle(descriptor);
+  reservation.descriptor = undefined;
+  reservation.closed = true;
+}
+
+function validateClosedReceiptReservation(reservation, code, platform = process.platform) {
+  if (!reservation || reservation.closed !== true || reservation.descriptor !== undefined) refusal(code);
+  let parent;
+  let current;
+  try {
+    parent = lstatSync(reservation.parentPath);
+    current = lstatSync(reservation.path);
+  } catch { refusal(code); }
+  if (!parent.isDirectory() || parent.isSymbolicLink() ||
+      realpathSync(reservation.parentPath) !== reservation.parentPath ||
+      !sameInode(parent, reservation.parentInfo) ||
+      (platform !== "win32" && (parent.mode & 0o077) !== 0) ||
+      (typeof process.getuid === "function" && parent.uid !== process.getuid()) ||
+      !Number.isSafeInteger(reservation.markerSize) || reservation.markerSize < 1 ||
+      reservation.markerSize > MAX_JSON_BYTES ||
+      !SHA256_PATTERN.test(reservation.markerHash || "") ||
+      !current.isFile() || current.isSymbolicLink() || current.nlink !== 1 ||
+      (platform !== "win32" && (current.mode & 0o077) !== 0) ||
+      current.size !== reservation.markerSize || reservation.info?.size !== reservation.markerSize ||
+      !sameInode(reservation.info, current)) refusal(code);
+  let markerDescriptor;
+  let markerBytes;
+  let markerMatches = false;
+  let stable;
+  try {
+    markerDescriptor = openSync(
+      reservation.path,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0) |
+        (platform === "win32" ? 0 : (fsConstants.O_NONBLOCK || 0)),
+    );
+    const opened = fstatSync(markerDescriptor);
+    if (!sameStableSingleFile(current, opened)) refusal(code);
+    markerBytes = Buffer.alloc(reservation.markerSize);
+    readDescriptorBytes(markerDescriptor, markerBytes);
+    const openedAfterRead = fstatSync(markerDescriptor);
+    stable = lstatSync(reservation.path);
+    markerMatches = sha256(markerBytes) === reservation.markerHash &&
+      sameStableSingleFile(current, openedAfterRead) &&
+      sameStableSingleFile(current, stable);
+  } catch { /* Refuse an unreadable or concurrently replaced marker below. */ }
+  finally {
+    if (Buffer.isBuffer(markerBytes)) markerBytes.fill(0);
+    if (markerDescriptor !== undefined) {
+      const descriptor = markerDescriptor;
+      closeSync(descriptor);
+      markerDescriptor = undefined;
+    }
+  }
+  if (!markerMatches) refusal(code);
+  return stable;
 }
 
 function syncReservationDirectory(reservation, code, expectedFinalInfo = null) {
@@ -1778,17 +1855,22 @@ export function reserveAggregateReceipt(output, marker) {
     parentInfo: parent.info,
     descriptor,
     info: null,
+    markerSize: null,
+    markerHash: null,
     closed: false,
   };
   let bytes;
   try {
     bytes = Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8");
+    reservation.markerSize = bytes.length;
+    reservation.markerHash = sha256(bytes);
     writeDescriptorBytes(descriptor, bytes);
     fsyncSync(descriptor);
     fchmodSync(descriptor, 0o600);
     reservation.info = fstatSync(descriptor);
     const current = lstatSync(output.path);
     if (!reservation.info.isFile() || reservation.info.nlink !== 1 ||
+        reservation.info.size !== reservation.markerSize ||
         (process.platform !== "win32" && (reservation.info.mode & 0o077) !== 0) ||
         !sameFile(reservation.info, current)) refusal("receipt_reservation_invalid");
     syncReservationDirectory(reservation, "receipt_parent_changed", reservation.info);
@@ -1805,9 +1887,13 @@ export function reserveAggregateReceipt(output, marker) {
 
 export function finalizeReservedAggregateReceipt(reservation, receipt, {
   writeBytes = writeDescriptorBytes,
+  readBytes = readDescriptorBytes,
   syncFile = fsyncSync,
   rename = renameSync,
   syncDirectory = syncReservationDirectory,
+  platform = process.platform,
+  closeReservation = closeSync,
+  closeTemporary = closeSync,
 } = {}) {
   validateReceiptReservation(reservation, "receipt_reservation_changed");
   const nonce = randomBytes(12).toString("hex");
@@ -1831,25 +1917,62 @@ export function finalizeReservedAggregateReceipt(reservation, receipt, {
     temporaryInfo = fstatSync(temporaryDescriptor);
     const temporaryCurrent = lstatSync(temporaryPath);
     if (!temporaryInfo.isFile() || temporaryInfo.nlink !== 1 || temporaryInfo.size !== bytes.length ||
-        (process.platform !== "win32" && (temporaryInfo.mode & 0o077) !== 0) ||
+        (platform !== "win32" && (temporaryInfo.mode & 0o077) !== 0) ||
         !sameFile(temporaryInfo, temporaryCurrent)) refusal("receipt_finalization_invalid");
     validateReceiptReservation(reservation, "receipt_reservation_changed");
+    let closedReservationInfo = null;
+    if (platform === "win32") {
+      closeReceiptReservationHandle(reservation, closeReservation);
+      closedReservationInfo = validateClosedReceiptReservation(
+        reservation,
+        "receipt_reservation_changed",
+        platform,
+      );
+      if (!sameStableSingleFile(temporaryInfo, lstatSync(temporaryPath))) {
+        refusal("receipt_finalization_changed");
+      }
+      if (!sameStableSingleFile(closedReservationInfo, lstatSync(reservation.path))) {
+        refusal("receipt_reservation_changed");
+      }
+    }
     rename(temporaryPath, reservation.path);
     renamed = true;
     const finalCurrent = lstatSync(reservation.path);
-    if (!sameFile(temporaryInfo, finalCurrent) || fstatSync(reservation.descriptor).nlink !== 0) {
+    const finalOpened = fstatSync(temporaryDescriptor);
+    if (!finalCurrent.isFile() || finalCurrent.isSymbolicLink() || finalCurrent.nlink !== 1 ||
+        !sameFile(temporaryInfo, finalCurrent) ||
+        !sameStableSingleFile(finalCurrent, finalOpened) ||
+        (platform !== "win32" && fstatSync(reservation.descriptor).nlink !== 0)) {
       refusal("receipt_finalization_changed");
     }
-    syncDirectory(reservation, "receipt_parent_changed", finalCurrent);
+    let readback;
+    let verifiedCurrent;
+    try {
+      readback = Buffer.alloc(bytes.length);
+      readBytes(temporaryDescriptor, readback);
+      if (!readback.equals(bytes)) refusal("receipt_finalization_changed");
+      const openedAfterRead = fstatSync(temporaryDescriptor);
+      verifiedCurrent = lstatSync(reservation.path);
+      if (!sameStableSingleFile(finalOpened, openedAfterRead) ||
+          !sameStableSingleFile(finalCurrent, verifiedCurrent) ||
+          !sameStableSingleFile(verifiedCurrent, openedAfterRead)) {
+        refusal("receipt_finalization_changed");
+      }
+    } finally {
+      if (Buffer.isBuffer(readback)) readback.fill(0);
+    }
+    syncDirectory(reservation, "receipt_parent_changed", verifiedCurrent);
     const durableCurrent = lstatSync(reservation.path);
-    if (!sameFile(temporaryInfo, durableCurrent) ||
+    if (!sameStableSingleFile(verifiedCurrent, durableCurrent) ||
         !sameInode(lstatSync(reservation.parentPath), reservation.parentInfo)) {
       refusal("receipt_finalization_changed");
     }
-    closeSync(temporaryDescriptor);
-    temporaryDescriptor = undefined;
-    closeSync(reservation.descriptor);
-    reservation.closed = true;
+    if (temporaryDescriptor !== undefined) {
+      const descriptor = temporaryDescriptor;
+      closeTemporary(descriptor);
+      temporaryDescriptor = undefined;
+    }
+    if (!reservation.closed) closeReceiptReservationHandle(reservation, closeReservation);
     return true;
   } catch (error) {
     if (!renamed && temporaryIdentity) {
@@ -1873,8 +1996,9 @@ export function finalizeReservedAggregateReceipt(reservation, receipt, {
 
 function abandonReceiptReservation(reservation) {
   if (!reservation || reservation.closed === true) return;
-  try { closeSync(reservation.descriptor); } catch { /* Preserve the exact reserved path for review. */ }
-  reservation.closed = true;
+  try { closeReceiptReservationHandle(reservation); } catch {
+    /* Preserve the exact reserved path for review. */
+  }
 }
 
 function acquireExecutionLock(directory, planFingerprint, durabilityPath) {
