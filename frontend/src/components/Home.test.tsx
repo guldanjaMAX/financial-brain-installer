@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FinanceScopeProvider } from "./FinanceScope";
-import { AttentionList, Home, SourceChip } from "./Home";
+import { AttentionList, FirstFinancialEntityPrompt, Home, needsFirstFinancialEntity, SourceChip } from "./Home";
 import type { FinSnapshot } from "../lib/api";
 
 describe("home composition", () => {
@@ -33,6 +33,31 @@ describe("home composition", () => {
     );
     expect(html).toContain("Open This Year");
     expect(html).toContain("Open Add &amp; Review");
+  });
+
+  it("gives a brand-new owner one plain-language path to the reviewed entity form", () => {
+    const html = renderToStaticMarkup(<FirstFinancialEntityPrompt onStart={() => undefined} />);
+
+    expect(html).toContain("Start with one part of your finances");
+    expect(html).toContain("will not guess or combine");
+    expect(html).toContain("Add my first financial entity");
+    expect(html).not.toContain("entity_slug");
+  });
+
+  it("never mistakes an unselected existing entity or Whole Brain choice for a brand-new Brain", () => {
+    const existing = [{
+      entity_slug: "example-business",
+      label: "Example Business",
+      legal_name: "Example Business",
+      kind: "business",
+      status: "active",
+      relationship: "owned",
+      counterparty: false,
+    }];
+
+    expect(needsFirstFinancialEntity("required", [])).toBe(true);
+    expect(needsFirstFinancialEntity("required", existing)).toBe(false);
+    expect(needsFirstFinancialEntity("selected", [])).toBe(false);
   });
 
   it("names unreadable documents and stale sources instead of relying on the generic problem state", () => {

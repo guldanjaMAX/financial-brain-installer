@@ -10,6 +10,25 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **You can now see the scanned-PDF work before choosing OCR.** `brain
+  ocr-preflight <manifest> --path <folder> --json` reads local PDF structure
+  without running OCR or making an application HTTP request, opening an
+  application key store, or writing a Brain record, cursor, checkpoint, local
+  state file, manifest, or source file. Reading a cloud-synced local file can
+  ask its operating-system file provider to hydrate it, so provider network,
+  credential, and filesystem effects remain explicitly unknown. Its private
+  aggregate receipt separates
+  affected documents and authoritative pages from unknown or uninspectable
+  cases, applies the configured per-document page limit, and binds the exact OCR
+  model and pricing-basis version. Only the reviewed default model receives a
+  cost/time range; a nondefault or mismatched pricing contract stays unpriced.
+  The full configured-cap comparison uses the unrounded high planning value and
+  stays separate from the unknown remaining shared daily budget and unknown
+  actual affordability. A missing cap stays
+  missing. A state-bound fingerprint can support a later approval, but this
+  command does not authorize or perform OCR. This remains a held candidate and
+  has not run on a customer folder.
+
 - **Two computers can no longer create competing provenance histories for the
   same original.** Each new observation now names the exact prior observation
   seen by its reviewed plan, and the Brain compares that head atomically. The

@@ -48,6 +48,14 @@ const matrixStep = (name, workflow = ci) => {
   const next = workflow.indexOf('\n      - name: ', start + 1);
   return workflow.slice(start, next < 0 ? workflow.length : next);
 };
+const assertBrowserBundleOrder = (workflow, label) => {
+  const bundle = workflow.indexOf('      - name: owner app production bundle parity\n');
+  const browser = workflow.indexOf('      - name: owner scope browser regressions\n');
+  assert.ok(bundle >= 0, `${label} omits the owner app production bundle`);
+  assert.ok(browser >= 0, `${label} omits the owner browser regressions`);
+  assert.ok(bundle < browser, `${label} must build frontend/dist before the browser harness serves it`);
+};
+assertBrowserBundleOrder(ci, 'CI');
 // Continuation steps fall into two kinds, and the difference is a security
 // boundary, not a style choice. Steps that only exercise the source checkout
 // must stay visible when an unrelated check fails. Steps that install or run
@@ -73,6 +81,7 @@ for (const [name, condition] of [
   assert.ok(!step.includes(PACKAGE_BARRIER), `${name} runs from source and must not wait on the package`);
 }
 const windowsRehearsal = read('.github/workflows/windows-rehearsal.yml').replace(/\r\n/g, '\n');
+assertBrowserBundleOrder(windowsRehearsal, 'Windows rehearsal');
 for (const name of ['install owner browser test runtime', 'owner scope browser regressions']) {
   assert.ok(matrixStep(name, windowsRehearsal).includes('if: ${{ !cancelled() }}'),
     `${name} can be hidden by an earlier Windows rehearsal failure`);

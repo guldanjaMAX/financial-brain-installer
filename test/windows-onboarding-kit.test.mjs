@@ -343,6 +343,8 @@ test("the sealed archive and receipts are deterministic, generic, and synthetic 
   assert.equal(first.release.purpose, PURPOSE);
   assert.equal(first.release.artifact_kind, ARTIFACT_KIND);
   assert.equal(first.release.intended_loopback_origin, LOOPBACK_ORIGIN);
+  assert.equal(first.release.launcher.digest_scope, "checked_in_file_in_reviewed_checkout");
+  assert.equal(first.release.launcher.included_in_handoff_archive, false);
   assert.equal(first.release.archive.sha256.length, 64);
   assert.equal(first.release.tested_package.sha256, PACKAGE_SHA);
   assert.equal(first.release.tested_package.github_artifact_api_size_bytes, 123456);
@@ -366,16 +368,21 @@ test("the sealed archive and receipts are deterministic, generic, and synthetic 
   assert.equal(manifest.ready_to_send, true);
   assert.equal(manifest.source.head_sha, SHA);
   assert.equal(manifest.launcher.path, LAUNCHER_PATH);
+  assert.equal(manifest.launcher.digest_scope, "checked_in_file_in_reviewed_checkout");
+  assert.equal(manifest.launcher.included_in_handoff_archive, false);
   assert.match(instructions, /normal PowerShell window opened from the Windows Start menu/i);
   assert.match(instructions, /artifact_kind is financial_brain_windows_onboarding_rehearsal/i);
   assert.match(instructions, /successful CI event is push for exact source SHA/i);
   assert.match(instructions, /detached-HEAD mode/i);
   assert.match(instructions, /start-windows-rehearsal\.ps1.*-ExpectedSha/i);
   assert.match(instructions, /Do not paste or reconstruct the PowerShell script body/i);
+  assert.match(instructions, /launcher digest in release\.json describes this file in the reviewed checkout/i);
+  assert.match(instructions, /launcher is not an entry inside the ZIP/i);
   assert.match(instructions, /Do not run npm install, npm ci/i);
   assert.match(instructions, /Do not run setup, provision, deploy, update, connect, ingest, OCR/i);
   assert.match(instructions, /owner should only need to answer questions.*click when guided/i);
   assert.match(instructions, /Guide them through one synthetic screen at a time/i);
+  assert.match(instructions, /browser closes.*reopen http:\/\/127\.0\.0\.1:4176\/.*do not rerun the launcher/i);
   assert.match(instructions, /three biggest points of confusion/i);
   assert.doesNotMatch(
     `${instructions}\n${JSON.stringify(first.release)}`,

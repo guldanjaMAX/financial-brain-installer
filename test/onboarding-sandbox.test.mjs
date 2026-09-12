@@ -81,13 +81,19 @@ test("the rehearsal starts with an unmistakable local-only safety screen", () =>
     "SYNTHETIC DATA",
     "Nothing is deployed",
     "does not prove Cloudflare",
-    "Close this terminal",
+    "If this browser tab closes",
+    "Do not rerun the launcher",
   ]) assert.match(html, new RegExp(phrase, "i"));
   assert.equal((html.match(/class="card"/g) || []).length, SANDBOX_SCENARIOS.length);
   assert.match(html, /state=signin#enroll=local-rehearsal-only/);
   assert.match(html, /state=document-enrollment#document-enroll=doc_local-rehearsal-only/);
   assert.match(html, /state=financial-map&amp;view=financial-map/);
   assert.match(html, /href="http:\/\/127\.0\.0\.1:4176\/document-journey"/);
+  assert.match(html, /If a save confirmation goes missing/i);
+  assert.match(html, /shows the original result without doing it twice/i);
+  assert.match(html, /When a save is out of date/i);
+  assert.match(html, /tell you how to refresh before trying again/i);
+  assert.doesNotMatch(html, /Lost-response retry|same action receipt|reused request ID/i);
   assert.doesNotMatch(html, /api[_-]?key|client[_-]?secret|app[_-]?password/i);
 });
 
@@ -346,6 +352,7 @@ test("the Windows owner guide requires a fresh clean checkout and exact SHA equa
   assert.match(guide, /start-windows-rehearsal\.ps1/);
   assert.match(guide, /one command/i);
   assert.match(guide, /can be quiet for several minutes/i);
+  assert.match(guide, /browser closes.*127\.0\.0\.1:4176.*do not rerun the launcher/is);
   assert.match(guide, /Do not run `npm ci`/i);
   assert.match(guide, /Terminate batch job \(Y\/N\)\?/);
   assert.match(guide, /npm\.cmd run rehearse:onboarding/);
@@ -364,6 +371,17 @@ test("the Windows owner guide requires a fresh clean checkout and exact SHA equa
   assert.match(launcher, /nodeVersion\.Major -lt 22/);
   assert.match(launcher, /scripts\\onboarding-sandbox\.mjs/);
   assert.match(launcher, /quiet for several minutes/i);
+  assert.match(launcher, /browser closes.*127\.0\.0\.1:4176.*do not restart this launcher/is);
+  assert.match(launcher, /\$env:BRAIN_ONBOARDING_PORT\s*=\s*"4176"/);
+  assert.match(launcher, /\$env:BRAIN_VISUAL_PORT\s*=\s*"4177"/);
+  assert.ok(
+    launcher.indexOf('$env:BRAIN_ONBOARDING_PORT = "4176"') < launcher.indexOf("& $node.Source $rehearsal"),
+    "the launcher must bind its reviewed public port before starting Node",
+  );
+  assert.ok(
+    launcher.indexOf('$env:BRAIN_VISUAL_PORT = "4177"') < launcher.indexOf("& $node.Source $rehearsal"),
+    "the launcher must bind its reviewed fixture port before starting Node",
+  );
   assert.match(launcher, /Do not run npm ci or any npm command yourself/i);
   assert.match(launcher, /Local-only synthetic data: confirmed/i);
   for (const nextAction of [
@@ -371,6 +389,7 @@ test("the Windows owner guide requires a fresh clean checkout and exact SHA equa
     /Ask your technician to resend the exact SHA/is,
     /ask the technician to confirm the repository link and exact SHA/is,
     /Install Node\.js 22 or newer.*open a new normal PowerShell window/is,
+    /too old.*Install Node\.js 22 or newer.*run the same supplied command again/is,
     /ask the technician for a fresh reviewed repository link and exact SHA/is,
   ]) assert.match(launcher, nextAction);
   assert.doesNotMatch(launcher, /npm(?:\.cmd)?\s+run\s+rehearse:onboarding/i);
@@ -409,6 +428,10 @@ test("synthetic owner actions have intentional receipts and the entity-add rehea
     assert.match(bankBoundaryHtml, /Bank feeds remain outside ordinary onboarding/i);
     assert.match(bankBoundaryHtml, /Back to the synthetic Access screen/i);
     assert.doesNotMatch(bankBoundaryHtml, /must-not-be-echoed|HTTP 404|not found/i);
+
+    const zeroEntityActivity = await post("/api/owner/activity", {}, "zero-entities");
+    assert.equal(zeroEntityActivity.status, 200);
+    assert.deepEqual((await zeroEntityActivity.json()).activity_events, []);
 
     const entityRequest = {
       request_id: "entity-fixture-request",

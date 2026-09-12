@@ -60,6 +60,17 @@ import {
   renderFinancialPicture,
   requestFinancialPicture,
 } from "./operations/financial-picture.mjs";
+import {
+  OCR_PREFLIGHT_DEFAULT_MODEL,
+  ocrPreflightFailureReceipt,
+  ocrPreflightPolicy,
+  ocrPreflightPricingBasis,
+  ocrPreflightReceipt,
+  ocrPreflightRequest,
+  ocrPreflightWalkEvidence,
+  parseOcrPreflightArgv,
+  renderOcrPreflightReceipt,
+} from "./operations/ocr-preflight.mjs";
 // The ingest pipeline is loaded LAZILY, inside the commands that use it. It
 // pulls in the PDF/Office dependencies at import time, so a top-level import
 // meant that on a clone without node_modules the very first command, including
@@ -180,6 +191,7 @@ import {
   renderLocalAssistantRepairPlan,
 } from "./operations/local-assistant-repair.mjs";
 import {
+  canonicalProvenanceFilesystemInteger,
   provenanceRepairPlan,
   provenanceRepairReadback,
   provenanceRepairRemoteGeneration,
@@ -368,6 +380,7 @@ let currentSupportCommand = "";
 
 export function supportSourceForCommand(command = "") {
   if (command === "schedule") return "scheduler";
+  if (command === "ocr-preflight") return "local";
   if (["financial-picture", "machine-continuity"].includes(command)) return "brain-data-plane";
   if (command === "ingest") {
     const index = process.argv.indexOf("--from");
@@ -482,9 +495,10 @@ export function supportProductRelativeLocation(error, options = {}) {
 
 function recordSupportFailure(error, { unexpected = false } = {}) {
   const command = currentSupportCommand;
-  // The continuity command promises a filesystem-zero audit, including its
-  // failure path. Do not create a local support journal entry for it.
-  if (!command || command === "support" || command === "machine-continuity") return null;
+  // These machine-readable audits promise a filesystem-zero boundary,
+  // including failure paths. Do not create a local support journal entry.
+  if (!command || command === "support" ||
+      command === "machine-continuity" || command === "ocr-preflight") return null;
   const errorCode = supportErrorCode(error, { command, unexpected });
   try {
     const productRelativeLocation = supportProductRelativeLocation(error);
@@ -7100,7 +7114,7 @@ export function ocrPolicy(manifest = {}) {
   const cfg = manifest?.safety?.ocr || {};
   return {
     enabled: cfg.enabled === true,
-    model: typeof cfg.model === "string" && cfg.model.trim() ? cfg.model.trim() : "@cf/google/gemma-4-26b-a4b-it",
+    model: typeof cfg.model === "string" && cfg.model.trim() ? cfg.model.trim() : OCR_PREFLIGHT_DEFAULT_MODEL,
     maxPages: Number.isFinite(cfg.max_pages_per_document) && cfg.max_pages_per_document > 0
       ? Math.floor(cfg.max_pages_per_document)
       : 40,
@@ -9297,16 +9311,20 @@ export async function inspectProvenanceRepairReadiness({ m, manifestPath, source
       blockers.push("corpora.local_folder.path is not one absolute folder");
     } else {
       try {
-        const identity = lstatSync(path);
+        const inspectLocalPath = options.inspectLocalPath ?? lstatSync;
+        const resolveLocalPath = options.resolveLocalPath ?? realpathSync;
+        const assertLocalPathReadable = options.assertLocalPathReadable ??
+          ((candidate) => accessSync(candidate, fsConstants.R_OK));
+        const identity = inspectLocalPath(path, { bigint: true });
         if (!identity.isDirectory() || identity.isSymbolicLink()) {
           throw new Error("the declared path is not a direct directory");
         }
-        accessSync(path, fsConstants.R_OK);
+        assertLocalPathReadable(path);
         selectedConfig.local_identity = {
           path: resolve(path),
-          realpath: realpathSync(path),
-          device: Number(identity.dev),
-          inode: Number(identity.ino),
+          realpath: resolveLocalPath(path),
+          device: canonicalProvenanceFilesystemInteger(identity.dev, "local folder device"),
+          inode: canonicalProvenanceFilesystemInteger(identity.ino, "local folder inode"),
         };
       } catch {
         sourceStatus = "unavailable";
@@ -10115,6 +10133,192 @@ async function cmdForget(manifestPath) {
   console.log("");
 }
 
+
+const OCR_PREFLIGHT_PDF_NAME = /\.pdf$/iu;
+
+function ocrPreflightFail(code) {
+  throw new JsonFatal(ocrPreflightFailureReceipt(code));
+}
+
+function ocrPreflightRootSnapshot(path) {
+  const stat = lstatSync(path, { bigint: true });
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new TypeError("OCR preflight root identity is not a directory");
+  }
+  return Object.freeze({
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    mtime_ns: String(stat.mtimeNs ?? BigInt(Math.trunc(Number(stat.mtimeMs) * 1e6))),
+    ctime_ns: String(stat.ctimeNs ?? BigInt(Math.trunc(Number(stat.ctimeMs) * 1e6))),
+  });
+}
+
+function ocrPreflightPlanFingerprint({ root, policy, pricingBasis, privatePrefixes, files, skips }) {
+  const hash = createHash("sha256");
+  hash.update("financial-brain:local-ocr-preflight:v1\0");
+  hash.update(JSON.stringify({
+    root,
+    policy,
+    pricing_basis: pricingBasis,
+    private_prefixes: [...privatePrefixes].sort(),
+  }));
+  for (const file of [...files].sort((left, right) => left.locator.localeCompare(right.locator))) {
+    hash.update("\0file\0");
+    hash.update(JSON.stringify(file));
+  }
+  for (const skip of [...skips].sort((left, right) => left.locator.localeCompare(right.locator))) {
+    hash.update("\0skip\0");
+    hash.update(JSON.stringify(skip));
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+/**
+ * Read local PDF structure and produce an aggregate OCR plan without OCR.
+ *
+ * This is a separate command rather than another ingest dry-run spelling so
+ * its process entry can be credential-exempt and its only output can be one
+ * closed JSON object. It reads no ingest state and calls prepare() with a
+ * literal null OCR callback, which makes model use impossible on this path.
+ */
+export async function cmdOcrPreflight(manifestPath, options = {}) {
+  let request;
+  try {
+    request = options.flags
+      ? ocrPreflightRequest(options.flags)
+      : parseOcrPreflightArgv((options.argv ?? process.argv).slice(4));
+  } catch {
+    ocrPreflightFail("INVALID_REQUEST");
+  }
+  if (typeof manifestPath !== "string" || !manifestPath || manifestPath.startsWith("--")) {
+    ocrPreflightFail("INVALID_REQUEST");
+  }
+
+  let manifest;
+  try {
+    const readManifest = options.readManifest ?? ((path) => JSON.parse(readFileSync(path, "utf8")));
+    manifest = readManifest(manifestPath);
+  } catch {
+    ocrPreflightFail("MANIFEST_UNAVAILABLE");
+  }
+
+  let policy;
+  let privatePrefixes;
+  try {
+    policy = ocrPreflightPolicy(manifest);
+    privatePrefixes = manifest?.safety?.private_path_prefixes ?? [];
+    if (!Array.isArray(privatePrefixes) || privatePrefixes.some((value) => typeof value !== "string")) {
+      throw new TypeError("private path prefixes must be strings");
+    }
+  } catch {
+    ocrPreflightFail("MANIFEST_POLICY_INVALID");
+  }
+
+  let localIngest;
+  let estimateCost;
+  let pricingBasis;
+  try {
+    localIngest = await (options.ingestLib ?? (() => import("./ingest/run.mjs")))();
+    const ocrModule = await (options.ocrLib ?? ingestOcrLib)();
+    ({ estimateOcrCost: estimateCost } = ocrModule);
+    pricingBasis = ocrPreflightPricingBasis(policy.ocr_model, ocrModule?.OCR_PRICE);
+    if (typeof localIngest?.walk !== "function" || typeof localIngest?.prepare !== "function" ||
+        typeof estimateCost !== "function") {
+      throw new TypeError("OCR preflight dependencies are incomplete");
+    }
+  } catch (error) {
+    const missing = error?.code === "ERR_MODULE_NOT_FOUND" || error?.cause?.code === "ERR_MODULE_NOT_FOUND";
+    ocrPreflightFail(missing ? "DEPENDENCIES_UNAVAILABLE" : "PREFLIGHT_FAILED");
+  }
+
+  let walked;
+  let walkEvidence;
+  let rootBefore;
+  try {
+    walked = localIngest.walk(request.path, { privatePrefixes });
+    if (!walked || !Array.isArray(walked.files) || !Array.isArray(walked.skipped) ||
+        typeof walked.complete !== "boolean") {
+      throw new TypeError("the local walk returned an invalid result");
+    }
+    walkEvidence = ocrPreflightWalkEvidence(walked.skipped);
+    if (!walkEvidence.root_unavailable) rootBefore = ocrPreflightRootSnapshot(request.path);
+  } catch {
+    ocrPreflightFail("PREFLIGHT_FAILED");
+  }
+  if (walkEvidence.root_unavailable) ocrPreflightFail("SOURCE_UNAVAILABLE");
+
+  const observations = [...walkEvidence.observations];
+  const fileBindings = [];
+  const pdfFiles = walked.files
+    .filter((file) => OCR_PREFLIGHT_PDF_NAME.test(String(file?.name || "")))
+    .sort((left, right) => String(left?.rel || left?.name || "")
+      .localeCompare(String(right?.rel || right?.name || "")));
+  for (const file of pdfFiles) {
+    try {
+      const prepared = await localIngest.prepare(file, {
+        sourceName: "ocr-preflight",
+        ocr: null,
+      });
+      // Missing structured evidence is deliberately an invalid observation,
+      // not a reason to recover state from the private path or human error.
+      observations.push(prepared?.observation ?? null);
+      fileBindings.push({
+        locator: String(file?.rel || file?.name || ""),
+        content_sha256: /^[a-f0-9]{64}$/u.test(String(prepared?.hash || "")) ? prepared.hash : null,
+        observation: prepared?.observation ?? null,
+      });
+    } catch {
+      observations.push(null);
+      fileBindings.push({
+        locator: String(file?.rel || file?.name || ""),
+        content_sha256: null,
+        observation: null,
+      });
+    }
+  }
+
+  let receipt;
+  try {
+    const rootAfter = ocrPreflightRootSnapshot(request.path);
+    if (JSON.stringify(rootAfter) !== JSON.stringify(rootBefore)) {
+      throw new TypeError("OCR preflight root changed during inspection");
+    }
+    const skipBindings = walked.skipped.map((skip) => ({
+      locator: String(skip?.path || ""),
+      scope: String(skip?.scope || ""),
+      reason_code: String(skip?.reason_code || ""),
+      original_state: String(skip?.original_state || ""),
+      adjudication: String(skip?.adjudication || ""),
+      coverage_gap: skip?.coverage_gap === false ? false : true,
+    }));
+    const planFingerprint = ocrPreflightPlanFingerprint({
+      root: rootAfter,
+      policy,
+      pricingBasis,
+      privatePrefixes,
+      files: fileBindings,
+      skips: skipBindings,
+    });
+    receipt = ocrPreflightReceipt({
+      planFingerprint,
+      observations,
+      walkComplete: walked.complete,
+      scopeItems: walkEvidence.scope_items,
+      policy,
+      pricingBasis,
+      estimateCost,
+    });
+  } catch {
+    ocrPreflightFail("PREFLIGHT_FAILED");
+  }
+  const write = options.write ?? ((value) => process.stdout.write(value));
+  write(renderOcrPreflightReceipt(receipt));
+  return receipt;
+}
+
+async function cmdOcrPreflightInteractive(manifestPath) {
+  return cmdOcrPreflight(manifestPath, { argv: process.argv });
+}
 
 /**
  * brain ingest — load a folder into the brain.
@@ -23806,6 +24010,7 @@ const commands = {
   "machine-continuity": cmdMachineContinuity,
   "provenance-repair": cmdProvenanceRepairInteractive,
   migrate: (path) => withManifestCloudflareControl(path, () => cmdMigrate(path)),
+  "ocr-preflight": cmdOcrPreflightInteractive,
   ingest: cmdIngest,
   import: cmdImport,
   load: cmdLoad,
@@ -23856,6 +24061,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "machine-continuity",
   "provenance-repair",
   "assistant-repair",
+  "ocr-preflight",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
@@ -23937,6 +24143,11 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end
+    brain ocr-preflight <manifest> --path <dir> --json
+                                           read-only aggregate scanned-PDF plan: affected and
+                                           cap-eligible pages, priced-model estimate, daily cap,
+                                           shared-budget and local file-provider unknowns; no OCR,
+                                           app HTTP/key-store, Brain, or local-state write
     brain ingest     <manifest> --path <dir>  load a folder into the brain
     brain ingest     <manifest> --from drive  load from a connected remote source
                                            add --dry-run --json for one bounded,

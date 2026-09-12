@@ -197,7 +197,14 @@ async function fresh(options = {}) {
         createArrival.resolve();
         await bounded(createRelease.promise, "Synthetic document grant was never released");
       }
-      if (options.createFailure) {
+      if (options.createConflict) {
+        status = 409;
+        response = {
+          error: "conflict",
+          code: "idempotency_conflict",
+          detail: "request_id was already used for a different document access change",
+        };
+      } else if (options.createFailure) {
         status = 503;
         response = { error: "synthetic grant unavailable" };
       } else {
@@ -361,6 +368,21 @@ try {
     check("late A search failure and finally cannot alter the B editor",
       !(await page.locator("body").innerText()).includes("This part of the brain is unavailable")
       && await page.getByRole("button", { name: "Find", exact: true }).count() === 1);
+    await page.close();
+  }
+
+  {
+    const { page, state } = await fresh({ createConflict: true });
+    await searchAndSelect(page);
+    await page.getByLabel("Who is this for?").fill("Current recipient");
+    await page.getByRole("button", { name: "Create exact document access", exact: true }).click();
+    await page.getByText("This save was already used for a different choice. Nothing changed. Refresh this page, review the current information, and try again.", { exact: true }).waitFor();
+    const visible = await page.locator("body").innerText();
+    check("a technical replay conflict becomes a plain no-change recovery step",
+      state.creates.length === 1
+      && state.grants.length === 0
+      && await page.getByRole("button", { name: "Copy private enrollment link", exact: true }).count() === 0
+      && !/request[_ -]?id|idempotenc/i.test(visible));
     await page.close();
   }
 

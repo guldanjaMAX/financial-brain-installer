@@ -8,6 +8,22 @@ export { verifiedNpmCliPath } from "../operations/npm-cli-runtime.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 
+// Keep ordinary audit regressions bounded at five minutes. The disposable
+// recovery adapter is intentionally heavier: it exercises the exact 6,001-row
+// replay and cryptographically bound recovery fixture, and a hosted macOS
+// Node 22 run completed normally just under the ordinary ceiling. Give only
+// that exact proof a reviewed ten-minute ceiling; a lookalike path does not
+// inherit the exception.
+export const DEFAULT_REGRESSION_TIMEOUT_MS = 300_000;
+export const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS = 600_000;
+const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION = "test/cloudflare-recovery-adapter.test.mjs";
+
+function regressionTimeoutMs(path) {
+  return path === CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION
+    ? CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS
+    : DEFAULT_REGRESSION_TIMEOUT_MS;
+}
+
 // A RELEASE MAY DECLARE ITS SCOPE. IT MAY NOT DECLARE ITSELF EXEMPT.
 //
 // Requiring every incident ever opened to carry field evidence before ANY
@@ -220,8 +236,8 @@ export function regressionEnvironment(env = process.env) {
   return clean;
 }
 
-export function runRegressions(cases, run = (path) => spawnSync(process.execPath,
-  ["--no-warnings", path], { cwd: root, env: regressionEnvironment(), stdio: "inherit", timeout: 300_000 }), platform = process.platform) {
+export function runRegressions(cases, run = (path, timeout) => spawnSync(process.execPath,
+  ["--no-warnings", path], { cwd: root, env: regressionEnvironment(), stdio: "inherit", timeout }), platform = process.platform) {
   const results = [];
   for (const path of new Set(cases.flatMap((item) => item.tests))) {
     const runnable = cases.some((item) => item.tests.includes(path) && (!item.testPlatform || item.testPlatform === platform));
@@ -230,7 +246,7 @@ export function runRegressions(cases, run = (path) => spawnSync(process.execPath
       console.log(`SKIP audit regression: ${path} requires another host platform`);
       continue;
     }
-    const result = run(path);
+    const result = run(path, regressionTimeoutMs(path));
     results.push({ path, passed: result.status === 0 && !result.error && !result.signal });
     console.log(`${results.at(-1).passed ? "PASS" : "FAIL"} audit regression: ${path}`);
   }

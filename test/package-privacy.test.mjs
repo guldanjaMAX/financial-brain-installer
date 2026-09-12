@@ -491,6 +491,34 @@ const expected = [
   "operations/provenance-target-repair.mjs",
   "operations/provenance-target-cli.mjs",
   "operations/provenance-source-assessment.mjs",
+  // Fixed fictional field fixture. It has no corpus/path/credential input or
+  // live transport and emits only an aggregate plan or D1-count receipt.
+  "operations/disposable-recovery-seeder.mjs",
+  // Strict private receipt validator for the fixed synthetic deployment. It
+  // stores only hashes, counts, opaque provider version identities, and
+  // reviewed resource-contract booleans; it owns no provider transport.
+  "operations/disposable-recovery-deployment-receipt.mjs",
+  // Provider-neutral fixed-campaign orchestration core. It is not executable
+  // without an injected adapter and reserves owner-only ambiguity markers
+  // before that adapter can be created.
+  "operations/disposable-recovery-field-deploy.mjs",
+  // Exact 6,001-document field transport. It accepts no corpus/source selector,
+  // reserves an owner-only pending receipt before credential/provider work,
+  // and uses only the locked runtime plus manifest-bound disposable source.
+  "operations/disposable-recovery-field-seed.mjs",
+  // Owner-only aggregate field receipts. The helper reserves both final and
+  // pending paths before any live action, pins inode/owner/mode, and refuses
+  // ambiguous replacement or durability state.
+  "operations/private-aggregate-receipt.mjs",
+  // Shared byte contract for a normalized install-state prefix plus one direct
+  // D1 data export. It owns no credential, provider, or command transport.
+  "operations/recovery-content-fingerprint.mjs",
+  // Aggregate-only local OCR planner. Reviewed 2026-09-12 for filename, path,
+  // content, parser-error, hash, credential, and root-identity disclosure. Its
+  // exact schema contains only counts, policy/model/pricing values, ranges,
+  // typed unknowns, application-action false flags, and file-provider unknowns;
+  // the policy module owns no I/O or external capability.
+  "operations/ocr-preflight.mjs",
   // Reviewed read-only Optimize inventory client. It accepts no literal key,
   // validates HTTPS before resolving the protected credential, refuses
   // redirects, and sends only bounded exact filters to the Brain data plane.
@@ -646,7 +674,12 @@ const expected = [
   "operations/whatsapp-daemon.mjs",
   "operations/whatsapp-drain-scheduler.mjs",
   "operations/installed-manifest.mjs",
+  // Counts-only disposable bootstrap observer. It has no provider, credential,
+  // filesystem, retry, or mutation implementation and receives one fixed
+  // aggregate SELECT through injected read-only callbacks.
+  "operations/aggregate-field-observer.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
+  "operations/locked-wrangler-runtime.mjs",
   "operations/verified-recovery.mjs",
   "operations/windows-dpapi.ps1",
   "operations/windows-dpapi-bridge.mjs",
@@ -874,6 +907,12 @@ if (packageProbeDirectory) try {
       "operations",
       "cloudflare-recovery-adapter.mjs",
     );
+    const observerPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "aggregate-field-observer.mjs",
+    );
     const targetRepairPath = join(
       packageProbeDirectory,
       "package",
@@ -911,7 +950,12 @@ if (packageProbeDirectory) try {
             PATH: process.env.PATH || "",
             ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
             ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
-            PACK_IMPORT_PATHS: JSON.stringify([adapterPath, targetRepairPath, targetCliPath]),
+            PACK_IMPORT_PATHS: JSON.stringify([
+              adapterPath,
+              observerPath,
+              targetRepairPath,
+              targetCliPath,
+            ]),
           },
           timeout: 60_000,
         })

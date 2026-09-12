@@ -87,7 +87,7 @@ try {
   Stop-Rehearsal "the Node.js version could not be verified. Install Node.js 22 or newer, then open a new normal PowerShell window and try again"
 }
 if ($nodeVersion.Major -lt 22) {
-  Stop-Rehearsal "Node.js $nodeVersion is too old. This rehearsal needs Node.js 22 or newer"
+  Stop-Rehearsal "Node.js $nodeVersion is too old. Install Node.js 22 or newer, close this PowerShell window, open a new normal PowerShell window, return to this same reviewed checkout, and run the same supplied command again"
 }
 
 $rehearsal = Join-Path $repositoryRoot "scripts\onboarding-sandbox.mjs"
@@ -106,10 +106,17 @@ Write-Host "The first run may download one additional small set of public UI pac
 Write-Host "That preparation uses no account credential and can be quiet for several minutes."
 Write-Host "Please leave this window open until the local address appears."
 Write-Host ""
+Write-Host "If the browser closes, open http://127.0.0.1:4176/ in your browser while this PowerShell window is still open. Do not restart this launcher."
+Write-Host ""
 Write-Host "When you are finished, close the browser tab, return here, and press Control-C once."
 Write-Host "This launcher starts Node directly, so the ready rehearsal does not use the npm.cmd batch prompt."
 Write-Host ""
 
+# The sealed receipt and every recovery instruction bind these exact loopback
+# addresses. Ignore inherited developer overrides so the address shown to the
+# owner cannot diverge from the process this launcher actually starts.
+$env:BRAIN_ONBOARDING_PORT = "4176"
+$env:BRAIN_VISUAL_PORT = "4177"
 & $node.Source $rehearsal
 $rehearsalExit = $LASTEXITCODE
 if ($rehearsalExit -ne 0) {

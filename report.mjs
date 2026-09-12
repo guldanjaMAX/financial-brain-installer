@@ -184,14 +184,32 @@ export function sourceReceiptSummary(source) {
     : {};
   const state = String(freshness.state || "unknown").toLowerCase();
   const expected = finiteCount(freshness.expected_refresh_seconds);
-  const latestOutcome = String(receipt.latest_run?.outcome || "").toLowerCase();
+  const latestRun = receipt.latest_run && typeof receipt.latest_run === "object"
+    ? receipt.latest_run
+    : {};
+  const latestOutcome = String(latestRun.outcome || "").toLowerCase();
+  const latestWalkComplete = latestRun.walk_complete === true || Number(latestRun.walk_complete) === 1;
+  const latestRefused = finiteCount(latestRun.docs_refused);
+  const latestFailed = finiteCount(latestRun.docs_failed);
   const lastSuccessful = isoDay(receipt.last_successful_run_at);
+  const lastSuccessfulMs = Date.parse(String(receipt.last_successful_run_at || ""));
+  const latestFinishedMs = Date.parse(String(latestRun.finished_at || ""));
+  const latestWasSuccessful = Number.isFinite(lastSuccessfulMs) &&
+    Number.isFinite(latestFinishedMs) && lastSuccessfulMs === latestFinishedMs;
   const lastReceipt = isoDay(receipt.last_ingest_receipt_at || freshness.last_ingest_at);
   const completeThrough = isoDay(receipt.complete_history_through || freshness.last_complete_sweep_at);
 
   let currency;
-  if (["failed", "refused", "partial"].includes(latestOutcome)) {
-    currency = "needs attention; the latest authenticated run did not complete cleanly";
+  if (["failed", "refused"].includes(latestOutcome)) {
+    currency = "needs attention; the latest authenticated ingest did not succeed";
+  } else if (latestOutcome === "partial" && ((latestRefused || 0) > 0 || (latestFailed || 0) > 0)) {
+    currency = "needs attention; the latest authenticated run left one or more documents unaccepted";
+  } else if (latestOutcome === "partial" && !latestWalkComplete) {
+    currency = latestWasSuccessful
+      ? "the latest authenticated ingest succeeded, but its source walk was bounded or incomplete"
+      : "the latest authenticated run was bounded or did not complete its source walk; whole-source currentness remains unproven";
+  } else if (latestOutcome === "partial") {
+    currency = "needs attention; the latest authenticated run did not establish complete source coverage";
   } else if (latestOutcome === "in_progress") {
     currency = "refresh in progress; currentness is not yet confirmed";
   } else if (state === "ok" && expected !== null) {
@@ -211,15 +229,26 @@ export function sourceReceiptSummary(source) {
   }
 
   const historyState = String(coverage.history?.state || "unknown").toLowerCase();
-  const history = historyState === "complete" || completeThrough
-    ? `complete sweep recorded${completeThrough ? ` through ${completeThrough}` : ""}`
-    : historyState === "running"
-      ? "history sweep in progress; completeness remains unproven"
-      : historyState === "needs_attention"
-        ? "history needs attention; completeness remains unproven"
-        : historyState === "not_started"
-          ? "no complete history sweep recorded"
-          : "historical completeness unverified";
+  const latestFailedOrRefused = ["failed", "refused"].includes(latestOutcome);
+  const history = latestOutcome === "partial" && completeThrough
+    ? latestWalkComplete
+      ? `last complete sweep recorded through ${completeThrough}; the newer run left document gaps and did not extend that boundary`
+      : `last complete sweep recorded through ${completeThrough}; the newer run did not prove another complete walk or extend that boundary`
+    : latestFailedOrRefused && completeThrough
+    ? `last complete sweep recorded through ${completeThrough}; the newer run needs attention and did not extend that boundary`
+    : latestOutcome === "partial"
+      ? "the latest run did not prove a complete walk; historical completeness remains unverified"
+      : latestFailedOrRefused || historyState === "needs_attention"
+      ? "history needs attention; historical completeness unverified"
+      : historyState === "running" && completeThrough
+        ? `history sweep in progress; the last complete sweep remains through ${completeThrough}`
+        : historyState === "running"
+          ? "history sweep in progress; completeness remains unproven"
+          : historyState === "complete" || completeThrough
+            ? `complete sweep recorded${completeThrough ? ` through ${completeThrough}` : ""}`
+            : historyState === "not_started"
+              ? "no complete history sweep recorded"
+              : "historical completeness unverified";
 
   const ingest = lastSuccessful
     ? `last successful ingest receipt ${lastSuccessful}`
