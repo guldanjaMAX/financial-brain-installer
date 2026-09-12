@@ -82,6 +82,11 @@ for (const f of files) {
   }
 }
 check(`all ${applied} statements across ${files.length} files applied`, true);
+db.prepare(
+  `INSERT INTO install_state
+     (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
+   VALUES (1, 'fixture', '0.0.0', 12, 0, '2026-01-01T00:00:00Z', 'test')`,
+).run();
 
 /* ---- provenance assessment markers are new proof, never a legacy backfill ---- */
 {
@@ -173,6 +178,9 @@ for (const t of [
   "source_original_result_family_receipts",
   "source_original_result_family_verifications",
   "source_original_result_family_recovery_state",
+  "source_original_accepted_resolution_admissions",
+  "source_original_accepted_resolutions",
+  "source_original_accepted_resolution_activations",
 ]) {
   check(`${t} exists`, names.has(t), [...names].join(", "));
 }
@@ -185,6 +193,15 @@ for (const t of [
   const chunkColumns = new Set(db.prepare("PRAGMA table_info(chunks)").all().map((row) => row.name));
   check("0044 adds nullable exact revision and stored-chunk receipt pointers",
     chunkColumns.has("bound_document_revision_id") && chunkColumns.has("result_chunk_receipt_hash"));
+}
+{
+  const installColumns = new Set(db.prepare("PRAGMA table_info(install_state)").all().map((row) => row.name));
+  const verificationColumns = new Set(db.prepare(
+    "PRAGMA table_info(source_original_result_family_verifications)",
+  ).all().map((row) => row.name));
+  check("0045 adds deployment-local full-result retrieval generations",
+    installColumns.has("source_original_retrieval_generation") &&
+      verificationColumns.has("retrieval_generation"));
 }
 for (const object of [
   "idx_source_original_result_family_members_revision",
@@ -207,6 +224,46 @@ for (const object of [
   "source_original_result_family_verification_validate_insert",
   "source_original_result_family_verification_no_update",
   "source_original_result_family_verification_no_delete",
+  "idx_source_original_accepted_resolutions_original_sequence",
+  "idx_source_original_accepted_resolution_activations_resolution_sequence",
+  "source_original_current_result_family_verifications",
+  "source_original_current_accepted_resolutions",
+  "source_original_result_family_verification_recovery_block",
+  "source_original_result_family_verification_retrieval_generation_validate",
+  "source_original_retrieval_generation_no_reset_update",
+  "source_original_retrieval_generation_no_replace_insert",
+  "source_original_retrieval_generation_no_singleton_delete",
+  "source_original_retrieval_generation_documents_ai",
+  "source_original_retrieval_generation_documents_ad",
+  "source_original_retrieval_generation_documents_au",
+  "source_original_retrieval_generation_chunks_ai",
+  "source_original_retrieval_generation_chunks_ad",
+  "source_original_retrieval_generation_chunks_au",
+  "source_original_retrieval_generation_sources_ai",
+  "source_original_retrieval_generation_sources_ad",
+  "source_original_retrieval_generation_sources_au",
+  "source_original_retrieval_generation_memory_ai",
+  "source_original_retrieval_generation_memory_ad",
+  "source_original_retrieval_generation_memory_au",
+  "chunks_source_original_sealed_receipt_no_revival_update",
+  "chunks_source_original_sealed_receipt_no_revival_insert",
+  "documents_source_original_sealed_evidence_no_revival_update",
+  "documents_source_original_sealed_evidence_no_revival_insert",
+  "source_original_accepted_resolution_no_duplicate_insert",
+  "source_original_accepted_resolution_requires_admission",
+  "source_original_accepted_resolution_validate_recovery_insert",
+  "source_original_accepted_resolution_no_update",
+  "source_original_accepted_resolution_no_delete",
+  "source_original_accepted_resolution_activation_no_duplicate_insert",
+  "source_original_accepted_resolution_activation_validate_insert",
+  "source_original_accepted_resolution_activation_no_update",
+  "source_original_accepted_resolution_activation_no_delete",
+  "source_original_accepted_resolution_admission_validate_insert",
+  "source_original_accepted_resolution_admission_no_update",
+  "source_original_accepted_resolution_admission_commit",
+  "source_original_accepted_resolution_recovery_close_validate",
+  "source_original_accepted_resolution_recovery_state_validate_insert",
+  "source_original_observation_accepted_admission_required",
 ]) {
   check(`${object} exists`, names.has(object));
 }
@@ -326,11 +383,6 @@ for (const trigger of [
 
 /* queued_at is allowed to collide; the database-owned generation is not. */
 {
-  db.prepare(
-    `INSERT INTO install_state
-       (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
-     VALUES (1, 'fixture', '0.0.0', 12, 0, '2026-01-01T00:00:00Z', 'test')`
-  ).run();
   db.prepare(
     `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
      VALUES ('race#0', 'race#0', 'upsert', 1000)`

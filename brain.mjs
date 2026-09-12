@@ -3870,18 +3870,22 @@ export async function cmdMigrate(manifestPath, options = {}) {
     `INSERT INTO install_state
        (id, client_slug, product_version, schema_version, gate_version, installed_at, ring,
         vector_projection_status, vector_projection_bootstrap_epoch,
-        vector_projection_bootstrap_cursor, vector_projection_bootstrap_high_water)
+        vector_projection_bootstrap_cursor, vector_projection_bootstrap_high_water,
+        source_original_retrieval_generation)
      VALUES (
        1,?,?,?,?,?,?,
        CASE WHEN EXISTS (SELECT 1 FROM chunks) THEN 'bootstrap_required' ELSE 'verified' END,
        CASE WHEN EXISTS (SELECT 1 FROM chunks) THEN 1 ELSE 0 END,
        NULL,
-       (SELECT MAX(chunk_uid) FROM chunks)
+       (SELECT MAX(chunk_uid) FROM chunks),
+       COALESCE((SELECT source_original_retrieval_generation + 1
+                   FROM install_state WHERE id = 1), 0)
      )
      ON CONFLICT(id) DO UPDATE SET
        client_slug = excluded.client_slug,
        schema_version = excluded.schema_version,
-       gate_version = excluded.gate_version`,
+       gate_version = excluded.gate_version,
+       source_original_retrieval_generation = excluded.source_original_retrieval_generation`,
     [
       m.client?.slug || "unknown",
       PRODUCT_VERSION,

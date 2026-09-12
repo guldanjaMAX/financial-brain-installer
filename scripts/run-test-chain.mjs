@@ -48,8 +48,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/financial-picture.test.mjs",
   "node --no-warnings test/financial-picture-cli.test.mjs",
   // Client upgrade rehearsals, added after the launcher freeze. Every shipped
-  // release through v0.3.6 ships 22 migrations and this release ships 44, so
-  // 0023..0044 have never run on a real client brain until these.
+  // release through v0.3.6 ships 22 migrations and this release ships 45, so
+  // 0023..0045 have never run on a real client brain until these.
   "node --no-warnings test/migration-walk-22-to-35.test.mjs",
   "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
@@ -65,9 +65,11 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/source-original-observation-migration.test.mjs",
   "node --no-warnings --test test/source-original-result-binding-migration.test.mjs",
   "node --no-warnings --test test/source-original-result-family-migration.test.mjs",
+  "node --no-warnings --test test/source-original-accepted-resolution-migration.test.mjs",
   "node --no-warnings --test test/provenance-source-assessment.test.mjs",
   "node --no-warnings --test worker/test/source-original-binding.test.mjs",
   "node --no-warnings --test worker/test/source-original-result-family.test.mjs",
+  "node --no-warnings --test worker/test/source-original-accepted-resolution.test.mjs",
   "node --no-warnings --test worker/test/source-original-observation.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
@@ -111,7 +113,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/vector-delete-outbox.test.mjs",
   "node --no-warnings test/vector-bootstrap-paused-strand.test.mjs",
   // Client upgrade rehearsals. Every shipped release through v0.3.6 carries 22
-  // migrations and this release carries 44, so 0023..0044 have never run on a
+  // migrations and this release carries 45, so 0023..0045 have never run on a
   // real client brain. These walk a populated schema-22 database forward.
   "node --no-warnings test/migration-walk-22-to-35.test.mjs",
   "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
@@ -294,9 +296,11 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/source-original-observation-migration.test.mjs",
   "node --no-warnings --test test/source-original-result-binding-migration.test.mjs",
   "node --no-warnings --test test/source-original-result-family-migration.test.mjs",
+  "node --no-warnings --test test/source-original-accepted-resolution-migration.test.mjs",
   "node --no-warnings --test test/provenance-source-assessment.test.mjs",
   "node --no-warnings --test worker/test/source-original-binding.test.mjs",
   "node --no-warnings --test worker/test/source-original-result-family.test.mjs",
+  "node --no-warnings --test worker/test/source-original-accepted-resolution.test.mjs",
   "node --no-warnings --test worker/test/source-original-observation.test.mjs",
 ]);
 

@@ -231,6 +231,26 @@ the target has no imported corpus or provenance rows, keeps immutable binding
 checks active, then deletes the marker and executes a fail-closed empty-state
 assertion. Source inspection, restored snapshot checks, and promotion also
 refuse any target with that marker left open.
+
+Schema 45 accepted-resolution rows are portable historical lineage and restore
+after their observation, binding, and result-family dependencies. The export
+does not include the ephemeral admission rows, deployment-local result-family
+verifications, or accepted-resolution activations. Closing the import marker
+requires every restored accepted observation to have exactly one matching
+portable resolution, every portable resolution to have its matching prior
+unresolved observation and family receipt, and all local-only acceptance tables
+to be empty.
+
+A restored accepted resolution is therefore not current verification for the
+target deployment. After the recovered Vectorize projection is rebuilt, the
+full-admin-only `accepted_resolution` mode must rerun the exact one-target
+schema-44 family, Vectorize, and production owner retrieval proof and record a
+fresh local activation. Until that succeeds, verification reports the
+resolution as requiring reactivation. The portable history never establishes
+whole-source completeness, and recovery does not enable the legacy
+`provenance-repair --apply` command or authorize OCR, reingest, deletion,
+deployment, or customer execution.
+
 The exact verified artifact also anchors a versioned bank security proof in the
 private recovery journal. Each ordered pair of hashes commits the row identity
 and every bank field: the exact original semantic row and its one permitted

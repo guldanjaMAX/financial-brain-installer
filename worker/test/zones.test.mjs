@@ -57,6 +57,11 @@ function makeEnv() {
   for (const file of readdirSync(MIGRATIONS).filter((name) => name.endsWith(".sql")).sort()) {
     db.exec(readFileSync(join(MIGRATIONS, file), "utf8"));
   }
+  db.prepare(
+    `INSERT INTO install_state
+       (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
+     VALUES (1,'zones-fixture','0.0.0-test',45,0,'2026-09-11T00:00:00Z','test')`,
+  ).run();
   return { db, env: { DB: d1Facade(db) } };
 }
 

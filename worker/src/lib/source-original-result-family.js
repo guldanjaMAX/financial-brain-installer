@@ -348,7 +348,7 @@ async function exactFamilySnapshot(env, request, originalId) {
 
 async function projectionReceipt(env, originalId, expectedReadiness) {
   const state = await env.DB.prepare(
-    `SELECT schema_version,outbox_generation,
+    `SELECT schema_version,outbox_generation,source_original_retrieval_generation,
             vector_projection_mutation_id,vector_projection_submitted_at,
             vector_projection_status,vector_projection_bootstrap_epoch,
             (SELECT COUNT(*) FROM chunks) AS expected_vector_count,
@@ -366,6 +366,14 @@ async function projectionReceipt(env, originalId, expectedReadiness) {
       503,
       "source_original_result_family_schema_unavailable",
       "result-family receipt schema is not active",
+    );
+  }
+  const retrievalGeneration = Number(state.source_original_retrieval_generation);
+  if (!Number.isSafeInteger(retrievalGeneration) || retrievalGeneration < 0) {
+    throw new SourceOriginalResultFamilyError(
+      503,
+      "source_original_result_family_schema_unavailable",
+      "result-family retrieval generation is unavailable",
     );
   }
   const receipt = {
@@ -408,7 +416,25 @@ async function projectionReceipt(env, originalId, expectedReadiness) {
   return {
     ...receipt,
     vector_readiness_hash: await sha256Id(canonical(receipt)),
+    retrieval_generation: retrievalGeneration,
   };
+}
+
+async function currentRetrievalGeneration(env) {
+  const state = await env.DB.prepare(
+    `SELECT schema_version,source_original_retrieval_generation
+       FROM install_state WHERE id=1`,
+  ).first();
+  const generation = Number(state?.source_original_retrieval_generation);
+  if (!state || Number(state.schema_version) < 45 ||
+      !Number.isSafeInteger(generation) || generation < 0) {
+    throw new SourceOriginalResultFamilyError(
+      503,
+      "source_original_result_family_schema_unavailable",
+      "result-family retrieval generation is unavailable",
+    );
+  }
+  return generation;
 }
 
 function resultProjection(pair, position) {
@@ -537,6 +563,9 @@ function verificationFields(value) {
     target_outbox_count: Number(value.target_outbox_count),
     global_outbox_count: Number(value.global_outbox_count),
     vector_readiness_hash: String(value.vector_readiness_hash),
+    retrieval_generation: value.retrieval_generation === null
+      ? null
+      : Number(value.retrieval_generation),
     retrieval_contract_version: Number(value.retrieval_contract_version),
     retrieval_probe_id: String(value.retrieval_probe_id),
     retrieval_status: String(value.retrieval_status),
@@ -564,24 +593,25 @@ function memberFields(value) {
 }
 
 async function readStoredProof(env, familyReceiptHash, verificationHash) {
-  const [receiptResult, memberResult, verificationResult] = await Promise.all([
+  const [receiptResult, memberResult, verificationResult] = await env.DB.batch([
     env.DB.prepare(
       `SELECT contract_version,tenant_id,source,original_id,locator_kind,
               original_content_sha256,original_byte_count,document_count,document_set_hash,
               chunk_count,chunk_set_hash,family_receipt_hash,sealed_at
          FROM source_original_result_family_receipts WHERE family_receipt_hash=?1 LIMIT 2`,
-    ).bind(familyReceiptHash).all(),
+    ).bind(familyReceiptHash),
     env.DB.prepare(
       `SELECT document_revision_id,source_original_binding_hash,chunk_ix,chunk_receipt_hash
          FROM source_original_result_family_members WHERE family_receipt_hash=?1
         ORDER BY document_revision_id,chunk_ix LIMIT ?2`,
-    ).bind(familyReceiptHash, MAX_CHUNKS + 1).all(),
+    ).bind(familyReceiptHash, MAX_CHUNKS + 1),
     env.DB.prepare(
       `SELECT contract_version,tenant_id,family_receipt_hash,outbox_generation,
               vector_projection_mutation_id,vector_projection_submitted_at,
               vector_projection_bootstrap_epoch,vector_projection_status,
               expected_vector_count,actual_vector_count,target_outbox_count,global_outbox_count,
-              vector_readiness_hash,retrieval_contract_version,retrieval_probe_id,retrieval_status,
+              vector_readiness_hash,retrieval_generation,
+              retrieval_contract_version,retrieval_probe_id,retrieval_status,
               retrieval_result_hash_a,retrieval_result_hash_b,
               retrieved_document_revision_id_a,retrieved_document_revision_id_b,
               retrieved_chunk_ix_a,retrieved_chunk_ix_b,citation_status,
@@ -589,7 +619,7 @@ async function readStoredProof(env, familyReceiptHash, verificationHash) {
               cited_document_revision_id_a,cited_document_revision_id_b,
               verification_hash,verified_at
          FROM source_original_result_family_verifications WHERE verification_hash=?1 LIMIT 2`,
-    ).bind(verificationHash).all(),
+    ).bind(verificationHash),
   ]);
   return {
     receipts: rowsOf(receiptResult),
@@ -610,32 +640,92 @@ function storedProofMatches(stored, familyReceipt, members, verification) {
     canonical(verificationFields(verified)) === canonical(verificationFields(verification));
 }
 
-async function persistProof(env, familyReceipt, members, verification, operation, recordedAt) {
+function verificationInsertStatement(env, verification, recordedAt) {
+  return env.DB.prepare(
+    `INSERT INTO source_original_result_family_verifications
+       (contract_version,tenant_id,family_receipt_hash,outbox_generation,
+        vector_projection_mutation_id,vector_projection_submitted_at,
+        vector_projection_bootstrap_epoch,vector_projection_status,
+        expected_vector_count,actual_vector_count,target_outbox_count,global_outbox_count,
+        vector_readiness_hash,retrieval_generation,
+        retrieval_contract_version,retrieval_probe_id,retrieval_status,
+        retrieval_result_hash_a,retrieval_result_hash_b,
+        retrieved_document_revision_id_a,retrieved_document_revision_id_b,
+        retrieved_chunk_ix_a,retrieved_chunk_ix_b,citation_status,
+        citation_set_hash_a,citation_set_hash_b,
+        cited_document_revision_id_a,cited_document_revision_id_b,
+        verification_hash,verified_at)
+     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
+             ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)`,
+  ).bind(
+    verification.contract_version, verification.tenant_id, verification.family_receipt_hash,
+    verification.outbox_generation, verification.vector_projection_mutation_id,
+    verification.vector_projection_submitted_at, verification.vector_projection_bootstrap_epoch,
+    verification.vector_projection_status, verification.expected_vector_count,
+    verification.actual_vector_count, verification.target_outbox_count,
+    verification.global_outbox_count, verification.vector_readiness_hash,
+    verification.retrieval_generation, verification.retrieval_contract_version,
+    verification.retrieval_probe_id,
+    verification.retrieval_status, verification.retrieval_result_hash_a,
+    verification.retrieval_result_hash_b, verification.retrieved_document_revision_id_a,
+    verification.retrieved_document_revision_id_b, verification.retrieved_chunk_ix_a,
+    verification.retrieved_chunk_ix_b, verification.citation_status,
+    verification.citation_set_hash_a, verification.citation_set_hash_b,
+    verification.cited_document_revision_id_a, verification.cited_document_revision_id_b,
+    verification.verification_hash, recordedAt,
+  );
+}
+
+/**
+ * Prepare the schema-44 rows without executing them. Accepted-resolution
+ * admission uses this plan so a missing deployment-local verification and the
+ * schema-45 admission row share one D1 transaction. Portable family evidence
+ * must already exist for that path; schema 45 does not silently manufacture
+ * the preceding proof gate.
+ */
+export async function prepareSourceOriginalResultFamilyPersistence(
+  env,
+  { familyReceipt, members, verification },
+  { operation = "record", recordedAt = Date.now() } = {},
+) {
+  if (!["record", "verify", "accepted_resolution"].includes(operation)) {
+    throw new TypeError("unsupported result-family persistence operation");
+  }
   const before = await readStoredProof(
     env,
     familyReceipt.family_receipt_hash,
     verification.verification_hash,
   );
-  if (storedProofMatches(before, familyReceipt, members, verification)) {
-    return { recorded: false, replayed: true };
+  const exactReceipt = before.receipts.length === 1 &&
+    canonical(familyReceiptFields(before.receipts[0])) === canonical(familyReceiptFields(familyReceipt));
+  const exactMembers = before.members.length === members.length &&
+    canonical(before.members.map(memberFields)) === canonical(members.map(memberFields));
+  const exactVerification = before.verifications.length === 1 &&
+    canonical(verificationFields(before.verifications[0])) === canonical(verificationFields(verification));
+  const exactProof = exactReceipt && exactMembers && exactVerification;
+  if (exactProof) {
+    return { statements: [], familyStored: true, verificationStored: true };
   }
   if (operation === "verify") {
     refuse("source_original_result_family_receipt_missing", "the exact current result-family proof is not recorded", 409);
   }
-  const exactMembers = before.members.length === members.length &&
-    canonical(before.members.map(memberFields)) === canonical(members.map(memberFields));
   if (before.receipts.length > 1 || before.verifications.length > 1 ||
-      (before.receipts.length === 1 &&
-        canonical(familyReceiptFields(before.receipts[0])) !== canonical(familyReceiptFields(familyReceipt))) ||
+      (before.receipts.length === 1 && !exactReceipt) ||
       (before.receipts.length === 1 && !exactMembers) ||
       (before.receipts.length === 0 && before.members.length > 0 && !exactMembers) ||
-      (before.verifications.length === 1 &&
-        canonical(verificationFields(before.verifications[0])) !== canonical(verificationFields(verification)))) {
+      (before.verifications.length === 1 && !exactVerification)) {
     refuse("source_original_result_family_receipt_conflict", "stored result-family proof does not match the exact current proof", 409);
+  }
+  if (operation === "accepted_resolution" && (!exactReceipt || !exactMembers)) {
+    refuse(
+      "source_original_result_family_receipt_missing",
+      "the exact portable result-family receipt must be recorded before accepted resolution",
+      409,
+    );
   }
 
   const statements = [];
-  if (before.receipts.length === 0) {
+  if (operation === "record" && before.receipts.length === 0) {
     if (before.members.length === 0) {
       statements.push(env.DB.prepare(
         `INSERT INTO source_original_result_family_members
@@ -667,53 +757,48 @@ async function persistProof(env, familyReceipt, members, verification, operation
     ));
   }
   if (before.verifications.length === 0) {
-    statements.push(env.DB.prepare(
-      `INSERT INTO source_original_result_family_verifications
-         (contract_version,tenant_id,family_receipt_hash,outbox_generation,
-          vector_projection_mutation_id,vector_projection_submitted_at,
-          vector_projection_bootstrap_epoch,vector_projection_status,
-          expected_vector_count,actual_vector_count,target_outbox_count,global_outbox_count,
-          vector_readiness_hash,retrieval_contract_version,retrieval_probe_id,retrieval_status,
-          retrieval_result_hash_a,retrieval_result_hash_b,
-          retrieved_document_revision_id_a,retrieved_document_revision_id_b,
-          retrieved_chunk_ix_a,retrieved_chunk_ix_b,citation_status,
-          citation_set_hash_a,citation_set_hash_b,
-          cited_document_revision_id_a,cited_document_revision_id_b,
-          verification_hash,verified_at)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-               ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)`,
-    ).bind(
-      verification.contract_version, verification.tenant_id, verification.family_receipt_hash,
-      verification.outbox_generation, verification.vector_projection_mutation_id,
-      verification.vector_projection_submitted_at, verification.vector_projection_bootstrap_epoch,
-      verification.vector_projection_status, verification.expected_vector_count,
-      verification.actual_vector_count, verification.target_outbox_count,
-      verification.global_outbox_count, verification.vector_readiness_hash,
-      verification.retrieval_contract_version, verification.retrieval_probe_id,
-      verification.retrieval_status, verification.retrieval_result_hash_a,
-      verification.retrieval_result_hash_b, verification.retrieved_document_revision_id_a,
-      verification.retrieved_document_revision_id_b, verification.retrieved_chunk_ix_a,
-      verification.retrieved_chunk_ix_b, verification.citation_status,
-      verification.citation_set_hash_a, verification.citation_set_hash_b,
-      verification.cited_document_revision_id_a, verification.cited_document_revision_id_b,
-      verification.verification_hash, recordedAt,
-    ));
+    statements.push(verificationInsertStatement(env, verification, recordedAt));
   }
+  return {
+    statements,
+    familyStored: exactReceipt && exactMembers,
+    verificationStored: exactVerification,
+  };
+}
+
+/** Exact hash-checked readback for a proof planned by this module. */
+export async function sourceOriginalResultFamilyProofStored(
+  env,
+  { familyReceipt, members, verification },
+) {
+  const stored = await readStoredProof(
+    env,
+    familyReceipt.family_receipt_hash,
+    verification.verification_hash,
+  );
+  return storedProofMatches(stored, familyReceipt, members, verification);
+}
+
+async function persistProof(env, familyReceipt, members, verification, operation, recordedAt) {
+  const plan = await prepareSourceOriginalResultFamilyPersistence(
+    env,
+    { familyReceipt, members, verification },
+    { operation, recordedAt },
+  );
+  if (plan.statements.length === 0) return { recorded: false, replayed: true };
 
   let batchFailed = false;
   try {
-    if (statements.length) await env.DB.batch(statements);
+    await env.DB.batch(plan.statements);
   } catch {
     // A concurrent exact writer may have won. Only exact, hash-checked readback
     // below may reconcile that race; every other state remains a failure.
     batchFailed = true;
   }
-  const after = await readStoredProof(
+  if (!await sourceOriginalResultFamilyProofStored(
     env,
-    familyReceipt.family_receipt_hash,
-    verification.verification_hash,
-  );
-  if (!storedProofMatches(after, familyReceipt, members, verification)) {
+    { familyReceipt, members, verification },
+  )) {
     throw new SourceOriginalResultFamilyError(
       503,
       "source_original_result_family_record_unavailable",
@@ -722,15 +807,10 @@ async function persistProof(env, familyReceipt, members, verification, operation
   }
   return batchFailed
     ? { recorded: false, replayed: true }
-    : { recorded: statements.length > 0, replayed: false };
+    : { recorded: true, replayed: false };
 }
 
-/** Build, atomically record, or exactly reverify one bounded family proof. */
-export async function handleSourceOriginalResultFamily(env, body, {
-  retrieve,
-  readBindingReadiness,
-  readVectorReadiness = vectorReadiness,
-} = {}) {
+function requireProofDependencies(retrieve, readBindingReadiness) {
   if (typeof retrieve !== "function") {
     throw new SourceOriginalResultFamilyError(
       503,
@@ -745,14 +825,23 @@ export async function handleSourceOriginalResultFamily(env, body, {
       "the source-original revision binding proof is unavailable",
     );
   }
+}
+
+/**
+ * Build one exact result-family proof without writing it. The accepted
+ * resolution gate uses this same production proof builder before it prepares
+ * its single transactional admission batch.
+ */
+export async function buildSourceOriginalResultFamilyProof(env, body, {
+  retrieve,
+  readBindingReadiness,
+  readVectorReadiness = vectorReadiness,
+} = {}) {
+  requireProofDependencies(retrieve, readBindingReadiness);
   const request = normalizedRequest(body);
-  if (request.operation === "record" && env.VECTOR_DRAIN_MODE === "paused-for-upgrade") {
-    throw new SourceOriginalResultFamilyError(
-      503,
-      "corpus_writes_paused",
-      "brain writes are paused for a verified upgrade or rollback",
-    );
-  }
+  // Fence every D1 input consumed below, including source authority, binding
+  // readiness and the exact family snapshot, not only the two retrieval calls.
+  const retrievalGenerationBefore = await currentRetrievalGeneration(env);
   const source = await env.DB.prepare("SELECT name,kind FROM sources WHERE name=?1")
     .bind(request.source).first();
   if (source?.name !== request.source) {
@@ -820,6 +909,13 @@ export async function handleSourceOriginalResultFamily(env, body, {
     refuse("source_original_result_family_retrieval_nondeterministic", "identical production retrieval probes did not produce the same result and citation", 409);
   }
   const projection = await projectionReceipt(env, originalId, readiness);
+  if (projection.retrieval_generation !== retrievalGenerationBefore) {
+    refuse(
+      "source_original_result_family_retrieval_changed",
+      "the retrieval corpus changed during production probes",
+      409,
+    );
+  }
   const verification = {
     contract_version: SOURCE_ORIGINAL_RESULT_FAMILY_CONTRACT_VERSION,
     tenant_id: SOURCE_ORIGINAL_TENANT_ID,
@@ -834,6 +930,7 @@ export async function handleSourceOriginalResultFamily(env, body, {
     target_outbox_count: projection.target_outbox_count,
     global_outbox_count: projection.global_outbox_count,
     vector_readiness_hash: projection.vector_readiness_hash,
+    retrieval_generation: retrievalGenerationBefore,
     retrieval_contract_version: SOURCE_ORIGINAL_RESULT_FAMILY_CONTRACT_VERSION,
     retrieval_probe_id: retrievalProbeId,
     retrieval_status: "deterministic",
@@ -850,26 +947,51 @@ export async function handleSourceOriginalResultFamily(env, body, {
     cited_document_revision_id_b: secondProbe.document_revision_id,
   };
   verification.verification_hash = await sha256Id(canonical(verification));
+  return Object.freeze({
+    request,
+    originalId,
+    familyReceipt: Object.freeze(familyReceipt),
+    members: Object.freeze(family.members.map((member) => Object.freeze({ ...member }))),
+    verification: Object.freeze(verification),
+    projection: Object.freeze(projection),
+    retrievalProbeId,
+    documentCount: family.document_count,
+    chunkCount: family.chunk_count,
+  });
+}
+
+/** Build, atomically record, or exactly reverify one bounded family proof. */
+export async function handleSourceOriginalResultFamily(env, body, dependencies = {}) {
+  requireProofDependencies(dependencies.retrieve, dependencies.readBindingReadiness);
+  const request = normalizedRequest(body);
+  if (request.operation === "record" && env.VECTOR_DRAIN_MODE === "paused-for-upgrade") {
+    throw new SourceOriginalResultFamilyError(
+      503,
+      "corpus_writes_paused",
+      "brain writes are paused for a verified upgrade or rollback",
+    );
+  }
+  const proof = await buildSourceOriginalResultFamilyProof(env, body, dependencies);
   const persistence = await persistProof(
     env,
-    familyReceipt,
-    family.members,
-    verification,
-    request.operation,
+    proof.familyReceipt,
+    proof.members,
+    proof.verification,
+    proof.request.operation,
     Date.now(),
   );
   return {
     contract_version: SOURCE_ORIGINAL_RESULT_FAMILY_CONTRACT_VERSION,
     mode: "result_family",
-    operation: request.operation,
-    source: request.source,
-    original_id: originalId,
-    family_receipt_hash: familyReceipt.family_receipt_hash,
-    verification_hash: verification.verification_hash,
-    document_count: family.document_count,
-    chunk_count: family.chunk_count,
-    vector_readiness_hash: projection.vector_readiness_hash,
-    retrieval_probe_id: retrievalProbeId,
+    operation: proof.request.operation,
+    source: proof.request.source,
+    original_id: proof.originalId,
+    family_receipt_hash: proof.familyReceipt.family_receipt_hash,
+    verification_hash: proof.verification.verification_hash,
+    document_count: proof.documentCount,
+    chunk_count: proof.chunkCount,
+    vector_readiness_hash: proof.projection.vector_readiness_hash,
+    retrieval_probe_id: proof.retrievalProbeId,
     retrieval_status: "deterministic",
     citation_status: "same_family",
     recorded: persistence.recorded,
