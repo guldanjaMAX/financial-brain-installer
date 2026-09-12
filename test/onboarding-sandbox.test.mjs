@@ -335,10 +335,12 @@ test("the Windows owner guide requires a fresh clean checkout and exact SHA equa
   assert.match(guide, /Terminate batch job \(Y\/N\)\?/);
   assert.match(guide, /npm\.cmd run rehearse:onboarding/);
 
-  const powerShellBlocks = [...guide.matchAll(/```powershell\n([\s\S]*?)```/g)];
-  assert.equal(powerShellBlocks[0][1].trim().split(/\r?\n/).length, 1,
-    "the owner launcher must remain one copy-safe command");
-  assert.match(powerShellBlocks[0][1], /-ExpectedSha "<EXACT 40-CHARACTER LOWERCASE SHA FROM THE TECHNICIAN>"/);
+  for (const renderedGuide of [guide, guide.replace(/\r?\n/g, "\r\n")]) {
+    const powerShellBlocks = [...renderedGuide.matchAll(/```powershell\r?\n([\s\S]*?)```/g)];
+    assert.equal(powerShellBlocks[0][1].trim().split(/\r?\n/).length, 1,
+      "the owner launcher must remain one copy-safe command with LF or CRLF");
+    assert.match(powerShellBlocks[0][1], /-ExpectedSha "<EXACT 40-CHARACTER LOWERCASE SHA FROM THE TECHNICIAN>"/);
+  }
 
   assert.match(launcher, /WindowsBuiltInRole\]::Administrator/);
   assert.match(launcher, /OrdinalIgnoreCase/);
