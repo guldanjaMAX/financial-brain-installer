@@ -5,6 +5,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -14,6 +15,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeSync,
   writeFileSync,
 } from "node:fs";
@@ -23,6 +25,10 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { cloudflareOAuthInstallIdentity } from "../brain.mjs";
 import { cloudflareOAuthProfileName } from "../operations/cloudflare-oauth-session.mjs";
+import {
+  buildNpmCliInvocation,
+  resolveNpmCliPath,
+} from "../operations/npm-cli-runtime.mjs";
 import {
   buildFieldGates,
   FULL_FIELD_PREPARATION_STEPS,
@@ -35,6 +41,7 @@ import {
   SYNTHETIC_DISPLAY_NAME,
   UPGRADE_SUMMARY_SQL,
   acceleratedUpdatePlan,
+  assertAcceleratedFieldRuntimeSupported,
   assertNoAmbientProviderCredential,
   createInstalledCloudflareProvider,
   createLifecycleEnvironment,
@@ -50,6 +57,7 @@ import {
   readInstalledContract,
   removeCandidateRuntime,
   reserveAggregateReceipt,
+  syncDirectoryBarrier,
   syntheticSeedReceipt,
   validateAccountWorkersDevSubdomain,
   validateActiveWorkerBindings,
@@ -254,14 +262,14 @@ function inspectedField(fixture) {
 }
 
 function runtimeFor(field) {
-  const runtimeRoot = "/synthetic/private-runtime";
+  const runtimeRoot = resolve(tmpdir(), "synthetic", "private-runtime");
   return {
     runtimeRoot,
     runtimeInfo: { dev: 1, ino: 2 },
     environment: createLifecycleEnvironment({ PATH: process.env.PATH || "/usr/bin:/bin" }, runtimeRoot),
-    prefix: `${runtimeRoot}/prefix`,
-    packageRoot: `${runtimeRoot}/prefix/lib/node_modules/brain-installer`,
-    cliPath: `${runtimeRoot}/prefix/bin/brain`,
+    prefix: join(runtimeRoot, "prefix"),
+    packageRoot: join(runtimeRoot, "prefix", "lib", "node_modules", "brain-installer"),
+    cliPath: join(runtimeRoot, "prefix", "bin", "brain"),
     candidate: field.candidate,
     contract: CONTRACT,
   };
@@ -568,9 +576,9 @@ function dependenciesFor(fixture, state, updateBehavior = null) {
       assert.equal(command, runtime.cliPath);
       assert.deepEqual(args, ["update", fixture.manifestPath]);
       assert.equal(options.cwd, runtime.runtimeRoot);
-      assert.equal(options.env.HOME, `${runtime.runtimeRoot}/home`);
-      assert.equal(options.env.CODEX_HOME, `${runtime.runtimeRoot}/codex`);
-      assert.equal(options.env.CLAUDE_CONFIG_DIR, `${runtime.runtimeRoot}/claude`);
+      assert.equal(options.env.HOME, join(runtime.runtimeRoot, "home"));
+      assert.equal(options.env.CODEX_HOME, join(runtime.runtimeRoot, "codex"));
+      assert.equal(options.env.CLAUDE_CONFIG_DIR, join(runtime.runtimeRoot, "claude"));
       assert.equal(options.env.BRAIN_NO_WRANGLER_LOGIN, "1");
       assert.equal(options.env.CLOUDFLARE_API_TOKEN, undefined);
       assert.equal(options.env.NODE_OPTIONS, undefined);
@@ -600,7 +608,7 @@ test("plan mode is inert and phase parsing binds every explicit provisioned targ
   assert.equal(plan.allowed_mutations.post_update_canary_drain_max_calls, 12);
   assert.equal(plan.forbidden_mutations.includes("direct residue bootstrap or residue drain"), true);
   assert.equal(plan.reads_manifest, false);
-  const absolute = resolve("/tmp", "synthetic-accelerated-plan-test");
+  const absolute = resolve(tmpdir(), "synthetic-accelerated-plan-test");
   const args = [
     "--prepare",
     "--manifest", `${absolute}.manifest.json`,
@@ -638,9 +646,9 @@ test("the CLI plan reads no manifest, credential store, or ambient private value
     encoding: "utf8",
     env: {
       PATH: process.env.PATH || "/usr/bin:/bin",
-      HOME: `/missing/${PRIVATE_SENTINEL}`,
+      HOME: join(tmpdir(), "missing", PRIVATE_SENTINEL),
       CLOUDFLARE_API_TOKEN: TOKEN_SENTINEL,
-      CUSTOMER_MANIFEST: `/missing/${PRIVATE_SENTINEL}.json`,
+      CUSTOMER_MANIFEST: join(tmpdir(), "missing", `${PRIVATE_SENTINEL}.json`),
       NODE_OPTIONS: "",
     },
   });
@@ -654,7 +662,7 @@ test("the CLI plan reads no manifest, credential store, or ambient private value
 });
 
 test("the lifecycle environment isolates all mutable homes and ambient credentials are refused", () => {
-  const root = "/private/synthetic-runtime";
+  const root = resolve(tmpdir(), "private", "synthetic-runtime");
   const environment = createLifecycleEnvironment({
     PATH: "/fixture/bin",
     HOME: "/owner/home",
@@ -664,17 +672,17 @@ test("the lifecycle environment isolates all mutable homes and ambient credentia
     ADMIN_KEY: ADMIN_SENTINEL,
     NODE_OPTIONS: `--import=${PRIVATE_SENTINEL}`,
   }, root);
-  assert.equal(environment.HOME, `${root}/home`);
-  assert.equal(environment.USERPROFILE, `${root}/home`);
-  assert.equal(environment.APPDATA, `${root}/appdata/roaming`);
-  assert.equal(environment.LOCALAPPDATA, `${root}/appdata/local`);
-  assert.equal(environment.XDG_CONFIG_HOME, `${root}/xdg/config`);
-  assert.equal(environment.XDG_DATA_HOME, `${root}/xdg/data`);
-  assert.equal(environment.XDG_STATE_HOME, `${root}/xdg/state`);
-  assert.equal(environment.XDG_CACHE_HOME, `${root}/xdg/cache`);
-  assert.equal(environment.CODEX_HOME, `${root}/codex`);
-  assert.equal(environment.CLAUDE_CONFIG_DIR, `${root}/claude`);
-  assert.equal(environment.TMPDIR, `${root}/tmp`);
+  assert.equal(environment.HOME, join(root, "home"));
+  assert.equal(environment.USERPROFILE, join(root, "home"));
+  assert.equal(environment.APPDATA, join(root, "appdata", "roaming"));
+  assert.equal(environment.LOCALAPPDATA, join(root, "appdata", "local"));
+  assert.equal(environment.XDG_CONFIG_HOME, join(root, "xdg", "config"));
+  assert.equal(environment.XDG_DATA_HOME, join(root, "xdg", "data"));
+  assert.equal(environment.XDG_STATE_HOME, join(root, "xdg", "state"));
+  assert.equal(environment.XDG_CACHE_HOME, join(root, "xdg", "cache"));
+  assert.equal(environment.CODEX_HOME, join(root, "codex"));
+  assert.equal(environment.CLAUDE_CONFIG_DIR, join(root, "claude"));
+  assert.equal(environment.TMPDIR, join(root, "tmp"));
   assert.equal(environment.GIT_CONFIG_NOSYSTEM, "1");
   assert.equal(environment.BRAIN_NO_WRANGLER_LOGIN, "1");
   assert.equal(environment.CLOUDFLARE_API_TOKEN, undefined);
@@ -687,6 +695,246 @@ test("the lifecycle environment isolates all mutable homes and ambient credentia
     () => assertNoAmbientProviderCredential({ CLOUDFLARE_API_TOKEN: TOKEN_SENTINEL }),
     /ambient_cloudflare_credential_refused/,
   );
+});
+
+test("the live accelerated runtime remains unavailable on Windows before install", () => {
+  assert.throws(
+    () => assertAcceleratedFieldRuntimeSupported("win32"),
+    /accelerated_field_runtime_windows_not_reviewed/,
+  );
+  if (process.platform !== "win32") {
+    assert.equal(assertAcceleratedFieldRuntimeSupported(process.platform), true);
+  }
+});
+
+test("Windows directory barriers accept only documented limitations and flush the exact final file", () => {
+  const unsupported = [
+    "EACCES", "EBADF", "EISDIR", "EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM",
+  ];
+  for (const errorCode of unsupported) {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-directory-sync-test-")));
+    const finalPath = join(directory, "receipt.json");
+    privateWrite(finalPath, "{}\n");
+    let finalFlushes = 0;
+    try {
+      assert.equal(syncDirectoryBarrier(
+        directory,
+        lstatSync(directory),
+        finalPath,
+        lstatSync(finalPath),
+        "receipt_parent_changed",
+        {
+          platform: "win32",
+          syncDirectoryHandle() {
+            throw Object.assign(new Error("synthetic unsupported directory sync"), { code: errorCode });
+          },
+          syncFileHandle() { finalFlushes += 1; },
+        },
+      ), true);
+      assert.equal(finalFlushes, 1, errorCode);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-directory-sync-eio-test-")));
+  const finalPath = join(directory, "receipt.json");
+  privateWrite(finalPath, "{}\n");
+  const directoryInfo = lstatSync(directory);
+  const finalInfo = lstatSync(finalPath);
+  let fallbackFlushes = 0;
+  try {
+    let openFallbackFlushes = 0;
+    assert.equal(syncDirectoryBarrier(
+      directory,
+      directoryInfo,
+      finalPath,
+      finalInfo,
+      "receipt_parent_changed",
+      {
+        platform: "win32",
+        openDirectoryHandle() {
+          throw Object.assign(new Error("synthetic unsupported directory open"), { code: "EPERM" });
+        },
+        syncFileHandle() { openFallbackFlushes += 1; },
+      },
+    ), true);
+    assert.equal(openFallbackFlushes, 1);
+
+    assert.throws(
+      () => syncDirectoryBarrier(
+        directory,
+        directoryInfo,
+        finalPath,
+        finalInfo,
+        "receipt_parent_changed",
+        {
+          platform: "win32",
+          syncDirectoryHandle() {
+            throw Object.assign(new Error("synthetic unexpected directory failure"), { code: "EIO" });
+          },
+          syncFileHandle() { fallbackFlushes += 1; },
+        },
+      ),
+      /synthetic unexpected directory failure/,
+    );
+    assert.equal(fallbackFlushes, 0);
+
+    assert.throws(
+      () => syncDirectoryBarrier(
+        directory,
+        directoryInfo,
+        finalPath,
+        finalInfo,
+        "receipt_parent_changed",
+        {
+          platform: "win32",
+          statDirectoryHandle() {
+            throw Object.assign(new Error("synthetic directory identity failure"), { code: "EPERM" });
+          },
+          syncFileHandle() { fallbackFlushes += 1; },
+        },
+      ),
+      /synthetic directory identity failure/,
+    );
+    assert.equal(fallbackFlushes, 0);
+
+    assert.throws(
+      () => syncDirectoryBarrier(
+        directory,
+        directoryInfo,
+        finalPath,
+        finalInfo,
+        "receipt_parent_changed",
+        {
+          platform: "win32",
+          syncDirectoryHandle() {},
+          closeDirectoryHandle(descriptor) {
+            closeSync(descriptor);
+            throw Object.assign(new Error("synthetic directory close failure"), { code: "EPERM" });
+          },
+          syncFileHandle() { fallbackFlushes += 1; },
+        },
+      ),
+      /synthetic directory close failure/,
+    );
+    assert.equal(fallbackFlushes, 0);
+
+    assert.throws(
+      () => syncDirectoryBarrier(
+        directory,
+        directoryInfo,
+        finalPath,
+        finalInfo,
+        "receipt_parent_changed",
+        {
+          platform: "win32",
+          syncDirectoryHandle() {
+            throw Object.assign(new Error("synthetic unsupported directory sync"), { code: "EPERM" });
+          },
+          syncFileHandle() {
+            throw Object.assign(new Error("synthetic final file flush failure"), { code: "EIO" });
+          },
+        },
+      ),
+      /synthetic final file flush failure/,
+    );
+
+    assert.throws(
+      () => syncDirectoryBarrier(
+        directory,
+        directoryInfo,
+        finalPath,
+        finalInfo,
+        "receipt_parent_changed",
+        {
+          platform: "linux",
+          syncDirectoryHandle() {
+            throw Object.assign(new Error("synthetic POSIX directory failure"), { code: "EPERM" });
+          },
+          syncFileHandle() { fallbackFlushes += 1; },
+        },
+      ),
+      /synthetic POSIX directory failure/,
+    );
+    assert.equal(fallbackFlushes, 0);
+
+    assert.throws(
+      () => syncDirectoryBarrier(
+        directory,
+        directoryInfo,
+        finalPath,
+        finalInfo,
+        "receipt_parent_changed",
+        {
+          platform: "win32",
+          syncDirectoryHandle() {
+            writeFileSync(finalPath, "{\"changed\":true}\n");
+            throw Object.assign(new Error("synthetic unsupported directory sync"), { code: "EPERM" });
+          },
+        },
+      ),
+      /receipt_parent_changed/,
+    );
+
+    const hardLinkPath = join(directory, "receipt-hard-link.json");
+    assert.throws(
+      () => syncDirectoryBarrier(
+        directory,
+        directoryInfo,
+        finalPath,
+        lstatSync(finalPath),
+        "receipt_parent_changed",
+        {
+          platform: "win32",
+          syncDirectoryHandle() {
+            throw Object.assign(new Error("synthetic unsupported directory sync"), { code: "EPERM" });
+          },
+          syncFileHandle() { linkSync(finalPath, hardLinkPath); },
+        },
+      ),
+      /receipt_parent_changed/,
+    );
+    assert.equal(lstatSync(finalPath).nlink, 2);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("directory barriers reject pre-barrier ctime drift even when file identity, size, and mtime match", () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-directory-ctime-test-")));
+  const finalPath = join(directory, "receipt.json");
+  privateWrite(finalPath, "{}\n");
+  const directoryInfo = lstatSync(directory);
+  const expectedFinalInfo = lstatSync(finalPath);
+  try {
+    let changed = expectedFinalInfo;
+    for (let index = 0; index < 16 && changed.ctimeMs === expectedFinalInfo.ctimeMs; index += 1) {
+      const sibling = join(directory, `receipt-link-${index}.json`);
+      linkSync(finalPath, sibling);
+      unlinkSync(sibling);
+      changed = lstatSync(finalPath);
+    }
+    assert.equal(changed.dev, expectedFinalInfo.dev);
+    assert.equal(changed.ino, expectedFinalInfo.ino);
+    assert.equal(changed.size, expectedFinalInfo.size);
+    assert.equal(changed.mtimeMs, expectedFinalInfo.mtimeMs);
+    assert.equal(changed.nlink, 1);
+    assert.notEqual(changed.ctimeMs, expectedFinalInfo.ctimeMs);
+    assert.throws(
+      () => syncDirectoryBarrier(
+        directory,
+        directoryInfo,
+        finalPath,
+        expectedFinalInfo,
+        "receipt_parent_changed",
+        { platform: "win32" },
+      ),
+      /receipt_parent_changed/,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("control-plane list proof refuses incomplete pagination or a different Worker", () => {
@@ -884,7 +1132,7 @@ test("the installed provider uses complete official zone-route and account-domai
   }
 });
 
-test("field preparation receipt binds exact full artifact bytes and refuses partial or public files", () => {
+test("field preparation receipt binds exact full artifact bytes and refuses partial or POSIX-public files", () => {
   const fixture = setupFixture();
   try {
     const inspected = inspectFieldPreparation(fixture.packagePath, fixture.fieldReceiptPath);
@@ -899,11 +1147,13 @@ test("field preparation receipt binds exact full artifact bytes and refuses part
       /field_prepare_receipt_incomplete/,
     );
     privateWrite(fixture.fieldReceiptPath, `${JSON.stringify(fieldReceipt(fixture.packagePath))}\n`);
-    if (process.platform !== "win32") chmodSync(fixture.packagePath, 0o644);
-    assert.throws(
-      () => inspectFieldPreparation(fixture.packagePath, fixture.fieldReceiptPath),
-      /candidate_archive_refused/,
-    );
+    if (process.platform !== "win32") {
+      chmodSync(fixture.packagePath, 0o644);
+      assert.throws(
+        () => inspectFieldPreparation(fixture.packagePath, fixture.fieldReceiptPath),
+        /candidate_archive_refused/,
+      );
+    }
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true });
   }
@@ -970,13 +1220,14 @@ test("the installed package derives current migration and accelerated constants 
     if (String(path).endsWith("index.js")) return "const BATCH_MAX_DOCS = 25;";
     return "CREATE TABLE synthetic(value TEXT);";
   };
-  const derived = readInstalledContract("/fixture", fakeRead, () => ["0001_vector_projection_events.sql"]);
+  const fixtureRoot = resolve(tmpdir(), "fixture");
+  const derived = readInstalledContract(fixtureRoot, fakeRead, () => ["0001_vector_projection_events.sql"]);
   assert.equal(derived.terminalSchema, 1);
   assert.equal(derived.triggerRows, 101);
   assert.equal(derived.pageSize, 100);
   assert.equal(derived.seedCalls, 5);
   assert.throws(
-    () => readInstalledContract("/fixture", fakeRead, () => ["0001_vector_projection_events.sql", "0003_gap.sql"]),
+    () => readInstalledContract(fixtureRoot, fakeRead, () => ["0001_vector_projection_events.sql", "0003_gap.sql"]),
     /installed_migration_sequence_not_contiguous/,
   );
 });
@@ -985,10 +1236,16 @@ test("the exact archive can be installed offline and the installed brain wrapper
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-accelerated-pack-test-")));
   if (process.platform !== "win32") chmodSync(directory, 0o700);
   try {
-    const packed = spawnSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", directory], {
+    const npmCli = resolveNpmCliPath();
+    const npmInvocation = buildNpmCliInvocation(npmCli, [
+      "pack", "--json", "--ignore-scripts", "--pack-destination", directory,
+    ]);
+    assert.equal(npmInvocation.shell, false);
+    const packed = spawnSync(npmInvocation.command, npmInvocation.args, {
       cwd: ROOT,
       encoding: "utf8",
       env: { PATH: process.env.PATH || "/usr/bin:/bin", HOME: directory },
+      shell: npmInvocation.shell,
       timeout: 60_000,
       maxBuffer: 16 * 1024 * 1024,
     });
@@ -1012,9 +1269,16 @@ test("the exact archive can be installed offline and the installed brain wrapper
       packagePin,
       receiptPin: pin(receiptPath),
     };
+    if (process.platform === "win32") {
+      assert.throws(
+        () => installCandidateArtifact(field, { PATH: process.env.PATH || "" }),
+        /accelerated_field_runtime_windows_not_reviewed/,
+      );
+      return;
+    }
     const runtime = installCandidateArtifact(field, { PATH: process.env.PATH || "/usr/bin:/bin" });
     try {
-      assert.match(runtime.cliPath, /\/prefix\/bin\/brain$/);
+      assert.equal(runtime.cliPath, join(runtime.prefix, "bin", "brain"));
       assert.equal(runtime.candidate.archiveSha256, packagePin.hash);
       assert.equal(runtime.contract.terminalSchema, CONTRACT.terminalSchema);
       assert.equal(runtime.contract.triggerRows, 1001);
@@ -1273,7 +1537,9 @@ test("prepare binds the clean live baseline and execute proves one durable updat
     assert.equal(prepared.contract.trigger_rows, 1001);
     assert.equal(prepared.control.zero_schedules, true);
     assert.equal(prepared.safeguards.update_executed, false);
-    assert.equal(statSync(join(fixture.directory, "plan.json")).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(join(fixture.directory, "plan.json")).mode & 0o777, 0o600);
+    }
 
     privateWrite(join(fixture.directory, "seed.json"), `${JSON.stringify(syntheticSeedReceipt(prepared), null, 2)}\n`);
     state.phase = "seeded";
@@ -1303,7 +1569,9 @@ test("prepare binds the clean live baseline and execute proves one durable updat
     assert.equal(result.mutations.post_update_canary_retrieval_calls, 1);
     assert.equal(result.control.declared_schedules_restored, 1);
     assert.equal(result.cleanup.verified, false);
-    assert.equal(statSync(join(fixture.directory, "result.json")).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(join(fixture.directory, "result.json")).mode & 0o777, 0o600);
+    }
     assert.equal(existsSync(join(fixture.directory, ".accelerated-update-field-gate.lock")), false);
 
     const persisted = readFileSync(join(fixture.directory, "result.json"), "utf8");

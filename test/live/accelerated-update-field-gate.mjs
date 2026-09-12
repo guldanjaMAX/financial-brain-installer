@@ -49,6 +49,10 @@ import {
   buildFieldGates,
   FULL_FIELD_PREPARATION_STEPS,
 } from "../../scripts/field-prepare.mjs";
+import {
+  buildNpmCliInvocation,
+  resolveNpmCliPath,
+} from "../../operations/npm-cli-runtime.mjs";
 
 export const EXECUTION_CONFIRMATION = "accelerated-update-synthetic-v2";
 export const SYNTHETIC_DISPLAY_NAME = "Synthetic Accelerated Update Field Gate";
@@ -137,6 +141,15 @@ function integer(value, code) {
 function sameFile(left, right) {
   return left?.dev === right?.dev && left?.ino === right?.ino &&
     left?.size === right?.size && left?.mtimeMs === right?.mtimeMs;
+}
+
+function sameSingleFileIdentity(left, right) {
+  return left?.isFile?.() === true && right?.isFile?.() === true &&
+    left.nlink === 1 && right.nlink === 1 && sameFile(left, right);
+}
+
+function sameStableSingleFile(left, right) {
+  return sameSingleFileIdentity(left, right) && left.ctimeMs === right.ctimeMs;
 }
 
 function sameInode(left, right) {
@@ -553,8 +566,13 @@ export function readInstalledContract(packageRoot, read = readFileSync, list = r
   });
 }
 
+export function assertAcceleratedFieldRuntimeSupported(platform = process.platform) {
+  if (platform === "win32") refusal("accelerated_field_runtime_windows_not_reviewed");
+  return true;
+}
+
 export function installCandidateArtifact(field, source = process.env, options = {}) {
-  if (process.platform === "win32") refusal("accelerated_field_runtime_windows_not_reviewed");
+  assertAcceleratedFieldRuntimeSupported();
   const spawn = options.spawn || spawnSync;
   const created = mkdtempSync(join(options.temporaryRoot || tmpdir(), "brain-accelerated-update-field-"));
   const runtimeRoot = realpathSync(created);
@@ -568,13 +586,20 @@ export function installCandidateArtifact(field, source = process.env, options = 
   try {
     assertFilePin(field.packagePin, "candidate_archive_changed");
     assertFilePin(field.receiptPin, "field_prepare_receipt_changed");
-    const result = spawn("npm", [
+    const npmCli = resolveNpmCliPath({
+      environment: source,
+      nodeExecutable: process.execPath,
+      platform: process.platform,
+    });
+    const npmInvocation = buildNpmCliInvocation(npmCli, [
       "install", "--global", "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
       "--prefix", prefix, field.packagePin.path,
-    ], {
+    ]);
+    const result = spawn(npmInvocation.command, npmInvocation.args, {
       cwd: runtimeRoot, encoding: null,
       env: { ...environment, NPM_CONFIG_OFFLINE: "true", NO_UPDATE_NOTIFIER: "1" },
-      input: Buffer.alloc(0), shell: false, timeout: 5 * 60_000, maxBuffer: 16 * 1024 * 1024,
+      input: Buffer.alloc(0), shell: npmInvocation.shell,
+      timeout: 5 * 60_000, maxBuffer: 16 * 1024 * 1024,
     });
     try {
       if (!childSucceeded(result)) refusal("candidate_prefix_install_failed");
@@ -590,7 +615,10 @@ export function installCandidateArtifact(field, source = process.env, options = 
     if (packageJson.name !== field.candidate.name || packageJson.version !== field.candidate.version ||
         realpathSync(cliPath) !== join(packageRoot, "brain.mjs")) refusal("installed_candidate_identity_mismatch");
     const cliInfo = statSync(cliPath);
-    if (!cliInfo.isFile() || (cliInfo.mode & 0o100) === 0) refusal("installed_candidate_cli_refused");
+    if (!cliInfo.isFile() ||
+        (process.platform !== "win32" && (cliInfo.mode & 0o100) === 0)) {
+      refusal("installed_candidate_cli_refused");
+    }
     const version = spawn(cliPath, ["--version"], {
       cwd: runtimeRoot, encoding: null, env: environment, input: Buffer.alloc(0), shell: false,
       timeout: 60_000, maxBuffer: 64 * 1024,
@@ -1548,9 +1576,124 @@ export function validateSyntheticSeedReceipt(receipt, planReceipt, contract) {
   return true;
 }
 
+const WINDOWS_DIRECTORY_SYNC_UNSUPPORTED = new Set([
+  "EACCES", "EBADF", "EISDIR", "EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM",
+]);
+
+function windowsDirectorySyncUnsupported(error, platform) {
+  return platform === "win32" && WINDOWS_DIRECTORY_SYNC_UNSUPPORTED.has(error?.code);
+}
+
+/**
+ * Flush a directory entry after create, rename, or unlink. Node may reject a
+ * directory handle on Windows. Only those documented platform errors fall
+ * back to a stable O_RDWR handle for the final file in the same directory.
+ */
+export function syncDirectoryBarrier(
+  directoryPath,
+  expectedDirectoryInfo,
+  finalPath,
+  expectedFinalInfo,
+  code,
+  {
+    platform = process.platform,
+    openDirectoryHandle = openSync,
+    statDirectoryHandle = fstatSync,
+    syncDirectoryHandle = fsyncSync,
+    closeDirectoryHandle = closeSync,
+    syncFileHandle = fsyncSync,
+  } = {},
+) {
+  const absoluteDirectory = resolve(directoryPath);
+  const absoluteFinal = resolve(finalPath);
+  if (dirname(absoluteFinal) !== absoluteDirectory) refusal(code);
+  const initialDirectory = lstatSync(absoluteDirectory);
+  if (!initialDirectory.isDirectory() || initialDirectory.isSymbolicLink() ||
+      realpathSync(absoluteDirectory) !== absoluteDirectory ||
+      !sameInode(initialDirectory, expectedDirectoryInfo)) refusal(code);
+  const initialFinal = lstatSync(absoluteFinal);
+  if (!initialFinal.isFile() || initialFinal.isSymbolicLink() || initialFinal.nlink !== 1 ||
+      (expectedFinalInfo && !sameStableSingleFile(initialFinal, expectedFinalInfo))) refusal(code);
+
+  let directoryDescriptor;
+  let directoryFailure = null;
+  try {
+    try {
+      directoryDescriptor = openDirectoryHandle(
+        absoluteDirectory,
+        fsConstants.O_RDONLY |
+          (platform === "win32" ? 0 : (fsConstants.O_DIRECTORY || 0)) |
+          (fsConstants.O_NOFOLLOW || 0),
+      );
+    } catch (error) {
+      if (!windowsDirectorySyncUnsupported(error, platform)) throw error;
+      directoryFailure = error;
+    }
+    if (directoryDescriptor !== undefined) {
+      const opened = statDirectoryHandle(directoryDescriptor);
+      if (!opened.isDirectory() || !sameInode(opened, expectedDirectoryInfo)) refusal(code);
+      try {
+        syncDirectoryHandle(directoryDescriptor);
+      } catch (error) {
+        if (!windowsDirectorySyncUnsupported(error, platform)) throw error;
+        directoryFailure = error;
+      }
+      if (!directoryFailure) {
+        if (!sameInode(statDirectoryHandle(directoryDescriptor), expectedDirectoryInfo)) refusal(code);
+        const finalDirectory = lstatSync(absoluteDirectory);
+        const finalFile = lstatSync(absoluteFinal);
+        if (!finalDirectory.isDirectory() || finalDirectory.isSymbolicLink() ||
+            realpathSync(absoluteDirectory) !== absoluteDirectory ||
+            !sameInode(finalDirectory, expectedDirectoryInfo) ||
+            !sameStableSingleFile(initialFinal, finalFile)) refusal(code);
+      }
+    }
+  } finally {
+    if (directoryDescriptor !== undefined) {
+      closeDirectoryHandle(directoryDescriptor);
+    }
+  }
+  if (!directoryFailure) return true;
+
+  // FlushFileBuffers needs a writable handle. The file was already fsynced
+  // before the directory barrier; this is the strongest supported Windows
+  // post-entry barrier and retains exact identity checks around the flush.
+  let finalDescriptor;
+  let finalFailure = null;
+  try {
+    const before = lstatSync(absoluteFinal);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
+        (expectedFinalInfo && !sameStableSingleFile(before, expectedFinalInfo))) refusal(code);
+    finalDescriptor = openSync(
+      absoluteFinal,
+      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW || 0),
+    );
+    const opened = fstatSync(finalDescriptor);
+    if (!sameStableSingleFile(before, opened)) refusal(code);
+    syncFileHandle(finalDescriptor);
+    const openedAfter = fstatSync(finalDescriptor);
+    const finalAfter = lstatSync(absoluteFinal);
+    const directoryAfter = lstatSync(absoluteDirectory);
+    if (!sameStableSingleFile(before, openedAfter) ||
+        !sameStableSingleFile(before, finalAfter) ||
+        !directoryAfter.isDirectory() || directoryAfter.isSymbolicLink() ||
+        realpathSync(absoluteDirectory) !== absoluteDirectory ||
+        !sameInode(directoryAfter, expectedDirectoryInfo)) refusal(code);
+  } catch (error) {
+    finalFailure = error;
+  } finally {
+    if (finalDescriptor !== undefined) {
+      try { closeSync(finalDescriptor); } catch (error) { finalFailure ||= error; }
+    }
+  }
+  if (finalFailure) throw finalFailure;
+  return true;
+}
+
 export function persistAggregateReceipt(path, receipt) {
   const parent = assertPrivateDirectory(dirname(resolve(path)), "receipt_parent_refused");
   let descriptor;
+  let info;
   try {
     descriptor = openSync(
       path,
@@ -1560,15 +1703,14 @@ export function persistAggregateReceipt(path, receipt) {
     writeFileSync(descriptor, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
     fsyncSync(descriptor);
     fchmodSync(descriptor, 0o600);
-    const info = fstatSync(descriptor);
+    info = fstatSync(descriptor);
     if (!info.isFile() || info.nlink !== 1 || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       refusal("receipt_file_refused");
     }
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
-  const directory = openSync(parent.path, fsConstants.O_RDONLY);
-  try { fsyncSync(directory); } finally { closeSync(directory); }
+  syncDirectoryBarrier(parent.path, parent.info, path, info, "receipt_parent_changed");
 }
 
 function writeDescriptorBytes(descriptor, bytes) {
@@ -1603,16 +1745,14 @@ function validateReceiptReservation(reservation, code) {
   return true;
 }
 
-function syncReservationDirectory(reservation, code) {
-  const directory = openSync(reservation.parentPath, fsConstants.O_RDONLY);
-  try {
-    if (!sameInode(fstatSync(directory), reservation.parentInfo)) refusal(code);
-    fsyncSync(directory);
-    if (!sameInode(fstatSync(directory), reservation.parentInfo) ||
-        !sameInode(lstatSync(reservation.parentPath), reservation.parentInfo)) refusal(code);
-  } finally {
-    closeSync(directory);
-  }
+function syncReservationDirectory(reservation, code, expectedFinalInfo = null) {
+  return syncDirectoryBarrier(
+    reservation.parentPath,
+    reservation.parentInfo,
+    reservation.path,
+    expectedFinalInfo,
+    code,
+  );
 }
 
 export function reserveAggregateReceipt(output, marker) {
@@ -1651,7 +1791,7 @@ export function reserveAggregateReceipt(output, marker) {
     if (!reservation.info.isFile() || reservation.info.nlink !== 1 ||
         (process.platform !== "win32" && (reservation.info.mode & 0o077) !== 0) ||
         !sameFile(reservation.info, current)) refusal("receipt_reservation_invalid");
-    syncReservationDirectory(reservation, "receipt_parent_changed");
+    syncReservationDirectory(reservation, "receipt_parent_changed", reservation.info);
     validateReceiptReservation(reservation, "receipt_reservation_changed");
     return reservation;
   } catch (error) {
@@ -1700,7 +1840,7 @@ export function finalizeReservedAggregateReceipt(reservation, receipt, {
     if (!sameFile(temporaryInfo, finalCurrent) || fstatSync(reservation.descriptor).nlink !== 0) {
       refusal("receipt_finalization_changed");
     }
-    syncDirectory(reservation, "receipt_parent_changed");
+    syncDirectory(reservation, "receipt_parent_changed", finalCurrent);
     const durableCurrent = lstatSync(reservation.path);
     if (!sameFile(temporaryInfo, durableCurrent) ||
         !sameInode(lstatSync(reservation.parentPath), reservation.parentInfo)) {
@@ -1737,8 +1877,11 @@ function abandonReceiptReservation(reservation) {
   reservation.closed = true;
 }
 
-function acquireExecutionLock(directory, planFingerprint) {
+function acquireExecutionLock(directory, planFingerprint, durabilityPath) {
   const path = join(directory.path, ".accelerated-update-field-gate.lock");
+  if (!durabilityPath || dirname(resolve(durabilityPath)) !== directory.path) {
+    refusal("execution_lock_durability_path_refused");
+  }
   let descriptor;
   try {
     descriptor = openSync(
@@ -1749,9 +1892,15 @@ function acquireExecutionLock(directory, planFingerprint) {
     writeFileSync(descriptor, `${JSON.stringify({ schema_version: 1, plan_fingerprint: planFingerprint })}\n`);
     fsyncSync(descriptor);
     const info = fstatSync(descriptor);
-    const directoryDescriptor = openSync(directory.path, fsConstants.O_RDONLY);
-    try { fsyncSync(directoryDescriptor); } finally { closeSync(directoryDescriptor); }
-    return Object.freeze({ path, descriptor, info, directoryPath: directory.path });
+    syncDirectoryBarrier(directory.path, directory.info, path, info, "execution_lock_parent_changed");
+    return Object.freeze({
+      path,
+      descriptor,
+      info,
+      directoryPath: directory.path,
+      directoryInfo: directory.info,
+      durabilityPath,
+    });
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor);
     if (error?.code === "EEXIST") refusal("execution_plan_locked");
@@ -1766,10 +1915,22 @@ function releaseExecutionLock(lock) {
   if (!sameFile(lock.info, current) || !sameFile(lock.info, opened) || current.nlink !== 1) {
     refusal("execution_lock_changed");
   }
+  const durabilityInfo = lstatSync(lock.durabilityPath);
+  if (!durabilityInfo.isFile() || durabilityInfo.isSymbolicLink() || durabilityInfo.nlink !== 1 ||
+      dirname(resolve(lock.durabilityPath)) !== lock.directoryPath) {
+    refusal("execution_lock_durability_path_refused");
+  }
+  const directoryInfo = lstatSync(lock.directoryPath);
+  if (!sameInode(directoryInfo, lock.directoryInfo)) refusal("execution_lock_parent_changed");
   closeSync(lock.descriptor);
   unlinkSync(lock.path);
-  const directory = openSync(lock.directoryPath, fsConstants.O_RDONLY);
-  try { fsyncSync(directory); } finally { closeSync(directory); }
+  syncDirectoryBarrier(
+    lock.directoryPath,
+    directoryInfo,
+    lock.durabilityPath,
+    durabilityInfo,
+    "execution_lock_parent_changed",
+  );
 }
 
 function validateDistinctPaths(options) {
@@ -2341,7 +2502,11 @@ export async function executeAcceleratedUpdateFieldGate(options, dependencies = 
     receiptReservation = (dependencies.reserveReceipt || reserveAggregateReceipt)(local.finalOutput, marker);
     let resultReceipt;
     try {
-      lock = (dependencies.acquireLock || acquireExecutionLock)(local.finalOutput.parent, planPin.value.plan_fingerprint);
+      lock = (dependencies.acquireLock || acquireExecutionLock)(
+        local.finalOutput.parent,
+        planPin.value.plan_fingerprint,
+        receiptReservation.path,
+      );
       const provider = await openProvider(local.runtime, local.binding, revalidate, dependencies);
       const evidence = await providerCall(revalidate, () => provider.withSession(async (active) => {
         const beforeControl = await providerCall(revalidate, () =>
