@@ -690,7 +690,15 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
   assert.equal(captured.familyRecordResponse.recorded, true);
   assert.equal(captured.familyVerifyResponse.replayed, true);
   assert.equal(captured.acceptedRecordResponse.accepted_outcome_authorized, true);
+  assert.equal(
+    captured.acceptedRecordResponse.resolves_observation_hash,
+    captured.discoveryResponse.observations[0].observation_hash,
+  );
   assert.equal(captured.acceptedVerifyResponse.status, "accepted_resolution_current");
+  assert.equal(
+    captured.acceptedVerifyResponse.resolves_observation_hash,
+    captured.discoveryResponse.observations[0].observation_hash,
+  );
   assert.equal(currentAcceptedCount(sourceBrain), 1);
   const initialFamilyRecordResponse = captured.familyRecordResponse;
   const initialAcceptedRecordResponse = captured.acceptedRecordResponse;
@@ -781,6 +789,14 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
   assert.equal(replayFamilyVerify.replayed, true);
   assert.equal(replayAcceptedRecord.replayed, true);
   assert.equal(replayAcceptedVerify.replayed, true);
+  assert.equal(
+    replayAcceptedRecord.resolves_observation_hash,
+    discoveryObservation.observation_hash,
+  );
+  assert.equal(
+    replayAcceptedVerify.resolves_observation_hash,
+    discoveryObservation.observation_hash,
+  );
   assert.equal(currentAcceptedCount(sourceBrain), 1);
 
   await sourceHarness.adminPost(
@@ -830,7 +846,12 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
   );
   assert.equal(refreshedAccepted.reactivated, true);
   assert.equal(refreshedAccepted.resolution_hash, initialAcceptedRecordResponse.resolution_hash);
+  assert.equal(refreshedAccepted.resolves_observation_hash, discoveryObservation.observation_hash);
   assert.equal(captured.acceptedVerifyResponse.status, "accepted_resolution_current");
+  assert.equal(
+    captured.acceptedVerifyResponse.resolves_observation_hash,
+    discoveryObservation.observation_hash,
+  );
   assert.equal(currentAcceptedCount(sourceBrain), 1);
   assertEveryPrivateBoundaryWasLeased(sourceHarness.state.events);
   assertNoSourceWideControlMutation(sourceHarness.state.requests);
@@ -935,8 +956,13 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
   assert.equal(recoveredAccepted.reactivated, true);
   assert.equal(recoveredAccepted.resolution_hash, refreshedAccepted.resolution_hash);
   assert.equal(recoveredAccepted.verification_hash, recoveredFamilyRecord.verification_hash);
+  assert.equal(
+    recoveredAccepted.resolves_observation_hash,
+    discoveryObservation.observation_hash,
+  );
   assert.equal(finalVerify.status, "accepted_resolution_current");
   assert.equal(finalVerify.resolution_hash, recoveredAccepted.resolution_hash);
+  assert.equal(finalVerify.resolves_observation_hash, discoveryObservation.observation_hash);
   assert.equal(currentAcceptedCount(recoveredBrain), 1);
   assertEveryPrivateBoundaryWasLeased(recoveredHarness.state.events);
   assertNoSourceWideControlMutation(recoveredHarness.state.requests);

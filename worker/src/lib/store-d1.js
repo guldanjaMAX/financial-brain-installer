@@ -5751,7 +5751,14 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
     }
   }
   if (state.status === "verified") {
-    state = await rebaseVerifiedAcceleratedBootstrap(env, state);
+    // Contract 3 is the supervised field-proof contract. Its caller binds an
+    // interruption receipt to this epoch and independently verifies the exact
+    // batch ledger before promotion, so keep the completed rows addressable
+    // for that final observation. Ordinary clients retain the rebase that
+    // prevents historical batches from counting toward a later projection.
+    if (!(Number(options?.contract) >= 3)) {
+      state = await rebaseVerifiedAcceleratedBootstrap(env, state);
+    }
     return acceleratedBootstrapReceipt(env, "waiting", null, options);
   }
   if (state.status !== "bootstrap_required") {

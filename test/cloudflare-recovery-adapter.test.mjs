@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -8,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -19,10 +21,12 @@ import { join } from "node:path";
 
 import {
   CloudflareRecoveryAdapterError,
+  RECOVERY_BOOTSTRAP_INTERRUPTION_CONFIRMATION,
   RECOVERY_DURABLE_TABLES,
   RECOVERY_EXPORT_TABLES,
   RECOVERY_FIELD_GATE_STOP_STAGES,
   createCloudflareRecoveryFieldGateAdapters,
+  normalizeRecoveryBootstrapObservation,
   normalizedInstallStateExport,
   parseCloudflareRecoveryCliArguments,
   previewCloudflareRecoveryFieldGate,
@@ -79,6 +83,45 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_accepted_resoluti
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_admissions"), false);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_family_recovery_state"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_recovery_state"), false);
+
+const normalizedBootstrapObservation = normalizeRecoveryBootstrapObservation({
+  projection_status: "bootstrap_required",
+  protocol: "bootstrap-v2",
+  epoch: 3,
+  cursor: "private-fixture-cursor",
+  base_count: 0,
+  chunks: 3_201,
+  fts_rows: 3_201,
+  batches: 3,
+  full_1000_batches: 3,
+  tail_201_batches: 0,
+  unexpected_batch_sizes: 0,
+  exact_batch_shape: 0,
+  queued_batches: 0,
+  submitted_batches: 0,
+  confirmed_batches: 3,
+  admitted_rows: 3_000,
+  queued_rows: 0,
+  submitted_rows: 0,
+  confirmed_rows: 3_000,
+  outbox_rows: 0,
+  queued_outbox: 0,
+  submitted_outbox: 0,
+  failed_outbox: 0,
+  cursor_matches_last_batch_end: 1,
+  cursor_at_high_water: 0,
+  lease_present: 0,
+}, 3_000);
+assert.equal(normalizedBootstrapObservation.cursorPresent, true);
+assert.match(normalizedBootstrapObservation.cursorHash, /^[0-9a-f]{64}$/);
+assert.equal(JSON.stringify(normalizedBootstrapObservation).includes("private-fixture-cursor"), false);
+assert.throws(
+  () => normalizeRecoveryBootstrapObservation({
+    projection_status: "bootstrap_required",
+    protocol: "bootstrap-v2",
+  }, 0),
+  (error) => error.code === "RECOVERY_BOOTSTRAP_OBSERVATION_INVALID",
+);
 assert.ok(
   RECOVERY_EXPORT_TABLES.indexOf("source_original_observations") <
     RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") &&
@@ -109,6 +152,20 @@ const pausedWorkerVersionId = "fixture-paused-version-id";
 const activeWorkerVersionId = "fixture-active-version-id";
 const workerScriptEtag = "a".repeat(64);
 const sourceWorkerScriptEtag = "b".repeat(64);
+
+function macAclChange(...args) {
+  const result = spawnSync("/bin/chmod", args, {
+    cwd: "/",
+    encoding: null,
+    env: { LANG: "C", LC_ALL: "C" },
+    shell: false,
+    timeout: 5_000,
+    windowsHide: true,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0);
+}
 
 const sourceManifest = {
   manifest_version: 1,
@@ -455,9 +512,10 @@ async function recoveryBankFixture() {
   return fixture;
 }
 
-function snapshotForChunkCount(chunkCount) {
+function snapshotForChunkCount(chunkCount, documentCount = 3) {
   const aggregate = {
     ...aggregateTemplate,
+    documents: String(documentCount),
     chunks: String(chunkCount),
     chunks_fts: String(chunkCount),
     chunks_id_max: String(chunkCount),
@@ -466,6 +524,7 @@ function snapshotForChunkCount(chunkCount) {
   return Object.freeze({
     ...expectedSnapshot,
     aggregate_fingerprint: hash(canonical(aggregate)),
+    document_count: documentCount,
     chunk_count: chunkCount,
     fts_count: chunkCount,
   });
@@ -737,7 +796,12 @@ function providerHarness({
   bootstrapMutatesCorpus = false,
   bootstrapBusyOnce = false,
   bootstrapPageSize = 3_000,
+  bootstrapObservationDriftOnce = false,
+  bootstrapObservationLagOnce = false,
+  bootstrapRequestObserver = () => {},
+  bootstrapShapeOverride = null,
   bootstrapReceiptTransform = (receipt) => receipt,
+  expectedBootstrapContract = null,
   busyReceiptTransform = (receipt) => receipt,
   deploymentChangesDuringEval = false,
   redirectHealth = false,
@@ -771,6 +835,9 @@ function providerHarness({
   // so a new additive migration never breaks these fixtures (found 13 -> 14).
   sourceMigrationVersion = appliedMigrations.at(-1).version,
   targetChunkCount = 5,
+  sourceChunkCount = targetChunkCount,
+  sourceDocumentCount = 3,
+  targetDocumentCount = sourceDocumentCount,
   targetMigrationVersion = appliedMigrations.at(-1).version,
   sourceInstallStateMissing = false,
   splitTargetDeployment = false,
@@ -781,9 +848,11 @@ function providerHarness({
   let vectorCount = initialVectorCount;
   let outbox = 0;
   let bootstrapRequired = initialTargetRestored && initialVectorCount < targetChunkCount;
+  let bootstrapPending = false;
   let bootstrapEpoch = 1;
   let bootstrapCursor = null;
   let bootstrapConfirmed = initialVectorCount;
+  let bootstrapSubmitted = 0;
   let currentTargetVersionId = targetVersionId;
   let corpusMutated = false;
   let evalCalls = 0;
@@ -795,6 +864,9 @@ function providerHarness({
   let readinessLagRemaining = readinessLagAfterBootstrap ? 1 : 0;
   let promotionFailuresRemaining = failPromotionAfterApplyOnce ? 1 : 0;
   let bootstrapCalls = 0;
+  let bootstrapObservationQueries = 0;
+  let bootstrapObservationLagRemaining = bootstrapObservationLagOnce ? 1 : 0;
+  let bootstrapObservationDriftRemaining = bootstrapObservationDriftOnce ? 1 : 0;
   let promotionCalls = 0;
   let sleepCalls = 0;
   let normalizedLeaseSelections = 0;
@@ -877,11 +949,17 @@ function providerHarness({
     }
     if (args[0] === "vectorize" && args[1] === "info") {
       const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id;
+      let observedVectorCount = vectorCount;
+      if (!isSource && bootstrapObservationLagRemaining > 0 &&
+          bootstrapConfirmed > 0 && bootstrapSubmitted > 0) {
+        bootstrapObservationLagRemaining--;
+        observedVectorCount = bootstrapConfirmed - 1;
+      }
       return ok({
         dimensions: 768,
         ...(!isSource && missingVectorCount
           ? {}
-          : { vectorCount: isSource ? 5 : vectorCount }),
+          : { vectorCount: isSource ? 5 : observedVectorCount }),
       });
     }
     if (args[0] === "deployments" && args[1] === "status") {
@@ -1031,7 +1109,9 @@ function providerHarness({
       importCalls++;
       targetRestored = true;
       bootstrapRequired = true;
+      bootstrapPending = false;
       bootstrapConfirmed = 0;
+      bootstrapSubmitted = 0;
       vectorCount = 0;
       return ok();
     }
@@ -1042,6 +1122,57 @@ function providerHarness({
         rows = [{ user_table_count: targetRestored
           ? durableTablesForVersion(targetMigrationVersion).length + 1
           : 0 }];
+      } else if (/cursor_matches_last_batch_end/.test(sql)) {
+        bootstrapObservationQueries++;
+        const admitted = bootstrapConfirmed + bootstrapSubmitted;
+        const confirmedBatches = bootstrapConfirmed > 0
+          ? Math.floor(bootstrapConfirmed / 1_000) + (bootstrapConfirmed % 1_000 === 201 ? 1 : 0)
+          : 0;
+        const submittedBatches = bootstrapSubmitted > 0
+          ? Math.ceil(bootstrapSubmitted / 1_000)
+          : 0;
+        const exactShape = (admitted > 0 && bootstrapShapeOverride) || {
+          full1000Batches: Math.min(3, Math.floor(admitted / 1_000)),
+          tail201Batches: admitted === 3_201 ? 1 : 0,
+          unexpectedBatchSizes: 0,
+          exactBatchShape: admitted === 3_201,
+        };
+        let observedCursor = bootstrapCursor ?? "";
+        if (bootstrapObservationDriftRemaining > 0 && bootstrapSubmitted > 0 &&
+            bootstrapObservationQueries > 2) {
+          bootstrapObservationDriftRemaining--;
+          observedCursor = `${observedCursor}:drift`;
+        }
+        rows = [{
+          projection_status: bootstrapRequired
+            ? "bootstrap_required"
+            : bootstrapPending ? "pending" : "verified",
+          protocol: admitted > 0 ? "bootstrap-v2" : null,
+          epoch: bootstrapEpoch,
+          cursor: observedCursor,
+          base_count: 0,
+          chunks: targetChunkCount,
+          fts_rows: targetChunkCount,
+          batches: confirmedBatches + submittedBatches,
+          full_1000_batches: exactShape.full1000Batches,
+          tail_201_batches: exactShape.tail201Batches,
+          unexpected_batch_sizes: exactShape.unexpectedBatchSizes,
+          exact_batch_shape: exactShape.exactBatchShape ? 1 : 0,
+          queued_batches: 0,
+          submitted_batches: submittedBatches,
+          confirmed_batches: confirmedBatches,
+          admitted_rows: admitted,
+          queued_rows: 0,
+          submitted_rows: bootstrapSubmitted,
+          confirmed_rows: bootstrapConfirmed,
+          outbox_rows: bootstrapSubmitted,
+          queued_outbox: 0,
+          submitted_outbox: bootstrapSubmitted,
+          failed_outbox: 0,
+          cursor_matches_last_batch_end: observedCursor ? 1 : 0,
+          cursor_at_high_water: admitted === targetChunkCount ? 1 : 0,
+          lease_present: 0,
+        }];
       } else if (/pending_outbox/.test(sql)) {
         rows = [{ pending_outbox: outbox, failed_vectors: 0 }];
       } else if (/COUNT\(\*\) AS agent_action_receipts FROM agent_action_receipts/.test(sql)) {
@@ -1116,19 +1247,22 @@ function providerHarness({
           sql,
           /CAST\(\(SELECT 0\) AS TEXT\) AS "vector_bootstrap_batches"/,
         );
-        const aggregate = env.CLOUDFLARE_ACCOUNT_ID === targetManifest.infrastructure.cloudflare.account_id &&
-            targetRestored
-          ? {
-              ...aggregateTemplate,
-              chunks: String(targetChunkCount),
-              chunks_fts: String(targetChunkCount),
-              chunks_id_max: String(targetChunkCount),
-              chunks_text_bytes: String(targetChunkCount * 100),
-              ...(corpusMutated
-                ? { chunks_text_bytes: String(targetChunkCount * 100 + 1) }
-                : {}),
-            }
-          : aggregateTemplate;
+        const targetAggregate =
+          env.CLOUDFLARE_ACCOUNT_ID === targetManifest.infrastructure.cloudflare.account_id &&
+          targetRestored;
+        const aggregateChunkCount = targetAggregate ? targetChunkCount : sourceChunkCount;
+        const aggregateDocumentCount = targetAggregate ? targetDocumentCount : sourceDocumentCount;
+        const aggregate = {
+          ...aggregateTemplate,
+          documents: String(aggregateDocumentCount),
+          chunks: String(aggregateChunkCount),
+          chunks_fts: String(aggregateChunkCount),
+          chunks_id_max: String(aggregateChunkCount),
+          chunks_text_bytes: String(aggregateChunkCount * 100),
+          ...(targetAggregate && corpusMutated
+            ? { chunks_text_bytes: String(aggregateChunkCount * 100 + 1) }
+            : {}),
+        };
         rows = [{
           ...aggregate,
           vector_outbox: String(outbox),
@@ -1193,8 +1327,13 @@ function providerHarness({
     }
     if (path === "/api/admin/brain/bootstrap") {
       assert.equal(options.headers["X-Admin-Key"], fixtureAdminKey);
+      assert.equal(
+        options.headers["X-Bootstrap-Contract"],
+        expectedBootstrapContract ?? undefined,
+      );
       assert.equal(currentTargetVersionId, pausedWorkerVersionId);
       assert.equal(options.body, undefined);
+      bootstrapRequestObserver({ call: bootstrapCalls + 1 });
       bootstrapCalls++;
       if (bootstrapFailuresRemaining > 0) {
         bootstrapFailuresRemaining--;
@@ -1209,23 +1348,35 @@ function providerHarness({
           retry_after_seconds: 2,
         }), 409);
       }
-      if (bootstrapRequired && bootstrapConfirmed < targetChunkCount) {
-        bootstrapConfirmed = Math.min(
-          targetChunkCount,
-          bootstrapConfirmed + bootstrapPageSize,
-        );
+      const modelsSubmittedWindow = targetChunkCount === 3_201;
+      if (bootstrapRequired && modelsSubmittedWindow) {
+        if (bootstrapSubmitted > 0) {
+          bootstrapConfirmed += bootstrapSubmitted;
+          bootstrapSubmitted = 0;
+        }
+        const unadmitted = targetChunkCount - bootstrapConfirmed;
+        if (unadmitted > 0) bootstrapSubmitted = Math.min(unadmitted, bootstrapPageSize);
+        vectorCount = bootstrapConfirmed + bootstrapSubmitted;
+        const admitted = bootstrapConfirmed + bootstrapSubmitted;
+        bootstrapCursor = `fixture:chunk#${String(Math.max(0, admitted - 1)).padStart(8, "0")}`;
+      } else if (bootstrapRequired && bootstrapConfirmed < targetChunkCount) {
+        bootstrapConfirmed = Math.min(targetChunkCount, bootstrapConfirmed + bootstrapPageSize);
         vectorCount = bootstrapConfirmed;
         bootstrapCursor = `fixture:chunk#${String(Math.max(0, bootstrapConfirmed - 1)).padStart(8, "0")}`;
       }
-      if (postProgressBootstrapFailuresRemaining > 0 && bootstrapConfirmed > 0) {
+      if (postProgressBootstrapFailuresRemaining > 0 &&
+          bootstrapConfirmed + bootstrapSubmitted > 0) {
         postProgressBootstrapFailuresRemaining--;
         throw new TypeError("synthetic interruption after durable bootstrap progress");
       }
-      const countComplete = bootstrapConfirmed === targetChunkCount;
+      const countComplete = bootstrapConfirmed === targetChunkCount && bootstrapSubmitted === 0;
       const visibilityLagged = countComplete && readinessLagRemaining > 0;
       if (visibilityLagged) readinessLagRemaining--;
       const complete = countComplete && !visibilityLagged;
-      if (complete) bootstrapRequired = false;
+      if (countComplete) {
+        bootstrapRequired = false;
+        bootstrapPending = !complete;
+      }
       if (complete && bootstrapMutatesCorpus) corpusMutated = true;
       return response(bootstrapReceiptTransform({
         protocol: "bootstrap-v2",
@@ -1234,9 +1385,9 @@ function providerHarness({
         total: targetChunkCount,
         confirmed: bootstrapConfirmed,
         queued: 0,
-        submitted: 0,
+        submitted: bootstrapSubmitted,
         remaining: targetChunkCount - bootstrapConfirmed,
-        in_flight_batches: 0,
+        in_flight_batches: bootstrapSubmitted > 0 ? Math.ceil(bootstrapSubmitted / 1_000) : 0,
         failed: 0,
         complete,
         vector_ready: complete,
@@ -1285,7 +1436,8 @@ function providerHarness({
         // Location host, so the authenticated header cannot cross origins.
         throw new TypeError("redirect mode is set to error");
       }
-      const ready = !bootstrapRequired && outbox === 0 && vectorCount === targetChunkCount;
+      const ready = !bootstrapRequired && !bootstrapPending &&
+        outbox === 0 && vectorCount === targetChunkCount;
       return response({
         backend: "d1",
         rows: [],
@@ -1334,7 +1486,7 @@ function providerHarness({
         assert.match(text, /CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts/);
         assert.equal(text.includes(privateSentinel), false);
         if (inspectCombinedArtifact) await inspectCombinedArtifact(text);
-        return expectedSnapshot;
+        return snapshotForChunkCount(sourceChunkCount, sourceDocumentCount);
       },
       runEval: async ({ args, env, input }) => {
         evalCalls++;
@@ -1368,8 +1520,13 @@ function providerHarness({
     get normalizedLeaseSelections() { return normalizedLeaseSelections; },
     get bootstrapEpoch() { return bootstrapEpoch; },
     get bootstrapCursor() { return bootstrapCursor; },
+    get bootstrapProjectionStatus() {
+      return bootstrapRequired ? "bootstrap_required" : bootstrapPending ? "pending" : "verified";
+    },
     get sourceLeaseMarker() { return sourceDrainLease ? "fixture-live-drain-owner" : null; },
     mutateNonBank() { corpusMutated = true; },
+    setBootstrapEpoch(value) { bootstrapEpoch = value; },
+    setBootstrapCursor(value) { bootstrapCursor = value; },
   };
 }
 
@@ -1432,6 +1589,30 @@ try {
     approveWrapper: preview.wrapper_approval_fingerprint,
     approveGolden: preview.golden_approval_fingerprint,
   });
+
+  if (process.platform === "darwin") {
+    const aclHarness = providerHarness();
+    const stateBeforeAclRefusal = readFileSync(statePath);
+    try {
+      macAclChange("+a", "everyone allow read,execute,file_inherit", artifactDirectory);
+      assert.equal(statSync(artifactDirectory).mode & 0o777, 0o700);
+      await assert.rejects(
+        runCloudflareRecoveryFieldGate(approvedAdapterConfig, aclHarness.dependencies),
+        (error) => error.code === "RECOVERY_PRIVATE_DIRECTORY_UNSAFE",
+      );
+      assert.equal(aclHarness.adminReads, 0);
+      assert.equal(aclHarness.wranglerCalls.length, 0);
+      assert.equal(aclHarness.fetchCalls.length, 0);
+      assert.equal(
+        existsSync(join(artifactDirectory, ".brain-recovery-field-gate.lock")),
+        false,
+      );
+      assert.deepEqual(readFileSync(statePath), stateBeforeAclRefusal);
+    } finally {
+      macAclChange("-N", artifactDirectory);
+      stateBeforeAclRefusal.fill(0);
+    }
+  }
 
   const stageContext = (stage, completed = [], attempt = 1) => ({ stage, attempt,
     planFingerprint: initialized.plan.plan_fingerprint,
@@ -1631,8 +1812,10 @@ try {
     "--approve-wrapper", preview.wrapper_approval_fingerprint,
     "--approve-golden", preview.golden_approval_fingerprint,
     "--stop-after-stage", "restore_d1",
+    "--stop-after-bootstrap-progress", RECOVERY_BOOTSTRAP_INTERRUPTION_CONFIRMATION,
   ]);
   assert.equal(parsedStop.stopAfterStage, "restore_d1");
+  assert.equal(parsedStop.stopAfterBootstrapProgress, true);
   assert.equal(parsedStop.approveGolden, preview.golden_approval_fingerprint);
   assert.throws(
     () => parseCloudflareRecoveryCliArguments([
@@ -1748,6 +1931,23 @@ try {
   );
   assert.equal(invalidStopHarness.wranglerCalls.length, 0);
   assert.equal(invalidStopHarness.adminReads, 0);
+
+  const invalidBootstrapStopHarness = providerHarness();
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...baseConfig,
+      approvePlan: initialized.plan.plan_fingerprint,
+      approveDisposableTarget: initialized.plan.target_resource_fingerprint,
+      approveTargetExecution: preview.target_execution_approval_fingerprint,
+      approveSourceExportBlocking: preview.source_export_blocking_approval_fingerprint,
+      approveWrapper: preview.wrapper_approval_fingerprint,
+      approveGolden: preview.golden_approval_fingerprint,
+      stopAfterBootstrapProgress: "yes",
+    }, invalidBootstrapStopHarness.dependencies),
+    (error) => error.code === "RECOVERY_BOOTSTRAP_INTERRUPTION_OPTION_INVALID",
+  );
+  assert.equal(invalidBootstrapStopHarness.wranglerCalls.length, 0);
+  assert.equal(invalidBootstrapStopHarness.adminReads, 0);
 
   const drillPlanPath = join(sandbox, ".brain-recovery-drill-plan.json");
   const drillStatePath = join(sandbox, ".brain-recovery-drill-state.json");
@@ -1980,6 +2180,550 @@ try {
   assert.equal(drillHarness.promotionCalls, 1);
   assert.equal(drillHarness.evalCalls, 1);
   assert.equal(existsSync(join(drillArtifactDirectory, ".brain-recovery-field-gate.lock")), false);
+
+  // The v0.4.8-only field hook stops inside rebuild after independently
+  // proving one non-final 3,201-row bootstrap cut. The failed stage is
+  // retryable, the process lock is gone, and no cursor value enters either
+  // durable aggregate receipt. Resume proves that exact epoch/cursor hash
+  // before issuing the next bootstrap POST and then completes normally.
+  const bootstrapPlanPath = join(sandbox, ".brain-recovery-bootstrap-plan.json");
+  const bootstrapStatePath = join(sandbox, ".brain-recovery-bootstrap-state.json");
+  const bootstrapArtifactDirectory = join(sandbox, "private-bootstrap-artifacts");
+  mkdirSync(bootstrapArtifactDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(bootstrapArtifactDirectory, 0o700);
+  const bootstrapInitialized = initializeVerifiedRecovery(
+    sourceManifestPath,
+    targetManifestPath,
+    bootstrapPlanPath,
+    bootstrapStatePath,
+    { now: new Date("2026-08-25T12:45:00.000Z") },
+  );
+  const bootstrapConfig = {
+    ...baseConfig,
+    planPath: bootstrapPlanPath,
+    statePath: bootstrapStatePath,
+    artifactDirectory: bootstrapArtifactDirectory,
+  };
+  const bootstrapPreview = previewCloudflareRecoveryFieldGate(
+    bootstrapConfig,
+    { platform: "darwin" },
+  );
+  const approvedBootstrapConfig = Object.freeze({
+    ...bootstrapConfig,
+    approvePlan: bootstrapInitialized.plan.plan_fingerprint,
+    approveDisposableTarget: bootstrapInitialized.plan.target_resource_fingerprint,
+    approveTargetExecution: bootstrapPreview.target_execution_approval_fingerprint,
+    approveSourceExportBlocking: bootstrapPreview.source_export_blocking_approval_fingerprint,
+    approveWrapper: bootstrapPreview.wrapper_approval_fingerprint,
+    approveGolden: bootstrapPreview.golden_approval_fingerprint,
+  });
+  const interruptionPath = join(
+    bootstrapArtifactDirectory,
+    ".brain-recovery-bootstrap-interruption-v1.json",
+  );
+  const resumePath = join(
+    bootstrapArtifactDirectory,
+    ".brain-recovery-bootstrap-resume-v1.json",
+  );
+  const interruptionPendingPath = join(
+    bootstrapArtifactDirectory,
+    ".brain-recovery-bootstrap-interruption-v1.pending.json",
+  );
+  const resumePendingPath = join(
+    bootstrapArtifactDirectory,
+    ".brain-recovery-bootstrap-resume-v1.pending.json",
+  );
+  let losePendingBootstrapResponse = true;
+  let loseCompletedBootstrapResponse = true;
+  const bootstrapHarness = providerHarness({
+    bootstrapObservationLagOnce: true,
+    failPromotionAfterApplyOnce: true,
+    expectedBootstrapContract: "3",
+    readinessLagAfterBootstrap: true,
+    bootstrapRequestObserver({ call }) {
+      if (call === 3) {
+        assert.equal(existsSync(resumePath), true);
+        assert.equal(existsSync(resumePendingPath), false);
+      }
+    },
+    bootstrapReceiptTransform(receipt) {
+      if (losePendingBootstrapResponse && !receipt.complete &&
+          receipt.confirmed === 3_201 && receipt.submitted === 0) {
+        losePendingBootstrapResponse = false;
+        throw new TypeError("synthetic lost pending bootstrap response");
+      }
+      if (loseCompletedBootstrapResponse && receipt.complete) {
+        loseCompletedBootstrapResponse = false;
+        throw new TypeError("synthetic lost completed bootstrap response");
+      }
+      return receipt;
+    },
+    targetChunkCount: 3_201,
+    sourceChunkCount: 3_201,
+    sourceDocumentCount: 3_201,
+    targetDocumentCount: 3_201,
+  });
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...approvedBootstrapConfig,
+      stopAfterBootstrapProgress: true,
+    }, bootstrapHarness.dependencies),
+    (error) => error instanceof CloudflareRecoveryAdapterError &&
+      error.code === "RECOVERY_BOOTSTRAP_STAGE_CONTROL_REQUIRED",
+  );
+  assert.equal(bootstrapHarness.bootstrapCalls, 0);
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+
+  const interruptedBootstrap = await runCloudflareRecoveryFieldGate({
+    ...approvedBootstrapConfig,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, bootstrapHarness.dependencies);
+  assert.equal(interruptedBootstrap.ok, false);
+  assert.equal(
+    interruptedBootstrap.cause,
+    "RECOVERY_FIELD_GATE_INTENTIONAL_BOOTSTRAP_INTERRUPTION",
+  );
+  assert.equal(interruptedBootstrap.status.current_stage, "rebuild_vectorize");
+  assert.equal(interruptedBootstrap.status.stage_status, "failed");
+  assert.equal(bootstrapHarness.bootstrapCalls, 2);
+  assert.equal(bootstrapHarness.bootstrapConfirmed, 3_000);
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+  assert.equal(
+    existsSync(join(bootstrapArtifactDirectory, ".brain-recovery-field-gate.lock")),
+    false,
+  );
+  assert.equal(existsSync(interruptionPath), true);
+  assert.equal(existsSync(interruptionPendingPath), false);
+  assert.equal(existsSync(resumePath), false);
+  const interruptionText = readFileSync(interruptionPath, "utf8");
+  assert.doesNotMatch(interruptionText, /fixture:chunk/);
+  assert.doesNotMatch(interruptionText, new RegExp(privateSentinel));
+  const interruptionReceipt = JSON.parse(interruptionText);
+  assert.equal(interruptionReceipt.counts.chunks, 3_201);
+  assert.equal(interruptionReceipt.counts.confirmed, 3_000);
+  assert.equal(interruptionReceipt.counts.remaining, 201);
+  assert.equal(interruptionReceipt.counts.submitted_rows, 201);
+  assert.equal(interruptionReceipt.counts.provider_vectors, 3_201);
+  assert.equal(interruptionReceipt.counts.exact_batch_shape, 1);
+  assert.equal(interruptionReceipt.cursor_advanced, true);
+  assert.equal(interruptionReceipt.cursor_at_high_water, true);
+
+  const recordedBootstrapCursor = bootstrapHarness.bootstrapCursor;
+  const bootstrapCallsBeforeMissingControl = bootstrapHarness.bootstrapCalls;
+  const hiddenInterruptionPath = join(sandbox, "hidden-bootstrap-interruption.json");
+  renameSync(interruptionPath, hiddenInterruptionPath);
+  try {
+    await assert.rejects(
+      runCloudflareRecoveryFieldGate({
+        ...approvedBootstrapConfig,
+        stopAfterBootstrapProgress: true,
+        stopAfterStage: "rebuild_vectorize",
+      }, bootstrapHarness.dependencies),
+      (error) => error instanceof CloudflareRecoveryAdapterError &&
+        error.code === "RECOVERY_BOOTSTRAP_INTERRUPTION_RECEIPT_MISSING",
+    );
+    assert.equal(bootstrapHarness.bootstrapCalls, bootstrapCallsBeforeMissingControl);
+    assert.equal(bootstrapHarness.promotionCalls, 0);
+  } finally {
+    renameSync(hiddenInterruptionPath, interruptionPath);
+  }
+
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate(
+      approvedBootstrapConfig,
+      bootstrapHarness.dependencies,
+    ),
+    (error) => error instanceof CloudflareRecoveryAdapterError &&
+      error.code === "RECOVERY_BOOTSTRAP_STOP_CONTROL_REQUIRED",
+  );
+  assert.equal(bootstrapHarness.bootstrapCalls, bootstrapCallsBeforeMissingControl);
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+  assert.equal(existsSync(resumePath), false);
+
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...approvedBootstrapConfig,
+      stopAfterBootstrapProgress: true,
+    }, bootstrapHarness.dependencies),
+    (error) => error instanceof CloudflareRecoveryAdapterError &&
+      error.code === "RECOVERY_BOOTSTRAP_STAGE_CONTROL_REQUIRED",
+  );
+  assert.equal(bootstrapHarness.bootstrapCalls, bootstrapCallsBeforeMissingControl);
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+  assert.equal(existsSync(resumePath), false);
+
+  const bootstrapCallsBeforeResumeRefusal = bootstrapHarness.bootstrapCalls;
+  bootstrapHarness.setBootstrapCursor("fixture:chunk#tampered");
+  const refusedBootstrapResume = await runCloudflareRecoveryFieldGate(
+    {
+      ...approvedBootstrapConfig,
+      stopAfterBootstrapProgress: true,
+      stopAfterStage: "rebuild_vectorize",
+    },
+    bootstrapHarness.dependencies,
+  );
+  assert.equal(refusedBootstrapResume.ok, false);
+  assert.equal(refusedBootstrapResume.cause, "RECOVERY_BOOTSTRAP_RESUME_PROOF_INVALID");
+  assert.equal(bootstrapHarness.bootstrapCalls, bootstrapCallsBeforeResumeRefusal);
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+  assert.equal(existsSync(resumePath), false);
+  assert.equal(
+    existsSync(join(bootstrapArtifactDirectory, ".brain-recovery-field-gate.lock")),
+    false,
+  );
+  bootstrapHarness.setBootstrapCursor(recordedBootstrapCursor);
+
+  const lostPendingBootstrap = await runCloudflareRecoveryFieldGate({
+    ...approvedBootstrapConfig,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, bootstrapHarness.dependencies);
+  assert.equal(lostPendingBootstrap.ok, false);
+  assert.equal(lostPendingBootstrap.cause, "RECOVERY_DATA_PLANE_REQUEST_FAILED");
+  assert.equal(bootstrapHarness.bootstrapCalls, 3);
+  assert.equal(bootstrapHarness.bootstrapConfirmed, 3_201);
+  assert.equal(bootstrapHarness.bootstrapProjectionStatus, "pending");
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+  assert.equal(existsSync(resumePath), true);
+  assert.equal(existsSync(interruptionPendingPath), false);
+  assert.equal(existsSync(resumePendingPath), false);
+  const resumeText = readFileSync(resumePath, "utf8");
+  assert.doesNotMatch(resumeText, /fixture:chunk/);
+  assert.doesNotMatch(resumeText, new RegExp(privateSentinel));
+  const resumeReceipt = JSON.parse(resumeText);
+  assert.equal(resumeReceipt.cursor_unchanged, true);
+  assert.equal(resumeReceipt.interruption_cursor_sha256, interruptionReceipt.cursor_sha256);
+  const lostPendingCheckpoint = loadVerifiedRecoveryState(
+    bootstrapStatePath,
+    bootstrapInitialized.plan,
+  );
+  assert.equal(lostPendingCheckpoint.current_stage, "rebuild_vectorize");
+  assert.equal(lostPendingCheckpoint.stage_status, "failed");
+
+  // Once both receipts exist, every retry must re-observe the live epoch and
+  // cursor before another bootstrap POST. A completed response may be lost,
+  // but drift can never be mistaken for that reconciliation case.
+  const completedBootstrapCursor = bootstrapHarness.bootstrapCursor;
+  const completedBootstrapEpoch = bootstrapHarness.bootstrapEpoch;
+  const callsBeforeExistingResumeChecks = bootstrapHarness.bootstrapCalls;
+  bootstrapHarness.setBootstrapCursor("fixture:chunk#tampered-after-resume");
+  const refusedExistingResumeCursor = await runCloudflareRecoveryFieldGate({
+    ...approvedBootstrapConfig,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, bootstrapHarness.dependencies);
+  assert.equal(refusedExistingResumeCursor.ok, false);
+  assert.equal(
+    refusedExistingResumeCursor.cause,
+    "RECOVERY_BOOTSTRAP_EXISTING_RESUME_PROOF_INVALID",
+  );
+  assert.equal(bootstrapHarness.bootstrapCalls, callsBeforeExistingResumeChecks);
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+  bootstrapHarness.setBootstrapCursor(completedBootstrapCursor);
+
+  bootstrapHarness.setBootstrapEpoch(completedBootstrapEpoch + 1);
+  const refusedExistingResumeEpoch = await runCloudflareRecoveryFieldGate({
+    ...approvedBootstrapConfig,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, bootstrapHarness.dependencies);
+  assert.equal(refusedExistingResumeEpoch.ok, false);
+  assert.equal(
+    refusedExistingResumeEpoch.cause,
+    "RECOVERY_BOOTSTRAP_EXISTING_RESUME_PROOF_INVALID",
+  );
+  assert.equal(bootstrapHarness.bootstrapCalls, callsBeforeExistingResumeChecks);
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+  bootstrapHarness.setBootstrapEpoch(completedBootstrapEpoch);
+
+  const lostCompletedBootstrap = await runCloudflareRecoveryFieldGate({
+    ...approvedBootstrapConfig,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, bootstrapHarness.dependencies);
+  assert.equal(lostCompletedBootstrap.ok, false);
+  assert.equal(lostCompletedBootstrap.cause, "RECOVERY_DATA_PLANE_REQUEST_FAILED");
+  assert.equal(bootstrapHarness.bootstrapCalls, callsBeforeExistingResumeChecks + 1);
+  assert.equal(bootstrapHarness.bootstrapProjectionStatus, "verified");
+  assert.equal(bootstrapHarness.promotionCalls, 0);
+  const callsAfterCompletedBootstrap = bootstrapHarness.bootstrapCalls;
+
+  const lostPromotion = await runCloudflareRecoveryFieldGate({
+    ...approvedBootstrapConfig,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, bootstrapHarness.dependencies);
+  assert.equal(lostPromotion.ok, false);
+  assert.equal(lostPromotion.cause, "RECOVERY_WRANGLER_CALL_FAILED");
+  assert.equal(bootstrapHarness.bootstrapCalls, callsAfterCompletedBootstrap);
+  assert.equal(bootstrapHarness.promotionCalls, 1);
+  assert.equal(bootstrapHarness.currentTargetVersionId, activeWorkerVersionId);
+
+  // If promotion applied but its response was lost, the active retry must
+  // still prove the same completed epoch/cursor ledger before journaling the
+  // receipt hashes as completed rebuild evidence.
+  bootstrapHarness.setBootstrapCursor("fixture:chunk#tampered-after-promotion");
+  const refusedActiveCompletion = await runCloudflareRecoveryFieldGate({
+    ...approvedBootstrapConfig,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, bootstrapHarness.dependencies);
+  assert.equal(refusedActiveCompletion.ok, false);
+  assert.equal(refusedActiveCompletion.cause, "RECOVERY_BOOTSTRAP_COMPLETION_PROOF_INVALID");
+  assert.equal(bootstrapHarness.bootstrapCalls, callsAfterCompletedBootstrap);
+  assert.equal(bootstrapHarness.promotionCalls, 1);
+  bootstrapHarness.setBootstrapCursor(completedBootstrapCursor);
+
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...approvedBootstrapConfig,
+      stopAfterBootstrapProgress: true,
+      stopAfterStage: "rebuild_vectorize",
+    }, bootstrapHarness.dependencies),
+    (error) => error instanceof CloudflareRecoveryAdapterError &&
+      error.code === "RECOVERY_FIELD_GATE_INTENTIONAL_INTERRUPTION",
+  );
+  assert.equal(bootstrapHarness.bootstrapCalls, callsAfterCompletedBootstrap);
+  assert.equal(bootstrapHarness.promotionCalls, 1);
+  const rebuildCheckpoint = loadVerifiedRecoveryState(
+    bootstrapStatePath,
+    bootstrapInitialized.plan,
+  );
+  assert.equal(rebuildCheckpoint.current_stage, "verify_health");
+  assert.deepEqual(
+    rebuildCheckpoint.completed.map((entry) => entry.id).slice(-1),
+    ["rebuild_vectorize"],
+  );
+  const rebuildEvidence = rebuildCheckpoint.completed.at(-1).evidence;
+  assert.equal(
+    rebuildEvidence.bootstrap_interruption_receipt_sha256,
+    createHash("sha256").update(interruptionText).digest("hex"),
+  );
+  assert.equal(
+    rebuildEvidence.bootstrap_resume_receipt_sha256,
+    createHash("sha256").update(resumeText).digest("hex"),
+  );
+
+  const bootstrapCallsBeforeThirdControlRefusals = bootstrapHarness.bootstrapCalls;
+  const hiddenCompletedInterruptionPath = join(
+    sandbox,
+    "hidden-completed-bootstrap-interruption.json",
+  );
+  const hiddenCompletedResumePath = join(sandbox, "hidden-completed-bootstrap-resume.json");
+  renameSync(interruptionPath, hiddenCompletedInterruptionPath);
+  renameSync(resumePath, hiddenCompletedResumePath);
+  try {
+    await assert.rejects(
+      runCloudflareRecoveryFieldGate({
+        ...approvedBootstrapConfig,
+        stopAfterBootstrapProgress: true,
+        stopAfterStage: "rebuild_vectorize",
+      }, bootstrapHarness.dependencies),
+      (error) => error instanceof CloudflareRecoveryAdapterError &&
+        error.code === "RECOVERY_BOOTSTRAP_COMPLETED_PROOF_MISSING",
+    );
+    assert.equal(bootstrapHarness.bootstrapCalls, bootstrapCallsBeforeThirdControlRefusals);
+    assert.equal(bootstrapHarness.promotionCalls, 1);
+  } finally {
+    renameSync(hiddenCompletedInterruptionPath, interruptionPath);
+    renameSync(hiddenCompletedResumePath, resumePath);
+  }
+
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate(
+      approvedBootstrapConfig,
+      bootstrapHarness.dependencies,
+    ),
+    (error) => error instanceof CloudflareRecoveryAdapterError &&
+      error.code === "RECOVERY_BOOTSTRAP_STOP_CONTROL_REQUIRED",
+  );
+  assert.equal(bootstrapHarness.bootstrapCalls, bootstrapCallsBeforeThirdControlRefusals);
+  assert.equal(bootstrapHarness.promotionCalls, 1);
+
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...approvedBootstrapConfig,
+      stopAfterBootstrapProgress: true,
+    }, bootstrapHarness.dependencies),
+    (error) => error instanceof CloudflareRecoveryAdapterError &&
+      error.code === "RECOVERY_BOOTSTRAP_STAGE_CONTROL_REQUIRED",
+  );
+  assert.equal(bootstrapHarness.bootstrapCalls, bootstrapCallsBeforeThirdControlRefusals);
+  assert.equal(bootstrapHarness.promotionCalls, 1);
+
+  const completedBootstrap = await runCloudflareRecoveryFieldGate({
+    ...approvedBootstrapConfig,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, bootstrapHarness.dependencies);
+  assert.equal(completedBootstrap.ok, true);
+  assert.equal(completedBootstrap.status.status, "complete");
+  assert.equal(bootstrapHarness.bootstrapCalls, bootstrapCallsBeforeThirdControlRefusals);
+  assert.equal(bootstrapHarness.promotionCalls, 1);
+  assert.equal(
+    existsSync(join(bootstrapArtifactDirectory, ".brain-recovery-field-gate.lock")),
+    false,
+  );
+
+  const bootstrapFailureScenario = (name, harnessOptions) => {
+    const plan = join(sandbox, `.brain-recovery-${name}-plan.json`);
+    const state = join(sandbox, `.brain-recovery-${name}-state.json`);
+    const artifacts = join(sandbox, `private-${name}-artifacts`);
+    mkdirSync(artifacts, { mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(artifacts, 0o700);
+    const initializedScenario = initializeVerifiedRecovery(
+      sourceManifestPath,
+      targetManifestPath,
+      plan,
+      state,
+      { now: new Date("2026-08-25T12:45:00.000Z") },
+    );
+    const config = {
+      ...baseConfig,
+      planPath: plan,
+      statePath: state,
+      artifactDirectory: artifacts,
+    };
+    const scenarioPreview = previewCloudflareRecoveryFieldGate(config, { platform: "darwin" });
+    return {
+      artifacts,
+      config,
+      initialized: initializedScenario,
+      harness: providerHarness({
+        expectedBootstrapContract: "3",
+        targetChunkCount: 3_201,
+        sourceChunkCount: 3_201,
+        sourceDocumentCount: 3_201,
+        targetDocumentCount: 3_201,
+        ...harnessOptions,
+      }),
+      approved: Object.freeze({
+        ...config,
+        approvePlan: initializedScenario.plan.plan_fingerprint,
+        approveDisposableTarget: initializedScenario.plan.target_resource_fingerprint,
+        approveTargetExecution: scenarioPreview.target_execution_approval_fingerprint,
+        approveSourceExportBlocking: scenarioPreview.source_export_blocking_approval_fingerprint,
+        approveWrapper: scenarioPreview.wrapper_approval_fingerprint,
+        approveGolden: scenarioPreview.golden_approval_fingerprint,
+      }),
+    };
+  };
+
+  // The guard exists before the first mutating POST. A lost response after
+  // provider submission leaves an explicit ambiguous state, and a restart
+  // cannot issue another POST or promote the Worker.
+  const crashScenario = bootstrapFailureScenario("bootstrap-crash", {
+    failBootstrapAfterProgressOnce: true,
+  });
+  const crashResult = await runCloudflareRecoveryFieldGate({
+    ...crashScenario.approved,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, crashScenario.harness.dependencies);
+  assert.equal(crashResult.ok, false);
+  assert.equal(crashResult.cause, "RECOVERY_DATA_PLANE_REQUEST_FAILED");
+  assert.equal(crashScenario.harness.bootstrapCalls, 1);
+  assert.equal(crashScenario.harness.promotionCalls, 0);
+  const crashPending = join(
+    crashScenario.artifacts,
+    ".brain-recovery-bootstrap-interruption-v1.pending.json",
+  );
+  assert.equal(existsSync(crashPending), true);
+  const crashCalls = crashScenario.harness.bootstrapCalls;
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
+      ...crashScenario.approved,
+      stopAfterBootstrapProgress: true,
+      stopAfterStage: "rebuild_vectorize",
+    }, crashScenario.harness.dependencies),
+    (error) => error instanceof CloudflareRecoveryAdapterError &&
+      error.code === "RECOVERY_BOOTSTRAP_RECEIPT_AMBIGUOUS",
+  );
+  assert.equal(crashScenario.harness.bootstrapCalls, crashCalls);
+  assert.equal(crashScenario.harness.promotionCalls, 0);
+
+  // Provider aggregate lag is retried read-only, but any D1 ledger drift while
+  // waiting preserves the guard and blocks future mutation.
+  const driftScenario = bootstrapFailureScenario("bootstrap-drift", {
+    bootstrapObservationLagOnce: true,
+    bootstrapObservationDriftOnce: true,
+  });
+  const driftResult = await runCloudflareRecoveryFieldGate({
+    ...driftScenario.approved,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, driftScenario.harness.dependencies);
+  assert.equal(driftResult.ok, false);
+  assert.equal(driftResult.cause, "RECOVERY_BOOTSTRAP_INTERRUPTION_PROOF_INVALID");
+  assert.equal(driftScenario.harness.bootstrapCalls, 2);
+  assert.equal(driftScenario.harness.promotionCalls, 0);
+  assert.equal(existsSync(join(
+    driftScenario.artifacts,
+    ".brain-recovery-bootstrap-interruption-v1.pending.json",
+  )), true);
+
+  // Matching totals cannot hide reordered page geometry. The ordered shape
+  // must bind batches 1..4 to 1000/1000/1000/201 exactly.
+  const shapeScenario = bootstrapFailureScenario("bootstrap-shape", {
+    bootstrapShapeOverride: {
+      full1000Batches: 3,
+      tail201Batches: 1,
+      unexpectedBatchSizes: 0,
+      exactBatchShape: false,
+    },
+  });
+  const shapeResult = await runCloudflareRecoveryFieldGate({
+    ...shapeScenario.approved,
+    stopAfterBootstrapProgress: true,
+    stopAfterStage: "rebuild_vectorize",
+  }, shapeScenario.harness.dependencies);
+  assert.equal(shapeResult.ok, false);
+  assert.equal(shapeResult.cause, "RECOVERY_BOOTSTRAP_INTERRUPTION_PROOF_INVALID");
+  assert.equal(shapeScenario.harness.bootstrapCalls, 2);
+  assert.equal(shapeScenario.harness.promotionCalls, 0);
+  assert.equal(existsSync(join(
+    shapeScenario.artifacts,
+    ".brain-recovery-bootstrap-interruption-v1.pending.json",
+  )), true);
+
+  // Corpus size is not a hidden mode bit. An ordinary 3,201-chunk recovery
+  // that never requested the field-proof control can retry its own provider
+  // ambiguity without being forced into the supervised interruption drill.
+  const ordinaryRetryScenario = bootstrapFailureScenario("ordinary-bootstrap-retry", {
+    expectedBootstrapContract: null,
+    failBootstrapAfterProgressOnce: true,
+  });
+  const ordinaryFailure = await runCloudflareRecoveryFieldGate(
+    ordinaryRetryScenario.approved,
+    ordinaryRetryScenario.harness.dependencies,
+  );
+  assert.equal(ordinaryFailure.ok, false);
+  assert.equal(ordinaryFailure.cause, "RECOVERY_DATA_PLANE_REQUEST_FAILED");
+  const ordinaryFailedState = loadVerifiedRecoveryState(
+    ordinaryRetryScenario.config.statePath,
+    ordinaryRetryScenario.initialized.plan,
+  );
+  assert.equal(Object.hasOwn(ordinaryFailedState, "field_proof"), false);
+  const ordinaryCallsBeforeRetry = ordinaryRetryScenario.harness.bootstrapCalls;
+  const ordinaryRetry = await runCloudflareRecoveryFieldGate(
+    ordinaryRetryScenario.approved,
+    ordinaryRetryScenario.harness.dependencies,
+  );
+  assert.equal(ordinaryRetry.ok, true);
+  assert.ok(ordinaryRetryScenario.harness.bootstrapCalls > ordinaryCallsBeforeRetry);
+  const ordinaryCompletedState = loadVerifiedRecoveryState(
+    ordinaryRetryScenario.config.statePath,
+    ordinaryRetryScenario.initialized.plan,
+  );
+  assert.equal(Object.hasOwn(ordinaryCompletedState, "field_proof"), false);
+  const ordinaryRebuildEvidence = ordinaryCompletedState.completed.find(
+    (entry) => entry.id === "rebuild_vectorize",
+  ).evidence;
+  assert.equal(
+    Object.hasOwn(ordinaryRebuildEvidence, "bootstrap_interruption_receipt_sha256"),
+    false,
+  );
 
   // The complete field gate must accept the exact four-secret group written by
   // `brain connect zoom`, while still requiring source and target parity.

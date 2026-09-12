@@ -1109,10 +1109,11 @@ export function validatePrivateProvenanceResultFamilyResponse(
 
 const ACCEPTED_RESOLUTION_RESPONSE_FIELDS = Object.freeze([
   "contract_version", "mode", "operation", "source", "run_id", "original_id",
-  "target_set_hash", "target_count", "accepted_observation_hash", "resolution_hash",
-  "activation_hash", "family_receipt_hash", "verification_hash", "document_count",
-  "chunk_count", "vector_readiness_hash", "retrieval_probe_id", "retrieval_status",
-  "citation_status", "status", "recorded", "replayed", "reactivated",
+  "target_set_hash", "target_count", "resolves_observation_hash",
+  "accepted_observation_hash", "resolution_hash", "activation_hash",
+  "family_receipt_hash", "verification_hash", "document_count", "chunk_count",
+  "vector_readiness_hash", "retrieval_probe_id", "retrieval_status", "citation_status",
+  "status", "recorded", "replayed", "reactivated",
   "accepted_outcome_authorized", "bounded_target_set_repair_verified", "scope",
 ]);
 
@@ -1150,6 +1151,7 @@ function normalizedAcceptedResolutionResponse(
       response.original_id !== validated.seal.targets[0].original_id ||
       response.target_set_hash !== requestBinding.target_set_hash ||
       response.target_count !== 1 ||
+      response.resolves_observation_hash !== resolvesObservationHash ||
       !SHA_ID_RE.test(String(response.accepted_observation_hash || "")) ||
       (requestBinding.accepted_observation_hash === null
         ? response.accepted_observation_hash === resolvesObservationHash
@@ -1184,6 +1186,7 @@ function normalizedAcceptedResolutionResponse(
 function sameAcceptedResolution(left, right) {
   return left.source === right.source && left.run_id === right.run_id &&
     left.original_id === right.original_id && left.target_set_hash === right.target_set_hash &&
+    left.resolves_observation_hash === right.resolves_observation_hash &&
     left.accepted_observation_hash === right.accepted_observation_hash &&
     left.resolution_hash === right.resolution_hash && left.activation_hash === right.activation_hash &&
     left.family_receipt_hash === right.family_receipt_hash &&

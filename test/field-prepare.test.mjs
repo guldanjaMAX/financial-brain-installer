@@ -292,6 +292,10 @@ test("the command boundary refuses live modes, manifests, and mutating Cloudflar
   for (const step of full.filter((item) => !item.internal)) assert.equal(assertNoLiveCommand(step), true);
   assert.throws(() => assertNoLiveCommand({ command: "node", args: ["runner.mjs", "--live"] }), /unsafe/);
   assert.throws(() => assertNoLiveCommand({ command: "node", args: ["brain.mjs", "setup"] }), /unsafe/);
+  assert.throws(() => assertNoLiveCommand({
+    command: "node",
+    args: ["test/live/v048-disposable-vector-seed.mjs", "--execute"],
+  }), /unsafe/);
   assert.throws(() => assertNoLiveCommand({ command: "node", args: ["x.manifest.json"] }), /unsafe/);
 });
 
@@ -308,6 +312,10 @@ test("the generated checklist keeps offline proof separate from human field gate
   assert.match(checklist, /Clean Windows owner profile/);
   assert.match(checklist, /Disposable Cloudflare Brain/);
   assert.match(checklist, /schema 46/);
+  assert.match(checklist, /v0\.4\.8 disposable bootstrap interruption and resume/);
+  assert.match(checklist, /v048-disposable-vector-seed\.mjs --plan/);
+  assert.match(checklist, /exactly 3,201 fictional one-chunk records/);
+  assert.match(checklist, /Local tests and this checklist are not that proof/);
   assert.match(checklist, /Plaid Sandbox through the deployed Brain/);
   assert.match(checklist, /QuickBooks Online Sandbox/);
   assert.match(checklist, /does not prove Cloudflare/i);

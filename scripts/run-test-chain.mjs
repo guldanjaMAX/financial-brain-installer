@@ -13,6 +13,8 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/private-aggregate-receipt.test.mjs",
+  "node --test test/v048-disposable-vector-seed.test.mjs",
   "node --test test/frontend-build-idempotence.test.mjs",
   "node --test test/source-inventory-cli.test.mjs",
   "node --no-warnings --test test/machine-continuity.test.mjs",
@@ -81,6 +83,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
   "node test/test-chain-runner.test.mjs",
+  "node --test test/private-aggregate-receipt.test.mjs",
+  "node --test test/v048-disposable-vector-seed.test.mjs",
   "node --test test/frontend-build-idempotence.test.mjs",
   "node --test test/source-inventory-cli.test.mjs",
   "node --no-warnings --test test/machine-continuity.test.mjs",

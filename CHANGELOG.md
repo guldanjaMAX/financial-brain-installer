@@ -206,6 +206,40 @@ asset publication.
   wall-clock safety limit still applies, and a stopped update still keeps the
   Brain's writes paused until the same update command is run again.
 
+- **The held recovery drill can now test a real mid-rebuild restart without
+  killing the updater.** A disposable-only control stops after the first
+  independently verified durable bootstrap progress, preserves private
+  interruption evidence, releases its local lock, and requires the identical
+  approved rerun to prove the same epoch, cursor hash, corpus, target, and
+  paused Worker before continuing. A fixed fictional 3,201-record source runner
+  prepares the scale boundary without accepting outside content. It verifies
+  the clean source commit, runner, package archive bytes, source and unpacked
+  package content, manifest, and corpus, then durably reserves both private
+  receipt markers before any credential or provider use. The reviewed combined
+  recovery drill uses three identical invocations: interrupt mid-bootstrap,
+  prove the resume boundary and stop after the completed rebuild, then continue
+  beyond that checkpoint without replay. Its private recovery journal records
+  the field-proof obligation before the run and binds both receipt hashes into
+  completed rebuild evidence, so missing files or omitted controls fail closed.
+  Each retry with an existing resume receipt now rechecks the live epoch and
+  cursor before another bootstrap POST. Field receipt contract 3 preserves the
+  exact completed four-row ledger through provider-count lag, an already
+  verified lost response is reconciled without replay, and an active retry
+  after an ambiguous promotion must prove the ledger again before completion.
+  This is maintainer field
+  infrastructure, not a normal `brain update` option. Its deterministic tests
+  are local only, no v0.4.8 field run has occurred, and the candidate remains
+  held.
+  Private-receipt and seeder execution is POSIX-only, and the recovery campaign
+  requires macOS Keychain. Native Windows refuses before receipt reservation,
+  credentials, or provider calls until current-user-only DACL privacy can be
+  verified; Windows CI proves that refusal rather than a Windows field run.
+  macOS execution also refuses inherited or explicit extended ACLs on the
+  receipt directory and files, checking empty created files before writing any
+  receipt byte and leaving caller-owned ACLs unchanged.
+  The field adapter checks that directory before its lock and before any
+  credential, Wrangler, or HTTP action.
+
 - **When a paused rebuild still finds an index mismatch, the advice is now
   runnable.** It used to point at reindex even though a paused Brain refuses
   every reindex request. It now keeps the safety pause in place, directs the

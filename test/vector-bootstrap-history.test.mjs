@@ -299,6 +299,82 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   check("bulk count convergence completes through actual CLI validation", complete.complete === true);
 }
 
+/* The supervised recovery proof binds the exact 3,201-row epoch and its
+   1000/1000/1000/201 ledger. If provider aggregate visibility lags at the
+   final cut, its next contract-3 poll must verify without rebasing those rows
+   out from under the independent adapter observation. Ordinary contracts
+   still rebase that history on their next verified poll. */
+{
+  const { env, db } = makeEnv();
+  env.VECTOR_DRAIN_MODE = "paused-for-upgrade";
+  insertDocument(db, "drive:field-proof");
+  const insertFieldChunk = db.prepare(
+    `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
+     VALUES (?, 'drive:field-proof', ?, ?, 'drive', ?)`,
+  );
+  for (let index = 0; index < 3_201; index++) {
+    const uid = `drive:field-proof#${String(index).padStart(8, "0")}`;
+    insertFieldChunk.run(uid, index, `field proof text ${index}`, uid);
+  }
+  db.prepare(`UPDATE install_state SET schema_version=13,
+    vector_projection_status='bootstrap_required', vector_projection_bootstrap_epoch=70,
+    vector_projection_bootstrap_cursor=NULL,
+    vector_projection_bootstrap_high_water=(SELECT MAX(chunk_uid) FROM chunks),
+    vector_projection_bootstrap_protocol=NULL, vector_projection_bootstrap_base_count=0
+    WHERE id=1`).run();
+  const options = { ...acceleratedOptions(45_000), contract: 3 };
+  await acceleratedVectorBootstrap(env, options);
+  const interruptedCut = await acceleratedVectorBootstrap(env, options);
+  const describe = env.VECTORIZE.describe;
+  let holdAggregateCount = true;
+  env.VECTORIZE.describe = async () => ({
+    ...await describe(),
+    ...(holdAggregateCount ? { vectorCount: 3_000 } : {}),
+  });
+  const pending = await acceleratedVectorBootstrap(env, options);
+  holdAggregateCount = false;
+  const proven = await acceleratedVectorBootstrap(env, options);
+  const preserved = db.prepare(
+    `SELECT vector_projection_status AS status,
+            vector_projection_bootstrap_epoch AS epoch,
+            vector_projection_bootstrap_base_count AS base_count,
+            (SELECT COUNT(*) FROM vector_bootstrap_batches WHERE epoch=70) AS batches,
+            (SELECT COUNT(*) FROM vector_bootstrap_batches
+              WHERE epoch=70 AND batch_no IN (1,2,3) AND row_count=1000) AS full_batches,
+            (SELECT COUNT(*) FROM vector_bootstrap_batches
+              WHERE epoch=70 AND batch_no=4 AND row_count=201) AS tail_batches,
+            (SELECT COUNT(*) FROM vector_bootstrap_batches
+              WHERE epoch=70 AND status='confirmed') AS confirmed_batches
+       FROM install_state WHERE id=1`,
+  ).get();
+  check("field proof reaches the exact interrupted 3,201-row batch cut",
+    interruptedCut.epoch === 70 && interruptedCut.confirmed === 3_000 &&
+      interruptedCut.submitted === 201 && interruptedCut.remaining === 201,
+    JSON.stringify(interruptedCut));
+  check("contract 3 preserves the verified epoch and exact four-row ledger after count lag",
+    pending.phase === "waiting" && pending.confirmed === 3_201 && !pending.complete &&
+      proven.complete === true && proven.epoch === 70 && preserved.status === "verified" &&
+      Number(preserved.epoch) === 70 && Number(preserved.base_count) === 0 &&
+      Number(preserved.batches) === 4 && Number(preserved.full_batches) === 3 &&
+      Number(preserved.tail_batches) === 1 && Number(preserved.confirmed_batches) === 4,
+    JSON.stringify({ pending, proven, preserved }));
+  const ordinary = await acceleratedVectorBootstrap(env, {
+    ...options,
+    contract: 2,
+  });
+  const rebased = db.prepare(
+    `SELECT vector_projection_bootstrap_epoch AS epoch,
+            vector_projection_bootstrap_base_count AS base_count,
+            (SELECT COUNT(*) FROM vector_bootstrap_batches
+              WHERE epoch=vector_projection_bootstrap_epoch) AS current_batches
+       FROM install_state WHERE id=1`,
+  ).get();
+  check("ordinary bootstrap contracts still rebase completed history",
+    ordinary.complete === true && ordinary.epoch === 71 && Number(rebased.epoch) === 71 &&
+      Number(rebased.base_count) === 3_201 && Number(rebased.current_batches) === 0,
+    JSON.stringify({ ordinary, rebased }));
+}
+
 /* A later upgrade must not count one completed bootstrap's durable batch
    history against a new exact verified cut. This fixture reaches the shape
    through the real coordinator first; a hand-seeded empty ledger missed the

@@ -201,7 +201,7 @@ the full release gate.
 | Credentials | `node test/admin-key-rotation.test.mjs`, `node test/google-auth-storage.test.mjs`, and `node test/mcp-rotation.test.mjs` |
 | Ingest and extraction | `node test/ingest-run.test.mjs` and `node test/quality.test.mjs` |
 | D1 migrations | `node test/migrations.test.mjs` |
-| Recovery | `node test/verified-recovery.test.mjs` and `node test/cloudflare-recovery-adapter.test.mjs` |
+| Recovery | `node test/verified-recovery.test.mjs`, `node test/cloudflare-recovery-adapter.test.mjs`, `node --test test/private-aggregate-receipt.test.mjs`, and `node --test test/v048-disposable-vector-seed.test.mjs` |
 | Worker data plane | `node worker/test/routes.test.mjs`, `node worker/test/store.test.mjs`, and `node worker/test/store-d1.test.mjs` |
 | Evaluation | `npm run test:eval` |
 | Published package privacy | `node test/package-privacy.test.mjs` |
@@ -251,6 +251,30 @@ There are three separate claims:
 
 Never combine those into a broader claim than the evidence supports.
 
+For the held v0.4.8 candidate, the private receipt helper, exact 3,201-record
+source runner, and controlled bootstrap interruption and resume hook have only
+deterministic local coverage. The source runner is not packaged, and its
+`--plan` output performs no live action. No provider field campaign has run, so
+none of this closes the disposable recovery gate or supports a release claim.
+The local recovery coverage includes a real-SQLite 3,201-row bootstrap with
+provider-count lag. It proves that the field-only receipt contract preserves
+the exact four-row epoch for independent completion observation while ordinary
+bootstrap contracts still rebase it. That remains offline protocol evidence,
+not provider proof.
+
+The v0.4.8 private-receipt helper and source runner execute only on POSIX
+systems. Native Windows execution refuses before credential or provider access
+until the implementation can prove a current-user-only DACL. This restriction
+does not change the six-job packaged-product CI requirement above; the runner is
+source-only and excluded from the package. Its `--plan` mode remains local and
+no-write. Windows CI exercises the explicit unsupported-platform refusal only;
+it is not Windows execution evidence for the helper, seeder, or recovery drill.
+macOS execution also fails closed on any extended ACL in the selected receipt
+directory or its marker, temporary, and final files; the helper checks empty
+created files before writing receipt bytes and never edits caller-owned ACLs.
+The adapter proves that artifact-directory boundary again before its lock and
+before any credential, Wrangler, or HTTP action.
+
 ## Cut an immutable release
 
 The current 0.4.8/schema46 field candidate remains held. The earlier 0.4.7
@@ -263,11 +287,21 @@ bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
 around a failed workflow. The
 [0.4.8 candidate evidence plan](./release-evidence/v0.4.8-candidate-release-evidence-plan.md)
-is planning only until a reviewed change binds it to the final candidate SHA.
+and the
+[v0.4.8 disposable field plan](./release-evidence/v0.4.8-disposable-vector-field-plan.md)
+are planning only until a reviewed change binds the candidate to its final SHA
+and package. The disposable plan still reports no provider activity.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest
    changelog heading, README archive URLs, and current-version checks aligned.
    Commit every required module, migration, test, and generated owner bundle.
+   For the source-only v0.4.8 field runner, prepare its private closed-schema
+   binding with `schema_version`, `candidate_commit`, `runner_sha256`,
+   `package_sha256`, `package_bytes`, `package_content_fingerprint`,
+   `manifest_sha256`, and the fixed `corpus_sha256`. The runner is not part of
+   the npm tarball. It independently verifies the archive SHA-256 and byte count
+   and requires the clean source tree and unpacked package to share the bound
+   runtime-content fingerprint before credential or provider use.
    The release checkout must not contain a tracked node_modules link or depend
    on another worktree's dependencies. Run npm ci from the lockfile.
 2. Run the complete offline suite, audit:regressions, npm audit --offline, package

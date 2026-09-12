@@ -362,6 +362,7 @@ const acceptedRecordReceipt = {
   original_id: existingInput.priorGap.original_id,
   target_set_hash: sealed.target_set_hash,
   target_count: 1,
+  resolves_observation_hash: existingInput.priorGap.observation_hash,
   accepted_observation_hash: id("7"),
   resolution_hash: id("2"),
   activation_hash: id("3"),
@@ -397,6 +398,23 @@ assert.equal(validatePrivateProvenanceAcceptedResolutionResponse(
     resultFamilyVerifyReceipt,
   },
 ).recorded, true);
+for (const mutate of [
+  (receipt) => { delete receipt.resolves_observation_hash; },
+  (receipt) => { receipt.resolves_observation_hash = id("f"); },
+]) {
+  const invalid = clone(acceptedRecordReceipt);
+  mutate(invalid);
+  assert.throws(() => validatePrivateProvenanceAcceptedResolutionResponse(
+    privatePlan,
+    invalid,
+    {
+      operation: "record",
+      approvalId: publicPlan.approval_id,
+      resultFamilyRecordReceipt,
+      resultFamilyVerifyReceipt,
+    },
+  ), /accepted-resolution response/);
+}
 assert.throws(() => validatePrivateProvenanceAcceptedResolutionResponse(
   privatePlan,
   { ...acceptedRecordReceipt, accepted_observation_hash: existingInput.priorGap.observation_hash },
@@ -683,6 +701,48 @@ const acceptedAfterDiscovery = formatPrivateProvenanceAcceptedResolutionRequest(
 assert.equal(acceptedAfterDiscovery.run_id, discoveryPlan.run_ids.accepted_resolution);
 assert.equal(acceptedAfterDiscovery.targets[0].resolves_observation_hash,
   discoveryObservation.observation_hash);
+const acceptedDiscoveryReceipt = {
+  ...acceptedRecordReceipt,
+  run_id: discoveryPlan.run_ids.accepted_resolution,
+  original_id: discoverySeal.targets[0].original_id,
+  target_set_hash: discoverySeal.target_set_hash,
+  resolves_observation_hash: discoveryObservation.observation_hash,
+  family_receipt_hash: discoveryFamilyRecordReceipt.family_receipt_hash,
+  verification_hash: discoveryFamilyRecordReceipt.verification_hash,
+  document_count: discoveryFamilyRecordReceipt.document_count,
+  chunk_count: discoveryFamilyRecordReceipt.chunk_count,
+  vector_readiness_hash: discoveryFamilyRecordReceipt.vector_readiness_hash,
+  retrieval_probe_id: discoveryFamilyRecordReceipt.retrieval_probe_id,
+};
+assert.equal(validatePrivateProvenanceAcceptedResolutionResponse(
+  discoveryPlan,
+  acceptedDiscoveryReceipt,
+  {
+    operation: "record",
+    approvalId: discoveryPublic.approval_id,
+    discoveryReceipt: discoveryResponse,
+    resultFamilyRecordReceipt: discoveryFamilyRecordReceipt,
+    resultFamilyVerifyReceipt: discoveryFamilyVerifyReceipt,
+  },
+).resolves_observation_hash, discoveryObservation.observation_hash);
+for (const mutate of [
+  (receipt) => { delete receipt.resolves_observation_hash; },
+  (receipt) => { receipt.resolves_observation_hash = id("f"); },
+]) {
+  const invalid = clone(acceptedDiscoveryReceipt);
+  mutate(invalid);
+  assert.throws(() => validatePrivateProvenanceAcceptedResolutionResponse(
+    discoveryPlan,
+    invalid,
+    {
+      operation: "record",
+      approvalId: discoveryPublic.approval_id,
+      discoveryReceipt: discoveryResponse,
+      resultFamilyRecordReceipt: discoveryFamilyRecordReceipt,
+      resultFamilyVerifyReceipt: discoveryFamilyVerifyReceipt,
+    },
+  ), /accepted-resolution response/);
+}
 assert.throws(() => formatPrivateProvenanceAcceptedResolutionRequest(discoveryPlan, {
   operation: "record",
   approvalId: discoveryPublic.approval_id,
