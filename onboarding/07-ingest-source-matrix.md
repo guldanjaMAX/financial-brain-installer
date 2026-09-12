@@ -222,7 +222,7 @@ node brain.mjs ingest <manifest> --from calendar
 
 Later runs are incremental through Google's own sync token, same idea as Gmail's historyId. The token advances only after every event and cancellation is accepted; a failed or refused event is retried from the same Google window rather than silently skipped. A cancelled meeting is removed from your index, not left behind as a stale document. By default it reads your primary calendar; more than one calendar, or a shared one, is a manifest setting.
 
-A Calendar dry run reports the exact event count it could preview. If any declared calendar cannot be read, it prints the partial scope and exits nonzero with the reconsent or provider fix. An unread calendar is never presented as an empty one.
+A Calendar dry run reports the exact event count it could preview. If any declared calendar cannot be read, it prints the partial scope and exits nonzero with the reconsent or provider fix. An unread calendar is never presented as an empty one. Add `--aggregate-json` only with `--dry-run` when a local assistant needs a counts-only machine receipt; this suppresses event subjects and all other record-level output.
 
 **The honest production boundary, same shape as Gmail's:** the connector and the command that runs it have both passed the product test suite against scripted Google responses, including custom source namespaces, resume state, and cancellation targets. Neither has completed a real-calendar production run yet. Treat it as built but not yet production-proven.
 

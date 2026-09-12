@@ -555,6 +555,14 @@ The dry run sends nothing. It reports what it **would** load, and more usefully,
 what it would skip and why. Read that list. It is where you find out what your
 brain will not know.
 
+When a local assistant needs to run a Google Drive or Calendar preview, add
+`--aggregate-json`. This explicit mode prints one versioned JSON object with
+counts only. It never prints filenames, titles, event subjects, document or
+source IDs, URLs, content, credentials, or raw provider errors. The ordinary
+dry run remains the detailed owner-terminal view. A complete aggregate preview
+exits zero; a bounded, incomplete, or failed one still prints the same safe JSON
+shape and exits nonzero so automation cannot mistake partial coverage for proof.
+
 Then drop `--dry-run` to load it for real. Large loads are resumable: if it is
 interrupted, run the same command again and it continues from where it stopped.
 

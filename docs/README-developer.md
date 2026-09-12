@@ -303,6 +303,64 @@ Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, and the
 exact-plan acknowledgement `--approve-removals <fingerprint>` when a Drive,
 Gmail, IMAP, or local-folder cleanup exceeds its routine safety limits.
 
+Drive and Calendar have one additional assistant-safe preview form:
+
+```bash
+node brain.mjs ingest ./acme.manifest.json --from drive --dry-run --aggregate-json
+node brain.mjs ingest ./acme.manifest.json --from calendar --dry-run --aggregate-json
+```
+
+`--aggregate-json` is accepted only with `--dry-run` and only for these two
+connectors. It suppresses every human progress, item, skip, and provider-error
+line, then writes exactly one JSON object to stdout. Stderr remains empty for
+anticipated complete and failure paths. Normal `--dry-run` output is unchanged.
+Calendar refuses `--limit` in this mode; a limited Drive preview is labeled
+incomplete and exits nonzero. A recognized aggregate request with an invalid
+flag combination fails with the same schema and the closed `INVALID_REQUEST`
+code, without creating a support-journal entry.
+
+The version 1 receipt has exact top-level fields:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "connector_aggregate_preview",
+  "source": "drive",
+  "dry_run": true,
+  "aggregate_only": true,
+  "status": "complete",
+  "scope": "full",
+  "counts": {
+    "observed": 12,
+    "would_send": 8,
+    "unchanged": 2,
+    "skipped": 2,
+    "removal_candidates": 1
+  },
+  "removal_candidates": {
+    "source_policy": 1,
+    "source_deleted": 0,
+    "intentional_skip": 0
+  },
+  "coverage": {
+    "complete": true,
+    "bounded": false,
+    "units_total": 1,
+    "units_succeeded": 1,
+    "units_failed": 0
+  },
+  "failure": null
+}
+```
+
+Counts may be `null` only when a failed preview stopped before they could be
+proved. `status` is `complete`, `incomplete`, or `failed`; `scope` is `full`,
+`incremental`, `mixed`, or `unknown`. A non-complete receipt carries only a
+closed failure code and a retryable boolean, never provider text. Complete is
+exit 0. Incomplete and failed are exit 1 and still emit the exact JSON schema.
+Unknown fields, mismatched totals, or a receipt that calls bounded or failed
+coverage complete are rejected before output.
+
 ---
 
 ## Using it: Claude Code and Codex

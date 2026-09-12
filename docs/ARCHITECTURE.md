@@ -208,6 +208,16 @@ connect ceremony uses the same shared lease. Mutating load preflight reads only
 credential-store metadata; dry-run connectors use a full-record reader that
 cannot migrate legacy Windows or macOS storage.
 
+Drive and Calendar also expose an explicit `--dry-run --aggregate-json`
+boundary for local assistants. The connector still performs its read-only
+provider walk, but the command suppresses all item and human progress output
+and returns one schema-checked counts-only receipt. Its allowlist contains no
+field for a filename, title, event subject, document or source ID, URL, content,
+credential, or provider message. Anticipated failures are reduced to closed
+codes and exit nonzero without writing source state, source receipts, or support
+journal events. The dispatcher also bypasses the Cloudflare credential session
+for this provider-only read. The ordinary owner-terminal dry run remains detailed.
+
 The authenticated HTTP batch route preserves one receipt per input document.
 For D1 it reads prior rows for unique document identities in one batch preflight,
 so an unchanged 50-document safety rescan is one database round trip rather than

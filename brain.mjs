@@ -165,6 +165,14 @@ import {
   renderProvenanceRepairPlan,
 } from "./operations/provenance-repair.mjs";
 import {
+  aggregateConnectorPreviewRequested,
+  aggregateRemovalCandidateCounts,
+  connectorAggregatePreviewFailure,
+  connectorAggregatePreviewRequestFailure,
+  connectorAggregatePreviewReceipt,
+  renderConnectorAggregatePreview,
+} from "./operations/connector-aggregate-preview.mjs";
+import {
   isHtmlDocumentBody,
   requestZoneAssignmentWithRetry,
   zoneAssignmentExhaustedMessage,
@@ -335,6 +343,34 @@ class JsonFatal extends Fatal {
 const die = (s) => {
   throw new Fatal(s);
 };
+
+function aggregateConnectorPreviewMode(flags, source) {
+  const explicitlySelected = flags["aggregate-json"] !== undefined;
+  try {
+    const requested = aggregateConnectorPreviewRequested(flags, source);
+    if (!requested) return false;
+
+    const common = ["from", "source", "dry-run", "reset", "aggregate-json"];
+    const known = [...common, "limit"];
+    assertKnownFlags(flags, known, `brain ingest --from ${source} --dry-run --aggregate-json`);
+    if (source === "calendar" && flags.limit !== undefined) {
+      die("--limit is not supported by the Calendar aggregate preview; remove it so coverage can be proved complete");
+    }
+    return true;
+  } catch (error) {
+    if (explicitlySelected && ["drive", "calendar"].includes(source)) {
+      throw new JsonFatal(connectorAggregatePreviewRequestFailure(source));
+    }
+    die(error.message);
+  }
+}
+
+function emitConnectorAggregatePreview(receipt, options = {}) {
+  const rendered = renderConnectorAggregatePreview(receipt);
+  const writePreview = options.writeAggregatePreview ?? ((value) => process.stdout.write(value));
+  writePreview(rendered);
+  return receipt;
+}
 
 const SUPPORT_REMOTE_COMMANDS = new Set([
   "check", "deploy", "diagnose", "drain", "health", "migrate", "provision",
@@ -9258,6 +9294,9 @@ async function cmdForget(manifestPath) {
 async function cmdIngest(manifestPath) {
   const { m } = loadManifest(manifestPath);
   const flags = parseFlags(process.argv.slice(4));
+  if (flags["aggregate-json"] !== undefined) {
+    aggregateConnectorPreviewMode(flags, String(flags.from || "").toLowerCase());
+  }
   // Remote sources reuse everything below the envelope: splitting, batching,
   // the credential gate, resume state and the skip report. Only the producer
   // differs. Calendar is the one exception: its connector already carries
@@ -10588,23 +10627,35 @@ function saveCalendarState(path, state) {
  * write new code only for what is actually new (the sync-token state file).
  */
 export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
-  const sourceName = assertSourceName(flags.source === true || !flags.source ? "calendar" : flags.source);
+  const aggregatePreview = aggregateConnectorPreviewMode(flags, "calendar");
+  let sourceName;
+  try {
+    sourceName = assertSourceName(flags.source === true || !flags.source ? "calendar" : flags.source);
+  } catch (error) {
+    if (aggregatePreview) throw new JsonFatal(connectorAggregatePreviewRequestFailure("calendar"));
+    throw error;
+  }
   const dry = !!flags["dry-run"];
   const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName });
-  return runMutatingSourceIngest({
-    manifestPath,
-    sourceName,
-    statePath,
-    sharedRecord: "provider:google",
-    dryRun: dry,
-    options,
-  }, (assertLockOwned) => cmdIngestCalendarRun(
-    m,
-    manifestPath,
-    flags,
-    options,
-    { sourceName, dry, statePath, assertLockOwned },
-  ));
+  try {
+    return await runMutatingSourceIngest({
+      manifestPath,
+      sourceName,
+      statePath,
+      sharedRecord: "provider:google",
+      dryRun: dry,
+      options,
+    }, (assertLockOwned) => cmdIngestCalendarRun(
+      m,
+      manifestPath,
+      flags,
+      options,
+      { sourceName, dry, statePath, assertLockOwned, aggregatePreview },
+    ));
+  } catch (error) {
+    if (!aggregatePreview || error instanceof JsonFatal) throw error;
+    throw new JsonFatal(connectorAggregatePreviewFailure("calendar", error));
+  }
 }
 
 async function cmdIngestCalendarRun(
@@ -10612,8 +10663,11 @@ async function cmdIngestCalendarRun(
   manifestPath,
   flags,
   options,
-  { sourceName, dry, statePath, assertLockOwned },
+  { sourceName, dry, statePath, assertLockOwned, aggregatePreview },
 ) {
+  const humanInfo = aggregatePreview ? () => {} : info;
+  const humanWarn = aggregatePreview ? () => {} : warn;
+  const humanOk = aggregatePreview ? () => {} : ok;
   const resolveIngestAccount = options.resolveAccount ?? resolveAccount;
   const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
   const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
@@ -10651,22 +10705,22 @@ async function cmdIngestCalendarRun(
   const config = m.calendar || {};
   const calendarLabel = (config.calendars?.length ? config.calendars : ["primary"])
     .map((c) => (typeof c === "string" ? c : c.id)).join(", ");
-  info(`syncing calendar(s): ${calendarLabel}`);
+  humanInfo(`syncing calendar(s): ${calendarLabel}`);
 
   const result = await syncAll({
     config, state, getAccessToken: getToken,
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
   });
 
-  info(
+  humanInfo(
     `${result.summary.events_seen} event(s) seen across ${result.summary.calendars_ok}/${result.calendars.length} calendar(s); ` +
       `${result.documents.length} to upsert, ${result.deletions.length} cancelled, ${result.summary.skipped} skipped`
   );
   for (const cal of result.calendars) {
-    if (cal.error) warn(`${cal.calendar_key}: ${cal.error.message}`);
+    if (cal.error) humanWarn(`${cal.calendar_key}: ${cal.error.message}`);
   }
   if (result.summary.needs_reconsent) {
-    warn(
+    humanWarn(
       "Google refused the calendar refresh token (it is dead: revoked, expired from six months of " +
         "non-use, or the OAuth app is still in Testing and issued a seven-day token). Reconnect with " +
         "`brain connect google --scopes drive,gmail,calendar` before running this again. " +
@@ -10676,14 +10730,58 @@ async function cmdIngestCalendarRun(
 
   if (dry) {
     const previewFailures = result.calendars.filter((calendar) => calendar.error);
+    const aggregateFailures = result.calendars.filter((calendar) =>
+      calendar.ok !== true || calendar.error || calendar.authoritative_snapshot !== true);
     const previewSummary = `dry run: ${result.documents.length} event(s) would be sent, ${result.deletions.length} cancellation(s) would be removed`;
-    if (previewFailures.length) warn(`Calendar preview incomplete: ${previewSummary}`);
-    else ok(previewSummary);
-    if (result.documents.length) {
+    if (previewFailures.length) humanWarn(`Calendar preview incomplete: ${previewSummary}`);
+    else humanOk(previewSummary);
+    if (!aggregatePreview && result.documents.length) {
       console.log("\n  first few that WOULD be sent:");
       for (const envelope of result.documents.slice(0, 5)) {
         console.log(`    ${envelope.title}  (${envelope.occurred_at || "no date"})`);
       }
+    }
+    if (aggregatePreview) {
+      const modes = new Set(result.calendars
+        .filter((calendar) => calendar.ok === true)
+        .map((calendar) => calendar.mode)
+        .filter((mode) => mode === "full" || mode === "incremental"));
+      const scope = modes.size === 1 ? [...modes][0] : modes.size > 1 ? "mixed" : "unknown";
+      const succeeded = result.calendars.filter((calendar) =>
+        calendar.ok === true && !calendar.error && calendar.authoritative_snapshot === true).length;
+      const removals = aggregateRemovalCandidateCounts({
+        sourceDeleted: result.deletions.map((deletion) => deletion.source_id),
+      });
+      const sourceCoverageIncomplete = result.summary.skipped > 0;
+      const providerCoverageIncomplete = aggregateFailures.length > 0 || result.summary.needs_reconsent === true;
+      const complete = !sourceCoverageIncomplete && !providerCoverageIncomplete;
+      const receipt = connectorAggregatePreviewReceipt({
+        source: "calendar",
+        status: complete ? "complete" : "incomplete",
+        scope,
+        counts: {
+          observed: result.summary.events_seen,
+          would_send: result.documents.length,
+          unchanged: 0,
+          skipped: result.summary.skipped,
+          removal_candidates: Object.values(removals).reduce((sum, value) => sum + value, 0),
+        },
+        removalCandidates: removals,
+        coverage: {
+          complete,
+          bounded: false,
+          units_total: result.calendars.length,
+          units_succeeded: succeeded,
+          units_failed: result.calendars.length - succeeded,
+        },
+        failure: complete
+          ? null
+          : providerCoverageIncomplete
+            ? { code: "PROVIDER_SCOPE_INCOMPLETE", retryable: true }
+            : { code: "SOURCE_COVERAGE_INCOMPLETE", retryable: false },
+      });
+      if (!complete) throw new JsonFatal(receipt);
+      return emitConnectorAggregatePreview(receipt, options);
     }
     if (previewFailures.length) {
       die(
@@ -10750,7 +10848,7 @@ async function cmdIngestCalendarRun(
   // idempotent and is the only safe retry boundary.
   const deliveryIncomplete = sent.errors.length > 0 || sent.refused.length > 0 || removalPending > 0;
   if (deliveryIncomplete) {
-    warn("Calendar sync state was not advanced because not every event and cancellation was accepted. Re-running retries the same Google window.");
+    humanWarn("Calendar sync state was not advanced because not every event and cancellation was accepted. Re-running retries the same Google window.");
   } else {
     saveState(statePath, result.state);
   }
@@ -10797,13 +10895,13 @@ async function cmdIngestCalendarRun(
   });
 
   const calendarSummary = `${sent.created} created, ${sent.updated} updated, ${sent.unchanged} unchanged, ${removed} cancellation(s) removed`;
-  if (finalStatus === "ready") ok(calendarSummary);
-  else warn(`Calendar sync incomplete: ${calendarSummary}`);
+  if (finalStatus === "ready") humanOk(calendarSummary);
+  else humanWarn(`Calendar sync incomplete: ${calendarSummary}`);
   if (sent.refused.length) {
-    warn(`${sent.refused.length} event(s) refused by the credential gate (a live credential was pasted into an event)`);
+    humanWarn(`${sent.refused.length} event(s) refused by the credential gate (a live credential was pasted into an event)`);
   }
-  if (sent.errors.length) warn(`${sent.errors.length} event(s) failed to send and will be retried on the next run`);
-  if (removalPending) warn(`${removalPending} cancellation removal(s) remain pending and will be retried on the next run`);
+  if (sent.errors.length) humanWarn(`${sent.errors.length} event(s) failed to send and will be retried on the next run`);
+  if (removalPending) humanWarn(`${removalPending} cancellation removal(s) remain pending and will be retried on the next run`);
   return { result, sent, removed, removalPending };
 }
 
@@ -12504,6 +12602,7 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
   if (!["drive", "gmail", "imap"].includes(which)) {
     die(`--from ${which} is not a source. Available: drive, gmail, imap.`);
   }
+  const aggregatePreview = aggregateConnectorPreviewMode(flags, which);
 
   const removalApproval = flags["approve-removals"];
   if (removalApproval !== undefined) {
@@ -12516,7 +12615,13 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
     }
   }
 
-  const sourceName = assertSourceName(flags.source === true || !flags.source ? which : flags.source);
+  let sourceName;
+  try {
+    sourceName = assertSourceName(flags.source === true || !flags.source ? which : flags.source);
+  } catch (error) {
+    if (aggregatePreview) throw new JsonFatal(connectorAggregatePreviewRequestFailure(which));
+    throw error;
+  }
   const dry = !!flags["dry-run"];
   // Drive and Gmail share their canonical state identity with the source
   // lease. IMAP is outside this provenance-repair lease change, so preserve
@@ -12529,22 +12634,27 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
     manifestPath,
     flags,
     options,
-    { which, sourceName, dry, removalApproval, statePath, assertLockOwned },
+    { which, sourceName, dry, removalApproval, statePath, assertLockOwned, aggregatePreview },
   );
   // A dry run writes neither resume state nor source receipts, so it cannot
   // race the durable writer. Every real Drive or Gmail path, including brain
   // load and provenance repair, takes the same cross-platform owner lease
   // before credentials or network. IMAP is outside provenance repair and keeps
   // its existing boundary in this change.
-  if (dry || !["drive", "gmail"].includes(which)) return run();
-  return runMutatingSourceIngest({
-    manifestPath,
-    sourceName,
-    statePath,
-    sharedRecord: "provider:google",
-    dryRun: false,
-    options,
-  }, run);
+  try {
+    if (dry || !["drive", "gmail"].includes(which)) return await run();
+    return await runMutatingSourceIngest({
+      manifestPath,
+      sourceName,
+      statePath,
+      sharedRecord: "provider:google",
+      dryRun: false,
+      options,
+    }, run);
+  } catch (error) {
+    if (!aggregatePreview || error instanceof JsonFatal) throw error;
+    throw new JsonFatal(connectorAggregatePreviewFailure(which, error));
+  }
 }
 
 const cmdIngestRemoteRun = async (
@@ -12552,8 +12662,12 @@ const cmdIngestRemoteRun = async (
   manifestPath,
   flags,
   options,
-  { which, sourceName, dry, removalApproval, statePath, assertLockOwned = null },
+  { which, sourceName, dry, removalApproval, statePath, assertLockOwned = null, aggregatePreview = false },
 ) => {
+  const humanInfo = aggregatePreview ? () => {} : info;
+  const humanWarn = aggregatePreview ? () => {} : warn;
+  const humanOk = aggregatePreview ? () => {} : ok;
+  const humanProgress = aggregatePreview ? () => {} : (value) => process.stdout.write(value);
   // A deployed connector talks to the brain's authenticated data-plane route.
   // The Cloudflare control token is an install/deploy credential, not something
   // a daily Drive or Gmail refresh should retain forever. A dry run talks only
@@ -12608,15 +12722,15 @@ const cmdIngestRemoteRun = async (
       // Per PAGE, not per file. A forty-page scan is forty model calls and
       // over a minute of waiting; without this the run looks hung and the
       // first client to see it kills it.
-      info(`  OCR page ${page}${totalPages ? ` of ${totalPages}` : ""} (${ocrPages} page(s) read so far this run)`);
+      humanInfo(`  OCR page ${page}${totalPages ? ` of ${totalPages}` : ""} (${ocrPages} page(s) read so far this run)`);
     },
   });
   if (ocrCfg.enabled && !dry) {
     const { estimateOcrCost, describeOcrCost } = await ingestOcrLib();
-    info(`OCR is ON, model ${ocrCfg.model}, up to ${ocrCfg.maxPages} page(s) per document.`);
-    info(`  cost per 100 scanned pages: ${describeOcrCost(estimateOcrCost(100))}`);
+    humanInfo(`OCR is ON, model ${ocrCfg.model}, up to ${ocrCfg.maxPages} page(s) per document.`);
+    humanInfo(`  cost per 100 scanned pages: ${describeOcrCost(estimateOcrCost(100))}`);
   } else if (ocrCfg.enabled && dry) {
-    info("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
+    humanInfo("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
   }
 
   const savedState = loadState(statePath);
@@ -12743,6 +12857,12 @@ const cmdIngestRemoteRun = async (
   const rejectedFamilyParts = new Map();
   const intentionalRemovalUids = [];
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+  let aggregateScope = "unknown";
+  let aggregateRemovals = Object.freeze({
+    source_policy: 0,
+    source_deleted: 0,
+    intentional_skip: 0,
+  });
 
   const addTally = (part) => {
     for (const key of Object.keys(tally)) tally[key] += Number(part?.[key] || 0);
@@ -12805,7 +12925,7 @@ const cmdIngestRemoteRun = async (
         families: settlement.reconciliations, base, adminKey,
         assertOwned: assertLockOwned,
       });
-      if (staleParts) ok(`${staleParts} obsolete split-document part(s) removed`);
+      if (staleParts) humanOk(`${staleParts} obsolete split-document part(s) removed`);
     }
     intentionalRemovalUids.push(...settlement.intentionalRemovalUids);
     for (const plan of outcome.completed) {
@@ -12825,7 +12945,7 @@ const cmdIngestRemoteRun = async (
       rejectedFamilyParts.delete(plan.stateKey);
     }
     if (outcome.completed.length || outcome.incomplete.length) saveState(statePath, state);
-    process.stdout.write(
+    humanProgress(
       `\r  batch ${batchNo}  loaded ${tally.created + tally.updated}  refused ${tally.refused}  failed ${tally.failed}   `
     );
   };
@@ -12845,12 +12965,12 @@ const cmdIngestRemoteRun = async (
   }
 
   if (which === "drive") {
-    const drive = await import("./connectors/google-drive.mjs");
+    const drive = options.googleDrive ?? await import("./connectors/google-drive.mjs");
     const sourceDeletedUids = [];
-    if (!incremental && state.sync_token) info(`${driveDecision.reason}; using a full Drive comparison`);
-    if (sourcePolicy.excludeFileIds.length) info(`${sourcePolicy.excludeFileIds.length} reviewed Drive file-id exclusion(s) enforced`);
-    if (sourcePolicy.excludePaths.length) info(`${sourcePolicy.excludePaths.length} Drive path exclusion(s) enforced`);
-    if (sourcePolicy.privatePrefixes.length) info(`private path prefixes enforced in Drive: ${sourcePolicy.privatePrefixes.join(", ")}`);
+    if (!incremental && state.sync_token) humanInfo(`${driveDecision.reason}; using a full Drive comparison`);
+    if (sourcePolicy.excludeFileIds.length) humanInfo(`${sourcePolicy.excludeFileIds.length} reviewed Drive file-id exclusion(s) enforced`);
+    if (sourcePolicy.excludePaths.length) humanInfo(`${sourcePolicy.excludePaths.length} Drive path exclusion(s) enforced`);
+    if (sourcePolicy.privatePrefixes.length) humanInfo(`private path prefixes enforced in Drive: ${sourcePolicy.privatePrefixes.join(", ")}`);
     // Taken BEFORE the walk. Taken after, anything changed during the walk
     // would be missed forever, because the next run starts from a token that
     // already claims to include it.
@@ -12858,18 +12978,18 @@ const cmdIngestRemoteRun = async (
     try {
       nextSync = await drive.startPageToken(getToken);
     } catch (e) {
-      warn(`could not get a change token, so the next run will be a full walk: ${e.message.slice(0, 100)}`);
+      humanWarn(`could not get a change token, so the next run will be a full walk: ${e.message.slice(0, 100)}`);
     }
 
     let files = [];
     if (incremental) {
-      info("incremental sync from the saved change token");
+      humanInfo("incremental sync from the saved change token");
       let ch = null;
       try {
         ch = await drive.listChanges(getToken, state.sync_token);
       } catch (error) {
         if (error?.status !== 410) throw error;
-        warn("the saved Drive change token is no longer usable, so this run is rebuilding source truth with a full comparison");
+        humanWarn("the saved Drive change token is no longer usable, so this run is rebuilding source truth with a full comparison");
         incremental = false;
         lane = "sweep";
       }
@@ -12888,7 +13008,7 @@ const cmdIngestRemoteRun = async (
         // therefore turns this into a rooted comparison before content bytes
         // can be read. This also expands changed folders through descendants.
         if (ch.changed.length) {
-          warn("Drive reported changed items, so this run is using a rooted full comparison before reading content");
+          humanWarn("Drive reported changed items, so this run is using a rooted full comparison before reading content");
           incremental = false;
           lane = "sweep";
           files = [];
@@ -12896,7 +13016,7 @@ const cmdIngestRemoteRun = async (
       }
     }
     if (!incremental) {
-      info(`full walk of ${sourcePolicy.rootFolderIds.length} reviewed Drive root folder(s)`);
+      humanInfo(`full walk of ${sourcePolicy.rootFolderIds.length} reviewed Drive root folder(s)`);
       for await (const f of drive.listRootedFiles(getToken, {
         rootFolderIds: sourcePolicy.rootFolderIds,
       })) {
@@ -12904,6 +13024,7 @@ const cmdIngestRemoteRun = async (
         if (files.length >= limit) break;
       }
     }
+    aggregateScope = incremental ? "incremental" : "full";
 
     const pendingDriveAtStart = Object.keys(state.removed || {}).filter(
       (uid) => uid.startsWith(`${sourceName}:`)
@@ -13036,7 +13157,7 @@ const cmdIngestRemoteRun = async (
         skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: f.id,
       };
-      if (scanned % 200 === 0) process.stdout.write(`\r  scanned ${scanned}...   `);
+      if (scanned % 200 === 0) humanProgress(`\r  scanned ${scanned}...   `);
       return {
         hash: r.version, envelopes, rel: f.name, stateKey: key,
         deferState: true, familyPlan,
@@ -13052,15 +13173,22 @@ const cmdIngestRemoteRun = async (
     if (dry) {
       // A preview has no authenticated inventory, but still reports every
       // observed category. It cannot delete or advance a cursor.
-      await applyDriveRemovals({
-        uids: excludedUids, base, adminKey, state, dryRun: true, label: "source policy",
+      aggregateRemovals = aggregateRemovalCandidateCounts({
+        sourcePolicy: excludedUids,
+        sourceDeleted: sourceDeletedUids,
+        intentionalSkip: intentionalRemovalUids,
       });
-      await applyDriveRemovals({
-        uids: sourceDeletedUids, base, adminKey, state, dryRun: true, label: "Drive deletion",
-      });
-      await applyDriveRemovals({
-        uids: intentionalRemovalUids, base, adminKey, state, dryRun: true, label: "intentional source skip",
-      });
+      if (!aggregatePreview) {
+        await applyDriveRemovals({
+          uids: excludedUids, base, adminKey, state, dryRun: true, label: "source policy",
+        });
+        await applyDriveRemovals({
+          uids: sourceDeletedUids, base, adminKey, state, dryRun: true, label: "Drive deletion",
+        });
+        await applyDriveRemovals({
+          uids: intentionalRemovalUids, base, adminKey, state, dryRun: true, label: "intentional source skip",
+        });
+      }
       intentionalRemovalUids.length = 0;
     } else {
       // The pre-ingest inventory keeps the safety denominator stable and also
@@ -13115,7 +13243,7 @@ const cmdIngestRemoteRun = async (
       if (driveRemovalPlan.total) {
         const percent = (driveRemovalPlan.ratio * 100).toFixed(1);
         const disposition = driveRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-        info(`Drive cleanup plan ${disposition}: ${driveRemovalPlan.total} of ${driveRemovalPlan.stored} stored documents (${percent}%)`);
+        humanInfo(`Drive cleanup plan ${disposition}: ${driveRemovalPlan.total} of ${driveRemovalPlan.stored} stored documents (${percent}%)`);
       }
 
       const categories = [
@@ -13128,7 +13256,7 @@ const cmdIngestRemoteRun = async (
           uids: driveRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
           assertOwned: assertLockOwned,
         });
-        if (result.applied) ok(`${result.applied} ${success}`);
+        if (result.applied) humanOk(`${result.applied} ${success}`);
         if (driveRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (driveRemovalPlan.total) {
@@ -13198,14 +13326,14 @@ const cmdIngestRemoteRun = async (
     if (incremental) {
       const h = await gmail.listHistory(getToken, state.history_id);
       if (h.expired) {
-        warn("the saved Gmail history id is too old to answer from, so this is a full pass");
+        humanWarn("the saved Gmail history id is too old to answer from, so this is a full pass");
         incremental = false;
         lane = "sweep";
         authoritativeSnapshot = true;
         await capturePrewalkHistory();
         ids = gmail.listMessages(getToken, { max: limit });
       } else {
-        info(`incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s)`);
+        humanInfo(`incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s)`);
         gmailDeletedUids.push(...h.deletedIds.map((id) => `${sourceName}:${id}`));
         nextHistory = h.historyId || nextHistory;
         gmailHistoryMarkerMissing = nextHistory ? 0 : 1;
@@ -13233,7 +13361,7 @@ const cmdIngestRemoteRun = async (
             skips.push(policy.skip);
           }
           if (!dry) saveState(statePath, state);
-          warn(
+          humanWarn(
             `${gmailLabelGaps} Gmail message(s) had no trustworthy label classification, so this history window was refused before any message or removal was sent`,
           );
           ids = [];
@@ -13297,7 +13425,7 @@ const cmdIngestRemoteRun = async (
       // pass may recheck thousands of already-accepted messages before it
       // reaches new mail; printing only for newly prepared documents made a
       // healthy run look frozen during that whole recovery window.
-      if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
+      if (scanned % 200 === 0) humanProgress(`\r  fetched ${scanned}...   `);
       const key = `${sourceName}:${id}`;
       gmailActiveUids.add(key);
       if (r.skip) {
@@ -13479,7 +13607,7 @@ const cmdIngestRemoteRun = async (
         if (gmailRemovalPlan.total) {
           const percent = (gmailRemovalPlan.ratio * 100).toFixed(1);
           const disposition = gmailRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-          info(`Gmail cleanup plan ${disposition}: ${gmailRemovalPlan.total} of ${gmailRemovalPlan.stored} stored documents (${percent}%)`);
+          humanInfo(`Gmail cleanup plan ${disposition}: ${gmailRemovalPlan.total} of ${gmailRemovalPlan.stored} stored documents (${percent}%)`);
         }
         const categories = [
           ["source_policy", "Gmail source policy", "message(s) removed to enforce the Gmail source policy"],
@@ -13491,7 +13619,7 @@ const cmdIngestRemoteRun = async (
             uids: gmailRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
             assertOwned: assertLockOwned,
           });
-          if (result.applied) ok(`${result.applied} ${success}`);
+          if (result.applied) humanOk(`${result.applied} ${success}`);
           if (gmailRemovalPlan.targets[category].length) saveState(statePath, state);
         }
         if (gmailRemovalPlan.total) {
@@ -13581,18 +13709,18 @@ const cmdIngestRemoteRun = async (
       // confidently ignorant of it; a folder told the wrong reason sends the
       // operator looking for the wrong problem.
       const mailFolders = folders.length - containers.length;
-      info(`${mailFolders} mail folder(s) on this mailbox; reading ${included.length}: ${included.map((f) => f.name).join(", ") || "none"}`);
+      humanInfo(`${mailFolders} mail folder(s) on this mailbox; reading ${included.length}: ${included.map((f) => f.name).join(", ") || "none"}`);
       if (skippedRoles.length) {
         // These are folders, not message-level skips. Preserve their count for
         // the receipt without subtracting them from message coverage below.
         folderPolicySkipped += skippedRoles.length;
-        info(`  not read, by policy: ${skippedRoles.map((f) => `${f.name} (${f.role})`).join(", ")}`);
+        humanInfo(`  not read, by policy: ${skippedRoles.map((f) => `${f.name} (${f.role})`).join(", ")}`);
       }
       if (unlisted.length) {
         // These were identified. Saying they "could not be classified" would be
         // false, and it is the more alarming of the two readings. An Archive
         // folder in particular can hold years of a client's real mail.
-        warn(
+        humanWarn(
           `${unlisted.length} folder(s) were identified but are NOT read, because no rule includes them: ` +
             `${unlisted.map((f) => `${f.name} (${f.role})`).join(", ")}\n` +
             "      Only inbox and sent are read by default. If one of these holds mail you need, that needs a rule."
@@ -13602,7 +13730,7 @@ const cmdIngestRemoteRun = async (
         // Not guessed at. A name table is localized and provider-specific, and
         // guessing "junk" on a folder that is really a client's invoice archive
         // loses it; guessing the other way reads their spam.
-        warn(
+        humanWarn(
           `${unclassified.length} folder(s) could not be identified and were NOT read: ${unclassified.map((f) => f.name).join(", ")}\n` +
             "      A folder whose purpose cannot be worked out is left alone rather than guessed at. There is no\n" +
             "      manifest setting that includes one yet: if one of these holds mail you need, that needs a rule."
@@ -13611,7 +13739,7 @@ const cmdIngestRemoteRun = async (
       if (containers.length) {
         // Not mail folders. Reported so the count above adds up, and NOT as a
         // problem, because they never held a message.
-        info(`  ${containers.length} name(s) are folder containers that hold no mail and cannot be opened: ${containers.map((f) => f.name).join(", ")}`);
+        humanInfo(`  ${containers.length} name(s) are folder containers that hold no mail and cannot be opened: ${containers.map((f) => f.name).join(", ")}`);
       }
       if (!included.length) {
         die("no readable folder was found on this mailbox. Nothing was changed.");
@@ -13630,8 +13758,8 @@ const cmdIngestRemoteRun = async (
         });
         // Never silent. A resync that just happens is indistinguishable from a
         // bug, and this is the same posture as the Gmail history-expiry warning.
-        if (decision.resynced) warn(`${folder.name}: ${decision.reason}`);
-        else if (decision.reason) info(`${folder.name}: ${decision.reason}`);
+        if (decision.resynced) humanWarn(`${folder.name}: ${decision.reason}`);
+        else if (decision.reason) humanInfo(`${folder.name}: ${decision.reason}`);
 
         let highest = decision.resynced ? 0 : (saved?.last_uid ?? 0);
         const prepareImap = async (message) => {
@@ -13690,7 +13818,7 @@ const cmdIngestRemoteRun = async (
             return { skip };
           }
           const envelopes = splitOversized(envelope);
-          if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
+          if (scanned % 200 === 0) humanProgress(`\r  fetched ${scanned}...   `);
           return {
             hash: r.version, envelopes, rel: key, stateKey: key, deferState: true,
             familyPlan: {
@@ -13797,7 +13925,7 @@ const cmdIngestRemoteRun = async (
       ]);
       if (ambiguousSnapshot) {
         for (const uid of unmatchedStoredUids) imapSnapshotGapUids.add(uid);
-        warn(
+        humanWarn(
           `${unmatchedStoredUids.length} stored IMAP document(s) could not be matched while ` +
           `${imapUnidentifiedSkips} current message(s) lacked stable identity; no absence-based removal was attempted`
         );
@@ -13833,7 +13961,7 @@ const cmdIngestRemoteRun = async (
       if (imapRemovalPlan.total) {
         const percent = (imapRemovalPlan.ratio * 100).toFixed(1);
         const disposition = imapRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-        info(`IMAP cleanup plan ${disposition}: ${imapRemovalPlan.total} of ${imapRemovalPlan.stored} stored documents (${percent}%)`);
+        humanInfo(`IMAP cleanup plan ${disposition}: ${imapRemovalPlan.total} of ${imapRemovalPlan.stored} stored documents (${percent}%)`);
       }
       const categories = [
         ["source_policy", "IMAP source policy", "message(s) removed to enforce the IMAP source policy"],
@@ -13844,7 +13972,7 @@ const cmdIngestRemoteRun = async (
         const result = await applyDriveRemovals({
           uids: imapRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
         });
-        if (result.applied) ok(`${result.applied} ${success}`);
+        if (result.applied) humanOk(`${result.applied} ${success}`);
         if (imapRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (imapRemovalPlan.total) {
@@ -13887,16 +14015,49 @@ const cmdIngestRemoteRun = async (
       deleteKeysOnScannerCommit: ["imap_removal_safety_baseline"],
     };
   }
-  process.stdout.write("\r");
+  humanProgress("\r");
 
-  info(`${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ${unchanged} unchanged; ${skips.length} skipped`);
+  humanInfo(`${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ${unchanged} unchanged; ${skips.length} skipped`);
 
   const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
   if (dry) {
-    ok("dry run, nothing was sent");
-    await reportSkips(skips);
+    if (aggregatePreview) {
+      const bounded = Number.isFinite(limit);
+      const sourceCoverageIncomplete = coverageGaps > 0 || localRefused > 0 || tally.refused > 0 || tally.failed > 0;
+      const complete = !bounded && !sourceCoverageIncomplete;
+      const removalTotal = Object.values(aggregateRemovals).reduce((sum, value) => sum + value, 0);
+      const receipt = connectorAggregatePreviewReceipt({
+        source: which,
+        status: complete ? "complete" : "incomplete",
+        scope: aggregateScope,
+        counts: {
+          observed: scanned,
+          would_send: prepared,
+          unchanged,
+          skipped: skips.length,
+          removal_candidates: removalTotal,
+        },
+        removalCandidates: aggregateRemovals,
+        coverage: {
+          complete,
+          bounded,
+          units_total: 1,
+          units_succeeded: 1,
+          units_failed: 0,
+        },
+        failure: bounded
+          ? { code: "PREVIEW_BOUNDED", retryable: false }
+          : sourceCoverageIncomplete
+            ? { code: "SOURCE_COVERAGE_INCOMPLETE", retryable: false }
+            : null,
+      });
+      if (!complete) throw new JsonFatal(receipt);
+      return emitConnectorAggregatePreview(receipt, options);
+    }
+    humanOk("dry run, nothing was sent");
+    if (!aggregatePreview) await reportSkips(skips);
     return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length };
   }
 
@@ -13924,7 +14085,7 @@ const cmdIngestRemoteRun = async (
       : which === "imap" && imapSnapshotGaps
         ? `${imapSnapshotGaps} IMAP source snapshot gap(s) remained unresolved`
         : `${tally.failed} document(s) failed`;
-    warn(`${reason}, so the source cursor was NOT advanced; the next run will retry them`);
+    humanWarn(`${reason}, so the source cursor was NOT advanced; the next run will retry them`);
   }
   // A non-policy skip remains visible as incomplete coverage. Gmail still
   // advances past deterministic credential, parse and quality outcomes so one
@@ -13970,11 +14131,11 @@ const cmdIngestRemoteRun = async (
   runClosed = true;
 
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
-  if (tally.failed) info(summary);
-  else ok(summary);
-  if (totalRefused) warn(`${totalRefused} document(s) refused for carrying live credentials.`);
-  await reportSkips(skips);
-  info(`progress saved to ${relative(process.cwd(), statePath)}`);
+  if (tally.failed) humanInfo(summary);
+  else humanOk(summary);
+  if (totalRefused) humanWarn(`${totalRefused} document(s) refused for carrying live credentials.`);
+  if (!aggregatePreview) await reportSkips(skips);
+  humanInfo(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
   await reportBacklog(manifestPath);
   if (which === "gmail" && hasRemoteGap) {
@@ -22941,7 +23102,9 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
   if (typeof run !== "function") throw new TypeError("a CLI command function is required");
-  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(String(command || ""))) {
+  const argv = options.argv ?? process.argv;
+  const aggregateConnectorPreview = String(command || "") === "ingest" && argv.includes("--aggregate-json");
+  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(String(command || "")) || aggregateConnectorPreview) {
     return Promise.resolve().then(run);
   }
   const withWrangler = options.withWranglerSession ?? withWranglerSessionIfNeeded;
@@ -23019,9 +23182,11 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end
     brain ingest     <manifest> --path <dir>  load a folder into the brain
-    brain ingest     <manifest> --from drive  load from a connected remote source
+    brain ingest     <manifest> --from drive  load from a connected remote source;
+                                           --dry-run --aggregate-json emits counts-only JSON
     brain ingest     <manifest> --from gmail  sync connected Gmail (--dry-run to preview)
-    brain ingest     <manifest> --from calendar  sync Google Calendar (--dry-run to preview)
+    brain ingest     <manifest> --from calendar  sync Google Calendar (--dry-run to preview;
+                                           add --aggregate-json for counts-only JSON)
     brain ingest     <manifest> --from imap  sync a connected IMAP mailbox (--dry-run to preview)
     brain ingest     <manifest> --from imessage  one incremental Messages capture pass (Mac only)
     brain ingest     <manifest> --from whatsapp  one drain of the WhatsApp capture outbox
@@ -23076,7 +23241,11 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            Dropbox or HubSpot OAuth connection
     brain support    --clear --yes         clear private local issue notes
 
-  brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
+  brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. Drive
+  and Calendar also take --aggregate-json only with --dry-run. That explicit mode
+  writes one versioned counts-only JSON receipt and no item details; complete exits
+  zero, while bounded, incomplete, or failed previews return JSON and exit nonzero.
+  It is
   resumable: re-run the same command to continue an interrupted load. A large
   Drive, Gmail, or IMAP cleanup stops first and prints the exact
   --approve-removals fingerprint.
