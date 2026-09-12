@@ -768,6 +768,45 @@ It is **off by default**, because it spends money on your account, once per
 scanned page. Turn it on with `safety.ocr.enabled` in the manifest. Before a run
 the installer prints what the pages will cost and how long they will take.
 
+Before enabling it, an owner or technician can inspect a local folder without
+spending anything:
+
+```bash
+brain ocr-preflight ./brain.manifest.json --path "/path/to/documents" --json
+```
+
+This command reads local PDF structure only. It returns one aggregate JSON
+receipt with the number of scan-only documents, authoritative affected pages,
+pages inside and outside the per-document limit, the existing OCR cost and time
+range for the reviewed default model, and the manifest's configured daily spend
+cap. It does not show file
+names, paths, content, document hashes, or parser errors. A missing daily cap remains
+`null` with source `not_configured`; it is never replaced with a guessed value.
+The exact OCR model and pricing-basis version are part of the receipt and plan
+fingerprint. A nondefault model or changed pricing contract is explicitly
+unpriced, with no cost or cap result borrowed from the default model.
+
+`estimated_fits_configured_cap` compares the unrounded high value behind the
+complete estimated range only with the full configured cap. Display rounding
+cannot turn a slightly undersized cap into a positive result. It is not a
+promise that OCR can finish today. The cap
+is shared with other model calls, this read-only command does not ask the Brain
+how much has already been used, and the estimate's high value is a planning
+bracket rather than a guaranteed upper bound. Therefore the remaining shared
+daily budget and actual affordability are always reported as unknown. Unknown
+pages or incomplete traversal also make the configured-cap comparison `null`.
+
+A complete zero is reported as zero. If a folder, document, or page count could
+not be inspected, the estimate stays unavailable or is explicitly a known-page
+lower bound instead. The receipt includes a state-bound plan fingerprint for a
+future approval check, but this command does not approve or run OCR. It reads no
+Brain or Wrangler credential or ingest checkpoint, makes no application HTTP
+request, and performs no application-controlled Brain, cursor, state, manifest,
+or source-file write. A read can cause Google Drive, OneDrive, iCloud, or another
+operating-system file provider to hydrate a cloud-synced file. Whether that
+provider used its network, credential, or local filesystem is explicitly
+unknown rather than reported as false.
+
 ---
 
 ## Undo

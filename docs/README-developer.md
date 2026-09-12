@@ -271,6 +271,39 @@ document. `documents.text_source` and `text_reliable` carry the OCR provenance
 through retrieval and citations. Local synthetic scans prove this contract;
 real typed, fax-quality, and handwritten scans remain a private field gate.
 
+`brain ocr-preflight <manifest> --path <folder> --json` is the no-model planning
+boundary for that local PDF path. `ingest/extract.mjs` forwards the PDF parser's
+closed `observation`, and `ingest/run.mjs#prepare` retains its structured
+scan-only state and authoritative page count even when the human ingest result
+is a skip. The command calls the real walker and preparer with `ocr: null`, does
+not load ingest state, and is exempt from the process-wide Wrangler session.
+It imports the existing `estimateOcrCost` and price contract lazily and sends
+only content-free observations into `operations/ocr-preflight.mjs`.
+
+The schema-v1 receipt is exact and aggregate-only. It separates known affected
+pages from unknown page counts, pages admitted or omitted by the per-document
+limit, and filesystem traversal gaps from a proved zero. Cost/time values are
+either the complete reviewed-default-model range, a named known-page lower
+bound, or null. The exact OCR model and pricing-basis version are public receipt
+fields and private fingerprint inputs. A nondefault model or price-contract
+drift is unpriced instead of borrowing the default model's range. The daily cap
+is included only when the manifest actually configures it; absence is null with
+`daily_spend_cap_source: "not_configured"` and keeps the plan incomplete.
+`estimated_fits_configured_cap` compares the unrounded estimated high value with
+the full configured cap only, so display rounding cannot create a positive fit.
+Because the high value is not a guaranteed upper bound and
+the cap is shared with other model calls, remaining daily headroom and actual
+affordability remain explicit unknowns. A SHA-256 plan fingerprint binds the
+private root identity, exact model, versioned pricing basis, relevant policy,
+private-prefix policy, PDF byte receipts, observations, and walk skips without
+returning those private inputs. The receipt has explicit false flags only for
+application-controlled OCR, HTTP, key-store access, Brain writes, checkpoints,
+cursors, ingest state, and filesystem writes. A cloud-synced read may make the
+operating-system file provider hydrate data, so its network, credential, and
+filesystem effects stay unknown. Failed commands print only a fixed failure
+code through `JsonFatal`, so neither raw paths nor parser errors enter output or
+the support journal.
+
 Every corpus write also carries the exact `metadata.provenance_receipt` v1
 object: `version`, `status`, `reason`, and sorted unique `root_ids`. `complete`
 means only that lineage and text-origin fields were recorded. It says nothing
