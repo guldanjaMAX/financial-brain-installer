@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
@@ -40,9 +40,18 @@ import {
   loadVerifiedRecoveryState,
 } from "../operations/verified-recovery.mjs";
 import { withDecryptedRecoveryArtifact } from "../operations/recovery-artifact-crypto.mjs";
+import {
+  LOCKED_WRANGLER_ENTRYPOINT,
+  LOCKED_WRANGLER_RESOLUTION_GUARD,
+  LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+  inspectLockedWranglerRuntime,
+  materializeLockedWranglerRuntime,
+  prepareLockedWranglerRuntimeFromCache,
+} from "../operations/locked-wrangler-runtime.mjs";
 import { ZOOM_CREDENTIAL_ENV } from "../connectors/zoom.mjs";
 import Worker from "../worker/src/index.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET, encryptAccessReference } from "../worker/src/lib/bank-feed.js";
+import { resolveNpmCacheContentRoot } from "../scripts/field-prepare.mjs";
 
 const sandbox = mkdtempSync(join(tmpdir(), "brain-cloudflare-recovery-adapter-"));
 if (process.platform !== "win32") chmodSync(sandbox, 0o700);
@@ -110,7 +119,15 @@ const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.8.
 const privateSentinel = "fixture-private-question-and-provider-output";
 const fixtureAdminKey = "fixture-private-admin-key-value";
 const fixtureRecoveryArtifactKey = `v1.${Buffer.alloc(32, 19).toString("base64url")}`;
-const wrapperScript = "#!/bin/sh\nexec wrangler \"$@\"\n";
+const wrapperScript = "#!/bin/sh\n" +
+  "CLOUDFLARE_API_TOKEN=\"$(/usr/bin/security find-generic-password " +
+  "-a 'fixture-recovery' -s 'fixture-cloudflare-token' -w)\" || exit 125\n" +
+  "[ -n \"$CLOUDFLARE_API_TOKEN\" ] || exit 125\n" +
+  "export CLOUDFLARE_API_TOKEN\n" +
+  "exec \"${BRAIN_RECOVERY_NODE:?}\" --no-global-search-paths --require " +
+  "\"${BRAIN_RECOVERY_WRANGLER_RESOLUTION_GUARD:?}\" " +
+  "\"${BRAIN_RECOVERY_WRANGLER_ENTRYPOINT:?}\" \"$@\"\n";
+let lockedWranglerRuntime = inspectLockedWranglerRuntime(process.cwd());
 const sourceWorkerVersionId = "fixture-source-version-id";
 const pausedWorkerVersionId = "fixture-paused-version-id";
 const activeWorkerVersionId = "fixture-active-version-id";
@@ -284,6 +301,37 @@ function packageWithMutatedMember(packageBytes, wantedPath) {
   assert.fail(`package member missing from fixture: ${wantedPath}`);
 }
 
+function packageWithRenamedMember(packageBytes, wantedPath, replacementPath) {
+  const archive = gunzipSync(packageBytes);
+  const wanted = `package/${wantedPath}`;
+  const replacement = `package/${replacementPath}`;
+  assert.ok(Buffer.byteLength(replacement, "utf8") <= 100);
+  for (let offset = 0; offset + 512 <= archive.length;) {
+    const header = archive.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const text = (start, length) => header.subarray(start, start + length)
+      .toString("utf8").replace(/\0.*$/s, "");
+    const name = text(0, 100);
+    const prefix = text(345, 155);
+    const path = prefix ? `${prefix}/${name}` : name;
+    const size = Number.parseInt(text(124, 12).trim(), 8);
+    assert.equal(Number.isSafeInteger(size), true);
+    const contentStart = offset + 512;
+    if (path === wanted) {
+      assert.equal(prefix, "");
+      header.fill(0, 0, 100);
+      Buffer.from(replacement, "utf8").copy(header, 0);
+      header.fill(0x20, 148, 156);
+      const checksum = header.reduce((sum, byte) => sum + byte, 0);
+      Buffer.from(`${checksum.toString(8).padStart(6, "0")}\0 `, "ascii")
+        .copy(header, 148);
+      return gzipSync(archive, { level: 1 });
+    }
+    offset = contentStart + Math.ceil(size / 512) * 512;
+  }
+  assert.fail(`package member missing from fixture: ${wantedPath}`);
+}
+
 function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCount, {
   runId = "11111111-1111-4111-8111-111111111111",
 } = {}) {
@@ -305,7 +353,21 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
     external_network_allowed: false,
     tooling: {
       wrangler_package: "wrangler@4.127.1",
-      wrangler_resolution: "locked_local_dev_dependency",
+      wrangler_resolution: "locked_local_runtime_closure",
+      wrangler_runtime_directory: LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+      wrangler_runtime_schema_version: lockedWranglerRuntime.schemaVersion,
+      wrangler_entrypoint: lockedWranglerRuntime.entrypointRelative,
+      wrangler_entrypoint_sha256: lockedWranglerRuntime.entrypointSha256,
+      wrangler_runtime_inventory_sha256: lockedWranglerRuntime.inventorySha256,
+      wrangler_runtime_package_count: lockedWranglerRuntime.packageCount,
+      wrangler_runtime_file_count: lockedWranglerRuntime.fileCount,
+      wrangler_runtime_bytes: lockedWranglerRuntime.totalBytes,
+      wrangler_package_lock_sha256: lockedWranglerRuntime.packageLockSha256,
+      wrangler_host_platform: lockedWranglerRuntime.host.platform,
+      wrangler_host_arch: lockedWranglerRuntime.host.arch,
+      wrangler_host_libc: lockedWranglerRuntime.host.libc,
+      node_version: lockedWranglerRuntime.nodeVersion,
+      node_executable_sha256: lockedWranglerRuntime.nodeExecSha256,
     },
     source: {
       head_sha: candidateSha,
@@ -1005,6 +1067,7 @@ function providerHarness({
   let promotionCalls = 0;
   let sleepCalls = 0;
   let normalizedLeaseSelections = 0;
+  let wranglerRuntimeMaterializations = 0;
   const wranglerCalls = [];
   const fetchCalls = [];
   const observerSnapshots = [];
@@ -1057,6 +1120,23 @@ function providerHarness({
     assert.equal(env.WRANGLER_LOG, "log");
     assert.equal(env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id ||
       env.CLOUDFLARE_ACCOUNT_ID === targetManifestFixture.infrastructure.cloudflare.account_id, true);
+    if (Object.hasOwn(env, "BRAIN_RECOVERY_WRANGLER_ENTRYPOINT")) {
+      assert.equal(env.BRAIN_RECOVERY_NODE, process.execPath);
+      assert.equal(
+        env.BRAIN_RECOVERY_WRANGLER_ENTRYPOINT,
+        resolve(cwd, "wrangler-runtime", LOCKED_WRANGLER_ENTRYPOINT),
+      );
+      assert.equal(command, resolve(cwd, "wrangler-pinned"));
+      assert.equal(
+        env.BRAIN_RECOVERY_WRANGLER_RESOLUTION_GUARD,
+        resolve(cwd, "wrangler-runtime", LOCKED_WRANGLER_RESOLUTION_GUARD),
+      );
+      const executedWrapper = readFileSync(command, "utf8");
+      assert.match(
+        executedWrapper,
+        /^#!\/bin\/sh\nCLOUDFLARE_API_TOKEN="\$\(\/usr\/bin\/security find-generic-password -a '[A-Za-z0-9._:@/-]+' -s '[A-Za-z0-9._:@/-]+' -w\)" \|\| exit 125\n\[ -n "\$CLOUDFLARE_API_TOKEN" \] \|\| exit 125\nexport CLOUDFLARE_API_TOKEN\nexec /,
+      );
+    }
     writeFileSync(join(env.WRANGLER_LOG_PATH, "fixture.log"), "aggregate-only fixture log\n", { mode: 0o600 });
 
     const ok = (payload = "") => {
@@ -1637,6 +1717,40 @@ function providerHarness({
         SUPABASE_SERVICE_ROLE_KEY: "ambient-supabase-secret",
       },
       runWrangler,
+      materializeWranglerRuntime: (expected, destination) => {
+        wranglerRuntimeMaterializations++;
+        assert.equal(expected.inventorySha256, lockedWranglerRuntime.inventorySha256);
+        const entrypointPath = resolve(destination, expected.entrypointRelative);
+        mkdirSync(dirname(entrypointPath), { recursive: true, mode: 0o700 });
+        writeFileSync(entrypointPath, "// isolated synthetic Wrangler entrypoint\n", {
+          flag: "wx",
+          mode: 0o700,
+        });
+        const resolutionGuardPath = resolve(destination, LOCKED_WRANGLER_RESOLUTION_GUARD);
+        writeFileSync(resolutionGuardPath, "// isolated synthetic resolution guard\n", {
+          flag: "wx",
+          mode: 0o600,
+        });
+        return Object.freeze({
+          root: resolve(destination),
+          entrypointPath,
+          resolutionGuardPath,
+          inventorySha256: expected.inventorySha256,
+          filePins: Object.freeze([]),
+        });
+      },
+      assertMaterializedWranglerRuntimeUnchanged: (runtime) => {
+        assert.equal(runtime.inventorySha256, lockedWranglerRuntime.inventorySha256);
+        assert.equal(existsSync(runtime.entrypointPath), true);
+        assert.equal(existsSync(runtime.resolutionGuardPath), true);
+        return true;
+      },
+      assertLockedWranglerRuntimeUnchanged: (runtime) => {
+        assert.equal(runtime.inventorySha256, lockedWranglerRuntime.inventorySha256);
+        assert.equal(runtime.entrypointRelative, LOCKED_WRANGLER_ENTRYPOINT);
+        assert.equal(existsSync(runtime.entrypointPath), true);
+        return true;
+      },
       fetchImpl,
       readAdminKey: () => {
         adminReads++;
@@ -1686,6 +1800,7 @@ function providerHarness({
     get openingSnapshots() { return openingSnapshots; },
     get sensitiveBuffers() { return sensitiveBuffers; },
     get normalizedLeaseSelections() { return normalizedLeaseSelections; },
+    get wranglerRuntimeMaterializations() { return wranglerRuntimeMaterializations; },
     get bootstrapEpoch() { return bootstrapEpoch; },
     get bootstrapCursor() { return bootstrapCursor; },
     get sourceLeaseMarker() { return sourceDrainLease ? "fixture-live-drain-owner" : null; },
@@ -1776,6 +1891,37 @@ try {
   const stageContext = (stage, completed = [], attempt = 1) => ({ stage, attempt,
     planFingerprint: initialized.plan.plan_fingerprint,
     targetResourceFingerprint: initialized.plan.target_resource_fingerprint, completed });
+
+  const ordinaryCheckpointPath = join(
+    artifactDirectory,
+    ".brain-recovery-test-bootstrap-interruption-v1.json",
+  );
+  if (process.platform !== "win32") {
+    symlinkSync(join(artifactDirectory, "missing-control-target"), ordinaryCheckpointPath);
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "darwin" }),
+      (error) => error.code ===
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
+      "a dangling live-control symlink is present, never absent",
+    );
+    unlinkSync(ordinaryCheckpointPath);
+  }
+  const ordinaryControlHarness = providerHarness();
+  const ordinaryControlGate = createCloudflareRecoveryFieldGateAdapters(
+    approvedAdapterConfig,
+    ordinaryControlHarness.dependencies,
+  );
+  writeFileSync(ordinaryCheckpointPath, "{}\n", { flag: "wx", mode: 0o600 });
+  await assert.rejects(
+    ordinaryControlGate.adapters.export_d1(stageContext("export_d1")),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED",
+    "a live control injected after gate construction is refused at the first provider boundary",
+  );
+  assert.equal(ordinaryControlHarness.wranglerCalls.length, 0);
+  assert.equal(ordinaryControlHarness.adminReads, 0);
+  assert.equal(ordinaryControlHarness.fetchCalls.length, 0);
+  unlinkSync(ordinaryCheckpointPath);
+
   async function bankRecoveryRun() {
     const bank = await recoveryBankFixture();
     const harness = providerHarness({ bankFixture: bank, initialTargetRestored: true });
@@ -2141,6 +2287,63 @@ try {
   const fieldPackage = npmPackageFixture(fieldPreparationDirectory);
   const fieldPackageBytes = fieldPackage.bytes;
   if (process.platform !== "win32") chmodSync(fieldPackagePath, 0o600);
+  const npmCacheContentRoot = resolveNpmCacheContentRoot(process.env);
+  const installedWranglerEntrypoint = join(process.cwd(), LOCKED_WRANGLER_ENTRYPOINT);
+  const installedWranglerEntrypointBytes = readFileSync(installedWranglerEntrypoint);
+  const installedWranglerEntrypointMode = statSync(installedWranglerEntrypoint).mode & 0o777;
+  const corruptSourceHarness = providerHarness();
+  try {
+    writeFileSync(installedWranglerEntrypoint, Buffer.concat([
+      installedWranglerEntrypointBytes,
+      Buffer.from("\n// same-version synthetic source corruption\n"),
+    ]));
+    assert.throws(
+      () => prepareLockedWranglerRuntimeFromCache({
+        sourceRoot: process.cwd(),
+        destination: join(fieldPreparationDirectory, "corrupt-source-runtime"),
+        cacheContentRoot: npmCacheContentRoot,
+      }),
+      (error) => error.code === "LOCKED_WRANGLER_RUNTIME_SOURCE_MISMATCH",
+      "a same-version installed entrypoint cannot be blessed into field preparation",
+    );
+    assert.equal(corruptSourceHarness.wranglerCalls.length, 0);
+    assert.equal(corruptSourceHarness.adminReads, 0);
+    assert.equal(corruptSourceHarness.fetchCalls.length, 0);
+  } finally {
+    writeFileSync(installedWranglerEntrypoint, installedWranglerEntrypointBytes);
+    if (process.platform !== "win32") {
+      chmodSync(installedWranglerEntrypoint, installedWranglerEntrypointMode);
+    }
+  }
+  lockedWranglerRuntime = prepareLockedWranglerRuntimeFromCache({
+    sourceRoot: process.cwd(),
+    destination: join(fieldPreparationDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+    cacheContentRoot: npmCacheContentRoot,
+  });
+  const smokeRuntimePath = join(fieldPreparationDirectory, "wrangler-runtime-smoke");
+  const smokeRuntime = materializeLockedWranglerRuntime(
+    lockedWranglerRuntime,
+    smokeRuntimePath,
+  );
+  const runtimeSmoke = spawnSync(process.execPath, [
+    "--no-global-search-paths",
+    "--require", smokeRuntime.resolutionGuardPath,
+    smokeRuntime.entrypointPath,
+    "--version",
+  ], {
+    cwd: smokeRuntimePath,
+    encoding: "utf8",
+    env: {
+      PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
+      HOME: sandbox,
+      WRANGLER_SEND_METRICS: "false",
+      NO_COLOR: "1",
+      CI: "1",
+    },
+  });
+  assert.equal(runtimeSmoke.status, 0, runtimeSmoke.stderr);
+  assert.equal(runtimeSmoke.stdout.trim(), "4.127.1");
+  rmSync(smokeRuntimePath, { recursive: true, force: true });
   writePrivateJson(
     fieldReceiptPath,
     fullFieldPreparationReceipt(testCandidateSha, fieldPackageBytes, fieldPackage.fileCount),
@@ -2195,6 +2398,37 @@ try {
     wranglerWrapperPath: wrapperPath,
     goldenPath,
   };
+  const prefixedWrapperHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  try {
+    writeFileSync(
+      wrapperPath,
+      `#!/bin/sh\n: "\${CLOUDFLARE_ACCOUNT_ID:?}"\n${wrapperScript.slice("#!/bin/sh\n".length)}`,
+    );
+    if (process.platform !== "win32") chmodSync(wrapperPath, 0o700);
+    assert.throws(
+      () => createCloudflareRecoveryFieldGateAdapters({
+        ...fieldBaseConfig,
+        plan: fieldInitialized.plan,
+        state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+        testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+        testBootstrapCandidateSha: testCandidateSha,
+        testBootstrapFieldReceiptPath: fieldReceiptPath,
+        testBootstrapPackagePath: fieldPackagePath,
+      }, prefixedWrapperHarness.dependencies),
+      (error) => error.code ===
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRAPPER_CONTRACT_INVALID",
+      "a prefix command cannot run before the pinned Node trampoline",
+    );
+    assert.equal(prefixedWrapperHarness.wranglerCalls.length, 0);
+    assert.equal(prefixedWrapperHarness.adminReads, 0);
+    assert.equal(prefixedWrapperHarness.fetchCalls.length, 0);
+  } finally {
+    writeFileSync(wrapperPath, wrapperScript);
+    if (process.platform !== "win32") chmodSync(wrapperPath, 0o700);
+  }
   const fieldPreview = previewCloudflareRecoveryFieldGate({
     ...fieldBaseConfig,
     testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
@@ -2232,6 +2466,82 @@ try {
       fieldPreview.test_bootstrap_interruption.approval_fingerprint,
   });
 
+  // The receipt and approval bind the clean, cache-integrity-derived runtime.
+  // Replacing either the entrypoint or a transitive package with changed bytes
+  // under the same package version is refused before wrapper, key, or provider
+  // access.
+  for (const relativePath of [
+    LOCKED_WRANGLER_ENTRYPOINT,
+    "node_modules/miniflare/dist/src/index.js",
+  ]) {
+    const runtimePath = join(
+      fieldPreparationDirectory,
+      LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+      relativePath,
+    );
+    const original = readFileSync(runtimePath);
+    const mode = statSync(runtimePath).mode & 0o777;
+    const harness = providerHarness({
+      sourceManifestFixture: syntheticFieldSourceManifest,
+      targetManifestFixture: syntheticFieldTargetManifest,
+    });
+    try {
+      writeFileSync(runtimePath, Buffer.concat([
+        original,
+        Buffer.from("\n// same-version synthetic prepared-runtime corruption\n"),
+      ]));
+      await assert.rejects(
+        runCloudflareRecoveryFieldGate(approvedFieldConfig, harness.dependencies),
+        (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+        relativePath,
+      );
+      assert.equal(harness.wranglerCalls.length, 0, relativePath);
+      assert.equal(harness.adminReads, 0, relativePath);
+      assert.equal(harness.fetchCalls.length, 0, relativePath);
+    } finally {
+      writeFileSync(runtimePath, original);
+      if (process.platform !== "win32") chmodSync(runtimePath, mode);
+    }
+  }
+  const runtimePinHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const runtimePinDependencies = { ...runtimePinHarness.dependencies };
+  delete runtimePinDependencies.assertLockedWranglerRuntimeUnchanged;
+  const runtimePinGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, runtimePinDependencies);
+  const pinnedDependencyPath = join(
+    fieldPreparationDirectory,
+    LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+    "node_modules/miniflare/dist/src/index.js",
+  );
+  const pinnedDependencyBytes = readFileSync(pinnedDependencyPath);
+  const pinnedDependencyMode = statSync(pinnedDependencyPath).mode & 0o777;
+  try {
+    writeFileSync(pinnedDependencyPath, Buffer.concat([
+      pinnedDependencyBytes,
+      Buffer.from("\n// changed after local evidence was pinned\n"),
+    ]));
+    assert.throws(
+      () => runtimePinGate.revalidate(),
+      (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_CHANGED",
+    );
+    assert.equal(runtimePinHarness.wranglerCalls.length, 0);
+    assert.equal(runtimePinHarness.adminReads, 0);
+    assert.equal(runtimePinHarness.fetchCalls.length, 0);
+  } finally {
+    writeFileSync(pinnedDependencyPath, pinnedDependencyBytes);
+    if (process.platform !== "win32") chmodSync(pinnedDependencyPath, pinnedDependencyMode);
+  }
+  lockedWranglerRuntime = inspectLockedWranglerRuntime(
+    join(fieldPreparationDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+    { ownerOnly: true, exactRoot: true },
+  );
+
   const undersizedFieldHarness = providerHarness({
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
@@ -2256,6 +2566,133 @@ try {
   assert.equal(undersizedFieldHarness.fetchCalls.length, 0);
 
   const largeFieldSnapshot = snapshotForCounts(7_202, 7_202);
+  const wrapperSwapHarness = providerHarness({
+    initialTargetRestored: true,
+    sourceChunkCount: 7_202,
+    sourceDocumentCount: 7_202,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 7_202,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const wrapperSwapDependencies = { ...wrapperSwapHarness.dependencies };
+  const fixtureMaterialize = wrapperSwapDependencies.materializeWranglerRuntime;
+  wrapperSwapDependencies.materializeWranglerRuntime = (expected, destination) => {
+    const materialized = fixtureMaterialize(expected, destination);
+    const executionWrapper = join(dirname(destination), "wrangler-pinned");
+    const bytes = readFileSync(executionWrapper);
+    unlinkSync(executionWrapper);
+    writeFileSync(executionWrapper, bytes, { flag: "wx", mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(executionWrapper, 0o700);
+    bytes.fill(0);
+    return materialized;
+  };
+  const wrapperSwapGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, wrapperSwapDependencies);
+  await assert.rejects(
+    wrapperSwapGate.adapters.rebuild_vectorize({
+      stage: "rebuild_vectorize",
+      attempt: 1,
+      planFingerprint: fieldInitialized.plan.plan_fingerprint,
+      targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+      completed: [{ id: "verify_d1", evidence: largeFieldSnapshot }],
+    }),
+    (error) => error.code ===
+      "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRANGLER_RUNTIME_CHANGED",
+    "same-byte wrapper replacement is refused before the child/provider boundary",
+  );
+  assert.equal(wrapperSwapHarness.wranglerCalls.length, 0);
+  assert.equal(wrapperSwapHarness.adminReads, 0);
+  assert.equal(wrapperSwapHarness.fetchCalls.length, 0);
+
+  const wrapperMidCallHarness = providerHarness({
+    initialTargetRestored: true,
+    sourceChunkCount: 7_202,
+    sourceDocumentCount: 7_202,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 7_202,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const wrapperMidCallDependencies = { ...wrapperMidCallHarness.dependencies };
+  const fixtureRunWrangler = wrapperMidCallDependencies.runWrangler;
+  let swappedWrapperDuringCall = false;
+  wrapperMidCallDependencies.runWrangler = async (request) => {
+    if (!swappedWrapperDuringCall) {
+      swappedWrapperDuringCall = true;
+      const bytes = readFileSync(request.command);
+      unlinkSync(request.command);
+      writeFileSync(request.command, bytes, { flag: "wx", mode: 0o700 });
+      if (process.platform !== "win32") chmodSync(request.command, 0o700);
+      bytes.fill(0);
+    }
+    return fixtureRunWrangler(request);
+  };
+  const wrapperMidCallGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, wrapperMidCallDependencies);
+  await assert.rejects(
+    wrapperMidCallGate.adapters.rebuild_vectorize({
+      stage: "rebuild_vectorize",
+      attempt: 1,
+      planFingerprint: fieldInitialized.plan.plan_fingerprint,
+      targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+      completed: [{ id: "verify_d1", evidence: largeFieldSnapshot }],
+    }),
+    (error) => error.code ===
+      "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRANGLER_RUNTIME_CHANGED",
+    "same-byte wrapper replacement during the call invalidates its result",
+  );
+  assert.equal(wrapperMidCallHarness.wranglerCalls.length, 1);
+  assert.equal(wrapperMidCallHarness.adminReads, 0);
+  assert.equal(wrapperMidCallHarness.fetchCalls.length, 0);
+
+  const callRuntimeSwapHarness = providerHarness({
+    initialTargetRestored: true,
+    sourceChunkCount: 7_202,
+    sourceDocumentCount: 7_202,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 7_202,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const callRuntimeSwapDependencies = { ...callRuntimeSwapHarness.dependencies };
+  callRuntimeSwapDependencies.materializeWranglerRuntime = (expected, destination) => {
+    const materialized = materializeLockedWranglerRuntime(expected, destination);
+    const bytes = readFileSync(materialized.entrypointPath);
+    unlinkSync(materialized.entrypointPath);
+    writeFileSync(materialized.entrypointPath, bytes, { flag: "wx", mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(materialized.entrypointPath, 0o700);
+    bytes.fill(0);
+    return materialized;
+  };
+  delete callRuntimeSwapDependencies.assertMaterializedWranglerRuntimeUnchanged;
+  const callRuntimeSwapGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, callRuntimeSwapDependencies);
+  await assert.rejects(
+    callRuntimeSwapGate.adapters.rebuild_vectorize({
+      stage: "rebuild_vectorize",
+      attempt: 1,
+      planFingerprint: fieldInitialized.plan.plan_fingerprint,
+      targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+      completed: [{ id: "verify_d1", evidence: largeFieldSnapshot }],
+    }),
+    (error) => error.code ===
+      "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRANGLER_RUNTIME_INVALID",
+    "same-version call-local entrypoint replacement is refused before execution",
+  );
+  assert.equal(callRuntimeSwapHarness.wranglerCalls.length, 0);
+  assert.equal(callRuntimeSwapHarness.adminReads, 0);
+  assert.equal(callRuntimeSwapHarness.fetchCalls.length, 0);
+
   const wrongWranglerHarness = providerHarness({
     initialTargetRestored: true,
     sourceChunkCount: 7_202,
@@ -2331,6 +2768,10 @@ try {
   );
   mkdirSync(mismatchedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(mismatchedRuntimeDirectory, 0o700);
+  materializeLockedWranglerRuntime(
+    lockedWranglerRuntime,
+    join(mismatchedRuntimeDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+  );
   const mismatchedRuntimePackage = packageWithMutatedMember(
     fieldPackageBytes,
     "operations/cloudflare-recovery-adapter.mjs",
@@ -2355,6 +2796,49 @@ try {
       testBootstrapPackagePath: mismatchedRuntimePackagePath,
     }, { platform: "darwin" }),
     (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+  );
+
+  const omittedRuntimeDirectory = join(sandbox, "private-v048-runtime-member-omitted");
+  const omittedRuntimeReceiptPath = join(
+    omittedRuntimeDirectory,
+    "field-prepare-receipt.json",
+  );
+  const omittedRuntimePackagePath = join(
+    omittedRuntimeDirectory,
+    "brain-installer-0.4.8.tgz",
+  );
+  mkdirSync(omittedRuntimeDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(omittedRuntimeDirectory, 0o700);
+  materializeLockedWranglerRuntime(
+    lockedWranglerRuntime,
+    join(omittedRuntimeDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+  );
+  const omittedRuntimePackage = packageWithRenamedMember(
+    fieldPackageBytes,
+    "operations/locked-wrangler-runtime.mjs",
+    "operations/locked-wrangler-runtime-omitted.mjs",
+  );
+  writeFileSync(omittedRuntimePackagePath, omittedRuntimePackage, { mode: 0o600 });
+  if (process.platform !== "win32") chmodSync(omittedRuntimePackagePath, 0o600);
+  writePrivateJson(
+    omittedRuntimeReceiptPath,
+    fullFieldPreparationReceipt(
+      testCandidateSha,
+      omittedRuntimePackage,
+      fieldPackage.fileCount,
+      { runId: "44444444-4444-4444-8444-444444444444" },
+    ),
+  );
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate({
+      ...fieldBaseConfig,
+      testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+      testBootstrapCandidateSha: testCandidateSha,
+      testBootstrapFieldReceiptPath: omittedRuntimeReceiptPath,
+      testBootstrapPackagePath: omittedRuntimePackagePath,
+    }, { platform: "darwin" }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+    "the packed execution inventory must include the locked runtime verifier",
   );
 
   // Missing/wrong approval, missing evidence, and a wrong-but-well-formed
@@ -2392,6 +2876,10 @@ try {
   const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.8.tgz");
   mkdirSync(replayReceiptDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(replayReceiptDirectory, 0o700);
+  materializeLockedWranglerRuntime(
+    lockedWranglerRuntime,
+    join(replayReceiptDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+  );
   writeFileSync(replayPackagePath, fieldPackageBytes, { mode: 0o600 });
   if (process.platform !== "win32") chmodSync(replayPackagePath, 0o600);
   writePrivateJson(replayReceiptPath, fullFieldPreparationReceipt(
@@ -2512,18 +3000,30 @@ try {
     fieldArtifactDirectory,
     ".brain-recovery-test-bootstrap-interruption-v1.json",
   );
+  const completedInterruptionCheckpointPath = join(
+    fieldArtifactDirectory,
+    ".brain-recovery-test-bootstrap-interruption-v1.completed.json",
+  );
   assert.equal(existsSync(interruptionCheckpointPath), true);
   const checkpointText = readFileSync(interruptionCheckpointPath, "utf8");
   assert.equal(checkpointText.includes("fixture:chunk#"), false);
   assert.equal(checkpointText.includes(privateSentinel), false);
   const checkpointReceipt = JSON.parse(checkpointText);
-  assert.equal(checkpointReceipt.schema_version, 3);
+  assert.equal(checkpointReceipt.schema_version, 5);
   assert.equal(checkpointReceipt.plan_fingerprint, fieldInitialized.plan.plan_fingerprint);
   assert.equal(checkpointReceipt.candidate_sha, testCandidateSha);
   assert.equal(checkpointReceipt.field_receipt_sha256, hash(readFileSync(fieldReceiptPath)));
   assert.equal(checkpointReceipt.package_sha256, hash(fieldPackageBytes));
   assert.equal(checkpointReceipt.package_file_count, fieldPackage.fileCount);
   assert.match(checkpointReceipt.execution_inventory_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    checkpointReceipt.wrangler_runtime_schema_version,
+    lockedWranglerRuntime.schemaVersion,
+  );
+  assert.equal(
+    checkpointReceipt.wrangler_wrapper_sha256,
+    hash(readFileSync(wrapperPath)),
+  );
   assert.equal(
     checkpointReceipt.private_cursor_sha256,
     hash("fixture:chunk#00005999"),
@@ -2537,6 +3037,32 @@ try {
   assert.equal(checkpointReceipt.observation.confirmed, 6_000);
   assert.equal(checkpointReceipt.observation.batch_rows, 6_000);
   assert.equal(checkpointReceipt.observation.ready_to_interrupt, true);
+
+  // Once parsed, a control receipt is pinned to the exact inode and bytes.
+  // An identical-byte replacement cannot be substituted between local proof
+  // and the first provider or credential boundary.
+  const checkpointPinGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, fieldDependencies);
+  const beforeCheckpointReplacement = {
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  };
+  unlinkSync(interruptionCheckpointPath);
+  writeFileSync(interruptionCheckpointPath, checkpointText, { flag: "wx", mode: 0o600 });
+  if (process.platform !== "win32") chmodSync(interruptionCheckpointPath, 0o600);
+  assert.throws(
+    () => checkpointPinGate.revalidate(),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED",
+  );
+  assert.deepEqual({
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  }, beforeCheckpointReplacement);
 
   // A power loss can occur after the checkpoint directory is fsynced but
   // before the generic runner changes its already-durable running state to
@@ -2659,12 +3185,61 @@ try {
   const resumeAuthorizationText = readFileSync(resumeAuthorizationPath, "utf8");
   assert.equal(resumeAuthorizationText.includes("fixture:chunk#"), false);
   assert.equal(resumeAuthorizationText.includes(privateSentinel), false);
+  const resumePinGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, fieldDependencies);
+  const beforeResumeReplacement = {
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  };
+  unlinkSync(resumeAuthorizationPath);
+  writeFileSync(resumeAuthorizationPath, resumeAuthorizationText, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  if (process.platform !== "win32") chmodSync(resumeAuthorizationPath, 0o600);
+  assert.throws(
+    () => resumePinGate.revalidate(),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED",
+  );
+  assert.deepEqual({
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  }, beforeResumeReplacement);
 
   // Losing the active checkpoint filename cannot make ordinary recovery ignore
   // a still-live phase authorization. Only the completed checkpoint receipt
   // unblocks an ordinary future invocation.
   const activeCheckpointBytes = readFileSync(interruptionCheckpointPath);
   unlinkSync(interruptionCheckpointPath);
+  for (const completedFixture of [
+    { malformed: true },
+    { ...checkpointReceipt, plan_fingerprint: "f".repeat(64) },
+  ]) {
+    writePrivateJson(completedInterruptionCheckpointPath, completedFixture);
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate(fieldBaseConfig, { platform: "darwin" }),
+      (error) => error.code ===
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
+      "completed-marker existence never bypasses a live resume authorization",
+    );
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate({
+        ...fieldBaseConfig,
+        testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+        testBootstrapCandidateSha: testCandidateSha,
+        testBootstrapFieldReceiptPath: fieldReceiptPath,
+        testBootstrapPackagePath: fieldPackagePath,
+      }, { platform: "darwin" }),
+      (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_INVALID",
+      "malformed or cross-plan completion cannot consume this campaign",
+    );
+    unlinkSync(completedInterruptionCheckpointPath);
+  }
   assert.throws(
     () => previewCloudflareRecoveryFieldGate(fieldBaseConfig, { platform: "darwin" }),
     (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
@@ -2753,6 +3328,31 @@ try {
   assert.equal(fieldHarness.currentTargetVersionId, activeWorkerVersionId,
     "the exact reviewed promotion applied before its response was lost");
   assert.equal(fieldHarness.promotionCalls, 1);
+  const promotionPinGate = createCloudflareRecoveryFieldGateAdapters({
+    ...approvedFieldConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, fieldDependencies);
+  const beforePromotionReplacement = {
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  };
+  unlinkSync(promotionAuthorizationPath);
+  writeFileSync(promotionAuthorizationPath, promotionAuthorizationText, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  if (process.platform !== "win32") chmodSync(promotionAuthorizationPath, 0o600);
+  assert.throws(
+    () => promotionPinGate.revalidate(),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED",
+  );
+  assert.deepEqual({
+    wrangler: fieldHarness.wranglerCalls.length,
+    admin: fieldHarness.adminReads,
+    fetch: fieldHarness.fetchCalls.length,
+  }, beforePromotionReplacement);
 
   // The fsynced promotion authorization distinguishes that lost response from
   // the out-of-band active bypass rejected above. Resume reconciles exact
@@ -2802,11 +3402,19 @@ try {
     false,
   );
   assert.equal(existsSync(interruptionCheckpointPath), false);
-  const completedInterruptionCheckpointPath = join(
-    fieldArtifactDirectory,
-    ".brain-recovery-test-bootstrap-interruption-v1.completed.json",
-  );
   assert.equal(existsSync(completedInterruptionCheckpointPath), true);
+  const completedResumeAuthorizationPath = join(
+    fieldArtifactDirectory,
+    ".brain-recovery-test-bootstrap-resume-authorized-v1.completed.json",
+  );
+  const completedPromotionAuthorizationPath = join(
+    fieldArtifactDirectory,
+    ".brain-recovery-test-bootstrap-promotion-authorized-v1.completed.json",
+  );
+  assert.equal(existsSync(resumeAuthorizationPath), false);
+  assert.equal(existsSync(promotionAuthorizationPath), false);
+  assert.equal(existsSync(completedResumeAuthorizationPath), true);
+  assert.equal(existsSync(completedPromotionAuthorizationPath), true);
 
   // Model the narrow crash after the verified runner durably records complete
   // but before the active interruption checkpoint is renamed. A bound special
@@ -2841,12 +3449,64 @@ try {
   }, beforeCompleteStateRetirement);
   assert.equal(existsSync(interruptionCheckpointPath), false);
   assert.equal(existsSync(completedInterruptionCheckpointPath), true);
+  assert.equal(existsSync(resumeAuthorizationPath), false);
+  assert.equal(existsSync(promotionAuthorizationPath), false);
+  assert.equal(existsSync(completedResumeAuthorizationPath), true);
+  assert.equal(existsSync(completedPromotionAuthorizationPath), true);
 
   const ordinaryCompletedPreview = previewCloudflareRecoveryFieldGate(
     fieldBaseConfig,
     { platform: "darwin" },
   );
   assert.equal(ordinaryCompletedPreview.status, "complete");
+  const completedControlHarness = providerHarness({
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const completedControlPinGate = createCloudflareRecoveryFieldGateAdapters({
+    ...fieldBaseConfig,
+    plan: fieldInitialized.plan,
+    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+  }, completedControlHarness.dependencies);
+  const completedCheckpointText = readFileSync(completedInterruptionCheckpointPath, "utf8");
+  unlinkSync(completedInterruptionCheckpointPath);
+  writeFileSync(completedInterruptionCheckpointPath, completedCheckpointText, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  if (process.platform !== "win32") chmodSync(completedInterruptionCheckpointPath, 0o600);
+  assert.throws(
+    () => completedControlPinGate.revalidate(),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED",
+    "retired campaign controls remain inode- and byte-pinned in ordinary mode",
+  );
+  assert.equal(completedControlHarness.wranglerCalls.length, 0);
+  assert.equal(completedControlHarness.adminReads, 0);
+  assert.equal(completedControlHarness.fetchCalls.length, 0);
+
+  const validCompletedCheckpoint = JSON.parse(completedCheckpointText);
+  writePrivateJson(completedInterruptionCheckpointPath, {
+    ...validCompletedCheckpoint,
+    plan_fingerprint: "f".repeat(64),
+  });
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate(fieldBaseConfig, { platform: "darwin" }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID",
+    "a cross-plan completed marker cannot unblock ordinary recovery",
+  );
+  writeFileSync(completedInterruptionCheckpointPath, completedCheckpointText);
+  if (process.platform !== "win32") chmodSync(completedInterruptionCheckpointPath, 0o600);
+  unlinkSync(completedInterruptionCheckpointPath);
+  assert.throws(
+    () => previewCloudflareRecoveryFieldGate(fieldBaseConfig, { platform: "darwin" }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID",
+    "orphan completed authorizations require their exact plan-bound checkpoint",
+  );
+  writeFileSync(completedInterruptionCheckpointPath, completedCheckpointText, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  if (process.platform !== "win32") chmodSync(completedInterruptionCheckpointPath, 0o600);
   assert.throws(
     () => previewCloudflareRecoveryFieldGate({
       ...fieldBaseConfig,

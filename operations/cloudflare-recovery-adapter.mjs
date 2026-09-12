@@ -57,6 +57,15 @@ import {
   readAdminKeyFromKeychain,
 } from "./admin-key-persistence.mjs";
 import {
+  LOCKED_WRANGLER_ENTRYPOINT,
+  LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+  LOCKED_WRANGLER_VERSION,
+  assertLockedWranglerRuntimeUnchanged,
+  assertMaterializedWranglerRuntimeUnchanged,
+  inspectLockedWranglerRuntime,
+  materializeLockedWranglerRuntime,
+} from "./locked-wrangler-runtime.mjs";
+import {
   assertNoRecoveryArtifactResidue,
   encryptRecoveryArtifact,
   validateRecoveryArtifactKey,
@@ -150,8 +159,12 @@ const RECOVERY_TEST_BOOTSTRAP_COMPLETED_CHECKPOINT_NAME =
   ".brain-recovery-test-bootstrap-interruption-v1.completed.json";
 const RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_NAME =
   ".brain-recovery-test-bootstrap-promotion-authorized-v1.json";
+const RECOVERY_TEST_BOOTSTRAP_COMPLETED_PROMOTION_AUTHORIZATION_NAME =
+  ".brain-recovery-test-bootstrap-promotion-authorized-v1.completed.json";
 const RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_NAME =
   ".brain-recovery-test-bootstrap-resume-authorized-v1.json";
+const RECOVERY_TEST_BOOTSTRAP_COMPLETED_RESUME_AUTHORIZATION_NAME =
+  ".brain-recovery-test-bootstrap-resume-authorized-v1.completed.json";
 const MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES = 16 * 1024;
 const MAX_RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_BYTES = 16 * 1024;
 const MAX_RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_BYTES = 16 * 1024;
@@ -161,7 +174,12 @@ const MAX_RECOVERY_TEST_PACKAGE_UNPACKED_BYTES = 256 * 1024 * 1024;
 const MIN_RECOVERY_TEST_FIELD_DOCUMENTS = 6_001;
 const MIN_RECOVERY_TEST_FIELD_CHUNKS = 6_001;
 const MIN_RECOVERY_TEST_FIELD_EPOCH_ADMISSIONS = 3_001;
-const RECOVERY_TEST_WRANGLER_VERSION = "4.127.1";
+const RECOVERY_TEST_WRANGLER_VERSION = LOCKED_WRANGLER_VERSION;
+const RECOVERY_TEST_CLOUDFLARE_TOKEN_NAME = ["CLOUDFLARE", "API", "TOKEN"].join("_");
+const RECOVERY_TEST_WRANGLER_WRAPPER_EXEC_LINE =
+  'exec "${BRAIN_RECOVERY_NODE:?}" --no-global-search-paths --require "${BRAIN_RECOVERY_WRANGLER_RESOLUTION_GUARD:?}" "${BRAIN_RECOVERY_WRANGLER_ENTRYPOINT:?}" "$@"';
+const RECOVERY_TEST_WRANGLER_WRAPPER_TOKEN_LINE_RE =
+  /^CLOUDFLARE_API_TOKEN="\$\(\/usr\/bin\/security find-generic-password -a '[A-Za-z0-9._:@/-]{1,128}' -s '[A-Za-z0-9._:@/-]{1,128}' -w\)" \|\| exit 125$/;
 const RECOVERY_TEST_PACKAGE_REQUIRED_MEMBERS = Object.freeze([
   "package.json",
   "doctor.mjs",
@@ -172,6 +190,7 @@ const RECOVERY_TEST_PACKAGE_REQUIRED_MEMBERS = Object.freeze([
   "operations/admin-key-persistence.mjs",
   "operations/aggregate-field-observer.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
+  "operations/locked-wrangler-runtime.mjs",
   "operations/recovery-artifact-crypto.mjs",
   "operations/verified-recovery.mjs",
 ]);
@@ -772,9 +791,9 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
-function testBootstrapInterruptionApprovalFingerprint(plan, candidateEvidence) {
+function testBootstrapInterruptionApprovalFingerprint(plan, candidateEvidence, wrapperSha256) {
   return sha256(canonical({
-    schema_version: 2,
+    schema_version: 4,
     purpose: "controlled_synthetic_mid_bootstrap_interruption",
     mode: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
     candidate_sha: candidateEvidence.candidateSha,
@@ -786,6 +805,21 @@ function testBootstrapInterruptionApprovalFingerprint(plan, candidateEvidence) {
     package_sha256: candidateEvidence.packageSha256,
     package_file_count: candidateEvidence.packageFileCount,
     execution_inventory_sha256: candidateEvidence.executionInventorySha256,
+    wrangler_runtime_inventory_sha256:
+      candidateEvidence.wranglerRuntimeInventorySha256,
+    wrangler_entrypoint: candidateEvidence.wranglerRuntimeEntrypoint,
+    wrangler_entrypoint_sha256: candidateEvidence.wranglerRuntimeEntrypointSha256,
+    wrangler_runtime_package_count: candidateEvidence.wranglerRuntimePackageCount,
+    wrangler_runtime_file_count: candidateEvidence.wranglerRuntimeFileCount,
+    wrangler_runtime_bytes: candidateEvidence.wranglerRuntimeBytes,
+    wrangler_runtime_directory: candidateEvidence.wranglerRuntimeDirectory,
+    wrangler_runtime_schema_version: candidateEvidence.wranglerRuntimeSchemaVersion,
+    wrangler_host_platform: candidateEvidence.wranglerHostPlatform,
+    wrangler_host_arch: candidateEvidence.wranglerHostArch,
+    wrangler_host_libc: candidateEvidence.wranglerHostLibc,
+    node_version: candidateEvidence.nodeVersion,
+    node_executable_sha256: candidateEvidence.nodeExecutableSha256,
+    wrangler_wrapper_sha256: wrapperSha256,
     plan_fingerprint: plan.plan_fingerprint,
     source_manifest_fingerprint: plan.source_manifest_fingerprint,
     target_manifest_fingerprint: plan.target_manifest_fingerprint,
@@ -803,6 +837,21 @@ function testBootstrapInterruptionApprovalFingerprint(plan, candidateEvidence) {
 function sameFile(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.nlink === right.nlink &&
     left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function pathInfoOrAbsent(path, code) {
+  const absolute = resolve(path || "");
+  try {
+    return Object.freeze({ path: absolute, info: lstatSync(absolute) });
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    refuse(code);
+  }
+}
+
+function assertPathAbsent(path, code) {
+  if (pathInfoOrAbsent(path, code)) refuse(code);
+  return true;
 }
 
 function currentUid() {
@@ -860,6 +909,64 @@ function readStablePrivateFile(path, {
     refuse(code);
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function stablePrivateFileRecord(checked, value) {
+  return Object.freeze({
+    value,
+    pin: Object.freeze({
+      path: checked.path,
+      hash: checked.hash,
+      info: checked.info,
+    }),
+  });
+}
+
+function assertStablePrivateFileRecord(record, {
+  code,
+  maxBytes,
+} = {}) {
+  if (!record?.pin || typeof record.pin.path !== "string" ||
+      !SHA256_RE.test(String(record.pin.hash || "")) || !record.pin.info) {
+    refuse(code);
+  }
+  const checked = readStablePrivateFile(record.pin.path, { code, maxBytes });
+  try {
+    if (checked.hash !== record.pin.hash || !sameFile(checked.info, record.pin.info)) {
+      refuse(code);
+    }
+  } finally {
+    checked.raw.fill(0);
+  }
+  return true;
+}
+
+function movedStablePrivateFileRecord(record, path, { code, maxBytes }) {
+  if (!record?.pin) refuse(code);
+  const checked = readStablePrivateFile(path, { code, maxBytes });
+  try {
+    const before = record.pin.info;
+    const after = checked.info;
+    // rename(2) may update ctime. It must preserve the same inode and every
+    // other security-relevant attribute, and the bytes must still hash to the
+    // exact pinned control receipt.
+    if (checked.hash !== record.pin.hash || before.dev !== after.dev ||
+        before.ino !== after.ino || before.nlink !== after.nlink ||
+        before.size !== after.size || before.mode !== after.mode ||
+        before.uid !== after.uid || before.mtimeMs !== after.mtimeMs) {
+      refuse(code);
+    }
+    return Object.freeze({
+      value: record.value,
+      pin: Object.freeze({
+        path: checked.path,
+        hash: checked.hash,
+        info: checked.info,
+      }),
+    });
+  } finally {
+    checked.raw.fill(0);
   }
 }
 
@@ -1100,6 +1207,19 @@ function inspectNpmPackedExecutionInventory(raw, code) {
   }
 }
 
+function inspectRecoveryTestWranglerRuntime(receiptParent, code) {
+  try {
+    const runtimePath = join(receiptParent.path, LOCKED_WRANGLER_RUNTIME_DIRECTORY);
+    assertPrivateDirectory(runtimePath, code);
+    return inspectLockedWranglerRuntime(runtimePath, {
+      ownerOnly: true,
+      exactRoot: true,
+    });
+  } catch {
+    refuse(code);
+  }
+}
+
 /**
  * Bind the dangerous test seam to the exact package that passed the complete
  * credential-free field-preparation profile. The caller's SHA is only an
@@ -1128,6 +1248,7 @@ function inspectTestBootstrapCandidateEvidence(request) {
   } finally {
     packageFile.raw.fill(0);
   }
+  const wranglerRuntime = inspectRecoveryTestWranglerRuntime(receiptParent, code);
   let receipt;
   try {
     receipt = JSON.parse(receiptFile.raw.toString("utf8"));
@@ -1160,10 +1281,32 @@ function inspectTestBootstrapCandidateEvidence(request) {
   }
 
   exactAggregateReceiptFields(receipt.tooling, [
-    "wrangler_package", "wrangler_resolution",
+    "wrangler_package", "wrangler_resolution", "wrangler_runtime_directory",
+    "wrangler_runtime_schema_version", "wrangler_entrypoint",
+    "wrangler_entrypoint_sha256", "wrangler_runtime_inventory_sha256",
+    "wrangler_runtime_package_count", "wrangler_runtime_file_count",
+    "wrangler_runtime_bytes", "wrangler_package_lock_sha256",
+    "wrangler_host_platform", "wrangler_host_arch", "wrangler_host_libc",
+    "node_version", "node_executable_sha256",
   ], code);
   if (receipt.tooling.wrangler_package !== "wrangler@4.127.1" ||
-      receipt.tooling.wrangler_resolution !== "locked_local_dev_dependency") {
+      receipt.tooling.wrangler_resolution !== "locked_local_runtime_closure" ||
+      receipt.tooling.wrangler_runtime_directory !== LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
+      receipt.tooling.wrangler_runtime_schema_version !== wranglerRuntime.schemaVersion ||
+      receipt.tooling.wrangler_entrypoint !== LOCKED_WRANGLER_ENTRYPOINT ||
+      receipt.tooling.wrangler_entrypoint_sha256 !== wranglerRuntime.entrypointSha256 ||
+      receipt.tooling.wrangler_runtime_inventory_sha256 !==
+        wranglerRuntime.inventorySha256 ||
+      receipt.tooling.wrangler_runtime_package_count !== wranglerRuntime.packageCount ||
+      receipt.tooling.wrangler_runtime_file_count !== wranglerRuntime.fileCount ||
+      receipt.tooling.wrangler_runtime_bytes !== wranglerRuntime.totalBytes ||
+      receipt.tooling.wrangler_package_lock_sha256 !==
+        wranglerRuntime.packageLockSha256 ||
+      receipt.tooling.wrangler_host_platform !== wranglerRuntime.host.platform ||
+      receipt.tooling.wrangler_host_arch !== wranglerRuntime.host.arch ||
+      receipt.tooling.wrangler_host_libc !== wranglerRuntime.host.libc ||
+      receipt.tooling.node_version !== wranglerRuntime.nodeVersion ||
+      receipt.tooling.node_executable_sha256 !== wranglerRuntime.nodeExecSha256) {
     refuse(code);
   }
 
@@ -1189,7 +1332,8 @@ function inspectTestBootstrapCandidateEvidence(request) {
       source.package_alignment.package_lock_name !== source.package_name ||
       source.package_alignment.package_lock_version !== source.package_version ||
       source.package_alignment.package_lock_root_name !== source.package_name ||
-      source.package_alignment.package_lock_root_version !== source.package_version) {
+      source.package_alignment.package_lock_root_version !== source.package_version ||
+      source.package_lock_sha256 !== wranglerRuntime.packageLockSha256) {
     refuse(code);
   }
   if (request.candidateSha !== source.head_sha) {
@@ -1267,6 +1411,20 @@ function inspectTestBootstrapCandidateEvidence(request) {
     packageSha256: packed.sha256,
     packageFileCount: packageIdentity.fileCount,
     executionInventorySha256: packageIdentity.inventorySha256,
+    wranglerRuntimeInventorySha256: wranglerRuntime.inventorySha256,
+    wranglerRuntimeEntrypoint: wranglerRuntime.entrypointRelative,
+    wranglerRuntimeEntrypointSha256: wranglerRuntime.entrypointSha256,
+    wranglerRuntimePackageCount: wranglerRuntime.packageCount,
+    wranglerRuntimeFileCount: wranglerRuntime.fileCount,
+    wranglerRuntimeBytes: wranglerRuntime.totalBytes,
+    wranglerRuntimeDirectory: LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+    wranglerRuntimeSchemaVersion: wranglerRuntime.schemaVersion,
+    wranglerHostPlatform: wranglerRuntime.host.platform,
+    wranglerHostArch: wranglerRuntime.host.arch,
+    wranglerHostLibc: wranglerRuntime.host.libc,
+    nodeVersion: wranglerRuntime.nodeVersion,
+    nodeExecutableSha256: wranglerRuntime.nodeExecSha256,
+    wranglerRuntime,
     executionPins: packageIdentity.executionPins,
     packageJsonInfo: executingPackageJson.info,
     packageLockInfo: executingPackageLock.info,
@@ -1275,7 +1433,11 @@ function inspectTestBootstrapCandidateEvidence(request) {
   });
 }
 
-function assertTestBootstrapCandidateEvidenceUnchanged(expected, request) {
+function assertTestBootstrapCandidateEvidenceUnchanged(
+  expected,
+  request,
+  assertWranglerRuntime = assertLockedWranglerRuntimeUnchanged,
+) {
   let receiptInfo;
   let packageInfo;
   try {
@@ -1301,6 +1463,11 @@ function assertTestBootstrapCandidateEvidenceUnchanged(expected, request) {
     if (!sameFile(current, pin.info) || !current.isFile() || current.isSymbolicLink()) {
       refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_CHANGED");
     }
+  }
+  try {
+    assertWranglerRuntime(expected.wranglerRuntime);
+  } catch {
+    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_CHANGED");
   }
   return true;
 }
@@ -1421,8 +1588,22 @@ function testBootstrapPromotionAuthorizationPath(pins) {
   return join(pins.artifacts.path, RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_NAME);
 }
 
+function testBootstrapCompletedPromotionAuthorizationPath(pins) {
+  return join(
+    pins.artifacts.path,
+    RECOVERY_TEST_BOOTSTRAP_COMPLETED_PROMOTION_AUTHORIZATION_NAME,
+  );
+}
+
 function testBootstrapResumeAuthorizationPath(pins) {
   return join(pins.artifacts.path, RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_NAME);
+}
+
+function testBootstrapCompletedResumeAuthorizationPath(pins) {
+  return join(
+    pins.artifacts.path,
+    RECOVERY_TEST_BOOTSTRAP_COMPLETED_RESUME_AUTHORIZATION_NAME,
+  );
 }
 
 function assertTestBootstrapStateCoherence(state, checkpoint, promotionAuthorization = null) {
@@ -1460,16 +1641,28 @@ function assertTestBootstrapStateCoherence(state, checkpoint, promotionAuthoriza
   return true;
 }
 
-function validateTestBootstrapCheckpoint(input, plan, candidateEvidence, approvalFingerprint) {
+function validateTestBootstrapCheckpoint(
+  input,
+  plan,
+  candidateEvidence,
+  approvalFingerprint,
+  wrapperSha256,
+) {
   const code = "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_INVALID";
   exactAggregateReceiptFields(input, [
     "schema_version", "mode", "plan_fingerprint", "target_resource_fingerprint",
     "candidate_sha", "candidate_tree_sha", "field_receipt_sha256",
     "field_receipt_run_id", "package_filename", "package_bytes", "package_sha256",
     "package_file_count", "execution_inventory_sha256",
+    "wrangler_runtime_inventory_sha256", "wrangler_entrypoint",
+    "wrangler_entrypoint_sha256", "wrangler_runtime_package_count",
+    "wrangler_runtime_file_count", "wrangler_runtime_bytes",
+    "wrangler_runtime_directory", "wrangler_runtime_schema_version",
+    "wrangler_host_platform", "wrangler_host_arch", "wrangler_host_libc",
+    "node_version", "node_executable_sha256", "wrangler_wrapper_sha256",
     "interruption_approval_fingerprint", "private_cursor_sha256", "observation",
   ], code);
-  if (input.schema_version !== 3 ||
+  if (input.schema_version !== 5 ||
       input.mode !== RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE ||
       input.plan_fingerprint !== plan.plan_fingerprint ||
       input.target_resource_fingerprint !== plan.target_resource_fingerprint ||
@@ -1482,12 +1675,30 @@ function validateTestBootstrapCheckpoint(input, plan, candidateEvidence, approva
       input.package_sha256 !== candidateEvidence.packageSha256 ||
       input.package_file_count !== candidateEvidence.packageFileCount ||
       input.execution_inventory_sha256 !== candidateEvidence.executionInventorySha256 ||
+      input.wrangler_runtime_inventory_sha256 !==
+        candidateEvidence.wranglerRuntimeInventorySha256 ||
+      input.wrangler_entrypoint !== candidateEvidence.wranglerRuntimeEntrypoint ||
+      input.wrangler_entrypoint_sha256 !==
+        candidateEvidence.wranglerRuntimeEntrypointSha256 ||
+      input.wrangler_runtime_package_count !==
+        candidateEvidence.wranglerRuntimePackageCount ||
+      input.wrangler_runtime_file_count !== candidateEvidence.wranglerRuntimeFileCount ||
+      input.wrangler_runtime_bytes !== candidateEvidence.wranglerRuntimeBytes ||
+      input.wrangler_runtime_directory !== candidateEvidence.wranglerRuntimeDirectory ||
+      input.wrangler_runtime_schema_version !==
+        candidateEvidence.wranglerRuntimeSchemaVersion ||
+      input.wrangler_host_platform !== candidateEvidence.wranglerHostPlatform ||
+      input.wrangler_host_arch !== candidateEvidence.wranglerHostArch ||
+      input.wrangler_host_libc !== candidateEvidence.wranglerHostLibc ||
+      input.node_version !== candidateEvidence.nodeVersion ||
+      input.node_executable_sha256 !== candidateEvidence.nodeExecutableSha256 ||
+      input.wrangler_wrapper_sha256 !== wrapperSha256 ||
       input.interruption_approval_fingerprint !== approvalFingerprint ||
       !SHA256_RE.test(String(input.private_cursor_sha256 || ""))) {
     refuse(code);
   }
   return Object.freeze({
-    schema_version: 3,
+    schema_version: 5,
     mode: input.mode,
     plan_fingerprint: input.plan_fingerprint,
     target_resource_fingerprint: input.target_resource_fingerprint,
@@ -1500,6 +1711,20 @@ function validateTestBootstrapCheckpoint(input, plan, candidateEvidence, approva
     package_sha256: input.package_sha256,
     package_file_count: input.package_file_count,
     execution_inventory_sha256: input.execution_inventory_sha256,
+    wrangler_runtime_inventory_sha256: input.wrangler_runtime_inventory_sha256,
+    wrangler_entrypoint: input.wrangler_entrypoint,
+    wrangler_entrypoint_sha256: input.wrangler_entrypoint_sha256,
+    wrangler_runtime_package_count: input.wrangler_runtime_package_count,
+    wrangler_runtime_file_count: input.wrangler_runtime_file_count,
+    wrangler_runtime_bytes: input.wrangler_runtime_bytes,
+    wrangler_runtime_directory: input.wrangler_runtime_directory,
+    wrangler_runtime_schema_version: input.wrangler_runtime_schema_version,
+    wrangler_host_platform: input.wrangler_host_platform,
+    wrangler_host_arch: input.wrangler_host_arch,
+    wrangler_host_libc: input.wrangler_host_libc,
+    node_version: input.node_version,
+    node_executable_sha256: input.node_executable_sha256,
+    wrangler_wrapper_sha256: input.wrangler_wrapper_sha256,
     interruption_approval_fingerprint: input.interruption_approval_fingerprint,
     private_cursor_sha256: input.private_cursor_sha256,
     observation: validateTestBootstrapObservation(input.observation, {
@@ -1509,23 +1734,134 @@ function validateTestBootstrapCheckpoint(input, plan, candidateEvidence, approva
   });
 }
 
-function readTestBootstrapCheckpoint(pins, plan, candidateEvidence, approvalFingerprint) {
-  const path = testBootstrapCheckpointPath(pins);
-  if (!existsSync(path)) return null;
+function readTestBootstrapCheckpoint(
+  pins,
+  plan,
+  candidateEvidence,
+  approvalFingerprint,
+  wrapperSha256,
+  path = testBootstrapCheckpointPath(pins),
+) {
+  if (!pathInfoOrAbsent(path, "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_INVALID")) {
+    return null;
+  }
   const checked = readStablePrivateFile(path, {
     code: "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_INVALID",
     maxBytes: MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES,
   });
   try {
-    return validateTestBootstrapCheckpoint(
+    const checkpoint = validateTestBootstrapCheckpoint(
       JSON.parse(checked.raw.toString("utf8")),
       plan,
       candidateEvidence,
       approvalFingerprint,
+      wrapperSha256,
     );
+    return stablePrivateFileRecord(checked, checkpoint);
   } catch (error) {
     if (error instanceof CloudflareRecoveryAdapterError) throw error;
     refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_INVALID");
+  } finally {
+    checked.raw.fill(0);
+  }
+}
+
+function readCompletedTestBootstrapCheckpoint(pins, plan) {
+  const code = "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID";
+  const path = testBootstrapCompletedCheckpointPath(pins);
+  const checked = readStablePrivateFile(path, {
+    code,
+    maxBytes: MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES,
+  });
+  try {
+    let input;
+    try { input = JSON.parse(checked.raw.toString("utf8")); }
+    catch { refuse(code); }
+    const candidateEvidence = Object.freeze({
+      candidateSha: input?.candidate_sha,
+      candidateTreeSha: input?.candidate_tree_sha,
+      fieldReceiptRunId: input?.field_receipt_run_id,
+      fieldReceiptSha256: input?.field_receipt_sha256,
+      packageFilename: input?.package_filename,
+      packageBytes: input?.package_bytes,
+      packageSha256: input?.package_sha256,
+      packageFileCount: input?.package_file_count,
+      executionInventorySha256: input?.execution_inventory_sha256,
+      wranglerRuntimeInventorySha256: input?.wrangler_runtime_inventory_sha256,
+      wranglerRuntimeEntrypoint: input?.wrangler_entrypoint,
+      wranglerRuntimeEntrypointSha256: input?.wrangler_entrypoint_sha256,
+      wranglerRuntimePackageCount: input?.wrangler_runtime_package_count,
+      wranglerRuntimeFileCount: input?.wrangler_runtime_file_count,
+      wranglerRuntimeBytes: input?.wrangler_runtime_bytes,
+      wranglerRuntimeDirectory: input?.wrangler_runtime_directory,
+      wranglerRuntimeSchemaVersion: input?.wrangler_runtime_schema_version,
+      wranglerHostPlatform: input?.wrangler_host_platform,
+      wranglerHostArch: input?.wrangler_host_arch,
+      wranglerHostLibc: input?.wrangler_host_libc,
+      nodeVersion: input?.node_version,
+      nodeExecutableSha256: input?.node_executable_sha256,
+    });
+    const positiveIntegers = [
+      candidateEvidence.packageBytes,
+      candidateEvidence.packageFileCount,
+      candidateEvidence.wranglerRuntimePackageCount,
+      candidateEvidence.wranglerRuntimeFileCount,
+      candidateEvidence.wranglerRuntimeBytes,
+      candidateEvidence.wranglerRuntimeSchemaVersion,
+    ];
+    if (!/^[0-9a-f]{40}$/.test(String(candidateEvidence.candidateSha || "")) ||
+        !/^[0-9a-f]{40}$/.test(String(candidateEvidence.candidateTreeSha || "")) ||
+        !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(
+          String(candidateEvidence.fieldReceiptRunId || ""),
+        ) ||
+        [
+          candidateEvidence.fieldReceiptSha256,
+          candidateEvidence.packageSha256,
+          candidateEvidence.executionInventorySha256,
+          candidateEvidence.wranglerRuntimeInventorySha256,
+          candidateEvidence.wranglerRuntimeEntrypointSha256,
+          candidateEvidence.nodeExecutableSha256,
+          input?.wrangler_wrapper_sha256,
+        ].some((value) => !SHA256_RE.test(String(value || ""))) ||
+        positiveIntegers.some((value) => !Number.isSafeInteger(value) || value < 1) ||
+        candidateEvidence.packageFilename !== "brain-installer-0.4.8.tgz" ||
+        candidateEvidence.wranglerRuntimeDirectory !==
+          LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
+        candidateEvidence.wranglerRuntimeEntrypoint !== LOCKED_WRANGLER_ENTRYPOINT ||
+        candidateEvidence.wranglerHostPlatform !== "darwin" ||
+        !/^[A-Za-z0-9._-]{1,64}$/.test(
+          String(candidateEvidence.wranglerHostArch || ""),
+        ) ||
+        !/^[A-Za-z0-9._-]{1,64}$/.test(
+          String(candidateEvidence.wranglerHostLibc || ""),
+        ) ||
+        !/^v\d+\.\d+\.\d+$/.test(String(candidateEvidence.nodeVersion || "")) ||
+        input?.wrangler_wrapper_sha256 !== pins.wrapper.hash) {
+      refuse(code);
+    }
+    const approvalFingerprint = testBootstrapInterruptionApprovalFingerprint(
+      plan,
+      candidateEvidence,
+      pins.wrapper.hash,
+    );
+    if (input?.interruption_approval_fingerprint !== approvalFingerprint) refuse(code);
+    let checkpoint;
+    try {
+      checkpoint = validateTestBootstrapCheckpoint(
+        input,
+        plan,
+        candidateEvidence,
+        approvalFingerprint,
+        pins.wrapper.hash,
+      );
+    } catch {
+      refuse(code);
+    }
+    return Object.freeze({
+      checkpointRecord: stablePrivateFileRecord(checked, checkpoint),
+      candidateEvidence,
+      approvalFingerprint,
+    });
   } finally {
     checked.raw.fill(0);
   }
@@ -1541,7 +1877,7 @@ function writeTestBootstrapCheckpoint(
 ) {
   const path = testBootstrapCheckpointPath(pins);
   const checkpoint = validateTestBootstrapCheckpoint({
-    schema_version: 3,
+    schema_version: 5,
     mode: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
     plan_fingerprint: plan.plan_fingerprint,
     target_resource_fingerprint: plan.target_resource_fingerprint,
@@ -1554,10 +1890,25 @@ function writeTestBootstrapCheckpoint(
     package_sha256: candidateEvidence.packageSha256,
     package_file_count: candidateEvidence.packageFileCount,
     execution_inventory_sha256: candidateEvidence.executionInventorySha256,
+    wrangler_runtime_inventory_sha256:
+      candidateEvidence.wranglerRuntimeInventorySha256,
+    wrangler_entrypoint: candidateEvidence.wranglerRuntimeEntrypoint,
+    wrangler_entrypoint_sha256: candidateEvidence.wranglerRuntimeEntrypointSha256,
+    wrangler_runtime_package_count: candidateEvidence.wranglerRuntimePackageCount,
+    wrangler_runtime_file_count: candidateEvidence.wranglerRuntimeFileCount,
+    wrangler_runtime_bytes: candidateEvidence.wranglerRuntimeBytes,
+    wrangler_runtime_directory: candidateEvidence.wranglerRuntimeDirectory,
+    wrangler_runtime_schema_version: candidateEvidence.wranglerRuntimeSchemaVersion,
+    wrangler_host_platform: candidateEvidence.wranglerHostPlatform,
+    wrangler_host_arch: candidateEvidence.wranglerHostArch,
+    wrangler_host_libc: candidateEvidence.wranglerHostLibc,
+    node_version: candidateEvidence.nodeVersion,
+    node_executable_sha256: candidateEvidence.nodeExecutableSha256,
+    wrangler_wrapper_sha256: pins.wrapper.hash,
     interruption_approval_fingerprint: approvalFingerprint,
     private_cursor_sha256: privateCursorSha256,
     observation,
-  }, plan, candidateEvidence, approvalFingerprint);
+  }, plan, candidateEvidence, approvalFingerprint, pins.wrapper.hash);
   let descriptor;
   let bytes;
   try {
@@ -1582,19 +1933,13 @@ function writeTestBootstrapCheckpoint(
     if (descriptor !== undefined) closeSync(descriptor);
   }
   syncDirectory(pins.artifacts.path);
-  return readTestBootstrapCheckpoint(pins, plan, candidateEvidence, approvalFingerprint);
-}
-
-function testBootstrapCheckpointSha256(pins) {
-  const checked = readStablePrivateFile(testBootstrapCheckpointPath(pins), {
-    code: "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_INVALID",
-    maxBytes: MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES,
-  });
-  try {
-    return sha256(checked.raw);
-  } finally {
-    checked.raw.fill(0);
-  }
+  return readTestBootstrapCheckpoint(
+    pins,
+    plan,
+    candidateEvidence,
+    approvalFingerprint,
+    pins.wrapper.hash,
+  );
 }
 
 function validateTestBootstrapResumeAuthorization(
@@ -1603,17 +1948,20 @@ function validateTestBootstrapResumeAuthorization(
   plan,
   candidateEvidence,
   approvalFingerprint,
-  checkpoint,
+  checkpointRecord,
   restored,
 ) {
   const code = "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_INVALID";
+  const checkpoint = checkpointRecord?.value ?? null;
   exactAggregateReceiptFields(input, [
     "schema_version", "mode", "plan_fingerprint", "target_resource_fingerprint",
     "candidate_sha", "field_receipt_sha256", "package_sha256",
-    "execution_inventory_sha256", "interruption_approval_fingerprint",
+    "execution_inventory_sha256", "wrangler_runtime_inventory_sha256",
+    "wrangler_entrypoint", "wrangler_entrypoint_sha256",
+    "interruption_approval_fingerprint",
     "checkpoint_sha256", "private_cursor_sha256", "observation",
   ], code);
-  if (!checkpoint || !restored || input.schema_version !== 1 ||
+  if (!checkpoint || !restored || input.schema_version !== 2 ||
       input.mode !== RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE ||
       input.plan_fingerprint !== plan.plan_fingerprint ||
       input.target_resource_fingerprint !== plan.target_resource_fingerprint ||
@@ -1621,13 +1969,18 @@ function validateTestBootstrapResumeAuthorization(
       input.field_receipt_sha256 !== candidateEvidence.fieldReceiptSha256 ||
       input.package_sha256 !== candidateEvidence.packageSha256 ||
       input.execution_inventory_sha256 !== candidateEvidence.executionInventorySha256 ||
+      input.wrangler_runtime_inventory_sha256 !==
+        candidateEvidence.wranglerRuntimeInventorySha256 ||
+      input.wrangler_entrypoint !== candidateEvidence.wranglerRuntimeEntrypoint ||
+      input.wrangler_entrypoint_sha256 !==
+        candidateEvidence.wranglerRuntimeEntrypointSha256 ||
       input.interruption_approval_fingerprint !== approvalFingerprint ||
-      input.checkpoint_sha256 !== testBootstrapCheckpointSha256(pins) ||
+      input.checkpoint_sha256 !== checkpointRecord.pin.hash ||
       input.private_cursor_sha256 !== checkpoint.private_cursor_sha256) {
     refuse(code);
   }
   return Object.freeze({
-    schema_version: 1,
+    schema_version: 2,
     mode: input.mode,
     plan_fingerprint: input.plan_fingerprint,
     target_resource_fingerprint: input.target_resource_fingerprint,
@@ -1635,6 +1988,9 @@ function validateTestBootstrapResumeAuthorization(
     field_receipt_sha256: input.field_receipt_sha256,
     package_sha256: input.package_sha256,
     execution_inventory_sha256: input.execution_inventory_sha256,
+    wrangler_runtime_inventory_sha256: input.wrangler_runtime_inventory_sha256,
+    wrangler_entrypoint: input.wrangler_entrypoint,
+    wrangler_entrypoint_sha256: input.wrangler_entrypoint_sha256,
     interruption_approval_fingerprint: input.interruption_approval_fingerprint,
     checkpoint_sha256: input.checkpoint_sha256,
     private_cursor_sha256: input.private_cursor_sha256,
@@ -1652,25 +2008,29 @@ function readTestBootstrapResumeAuthorization(
   plan,
   candidateEvidence,
   approvalFingerprint,
-  checkpoint,
+  checkpointRecord,
   restored,
+  path = testBootstrapResumeAuthorizationPath(pins),
 ) {
-  const path = testBootstrapResumeAuthorizationPath(pins);
-  if (!existsSync(path)) return null;
+  if (!pathInfoOrAbsent(
+    path,
+    "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_INVALID",
+  )) return null;
   const checked = readStablePrivateFile(path, {
     code: "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_INVALID",
     maxBytes: MAX_RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_BYTES,
   });
   try {
-    return validateTestBootstrapResumeAuthorization(
+    const authorization = validateTestBootstrapResumeAuthorization(
       JSON.parse(checked.raw.toString("utf8")),
       pins,
       plan,
       candidateEvidence,
       approvalFingerprint,
-      checkpoint,
+      checkpointRecord,
       restored,
     );
+    return stablePrivateFileRecord(checked, authorization);
   } catch (error) {
     if (error instanceof CloudflareRecoveryAdapterError) throw error;
     refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_INVALID");
@@ -1684,14 +2044,14 @@ function writeTestBootstrapResumeAuthorization(
   plan,
   candidateEvidence,
   approvalFingerprint,
-  checkpoint,
+  checkpointRecord,
   restored,
   privateCursorSha256,
   observation,
 ) {
   const path = testBootstrapResumeAuthorizationPath(pins);
   const authorization = validateTestBootstrapResumeAuthorization({
-    schema_version: 1,
+    schema_version: 2,
     mode: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
     plan_fingerprint: plan.plan_fingerprint,
     target_resource_fingerprint: plan.target_resource_fingerprint,
@@ -1699,11 +2059,15 @@ function writeTestBootstrapResumeAuthorization(
     field_receipt_sha256: candidateEvidence.fieldReceiptSha256,
     package_sha256: candidateEvidence.packageSha256,
     execution_inventory_sha256: candidateEvidence.executionInventorySha256,
+    wrangler_runtime_inventory_sha256:
+      candidateEvidence.wranglerRuntimeInventorySha256,
+    wrangler_entrypoint: candidateEvidence.wranglerRuntimeEntrypoint,
+    wrangler_entrypoint_sha256: candidateEvidence.wranglerRuntimeEntrypointSha256,
     interruption_approval_fingerprint: approvalFingerprint,
-    checkpoint_sha256: testBootstrapCheckpointSha256(pins),
+    checkpoint_sha256: checkpointRecord?.pin?.hash,
     private_cursor_sha256: privateCursorSha256,
     observation,
-  }, pins, plan, candidateEvidence, approvalFingerprint, checkpoint, restored);
+  }, pins, plan, candidateEvidence, approvalFingerprint, checkpointRecord, restored);
   let descriptor;
   let bytes;
   try {
@@ -1733,7 +2097,7 @@ function writeTestBootstrapResumeAuthorization(
     plan,
     candidateEvidence,
     approvalFingerprint,
-    checkpoint,
+    checkpointRecord,
     restored,
   );
 }
@@ -1744,18 +2108,21 @@ function validateTestBootstrapPromotionAuthorization(
   plan,
   candidateEvidence,
   approvalFingerprint,
-  checkpoint,
+  checkpointRecord,
   restored,
 ) {
   const code = "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_INVALID";
+  const checkpoint = checkpointRecord?.value ?? null;
   exactAggregateReceiptFields(input, [
     "schema_version", "mode", "plan_fingerprint", "target_resource_fingerprint",
     "candidate_sha", "field_receipt_sha256", "package_sha256",
-    "execution_inventory_sha256", "interruption_approval_fingerprint",
+    "execution_inventory_sha256", "wrangler_runtime_inventory_sha256",
+    "wrangler_entrypoint", "wrangler_entrypoint_sha256",
+    "interruption_approval_fingerprint",
     "active_worker_version_id", "checkpoint_sha256", "private_cursor_sha256",
     "observation",
   ], code);
-  if (!checkpoint || !restored || input.schema_version !== 1 ||
+  if (!checkpoint || !restored || input.schema_version !== 2 ||
       input.mode !== RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE ||
       input.plan_fingerprint !== plan.plan_fingerprint ||
       input.target_resource_fingerprint !== plan.target_resource_fingerprint ||
@@ -1763,14 +2130,19 @@ function validateTestBootstrapPromotionAuthorization(
       input.field_receipt_sha256 !== candidateEvidence.fieldReceiptSha256 ||
       input.package_sha256 !== candidateEvidence.packageSha256 ||
       input.execution_inventory_sha256 !== candidateEvidence.executionInventorySha256 ||
+      input.wrangler_runtime_inventory_sha256 !==
+        candidateEvidence.wranglerRuntimeInventorySha256 ||
+      input.wrangler_entrypoint !== candidateEvidence.wranglerRuntimeEntrypoint ||
+      input.wrangler_entrypoint_sha256 !==
+        candidateEvidence.wranglerRuntimeEntrypointSha256 ||
       input.interruption_approval_fingerprint !== approvalFingerprint ||
       input.active_worker_version_id !== pins.isolation.activeWorkerVersionId ||
-      input.checkpoint_sha256 !== testBootstrapCheckpointSha256(pins) ||
+      input.checkpoint_sha256 !== checkpointRecord.pin.hash ||
       !SHA256_RE.test(String(input.private_cursor_sha256 || ""))) {
     refuse(code);
   }
   return Object.freeze({
-    schema_version: 1,
+    schema_version: 2,
     mode: input.mode,
     plan_fingerprint: input.plan_fingerprint,
     target_resource_fingerprint: input.target_resource_fingerprint,
@@ -1778,6 +2150,9 @@ function validateTestBootstrapPromotionAuthorization(
     field_receipt_sha256: input.field_receipt_sha256,
     package_sha256: input.package_sha256,
     execution_inventory_sha256: input.execution_inventory_sha256,
+    wrangler_runtime_inventory_sha256: input.wrangler_runtime_inventory_sha256,
+    wrangler_entrypoint: input.wrangler_entrypoint,
+    wrangler_entrypoint_sha256: input.wrangler_entrypoint_sha256,
     interruption_approval_fingerprint: input.interruption_approval_fingerprint,
     active_worker_version_id: input.active_worker_version_id,
     checkpoint_sha256: input.checkpoint_sha256,
@@ -1796,25 +2171,29 @@ function readTestBootstrapPromotionAuthorization(
   plan,
   candidateEvidence,
   approvalFingerprint,
-  checkpoint,
+  checkpointRecord,
   restored,
+  path = testBootstrapPromotionAuthorizationPath(pins),
 ) {
-  const path = testBootstrapPromotionAuthorizationPath(pins);
-  if (!existsSync(path)) return null;
+  if (!pathInfoOrAbsent(
+    path,
+    "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_INVALID",
+  )) return null;
   const checked = readStablePrivateFile(path, {
     code: "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_INVALID",
     maxBytes: MAX_RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_BYTES,
   });
   try {
-    return validateTestBootstrapPromotionAuthorization(
+    const authorization = validateTestBootstrapPromotionAuthorization(
       JSON.parse(checked.raw.toString("utf8")),
       pins,
       plan,
       candidateEvidence,
       approvalFingerprint,
-      checkpoint,
+      checkpointRecord,
       restored,
     );
+    return stablePrivateFileRecord(checked, authorization);
   } catch (error) {
     if (error instanceof CloudflareRecoveryAdapterError) throw error;
     refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_INVALID");
@@ -1828,14 +2207,14 @@ function writeTestBootstrapPromotionAuthorization(
   plan,
   candidateEvidence,
   approvalFingerprint,
-  checkpoint,
+  checkpointRecord,
   restored,
   privateCursorSha256,
   observation,
 ) {
   const path = testBootstrapPromotionAuthorizationPath(pins);
   const authorization = validateTestBootstrapPromotionAuthorization({
-    schema_version: 1,
+    schema_version: 2,
     mode: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
     plan_fingerprint: plan.plan_fingerprint,
     target_resource_fingerprint: plan.target_resource_fingerprint,
@@ -1843,12 +2222,16 @@ function writeTestBootstrapPromotionAuthorization(
     field_receipt_sha256: candidateEvidence.fieldReceiptSha256,
     package_sha256: candidateEvidence.packageSha256,
     execution_inventory_sha256: candidateEvidence.executionInventorySha256,
+    wrangler_runtime_inventory_sha256:
+      candidateEvidence.wranglerRuntimeInventorySha256,
+    wrangler_entrypoint: candidateEvidence.wranglerRuntimeEntrypoint,
+    wrangler_entrypoint_sha256: candidateEvidence.wranglerRuntimeEntrypointSha256,
     interruption_approval_fingerprint: approvalFingerprint,
     active_worker_version_id: pins.isolation.activeWorkerVersionId,
-    checkpoint_sha256: testBootstrapCheckpointSha256(pins),
+    checkpoint_sha256: checkpointRecord?.pin?.hash,
     private_cursor_sha256: privateCursorSha256,
     observation,
-  }, pins, plan, candidateEvidence, approvalFingerprint, checkpoint, restored);
+  }, pins, plan, candidateEvidence, approvalFingerprint, checkpointRecord, restored);
   let descriptor;
   let bytes;
   try {
@@ -1878,45 +2261,71 @@ function writeTestBootstrapPromotionAuthorization(
     plan,
     candidateEvidence,
     approvalFingerprint,
-    checkpoint,
+    checkpointRecord,
     restored,
   );
 }
 
-function retireTestBootstrapCheckpoint(pins, plan, candidateEvidence, approvalFingerprint) {
-  const active = testBootstrapCheckpointPath(pins);
-  const completed = testBootstrapCompletedCheckpointPath(pins);
-  const checkpoint = readTestBootstrapCheckpoint(
-    pins,
-    plan,
-    candidateEvidence,
-    approvalFingerprint,
-  );
-  if (!checkpoint || existsSync(completed)) {
-    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_RETIRE_FAILED");
+function retirePinnedTestBootstrapControlFile({
+  active,
+  completed,
+  record,
+  maxBytes,
+}) {
+  const code = "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_RETIRE_FAILED";
+  if (!record?.pin || ![resolve(active), resolve(completed)].includes(record.pin.path)) {
+    refuse(code);
   }
+  assertStablePrivateFileRecord(record, { code, maxBytes });
+  if (record.pin.path === resolve(completed)) {
+    assertPathAbsent(active, code);
+    return record;
+  }
+  assertPathAbsent(completed, code);
   try {
     renameSync(active, completed);
-    syncDirectory(pins.artifacts.path);
+    syncDirectory(dirname(completed));
   } catch {
+    refuse(code);
+  }
+  assertPathAbsent(active, code);
+  const moved = movedStablePrivateFileRecord(record, completed, { code, maxBytes });
+  assertStablePrivateFileRecord(moved, { code, maxBytes });
+  return moved;
+}
+
+function retireTestBootstrapCheckpoint(
+  pins,
+  checkpointRecord,
+  resumeAuthorizationRecord,
+  promotionAuthorizationRecord,
+) {
+  if (!checkpointRecord || !resumeAuthorizationRecord || !promotionAuthorizationRecord) {
     refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_RETIRE_FAILED");
   }
-  if (existsSync(active)) refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_RETIRE_FAILED");
-  const retired = readStablePrivateFile(completed, {
-    code: "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_RETIRE_FAILED",
+  // Move both live phase authorizations first and the checkpoint last. At
+  // every crash cut at least one active control file therefore remains, so an
+  // ordinary recovery cannot mistake a partially retired campaign for clean
+  // state. A bound special retry can finish these exact inode-preserving moves.
+  const resume = retirePinnedTestBootstrapControlFile({
+    active: testBootstrapResumeAuthorizationPath(pins),
+    completed: testBootstrapCompletedResumeAuthorizationPath(pins),
+    record: resumeAuthorizationRecord,
+    maxBytes: MAX_RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_BYTES,
+  });
+  const promotion = retirePinnedTestBootstrapControlFile({
+    active: testBootstrapPromotionAuthorizationPath(pins),
+    completed: testBootstrapCompletedPromotionAuthorizationPath(pins),
+    record: promotionAuthorizationRecord,
+    maxBytes: MAX_RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_BYTES,
+  });
+  const checkpoint = retirePinnedTestBootstrapControlFile({
+    active: testBootstrapCheckpointPath(pins),
+    completed: testBootstrapCompletedCheckpointPath(pins),
+    record: checkpointRecord,
     maxBytes: MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES,
   });
-  try {
-    validateTestBootstrapCheckpoint(
-      JSON.parse(retired.raw.toString("utf8")),
-      plan,
-      candidateEvidence,
-      approvalFingerprint,
-    );
-  } finally {
-    retired.raw.fill(0);
-  }
-  return completed;
+  return Object.freeze({ checkpoint, resume, promotion });
 }
 
 function inspectRecoveryIsolationClaim(binding, targetResourceFingerprint) {
@@ -2020,6 +2429,28 @@ function inspectWrapper(path) {
   });
 }
 
+function assertTestBootstrapWrapperRuntimeContract(wrapper) {
+  const code = "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRAPPER_CONTRACT_INVALID";
+  let text;
+  try { text = wrapper.raw.toString("utf8"); }
+  catch { refuse(code); }
+  // The field path has no ambient Cloudflare token. Its only accepted shell
+  // program is a fixed five-line trampoline: one literal, safely quoted
+  // Keychain lookup; a non-empty check; export; and the pinned Node exec. The
+  // private account/service locator may vary, but its grammar cannot execute
+  // shell syntax. The full wrapper bytes are also approval-bound.
+  const lines = text.split("\n");
+  if (Buffer.byteLength(text, "utf8") !== wrapper.raw.length ||
+      lines.length !== 6 || lines[5] !== "" || lines[0] !== "#!/bin/sh" ||
+      !RECOVERY_TEST_WRANGLER_WRAPPER_TOKEN_LINE_RE.test(lines[1]) ||
+      lines[2] !== `[ -n "$${RECOVERY_TEST_CLOUDFLARE_TOKEN_NAME}" ] || exit 125` ||
+      lines[3] !== `export ${RECOVERY_TEST_CLOUDFLARE_TOKEN_NAME}` ||
+      lines[4] !== RECOVERY_TEST_WRANGLER_WRAPPER_EXEC_LINE) {
+    refuse(code);
+  }
+  return true;
+}
+
 function syncDirectory(path) {
   if (process.platform === "win32") return;
   let descriptor;
@@ -2087,7 +2518,12 @@ function reconcileExportResidue(artifactPath, dataPartial, combinedPartial, arti
   return true;
 }
 
-function wrapperEnvironment(accountId, callDirectory, environment = process.env) {
+function wrapperEnvironment(
+  accountId,
+  callDirectory,
+  environment = process.env,
+  wranglerRuntime = null,
+) {
   const keychain = keychainChildEnvironment(environment);
   return Object.freeze({
     ...keychain,
@@ -2104,6 +2540,12 @@ function wrapperEnvironment(accountId, callDirectory, environment = process.env)
     CI: "1",
     FORCE_COLOR: "0",
     NO_COLOR: "1",
+    ...(wranglerRuntime ? {
+      BRAIN_RECOVERY_NODE: process.execPath,
+      BRAIN_RECOVERY_WRANGLER_ENTRYPOINT: wranglerRuntime.entrypointPath,
+      BRAIN_RECOVERY_WRANGLER_RESOLUTION_GUARD:
+        wranglerRuntime.resolutionGuardPath,
+    } : {}),
   });
 }
 
@@ -3297,76 +3739,179 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
   const testBootstrapCandidateEvidence = testBootstrapRequest
     ? inspectTestBootstrapCandidateEvidence(testBootstrapRequest)
     : null;
+  if (testBootstrapRequest) assertTestBootstrapWrapperRuntimeContract(pins.wrapper);
   const testBootstrapApprovalFingerprint = testBootstrapRequest
-    ? testBootstrapInterruptionApprovalFingerprint(plan, testBootstrapCandidateEvidence)
-    : null;
-  const testBootstrapCheckpointExists = existsSync(testBootstrapCheckpointPath(pins));
-  const testBootstrapCompletedCheckpointExists = existsSync(
-    testBootstrapCompletedCheckpointPath(pins),
-  );
-  if (testBootstrapCheckpointExists && !testBootstrapRequest) {
-    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED");
-  }
-  if (testBootstrapRequest && testBootstrapCompletedCheckpointExists) {
-    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_CONSUMED");
-  }
-  const testBootstrapCheckpoint = testBootstrapRequest && testBootstrapCheckpointExists
-    ? readTestBootstrapCheckpoint(
-        pins,
+    ? testBootstrapInterruptionApprovalFingerprint(
         plan,
         testBootstrapCandidateEvidence,
-        testBootstrapApprovalFingerprint,
+        pins.wrapper.hash,
       )
     : null;
-  const testBootstrapPromotionAuthorizationExists = existsSync(
-    testBootstrapPromotionAuthorizationPath(pins),
+  const testBootstrapControlPaths = Object.freeze({
+    checkpoint: testBootstrapCheckpointPath(pins),
+    completedCheckpoint: testBootstrapCompletedCheckpointPath(pins),
+    resume: testBootstrapResumeAuthorizationPath(pins),
+    completedResume: testBootstrapCompletedResumeAuthorizationPath(pins),
+    promotion: testBootstrapPromotionAuthorizationPath(pins),
+    completedPromotion: testBootstrapCompletedPromotionAuthorizationPath(pins),
+  });
+  const controlPresence = (path) => Boolean(pathInfoOrAbsent(
+    path,
+    "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED",
+  ));
+  const testBootstrapCheckpointExists = controlPresence(testBootstrapControlPaths.checkpoint);
+  const testBootstrapCompletedCheckpointExists = controlPresence(
+    testBootstrapControlPaths.completedCheckpoint,
   );
-  if (!testBootstrapRequest && testBootstrapPromotionAuthorizationExists &&
-      !testBootstrapCompletedCheckpointExists) {
-    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED");
-  }
-  if (testBootstrapRequest && testBootstrapPromotionAuthorizationExists &&
-      !testBootstrapCheckpoint) {
-    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_INVALID");
-  }
+  const testBootstrapPromotionAuthorizationExists = controlPresence(
+    testBootstrapControlPaths.promotion,
+  );
+  const testBootstrapResumeAuthorizationExists = controlPresence(
+    testBootstrapControlPaths.resume,
+  );
+  const testBootstrapCompletedResumeAuthorizationExists = controlPresence(
+    testBootstrapControlPaths.completedResume,
+  );
+  const testBootstrapCompletedPromotionAuthorizationExists = controlPresence(
+    testBootstrapControlPaths.completedPromotion,
+  );
   const restoredFromState = config.state?.completed?.find(
     (entry) => entry?.id === "reconcile_security",
   )?.evidence ?? config.state?.completed?.find(
     (entry) => entry?.id === "verify_d1",
   )?.evidence ?? null;
-  const testBootstrapResumeAuthorizationExists = existsSync(
-    testBootstrapResumeAuthorizationPath(pins),
-  );
-  if (!testBootstrapRequest && testBootstrapResumeAuthorizationExists &&
-      !testBootstrapCompletedCheckpointExists) {
+  // A completed filename is never an ordinary-mode bypass. Successful
+  // retirement moves every live authorization away before moving the active
+  // checkpoint last; any remaining active control file therefore blocks.
+  if (!testBootstrapRequest && (testBootstrapCheckpointExists ||
+      testBootstrapResumeAuthorizationExists ||
+      testBootstrapPromotionAuthorizationExists)) {
     refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED");
   }
-  if (testBootstrapRequest && testBootstrapResumeAuthorizationExists &&
-      !testBootstrapCheckpoint) {
+  let completedTestBootstrapCampaign = null;
+  if (!testBootstrapRequest && (testBootstrapCompletedCheckpointExists ||
+      testBootstrapCompletedResumeAuthorizationExists ||
+      testBootstrapCompletedPromotionAuthorizationExists)) {
+    if (!testBootstrapCompletedCheckpointExists ||
+        !testBootstrapCompletedResumeAuthorizationExists ||
+        !testBootstrapCompletedPromotionAuthorizationExists ||
+        config.state?.status !== "complete" || !restoredFromState) {
+      refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID");
+    }
+    try {
+      const completed = readCompletedTestBootstrapCheckpoint(pins, plan);
+      const resumeRecord = readTestBootstrapResumeAuthorization(
+        pins,
+        plan,
+        completed.candidateEvidence,
+        completed.approvalFingerprint,
+        completed.checkpointRecord,
+        restoredFromState,
+        testBootstrapControlPaths.completedResume,
+      );
+      const promotionRecord = readTestBootstrapPromotionAuthorization(
+        pins,
+        plan,
+        completed.candidateEvidence,
+        completed.approvalFingerprint,
+        completed.checkpointRecord,
+        restoredFromState,
+        testBootstrapControlPaths.completedPromotion,
+      );
+      if (!resumeRecord || !promotionRecord) {
+        refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID");
+      }
+      completedTestBootstrapCampaign = Object.freeze({
+        checkpointRecord: completed.checkpointRecord,
+        resumeRecord,
+        promotionRecord,
+      });
+    } catch {
+      refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID");
+    }
+  }
+  if (testBootstrapRequest && testBootstrapCompletedCheckpointExists) {
+    // The special request supplies the exact candidate evidence needed to
+    // validate this completed checkpoint. Existence alone is not proof that a
+    // campaign was consumed.
+    readTestBootstrapCheckpoint(
+      pins,
+      plan,
+      testBootstrapCandidateEvidence,
+      testBootstrapApprovalFingerprint,
+      pins.wrapper.hash,
+      testBootstrapCompletedCheckpointPath(pins),
+    );
+    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_CONSUMED");
+  }
+  let testBootstrapCheckpointRecord = testBootstrapRequest && testBootstrapCheckpointExists
+    ? readTestBootstrapCheckpoint(
+        pins,
+        plan,
+        testBootstrapCandidateEvidence,
+        testBootstrapApprovalFingerprint,
+        pins.wrapper.hash,
+      )
+    : null;
+  let testBootstrapCheckpoint = testBootstrapCheckpointRecord?.value ?? null;
+  if (testBootstrapRequest &&
+      ((testBootstrapResumeAuthorizationExists &&
+        testBootstrapCompletedResumeAuthorizationExists) ||
+       (testBootstrapPromotionAuthorizationExists &&
+        testBootstrapCompletedPromotionAuthorizationExists))) {
+    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_AUTHORIZATION_RETIREMENT_INVALID");
+  }
+  const partiallyRetired = testBootstrapCompletedResumeAuthorizationExists ||
+    testBootstrapCompletedPromotionAuthorizationExists;
+  if (testBootstrapRequest && partiallyRetired && config.state?.status !== "complete") {
+    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_AUTHORIZATION_RETIREMENT_INVALID");
+  }
+  if (testBootstrapRequest &&
+      (testBootstrapResumeAuthorizationExists ||
+       testBootstrapCompletedResumeAuthorizationExists) &&
+      !testBootstrapCheckpointRecord) {
     refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_INVALID");
   }
-  const testBootstrapResumeAuthorization = testBootstrapRequest &&
-      testBootstrapResumeAuthorizationExists
+  if (testBootstrapRequest &&
+      (testBootstrapPromotionAuthorizationExists ||
+       testBootstrapCompletedPromotionAuthorizationExists) &&
+      !testBootstrapCheckpointRecord) {
+    refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_INVALID");
+  }
+  let testBootstrapResumeAuthorizationRecord = testBootstrapRequest &&
+      (testBootstrapResumeAuthorizationExists ||
+       testBootstrapCompletedResumeAuthorizationExists)
     ? readTestBootstrapResumeAuthorization(
         pins,
         plan,
         testBootstrapCandidateEvidence,
         testBootstrapApprovalFingerprint,
-        testBootstrapCheckpoint,
+        testBootstrapCheckpointRecord,
         restoredFromState,
+        testBootstrapResumeAuthorizationExists
+          ? testBootstrapResumeAuthorizationPath(pins)
+          : testBootstrapCompletedResumeAuthorizationPath(pins),
       )
     : null;
-  const testBootstrapPromotionAuthorization = testBootstrapRequest &&
-      testBootstrapPromotionAuthorizationExists
+  let testBootstrapResumeAuthorization =
+    testBootstrapResumeAuthorizationRecord?.value ?? null;
+  let testBootstrapPromotionAuthorizationRecord = testBootstrapRequest &&
+      (testBootstrapPromotionAuthorizationExists ||
+       testBootstrapCompletedPromotionAuthorizationExists)
     ? readTestBootstrapPromotionAuthorization(
         pins,
         plan,
         testBootstrapCandidateEvidence,
         testBootstrapApprovalFingerprint,
-        testBootstrapCheckpoint,
+        testBootstrapCheckpointRecord,
         restoredFromState,
+        testBootstrapPromotionAuthorizationExists
+          ? testBootstrapPromotionAuthorizationPath(pins)
+          : testBootstrapCompletedPromotionAuthorizationPath(pins),
       )
     : null;
+  let testBootstrapPromotionAuthorization =
+    testBootstrapPromotionAuthorizationRecord?.value ?? null;
   if (testBootstrapRequest && testBootstrapPromotionAuthorization &&
       !testBootstrapResumeAuthorization) {
     refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_INVALID");
@@ -3388,6 +3933,14 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
   const readRecoveryArtifactKey = dependencies.readRecoveryArtifactKey ?? ((locator) =>
     defaultReadAdminKey(locator, config.environment));
   const runEval = dependencies.runEval ?? defaultRunEval;
+  const materializeWranglerRuntimeImpl = dependencies.materializeWranglerRuntime ??
+    materializeLockedWranglerRuntime;
+  const assertMaterializedWranglerRuntimeImpl =
+    dependencies.assertMaterializedWranglerRuntimeUnchanged ??
+      assertMaterializedWranglerRuntimeUnchanged;
+  const assertLockedWranglerRuntimeImpl =
+    dependencies.assertLockedWranglerRuntimeUnchanged ??
+      assertLockedWranglerRuntimeUnchanged;
   let wrapperVersionProven = false;
   const operationApproved = config.approvePlan === plan.plan_fingerprint &&
     config.approveDisposableTarget === plan.target_resource_fingerprint &&
@@ -3404,14 +3957,109 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_APPROVAL_MISMATCH");
   }
 
+  // An ordinary invocation has no authority to consume or replace a live test
+  // campaign. Pin the initial absence of all active test controls and prove it
+  // again at every local/provider/key boundary. A dangling symlink is present,
+  // not absent, and is therefore refused locally.
+  const ordinaryControlAbsencePins = !testBootstrapRequest
+    ? Object.freeze([
+        testBootstrapControlPaths.checkpoint,
+        testBootstrapControlPaths.resume,
+        testBootstrapControlPaths.promotion,
+        ...(!completedTestBootstrapCampaign ? [
+          testBootstrapControlPaths.completedCheckpoint,
+          testBootstrapControlPaths.completedResume,
+          testBootstrapControlPaths.completedPromotion,
+        ] : []),
+      ].map((path) => {
+        assertPathAbsent(
+          path,
+          "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
+        );
+        return resolve(path);
+      }))
+    : Object.freeze([]);
+
+  const assertControlPath = (path, record, maxBytes) => {
+    const absolute = resolve(path);
+    if (record?.pin?.path === absolute) {
+      return assertStablePrivateFileRecord(record, {
+        code: "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED",
+        maxBytes,
+      });
+    }
+    assertPathAbsent(absolute, "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED");
+    return true;
+  };
+
+  const assertTestBootstrapControlFilesUnchanged = () => {
+    if (!testBootstrapRequest) {
+      ordinaryControlAbsencePins.forEach((path) => assertPathAbsent(
+        path,
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CONTROL_CHANGED",
+      ));
+      if (completedTestBootstrapCampaign) {
+        assertControlPath(
+          testBootstrapControlPaths.completedCheckpoint,
+          completedTestBootstrapCampaign.checkpointRecord,
+          MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES,
+        );
+        assertControlPath(
+          testBootstrapControlPaths.completedResume,
+          completedTestBootstrapCampaign.resumeRecord,
+          MAX_RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_BYTES,
+        );
+        assertControlPath(
+          testBootstrapControlPaths.completedPromotion,
+          completedTestBootstrapCampaign.promotionRecord,
+          MAX_RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_BYTES,
+        );
+      }
+      return true;
+    }
+    assertControlPath(
+      testBootstrapCheckpointPath(pins),
+      testBootstrapCheckpointRecord,
+      MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES,
+    );
+    assertControlPath(
+      testBootstrapCompletedCheckpointPath(pins),
+      null,
+      MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES,
+    );
+    assertControlPath(
+      testBootstrapResumeAuthorizationPath(pins),
+      testBootstrapResumeAuthorizationRecord,
+      MAX_RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_BYTES,
+    );
+    assertControlPath(
+      testBootstrapCompletedResumeAuthorizationPath(pins),
+      testBootstrapResumeAuthorizationRecord,
+      MAX_RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_BYTES,
+    );
+    assertControlPath(
+      testBootstrapPromotionAuthorizationPath(pins),
+      testBootstrapPromotionAuthorizationRecord,
+      MAX_RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_BYTES,
+    );
+    assertControlPath(
+      testBootstrapCompletedPromotionAuthorizationPath(pins),
+      testBootstrapPromotionAuthorizationRecord,
+      MAX_RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_BYTES,
+    );
+    return true;
+  };
+
   const revalidate = () => {
     assertLocalPinsUnchanged(pins, config, plan);
     if (testBootstrapRequest) {
       assertTestBootstrapCandidateEvidenceUnchanged(
         testBootstrapCandidateEvidence,
         testBootstrapRequest,
+        assertLockedWranglerRuntimeImpl,
       );
     }
+    assertTestBootstrapControlFilesUnchanged();
     return true;
   };
 
@@ -3522,6 +4170,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     revalidate();
     const callDirectory = mkdtempSync(join(pins.artifacts.path, ".brain-recovery-runtime-"));
     let result;
+    let materializedWranglerRuntime = null;
     try {
       chmodSync(callDirectory, 0o700);
       mkdirSync(join(callDirectory, "logs"), { mode: 0o700 });
@@ -3533,8 +4182,41 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         maxBytes: MAX_WRAPPER_BYTES,
         executable: true,
       });
-      if (executionPin.hash !== pins.wrapper.hash) refuse("RECOVERY_WRANGLER_WRAPPER_UNSAFE");
-      const env = wrapperEnvironment(binding.accountId, callDirectory, config.environment);
+      const executionWrapperRecord = stablePrivateFileRecord(executionPin, null);
+      try {
+        if (executionPin.hash !== pins.wrapper.hash) refuse("RECOVERY_WRANGLER_WRAPPER_UNSAFE");
+      } finally {
+        executionPin.raw.fill(0);
+      }
+      if (testBootstrapRequest) {
+        try {
+          materializedWranglerRuntime = materializeWranglerRuntimeImpl(
+            testBootstrapCandidateEvidence.wranglerRuntime,
+            join(callDirectory, "wrangler-runtime"),
+          );
+          assertMaterializedWranglerRuntimeImpl(materializedWranglerRuntime);
+        } catch {
+          refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRANGLER_RUNTIME_INVALID");
+        }
+      }
+      revalidate();
+      const env = wrapperEnvironment(
+        binding.accountId,
+        callDirectory,
+        config.environment,
+        materializedWranglerRuntime,
+      );
+      const executionWrapperCode = testBootstrapRequest
+        ? "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRANGLER_RUNTIME_CHANGED"
+        : "RECOVERY_WRANGLER_WRAPPER_UNSAFE";
+      assertStablePrivateFileRecord(executionWrapperRecord, {
+        code: executionWrapperCode,
+        maxBytes: MAX_WRAPPER_BYTES,
+      });
+      if (testBootstrapRequest) {
+        try { assertMaterializedWranglerRuntimeImpl(materializedWranglerRuntime); }
+        catch { refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRANGLER_RUNTIME_CHANGED"); }
+      }
       result = normalizedChildResult(await runWranglerImpl({
         command: executionWrapper,
         args: args[0] === "--version"
@@ -3544,6 +4226,15 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         cwd: callDirectory,
         timeoutMs,
       }));
+      assertStablePrivateFileRecord(executionWrapperRecord, {
+        code: executionWrapperCode,
+        maxBytes: MAX_WRAPPER_BYTES,
+      });
+      if (testBootstrapRequest) {
+        try { assertMaterializedWranglerRuntimeImpl(materializedWranglerRuntime); }
+        catch { refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_WRANGLER_RUNTIME_CHANGED"); }
+      }
+      revalidate();
       if (result.status !== 0 || result.signal || result.error) {
         refuse("RECOVERY_WRANGLER_CALL_FAILED");
       }
@@ -4433,7 +5124,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         const observed = await observeTestBootstrapPoint("interrupt", restored, receipt);
         if (observed.observation.ready_to_interrupt) {
           revalidate();
-          writeTestBootstrapCheckpoint(
+          testBootstrapCheckpointRecord = writeTestBootstrapCheckpoint(
             pins,
             plan,
             testBootstrapCandidateEvidence,
@@ -4441,6 +5132,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
             observed.privateCursorSha256,
             observed.observation,
           );
+          testBootstrapCheckpoint = testBootstrapCheckpointRecord.value;
           revalidate();
           refuse(RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_CODE);
         }
@@ -4725,16 +5417,18 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         // but it has no reason to touch credentials or the data-plane door.
         const exactResumeProof = await observeTestBootstrapPoint("resume", restored);
         revalidate();
-        writeTestBootstrapResumeAuthorization(
+        testBootstrapResumeAuthorizationRecord = writeTestBootstrapResumeAuthorization(
           pins,
           plan,
           testBootstrapCandidateEvidence,
           testBootstrapApprovalFingerprint,
-          testBootstrapCheckpoint,
+          testBootstrapCheckpointRecord,
           restored,
           exactResumeProof.privateCursorSha256,
           exactResumeProof.observation,
         );
+        testBootstrapResumeAuthorization =
+          testBootstrapResumeAuthorizationRecord.value;
         revalidate();
       } else if (testBootstrapResumeAuthorization &&
           !testBootstrapPromotionAuthorization) {
@@ -4798,16 +5492,19 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
             completedBootstrapReceipt,
           );
           revalidate();
-          writeTestBootstrapPromotionAuthorization(
+          testBootstrapPromotionAuthorizationRecord =
+            writeTestBootstrapPromotionAuthorization(
             pins,
             plan,
             testBootstrapCandidateEvidence,
             testBootstrapApprovalFingerprint,
-            testBootstrapCheckpoint,
+            testBootstrapCheckpointRecord,
             restored,
             promotionProof.privateCursorSha256,
             promotionProof.observation,
           );
+          testBootstrapPromotionAuthorization =
+            testBootstrapPromotionAuthorizationRecord.value;
           revalidate();
         }
         // Both immutable versions and every binding were proven above. This is
@@ -4935,21 +5632,48 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
           packageFileCount: testBootstrapCandidateEvidence.packageFileCount,
           executionInventorySha256:
             testBootstrapCandidateEvidence.executionInventorySha256,
+          wranglerRuntimeInventorySha256:
+            testBootstrapCandidateEvidence.wranglerRuntimeInventorySha256,
+          wranglerRuntimeEntrypoint:
+            testBootstrapCandidateEvidence.wranglerRuntimeEntrypoint,
+          wranglerRuntimeEntrypointSha256:
+            testBootstrapCandidateEvidence.wranglerRuntimeEntrypointSha256,
+          wranglerRuntimePackageCount:
+            testBootstrapCandidateEvidence.wranglerRuntimePackageCount,
+          wranglerRuntimeFileCount:
+            testBootstrapCandidateEvidence.wranglerRuntimeFileCount,
+          wranglerRuntimeBytes: testBootstrapCandidateEvidence.wranglerRuntimeBytes,
+          wranglerRuntimeDirectory:
+            testBootstrapCandidateEvidence.wranglerRuntimeDirectory,
+          wranglerRuntimeSchemaVersion:
+            testBootstrapCandidateEvidence.wranglerRuntimeSchemaVersion,
+          wranglerHostPlatform: testBootstrapCandidateEvidence.wranglerHostPlatform,
+          wranglerHostArch: testBootstrapCandidateEvidence.wranglerHostArch,
+          wranglerHostLibc: testBootstrapCandidateEvidence.wranglerHostLibc,
+          nodeVersion: testBootstrapCandidateEvidence.nodeVersion,
+          nodeExecutableSha256: testBootstrapCandidateEvidence.nodeExecutableSha256,
         })
       : null,
     testBootstrapInterruptionApprovalFingerprint: testBootstrapApprovalFingerprint,
     acquireLock: () => acquireFieldGateLock(pins.artifacts.path, plan.plan_fingerprint),
     releaseLock: (lock) => releaseFieldGateLock(lock, pins.artifacts.path),
     retireTestBootstrapCheckpoint: () => {
-      if (!testBootstrapRequest || !testBootstrapCheckpoint) {
+      if (!testBootstrapRequest || !testBootstrapCheckpointRecord) {
         refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_CHECKPOINT_RETIRE_FAILED");
       }
-      return retireTestBootstrapCheckpoint(
+      const retired = retireTestBootstrapCheckpoint(
         pins,
-        plan,
-        testBootstrapCandidateEvidence,
-        testBootstrapApprovalFingerprint,
+        testBootstrapCheckpointRecord,
+        testBootstrapResumeAuthorizationRecord,
+        testBootstrapPromotionAuthorizationRecord,
       );
+      testBootstrapCheckpointRecord = retired.checkpoint;
+      testBootstrapCheckpoint = retired.checkpoint.value;
+      testBootstrapResumeAuthorizationRecord = retired.resume;
+      testBootstrapResumeAuthorization = retired.resume.value;
+      testBootstrapPromotionAuthorizationRecord = retired.promotion;
+      testBootstrapPromotionAuthorization = retired.promotion.value;
+      return retired.checkpoint.pin.path;
     },
   });
 }
@@ -5008,6 +5732,31 @@ export function previewCloudflareRecoveryFieldGate(configInput, dependencies = {
         package_file_count: gate.testBootstrapCandidateEvidence.packageFileCount,
         execution_inventory_sha256:
           gate.testBootstrapCandidateEvidence.executionInventorySha256,
+        wrangler_runtime_inventory_sha256:
+          gate.testBootstrapCandidateEvidence.wranglerRuntimeInventorySha256,
+        wrangler_entrypoint:
+          gate.testBootstrapCandidateEvidence.wranglerRuntimeEntrypoint,
+        wrangler_entrypoint_sha256:
+          gate.testBootstrapCandidateEvidence.wranglerRuntimeEntrypointSha256,
+        wrangler_runtime_package_count:
+          gate.testBootstrapCandidateEvidence.wranglerRuntimePackageCount,
+        wrangler_runtime_file_count:
+          gate.testBootstrapCandidateEvidence.wranglerRuntimeFileCount,
+        wrangler_runtime_bytes:
+          gate.testBootstrapCandidateEvidence.wranglerRuntimeBytes,
+        wrangler_runtime_directory:
+          gate.testBootstrapCandidateEvidence.wranglerRuntimeDirectory,
+        wrangler_runtime_schema_version:
+          gate.testBootstrapCandidateEvidence.wranglerRuntimeSchemaVersion,
+        wrangler_host_platform:
+          gate.testBootstrapCandidateEvidence.wranglerHostPlatform,
+        wrangler_host_arch:
+          gate.testBootstrapCandidateEvidence.wranglerHostArch,
+        wrangler_host_libc:
+          gate.testBootstrapCandidateEvidence.wranglerHostLibc,
+        node_version: gate.testBootstrapCandidateEvidence.nodeVersion,
+        node_executable_sha256:
+          gate.testBootstrapCandidateEvidence.nodeExecutableSha256,
         stage: "rebuild_vectorize",
         hook_point:
           "after_observed_persisted_nonfinal_bootstrap_v2_receipt_before_sleep_or_active_promotion",

@@ -651,6 +651,7 @@ const expected = [
   // aggregate SELECT through injected read-only callbacks.
   "operations/aggregate-field-observer.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
+  "operations/locked-wrangler-runtime.mjs",
   "operations/verified-recovery.mjs",
   "operations/windows-dpapi.ps1",
   "operations/windows-dpapi-bridge.mjs",

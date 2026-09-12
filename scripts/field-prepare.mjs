@@ -23,11 +23,15 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   basename, dirname, isAbsolute, join, relative, resolve, sep, win32 as pathWin32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+  prepareLockedWranglerRuntimeFromCache,
+} from "../operations/locked-wrangler-runtime.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const IS_WINDOWS = process.platform === "win32";
@@ -285,6 +289,17 @@ export function createSafeEnvironment(source, privateHome) {
     BRAIN_FIELD_PREPARE: "1",
   });
   return environment;
+}
+
+export function resolveNpmCacheContentRoot(
+  environment = process.env,
+  { platform = process.platform, userHome = homedir() } = {},
+) {
+  const cache = environment.NPM_CONFIG_CACHE || environment.npm_config_cache ||
+    (platform === "win32"
+      ? join(environment.LOCALAPPDATA || join(userHome, "AppData", "Local"), "npm-cache")
+      : join(userHome, ".npm"));
+  return resolve(cache, "_cacache", "content-v2", "sha512");
 }
 
 export function createPlanEnvironment(source) {
@@ -692,7 +707,7 @@ export function renderFieldChecklist(receipt) {
   return lines.join("\n");
 }
 
-function baseReceipt(options, plan) {
+function baseReceipt(options, plan, wranglerRuntime) {
   return {
     schema_version: 1,
     run_id: randomUUID(),
@@ -711,7 +726,21 @@ function baseReceipt(options, plan) {
     external_network_allowed: false,
     tooling: {
       wrangler_package: WRANGLER_PACKAGE,
-      wrangler_resolution: "locked_local_dev_dependency",
+      wrangler_resolution: "locked_local_runtime_closure",
+      wrangler_runtime_directory: LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+      wrangler_runtime_schema_version: wranglerRuntime.schemaVersion,
+      wrangler_entrypoint: wranglerRuntime.entrypointRelative,
+      wrangler_entrypoint_sha256: wranglerRuntime.entrypointSha256,
+      wrangler_runtime_inventory_sha256: wranglerRuntime.inventorySha256,
+      wrangler_runtime_package_count: wranglerRuntime.packageCount,
+      wrangler_runtime_file_count: wranglerRuntime.fileCount,
+      wrangler_runtime_bytes: wranglerRuntime.totalBytes,
+      wrangler_package_lock_sha256: wranglerRuntime.packageLockSha256,
+      wrangler_host_platform: wranglerRuntime.host.platform,
+      wrangler_host_arch: wranglerRuntime.host.arch,
+      wrangler_host_libc: wranglerRuntime.host.libc,
+      node_version: wranglerRuntime.nodeVersion,
+      node_executable_sha256: wranglerRuntime.nodeExecSha256,
     },
     source: null,
     package: null,
@@ -840,7 +869,15 @@ export async function runFieldPrepare(options, dependencies = {}) {
   const environment = createSafeEnvironment(process.env, privateHome);
   for (const directory of [environment.APPDATA, environment.LOCALAPPDATA, environment.XDG_CONFIG_HOME,
     environment.XDG_CACHE_HOME, environment.TMPDIR]) mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const receipt = baseReceipt(options, plan);
+  const cacheRoot = dependencies.npmCacheContentRoot ??
+    resolveNpmCacheContentRoot(process.env);
+  const wranglerRuntime = (dependencies.prepareWranglerRuntime || (() =>
+    prepareLockedWranglerRuntimeFromCache({
+      sourceRoot: ROOT,
+      destination: join(output, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+      cacheContentRoot: cacheRoot,
+    })))();
+  const receipt = baseReceipt(options, plan, wranglerRuntime);
   let archive = null;
   let privateHomeRemoved = false;
   const commandRunner = dependencies.runCommand || run;
@@ -869,6 +906,9 @@ export async function runFieldPrepare(options, dependencies = {}) {
       try {
         if (step.id === "source-identity") {
           receipt.source = { ...identityReader(options.expectSha, environment), end_clean: null };
+          if (receipt.source.package_lock_sha256 !== wranglerRuntime.packageLockSha256) {
+            throw new Error("wrangler_runtime_lock_mismatch");
+          }
         }
         else if (step.id === "source-identity-final") {
           const finalIdentity = identityReader(options.expectSha || receipt.source?.head_sha, environment);

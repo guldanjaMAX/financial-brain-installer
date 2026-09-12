@@ -10,10 +10,17 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import * as nodeModule from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import {
+  LOCKED_WRANGLER_RESOLUTION_GUARD,
+  LOCKED_WRANGLER_RESOLUTION_GUARD_MIN_NODE,
+  LOCKED_WRANGLER_RESOLUTION_GUARD_SHA256,
+  LOCKED_WRANGLER_RESOLUTION_GUARD_SOURCE,
+} from "../operations/locked-wrangler-runtime.mjs";
 import {
   assertDirectPlanEntrypoint,
   assertNoLiveCommand,
@@ -28,6 +35,7 @@ import {
   parseFieldPrepareArgs,
   readSourceIdentity,
   renderFieldChecklist,
+  resolveNpmCacheContentRoot,
   runFieldPrepare,
   sameCanonicalSourceRoot,
   sourceIdentityGitArgs,
@@ -127,6 +135,151 @@ test("every child environment drops credentials and customer-home access", () =>
     assert.equal(safe.NPM_CONFIG_USERCONFIG, join(temporary, "npmrc"));
     assert.equal(safe.NPM_CONFIG_OFFLINE, "true");
     assert.equal(safe.BRAIN_FIELD_PREPARE, "1");
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("the integrity cache locator follows npm and Windows cache semantics", () => {
+  assert.equal(
+    resolveNpmCacheContentRoot(
+      { NPM_CONFIG_CACHE: "/private/pinned-npm-cache" },
+      { platform: "linux", userHome: "/ignored" },
+    ),
+    resolve("/private/pinned-npm-cache/_cacache/content-v2/sha512"),
+  );
+  assert.equal(
+    resolveNpmCacheContentRoot(
+      { LOCALAPPDATA: "C:\\Users\\fixture\\AppData\\Local" },
+      { platform: "win32", userHome: "C:\\Users\\fixture" },
+    ),
+    resolve("C:\\Users\\fixture\\AppData\\Local", "npm-cache", "_cacache",
+      "content-v2", "sha512"),
+  );
+});
+
+test("the locked Wrangler guard rejects ambient module resolution in parent and child Node processes", {
+  skip: typeof nodeModule.registerHooks !== "function",
+}, () => {
+  assert.equal(LOCKED_WRANGLER_RESOLUTION_GUARD_MIN_NODE, "22.15.0");
+  assert.equal(
+    createHash("sha256").update(LOCKED_WRANGLER_RESOLUTION_GUARD_SOURCE).digest("hex"),
+    LOCKED_WRANGLER_RESOLUTION_GUARD_SHA256,
+  );
+
+  const temporary = mkdtempSync(join(tmpdir(), "brain-wrangler-resolution-"));
+  try {
+    const ancestor = join(temporary, "ancestor");
+    const runtime = join(ancestor, "call", "runtime");
+    const poisonPackage = join(ancestor, "node_modules", "ambient-poison");
+    const globalModules = join(temporary, "global-node-modules");
+    mkdirSync(runtime, { recursive: true });
+    mkdirSync(poisonPackage, { recursive: true });
+    mkdirSync(join(globalModules, "global-poison"), { recursive: true });
+    writeFileSync(
+      join(runtime, LOCKED_WRANGLER_RESOLUTION_GUARD),
+      LOCKED_WRANGLER_RESOLUTION_GUARD_SOURCE,
+    );
+    writeFileSync(join(poisonPackage, "index.js"),
+      'module.exports = "ANCESTOR_POISON_LOADED";\n');
+    writeFileSync(join(globalModules, "global-poison", "index.js"),
+      'module.exports = "GLOBAL_POISON_LOADED";\n');
+
+    const directEntrypoint = join(runtime, "direct.cjs");
+    writeFileSync(
+      directEntrypoint,
+      'process.stdout.write(require("ambient-poison"));\n',
+    );
+    const forwardedEntrypoint = join(runtime, "forwarded.cjs");
+    writeFileSync(forwardedEntrypoint, `
+const { spawnSync } = require("node:child_process");
+if (process.argv[2] === "child") {
+  process.stdout.write(require("ambient-poison"));
+} else {
+  const child = spawnSync(
+    process.execPath,
+    [...process.execArgv, __filename, "child"],
+    { encoding: "utf8", env: process.env },
+  );
+  process.stdout.write(child.stdout || "");
+  process.stderr.write(child.stderr || "");
+  process.exit(child.status === null ? 1 : child.status);
+}
+`);
+    const globalEntrypoint = join(runtime, "global.cjs");
+    writeFileSync(
+      globalEntrypoint,
+      'process.stdout.write(require("global-poison"));\n',
+    );
+    const guardPath = join(runtime, LOCKED_WRANGLER_RESOLUTION_GUARD);
+    const environment = {
+      PATH: process.env.PATH,
+      NODE_PATH: globalModules,
+    };
+    const launch = (entrypoint, guarded, extraArgs = []) => spawnSync(
+      process.execPath,
+      [
+        "--no-global-search-paths",
+        ...(guarded ? ["--require", guardPath] : []),
+        ...extraArgs,
+        entrypoint,
+      ],
+      { cwd: join(ancestor, "call"), encoding: "utf8", env: environment },
+    );
+
+    const ambientControl = launch(directEntrypoint, false);
+    assert.equal(ambientControl.status, 0, ambientControl.stderr);
+    assert.equal(ambientControl.stdout, "ANCESTOR_POISON_LOADED");
+
+    for (const entrypoint of [directEntrypoint, forwardedEntrypoint]) {
+      const blocked = launch(entrypoint, true);
+      assert.notEqual(blocked.status, 0, blocked.stdout);
+      assert.equal(blocked.stdout.includes("ANCESTOR_POISON_LOADED"), false);
+      assert.match(blocked.stderr, /LOCKED_WRANGLER_RESOLUTION_OUTSIDE_RUNTIME/);
+    }
+
+    const globalControl = spawnSync(process.execPath, [globalEntrypoint], {
+      cwd: join(ancestor, "call"),
+      encoding: "utf8",
+      env: environment,
+    });
+    assert.equal(globalControl.status, 0, globalControl.stderr);
+    assert.equal(globalControl.stdout, "GLOBAL_POISON_LOADED");
+    const globalBlocked = launch(globalEntrypoint, true);
+    assert.notEqual(globalBlocked.status, 0);
+    assert.equal(globalBlocked.stdout.includes("GLOBAL_POISON_LOADED"), false);
+
+    if (process.platform !== "win32") {
+      const symlinkEntrypoint = join(runtime, "symlink.cjs");
+      mkdirSync(join(runtime, "node_modules"));
+      symlinkSync(
+        poisonPackage,
+        join(runtime, "node_modules", "symlink-poison"),
+        "dir",
+      );
+      writeFileSync(
+        symlinkEntrypoint,
+        'process.stdout.write(require("symlink-poison"));\n',
+      );
+      const symlinkControl = launch(
+        symlinkEntrypoint,
+        false,
+        ["--preserve-symlinks"],
+      );
+      assert.equal(symlinkControl.status, 0, symlinkControl.stderr);
+      assert.equal(symlinkControl.stdout, "ANCESTOR_POISON_LOADED");
+      const symlinkBlocked = launch(
+        symlinkEntrypoint,
+        true,
+        ["--preserve-symlinks"],
+      );
+      assert.notEqual(symlinkBlocked.status, 0);
+      assert.equal(symlinkBlocked.stdout.includes("ANCESTOR_POISON_LOADED"), false);
+      assert.match(
+        symlinkBlocked.stderr,
+        /LOCKED_WRANGLER_RESOLUTION_OUTSIDE_RUNTIME/,
+      );
+    }
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -495,9 +648,14 @@ function writeFixtureLock(root, version) {
 function makeCleanPlanFixture() {
   const root = mkdtempSync(join(tmpdir(), "brain-field-plan-test-"));
   mkdirSync(join(root, "scripts"));
+  mkdirSync(join(root, "operations"));
   writeFileSync(
     join(root, "scripts", "field-prepare.mjs"),
     readFileSync(join(ROOT, "scripts", "field-prepare.mjs")),
+  );
+  writeFileSync(
+    join(root, "operations", "locked-wrangler-runtime.mjs"),
+    readFileSync(join(ROOT, "operations", "locked-wrangler-runtime.mjs")),
   );
   writeFileSync(join(root, "package.json"), `${JSON.stringify({
     name: "brain-installer",
