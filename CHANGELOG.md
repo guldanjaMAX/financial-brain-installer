@@ -12,15 +12,21 @@ asset publication.
 
 - **You can now see the scanned-PDF work before choosing OCR.** `brain
   ocr-preflight <manifest> --path <folder> --json` reads local PDF structure
-  without running OCR or touching a credential, network, Brain record, cursor,
-  checkpoint, or local state file. Its private aggregate receipt separates
+  without running OCR or making an application HTTP request, opening an
+  application key store, or writing a Brain record, cursor, checkpoint, local
+  state file, manifest, or source file. Reading a cloud-synced local file can
+  ask its operating-system file provider to hydrate it, so provider network,
+  credential, and filesystem effects remain explicitly unknown. Its private
+  aggregate receipt separates
   affected documents and authoritative pages from unknown or uninspectable
-  cases, applies the configured per-document page limit, reuses the existing
-  cost/time range, and shows only a manifest-configured daily cap. A missing cap
-  stays missing. Affordability is promised only when complete page coverage and
-  the high estimate fit the cap. A state-bound fingerprint can support a later
-  approval, but this command does not authorize or perform OCR. This remains a
-  held candidate and has not run on a customer folder.
+  cases, applies the configured per-document page limit, and binds the exact OCR
+  model and pricing-basis version. Only the reviewed default model receives a
+  cost/time range; a nondefault or mismatched pricing contract stays unpriced.
+  The full configured-cap comparison is separate from the unknown remaining
+  shared daily budget and unknown actual affordability. A missing cap stays
+  missing. A state-bound fingerprint can support a later approval, but this
+  command does not authorize or perform OCR. This remains a held candidate and
+  has not run on a customer folder.
 
 - **Two computers can no longer create competing provenance histories for the
   same original.** Each new observation now names the exact prior observation

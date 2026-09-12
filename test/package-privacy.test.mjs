@@ -493,8 +493,9 @@ const expected = [
   "operations/provenance-source-assessment.mjs",
   // Aggregate-only local OCR planner. Reviewed 2026-09-12 for filename, path,
   // content, parser-error, hash, credential, and root-identity disclosure. Its
-  // exact schema contains only counts, policy values, ranges, typed unknowns,
-  // and false action flags; the module owns no I/O or external capability.
+  // exact schema contains only counts, policy/model/pricing values, ranges,
+  // typed unknowns, application-action false flags, and file-provider unknowns;
+  // the policy module owns no I/O or external capability.
   "operations/ocr-preflight.mjs",
   // Reviewed read-only Optimize inventory client. It accepts no literal key,
   // validates HTTPS before resolving the protected credential, refuses
