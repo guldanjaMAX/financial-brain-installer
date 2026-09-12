@@ -56,6 +56,10 @@ test("Windows preflight honors the private installed manifest and package-local 
 
 test("Windows preflight never reuses missing, malformed, or unsupported Node for manifest selection", () => {
   assert.match(script, /\$nodeSupported = \$false/);
+  assert.match(
+    script,
+    /\$node = @\(Get-Command node -CommandType Application -ErrorAction SilentlyContinue\)\[0\]/,
+  );
   assert.match(script, /\$nodeExecutable = \$node\.Source/);
   assert.match(script, /versionMatch = \[regex\]::Match/);
   assert.match(script, /else \{\s*\$nodeSupported = \$true\s*\}/);

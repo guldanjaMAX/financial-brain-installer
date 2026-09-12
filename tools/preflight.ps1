@@ -78,7 +78,9 @@ if (-not $env:LOCALAPPDATA) {
 }
 $nodeSupported = $false
 $nodeExecutable = $null
-$node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+# Windows PowerShell can return both .cmd and .exe applications for one name.
+# Preserve its command-resolution order, but invoke exactly the first candidate.
+$node = @(Get-Command node -CommandType Application -ErrorAction SilentlyContinue)[0]
 if ($node) {
   $nodeExecutable = $node.Source
   $nodeOutput = @(& $nodeExecutable -v 2>$null)
