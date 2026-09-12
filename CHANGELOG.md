@@ -4,6 +4,245 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.8
+
+Candidate only. This version has not been released. Its versioned README URLs
+are deliberately unavailable until a separate release approval and immutable
+asset publication.
+
+- **Two computers can no longer create competing provenance histories for the
+  same original.** Each new observation now names the exact prior observation
+  seen by its reviewed plan, and the Brain compares that head atomically. The
+  first writer wins; another computer with an older preview stops before
+  reingest, family cleanup, or vector drain. A later owner exclusion, gap, or
+  failure also removes an older accepted resolution from current status and
+  prevents stale reactivation. Exact lost-response replay stays safe, and
+  verified recovery preserves the same ordering without restoring local
+  activation.
+
+- **One owner-selected local original can now be repaired through an exact,
+  proof-gated lane.** Add `--target <source-relative-file>` to
+  `brain provenance-repair <manifest> --source <name>` to preview one eligible
+  file from the manifest's registered local upload source. The command never
+  guesses a target, enables OCR, advances a source cursor or receipt, performs
+  a source-wide removal, or claims whole-source completeness. Apply needs the
+  preview's exact approval hash, reacquires the source lease, and repeats the
+  complete private history and state checks before it changes anything. It
+  reingests that one native-readable record, reconciles only its exact family,
+  drains the shared vector outbox, records and verifies the schema-44 family,
+  then records and verifies the schema-45 accepted resolution. The preview
+  explains that exact-family stale siblings may be removed, the shared drain
+  may process unrelated queued work, embeddings may be created, and the four
+  proof operations run eight private retrieval probes that can create ordinary
+  aggregate usage records. If the exact accepted observation already exists,
+  a fresh preview offers a re-verification-only approval: it repeats the four
+  proof operations but skips discovery, reingest, family cleanup, and the
+  shared vector drain. That makes a lost response, stale activation, or
+  verified recovery retry safe without duplicating accepted history. This
+  remains a held candidate and has not run on a customer Brain.
+
+- **Eligible local file imports keep a verifiable link to their exact
+  original.** The ordinary single-record local-file path records a private
+  fingerprint and byte length together with its current document revision. If
+  that record arrives with conflicting original evidence, the Brain stops
+  instead of silently replacing its history. Other ingest producers and
+  ambiguous multi-record exports remain unbound, so this does not yet prevent
+  every new provenance gap or repair every older one. The no-target repair
+  preview stays read-only. The separate one-target lane above must prove the
+  complete chain from the original through the search result and its citation.
+
+- **Ordinary setup will not surprise you with a bank-credential request.** Bank
+  application credentials remain outside normal setup and technician steps. An
+  already approved pilot with a complete existing bank setup keeps it unchanged.
+  If any piece is missing, setup stops before changing other credentials and
+  explains that a separate reviewed setup is needed. The health check cannot
+  call the signed webhook ready unless the exact Brain webhook address was
+  already recorded. General bank invitations remain held.
+
+- **One exact original can now enter a guarded accepted-resolution evidence
+  chain.** The full-admin-only source-original observation route adds
+  `mode: "accepted_resolution"` for exactly one sealed target. Record and
+  read-only verify both rerun the exact result-family, Vectorize, and production
+  owner retrieval proof. Initial admission requires the exact family receipt
+  to have been stored first by ordinary non-authorizing `result_family`
+  record. Accepted-resolution record then atomically binds the prior unresolved
+  observation, original bytes, that family receipt, fresh verification, and
+  accepted observation. Portable history survives recovery, but current
+  verification does not: the recovered Brain must rerun the proof and create a
+  fresh local activation. Every successful accepted-resolution response states
+  `whole_source_complete: false`. The ordinary
+  `result_family` mode remains non-authorizing, the legacy no-target
+  `provenance-repair --apply` remains disabled, and the route itself does not
+  run OCR, reingest, deletion, deployment, or customer execution.
+
+- **The no-target provenance recovery preview stays read-only.** `brain
+  provenance-repair <manifest> --source <name>`
+  shows a state-bound inventory for one manifest-declared local folder, Drive,
+  Gmail, or Calendar source. Its schema-1 `--apply` path is unavailable and
+  stops before reading the manifest, credentials, network, scheduler, or
+  source. Nothing is changed and zero candidates are reported fixed. The
+  preview never advertises an apply command; every candidate stays unresolved
+  through that CLI. The separate schema-45 route above can admit only one exact
+  sealed target after fresh family and retrieval proof.
+
+- **A private result-family proof can now seal exact stored chunks and test
+  retrieval without authorizing repair.** For one explicitly named local
+  original, schema 44 binds every current document revision and title-prefixed
+  chunk, requires a fully drained and count-matched vector index, repeats the
+  production owner retrieval path, and proves the top citation belongs to that
+  family. Private locators, queries, document IDs, titles, and text do not enter
+  the durable proof. Portable family evidence survives recovery, while the
+  deployment-local retrieval check must be repeated after Vectorize is rebuilt.
+  Historical seals restore only inside an empty-target marker that the verified
+  artifact closes and checks before the recovery can advance.
+  Ordinary `result_family` remains non-authorizing. The separate schema-45 gate
+  can consume the proof for one exact sealed target, but this still does not
+  authorize OCR, reingest, deletion, or a whole-source completeness claim.
+
+- **Optimize can now read exact source and provenance receipts without a
+  Cloudflare sign-in.** `brain sources <manifest> --json` uses the Brain's saved
+  owner credential and private Worker route to return a stable D1 source
+  inventory with masked scope/cursor state, physical and logical counts,
+  freshness, extraction, OCR, lineage, exact missing fields, and a validated
+  metadata-only Gmail failure receipt when available. Human output summarizes
+  that receipt without exposing a provider message, ID, path, cursor value,
+  content, or secret. A separate `--json --recovery` mode pages opaque record
+  identities and closed reason codes for planning. Both modes are strictly
+  read-only, reveal no raw source locator, and stop if the snapshot changes.
+  They do not run OCR or repair. The required failure field advances the shared
+  inventory/recovery response and cursor contract to v3; v2 is refused, while
+  schema 39 remains readable with the new evidence explicitly unknown. Because
+  0.4.6 is already live and the earlier held 0.4.7 candidate consumed its
+  evidence identity without being tagged or released, the enforcing release
+  audit refuses both older identities and requires 0.4.8 or newer.
+- **Optimize can now inventory the stored financial picture without changing
+  it.** The new `brain financial-picture <manifest> --json` command reads one
+  bounded D1 snapshot of exact entity, period, masked-account, books, tax,
+  filing, custody, provenance, extraction, supersession, and conflict evidence.
+  A document-derived name stays a possible mention until the owner explicitly
+  confirms it. Stored `owner_stated` data also remains an unconfirmed assertion
+  because the current schema has no durable owner-actor receipt; Optimize asks
+  for current owner confirmation instead of treating that tuple as authority.
+  Page-bounded gap counts name missing provenance, OCR or
+  readability state, freshness policy, payroll, filing-unit, tax-form,
+  K-1-role, and payment-confirmation evidence instead of guessing from search
+  results. A prior receipt's exact as-of time can now gate whether newly
+  recorded rows introduced provenance debt, while empty, page-truncated, or
+  nested-lineage-truncated scope refuses to pass. Recovery is planning only.
+  The receipt hash also binds its as-of and keyed database-version metadata; raw
+  corpus document IDs, source and feed keys, and provider locators stay private
+  behind per-Brain HMAC-SHA-256 references and resolution states. The keyed
+  references remain equal across pages until the Brain secret rotates and are
+  not dictionaryable without that secret; missing signing material fails
+  closed. Only closed-list connector kinds may be readable. A shared closed
+  version-2 schema rejects unknown or raw-looking nested fields at both the
+  Worker JSON boundary and CLI output boundary. Every material entity field has
+  its own confirmation state, stored owner assertions remain provenance debt,
+  and any requested Unavailable section forces baseline scope to be
+  insufficient. Orphaned statement or
+  coverage rows and missing extraction-reliability metadata remain explicit
+  blocking gaps instead of disappearing from a scoped audit.
+  Optimize uses those gaps as an evidence-first interview map, and an owner's
+  answer never auto-confirms a mapping or authorizes a mutation. The CLI also
+  requires a saved valid HTTPS Brain domain and never opens a Wrangler/account
+  session for this data-plane read.
+  The receipt is an inventory, never a
+  completeness, books-correctness, or tax-correctness verdict.
+
+- **Account and passkey steps now explain themselves before anything opens.**
+  Claude Code can handle official-page navigation and non-secret form fields,
+  then pauses for sign-in, 2FA, secrets, consent, billing, and the secure device
+  window. The first owner screen now says why the passkey protects the owner
+  area, what the next click opens, what to do or cancel, and what Financial
+  Brain and the assistant cannot see. It no longer promises that one passkey
+  works on every device.
+
+- **Setup checks the boring prerequisites before it can create anything.** It
+  now stops early if Node is older than 22, the real install drive has less than
+  2 GiB free, or the terminal is running as root or Administrator. On Windows it
+  checks the `LOCALAPPDATA` drive. The Cloudflare step also waits for the owner
+  to confirm the exact account says Workers Paid, because its narrow sign-in
+  cannot read billing status and should never pretend otherwise.
+
+- **Your own Claude Code or Codex can now add and correct information in your
+  Brain.** Setup previously connected the local tool without selecting its
+  profile, so it silently defaulted to read-only. Local installs now use Owner
+  assistant access and verify that the remember tool is really present. An
+  ordinary update also upgrades an existing installer-managed connection, but
+  never adds a missing one or changes a disabled or custom-profile connection.
+  It can read, remember, correct, and check the connection. It cannot delete
+  records or change who has access. New notes live in a registered Owner notes
+  source, show whether they came from the local owner assistant or an approved
+  remote connector, and remain recollections rather than current-source proof.
+
+- **Optimize can offer one precise local repair after its read-only report.**
+  A new computer can be missing the technician guide, the Claude Code
+  connection, the Codex connection, or any combination. The new preview lists
+  only the pieces you select and the exact files or settings they would change.
+  One approval can apply that bundle. Customized and disabled entries stay
+  untouched, every write destination is snapshotted before the first write, and a
+  failure anywhere restores the full bundle to its previewed state. It cannot
+  replace the Brain CLI or change anything in your Brain, Cloudflare account,
+  sources, access, zones, passkeys, or devices.
+
+- **A new computer can now be audited before it resumes a source.**
+  `brain machine-continuity <manifest> --json` checks the exact local manifest,
+  saved owner credential readability, local connector credentials and folders,
+  supported scheduler state and drift, resume checkpoints, current local CLI,
+  technician skill, and exact Claude Code and Codex MCP discovery. It reuses
+  only the authenticated read-only D1 source inventory and never opens a
+  browser, refreshes a provider, reads Cloudflare's control plane, checks a
+  passkey, installs, or writes. The receipt exposes only closed statuses and a
+  safe next step, not customer values, paths, resource IDs, credentials, or
+  cursors. Because a CLI cannot authenticate its own release, D1 masks cursors,
+  and legacy checkpoints have no manifest binding, release integrity, exact
+  cross-computer resume, and deployed-resource matches remain explicitly
+  unproven instead of being guessed from self-declared versions or counts.
+
+- **Closing a laptop no longer makes an index rebuild look stalled.** The
+  fifteen-minute no-movement check now counts only time the updater could keep
+  observing. Waking the computer continues from the durable rebuild instead of
+  treating the sleep interval as proof of a stuck index. The separate six-hour
+  wall-clock safety limit still applies, and a stopped update still keeps the
+  Brain's writes paused until the same update command is run again.
+
+- **When a paused rebuild still finds an index mismatch, the advice is now
+  runnable.** It used to point at reindex even though a paused Brain refuses
+  every reindex request. It now keeps the safety pause in place, directs the
+  update to resume its durable work, and asks for reviewed repair when the same
+  mismatch stops that update again. Once the Brain is active, the ordinary
+  reindex recovery remains available.
+
+- **A zone repair now rides through the exact Cloudflare edge error seen in a
+  live run.** If Cloudflare answers one assignment pass with an HTML 500, the
+  command says that the pass may already be saved, retries that same safe
+  checkpoint after 1, 2, and 4 seconds, and shows each attempt. It stops after
+  three retries and keeps every other failure immediate, so a different error
+  is never hidden or replayed by guesswork.
+
+- **A test that receives no written answer now names the stage that stopped.**
+  It distinguishes retrieval, incomplete source coverage, answer generation,
+  and evidence verification, then keeps only a reviewed safe explanation. It
+  no longer leaves the person running the test with "unknown."
+
+- **A check that could not finish no longer sounds clean.** If source history
+  is not yet proven or the search index is still building, `brain check` now
+  leads with how many record-review categories actually completed. When none
+  did, it says the check is still waiting and makes no agreement finding. Zero
+  completed categories can no longer be mistaken for zero conflicts or an
+  empty corpus. `brain check --set` also waits until every category completes,
+  exits nonzero without prompting or writing, and cannot turn a partial review
+  into a green confirmation result.
+
+- **The deep diagnostic can finish on a large brain without pretending a
+  timeout was a clean result.** Its chunk checks now move through one bounded
+  page at a time and reuse that pass for missing, blank, oversized, source, and
+  zone checks. Source and zone repairs plus vector-projection changes are part
+  of the same opening and closing receipt. If the brain changes during the
+  check, a page cannot be read, or the safety budget is reached, it says the
+  report is incomplete and does not publish partial counts as proof that
+  everything is fine.
+
 ## 0.4.6
 
 Candidate only. This version has not been released.

@@ -61,19 +61,29 @@ try {
   const isolateSupport = fileURLToPath(new URL("./fixtures/isolate-support-root.mjs", import.meta.url));
   const isolatedUserRoot = join(sandbox, "isolated-user-root");
   mkdirSync(isolatedUserRoot, { mode: 0o700 });
+  const isolatedEnvironment = () => {
+    const environment = {
+      ...process.env,
+      BRAIN_TEST_USER_ROOT: isolatedUserRoot,
+      // Keep every conventional user/config root inside the fixture so the
+      // preflight subprocess cannot discover a developer Wrangler session.
+      HOME: isolatedUserRoot,
+      USERPROFILE: isolatedUserRoot,
+      APPDATA: join(isolatedUserRoot, "AppData", "Roaming"),
+      LOCALAPPDATA: join(isolatedUserRoot, "AppData", "Local"),
+      XDG_CONFIG_HOME: join(isolatedUserRoot, ".config"),
+    };
+    delete environment.ADMIN_KEY;
+    delete environment.CLOUDFLARE_API_TOKEN;
+    delete environment.BRAIN_DEBUG;
+    return environment;
+  };
   const runProfilePreflight = (
     manifestPath,
     goldenPath = destination,
     extraArgs = [],
     profile = "release",
   ) => {
-    const environment = {
-      ...process.env,
-      BRAIN_TEST_USER_ROOT: isolatedUserRoot,
-    };
-    delete environment.ADMIN_KEY;
-    delete environment.CLOUDFLARE_API_TOKEN;
-    delete environment.BRAIN_DEBUG;
     return spawnSync(process.execPath, [
       // Node treats a bare Windows drive path as a URL scheme for --import.
       // A file URL keeps this isolation hook portable across every CI runner.
@@ -82,7 +92,7 @@ try {
       "--golden", goldenPath,
       "--profile", profile,
       ...extraArgs,
-    ], { encoding: "utf8", env: environment, timeout: 10_000 });
+    ], { encoding: "utf8", env: isolatedEnvironment(), timeout: 10_000 });
   };
 
   const noDomainManifest = join(sandbox, "no-domain.manifest.json");
@@ -92,6 +102,26 @@ try {
     infrastructure: { cloudflare: { account_id: "fixture-account" } },
     operations: { admin_key_secret: null },
   }));
+
+  const initializedGolden = join(sandbox, "initialized.golden.json");
+  const initialized = spawnSync(process.execPath, [
+    "--import", pathToFileURL(isolateSupport).href,
+    cli, "eval", noDomainManifest,
+    "--init", "--golden", initializedGolden,
+  ], { encoding: "utf8", env: isolatedEnvironment(), timeout: 10_000 });
+  const initializedOutput = `${initialized.stdout || ""}${initialized.stderr || ""}`;
+  assert.equal(initialized.status, 0, initializedOutput);
+  assert.equal(lstatSync(initializedGolden).isFile(), true);
+  assert.match(initializedOutput, /optional private regression suite/i);
+  assert.match(initializedOutput, /not required for\s+setup, adaptive acceptance, or handoff/i);
+  assert.match(initializedOutput, /write the questions FIRST, from memory/i);
+  assert.ok(
+    initializedOutput.search(/optional private regression suite/i) <
+      initializedOutput.search(/write the questions FIRST, from memory/i),
+    initializedOutput,
+  );
+  assert.doesNotMatch(initializedOutput, /Fill it in|testing\.probe_questions|questions from the intake/i);
+
   const beforeAccount = runProfilePreflight(noDomainManifest);
   const accountOutput = `${beforeAccount.stdout || ""}${beforeAccount.stderr || ""}`;
   assert.equal(beforeAccount.status, 1, accountOutput);

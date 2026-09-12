@@ -10,6 +10,9 @@ import { scopedAnswerLabel } from "../lib/owner";
 import { scopedRetrievalConfirmed } from "../lib/security";
 import { sourceLabel } from "../lib/words";
 
+export const SCOPED_SEARCH_UNAVAILABLE =
+  "Search is temporarily unavailable. This does not mean the shared documents have no matches. Nothing was changed. Try again, and if it keeps happening, ask the owner who shared this access to contact their Financial Brain installer.";
+
 /** Citation timestamps are normalized to UTC by the retrieval API. Format the
  *  stored calendar day in UTC so a midnight value cannot move to yesterday in
  *  browsers west of UTC. */
@@ -159,7 +162,7 @@ export function Ask() {
       });
       const label = scopedAnswerLabel(scope, next.entity_scope, activeLabel, next.filter_not_applied);
       if (!label) {
-        setError(`The brain could not prove that this answer was narrowed to ${activeLabel}. No whole-brain answer is being shown as business-scoped.`);
+        setError(`The Brain could not prove that this answer was narrowed to ${activeLabel}. No whole-Brain answer is being shown as narrowed to that selection.`);
         return;
       }
       setAnswerLabel(label);
@@ -214,7 +217,7 @@ export function Ask() {
           {scope && answer.degraded === "vector" && answer.degraded_reason === "entity-vector-authority-unindexed" && (
             <div className="mb-4">
               <Attention>
-                Exact business filtering was applied, but meaning-based business search is still being indexed. This answer may miss differently phrased evidence.
+                Exact financial-entity filtering was applied, but meaning-based search for that selection is still being indexed. This answer may miss differently phrased evidence.
               </Attention>
             </div>
           )}
@@ -237,12 +240,14 @@ export function ScopedAsk({ principal, onAccessEnded }: {
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
 
   async function ask() {
     const q = question.trim();
     if (!q || busy) return;
     setBusy(true);
     setError(null);
+    setCanRetry(false);
     setAnswer(null);
     try {
       // There is intentionally no business/document selector and no client
@@ -260,7 +265,8 @@ export function ScopedAsk({ principal, onAccessEnded }: {
           : "This document access is no longer active. Ask the owner for a new link.");
         onAccessEnded();
       } else if (next instanceof ApiError && next.status === 503) {
-        setError("Search is unavailable right now. That is not an answer with no matches.");
+        setError(SCOPED_SEARCH_UNAVAILABLE);
+        setCanRetry(true);
       } else {
         setError(next instanceof Error ? next.message : String(next));
       }
@@ -275,7 +281,7 @@ export function ScopedAsk({ principal, onAccessEnded }: {
         <p className="eyebrow">Exact shared evidence</p>
         <h1 className="page-title">Ask &amp; Explore</h1>
         <p className="page-intro">
-          Ask across only the documents in this access. There is no switch to another business, the owner workspace, or the rest of the brain.
+          Ask across only the documents in this access. There is no switch to another financial entity, the owner workspace, or the rest of the Brain.
         </p>
       </header>
       <div className="max-w-3xl">
@@ -301,7 +307,21 @@ export function ScopedAsk({ principal, onAccessEnded }: {
           </button>
           <span className="text-[13px] text-ink-soft">⌘ + Enter</span>
         </div>
-        {error && <div className="mt-4"><Attention>{error}</Attention></div>}
+        {error && (
+          <div className="mt-4" aria-live="polite">
+            <Attention>{error}</Attention>
+            {canRetry && (
+              <button
+                type="button"
+                onClick={() => void ask()}
+                disabled={busy}
+                className="mt-3 rounded-xl border border-line bg-card px-4 py-2 text-[14px] font-semibold text-ink hover:border-accent disabled:opacity-45"
+              >
+                {busy ? "Trying again…" : "Try again"}
+              </button>
+            )}
+          </div>
+        )}
         {answer && (
           <article className="mt-6 bg-card border border-line rounded-2xl p-6">
             <p className="text-[12px] uppercase tracking-wider text-ink-soft font-semibold mb-3">

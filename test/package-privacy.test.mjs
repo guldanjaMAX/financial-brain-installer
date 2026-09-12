@@ -137,6 +137,10 @@ const RULES = [
     sha: "27037fccea3062ee8ebaea07a9e2bf8dcb6511fd860ae993442aee0c512b8bbf" },
   { label: "client first name", mode: "word", cs: false, words: 1, len: 5, fnv: 3315428391,
     sha: "68d85a0a124d90d9eea4b9e3b436db429c8223911d52076d70aef4b78d9686c5" },
+  { label: "client first name", mode: "word", cs: false, words: 1, len: 7, fnv: 2661555375,
+    sha: "fbcaebefcb926027176bff9d66e266a50de140460873bfa9dba6165717a72ae3" },
+  { label: "client first name", mode: "word", cs: false, words: 1, len: 7, fnv: 2526642875,
+    sha: "9ad241dcbf432e7b773cbd74812bb05a53418a1a385b304daaaa273947eaf544" },
   { label: "family member first name", mode: "word", cs: false, words: 1, len: 6, fnv: 995860805,
     sha: "b675f2f6f1f675bb7be2e6694f55af82c76d063fcdf8c4606839d32bf505ef23" },
   // A client's BUSINESS name. It sat in a test fixture from v0.2.3 through
@@ -359,6 +363,9 @@ const expected = [
   "components/brain-mcp.mjs",
   "components/brain-mcp-runtime.mjs",
   "components/brain-http.mjs",
+  // Shared closed schema used immediately before Worker JSON serialization
+  // and again before the CLI accepts or renders a financial-picture receipt.
+  "worker/src/lib/financial-picture-contract.js",
   "connectors/gmail.mjs",
   "connectors/imap.mjs",
   "connectors/imessage.mjs",
@@ -452,6 +459,12 @@ const expected = [
   "onboarding/08-provisioning-prerequisites.md",
   "onboarding/09-technician-setup-and-rehearsal.md",
   "onboarding/10-client-onboarding-scorecard.md",
+  "onboarding/11-windows-onboarding-rehearsal.md",
+  // Generic synthetic-only Windows rehearsal launcher. Reviewed 2026-09-11:
+  // accepts only a commit SHA, refuses elevation, a different directory,
+  // checkout drift, and old Node, then starts the public local fixture. It has
+  // no manifest, account, credential, provider, deployment, or live-data input.
+  "onboarding/start-windows-rehearsal.ps1",
   "onboarding/client-experience/ACCEPTANCE-AND-HANDOFF.md",
   "onboarding/client-experience/DATA-PROTECTION-DRAFT.md",
   "onboarding/client-experience/README.md",
@@ -464,6 +477,24 @@ const expected = [
   "operations/wrangler-oauth.mjs",
   "operations/claude-workspace.mjs",
   "operations/claude-skill.mjs",
+  "operations/local-assistant-repair.mjs",
+  // Generic read-only continuity auditor. Reviewed 2026-09-11 for local path,
+  // manifest/resource/source identity, credential-store error, and ambient
+  // environment disclosure. Its public report is constrained to fixed status,
+  // bounded counts and booleans, and static next-step copy; it performs no
+  // install, repair, provider refresh, scheduler change, or Brain mutation.
+  "operations/machine-continuity.mjs",
+  "operations/provenance-repair.mjs",
+  // One-owner-selected-original provenance lane. The pure contract has no
+  // credential or I/O authority; the orchestrator keeps every private value
+  // behind the leased, authenticated boundary and prints a closed receipt.
+  "operations/provenance-target-repair.mjs",
+  "operations/provenance-target-cli.mjs",
+  "operations/provenance-source-assessment.mjs",
+  // Reviewed read-only Optimize inventory client. It accepts no literal key,
+  // validates HTTPS before resolving the protected credential, refuses
+  // redirects, and sends only bounded exact filters to the Brain data plane.
+  "operations/financial-picture.mjs",
   "operations/cloudflare-token-store.mjs",
   // Generic brain check modules. Reviewed 2026-09-05: categories and fixtures
   // are synthetic, with no client identity or credential material.
@@ -495,7 +526,9 @@ const expected = [
   // and live credentials before allowlisting: it names no account, no resource,
   // and no token, and it takes every value it checks from the published
   // contract rather than carrying one.
+  "operations/npm-cli-runtime.mjs",
   "scripts/install-from-public-contract.mjs",
+  "scripts/invoke-public-npm-install.ps1",
   // Ported from the field line 2026-09-03. Reviewed for private identity and
   // live credentials before allowlisting; both scans clean.
   "CHANGELOG.md",
@@ -529,11 +562,26 @@ const expected = [
   "migrations/d1/0034_document_source_inventory.sql",
   "migrations/d1/0035_plaid_sync_custody.sql",
   "migrations/d1/0036_vector_projection_events.sql",
+  "migrations/d1/0037_memory_supersessions.sql",
+  "migrations/d1/0038_source_run_coverage.sql",
+  "migrations/d1/0039_document_provenance_assessment.sql",
+  "migrations/d1/0040_source_failure_evidence.sql",
+  "migrations/d1/0041_owner_financial_map.sql",
+  "migrations/d1/0042_source_original_observations.sql",
+  "migrations/d1/0043_source_original_result_bindings.sql",
+  "migrations/d1/0044_source_original_result_family_receipts.sql",
+  "migrations/d1/0045_source_original_accepted_resolutions.sql",
+  "migrations/d1/0046_source_original_observation_authority_chain.sql",
   "operations/bank-access-wrapping-key.mjs",
   "operations/bootstrap-status.mjs",
+  // Generic local timing helper. It receives only injected clock/scheduler
+  // callbacks and timestamps, with no filesystem, credential, network, or
+  // instance inputs.
+  "operations/continuous-observation-clock.mjs",
   "operations/cloudflare-account-bootstrap.mjs",
   "operations/cloudflare-oauth-session.mjs",
   "operations/command-display.mjs",
+  "operations/zone-assignment-retry.mjs",
   "operations/off-provider-backup.mjs",
   "operations/plaid-sandbox-runner.mjs",
   "operations/provider-scheduler.mjs",
@@ -543,6 +591,7 @@ const expected = [
   "privacy/credential-dispositions.json",
   "privacy/history-baseline.json",
   "privacy/public-refs.json",
+  "scripts/build-windows-onboarding-kit.mjs",
   "scripts/build-worker-bank-export.mjs",
   "scripts/build-worker-upload-extract.mjs",
   "scripts/field-prepare.mjs",
@@ -572,6 +621,12 @@ const expected = [
   "worker/src/lib/reliability-alerts.js",
   "worker/src/lib/source-receipt.js",
   "worker/src/lib/source-coverage.js",
+  // Owner-only D1 source inventory. Reviewed for raw locator, credential,
+  // entity/year inference, and package identity disclosure before allowlisting.
+  "worker/src/lib/source-inventory-api.js",
+  "worker/src/lib/source-original-observation.js",
+  // Sealed owner map with opaque row references and passkey-only activation.
+  "worker/src/lib/owner-financial-map.js",
   "worker/src/lib/support-access.js",
   "worker/src/lib/tax-qbo-reconciliation.js",
   "worker/src/lib/update-status.js",
@@ -612,15 +667,31 @@ const expected = [
   "worker/src/lib/confidence.js",
   "worker/src/lib/connections.js",
   "worker/src/lib/core.js",
+  "worker/src/lib/diagnose-scan.js",
   "worker/src/lib/document-access.js",
   "worker/src/lib/evidence-authority.js",
+  "worker/src/lib/evidence-lineage.js",
+  "worker/src/lib/ingest-envelope.js",
+  "worker/src/lib/provenance-receipt.js",
+  "worker/src/lib/source-original-binding.js",
+  "worker/src/lib/source-original-chunk.js",
+  "worker/src/lib/source-original-result-family.js",
+  "worker/src/lib/source-original-accepted-resolution.js",
+  "worker/src/lib/tax-evidence-scope.js",
   "worker/src/lib/fin-api.js",
+  // Reviewed owner/admin-only D1 inventory. SELECT statements only, bounded
+  // pages and derivation roots, masked account/system identities, no search,
+  // inference, mutation, or instance defaults.
+  "worker/src/lib/financial-picture.js",
   "worker/src/lib/fin-d1.js",
   "worker/src/lib/fin-import.js",
   "worker/src/lib/fin-upload.js",
   "worker/src/lib/grants.js",
   "worker/src/lib/mcp-endpoint.js",
+  "worker/src/lib/memory-supersession.js",
   "worker/src/lib/oauth.js",
+  "worker/src/lib/owner-note-contract.js",
+  "worker/src/lib/owner-notes.js",
   "worker/src/lib/remember-contract.js",
   "worker/src/lib/ocr.js",
   "worker/src/lib/owner-auth.js",
@@ -766,9 +837,11 @@ for (const path of privateScanPaths) {
 
 // A packlist can name every file and still hide a broken relative import or a
 // skill that cannot be installed from the packed tree. Build and unpack the
-// actual tarball, import the recovery adapter, then install the reviewed skill
-// for both assistants and compare each readback with the packed source. These
-// probes invoke no CLI entry point or network.
+// actual tarball, import the recovery adapter and both target-repair modules,
+// then install the reviewed skill
+// for Claude Code by default and for Codex only when its config tree already
+// exists. Compare every readback with the packed source. These probes invoke
+// no CLI entry point or network.
 let packedAdapterImportFailed = false;
 let packedSkillInstallFailed = false;
 const packageProbeDirectory = SCAN_ONLY ? null : mkdtempSync(join(tmpdir(), "brain-package-probe-"));
@@ -801,6 +874,18 @@ if (packageProbeDirectory) try {
       "operations",
       "cloudflare-recovery-adapter.mjs",
     );
+    const targetRepairPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "provenance-target-repair.mjs",
+    );
+    const targetCliPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "provenance-target-cli.mjs",
+    );
     const skillModulePath = join(packageProbeDirectory, "package", "operations", "claude-skill.mjs");
     const skillSourcePath = join(
       packageProbeDirectory,
@@ -819,14 +904,14 @@ if (packageProbeDirectory) try {
       ? spawnSync(process.execPath, [
           "--input-type=module",
           "--eval",
-          "const {pathToFileURL}=await import('node:url');await import(pathToFileURL(process.env.PACK_IMPORT_PATH).href)",
+          "const {pathToFileURL}=await import('node:url');for(const path of JSON.parse(process.env.PACK_IMPORT_PATHS))await import(pathToFileURL(path).href)",
         ], {
           encoding: "utf-8",
           env: {
             PATH: process.env.PATH || "",
             ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
             ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
-            PACK_IMPORT_PATH: adapterPath,
+            PACK_IMPORT_PATHS: JSON.stringify([adapterPath, targetRepairPath, targetCliPath]),
           },
           timeout: 60_000,
         })
@@ -838,7 +923,7 @@ if (packageProbeDirectory) try {
           "--eval",
           [
             "const {pathToFileURL}=await import('node:url')",
-            "const {mkdtempSync,readFileSync,rmSync}=await import('node:fs')",
+            "const {mkdirSync,mkdtempSync,readFileSync,rmSync}=await import('node:fs')",
             "const {tmpdir}=await import('node:os')",
             "const {join}=await import('node:path')",
             "const skill=await import(pathToFileURL(process.env.PACK_SKILL_MODULE).href)",
@@ -846,11 +931,17 @@ if (packageProbeDirectory) try {
             "const home=mkdtempSync(join(tmpdir(),'brain-packed-skill-'))",
             "try{",
             "const first=skill.installTechnicianSkillEverywhere({home})",
-            "if(first.length!==2||first.some((x)=>x.status!=='installed'))throw new Error('packed skill did not install for both assistants')",
+            "if(first.length!==1||first[0]?.root!=='.claude'||first[0]?.status!=='installed')throw new Error('packed skill did not default to Claude Code')",
             "const source=renderCliCommands(readFileSync(process.env.PACK_SKILL_SOURCE,'utf8'))",
             "for(const path of skill.technicianSkillPaths({home}))if(readFileSync(path,'utf8')!==source)throw new Error('installed skill differs from packed source')",
             "const second=skill.installTechnicianSkillEverywhere({home})",
             "if(second.some((x)=>x.status!=='verified'||x.changed!==false))throw new Error('packed skill reinstall was not idempotent')",
+            "mkdirSync(join(home,'.codex'),{recursive:true})",
+            "const third=skill.installTechnicianSkillEverywhere({home})",
+            "if(third.length!==2||third[0]?.status!=='verified'||third[1]?.root!=='.codex'||third[1]?.status!=='installed')throw new Error('packed skill did not add Codex when already present')",
+            "for(const path of skill.technicianSkillPaths({home}))if(readFileSync(path,'utf8')!==source)throw new Error('installed assistant skill differs from packed source')",
+            "const fourth=skill.installTechnicianSkillEverywhere({home})",
+            "if(fourth.some((x)=>x.status!=='verified'||x.changed!==false))throw new Error('packed assistant skill reinstall was not idempotent')",
             "}finally{rmSync(home,{recursive:true,force:true})}",
           ].join(";"),
         ], {

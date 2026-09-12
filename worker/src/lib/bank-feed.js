@@ -91,10 +91,45 @@ export const BACKFILL_DAYS = 730;
 export const MAX_PAGES_PER_SLICE = 4;
 const PAGE_SIZE = 250;
 const CALL_TIMEOUT_MS = 20_000;
+export const BANK_FEED_ITEM_ENTITY_MAP_VERSION = 1;
+const ENTITY_SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /* ------------------------------------------------------------ configuration */
 
 class FeedConfigError extends Error {}
+
+/**
+ * Resolve only an explicit, owner-reviewed mapping for this exact connection.
+ * A single global entity is unsafe when one owner connects personal and
+ * business accounts, so the former BANK_FEED_ENTITY binding is deliberately
+ * ignored. Account-level assignment is supported by the Plaid profile; this
+ * compatibility connector remains paused unless this per-item P0 contract is
+ * present.
+ */
+export function reviewedBankFeedEntityForItem(env, itemRef) {
+  const raw = env?.BANK_FEED_REVIEWED_ITEM_ENTITIES;
+  let contract;
+  try {
+    contract = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch {
+    return null;
+  }
+  if (!contract || typeof contract !== "object" || Array.isArray(contract) ||
+      contract.version !== BANK_FEED_ITEM_ENTITY_MAP_VERSION ||
+      !contract.items || typeof contract.items !== "object" || Array.isArray(contract.items) ||
+      Object.keys(contract).some((key) => !["version", "items"].includes(key))) return null;
+  const entry = contract.items[String(itemRef || "")];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+      Object.keys(entry).some((key) => !["entity_slug", "reviewed_at", "reviewed_by"].includes(key)) ||
+      !ENTITY_SLUG.test(String(entry.entity_slug || "")) || entry.reviewed_by !== "owner" ||
+      typeof entry.reviewed_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(entry.reviewed_at) ||
+      !Number.isFinite(Date.parse(entry.reviewed_at))) return null;
+  return {
+    entity_slug: entry.entity_slug,
+    reviewed_at: entry.reviewed_at,
+    reviewed_by: "owner",
+  };
+}
 
 /**
  * Everything this connector needs, read from the environment.
@@ -1022,6 +1057,19 @@ export async function syncItemSlice(env, itemRef, {
     const { syncPlaidItem } = await import("./plaid-bank-feed.js");
     return syncPlaidItem(env, itemRef, { fetchImpl, now });
   }
+  const reviewedEntity = reviewedBankFeedEntityForItem(env, itemRef);
+  if (!reviewedEntity) {
+    return {
+      item_ref: itemRef,
+      ok: false,
+      pages: 0,
+      transactions: 0,
+      unread_lines: 0,
+      status: "error",
+      reason: "this exact bank-feed item has no valid owner-reviewed entity mapping; the feed remains paused",
+    };
+  }
+  const configuredEntity = reviewedEntity.entity_slug;
   const { tenantId } = tenantReference(env);
   const item = await loadItem(env, tenantId, itemRef);
   if (!item) return { item_ref: itemRef, ok: false, reason: "that connection is not on this brain" };
@@ -1057,7 +1105,7 @@ export async function syncItemSlice(env, itemRef, {
       });
       const receipt = await importBankExport(env, envelope, {
         tenantId,
-        entitySlug: String(env.BANK_FEED_ENTITY || "primary"),
+        entitySlug: configuredEntity,
         now: stamp,
         origin: { provenance: "feed", sourceFeed: feedScopeKey(itemRef) },
       });

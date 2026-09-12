@@ -1,7 +1,10 @@
-import { readFileSync, existsSync, lstatSync, realpathSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { basename, dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifiedNpmCliPath } from "../operations/npm-cli-runtime.mjs";
+
+export { verifiedNpmCliPath } from "../operations/npm-cli-runtime.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 
@@ -175,20 +178,38 @@ export function releaseAdjudication(cases, version) {
   };
 }
 
+export const SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION = "0.4.8";
+
+/** Prevent the v3 inventory contract from reusing a published or retired candidate identity. */
+export function assertSourceInventoryV3ReleaseVersion(version) {
+  const parse = (value) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value));
+    if (!match) throw new Error("package.json does not name an exact release version");
+    return match.slice(1).map(Number);
+  };
+  const candidate = parse(version);
+  const minimum = parse(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION);
+  for (let index = 0; index < candidate.length; index++) {
+    if (candidate[index] > minimum[index]) return version;
+    if (candidate[index] < minimum[index]) break;
+  }
+  if (candidate.every((part, index) => part === minimum[index])) return version;
+  if (version === "0.4.7") {
+    throw new Error(
+      "source inventory contract v3 cannot reuse retired held candidate identity 0.4.7; " +
+      "that candidate was never public or live, but its identity remains bound to its earlier evidence; " +
+      `the package version must be ${SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION} or newer`,
+    );
+  }
+  throw new Error(
+    `source inventory contract v3 cannot ship under already-live package ${version}; ` +
+    `the package version must be ${SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION} or newer`,
+  );
+}
+
 // Run independently: a failed auth test must not prevent the recovery tests
 // from running. No shell, no output pipes, no inherited success from a later
 // command. A signal, timeout, or spawn error is a failure too.
-export function verifiedNpmCliPath(candidate) {
-  if (typeof candidate !== "string" || !candidate) return null;
-  try {
-    const cli = realpathSync(candidate);
-    const info = lstatSync(cli);
-    if (!info.isFile() || info.isSymbolicLink() || basename(cli) !== "npm-cli.js") return null;
-    const pkg = JSON.parse(readFileSync(resolve(dirname(cli), "..", "package.json"), "utf8"));
-    return pkg.name === "npm" && /^\d+\.\d+\.\d+(?:[-+].*)?$/.test(String(pkg.version || "")) ? cli : null;
-  } catch { return null; }
-}
-
 export function regressionEnvironment(env = process.env) {
   const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI"];
   const clean = Object.fromEntries(keys.filter((key) => typeof env[key] === "string").map((key) => [key, env[key]]));
@@ -225,6 +246,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     // already pins to the tag. No flag, no environment override.
     const version = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).version;
     if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error("package.json does not name an exact release version");
+    if (mode === "--release") assertSourceInventoryV3ReleaseVersion(version);
     const cases = assertEvidenceDocuments(assertUndeferrableRegistered(
       validateIncidents(JSON.parse(readFileSync(resolve(root, "docs/update-incidents.json"), "utf8")), undefined, version)));
     if (mode === "--check") console.log("ADVISORY MODE: --check never fails. The release gate is --release.");

@@ -30,6 +30,11 @@ const MIG = fileURLToPath(new URL("../migrations/d1/", import.meta.url));
 function corpus(n) {
   const db = new DatabaseSync(":memory:");
   for (const f of readdirSync(MIG).filter((f) => f.endsWith(".sql")).sort()) db.exec(readFileSync(join(MIG, f), "utf-8"));
+  db.prepare(
+    `INSERT INTO install_state
+       (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
+     VALUES (1,'fts-stopwords','0.0.0-test',45,0,'2026-09-11T00:00:00Z','test')`,
+  ).run();
   const seen = [];
   for (let i = 0; i < n; i++) {
     const d = `d${i}`;

@@ -25,11 +25,14 @@ Cloudflare Worker in the owner's account
       +---- FTS5 keyword index
 ```
 
-The installer uses a scoped Cloudflare token only for control-plane work such
-as verification, provisioning, deployment, migration, and Worker secrets.
-Routine use goes through the deployed Worker with the brain's own admin key.
-At handoff, the control-plane token can be revoked without disabling retrieval,
-health, ingest through a configured domain, evaluation, drain, or reindex.
+Normal owner setup and updates use a per-install named Cloudflare browser
+profile in the operating-system credential store for control-plane work such as
+verification, provisioning, deployment, migration, and Worker secrets. Scoped
+API tokens are limited to explicit automation, recovery, and older manifests.
+Routine use goes through the deployed Worker with the Brain's own admin key.
+Removing the control-plane profile or revoking a recovery token does not disable
+retrieval, health, ingest through a configured domain, evaluation, drain, or
+reindex.
 
 The standard backend is D1 plus Vectorize. Legacy Supabase adapters and
 migration tools remain so an existing corpus can be moved or temporarily
@@ -81,15 +84,21 @@ live path.
    technician-machine install keeps Claude advisory on that machine.
 2. Create or resume the manifest, declare durable admin-key storage, and
    prepare the exact desired key before remote changes.
-3. Verify the scoped token and account, then provision D1 and Vectorize. A new
-   install with no existing Worker can migrate and deploy directly. A resumed
-   D1 install with an existing Worker first captures a required bookmark,
-   deploys and verifies the paused compatibility Worker, waits the declared
-   20-minute old-invocation window, migrates, and deploys active mode.
+3. Verify the selected Cloudflare approval and exact account. Because the
+   narrow session cannot read billing, open that account's plan page and bind
+   the separate owner Workers Paid confirmation to it before provisioning D1 or
+   Vectorize. The same account-bound prerequisite applies to resumed, recovery,
+   and automation setup paths. A new install with no existing Worker can migrate
+   and deploy directly. A resumed D1 install with an existing Worker first
+   captures a required bookmark, deploys and verifies the paused compatibility
+   Worker, waits the declared 20-minute old-invocation window, migrates, and
+   deploys active mode.
 4. Persist and read back the admin key, set Worker secrets, and verify health.
-5. Register locator-only MCP entries for supported AI tools. When Claude Code
-   is connected, write an owner-only `CLAUDE.md` beside the manifest with exact
-   locators and safe approved-folder rules. Preserve an unrelated existing file.
+5. Register locator-only MCP entries for supported AI tools with the local-only
+   `owner-assistant` profile, then verify the advertised tool list includes
+   curated write and diagnostics. When Claude Code is connected, write an
+   owner-only `CLAUDE.md` beside the manifest with exact locators and safe
+   approved-folder rules. Preserve an unrelated existing file.
 6. Optionally ingest the first folder and report the vector backlog.
 
 Deploy must happen before Worker secrets because Cloudflare attaches secrets to
@@ -135,8 +144,9 @@ then resets the derived outbox generation and bulk-bootstrap base to zero,
 forces the bootstrap protocol to `NULL`, and excludes provider-specific queue
 and batch receipts before hashing the remaining durable data.
 Exact older migration prefixes remain inspectable by the offline verifier only.
-The field recovery runner requires schema 13 on both source and restored target
-before it can export or invoke the current drain protocol.
+The live field recovery runner requires this package's exact current migration
+prefix on both source and restored target before it can export, promote the
+current Worker, or invoke the current drain protocol.
 
 ## Ingest lifecycle
 
@@ -178,12 +188,25 @@ resumable. A failure stays retryable. Drive policy changes and periodic full
 sweeps compare source truth with stored families so excluded, deleted, moved,
 or no-longer-accessible files can be removed safely.
 
-Mutating Gmail runs share one cross-platform owner lease keyed to the canonical
-adjacent source-state path. The lease is acquired before credential or network
-access, checked before each state write, and released in `finally`. Its private
-owner token and heartbeat allow a stale dead process to be recovered without
-letting an old timestamp evict a live long-running sync. Gmail dry runs do not
-take the lease because they write no state or source receipt.
+Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
+owner lease keyed to the canonical adjacent source-state path. The lease is
+acquired before credential or network access, checked before every document or
+batch send and before each OCR, removal, state, and source-receipt mutation,
+and released in `finally`.
+Direct commands, scheduled children, and `brain load` enter the same writer
+boundary exactly once. Legacy provenance repair apply is disabled before this
+boundary; any future repair executor must enter it. Its private owner token and heartbeat
+allow a stale dead process to be recovered without letting an old timestamp
+evict a live long-running sync. Dry runs do not take the lease because they
+write no state or source receipt.
+Manifest-file symlinks resolve to the target before the state identity is
+derived. A multiply hard-linked manifest is rejected before the runtime lock,
+credentials, or network because it has no portable single adjacent state path.
+Google source writers acquire that source lease first and then one shared
+`provider:google` lease before opening the credential record. The Google OAuth
+connect ceremony uses the same shared lease. Mutating load preflight reads only
+credential-store metadata; dry-run connectors use a full-record reader that
+cannot migrate legacy Windows or macOS storage.
 
 The authenticated HTTP batch route preserves one receipt per input document.
 For D1 it reads prior rows for unique document identities in one batch preflight,
@@ -247,7 +270,8 @@ without exposing source identifiers.
 | OCR for scanned PDFs | Built, optional, and provenance-marked; local synthetic scans pass and private real scans remain a field gate |
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |
 | Microsoft 365 and Dropbox | Built behind field gates for mail and files, cursor resume, tombstones, and scheduling; no real tenant or account has completed acceptance |
-| QuickBooks Online, Plaid, and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
+| QuickBooks Online and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
+| Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations and application-credential setup are held. Generic setup preserves a complete, already approved Worker binding set and refuses a missing or partial set before mutation. `brain connect bank` is a field-plan entrypoint until disposable-candidate acceptance and a separately approved production pilot pass |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
@@ -348,6 +372,24 @@ hash is removed from the response. This is retrieval protection, not physical
 deduplication: source lifecycle rows remain intact until an alias-aware storage
 plan can preserve update and deletion semantics.
 
+Evidence independence uses a separate metadata contract. A producer that knows
+the origin of a document may set `metadata.evidence_lineage` to version 1 with
+kind `source_record`, `derived_record`, or `agent_derived`. A derived record must
+name every durable source-family id in `root_ids`. A source record may omit
+`root_ids`, in which case its own fully qualified document uid is the root.
+Malformed contracts are rejected on new ingest. `family_of` still describes a
+physical split or import family, but does not by itself prove that the content is
+primary evidence.
+
+Retrieval keeps unknown-lineage documents and allows them to support what they
+directly say. Their filename cannot promote them to primary or derived authority,
+and they earn no independent-corroboration credit. Documents with overlapping
+roots form one corroboration group even when one is a generated report and the
+other is its ledger. Public results expose only opaque family tokens and a
+plain-language lineage status, never the underlying root ids. Agent memory writes
+are always stamped `agent_derived` in both metadata and native text so export and
+reingest cannot turn an agent's restatement into a new primary source.
+
 `/api/rag/unified` returns ranked evidence. It has no universal relevance floor,
 so a result list by itself is not proof that the corpus answers the question.
 `/api/rag/think` is the owner-facing answer path: it generates an answer from
@@ -376,6 +418,12 @@ Every `brain zone` assignment repairs up to 1,000 live documents and 1,000
 chunks in the same transaction as the source registry update, reports what
 remains, and can be repeated until the legacy projections converge. No retrieval
 path may trust those projections before that bounded repair completes.
+The CLI retries only the field-observed HTML/proxy HTTP 500 for an exact
+source-to-zone POST. It repeats the same idempotent assignment at most three
+times with 1, 2, and 4 second delays, announces that the prior pass may already
+be committed, and preserves the last confirmed checkpoint on exhaustion. It
+does not replay JSON 500 responses, other statuses, transport failures, list
+requests, or partial assignments.
 The exact access-zone readiness audit compares every live document and chunk
 with the source registry, so its cost grows with the corpus. It runs only from
 the explicit zones and `brain check` path, not from polled health or owner
@@ -387,9 +435,24 @@ aggregate counters rather than moving this scan into its request path.
 Durable secrets never belong in the manifest or MCP registration. The manifest
 contains only a non-secret locator when Keychain is used. Standard durable
 stores are macOS login Keychain, Windows DPAPI CurrentUser-protected files, and
-owner-only Linux files. AI-tool registrations carry the manifest locator and
-resolve the current key when the MCP process starts, so rotation does not leave
-stale copied credentials.
+owner-only Linux files. AI-tool registrations carry the manifest locator plus
+the nonsecret local profile and resolve the current key when the MCP process
+starts, so rotation does not leave stale copied credentials. The local
+`owner-assistant` profile may read, write contract-checked records to the
+registered `owner-notes` source, and run diagnostics. That source is
+non-refreshable, carries customer-visible MCP provenance, remains unzoned and
+excluded from named grants until assigned, and is classified as recollection
+rather than authoritative evidence. The owner and an explicitly approved Brain
+connector can still use it. A successful response requires exact D1 row and
+source readback. A direct write proves that record, not complete conversation history.
+It has no delete or access-control tool. Remote OAuth profiles are
+a separate list and can never request `owner-assistant`.
+
+The local MCP registration is user-wide, so repository instructions are not an
+authorization boundary. `brain_remember` is marked as data-changing and
+non-destructive, and the AI client's per-call approval must remain
+enabled. The model's tool instructions require a direct current-user request,
+but those instructions are defense in depth rather than proof of user presence.
 
 Every shipped client request carrying `X-Admin-Key` requires HTTPS, except for
 an explicit loopback test URL, and refuses redirects before sending the header.
@@ -397,6 +460,256 @@ The client also rejects a response whose final origin differs from the reviewed
 request origin. This is a shared transport invariant because Node preserves
 custom headers across a cross-origin redirect even though it strips the standard
 `Authorization` header.
+
+The owner-only source inventory is a narrow data-plane exception to the general
+admin route gate. `POST /api/admin/brain/sources` accepts the full admin key or
+an unscoped owner passkey session, rejects scoped grants, and reads D1 directly.
+It never asks for Cloudflare account authority. Default mode returns a complete
+or explicitly paged source receipt with masked configuration, physical/logical
+storage, readability, freshness, extraction, and lineage evidence. Recovery
+mode returns bounded opaque record identities and exact provenance/OCR reason
+codes for planning only. Both modes are private, stable-snapshot contracts and
+fail on observed corpus drift. Neither inventory mode can write, OCR, reingest,
+infer an entity or period, expose a raw locator, or alter the existing MCP tool
+set. A source row's `last_failure` is either `null` or the latest Gmail error's
+revalidated closed receipt: fixed operation class, HTTP status, canonical
+provider reason, aggregate checkpoint counts/readback state, and
+cursor-preservation category. Raw provider messages, IDs, paths, cursor values,
+content, and secrets never cross this boundary. `/zones` keeps its existing
+aggregate semantics and authorization boundary.
+
+The required row key makes this source-inventory contract v3, including both
+inventory and recovery cursors. Version mismatch is a refusal, not a partial
+parse. A schema-39 database receives one narrowly matched compatibility query
+that substitutes `NULL` for the not-yet-created `failure_evidence` column;
+other D1 errors cannot enter that fallback.
+
+The legacy CLI `provenance-repair` schema 1 contract is inventory-only. Its
+preview still binds one exact source, manifest and source configuration,
+semantic inventory and recovery generations, opaque candidate set, machine
+readiness, proposed reset/no-limit rewalk mode, and OCR policy. It always
+reports `can_apply: false`, because candidate disappearance cannot distinguish
+repair from deletion, replacement, refusal, or skip. `--apply` stops before
+manifest, credential, network, or source access. Schema-1 readback preserves
+every prior candidate as unresolved even when a later inventory no longer
+contains it.
+
+Migration 0042 introduces a separate bounded observation ledger for one to ten
+explicit local-upload originals. The private admin route accepts raw canonical
+source-relative locators only in a JSON request, derives stable HMAC identities
+from an independent recoverable D1 key, and never stores or returns those
+locators. Seal, inventory, and verify are read-only. Record is append-only,
+transactional, bound to one source snapshot and exact target set, and blocked
+during an upgrade write pause. Schema 42 records and verifies only gaps,
+failures, and adjudicated exclusions.
+
+Migration 0043 adds a revision-scoped raw-original result-binding ledger. The
+full-admin-authorized local ingest path hashes the exact bytes used by a
+one-record extraction. The Worker derives the schema-42 HMAC identity from the
+existing envelope locator and does not copy that locator into the immutable
+binding receipt or ledger. Existing document identity fields still retain the
+source-relative locator for retrieval and source lifecycle. A changed document
+receives a new revision ID. Its final semantic content hash, provenance digest, original hash
+and byte count, and deterministic binding hash commit atomically in D1. Full
+receipt readback, not pointer presence, is the verification boundary. Exact
+replay preserves the revision, while changed raw bytes create a new revision
+even when extracted text is identical. Structural parts can share one opaque
+original identity; `family_of` exports and legacy content remain unbound. This
+proves a full-admin-authorized local ingest assertion, not server-side raw-byte
+recomputation, and it does not cryptographically identify the producer binary.
+Accepted outcomes remain blocked in both the Worker and the
+schema-43 D1 trigger until a separate reviewed change authorizes their use.
+Deletion, absence, replacement bytes, an unreadable original, or a changed or
+incomplete result family therefore remains unresolved. Every observation
+receipt says `whole_source_complete: false`; this contract neither enumerates
+a source nor authorizes OCR or ingest.
+
+Migration 0044 adds a two-phase, non-authorizing proof. Each raw-bound chunk
+stores a Worker-computed digest over its exact revision ID, chunk index, title,
+and stored text after title prefixing. A portable seal then binds the
+all-and-only current logical family, with structural parts required to be a
+complete contiguous set. The portable tables contain only opaque revision IDs
+and hashes, not locators, document IDs, titles, text, queries, or citations.
+
+A second deployment-local seal reads Vectorize before D1, binds the exact
+outbox generation and mutation fence, requires target and global outbox zero
+and corpus-wide vector-count parity, and runs the production owner retrieval
+path twice without reranking. Both ranked results and citations must be
+identical, and the top result and citation must resolve to the sealed family.
+The final D1 insert rechecks the family and readiness state so a concurrent
+corpus mutation fails closed.
+
+Recovery restores portable members before their family header, but excludes
+the deployment-local verification because recovery rebuilds Vectorize. A new
+verification is required against the recovered projection. Historical headers
+use a narrow import marker that can open only before any recovery data exists.
+The artifact closes and checks that marker after import, while immutable
+schema-43 binding validation remains active throughout. Schema 44 itself
+remains non-authorizing. Ordinary observation recording and `result_family`
+cannot create an accepted observation; the schema supplies evidence, not
+repair authority or whole-source completeness.
+
+Migration 0045 adds a separate accepted-resolution admission protocol on the
+full-admin-only `POST /api/admin/brain/source-original-observations` endpoint.
+The Worker accepts
+`mode: "accepted_resolution"` for exactly one sealed target, with explicit
+`record` and read-only `verify` operations. Each operation rebuilds the exact
+schema-44 family proof and reruns the deployment-local Vectorize and production
+owner retrieval checks. The gate never treats a historical family header or
+verification row as proof that the present corpus is unchanged.
+
+Initial admission requires the exact portable family header and members to
+have already been written by ordinary `result_family` `record`. That prior
+receipt is still non-authorizing; accepted-resolution consumes it but cannot
+create it implicitly.
+
+For `record`, the Worker submits the prior unresolved observation, exact raw
+hash and byte count, family receipt, fresh verification receipt, and proposed
+accepted observation in one D1 batch. An ephemeral admission table and its
+triggers recheck the install-state generation and mutation fence, current
+bindings, current family and chunk digests, global and target outbox emptiness,
+and exact verification hash inside the write transaction. The trigger then
+appends the portable resolution, deployment-local activation, and accepted
+observation as one atomic admission. Stale proof, concurrent writes, conflicting
+replay, or direct accepted-observation insertion fails closed.
+
+The portable resolution records historical acceptance lineage. Currentness is
+a separate deployment-local property that requires a matching activation and
+verification plus the same live family, queue, generation, mutation, and
+projection checks. Recovery exports the portable resolution but excludes
+admissions, activations, and result-family verifications. Its import marker
+closes only after proving an exact accepted-observation-to-resolution bijection
+and empty local acceptance state. The recovered deployment must rerun the
+one-target proof and append a fresh local activation before the resolution is
+current there.
+
+Migration 0046 closes the remaining cross-machine history race without a
+mutable head row. `source_original_observations` adds an immutable chain
+version and prior-observation hash. Each normal insert must name the latest
+same-original row observed by its reviewed plan, while the first row names
+empty history. D1 checks that predecessor inside the insert transaction and a
+partial unique index prevents two schema-46 successors from sharing it.
+Schema-42 through schema-45 rows remain a version-zero prefix for upgrade and
+recovery compatibility. A schema-45 accepted row may resolve an earlier
+non-immediate gap because that was legal when it was recorded. Recovery retains
+such a row as historical evidence, but it is not current under schema 46 and
+cannot be reactivated while its accepted observation fails the current-head and
+immediate-predecessor checks.
+
+Accepted admission treats the resolved gap as its predecessor. Exact replay or
+recovery reactivation instead requires the accepted observation itself to
+remain the current head. The current-acceptance view also requires the accepted
+row to be the latest same-original sequence, so a later gap, failure, or
+adjudicated exclusion demotes it without deleting evidence. Recovery validates
+the immediate-predecessor chain before closing its import marker. Sequence,
+not `recorded_at`, is authoritative because different computers do not share a
+clock.
+
+The stable `observation_hash` remains an event-receipt digest over the original
+schema-42 canonical fields. It is not a self-authenticating chain digest and it
+does not cover `predecessor_observation_hash`. Schema 46 binds the chain through
+append-only D1 rows, transactional predecessor checks, and recovery-close
+validation; authenticated whole-artifact recovery protects those row bytes in
+transit and at rest. A future receipt-contract version may include the edge in
+its digest without changing the meaning of existing receipts.
+
+This dynamic SQL currentness is scoped to a fixed retrieval contract and
+supported Worker, D1, and outbox-mediated mutations. Direct FTS maintenance,
+out-of-band Vectorize writes, or a retrieval-code deployment can change ranked
+results outside the D1 generation counter. Crossing one of those boundaries
+requires rerunning the full accepted-resolution proof before the result is
+relied on.
+
+Every accepted-resolution receipt remains
+`whole_source_complete: false`. Schema 45 does not wire the legacy
+no-target `provenance-repair --apply` command, which remains disabled, and does
+not grant authority for OCR, source-wide reingest, source-wide deletion,
+deployment, or customer execution.
+
+The held candidate adds a separate exact-target orchestrator for
+`provenance-repair --target`. It accepts one owner-supplied source-relative
+locator only for the manifest's enabled `corpora.local_folder` and a registered
+upload source. It refuses target inference, multiple extraction records,
+unreliable or incomplete text, and every OCR path. The orchestrator derives its
+private retrieval query from the prepared native text and never sends that
+query, the locator, the local root, original hashes, document identities, or
+sealed internal receipts to public output.
+
+Both preview and apply obtain the existing source-ingest lease before any
+private manifest-content, source-file, credential, network, or Brain-state
+access. Under the lease they recompute the canonical manifest and source
+configuration, root identity, original bytes, local extraction, package runtime
+fingerprint, active product and schema 46 or newer, vector readiness, complete authenticated
+source inventory, and complete authenticated observation history. The history
+walk uses one stable snapshot and is bracketed by a fresh inventory read so a
+previous accepted resolution or a concurrent new gap cannot be hidden by a
+partial page. Every mutation and retry asserts that the same lease is still
+owned. The lease is held through final verification and released on every exit.
+
+A pure sealed target plan is design evidence only. It cannot advertise apply
+authority. Only the packaged orchestrator can attach current executor proof
+after all of the leased checks pass and produce a public state-bound approval
+hash. Apply reacquires the lease and rebuilds that proof before comparing the
+hash. It sends one prepared single-record ingest envelope, reconciles stale
+members only within that original's exact structural family, and never updates
+a source receipt, source cursor, or source-wide removal plan.
+
+The mutation sequence is fixed: exact-target ingest, exact-family reconcile,
+shared vector drain, schema-44 `result_family` record, schema-44
+`result_family` verify, schema-45 `accepted_resolution` record, then schema-45
+`accepted_resolution` verify. Every response is validated as a closed receipt
+before the next step. The accepted record is impossible before the portable
+family has both been stored and freshly verified. Replay is idempotent only for
+the exact same state; stale or mismatched receipts, recovery without local
+activation, lease loss, response drift, or a changed family fail closed and
+require a new preview. After recovery, portable history remains but the old
+approval and local activation do not. A new leased run must establish fresh
+deployment-local proof before reactivation.
+
+This lane has deliberately visible side effects. Exact-family reconciliation
+can remove stale siblings only from the selected family. The global drain can
+process unrelated work already present in the shared outbox. Reingest and drain
+can create embeddings. The result-family record and verify plus
+accepted-resolution record and verify each perform two private production
+retrieval calls, for eight probes total, and may create ordinary aggregate
+usage records. None of those effects widens the receipt beyond one original or
+establishes whole-source completeness.
+
+The new-computer continuity report composes that same authenticated source
+inventory with local-only observations. It reads the exact manifest, durable
+owner credential, connector stores, declared local roots, LaunchAgent status,
+resume state, current package entrypoint, technician skill, and Claude Code/Codex MCP
+registrations. It never accepts an ambient admin key or credential-store mode,
+enters a Wrangler session, opens a browser, refreshes a source, or writes. Its
+JSON projects every observation onto four states: `ready`, `missing`,
+`unproven`, or `inapplicable`. Raw paths, source and provider identities,
+Cloudflare resource IDs, credential values, and cursor values remain inside the
+inspection boundary. Since the source inventory masks cursors and does not echo
+the manifest's Cloudflare resource bindings, legacy checkpoint continuity and
+the exact deployed-resource match stay `unproven` until a future keyed receipt
+can prove them. The current package's existence and self-declared version are
+local facts only. Public release integrity and currency require an independently
+resolved release target and artifact receipt, so the report also keeps that
+claim `unproven`.
+
+The Owner Financial Map has a narrow technician read/preview contract under
+`/api/admin/brain/financial-map/` and a separate private review/confirmation
+contract under `/api/owner/financial-map/`. Migration 0041 adds no inferred
+history or backfill. Read and preview accept the durable admin credential or
+the exact owner session. The complete private review, passkey options, and
+activation require the exact unscoped owner app session with no admin-key,
+CLI, or MCP fallback. The old admin passkey and activation routes return 410.
+Every preview is a full closed snapshot of
+the current entity and account inventory, any owner-declared expected rows that
+are not in the ledger, and a finite entity-year horizon. Each entity-year names
+its filing-unit, return, form, K-1, books, payroll, and expected-source
+obligations. Opaque local map IDs keep that declared denominator separate from
+nullable ledger evidence. Rows and current values are represented by
+database-salt HMAC-bound references and hashes.
+The immutable activation chain binds the map hash, denominator hash, inventory
+generation, and one prior head. Local MCP can read and create an expiring
+non-authoritative preview only. It has no activation operation. No map route
+rewrites the ledger, sources, tax records, books, payroll, or accounts.
 
 Google OAuth uses Keychain by default on macOS and a protected file under
 `~/.brain/` on other supported paths. Scheduler logs and locks also live under
@@ -453,6 +766,24 @@ matching mutable human wording.
 | `brain eval` | Does this install retrieve the required documents, refuse unsupported questions honestly, and avoid regression? |
 | `npm test` and CI | Does shared product behavior pass offline on supported operating systems and Node versions? |
 | Live field gates | Does the real connector, scale, scheduler, or account lifecycle work outside mocks? |
+
+The D1 diagnostic's chunk-integrity lane is a bounded snapshot, not a collection
+of independent whole-table aggregates. It fixes one integer chunk-id high-water
+mark, visits that range once with keyset pages, and fuses the exact total, blank,
+oversized, orphan, document-source mismatch, and zone-projection counts in each
+page. Opening and closing schema, outbox-generation, corpus-stat, source-event,
+source-count, and vector-projection markers cheaply detect supported concurrent
+corpus changes. The bounded zone command records its source-authoritative
+assignment and projection-repair page in the same transaction, so a same-zone
+repair cannot evade the marker. Any changed marker, failed page, coverage gap,
+or exhausted statement/page budget makes the additive report `complete: false`,
+removes page-derived counts, and names the skipped checks. Store parity runs
+only at a verified empty-queue cut, because provider acceptance can become
+visible asynchronously, and then requires exact count equality with no
+percentage tolerance. The renderer cannot issue a clean verdict from partial
+evidence. Expensive duplicate-text and per-document outlier groupings are
+explicitly unobservable at large scale until maintained hashes or aggregates
+make them indexable.
 
 The eval golden set is per install. It should include answerable single-document
 questions, multi-document questions, hard paraphrases, near-miss entities, and

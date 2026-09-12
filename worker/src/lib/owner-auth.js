@@ -933,7 +933,7 @@ export async function handleOwnerAuth(env, request, url, path, options = {}) {
       return jsonResponse({
         ...grant,
         replayed,
-        enrollment_url: code ? `${url.origin}/app#enroll=${code}` : null,
+        enrollment_url: code ? `${url.origin}/app#document-enroll=${code}` : null,
         enrollment_expires_in_minutes: code ? 15 : null,
         scope_rule: "exact_document_ids_only",
       });
@@ -951,7 +951,7 @@ export async function handleOwnerAuth(env, request, url, path, options = {}) {
       const { enrollment_code: code, ...receipt } = result;
       return jsonResponse({
         ...receipt,
-        enrollment_url: code ? `${url.origin}/app#enroll=${code}` : null,
+        enrollment_url: code ? `${url.origin}/app#document-enroll=${code}` : null,
       });
     } catch (error) {
       if (error instanceof DocumentAccessError) {

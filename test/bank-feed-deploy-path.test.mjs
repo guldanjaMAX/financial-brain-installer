@@ -74,7 +74,8 @@ const legacyCustom = workerBindings({ ...base, corpora: { bank_feed: {
 } } }, cfg);
 assert.equal(valueOf(legacyCustom, "BANK_FEED_PROVIDER"), "custom");
 assert.equal(valueOf(legacyCustom, "BANK_FEED_API_BASE"), "https://bank-provider.invalid");
-assert.equal(valueOf(legacyCustom, "BANK_FEED_ENTITY"), "store-01");
+assert.equal(valueOf(legacyCustom, "BANK_FEED_ENTITY"), undefined,
+  "a manifest-wide entity must not silently assign every custom-feed item");
 
 // A malformed raw manifest must stop before it can upload a generically routed
 // or partially configured bank feed.

@@ -10,7 +10,7 @@ import {
   COVERAGE_DIMENSIONS, accessZonePresentation, coverageCaveat, coverageFacts, coveragePresentation,
 } from "../lib/source-coverage";
 import {
-  Attention, Chip, Critical, NextStep, Note, Row, Section, TruthNote,
+  Attention, Badge, Chip, Critical, NextStep, Note, Row, Section, TruthNote,
 } from "./ui";
 import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
 import { OwnerActivity } from "./OwnerActivity";
@@ -34,7 +34,9 @@ const FIN_LABELS: Record<string, string> = {
  * gaps. It never promotes installer commands into owner actions, and it does
  * not claim a ranked action list because the ledger has no common consequence
  * score, snooze state, or owner model across every collection. */
-export function Home() {
+export type HomeDestination = "year" | "review";
+
+export function Home({ onNavigate }: { onNavigate?: (destination: HomeDestination) => void } = {}) {
   const { scope, entities, activeLabel } = useFinanceScope();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [systemLoaded, setSystemLoaded] = useState(false);
@@ -134,8 +136,8 @@ export function Home() {
       {finance?.ledger_installed && !financeIsEmpty && (
         <div className="mt-7 grid gap-7 lg:grid-cols-[minmax(0,1.35fr)_minmax(19rem,0.85fr)] lg:items-start">
           <div>
-            <AttentionList snapshot={finance} entities={entities} scopeName={activeLabel} />
-            <BusinessStanding snapshot={finance} entities={entities} scope={scope} />
+            <AttentionList snapshot={finance} entities={entities} scopeName={activeLabel} onNavigate={onNavigate} />
+            <EntityStanding snapshot={finance} entities={entities} scope={scope} />
           </div>
           <div>
             <Glance snapshot={finance} scopeName={activeLabel} />
@@ -164,12 +166,15 @@ type AttentionItem = {
   move?: "yours" | "waiting";
   waitingOn?: string | null;
   consequence?: string | null;
+  issueLabel?: string;
+  destination: HomeDestination;
 };
 
-function AttentionList({ snapshot, entities, scopeName }: {
+export function AttentionList({ snapshot, entities, scopeName, onNavigate }: {
   snapshot: FinSnapshot;
   entities: Parameters<typeof entityLabel>[0];
   scopeName: string;
+  onNavigate?: (destination: HomeDestination) => void;
 }) {
   const items = useMemo<AttentionItem[]>(() => {
     const rows: AttentionItem[] = [];
@@ -188,6 +193,7 @@ function AttentionList({ snapshot, entities, scopeName }: {
         move,
         waitingOn: waitingDetail(deadline.waiting_on),
         consequence: deadline.consequence,
+        destination: "year",
       });
     });
     snapshot.exceptions?.forEach((item) => {
@@ -199,6 +205,7 @@ function AttentionList({ snapshot, entities, scopeName }: {
         state: move === "yours" ? "NEEDS" : "WORKING",
         move,
         waitingOn: waitingDetail(item.waiting_on),
+        destination: "review",
       });
     });
     snapshot.documents?.filter((document) => documentOutcome(document) === "PROBLEM").forEach((document) => {
@@ -208,6 +215,8 @@ function AttentionList({ snapshot, entities, scopeName }: {
         detail: `${entityLabel(entities, document.entity_slug)} · This copy could not be read${document.unreadable_reason ? `: ${document.unreadable_reason}` : ""}.`,
         state: "PROBLEM",
         move: "yours",
+        issueLabel: "Unreadable copy",
+        destination: "review",
       });
     });
     snapshot.reconciliations?.filter((item) => item.state === "mismatched").forEach((item) => {
@@ -217,6 +226,7 @@ function AttentionList({ snapshot, entities, scopeName }: {
         detail: `${entityLabel(entities, item.entity_slug)} · ${item.claims.length} dated claims are being kept separately.`,
         state: item.ruled_claim_uid ? "WORKING" : "NEEDS",
         move: item.ruled_claim_uid ? undefined : "yours",
+        destination: "review",
       });
     });
     return rows;
@@ -248,7 +258,19 @@ function AttentionList({ snapshot, entities, scopeName }: {
               <NextStep owner={item.move}>{item.move === "yours" ? "This is waiting for you." : "A person or custodian outside the brain has the next move."}</NextStep>
             ) : null}
           </span>
-          <Chip state={item.state} />
+          <span className="flex items-center gap-2 flex-wrap shrink-0">
+            {item.issueLabel && <Badge tone="warn">{item.issueLabel}</Badge>}
+            <Chip state={item.state} />
+            {onNavigate && (
+              <button
+                type="button"
+                onClick={() => onNavigate(item.destination)}
+                className="rounded-lg border border-line-strong bg-paper px-2.5 py-1.5 text-[12.5px] font-semibold text-ink hover:border-accent"
+              >
+                {item.destination === "year" ? "Open This Year" : "Open Add & Review"}
+              </button>
+            )}
+          </span>
         </Row>
       ))}
       {items.length > shown.length && (
@@ -315,7 +337,7 @@ function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeName: str
   );
 }
 
-function BusinessStanding({ snapshot, entities, scope }: {
+function EntityStanding({ snapshot, entities, scope }: {
   snapshot: FinSnapshot;
   entities: Parameters<typeof entityLabel>[0];
   scope: string | null;
@@ -324,8 +346,8 @@ function BusinessStanding({ snapshot, entities, scope }: {
   const complete = ["accounts", "documents", "deadlines", "exceptions"].every((key) => key in snapshot);
   const owned = entities.filter((entity) => !entity.counterparty);
   return (
-    <Section title="Where each business stands" blurb="The same records, separated by business rather than blended into one household view.">
-      {!complete && <Note>Some financial sections were unavailable, so these business rows may be incomplete.</Note>}
+    <Section title="Where each part stands" blurb="The same records, separated by financial entity rather than blended together.">
+      {!complete && <Note>Some financial sections were unavailable, so these rows may be incomplete.</Note>}
       {owned.map((entity) => {
         const accounts = snapshot.accounts?.filter((row) => row.entity_slug === entity.entity_slug);
         const coverage = accounts ? accountCoverage(accounts) : null;
@@ -549,9 +571,24 @@ function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatu
   );
 }
 
-function SourceChip({ state }: { state: string }) {
+export function sourceIssueLabel(state: string): string | null {
+  if (state === "stale") return "Source out of date";
+  if (state === "broken") return "Source not working";
+  if (state === "never_synced") return "Source never checked";
+  if (state === "unregistered") return "Source not registered";
+  return null;
+}
+
+export function SourceChip({ state }: { state: string }) {
   const outcome = sourceOutcome(state);
-  return outcome ? <Chip state={outcome} /> : null;
+  if (!outcome) return null;
+  const issue = sourceIssueLabel(state);
+  return (
+    <span className="flex items-center gap-2 flex-wrap justify-end">
+      {issue && <Badge tone="warn">{issue}</Badge>}
+      <Chip state={outcome} />
+    </span>
+  );
 }
 
 const dayPhrase = (days: number) =>

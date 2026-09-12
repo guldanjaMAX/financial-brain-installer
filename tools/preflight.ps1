@@ -4,20 +4,105 @@ function Ok  ($m){ Write-Host "  ok    $m" }
 function Warn($m){ Write-Host "  WARN  $m"; $script:Warned++ }
 function Stop_($m){ Write-Host "  STOP  $m"; $script:Stopped++ }
 
+function Get-WindowsPackageContext {
+  try {
+    if (-not ("FinancialBrainPackageContextNative" -as [type])) {
+      Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class FinancialBrainPackageContextNative
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetCurrentPackageFullName(
+        ref uint packageFullNameLength,
+        StringBuilder packageFullName);
+}
+'@ -ErrorAction Stop | Out-Null
+    }
+
+    [uint32]$length = 0
+    $status = [FinancialBrainPackageContextNative]::GetCurrentPackageFullName([ref]$length, $null)
+    if ($status -eq 15700) {
+      return [pscustomobject]@{ Known = $true; Packaged = $false; Code = $status }
+    }
+    if ($status -ne 122 -or $length -lt 1) {
+      return [pscustomobject]@{ Known = $false; Packaged = $false; Code = $status }
+    }
+
+    $name = New-Object System.Text.StringBuilder -ArgumentList ([int]$length)
+    $status = [FinancialBrainPackageContextNative]::GetCurrentPackageFullName([ref]$length, $name)
+    if ($status -ne 0) {
+      return [pscustomobject]@{ Known = $false; Packaged = $false; Code = $status }
+    }
+    return [pscustomobject]@{ Known = $true; Packaged = $true; Code = $status }
+  } catch {
+    return [pscustomobject]@{ Known = $false; Packaged = $false; Code = "native-check-failed" }
+  }
+}
+
 Write-Host "Financial Brain preflight  -  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
 Write-Host ""
 
 Write-Host "MACHINE"
+$osVersion = [System.Environment]::OSVersion.Version
 Write-Host ("  os              " + [System.Environment]::OSVersion.VersionString)
+if ($osVersion.Major -lt 10) {
+  Stop_ "Windows $osVersion is too old; Financial Brain needs Windows 10 or newer"
+} else { Ok "Windows 10 or newer" }
 Write-Host ("  powershell      " + $PSVersionTable.PSVersion)
-$node = Get-Command node -ErrorAction SilentlyContinue
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($isAdministrator) {
+  Stop_ "this PowerShell window is running as Administrator. Close it and open a normal PowerShell window for the owner's Windows account"
+} else { Ok "running as the current user, not Administrator" }
+
+if (-not $env:LOCALAPPDATA) {
+  Stop_ "LOCALAPPDATA is missing, so the per-user install drive cannot be checked"
+} else {
+  try {
+    $localRoot = [System.IO.Path]::GetPathRoot($env:LOCALAPPDATA)
+    $localDrive = New-Object -TypeName System.IO.DriveInfo -ArgumentList $localRoot
+    if (-not $localDrive.IsReady) {
+      Stop_ "the LOCALAPPDATA drive $localRoot is not ready"
+    } else {
+      $freeGiB = [Math]::Round($localDrive.AvailableFreeSpace / 1GB, 1)
+      if ($localDrive.AvailableFreeSpace -lt 2GB) {
+        Stop_ "the LOCALAPPDATA drive has $freeGiB GiB free; Financial Brain needs at least 2 GiB before download"
+      } else { Ok "LOCALAPPDATA drive has $freeGiB GiB free (2 GiB required)" }
+    }
+  } catch {
+    Stop_ "the LOCALAPPDATA drive could not be checked: $($_.Exception.Message)"
+  }
+}
+$nodeSupported = $false
+$nodeExecutable = $null
+# Windows PowerShell can return both .cmd and .exe applications for one name.
+# Preserve its command-resolution order, but invoke exactly the first candidate.
+$node = @(Get-Command node -CommandType Application -ErrorAction SilentlyContinue)[0]
 if ($node) {
-  $nv = (& node -v); Write-Host "  node            $nv ($($node.Source))"
-  $maj = [int](($nv -replace '^v','') -split '\.')[0]
-  if ($maj -lt 22) { Stop_ "node $nv is too old; the installer needs 22 or newer" }
+  $nodeExecutable = $node.Source
+  $nodeOutput = @(& $nodeExecutable -v 2>$null)
+  $nodeExit = $LASTEXITCODE
+  $nv = if ($nodeOutput.Count -eq 1) { [string]$nodeOutput[0] } else { "" }
+  Write-Host "  node            $(if ($nv) { $nv } else { 'unknown' }) ($nodeExecutable)"
+  $versionMatch = [regex]::Match($nv, '^v([0-9]+)\.[0-9]+\.[0-9]+(?:[-+].*)?$')
+  [int]$maj = 0
+  if ($nodeExit -ne 0 -or -not $versionMatch.Success -or
+      -not [int]::TryParse($versionMatch.Groups[1].Value, [ref]$maj)) {
+    Stop_ "node version could not be read; the installer needs Node 22 or newer"
+  } elseif ($maj -lt 22) {
+    Stop_ "node $nv is too old; the installer needs 22 or newer"
+  } else {
+    $nodeSupported = $true
+  }
 } else { Stop_ "node is not installed" }
-if (Get-Command npm.cmd -ErrorAction SilentlyContinue) { Write-Host ("  npm             " + (& npm.cmd -v)) }
-else { Stop_ "npm.cmd not found" }
+$npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+if ($npm) {
+  if ($nodeSupported) { Write-Host ("  npm             " + (& $npm.Source -v)) }
+  else { Write-Host "  npm             found (version check waits for Node 22 or newer)" }
+} else { Stop_ "npm.cmd not found" }
 Write-Host ""
 
 Write-Host "WINDOWS TRAPS"
@@ -32,9 +117,14 @@ Write-Host "  execution policy $pol  (CurrentUser=$user, LocalMachine=$machine)"
 if ($pol -in @('Restricted','AllSigned','Undefined')) {
   Warn "the bare 'brain', 'npm' and 'npx' resolve to blocked .ps1 shims under this policy. Use brain.cmd, npm.cmd and npx.cmd."
 } else { Ok "policy allows the .ps1 shims (the .cmd forms are still safe to use)" }
-if ($env:APPDATA -like '*\Packages\*') {
-  Stop_ "this shell is inside an MSIX sandbox (APPDATA = $env:APPDATA). A global install here lands where no ordinary shell can see it. Open a normal PowerShell window."
-} else { Ok "not running inside an MSIX/Claude sandboxed shell" }
+$packageContext = Get-WindowsPackageContext
+if (-not $packageContext.Known) {
+  Stop_ "Windows could not confirm whether this PowerShell window belongs to an app package (native check $($packageContext.Code)). Stop here and open PowerShell from the Start menu."
+} elseif ($packageContext.Packaged) {
+  Stop_ "this PowerShell window belongs to an app package. An install here can land in that app's private Windows container and disappear from normal PowerShell. Open PowerShell from the Start menu, then continue there."
+} elseif ($env:APPDATA -like '*\Packages\*' -or $env:LOCALAPPDATA -like '*\Packages\*') {
+  Stop_ "this shell uses an app-package data path. An install here can disappear from normal PowerShell. Open PowerShell from the Start menu, then continue there."
+} else { Ok "this process has no Windows package identity" }
 Write-Host ""
 
 Write-Host "THE BRAIN CLI"
@@ -44,7 +134,21 @@ foreach ($n in @('brain','brain.cmd')) {
   if ($c) { $copies += ($c | ForEach-Object { $_.Source }) }
 }
 $copies = $copies | Where-Object { $_ } | Sort-Object -Unique
-if ($copies.Count -eq 0) { $script:Fresh = $true; Warn "no 'brain' on PATH (fine before a first install; call it by full path otherwise)" }
+if ($copies.Count -eq 0) {
+  $packageRoot = Split-Path $PSScriptRoot -Parent
+  $packagePrefix = Split-Path (Split-Path $packageRoot -Parent) -Parent
+  $packageCli = Join-Path $packagePrefix "brain.cmd"
+  $knownCandidates = @($packageCli, "$env:LOCALAPPDATA\FinancialBrain\brain.cmd") |
+    Where-Object { $_ -and (Test-Path $_ -PathType Leaf) } | Sort-Object -Unique
+  if ($knownCandidates.Count -eq 1) {
+    Warn "'brain' is not on PATH, but the installed CLI is available at $($knownCandidates[0]); use that full path in this PowerShell window"
+  } elseif ($knownCandidates.Count -gt 1) {
+    Stop_ "more than one installed Brain CLI exists outside PATH; use the exact package path and repair PATH before continuing"
+  } else {
+    $script:Fresh = $true
+    Warn "no installed Brain CLI was found (expected before a first install)"
+  }
+}
 elseif ($copies.Count -eq 1) { Ok "resolves to $($copies[0])" }
 else {
   Stop_ "$($copies.Count) copies of the CLI are visible; the first wins and it may not be the one you updated"
@@ -98,11 +202,32 @@ try {
 Write-Host ""
 
 Write-Host "MANIFESTS"
-$mf = @(Get-ChildItem -Path $HOME -Recurse -Depth 4 -Filter brain.manifest.json -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch 'node_modules|templates' })
-if ($mf.Count -eq 0) { $script:NoManifest = $true; Ok "no manifest yet (expected before a first install)" }
-elseif ($mf.Count -eq 1) {
+$packageRoot = Split-Path $PSScriptRoot -Parent
+$pointerHelper = Join-Path $packageRoot "operations\installed-manifest.mjs"
+$pointerStatus = 4
+$mf = @()
+if (-not $nodeSupported) {
+  Warn "the saved Brain location check was skipped for now. Install or select Node 22 or newer, then run this check again"
+} else {
+  $selectedManifest = @(& $nodeExecutable $pointerHelper --preflight-locator 2>$null)
+  $pointerStatus = $LASTEXITCODE
+  if ($pointerStatus -eq 0 -and $selectedManifest.Count -eq 1) {
+    $mf = @([pscustomobject]@{ FullName = $selectedManifest[0] })
+    Ok "using the saved installed manifest: $($mf[0].FullName)"
+  } elseif ($pointerStatus -eq 2) {
+    $mf = @(Get-ChildItem -Path $HOME -Recurse -Depth 4 -Filter brain.manifest.json -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch 'node_modules|templates' })
+  } elseif ($pointerStatus -eq 3) {
+    Stop_ "the saved installed Brain location is unsafe, unreadable, or missing; repair that private pointer before choosing a manifest"
+  } else {
+    Stop_ "the installed Brain manifest selector could not run; use the exact installed package before choosing a manifest"
+  }
+}
+if ($pointerStatus -eq 2 -and $mf.Count -eq 0) { $script:NoManifest = $true; Ok "no manifest yet (expected before a first install)" }
+elseif ($pointerStatus -eq 2 -and $mf.Count -eq 1) {
   Ok "one manifest: $($mf[0].FullName)"
+}
+if ($mf.Count -eq 1 -and $pointerStatus -ne 3) {
   try {
     $m = Get-Content $mf[0].FullName -Raw | ConvertFrom-Json
     $dom = $m.brain.domain
@@ -113,7 +238,7 @@ elseif ($mf.Count -eq 1) {
       else { Warn "brain at $dom reports status=$($h.status)" }
     }
   } catch { Warn "could not read the manifest or reach its brain" }
-} else {
+} elseif ($pointerStatus -eq 2 -and $mf.Count -gt 1) {
   Stop_ "$($mf.Count) manifests found; the wrong one will be picked. Ask which folder is theirs."
   $mf | ForEach-Object { Write-Host "          $($_.FullName)" }
 }

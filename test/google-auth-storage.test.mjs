@@ -6,7 +6,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  saveTokens, loadTokens, tokenStorageDescription, tokenStorageStatus,
+  saveTokens, loadTokens, loadTokensReadOnly, tokenStorageDescription, tokenStorageStatus,
   verifyTokenStorageReadable,
   googleAuthChildEnvironment, openBrowser,
   fetchConnectedAccountEmail,
@@ -349,6 +349,14 @@ try {
       legacyStatus.exists && legacyStatus.backend === "legacy-file" &&
       legacyStatus.encrypted === false && legacyStatus.migrationPending === true &&
       /legacy Windows plaintext.*migration pending/i.test(legacyStatus.description));
+    const legacyBeforeReadOnly = readFileSync(path);
+    const dpapiCallsBeforeReadOnly = dpapi.calls.length;
+    const readOnly = loadTokensReadOnly(options);
+    check("a read-only Windows credential load returns a legacy record without migrating it",
+      JSON.stringify(readOnly) === JSON.stringify(record) &&
+      readFileSync(path).equals(legacyBeforeReadOnly) &&
+      dpapi.calls.length === dpapiCallsBeforeReadOnly &&
+      JSON.stringify(readdirSync(root)) === JSON.stringify(["google-tokens.json"]));
     const loaded = loadTokens(options);
     const migrated = readFileSync(path);
     check("a legacy Windows plaintext file is read and migrated to DPAPI",
@@ -688,6 +696,11 @@ try {
       saveTokens(record, { backend: "file", platform: "linux", path });
       const keychain = fakeKeychain();
       const options = { backend: "keychain", platform: "darwin", runSecurity: keychain.runSecurity, path };
+      const legacyBeforeReadOnly = readFileSync(path);
+      const readOnly = loadTokensReadOnly(options);
+      check("a read-only macOS credential load uses a legacy file without moving it to Keychain",
+        JSON.stringify(readOnly) === JSON.stringify(record) &&
+        readFileSync(path).equals(legacyBeforeReadOnly) && keychain.passwords.size === 0);
       const loaded = loadTokens(options);
       check("a legacy file is copied to Keychain and read back before removal",
         JSON.stringify(loaded) === JSON.stringify(record) && keychain.passwords.size > 1);

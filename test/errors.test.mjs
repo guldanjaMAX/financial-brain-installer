@@ -232,12 +232,12 @@ function ingestExitCli(scenario) {
       /hidden token entry/i.test(r.out)) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(r.out), r.out.slice(0, 400));
   // A session with no TTY cannot answer a browser prompt, so the copy has to
-  // name the switch that carries the owner's approval explicitly. Without it the
-  // only remaining reading of this failure is "paste a token", which is the one
-  // thing every other line here is written to prevent.
+  // name the explicit owner-approved browser lanes. A generic environment
+  // consent bypass must not come back.
   check("and it names the explicit consent switch a non-interactive session needs",
     /--adopt-cloudflare-profile/.test(r.out) &&
-      /BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(r.out) && /approv/i.test(r.out), r.out.slice(0, 600));
+      /--browser-sign-in/.test(r.out) &&
+      !/BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(r.out) && /approv/i.test(r.out), r.out.slice(0, 600));
   check("and it never offers setup as the way out of a missing credential",
     !r.out.includes(shown("brain setup")) && !/brain setup/.test(r.out), r.out.slice(0, 400));
   // Fatal is anticipated, so it must NOT be dressed up as an installer bug.

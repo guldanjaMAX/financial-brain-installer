@@ -1060,15 +1060,21 @@ test("plain doctor runs deployed migration checks inside the saved browser profi
   const manifest = JSON.parse(readFileSync(resolve("templates/brain.manifest.json"), "utf8"));
   manifest.infrastructure.cloudflare.account_id = ACCOUNT_A;
   manifest.infrastructure.cloudflare.auth_profile = profile;
+  manifest.infrastructure.cloudflare.d1_database_id = "d".repeat(32);
+  manifest.infrastructure.cloudflare.vectorize_index = "acme-brain";
   manifest.corpora.bank_feed.enabled = false;
   writeFileSync(manifestPath, JSON.stringify(manifest));
 
   let insideSavedProfile = false;
   let checksumChecks = 0;
   let request = null;
+  let doctorOptions = null;
   try {
     await cmdDoctor(manifestPath, {
-      doctorRunAll: async () => [],
+      doctorRunAll: async (received) => {
+        doctorOptions = received;
+        return [];
+      },
       withAvailableCloudflareToken: async (action) => action(),
       withCloudflareControl: async (action, received) => {
         request = received;
@@ -1098,6 +1104,7 @@ test("plain doctor runs deployed migration checks inside the saved browser profi
     });
 
     assert.equal(checksumChecks, 1);
+    assert.equal(doctorOptions.allowCodexForExistingBrain, true);
     assert.equal(request.manifestPath, manifestPath);
     assert.equal(request.accountId, ACCOUNT_A);
     assert.equal(request.authProfile, profile);
@@ -1106,6 +1113,73 @@ test("plain doctor runs deployed migration checks inside the saved browser profi
     assert.equal(request.allowTokenRecovery, false);
     assert.equal(request.oauthOptions.readOnlyExistingProfile, true);
     assert.notEqual(request.reauthorizeOAuth, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("plain doctor keeps the Codex alternative off for empty, invalid, incomplete, and pre-provision manifests", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-doctor-unprovisioned-gate-"));
+  const manifestPath = resolve(root, "brain.manifest.json");
+  const preProvision = readFileSync(resolve("templates/brain.manifest.json"), "utf8");
+  const cases = [
+    ["empty object", JSON.stringify({})],
+    ["invalid JSON", "{not-json"],
+    ["incomplete resource bindings", JSON.stringify({
+      manifest_version: 1,
+      client: { slug: "fixture", display_name: "Fixture" },
+      brain: { version: "0.4.7", worker_name: "fixture-brain" },
+      infrastructure: { cloudflare: { account_id: ACCOUNT_A, storage: "d1" } },
+    })],
+    ["invalid resource identities", JSON.stringify({
+      manifest_version: 1,
+      client: { slug: "fixture", display_name: "Fixture" },
+      brain: { version: "0.4.7", worker_name: "fixture-brain" },
+      infrastructure: {
+        cloudflare: {
+          account_id: "not-an-account-id",
+          storage: "d1",
+          d1_database_id: "not-a-database-id",
+          vectorize_index: "fixture-brain",
+        },
+      },
+    })],
+    ["pre-provision template", preProvision],
+  ];
+
+  try {
+    for (const [label, bytes] of cases) {
+      writeFileSync(manifestPath, bytes);
+      let doctorOptions = null;
+      await cmdDoctor(manifestPath, {
+        doctorRunAll: async (received) => {
+          doctorOptions = received;
+          return [];
+        },
+        withAvailableCloudflareToken: async (action) => action(),
+        buildUpgradePauseCheck: async () => ({
+          name: "upgrade state",
+          status: "ok",
+          detail: "fixture active",
+        }),
+        buildChecksumDriftCheck: async () => ({
+          name: "migration checksums",
+          status: "ok",
+          detail: "fixture checked",
+        }),
+        checkBankFeedRedirect: () => ({
+          name: "Bank feed",
+          status: "ok",
+          detail: "fixture disabled",
+        }),
+        checkPrioritySlice: () => ({
+          name: "priority slice",
+          status: "ok",
+          detail: "fixture selected",
+        }),
+      });
+      assert.equal(doctorOptions.allowCodexForExistingBrain, false, label);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

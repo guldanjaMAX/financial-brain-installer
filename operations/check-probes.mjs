@@ -99,9 +99,10 @@ export function candidatesFrom(probe, rows = []) {
       ts: date,
       date_source: r.date_source || null,
       date_reliable: r.date_reliable === true,
-      text_source: r.text_source || "native",
-      text_reliable: r.text_reliable !== false,
+      text_source: r.text_source || "unknown",
+      text_reliable: r.text_reliable === true || r.text_reliable === 1,
       authority: r.authority || null,
+      lineage: r.lineage || null,
       text,
     };
     if (probe.freeform) { out.push({ value: null, doc }); continue; }

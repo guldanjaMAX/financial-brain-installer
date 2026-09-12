@@ -7,6 +7,8 @@
  * without dropping the conversation that straddled a page boundary.
  */
 
+import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
+
 const HOUR_MS = 60 * 60 * 1000;
 export const MESSAGE_CHAT_PLATFORMS = Object.freeze(["imessage", "sms", "whatsapp", "fb_messenger"]);
 const CHAT_PLATFORMS = new Set(MESSAGE_CHAT_PLATFORMS);
@@ -87,7 +89,7 @@ export function emailEnvelope(row, { ownerLabel = "Owner" } = {}) {
     "",
     body,
   ].join("\n");
-  return {
+  return withFirstPartySourceProvenance({
     source_type: "message",
     source_id: id,
     title,
@@ -105,13 +107,13 @@ export function emailEnvelope(row, { ownerLabel = "Owner" } = {}) {
       sender: speaker,
       migrated_from: "messaging.messages",
     },
-  };
+  }, { textSource: "native", textReliable: true });
 }
 
 export function sessionEnvelope(session) {
   if (!session?.first_id || !session?.message_count || !session.lines?.length) return null;
   const participants = [...new Set(session.participants || [])].filter(Boolean);
-  return {
+  return withFirstPartySourceProvenance({
     source_type: "message",
     // The first message is stable for the lifetime of a session and keeps the
     // public citation compatible with the original message namespace.
@@ -133,7 +135,7 @@ export function sessionEnvelope(session) {
       migrated_from: "messaging.messages",
       grouped_as: "bounded_conversation_session",
     },
-  };
+  }, { textSource: "native", textReliable: true });
 }
 
 const newSession = (row, ownerLabel, groupingTimezone) => {

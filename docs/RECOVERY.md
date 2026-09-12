@@ -90,8 +90,15 @@ ordered that way, and they cannot be:
 
 Clearing the pause also buys the client nothing they do not already have. The
 pause is a corpus **write** barrier, not a read barrier: it refuses `POST` on
-ingest, batch ingest, source receipts and expectations, forget, reindex,
-vector-retry, drain, and bank import. Retrieval is untouched. `/api/rag/think`
+ingest, batch ingest, source registration, receipts and expectations, zone
+assignment, forget, reindex, drain, and bank import. Retrieval is untouched.
+The one retry-state exception is `/api/admin/brain/vector-retry`: its preview
+with `{"confirm":false}` is read-only, and an owner-reviewed
+`{"confirm":true}` deletes each selected retry-state row, including its
+quarantine marker, failure code, last error, attempt history, timestamps, and
+backoff, then resets attempts and the last error on the matching outbox row.
+That discards stored failure evidence so the generation can be tried as new. It
+does not write the corpus or call Vectorize. `/api/rag/think`
 and `/api/rag/unified` answer normally while paused, and the MCP connector's
 `think` and `search` are deliberately left open so a paused brain can still be
 asked questions. What the client loses under the pause is the ability to add
@@ -211,6 +218,67 @@ excluded from both the content export and aggregate fingerprint.
 `agent_action_receipts` holds live single-use authority, so its rows are also
 excluded; the restored table must remain empty before and after bank security
 reconciliation.
+
+Schema 44 result-family members and their portable family headers are durable
+history and are restored after the schema-43 raw binding rows. The
+`source_original_result_family_verifications` table remains in the schema, but
+its rows are excluded from export and restore because they describe the source
+deployment's Vectorize projection. A restored portable seal is historical
+evidence only. It is not query-ready proof until the target Vectorize rebuild
+finishes and the private deterministic retrieval verification is repeated.
+The artifact opens `source_original_result_family_recovery_state` only while
+the target has no imported corpus or provenance rows, keeps immutable binding
+checks active, then deletes the marker and executes a fail-closed empty-state
+assertion. Source inspection, restored snapshot checks, and promotion also
+refuse any target with that marker left open.
+
+Schema 45 accepted-resolution rows are portable historical lineage and restore
+after their observation, binding, and result-family dependencies. The export
+does not include the ephemeral admission rows, deployment-local result-family
+verifications, or accepted-resolution activations. Closing the import marker
+requires every restored accepted observation to have exactly one matching
+portable resolution, every portable resolution to have its matching prior
+unresolved observation and family receipt, and all local-only acceptance tables
+to be empty.
+
+Schema 46 carries the authority-chain version and predecessor on each portable
+observation row. Legacy schema-42 through schema-45 rows may appear only as a
+version-zero prefix. Before the import marker closes, every version-one row
+must point to the immediately preceding same-original sequence, and every
+version-one accepted observation must immediately follow the gap or failure it
+resolves. Schema 45 legally allowed a version-zero accepted row to resolve an
+earlier non-immediate gap. Recovery preserves that row as historical evidence,
+but the schema-46 current view keeps it noncurrent and the head check refuses
+reactivation with `history_advanced`. A restored later exclusion likewise
+remains the head and blocks reactivating an older accepted resolution. No
+deployment-local activation is restored or inferred from that history.
+
+`observation_hash` is the digest of the event receipt fields established by the
+schema-42 contract. It is not a self-authenticating chain hash and does not
+digest the schema-46 predecessor edge. The authenticated whole recovery
+artifact protects the exported row bytes, while the separate recovery-close
+validator proves each version-one predecessor against D1 sequence. A future
+receipt contract may bind the edge directly, but schema 46 does not reinterpret
+or invalidate existing observation digests.
+
+A restored accepted resolution is therefore not current verification for the
+target deployment. After the recovered Vectorize projection is rebuilt, the
+old preview approval is invalid and the exact target must be previewed again
+under a new source lease. The full-admin-only recovery sequence is fixed:
+record the current schema-44 `result_family`, verify that schema-44 receipt,
+record the schema-45 `accepted_resolution`, then verify schema 45. Every stage
+reruns or validates the exact one-target family, Vectorize, and production owner
+retrieval proof. The record operation creates the fresh local verification and
+activation; verify alone cannot recreate either. Until the complete sequence
+succeeds, verification reports the resolution as requiring reactivation.
+
+The portable history never establishes whole-source completeness. Recovery
+does not enable the legacy no-target `provenance-repair --apply` command or
+authorize OCR, source-wide reingest, source-wide deletion, deployment, or
+customer execution. The exact-target lane may reingest only the newly previewed
+native-readable original, reconcile only that original's family, and must keep
+source receipts, cursors, and source-wide removal state untouched.
+
 The exact verified artifact also anchors a versioned bank security proof in the
 private recovery journal. Each ordered pair of hashes commits the row identity
 and every bank field: the exact original semantic row and its one permitted

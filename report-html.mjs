@@ -5,14 +5,14 @@
  *
  * This is four things at once, which is why it gets the care it gets.
  *
- *   As a GATE it is what the operator reads at T-2 before anything ships. Not the
- *   pass/fail line: the actual answers to the client's actual questions.
- *   A green suite over answers nobody read is a green suite over nothing.
+ *   As a CHECK RECORD it reports the automated results without pretending to
+ *   replace the separate same-item receipt/evidence proof. Optional saved owner
+ *   questions add regression evidence when present; they are not onboarding
+ *   homework.
  *
- *   As a KICKOFF it replaces the terminal. The client opens a browser and the
- *   first thing they see is their own ten questions answered with sources,
- *   which is the difference between "impressive technology" and "it knows my
- *   business".
+ *   As a KICKOFF it replaces the terminal. The client opens a browser and sees
+ *   what was proved, what remains unknown, and any optional questions they
+ *   chose to save.
  *
  *   As an ACCEPTANCE DELIVERABLE it is the record of what was true on handoff
  *   day, including what was missing.
@@ -41,6 +41,11 @@
 import { Acceptance } from "./acceptance.mjs";
 import { fetchBrainWithAdminKey } from "./components/brain-http.mjs";
 import { renderCliCommands } from "./operations/cli-guidance.mjs";
+import {
+  collectSourceInventorySnapshot,
+  corpusReportCounts,
+  sourceReceiptSummary,
+} from "./report.mjs";
 
 /* ------------------------------------------------------------- escaping */
 
@@ -109,13 +114,6 @@ const h = (value) => escapeHtml(redactSecrets(value));
 const num = (n) => Number(n || 0).toLocaleString("en-US");
 const plural = (n, one, many) => (Number(n) === 1 ? one : many);
 
-function daysSince(iso) {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return null;
-  return Math.floor((Date.now() - t) / 864e5);
-}
-
 function isoDay(value) {
   if (!value) return "";
   const t = Date.parse(value);
@@ -161,7 +159,7 @@ const CORPUS_LABEL = {
 const TIER_NAMES = {
   1: "Reachable and access controlled",
   2: "Data present and current",
-  3: "Search and answers working",
+  3: "Optional owner-question checks",
   4: "Credential protection active",
   5: "Version and configuration",
 };
@@ -170,7 +168,7 @@ const TIER_NAMES = {
 const TIER_WHY = {
   1: "If this fails the brain is either down or, worse, answering without a key, which would make your records public.",
   2: "An empty or stale brain does not warn you. It answers from old information and sounds just as sure.",
-  3: "This runs on your own questions rather than generic ones, because passing a generic search proves nothing about yours.",
+  3: "Saved owner questions run here when present. Before handoff, one real item is proved separately through receipts, provenance, projection, and cited retrieval.",
   4: "Anything shaped like a password or an API key is refused at the door instead of being stored and later quoted back.",
   5: "The install is on the version we shipped, and a daily ceiling means a runaway process cannot become a surprise bill.",
 };
@@ -214,24 +212,78 @@ const REFUSAL = {
   },
 };
 
-function classifyAnswer(a) {
+const SEARCH_UNAVAILABLE_STATES = new Set([
+  "search_unavailable", "unavailable", "failed", "failure", "error", "degraded",
+]);
+const COVERAGE_INCOMPLETE_STATES = new Set([
+  "coverage_incomplete", "incomplete", "partial", "unknown", "unavailable",
+]);
+const COVERAGE_GAP_TYPES = new Set([
+  "coverage_unavailable", "coverage_incomplete", "coverage_stale",
+  "history_unproven", "source_unregistered", "sync_broken", "sync_review",
+  "sync_in_progress", "never_synced", "tax_evidence_unreadable",
+  "tax_document_inventory_unverified", "tax_question_scope_unresolved",
+]);
+
+const statusToken = (value) => String(value ?? "").trim().toLowerCase();
+
+function carriesIncompleteCoverage(a) {
+  if (arr(a?.gaps).some((gap) => COVERAGE_GAP_TYPES.has(statusToken(gap?.type)))) return true;
+  const direct = statusToken(
+    a?.coverage_state ?? a?.coverage?.state ?? a?.source_coverage?.state ??
+    a?.coverage?.status ?? a?.source_coverage?.status
+  );
+  return Boolean(direct) && COVERAGE_INCOMPLETE_STATES.has(direct);
+}
+
+/** Normalize version-skewed search truth before looking at result counts. */
+export function normalizedSearchStatus(a) {
+  const raw = statusToken(a?.search_status ?? a?.status);
+  if (raw === "coverage_incomplete") return "coverage_incomplete";
+  if (SEARCH_UNAVAILABLE_STATES.has(raw)) return "search_unavailable";
+  if (carriesIncompleteCoverage(a)) return "coverage_incomplete";
+  if (a?.degraded !== null && a?.degraded !== undefined && a?.degraded !== false &&
+      String(a.degraded).trim()) {
+    return "degraded";
+  }
+  if (raw === "no_results" || raw === "no_match" || raw === "complete" || raw === "ok") {
+    return raw === "no_match" ? "no_results" : raw;
+  }
+  return raw || null;
+}
+
+export function classifyAnswer(a) {
   if (!a || typeof a !== "object") return "error";
   if (a.error) return "error";
+  const searchStatus = normalizedSearchStatus(a);
+  if (searchStatus === "search_unavailable") return "search_unavailable";
+  if (searchStatus === "coverage_incomplete") return "coverage_incomplete";
   const count = Number(
     a.resultCount ?? a.results_count ?? (Array.isArray(a.results) ? a.results.length : 0)
   );
   const cites = arr(a.citations).length;
-  if (!count && !cites) return "no_sources";
+  if (!count && !cites) {
+    // A successful response with no failure, degradation, or coverage warning
+    // is a result only about the indexed material that search actually read.
+    // It is never a world-level or intended-corpus absence claim.
+    if (searchStatus === "degraded") return "search_unavailable";
+    return searchStatus && searchStatus !== "no_results" ? "unknown" : "no_match";
+  }
   if (!a.answer) return "unavailable";
   if (REFUSAL.test(String(a.answer))) return "refused";
+  if (searchStatus === "degraded") return "answered_degraded";
   return "answered";
 }
 
 const STATUS_COPY = {
   answered: ["pass", "Answered from your own documents"],
+  answered_degraded: ["warn", "Answered from a partial search"],
   refused: ["warn", "The brain said it does not know"],
-  no_sources: ["fail", "Nothing found"],
+  no_match: ["warn", "No indexed match in the searched material"],
+  search_unavailable: ["fail", "Search could not be completed"],
+  coverage_incomplete: ["warn", "Coverage remains unproven"],
   unavailable: ["warn", "Sources found, answer could not be generated"],
+  unknown: ["warn", "Search result remains unproven"],
   error: ["fail", "This check could not run"],
 };
 
@@ -239,8 +291,9 @@ const STATUS_COPY = {
 
 export function computeVerdict({ acceptance, acceptanceError, seeds }) {
   const counts = acceptance?.counts || null;
-  const answered = seeds.filter((s) => classifyAnswer(s) === "answered").length;
-  const sourced = seeds.filter((s) => classifyAnswer(s) !== "no_sources" && classifyAnswer(s) !== "error").length;
+  const kinds = seeds.map((seed) => classifyAnswer(seed));
+  const answered = kinds.filter((kind) => ["answered", "answered_degraded"].includes(kind)).length;
+  const fullyAnswered = kinds.filter((kind) => kind === "answered").length;
 
   const parts = [];
   if (counts) {
@@ -300,21 +353,20 @@ export function computeVerdict({ acceptance, acceptanceError, seeds }) {
       detail: parts.join(" "),
     };
   }
-  // A run whose retrieval tier never executed cannot read "ready": every
-  // check that ran passed, and the capability the client is paying for went
-  // untested. The questions section already explains the gap; the verdict
-  // must not contradict it.
+  // Preserve the honesty of older summaries that used "retrieval" to mean an
+  // entire unproven capability. Current runs use "optional_owner_questions"
+  // for an empty saved-question list, which is not a handoff blocker.
   if (Array.isArray(acceptance.untested) && acceptance.untested.includes("retrieval")) {
     return {
       state: "attention",
-      line: "The checks that ran passed, but retrieval was never tested: this install has no probe questions yet.",
+      line: "The automated checks passed, but this older result has no query-visible retrieval proof.",
       detail:
-        `${parts.join(" ")} Add the owner's own questions to testing.probe_questions ` +
-        "in the manifest and re-run this report.".trim(),
+        `${parts.join(" ")} Prove one approved low-sensitivity item as accepted, stored with provenance, ` +
+        "projected, and query-visible with a citation before handoff.".trim(),
     };
   }
-  if (counts.warn > 0 || sourced < seeds.length) {
-    const n = counts.warn + (seeds.length - sourced);
+  if (counts.warn > 0 || fullyAnswered < seeds.length) {
+    const n = counts.warn + (seeds.length - fullyAnswered);
     return {
       state: "attention",
       line: `Working, with ${n} ${plural(n, "thing", "things")} worth knowing about.`,
@@ -323,7 +375,7 @@ export function computeVerdict({ acceptance, acceptanceError, seeds }) {
   }
   return {
     state: "ready",
-    line: "Ready. Everything checked out.",
+    line: "Ready for adaptive acceptance. The automated checks passed.",
     detail: parts.join(" "),
   };
 }
@@ -435,15 +487,24 @@ function renderQuestionCard(seed, index) {
   let body;
   if (kind === "error") {
     body = `<p class="muted">${h(seed.error || "the request did not complete")}</p>`;
-  } else if (kind === "no_sources") {
-    body = `<p class="muted">Nothing in the indexed material matched this question. It is listed again under what your brain does not know.</p>`;
+  } else if (kind === "search_unavailable") {
+    body = `<p class="muted">${h(seed.notice || "The search did not complete, so this result says nothing about whether the Brain holds an answer.")}</p>`;
+  } else if (kind === "coverage_incomplete") {
+    body = `<p class="muted">${h(seed.notice || "The search ran, but source coverage is incomplete or unknown. Treat this result as provisional.")}</p>`;
+  } else if (kind === "no_match") {
+    body = `<p class="muted">The completed search found no indexed match in the material it searched. This does not prove the information does not exist elsewhere or that every intended source is complete.</p>`;
   } else if (kind === "unavailable") {
     body =
       `<p class="muted">Sources were found, but no written answer was produced` +
       (seed.answer_error ? `: ${h(seed.answer_error)}` : ".") +
       `</p>`;
+  } else if (kind === "unknown") {
+    body = `<p class="muted">The response did not carry enough search-status evidence to classify this as a completed no-match.</p>`;
   } else {
-    body = renderAnswerBody(seed.answer);
+    body = renderAnswerBody(seed.answer) +
+      (kind === "answered_degraded"
+        ? `<p class="headsup">${h(seed.notice || "Part of search was degraded. Read the cited answer as partial, not complete coverage.")}</p>`
+        : "");
   }
 
   return (
@@ -459,17 +520,41 @@ function renderQuestionCard(seed, index) {
 
 /* ------------------------------------------------------------- gap list */
 
-function buildGaps({ seeds, corpus, manifest }) {
+function buildGaps({ seeds, manifest, sourceInventory, sourceInventoryError }) {
   const items = [];
 
   for (const s of seeds) {
     const kind = classifyAnswer(s);
     const q = s?.question ?? s?.q ?? "";
-    if (kind === "no_sources") {
+    if (kind === "no_match") {
+      items.push({
+        tone: "warn",
+        title: "No indexed match in the searched material",
+        detail: `The completed search for "${q}" returned no indexed match in the material it searched. This does not establish nonexistence outside that searched material or prove every intended source is complete.`,
+      });
+    } else if (kind === "search_unavailable") {
       items.push({
         tone: "fail",
-        title: "No sources at all",
-        detail: `Your question "${q}" matched nothing in the indexed material. Either the source that answers it is not connected yet, or it is not written down anywhere.`,
+        title: "The search could not be completed",
+        detail: s?.notice || `The search for "${q}" was unavailable or degraded. No absence conclusion can be drawn from it.`,
+      });
+    } else if (kind === "coverage_incomplete") {
+      items.push({
+        tone: "warn",
+        title: "Source coverage remains unproven",
+        detail: s?.notice || `The search for "${q}" ran, but its source coverage was incomplete or unknown. Treat the result as provisional.`,
+      });
+    } else if (kind === "answered_degraded") {
+      items.push({
+        tone: "warn",
+        title: "Answer came from a partial search",
+        detail: s?.notice || `The cited answer for "${q}" used available results while part of search was degraded. It is not complete-coverage proof.`,
+      });
+    } else if (kind === "unknown" || kind === "error") {
+      items.push({
+        tone: kind === "error" ? "fail" : "warn",
+        title: kind === "error" ? "The question check did not complete" : "Search result remains unproven",
+        detail: s?.error || s?.notice || `The check for "${q}" did not carry enough evidence for a no-match conclusion.`,
       });
     } else if (kind === "refused") {
       items.push({
@@ -503,8 +588,8 @@ function buildGaps({ seeds, corpus, manifest }) {
   if (off.length) {
     items.push({
       tone: "info",
-      title: "Not connected",
-      detail: `Nothing from ${off.join(", ")} is in the brain, so it cannot answer from any of it. Connecting a source is a change we make on request, not something the brain does on its own.`,
+      title: "Disabled in this local configuration",
+      detail: `${off.join(", ")} ${plural(off.length, "is", "are")} disabled in this local manifest. That is intended configuration only, not proof of current connection state, historical absence, or completeness.`,
     });
   }
 
@@ -516,21 +601,41 @@ function buildGaps({ seeds, corpus, manifest }) {
   if (excluded.length) {
     items.push({
       tone: "info",
-      title: "Deliberately excluded",
-      detail: `These were held back at your instruction and were never indexed: ${excluded.join(", ")}.`,
+      title: "Local exclusion rules are configured",
+      detail: `The local manifest asks supported loaders to exclude: ${excluded.join(", ")}. This report does not prove whether those items existed historically or whether every prior loader applied the rule.`,
     });
   }
 
-  for (const row of arr(corpus?.rows)) {
-    const d = daysSince(row?.last_ingested);
-    if (d !== null && d > 14) {
-      const label = FRIENDLY[row.source_type] || row.source_type;
-      items.push({
-        tone: "warn",
-        title: "Behind on updates",
-        detail: `${label}: nothing new has come in for ${d} days. Anything added since then will not appear in an answer, and the brain will not mention that mid answer.`,
-      });
+  if (sourceInventory?.complete === true && sourceInventory.truncated === false) {
+    for (const source of arr(sourceInventory.sources)) {
+      const summary = sourceReceiptSummary(source);
+      const state = statusToken(source?.freshness?.state);
+      const history = statusToken(source?.freshness?.coverage?.history?.state);
+      const latestRun = statusToken(source?.receipt?.latest_run?.outcome);
+      if (["stale", "broken", "review", "never_synced", "unregistered"].includes(state) ||
+          (latestRun && latestRun !== "completed")) {
+        items.push({
+          tone: ["broken", "review", "unregistered"].includes(state) ||
+            ["failed", "refused"].includes(latestRun) ? "fail" : "warn",
+          title: `${summary.label} needs attention`,
+          detail: [summary.currency, summary.ingest, summary.run, summary.reason]
+            .filter(Boolean).join("; "),
+        });
+      }
+      if (history !== "complete") {
+        items.push({
+          tone: "warn",
+          title: `${summary.label} history remains unproven`,
+          detail: `${summary.history}; ${summary.ingest}.`,
+        });
+      }
     }
+  } else {
+    items.push({
+      tone: "warn",
+      title: "Authenticated source status is unknown",
+      detail: `The source-registry and receipt check was unavailable or incomplete${sourceInventoryError ? `: ${sourceInventoryError}` : "."} Local manifest settings do not replace that proof.`,
+    });
   }
 
   // Severity first. A question that returned nothing at all is a different
@@ -584,21 +689,33 @@ function renderExpectedToFail(expected) {
       } else if (kind === "answered") {
         outcome = "It answered anyway, with sources. Read that answer carefully before trusting it: you expected this one to be beyond the material.";
         tone = "pass";
+      } else if (kind === "answered_degraded") {
+        outcome = "It produced a cited answer while part of search was degraded. Treat it as partial, not as proof of complete coverage.";
+        tone = "warn";
       } else if (kind === "refused") {
         outcome = "It said it does not know, exactly as you predicted.";
+        tone = "warn";
+      } else if (kind === "search_unavailable") {
+        outcome = "The search did not complete. That is not a confirmed miss and supports no absence conclusion.";
+        tone = "fail";
+      } else if (kind === "coverage_incomplete") {
+        outcome = "The search ran, but source coverage remains incomplete or unknown. This is not a confirmed miss.";
         tone = "warn";
       } else if (kind === "unavailable") {
         outcome = "Sources matched, but no written answer was produced.";
         tone = "warn";
+      } else if (kind === "unknown") {
+        outcome = "The response did not carry enough status evidence to confirm a completed miss.";
+        tone = "warn";
       } else {
-        outcome = "Nothing matched, exactly as you predicted.";
+        outcome = "The completed search found no indexed match in the material it searched, as predicted. This does not prove nonexistence outside that searched material.";
         tone = "warn";
       }
       return (
         `<li class="predict predict-${tone}">` +
         `<span class="predict-q">${h(q)}</span>` +
         `<span class="predict-o">${h(outcome)}</span>` +
-        (kind === "answered" && !(typeof e === "string") && e.answer
+        (["answered", "answered_degraded"].includes(kind) && !(typeof e === "string") && e.answer
           ? `<div class="predict-a">${renderAnswerBody(e.answer)}</div>`
           : "") +
         `</li>`
@@ -616,57 +733,109 @@ function renderExpectedToFail(expected) {
 
 /* ------------------------------------------------------------- coverage */
 
-function renderCoverage(corpus, manifest) {
-  const rows = arr(corpus?.rows).slice().sort((a, b) => Number(b.total || 0) - Number(a.total || 0));
-  if (!rows.length) {
-    return `<p class="empty">No corpus summary was available when this report ran, so what is indexed could not be listed.</p>`;
+const displayCount = (value) => {
+  if (value === null || value === undefined || value === "") return "not reported";
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? num(Math.floor(count)) : "not reported";
+};
+
+function renderSourceReceipts(sourceInventory, sourceInventoryError) {
+  if (sourceInventory?.complete !== true || sourceInventory.truncated === true) {
+    return (
+      `<div class="empty"><p><b>Authenticated source status is unknown.</b></p>` +
+      `<p>The source-registry and receipt check was unavailable or incomplete` +
+      (sourceInventoryError ? `: ${h(sourceInventoryError)}` : ".") +
+      ` Local manifest settings do not replace that proof.</p></div>`
+    );
   }
+  const sources = arr(sourceInventory.sources);
+  if (!sources.length) {
+    return `<p class="empty">The authenticated source registry contains no source rows. Source completeness remains unproven.</p>`;
+  }
+  const body = sources.map((source) => {
+    const summary = sourceReceiptSummary(source);
+    const registered = source?.registered === true ? "registered" : "not registered";
+    return (
+      `<tr><td>${h(summary.label)}</td><td>${h(registered)}</td>` +
+      `<td>${h(summary.currency)}</td><td>${h(summary.history)}</td>` +
+      `<td>${h(summary.ingest)}` +
+      (summary.run ? `<br>${h(summary.run)}` : "") +
+      (summary.reason ? `<br>${h(summary.reason)}` : "") +
+      `</td></tr>`
+    );
+  }).join("");
+  return (
+    `<h3>Authenticated source receipts</h3>` +
+    `<p class="lede">Only the Brain's live source registry and completed receipts can establish connection status, a refresh expectation, a failure, or a complete sweep.</p>` +
+    `<div class="table-wrap"><table><thead><tr><th>Source</th><th>Registry</th><th>Freshness</th><th>History</th><th>Latest receipt</th></tr></thead>` +
+    `<tbody>${body}</tbody></table></div>`
+  );
+}
 
-  const total = rows.reduce((a, r) => a + Number(r.total || 0), 0);
-  const embedded = rows.reduce((a, r) => a + Number(r.embedded || 0), 0);
+function renderManifestIntent(manifest) {
+  const configured = Object.entries(manifest?.corpora || {})
+    .filter(([key, value]) => !key.startsWith("_") && value && typeof value === "object");
+  if (!configured.length) {
+    return `<p class="note">This local manifest lists no source intentions. That omission provides no evidence about live or historical source state.</p>`;
+  }
+  const items = configured.map(([key, value]) => {
+    const label = CORPUS_LABEL[key] || key;
+    const state = value.enabled === true ? "enabled" : value.enabled === false ? "disabled" : "not specified";
+    return `<li><b>${h(label)}:</b> ${h(state)} in this local manifest</li>`;
+  }).join("");
+  return (
+    `<h3>Intended local configuration</h3>` +
+    `<p class="lede">These settings describe what this local manifest intends. They do not prove an authenticated connection, a successful refresh, currentness, historical completeness, or that a source never held records.</p>` +
+    `<ul>${items}</ul>`
+  );
+}
 
-  const body = rows
-    .map((r) => {
-      const label = FRIENDLY[r.source_type] || r.source_type;
-      const t = Number(r.total || 0);
-      const e = Number(r.embedded || 0);
-      const readyPct = t ? Math.round((e / t) * 100) : 0;
-      const d = daysSince(r.last_ingested);
-      const fresh =
-        d === null
-          ? "not reported"
-          : d === 0
-            ? "today"
-            : `${d} ${plural(d, "day", "days")} ago`;
-      const toneClass = d === null ? "" : d <= 2 ? " fresh-ok" : d <= 14 ? " fresh-warn" : " fresh-bad";
+function renderCoverage(corpus, manifest, sourceInventory, sourceInventoryError) {
+  const knownCorpus = corpus && Array.isArray(corpus.rows);
+  const counts = corpusReportCounts(corpus);
+  const rows = counts.rows.slice().sort((a, b) =>
+    Number(b.chunks ?? b.total ?? 0) - Number(a.chunks ?? a.total ?? 0));
+
+  let corpusHtml;
+  if (!knownCorpus) {
+    corpusHtml = `<p class="empty">The authenticated corpus summary was unavailable, so logical document, extracted chunk, and semantic-visibility counts are unknown.</p>`;
+  } else if (!rows.length) {
+    corpusHtml = `<p class="empty">The authenticated corpus summary returned zero source rows for this snapshot. Source history and intended coverage still depend on the source receipts below.</p>`;
+  } else {
+    const body = rows.map((row) => {
+      const label = FRIENDLY[row.source_type] || row.source_type;
+      const logical = row.logical_documents ?? row.documents;
+      const chunks = row.chunks ?? row.total;
+      const visible = row.embedded;
       return (
         `<tr><td>${h(label)}</td>` +
-        `<td class="n">${h(num(t))}</td>` +
-        `<td class="n">${h(readyPct)}%</td>` +
-        `<td class="${toneClass.trim()}">${h(fresh)}</td></tr>`
+        `<td class="n">${h(displayCount(logical === null || logical === undefined ? null : Number(logical)))}</td>` +
+        `<td class="n">${h(displayCount(chunks === null || chunks === undefined ? null : Number(chunks)))}</td>` +
+        `<td class="n">${h(displayCount(visible === null || visible === undefined ? null : Number(visible)))}</td>` +
+        `<td>${h(isoDay(row.last_ingested) || "not reported")}</td></tr>`
       );
-    })
-    .join("");
+    }).join("");
+    const pending = counts.extractedChunks !== null && counts.semanticVisibleChunks !== null
+      ? Math.max(0, counts.extractedChunks - counts.semanticVisibleChunks)
+      : null;
+    corpusHtml = (
+      `<div class="stats">` +
+      `<div class="stat"><b>${h(displayCount(counts.logicalDocuments))}</b><span>logical documents</span></div>` +
+      `<div class="stat"><b>${h(displayCount(counts.extractedChunks))}</b><span>extracted chunks</span></div>` +
+      `<div class="stat"><b>${h(displayCount(counts.semanticVisibleChunks))}</b><span>meaning-search visible</span></div>` +
+      `</div>` +
+      `<p class="note">Extracted chunks are stored for keyword search. Meaning-search visibility is a separate, confirmed projection state.</p>` +
+      `<div class="table-wrap"><table><thead><tr><th>Kind</th><th class="n">Logical documents</th><th class="n">Extracted chunks</th><th class="n">Meaning-search visible</th><th>Last stored ingest receipt</th></tr></thead>` +
+      `<tbody>${body}</tbody></table></div>` +
+      (pending && pending > 0
+        ? `<p class="note">${h(num(pending))} extracted ${plural(pending, "chunk is", "chunks are")} not yet visibility-confirmed for meaning search. ${plural(pending, "It", "They")} may still be available to keyword search; this report does not call ${plural(pending, "it", "them")} absent.</p>`
+        : "")
+    );
+  }
 
-  const pending = total - embedded;
-  const note = pending > 0
-    ? `<p class="note">${h(num(pending))} ${plural(pending, "item is", "items are")} still being processed. Until that finishes they will not turn up in an answer.</p>`
-    : "";
-
-  const on = Object.keys(manifest?.corpora || {})
-    .filter((k) => !k.startsWith("_") && manifest.corpora[k] && manifest.corpora[k].enabled === true)
-    .map((k) => CORPUS_LABEL[k] || k);
-  const connected = on.length
-    ? `<p class="note">Connected sources: ${h(on.join(", "))}.</p>`
-    : "";
-
-  return (
-    `<p class="big-number">${h(num(total))} <span>${plural(total, "item", "items")} indexed</span></p>` +
-    connected +
-    `<div class="table-wrap"><table><thead><tr><th>Kind</th><th class="n">How many</th><th class="n">Searchable</th><th>Last update</th></tr></thead>` +
-    `<tbody>${body}</tbody></table></div>` +
-    note
-  );
+  return corpusHtml +
+    renderSourceReceipts(sourceInventory, sourceInventoryError) +
+    renderManifestIntent(manifest);
 }
 
 /* ------------------------------------------------------------ the checks */
@@ -905,6 +1074,8 @@ export function renderReportHtml(data) {
   const seeds = arr(d.seedAnswers);
   const expected = arr(d.expectedToFail);
   const corpus = d.corpus || null;
+  const sourceInventory = d.sourceInventory || null;
+  const sourceInventoryError = d.sourceInventoryError || null;
   const installState = d.installState || null;
   const generatedAt = d.generatedAt || new Date();
 
@@ -912,35 +1083,33 @@ export function renderReportHtml(data) {
   const title = clientName ? `${clientName} brain: verification report` : "Brain verification report";
 
   const verdict = computeVerdict({ acceptance, acceptanceError, seeds });
-  const gaps = buildGaps({ seeds, corpus, manifest });
+  const gaps = buildGaps({ seeds, manifest, sourceInventory, sourceInventoryError });
 
   const counts = acceptance?.counts || { pass: 0, fail: 0, warn: 0, skip: 0 };
   const checkTotal = counts.pass + counts.fail + counts.warn + counts.skip;
-  const answered = seeds.filter((s) => classifyAnswer(s) === "answered").length;
-  const indexed = arr(corpus?.rows).reduce((a, r) => a + Number(r.total || 0), 0);
-  const connectedCount = Object.keys(manifest.corpora || {}).filter(
-    (k) => !k.startsWith("_") && manifest.corpora[k] && manifest.corpora[k].enabled === true
-  ).length;
+  const answered = seeds.filter((s) =>
+    ["answered", "answered_degraded"].includes(classifyAnswer(s))).length;
+  const corpusCounts = corpusReportCounts(corpus);
 
   const stats =
     `<div class="stats">` +
     `<div class="stat"><b>${h(counts.pass)}/${h(checkTotal)}</b><span>checks passed</span></div>` +
     (seeds.length
       ? `<div class="stat"><b>${h(answered)}/${h(seeds.length)}</b><span>questions answered</span></div>`
-      : `<div class="stat"><b>none</b><span>questions captured</span></div>`) +
-    `<div class="stat"><b>${h(num(indexed))}</b><span>items indexed</span></div>` +
-    `<div class="stat"><b>${h(connectedCount)}</b><span>${plural(connectedCount, "source connected", "sources connected")}</span></div>` +
+      : `<div class="stat"><b>none</b><span>optional questions saved</span></div>`) +
+    `<div class="stat"><b>${h(displayCount(corpusCounts.logicalDocuments))}</b><span>logical documents</span></div>` +
+    `<div class="stat"><b>${h(displayCount(corpusCounts.extractedChunks))}</b><span>extracted chunks</span></div>` +
+    `<div class="stat"><b>${h(displayCount(corpusCounts.semanticVisibleChunks))}</b><span>meaning-search visible</span></div>` +
     `</div>`;
 
-  /* section 2: their questions. The reason this document exists. */
+  /* section 2: optional owner-authored regression questions. */
   const questions = seeds.length
     ? seeds.map((s, i) => renderQuestionCard(s, i)).join("")
-    : `<div class="empty"><p><b>No seed questions were captured for this install.</b></p>` +
-      `<p>This section is the point of the report: your own questions, answered from your own material, ` +
-      `with the sources named. Without them, everything below proves the machinery runs but not that it is useful to you.</p>` +
-      `<p>Send us ten questions you would ask a perfect assistant who had read everything. ` +
-      `They go in the manifest under testing.probe_questions, in your words rather than tidied up, ` +
-      `and the next run of this report answers them.</p></div>`;
+    : `<div class="empty"><p><b>No optional owner-authored questions were saved for this report.</b></p>` +
+      `<p>That is normal. Zero prepared questions are required for setup, adaptive acceptance, or handoff.</p>` +
+      `<p>Owner handoff uses actual source receipts and one approved low-sensitivity item proved as accepted, ` +
+      `stored with provenance, projected, and query-visible with a citation. An assistant can offer one ` +
+      `evidence-derived question at a time. Save owner-authored questions later only if repeatable regression checks would be useful.</p></div>`;
 
   const versionBits = [];
   if (installState?.product_version) versionBits.push(`Running version <b>${h(installState.product_version)}</b>.`);
@@ -968,7 +1137,7 @@ export function renderReportHtml(data) {
 <header>
 <p class="eyebrow">Verification report</p>
 <h1>${h(clientName ? clientName + " brain" : "Your brain")}</h1>
-<p class="sub">${h(generatedLabel ? "Generated " + generatedLabel + "." : "")} Every line below came from running live checks against your own installation${baseLabel ? ", at " + h(baseLabel) : ""}.</p>
+<p class="sub">${h(generatedLabel ? "Generated " + generatedLabel + "." : "")} This report combines completed live checks against your own installation${baseLabel ? ", at " + h(baseLabel) : ""}, intended local configuration, and explanatory guidance. Incomplete or unavailable checks are marked unknown.</p>
 <div class="verdict v-${h(verdict.state)}">
 <span class="verdict-word">${h(VERDICT_WORD[verdict.state])}</span>
 <p class="verdict-line">${h(verdict.line)}</p>
@@ -978,22 +1147,22 @@ ${stats}
 </header>
 
 <section id="questions">
-<div class="section-head"><h2>Your questions, answered</h2>
-<p class="lede">These are the questions you gave us at intake, in your words. Each answer below was produced by your brain from your own material, and every claim it makes names the document it came from.</p></div>
+<div class="section-head"><h2>Optional owner questions</h2>
+<p class="lede">When the owner chooses to save questions, each result below is produced from their own material and names the supporting document. A saved question list is not required for setup, adaptive acceptance, or handoff.</p></div>
 ${questions}
 </section>
 
 <section id="gaps">
-<div class="section-head"><h2>What your brain does not know</h2>
-<p class="lede">A tool that tells you where it is blind is worth more than one that always sounds sure. This list is generated from the same run as the answers above, not written by hand.</p></div>
+<div class="section-head"><h2>What needs attention or remains unproven</h2>
+<p class="lede">This list separates a completed no-match from an unavailable search, incomplete source coverage, local configuration, and authenticated source receipts.</p></div>
 ${renderGapList(gaps)}
 ${renderExpectedToFail(expected)}
 </section>
 
 <section id="coverage">
-<div class="section-head"><h2>What is indexed</h2>
-<p class="lede">Everything the brain can currently draw on, and how current each part is. Anything not listed here is not in it.</p></div>
-${renderCoverage(corpus, manifest)}
+<div class="section-head"><h2>What is stored and searchable</h2>
+<p class="lede">Logical documents, extracted keyword-searchable chunks, and visibility-confirmed semantic chunks are different counts. Source currentness and completeness appear only when authenticated receipts prove them.</p></div>
+${renderCoverage(corpus, manifest, sourceInventory, sourceInventoryError)}
 </section>
 
 <section id="checks">
@@ -1004,7 +1173,7 @@ ${renderChecks(acceptance, acceptanceError)}
 
 <footer>
 ${versionBits.length ? `<p>${versionBits.join(" ")}</p>` : ""}
-<p><b>You can run this yourself, at any time.</b> It is one command against your own infrastructure: <span class="cmd">${escapeHtml(renderCliCommands("brain test <manifest> --report"))}</span>. Nothing in this report was collected by us and no copy of your material leaves the accounts you own.</p>
+<p><b>You can run this yourself, at any time.</b> It is one command against your own infrastructure: <span class="cmd">${escapeHtml(renderCliCommands("brain test <manifest> --report"))}</span>. The report combines completed live checks, intended local configuration, and explanatory guidance; incomplete checks are marked unknown. Nothing in this report was collected by us and no copy of your material leaves the accounts you own.</p>
 <p>This file is self contained. It has no links, no fonts and no code to load, so it will open in any browser, on any machine, with no internet connection, for as long as you keep it.</p>
 </footer>
 </main>
@@ -1031,7 +1200,8 @@ export async function collectReportData({
   answerLimit = 8,
 }) {
   const root = String(base || "").replace(/\/+$/, "");
-  const probes = arr(manifest?.testing?.probe_questions);
+  const probes = arr(manifest?.testing?.probe_questions)
+    .filter((question) => String(question || "").trim());
   const predicted = arr(manifest?.testing?.expected_to_fail);
 
   const suite = new Acceptance({ base: root, adminKey, manifest, fetchImpl });
@@ -1063,6 +1233,20 @@ export async function collectReportData({
     // crash. The rest of the document is still worth handing over.
   }
 
+  let sourceInventory = null;
+  let sourceInventoryError = null;
+  try {
+    sourceInventory = await collectSourceInventorySnapshot({
+      base: root,
+      adminKey,
+      fetchImpl,
+    });
+  } catch (error) {
+    sourceInventoryError = String(
+      error?.message || error || "authenticated source inventory was unavailable"
+    );
+  }
+
   const askOne = async (question) => {
     try {
       const res = await fetchBrainWithAdminKey(fetchImpl, `${root}/api/rag/think`, {
@@ -1075,9 +1259,19 @@ export async function collectReportData({
       try {
         json = JSON.parse(text);
       } catch {
-        return { question, error: `the brain returned a non-JSON response (HTTP ${res.status})` };
+        return {
+          question,
+          search_status: "search_unavailable",
+          error: `the brain returned a non-JSON response (HTTP ${res.status})`,
+        };
       }
-      if (!res.ok) return { question, error: json?.error || `HTTP ${res.status}` };
+      if (!res.ok) {
+        return {
+          question,
+          search_status: "search_unavailable",
+          error: json?.error || `HTTP ${res.status}`,
+        };
+      }
       return {
         question,
         answer: json.answer || null,
@@ -1085,10 +1279,23 @@ export async function collectReportData({
         citations: json.citations || [],
         gaps: json.gaps || [],
         resultCount: Array.isArray(json.results) ? json.results.length : 0,
+        // Keep the Worker's explicit retrieval truth. Version-skewed Workers
+        // used `status`; current clients expose the same value as
+        // `search_status`, so the report stores both without discarding either.
+        search_status: json.search_status ?? json.status ?? null,
+        status: json.status ?? json.search_status ?? null,
+        degraded: json.degraded ?? null,
+        degraded_reason: json.degraded_reason ?? null,
+        notice: json.notice ?? null,
+        coverage_state: json.coverage_state ?? null,
+        coverage: json.coverage ?? null,
+        source_coverage: json.source_coverage ?? null,
+        retrieval_scope: json.retrieval_scope ?? null,
+        evidence_gate: json.evidence_gate ?? null,
       };
     } catch (e) {
       // One unreachable question must not cost the client the other nine.
-      return { question, error: e.message };
+      return { question, search_status: "search_unavailable", error: e.message };
     }
   };
 
@@ -1104,6 +1311,8 @@ export async function collectReportData({
     seedAnswers,
     expectedToFail,
     corpus,
+    sourceInventory,
+    sourceInventoryError,
     installState,
     base: root,
     generatedAt: new Date(),

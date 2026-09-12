@@ -53,8 +53,10 @@ const token = await onPlatform("win32", () =>
   readHiddenCloudflareToken({ input: terminal(), output: sink }));
 assert.ok(token, "the Cloudflare token prompt must refuse on Windows");
 assert.match(token, /cannot be trusted to hide/i);
-assert.match(token, /Read-Host -AsSecureString/, "the refusal must name a route that does mask");
-console.log("PASS  the token prompt refuses on Windows and names a masking alternative");
+assert.match(token, /not available from this Windows command in this release/i,
+  "the refusal must not claim a nonexistent secure launcher");
+assert.match(token, /Do not save a customer token in the user environment/i);
+console.log("PASS  the token prompt refuses on Windows without inventing a masking alternative");
 
 // The lesson from the first attempt. A secret with no environment alternative
 // must still be enterable on Windows, or the fix strands the whole platform.

@@ -2,7 +2,7 @@
 
 General invitations to connect banks are held. The reviewed source candidate
 is not a completed owner acceptance test. Track the executable regression and
-release requirements as UPDATE-017 through UPDATE-022 in
+release requirements as UPDATE-017 through UPDATE-022 and UPDATE-025 in
 [`update-incidents.json`](update-incidents.json). `npm run audit:updates`
 must remain held until reviewed evidence closes them.
 
@@ -17,6 +17,24 @@ Plaid protocol, ledger, custody, connection review or freshness paths is held by
 them outright.
 
 ## What the product must establish
+
+Until every step below has version-scoped evidence, ordinary onboarding must
+leave `corpora.bank_feed.enabled` false and must not run `brain connect bank`.
+The native command is an acceptance entrypoint, not permission to invite a
+customer. Use it first on the named disposable candidate under the approved
+field plan, then on the separately approved production pilot.
+
+Application-credential setup is also held. Generic `brain setup`, `brain
+secrets`, and technician workflows do not accept or write
+`BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, or
+`BANK_FEED_WRAPPING_KEY_V2`. Routine setup preserves an approved,
+already-configured candidate's complete existing set, but all three names must
+be present before a routine core-key rotation can begin. If any is missing,
+stop without changing a local or Worker secret and use only a separately
+reviewed owner-custody setup.
+Recording return and webhook URIs in a manifest is non-secret evidence of work
+already completed in the matching Plaid environment. It does not perform that
+held setup or justify automatically renewing a Plaid deferral for a new release.
 
 1. Deploy the exact packaged version and named Plaid environment to an approved
    disposable Brain. Read back its version, schema, required secret names and

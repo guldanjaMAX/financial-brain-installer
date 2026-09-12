@@ -65,8 +65,8 @@ function receiptFor(body, options) {
 
 async function fresh(options = {}) {
   const page = await harness.newPage();
-  await page.addInitScript(({ holdClipboard, failClipboard }) => {
-    sessionStorage.setItem("financial-brain:entity-scope", "company-alpha");
+  await page.addInitScript(({ holdClipboard, failClipboard, zeroEntities, savedScope }) => {
+    if (!zeroEntities) sessionStorage.setItem("financial-brain:entity-scope", savedScope || "company-alpha");
     window.__copiedEnrollmentLink = null;
     window.__clipboardWaiting = false;
     let releaseClipboard;
@@ -84,7 +84,14 @@ async function fresh(options = {}) {
         window.__copiedEnrollmentLink = value;
       } },
     });
-  }, { holdClipboard: Boolean(options.holdClipboard), failClipboard: Boolean(options.failClipboard) });
+  }, {
+    holdClipboard: Boolean(options.holdClipboard),
+    failClipboard: Boolean(options.failClipboard),
+    zeroEntities: Boolean(options.zeroEntities),
+    savedScope: options.savedScope || null,
+  });
+  const snapshotArrival = deferred();
+  const snapshotRelease = deferred();
   const searchArrival = deferred();
   const searchRelease = deferred();
   const createArrival = deferred();
@@ -92,8 +99,15 @@ async function fresh(options = {}) {
   const reissueArrival = deferred();
   const reissueRelease = deferred();
   const state = {
+    entities: options.zeroEntities ? [] : [...entities],
+    entityCreates: [],
+    searches: [],
+    snapshotArrived: snapshotArrival.promise,
+    releaseSnapshot: snapshotRelease.resolve,
     grants: [],
     creates: [],
+    reissues: [],
+    revokes: [],
     searchArrived: searchArrival.promise,
     releaseSearch: searchRelease.resolve,
     createArrived: createArrival.promise,
@@ -108,7 +122,39 @@ async function fresh(options = {}) {
     let response;
     let status = 200;
     if (endpoint === "/api/fin/snapshot") {
-      response = { ledger_installed: true, entities, sections_unavailable: [], unavailable: false };
+      if (options.holdSnapshot) {
+        snapshotArrival.resolve();
+        await bounded(snapshotRelease.promise, "Synthetic entity inventory was never released");
+      }
+      response = { ledger_installed: true, entities: state.entities, sections_unavailable: [], unavailable: false };
+    } else if (endpoint === "/api/owner/entities/create") {
+      state.entityCreates.push(body);
+      const entity = {
+        entity_slug: body.entity_slug,
+        legal_name: body.legal_name,
+        label: body.legal_name,
+        kind: body.kind,
+        status: "active",
+        relationship: "owned",
+        counterparty: false,
+        fixed: false,
+      };
+      state.entities.push(entity);
+      status = 201;
+      response = {
+        request_id: body.request_id,
+        entity_scope: { entity_slug: body.entity_slug },
+        entity: {
+          entity_slug: body.entity_slug,
+          legal_name: body.legal_name,
+          label: body.legal_name,
+          kind: body.kind,
+          parent_entity_slug: null,
+          ownership_bp: null,
+        },
+        changed: true,
+        replayed: false,
+      };
     } else if (endpoint === "/api/owner/preferences/read") {
       response = { preferences: [] };
     } else if (endpoint === "/api/app/document-access/status") {
@@ -119,6 +165,7 @@ async function fresh(options = {}) {
         grants: state.grants,
       };
     } else if (endpoint === "/api/rag/unified") {
+      state.searches.push(body);
       if (options.holdSearch) {
         searchArrival.resolve();
         await bounded(searchRelease.promise, "Synthetic document search was never released");
@@ -158,6 +205,7 @@ async function fresh(options = {}) {
         response = receiptFor(body, options);
       }
     } else if (endpoint === "/api/app/document-access/reissue") {
+      state.reissues.push(body);
       const grant = state.grants.find((item) => item.grant_id === body.grant_id);
       if (!grant) throw new Error("Synthetic reissue referenced an unknown grant");
       if (options.holdReissue) {
@@ -172,6 +220,19 @@ async function fresh(options = {}) {
         enrollment_url: `https://enrollment.invalid/reissue-${grant.grant_id}`,
         enrollment_expires_at: Date.now() + 15 * 60_000,
       };
+    } else if (endpoint === "/api/app/document-access/revoke") {
+      state.revokes.push(body);
+      const grant = state.grants.find((item) => item.grant_id === body.grant_id);
+      if (!grant) throw new Error("Synthetic revoke referenced an unknown grant");
+      grant.state = "revoked";
+      grant.revoked_at = Date.now();
+      response = {
+        status: "revoked",
+        grant_id: grant.grant_id,
+        changed: true,
+        replayed: false,
+        revoked_at: grant.revoked_at,
+      };
     } else {
       throw new Error(`Unexpected synthetic endpoint ${endpoint}`);
     }
@@ -179,7 +240,14 @@ async function fresh(options = {}) {
   });
 
   await page.goto(new URL("/test/browser/fixtures/document-access.html", harness.origin).href);
-  await page.getByRole("button", { name: "Company alpha", exact: true }).waitFor();
+  if (options.holdSnapshot) {
+    await bounded(state.snapshotArrived, "Synthetic entity inventory was not requested");
+    await page.getByText("Checking your financial list", { exact: true }).waitFor();
+  } else if (options.zeroEntities) {
+    await page.getByText("Add your first financial entity", { exact: true }).waitFor();
+  } else {
+    await page.getByRole("button", { name: "Company alpha", exact: true }).waitFor();
+  }
   await page.getByText("No document access has been created.", { exact: true }).waitFor();
   return { page, state };
 }
@@ -200,6 +268,70 @@ async function beginHeldCreate(page, state) {
 }
 
 try {
+  {
+    const { page, state } = await fresh({ holdSnapshot: true, savedScope: "stale-entity" });
+    check("a saved entity slug stays quarantined while current inventory is pending",
+      await page.getByLabel("Find evidence to share").isDisabled()
+      && await page.getByRole("button", { name: "Create exact document access", exact: true }).isDisabled()
+      && !(await page.locator("body").innerText()).includes("Another part of your finances"));
+    state.releaseSnapshot();
+    await page.getByText("Choose one part of your finances to continue", { exact: true }).waitFor();
+    check("an unverified saved slug is discarded without a search or write",
+      state.searches.length === 0
+      && await page.locator("[aria-pressed='true']").count() === 0
+      && await page.getByRole("button", { name: "Company alpha", exact: true }).isEnabled());
+    await page.close();
+  }
+
+  {
+    const { page, state } = await fresh({ zeroEntities: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await renderSettled(page);
+    const opening = await page.locator("body").innerText();
+    check("a zero-entity Brain explains the boundary and offers a first reviewed entity",
+      opening.includes("Nothing has been guessed or combined")
+      && opening.includes("does not import an account, decide a tax treatment")
+      && opening.includes("Do not guess"));
+    await page.getByLabel("Exact name").fill("Example Household");
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    await page.getByText("Choose what this is. Financial Brain will not choose a type for you.", { exact: true }).waitFor();
+    check("the first entity type is never silently chosen", state.entityCreates.length === 0
+      && await page.getByLabel("What is it?").inputValue() === "");
+    await page.getByLabel("What is it?").selectOption("household");
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    check("reviewing a first entity performs no write", state.entityCreates.length === 0
+      && (await page.locator("body").innerText()).includes("based only on your answer"));
+    await page.getByRole("button", { name: "Add this financial entity", exact: true }).click();
+    await page.getByRole("button", { name: "Example Household", exact: true }).waitFor();
+    check("one explicit confirmation creates and selects the exact owner-stated entity",
+      state.entityCreates.length === 1
+      && state.entityCreates[0].legal_name === "Example Household"
+      && state.entityCreates[0].kind === "household"
+      && !Object.hasOwn(state.entityCreates[0], "provenance")
+      && await page.getByRole("button", { name: "Example Household", exact: true }).getAttribute("aria-pressed") === "true");
+    check("the zero-entity recovery has no mobile horizontal overflow",
+      await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.close();
+  }
+
+  {
+    const { page } = await fresh();
+    const create = page.getByRole("button", { name: "Create exact document access", exact: true });
+    check("disabled guest access names the missing recipient",
+      await create.isDisabled()
+      && (await create.getAttribute("aria-describedby")) === "document-access-create-help"
+      && (await page.locator("#document-access-create-help").innerText()).includes("enter who this guest access is for"));
+    await page.getByLabel("Who is this for?").fill("Current recipient");
+    check("disabled guest access then names the missing exact document",
+      await create.isDisabled()
+      && (await page.locator("#document-access-create-help").innerText()).includes("find and select at least one exact document"));
+    await searchAndSelect(page);
+    check("guest access enables only after recipient and exact document are present",
+      await create.isEnabled()
+      && await page.locator("#document-access-create-help").count() === 0);
+    await page.close();
+  }
+
   {
     const { page, state } = await fresh({ holdSearch: true });
     await page.getByLabel("Find evidence to share").fill("alpha evidence");
@@ -368,6 +500,11 @@ try {
     await page.getByRole("button", { name: "Copy private enrollment link", exact: true }).waitFor();
     await page.getByLabel("Who is this for?").fill("Another draft");
     await page.getByRole("button", { name: "New link", exact: true }).click();
+    await page.getByText("Replace any earlier unused link with a new one?", { exact: true }).waitFor();
+    check("new-link consequence appears before the request",
+      state.reissues.length === 0
+      && (await page.locator("body").innerText()).includes("New link replaces any earlier unused link."));
+    await page.getByRole("button", { name: "Yes", exact: true }).click();
     await bounded(state.reissueArrived, "Synthetic reissue did not arrive");
     check("create and history mutations retain one shared action lock",
       await page.getByRole("button", { name: "Saving", exact: true }).isDisabled()
@@ -386,6 +523,15 @@ try {
     check("reissue copy confirmation names the same immutable receipt",
       (await page.locator("body").innerText()).includes("Private enrollment link for Current recipient in Company alpha copied. Send it only to the intended person before it expires.")
       && await page.evaluate(() => String(window.__copiedEnrollmentLink || "").includes("/reissue-dg_")));
+
+    await page.getByRole("button", { name: "Revoke", exact: true }).click();
+    await page.getByText("End this person's access now? Their current passkey session will stop working.", { exact: true }).waitFor();
+    check("revoke consequence appears before the request",
+      state.revokes.length === 0
+      && (await page.locator("body").innerText()).includes("Revoke ends this person's document access and current passkey session."));
+    await page.getByRole("button", { name: "Yes", exact: true }).click();
+    await page.getByText("Document access was revoked. Its passkey session can no longer read or ask.", { exact: true }).waitFor();
+    check("confirmed revoke ends the active grant", state.revokes.length === 1);
     await page.close();
   }
 

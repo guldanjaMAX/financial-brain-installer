@@ -11,6 +11,7 @@
 import { jsonResponse, privateNoStore } from "./core.js";
 import { ownerSessionPrincipal } from "./owner-auth.js";
 import { backendOf, storeFor, D1 } from "./store.js";
+import { restampFirstPartySourceProvenance } from "./provenance-receipt.js";
 import { isSourceKindConflict, resolveSourceKind } from "./source-receipt.js";
 import {
   decodeUploadBase64, extractOwnerUpload, OWNER_BINARY_MEDIA,
@@ -761,7 +762,7 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
         extracted_text_bytes: new TextEncoder().encode(normalizedContent).byteLength,
       };
     }
-    normalized = {
+    normalized = restampFirstPartySourceProvenance({
       ...envelope,
       source_type: "upload",
       source_id: `owner:${entitySlug}:${documentId}`,
@@ -779,7 +780,10 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
         owner_upload_payload_hash: payloadHash,
         ...(binaryHash ? { original_binary_sha256: binaryHash } : {}),
       },
-    };
+    }, {
+      textSource: extracted?.textSource || "native",
+      textReliable: extracted?.textReliable ?? true,
+    });
 
     // The intent is durable before common ingest. It contains no document
     // content, only hashes, provenance, and the preflight action required to

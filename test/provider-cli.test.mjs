@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,7 @@ writeFileSync(bankManifestPath, JSON.stringify({
     enabled: true,
     environment: "sandbox",
     registered_redirect_uris: ["https://fixture.invalid/app/connect/bank"],
+    registered_webhook_uris: ["https://fixture.invalid/api/webhooks/plaid"],
   } },
 }));
 
@@ -50,6 +51,15 @@ const realWarn = console.warn;
 console.log = () => {};
 console.warn = () => {};
 try {
+  let heldBankError = "";
+  try {
+    await cmdConnectBank(manifestPath, {}, { openImpl: () => true });
+  } catch (error) {
+    heldBankError = String(error?.message || error);
+  }
+  check("bank connect keeps an ordinary disabled manifest inside the held field gate",
+    /general Plaid bank invitations remain held/i.test(heldBankError) &&
+      /named, version-scoped disposable-candidate field plan/i.test(heldBankError), heldBankError);
   let bankPageUrl = null;
   const bankConnection = await cmdConnectBank(bankManifestPath, {}, {
     openImpl: (url) => { bankPageUrl = url; return true; },
@@ -324,6 +334,15 @@ try {
       /corpora\.slack\.enabled is not true/.test(routedOutput) &&
       !/--from must be drive, gmail, or imap/.test(routedOutput),
     routedOutput);
+
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const plaidReleaseGate = readFileSync(join(repositoryRoot, "docs", "PLAID-RELEASE-GATE.md"), "utf8");
+  const sourceMatrix = readFileSync(join(repositoryRoot, "onboarding", "07-ingest-source-matrix.md"), "utf8");
+  const publicTemplate = readFileSync(join(repositoryRoot, "templates", "brain.manifest.json"), "utf8");
+  check("the shipped gate, source matrix, and manifest template all keep ordinary bank invitations closed",
+    /ordinary onboarding must[\s\S]*leave `corpora\.bank_feed\.enabled` false/i.test(plaidReleaseGate) &&
+      /general bank invitations are closed/i.test(sourceMatrix) &&
+      /general[\s\S]*customer bank invitations remain held/i.test(publicTemplate));
 } finally {
   console.log = realLog;
   console.warn = realWarn;

@@ -34,6 +34,9 @@
 import { currentEvidenceCandidates, hasExplicitCurrentIntent } from "./query-intent.js";
 import { authorityFor } from "./evidence-authority.js";
 import {
+  annotateLineageFamilyTokens, attachEvidenceLineage, evidenceLineageFor,
+} from "./evidence-lineage.js";
+import {
   PUBLIC_INSTALL_SMOKE_CHUNK,
   PUBLIC_INSTALL_SMOKE_DOC_UID,
   PUBLIC_INSTALL_SMOKE_ID,
@@ -42,10 +45,30 @@ import {
   PUBLIC_INSTALL_SMOKE_TITLE,
   publicInstallSmokeContentHash,
 } from "./install-smoke.js";
-import { sourceReceiptOwnerMessage } from "./source-receipt.js";
+import { parseStoredSourceFailureEvidence, sourceReceiptOwnerMessage } from "./source-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { probeStalledVectorFence } from "./vector-fence-probe.js";
+import { publicOwnerNoteProvenance } from "./owner-note-contract.js";
+import {
+  storedProvenanceAssessment,
+  storedProvenanceMarkerAssessment,
+} from "./provenance-receipt.js";
+import {
+  currentMemorySql, legacySchemaMayReadWithoutMemorySupersessions,
+  memorySupersessionIntegrityFailure,
+} from "./memory-supersession.js";
+import {
+  DEFAULT_DIAGNOSE_CHUNK_PAGE_BUDGET,
+  DEFAULT_DIAGNOSE_CHUNK_PAGE_SIZE,
+  DEFAULT_DIAGNOSE_STATEMENT_BUDGET,
+  DIAGNOSE_MUTATION_MARKER_SQL,
+  mutationMarker,
+  mutationMarkerChanges,
+  publicMutationMarker,
+  scanChunkPages,
+} from "./diagnose-scan.js";
+import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
@@ -77,7 +100,20 @@ const HISTORICAL_SOURCE_LABELS = Object.freeze({
   plaid: "Plaid",
   upload: "uploaded file",
   "iphone-backup": "iPhone backup",
+  "owner-notes": "conversational owner notes",
 });
+
+// Migration 0020 populated legacy text columns with native/1. Those columns
+// are not extraction proof unless the same row carries a valid receipt.
+const assessStoredProvenance = (row) => {
+  // Real D1 projections always carry one of these metadata aliases, including
+  // an explicit null. A few pure ranking tests intentionally pass a reduced
+  // row shape; absence of the projection is not the same as a stored row with
+  // no receipt. The latter is gated to unknown below.
+  const projected = ["authority_meta", "_authority_meta", "meta", "metadata"]
+    .some((key) => Object.prototype.hasOwnProperty.call(row || {}, key));
+  return projected ? { ...row, ...storedProvenanceAssessment(row) } : row;
+};
 
 function historicalSourceLabel(kind) {
   return HISTORICAL_SOURCE_LABELS[String(kind || "")] || "connected";
@@ -473,7 +509,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const f = filterSql(filters, "c", 3);
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "c", "d", sc.nextParam);
-  const sql = `
+  const sql = (memoryClause) => `
     SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
            COALESCE(src.kind, 'unregistered') AS source_kind,
            c.title, c.document_date,
@@ -489,14 +525,74 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
     JOIN chunks c ON c.id = chunks_fts.rowid
     JOIN documents d ON d.doc_uid = c.doc_uid
     LEFT JOIN sources src ON src.name = d.source
-    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}
+    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${memoryClause}
     ORDER BY bm25(chunks_fts)
     LIMIT ?2`;
 
-  const { results } = await env.DB.prepare(sql).bind(
+  const run = (memoryClause) => env.DB.prepare(sql(memoryClause)).bind(
     terms, limit, ...f.params, ...sc.params, ...a.params,
   ).all();
+  let response;
+  try {
+    response = await run(currentMemorySql("d"));
+  } catch (error) {
+    if (!await legacySchemaMayReadWithoutMemorySupersessions(env, error)) throw error;
+    response = await run("");
+  }
+  const { results } = response;
   return results || [];
+}
+
+/**
+ * Find document rows that cannot participate in chunk search at all.
+ *
+ * An exact structured entity boundary uses the entity index. An ordinary owner
+ * question has no such boundary, so it inspects a bounded page of all
+ * zero-chunk rows and returns an explicit truncation state. That fallback is
+ * necessary for older encrypted files whose rows have neither entity_slug nor
+ * today's empty-content hash. The caller treats truncation as unknown coverage,
+ * so this lookup can never license a false corpus-absence claim. Every ordinary
+ * retrieval boundary is repeated here because even aggregate gap reporting
+ * must not reveal that a document exists outside the principal's grant or
+ * zones.
+ */
+export async function unchunkedTaxDocumentCandidates(env, {
+  entitySlug = null,
+  limit = 20,
+  filters = {},
+  access = null,
+  scope = null,
+} = {}) {
+  const boundedLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
+  const pageLimit = boundedLimit + 1;
+
+  const entityBound = Boolean(entitySlug);
+  const f = filterSql(filters, "d", entityBound ? 3 : 2);
+  const sc = scopeSql(scope, "d", f.nextParam);
+  const a = documentAccessSql(access, "d", "d", sc.nextParam);
+  const selectorSql = entityBound ? "AND d.entity_slug = ?1" : "";
+  const limitParameter = entityBound ? "?2" : "?1";
+  const binds = entityBound ? [entitySlug, pageLimit] : [pageLimit];
+  const { results } = await env.DB.prepare(
+    `/* unchunked-tax-document-candidates */
+     SELECT d.doc_uid, d.source, COALESCE(src.kind, 'unregistered') AS source_kind,
+            d.source_id, d.title, d.uri, d.document_date, d.date_source, d.date_reliable,
+            d.entity_slug, d.client, d.category, d.top_folder, d.platform,
+            d.text_source, d.text_reliable, d.meta AS authority_meta
+       FROM documents d
+       LEFT JOIN sources src ON src.name = d.source
+      WHERE d.deleted_at IS NULL
+        ${selectorSql}
+        AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_uid = d.doc_uid)
+        ${f.clause}${sc.clause}${a.clause}
+      ORDER BY d.ingested_at DESC
+      LIMIT ${limitParameter}`
+  ).bind(...binds, ...f.params, ...sc.params, ...a.params).all();
+  const page = (results || []).map(assessStoredProvenance);
+  return {
+    results: page.slice(0, boundedLimit).map((row) => ({ ...row, has_chunks: false })),
+    complete: page.length <= boundedLimit,
+  };
 }
 
 /** Vector search over Vectorize, hydrated and filtered in D1. */
@@ -558,7 +654,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
     const placeholders = batch.map((_, i) => "?" + (i + 1)).join(",");
     const f = filterSql(filters, "c", batch.length + 1);
     const sc = scopeSql(scope, "d", f.nextParam);
-    const { results: hydrated } = await env.DB.prepare(
+    const sql = (memoryClause) =>
       `SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
               COALESCE(src.kind, 'unregistered') AS source_kind,
               c.title, c.document_date,
@@ -571,10 +667,18 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
                    THEN json_extract(d.meta, '$.start') END AS occurred_at
        FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        LEFT JOIN sources src ON src.name = d.source
-       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}`
-    )
+       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${memoryClause}`;
+    const run = (memoryClause) => env.DB.prepare(sql(memoryClause))
       .bind(...batch, ...f.params, ...sc.params)
       .all();
+    let response;
+    try {
+      response = await run(currentMemorySql("d"));
+    } catch (error) {
+      if (!await legacySchemaMayReadWithoutMemorySupersessions(env, error)) throw error;
+      response = await run("");
+    }
+    const { results: hydrated } = response;
     results.push(...(hydrated || []));
   }
 
@@ -596,11 +700,15 @@ export async function search(env, {
   const pool = RETRIEVAL_CANDIDATE_DEPTH;
   const fusionK = Math.min(Math.max(Number(rrfK) || RRF_K, 1), 1e3);
 
-  const [kw, vec, projection] = await Promise.all([
-    searchKeyword(env, query, { limit: pool, filters, access, scope }).catch(() => []),
+  const settleModality = (promise) => promise.then(
+    (results) => ({ results, error: null }),
+    (error) => ({ results: [], error }),
+  );
+  const [keywordAttempt, vectorAttempt, projection] = await Promise.all([
+    settleModality(searchKeyword(env, query, { limit: pool, filters, access, scope })),
     embedding && access?.kind !== "grant" && scopeIsUnrestricted(scope)
-      ? searchVector(env, embedding, { limit: pool, filters, scope }).catch(() => [])
-      : Promise.resolve([]),
+      ? settleModality(searchVector(env, embedding, { limit: pool, filters, scope }))
+      : Promise.resolve({ results: [], error: null }),
     // Vectorize may return some old/current candidates while a newer accepted
     // changeset is still processing. Non-empty semantic results therefore do
     // not prove the complete D1 corpus is query-visible. Reuse the exact
@@ -610,6 +718,14 @@ export async function search(env, {
       ? vectorReadiness(env).catch(() => ({ ready: false }))
       : Promise.resolve(null),
   ]);
+  // Ordinary FTS or Vectorize failures remain independent degraded modalities.
+  // The correction ledger is shared authority for both, so losing it on schema
+  // 37 must stop the whole read instead of becoming a clean empty result.
+  const integrityFailure = [keywordAttempt.error, vectorAttempt.error]
+    .find((error) => memorySupersessionIntegrityFailure(error));
+  if (integrityFailure) throw integrityFailure;
+  const kw = keywordAttempt.results.map(assessStoredProvenance);
+  const vec = vectorAttempt.results.map(assessStoredProvenance);
 
   // Both empty is a real answer (nothing matched). Only ONE empty when both
   // were attempted means a subsystem is down, and a caller that cannot tell
@@ -765,6 +881,7 @@ export async function search(env, {
     // content_hash is an internal dedupe key, not part of the authenticated
     // search response contract or a stable source identifier for clients.
     const authority = authorityFor(row, { query, current: hasExplicitCurrentIntent(query) });
+    const lineage = evidenceLineageFor(row, { trustedSourceRecord: authority.owner_confirmed === true });
     const {
       content_hash: _internalContentHash,
       authority_meta: _internalAuthorityMeta,
@@ -773,8 +890,18 @@ export async function search(env, {
       _authority_document_head: _internalLegacyAuthorityDocumentHead,
       ...publicRow
     } = row;
-    documents.push({ ...publicRow, authority });
+    const writeProvenance = publicOwnerNoteProvenance(
+      row.source,
+      row.authority_meta ?? row._authority_meta,
+    );
+    documents.push(attachEvidenceLineage({
+      ...publicRow,
+      authority,
+      lineage: lineage.lineage,
+      ...(writeProvenance ? { write_provenance: writeProvenance } : {}),
+    }, lineage));
   }
+  await annotateLineageFamilyTokens(documents);
 
   return {
     results: documents.slice(0, limit),
@@ -802,31 +929,47 @@ export async function upsertChunks(env, chunks, { expectedContentHash = null } =
     // Computed at write time so a search hit can be resolved back to its chunk
     // even when the id had to be hashed to fit Vectorize's 64-byte ceiling.
     c.vector_id = await vectorIdFor(c.chunk_uid);
+    const boundRevisionId = c.bound_document_revision_id ?? null;
+    const chunkReceiptHash = boundRevisionId === null
+      ? null
+      : await sourceOriginalChunkReceiptHash({
+          document_revision_id: boundRevisionId,
+          chunk_ix: c.chunk_ix,
+          title: c.title ?? null,
+          text: c.text,
+        });
     const chunkStatement = env.DB.prepare(
       guarded
-        ? `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id)
-           SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12
+        ? `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id,
+                               bound_document_revision_id,result_chunk_receipt_hash)
+           SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14
            WHERE EXISTS (
-             SELECT 1 FROM documents WHERE doc_uid = ?2 AND content_hash = ?13
+             SELECT 1 FROM documents WHERE doc_uid = ?2 AND content_hash = ?15
            )
            ON CONFLICT(chunk_uid) DO UPDATE SET
              text = excluded.text, title = excluded.title,
              document_date = excluded.document_date,
              client = excluded.client, category = excluded.category,
              top_folder = excluded.top_folder, platform = excluded.platform,
-             vector_id = excluded.vector_id`
-        : `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+             vector_id = excluded.vector_id,
+             bound_document_revision_id = excluded.bound_document_revision_id,
+             result_chunk_receipt_hash = excluded.result_chunk_receipt_hash`
+        : `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id,
+                               bound_document_revision_id,result_chunk_receipt_hash)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
            ON CONFLICT(chunk_uid) DO UPDATE SET
              text = excluded.text, title = excluded.title,
              document_date = excluded.document_date,
              client = excluded.client, category = excluded.category,
              top_folder = excluded.top_folder, platform = excluded.platform,
-             vector_id = excluded.vector_id`
+             vector_id = excluded.vector_id,
+             bound_document_revision_id = excluded.bound_document_revision_id,
+             result_chunk_receipt_hash = excluded.result_chunk_receipt_hash`
     ).bind(
       c.chunk_uid, c.doc_uid, c.chunk_ix, c.text, c.source, c.title ?? null,
       c.document_date ?? null, c.client ?? null, c.category ?? null,
       c.top_folder ?? null, c.platform ?? null, c.vector_id,
+      boundRevisionId, chunkReceiptHash,
       ...(guarded ? [expectedContentHash] : [])
     );
     stmts.push(chunkStatement);
@@ -927,22 +1070,35 @@ export async function stageDocumentRevision(env, {
   const requiredWriteIndexes = [0];
   for (const chunk of chunks) {
     chunk.vector_id = await vectorIdFor(chunk.chunk_uid);
+    const boundRevisionId = chunk.bound_document_revision_id ?? null;
+    const chunkReceiptHash = boundRevisionId === null
+      ? null
+      : await sourceOriginalChunkReceiptHash({
+          document_revision_id: boundRevisionId,
+          chunk_ix: chunk.chunk_ix,
+          title: chunk.title ?? null,
+          text: chunk.text,
+        });
     requiredWriteIndexes.push(statements.length);
     statements.push(env.DB.prepare(
-      `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id)
+      `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id,
+                           bound_document_revision_id,result_chunk_receipt_hash)
        SELECT ?1,?2,?3,?4,?5,?6,?7,
-              documents.client, documents.category, documents.top_folder, documents.platform, ?8
+              documents.client, documents.category, documents.top_folder, documents.platform, ?8,?9,?10
        FROM documents
-       WHERE documents.doc_uid = ?2 AND documents.content_hash = ?9
+       WHERE documents.doc_uid = ?2 AND documents.content_hash = ?11
        ON CONFLICT(chunk_uid) DO UPDATE SET
          text = excluded.text, title = excluded.title,
          document_date = excluded.document_date,
          client = excluded.client, category = excluded.category,
          top_folder = excluded.top_folder, platform = excluded.platform,
-         vector_id = excluded.vector_id`
+         vector_id = excluded.vector_id,
+         bound_document_revision_id = excluded.bound_document_revision_id,
+         result_chunk_receipt_hash = excluded.result_chunk_receipt_hash`
     ).bind(
       chunk.chunk_uid, chunk.doc_uid, chunk.chunk_ix, chunk.text, chunk.source,
       chunk.title ?? null, chunk.document_date ?? null, chunk.vector_id,
+      boundRevisionId, chunkReceiptHash,
       expectedContentHash
     ));
 
@@ -2023,8 +2179,8 @@ const qAll = async (env, sql, ...bind) => {
 /**
  * Never prescribe an action the state that produced the message forbids.
  *
- * A paused brain refuses reindex and drain with 503, and the pause only lifts
- * when the update completes. Advising either from inside that state is a closed
+ * A paused brain refuses reindex, drain, and forget with 503, and the pause only
+ * lifts when the update completes. Advising one from inside that state is a closed
  * loop: the operator reads a remedy, runs it, is refused, and has learned
  * nothing. Four separate messages did this, and one client followed them across
  * four update attempts over 97 hours.
@@ -2032,42 +2188,182 @@ const qAll = async (env, sql, ...bind) => {
  * The rule is simple. If the brain is paused, say so and name what can actually
  * be done from here.
  */
-function remedyForState(env, remedy) {
+export function remedyForState(env, remedy, { pausedRemedy = null } = {}) {
   if (env?.VECTOR_DRAIN_MODE !== "paused-for-upgrade") return remedy;
-  return "This brain is paused for an upgrade, so reindex and drain both return 503 " +
-    "until it finishes. Complete or resume the update first; the pause lifts with it. " +
-    "Once it is running again, the remedy is: " + remedy;
+  const recovery = typeof pausedRemedy === "string" && pausedRemedy
+    ? pausedRemedy
+    : "Run `brain update <manifest>` to resume the durable paused work.";
+  return "This brain is paused for an upgrade, so corpus mutations including ingest, source registration, " +
+    "zone assignment, reindex, drain, and forget all return 503 until it finishes. " +
+    `${recovery} The update ` +
+    "is the only supported projection writer while this barrier holds. If the update " +
+    "reports this same finding again without progress, keep the brain paused and report " +
+    "that update failure for reviewed repair. Do not clear the pause or run reindex, drain, or forget by hand.";
 }
 
 export async function diagnose(env, {
   sampleLimit = 10,
   duplicateChunkScanLimit = 100_000,
+  chunkPageSize = DEFAULT_DIAGNOSE_CHUNK_PAGE_SIZE,
+  chunkPageBudget = DEFAULT_DIAGNOSE_CHUNK_PAGE_BUDGET,
+  statementBudget = DEFAULT_DIAGNOSE_STATEMENT_BUDGET,
 } = {}) {
   const findings = [];
+  const unavailableChecks = [];
+  const skippedChecks = new Set();
+  const incompleteReasons = new Set();
+  let statements = 0;
+  let budgetExhausted = false;
+  let reportComplete = true;
+
+  if (!Number.isSafeInteger(statementBudget) || statementBudget < 2) {
+    throw new Error("diagnose statementBudget must be a whole number of at least 2");
+  }
+
+  class DiagnoseStatementBudgetError extends Error {
+    constructor() {
+      super("the diagnostic statement budget was exhausted");
+      this.name = "DiagnoseStatementBudgetError";
+    }
+  }
+
+  // One statement is always held back for the closing mutation marker. Without
+  // that read, a report that used its whole budget could not tell whether the
+  // corpus changed while the earlier pages were being counted.
+  const query = async (method, sql, bind, { closingMarker = false } = {}) => {
+    const ceiling = closingMarker ? statementBudget : statementBudget - 1;
+    if (statements >= ceiling) throw new DiagnoseStatementBudgetError();
+    statements++;
+    const prepared = env.DB.prepare(sql);
+    const bound = bind.length ? prepared.bind(...bind) : prepared;
+    if (method === "first") return await bound.first();
+    const result = await bound.all();
+    return result?.results || [];
+  };
+  const one = (sql, ...bind) => query("first", sql, bind);
+  const all = (sql, ...bind) => query("all", sql, bind);
+  const closingMarker = (sql, ...bind) => query("first", sql, bind, { closingMarker: true });
   const add = (f) => findings.push(f);
+  const chunkDependentIds = new Set([
+    "store_agreement", "zone_projection", "chunk_document_source_mismatch",
+    "orphan_chunks", "blank_chunks", "chunk_outliers", "oversized_chunks",
+    "duplicate_chunks",
+  ]);
+  const addChunkDependent = (f) => findings.push({ ...f, chunkScanDependent: true });
+  const markIncomplete = (reason) => {
+    reportComplete = false;
+    incompleteReasons.add(reason);
+  };
   const safe = async (id, fn) => {
+    if (budgetExhausted) {
+      skippedChecks.add(id);
+      unavailableChecks.push(id);
+      return null;
+    }
     try { return await fn(); } catch (e) {
+      const exhausted = e instanceof DiagnoseStatementBudgetError;
+      if (exhausted) budgetExhausted = true;
+      markIncomplete(exhausted ? "statement_budget_exhausted" : `check_failed:${id}`);
+      // The opening marker is internal machinery for the eight public chunk
+      // checks below. Those logical checks are named unavailable together if
+      // the scan cannot be bracketed; do not leak a twentieth pseudo-check.
+      if (id !== "chunk_scan_marker") unavailableChecks.push(id);
       add({ id, area: "meta", severity: "warn", title: `check "${id}" could not run`,
+        observable: false, incomplete: true,
         detail: String(e.message || e).slice(0, 200),
-        action: "Usually a schema older than this version. Run `brain upgrade`." });
+        action: "This result proves no repair cause. Retry after the database recovers. If it persists, have a technician inspect this exact failed check before changing the corpus or schema." });
       return null;
     }
   };
 
-  const totals = (await safe("totals", async () => ({
-    documents: Number((await q1(env, "SELECT count(*) n FROM documents WHERE deleted_at IS NULL"))?.n || 0),
-    chunks: Number((await q1(env, "SELECT count(*) n FROM chunks"))?.n || 0),
-    sources: Number((await q1(env, "SELECT count(*) n FROM sources"))?.n || 0),
-  }))) || { documents: 0, chunks: 0, sources: 0 };
+  const openingRow = await safe("chunk_scan_marker", () => one(DIAGNOSE_MUTATION_MARKER_SQL));
+  let mutationStart = null;
+  let highWaterId = null;
+  if (openingRow) {
+    try {
+      mutationStart = mutationMarker(openingRow);
+      highWaterId = Number(openingRow.high_water_id);
+      if (!Number.isSafeInteger(highWaterId) || highWaterId < 0) {
+        throw new Error("diagnose returned an invalid chunk high-water id");
+      }
+    } catch (error) {
+      markIncomplete("invalid_opening_marker");
+      add({ id: "chunk_scan_marker", area: "meta", severity: "warn",
+        observable: false, incomplete: true,
+        title: "the opening corpus marker could not be read",
+        detail: String(error.message || error).slice(0, 200),
+        action: "Run `brain upgrade`, then rerun this diagnostic." });
+    }
+  }
+
+  const totalRow = await safe("totals", () => one(
+    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL) AS documents,
+            (SELECT count(*) FROM sources) AS sources`,
+  ));
+  const totalValue = (value, name) => {
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 0) {
+      throw new Error(`diagnose returned an invalid ${name} total`);
+    }
+    return number;
+  };
+  let documents = null;
+  let sources = null;
+  if (totalRow) {
+    try {
+      documents = totalValue(totalRow.documents, "document");
+      sources = totalValue(totalRow.sources, "source");
+    } catch (error) {
+      markIncomplete("invalid_totals");
+      unavailableChecks.push("totals");
+      add({ id: "totals", area: "meta", severity: "warn", observable: false, incomplete: true,
+        title: "the document totals could not be verified",
+        detail: String(error.message || error).slice(0, 200),
+        action: "Run `brain upgrade`, then rerun this diagnostic." });
+    }
+  }
+
+  let chunkScan = {
+    complete: false,
+    pageSize: chunkPageSize,
+    pages: 0,
+    highWaterId,
+    coveredThroughId: 0,
+    reason: "opening_marker_unavailable",
+    counts: null,
+  };
+  if (mutationStart && highWaterId !== null) {
+    chunkScan = await scanChunkPages(one, {
+      highWaterId,
+      pageSize: chunkPageSize,
+      pageBudget: chunkPageBudget,
+      chunkCharWarn: CHUNK_CHAR_WARN,
+      canReadPage: () => statements < statementBudget - 1,
+    });
+  }
+  if (!chunkScan.complete) {
+    if (chunkScan.reason === "statement_budget_exhausted") budgetExhausted = true;
+    markIncomplete(chunkScan.reason);
+    add({ id: "chunk_scan", area: "meta", severity: "warn", observable: false, incomplete: true,
+      title: "the bounded chunk audit did not finish",
+      detail: `It covered chunk ids through ${chunkScan.coveredThroughId ?? 0} of the fixed high-water ${chunkScan.highWaterId ?? "unknown"}. Reason: ${chunkScan.reason}. Partial counts were not treated as complete.`,
+      action: "Wait for active loading to finish, then rerun `brain diagnose <manifest>`. If this repeats, update the installer before relying on a clean result." });
+  }
+
+  const totals = {
+    documents,
+    chunks: chunkScan.complete ? chunkScan.counts.total : null,
+    sources,
+  };
 
   /* ---------------- COVERAGE: what did not make it in ---------------- */
 
   await safe("empty_documents", async () => {
-    const n = Number((await q1(env,
+    const n = Number((await one(
       `SELECT count(*) n FROM documents d LEFT JOIN chunks c ON c.doc_uid = d.doc_uid
        WHERE d.deleted_at IS NULL AND c.chunk_uid IS NULL`))?.n || 0);
     if (!n) return;
-    const rows = await qAll(env,
+    const rows = await all(
       `SELECT d.doc_uid, d.title, d.uri FROM documents d
        LEFT JOIN chunks c ON c.doc_uid = d.doc_uid
        WHERE d.deleted_at IS NULL AND c.chunk_uid IS NULL LIMIT ?1`, sampleLimit);
@@ -2075,14 +2371,14 @@ export async function diagnose(env, {
       title: `${n} document(s) were indexed but hold no text`,
       detail: "The brain believes it has these and can never answer from them. Almost always a scanned PDF with no text layer, or a format that extracted nothing.",
       samples: rows.map((r) => r.title || r.uri || r.doc_uid),
-      action: "If OCR is off, turn it on (safety.ocr.enabled) and re-ingest; these are the documents it exists for. If it is already on, these were refused for a stated reason, so read the ingest report and remove them rather than leaving the document count overstating what the brain knows." });
+      action: remedyForState(env, "If OCR is off, turn it on (safety.ocr.enabled) and re-ingest; these are the documents it exists for. If it is already on, these were refused for a stated reason, so read the ingest report and remove them rather than leaving the document count overstating what the brain knows.") });
   });
 
   // How much of this corpus was read by a machine off a picture. An owner
   // reading an answer deserves to know the shape of the evidence underneath it,
   // and this is the only place that number is visible in aggregate.
   await safe("ocr_coverage", async () => {
-    const row = await q1(env,
+    const row = await one(
       // Aliased ocr_full, not full: FULL is a reserved word in SQLite (FULL
       // OUTER JOIN) and the bare alias is a syntax error.
       `SELECT SUM(CASE WHEN text_source = 'ocr' THEN 1 ELSE 0 END) ocr_full,
@@ -2100,7 +2396,7 @@ export async function diagnose(env, {
   });
 
   await safe("undated", async () => {
-    const n = Number((await q1(env, "SELECT count(*) n FROM documents WHERE deleted_at IS NULL AND document_date IS NULL"))?.n || 0);
+    const n = Number((await one("SELECT count(*) n FROM documents WHERE deleted_at IS NULL AND document_date IS NULL"))?.n || 0);
     if (!n) return;
     const pct = totals.documents ? Math.round((n / totals.documents) * 100) : 0;
     add({ id: "undated", area: "coverage", severity: pct >= 34 ? "warn" : "info", count: n,
@@ -2112,29 +2408,29 @@ export async function diagnose(env, {
   });
 
   await safe("unregistered_sources", async () => {
-    const rows = await qAll(env,
+    const rows = await all(
       `SELECT d.source, count(*) n FROM documents d
        LEFT JOIN sources s ON s.name = d.source
        WHERE d.deleted_at IS NULL AND s.name IS NULL GROUP BY d.source`);
     for (const r of rows) add({ id: "unregistered_source", area: "coverage", severity: "warn", count: Number(r.n),
       title: `${r.n} document(s) sit under an unregistered source "${r.source}"`,
       detail: "They exist in the brain but no source owns them, so `brain forget` cannot remove them and freshness reporting cannot see them.",
-      action: `Register it: brain sources <manifest> --add ${r.source}` });
+      action: remedyForState(env, `Register it: brain sources <manifest> --add ${r.source}`) });
   });
 
   await safe("empty_sources", async () => {
-    const rows = await qAll(env,
+    const rows = await all(
       `SELECT s.name FROM sources s
        LEFT JOIN documents d ON d.source = s.name AND d.deleted_at IS NULL
        GROUP BY s.name HAVING count(d.doc_uid) = 0`);
     for (const r of rows) add({ id: "empty_source", area: "coverage", severity: "warn",
       title: `source "${r.name}" is registered but holds nothing`,
       detail: "Either it was never loaded, or a load failed and left no trace.",
-      action: "Run its ingest, or remove the registration so it stops implying coverage that does not exist." });
+      action: remedyForState(env, "Run its ingest, or remove the registration so it stops implying coverage that does not exist.") });
   });
 
   await safe("zone_assignment", async () => {
-    const row = await q1(env,
+    const row = await one(
       `SELECT count(*) AS sources,
               sum(CASE WHEN zone IS NULL OR trim(zone) = '' THEN 1 ELSE 0 END) AS unzoned,
               sum(CASE WHEN zone IS NOT NULL AND trim(zone) != '' THEN 1 ELSE 0 END) AS zoned
@@ -2150,7 +2446,7 @@ export async function diagnose(env, {
       add({ id: "zone_assignment", area: "coverage", severity: "warn", count: unzoned,
         title: `${unzoned} of ${sources} source(s) have no zone assignment`,
         detail: "Unzoned sources remain owner-only and are excluded from every named zone grant. A partially zoned corpus can therefore look complete to the owner while a scoped person cannot search most of it.",
-        action: "Run `brain sources <manifest>` to review the registered sources, then assign each intended source with `brain zone <manifest> --source NAME --zone ZONE`." });
+        action: remedyForState(env, "Run `brain sources <manifest>` to review the registered sources, then assign each intended source with `brain zone <manifest> --source NAME --zone ZONE`.") });
       return;
     }
     add({ id: "zone_assignment", area: "coverage", severity: "ok", count: sources,
@@ -2159,75 +2455,98 @@ export async function diagnose(env, {
   });
 
   await safe("zone_projection", async () => {
-    const row = await q1(env,
+    const row = await one(
       `SELECT
          (SELECT count(*)
             FROM documents d JOIN sources s ON s.name = d.source
            WHERE d.deleted_at IS NULL AND d.zone IS NOT s.zone) AS documents,
-         (SELECT count(*)
-            FROM chunks c JOIN sources s ON s.name = c.source
-           WHERE c.zone IS NOT s.zone) AS chunks,
          (SELECT count(*) FROM sources
            WHERE zone IS NOT NULL AND trim(zone) != '') AS zoned_sources`);
     if (!Number(row?.zoned_sources || 0)) return;
+    if (!chunkScan.complete) {
+      skippedChecks.add("zone_projection");
+      return;
+    }
     const documents = Number(row?.documents || 0);
-    const chunks = Number(row?.chunks || 0);
+    const chunks = chunkScan.counts.zoneMismatch;
     if (!documents && !chunks) return;
-    add({ id: "zone_projection", area: "integrity", severity: "warn", count: documents + chunks,
+    addChunkDependent({ id: "zone_projection", area: "integrity", severity: "warn", count: documents + chunks,
       title: `zone projection is behind for ${documents} document(s) and ${chunks} chunk(s)`,
       detail: "Access still follows the registered source's zone, so this drift does not widen a scoped grant. The denormalized document and chunk fields are not ready to become authorization inputs until the legacy rows are repaired.",
-      action: "Keep retrieval source-authoritative. Rerun `brain zone <manifest> --source NAME --zone ZONE` for each assigned source; every pass repairs at most 1,000 documents and 1,000 chunks. Repeat until the command reports no pending rows, then rerun `brain diagnose <manifest>`." });
+      action: remedyForState(env, "Keep retrieval source-authoritative. Rerun `brain zone <manifest> --source NAME --zone ZONE` for each assigned source; every pass repairs at most 1,000 documents and 1,000 chunks. Repeat until the command reports no pending rows, then rerun `brain diagnose <manifest>`.") });
   });
 
-  await safe("chunk_document_source_mismatch", async () => {
-    const count = Number((await q1(env,
-      `SELECT count(*) AS n
-         FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
-        WHERE c.source IS NOT d.source`))?.n || 0);
-    if (!count) return;
-    add({ id: "chunk_document_source_mismatch", area: "integrity", severity: "warn", count,
+  if (chunkScan.complete && chunkScan.counts.sourceMismatch) {
+    const count = chunkScan.counts.sourceMismatch;
+    addChunkDependent({ id: "chunk_document_source_mismatch", area: "integrity", severity: "warn", count,
       title: `${count} chunk(s) disagree with their owning document's source`,
       detail: "Authorization follows the document source, so this drift does not widen access. Source filters and provenance can still be misleading until the chunk projection is repaired.",
-      action: "Reingest the affected registered source. If the mismatch remains, run `brain update <manifest>` before relying on source-filtered results." });
-  });
+      action: remedyForState(env, "Reingest the affected registered source. If the mismatch remains, run `brain update <manifest>` before relying on source-filtered results.") });
+  } else if (!chunkScan.complete) {
+    skippedChecks.add("chunk_document_source_mismatch");
+  }
 
   /* ---------------- INTEGRITY: is it stored correctly ---------------- */
 
   await safe("store_agreement", async () => {
+    if (!chunkScan.complete) {
+      skippedChecks.add("store_agreement");
+      return;
+    }
+    const queue = await one(
+      `SELECT sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) upserts,
+              sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) deletes,
+              (SELECT vector_projection_status FROM install_state WHERE id = 1) projection_status
+       FROM vector_outbox`);
+    const pendingUpserts = totalValue(queue?.upserts ?? 0, "pending vector upsert");
+    const pendingDeletes = totalValue(queue?.deletes ?? 0, "pending vector delete");
+    const projectionStatus = String(queue?.projection_status || "");
+
+    // Provider acceptance and provider visibility are separate states. While
+    // an outbox row or an unverified projection remains, Vectorize can change
+    // between describe() and this D1 read without any corpus row changing. A
+    // count comparison in that interval can falsely call accepted work an
+    // orphan or a missing vector. The backlog and projection receipts already
+    // name that unsettled state; compare stores only at a verified empty cut.
+    if (pendingUpserts || pendingDeletes || projectionStatus !== "verified") {
+      addChunkDependent({ id: "store_agreement", area: "integrity", severity: "warn",
+        observable: false,
+        title: "the two stores cannot be compared while vector work is unsettled",
+        detail: `D1 holds ${totals.chunks} chunk(s), with ${pendingUpserts} upsert(s) and ${pendingDeletes} delete(s) still queued. The projection state is ${projectionStatus || "unavailable"}. A Vectorize count during this interval is not an exact snapshot of either side.`,
+        action: remedyForState(env, "Let the current vector work finish, then rerun `brain diagnose <manifest>`.") });
+      return;
+    }
+
     let vectors = null;
     try {
       const d = await env.VECTORIZE.describe();
       const v = Number(d?.vectorCount ?? d?.vectorsCount ?? d?.count);
-      if (Number.isFinite(v)) vectors = v;
+      if (Number.isSafeInteger(v) && v >= 0) vectors = v;
     } catch { /* older binding without describe() */ }
-
-    const queue = await q1(env,
-      `SELECT sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) upserts,
-              sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) deletes
-       FROM vector_outbox`);
-    const pendingUpserts = Number(queue?.upserts || 0);
-    const pendingDeletes = Number(queue?.deletes || 0);
-    const expected = totals.chunks - pendingUpserts;
+    const expected = totals.chunks;
 
     if (vectors === null) {
-      add({ id: "store_agreement", area: "integrity", severity: "info",
+      markIncomplete("vector_count_unavailable");
+      skippedChecks.add("store_agreement");
+      unavailableChecks.push("store_agreement");
+      addChunkDependent({ id: "store_agreement", area: "integrity", severity: "warn",
+        observable: false, incomplete: true,
         title: "the vector count could not be read from Vectorize",
-        detail: `D1 holds ${totals.chunks} chunk(s) with ${pendingUpserts} upsert(s) and ${pendingDeletes} delete(s) queued, so ${expected} current chunk(s) should be embedded. The vector store could not be asked how many it holds, so the two cannot be compared.`,
-        action: "Not a fault. This check needs a Vectorize binding that supports describe()." });
+        detail: `D1 holds ${totals.chunks} chunk(s) at a verified empty-queue cut. The vector store could not be asked how many it holds, so the two cannot be compared.`,
+        action: "Rerun this check. If it repeats, update the installer before relying on a clean result." });
       return;
     }
     const drift = Math.abs(vectors - expected);
-    const tolerance = Math.max(5, Math.round(expected * 0.01));
-    if (drift <= tolerance) {
-      add({ id: "store_agreement", area: "integrity", severity: "ok",
+    if (drift === 0) {
+      addChunkDependent({ id: "store_agreement", area: "integrity", severity: "ok",
         title: `both stores agree: ${vectors} vector(s) for ${expected} embedded chunk(s)`,
         detail: "The text store and the vector store hold the same corpus.", action: null });
       return;
     }
     const missing = vectors < expected;
-    add({ id: "store_agreement", area: "integrity", severity: "crit", count: drift,
+    addChunkDependent({ id: "store_agreement", area: "integrity", severity: "crit", count: drift,
       title: `the two stores disagree by ${drift} vector(s)`,
-      detail: `D1 says ${totals.chunks} chunk(s) with ${pendingUpserts} upsert(s) and ${pendingDeletes} delete(s) queued, so ${expected} current chunk(s) should be embedded. Vectorize holds ${vectors}. ` + (missing
+      detail: `D1 says ${totals.chunks} chunk(s) at a verified empty-queue cut, and Vectorize holds ${vectors}. ` + (missing
         ? "Vectors are MISSING: those chunks still answer keyword queries and are invisible to meaning-based search, which reads as poor retrieval rather than as a fault."
         : "There are MORE vectors than chunks: deleted documents likely left theirs behind, and they still compete for retrieval slots."),
       action: remedyForState(env, missing
@@ -2236,7 +2555,7 @@ export async function diagnose(env, {
   });
 
   await safe("backlog", async () => {
-    const row = await q1(env,
+    const row = await one(
       `SELECT count(*) n, min(queued_at) oldest, max(queued_at) newest,
               sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) upserts,
               sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) deletes
@@ -2250,7 +2569,7 @@ export async function diagnose(env, {
     // The projection fence retains the last accepted mutation timestamp even
     // after release. Report that durable evidence separately from a currently
     // held lease; neither proves exact provider visibility or future progress.
-    const state = await q1(env,
+    const state = await one(
       `SELECT CASE WHEN vector_drain_lease_owner IS NULL THEN 0 ELSE 1 END AS held,
               vector_drain_lease_expires_at AS expires,
               vector_projection_submitted_at AS submitted_at
@@ -2286,12 +2605,12 @@ export async function diagnose(env, {
   });
 
   await safe("quarantined", async () => {
-    const n = Number((await q1(env,
+    const n = Number((await one(
       `SELECT count(*) n FROM vector_outbox o
        JOIN vector_outbox_retry_state s ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
        WHERE s.quarantined_at IS NOT NULL`))?.n || 0);
     if (!n) return;
-    const rows = await qAll(env,
+    const rows = await all(
       `SELECT o.chunk_uid, s.attempts, s.last_error FROM vector_outbox o
        JOIN vector_outbox_retry_state s ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
        WHERE s.quarantined_at IS NOT NULL ORDER BY s.attempts DESC LIMIT ?1`, sampleLimit);
@@ -2299,13 +2618,15 @@ export async function diagnose(env, {
       title: `${n} vector operation(s) failed and were set aside`,
       detail: "Upsert failures stay invisible to meaning search; delete failures leave stale vectors consuming candidates. Both remain queued for repair.",
       samples: rows.map((r) => `${r.chunk_uid}: ${String(r.last_error || "").slice(0, 90)}`),
-      action: remedyForState(env, "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain drain <manifest>`.") });
+      action: remedyForState(env,
+        "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain drain <manifest>`.",
+        { pausedRemedy: "Read the errors above. Once the cause is fixed, use the operator vector-retry preview and confirmation to release the affected generations, then run `brain update <manifest>` to resume the paused bootstrap." }) });
   });
 
   await safe("vector_retries", async () => {
     // Attempts record history, not quarantine. Only the current generation's
     // retry state can say whether a row is held or waiting on its backoff.
-    const row = await q1(env,
+    const row = await one(
       `SELECT count(*) n,
               sum(CASE WHEN s.next_attempt_at>?1 THEN 1 ELSE 0 END) delayed
          FROM vector_outbox o LEFT JOIN vector_outbox_retry_state s
@@ -2320,22 +2641,25 @@ export async function diagnose(env, {
       action: remedyForState(env, "Let the scheduled drain retry eligible work, then check the next receipt or run `brain drain <manifest>`. If progress stops, inspect the next drain result.") });
   });
 
-  await safe("orphan_chunks", async () => {
-    const n = Number((await q1(env,
-      "SELECT count(*) n FROM chunks c LEFT JOIN documents d ON d.doc_uid = c.doc_uid WHERE d.doc_uid IS NULL"))?.n || 0);
-    if (n) add({ id: "orphan_chunks", area: "integrity", severity: "crit", count: n,
+  if (chunkScan.complete && chunkScan.counts.orphaned) {
+    const n = chunkScan.counts.orphaned;
+    addChunkDependent({ id: "orphan_chunks", area: "integrity", severity: "crit", count: n,
       title: `${n} chunk(s) belong to no document`,
       detail: "They can still be retrieved and cited, but the document behind the citation is gone.",
       action: remedyForState(env, "Report this, it should not happen. `brain reindex <manifest> --yes` will not clear it on its own.") });
-  });
+  } else if (!chunkScan.complete) {
+    skippedChecks.add("orphan_chunks");
+  }
 
-  await safe("blank_chunks", async () => {
-    const n = Number((await q1(env, "SELECT count(*) n FROM chunks WHERE trim(text) = ''"))?.n || 0);
-    if (n) add({ id: "blank_chunks", area: "integrity", severity: "warn", count: n,
+  if (chunkScan.complete && chunkScan.counts.blank) {
+    const n = chunkScan.counts.blank;
+    addChunkDependent({ id: "blank_chunks", area: "integrity", severity: "warn", count: n,
       title: `${n} chunk(s) hold no text`,
       detail: "Each occupies a vector and can be returned as a hit while carrying nothing.",
-      action: "Re-ingest the documents they came from." });
-  });
+      action: remedyForState(env, "Re-ingest the documents they came from.") });
+  } else if (!chunkScan.complete) {
+    skippedChecks.add("blank_chunks");
+  }
 
   await safe("duplicate_documents", async () => {
     // Sampling the largest groups made the displayed count look exact while it
@@ -2343,7 +2667,7 @@ export async function diagnose(env, {
     // the complete grouped result, and keep private identities out of the
     // finding. This stays cheap because documents stores one content hash per
     // document rather than full chunk bodies.
-    const summary = await q1(env,
+    const summary = await one(
       `SELECT count(*) groups, COALESCE(sum(n - 1), 0) extra
        FROM (
          SELECT content_hash, count(*) n FROM documents
@@ -2360,7 +2684,19 @@ export async function diagnose(env, {
   /* ---------------- EFFICIENCY: is it stored well ---------------- */
 
   await safe("chunk_outliers", async () => {
-    const rows = await qAll(env,
+    if (!chunkScan.complete) {
+      skippedChecks.add("chunk_outliers");
+      return;
+    }
+    if (totals.chunks > duplicateChunkScanLimit) {
+      addChunkDependent({ id: "chunk_outliers", area: "efficiency", severity: "info",
+        observable: false,
+        title: "exact per-document chunk outliers are not observable at this scale",
+        detail: `The exact grouping check is bounded to ${duplicateChunkScanLimit} chunks, and this corpus has ${totals.chunks}. Running it here would add another whole-corpus pass after the bounded integrity scan.`,
+        action: "No fault was inferred. Review unusually large source files during ingest; a future maintained aggregate will make this exact check scale safely." });
+      return;
+    }
+    const rows = await all(
       `SELECT d.title, d.uri, count(*) n FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        WHERE d.deleted_at IS NULL GROUP BY c.doc_uid ORDER BY n DESC LIMIT ?1`, sampleLimit);
     if (!rows.length) return;
@@ -2370,52 +2706,137 @@ export async function diagnose(env, {
     // one chunk each makes the largest 33% of everything. Firing there would
     // warn on every healthy small install, which is how a client learns to
     // ignore this report entirely.
-    if (totals.chunks >= 50 && share >= 20) add({ id: "chunk_outliers", area: "efficiency", severity: "warn", count: top,
+    if (totals.chunks >= 50 && share >= 20) addChunkDependent({ id: "chunk_outliers", area: "efficiency", severity: "warn", count: top,
       title: `one document produced ${top} chunks, ${share}% of the entire corpus`,
       detail: "Usually a spreadsheet. It crowds out every other document in retrieval and dominates cost, while rarely being what anyone is actually asking about.",
       samples: rows.slice(0, 5).map((r) => `${r.n} chunks: ${(r.title || r.uri || "?").slice(0, 60)}`),
-      action: "Consider loading a summary instead of the raw sheet, or excluding it." });
+      action: remedyForState(env, "Consider loading a summary instead of the raw sheet, or excluding it.") });
   });
 
-  await safe("oversized_chunks", async () => {
-    const n = Number((await q1(env, "SELECT count(*) n FROM chunks WHERE length(text) > ?1", CHUNK_CHAR_WARN))?.n || 0);
-    if (!n) return;
+  if (chunkScan.complete && chunkScan.counts.oversized) {
+    const n = chunkScan.counts.oversized;
     const pct = totals.chunks ? Math.round((n / totals.chunks) * 100) : 0;
-    add({ id: "oversized_chunks", area: "efficiency", severity: pct >= 20 ? "warn" : "info", count: n,
+    addChunkDependent({ id: "oversized_chunks", area: "efficiency", severity: pct >= 20 ? "warn" : "info", count: n,
       title: `${n} chunk(s) (${pct}%) are long enough to be truncated before embedding`,
       detail: `The embedding model reads about 512 tokens. Past roughly ${CHUNK_CHAR_WARN} characters the rest is silently cut, so the tail is stored but never searchable by meaning.`,
       action: "Not urgent, and invisible in every other way. Worth knowing before blaming retrieval quality." });
-  });
+  } else if (!chunkScan.complete) {
+    skippedChecks.add("oversized_chunks");
+  }
 
   await safe("duplicate_chunks", async () => {
+    if (!chunkScan.complete) {
+      skippedChecks.add("duplicate_chunks");
+      return;
+    }
     // Exact GROUP BY over every full chunk body exceeds D1's query budget on a
     // large corpus. A timed-out diagnostic used to become a generic warning,
     // which made a healthy large install look broken while proving nothing
     // about duplicates. Stay explicit about the unavailable measurement until
     // chunk text hashes make the check bounded and indexable.
     if (totals.chunks > duplicateChunkScanLimit) {
-      add({ id: "duplicate_chunks", area: "efficiency", severity: "info",
+      addChunkDependent({ id: "duplicate_chunks", area: "efficiency", severity: "info",
         observable: false,
         title: "exact duplicate chunk measurement is not observable at this scale",
         detail: `The exact full-text grouping check is bounded to ${duplicateChunkScanLimit} chunks, and this corpus has ${totals.chunks}. Running it here could exhaust D1's query budget without returning evidence.`,
         action: "Use the duplicate-document result today. A future chunk text-hash migration will make this exact check scale safely." });
       return;
     }
-    const rows = await qAll(env,
+    const rows = await all(
       "SELECT count(*) n FROM (SELECT text FROM chunks GROUP BY text HAVING count(*) > 1 LIMIT 5000)");
     const groups = Number(rows?.[0]?.n || 0);
-    if (groups > 10) add({ id: "duplicate_chunks", area: "efficiency", severity: "info", count: groups,
+    if (groups > 10) addChunkDependent({ id: "duplicate_chunks", area: "efficiency", severity: "info", count: groups,
       title: `${groups}+ groups of identical chunk text`,
       detail: "Repeated headers, footers or boilerplate. Each copy is embedded and stored separately and can occupy a retrieval slot.",
-      action: "Harmless at small scale. Worth trimming on a large corpus." });
+      action: remedyForState(env, "Harmless at small scale. Worth trimming on a large corpus.") });
   });
 
-  const count = (s) => findings.filter((f) => f.severity === s).length;
+  let mutationEnd = null;
+  try {
+    mutationEnd = mutationMarker(await closingMarker(DIAGNOSE_MUTATION_MARKER_SQL));
+  } catch (error) {
+    const reason = error instanceof DiagnoseStatementBudgetError
+      ? "statement_budget_exhausted"
+      : "closing_marker_unavailable";
+    markIncomplete(reason);
+    chunkScan.complete = false;
+    chunkScan.reason = reason;
+    add({ id: "chunk_scan_marker", area: "meta", severity: "warn",
+      observable: false, incomplete: true,
+      title: "the closing corpus marker could not be read",
+      detail: "The diagnostic cannot prove that its pages describe one stable corpus. No partial count was treated as a clean result.",
+      action: "Wait for active loading to finish, then rerun `brain diagnose <manifest>`." });
+  }
+
+  const changedMarkers = mutationStart && mutationEnd
+    ? mutationMarkerChanges(mutationStart, mutationEnd)
+    : [];
+  if (changedMarkers.length) {
+    markIncomplete("corpus_changed_during_diagnosis");
+    chunkScan.complete = false;
+    chunkScan.reason = "corpus_changed_during_diagnosis";
+    add({ id: "chunk_scan", area: "meta", severity: "warn",
+      observable: false, incomplete: true,
+      title: "the corpus changed while it was being checked",
+      detail: "The opening and closing mutation markers differ. Counts from different moments were not combined into a clean result.",
+      action: "Let the current load, update, or deletion finish, then rerun `brain diagnose <manifest>`." });
+  }
+
+  if (!chunkScan.complete) {
+    for (const id of chunkDependentIds) {
+      skippedChecks.add(id);
+      unavailableChecks.push(id);
+    }
+    // A page-derived count may have been valid when it was read, but it is not
+    // an exact report of one corpus after a concurrent mutation was observed.
+    for (let index = findings.length - 1; index >= 0; index--) {
+      if (findings[index].chunkScanDependent) findings.splice(index, 1);
+    }
+    totals.chunks = null;
+  }
+  const stableMarkerBracket = Boolean(mutationStart && mutationEnd && changedMarkers.length === 0);
+  if (!stableMarkerBracket) {
+    // These totals came from separate statements inside the same bracket. If
+    // either marker is missing or changed, none is a current count receipt.
+    totals.documents = null;
+    totals.sources = null;
+    unavailableChecks.push("totals");
+  }
+
+  const publicFindings = findings.map(({ chunkScanDependent: _internal, ...finding }) => finding);
+  const count = (s) => publicFindings.filter((f) => f.severity === s).length;
+  const unavailable = [...new Set(unavailableChecks)].sort();
+  const scan = {
+    complete: reportComplete && chunkScan.complete,
+    pageSize: chunkScan.pageSize,
+    pages: chunkScan.pages,
+    statements,
+    highWaterId: chunkScan.highWaterId,
+    coveredThroughId: chunkScan.coveredThroughId,
+    mutationStart: publicMutationMarker(mutationStart),
+    mutationEnd: publicMutationMarker(mutationEnd),
+    changedMarkers,
+    reason: reportComplete && chunkScan.complete ? null : [...incompleteReasons][0] || chunkScan.reason,
+  };
+  const complete = scan.complete && unavailable.length === 0;
   return {
+    complete,
+    scan: { ...scan, complete },
     totals,
-    findings,
-    summary: { crit: count("crit"), warn: count("warn"), info: count("info"), ok: count("ok") },
-    verdict: count("crit") ? "problems" : count("warn") ? "usable_with_gaps" : "healthy",
+    findings: publicFindings,
+    skippedChecks: [...skippedChecks].sort(),
+    unavailable_checks: unavailable,
+    summary: {
+      crit: count("crit"), warn: count("warn"), info: count("info"), ok: count("ok"),
+      unavailable: unavailable.length,
+    },
+    verdict: !complete
+      ? "incomplete"
+      : count("crit")
+        ? "problems"
+        : count("warn")
+          ? "usable_with_gaps"
+          : "healthy",
   };
 }
 
@@ -2445,11 +2866,64 @@ const REFRESHABLE_SOURCE_KINDS = new Set([
   "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid",
 ]);
 
+function sourceOwnerRemedy(source, concern = "refresh") {
+  const kind = String(source?.kind || "").toLowerCase();
+  const full = {
+    drive: "Reconnect Google if access has expired, then run a full Drive sync with no --limit.",
+    gmail: "Reconnect Google if access has expired, then run a full Gmail sync with no --limit.",
+    calendar: "Reconnect Google if access has expired, then run Calendar with --reset and no --limit for the configured historical scope.",
+    imap: "Check the mailbox connection, then run a full IMAP sync with --reset and no --limit.",
+    imessage: "On the owner Mac, confirm Full Disk Access, then run iMessage with --reset and no --limit. That proves only the selected local Messages database; load a reviewed iPhone backup or export when older, deleted, or attachment-only history matters.",
+    whatsapp: "Keep the phone linked for new messages and load an owner-provided export for any history from before the link date.",
+    microsoft: "Reconnect Microsoft 365 if access has expired, then run a full Microsoft sync with no --limit.",
+    dropbox: "Reconnect Dropbox if access has expired, then run a full Dropbox sync with no --limit.",
+    slack: "Reconnect Slack if access has expired, then traverse every accessible channel without bounded thread limits. Removed or inaccessible conversations remain an explicit connector limitation.",
+    notion: "Reconnect Notion if access has expired, share the intended pages with the integration, then traverse those pages without block limits. Pages removed from integration access remain an explicit limitation.",
+    hubspot: "Reconnect HubSpot if access has expired, then capture every intended object type. Permanently deleted objects remain an explicit connector limitation.",
+    quickbooks: "Reconnect the intended QuickBooks company if access has expired, then capture every intended entity type. Deleted records remain an explicit connector limitation.",
+    zoom: "Reconnect Zoom if access has expired, then run a full Zoom sync with no --limit.",
+    plaid: "Reconnect the intended financial institutions, resolve any account that needs attention, then run the bank sync again.",
+    upload: `Re-run the whole folder for source "${source?.name}" with no --limit, then resolve every unreadable or unsupported file it reports.`,
+    "iphone-backup": "Create a current, readable iPhone backup and load that whole snapshot again with no --limit. Load important attachment-only content separately when a message row has no searchable text.",
+  }[kind];
+  if (full) return full;
+  return concern === "refresh"
+    ? "Check this source's connection and schedule, then run its normal refresh again."
+    : "Run a complete source load with no item or date limit, then resolve every reported skip or failure.";
+}
+
+function gapWithRemedy(source, concern, gap) {
+  const remedy = sourceOwnerRemedy(source, concern);
+  return { ...gap, remedy, detail: `${gap.detail} Next: ${remedy}` };
+}
+
 function timestampMs(value) {
   if (value === null || value === undefined || value === "") return NaN;
   if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function missingCoverageRunColumns(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return [
+    "docs_refused", "docs_failed", "metrics_version",
+    "confirmed_from", "confirmed_through", "target_from", "target_through",
+  ].some((column) => new RegExp(
+    `(?:no such column|unknown column)\\s*:?\\s*(?:[a-z0-9_]+\\.)?[\"'\\x60]?${column}[\"'\\x60]?\\b`,
+    "i",
+  ).test(message));
+}
+
+function missingFailureEvidenceColumn(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return /(?:no such column|unknown column)\s*:?\s*(?:[a-z0-9_]+\.)?["'\x60]?failure_evidence["'\x60]?\b/i
+    .test(message);
+}
+
+function missingSyncRunsTable(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return /no such table|does not exist/.test(message) && message.includes("sync_runs");
 }
 
 /**
@@ -2544,11 +3018,11 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
   for (const s of rows) {
     if (allowed && !allowed.has(String(s.name))) continue;
     if (s.registered === 0 || s.registered === false || String(s.registered) === "0") {
-      gaps.push({
+      gaps.push(gapWithRemedy(s, "history", {
         type: "source_unregistered",
         source: s.name,
         detail: `Records stored under "${s.name}" have no source-registry entry. Their connector, complete-history status, and access zone are unproven, so a missing result cannot be treated as proof that those records contain no answer.`,
-      });
+      }));
       continue;
     }
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
@@ -2557,87 +3031,83 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     const operational = operationalFreshness(s, now);
 
     if (operational.state === "broken") {
-      gaps.push({
+      gaps.push(gapWithRemedy(s, "refresh", {
         type: "sync_broken",
         source: s.name,
         days_since_ingest: days,
         detail: `The "${s.name}" source stopped updating${days === null ? "" : ` ${days} day(s) ago`}: ${operational.reason}. Anything added since is not in the brain.`,
-      });
-      continue;
+      }));
     }
     if (operational.state === "review") {
-      gaps.push({
+      gaps.push(gapWithRemedy(s, "refresh", {
         type: "sync_review",
         source: s.name,
         days_since_ingest: days,
         detail: `The ${historicalSourceLabel(s.kind)} source is paused for safety review: ${operational.reason}. Its coverage is not complete until the owner resolves that review.`,
-      });
-      continue;
+      }));
     }
 
     const syncInProgress = operational.state === "indexing";
     if (syncInProgress) {
-      gaps.push({
+      gaps.push(gapWithRemedy(s, "refresh", {
         type: "sync_in_progress",
         source: s.name,
         days_since_ingest: days,
         detail: `The ${historicalSourceLabel(s.kind)} source is currently updating. Records accepted before this run remain usable, but material still being discovered may be absent from results, so a missing result is provisional.`,
-      });
+      }));
     }
 
     const expected = Number(s.expected_refresh_seconds) || null;
     if (!expected) {
       if (!s.last_complete_sweep_at) {
         const hasRecords = Number(s.document_count || 0) > 0;
-        gaps.push({
+        gaps.push(gapWithRemedy(s, "history", {
           type: "history_unproven",
           source: s.name,
           detail: hasRecords
             ? `The ${historicalSourceLabel(s.kind)} source has usable records, but its declared history is not yet proven complete. A missing result may still be outside confirmed coverage.`
             : `The ${historicalSourceLabel(s.kind)} source is registered, but no complete history sweep has been confirmed. A missing result cannot be treated as proof that its declared records contain no answer.`,
-        });
-      } else if (!syncInProgress && REFRESHABLE_SOURCE_KINDS.has(String(s.kind || "").toLowerCase())) {
-        gaps.push({
+        }));
+      } else if (!operational.state && REFRESHABLE_SOURCE_KINDS.has(String(s.kind || "").toLowerCase())) {
+        gaps.push(gapWithRemedy(s, "refresh", {
           type: "refresh_unscheduled",
           source: s.name,
           days_since_ingest: days,
           detail: `The ${historicalSourceLabel(s.kind)} source has a complete point-in-time sweep, but no refresh schedule is recorded. Material added after${Number.isFinite(last) ? ` ${new Date(last).toISOString().slice(0, 10)}` : " that sweep"} may be missing from the brain.`,
-        });
+        }));
       }
       continue; // no refresh expectation, so no staleness claim made
     }
 
     if (ageSec === null) {
-      gaps.push({
+      gaps.push(gapWithRemedy(s, "refresh", {
         type: "never_synced",
         source: s.name,
         detail: `The "${s.name}" source is expected to refresh but has never completed one, so its contents may be missing entirely.`,
-      });
-      continue;
+      }));
     }
 
     // 1.5x before complaining: a cron that runs daily and is six hours late is
     // working. Warning at the first minute past due is how alerts get ignored.
-    if (ageSec > expected * 1.5) {
-      gaps.push({
+    if (ageSec !== null && ageSec > expected * 1.5) {
+      gaps.push(gapWithRemedy(s, "refresh", {
         type: "coverage_stale",
         source: s.name,
         days_since_ingest: days,
         expected_every_days: Math.round(expected / 86400) || null,
         detail: `The "${s.name}" source was last read ${days} day(s) ago and is expected to refresh about every ${Math.max(1, Math.round(expected / 86400))} day(s). Material added since then is not in the brain, and would not show up as a missing answer.`,
-      });
-      continue;
+      }));
     }
 
     if (!s.last_complete_sweep_at) {
       const hasRecords = Number(s.document_count || 0) > 0;
-      gaps.push({
+      gaps.push(gapWithRemedy(s, "history", {
         type: "history_unproven",
         source: s.name,
         detail: hasRecords
           ? `The ${historicalSourceLabel(s.kind)} source has usable records, but its declared history is not yet proven complete. A missing result may still be outside confirmed coverage.`
           : `The ${historicalSourceLabel(s.kind)} source is registered, but no complete history sweep has been confirmed. A missing result cannot be treated as proof that its declared records contain no answer.`,
-      });
+      }));
     }
   }
   return { gaps, unavailable: false };
@@ -2662,7 +3132,29 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
   }
   const latestRuns = new Map();
   try {
-    const result = await env.DB.prepare(
+    let result;
+    const currentRunSql =
+      `SELECT source,lane,started_at,finished_at,walk_complete,files_seen,
+              docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+              confirmed_from,confirmed_through,target_from,target_through,refusal_reason,error,
+              failure_evidence
+         FROM (
+           SELECT sr.*,
+                  ROW_NUMBER() OVER (PARTITION BY source ORDER BY started_at DESC, run_id DESC) AS source_rank
+             FROM sync_runs sr
+         )
+        WHERE source_rank=1`;
+    const coverageRunSql =
+      `SELECT source,lane,started_at,finished_at,walk_complete,files_seen,
+              docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+              confirmed_from,confirmed_through,target_from,target_through,refusal_reason,error
+         FROM (
+           SELECT sr.*,
+                  ROW_NUMBER() OVER (PARTITION BY source ORDER BY started_at DESC, run_id DESC) AS source_rank
+             FROM sync_runs sr
+         )
+        WHERE source_rank=1`;
+    const legacyRunSql =
       `SELECT source,lane,started_at,finished_at,walk_complete,files_seen,
               docs_added,docs_updated,docs_unchanged,refusal_reason,error
          FROM (
@@ -2670,14 +3162,33 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
                   ROW_NUMBER() OVER (PARTITION BY source ORDER BY started_at DESC, run_id DESC) AS source_rank
              FROM sync_runs sr
          )
-        WHERE source_rank=1`
-    ).all();
+        WHERE source_rank=1`;
+    try {
+      result = await env.DB.prepare(currentRunSql).all();
+    } catch (error) {
+      if (missingFailureEvidenceColumn(error)) {
+        try {
+          // Schema 38 remains readable while migration 0040 is pending. The
+          // missing evidence is unknown; all existing coverage counters and
+          // ranges keep their exact same-run meaning.
+          result = await env.DB.prepare(coverageRunSql).all();
+        } catch (coverageError) {
+          if (!missingCoverageRunColumns(coverageError)) throw coverageError;
+          result = await env.DB.prepare(legacyRunSql).all();
+        }
+      } else if (missingCoverageRunColumns(error)) {
+        result = await env.DB.prepare(legacyRunSql).all();
+      } else {
+        throw error;
+      }
+    }
     for (const run of result?.results || []) {
       if (typeof run?.source === "string" && run.source) latestRuns.set(run.source, run);
     }
-  } catch {
+  } catch (error) {
     // Legacy or partially migrated installs still receive the older freshness
     // view. Coverage falls back to unknown instead of breaking the whole read.
+    if (!missingSyncRunsTable(error)) throw error;
   }
   // Kinds we can refresh without the client's machine being on.
   return {
@@ -2714,14 +3225,25 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         reason,
         automatable,
       };
+      const latestRun = latestRuns.get(s.name) || null;
       return {
         ...report,
+        last_failure: latestRun?.error
+          ? parseStoredSourceFailureEvidence(latestRun.failure_evidence, {
+              status: "error",
+              kind: String(s.kind || "").trim().toLowerCase(),
+              metricsVersion: Number(latestRun.metrics_version) === 1 ? 1 : 0,
+              measuredDocsFailed: Number(latestRun.metrics_version) === 1
+                ? latestRun.docs_failed
+                : null,
+            })
+          : null,
         coverage: sourceCoverageFromEvidence({
           ...report,
           last_ingest_at: s.last_ingest_at || null,
           expected_every_days: expected ? Math.max(1, Math.round(expected / 86400)) : null,
         }, {
-          latestRun: latestRuns.get(s.name) || null,
+          latestRun,
           // Per-source outbox counts would scan a large derived queue on every
           // owner read. Keep this unknown until priority lanes materialize a
           // cheap aggregate; ownerSystemStatus settles it conservatively from
@@ -2730,6 +3252,1217 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         }),
       };
     }),
+  };
+}
+
+/**
+ * A bounded, owner-only inventory of the source evidence D1 actually holds.
+ *
+ * One SELECT produces the complete snapshot so paging never combines the
+ * registry from one moment with document counts from another. This query is
+ * intentionally read-only: callers can safely run it during Optimize without
+ * changing a source receipt, sync cursor, corpus row, or credential record.
+ *
+ * The inventory reports only fields the current schema can prove. It does not
+ * infer people, entities, tax years, or financial coverage from a source name.
+ */
+export const SOURCE_INVENTORY_MAX_ROWS = 10_000;
+
+export const SOURCE_RECOVERY_MAX_PAGE_SIZE = 250;
+
+const SOURCE_PROVIDER_BY_KIND = Object.freeze({
+  calendar: "google",
+  drive: "google",
+  dropbox: "dropbox",
+  gmail: "google",
+  hubspot: "hubspot",
+  imessage: "apple",
+  microsoft: "microsoft",
+  notion: "notion",
+  "owner-notes": "local",
+  plaid: "plaid",
+  qbo: "intuit",
+  quickbooks: "intuit",
+  slack: "slack",
+  upload: "local",
+  whatsapp: "meta",
+  zoom: "zoom",
+  "iphone-backup": "apple",
+});
+
+const SAFE_SCOPE_FIELDS = Object.freeze([
+  "calendar_ids",
+  "channel_ids",
+  "drive_ids",
+  "exclude",
+  "folder_ids",
+  "include",
+  "label_ids",
+  "root_folder_ids",
+  "roots",
+  "since",
+  "site_ids",
+  "team_ids",
+]);
+const ROOT_SCOPE_FIELDS = Object.freeze(["root_folder_ids", "folder_ids", "roots"]);
+
+function maskedSourceScope(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return {
+      status: "unavailable",
+      masked: true,
+      format: null,
+      recorded_fields: [],
+      configured_root_count: null,
+    };
+  }
+  let parsed;
+  try { parsed = JSON.parse(value); } catch {
+    return {
+      status: "partial",
+      masked: true,
+      format: "opaque",
+      recorded_fields: [],
+      configured_root_count: null,
+    };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      status: "partial",
+      masked: true,
+      format: "json_non_object",
+      recorded_fields: [],
+      configured_root_count: null,
+    };
+  }
+  const recordedFields = SAFE_SCOPE_FIELDS.filter((field) => Object.hasOwn(parsed, field));
+  const rootFields = ROOT_SCOPE_FIELDS.filter((field) => Object.hasOwn(parsed, field));
+  const rootArrays = rootFields.map((field) => parsed[field]);
+  const rootsAreCountable = rootArrays.length > 0 && rootArrays.every(Array.isArray);
+  return {
+    status: recordedFields.length ? (rootsAreCountable || rootFields.length === 0 ? "supported" : "partial") : "partial",
+    masked: true,
+    format: "json_object",
+    recorded_fields: recordedFields,
+    configured_root_count: rootsAreCountable
+      ? rootArrays.reduce((count, roots) => count + roots.length, 0)
+      : null,
+  };
+}
+
+function coverageStatus(total, covered) {
+  if (!total || !covered) return "unavailable";
+  return covered === total ? "complete" : "partial";
+}
+
+function earliestInventoryTimestamp(entries) {
+  const recorded = entries
+    .map(([field, value]) => [field, timestampMs(value)])
+    .filter(([, millis]) => Number.isFinite(millis))
+    .sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0]));
+  if (!recorded.length) return { at: null, evidence: [] };
+  const at = recorded[0][1];
+  return {
+    at: new Date(at).toISOString(),
+    evidence: recorded.filter(([, millis]) => millis === at).map(([field]) => field),
+  };
+}
+
+const PROVENANCE_MARKER_SQL = `CASE WHEN
+  d.provenance_receipt_version = 1
+  AND d.provenance_receipt_status IN ('complete','partial','unavailable')
+  AND (
+    (d.provenance_receipt_status = 'complete' AND d.provenance_receipt_reason = 'lineage_and_text_recorded')
+    OR (d.provenance_receipt_status = 'partial' AND d.provenance_receipt_reason IN ('text_provenance_unavailable','lineage_unavailable'))
+    OR (d.provenance_receipt_status = 'unavailable' AND d.provenance_receipt_reason = 'provenance_unavailable')
+  )
+  AND length(COALESCE(d.provenance_receipt_digest,'')) = 64
+  AND d.provenance_receipt_digest = lower(d.provenance_receipt_digest)
+  AND lower(d.provenance_receipt_digest) NOT GLOB '*[^0-9a-f]*'
+  AND json_valid(d.meta)
+  AND json_type(d.meta,'$.provenance_receipt') = 'object'
+  AND json_extract(d.meta,'$.provenance_receipt.version') = d.provenance_receipt_version
+  AND json_extract(d.meta,'$.provenance_receipt.status') = d.provenance_receipt_status
+  AND json_extract(d.meta,'$.provenance_receipt.reason') = d.provenance_receipt_reason
+THEN 1 ELSE 0 END`;
+
+const FAMILY_UID_SQL = `CASE
+  WHEN (${PROVENANCE_MARKER_SQL}) = 1
+   AND json_valid(d.meta)
+   AND json_type(d.meta,'$.family_of') = 'text'
+   AND length(json_extract(d.meta,'$.family_of')) > 0
+    THEN json_extract(d.meta,'$.family_of')
+  WHEN (${PROVENANCE_MARKER_SQL}) = 1
+   AND json_valid(d.meta)
+   AND json_type(d.meta,'$.part_of') = 'text'
+   AND length(json_extract(d.meta,'$.part_of')) > 0
+    THEN CASE
+      WHEN substr(json_extract(d.meta,'$.part_of'), 1, length(d.source) + 1) = d.source || ':'
+        THEN json_extract(d.meta,'$.part_of')
+      ELSE d.source || ':' || json_extract(d.meta,'$.part_of')
+    END
+  ELSE d.doc_uid
+END`;
+
+const LINEAGE_SHAPE_SQL = `CASE WHEN
+  json_valid(meta)
+  AND json_type(meta,'$.evidence_lineage') = 'object'
+  AND json_type(meta,'$.evidence_lineage.version') = 'integer'
+  AND json_extract(meta,'$.evidence_lineage.version') = 1
+  AND json_type(meta,'$.evidence_lineage.kind') = 'text'
+  AND json_extract(meta,'$.evidence_lineage.kind') IN ('source_record','derived_record','agent_derived')
+  AND NOT EXISTS (
+    SELECT 1 FROM json_each(json_extract(meta,'$.evidence_lineage')) lineage_field
+     WHERE lineage_field.key NOT IN ('version','kind','root_ids')
+  )
+  AND (
+    json_type(meta,'$.evidence_lineage.root_ids') IS NULL
+    OR (
+      json_type(meta,'$.evidence_lineage.root_ids') = 'array'
+      AND json_array_length(json_extract(meta,'$.evidence_lineage.root_ids')) <= 16
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(json_extract(meta,'$.evidence_lineage.root_ids')) lineage_root
+         WHERE lineage_root.type != 'text'
+            OR length(trim(lineage_root.value)) = 0
+            OR length(lineage_root.value) > 512
+      )
+    )
+  )
+  AND (
+    json_extract(meta,'$.evidence_lineage.kind') != 'derived_record'
+    OR (
+      json_type(meta,'$.evidence_lineage.root_ids') = 'array'
+      AND json_array_length(json_extract(meta,'$.evidence_lineage.root_ids')) > 0
+    )
+  )
+  AND (
+    json_extract(meta,'$.evidence_lineage.kind') != 'source_record'
+    OR json_type(meta,'$.evidence_lineage.root_ids') IS NULL
+    OR json_array_length(json_extract(meta,'$.evidence_lineage.root_ids')) <= 1
+  )
+THEN 1 ELSE 0 END`;
+
+const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `
+  WITH live_documents AS MATERIALIZED (
+    SELECT d.rowid AS document_rowid,
+           d.doc_uid,
+           d.source AS physical_source,
+           d.source_id,
+           d.ingested_at,
+           d.meta,
+           d.text_source,
+           d.text_reliable,
+           d.provenance_receipt_version,
+           d.provenance_receipt_status,
+           d.provenance_receipt_reason,
+           d.provenance_receipt_digest,
+           ${PROVENANCE_MARKER_SQL} AS provenance_marker_valid,
+           ${FAMILY_UID_SQL} AS family_doc_uid
+      FROM documents d
+     WHERE d.deleted_at IS NULL
+  ),
+  attributed_documents AS MATERIALIZED (
+    SELECT live_documents.*,
+           CASE
+             WHEN instr(family_doc_uid, ':') BETWEEN 2 AND 65
+              AND substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1) GLOB '[a-z0-9]*'
+              AND substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1) NOT GLOB '*[^a-z0-9_-]*'
+               THEN substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1)
+             ELSE physical_source
+           END AS inventory_source
+      FROM live_documents
+  ),
+  chunk_per_document AS (
+    SELECT a.doc_uid,
+           COUNT(c.chunk_uid) AS chunk_count,
+           COALESCE(SUM(CASE WHEN trim(c.text) != '' THEN 1 ELSE 0 END),0) AS nonblank_chunk_count
+      FROM attributed_documents a
+      LEFT JOIN chunks c ON c.doc_uid=a.doc_uid
+     GROUP BY a.doc_uid
+  ),
+  document_flags AS MATERIALIZED (
+    SELECT a.*,
+           COALESCE(c.chunk_count,0) AS chunk_count,
+           COALESCE(c.nonblank_chunk_count,0) AS nonblank_chunk_count,
+           CASE WHEN a.provenance_marker_valid=1 AND trim(COALESCE(a.source_id,'')) != '' THEN 1 ELSE 0 END AS has_source_identity,
+           CASE WHEN a.provenance_marker_valid=1
+                     AND lower(COALESCE(a.text_source,'')) IN ('native','ocr','ocr_partial') THEN 1 ELSE 0 END AS has_extraction_method,
+           CASE WHEN a.provenance_marker_valid=1
+                     AND lower(COALESCE(a.text_source,'')) IN ('native','ocr','ocr_partial')
+                     AND a.text_reliable IN (0,1) THEN 1 ELSE 0 END AS has_text_reliability,
+           CASE WHEN a.provenance_marker_valid=1 AND json_valid(a.meta)
+                     AND json_type(a.meta,'$.evidence_lineage')='object' THEN 1 ELSE 0 END AS declared_lineage,
+           CASE WHEN a.provenance_marker_valid=1 THEN ${LINEAGE_SHAPE_SQL} ELSE 0 END AS recognized_lineage,
+           CASE WHEN a.provenance_marker_valid=1 AND json_valid(a.meta) AND (
+             (json_type(a.meta,'$.family_of')='text' AND length(trim(json_extract(a.meta,'$.family_of'))) > 0)
+             OR (json_type(a.meta,'$.part_of')='text' AND length(trim(json_extract(a.meta,'$.part_of'))) > 0)
+           ) THEN 1 ELSE 0 END AS family_lineage,
+           CASE WHEN a.provenance_marker_valid=1 AND (
+             a.provenance_receipt_status='complete'
+             OR a.provenance_receipt_reason='text_provenance_unavailable'
+           ) THEN 1 ELSE 0 END AS has_lineage
+      FROM attributed_documents a
+      LEFT JOIN chunk_per_document c ON c.doc_uid=a.doc_uid
+  ),
+  source_names AS (
+    SELECT name FROM sources
+    UNION
+    SELECT inventory_source AS name FROM attributed_documents
+  ),
+  document_rollup AS (
+    SELECT inventory_source AS source,
+           COUNT(*) AS physical_documents,
+           COUNT(DISTINCT family_doc_uid) AS logical_documents,
+           MIN(ingested_at) AS first_stored_ingest_at,
+           MAX(ingested_at) AS last_stored_ingest_at,
+           SUM(chunk_count) AS chunks,
+           SUM(CASE WHEN nonblank_chunk_count > 0 THEN 1 ELSE 0 END) AS readable_documents,
+           SUM(CASE WHEN nonblank_chunk_count = 0 THEN 1 ELSE 0 END) AS unreadable_documents,
+           SUM(CASE WHEN chunk_count = 0 THEN 1 ELSE 0 END) AS empty_documents,
+           SUM(CASE WHEN chunk_count > 0 AND nonblank_chunk_count = 0 THEN 1 ELSE 0 END) AS blank_only_documents,
+           SUM(CASE WHEN has_text_reliability=1 AND text_reliable=1 THEN 1 ELSE 0 END) AS text_reliable_documents,
+           SUM(CASE WHEN has_text_reliability=1 AND text_reliable=0 THEN 1 ELSE 0 END) AS text_unreliable_documents,
+           SUM(CASE WHEN has_text_reliability=0 THEN 1 ELSE 0 END) AS text_reliability_unknown_documents,
+           SUM(CASE WHEN has_extraction_method=1 AND lower(COALESCE(text_source,''))='native' THEN 1 ELSE 0 END) AS native_text_documents,
+           SUM(CASE WHEN has_extraction_method=1 AND lower(COALESCE(text_source,''))='ocr' THEN 1 ELSE 0 END) AS ocr_documents,
+           SUM(CASE WHEN has_extraction_method=1 AND lower(COALESCE(text_source,''))='ocr_partial' THEN 1 ELSE 0 END) AS ocr_partial_documents,
+           SUM(CASE WHEN has_extraction_method=0 THEN 1 ELSE 0 END) AS unknown_text_source_documents,
+           SUM(CASE WHEN nonblank_chunk_count=0 AND (has_extraction_method=0
+                     OR lower(COALESCE(text_source,'')) NOT IN ('ocr','ocr_partial')) THEN 1 ELSE 0 END) AS likely_ocr_candidates,
+           SUM(CASE WHEN nonblank_chunk_count=0 AND has_extraction_method=1
+                     AND lower(COALESCE(text_source,'')) IN ('ocr','ocr_partial') THEN 1 ELSE 0 END) AS ocr_retry_candidates,
+           SUM(has_source_identity) AS source_identity_documents,
+           SUM(CASE WHEN provenance_marker_valid=0 THEN 1 ELSE 0 END) AS unassessed_provenance_documents,
+           SUM(declared_lineage) AS declared_lineage_documents,
+           SUM(recognized_lineage) AS recognized_lineage_documents,
+           SUM(CASE WHEN declared_lineage=1 AND recognized_lineage=0 THEN 1 ELSE 0 END) AS unrecognized_lineage_documents,
+           SUM(family_lineage) AS family_lineage_documents,
+           SUM(has_lineage) AS recorded_lineage_documents,
+           SUM(CASE WHEN provenance_marker_valid=1 AND provenance_receipt_status='complete'
+                    THEN 1 ELSE 0 END) AS complete_provenance_documents,
+           SUM(CASE WHEN nonblank_chunk_count=0
+                     OR (has_extraction_method=1 AND lower(COALESCE(text_source,''))='ocr_partial')
+                     OR provenance_marker_valid=0
+                     OR has_source_identity=0 OR has_extraction_method=0 OR has_text_reliability=0
+                     OR has_lineage=0
+                     OR (declared_lineage=1 AND recognized_lineage=0)
+                    THEN 1 ELSE 0 END) AS recovery_candidate_documents
+      FROM document_flags
+     GROUP BY inventory_source
+  ),
+  source_events_rollup AS (
+    SELECT source_name AS source,
+           MIN(CASE WHEN event='ingest' THEN at END) AS first_ingest_event_at,
+           MAX(CASE WHEN event='ingest' THEN at END) AS last_ingest_event_at
+      FROM source_events
+     GROUP BY source_name
+  ),
+  run_rollup AS (
+    SELECT source,
+           MIN(started_at) AS first_run_started_at,
+           MAX(CASE WHEN finished_at IS NOT NULL AND error IS NULL AND refusal_reason IS NULL
+                    THEN finished_at END) AS last_successful_run_at
+      FROM sync_runs
+     GROUP BY source
+  ),
+  latest_runs AS (
+    SELECT source,lane,started_at,finished_at,walk_complete,files_seen,
+           docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+           confirmed_from,confirmed_through,target_from,target_through,proposed_deletes,
+           delete_action,refusal_reason,error,
+           ${includeFailureEvidence ? "failure_evidence" : "NULL AS failure_evidence"}
+      FROM (
+        SELECT sr.*,
+               ROW_NUMBER() OVER (
+                 PARTITION BY source ORDER BY started_at DESC, run_id DESC
+               ) AS source_rank
+          FROM sync_runs sr
+      )
+     WHERE source_rank=1
+  )
+  SELECT n.name,
+         COALESCE(s.kind,'unregistered') AS kind,
+         s.zone,
+         s.status,
+         s.created_at,
+         s.last_ingest_at,
+         s.last_complete_sweep_at,
+         s.scope,
+         s.sync_cursor,
+         s.cursor_updated_at,
+         s.expected_refresh_seconds,
+         s.stale_reason,
+         s.document_count AS reported_logical_documents,
+         CASE WHEN s.name IS NULL THEN 0 ELSE 1 END AS registered,
+         COALESCE(d.physical_documents,0) AS physical_documents,
+         COALESCE(d.logical_documents,0) AS logical_documents,
+         d.first_stored_ingest_at,
+         d.last_stored_ingest_at,
+         COALESCE(d.readable_documents,0) AS readable_documents,
+         COALESCE(d.unreadable_documents,0) AS unreadable_documents,
+         COALESCE(d.empty_documents,0) AS empty_documents,
+         COALESCE(d.blank_only_documents,0) AS blank_only_documents,
+         COALESCE(d.text_reliable_documents,0) AS text_reliable_documents,
+         COALESCE(d.text_unreliable_documents,0) AS text_unreliable_documents,
+         COALESCE(d.text_reliability_unknown_documents,0) AS text_reliability_unknown_documents,
+         COALESCE(d.native_text_documents,0) AS native_text_documents,
+         COALESCE(d.ocr_documents,0) AS ocr_documents,
+         COALESCE(d.ocr_partial_documents,0) AS ocr_partial_documents,
+         COALESCE(d.unknown_text_source_documents,0) AS unknown_text_source_documents,
+         COALESCE(d.likely_ocr_candidates,0) AS likely_ocr_candidates,
+         COALESCE(d.ocr_retry_candidates,0) AS ocr_retry_candidates,
+         COALESCE(d.source_identity_documents,0) AS source_identity_documents,
+         COALESCE(d.unassessed_provenance_documents,0) AS unassessed_provenance_documents,
+         COALESCE(d.declared_lineage_documents,0) AS declared_lineage_documents,
+         COALESCE(d.recognized_lineage_documents,0) AS recognized_lineage_documents,
+         COALESCE(d.unrecognized_lineage_documents,0) AS unrecognized_lineage_documents,
+         COALESCE(d.family_lineage_documents,0) AS family_lineage_documents,
+         COALESCE(d.recorded_lineage_documents,0) AS recorded_lineage_documents,
+         COALESCE(d.complete_provenance_documents,0) AS complete_provenance_documents,
+         COALESCE(d.recovery_candidate_documents,0) AS recovery_candidate_documents,
+         COALESCE(d.chunks,0) AS chunks,
+         e.first_ingest_event_at,
+         e.last_ingest_event_at,
+         rr.first_run_started_at,
+         rr.last_successful_run_at,
+         r.lane AS run_lane,
+         r.started_at AS run_started_at,
+         r.finished_at AS run_finished_at,
+         r.walk_complete AS run_walk_complete,
+         r.files_seen AS run_files_seen,
+         r.docs_added AS run_docs_added,
+         r.docs_updated AS run_docs_updated,
+         r.docs_unchanged AS run_docs_unchanged,
+         r.docs_refused AS run_docs_refused,
+         r.docs_failed AS run_docs_failed,
+         r.metrics_version AS run_metrics_version,
+         r.confirmed_from AS run_confirmed_from,
+         r.confirmed_through AS run_confirmed_through,
+         r.target_from AS run_target_from,
+         r.target_through AS run_target_through,
+         r.proposed_deletes AS run_proposed_deletes,
+         r.delete_action AS run_delete_action,
+         r.failure_evidence AS run_failure_evidence,
+         CASE
+           WHEN r.source IS NULL THEN NULL
+           WHEN r.finished_at IS NULL THEN 'in_progress'
+           WHEN r.error IS NOT NULL THEN 'failed'
+           WHEN r.refusal_reason IS NOT NULL THEN 'refused'
+           ELSE 'completed'
+         END AS run_outcome,
+         CASE WHEN r.error IS NULL THEN 0 ELSE 1 END AS run_had_error,
+         CASE WHEN r.refusal_reason IS NULL THEN 0 ELSE 1 END AS run_was_refused,
+         COUNT(*) OVER () AS inventory_total
+    FROM source_names n
+    LEFT JOIN sources s ON s.name=n.name
+    LEFT JOIN document_rollup d ON d.source=n.name
+    LEFT JOIN source_events_rollup e ON e.source=n.name
+    LEFT JOIN run_rollup rr ON rr.source=n.name
+    LEFT JOIN latest_runs r ON r.source=n.name
+   ORDER BY n.name ASC
+   LIMIT ?1`;
+
+function inventoryTimestamp(value) {
+  const millis = timestampMs(value);
+  return Number.isFinite(millis) ? new Date(millis).toISOString() : null;
+}
+
+const inventoryCount = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0;
+};
+
+const inventoryNullableCount = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null;
+};
+
+/** Return every source row for one bounded D1 snapshot, in stable id order. */
+export async function sourceInventory(env, {
+  now = Date.now(),
+  maxRows = SOURCE_INVENTORY_MAX_ROWS,
+} = {}) {
+  if (!Number.isFinite(now) || now < 0) throw new TypeError("source inventory time is invalid");
+  if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > SOURCE_INVENTORY_MAX_ROWS) {
+    throw new TypeError("source inventory row limit is invalid");
+  }
+
+  let result;
+  try {
+    result = await env.DB.prepare(sourceInventorySql()).bind(maxRows + 1).all();
+  } catch (error) {
+    if (!missingFailureEvidenceColumn(error)) throw error;
+    // Schema 39 remains readable while migration 0040 is pending. Missing
+    // failure evidence is unknown; every older receipt and coverage field
+    // keeps its exact meaning, and malformed/non-schema errors never retry.
+    result = await env.DB.prepare(sourceInventorySql({ includeFailureEvidence: false }))
+      .bind(maxRows + 1)
+      .all();
+  }
+  const rawRows = Array.isArray(result?.results) ? result.results : [];
+  const total = rawRows.length ? inventoryCount(rawRows[0].inventory_total) : 0;
+  if (total > maxRows || rawRows.length > maxRows) {
+    const error = new Error("source inventory exceeds the safe row limit");
+    error.code = "source_inventory_too_large";
+    throw error;
+  }
+
+  const rows = rawRows.map((row) => {
+    const registered = row.registered === 1 || row.registered === true || String(row.registered) === "1";
+    const sourceId = String(row.name || "");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(sourceId)) {
+      const error = new Error("source inventory contains an invalid source identity");
+      error.code = "source_inventory_invalid_source";
+      throw error;
+    }
+    const physicalDocuments = inventoryCount(row.physical_documents);
+    const logicalDocuments = inventoryCount(row.logical_documents);
+    const last = timestampMs(row.last_ingest_at);
+    const days = Number.isFinite(last) ? Math.floor((now - last) / 86400000) : null;
+    const expectedSeconds = Number(row.expected_refresh_seconds) > 0
+      ? Math.floor(Number(row.expected_refresh_seconds))
+      : null;
+    const operational = operationalFreshness({
+      ...row,
+      indexing_started_at: row.run_finished_at === null ? row.run_started_at : null,
+    }, now);
+    const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(row.kind || "").toLowerCase());
+    let state = registered ? "ok" : "unregistered";
+    let reason = registered ? operational.reason : "the source registry entry is missing";
+    if (registered && operational.state) state = operational.state;
+    else if (registered && !expectedSeconds) state = automatable ? "unscheduled" : "manual";
+    else if (registered && !Number.isFinite(last)) state = "never_synced";
+    else if (registered && (now - last) / 1000 > expectedSeconds * 1.5) state = "stale";
+
+    const latestRun = row.run_lane === null || row.run_lane === undefined
+      ? null
+      : {
+          lane: String(row.run_lane),
+          started_at: inventoryTimestamp(row.run_started_at),
+          finished_at: inventoryTimestamp(row.run_finished_at),
+          walk_complete: row.run_walk_complete === 1 || row.run_walk_complete === true,
+          files_seen: inventoryCount(row.run_files_seen),
+          docs_added: inventoryCount(row.run_docs_added),
+          docs_updated: inventoryCount(row.run_docs_updated),
+          docs_unchanged: inventoryCount(row.run_docs_unchanged),
+          docs_refused: inventoryNullableCount(row.run_docs_refused),
+          docs_failed: inventoryNullableCount(row.run_docs_failed),
+          metrics_version: inventoryNullableCount(row.run_metrics_version),
+          confirmed_from: inventoryTimestamp(row.run_confirmed_from),
+          confirmed_through: inventoryTimestamp(row.run_confirmed_through),
+          target_from: inventoryTimestamp(row.run_target_from),
+          target_through: inventoryTimestamp(row.run_target_through),
+          proposed_deletes: inventoryCount(row.run_proposed_deletes),
+          delete_action: typeof row.run_delete_action === "string" && row.run_delete_action
+            ? row.run_delete_action
+            : null,
+          outcome: row.run_outcome || null,
+        };
+    const lastFailure = latestRun?.outcome === "failed"
+      ? parseStoredSourceFailureEvidence(row.run_failure_evidence, {
+          status: "error",
+          kind: String(row.kind || "").trim().toLowerCase(),
+          metricsVersion: latestRun.metrics_version,
+          measuredDocsFailed: latestRun.metrics_version === 1 ? latestRun.docs_failed : null,
+        })
+      : null;
+    const freshness = {
+      state,
+      reason,
+      days_since_ingest: days,
+      expected_refresh_seconds: expectedSeconds,
+      expected_every_days: expectedSeconds ? Math.max(1, Math.round(expectedSeconds / 86400)) : null,
+      last_ingest_at: inventoryTimestamp(row.last_ingest_at),
+      last_complete_sweep_at: inventoryTimestamp(row.last_complete_sweep_at),
+      indexing_started_at: row.run_finished_at === null ? inventoryTimestamp(row.run_started_at) : null,
+      hours_indexing: operational.indexingMs === null
+        ? null
+        : Math.floor(operational.indexingMs / 3600000),
+      automatable,
+    };
+    freshness.coverage = sourceCoverageFromEvidence({
+      kind: String(row.kind || "unregistered"),
+      state,
+      documents: logicalDocuments,
+      last_ingest_at: freshness.last_ingest_at,
+      last_complete_sweep_at: freshness.last_complete_sweep_at,
+      expected_every_days: freshness.expected_every_days,
+      indexing_started_at: freshness.indexing_started_at,
+    }, {
+      latestRun: latestRun
+        ? {
+            ...latestRun,
+            error: row.run_had_error === 1 || String(row.run_had_error) === "1" ? "present" : null,
+            refusal_reason: row.run_was_refused === 1 || String(row.run_was_refused) === "1" ? "present" : null,
+          }
+        : null,
+      projectionPending: null,
+    });
+
+    const kind = String(row.kind || "unregistered");
+    const provider = SOURCE_PROVIDER_BY_KIND[kind.toLowerCase()] || null;
+    const scopeReceipt = maskedSourceScope(row.scope);
+    const cursorPresent = registered && typeof row.sync_cursor === "string" && row.sync_cursor.length > 0;
+    const firstIngest = earliestInventoryTimestamp([
+      ["stored_document", row.first_stored_ingest_at],
+      ["source_event", row.first_ingest_event_at],
+      ["sync_run", row.first_run_started_at],
+    ]);
+    const sourceIdentityDocuments = inventoryCount(row.source_identity_documents);
+    const extractionMethodDocuments = physicalDocuments - inventoryCount(row.unknown_text_source_documents);
+    const extractionReliabilityDocuments = physicalDocuments - inventoryCount(row.text_reliability_unknown_documents);
+    const recordedLineageDocuments = inventoryCount(row.recorded_lineage_documents);
+    const completeProvenanceDocuments = inventoryCount(row.complete_provenance_documents);
+    const unassessedProvenanceDocuments = inventoryCount(row.unassessed_provenance_documents);
+    const provenanceEvidenceDocuments = Math.max(
+      sourceIdentityDocuments,
+      extractionMethodDocuments,
+      extractionReliabilityDocuments,
+      recordedLineageDocuments,
+    );
+    const provenanceMissing = [];
+    if (unassessedProvenanceDocuments > 0) provenanceMissing.push("validated_provenance_receipt");
+    if (sourceIdentityDocuments < physicalDocuments) provenanceMissing.push("source_record_id");
+    if (extractionMethodDocuments < physicalDocuments) provenanceMissing.push("extraction_method");
+    if (extractionReliabilityDocuments < physicalDocuments) provenanceMissing.push("text_reliability");
+    if (recordedLineageDocuments < physicalDocuments) provenanceMissing.push("derivation_lineage");
+    if (inventoryCount(row.unrecognized_lineage_documents) > 0) {
+      provenanceMissing.push("recognized_lineage_contract");
+    }
+    const configurationMissing = [];
+    if (scopeReceipt.status !== "supported") configurationMissing.push("scope_receipt");
+    if (registered && !cursorPresent) configurationMissing.push("sync_cursor_receipt");
+
+    return {
+      source_id: sourceId,
+      name: sourceId,
+      kind,
+      registered,
+      zone: typeof row.zone === "string" && row.zone.trim() ? row.zone.trim() : null,
+      connector: {
+        kind,
+        provider,
+        provider_identity_status: provider ? "supported" : "unavailable",
+      },
+      configuration: {
+        scope: scopeReceipt,
+        cursor: {
+          status: registered ? (cursorPresent ? "present" : "absent") : "unavailable",
+          masked: true,
+          updated_at: inventoryTimestamp(row.cursor_updated_at),
+        },
+        status: !registered || configurationMissing.length
+          ? (registered ? "partial" : "unavailable")
+          : "complete",
+        missing_subfields: configurationMissing,
+      },
+      storage: {
+        physical_documents: physicalDocuments,
+        logical_documents: logicalDocuments,
+        chunks: inventoryCount(row.chunks),
+        readable_documents: inventoryCount(row.readable_documents),
+        unreadable_documents: inventoryCount(row.unreadable_documents),
+        basis: "document rows are attributed by a validated family_of or part_of receipt when present, otherwise by doc_uid; readable means at least one nonblank stored chunk",
+      },
+      readability: {
+        status: coverageStatus(physicalDocuments, physicalDocuments - inventoryCount(row.unreadable_documents)),
+        readable_documents: inventoryCount(row.readable_documents),
+        unreadable_documents: inventoryCount(row.unreadable_documents),
+        empty_documents: inventoryCount(row.empty_documents),
+        blank_only_documents: inventoryCount(row.blank_only_documents),
+        text_reliable_documents: inventoryCount(row.text_reliable_documents),
+        text_unreliable_documents: inventoryCount(row.text_unreliable_documents),
+        text_reliability_unknown_documents: inventoryCount(row.text_reliability_unknown_documents),
+        native_text_documents: inventoryCount(row.native_text_documents),
+        ocr_documents: inventoryCount(row.ocr_documents),
+        ocr_partial_documents: inventoryCount(row.ocr_partial_documents),
+        unknown_text_source_documents: inventoryCount(row.unknown_text_source_documents),
+        scan_only_documents: null,
+        scan_only_status: "unavailable",
+        likely_ocr_candidates: inventoryCount(row.likely_ocr_candidates),
+        ocr_retry_candidates: inventoryCount(row.ocr_retry_candidates),
+        basis: "scan-only is not recorded; OCR candidates are selected only from stored text and extraction receipts",
+      },
+      provenance: {
+        status: physicalDocuments === 0 || provenanceEvidenceDocuments === 0
+          ? "unavailable"
+          : completeProvenanceDocuments === physicalDocuments
+            ? "complete"
+            : "partial",
+        complete_documents: completeProvenanceDocuments,
+        partial_or_unavailable_documents: Math.max(0, physicalDocuments - completeProvenanceDocuments),
+        source_identity: {
+          status: coverageStatus(physicalDocuments, sourceIdentityDocuments),
+          recorded_documents: sourceIdentityDocuments,
+          missing_documents: Math.max(0, physicalDocuments - sourceIdentityDocuments),
+        },
+        extraction: {
+          status: coverageStatus(physicalDocuments, Math.min(extractionMethodDocuments, extractionReliabilityDocuments)),
+          method_recorded_documents: extractionMethodDocuments,
+          method_missing_documents: Math.max(0, physicalDocuments - extractionMethodDocuments),
+          reliability_recorded_documents: extractionReliabilityDocuments,
+          reliability_missing_documents: Math.max(0, physicalDocuments - extractionReliabilityDocuments),
+        },
+        lineage: {
+          status: coverageStatus(physicalDocuments, recordedLineageDocuments),
+          recorded_documents: recordedLineageDocuments,
+          missing_documents: Math.max(0, physicalDocuments - recordedLineageDocuments),
+          declared_contract_documents: inventoryCount(row.declared_lineage_documents),
+          recognized_contract_documents: inventoryCount(row.recognized_lineage_documents),
+          family_marker_documents: inventoryCount(row.family_lineage_documents),
+        },
+        missing_subfields: provenanceMissing,
+      },
+      recovery_plan: {
+        status: inventoryCount(row.recovery_candidate_documents) ? "review_needed" : "no_candidates",
+        candidate_documents: inventoryCount(row.recovery_candidate_documents),
+        reason_counts: {
+          no_stored_chunks: inventoryCount(row.empty_documents),
+          blank_only_chunks: inventoryCount(row.blank_only_documents),
+          ocr_partial_review: inventoryCount(row.ocr_partial_documents),
+          extraction_method_missing: inventoryCount(row.unknown_text_source_documents),
+          text_reliability_missing: inventoryCount(row.text_reliability_unknown_documents),
+          source_record_id_missing: Math.max(0, physicalDocuments - sourceIdentityDocuments),
+          derivation_lineage_missing: Math.max(0, physicalDocuments - recordedLineageDocuments),
+          lineage_contract_unrecognized: inventoryCount(row.unrecognized_lineage_documents),
+          provenance_receipt_unassessed: unassessedProvenanceDocuments,
+        },
+        blocking_signals: [
+          ...(inventoryCount(row.unreadable_documents) ? ["records_without_readable_text"] : []),
+          ...(inventoryCount(row.ocr_partial_documents) ? ["partial_ocr_receipts"] : []),
+          ...(provenanceMissing.length ? ["incomplete_provenance_receipts"] : []),
+        ],
+        priority: inventoryCount(row.unreadable_documents)
+          ? "high"
+          : inventoryCount(row.recovery_candidate_documents)
+            ? "review"
+            : "none",
+        priority_basis: inventoryCount(row.unreadable_documents)
+          ? "stored records without nonblank searchable text"
+          : inventoryCount(row.recovery_candidate_documents)
+            ? "stored OCR or provenance receipts require review"
+            : "no stored recovery condition was found",
+        read_only: true,
+      },
+      receipt: registered
+        ? {
+            status: typeof row.status === "string" && row.status ? row.status : null,
+            registered_at: inventoryTimestamp(row.created_at),
+            first_ingest_observed_at: firstIngest.at,
+            first_ingest_evidence: firstIngest.evidence,
+            first_stored_ingest_at: inventoryTimestamp(row.first_stored_ingest_at),
+            last_stored_ingest_at: inventoryTimestamp(row.last_stored_ingest_at),
+            last_ingest_receipt_at: inventoryTimestamp(row.last_ingest_at),
+            last_successful_run_at: inventoryTimestamp(row.last_successful_run_at),
+            complete_history_through: inventoryTimestamp(row.last_complete_sweep_at),
+            reported_logical_documents: inventoryCount(row.reported_logical_documents),
+            logical_matches_reported: inventoryCount(row.reported_logical_documents) === logicalDocuments,
+            latest_run: latestRun,
+          }
+        : null,
+      last_failure: lastFailure,
+      freshness,
+    };
+  });
+
+  if (rows.length !== total) {
+    throw new Error("source inventory did not return the complete bounded snapshot");
+  }
+  return { total, rows };
+}
+
+const sourceRecoveryMarkerSql = `
+  SELECT i.schema_version AS schema_version,
+         i.session_generation AS session_generation,
+         i.outbox_generation AS outbox_generation,
+         COALESCE((SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL),0) AS live_documents,
+         COALESCE((SELECT MAX(rowid) FROM documents),0) AS document_high_water,
+         COALESCE((SELECT SUM(rowid) FROM documents WHERE deleted_at IS NULL),0) AS document_rowid_sum,
+         COALESCE((SELECT MAX(ingested_at) FROM documents WHERE deleted_at IS NULL),0) AS latest_document_ingest,
+         COALESCE((SELECT SUM((rowid * (ingested_at % 1000003)) % 2147483629)
+                    FROM documents WHERE deleted_at IS NULL),0) AS ingest_position_marker,
+         COALESCE((SELECT SUM(CASE lower(COALESCE(text_source,''))
+                           WHEN 'native' THEN 1 WHEN 'ocr' THEN 3 WHEN 'ocr_partial' THEN 7 ELSE 13 END)
+                    FROM documents WHERE deleted_at IS NULL),0) AS extraction_marker,
+         COALESCE((SELECT SUM(rowid * CASE lower(COALESCE(text_source,''))
+                           WHEN 'native' THEN 1 WHEN 'ocr' THEN 3 WHEN 'ocr_partial' THEN 7 ELSE 13 END)
+                    FROM documents WHERE deleted_at IS NULL),0) AS extraction_position_marker,
+         COALESCE((SELECT SUM(CASE WHEN text_reliable=1 THEN 1 WHEN text_reliable=0 THEN 3 ELSE 7 END)
+                    FROM documents WHERE deleted_at IS NULL),0) AS reliability_marker,
+         COALESCE((SELECT SUM(rowid * CASE WHEN text_reliable=1 THEN 1 WHEN text_reliable=0 THEN 3 ELSE 7 END)
+                    FROM documents WHERE deleted_at IS NULL),0) AS reliability_position_marker,
+         COALESCE((SELECT SUM(length(COALESCE(meta,'')) + length(source) + length(source_id))
+                    FROM documents WHERE deleted_at IS NULL),0) AS provenance_shape_marker,
+         COALESCE((SELECT SUM(rowid * (
+                           CASE WHEN trim(COALESCE(source_id,'')) != '' THEN 1 ELSE 3 END
+                           + CASE WHEN json_valid(meta) AND json_type(meta,'$.evidence_lineage')='object' THEN 5 ELSE 11 END
+                           + CASE WHEN json_valid(meta) AND (
+                               (json_type(meta,'$.family_of')='text' AND length(trim(json_extract(meta,'$.family_of'))) > 0)
+                               OR (json_type(meta,'$.part_of')='text' AND length(trim(json_extract(meta,'$.part_of'))) > 0)
+                             ) THEN 17 ELSE 23 END
+                           + CASE WHEN ${LINEAGE_SHAPE_SQL}=1 THEN 29 ELSE 31 END
+                         )) FROM documents WHERE deleted_at IS NULL),0) AS provenance_position_marker,
+         COALESCE((SELECT SUM(
+                           COALESCE(provenance_receipt_version,0) * 3
+                           + length(COALESCE(provenance_receipt_status,'')) * 5
+                           + length(COALESCE(provenance_receipt_reason,'')) * 7
+                           + length(COALESCE(provenance_receipt_digest,'')) * 11
+                         ) FROM documents WHERE deleted_at IS NULL),0) AS provenance_assessment_marker,
+         COALESCE((SELECT SUM(rowid * (
+                           COALESCE(provenance_receipt_version,0) * 3
+                           + length(COALESCE(provenance_receipt_status,'')) * 5
+                           + length(COALESCE(provenance_receipt_reason,'')) * 7
+                           + length(COALESCE(provenance_receipt_digest,'')) * 11
+                         )) FROM documents WHERE deleted_at IS NULL),0) AS provenance_assessment_position_marker,
+         COALESCE((SELECT COUNT(*) FROM chunks),0) AS chunks,
+         COALESCE((SELECT MAX(id) FROM chunks),0) AS chunk_high_water,
+         COALESCE((SELECT SUM(id) FROM chunks),0) AS chunk_id_sum,
+         COALESCE((SELECT COUNT(*) FROM chunks WHERE trim(text) != ''),0) AS nonblank_chunks,
+         COALESCE((SELECT SUM(id) FROM chunks WHERE trim(text) != ''),0) AS nonblank_chunk_id_sum,
+         COALESCE((SELECT COUNT(*) FROM sources),0) AS sources,
+         COALESCE((SELECT SUM(rowid * (
+                           length(name) * 3 + length(kind) * 5 + length(COALESCE(zone,'')) * 7
+                           + length(status) * 11 + length(COALESCE(sync_cursor,'')) * 13
+                         )) FROM sources),0) AS source_position_marker,
+         COALESCE((SELECT MAX(id) FROM source_events),0) AS source_event_high_water
+    FROM install_state i
+   WHERE i.id=1`;
+
+const sourceRecoverySql = `
+  WITH live_documents AS MATERIALIZED (
+    SELECT d.rowid AS document_rowid,
+           d.doc_uid,
+           d.source AS physical_source,
+           d.source_id,
+           d.ingested_at,
+           d.meta,
+           d.text_source,
+           d.text_reliable,
+           d.provenance_receipt_version,
+           d.provenance_receipt_status,
+           d.provenance_receipt_reason,
+           d.provenance_receipt_digest,
+           ${PROVENANCE_MARKER_SQL} AS provenance_marker_valid,
+           ${FAMILY_UID_SQL} AS family_doc_uid
+      FROM documents d
+     WHERE d.deleted_at IS NULL
+  ),
+  attributed_documents AS MATERIALIZED (
+    SELECT live_documents.*,
+           CASE
+             WHEN instr(family_doc_uid, ':') BETWEEN 2 AND 65
+              AND substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1) GLOB '[a-z0-9]*'
+              AND substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1) NOT GLOB '*[^a-z0-9_-]*'
+               THEN substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1)
+             ELSE physical_source
+           END AS inventory_source
+      FROM live_documents
+  ),
+  chunk_per_document AS (
+    SELECT a.doc_uid,
+           COUNT(c.chunk_uid) AS chunk_count,
+           COALESCE(SUM(CASE WHEN trim(c.text) != '' THEN 1 ELSE 0 END),0) AS nonblank_chunk_count
+      FROM attributed_documents a
+      LEFT JOIN chunks c ON c.doc_uid=a.doc_uid
+     GROUP BY a.doc_uid
+  ),
+  document_flags AS MATERIALIZED (
+    SELECT a.*,
+           COALESCE(c.chunk_count,0) AS chunk_count,
+           COALESCE(c.nonblank_chunk_count,0) AS nonblank_chunk_count,
+           CASE WHEN a.provenance_marker_valid=1 AND trim(COALESCE(a.source_id,'')) != '' THEN 1 ELSE 0 END AS has_source_identity,
+           CASE WHEN a.provenance_marker_valid=1
+                     AND lower(COALESCE(a.text_source,'')) IN ('native','ocr','ocr_partial') THEN 1 ELSE 0 END AS has_extraction_method,
+           CASE WHEN a.provenance_marker_valid=1
+                     AND lower(COALESCE(a.text_source,'')) IN ('native','ocr','ocr_partial')
+                     AND a.text_reliable IN (0,1) THEN 1 ELSE 0 END AS has_text_reliability,
+           CASE WHEN a.provenance_marker_valid=1 AND json_valid(a.meta)
+                     AND json_type(a.meta,'$.evidence_lineage')='object' THEN 1 ELSE 0 END AS declared_lineage,
+           CASE WHEN a.provenance_marker_valid=1 THEN ${LINEAGE_SHAPE_SQL} ELSE 0 END AS recognized_lineage,
+           CASE WHEN a.provenance_marker_valid=1 AND json_valid(a.meta) AND (
+             (json_type(a.meta,'$.family_of')='text' AND length(trim(json_extract(a.meta,'$.family_of'))) > 0)
+             OR (json_type(a.meta,'$.part_of')='text' AND length(trim(json_extract(a.meta,'$.part_of'))) > 0)
+           ) THEN 1 ELSE 0 END AS family_lineage,
+           CASE WHEN a.provenance_marker_valid=1 AND (
+             a.provenance_receipt_status='complete'
+             OR a.provenance_receipt_reason='text_provenance_unavailable'
+           ) THEN 1 ELSE 0 END AS has_lineage
+      FROM attributed_documents a
+      LEFT JOIN chunk_per_document c ON c.doc_uid=a.doc_uid
+  ),
+  candidate_rows AS MATERIALIZED (
+    SELECT f.*,
+           COALESCE(s.kind,'unregistered') AS source_kind,
+           s.zone AS source_zone,
+           CASE WHEN s.name IS NULL THEN 0 ELSE 1 END AS registered,
+           CASE WHEN f.chunk_count=0 THEN 1 ELSE 0 END AS reason_no_stored_chunks,
+           CASE WHEN f.chunk_count>0 AND f.nonblank_chunk_count=0 THEN 1 ELSE 0 END AS reason_blank_only_chunks,
+           CASE WHEN f.has_extraction_method=1 AND lower(COALESCE(f.text_source,''))='ocr_partial' THEN 1 ELSE 0 END AS reason_ocr_partial_review,
+           CASE WHEN f.provenance_marker_valid=0 THEN 1 ELSE 0 END AS reason_provenance_receipt_unassessed,
+           CASE WHEN f.has_extraction_method=0 THEN 1 ELSE 0 END AS reason_extraction_method_missing,
+           CASE WHEN f.has_text_reliability=0 THEN 1 ELSE 0 END AS reason_text_reliability_missing,
+           CASE WHEN f.has_source_identity=0 THEN 1 ELSE 0 END AS reason_source_record_id_missing,
+           CASE WHEN f.has_lineage=0 THEN 1 ELSE 0 END AS reason_derivation_lineage_missing,
+           CASE WHEN f.declared_lineage=1 AND f.recognized_lineage=0 THEN 1 ELSE 0 END AS reason_lineage_contract_unrecognized
+      FROM document_flags f
+      LEFT JOIN sources s ON s.name=f.inventory_source
+     WHERE (?1 IS NULL OR f.inventory_source=?1)
+       AND (
+         f.nonblank_chunk_count=0
+         OR (f.has_extraction_method=1 AND lower(COALESCE(f.text_source,''))='ocr_partial')
+         OR f.provenance_marker_valid=0
+         OR f.has_source_identity=0
+         OR f.has_extraction_method=0
+         OR f.has_text_reliability=0
+         OR f.has_lineage=0
+         OR (f.declared_lineage=1 AND f.recognized_lineage=0)
+       )
+  ),
+  source_groups AS MATERIALIZED (
+    SELECT inventory_source AS source_id,
+           source_kind,
+           source_zone AS zone,
+           COUNT(*) AS candidate_documents,
+           SUM(reason_no_stored_chunks) AS no_stored_chunks,
+           SUM(reason_blank_only_chunks) AS blank_only_chunks,
+           SUM(reason_ocr_partial_review) AS ocr_partial_review,
+           SUM(reason_provenance_receipt_unassessed) AS provenance_receipt_unassessed,
+           SUM(reason_extraction_method_missing) AS extraction_method_missing,
+           SUM(reason_text_reliability_missing) AS text_reliability_missing,
+           SUM(reason_source_record_id_missing) AS source_record_id_missing,
+           SUM(reason_derivation_lineage_missing) AS derivation_lineage_missing,
+           SUM(reason_lineage_contract_unrecognized) AS lineage_contract_unrecognized
+      FROM candidate_rows
+     GROUP BY inventory_source,source_kind,source_zone
+  ),
+  global_summary AS (
+    SELECT COUNT(*) AS recovery_total,
+           (SELECT COUNT(*) FROM source_groups) AS recovery_source_group_total,
+           COALESCE(SUM(reason_no_stored_chunks),0) AS total_no_stored_chunks,
+           COALESCE(SUM(reason_blank_only_chunks),0) AS total_blank_only_chunks,
+           COALESCE(SUM(reason_ocr_partial_review),0) AS total_ocr_partial_review,
+           COALESCE(SUM(reason_provenance_receipt_unassessed),0) AS total_provenance_receipt_unassessed,
+           COALESCE(SUM(reason_extraction_method_missing),0) AS total_extraction_method_missing,
+           COALESCE(SUM(reason_text_reliability_missing),0) AS total_text_reliability_missing,
+           COALESCE(SUM(reason_source_record_id_missing),0) AS total_source_record_id_missing,
+           COALESCE(SUM(reason_derivation_lineage_missing),0) AS total_derivation_lineage_missing,
+           COALESCE(SUM(reason_lineage_contract_unrecognized),0) AS total_lineage_contract_unrecognized
+      FROM candidate_rows
+  )
+  SELECT candidate_rows.*,
+         global_summary.*,
+         CASE WHEN candidate_rows.document_rowid=(
+           SELECT MIN(next_candidate.document_rowid)
+             FROM candidate_rows next_candidate
+            WHERE next_candidate.document_rowid>?2
+         ) THEN (SELECT json_group_array(json_object(
+            'source_id',ordered.source_id,
+            'source_kind',ordered.source_kind,
+            'zone',ordered.zone,
+            'candidate_documents',ordered.candidate_documents,
+            'no_stored_chunks',ordered.no_stored_chunks,
+            'blank_only_chunks',ordered.blank_only_chunks,
+            'ocr_partial_review',ordered.ocr_partial_review,
+            'provenance_receipt_unassessed',ordered.provenance_receipt_unassessed,
+            'extraction_method_missing',ordered.extraction_method_missing,
+            'text_reliability_missing',ordered.text_reliability_missing,
+            'source_record_id_missing',ordered.source_record_id_missing,
+            'derivation_lineage_missing',ordered.derivation_lineage_missing,
+            'lineage_contract_unrecognized',ordered.lineage_contract_unrecognized
+          )) FROM (SELECT * FROM source_groups ORDER BY source_id LIMIT 250) ordered)
+         ELSE NULL END AS recovery_source_groups
+    FROM candidate_rows
+    CROSS JOIN global_summary
+   WHERE document_rowid>?2
+   ORDER BY document_rowid ASC
+   LIMIT ?3`;
+
+function normalizedRecoveryMarker(row) {
+  if (!row || typeof row !== "object") throw new Error("source recovery marker is unavailable");
+  const marker = {};
+  for (const field of [
+    "schema_version", "session_generation", "outbox_generation", "live_documents", "document_high_water", "document_rowid_sum",
+    "latest_document_ingest", "ingest_position_marker", "extraction_marker", "extraction_position_marker",
+    "reliability_marker", "reliability_position_marker", "provenance_shape_marker", "provenance_position_marker",
+    "provenance_assessment_marker", "provenance_assessment_position_marker",
+    "chunks", "chunk_high_water", "chunk_id_sum", "nonblank_chunks", "nonblank_chunk_id_sum",
+    "sources", "source_position_marker", "source_event_high_water",
+  ]) {
+    const value = Number(row[field]);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`source recovery marker has an invalid ${field}`);
+    }
+    marker[field] = value;
+  }
+  return marker;
+}
+
+async function sourceRecoveryMarker(env) {
+  return normalizedRecoveryMarker(await env.DB.prepare(sourceRecoveryMarkerSql).first());
+}
+
+async function sourceRecoveryPrivacyKey(env) {
+  const secret = String(env?.SESSION_SIGNING_KEY || "");
+  if (!secret) throw new Error("source recovery privacy key is unavailable");
+  const encoder = new TextEncoder();
+  return crypto.subtle.importKey(
+    "raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+}
+
+async function opaqueInventoryRecordId(key, docUid) {
+  const encoder = new TextEncoder();
+  const digest = await crypto.subtle.sign(
+    "HMAC", key, encoder.encode(`financial-brain-source-record-v1\u0000${String(docUid)}`),
+  );
+  return `hmac-sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/**
+ * Return one bounded page of records that need provenance or OCR review.
+ *
+ * No title, URI, provider id, source-local path, content, metadata, or raw
+ * document uid crosses this boundary. The opaque digest is a stable way to
+ * compare a later approved repair receipt with this preview, not a write
+ * capability. The opening and closing markers refuse a page that overlaps a
+ * corpus change.
+ */
+export async function sourceRecoveryCandidates(env, {
+  source = null,
+  afterRowId = 0,
+  limit = 100,
+} = {}) {
+  const normalizedSource = source === null ? null : String(source);
+  if (normalizedSource !== null && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(normalizedSource)) {
+    throw new TypeError("source recovery filter needs a normalized source name");
+  }
+  if (!Number.isSafeInteger(afterRowId) || afterRowId < 0) {
+    throw new TypeError("source recovery cursor is invalid");
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SOURCE_RECOVERY_MAX_PAGE_SIZE) {
+    throw new TypeError("source recovery page size is invalid");
+  }
+
+  const openingMarker = await sourceRecoveryMarker(env);
+  const result = await env.DB.prepare(sourceRecoverySql)
+    .bind(normalizedSource, afterRowId, limit + 1)
+    .all();
+  const closingMarker = await sourceRecoveryMarker(env);
+  if (JSON.stringify(openingMarker) !== JSON.stringify(closingMarker)) {
+    const error = new Error("source recovery inventory changed during the read");
+    error.code = "source_recovery_changed";
+    throw error;
+  }
+
+  const rawRows = Array.isArray(result?.results) ? result.results : [];
+  const pageRows = rawRows.slice(0, limit);
+  const total = rawRows.length ? inventoryCount(rawRows[0].recovery_total) : 0;
+  const reasonFieldMap = Object.freeze({
+    no_stored_chunks: "total_no_stored_chunks",
+    blank_only_chunks: "total_blank_only_chunks",
+    ocr_partial_review: "total_ocr_partial_review",
+    provenance_receipt_unassessed: "total_provenance_receipt_unassessed",
+    extraction_method_missing: "total_extraction_method_missing",
+    text_reliability_missing: "total_text_reliability_missing",
+    source_record_id_missing: "total_source_record_id_missing",
+    derivation_lineage_missing: "total_derivation_lineage_missing",
+    lineage_contract_unrecognized: "total_lineage_contract_unrecognized",
+  });
+  const reasonCounts = Object.fromEntries(Object.entries(reasonFieldMap).map(([reason, field]) => [
+    reason,
+    rawRows.length ? inventoryCount(rawRows[0][field]) : 0,
+  ]));
+  let rawGroups = [];
+  if (rawRows.length) {
+    try { rawGroups = JSON.parse(String(rawRows[0].recovery_source_groups || "[]")); } catch {
+      throw new Error("source recovery source summary is invalid");
+    }
+  }
+  if (!Array.isArray(rawGroups)) throw new Error("source recovery source summary is invalid");
+  const sourceGroups = rawGroups.map((group) => {
+    const sourceId = String(group?.source_id || "");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(sourceId)) {
+      throw new Error("source recovery source summary contains an invalid source identity");
+    }
+    const reasons = Object.fromEntries(Object.keys(reasonFieldMap).map((reason) => [
+      reason,
+      inventoryCount(group[reason]),
+    ]));
+    const blockingSignals = [
+      ...(reasons.no_stored_chunks || reasons.blank_only_chunks ? ["records_without_readable_text"] : []),
+      ...(reasons.ocr_partial_review ? ["partial_ocr_receipts"] : []),
+      ...(reasons.provenance_receipt_unassessed || reasons.extraction_method_missing || reasons.text_reliability_missing ||
+          reasons.source_record_id_missing || reasons.derivation_lineage_missing ||
+          reasons.lineage_contract_unrecognized ? ["incomplete_provenance_receipts"] : []),
+    ];
+    return {
+      source_id: sourceId,
+      source_kind: String(group.source_kind || "unregistered"),
+      zone: typeof group.zone === "string" && group.zone.trim() ? group.zone.trim() : null,
+      candidate_documents: inventoryCount(group.candidate_documents),
+      reason_counts: reasons,
+      blocking_signals: blockingSignals,
+      priority: blockingSignals.includes("records_without_readable_text") ? "high" : "review",
+      priority_basis: blockingSignals.includes("records_without_readable_text")
+        ? "stored records without nonblank searchable text"
+        : "stored OCR or provenance receipts require review",
+    };
+  });
+  const sourceGroupTotal = rawRows.length
+    ? inventoryCount(rawRows[0].recovery_source_group_total)
+    : 0;
+  if (sourceGroups.length > sourceGroupTotal || sourceGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE) {
+    throw new Error("source recovery source summary exceeds its declared bound");
+  }
+  const privacyKey = pageRows.length ? await sourceRecoveryPrivacyKey(env) : null;
+  const candidates = await Promise.all(pageRows.map(async (row) => {
+    const sourceId = String(row.inventory_source || "");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(sourceId)) {
+      const error = new Error("source recovery inventory contains an invalid source identity");
+      error.code = "source_inventory_invalid_source";
+      throw error;
+    }
+    const chunkCount = inventoryCount(row.chunk_count);
+    const nonblankChunks = inventoryCount(row.nonblank_chunk_count);
+    const storedAssessment = await storedProvenanceMarkerAssessment({
+      ...row,
+      source: row.physical_source,
+    });
+    const provenanceAssessed = storedAssessment.provenance_assessed === true &&
+      storedAssessment.provenance_marker_valid === true;
+    const extractionMethod = provenanceAssessed &&
+      ["native", "ocr", "ocr_partial"].includes(storedAssessment.text_source)
+      ? storedAssessment.text_source
+      : "unknown";
+    const hasSourceIdentity = provenanceAssessed &&
+      (row.has_source_identity === 1 || String(row.has_source_identity) === "1");
+    const hasExtractionMethod = provenanceAssessed &&
+      (row.has_extraction_method === 1 || String(row.has_extraction_method) === "1");
+    const hasTextReliability = provenanceAssessed &&
+      (row.has_text_reliability === 1 || String(row.has_text_reliability) === "1");
+    const declaredLineage = provenanceAssessed &&
+      (row.declared_lineage === 1 || String(row.declared_lineage) === "1");
+    const recognizedLineage = provenanceAssessed &&
+      (row.recognized_lineage === 1 || String(row.recognized_lineage) === "1");
+    const familyLineage = provenanceAssessed &&
+      (row.family_lineage === 1 || String(row.family_lineage) === "1");
+    const hasLineage = provenanceAssessed &&
+      (row.has_lineage === 1 || String(row.has_lineage) === "1");
+    const missingFields = [];
+    if (!provenanceAssessed) missingFields.push("validated_provenance_receipt");
+    if (!hasSourceIdentity) missingFields.push("source_record_id");
+    if (!hasExtractionMethod) missingFields.push("extraction_method");
+    if (!hasTextReliability) missingFields.push("text_reliability");
+    if (!hasLineage) missingFields.push("derivation_lineage");
+    if (declaredLineage && !recognizedLineage) missingFields.push("recognized_lineage_contract");
+    const reasons = [];
+    if (chunkCount === 0) reasons.push("no_stored_chunks");
+    else if (nonblankChunks === 0) reasons.push("blank_only_chunks");
+    if (extractionMethod === "ocr_partial") reasons.push("ocr_partial_review");
+    if (!provenanceAssessed) reasons.push("provenance_receipt_unassessed");
+    if (!hasExtractionMethod) reasons.push("extraction_method_missing");
+    if (!hasTextReliability) reasons.push("text_reliability_missing");
+    if (!hasSourceIdentity) reasons.push("source_record_id_missing");
+    if (!hasLineage) reasons.push("derivation_lineage_missing");
+    if (declaredLineage && !recognizedLineage) reasons.push("lineage_contract_unrecognized");
+    const recordId = await opaqueInventoryRecordId(privacyKey, row.doc_uid);
+    const likelyOcrCandidate = nonblankChunks === 0 && !["ocr", "ocr_partial"].includes(extractionMethod);
+    const ocrRetryCandidate = nonblankChunks === 0 && ["ocr", "ocr_partial"].includes(extractionMethod);
+    return {
+      record_id: recordId,
+      locator: { kind: "opaque_document_digest", value: recordId, reversible: false },
+      source_id: sourceId,
+      source_kind: String(row.source_kind || "unregistered"),
+      registered: row.registered === 1 || String(row.registered) === "1",
+      zone: typeof row.source_zone === "string" && row.source_zone.trim() ? row.source_zone.trim() : null,
+      ingested_at: inventoryTimestamp(row.ingested_at),
+      text: {
+        extraction_method: extractionMethod,
+        text_reliable: hasTextReliability ? storedAssessment.text_reliable : null,
+        chunks: chunkCount,
+        nonblank_chunks: nonblankChunks,
+        content_state: nonblankChunks > 0 ? "readable" : (chunkCount > 0 ? "blank_only" : "empty"),
+        scan_only_status: "unavailable",
+      },
+      ocr: {
+        likely_candidate: likelyOcrCandidate,
+        retry_candidate: ocrRetryCandidate,
+        partial_review: extractionMethod === "ocr_partial",
+        basis: likelyOcrCandidate
+          ? "no nonblank stored text and no recorded prior OCR"
+          : ocrRetryCandidate
+            ? "no nonblank stored text after recorded OCR"
+            : extractionMethod === "ocr_partial"
+              ? "the ingestion receipt records partial OCR"
+              : null,
+      },
+      provenance: {
+        status: provenanceAssessed
+          ? storedAssessment.provenance_status
+          : "unavailable",
+        receipt_validation_status: provenanceAssessed ? "validated" : "unassessed",
+        source_identity_status: hasSourceIdentity ? "complete" : "unavailable",
+        extraction_status: hasExtractionMethod && hasTextReliability
+          ? "complete"
+          : (hasExtractionMethod || hasTextReliability ? "partial" : "unavailable"),
+        lineage_status: hasLineage ? "complete" : "unavailable",
+        lineage_basis: recognizedLineage
+          ? "recognized_contract"
+          : familyLineage
+            ? "recorded_family_marker"
+            : declaredLineage
+              ? "unrecognized_contract"
+              : "not_recorded",
+        missing_subfields: missingFields,
+      },
+      reasons,
+      plan: {
+        mode: "preview_only",
+        suggested_next_step: likelyOcrCandidate
+          ? "review_original_for_ocr"
+          : ocrRetryCandidate
+            ? "review_empty_ocr_result"
+            : extractionMethod === "ocr_partial"
+              ? "review_partial_ocr_result"
+              : "recover_provenance_receipt",
+      },
+    };
+  }));
+
+  return {
+    total,
+    rows: candidates,
+    truncated: rawRows.length > limit,
+    nextAfterRowId: rawRows.length > limit && pageRows.length
+      ? inventoryCount(pageRows[pageRows.length - 1].document_rowid)
+      : null,
+    marker: openingMarker,
+    summary: {
+      status: total ? "review_needed" : "no_candidates",
+      read_only: true,
+      candidate_documents: total,
+      candidate_source_groups: sourceGroupTotal,
+      source_groups_returned: sourceGroups.length,
+      source_groups_truncated: sourceGroups.length < sourceGroupTotal,
+      source_group_details: sourceGroups.length < sourceGroupTotal
+        ? "rerun_with_source_filter_or_read_source_inventory_pages"
+        : "complete",
+      candidate_pages_at_max_size: Math.ceil(total / SOURCE_RECOVERY_MAX_PAGE_SIZE),
+      maximum_page_size: SOURCE_RECOVERY_MAX_PAGE_SIZE,
+      priority: sourceGroups.some((group) => group.priority === "high")
+        ? "high"
+        : total
+          ? "review"
+          : "none",
+      blocking_signals: [
+        "records_without_readable_text",
+        "partial_ocr_receipts",
+        "incomplete_provenance_receipts",
+      ].filter((signal) => sourceGroups.some((group) => group.blocking_signals.includes(signal))),
+      reason_counts: reasonCounts,
+      source_groups: sourceGroups,
+    },
   };
 }
 
@@ -4353,6 +6086,7 @@ export async function vectorReadiness(env) {
 
   const state = await env.DB.prepare(
     `SELECT schema_version,
+            outbox_generation,
             vector_projection_mutation_id AS mutation_id,
             vector_projection_submitted_at AS mutation_submitted_at,
             vector_projection_status AS projection_status,
@@ -4372,7 +6106,9 @@ export async function vectorReadiness(env) {
   const expected = Number(state.expected_vectors);
   const pending = Number(state.pending);
   const submitted = Number(state.submitted);
-  if (![expected, pending, submitted].every((value) => Number.isSafeInteger(value) && value >= 0) ||
+  const outboxGeneration = Number(state.outbox_generation ?? 0);
+  if (![expected, pending, submitted, outboxGeneration]
+      .every((value) => Number.isSafeInteger(value) && value >= 0) ||
       submitted > pending) {
     throw new Error("the vector readiness counts are invalid");
   }
@@ -4437,6 +6173,8 @@ export async function vectorReadiness(env) {
     actual_vectors: vectorCount,
     pending,
     submitted,
+    outbox_generation: outboxGeneration,
+    mutation_id: mutationId,
     oldest_queued_at: state.oldest_queued_at ?? null,
     mutation_submitted_at: state.mutation_submitted_at ?? null,
     projection_status: status,
@@ -4849,6 +6587,7 @@ export async function fixedPublicSmokeState(env) {
        (SELECT count(*) FROM documents
          WHERE source=?1 AND deleted_at IS NULL) live_document_count,
        d.doc_uid,d.source,d.source_id,d.title,d.content_hash,d.meta,
+       d.text_source,d.text_reliable,
        (SELECT count(*) FROM chunks c
          WHERE c.doc_uid=?2) chunk_count,
        (SELECT count(*) FROM chunks c
@@ -4867,17 +6606,23 @@ export async function fixedPublicSmokeState(env) {
   const identityExact = documents === 1 && row?.doc_uid === PUBLIC_INSTALL_SMOKE_DOC_UID &&
     row?.source === PUBLIC_INSTALL_SMOKE_SOURCE && row?.source_id === PUBLIC_INSTALL_SMOKE_ID &&
     row?.title === PUBLIC_INSTALL_SMOKE_TITLE && Number(row?.chunk_count) === 1 &&
-    Number(row?.exact_chunk_count) === 1 && row?.content_hash === expectedContentHash;
+    Number(row?.exact_chunk_count) === 1 && row?.content_hash === expectedContentHash &&
+    row?.text_source === "native" && Number(row?.text_reliable) === 1;
   let metadata;
   try { metadata = JSON.parse(String(row?.meta || "{}")); } catch { metadata = null; }
   const metadataKeys = metadata && !Array.isArray(metadata)
     ? Object.keys(metadata).sort()
     : [];
-  const metadataExact = metadataKeys.length === 3 &&
-    metadataKeys.join("|") === "contains_customer_data|proof_kind|schema_version" &&
+  const metadataExact = metadataKeys.length === 5 &&
+    metadataKeys.join("|") ===
+      "contains_customer_data|evidence_lineage|proof_kind|provenance_receipt|schema_version" &&
     metadata.proof_kind === PUBLIC_INSTALL_SMOKE_METADATA.proof_kind &&
     metadata.contains_customer_data === PUBLIC_INSTALL_SMOKE_METADATA.contains_customer_data &&
-    metadata.schema_version === PUBLIC_INSTALL_SMOKE_METADATA.schema_version;
+    metadata.schema_version === PUBLIC_INSTALL_SMOKE_METADATA.schema_version &&
+    JSON.stringify(metadata.evidence_lineage) ===
+      JSON.stringify(PUBLIC_INSTALL_SMOKE_METADATA.evidence_lineage) &&
+    JSON.stringify(metadata.provenance_receipt) ===
+      JSON.stringify(PUBLIC_INSTALL_SMOKE_METADATA.provenance_receipt);
   return { proven: Boolean(identityExact && metadataExact), documents };
 }
 

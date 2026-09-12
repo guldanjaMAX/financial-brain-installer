@@ -82,11 +82,214 @@ for (const f of files) {
   }
 }
 check(`all ${applied} statements across ${files.length} files applied`, true);
+db.prepare(
+  `INSERT INTO install_state
+     (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
+   VALUES (1, 'fixture', '0.0.0', 12, 0, '2026-01-01T00:00:00Z', 'test')`,
+).run();
+
+/* ---- provenance assessment markers are new proof, never a legacy backfill ---- */
+{
+  const documentColumns = new Set(db.prepare("PRAGMA table_info(documents)").all().map((row) => row.name));
+  check("0039 adds the complete provenance assessment marker",
+    ["provenance_receipt_version", "provenance_receipt_status", "provenance_receipt_reason",
+      "provenance_receipt_digest"].every((column) => documentColumns.has(column)));
+  db.exec("SAVEPOINT provenance_marker_fixture");
+  db.prepare(
+    `INSERT INTO documents (doc_uid,source,source_id,ingested_at,content_hash,meta,text_source,text_reliable)
+     VALUES ('marker:test','marker','test',1,'fixture-hash','{}','native',1)`,
+  ).run();
+  const legacy = db.prepare(
+    `SELECT provenance_receipt_version,provenance_receipt_status,
+            provenance_receipt_reason,provenance_receipt_digest
+       FROM documents WHERE doc_uid='marker:test'`,
+  ).get();
+  check("0039 leaves a legacy native/1 row explicitly unassessed",
+    Object.values(legacy).every((value) => value === null), JSON.stringify(legacy));
+  db.prepare(
+    `UPDATE documents
+        SET provenance_receipt_version=1,
+            provenance_receipt_status='partial',
+            provenance_receipt_reason='lineage_unavailable',
+            provenance_receipt_digest=?
+      WHERE doc_uid='marker:test'`,
+  ).run("a".repeat(64));
+  db.prepare("UPDATE documents SET text_source='ocr' WHERE doc_uid='marker:test'").run();
+  const invalidated = db.prepare(
+    `SELECT provenance_receipt_version,provenance_receipt_status,
+            provenance_receipt_reason,provenance_receipt_digest
+       FROM documents WHERE doc_uid='marker:test'`,
+  ).get();
+  check("0039 invalidates a marker when low-level provenance changes without a matching marker",
+    Object.values(invalidated).every((value) => value === null), JSON.stringify(invalidated));
+  db.exec("ROLLBACK TO provenance_marker_fixture");
+  db.exec("RELEASE provenance_marker_fixture");
+}
+
+/* ---- a populated schema-36 sync history survives every later additive migration ---- */
+{
+  const schema36 = new DatabaseSync(":memory:");
+  for (const file of files.filter((name) => Number(name.slice(0, 4)) <= 36)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, file), "utf-8"))) schema36.exec(statement);
+  }
+  schema36.prepare(
+    `INSERT INTO sync_runs
+       (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+        docs_added,docs_updated,docs_unchanged,proposed_deletes,delete_action,refusal_reason,error)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run("schema36_run", "drive", "sweep", 10, 20, 1, 7, 2, 3, 2, 0, "applied", null, null);
+  for (const file of files.filter((name) => Number(name.slice(0, 4)) > 36)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, file), "utf-8"))) schema36.exec(statement);
+  }
+  const upgradedRun = schema36.prepare(
+    `SELECT run_id,files_seen,docs_added,docs_updated,docs_unchanged,
+            docs_refused,docs_failed,metrics_version,
+            confirmed_from,confirmed_through,target_from,target_through
+       FROM sync_runs WHERE run_id='schema36_run'`,
+  ).get();
+  check("a populated schema-36 sync run survives the coverage telemetry migration",
+    upgradedRun?.run_id === "schema36_run" && upgradedRun.files_seen === 7 &&
+      upgradedRun.docs_added === 2 && upgradedRun.docs_updated === 3 && upgradedRun.docs_unchanged === 2,
+    JSON.stringify(upgradedRun));
+  check("legacy refusal counts remain explicitly unmeasured after upgrade",
+    upgradedRun?.docs_refused === 0 && upgradedRun?.docs_failed === 0 && upgradedRun?.metrics_version === 0 &&
+      upgradedRun?.confirmed_from === null && upgradedRun?.confirmed_through === null &&
+      upgradedRun?.target_from === null && upgradedRun?.target_through === null,
+    JSON.stringify(upgradedRun));
+  schema36.close();
+}
 
 /* ---- the objects the worker hard-depends on must exist ---- */
 const names = new Set(db.prepare("SELECT name FROM sqlite_master").all().map((r) => r.name));
-for (const t of ["documents", "document_source_inventory", "chunks", "chunks_fts", "vector_outbox", "vector_bootstrap_batches", "corpus_stats", "schema_migrations", "install_state"]) {
+for (const t of [
+  "documents",
+  "document_source_inventory",
+  "chunks",
+  "chunks_fts",
+  "vector_outbox",
+  "vector_bootstrap_batches",
+  "corpus_stats",
+  "schema_migrations",
+  "install_state",
+  "source_original_id_key_state",
+  "source_original_observations",
+  "source_original_result_bindings",
+  "source_original_result_family_members",
+  "source_original_result_family_receipts",
+  "source_original_result_family_verifications",
+  "source_original_result_family_recovery_state",
+  "source_original_accepted_resolution_admissions",
+  "source_original_accepted_resolutions",
+  "source_original_accepted_resolution_activations",
+]) {
   check(`${t} exists`, names.has(t), [...names].join(", "));
+}
+{
+  const documentColumns = new Set(db.prepare("PRAGMA table_info(documents)").all().map((row) => row.name));
+  check("0043 adds nullable document revision and raw-original binding pointers",
+    documentColumns.has("document_revision_id") && documentColumns.has("source_original_binding_hash"));
+}
+{
+  const chunkColumns = new Set(db.prepare("PRAGMA table_info(chunks)").all().map((row) => row.name));
+  check("0044 adds nullable exact revision and stored-chunk receipt pointers",
+    chunkColumns.has("bound_document_revision_id") && chunkColumns.has("result_chunk_receipt_hash"));
+}
+{
+  const installColumns = new Set(db.prepare("PRAGMA table_info(install_state)").all().map((row) => row.name));
+  const verificationColumns = new Set(db.prepare(
+    "PRAGMA table_info(source_original_result_family_verifications)",
+  ).all().map((row) => row.name));
+  check("0045 adds deployment-local full-result retrieval generations",
+    installColumns.has("source_original_retrieval_generation") &&
+      verificationColumns.has("retrieval_generation"));
+}
+{
+  const observationColumns = new Set(db.prepare(
+    "PRAGMA table_info(source_original_observations)",
+  ).all().map((row) => row.name));
+  check("0046 adds append-only per-original authority predecessor bindings",
+    observationColumns.has("authority_chain_version") &&
+      observationColumns.has("predecessor_observation_hash"));
+}
+for (const object of [
+  "idx_source_original_result_family_members_revision",
+  "idx_source_original_result_family_receipts_original_sequence",
+  "idx_source_original_result_family_verifications_family_sequence",
+  "chunks_source_original_receipt_insert",
+  "chunks_source_original_receipt_update",
+  "chunks_source_original_receipt_no_stale_update",
+  "chunks_source_original_receipt_no_stale_replace",
+  "source_original_result_family_recovery_state_validate_insert",
+  "source_original_result_family_member_no_duplicate_insert",
+  "source_original_result_family_member_after_seal_insert",
+  "source_original_result_family_member_no_update",
+  "source_original_result_family_member_no_sealed_delete",
+  "source_original_result_family_receipt_no_duplicate_insert",
+  "source_original_result_family_receipt_validate_insert",
+  "source_original_result_family_receipt_no_update",
+  "source_original_result_family_receipt_no_delete",
+  "source_original_result_family_verification_no_duplicate_insert",
+  "source_original_result_family_verification_validate_insert",
+  "source_original_result_family_verification_no_update",
+  "source_original_result_family_verification_no_delete",
+  "idx_source_original_accepted_resolutions_original_sequence",
+  "idx_source_original_accepted_resolution_activations_resolution_sequence",
+  "source_original_current_result_family_verifications",
+  "source_original_current_accepted_resolutions",
+  "source_original_result_family_verification_recovery_block",
+  "source_original_result_family_verification_retrieval_generation_validate",
+  "source_original_retrieval_generation_no_reset_update",
+  "source_original_retrieval_generation_no_replace_insert",
+  "source_original_retrieval_generation_no_singleton_delete",
+  "source_original_retrieval_generation_documents_ai",
+  "source_original_retrieval_generation_documents_ad",
+  "source_original_retrieval_generation_documents_au",
+  "source_original_retrieval_generation_chunks_ai",
+  "source_original_retrieval_generation_chunks_ad",
+  "source_original_retrieval_generation_chunks_au",
+  "source_original_retrieval_generation_sources_ai",
+  "source_original_retrieval_generation_sources_ad",
+  "source_original_retrieval_generation_sources_au",
+  "source_original_retrieval_generation_memory_ai",
+  "source_original_retrieval_generation_memory_ad",
+  "source_original_retrieval_generation_memory_au",
+  "chunks_source_original_sealed_receipt_no_revival_update",
+  "chunks_source_original_sealed_receipt_no_revival_insert",
+  "documents_source_original_sealed_evidence_no_revival_update",
+  "documents_source_original_sealed_evidence_no_revival_insert",
+  "source_original_accepted_resolution_no_duplicate_insert",
+  "source_original_accepted_resolution_requires_admission",
+  "source_original_accepted_resolution_validate_recovery_insert",
+  "source_original_accepted_resolution_no_update",
+  "source_original_accepted_resolution_no_delete",
+  "source_original_accepted_resolution_activation_no_duplicate_insert",
+  "source_original_accepted_resolution_activation_validate_insert",
+  "source_original_accepted_resolution_activation_no_update",
+  "source_original_accepted_resolution_activation_no_delete",
+  "source_original_accepted_resolution_admission_validate_insert",
+  "source_original_accepted_resolution_admission_no_update",
+  "source_original_accepted_resolution_admission_commit",
+  "source_original_accepted_resolution_recovery_close_validate",
+  "source_original_accepted_resolution_recovery_state_validate_insert",
+  "source_original_observation_accepted_admission_required",
+  "idx_source_original_observation_authority_predecessor",
+  "source_original_observation_authority_head_insert",
+  "source_original_accepted_resolution_authority_head_insert",
+  "source_original_observation_authority_recovery_close_validate",
+]) {
+  check(`${object} exists`, names.has(object));
+}
+{
+  const currentAcceptedSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='view' AND name='source_original_current_accepted_resolutions'",
+  ).get()?.sql || "";
+  const admissionCommitSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='source_original_accepted_resolution_admission_commit'",
+  ).get()?.sql || "";
+  check("0046 current accepted authority joins observations inside the tenant",
+    /accepted\.tenant_id\s*=\s*resolution\.tenant_id/i.test(currentAcceptedSql));
+  check("0046 accepted observation replay lookup remains inside the tenant",
+    /accepted\.tenant_id\s*=\s*NEW\.tenant_id/i.test(admissionCommitSql));
 }
 for (const t of ["chunks_ai", "chunks_ad", "chunks_au"]) {
   check(`trigger ${t} exists`, names.has(t), "MISSING — keyword search would silently return nothing forever");
@@ -204,11 +407,6 @@ for (const trigger of [
 
 /* queued_at is allowed to collide; the database-owned generation is not. */
 {
-  db.prepare(
-    `INSERT INTO install_state
-       (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
-     VALUES (1, 'fixture', '0.0.0', 12, 0, '2026-01-01T00:00:00Z', 'test')`
-  ).run();
   db.prepare(
     `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
      VALUES ('race#0', 'race#0', 'upsert', 1000)`
@@ -851,7 +1049,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
     });
   } catch (error) { schema32Error = error; }
   check("direct migrate refuses a live schema-32 brain before dropping its FTS writer",
-    /0010-0013 or 0033.*brain update/is.test(schema32Error?.message || "") &&
+    /0010-0013, 0033, or 0044.*brain update/is.test(schema32Error?.message || "") &&
       schema32Fault.mutations === 0 &&
       schema32.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger' AND name='chunks_ai'").get().n === 1,
     `${schema32Error?.message}; mutations=${schema32Fault.mutations}`);
@@ -930,7 +1128,28 @@ check("restart guard refuses an existing migration column with the wrong contrac
       seededSingleton.status === "bootstrap_required" && seededSingleton.epoch === 1 &&
       seededSingleton.cursor === null && seededSingleton.high_water === "legacy:missing-row#0",
     JSON.stringify(seededSingleton));
+  check("fresh migration completion seeds one durable owner financial map key",
+    missingSingleton.prepare(
+      "SELECT count(*) AS n FROM owner_financial_map_key_state WHERE tenant_id='primary'",
+    ).get()?.n === 1);
   missingSingleton.close();
+
+  const fresh = new DatabaseSync(":memory:");
+  const freshFault = { after: null, mutations: 0 };
+  await cmdMigrate(manifestPath, {
+    silent: true,
+    resolveAccount: async () => ({ id: "fixture-account" }),
+    d1Query: adapterFor(fresh, freshFault),
+  });
+  const freshOriginalKey = fresh.prepare(
+    "SELECT signing_salt FROM source_original_id_key_state WHERE tenant_id='primary'",
+  ).get();
+  check("fresh cmdMigrate completion seeds one durable source-original identity key",
+    fresh.prepare("SELECT schema_version FROM install_state WHERE id=1").get()?.schema_version === LATEST_SCHEMA &&
+      fresh.prepare("SELECT count(*) AS n FROM source_original_id_key_state").get()?.n === 1 &&
+      /^[a-f0-9]{64}$/.test(freshOriginalKey?.signing_salt || ""),
+    JSON.stringify(freshOriginalKey));
+  fresh.close();
   rmSync(sandbox, { recursive: true, force: true });
 }
 
@@ -1007,10 +1226,33 @@ check("restart guard refuses an existing migration column with the wrong contrac
 
   const ready = await (await post({
     source: "drive", kind: "drive", status: "ready", run_id: "real_run_1",
-    lane: "sweep", started_at: oldStart, complete_sweep: true,
+    lane: "sweep", started_at: oldStart, complete_sweep: true, walk_complete: true,
+    files_seen: 4, docs_added: 1, docs_updated: 1, docs_unchanged: 1,
+    docs_refused: 1, docs_failed: 0,
+    confirmed_range: { from: "2025-01-01T00:00:00.000Z", through: "2026-09-06T00:00:00.000Z" },
+    target_range: { from: "2025-01-01T00:00:00.000Z", through: null },
   })).json();
   check("a real completion counts one split family as one logical document",
     ready.documents === 2 && ready.stored_documents === 3, JSON.stringify(ready));
+  const measuredRun = db.prepare(
+    `SELECT files_seen,docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+            confirmed_from,confirmed_through,target_from,target_through
+       FROM sync_runs WHERE run_id='real_run_1'`,
+  ).get();
+  check("a terminal receipt durably stores measured refusal counts and claimed ranges",
+    measuredRun?.files_seen === 4 && measuredRun?.docs_refused === 1 && measuredRun?.docs_failed === 0 &&
+      measuredRun?.metrics_version === 1 && measuredRun?.confirmed_from === "2025-01-01T00:00:00.000Z" &&
+      measuredRun?.confirmed_through === "2026-09-06T00:00:00.000Z" &&
+      measuredRun?.target_from === "2025-01-01T00:00:00.000Z" && measuredRun?.target_through === null,
+    JSON.stringify(measuredRun));
+  const invalidRange = await post({
+    source: "drive", kind: "drive", status: "ready", run_id: "invalid_range_run",
+    lane: "sweep", confirmed_range: { from: "2026-01-02", through: "2026-01-01" },
+  });
+  check("an inverted claimed range is refused before a sync run is written",
+    invalidRange.status === 400 &&
+      db.prepare("SELECT count(*) AS n FROM sync_runs WHERE run_id='invalid_range_run'").get().n === 0,
+    await invalidRange.text());
   const successfulAt = db.prepare("SELECT last_ingest_at FROM sources WHERE name='drive'").get().last_ingest_at;
 
   await post({ source: "drive", kind: "drive", status: "indexing", run_id: "real_run_2", lane: "incremental" });

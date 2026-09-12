@@ -67,10 +67,10 @@ function documentsPayload(rows) {
   };
 }
 
-/** Run the real tier-2 checks against a fixture install. */
-async function tierDataFor(rows) {
+/** Build an acceptance suite around the Worker's real source-freshness report. */
+async function acceptanceFor(rows) {
   const freshness = await reportFor(rows);
-  const suite = new Acceptance({
+  return new Acceptance({
     base: "https://fixture.invalid",
     adminKey: "fixture-admin-key",
     manifest,
@@ -81,6 +81,11 @@ async function tierDataFor(rows) {
       });
     },
   });
+}
+
+/** Run the real tier-2 checks against a fixture install. */
+async function tierDataFor(rows) {
+  const suite = await acceptanceFor(rows);
   await suite.tierData();
   return suite;
 }
@@ -257,6 +262,75 @@ const named = (suite, needle) =>
     /2 of 2 scheduled source\(s\) have stopped updating/.test(
       by["every source expected to refresh is current"]?.detail || ""),
     JSON.stringify(by["every source expected to refresh is current"]));
+}
+
+/* ================================================================
+   7. ONE BROKEN SOURCE DOES NOT STOP INDEPENDENT LATER TIERS
+   The first failure stays visible, but stoppedAtTier is reserved for
+   an intentional early stop after tier 1.
+   ================================================================ */
+{
+  const rows = [
+    { name: "gmail", kind: "gmail", status: "ready", last_ingest_at: ago(2 * DAY),
+      stale_reason: "fixture provider failure", expected_refresh_seconds: DAY, document_count: 8_100 },
+    { name: "drive", kind: "drive", status: "ready", last_ingest_at: ago(2 * 3600),
+      expected_refresh_seconds: DAY, document_count: 12_400 },
+  ];
+  const suite = await acceptanceFor(rows);
+  const tiersRun = [];
+  suite.tierReach = async () => {
+    tiersRun.push(1);
+    suite.record(1, "fixture reach", "pass", "reachable");
+  };
+  const realTierData = suite.tierData.bind(suite);
+  suite.tierData = async () => {
+    tiersRun.push(2);
+    await realTierData();
+  };
+  suite.tierRetrieval = async () => {
+    tiersRun.push(3);
+    suite.record(3, "fixture retrieval", "pass", "independent check ran");
+  };
+  suite.tierSafety = async () => {
+    tiersRun.push(4);
+    suite.record(4, "fixture safety", "pass", "independent check ran");
+  };
+  suite.tierOperations = async () => {
+    tiersRun.push(5);
+    suite.record(5, "fixture operations", "pass", "independent check ran");
+  };
+
+  const summary = await suite.run();
+  check("a broken Gmail source does not stop acceptance tiers 3 through 5",
+    JSON.stringify(tiersRun) === JSON.stringify([1, 2, 3, 4, 5]), JSON.stringify(tiersRun));
+  check("the broken source remains a named failure",
+    summary.results.some((r) => r.name === "freshness: gmail" && r.status === "fail"),
+    JSON.stringify(summary.results));
+  check("the first failed tier is preserved separately",
+    summary.firstFailedTier === 2 && suite.tierFailed === 2, JSON.stringify(summary));
+  check("a completed five-tier run does not claim it stopped at the first failure",
+    summary.stoppedAtTier === null, JSON.stringify(summary));
+  check("later passes do not erase the source failure",
+    summary.passed === false && summary.counts.fail >= 1, JSON.stringify(summary.counts));
+}
+
+{
+  const suite = new Acceptance({ base: "https://fixture.invalid", adminKey: "fixture-admin-key", manifest });
+  const tiersRun = [];
+  suite.tierReach = async () => {
+    tiersRun.push(1);
+    suite.record(1, "fixture reach", "fail", "unreachable");
+  };
+  suite.tierData = async () => tiersRun.push(2);
+  suite.tierRetrieval = async () => tiersRun.push(3);
+  suite.tierSafety = async () => tiersRun.push(4);
+  suite.tierOperations = async () => tiersRun.push(5);
+
+  const summary = await suite.run();
+  check("an actual tier-1 early stop still skips every dependent tier",
+    JSON.stringify(tiersRun) === JSON.stringify([1]), JSON.stringify(tiersRun));
+  check("an actual early stop reports both the first failure and stopped tier",
+    summary.firstFailedTier === 1 && summary.stoppedAtTier === 1, JSON.stringify(summary));
 }
 
 console.log(`\nacceptance freshness: ${ran - fail}/${ran} passed`);

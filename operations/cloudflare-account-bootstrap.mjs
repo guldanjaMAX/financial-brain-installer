@@ -16,6 +16,17 @@ export const CLOUDFLARE_ACCOUNT_URLS = Object.freeze({
   plans: "https://dash.cloudflare.com/?to=/:account/workers/plans",
 });
 
+const ACCOUNT_ID_PATTERN = /^[a-f0-9]{32}$/i;
+
+/** Deep-link to the plan page only after Cloudflare has verified the account. */
+export function cloudflareWorkersPlanUrl(accountId) {
+  const exact = String(accountId || "").trim().toLowerCase();
+  if (!ACCOUNT_ID_PATTERN.test(exact)) {
+    throw new TypeError("a verified Cloudflare account id is required before opening its plan page");
+  }
+  return CLOUDFLARE_ACCOUNT_URLS.plans.replace(":account", exact);
+}
+
 export function normalizeCloudflareAccountPath(value, { required = false } = {}) {
   const normalized = String(value || "").trim().toLowerCase();
   if (!normalized && !required) return null;
@@ -36,19 +47,23 @@ export function cloudflareAccountPlan(value) {
       ? [
           "Create the account in Cloudflare's own page.",
           "Verify the email address and complete any sign-in protection Cloudflare requests.",
-          "Choose the supported Workers Paid plan after the installer identifies the exact account.",
+          "After sign-in verifies the account, the installer opens that exact account's Workers & Pages > Plans page. It must say Paid before setup creates anything.",
+          "If a plan change or payment is needed, the owner reviews and approves it in Cloudflare before returning here.",
         ]
       : [
           "Sign in to Cloudflare in its own page.",
           "If the login can reach several accounts, choose the exact account by name and ID before setup changes anything.",
-          "Confirm that the selected account uses the supported Workers Paid plan.",
+          "After sign-in verifies the account, the installer opens that exact account's Workers & Pages > Plans page. It must say Paid before setup creates anything.",
+          "If a plan change or payment is needed, the owner reviews and approves it in Cloudflare before returning here.",
         ]),
-    convergence: "Continue with the same Wrangler browser sign-in. The installer verifies the exact reachable account before creating any Brain resource.",
+    convergence: "Continue with the same Wrangler browser sign-in. The installer verifies the exact reachable account, then opens that account's plan page for the owner's separate Workers Paid confirmation, before any Brain resource is created.",
     multi_brain: "One Cloudflare account can hold many separate Brains. Each Brain receives its own Worker, D1 database, Vectorize index, secrets, hostname, and saved resource IDs.",
     boundaries: Object.freeze({
       account_creation: "human_in_cloudflare",
       login_2fa_and_billing: "human_in_cloudflare",
-      exact_account_selection: "owner_confirmed_then_api_verified",
+      workers_paid_confirmation: "owner_confirmed_before_provisioning",
+      plan_visibility: "owner_dashboard_only_not_narrow_session",
+      exact_account_selection: "api_verified_then_owner_plan_confirmed",
       credential_storage: "wrangler_os_keyring",
       provisioning: "not_started_by_this_plan",
     }),

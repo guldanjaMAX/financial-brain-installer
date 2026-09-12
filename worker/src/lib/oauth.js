@@ -30,7 +30,8 @@ import { FAVICON } from "./app-page.js";
 import { randomToken, sessionGeneration } from "./auth-store.js";
 import { ownerSessionPrincipal } from "./owner-auth.js";
 import {
-  AGENT_PROFILE_NAMES, DEFAULT_AGENT_PROFILE, profileDescription, profileFromScope, profileHas,
+  CONNECTOR_AGENT_PROFILE_NAMES, DEFAULT_AGENT_PROFILE,
+  profileDescription, profileFromScope, profileHas,
 } from "./agent-authority.js";
 
 const CODE_TTL_MS = 5 * 60 * 1000;
@@ -110,7 +111,7 @@ export function handleOAuthMetadata(url) {
     grant_types_supported: ["authorization_code"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
-    scopes_supported: AGENT_PROFILE_NAMES,
+    scopes_supported: CONNECTOR_AGENT_PROFILE_NAMES,
   });
 }
 
@@ -119,7 +120,7 @@ export function handleProtectedResourceMetadata(url) {
     resource: `${url.origin}/mcp`,
     authorization_servers: [url.origin],
     bearer_methods_supported: ["header"],
-    scopes_supported: AGENT_PROFILE_NAMES,
+    scopes_supported: CONNECTOR_AGENT_PROFILE_NAMES,
   });
 }
 
@@ -213,7 +214,7 @@ export async function handleAuthorizePage(env, url) {
   const profile = profileDescription(params.scope);
   const profileSentences = {
     librarian: "It can ask questions and read documents. It cannot add, diagnose, change, or remove anything.",
-    "structured-contributor": "It can read and add contract-checked curated lessons. It cannot diagnose or remove anything.",
+    "structured-contributor": "It can read and add contract-checked facts, decisions, preferences, notes, or corrections. It cannot diagnose or remove anything.",
     technician: "It can read documents and whole-brain diagnostics. It cannot add, change, or remove anything.",
     "break-glass": "It can read, diagnose, and prepare an exact short-lived deletion preview. It cannot execute a deletion. Execution always requires your fresh passkey in the owner app.",
   };
@@ -260,11 +261,14 @@ export async function handleAuthorizePage(env, url) {
 
     <button id="approve"
       class="mt-7 w-full rounded-xl bg-accent px-5 py-3.5 text-white font-semibold disabled:opacity-55 transition-opacity">
-      Approve with Face ID
+      Approve access
     </button>
     <button id="deny" class="mt-2 w-full rounded-xl px-5 py-3 text-ink-soft">Cancel</button>
     <p class="mt-4 text-[13px] text-ink-soft leading-relaxed">
-      Approving uses your passkey. Revoke it any time from Settings, or end every
+      If you need to sign in, approving will open your device's normal passkey
+      window. Answer that system prompt yourself. Your biometric data and device
+      PIN stay on your device; this brain verifies only the signed passkey
+      challenge. Revoke this connection any time from Settings, or end every
       connection at once with Sign out everywhere.
     </p>
     <p id="err" class="mt-4 text-[14px] text-red-700" hidden></p>

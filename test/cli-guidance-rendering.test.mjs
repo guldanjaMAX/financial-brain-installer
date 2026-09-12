@@ -50,7 +50,7 @@ const alternation = guidanceSource.match(/const COMMAND = \/\\bbrain\(\?=\\s\+\(
 assert.ok(alternation, "operations/cli-guidance.mjs no longer exposes a readable command alternation");
 const SUBCOMMANDS = alternation.split("|");
 const bareCommand = new RegExp(String.raw`\bbrain\s+(?:${alternation})\b`);
-for (const covered of ["setup", "doctor", "update", "drain", "support", "technician", "eval", "grants", "forget", "mcp-config", "tools"]) {
+for (const covered of ["setup", "doctor", "update", "drain", "support", "technician", "eval", "grants", "forget", "mcp-config", "assistant-repair", "machine-continuity", "provenance-repair", "tools"]) {
   assert.ok(SUBCOMMANDS.includes(covered), `the renderer stopped covering \`brain ${covered}\``);
 }
 
@@ -91,6 +91,66 @@ try {
 }
 assert.match(output.join("\n"), /Synthetic backlog/);
 assert.doesNotMatch(output.join("\n"), bareCommand);
+
+const incompleteOutput = [];
+try {
+  console.log = (...parts) => incompleteOutput.push(parts.join(" "));
+  renderDiagnosis({
+    complete: false,
+    totals: { documents: 12, chunks: null, sources: 1 },
+    findings: [{
+      area: "meta", severity: "warn", observable: false,
+      title: "The bounded chunk audit did not finish",
+      action: "Run brain diagnose C:\\fixture\\brain.manifest.json again.",
+    }],
+    summary: { crit: 0, warn: 1, info: 0, ok: 0 },
+    verdict: "usable_with_gaps",
+  }, windows);
+} finally {
+  console.log = originalLog;
+}
+const incompleteText = incompleteOutput.join("\n");
+assert.match(incompleteText, /not verified\s+chunks/);
+assert.match(incompleteText, /did not finish.*cannot say the brain is clear/s);
+assert.doesNotMatch(incompleteText, /nothing is missing, nothing is stored wrong/);
+
+const optionalOutput = [];
+try {
+  console.log = (...parts) => optionalOutput.push(parts.join(" "));
+  renderDiagnosis({
+    complete: true,
+    totals: { documents: 12, chunks: 12, sources: 1 },
+    findings: [{
+      area: "efficiency", severity: "info", observable: false,
+      title: "Exact outlier measurement is not observable at this scale",
+    }],
+    summary: { crit: 0, warn: 0, info: 1, ok: 0 },
+    verdict: "healthy",
+  }, windows);
+} finally {
+  console.log = originalLog;
+}
+assert.match(optionalOutput.join("\n"), /not a claim that every efficiency check ran/);
+assert.doesNotMatch(optionalOutput.join("\n"), /nothing is missing, nothing is stored wrong/);
+
+const gapOutput = [];
+try {
+  console.log = (...parts) => gapOutput.push(parts.join(" "));
+  renderDiagnosis({
+    complete: true,
+    totals: { documents: 12, chunks: 12, sources: 1 },
+    findings: [{
+      area: "integrity", severity: "warn",
+      title: "Some meaning-search work is still settling",
+    }],
+    summary: { crit: 0, warn: 1, info: 0, ok: 0 },
+    verdict: "usable_with_gaps",
+  }, windows);
+} finally {
+  console.log = originalLog;
+}
+assert.match(gapOutput.join("\n"), /Some gaps can make answers incomplete/);
+assert.doesNotMatch(gapOutput.join("\n"), /Nothing here makes an answer wrong/);
 
 // These assertions bind the pure renderer checks above to the actual human
 // output branches. Structured JSON deliberately stays byte-stable.

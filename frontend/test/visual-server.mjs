@@ -1,11 +1,18 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { extname, join } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ownerThinkResponse } from "./rehearsal-responses.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(HERE, "..", "dist");
 const PORT = Number(process.env.BRAIN_VISUAL_PORT || 4177);
+const rehearsalState = {
+  disconnectedConnections: new Set(),
+  createdEntities: new Map(),
+  entityRequests: new Map(),
+  deviceNicknames: new Map(),
+};
 
 const entities = [
   { entity_slug: "household", legal_name: "Rivera Household", label: "Household", kind: "household", status: "active", relationship: "owned", counterparty: false, fixed: true },
@@ -116,6 +123,67 @@ const systemStatus = {
   unavailable: [],
 };
 
+const rehearsalFinancialMap = {
+  population_state: "known_partial",
+  tax_year_horizon: { start: 2025, end: 2026 },
+  filing_units: [{ label: "Rivera household", assessment: "confirmed" }],
+  entities: [{
+    label: "Mesa Coffee", disposition: "included", evidence_state: "linked_current_record",
+    fields: {
+      kind: { assessment: "confirmed", owner_value: "business", current_value: "business", comparison: "matches_current" },
+      status: { assessment: "confirmed", owner_value: "active", current_value: "active", comparison: "matches_current" },
+      holds: { assessment: "confirmed", owner_value: "Coffee shop", current_value: "Coffee shop", comparison: "matches_current" },
+      ownership: { assessment: "confirmed", owner_value: 10000, current_value: 10000, comparison: "matches_current" },
+      tax_class: { assessment: "confirmed", owner_value: "S corporation", current_value: "LLC", comparison: "differs_from_current" },
+      relationship: { assessment: "confirmed", owner_value: "owned", current_value: "owned", comparison: "matches_current" },
+      parent: { assessment: "not_applicable", owner_value: null, current_value: null, comparison: "not_compared" },
+    },
+    tax_years: [2025, 2026].map((tax_year) => ({
+      tax_year, state: "included",
+      filing_units: { assessment: "confirmed", labels: ["Rivera household"] },
+      required_returns: { assessment: "confirmed", items: [{ label: "Form 1120-S", assessment: "confirmed" }] },
+      required_forms: { assessment: "unknown", items: [] },
+      k1_roles: { assessment: "not_applicable", items: [] },
+      books: { assessment: "confirmed", bookkeeping_company: { label: "Rivera Bookkeeping", assessment: "confirmed" } },
+      payroll: { assessment: "confirmed" },
+      expected_sources: { assessment: "confirmed", items: [{ label: "Operating checking 2281", kind: "banking", assessment: "confirmed" }] },
+    })),
+  }],
+  accounts: [{
+    label: "Operating checking 2281", disposition: "included", evidence_state: "linked_current_record",
+    fields: {
+      entity_assignment: { assessment: "confirmed", owner_value: "Mesa Coffee", current_value: "Mesa Coffee", comparison: "matches_current" },
+      kind: { assessment: "confirmed", owner_value: "checking", current_value: "checking", comparison: "matches_current" },
+      balance_role: { assessment: "confirmed", owner_value: "asset", current_value: "asset", comparison: "matches_current" },
+      currency: { assessment: "confirmed", owner_value: "USD", current_value: "USD", comparison: "matches_current" },
+      status: { assessment: "confirmed", owner_value: "active", current_value: "active", comparison: "matches_current" },
+    },
+  }],
+};
+
+function financialMapReview() {
+  return {
+    status: "ready", review_state: "pending", authoritative: false,
+    activation_performed: false, complete: true, truncated: false,
+    review_id: `ofmp_${"b".repeat(64)}`, map_hash: "a".repeat(64),
+    denominator_hash: "c".repeat(64), expected_sequence: 2,
+    created_at: Date.now() - 60_000, expires_at: Date.now() + 60 * 60_000,
+    counts: { entities: 1, accounts: 1, entity_years: 2, filing_units: 1, obligation_items: 6 },
+    complete_preview: rehearsalFinancialMap,
+    prior_comparison: {
+      state: "compared", changed: true, change_count: 1,
+      changes: [{ area: "Entities", subject: "Mesa Coffee", field: "tax class", before: "confirmed; owner: LLC", after: "confirmed; owner: S corporation" }],
+      previous_confirmed_map: rehearsalFinancialMap,
+    },
+    unresolved_count: 2,
+    unresolved_items: [2025, 2026].map((tax_year) => ({
+      kind: "required_forms", state: "unknown", label: "Mesa Coffee",
+      item_label: "State and local filing requirements", tax_year,
+    })),
+    requires: "explicit_owner_passkey_confirmation",
+  };
+}
+
 const ownerActivity = [
   { event_id: "event-access", event_type: "document_grant_created", entity_slug: "mesa-coffee", subject_kind: "document_grant", subject_id: "grant", display_label: "External reviewer document access", occurred_at: "2026-08-29T17:00:00Z" },
   { event_id: "event-target", event_type: "target_set", entity_slug: "mesa-coffee", subject_kind: "target", subject_id: "monthly-revenue", display_label: "Monthly revenue target", occurred_at: "2026-08-29T16:00:00Z" },
@@ -174,14 +242,14 @@ function emptyCash() {
 }
 
 function snapshotFor(sections, entitySlug, scenario) {
-  const empty = scenario === "empty";
+  const empty = scenario === "empty" || scenario === "zero-entities";
   const unavailable = scenario === "degraded"
     ? new Set(["obligations", "cash", "reconciliations"])
     : scenario === "partial"
       ? new Set(["obligations"])
       : new Set();
   const values = {
-    entities,
+    entities: scenario === "zero-entities" ? [...rehearsalState.createdEntities.values()] : entities,
     accounts: empty ? [] : filterRows(accounts, entitySlug),
     documents: empty ? [] : filterRows(documents, entitySlug),
     deadlines: empty ? [] : filterRows(deadlines, entitySlug),
@@ -217,7 +285,7 @@ function snapshotFor(sections, entitySlug, scenario) {
   return result;
 }
 
-const server = createServer(async (request, response) => {
+export const visualFixtureServer = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://127.0.0.1:${PORT}`);
   const scenario = scenarioFor(request);
   if (scenario === "loading" && url.pathname.startsWith("/api/")) {
@@ -239,9 +307,136 @@ const server = createServer(async (request, response) => {
     return sendJson(response, {
       signed_in: true, owner: "Owner", brain: "Financial Brain",
       principal: { kind: "owner", grant_id: null },
-      devices: [{ credential_id: "device", nickname: "Primary device", created_at: Date.now() - 86400000 * 20, last_used_at: Date.now() - 60000 }],
-      connections: [{ client_id: "app", name: "Claude", can_write: false, connected_at: Date.now() - 86400000 * 4, last_used_at: Date.now() - 3600000 }],
+      devices: [{ credential_id: "device", nickname: rehearsalState.deviceNicknames.get(scenario) || "Primary device", created_at: Date.now() - 86400000 * 20, last_used_at: Date.now() - 60000 }],
+      connections: rehearsalState.disconnectedConnections.has(scenario)
+        ? []
+        : [{ client_id: "app", name: "Claude remote connector (Librarian)", can_write: false, connected_at: Date.now() - 86400000 * 4, last_used_at: Date.now() - 3600000 }],
     });
+  }
+  if (url.pathname === "/api/owner/entities/create") {
+    const body = await jsonBody(request);
+    const allowedKinds = new Set(["person", "household", "business", "trust", "property", "investment"]);
+    if (scenario !== "zero-entities") {
+      return sendJson(response, {
+        error: "rehearsal_scenario_mismatch",
+        detail: "Use the No financial entities yet rehearsal to try this synthetic action. Nothing changed.",
+      }, 409);
+    }
+    if (typeof body.request_id !== "string" || !body.request_id
+      || typeof body.entity_slug !== "string" || !body.entity_slug
+      || typeof body.legal_name !== "string" || !body.legal_name.trim()
+      || !allowedKinds.has(body.kind)) {
+      return sendJson(response, {
+        error: "invalid_synthetic_entity",
+        detail: "Enter an exact name, choose one type, review it, and try the synthetic action again. Nothing changed.",
+      }, 422);
+    }
+    const signature = JSON.stringify({
+      entity_slug: body.entity_slug,
+      legal_name: body.legal_name,
+      kind: body.kind,
+    });
+    const priorRequest = rehearsalState.entityRequests.get(body.request_id);
+    if (priorRequest && priorRequest !== signature) {
+      return sendJson(response, {
+        error: "idempotency_conflict",
+        detail: "This synthetic request was already used for a different reviewed entity. Nothing changed.",
+      }, 409);
+    }
+    const existing = rehearsalState.createdEntities.get(body.entity_slug);
+    if (existing && (existing.legal_name !== body.legal_name || existing.kind !== body.kind)) {
+      return sendJson(response, {
+        error: "entity_already_exists",
+        code: "entity_already_exists",
+        detail: "That synthetic entity identifier is already in use. Nothing changed.",
+      }, 409);
+    }
+    const replayed = Boolean(priorRequest);
+    const changed = !existing;
+    const entity = existing || {
+      entity_slug: body.entity_slug,
+      legal_name: body.legal_name,
+      label: body.legal_name,
+      kind: body.kind,
+      status: "active",
+      relationship: "owned",
+      counterparty: false,
+      fixed: false,
+    };
+    rehearsalState.entityRequests.set(body.request_id, signature);
+    rehearsalState.createdEntities.set(body.entity_slug, entity);
+    return sendJson(response, {
+      request_id: body.request_id,
+      entity_scope: { entity_slug: body.entity_slug },
+      entity: {
+        entity_slug: entity.entity_slug,
+        legal_name: entity.legal_name,
+        kind: entity.kind,
+      },
+      changed,
+      replayed,
+    }, replayed ? 200 : 201);
+  }
+  if (url.pathname === "/api/app/devices/rename") {
+    const body = await jsonBody(request);
+    if (body.credential_id !== "device" || typeof body.nickname !== "string") {
+      return sendJson(response, {
+        error: "synthetic_device_not_found",
+        detail: "Choose the visible synthetic device and try again. No real device can be changed here.",
+      }, 404);
+    }
+    const nickname = body.nickname.trim() || "unnamed device";
+    rehearsalState.deviceNicknames.set(scenario, nickname);
+    return sendJson(response, {
+      renamed: true,
+      credential_id: "device",
+      nickname,
+    });
+  }
+  if (url.pathname === "/api/app/devices/revoke") {
+    await jsonBody(request);
+    return sendJson(response, {
+      removed: false,
+      reason: "This rehearsal keeps its only synthetic owner passkey so you can continue. In a real Brain, add and verify another owner passkey before removing the last one.",
+    });
+  }
+  if (url.pathname === "/api/app/connections/revoke") {
+    const body = await jsonBody(request);
+    if (body.client_id !== "app") {
+      return sendJson(response, {
+        error: "synthetic_connection_not_found",
+        detail: "Choose the visible synthetic app and try again. No real app can be disconnected here.",
+      }, 404);
+    }
+    const changed = !rehearsalState.disconnectedConnections.has(scenario);
+    rehearsalState.disconnectedConnections.add(scenario);
+    return sendJson(response, { revoked: true, client_id: "app", changed });
+  }
+  if (url.pathname === "/api/owner/financial-map/review") {
+    if (scenario === "degraded") {
+      return sendJson(response, { error: "unavailable", detail: "The synthetic Financial Map is unavailable in this rehearsal state." }, 503);
+    }
+    if (scenario === "financial-map") return sendJson(response, financialMapReview());
+    const active = scenario !== "empty";
+    return sendJson(response, {
+      status: "no_pending_review", review_state: "none", complete: true, truncated: false,
+      active_map_present: active, active_map_authoritative: active,
+      active_sequence: active ? 1 : null,
+      active_map_hash: active ? "d".repeat(64) : null,
+      active_denominator_hash: active ? "e".repeat(64) : null,
+      active_activated_at: active ? Date.now() - 86_400_000 : null,
+      owner_message: active
+        ? "No Financial Map is waiting for review. The latest confirmed map remains available for future completeness checks."
+        : "No Financial Map is waiting for review. Complete the guided interview and create a fresh preview.",
+    });
+  }
+  if (url.pathname === "/api/owner/financial-map/passkey/options") {
+    return sendJson(response, {
+      error: "rehearsal_stop", detail: "This local rehearsal stops before the real device passkey window. Nothing was confirmed or changed.",
+    }, 503);
+  }
+  if (url.pathname === "/api/owner/financial-map/activate") {
+    return sendJson(response, { error: "rehearsal_stop", detail: "Local rehearsal cannot activate a Financial Map." }, 503);
   }
   if (url.pathname === "/api/app/document-access/documents") {
     if (scenario === "grant-unavailable") return sendJson(response, { error: "unavailable", code: "document_access_unavailable" }, 503);
@@ -273,7 +468,7 @@ const server = createServer(async (request, response) => {
     return sendJson(response, {
       status: "active", grant_id: "dg_created", subject_label: body.subject_label, entity_slug: body.entity_slug,
       document_ids: body.document_ids, expires_at: null, created_at: Date.now(), invite_state: "active",
-      enrollment_url: "http://127.0.0.1/app#enroll=fixture-private", enrollment_expires_at: Date.now() + 900000,
+      enrollment_url: "http://127.0.0.1/app#document-enroll=doc_fixture-private", enrollment_expires_at: Date.now() + 900000,
       scope_rule: "exact_document_ids_only", replayed: scenario === "idempotent",
     });
   }
@@ -281,7 +476,7 @@ const server = createServer(async (request, response) => {
     const body = await jsonBody(request);
     if (scenario === "conflict") return sendJson(response, { error: "conflict", code: "idempotency_conflict" }, 409);
     if (scenario === "forbidden") return sendJson(response, { error: "forbidden", code: "owner_required" }, 403);
-    return sendJson(response, { status: "active", grant_id: body.grant_id, invite_state: "active", enrollment_url: "http://127.0.0.1/app#enroll=fixture-reissued", enrollment_expires_at: Date.now() + 900000, replayed: scenario === "idempotent" });
+    return sendJson(response, { status: "active", grant_id: body.grant_id, invite_state: "active", enrollment_url: "http://127.0.0.1/app#document-enroll=doc_fixture-reissued", enrollment_expires_at: Date.now() + 900000, replayed: scenario === "idempotent" });
   }
   if (url.pathname === "/api/app/document-access/revoke") {
     const body = await jsonBody(request);
@@ -372,6 +567,27 @@ const server = createServer(async (request, response) => {
   if (url.pathname === "/api/bank-feed/status") {
     return sendJson(response, { configured: true, connections: [{ item_ref: "bank", institution_label: "Desert Bank", status: "healthy", connected_at: "2026-07-01T00:00:00Z", last_synced_at: "2026-08-29T06:00:00Z" }], needs_attention: [] });
   }
+  if (url.pathname === "/api/bank-feed/disconnect") {
+    await jsonBody(request);
+    return sendJson(response, {
+      error: "This local rehearsal keeps its synthetic bank connected so you can continue. Nothing was disconnected. On a real Brain, this control stops future bank reads while keeping the history already stored.",
+      code: "rehearsal_stop",
+    }, 409);
+  }
+  if (url.pathname === "/api/app/signout") {
+    await jsonBody(request);
+    return sendJson(response, {
+      error: "This local rehearsal keeps its synthetic session open so you can continue. Nothing was signed out. When you finish, close this browser tab, return to PowerShell, and press Control-C once.",
+      code: "rehearsal_stop",
+    }, 409);
+  }
+  if (url.pathname === "/api/app/signout-all") {
+    await jsonBody(request);
+    return sendJson(response, {
+      error: "This local rehearsal keeps its synthetic sessions open so you can continue. Nothing was signed out or disconnected. On a real Brain, this control ends every device session and remote AI connection.",
+      code: "rehearsal_stop",
+    }, 409);
+  }
   if (url.pathname === "/api/rag/unified") {
     const body = await jsonBody(request);
     if (scenario.startsWith("grant")) {
@@ -397,7 +613,15 @@ const server = createServer(async (request, response) => {
       ? { answer: null, answer_error: "search unavailable", status: "unavailable", degraded: "vector" }
       : scenario === "scope-mismatch"
         ? { answer: "This answer was not safely narrowed.", entity_scope: { entity_slug: null, applied: false }, filter_not_applied: true }
-        : { answer: "Mesa Coffee has one confirmed cash figure as of July 31. [1] The rental account is not included because no confirmed figure is recorded.", entity_scope: { entity_slug: body.entity_slug || null, applied: Boolean(body.entity_slug) }, degraded: body.entity_slug ? "vector" : undefined, degraded_reason: body.entity_slug ? "entity-vector-authority-unindexed" : undefined, confidence: { percent: 86, band: "high", basis: ["Strongest evidence is T1 primary: named like an authoritative record (statement)", "One known account is explicitly missing"] }, citations: [{ n: 1, title: "Mesa Coffee checking, July 2026", source: "drive", ts: "2026-07-31", authority: { tier: "T1", rank: 1, name: "primary", reason: "named like an authoritative record (statement)", eligible: true, authoritative: true } }] });
+        : ownerThinkResponse(scenario, body.entity_slug));
+  }
+
+  if (url.pathname === "/app/connect/bank") {
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bank rehearsal boundary</title>
+      <style>:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171a24;background:#f4f5f8}*{box-sizing:border-box}body{margin:0}.flag{padding:9px 16px;background:#fff0d9;color:#6f3c00;border-bottom:1px solid #e9be73;text-align:center;font-size:12px;font-weight:800;letter-spacing:.06em}.wrap{max-width:640px;margin:0 auto;padding:48px 20px}.card{background:#fff;border:1px solid #dfe2ea;border-radius:20px;padding:26px}.card h1{font-size:28px;line-height:1.15;margin:0 0 14px}.card p{color:#5f6675;line-height:1.6}.card a{color:#334fc0}</style>
+      <body><div class="flag">LOCAL REHEARSAL · SYNTHETIC DATA · SCENARIO: Owner creates guest access · NO ACCOUNTS CONNECTED</div><main class="wrap"><section class="card"><h1>Bank controls are unavailable in this rehearsal</h1><p>This page uses invented data. No bank is connected, no provider was contacted, and no account choice or credential was requested.</p><p>Bank feeds remain outside ordinary onboarding. An already approved pilot uses a separate reviewed plan on the Brain's normal HTTPS address.</p><p><a href="/app?state=owner-access&amp;view=access">Back to the synthetic Access screen</a></p></section></main></body></html>`);
+    return;
   }
 
   const requested = url.pathname === "/" || url.pathname === "/app" ? "index.html" : url.pathname.replace(/^\//, "");
@@ -413,6 +637,13 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`Financial Brain visual server listening on http://127.0.0.1:${PORT}`);
-});
+const IS_MAIN = (() => {
+  try { return resolve(process.argv[1] || "") === fileURLToPath(import.meta.url); }
+  catch { return false; }
+})();
+
+if (IS_MAIN) {
+  visualFixtureServer.listen(PORT, "127.0.0.1", () => {
+    console.log(`Financial Brain visual server listening on http://127.0.0.1:${PORT}`);
+  });
+}

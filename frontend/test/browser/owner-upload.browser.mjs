@@ -104,7 +104,7 @@ try{
  {
   const {page,state}=await fresh();
   await page.locator('input[type=file]').setInputFiles(syntheticFile('alpha'));
-  await page.getByRole('button',{name:'All',exact:true}).click();
+  await page.getByRole('button',{name:'Whole Brain',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('input[type=file]')?.disabled===true);
   await renderSettled(page);
   const wholeBrainCleared=await page.locator('input[type=file]').evaluate(el=>el.files.length===0);

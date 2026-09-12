@@ -27,8 +27,10 @@ const check = (n, c, d = "") => {
 
 const okHealth = () => ({ status: "ok", accepting_documents: true, vector_drain_mode: "active" });
 const okDiagnose = async () => ({
+  complete: true,
   totals: { documents: 70844, chunks: 876761, sources: 3 },
-  summary: { crit: 2, warn: 1, info: 2, ok: 1 },
+  unavailable_checks: [],
+  summary: { crit: 2, warn: 1, info: 2, ok: 1, unavailable: 0 },
   findings: [
     { id: "empty_documents", area: "coverage", severity: "crit", count: 1,
       title: "1 document(s) hold no text", detail: "d",
@@ -151,6 +153,42 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
   check("the working reads still come through", s.sources.length === 2 && !!s.vectors);
 }
 {
+  const incomplete = async () => ({
+    complete: false,
+    totals: { documents: null, chunks: null, sources: null },
+    unavailable_checks: ["totals"],
+    summary: { crit: 0, warn: 19, info: 0, ok: 0, unavailable: 19 },
+    findings: [{ id: "totals", severity: "warn", title: "check could not run" }],
+    verdict: "incomplete",
+  });
+  const s = await ownerSystemStatus({}, { ...deps, diagnose: incomplete });
+  check("an incomplete diagnose report is NAMED as unavailable",
+    s.unavailable.includes("diagnose"), JSON.stringify(s.unavailable));
+  check("an incomplete report cannot recreate false zero corpus counts",
+    !("documents" in s) && !("chunks" in s), JSON.stringify(s));
+  check("an incomplete report cannot project a seemingly available problem list",
+    !("problems" in s) && !("problem_counts" in s), JSON.stringify(s));
+}
+{
+  const partial = async () => ({
+    complete: false,
+    totals: { documents: 12, chunks: null, sources: 1 },
+    unavailable_checks: ["chunk_scan"],
+    summary: { crit: 0, warn: 2, info: 0, ok: 0, unavailable: 1 },
+    findings: [
+      { id: "source_mismatch", area: "integrity", severity: "warn", count: 1,
+        title: "one source mismatch was confirmed" },
+      { id: "chunk_scan", area: "meta", severity: "warn", observable: false,
+        incomplete: true, title: "scan incomplete" },
+    ],
+  });
+  const s = await ownerSystemStatus({}, { ...deps, diagnose: partial });
+  check("a partial diagnosis is named as unavailable even when it found a problem",
+    s.unavailable.includes("diagnose") && s.problems.length === 1, JSON.stringify(s));
+  check("a verified document total survives while an unverified chunk total stays absent",
+    s.documents === 12 && !("chunks" in s), JSON.stringify(s));
+}
+{
   const s = await ownerSystemStatus({}, { ...deps, freshness: async () => { throw new Error("down"); } });
   check("a broken freshness is NAMED", s.unavailable.includes("freshness"));
   check("a broken freshness also leaves access zones unavailable", s.unavailable.includes("zones"));
@@ -207,6 +245,64 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
     closedCoverage.counts.seen === 66500 && closedCoverage.counts.accepted === 66000 &&
       closedCoverage.counts.refused === null && closedCoverage.counts.failed === null,
     JSON.stringify(closedCoverage.counts));
+  const measuredCoverage = sourceCoverageFromEvidence({
+    kind: "whatsapp", state: "ok", documents: 17, last_complete_sweep_at: null,
+  }, {
+    latestRun: {
+      files_seen: 20, docs_added: 15, docs_updated: 1, docs_unchanged: 1,
+      docs_refused: 2, docs_failed: 1, metrics_version: 1, walk_complete: 1,
+      confirmed_from: "2026-09-01T00:00:00.000Z",
+      confirmed_through: "2026-09-06T11:00:00.000Z",
+      target_from: "2026-09-01T00:00:00.000Z",
+      target_through: "2026-09-06T11:00:00.000Z",
+      finished_at: "2026-09-06T11:00:00.000Z",
+    },
+    projectionPending: 0,
+  });
+  check("a measured walk exposes refusal and failure counts",
+    measuredCoverage.counts.seen === 20 && measuredCoverage.counts.accepted === 17 &&
+      measuredCoverage.counts.refused === 2 && measuredCoverage.counts.failed === 1,
+    JSON.stringify(measuredCoverage.counts));
+  check("a measured refusal or failure suppresses the receipt's claimed range",
+    measuredCoverage.confirmed_range.from === null &&
+      measuredCoverage.confirmed_range.through === null &&
+      measuredCoverage.history.state !== "complete" &&
+      /not yet proven complete/i.test(provisionalCoverageNotice("Messages", measuredCoverage) || ""),
+    JSON.stringify(measuredCoverage));
+  const cleanCoverage = sourceCoverageFromEvidence({
+    kind: "whatsapp", state: "ok", documents: 17, last_complete_sweep_at: null,
+  }, {
+    latestRun: {
+      files_seen: 17, docs_added: 15, docs_updated: 1, docs_unchanged: 1,
+      docs_refused: 0, docs_failed: 0, metrics_version: 1, walk_complete: 1,
+      confirmed_from: "2026-09-01T00:00:00.000Z",
+      confirmed_through: "2026-09-06T11:00:00.000Z",
+      finished_at: "2026-09-06T11:00:00.000Z",
+    },
+    projectionPending: 0,
+  });
+  check("a clean measured receipt exposes only its own bounded confirmed range",
+    cleanCoverage.confirmed_range.from === "2026-09-01T00:00:00.000Z" &&
+      cleanCoverage.confirmed_range.through === "2026-09-06T11:00:00.000Z" &&
+      /confirmed from 2026-09-01 through 2026-09-06/i.test(
+        provisionalCoverageNotice("Messages", cleanCoverage) || ""),
+    JSON.stringify(cleanCoverage));
+  const erroredRange = sourceCoverageFromEvidence({
+    kind: "calendar", state: "broken", documents: 17, last_complete_sweep_at: null,
+  }, {
+    latestRun: {
+      docs_added: 17, docs_updated: 0, docs_unchanged: 0,
+      docs_refused: 0, docs_failed: 0, metrics_version: 1, walk_complete: 1,
+      confirmed_from: "2026-09-01T00:00:00.000Z",
+      confirmed_through: "2026-09-06T11:00:00.000Z",
+      error: "cancellation removal remained pending",
+      finished_at: "2026-09-06T11:00:00.000Z",
+    },
+    projectionPending: 0,
+  });
+  check("a terminal receipt error suppresses a clean-count claimed range",
+    erroredRange.confirmed_range.from === null && erroredRange.confirmed_range.through === null,
+    JSON.stringify(erroredRange));
   const unmeasuredCoverage = sourceCoverageFromEvidence({
     kind: "zoom", state: "manual", documents: 4,
   }, {
@@ -249,7 +345,13 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
 
 /* ------------------------------------------------ an empty brain is not a broken one */
 {
-  const empty = async () => ({ totals: { documents: 0, chunks: 0, sources: 0 }, summary: {}, findings: [] });
+  const empty = async () => ({
+    complete: true,
+    totals: { documents: 0, chunks: 0, sources: 0 },
+    unavailable_checks: [],
+    summary: { crit: 0, warn: 0, info: 0, ok: 0, unavailable: 0 },
+    findings: [],
+  });
   const s = await ownerSystemStatus({}, { ...deps, diagnose: empty });
   check("an EMPTY brain reports 0 documents present", s.documents === 0 && !s.unavailable.includes("diagnose"));
   check("which is distinguishable from a broken read", "documents" in s);

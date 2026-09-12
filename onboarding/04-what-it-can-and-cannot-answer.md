@@ -2,7 +2,15 @@
 
 One page. Keep it near you for the first month.
 
-The rule underneath all of it: **your brain reads what your business already wrote down.** It is very good at finding something that exists and telling you where it came from. It is not a calculator, it is not your accountant, and it is not a decision maker.
+The rule underneath all of it: **your brain searches the approved material it
+can prove was loaded, readable, current enough, available to you, and
+searchable.** It can find useful evidence and tell you where it came from. It is
+not a calculator, it is not your accountant, and it is not a decision maker.
+
+An empty result is bounded to the material and coverage actually searched. If
+source history, freshness, readability, access zones, or search readiness is
+unproven, the result is unknown, not absent. Even a complete authorized corpus
+is not proof that a record or event does not exist anywhere in the world.
 
 ---
 
@@ -23,7 +31,9 @@ A pattern across many documents. A human cannot see this by scrolling, because t
 It finds the comparable jobs and cites each quote separately, so you can see the actual documents rather than trusting a number.
 
 **5. "What is still open from the [month] meeting with [person]?"**
-If the transcript exists, it will pull the open items. If the transcript does not exist, it tells you that instead of guessing, which is the second most useful answer available.
+If a transcript is in the proven search scope, it can pull the open items. If
+that bounded material contains no transcript, it can say none was found there
+without guessing about other sources.
 
 **What those five have in common:** somebody, at some point, wrote the answer down in words. Finding it and citing it is the whole job.
 
@@ -53,11 +63,18 @@ If the answer comes back sounding decisive, that confidence is the writing engin
 
 **Why this goes wrong:** two problems at once.
 
-First, it only knows what was written down. If that call was not recorded or transcribed, there is nothing to find, and no amount of rephrasing will produce it.
+First, search can retrieve only a record that was written down and reached the
+proven search scope. If the call was never recorded or transcribed, rephrasing
+cannot create it. An empty result alone does not prove which part of that chain
+is missing.
 
 Second, yesterday may not be loaded yet. Your material syncs on a schedule, not instantly, and something from yesterday afternoon may not be in there this morning.
 
-**Ask instead:** first "do we have a transcript from [date] with [person]", then ask about its contents. That way an empty answer means "it never existed" rather than leaving you guessing which of the two problems you hit.
+**Ask instead:** first "do we have a transcript from [date] with [person]", then
+ask about its contents. Read the answer beside the source-history, freshness,
+readability, access-zone, and search checks. If any is unproven, an empty answer
+means unknown. If all are proven, it means no transcript was found in that
+authorized scope, not that one never existed elsewhere.
 
 ---
 
@@ -69,13 +86,19 @@ Second, yesterday may not be loaded yet. Your material syncs on a schedule, not 
 
 **A line starting "Heads up:"** means something about the evidence should change your confidence. It appears only when it matters, so when it appears, it matters.
 
-**"The documents do not answer this" is a real answer.** It is the one thing you cannot get from anything else in this category, and it is the reason the rest can be trusted. A tool that always produces something has taught you nothing about when to believe it.
+**"The searched material does not answer this" can be a real answer.** Trust it
+only with the named authorized scope and its coverage checks. If history,
+freshness, readability, zones, or search is unproven, the honest answer is
+unknown. A tool that always produces something has taught you nothing about
+when to believe it.
 
 ---
 
 ## Three rules of thumb
 
-1. **If someone had to write it down for you to know it, your brain can find it. If not, it cannot.** Decisions made in a hallway are gone.
+1. **If someone wrote it down in authorized material, your brain can look for it
+   and cite what it finds.** If coverage is unproven, an empty result stays
+   unknown. A decision that was never recorded cannot be retrieved.
 
 2. **If the answer needs adding, averaging, or counting across records, ask the system that owns those records.** Accounting questions go to accounting.
 
@@ -85,8 +108,15 @@ Second, yesterday may not be loaded yet. Your material syncs on a schedule, not 
 
 ## When it gets something wrong
 
-Tell me, and bring the exact question you asked and what came back. Most wrong answers fall into one of three buckets and I can usually tell which within a minute:
+Tell me, and bring the exact question you asked and what came back. Most wrong
+answers fall into one of four buckets and I can usually narrow the problem
+quickly:
 
-- **The material is not connected yet.** Fixable, often quickly.
+- **The current run did not load the material.** Fixable, often quickly, but
+  older stored records need an authenticated inventory before anyone calls them
+  absent.
 - **The material exists but is in a format it cannot read.** Fixable, and I will tell you the cost honestly.
-- **The material was never written down.** Not fixable by me, and worth knowing about your business.
+- **Coverage or search is still unproven.** History, freshness, readability,
+  zones, or query visibility may leave the result unknown.
+- **No record exists in the complete authorized scope.** Search can establish
+  that bounded result. It cannot establish world nonexistence.

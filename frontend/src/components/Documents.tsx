@@ -38,7 +38,7 @@ export function Documents() {
         <p className="eyebrow">Evidence and custody</p>
         <h1 className="page-title">Documents</h1>
         <p className="page-intro">
-          Check which financial records are present and readable, or search evidence inside the selected business or your whole brain.
+          Check which financial records are present and readable, or search evidence inside one selected part of your finances or your whole Brain.
         </p>
       </header>
       <div className="mt-5 inline-flex rounded-xl bg-card border border-line p-1" role="tablist" aria-label="Document view">
@@ -197,6 +197,7 @@ function DocumentRegister() {
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2 flex-wrap">
                     <span className="text-[14.5px] font-medium">{document.title}</span>
+                    {!document.readable && <Badge tone="warn">Unreadable copy</Badge>}
                     {document.restricted && <Badge tone="muted">Restriction noted</Badge>}
                   </span>
                   <span className="block text-[13px] text-ink-soft mt-0.5">
@@ -244,7 +245,7 @@ function EvidenceSearch() {
         setNotice(body.notice || unavailableNotice(body.degraded));
       } else if (scope && (body.filter_not_applied || body.entity_scope?.applied !== true || body.entity_scope.entity_slug !== scope)) {
         setHits(null);
-        setNotice(`The brain could not prove that this search was narrowed to ${activeLabel}. No whole-brain results are being shown as business-scoped.`);
+        setNotice(`The Brain could not prove that this search was narrowed to ${activeLabel}. No whole-Brain results are being shown as narrowed to that selection.`);
       } else {
         const rows = body.results || [];
         const coverageIncomplete = body.status === COVERAGE_INCOMPLETE;
@@ -257,7 +258,7 @@ function EvidenceSearch() {
           const coverageUnavailable = body.gaps?.some((gap) => gap.type === "coverage_unavailable") === true;
           setNotice(body.notice || coverageIncompleteNotice(coverageUnavailable, rows.length > 0));
         } else if (scope && body.degraded === "vector" && body.degraded_reason === "entity-vector-authority-unindexed") {
-          setNotice(`Exact business filtering was applied for ${activeLabel}, but meaning-based business search is still being indexed. These keyword results may miss differently phrased evidence.`);
+          setNotice(`Exact financial-entity filtering was applied for ${activeLabel}, but meaning-based search for that selection is still being indexed. These keyword results may miss differently phrased evidence.`);
         }
       }
       setSearched(q);

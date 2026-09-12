@@ -13,11 +13,13 @@
   },
 
   "_how_to_read_this": [
-    "This is the acceptance test for YOUR brain. It is not a benchmark and it is",
-    "not comparable to anyone else's, because it is built from your documents and",
-    "your questions.",
+    "This is an optional private regression suite for YOUR brain. It is not",
+    "required for setup, adaptive acceptance, or handoff, and it does not replace",
+    "the same-item source receipt and evidence gate. It is not a benchmark and it",
+    "is not comparable to anyone else's, because it is built from your documents",
+    "and your questions.",
     "",
-    "HOW TO WRITE IT, and the order matters:",
+    "IF YOU CHOOSE TO BUILD IT, the order matters:",
     "",
     "1. Write the questions FIRST, from memory, without looking at your files.",
     "   A question written while reading a document borrows that document's",

@@ -29,6 +29,7 @@ import "../ingest/formats.mjs";
 import { textQuality, isLikelyBinary } from "../ingest/quality.mjs";
 import { documentDate } from "../ingest/doc-date.mjs";
 import { isBinaryFormat } from "../ingest/extract.mjs";
+import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 export const API = "https://www.googleapis.com/drive/v3";
 export const SOURCE_TYPE = "drive";
@@ -59,11 +60,18 @@ const FIELDS = `nextPageToken, incompleteSearch, files(${FILE_FIELDS})`;
 const SKIP_MIME = /^(image|video|audio)\//;
 
 export class DriveError extends Error {
-  constructor(message, status, reason, { retryable = false, cause } = {}) {
+  constructor(message, status, reason, {
+    retryable = false, cause, providerReason = null, providerStatus = null,
+  } = {}) {
     super(message, cause ? { cause } : undefined);
     this.name = "DriveError";
     this.status = status;
     this.reason = reason;
+    // `reason` also names local connector conditions such as networkError and
+    // repeatedPageToken. Only this separate field came from a parsed Google
+    // error response and may be collapsed into durable provider metadata.
+    this.providerReason = providerReason;
+    this.providerStatus = providerStatus;
     this.retryable = retryable;
   }
 }
@@ -188,7 +196,11 @@ export async function api(getAccessToken, path, {
       res.status >= 500 ||
       (res.status === 403 && /rateLimit|userRateLimit|quotaExceeded|backendError/i.test(reason));
 
-    lastErr = new DriveError(body?.error?.message || `HTTP ${res.status}`, res.status, reason, { retryable });
+    lastErr = new DriveError(body?.error?.message || `HTTP ${res.status}`, res.status, reason, {
+      retryable,
+      providerReason: reason || null,
+      providerStatus: res.status,
+    });
     if (!retryable) throw lastErr;
     if (retryAuth) forceRefresh = true;
     if (i + 1 >= totalAttempts) throw lastErr;
@@ -397,6 +409,150 @@ export async function* listRootedFiles(getAccessToken, {
   }
 
   for (const file of found.values()) yield file;
+}
+
+/**
+ * A deliberately bounded rooted walk for assistant-visible previews.
+ *
+ * The ordinary full walk must finish before yielding because its result can
+ * authorize deletion. This preview can authorize nothing, so it validates
+ * every configured root first and then stops provider traversal as soon as the
+ * requested aggregate sample is full. Names and ids stay inside the process.
+ */
+export async function* listRootedFilesPreview(getAccessToken, {
+  rootFolderIds,
+  limit = 25,
+  pageSize = 100,
+  maxFolders = 10_000,
+  maxPages = 10_000,
+  opts = {},
+} = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new DriveError("the assistant Drive preview limit must be between 1 and 100", 0, "previewLimit");
+  }
+  const roots = normalizeRootFolderIds(rootFolderIds);
+  const validatedRoots = [];
+  for (const rootId of roots) {
+    let root;
+    try { root = await getFileMetadata(getAccessToken, rootId, opts); }
+    catch (error) {
+      if (error instanceof DriveError && (error.status === 403 || error.status === 404)) {
+        throw new DriveError("a reviewed Drive root is unavailable", error.status, "rootUnavailable", { cause: error });
+      }
+      throw error;
+    }
+    if (root?.trashed === true || root?.mimeType !== FOLDER_MIME) {
+      throw new DriveError("a reviewed Drive root is not an active folder", 0, "rootUnavailable");
+    }
+    validatedRoots.push({ ...root, scope_root_ids: [rootId] });
+  }
+
+  const queue = [...validatedRoots];
+  const visitedFolders = new Set();
+  const emitted = new Set();
+  let pages = 0;
+  let folders = 0;
+  let count = 0;
+  while (queue.length && count < limit) {
+    const folder = queue.shift();
+    const folderId = String(folder?.id || "");
+    if (!folderId || visitedFolders.has(folderId)) continue;
+    visitedFolders.add(folderId);
+    folders++;
+    if (folders > maxFolders) {
+      throw new DriveError("bounded Drive preview exceeded its folder limit", 0, "folderLimit");
+    }
+    if (!emitted.has(folderId)) {
+      emitted.add(folderId);
+      count++;
+      yield folder;
+      if (count >= limit) return;
+    }
+
+    let pageToken;
+    const seenPageTokens = new Set();
+    do {
+      if (pageToken && seenPageTokens.has(pageToken)) {
+        throw new DriveError("Google Drive repeated a preview page token", 200, "repeatedPageToken");
+      }
+      if (pageToken) seenPageTokens.add(pageToken);
+      pages++;
+      if (pages > maxPages) {
+        throw new DriveError("bounded Drive preview exceeded its page limit", 0, "pageLimit");
+      }
+      const page = await api(getAccessToken, "/files", {
+        search: {
+          pageSize: Math.min(pageSize, Math.max(1, limit - count)),
+          pageToken,
+          fields: FIELDS,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+          corpora: "allDrives",
+          q: `'${driveQueryValue(folderId)}' in parents and trashed = false`,
+          orderBy: "name",
+        },
+        ...opts,
+      });
+      if (page.incompleteSearch === true) {
+        throw new DriveError("Google Drive reported an incomplete bounded preview", 200, "incompleteSearch");
+      }
+      for (const file of page.files || []) {
+        if (!file?.id || file.trashed === true) continue;
+        const id = String(file.id);
+        if (emitted.has(id)) continue;
+        const scoped = { ...file, scope_root_ids: [...(folder.scope_root_ids || [])] };
+        emitted.add(id);
+        if (file.mimeType === FOLDER_MIME) queue.push(scoped);
+        count++;
+        yield scoped;
+        if (count >= limit) return;
+      }
+      pageToken = page.nextPageToken || null;
+    } while (pageToken && count < limit);
+  }
+}
+
+export function driveAssistantPreviewSummary({
+  limit,
+  configuredRootCount,
+  scanned,
+  wouldSend,
+  unchanged,
+  skipped,
+} = {}) {
+  const count = (value, label) => {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new DriveError(`the bounded Drive preview returned an invalid ${label} count`, 0, "invalidPreviewReceipt");
+    }
+    return value;
+  };
+  const previewLimit = count(limit, "limit");
+  const rootCount = count(configuredRootCount, "root");
+  if (previewLimit < 1 || previewLimit > 100 || rootCount < 1) {
+    throw new DriveError("the bounded Drive preview receipt has an invalid scope", 0, "invalidPreviewReceipt");
+  }
+  return Object.freeze({
+    schema_version: 1,
+    operation: "drive.bounded_preview",
+    status: "partial_preview",
+    read_only: true,
+    scope_complete: false,
+    preview_limit: previewLimit,
+    configured_root_count: rootCount,
+    counts: Object.freeze({
+      scanned: count(scanned, "scanned"),
+      would_send: count(wouldSend, "would-send"),
+      unchanged: count(unchanged, "unchanged"),
+      skipped: count(skipped, "skipped"),
+    }),
+    effects: Object.freeze({
+      brain_documents_sent: 0,
+      brain_receipts_written: 0,
+      checkpoint_written: false,
+      source_cursor_advanced: false,
+      ocr_calls: 0,
+    }),
+  });
 }
 
 /**
@@ -734,7 +890,7 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
     // namespacing and constructs `<source_type>:<source_id>` exactly once. This
     // is also the identity used by the Supabase migration, so the first live
     // sync updates that document instead of creating `drive:drive:<id>`.
-    envelope: {
+    envelope: withFirstPartySourceProvenance({
       source_type: sourceName,
       source_id: String(file.id),
       title: file.name,
@@ -761,7 +917,10 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
         ...(got.incomplete === true ? { extraction_incomplete: true } : {}),
         ...(got.provenance ? { ocr: got.provenance } : {}),
       },
-    },
+    }, {
+      textSource: got.provenance?.text_source || "native",
+      textReliable: got.provenance?.text_reliable ?? got.incomplete !== true,
+    }),
     // Drive's own change signal. Cheaper than hashing content we already have,
     // and it is what the changes feed reports against.
     version: driveVersion(file, folder),

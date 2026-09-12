@@ -19,8 +19,8 @@
 // those secrets leaves the enabled set intact, removes only provider access
 // when disabled, and preserves the independent wrapping key across that toggle.
 //
-// The second half of the file covers the other thing that cannot be fixed while
-// a client is sitting in front of you: the return address registration.
+// The second half of the file covers the other things that cannot be fixed while
+// a client is sitting in front of you: exact return and webhook registration.
 //
 // Every persona and identifier here is invented.
 
@@ -30,8 +30,18 @@ import { join } from "node:path";
 import {
   WORKER_PROVIDER_SECRET_NAMES, optionalWorkerSecretNames, cmdSecrets,
 } from "../brain.mjs";
-import { checkBankFeedRedirect, bankFeedRedirectUri, BANK_FEED_REDIRECT_PATH, OK, WARN, FAIL } from "../doctor.mjs";
+import {
+  checkBankFeedRedirect,
+  bankFeedRedirectUri,
+  plaidWebhookUri,
+  BANK_FEED_REDIRECT_PATH,
+  PLAID_WEBHOOK_PATH,
+  OK,
+  WARN,
+  FAIL,
+} from "../doctor.mjs";
 import { redirectUriFor } from "../worker/src/lib/bank-feed.js";
+import { PLAID_WEBHOOK_PATH as WORKER_PLAID_WEBHOOK_PATH } from "../worker/src/lib/plaid-protocol.js";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => {
@@ -135,7 +145,7 @@ try {
     check("the independent wrapping key is not deletion-managed by the sync toggle",
       !WORKER_PROVIDER_SECRET_NAMES.includes(WRAPPING_NAME),
       JSON.stringify(WORKER_PROVIDER_SECRET_NAMES));
-    check("all three secrets are ALLOWED when the manifest enables the feed",
+    check("all three existing Worker secrets are preserved when the manifest enables the feed",
       FEED_NAMES.every((name) => optionalWorkerSecretNames(manifest({ bankFeed: true })).includes(name)),
       JSON.stringify(optionalWorkerSecretNames(manifest({ bankFeed: true }))));
     check("with the feed off no bank secret is eligible for a write from the local environment",
@@ -151,26 +161,50 @@ try {
 
   /* ============ THE PROOF: a real reconciliation run ============ */
   {
-    const events = [];
-    await isolatedRuntime({
-      fetchImpl: cloudflareHarness(events, [
-        "ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY", ...FEED_NAMES,
-      ]),
-      env: {
-        CLOUDFLARE_API_TOKEN: "fixture-token",
-        BANK_FEED_CLIENT_ID: "fixture-client-id",
-        BANK_FEED_SECRET: "fixture-service-secret",
-        BANK_FEED_WRAPPING_KEY_V2: FIXTURE_WRAPPING_KEY,
-      },
-    }, () => cmdSecrets(writeManifest("feed-on", manifest({ bankFeed: true })), secretsOptions));
-
-    check("A RECONCILIATION RUN ON A FEED-ENABLED BRAIN LEAVES THE BANK SECRETS INTACT",
-      !events.some((event) => event.startsWith("delete:BANK_FEED")), JSON.stringify(events));
-    check("and it re-sets them from the environment rather than leaving them unmanaged",
-      FEED_NAMES.every((name) => events.includes(`set:${name}`)), JSON.stringify(events));
-    check("the admin key and its derived keys are still set in the same run",
-      ["ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY"].every((n) => events.includes(`set:${n}`)),
-      JSON.stringify(events));
+    const cases = [
+      ["BANK_FEED_CLIENT_ID", "fixture-client-id"],
+      ["BANK_FEED_SECRET", "fixture-service-secret"],
+      ["BANK_FEED_WRAPPING_KEY_V2", FIXTURE_WRAPPING_KEY],
+      ["BANK_FEED_SECRET", ""],
+    ];
+    const outcomes = [];
+    for (const [name, value] of cases) {
+      const events = [];
+      const localMutations = [];
+      let message = "";
+      try {
+        await isolatedRuntime({
+          fetchImpl: cloudflareHarness(events, ["ADMIN_KEY", ...FEED_NAMES]),
+          env: { CLOUDFLARE_API_TOKEN: "fixture-token", [name]: value },
+        }, () => cmdSecrets(
+          writeManifest(`ambient-${name.toLowerCase()}-${outcomes.length}`, manifest({ bankFeed: true })),
+          {
+            ...secretsOptions,
+            gitignoreTheKey: () => localMutations.push("gitignore"),
+            persistAdminKeyDurably: async () => {
+              localMutations.push("persist");
+              throw new Error("must not be reached");
+            },
+          },
+        ));
+      } catch (error) {
+        message = String(error?.message || error);
+      }
+      outcomes.push({ name, value, events, localMutations, message });
+    }
+    check("EVERY AMBIENT BANK SECRET IS REFUSED BEFORE LOCAL OR WORKER MUTATION",
+      outcomes.every(({ name, events, localMutations, message }) =>
+        message.includes(name) &&
+        /not accepted from environment variables or by `brain secrets`/i.test(message) &&
+        /credential setup remains held/i.test(message) &&
+        /separately reviewed owner-custody process/i.test(message) &&
+        events.length === 0 && localMutations.length === 0),
+      JSON.stringify(outcomes.map(({ name, events, localMutations, message }) => ({
+        name, events, localMutations, message: message.slice(0, 180),
+      }))));
+    check("the ambient-secret refusal repeats no provider or wrapping-key value",
+      outcomes.every(({ value, message }) => !value || !message.includes(value)),
+      JSON.stringify(outcomes.map(({ name, message }) => ({ name, message: message.slice(0, 180) }))));
   }
 
   {
@@ -179,83 +213,67 @@ try {
       fetchImpl: cloudflareHarness(events, ["ADMIN_KEY", ...FEED_NAMES]),
       env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
     }, () => cmdSecrets(writeManifest("feed-on-reuse", manifest({ bankFeed: true })), secretsOptions));
-    check("an enabled update preserves an existing wrapping key when no local replacement is supplied",
-      !events.includes("delete:BANK_FEED_WRAPPING_KEY_V2") &&
-      !events.includes("set:BANK_FEED_WRAPPING_KEY_V2"), JSON.stringify(events));
+    check("an enabled core-key repair preserves every existing bank secret without rewriting one",
+      FEED_NAMES.every((name) =>
+        !events.includes(`delete:${name}`) && !events.includes(`set:${name}`)) &&
+      ["ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY"].every((name) =>
+        events.includes(`set:${name}`)), JSON.stringify(events));
   }
 
   {
     const events = [];
+    const localMutations = [];
     let message = "";
     try {
       await isolatedRuntime({
         fetchImpl: cloudflareHarness(events, ["ADMIN_KEY"]),
         env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
-      }, () => cmdSecrets(writeManifest("feed-incomplete", manifest({ bankFeed: true })), secretsOptions));
+      }, () => cmdSecrets(writeManifest("feed-incomplete", manifest({ bankFeed: true })), {
+        ...secretsOptions,
+        gitignoreTheKey: () => localMutations.push("gitignore"),
+        persistAdminKeyDurably: async () => {
+          localMutations.push("persist");
+          throw new Error("must not be reached");
+        },
+      }));
     } catch (error) {
       message = String(error?.message || error);
     }
-    check("a fresh enabled feed cannot pass with none of its required secrets available",
+    check("a fresh enabled feed stops before any core-key or local mutation",
       /BANK_FEED_CLIENT_ID/.test(message) && /BANK_FEED_SECRET/.test(message) &&
-      /BANK_FEED_WRAPPING_KEY_V2/.test(message) && events.length === 0,
-      `${message.slice(0, 240)} ${JSON.stringify(events)}`);
+      /BANK_FEED_WRAPPING_KEY_V2/.test(message) &&
+      /credential setup remains held/i.test(message) &&
+      /separately reviewed owner-custody process/i.test(message) &&
+      !/ceremony/i.test(message) && events.length === 0 && localMutations.length === 0,
+      `${message.slice(0, 280)} ${JSON.stringify({ events, localMutations })}`);
   }
 
   {
     const events = [];
+    const localMutations = [];
     let message = "";
     try {
       await isolatedRuntime({
-        fetchImpl: cloudflareHarness(events, ["ADMIN_KEY", ...FEED_NAMES]),
-        env: {
-          CLOUDFLARE_API_TOKEN: "fixture-token",
-          BANK_FEED_CLIENT_ID: "fixture-replacement-client",
+        fetchImpl: cloudflareHarness(events, [
+          "ADMIN_KEY", "BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET", "SUPABASE_SERVICE_ROLE_KEY",
+        ]),
+        env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
+      }, () => cmdSecrets(writeManifest("feed-partial-worker", manifest({ bankFeed: true })), {
+        ...secretsOptions,
+        gitignoreTheKey: () => localMutations.push("gitignore"),
+        persistAdminKeyDurably: async () => {
+          localMutations.push("persist");
+          throw new Error("must not be reached");
         },
-      }, () => cmdSecrets(writeManifest("feed-partial-service-rotation", manifest({ bankFeed: true })), secretsOptions));
+      }));
     } catch (error) {
       message = String(error?.message || error);
     }
-    check("the provider client id and secret cannot be replaced one at a time",
-      /BANK_FEED_CLIENT_ID.*BANK_FEED_SECRET.*together/i.test(message) && events.length === 0,
-      `${message.slice(0, 240)} ${JSON.stringify(events)}`);
-  }
-
-  {
-    const events = [];
-    const fetchImpl = cloudflareHarness(events, ["ADMIN_KEY", WRAPPING_NAME]);
-    await isolatedRuntime({
-      fetchImpl,
-      env: {
-        CLOUDFLARE_API_TOKEN: "fixture-token",
-        BANK_FEED_CLIENT_ID: "fixture-client-id",
-        BANK_FEED_SECRET: "fixture-service-secret",
-      },
-    }, () => cmdSecrets(writeManifest("feed-existing-wrap", manifest({ bankFeed: true })), secretsOptions));
-    check("an existing wrapping key plus a supplied provider pair is a complete enabled configuration",
-      SERVICE_NAMES.every((name) => events.includes(`set:${name}`)) &&
-      !events.includes(`set:${WRAPPING_NAME}`) && fetchImpl.secretNames().has(WRAPPING_NAME),
-      JSON.stringify(events));
-  }
-
-  {
-    const events = [];
-    let message = "";
-    try {
-      await isolatedRuntime({
-        fetchImpl: cloudflareHarness(events, []),
-        env: {
-          CLOUDFLARE_API_TOKEN: "fixture-token",
-          BANK_FEED_WRAPPING_KEY_V2: "fixture-invalid-key",
-        },
-      }, () => cmdSecrets(writeManifest("feed-invalid-key", manifest({ bankFeed: true })), secretsOptions));
-    } catch (error) {
-      message = String(error?.message || error);
-    }
-    check("an invalid supplied wrapping key stops before any remote secret mutation",
-      /version-2 32-byte base64url key/i.test(message) && events.length === 0,
-      `${message.slice(0, 180)} ${JSON.stringify(events)}`);
-    check("the invalid wrapping value is never repeated in the failure",
-      !message.includes("fixture-invalid-key"), message.slice(0, 180));
+    check("a partial bank inventory refuses before unrelated cleanup or core-key rotation",
+      /BANK_FEED_WRAPPING_KEY_V2/.test(message) &&
+      /credential setup remains held/i.test(message) &&
+      events.length === 0 && localMutations.length === 0,
+      `${message.slice(0, 240)} ${JSON.stringify({ events, localMutations })}`);
   }
 
   {
@@ -292,39 +310,31 @@ try {
 
   {
     const events = [];
-    const fetchImpl = cloudflareHarness(events, ["ADMIN_KEY"]);
+    const fetchImpl = cloudflareHarness(events, ["ADMIN_KEY", ...FEED_NAMES]);
     const enabledPath = writeManifest("lifecycle-enabled", manifest({ bankFeed: true }));
     const disabledPath = writeManifest("lifecycle-disabled", manifest());
     await isolatedRuntime({
       fetchImpl,
-      env: {
-        CLOUDFLARE_API_TOKEN: "fixture-token",
-        BANK_FEED_CLIENT_ID: "fixture-client-id",
-        BANK_FEED_SECRET: "fixture-service-secret",
-        BANK_FEED_WRAPPING_KEY_V2: FIXTURE_WRAPPING_KEY,
-      },
-    }, () => cmdSecrets(enabledPath, secretsOptions));
-    const afterEnable = events.length;
-    await isolatedRuntime({
-      fetchImpl,
       env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
     }, () => cmdSecrets(disabledPath, secretsOptions));
-    const disabledEvents = events.slice(afterEnable);
+    const disabledEvents = [...events];
     const afterDisable = events.length;
-    await isolatedRuntime({
-      fetchImpl,
-      env: {
-        CLOUDFLARE_API_TOKEN: "fixture-token",
-        BANK_FEED_CLIENT_ID: "fixture-client-id",
-        BANK_FEED_SECRET: "fixture-service-secret",
-      },
-    }, () => cmdSecrets(enabledPath, secretsOptions));
+    let message = "";
+    try {
+      await isolatedRuntime({
+        fetchImpl,
+        env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
+      }, () => cmdSecrets(enabledPath, secretsOptions));
+    } catch (error) {
+      message = String(error?.message || error);
+    }
     const reenabledEvents = events.slice(afterDisable);
-    check("enabled to disabled to re-enabled preserves the exact existing wrapping-key binding",
+    check("disabled to held re-enable preserves wrapping-key custody and refuses missing provider bindings",
       disabledEvents.every((event) => event !== `delete:${WRAPPING_NAME}`) &&
       reenabledEvents.every((event) => event !== `set:${WRAPPING_NAME}`) &&
-      fetchImpl.secretNames().has(WRAPPING_NAME),
-      JSON.stringify({ disabledEvents, reenabledEvents }));
+      fetchImpl.secretNames().has(WRAPPING_NAME) &&
+      /missing required Worker secrets/i.test(message) && reenabledEvents.length === 0,
+      JSON.stringify({ message, disabledEvents, reenabledEvents }));
   }
 
   /* ============ deploy before secrets ============ */
@@ -343,13 +353,8 @@ try {
     try {
       await isolatedRuntime({
         fetchImpl: missingScript,
-        env: {
-          CLOUDFLARE_API_TOKEN: "fixture-token",
-          BANK_FEED_CLIENT_ID: "fixture-client-id",
-          BANK_FEED_SECRET: "fixture-service-secret",
-          BANK_FEED_WRAPPING_KEY_V2: FIXTURE_WRAPPING_KEY,
-        },
-      }, () => cmdSecrets(writeManifest("no-worker", manifest({ bankFeed: true })), secretsOptions));
+        env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
+      }, () => cmdSecrets(writeManifest("no-worker", manifest()), secretsOptions));
     } catch (error) {
       message = String(error?.message || error);
     }
@@ -362,11 +367,14 @@ try {
 
   /* ============ the return address, checked before the session ============ */
   {
-    check("the two runtimes agree on the return address path, so the check cannot drift from the route",
+    check("the two runtimes agree on the return and Plaid webhook paths",
       BANK_FEED_REDIRECT_PATH === "/app/connect/bank" &&
+      PLAID_WEBHOOK_PATH === WORKER_PLAID_WEBHOOK_PATH &&
       redirectUriFor("https://fixture-brain.example.workers.dev/x") ===
-        bankFeedRedirectUri("fixture-brain.example.workers.dev"),
-      `${BANK_FEED_REDIRECT_PATH} vs ${redirectUriFor("https://fixture-brain.example.workers.dev/x")}`);
+        bankFeedRedirectUri("fixture-brain.example.workers.dev") &&
+      plaidWebhookUri("fixture-brain.example.workers.dev") ===
+        "https://fixture-brain.example.workers.dev/api/webhooks/plaid",
+      JSON.stringify({ BANK_FEED_REDIRECT_PATH, PLAID_WEBHOOK_PATH, WORKER_PLAID_WEBHOOK_PATH }));
 
     const off = checkBankFeedRedirect(manifest());
     check("a brain not using the feed passes without noise", off.status === OK && /not in use/.test(off.detail), JSON.stringify(off));
@@ -388,8 +396,37 @@ try {
       ...manifest({ bankFeed: true }),
       corpora: { bank_feed: { enabled: true, registered_redirect_uris: ["https://fixture-brain.example.workers.dev/app/connect/bank"] } },
     });
-    check("an omitted provider with no endpoint overrides uses the named Plaid default and signed webhook",
-      halfConfigured.status === OK && /plaid/.test(halfConfigured.detail) && /signed webhook/.test(halfConfigured.detail), JSON.stringify(halfConfigured));
+    check("a Plaid feed with no exact webhook record cannot report OK or claim a signed webhook",
+      halfConfigured.status === FAIL &&
+      /signed webhook destination.*not recorded as registered/i.test(halfConfigured.detail) &&
+      halfConfigured.fix.includes("https://fixture-brain.example.workers.dev/api/webhooks/plaid") &&
+      /credential setup and dashboard changes remain held/i.test(halfConfigured.fix),
+      JSON.stringify(halfConfigured));
+
+    const wrongWebhook = checkBankFeedRedirect({
+      ...manifest({ bankFeed: true }),
+      corpora: { bank_feed: {
+        enabled: true,
+        registered_redirect_uris: ["https://fixture-brain.example.workers.dev/app/connect/bank"],
+        registered_webhook_uris: ["https://other-brain.example.workers.dev/api/webhooks/plaid"],
+      } },
+    });
+    check("a different Brain's Plaid webhook does not satisfy the exact registration check",
+      wrongWebhook.status === FAIL && !/signed webhook https:\/\/other-brain/.test(wrongWebhook.detail),
+      JSON.stringify(wrongWebhook));
+
+    const plaidReady = checkBankFeedRedirect({
+      ...manifest({ bankFeed: true }),
+      corpora: { bank_feed: {
+        enabled: true,
+        registered_redirect_uris: ["https://fixture-brain.example.workers.dev/app/connect/bank"],
+        registered_webhook_uris: ["https://fixture-brain.example.workers.dev/api/webhooks/plaid"],
+      } },
+    });
+    check("Plaid reports its signed webhook only after the exact URI is recorded",
+      plaidReady.status === OK &&
+      /signed webhook https:\/\/fixture-brain\.example\.workers\.dev\/api\/webhooks\/plaid/.test(plaidReady.detail),
+      JSON.stringify(plaidReady));
     const partialLegacy = checkBankFeedRedirect({
       ...manifest({ bankFeed: true }),
       corpora: { bank_feed: { enabled: true, api_base: "https://sandbox.provider.invalid",

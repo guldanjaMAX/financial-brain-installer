@@ -27,6 +27,8 @@ const cli = { command: process.execPath, args: [resolve("brain.mjs")] };
 
 const okChecks = {
   node: { status: "ok" },
+  install_drive: { status: "ok" },
+  install_session: { status: "ok" },
   claude: { status: "ok" },
   claude_path: { status: "not_applicable" },
   wrangler: { status: "ok" },
@@ -111,9 +113,11 @@ test("partial v0.2.0 state and a version difference produce distinct recovery ou
   assert.equal(same.issue_code, null);
 });
 
-test("local runtime, Claude sign-in, PATH repair, Wrangler, and skill failures remain named and retryable", () => {
+test("local runtime, drive, privilege, Claude, PATH, Wrangler, and skill failures remain named and retryable", () => {
   const cases = [
     [{ checks: { ...okChecks, node: { status: "fail" } } }, "RUNTIME_UNAVAILABLE"],
+    [{ checks: { ...okChecks, install_drive: { status: "fail" } } }, "INSTALL_DRIVE_SPACE_LOW"],
+    [{ checks: { ...okChecks, install_session: { status: "fail" } } }, "ELEVATED_INSTALL_SESSION"],
     [{ checks: { ...okChecks, claude: { status: "fail", detail: "installed but not signed in" } } }, "CLAUDE_SIGN_IN_REQUIRED"],
     [{ checks: { ...okChecks, claude: { status: "fail", detail: "not installed" } } }, "CLAUDE_UNAVAILABLE"],
     [{ checks: { ...okChecks, claude_path: { status: "failed", issue_code: "CLAUDE_PATH_UPDATE_FAILED" } } }, "CLAUDE_PATH_UPDATE_FAILED"],
