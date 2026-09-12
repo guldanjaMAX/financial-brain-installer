@@ -50,9 +50,26 @@ function liveState(source) {
   return "unavailable";
 }
 
+function latestRunNeedsAttention(latestRun) {
+  if (!latestRun) return false;
+  const outcome = String(latestRun.outcome || "").toLowerCase();
+  if (["failed", "refused", "partial"].includes(outcome)) return true;
+  if (latestRun.error || latestRun.refusal_reason) return true;
+  const runClosed = latestRun.finished_at !== null && latestRun.finished_at !== undefined;
+  if (!runClosed) return false;
+  if (!(latestRun.walk_complete === true || Number(latestRun.walk_complete) === 1)) return true;
+  return (finiteCount(latestRun.docs_refused) || 0) > 0 ||
+    (finiteCount(latestRun.docs_failed) || 0) > 0;
+}
+
 function historyState(source, latestRun) {
+  const latestOutcome = String(latestRun?.outcome || "").toLowerCase();
+  if (source.state === "indexing" || latestOutcome === "in_progress" ||
+      (latestRun && latestRun.finished_at === null)) return "running";
+  // The prior complete-through timestamp remains useful evidence, but a newer
+  // incomplete run must not borrow it to look complete today.
+  if (latestRunNeedsAttention(latestRun)) return "needs_attention";
   if (source.last_complete_sweep_at) return "complete";
-  if (source.state === "indexing" || (latestRun && latestRun.finished_at === null)) return "running";
   if (["broken", "review"].includes(source.state)) return "needs_attention";
   if ((finiteCount(source.documents) || 0) === 0) return "not_started";
   return "unknown";

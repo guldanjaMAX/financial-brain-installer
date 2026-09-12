@@ -655,7 +655,7 @@ const staleReceipt = {
 };
 const staleSummary = sourceReceiptSummary(staleReceipt);
 check("an authenticated failed run outranks an otherwise late status",
-  /latest authenticated run did not complete cleanly/.test(staleSummary.currency) &&
+  staleSummary.currency === "needs attention; the latest authenticated ingest did not succeed" &&
     staleSummary.run === "latest run outcome failed" &&
     /completeness unverified/.test(staleSummary.history),
   JSON.stringify(staleSummary));
@@ -675,6 +675,96 @@ const staleByReceipt = renderReportHtml({
 check("authenticated stale and failed receipts produce an attention finding",
   has(staleByReceipt, "Google Drive needs attention") &&
     has(staleByReceipt, "latest run outcome failed"));
+
+const partialRunSentinel = "SYNTHETIC_PRIVATE_RUN_DETAIL /private/source/path secret-account@example.invalid";
+const priorCompleteThrough = "2026-08-01T00:01:00.000Z";
+const latestBoundedSuccess = "2026-08-02T00:01:00.000Z";
+const partialRunSources = [
+  {
+    source_id: "drive", kind: "drive", walk_complete: false, docs_refused: 0, docs_failed: 0,
+    last_successful_run_at: latestBoundedSuccess,
+    expected_currency: "the latest authenticated ingest succeeded, but its source walk was bounded or incomplete",
+    expected_history: "last complete sweep recorded through 2026-08-01; the newer run did not prove another complete walk or extend that boundary",
+  },
+  {
+    source_id: "gmail", kind: "gmail", walk_complete: true, docs_refused: 1, docs_failed: 0,
+    last_successful_run_at: priorCompleteThrough,
+    expected_currency: "needs attention; the latest authenticated run left one or more documents unaccepted",
+    expected_history: "last complete sweep recorded through 2026-08-01; the newer run left document gaps and did not extend that boundary",
+  },
+  {
+    source_id: "calendar", kind: "calendar", walk_complete: true, docs_refused: 0, docs_failed: 1,
+    last_successful_run_at: priorCompleteThrough,
+    expected_currency: "needs attention; the latest authenticated run left one or more documents unaccepted",
+    expected_history: "last complete sweep recorded through 2026-08-01; the newer run left document gaps and did not extend that boundary",
+  },
+].map((shape) => ({
+  source_id: shape.source_id,
+  kind: shape.kind,
+  registered: true,
+  freshness: {
+    state: "ok",
+    expected_refresh_seconds: 86400,
+    last_ingest_at: "2026-08-02T00:01:00.000Z",
+    last_complete_sweep_at: priorCompleteThrough,
+    coverage: { history: { state: "needs_attention" } },
+  },
+  receipt: {
+    last_successful_run_at: shape.last_successful_run_at,
+    complete_history_through: priorCompleteThrough,
+    latest_run: {
+      outcome: "partial",
+      finished_at: latestBoundedSuccess,
+      walk_complete: shape.walk_complete,
+      docs_refused: shape.docs_refused,
+      docs_failed: shape.docs_failed,
+      private_debug_detail: partialRunSentinel,
+    },
+  },
+  expected_currency: shape.expected_currency,
+  expected_history: shape.expected_history,
+}));
+for (const source of partialRunSources) {
+  const summary = sourceReceiptSummary(source);
+  check(`${source.source_id} partial run describes ingest and coverage separately`,
+    summary.currency === source.expected_currency && summary.run === "latest run outcome partial",
+    JSON.stringify(summary));
+  check(`${source.source_id} partial run preserves only the older complete-through boundary`,
+    summary.history === source.expected_history,
+    JSON.stringify(summary));
+  check(`${source.source_id} partial run reports the independently proven successful-ingest date`,
+    summary.ingest === `last successful ingest receipt ${source.source_id === "drive" ? "2026-08-02" : "2026-08-01"}`,
+    JSON.stringify(summary));
+}
+
+const partialRunsReport = renderReportHtml({
+  manifest: cleanManifest,
+  acceptance: passingAcceptance,
+  seedAnswers: goodSeeds,
+  corpus: cleanCorpus,
+  sourceInventory: {
+    ...cleanSourceInventory,
+    total: partialRunSources.length,
+    returned: partialRunSources.length,
+    sources: partialRunSources,
+  },
+});
+check("walk-incomplete, refused-count, and failed-count runs all produce attention findings",
+  has(partialRunsReport, "Google Drive needs attention") &&
+    has(partialRunsReport, "Gmail needs attention") &&
+    has(partialRunsReport, "Google Calendar needs attention") &&
+    partialRunsReport.split("latest run outcome partial").length - 1 >= partialRunSources.length);
+check("partial-run report keeps successful ingest and complete-through boundaries separate",
+  has(partialRunsReport,
+    "last complete sweep recorded through 2026-08-01; the newer run did not prove another complete walk or extend that boundary") &&
+    has(partialRunsReport,
+      "last complete sweep recorded through 2026-08-01; the newer run left document gaps and did not extend that boundary") &&
+    has(partialRunsReport, "last successful ingest receipt 2026-08-02") &&
+    has(partialRunsReport, "last successful ingest receipt 2026-08-01"));
+check("partial-run report does not expose ignored private run fields",
+  !has(partialRunsReport, "SYNTHETIC_PRIVATE_RUN_DETAIL") &&
+    !has(partialRunsReport, "/private/source/path") &&
+    !has(partialRunsReport, "secret-account@example.invalid"));
 
 const unknownSources = renderReportHtml({
   manifest: cleanManifest,
