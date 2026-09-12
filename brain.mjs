@@ -180,6 +180,7 @@ import {
   renderLocalAssistantRepairPlan,
 } from "./operations/local-assistant-repair.mjs";
 import {
+  canonicalProvenanceFilesystemInteger,
   provenanceRepairPlan,
   provenanceRepairReadback,
   provenanceRepairRemoteGeneration,
@@ -9297,16 +9298,20 @@ export async function inspectProvenanceRepairReadiness({ m, manifestPath, source
       blockers.push("corpora.local_folder.path is not one absolute folder");
     } else {
       try {
-        const identity = lstatSync(path);
+        const inspectLocalPath = options.inspectLocalPath ?? lstatSync;
+        const resolveLocalPath = options.resolveLocalPath ?? realpathSync;
+        const assertLocalPathReadable = options.assertLocalPathReadable ??
+          ((candidate) => accessSync(candidate, fsConstants.R_OK));
+        const identity = inspectLocalPath(path, { bigint: true });
         if (!identity.isDirectory() || identity.isSymbolicLink()) {
           throw new Error("the declared path is not a direct directory");
         }
-        accessSync(path, fsConstants.R_OK);
+        assertLocalPathReadable(path);
         selectedConfig.local_identity = {
           path: resolve(path),
-          realpath: realpathSync(path),
-          device: Number(identity.dev),
-          inode: Number(identity.ino),
+          realpath: resolveLocalPath(path),
+          device: canonicalProvenanceFilesystemInteger(identity.dev, "local folder device"),
+          inode: canonicalProvenanceFilesystemInteger(identity.ino, "local folder inode"),
         };
       } catch {
         sourceStatus = "unavailable";
