@@ -71,13 +71,19 @@ change anything.
    read-only contract. Do not search repositories, release history, planning
    notes, or the web to decide whether Optimize exists when that contract is
    available and agrees with the installed CLI.
-2. Open with exactly one goal question and no setup quiz: "What would you most
-   like your Financial Brain to help you understand or keep current?" Let the
-   owner answer, say "not sure," or skip it. Then say in ordinary owner
-   language: "I can check your Brain without changing its data, settings,
-   access, or indexes. I will run the read-only checks and report what I find.
-   If a CLI check fails, it may save a private support note on this computer so
-   the problem can be explained later." Do not narrate
+2. Use one total owner-question budget per owner-facing Optimize response across
+   the optional goal, evidence clarification, and zoning. Ask only the
+   highest-priority blocker, in this order: a material evidence conflict, a
+   whole-source zoning decision, then the optional goal. Skip
+   the goal whenever a material evidence conflict or any zoning decision is
+   already pending. Only when neither is pending may you ask: "What would you
+   most like your Financial Brain to help you understand or keep current?" Let
+   the owner answer, say "not sure," or skip it. Once the response asks one
+   question, state and defer every other blocker instead of asking another.
+   Then say in ordinary owner language: "I can check your Brain without
+   changing its data, settings, access, or indexes. I will run the read-only
+   checks and report what I find. If a CLI check fails, it may save a private
+   support note on this computer so the problem can be explained later." Do not narrate
    skill selection, source-code inspection, PATH archaeology, release research, or whether the
    workflow "shipped." Those are internal implementation details, not part of
    the owner's experience.
@@ -94,7 +100,8 @@ change anything.
    filenames, version-search history, or tool activity unless the owner asks.
 
 Make the Owner Financial Map state the first audit evidence after that opening
-question. Immediately before calling `brain_financial_map` with `mode: "read"`,
+decision, whether the optional goal was asked or skipped. Immediately before
+calling `brain_financial_map` with `mode: "read"`,
 say: "I'm about to read your current Financial Map. This sends no Financial Map
 snapshot and changes nothing. Your assistant may still show an approval prompt
 because it is authorizing a private read from your Brain." Do not let a normal
@@ -119,7 +126,10 @@ Immediately add, "Optimize checked this computer's Brain skill and MCP
 connection but installed nothing and changed no settings." Say whether each is
 ready, missing, stale, or unproven. Keep the rest to at most three short sections:
 **Working**, **Needs attention**, and **Need from you**. Lead with
-what the Brain can currently be trusted to do.
+what the Brain can currently be trusted to do. List every material blocker, but
+use **Need from you** to ask only the one highest-priority question allowed by
+the response's shared question budget. State that lower-priority decisions are
+deferred.
 Do not print the numbered fifteen-check table unless the owner asks for the
 check details. Separate these findings instead of collapsing them into a wall
 of failures:
@@ -150,9 +160,12 @@ Use the records and metadata already present. Compare provenance, effective and
 modified dates, source receipts with stored counts, extraction gaps, conflicting
 values, superseded evidence, duplicate document families, and whose voice each
 claim represents. Resolve every ambiguity that those records can resolve. Ask
-at most one additional small, specific owner question outside an owner-chosen
-guided map interview, and only when a material ambiguity remains after that
-evidence review.
+an evidence clarification only when a material ambiguity remains after that
+review and only when it is the highest-priority blocker for this response. It
+uses the same single question budget as the optional goal and zoning; it is not
+an additional question. Once the owner explicitly chooses the guided map
+interview, each interview response still asks only its one adaptive map question
+and never combines it with a goal, evidence-clarification, or zoning question.
 
 For the Financial Picture stage, run the read-only
 `brain financial-picture <manifest> --json` inventory. Use its exact entity,
@@ -165,9 +178,9 @@ entity-to-account scope, a tax period, or a supersession target from a name or
 raw identifier. Treat `owner_stated` plus `confirmed` as a stored assertion, not
 proof of who performed a confirmation ceremony. The inventory requires current
 owner confirmation because the schema has no owner-actor receipt for these
-mappings. If one additional owner question is needed outside the guided map
-interview, choose it from a material blocking gap or conflict that the cited
-provenance cannot resolve, and name the evidence that made the question
+mappings. If the one owner question for this response should be an evidence
+clarification, choose it from a material blocking gap or conflict that the
+cited provenance cannot resolve, and name the evidence that made the question
 necessary.
 
 An owner's interview answer does not authorize a write. Keep any correction,
@@ -181,8 +194,9 @@ documents or structured records into owner-confirmed truth. A map that cannot
 establish the denominator does not mean the owner has no other entities or
 accounts.
 
-Do not run a Golden evaluation, create a canned refusal exercise, or require the
-owner to prepare test questions. Those remain optional, separate testing tools,
+Do not run Golden Questions, a Golden evaluation, a canned refusal exercise, a
+known-answer control question, or require the owner to prepare test content.
+Those remain optional, separate testing tools,
 never Optimize prerequisites. Do check whether THIS computer has the reviewed
 Financial Brain technician skill and whether its existing Claude Code MCP entry
 matches the read-only output of `brain mcp-config <manifest>`. Verify the MCP
@@ -192,14 +206,25 @@ known-answer content question for MCP proof. Do not run `brain tools` during Opt
 because it writes the technician skill and local setup files, and do not run `brain mcp-config --apply`.
 
 Make zoning a normal Optimize checkpoint. Run read-only `brain zone <manifest>`
-and `brain grants <manifest>`, list every unzoned source, explain that zoning
-applies to the whole source, and propose the safest exact source-to-zone mapping.
-Unzoned sources with no grants are sharing-readiness
-work, not evidence that somebody currently has access. Do not apply a mapping during the audit. After
-the report, show the exact mapping and affected counts. Only if the owner
-explicitly approves that mapping, run `brain zone --source ... --zone ...` one
-source at a time, repeat its bounded projection pass when the receipt says work
-remains, then verify zones and grants again.
+and `brain grants <manifest>`, list every unzoned source, and explain that zoning
+applies to the whole source. Recommend an exact source-to-zone mapping only when
+source-specific evidence establishes the boundary for the entire source; cite
+that evidence. A source label, connector kind, document count, or plausible
+guess is not enough. Without supporting evidence, never propose or recommend a
+zone. State the available whole-source choices, including leaving the source
+unzoned, explain each consequence, and say that the records do not determine
+the choice. When zoning is the highest-priority blocker, ask the owner to choose
+among those whole-source options; that question uses this response's one
+question budget. When a material evidence conflict has higher priority, defer
+the zoning choice to the next response.
+Unzoned sources with no grants are sharing-readiness work, not evidence that
+somebody currently has access. Do not apply a mapping during the audit. After
+the report, show an exact mapping and affected counts only when it is either an
+evidence-backed recommendation or the owner's selected choice. Label which one
+it is. Only if the owner separately and explicitly approves that mapping, run
+`brain zone --source ... --zone ...` one source at a time, repeat its bounded
+projection pass when the receipt says work remains, then verify zones and grants
+again.
 
 If a prior Optimize report is available, say what improved, regressed, or stayed
 unproven. If none is available, call this the first baseline without creating a

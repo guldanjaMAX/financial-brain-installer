@@ -214,9 +214,17 @@ the owner the final click.
 The owner remains the administrator of their Brain. Deletion and access
 changes stay in explicit owner controls instead of becoming silent chat tools.
 
+Optimize asks at most one owner question per response across evidence
+clarification, whole-source zoning, and its optional opening goal. A material
+evidence conflict comes first, then a pending zoning choice, then the goal; a
+pending conflict or zoning choice skips the goal. When records cannot support a
+zone recommendation, Optimize states the whole-source choices and consequences
+and lets the owner choose instead of guessing.
+
 The Owner Financial Map is the denominator for later financial-completeness
-work. Immediately after the owner's opening goal, Optimize reads whether that
-map is current, stale, or not established and reports its unresolved gaps.
+work. Immediately after that opening decision, whether the goal was asked or
+skipped, Optimize reads whether the map is current, stale, or not established
+and reports its unresolved gaps.
 Before the private read, it explains that no map snapshot will be sent, nothing
 will change, and the assistant may still show an approval prompt for the read.
 Before any financial-completeness conclusion, it offers an optional guided,

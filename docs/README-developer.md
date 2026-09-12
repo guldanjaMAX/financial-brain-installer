@@ -1114,9 +1114,16 @@ Optimize also reads `POST /api/admin/brain/financial-map/read`. Migration 0041
 starts with no map history and never promotes existing structured rows by
 backfill. The response calls those rows possible mentions, exposes current,
 stale, or not-established map state, and returns the complete unresolved-item
-list. This is the first audit evidence after the owner's opening goal. Before
-the read, the host explains that it sends no map snapshot and changes nothing,
-even if the assistant displays an approval prompt for the private read. Before
+list. Each owner-facing Optimize response has one question budget shared by
+material evidence clarification, whole-source zoning, and the optional opening
+goal, in that priority order. A pending evidence conflict or zoning choice
+skips the goal. An unsupported zoning recommendation is forbidden: the host
+states the whole-source choices and consequences, says the evidence does not
+choose among them, and uses the one question only when zoning is the
+highest-priority blocker. This map read is the first audit evidence after that
+opening decision, whether the goal was asked or skipped. Before the read, the
+host explains that it sends no map snapshot and changes nothing, even if the
+assistant displays an approval prompt for the private read. Before
 any financial-completeness conclusion, the host offers the optional guided,
 session-only interview and asks one short question at a time if the owner
 accepts. The interview submits nothing and changes nothing. If the owner

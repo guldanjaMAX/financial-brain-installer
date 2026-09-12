@@ -21,6 +21,7 @@ import {
 import {
   CLAUDE_TECHNICIAN_SKILL_MARKER,
   installClaudeTechnicianSkill,
+  installTechnicianSkillEverywhere,
 } from "../operations/claude-skill.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
@@ -138,16 +139,25 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.ok(setupRouteStart > passkeyRouteStart, "passkey routing must run before the setup-oriented plan");
   const optimizeRoute = content.slice(optimizeRouteStart, updateRouteStart);
   assert.match(optimizeRoute, /included\s+owner feature/i);
-  const openingGoal = /What would you most\s+like your Financial Brain to help you understand or keep current\?/g;
+  const openingGoal = /What would you\s+most\s+like your Financial Brain to help you understand or keep current\?/g;
   assert.equal([...optimizeRoute.matchAll(openingGoal)].length, 1,
-    "Optimize must open with exactly one plain-language goal question");
+    "Optimize must retain one optional plain-language goal question");
   const openingGoalIndex = optimizeRoute.search(openingGoal);
   const mapReadDisclosureIndex = optimizeRoute.search(/This sends no Financial Map\s+snapshot and changes nothing\./);
   const financialPictureIndex = optimizeRoute.indexOf(renderCliCommands("brain financial-picture <manifest> --json"));
   assert.ok(openingGoalIndex >= 0 && mapReadDisclosureIndex > openingGoalIndex &&
     financialPictureIndex > mapReadDisclosureIndex,
-  "Optimize must ask the goal, explain and read map state, then inventory the financial picture");
-  assert.match(optimizeRoute, /I can check your Brain without changing\s+it/i);
+  "Optimize must define the optional goal, explain and read map state, then inventory the financial picture");
+  assert.match(optimizeRoute,
+    /one total owner-question budget per owner-facing Optimize response across\s+the optional goal, evidence clarification, and zoning/i);
+  assert.match(optimizeRoute,
+    /Ask only the\s+highest-priority blocker, in this order: a material evidence conflict, a\s+whole-source zoning decision, then the optional goal/i);
+  assert.match(optimizeRoute,
+    /Skip\s+the goal whenever a material evidence conflict or any zoning decision is\s+already pending/i);
+  assert.match(optimizeRoute,
+    /Once the response asks one\s+question, state and defer every other blocker instead of asking another/i);
+  assert.doesNotMatch(optimizeRoute, /Open with exactly one goal question/i);
+  assert.match(optimizeRoute, /I can check your Brain without\s+changing\s+it/i);
   assert.match(optimizeRoute, /Do not narrate\s+skill selection, source-code inspection, PATH archaeology, release research/is);
   assert.match(optimizeRoute, /request already authorizes the contract's read-only checks/i);
   assert.match(optimizeRoute, /Do\s+not ask for a second approval/i);
@@ -172,10 +182,12 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute, /Never infer or auto-confirm ownership/i);
   assert.match(optimizeRoute, /owner's interview answer does not authorize a write/i);
   assert.match(optimizeRoute, /separate explicit owner\s+approval/i);
-  assert.match(optimizeRoute, /Unzoned sources with no grants are sharing-readiness\s+work, not evidence that somebody currently has access/i);
+  assert.match(optimizeRoute,
+    /Unzoned sources with no grants are sharing-readiness\s+work, not evidence that\s+somebody currently has access/i);
   assert.match(optimizeRoute, /Leave passkeys\s+and enrolled devices out of Optimize/i);
   assert.match(optimizeRoute, /brain_financial_map.*mode: "read"/is);
-  assert.match(optimizeRoute, /immediately before calling `brain_financial_map` with `mode: "read"`/i);
+  assert.match(optimizeRoute,
+    /immediately before\s+calling `brain_financial_map` with `mode: "read"`/i);
   assert.match(optimizeRoute, /assistant may still show an approval prompt.*authorizing a private read/is);
   assert.match(optimizeRoute, /possible mention until the owner confirms/i);
   assert.match(optimizeRoute,
@@ -195,15 +207,27 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute,
     new RegExp("do not run `" + renderedCommand("brain mcp-config --apply") + "`", "i"));
   assert.match(optimizeRoute, /especially after a move to a new computer/i);
-  assert.match(optimizeRoute, /Do not run a Golden evaluation, create a canned refusal exercise/i);
+  assert.match(optimizeRoute,
+    /Do not run Golden Questions, a Golden evaluation, a canned refusal exercise, a\s+known-answer control question/i);
   assert.match(optimizeRoute, /Do not ask a\s+known-answer content question for MCP proof/i);
   assert.match(optimizeRoute, /protocol\s+initialization, connection status, and expected tool discovery/i);
   assert.match(optimizeRoute, /zoning\s+applies to the whole source/i);
-  assert.match(optimizeRoute, /Only if the owner\s+explicitly approves that mapping/i);
-  assert.match(optimizeRoute, /repeat its bounded projection pass/i);
+  assert.match(optimizeRoute, /Only\s+if the owner separately and explicitly approves that mapping/i);
+  assert.match(optimizeRoute, /repeat its bounded\s+projection pass/i);
   assert.match(optimizeRoute, /what improved, regressed, or stayed\s+unproven/i);
   assert.match(optimizeRoute, /estimate the affected scope, likely cost, expected answer impact/i);
   assert.match(optimizeRoute, /Prioritize findings by likely answer impact, not raw\s+count/i);
+  assert.match(optimizeRoute,
+    /Without supporting evidence, never propose or recommend a\s+zone/i);
+  assert.match(optimizeRoute,
+    /available whole-source choices, including leaving the source\s+unzoned.*records do not determine\s+the choice/is);
+  assert.match(optimizeRoute,
+    /When zoning is the highest-priority blocker, ask the owner to choose\s+among those whole-source options.*one\s+question budget/is);
+  assert.match(optimizeRoute,
+    /When a material evidence conflict has higher priority, defer\s+the zoning choice to the next response/i);
+  assert.match(optimizeRoute,
+    /exact mapping and affected counts only when it is either an\s+evidence-backed recommendation or the owner's selected choice/i);
+  assert.match(optimizeRoute, /Label which one\s+it is/i);
   assert.doesNotMatch(optimizeRoute, /planned owner-facing workflow|lucky|qualif(?:y|ies|ied) for access/i);
   assert.ok(releaseManifest > updateRouteStart && releaseManifest < agentPlaybook,
     "the held release feed must be the first live update decision");
@@ -302,6 +326,32 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   });
 });
 
+test("the distributed Optimize guidance defers zoning behind one evidence question, then asks it next", () => {
+  const home = join(sandbox, "optimize-question-budget-home");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  const installed = installTechnicianSkillEverywhere({ home });
+  assert.deepEqual(installed.map(({ root, status }) => ({ root, status })), [
+    { root: ".claude", status: "installed" },
+    { root: ".codex", status: "installed" },
+  ]);
+  const copies = installed.map(({ path }) => readFileSync(path, "utf8"));
+  assert.equal(copies[0], copies[1], "Claude Code and Codex must receive the same reviewed guidance");
+  const optimizeStart = copies[0].indexOf("## Route an Optimize request first");
+  const updateStart = copies[0].indexOf("## Route an update request first");
+  const optimizeRoute = copies[0].slice(optimizeStart, updateStart);
+
+  assert.match(optimizeRoute,
+    /material evidence conflict has higher priority, defer\s+the zoning choice to the next response/i);
+  assert.match(optimizeRoute,
+    /When zoning is the highest-priority blocker, ask the owner to choose\s+among those whole-source options/i);
+  assert.match(optimizeRoute,
+    /question uses this response's one\s+question budget/i);
+  assert.match(optimizeRoute,
+    /Without supporting evidence, never propose or recommend a\s+zone/i);
+  assert.match(optimizeRoute,
+    /records do not determine\s+the choice/i);
+});
+
 test("an unrelated personal Claude skill with the same name is preserved byte-for-byte", () => {
   const home = join(sandbox, "skill-collision-home");
   const target = join(home, ".claude", "skills", "financial-brain-technician", "SKILL.md");
@@ -343,13 +393,28 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.match(content, /restore prior installer-owned state if readback fails/i);
   assert.match(content, /Do not invent a command.*CLI replacement separate/is);
   assert.match(content, /does not run passkey enrollment or device review/i);
-  const workspaceGoal = /What would you most\s+like your Financial Brain to help you understand or keep current\?/g;
+  const workspaceGoal = /What would you\s+most\s+like your Financial Brain to help you understand or keep current\?/g;
   assert.equal([...content.matchAll(workspaceGoal)].length, 1,
-    "the workspace guide must open Optimize with exactly one goal question");
+    "the workspace guide must retain one optional goal question");
   const workspaceGoalIndex = content.search(workspaceGoal);
   const workspaceMapDisclosureIndex = content.search(/This sends no Financial Map\s+snapshot and changes nothing\./);
   assert.ok(workspaceMapDisclosureIndex > workspaceGoalIndex,
-    "the workspace guide must explain the private map read after the goal question");
+    "the workspace guide must explain the private map read after the opening decision contract");
+  assert.match(content,
+    /one total owner-question budget per response across the optional goal, evidence clarification, and zoning/i);
+  assert.match(content,
+    /Ask only the highest-priority blocker: a material evidence conflict, then a whole-source zoning decision, then the optional goal/i);
+  assert.match(content,
+    /Skip the goal whenever a material evidence conflict or any zoning decision is pending/i);
+  assert.match(content, /Once one question is asked, state and defer every other blocker/i);
+  assert.match(content,
+    /Without that evidence, state the available whole-source choices and consequences, including leaving it unzoned.*records do not determine the choice/is);
+  assert.match(content,
+    /If zoning is the highest-priority blocker, ask the owner to choose with the response's one question/i);
+  assert.match(content, /If a material evidence conflict has higher priority, defer zoning to the next response/i);
+  assert.match(content,
+    /Do not run Golden Questions, a Golden evaluation, a canned refusal exercise, a known-answer control question/i);
+  assert.doesNotMatch(content, /Open Optimize with exactly one goal question/i);
   assert.match(content, /brain_financial_map.*mode: "read".*approval prompt.*private read/is);
   assert.match(content,
     /Before any financial completeness conclusion, offer the guided read-only interview.*one short adaptive question/is);
