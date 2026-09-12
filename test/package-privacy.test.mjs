@@ -646,6 +646,10 @@ const expected = [
   "operations/whatsapp-daemon.mjs",
   "operations/whatsapp-drain-scheduler.mjs",
   "operations/installed-manifest.mjs",
+  // Counts-only disposable bootstrap observer. It has no provider, credential,
+  // filesystem, retry, or mutation implementation and receives one fixed
+  // aggregate SELECT through injected read-only callbacks.
+  "operations/aggregate-field-observer.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
   "operations/verified-recovery.mjs",
   "operations/windows-dpapi.ps1",
@@ -874,6 +878,12 @@ if (packageProbeDirectory) try {
       "operations",
       "cloudflare-recovery-adapter.mjs",
     );
+    const observerPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "aggregate-field-observer.mjs",
+    );
     const targetRepairPath = join(
       packageProbeDirectory,
       "package",
@@ -911,7 +921,12 @@ if (packageProbeDirectory) try {
             PATH: process.env.PATH || "",
             ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
             ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
-            PACK_IMPORT_PATHS: JSON.stringify([adapterPath, targetRepairPath, targetCliPath]),
+            PACK_IMPORT_PATHS: JSON.stringify([
+              adapterPath,
+              observerPath,
+              targetRepairPath,
+              targetCliPath,
+            ]),
           },
           timeout: 60_000,
         })

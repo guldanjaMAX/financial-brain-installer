@@ -139,6 +139,17 @@ resource. Its sole Worker mutation is the exact 100-percent deployment of the
 active immutable version already named in the reviewed target claim, after the
 paused bootstrap has passed exact vector proof. It does not touch Supabase.
 
+`operations/aggregate-field-observer.mjs` is the separate read-only progress
+boundary for a supervised disposable bootstrap. It owns no provider client,
+credential lookup, retry loop, deployment, drain, reindex, or write callback.
+A reviewed adapter supplies a target-identity fingerprint, one fixed
+aggregate-only D1 SELECT, and the Vectorize count. The observer brackets those
+reads, rejects identity or corpus drift, and returns only counts and cursor
+ordinals. Raw cursors, high-water identities, document identities, provider
+responses, errors, and paths cannot enter its receipt. A local observer pass is
+not Cloudflare field proof until the separately approved disposable campaign
+binds those injected reads to the exact target resources.
+
 A normal full D1 export cannot include an FTS5 virtual table. The adapter never
 drops or changes source FTS. It exports data only from the exact reviewed table
 allowlist, prepends the exact checked-in migrations recorded on the source, and
