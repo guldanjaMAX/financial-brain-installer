@@ -114,8 +114,9 @@ operating-system file provider to hydrate the file, so its network, credential,
 and filesystem effects are unknown. Review the affected document/page counts,
 pages outside the per-document cap, exact OCR model, pricing-basis status,
 cost/time range, configured daily cap, and every typed unknown with the owner.
-`estimated_fits_configured_cap` compares against the full configured cap only;
-the remaining shared daily budget and actual affordability are unknown. If the
+`estimated_fits_configured_cap` compares the unrounded high planning value
+against the full configured cap only; the remaining shared daily budget and
+actual affordability are unknown. If the
 cap is not configured, the model is unpriced, or any relevant page or scope
 remains unknown, do not present the plan as ready to run.
 

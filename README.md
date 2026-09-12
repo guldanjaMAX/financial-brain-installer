@@ -786,8 +786,10 @@ The exact OCR model and pricing-basis version are part of the receipt and plan
 fingerprint. A nondefault model or changed pricing contract is explicitly
 unpriced, with no cost or cap result borrowed from the default model.
 
-`estimated_fits_configured_cap` compares the complete estimated range only with
-the full configured cap. It is not a promise that OCR can finish today. The cap
+`estimated_fits_configured_cap` compares the unrounded high value behind the
+complete estimated range only with the full configured cap. Display rounding
+cannot turn a slightly undersized cap into a positive result. It is not a
+promise that OCR can finish today. The cap
 is shared with other model calls, this read-only command does not ask the Brain
 how much has already been used, and the estimate's high value is a planning
 bracket rather than a guaranteed upper bound. Therefore the remaining shared

@@ -22,8 +22,9 @@ asset publication.
   cases, applies the configured per-document page limit, and binds the exact OCR
   model and pricing-basis version. Only the reviewed default model receives a
   cost/time range; a nondefault or mismatched pricing contract stays unpriced.
-  The full configured-cap comparison is separate from the unknown remaining
-  shared daily budget and unknown actual affordability. A missing cap stays
+  The full configured-cap comparison uses the unrounded high planning value and
+  stays separate from the unknown remaining shared daily budget and unknown
+  actual affordability. A missing cap stays
   missing. A state-bound fingerprint can support a later approval, but this
   command does not authorize or perform OCR. This remains a held candidate and
   has not run on a customer folder.

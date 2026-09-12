@@ -174,7 +174,7 @@ page count without parsing human error prose. The operation module receives
 only these content-free observations and produces an exact aggregate schema.
 It reports known scan-only documents/pages, per-document-cap eligibility,
 cost/time ranges for the exact reviewed default model, the manifest cap, the
-estimated full-cap comparison, and typed uninspectable cases. A nondefault model
+unrounded-high full-cap comparison, and typed uninspectable cases. A nondefault model
 or pricing-contract mismatch is unpriced rather than estimated at the default
 model's rate. Remaining shared daily budget and actual affordability are unknown
 because this local command deliberately does not ask the Brain for today's model
