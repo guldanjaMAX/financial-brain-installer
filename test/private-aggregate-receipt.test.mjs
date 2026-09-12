@@ -6,6 +6,7 @@ import {
   closeSync,
   constants as fsConstants,
   existsSync,
+  fsyncSync,
   linkSync,
   lstatSync,
   mkdtempSync,
@@ -513,6 +514,190 @@ receiptTest("Windows directory sync is refused rather than inferring privacy fro
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("directory sync refuses a parent made public during its durability barrier", {
+  skip: process.platform === "win32",
+}, () => {
+  const directory = privateDirectory("brain-private-receipt-directory-mode-race-");
+  const finalPath = join(directory, "receipt.json");
+  privateWrite(finalPath, "{}\n");
+  const directoryInfo = lstatSync(directory);
+  const finalInfo = lstatSync(finalPath);
+  try {
+    assert.throws(
+      () => syncPrivateReceiptDirectory(
+        directory,
+        directoryInfo,
+        finalPath,
+        finalInfo,
+        "SYNTHETIC_PARENT_CHANGED",
+        {
+          syncDirectoryHandle(descriptor) {
+            fsyncSync(descriptor);
+            chmodSync(directory, 0o755);
+          },
+        },
+      ),
+      receiptError("SYNTHETIC_PARENT_CHANGED"),
+    );
+  } finally {
+    chmodSync(directory, 0o700);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("directory sync detects a parent made public and private again during fsync", {
+  skip: process.platform === "win32",
+}, () => {
+  const directory = privateDirectory("brain-private-receipt-directory-mode-toggle-");
+  const finalPath = join(directory, "receipt.json");
+  privateWrite(finalPath, "{}\n");
+  const directoryInfo = lstatSync(directory);
+  const finalInfo = lstatSync(finalPath);
+  try {
+    assert.throws(
+      () => syncPrivateReceiptDirectory(
+        directory,
+        directoryInfo,
+        finalPath,
+        finalInfo,
+        "SYNTHETIC_PARENT_CHANGED",
+        {
+          syncDirectoryHandle(descriptor) {
+            fsyncSync(descriptor);
+            chmodSync(directory, 0o755);
+            chmodSync(directory, 0o700);
+          },
+        },
+      ),
+      receiptError("SYNTHETIC_PARENT_CHANGED"),
+    );
+  } finally {
+    chmodSync(directory, 0o700);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("finalization refuses a parent made public after sync and preserves the pending marker", {
+  skip: process.platform === "win32",
+}, () => {
+  const fixture = outputFixture("brain-private-receipt-final-parent-race-");
+  let reservation;
+  try {
+    reservation = reservePrivateAggregateReceipt(fixture.output, { status: "reserved" });
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(
+        reservation,
+        { status: "must_not_commit" },
+        {
+          syncDirectory() {
+            chmodSync(fixture.directory, 0o755);
+            return true;
+          },
+        },
+      ),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED"),
+    );
+    assert.equal(existsSync(fixture.output.pendingPath), true);
+  } finally {
+    chmodSync(fixture.directory, 0o700);
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("pending-marker commit rechecks parent privacy after descriptor close", {
+  skip: process.platform === "win32",
+}, () => {
+  const fixture = outputFixture("brain-private-receipt-pending-parent-race-");
+  let reservation;
+  try {
+    reservation = reservePrivateAggregateReceipt(fixture.output, { status: "reserved" });
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(
+        reservation,
+        { status: "must_not_commit" },
+        {
+          closeTemporary(descriptor) {
+            closeSync(descriptor);
+            chmodSync(fixture.directory, 0o755);
+          },
+        },
+      ),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_PENDING_CHANGED"),
+    );
+    assert.equal(existsSync(fixture.output.pendingPath), true);
+  } finally {
+    chmodSync(fixture.directory, 0o700);
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("pending-marker commit detects a parent permission toggle after descriptor close", {
+  skip: process.platform === "win32",
+}, () => {
+  const fixture = outputFixture("brain-private-receipt-pending-parent-toggle-");
+  let reservation;
+  try {
+    reservation = reservePrivateAggregateReceipt(fixture.output, { status: "reserved" });
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(
+        reservation,
+        { status: "must_not_commit" },
+        {
+          closeTemporary(descriptor) {
+            closeSync(descriptor);
+            chmodSync(fixture.directory, 0o755);
+            chmodSync(fixture.directory, 0o700);
+          },
+        },
+      ),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_PENDING_CHANGED"),
+    );
+    assert.equal(existsSync(fixture.output.pendingPath), true);
+  } finally {
+    chmodSync(fixture.directory, 0o700);
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("pending-marker commit rejects a substituted finalized receipt", {
+  skip: process.platform === "win32",
+}, () => {
+  const fixture = outputFixture("brain-private-receipt-final-substitution-");
+  let reservation;
+  try {
+    reservation = reservePrivateAggregateReceipt(fixture.output, { status: "reserved" });
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(
+        reservation,
+        { status: "complete" },
+        {
+          closeTemporary(descriptor) {
+            closeSync(descriptor);
+            writeFileSync(
+              fixture.path,
+              JSON.stringify({ status: "altered!" }, null, 2) + "\n",
+              { mode: 0o600 },
+            );
+            chmodSync(fixture.path, 0o600);
+          },
+        },
+      ),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_PENDING_CHANGED"),
+    );
+    assert.equal(existsSync(fixture.output.pendingPath), true);
+    assert.throws(
+      () => readPrivateAggregateReceipt(fixture.path),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_READ_REFUSED"),
+    );
+  } finally {
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
   }
 });
 

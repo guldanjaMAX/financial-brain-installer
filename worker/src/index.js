@@ -3103,12 +3103,17 @@ export default {
             paused: false,
           }, 409);
         }
+        const requestedBootstrapContract = request.headers.get("x-bootstrap-contract");
+        if (requestedBootstrapContract !== null &&
+            !["1", "2", "3"].includes(requestedBootstrapContract)) {
+          return jsonResponse({ error: "unsupported bootstrap receipt contract" }, 400);
+        }
         const r = await acceleratedVectorBootstrap(env, {
           embed: (text) => embedText(env, text),
           embedBatch: (texts) => embedTexts(env, texts),
           // Receipt contract: a CLI that understands the named-cause fields
           // says so; an older kit gets the exact field set it validates.
-          contract: Number(request.headers.get("x-bootstrap-contract")) || 1,
+          contract: requestedBootstrapContract === null ? 1 : Number(requestedBootstrapContract),
         });
         if (r.busy) {
           // The CLI treats 409 as a separate exact contract. Do not mix the

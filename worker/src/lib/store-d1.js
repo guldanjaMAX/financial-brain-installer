@@ -5756,7 +5756,7 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
     // batch ledger before promotion, so keep the completed rows addressable
     // for that final observation. Ordinary clients retain the rebase that
     // prevents historical batches from counting toward a later projection.
-    if (!(Number(options?.contract) >= 3)) {
+    if (options?.contract !== 3) {
       state = await rebaseVerifiedAcceleratedBootstrap(env, state);
     }
     return acceleratedBootstrapReceipt(env, "waiting", null, options);

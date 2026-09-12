@@ -358,21 +358,32 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
       Number(preserved.batches) === 4 && Number(preserved.full_batches) === 3 &&
       Number(preserved.tail_batches) === 1 && Number(preserved.confirmed_batches) === 4,
     JSON.stringify({ pending, proven, preserved }));
-  const ordinary = await acceleratedVectorBootstrap(env, {
-    ...options,
-    contract: 2,
-  });
-  const rebased = db.prepare(
-    `SELECT vector_projection_bootstrap_epoch AS epoch,
-            vector_projection_bootstrap_base_count AS base_count,
-            (SELECT COUNT(*) FROM vector_bootstrap_batches
-              WHERE epoch=vector_projection_bootstrap_epoch) AS current_batches
-       FROM install_state WHERE id=1`,
-  ).get();
-  check("ordinary bootstrap contracts still rebase completed history",
-    ordinary.complete === true && ordinary.epoch === 71 && Number(rebased.epoch) === 71 &&
-      Number(rebased.base_count) === 3_201 && Number(rebased.current_batches) === 0,
-    JSON.stringify({ ordinary, rebased }));
+  const rebasedContracts = [];
+  for (const contract of [2, 4, 3.1, Infinity, "3"]) {
+    db.prepare(
+      `UPDATE install_state
+          SET vector_projection_status='verified',
+              vector_projection_bootstrap_epoch=70,
+              vector_projection_bootstrap_base_count=0
+        WHERE id=1`,
+    ).run();
+    const beforeEpoch = 70;
+    const ordinary = await acceleratedVectorBootstrap(env, { ...options, contract });
+    const rebased = db.prepare(
+      `SELECT vector_projection_bootstrap_epoch AS epoch,
+              vector_projection_bootstrap_base_count AS base_count,
+              (SELECT COUNT(*) FROM vector_bootstrap_batches
+                WHERE epoch=vector_projection_bootstrap_epoch) AS current_batches
+         FROM install_state WHERE id=1`,
+    ).get();
+    rebasedContracts.push({ contract: String(contract), beforeEpoch, ordinary, rebased });
+  }
+  check("only exact numeric contract 3 preserves completed bootstrap history",
+    rebasedContracts.every(({ beforeEpoch, ordinary, rebased }) =>
+      ordinary.complete === true && ordinary.epoch === beforeEpoch + 1 &&
+      Number(rebased.epoch) === beforeEpoch + 1 && Number(rebased.base_count) === 3_201 &&
+      Number(rebased.current_batches) === 0),
+    JSON.stringify(rebasedContracts));
 }
 
 /* A later upgrade must not count one completed bootstrap's durable batch
