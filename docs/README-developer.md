@@ -1317,9 +1317,13 @@ ambient provider credentials are refused.
 
 With schedules disabled, an operator separately seeds the fingerprinted target
 with the candidate-derived trigger count of fictional one-chunk documents and
-writes the exact aggregate-only seed receipt. `--execute` rechecks the seed and
-all target pins, invokes the installed `brain update` wrapper exactly once, and
-fails if the CLI did not positively report verified writer quiescence. Success
+writes the exact aggregate-only seed receipt. Before provider access or update,
+`--execute` reserves its final receipt path with a durable conservative marker.
+It rechecks the seed and all target pins, invokes the installed `brain update`
+wrapper exactly once, and fails if the CLI did not positively report verified
+writer quiescence. The final aggregate is written to a private sibling and
+atomically replaces that marker, so a write or fsync failure leaves either a
+valid review marker or a valid final receipt. Success
 requires direct D1 proof of exactly one residue re-projection event, the exact
 full-page and final-page batch ledger, installed migration checksum parity,
 exactly one verified upgrade run, restored cron and active health, D1/Vectorize

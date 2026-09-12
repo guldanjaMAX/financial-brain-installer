@@ -3,12 +3,15 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -36,6 +39,7 @@ import {
   createLifecycleEnvironment,
   deriveInstalledAuthProfile,
   executeAcceleratedUpdateFieldGate,
+  finalizeReservedAggregateReceipt,
   inspectFieldPreparation,
   installCandidateArtifact,
   normalizeCompleteWorkerRecords,
@@ -44,6 +48,7 @@ import {
   prepareAcceleratedUpdateFieldGate,
   readInstalledContract,
   removeCandidateRuntime,
+  reserveAggregateReceipt,
   syntheticSeedReceipt,
   validateAccountWorkersDevSubdomain,
   validateActiveWorkerBindings,
@@ -341,8 +346,8 @@ function workerVersionFixture(binding, version, id = "11111111-1111-1111-1111-11
     id,
     resources: {
       bindings: [
-        { type: "d1", name: "DB", id: binding.databaseId, database_id: binding.databaseId },
-        { type: "ai", name: "AI", project: "<catalog>" },
+        { type: "d1", name: "DB", id: binding.databaseId },
+        { type: "ai", name: "AI" },
         { type: "vectorize", name: "VECTORIZE", index_name: binding.vectorIndex },
         plain("STORAGE", "d1"),
         plain("BRAIN_NAME", binding.slug),
@@ -511,7 +516,10 @@ function statefulProvider(state) {
       return {
         status: 200,
         headers: new Headers({ "Cache-Control": "private, no-store" }),
-        body: { degraded: null, results: [{ title: state.canaryTitle, content: PRIVATE_SENTINEL }] },
+        body: {
+          ...(state.omitDegraded ? {} : { degraded: null }),
+          results: [{ title: state.canaryTitle, content: PRIVATE_SENTINEL }],
+        },
       };
     },
   };
@@ -727,8 +735,21 @@ test("active Worker bindings join the exact D1, Vectorize, synthetic vars, and s
   const version = workerVersionFixture(binding, "0.4.6", activeId);
   assert.match(validateActiveWorkerBindings(version, binding, "0.4.6", activeId), /^[a-f0-9]{64}$/);
 
+  const d1 = version.resources.bindings.find((entry) => entry.name === "DB");
+  delete d1.id;
+  d1.database_id = D1_ID;
+  assert.match(validateActiveWorkerBindings(version, binding, "0.4.6", activeId), /^[a-f0-9]{64}$/);
+  d1.id = D1_ID;
+  assert.match(validateActiveWorkerBindings(version, binding, "0.4.6", activeId), /^[a-f0-9]{64}$/);
+
   const mismatches = [
     (copy) => { copy.resources.bindings.find((entry) => entry.name === "DB").database_id = "2".repeat(32); },
+    (copy) => {
+      const entry = copy.resources.bindings.find((candidate) => candidate.name === "DB");
+      delete entry.id;
+      delete entry.database_id;
+    },
+    (copy) => { copy.resources.bindings.find((entry) => entry.name === "AI").type = "plain_text"; },
     (copy) => { copy.resources.bindings.find((entry) => entry.name === "VECTORIZE").index_name = "other-index"; },
     (copy) => { copy.resources.bindings.find((entry) => entry.name === "BRAIN_NAME").text = "other-brain"; },
     (copy) => { copy.resources.bindings.find((entry) => entry.name === "BRAIN_VERSION").text = PACKAGE_VERSION; },
@@ -1175,6 +1196,70 @@ test("prepare refuses a logically different D1 client before authorizing any see
   }
 });
 
+test("a late final-receipt collision refuses before provider access or update", async () => {
+  const fixture = setupFixture();
+  const state = { phase: "baseline", sessions: 0, updateCalls: 0, calls: [], canaryTitle: null };
+  const dependencies = dependenciesFor(fixture, state);
+  try {
+    const prepared = await prepareAcceleratedUpdateFieldGate(optionsFor(fixture.directory, "prepare"), dependencies);
+    privateWrite(join(fixture.directory, "seed.json"), `${JSON.stringify(syntheticSeedReceipt(prepared), null, 2)}\n`);
+    state.phase = "seeded";
+    const sessionsBeforeExecute = state.sessions;
+    dependencies.reserveReceipt = (output, marker) => {
+      privateWrite(output.path, "{\"late_collision\":true}\n");
+      return reserveAggregateReceipt(output, marker);
+    };
+    await assert.rejects(
+      () => executeAcceleratedUpdateFieldGate(
+        optionsFor(fixture.directory, "execute", prepared.plan_fingerprint),
+        dependencies,
+      ),
+      /receipt_reservation_collision/,
+    );
+    assert.equal(state.sessions, sessionsBeforeExecute);
+    assert.equal(state.updateCalls, 0);
+    assert.equal(state.calls.includes("ingest"), false);
+    assert.equal(existsSync(join(fixture.directory, ".accelerated-update-field-gate.lock")), false);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("receipt finalization refuses a replaced result path or parent inode", () => {
+  for (const replace of ["path", "parent"]) {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-receipt-reservation-test-")));
+    if (process.platform !== "win32") chmodSync(directory, 0o700);
+    const moved = `${directory}-moved`;
+    const output = {
+      path: join(directory, "result.json"),
+      parent: { path: directory, info: lstatSync(directory) },
+    };
+    const reservation = reserveAggregateReceipt(output, {
+      schema_version: 1,
+      status: "conservative_marker",
+    });
+    try {
+      if (replace === "path") {
+        renameSync(output.path, join(directory, "original-marker.json"));
+        privateWrite(output.path, "{\"replacement\":true}\n");
+      } else {
+        renameSync(directory, moved);
+        mkdirSync(directory, { mode: 0o700 });
+        if (process.platform !== "win32") chmodSync(directory, 0o700);
+      }
+      assert.throws(
+        () => finalizeReservedAggregateReceipt(reservation, { status: "must_not_commit" }),
+        /receipt_reservation_changed/,
+      );
+    } finally {
+      try { closeSync(reservation.descriptor); } catch { /* Already closed only on unexpected success. */ }
+      reservation.closed = true;
+      rmSync(directory, { recursive: true, force: true });
+      rmSync(moved, { recursive: true, force: true });
+    }
+  }
+});
+
 test("prepare binds the clean live baseline and execute proves one durable update plus canary", async () => {
   const fixture = setupFixture();
   const state = { phase: "baseline", sessions: 0, updateCalls: 0, calls: [], canaryTitle: null };
@@ -1251,6 +1336,74 @@ test("prepare binds the clean live baseline and execute proves one durable updat
       "started_at", "finished_at", "from_version", "to_version",
       "status", "d1_bookmark", "detail",
     ]);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("write, file-fsync, rename, and directory-fsync failures preserve a valid aggregate outcome", async () => {
+  for (const stage of ["write", "file_fsync", "rename", "directory_fsync"]) {
+    const fixture = setupFixture();
+    const state = { phase: "baseline", sessions: 0, updateCalls: 0, calls: [], canaryTitle: null };
+    const dependencies = dependenciesFor(fixture, state);
+    try {
+      const prepared = await prepareAcceleratedUpdateFieldGate(optionsFor(fixture.directory, "prepare"), dependencies);
+      privateWrite(join(fixture.directory, "seed.json"), `${JSON.stringify(syntheticSeedReceipt(prepared), null, 2)}\n`);
+      state.phase = "seeded";
+      const fail = () => { throw new Error(`simulated_${stage}_failure`); };
+      dependencies.finalizeReceipt = (reservation, receipt) => finalizeReservedAggregateReceipt(
+        reservation,
+        receipt,
+        {
+          ...(stage === "write" ? { writeBytes: fail } : {}),
+          ...(stage === "file_fsync" ? { syncFile: fail } : {}),
+          ...(stage === "rename" ? { rename: fail } : {}),
+          ...(stage === "directory_fsync" ? { syncDirectory: fail } : {}),
+        },
+      );
+      await assert.rejects(
+        () => executeAcceleratedUpdateFieldGate(
+          optionsFor(fixture.directory, "execute", prepared.plan_fingerprint),
+          dependencies,
+        ),
+        new RegExp(`simulated_${stage}_failure`),
+      );
+      assert.equal(state.updateCalls, 1);
+      const visible = JSON.parse(readFileSync(join(fixture.directory, "result.json"), "utf8"));
+      assert.equal([
+        "execution_in_progress_or_interrupted_target_requires_review",
+        "passed_cleanup_required",
+      ].includes(visible.status), true);
+      if (stage === "directory_fsync") assert.equal(visible.status, "passed_cleanup_required");
+      else assert.equal(visible.status, "execution_in_progress_or_interrupted_target_requires_review");
+      const persisted = JSON.stringify(visible);
+      assert.doesNotMatch(persisted, new RegExp(`${PRIVATE_SENTINEL}|${ADMIN_SENTINEL}|${SLUG}|${D1_ID}|${ACCOUNT}`));
+      assert.equal(existsSync(join(fixture.directory, ".accelerated-update-field-gate.lock")), true);
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("the retrieval canary requires an explicit non-degraded result", async () => {
+  const fixture = setupFixture();
+  const state = {
+    phase: "baseline", sessions: 0, updateCalls: 0, calls: [], canaryTitle: null,
+    omitDegraded: true,
+  };
+  const dependencies = dependenciesFor(fixture, state);
+  try {
+    const prepared = await prepareAcceleratedUpdateFieldGate(optionsFor(fixture.directory, "prepare"), dependencies);
+    privateWrite(join(fixture.directory, "seed.json"), `${JSON.stringify(syntheticSeedReceipt(prepared), null, 2)}\n`);
+    state.phase = "seeded";
+    const result = await executeAcceleratedUpdateFieldGate(
+      optionsFor(fixture.directory, "execute", prepared.plan_fingerprint),
+      dependencies,
+    );
+    assert.equal(result.status, "failed_target_requires_review");
+    assert.equal(result.failure_code, "canary_retrieval_invalid");
+    assert.equal(result.mutations.post_update_canary_retrieval_calls, 1);
+    assert.equal(state.updateCalls, 1);
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true });
   }

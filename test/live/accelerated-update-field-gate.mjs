@@ -29,10 +29,12 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import {
@@ -135,6 +137,10 @@ function integer(value, code) {
 function sameFile(left, right) {
   return left?.dev === right?.dev && left?.ino === right?.ino &&
     left?.size === right?.size && left?.mtimeMs === right?.mtimeMs;
+}
+
+function sameInode(left, right) {
+  return left?.dev === right?.dev && left?.ino === right?.ino;
 }
 
 function assertPrivateDirectory(path, code = "private_directory_required") {
@@ -883,12 +889,16 @@ export function validateActiveWorkerBindings(version, binding, expectedVersion, 
     refusal("cloudflare_worker_bindings_refused");
   }
   const exactlyOne = (predicate) => bindings.filter(predicate).length === 1;
-  if (!exactlyOne((entry) => entry.type === "d1" && entry.name === "DB" &&
-      entry.id === binding.databaseId && entry.database_id === binding.databaseId) ||
+  const d1Bindings = bindings.filter((entry) => entry.type === "d1" && entry.name === "DB");
+  if (d1Bindings.length !== 1) refusal("cloudflare_worker_bindings_refused");
+  const d1Binding = d1Bindings[0];
+  const d1Aliases = ["id", "database_id"].filter((key) => Object.hasOwn(d1Binding, key));
+  if (d1Aliases.length < 1 || d1Aliases.some((key) => d1Binding[key] !== binding.databaseId) ||
       !exactlyOne((entry) => entry.type === "vectorize" && entry.name === "VECTORIZE" &&
         entry.index_name === binding.vectorIndex) ||
-      !exactlyOne((entry) => entry.type === "ai" && entry.name === "AI" &&
-        entry.project === "<catalog>")) refusal("cloudflare_worker_bindings_refused");
+      !exactlyOne((entry) => entry.type === "ai" && entry.name === "AI")) {
+    refusal("cloudflare_worker_bindings_refused");
+  }
   const expectedPlainText = new Map([
     ["STORAGE", "d1"],
     ["BRAIN_NAME", binding.slug],
@@ -1561,6 +1571,172 @@ export function persistAggregateReceipt(path, receipt) {
   try { fsyncSync(directory); } finally { closeSync(directory); }
 }
 
+function writeDescriptorBytes(descriptor, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+    if (!Number.isSafeInteger(written) || written < 1) refusal("receipt_write_failed");
+    offset += written;
+  }
+}
+
+function validateReceiptReservation(reservation, code) {
+  if (!reservation || reservation.closed === true || !Number.isSafeInteger(reservation.descriptor)) {
+    refusal(code);
+  }
+  let parent;
+  let current;
+  let opened;
+  try {
+    parent = lstatSync(reservation.parentPath);
+    current = lstatSync(reservation.path);
+    opened = fstatSync(reservation.descriptor);
+  } catch { refusal(code); }
+  if (!parent.isDirectory() || parent.isSymbolicLink() ||
+      realpathSync(reservation.parentPath) !== reservation.parentPath ||
+      !sameInode(parent, reservation.parentInfo) ||
+      (process.platform !== "win32" && (parent.mode & 0o077) !== 0) ||
+      (typeof process.getuid === "function" && parent.uid !== process.getuid()) ||
+      !current.isFile() || current.isSymbolicLink() || current.nlink !== 1 ||
+      (process.platform !== "win32" && (current.mode & 0o077) !== 0) ||
+      !sameFile(reservation.info, current) || !sameFile(reservation.info, opened)) refusal(code);
+  return true;
+}
+
+function syncReservationDirectory(reservation, code) {
+  const directory = openSync(reservation.parentPath, fsConstants.O_RDONLY);
+  try {
+    if (!sameInode(fstatSync(directory), reservation.parentInfo)) refusal(code);
+    fsyncSync(directory);
+    if (!sameInode(fstatSync(directory), reservation.parentInfo) ||
+        !sameInode(lstatSync(reservation.parentPath), reservation.parentInfo)) refusal(code);
+  } finally {
+    closeSync(directory);
+  }
+}
+
+export function reserveAggregateReceipt(output, marker) {
+  if (!output?.path || !output?.parent?.path || dirname(output.path) !== output.parent.path) {
+    refusal("receipt_reservation_invalid");
+  }
+  const parent = assertPrivateDirectory(output.parent.path, "receipt_parent_refused");
+  if (!sameInode(parent.info, output.parent.info)) refusal("receipt_parent_changed");
+  let descriptor;
+  try {
+    descriptor = openSync(
+      output.path,
+      fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0),
+      0o600,
+    );
+  } catch (error) {
+    if (error?.code === "EEXIST") refusal("receipt_reservation_collision");
+    throw error;
+  }
+  const reservation = {
+    path: output.path,
+    parentPath: parent.path,
+    parentInfo: parent.info,
+    descriptor,
+    info: null,
+    closed: false,
+  };
+  let bytes;
+  try {
+    bytes = Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8");
+    writeDescriptorBytes(descriptor, bytes);
+    fsyncSync(descriptor);
+    fchmodSync(descriptor, 0o600);
+    reservation.info = fstatSync(descriptor);
+    const current = lstatSync(output.path);
+    if (!reservation.info.isFile() || reservation.info.nlink !== 1 ||
+        (process.platform !== "win32" && (reservation.info.mode & 0o077) !== 0) ||
+        !sameFile(reservation.info, current)) refusal("receipt_reservation_invalid");
+    syncReservationDirectory(reservation, "receipt_parent_changed");
+    validateReceiptReservation(reservation, "receipt_reservation_changed");
+    return reservation;
+  } catch (error) {
+    try { closeSync(descriptor); } catch { /* The reserved path remains a conservative marker. */ }
+    reservation.closed = true;
+    throw error;
+  } finally {
+    if (bytes) bytes.fill(0);
+  }
+}
+
+export function finalizeReservedAggregateReceipt(reservation, receipt, {
+  writeBytes = writeDescriptorBytes,
+  syncFile = fsyncSync,
+  rename = renameSync,
+  syncDirectory = syncReservationDirectory,
+} = {}) {
+  validateReceiptReservation(reservation, "receipt_reservation_changed");
+  const nonce = randomBytes(12).toString("hex");
+  const temporaryPath = join(reservation.parentPath, `.accelerated-update-field-gate-final-${nonce}.tmp`);
+  let temporaryDescriptor;
+  let temporaryIdentity = null;
+  let temporaryInfo = null;
+  let renamed = false;
+  let bytes;
+  try {
+    bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+    temporaryDescriptor = openSync(
+      temporaryPath,
+      fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0),
+      0o600,
+    );
+    temporaryIdentity = fstatSync(temporaryDescriptor);
+    writeBytes(temporaryDescriptor, bytes);
+    syncFile(temporaryDescriptor);
+    fchmodSync(temporaryDescriptor, 0o600);
+    temporaryInfo = fstatSync(temporaryDescriptor);
+    const temporaryCurrent = lstatSync(temporaryPath);
+    if (!temporaryInfo.isFile() || temporaryInfo.nlink !== 1 || temporaryInfo.size !== bytes.length ||
+        (process.platform !== "win32" && (temporaryInfo.mode & 0o077) !== 0) ||
+        !sameFile(temporaryInfo, temporaryCurrent)) refusal("receipt_finalization_invalid");
+    validateReceiptReservation(reservation, "receipt_reservation_changed");
+    rename(temporaryPath, reservation.path);
+    renamed = true;
+    const finalCurrent = lstatSync(reservation.path);
+    if (!sameFile(temporaryInfo, finalCurrent) || fstatSync(reservation.descriptor).nlink !== 0) {
+      refusal("receipt_finalization_changed");
+    }
+    syncDirectory(reservation, "receipt_parent_changed");
+    const durableCurrent = lstatSync(reservation.path);
+    if (!sameFile(temporaryInfo, durableCurrent) ||
+        !sameInode(lstatSync(reservation.parentPath), reservation.parentInfo)) {
+      refusal("receipt_finalization_changed");
+    }
+    closeSync(temporaryDescriptor);
+    temporaryDescriptor = undefined;
+    closeSync(reservation.descriptor);
+    reservation.closed = true;
+    return true;
+  } catch (error) {
+    if (!renamed && temporaryIdentity) {
+      try {
+        const current = lstatSync(temporaryPath);
+        const opened = temporaryDescriptor === undefined ? null : fstatSync(temporaryDescriptor);
+        if (current.isFile() && !current.isSymbolicLink() && current.nlink === 1 &&
+            sameInode(temporaryIdentity, current) && (!opened || sameInode(temporaryIdentity, opened))) {
+          unlinkSync(temporaryPath);
+        }
+      } catch { /* Leave an ambiguous private sibling untouched for review. */ }
+    }
+    throw error;
+  } finally {
+    if (bytes) bytes.fill(0);
+    if (temporaryDescriptor !== undefined) {
+      try { closeSync(temporaryDescriptor); } catch { /* The target lock remains on failure. */ }
+    }
+  }
+}
+
+function abandonReceiptReservation(reservation) {
+  if (!reservation || reservation.closed === true) return;
+  try { closeSync(reservation.descriptor); } catch { /* Preserve the exact reserved path for review. */ }
+  reservation.closed = true;
+}
+
 function acquireExecutionLock(directory, planFingerprint) {
   const path = join(directory.path, ".accelerated-update-field-gate.lock");
   let descriptor;
@@ -1879,7 +2055,7 @@ async function runCanary(active, adminKey, post, revalidate, dependencies, progr
   const search = await providerCall(revalidate, () => active.unified(adminKey, {
     q: query, source, limit: 10, rerank: 0,
   }));
-  if (search?.status !== 200 || !cacheIsNoStore(search.headers) || search.body?.degraded != null ||
+  if (search?.status !== 200 || !cacheIsNoStore(search.headers) || search.body?.degraded !== null ||
       !Array.isArray(search.body?.results) || !search.body.results.some((row) => row?.title === title)) {
     refusal("canary_retrieval_invalid");
   }
@@ -1930,6 +2106,41 @@ function validateUpdatedManifest(path, original, candidateVersion) {
   expected.brain = { ...expected.brain, version: candidateVersion };
   if (canonical(updated.value) !== canonical(expected)) refusal("manifest_changed_beyond_exact_version");
   return updated;
+}
+
+function executionInProgressReceipt({ now, planReceipt, field, runtime, cleanupOwner }) {
+  return Object.freeze({
+    schema_version: 2,
+    gate: GATE,
+    status: "execution_in_progress_or_interrupted_target_requires_review",
+    reserved_at: now,
+    plan_fingerprint: planReceipt.plan_fingerprint,
+    data_class: "fictional_synthetic_only",
+    mutation_state: "unknown_if_process_interrupted",
+    candidate: Object.freeze({
+      git_sha: field.candidate.commit,
+      package_version: field.candidate.version,
+      package_sha256: field.candidate.archiveSha256,
+      d1_schema_version: runtime.contract.terminalSchema,
+      residue_trigger_rows: runtime.contract.triggerRows,
+    }),
+    safeguards: Object.freeze({
+      exact_receipt_inode_reserved_before_provider_or_update: true,
+      resources_created_by_harness: false,
+      resources_deleted_by_harness: false,
+      target_identifiers_recorded: false,
+      receipt_paths_recorded: false,
+      credential_values_recorded: false,
+      customer_data_read: false,
+    }),
+    cleanup: Object.freeze({
+      required: true,
+      owner: cleanupOwner,
+      verified: false,
+      target_must_be_preserved_for_review: true,
+    }),
+    proof_boundary: "If this marker remains, execution did not durably record a final outcome. Treat the synthetic target as possibly updated or paused and do not rerun it.",
+  });
 }
 
 function successReceipt({ now, planReceipt, field, runtime, baseline, post, final, event, canary, upgrade, cleanupOwner, timings }) {
@@ -2006,6 +2217,8 @@ function successReceipt({ now, planReceipt, field, runtime, baseline, post, fina
     safeguards: Object.freeze({
       exact_field_prepare_artifact_consumed: true,
       installed_cli_executed: true,
+      receipt_reserved_before_provider_or_update: true,
+      receipt_finalized_via_private_atomic_replace: true,
       writer_quiescence_proven_by_installed_cli: true,
       named_oauth_profile_and_account_bound: true,
       ambient_provider_credentials_refused: true,
@@ -2062,6 +2275,7 @@ function failureReceipt({ now, planReceipt, field, runtime, cleanupOwner, error,
       durable_completion_verified: false,
     }),
     safeguards: Object.freeze({
+      receipt_reserved_before_provider_or_update: true,
       resources_created_by_harness: false,
       resources_deleted_by_harness: false,
       update_retried_by_harness: false,
@@ -2095,7 +2309,8 @@ export async function executeAcceleratedUpdateFieldGate(options, dependencies = 
   const executionStarted = monotonicNow();
   const local = await prepareLocalContext(options, dependencies, "execute");
   let lock = null;
-  let receiptWritten = false;
+  let receiptReservation = null;
+  let receiptFinalized = false;
   let lockReleaseAttempted = false;
   let updateDuration = null;
   let canaryDuration = null;
@@ -2116,9 +2331,17 @@ export async function executeAcceleratedUpdateFieldGate(options, dependencies = 
       else assertFilePin(local.manifestPin, "synthetic_manifest_changed");
       return true;
     };
-    lock = (dependencies.acquireLock || acquireExecutionLock)(local.finalOutput.parent, planPin.value.plan_fingerprint);
+    const marker = executionInProgressReceipt({
+      now: (dependencies.now || (() => new Date().toISOString()))(),
+      planReceipt: planPin.value,
+      field: local.field,
+      runtime: local.runtime,
+      cleanupOwner: options.cleanupOwner,
+    });
+    receiptReservation = (dependencies.reserveReceipt || reserveAggregateReceipt)(local.finalOutput, marker);
     let resultReceipt;
     try {
+      lock = (dependencies.acquireLock || acquireExecutionLock)(local.finalOutput.parent, planPin.value.plan_fingerprint);
       const provider = await openProvider(local.runtime, local.binding, revalidate, dependencies);
       const evidence = await providerCall(revalidate, () => provider.withSession(async (active) => {
         const beforeControl = await providerCall(revalidate, () =>
@@ -2140,6 +2363,16 @@ export async function executeAcceleratedUpdateFieldGate(options, dependencies = 
         const seededUpgrade = normalizeUpgradeSummary(await providerCall(revalidate, () => singleD1Row(active, UPGRADE_SUMMARY_SQL, "seeded_upgrade_summary_required")));
         if (canonical(seededUpgrade) !== canonical(planned.upgrade)) refusal("upgrade_history_changed_before_update");
         validateSeededState(seeded, residue, seededVector, planned.snapshot, local.binding, local.runtime.contract);
+
+        const immediateControl = await providerCall(revalidate, () =>
+          active.inspectControl(local.binding.fromVersion));
+        const immediateControlProof = validateControlSnapshot(immediateControl, local.binding, {
+          expectedSchedules: [],
+        });
+        if (immediateControlProof.isolationFingerprint !== beforeControlProof.isolationFingerprint ||
+            immediateControlProof.vectorCount !== seededVector.vectorCount) {
+          refusal("target_changed_immediately_before_update");
+        }
 
         revalidate();
         updateStarted = true;
@@ -2225,15 +2458,18 @@ export async function executeAcceleratedUpdateFieldGate(options, dependencies = 
         canaryProgress,
       });
     }
-    (dependencies.persistReceipt || persistAggregateReceipt)(options.receiptPath, resultReceipt);
-    receiptWritten = true;
-    lockReleaseAttempted = true;
-    (dependencies.releaseLock || releaseExecutionLock)(lock);
-    lock = null;
+    (dependencies.finalizeReceipt || finalizeReservedAggregateReceipt)(receiptReservation, resultReceipt);
+    receiptFinalized = true;
+    if (lock) {
+      lockReleaseAttempted = true;
+      (dependencies.releaseLock || releaseExecutionLock)(lock);
+      lock = null;
+    }
     return resultReceipt;
   } finally {
+    abandonReceiptReservation(receiptReservation);
     if (lock) {
-      if (receiptWritten && !lockReleaseAttempted) (dependencies.releaseLock || releaseExecutionLock)(lock);
+      if (receiptFinalized && !lockReleaseAttempted) (dependencies.releaseLock || releaseExecutionLock)(lock);
       else abandonExecutionLock(lock);
     }
     (dependencies.removeCandidateRuntime || removeCandidateRuntime)(local.runtime);
