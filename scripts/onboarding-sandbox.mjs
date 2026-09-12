@@ -15,6 +15,8 @@ import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveNpmCliPath } from "../operations/npm-cli-runtime.mjs";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FRONTEND = join(ROOT, "frontend");
 const CHILD_TIMEOUT_MS = 120_000;
@@ -187,29 +189,35 @@ export function prepareFrontend({
   root = ROOT,
   run = runChecked,
   npmExecPath = process.env.npm_execpath,
+  resolveNpmCli = resolveNpmCliPath,
   environment = process.env,
   platform = process.platform,
   stdio = "inherit",
+  log = console.log,
 } = {}) {
   const frontend = join(root, "frontend");
   const vite = join(frontend, "node_modules", "vite", "bin", "vite.js");
   assertNoFrontendEnvironmentFiles(frontend);
   if (!existsSync(vite)) {
-    console.log("Installing the local UI test dependencies. No account credential is used.");
+    log("Preparing the local rehearsal screen.");
+    log("The first run may download one additional small set of public UI packages.");
+    log("No account credential is used. This can be quiet for several minutes, so please leave this window open.");
     const npmEnvironment = onboardingSandboxEnvironment(environment, { npm: true, platform });
-    if (npmExecPath && existsSync(npmExecPath)) {
-      run(process.execPath, [npmExecPath, "ci", "--ignore-scripts"], {
-        cwd: frontend,
-        env: npmEnvironment,
-        stdio: stdio === "inherit" ? ["ignore", "inherit", "inherit"] : stdio,
+    let npmCli;
+    try {
+      npmCli = resolveNpmCli({
+        environment: npmExecPath ? { ...environment, npm_execpath: npmExecPath } : environment,
+        nodeExecutable: process.execPath,
+        platform,
       });
-    } else {
-      run(platform === "win32" ? "npm.cmd" : "npm", ["ci", "--ignore-scripts"], {
-        cwd: frontend,
-        env: npmEnvironment,
-        stdio: stdio === "inherit" ? ["ignore", "inherit", "inherit"] : stdio,
-      });
+    } catch {
+      throw new Error("the local rehearsal could not verify npm from this Node.js installation");
     }
+    run(process.execPath, [npmCli, "ci", "--ignore-scripts"], {
+      cwd: frontend,
+      env: npmEnvironment,
+      stdio: stdio === "inherit" ? ["ignore", "inherit", "inherit"] : stdio,
+    });
   }
   // Run Vite directly. `npm run build` also folds the result into the committed
   // Worker asset module, which a local rehearsal must not rewrite.
@@ -358,7 +366,11 @@ export async function startOnboardingSandbox({
     console.log(`  ${publicOrigin}/`);
     console.log("");
     console.log("LOCAL REHEARSAL ONLY: synthetic data, no deployment, no accounts, no real passkey proof.");
-    console.log("Press Control-C when finished.");
+    if (platform === "win32") {
+      console.log("When finished, close the browser tab, return to PowerShell, and press Control-C once.");
+    } else {
+      console.log("Press Control-C when finished.");
+    }
   }
   if (open) openBrowser(`${publicOrigin}/`, { platform, environment, spawnChild });
 

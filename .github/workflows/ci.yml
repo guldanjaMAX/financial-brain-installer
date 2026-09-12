@@ -307,10 +307,27 @@ jobs:
       - name: install owner app
         run: npm ci --prefix frontend --ignore-scripts
 
-      # Exercise the same npm.cmd entrypoint a Windows owner will use, but keep
-      # CI synthetic and headless. Hosted runners are elevated, so this proves
-      # build, loopback guide/app/API, and clean exit rather than the physical
-      # non-admin terminal or automatic browser-opening field gates.
+      - name: parse checked-in Windows owner rehearsal launcher
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path '.\onboarding\start-windows-rehearsal.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw 'the checked-in Windows owner rehearsal launcher did not parse'
+          }
+
+      # Exercise the same Node rehearsal through the existing bounded npm smoke,
+      # but keep CI synthetic and headless. The physical owner uses the parsed
+      # launcher above so Control-C does not cross the npm.cmd batch shim. Hosted
+      # runners are elevated, so this proves build, loopback guide/app/API, and
+      # clean exit rather than the non-admin or automatic-browser field gates.
       - name: Windows synthetic onboarding smoke
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: powershell

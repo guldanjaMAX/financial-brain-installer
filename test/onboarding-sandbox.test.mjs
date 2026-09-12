@@ -205,11 +205,14 @@ test("npm, the fixture, and browser launch each receive only their explicit safe
     prepareFrontend({
       root,
       npmExecPath: npmCli,
+      resolveNpmCli: () => npmCli,
       environment: plantedEnvironment(),
       platform: "win32",
       run: (...args) => buildCalls.push(args),
     });
     assert.equal(buildCalls.length, 2);
+    assert.equal(buildCalls[0][0], process.execPath);
+    assert.deepEqual(buildCalls[0][1], [npmCli, "ci", "--ignore-scripts"]);
     assertCredentialFree(buildCalls[0][2].env, { npm: true });
     assert.deepEqual(buildCalls[0][2].stdio, ["ignore", "inherit", "inherit"]);
     assertCredentialFree(buildCalls[1][2].env);
@@ -241,6 +244,33 @@ test("npm, the fixture, and browser launch each receive only their explicit safe
     assert.equal(browserCall.command, "cmd");
     assert.deepEqual(browserCall.args, ["/c", "start", "", "http://127.0.0.1:43116/"]);
     assertCredentialFree(browserCall.options.env);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("frontend preparation explains its separate download and quiet wait before npm starts", () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-onboarding-sandbox-notice-"));
+  const npmCli = join(root, "npm-cli.js");
+  const messages = [];
+  mkdirSync(join(root, "frontend"), { recursive: true });
+  writeFileSync(npmCli, "// synthetic npm entrypoint\n");
+  try {
+    prepareFrontend({
+      root,
+      npmExecPath: npmCli,
+      resolveNpmCli: () => npmCli,
+      environment: plantedEnvironment(),
+      platform: "win32",
+      log: (message) => messages.push(message),
+      run: () => {},
+    });
+    assert.equal(messages.length, 3);
+    const notice = messages.join(" ");
+    assert.match(notice, /additional small set of public UI packages/i);
+    assert.match(notice, /No account credential is used/i);
+    assert.match(notice, /quiet for several minutes/i);
+    assert.match(notice, /leave this window open/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -292,14 +322,35 @@ test("Windows CI runs the exact npm.cmd no-browser smoke on Node 22 and 24", () 
 });
 
 test("the Windows owner guide requires a fresh clean checkout and exact SHA equality", () => {
-  const guide = readFileSync(join(import.meta.dirname, "..", "onboarding", "11-windows-onboarding-rehearsal.md"), "utf8");
+  const root = join(import.meta.dirname, "..");
+  const guide = readFileSync(join(root, "onboarding", "11-windows-onboarding-rehearsal.md"), "utf8");
+  const launcher = readFileSync(join(root, "onboarding", "start-windows-rehearsal.ps1"), "utf8");
   assert.equal((guide.match(/^````text$/gm) || []).length, 1);
   assert.equal((guide.match(/^````$/gm) || []).length, 1);
   assert.equal((guide.match(/^```powershell$/gm) || []).length, 2);
   assert.match(guide, /new empty folder/i);
-  assert.match(guide, /\$ActualSha\.Trim\(\) -ne \$ExpectedSha/);
-  assert.match(guide, /git status --porcelain/);
+  assert.match(guide, /start-windows-rehearsal\.ps1/);
+  assert.match(guide, /one command/i);
+  assert.match(guide, /can be quiet for several minutes/i);
+  assert.match(guide, /Terminate batch job \(Y\/N\)\?/);
   assert.match(guide, /npm\.cmd run rehearse:onboarding/);
+
+  const powerShellBlocks = [...guide.matchAll(/```powershell\n([\s\S]*?)```/g)];
+  assert.equal(powerShellBlocks[0][1].trim().split(/\r?\n/).length, 1,
+    "the owner launcher must remain one copy-safe command");
+  assert.match(powerShellBlocks[0][1], /-ExpectedSha "<EXACT 40-CHARACTER LOWERCASE SHA FROM THE TECHNICIAN>"/);
+
+  assert.match(launcher, /WindowsBuiltInRole\]::Administrator/);
+  assert.match(launcher, /OrdinalIgnoreCase/);
+  assert.match(launcher, /rev-parse HEAD/);
+  assert.match(launcher, /status --porcelain=v1 --untracked-files=all/);
+  assert.match(launcher, /nodeVersion\.Major -lt 22/);
+  assert.match(launcher, /scripts\\onboarding-sandbox\.mjs/);
+  assert.match(launcher, /quiet for several minutes/i);
+  assert.match(launcher, /Local-only synthetic data: confirmed/i);
+  assert.doesNotMatch(launcher, /npm(?:\.cmd)?\s+run\s+rehearse:onboarding/i);
+  assert.doesNotMatch(launcher, /Set-Location|\bcd\b/i,
+    "the launcher must refuse a wrong current directory instead of changing it");
 });
 
 test("the document journey names all four separate proof checkpoints", () => {

@@ -12,13 +12,19 @@ can improve the next one.
 
 ## Try the owner experience with no accounts
 
-From a source checkout:
+From a source checkout on macOS or Linux:
 
 ```bash
 npm run rehearse:onboarding
 ```
 
-The command installs only the local UI test dependencies when needed, builds
+On Windows, use the checked-in launcher and exact-SHA procedure in
+[the Windows onboarding rehearsal](./11-windows-onboarding-rehearsal.md). Do
+not email the script as an attachment or paste its body into a message. The
+reviewed checkout supplies it, and its one-line invocation avoids copy-wrapped
+script bodies and the `npm.cmd` stop prompt.
+
+The rehearsal installs only the local UI test dependencies when needed, builds
 the real owner-workspace bundle, starts a loopback-only fixture, and opens a
 safety page. Every screen says `LOCAL REHEARSAL`, uses invented data, and keeps
 the following states one click away:
@@ -31,8 +37,12 @@ the following states one click away:
 - exact-document guest access
 - guest search with the scoped vector gap stated explicitly
 
-Stop it with Control-C. Nothing is deployed, no manifest or credential store is
-read, and no account is contacted.
+The first run may download one additional small set of public frontend packages
+and can be quiet for several minutes while it installs and builds. It uses no
+account credential. Leave the terminal open until the local address appears.
+On Windows, finish by closing the browser tab, returning to the same PowerShell
+window, and pressing Control-C once. Nothing is deployed, no manifest or
+credential store is read, and no account is contacted.
 
 This proves local layout, navigation, API response handling, access-surface
 separation, and empty-versus-unavailable language. It does not prove Cloudflare,

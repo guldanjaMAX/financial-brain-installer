@@ -950,6 +950,17 @@ a persistent rehearsal banner and exposes populated, sign-in, empty, partial,
 degraded, conflict, replay, owner, and exact-document grant states. It reads no
 manifest or credential store and makes no live service call.
 
+Physical Windows owner rehearsals start through the checked-in
+`onboarding/start-windows-rehearsal.ps1`, not through an emailed script body or
+the `npm.cmd` package-script shim. The launcher requires the technician's exact
+SHA, a clean current directory equal to the checkout root, Node.js 22+, and a
+non-administrator PowerShell window. After frontend preparation it invokes the
+Node rehearsal entrypoint directly, which keeps Control-C out of `cmd.exe` batch
+job handling. The first run may download a separate small public frontend
+dependency set and may be quiet for several minutes. Script attachments are
+not a supported delivery path because mail and endpoint-security systems may
+block them; the exact reviewed checkout is the source of the launcher.
+
 `test/onboarding-sandbox.test.mjs` protects the safety labeling, state menu,
 scenario routing, and absence of credential fields. This is browser-contract
 and layout evidence only. Cloudflare install, provider OAuth, webhook delivery,

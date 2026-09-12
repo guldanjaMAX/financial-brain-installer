@@ -460,6 +460,11 @@ const expected = [
   "onboarding/09-technician-setup-and-rehearsal.md",
   "onboarding/10-client-onboarding-scorecard.md",
   "onboarding/11-windows-onboarding-rehearsal.md",
+  // Generic synthetic-only Windows rehearsal launcher. Reviewed 2026-09-11:
+  // accepts only a commit SHA, refuses elevation, a different directory,
+  // checkout drift, and old Node, then starts the public local fixture. It has
+  // no manifest, account, credential, provider, deployment, or live-data input.
+  "onboarding/start-windows-rehearsal.ps1",
   "onboarding/client-experience/ACCEPTANCE-AND-HANDOFF.md",
   "onboarding/client-experience/DATA-PROTECTION-DRAFT.md",
   "onboarding/client-experience/README.md",
