@@ -138,6 +138,7 @@ function acceptedResolutionResponseFor(plan, family, operation = "record", patch
     original_id: plan.seal.targets[0].original_id,
     target_set_hash: plan.seal.target_set_hash,
     target_count: 1,
+    resolves_observation_hash: plan.input.priorGap?.observation_hash ?? null,
     accepted_observation_hash: id("7"),
     resolution_hash: id("8"),
     activation_hash: id("9"),
@@ -288,6 +289,10 @@ assert.deepEqual(validatePrivateProvenanceResultFamilyResponse(
 ), familyVerifyReceipt);
 
 const acceptedRecordReceipt = acceptedResolutionResponseFor(privatePlan, familyRecordReceipt);
+assert.equal(
+  acceptedRecordReceipt.resolves_observation_hash,
+  existingInput.priorGap.observation_hash,
+);
 assert.deepEqual(validatePrivateProvenanceAcceptedResolutionResponse(
   privatePlan,
   acceptedRecordReceipt,
@@ -425,6 +430,8 @@ for (const mutate of [
   (receipt) => { receipt.run_id = "other_run"; },
   (receipt) => { receipt.original_id = originalId("f"); },
   (receipt) => { receipt.target_set_hash = id("f"); },
+  (receipt) => { delete receipt.resolves_observation_hash; },
+  (receipt) => { receipt.resolves_observation_hash = id("f"); },
   (receipt) => { receipt.family_receipt_hash = id("f"); },
   (receipt) => { receipt.verification_hash = "not-a-hash"; },
   (receipt) => { receipt.vector_readiness_hash = "not-a-hash"; },
@@ -511,6 +518,8 @@ const discoveryFamilyReceipt = resultFamilyResponseFor(discoveryPlan);
 const discoveryAcceptedReceipt = acceptedResolutionResponseFor(
   discoveryPlan,
   discoveryFamilyReceipt,
+  "record",
+  { resolves_observation_hash: discoveryObservation.observation_hash },
 );
 assert.throws(() => validatePrivateProvenanceAcceptedResolutionResponse(
   discoveryPlan,
@@ -529,6 +538,22 @@ assert.deepEqual(validatePrivateProvenanceAcceptedResolutionResponse(
     resultFamilyReceipt: discoveryFamilyReceipt,
   },
 ), discoveryAcceptedReceipt);
+for (const mutate of [
+  (receipt) => { delete receipt.resolves_observation_hash; },
+  (receipt) => { receipt.resolves_observation_hash = id("f"); },
+]) {
+  const invalid = clone(discoveryAcceptedReceipt);
+  mutate(invalid);
+  assert.throws(() => validatePrivateProvenanceAcceptedResolutionResponse(
+    discoveryPlan,
+    invalid,
+    {
+      operation: "record",
+      discoveryReceipt: discoveryResponse,
+      resultFamilyReceipt: discoveryFamilyReceipt,
+    },
+  ), /accepted-resolution response/);
+}
 const tamperedObservation = clone(discoveryResponse);
 tamperedObservation.observations[0].result_document_count = 1;
 assert.throws(() =>

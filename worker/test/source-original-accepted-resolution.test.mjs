@@ -357,6 +357,7 @@ test("accepted_resolution atomically records, exactly replays, verifies, and ret
   assert.equal(first.mode, "accepted_resolution");
   assert.equal(first.operation, "record");
   assert.equal(first.original_id, state.originalId);
+  assert.equal(first.resolves_observation_hash, state.gapHash);
   assert.equal(first.family_receipt_hash, state.familyReceiptHash);
   assert.equal(first.verification_hash, state.verificationHash);
   assert.equal(first.accepted_outcome_authorized, true);
@@ -394,6 +395,7 @@ test("accepted_resolution atomically records, exactly replays, verifies, and ret
   assert.equal(replayResponse.status, 200, JSON.stringify(replay));
   assert.equal(replay.resolution_hash, first.resolution_hash);
   assert.equal(replay.activation_hash, first.activation_hash);
+  assert.equal(replay.resolves_observation_hash, state.gapHash);
   assert.equal(replay.recorded, false);
   assert.equal(replay.replayed, true);
   assert.deepEqual(acceptedCounts(fixture), {
@@ -412,6 +414,7 @@ test("accepted_resolution atomically records, exactly replays, verifies, and ret
   const verified = await body(verifyResponse);
   assert.equal(verifyResponse.status, 200, JSON.stringify(verified));
   assert.equal(verified.operation, "verify");
+  assert.equal(verified.resolves_observation_hash, state.gapHash);
   assert.equal(verified.status, "accepted_resolution_current");
   assert.equal(verified.accepted_outcome_authorized, true);
   assert.equal(verified.bounded_target_set_repair_verified, true);
@@ -452,6 +455,7 @@ test("a same-timestamp admission loser is reported as replayed, not newly record
   assert.equal(result.recorded, false);
   assert.equal(result.replayed, true);
   assert.equal(result.reactivated, false);
+  assert.equal(result.resolves_observation_hash, state.gapHash);
   assert.match(result.resolution_hash, /^sha256:[a-f0-9]{64}$/);
   assert.match(result.activation_hash, /^sha256:[a-f0-9]{64}$/);
   assert.deepEqual(acceptedCounts(fixture), {
@@ -503,6 +507,7 @@ test("a stale requested activation is not made current by a newer exact activati
   );
   const reactivated = await body(reactivatedResponse);
   assert.equal(reactivatedResponse.status, 200, JSON.stringify(reactivated));
+  assert.equal(reactivated.resolves_observation_hash, state.gapHash);
   assert.notEqual(reactivated.verification_hash, accepted.verification_hash);
   assert.equal(fixture.first(
     "SELECT COUNT(*) AS n FROM source_original_accepted_resolution_activations",
@@ -886,6 +891,7 @@ test("portable accepted history requires a fresh local record after verification
   );
   const initial = await body(initialResponse);
   assert.equal(initialResponse.status, 200, JSON.stringify(initial));
+  assert.equal(initial.resolves_observation_hash, state.gapHash);
 
   // A recovery artifact preserves the portable observation, family receipt,
   // and resolution, but deliberately excludes these deployment-local rows.
@@ -921,6 +927,7 @@ test("portable accepted history requires a fresh local record after verification
   const reactivated = await body(reactivateResponse);
   assert.equal(reactivateResponse.status, 200, JSON.stringify(reactivated));
   assert.equal(reactivated.status, "accepted_resolution_current");
+  assert.equal(reactivated.resolves_observation_hash, state.gapHash);
   assert.equal(reactivated.reactivated, true);
   assert.equal(reactivated.resolution_hash, initial.resolution_hash);
   assert.equal(fixture.first(
@@ -942,6 +949,7 @@ test("portable accepted history requires a fresh local record after verification
   const finalVerify = await body(finalVerifyResponse);
   assert.equal(finalVerifyResponse.status, 200, JSON.stringify(finalVerify));
   assert.equal(finalVerify.status, "accepted_resolution_current");
+  assert.equal(finalVerify.resolves_observation_hash, state.gapHash);
 });
 
 test("one-target repair contract rehearses schema-44 admission and recovery end to end", async (t) => {
@@ -1143,7 +1151,29 @@ test("one-target repair contract rehearses schema-44 admission and recovery end 
     },
   );
   assert.equal(accepted.status, "accepted_resolution_current");
+  assert.equal(accepted.resolves_observation_hash, selectedDiscovery.observation_hash);
   assert.equal(accepted.scope.whole_source_complete, false);
+
+  const replayResponse = await fixture.post(
+    SOURCE_ORIGINAL_OBSERVATION_PATH,
+    acceptedFixtureRequest("record"),
+    ADMIN,
+  );
+  const replayBody = await body(replayResponse);
+  assert.equal(replayResponse.status, 200, JSON.stringify(replayBody));
+  const replayed = validatePrivateProvenanceAcceptedResolutionResponse(
+    privatePlan,
+    replayBody,
+    {
+      operation: "record",
+      ...acceptedValidation,
+    },
+  );
+  assert.equal(replayed.recorded, false);
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.resolution_hash, accepted.resolution_hash);
+  assert.equal(replayed.activation_hash, accepted.activation_hash);
+  assert.equal(replayed.resolves_observation_hash, selectedDiscovery.observation_hash);
 
   const verifyOptions = {
     operation: "verify",
@@ -1165,6 +1195,7 @@ test("one-target repair contract rehearses schema-44 admission and recovery end 
     },
   );
   assert.equal(verified.status, "accepted_resolution_current");
+  assert.equal(verified.resolves_observation_hash, selectedDiscovery.observation_hash);
   assert.equal(verified.scope.whole_source_complete, false);
 
   // Recovery preserves portable observations, family receipt, and resolution,
@@ -1212,6 +1243,7 @@ test("one-target repair contract rehearses schema-44 admission and recovery end 
     },
   );
   assert.equal(reactivated.status, "accepted_resolution_current");
+  assert.equal(reactivated.resolves_observation_hash, selectedDiscovery.observation_hash);
   assert.equal(reactivated.reactivated, true);
   assert.equal(reactivated.resolution_hash, accepted.resolution_hash);
   assert.equal(reactivated.scope.whole_source_complete, false);
@@ -1232,5 +1264,6 @@ test("one-target repair contract rehearses schema-44 admission and recovery end 
     },
   );
   assert.equal(finalVerify.status, "accepted_resolution_current");
+  assert.equal(finalVerify.resolves_observation_hash, selectedDiscovery.observation_hash);
   assert.equal(finalVerify.scope.whole_source_complete, false);
 });

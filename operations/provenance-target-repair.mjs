@@ -757,10 +757,11 @@ export function validatePrivateProvenanceResultFamilyResponse(
 
 const ACCEPTED_RESOLUTION_RESPONSE_FIELDS = Object.freeze([
   "contract_version", "mode", "operation", "source", "run_id", "original_id",
-  "target_set_hash", "target_count", "accepted_observation_hash", "resolution_hash",
-  "activation_hash", "family_receipt_hash", "verification_hash", "document_count",
-  "chunk_count", "vector_readiness_hash", "retrieval_probe_id", "retrieval_status",
-  "citation_status", "status", "recorded", "replayed", "reactivated",
+  "target_set_hash", "target_count", "resolves_observation_hash",
+  "accepted_observation_hash", "resolution_hash", "activation_hash",
+  "family_receipt_hash", "verification_hash", "document_count", "chunk_count",
+  "vector_readiness_hash", "retrieval_probe_id", "retrieval_status", "citation_status",
+  "status", "recorded", "replayed", "reactivated",
   "accepted_outcome_authorized", "bounded_target_set_repair_verified", "scope",
 ]);
 
@@ -770,7 +771,11 @@ function normalizedAcceptedResolutionResponse(
   { operation, discoveryReceipt, resultFamilyReceipt },
 ) {
   const validated = validatePrivatePlan(privatePlan);
-  resolvingObservationHash(privatePlan, validated, discoveryReceipt);
+  const expectedResolvesObservationHash = resolvingObservationHash(
+    privatePlan,
+    validated,
+    discoveryReceipt,
+  );
   const family = normalizedResultFamilyResponse(privatePlan, resultFamilyReceipt, "record");
   const recordState = response?.recorded === true && response?.replayed === false;
   const replayState = response?.recorded === false && response?.replayed === true;
@@ -783,6 +788,7 @@ function normalizedAcceptedResolutionResponse(
       response.original_id !== validated.seal.targets[0].original_id ||
       response.target_set_hash !== validated.seal.target_set_hash ||
       response.target_count !== 1 ||
+      response.resolves_observation_hash !== expectedResolvesObservationHash ||
       !SHA_ID_RE.test(String(response.accepted_observation_hash || "")) ||
       !SHA_ID_RE.test(String(response.resolution_hash || "")) ||
       !SHA_ID_RE.test(String(response.activation_hash || "")) ||
@@ -814,6 +820,7 @@ function normalizedAcceptedResolutionResponse(
 function sameAcceptedResolutionCurrentIdentity(left, right) {
   return left.source === right.source && left.run_id === right.run_id &&
     left.original_id === right.original_id && left.target_set_hash === right.target_set_hash &&
+    left.resolves_observation_hash === right.resolves_observation_hash &&
     left.accepted_observation_hash === right.accepted_observation_hash &&
     left.resolution_hash === right.resolution_hash && left.activation_hash === right.activation_hash &&
     left.family_receipt_hash === right.family_receipt_hash &&

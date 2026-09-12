@@ -997,6 +997,7 @@ async function handleAcceptedResolution(env, body, dependencies) {
     original_id: target.original_id,
     target_set_hash: binding.target_set_hash,
     target_count: 1,
+    resolves_observation_hash: observation.resolves_observation_hash,
     accepted_observation_hash: observation.observation_hash,
     resolution_hash: persistence.resolution_hash,
     activation_hash: persistence.activation_hash,
