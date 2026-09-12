@@ -57,11 +57,16 @@ export function ownerViewScopeGate(
   view: View,
   scopeChoiceMade: boolean,
   entityScopeState: EntityScopeState,
+  hasOwnedEntities = true,
 ): "entity" | "choice" | "checking" | null {
   // These pages contain entity-scoped writes, so a stale saved choice or an
   // unavailable inventory never opens them. The backend validates any owned
   // financial entity, not businesses alone.
   if (ownerViewRequiresEntity(view) && entityScopeState !== "selected") return "entity";
+  // A brand-new owner has no meaningful scope choice yet. Open Home so it can
+  // explain the next step and offer one obvious path to the reviewed first-
+  // entity form instead of trapping them behind an empty scope chooser.
+  if (view === "home" && entityScopeState === "required" && !hasOwnedEntities) return null;
   if (SCOPE_CHOICE_VIEWS.includes(view) && !scopeChoiceMade) {
     if (entityScopeState === "checking") return "checking";
     if (entityScopeState === "required") return "choice";
@@ -71,6 +76,10 @@ export function ownerViewScopeGate(
     return null;
   }
   return null;
+}
+
+export function scopeGateRequiresEntity(scopeGate: ReturnType<typeof ownerViewScopeGate>): boolean {
+  return scopeGate === "entity";
 }
 
 export function initialOwnerView(): View {
@@ -162,8 +171,13 @@ export function OwnerWorkspace({ owner, me, view, setView, refresh }: {
   setView: (view: View) => void;
   refresh: () => Promise<void>;
 }) {
-  const { entityScopeState, scopeChoiceMade } = useFinanceScope();
-  const scopeGate = ownerViewScopeGate(view, scopeChoiceMade, entityScopeState);
+  const { entityScopeState, scopeChoiceMade, entities } = useFinanceScope();
+  const scopeGate = ownerViewScopeGate(
+    view,
+    scopeChoiceMade,
+    entityScopeState,
+    entities.some((entity) => !entity.counterparty),
+  );
   const guardedTitle = view === "year" ? "This Year" : "Add & Review";
 
   return (
@@ -186,7 +200,9 @@ export function OwnerWorkspace({ owner, me, view, setView, refresh }: {
                   ? "The Brain is checking which parts of your finances are available before it opens this page."
                   : "Choose one part of your finances or Whole Brain before opening this page. Nothing is combined until you make that choice."}
             </p>
-            <div className="mt-6"><FinanceScopeBar requireEntity={scopeGate === "entity"} /></div>
+            <div className="mt-6">
+              <FinanceScopeBar requireEntity={scopeGateRequiresEntity(scopeGate)} />
+            </div>
           </section>
         ) : (
           <>

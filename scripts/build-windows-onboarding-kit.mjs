@@ -314,12 +314,12 @@ export function renderShareableInstructions(candidate, ci) {
     `1. Keep release.json beside the downloaded ZIP. Continue only when its artifact_kind is ${ARTIFACT_KIND}, ready_to_send is true, ready_for_live_accounts is false, its filename, byte count, and SHA-256 match the ZIP, its successful CI event is push for exact source SHA ${candidate.head_sha}, and valid_until has not passed.\n` +
     `2. Use Claude Code launched from a normal PowerShell window opened from the Windows Start menu. Do not use an embedded app terminal and do not choose Run as administrator.\n` +
     `3. Start in a new empty folder. Clone only ${candidate.repository_url}, then check out ${candidate.head_sha} in detached-HEAD mode. Do not reuse an older clone or switch to main.\n` +
-    `4. Confirm the checkout is clean and the checked-in launcher ${candidate.launcher.path} has SHA-256 ${candidate.launcher.sha256}.\n\n` +
+    `4. Confirm the checkout is clean and the checked-in launcher ${candidate.launcher.path} has SHA-256 ${candidate.launcher.sha256}. The launcher digest in release.json describes this file in the reviewed checkout; the launcher is not an entry inside the ZIP.\n\n` +
     `From the top-level folder of that exact checkout, run this one line, replacing nothing:\n\n` +
     `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\onboarding\\start-windows-rehearsal.ps1" -ExpectedSha "${candidate.head_sha}"\n\n` +
     `Do not paste or reconstruct the PowerShell script body. Do not run npm install, npm ci, or another npm command yourself; the checked-in launcher handles the local UI preparation it needs.\n\n` +
     `Do not run setup, provision, deploy, update, connect, ingest, OCR, repair, reindex, drain, forget, zone, grant, invite, or any live Cloudflare or provider command. Do not enter a token, password, authentication code, billing approval, consent, or real passkey. Stop at the first refusal or mismatch.\n\n` +
-    `When the browser opens, remind the owner that every record is invented. Guide them through one synthetic screen at a time and ask what feels clear, confusing, too technical, or surprising. Pay special attention to the first passkey explanation, healthy-empty versus unavailable wording, partial data, conflicts, retries, guest access, and the Owner Financial Map review.\n\n` +
+    `When the browser opens, remind the owner that every record is invented. Guide them through one synthetic screen at a time and ask what feels clear, confusing, too technical, or surprising. Pay special attention to the first passkey explanation, healthy-empty versus unavailable wording, partial data, conflicts, retries, guest access, and the Owner Financial Map review. If the browser closes, reopen ${LOOPBACK_ORIGIN}/ while the original PowerShell window remains open; do not rerun the launcher.\n\n` +
     `At the end, have the owner close the browser tab, return to the same PowerShell window, and press Control-C once. Then provide a short feedback note containing only: the exact commit SHA, Windows version, Node version, whether the browser opened automatically, which synthetic screens were reviewed, the three biggest points of confusion, what felt reassuring, and any step where the owner did not know what to click. Do not include the Windows username, local paths, account names, private data, credentials, or full environment output.\n\n` +
     `Expected local address: ${LOOPBACK_ORIGIN}/\n` +
     `CI evidence: ${ci ? ci.url : "not supplied; this draft is not ready to send"}\n` +
@@ -348,7 +348,11 @@ function receiptCore(candidate, ci) {
       package_json_sha256: candidate.package_json_sha256,
       package_lock_sha256: candidate.package_lock_sha256,
     },
-    launcher: candidate.launcher,
+    launcher: {
+      ...candidate.launcher,
+      digest_scope: "checked_in_file_in_reviewed_checkout",
+      included_in_handoff_archive: false,
+    },
     ci,
     tested_package: ci?.package || null,
     intended_loopback_origin: LOOPBACK_ORIGIN,

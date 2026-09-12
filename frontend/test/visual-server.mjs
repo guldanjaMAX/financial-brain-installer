@@ -463,7 +463,11 @@ export const visualFixtureServer = createServer(async (request, response) => {
   }
   if (url.pathname === "/api/app/document-access/create") {
     const body = await jsonBody(request);
-    if (scenario === "conflict") return sendJson(response, { error: "conflict", code: "idempotency_conflict", detail: "request id conflict" }, 409);
+    if (scenario === "conflict") return sendJson(response, {
+      error: "conflict",
+      code: "idempotency_conflict",
+      detail: "request_id was already used for a different document access change",
+    }, 409);
     if (scenario === "forbidden") return sendJson(response, { error: "forbidden", code: "owner_required" }, 403);
     return sendJson(response, {
       status: "active", grant_id: "dg_created", subject_label: body.subject_label, entity_slug: body.entity_slug,
@@ -506,7 +510,9 @@ export const visualFixtureServer = createServer(async (request, response) => {
   if (url.pathname === "/api/owner/activity") {
     const body = await jsonBody(request);
     if (scenario === "degraded") return sendJson(response, { error: "unavailable", unavailable: true, sections_unavailable: ["activity_events"] }, 503);
-    const rows = scenario === "empty" ? [] : filterRows(ownerActivity, body.entity_slug || null);
+    const rows = scenario === "empty" || scenario === "zero-entities"
+      ? []
+      : filterRows(ownerActivity, body.entity_slug || null);
     return sendJson(response, { entity_scope: { entity_slug: body.entity_slug || null }, activity_events: rows, truncated: scenario === "partial", next_cursor: scenario === "partial" ? "next" : null, unavailable: false });
   }
   if (url.pathname === "/api/owner/preferences/read") {

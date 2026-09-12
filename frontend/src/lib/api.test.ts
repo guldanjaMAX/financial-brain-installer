@@ -106,4 +106,68 @@ describe("owner API response decoding", () => {
 
     expect(ownerError(new Error("HTTP 502"))).toEqual({ status: null, message: safeFallback });
   });
+
+  it("turns reviewed conflict and validation codes into explicit recovery guidance", () => {
+    expect(ownerError(new ApiError(409, {
+      code: "idempotency_conflict",
+      detail: "request_id was already used for a different document access change",
+    }))).toEqual({
+      status: 409,
+      message: "This save was already used for a different choice. Nothing changed. Refresh this page, review the current information, and try again.",
+    });
+    expect(ownerError(new ApiError(422, { code: "owner_upload_pdf_needs_ocr" }))).toEqual({
+      status: 422,
+      message: "This PDF appears to be scanned, but text recognition is not available. Nothing was added. Upload a searchable copy or ask your installer for help.",
+    });
+  });
+
+  it("replaces technical conflict details with a clear no-change recovery action", () => {
+    const conflict = ownerError(new ApiError(409, {
+      code: "idempotency_conflict",
+      detail: "request_id was already used for a different document access change",
+    }));
+    const unknownConflict = ownerError(new ApiError(409, { detail: "request id conflict in upstream worker" }));
+    const validation = ownerError(new ApiError(422, { detail: "schema validation failed" }));
+
+    expect(conflict.status).toBe(409);
+    expect(conflict.message).toContain("Nothing changed");
+    expect(conflict.message).toContain("Refresh this page");
+    expect(conflict.message).not.toMatch(/request id|upstream|worker/i);
+    expect(unknownConflict.message).toContain("Nothing changed");
+    expect(unknownConflict.message).not.toMatch(/request id|upstream|worker/i);
+    expect(validation.status).toBe(422);
+    expect(validation.message).toContain("Nothing was added or changed");
+    expect(validation.message).toContain("Review the fields");
+    expect(validation.message).not.toContain("schema validation");
+  });
+
+  it("never renders arbitrary conflict or validation detail", () => {
+    const privateDetails = [
+      "Nothing was saved. Refresh this page. Debug bearer token secret-example and C:\\Users\\Owner\\tax.pdf",
+      "Nothing was added. Try again at https://internal.example/private?id=document_123 for Morgan Private LLC.",
+      "Nothing changed. Reload after reading /Users/owner/Records/account-9988.csv.",
+    ];
+
+    for (const detail of privateDetails) {
+      for (const status of [409, 422]) {
+        const result = ownerError(new ApiError(status, { code: "unknown_private_failure", detail }));
+        expect(result.message).not.toContain(detail);
+        expect(result.message).not.toMatch(/secret-example|Users|internal\.example|document_123|Morgan Private|account-9988/i);
+      }
+    }
+
+    const reviewedCodeWithPrivateDetail = ownerError(new ApiError(409, {
+      code: "idempotency_conflict",
+      detail: privateDetails[0],
+    }));
+    expect(reviewedCodeWithPrivateDetail.message).toContain("Nothing changed");
+    expect(reviewedCodeWithPrivateDetail.message).not.toMatch(/secret-example|Users|tax\.pdf/i);
+
+    for (const inheritedKey of ["constructor", "toString", "__proto__"]) {
+      const result = ownerError(new ApiError(409, { code: inheritedKey, detail: privateDetails[0] }));
+      expect(typeof result.message).toBe("string");
+      expect(result.message).toContain("Nothing changed");
+      expect(result.message).not.toMatch(/secret-example|Users|tax\.pdf/i);
+    }
+  });
 });
