@@ -662,10 +662,31 @@ own contract. Never infer an install-kit contract from the filename
 For a fresh install, checkup, connector, passkey, or handoff request, continue
 below. The update route above replaces this setup-oriented sequence.
 
+Before running `brain tools` or the technician plan, ask one routing question:
+"Which best describes today: this is your first Brain, this Brain already works
+on this computer, you are reconnecting an existing Brain on a new computer, a
+setup on this computer was interrupted, or you are not sure?" Map the answer to
+exactly one CLI value:
+
+- `first_brain`: the owner confirms they have no existing Brain.
+- `existing_this_computer`: the intended Brain already works on this computer.
+- `existing_new_computer`: the owner is reconnecting an existing Brain on a
+  replacement or additional computer.
+- `resume_interrupted`: setup for this exact Brain stopped on this computer.
+- `unsure`: the owner cannot yet identify which case applies.
+
+Do not infer `first_brain` from a missing local file. Keep the selected value in
+every `brain tools` and `brain technician` command during this route. `unsure`
+is a read-only stop, not permission to provision. A missing manifest for an
+existing or new-computer route requires recovery of the exact owner-custody
+install record, never Cloudflare name matching or credential copying.
+
 For a fresh install, front-load these prerequisites before any Cloudflare
 resource is created:
 
-- Run `brain tools` and the packaged read-only preflight. They must prove
+- After explaining and receiving approval for its local writes, run `brain
+  tools "/absolute/path/to/brain.manifest.json" --intent <selected-intent>` and
+  the packaged read-only preflight. They must prove
   Node.js 22 or newer, at least 2 GiB free on the actual per-user install drive,
   and a normal current-user terminal without `sudo`, root, or Run as
   administrator. On Windows the space check must target `LOCALAPPDATA`, not a
@@ -709,7 +730,7 @@ must stop before resource creation.
 4. Run the read-only plan, even before the manifest exists:
 
    ```bash
-   brain technician "/absolute/path/to/brain.manifest.json" --json
+   brain technician "/absolute/path/to/brain.manifest.json" --intent <selected-intent> --json
    ```
 
 5. Explain the next incomplete step in ordinary language. Before running its
@@ -721,7 +742,7 @@ must stop before resource creation.
    alone. For Cloudflare, review the non-secret name, short name, new-or-existing
    account choice, exact account ID, and Workers Paid status with the owner.
    Then run the plan's complete **Claude runs after your approval** command
-   without dropping any confirmation flag. Never add or forward a Cloudflare
+   without dropping `--intent` or any confirmation flag. Never add or forward a Cloudflare
    token. The owner still performs sign-in, 2FA, billing acceptance, and final
    consent in the browser.
 

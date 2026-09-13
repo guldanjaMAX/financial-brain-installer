@@ -696,7 +696,7 @@ export function renderFieldChecklist(receipt) {
     "These commands print local plans or templates. They do not perform the live action:",
     "",
     "```bash",
-    "node test/live/disposable-cloudflare-v021-field-gate.mjs --plan",
+    "brain-v048-disposable-deploy help",
     "node test/live/passkey-permanent-hostname-acceptance.mjs --plan",
     "node test/live/supervised-permanent-hostname-v021-field-gate.mjs --plan",
     "```",

@@ -64,9 +64,11 @@ assert.doesNotMatch(supportText, bareCommand);
 const plan = technicianPlan("C:\\Users\\client\\Financial Brain\\brain.manifest.json", {
   existsSync: () => false,
   cli: { command: "/synthetic/node", args: ["/synthetic/brain.mjs"] },
+  intent: "first_brain",
 });
 const technicianText = renderCliCommands(renderTechnicianPlan(plan), windows);
 assert.match(technicianText, /'--run' 'tools'/);
+assert.match(technicianText, /'--intent' 'first_brain'/);
 assert.equal(technicianText, renderTechnicianPlan(plan), 'existing structured technician commands remain byte-stable');
 assert.doesNotMatch(technicianText, bareCommand);
 

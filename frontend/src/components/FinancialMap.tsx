@@ -57,7 +57,7 @@ export function financialMapReadFailure(error: unknown): PageState {
     if (error.status === 404) {
       return {
         kind: "unavailable",
-        message: "Financial Map is not available on this Brain yet. This is not an empty review queue. Update the Brain or ask the installer to finish enabling Financial Map, then try again.",
+        message: "Financial Map is not available on this Brain yet. This is not an empty review queue. Ask the installer to check whether a supported update is available. If it is not, your existing Brain remains unchanged and this review will wait.",
       };
     }
     if (error.status === 410) return { kind: "expired", message: "This Financial Map review expired. Nothing was activated." };
@@ -70,7 +70,7 @@ export function financialMapReadFailure(error: unknown): PageState {
   }
   return {
     kind: "unavailable",
-    message: responseMessage(error, "The complete Financial Map review could not be read. Nothing was treated as empty or confirmed."),
+    message: responseMessage(error, "The Financial Map review could not be read. Nothing was treated as empty or confirmed."),
   };
 }
 
@@ -124,7 +124,7 @@ export function FinancialMap() {
           if (value.active_map_present && !value.active_map_authoritative) {
             setState({
               kind: "stale",
-              message: "Your last confirmed Financial Map no longer matches the Brain's current records, so it is not being treated as a current completeness map. Create and review a fresh preview before relying on it.",
+              message: "Your last confirmed Financial Map no longer matches the Brain's current records, so it is not being treated as the current intended-scope map. Create and review a fresh preview before relying on it.",
             });
             return;
           }
@@ -139,7 +139,7 @@ export function FinancialMap() {
         if (!validFinancialMapReview(value)) {
           setState({
             kind: "unavailable",
-            message: "The Brain did not return one complete, privacy-safe Financial Map review. Nothing was confirmed.",
+            message: "The Brain did not return one valid, privacy-safe Financial Map review. Nothing was confirmed.",
           });
           return;
         }
@@ -227,7 +227,7 @@ export function FinancialMap() {
             } else {
               setState({
                 kind: "unavailable",
-                message: "The confirmation was refused, but the Brain did not return a complete current map for verification. Do not assume it was confirmed. Read the latest map before taking another action.",
+                message: "The confirmation was refused, but the Brain did not return a complete current verification receipt. Do not assume it was confirmed. Read the latest map before taking another action.",
               });
             }
           } catch {
@@ -260,7 +260,7 @@ export function FinancialMap() {
   };
 
   if (state.kind === "loading") {
-    return <PageShell><Empty>Reading the complete Financial Map review.</Empty></PageShell>;
+    return <PageShell><Empty>Reading the Financial Map review.</Empty></PageShell>;
   }
   if (state.kind === "missing") {
     return (
@@ -300,8 +300,9 @@ export function FinancialMap() {
         <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-5 text-emerald-950">
           <h2 className="text-lg font-semibold">Your Financial Map is confirmed</h2>
           <p className="mt-2 text-[14px] leading-relaxed">
-            The Brain verified the exact map you reviewed as your owner-confirmed financial picture.
-            No account, book, tax, payroll, source, or ledger record was changed.
+            The Brain verified the exact map you reviewed as your owner-confirmed intended financial scope.
+            This does not prove that every expected record is present or correct. No account, book, tax,
+            payroll, source, or ledger record was changed.
           </p>
         </div>
       </PageShell>
@@ -312,8 +313,9 @@ export function FinancialMap() {
   return (
     <PageShell>
       <TruthNote>
-        This is a review, not a change. It shows the complete map prepared with your connected Claude Code or Codex assistant,
-        including what the Brain currently holds and anything that remains unknown or different.
+        This is a review draft, not a change or a statement of ownership. It shows the starting map prepared
+        with your connected Claude Code or Codex assistant, including possible mentions, owner-provided scope,
+        and anything that remains unknown or different.
       </TruthNote>
 
       <ReviewSummary review={review} />
@@ -322,7 +324,7 @@ export function FinancialMap() {
 
       <ReviewSection title="Entities" intro="Every person, household, trust, business, property, and investment in this preview appears below.">
         {review.complete_preview.entities.length === 0 ? (
-          <Empty>No entities are in this complete preview.</Empty>
+          <Empty>No entities are in this preview.</Empty>
         ) : review.complete_preview.entities.map((entity, index) => (
           <article key={`${entity.label}:${index}`} className="border-b border-line last:border-b-0 px-4 py-5 sm:px-5">
             <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -346,7 +348,7 @@ export function FinancialMap() {
 
       <ReviewSection title="Accounts" intro="Every expected account in this preview appears below, including accounts not yet present in current structured records.">
         {review.complete_preview.accounts.length === 0 ? (
-          <Empty>No accounts are in this complete preview.</Empty>
+          <Empty>No accounts are in this preview.</Empty>
         ) : review.complete_preview.accounts.map((account, index) => (
           <article key={`${account.label}:${index}`} className="border-b border-line last:border-b-0 px-4 py-5 sm:px-5">
             <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -430,7 +432,7 @@ function PageShell({ children }: { children: ReactNode }) {
       <p className="eyebrow">Owner review</p>
       <h1 className="page-title">Financial Map</h1>
       <p className="page-intro">
-        Review the entities, accounts, filing responsibilities, books, payroll, and expected sources that define your complete financial picture.
+        Review the entities, accounts, filing responsibilities, books, payroll, and expected sources you want this review to cover. Unknown or later items remain open.
       </p>
       <div className="mt-6">{children}</div>
     </div>
@@ -485,7 +487,7 @@ export function FinancialMapAssistantPath({ action, onReadLatest }: {
 
 export function financialMapAssistantPrompt(action: "create" | "correct"): string {
   const verb = action === "correct" ? "correct" : "create";
-  return `Help me ${verb} my complete Owner Financial Map. Use brain_financial_map in read mode first, ask me one short question at a time, and do not infer missing answers. When the map is complete, explain that preview mode writes one expiring review copy and ask for my approval before using it.`;
+  return `Help me ${verb} a useful starting Owner Financial Map for the question I care about. Use brain_financial_map in read mode first, treat current records as possible mentions until I confirm them, ask me one short question at a time, and keep uncertain, skipped, or later items visible. When we have a useful starting map, explain that preview mode writes one expiring review copy and ask for my approval before using it.`;
 }
 
 export async function copyFinancialMapAssistantPrompt(
@@ -522,7 +524,7 @@ function PriorComparison({ review }: { review: FinancialMapReview }) {
     return (
       <ReviewSection
         title="Changes from your last confirmed map"
-        intro="This is your first owner-confirmed Financial Map, so there is no earlier map to compare."
+        intro="No earlier owner-confirmed Financial Map exists, so this review draft has no confirmed map to compare."
       >
         <Empty>No earlier confirmed map exists.</Empty>
       </ReviewSection>
@@ -531,7 +533,7 @@ function PriorComparison({ review }: { review: FinancialMapReview }) {
   return (
     <ReviewSection
       title={`Changes from your last confirmed map (${comparison.change_count})`}
-      intro="Every recorded difference from the last owner-confirmed map appears here. The complete current map follows below."
+      intro="Every recorded difference from the last owner-confirmed map appears here. The current review draft follows below."
     >
       {comparison.changes.length === 0 ? (
         <p className="px-4 py-5 text-[14px] text-emerald-800">No recorded field or map entry changed.</p>
@@ -592,7 +594,7 @@ function Count({ label, value }: { label: string; value: number }) {
 function FilingUnits({ review }: { review: FinancialMapReview }) {
   return (
     <ReviewSection title="Filing units" intro="The people or groups that tax returns and filing responsibilities are organized around.">
-      {review.complete_preview.filing_units.length === 0 ? <Empty>No filing units are in this complete preview.</Empty>
+      {review.complete_preview.filing_units.length === 0 ? <Empty>No filing units are in this preview.</Empty>
         : review.complete_preview.filing_units.map((unit, index) => (
           <div key={`${unit.label}:${index}`} className="px-4 py-3.5 border-b border-line last:border-b-0 flex items-center justify-between gap-3">
             <span className="text-[14px] font-medium">{unit.label}</span>

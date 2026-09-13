@@ -31,7 +31,9 @@
  * query.
  */
 
-import { currentEvidenceCandidates, hasExplicitCurrentIntent } from "./query-intent.js";
+import {
+  currentEvidenceCandidates, hasExplicitCurrentIntent, parseCanonicalEvidenceDate,
+} from "./query-intent.js";
 import { authorityFor } from "./evidence-authority.js";
 import {
   annotateLineageFamilyTokens, attachEvidenceLineage, evidenceLineageFor,
@@ -318,8 +320,75 @@ function composeDocumentEvidence(vectorRow, keywordRow, query) {
  */
 export const D1_FILTERS = ["source", "entity_slug", "client", "category", "top_folder", "platform", "from", "to"];
 export const D1_UNSUPPORTED = [];
+const D1_ACCEPTED_FILTERS = new Set([...D1_FILTERS, "vector_client"]);
+
+function retrievalFilterError(code, message, filter = null) {
+  const error = new TypeError(message);
+  error.code = code;
+  if (filter) error.filter = filter;
+  return error;
+}
+
+/**
+ * Validate at the storage boundary before either retrieval modality starts.
+ *
+ * HTTP callers are checked earlier for a useful 400, but direct first-party
+ * callers must not be able to turn a misspelled or malformed scope into an
+ * unfiltered query. `vector_client` is the one private exception: it is an
+ * entity-scoped candidate hint created by index.js and D1 still applies the
+ * authoritative `entity_slug` predicate during hydration.
+ */
+function validatedFilterDates(filters = {}) {
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) {
+    throw retrievalFilterError("invalid_filters", "retrieval filters must be an object");
+  }
+  const unknown = unsupportedFilters(filters);
+  if (unknown.length) {
+    throw retrievalFilterError(
+      "unsupported_filter",
+      "retrieval contains a filter this backend cannot apply",
+      unknown[0],
+    );
+  }
+
+  for (const key of D1_ACCEPTED_FILTERS) {
+    if (!Object.prototype.hasOwnProperty.call(filters, key)) continue;
+    const value = filters[key];
+    if (typeof value !== "string" || !value.trim()) {
+      throw retrievalFilterError(
+        "invalid_filter_value",
+        `retrieval filter ${key} must be a non-empty string`,
+        key,
+      );
+    }
+  }
+
+  const parseBound = (key) => {
+    if (!Object.prototype.hasOwnProperty.call(filters, key)) return null;
+    const value = filters[key];
+    const parsed = parseCanonicalEvidenceDate(value);
+    if (parsed === null) {
+      throw retrievalFilterError(
+        "invalid_date_filter",
+        `retrieval filter ${key} must be YYYY-MM-DD or an RFC 3339 instant`,
+        key,
+      );
+    }
+    return parsed;
+  };
+  const from = parseBound("from");
+  const to = parseBound("to");
+  if (from !== null && to !== null && from > to) {
+    throw retrievalFilterError(
+      "reversed_date_range",
+      "retrieval filter from must not be after to",
+    );
+  }
+  return { from, to };
+}
 
 export function filterSql(filters = {}, alias = "c", nextParam = 3) {
+  const dates = validatedFilterDates(filters);
   const parts = [];
   const params = [];
   const add = (frag, val) => { parts.push(frag.replace("?N", "?" + nextParam++)); params.push(val); };
@@ -337,8 +406,8 @@ export function filterSql(filters = {}, alias = "c", nextParam = 3) {
   // A date filter must not swallow undated rows silently, but it must not keep
   // them either: "since June" cannot be answered by a document with no date.
   // They are excluded, and the undated count is what the gap engine reports.
-  if (filters.from) { const t = Date.parse(filters.from); if (Number.isFinite(t)) add(`${alias}.document_date >= ?N`, t); }
-  if (filters.to)   { const t = Date.parse(filters.to);   if (Number.isFinite(t)) add(`${alias}.document_date <= ?N`, t); }
+  if (dates.from !== null) add(`${alias}.document_date >= ?N`, dates.from);
+  if (dates.to !== null) add(`${alias}.document_date <= ?N`, dates.to);
   return { clause: parts.length ? " AND " + parts.join(" AND ") : "", params, nextParam };
 }
 
@@ -399,7 +468,8 @@ export function scopeSql(scope, alias = "c", nextParam = 1) {
 
 /** Which requested filters this backend cannot honour. */
 export function unsupportedFilters(filters = {}) {
-  return D1_UNSUPPORTED.filter((k) => filters[k]);
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return ["filters"];
+  return Object.keys(filters).filter((key) => !D1_ACCEPTED_FILTERS.has(key)).sort();
 }
 
 const VECTOR_STRING_FILTERS = ["source", "client", "category", "top_folder", "platform"];
@@ -427,6 +497,7 @@ export async function vectorMetadataFor(row) {
 
 /** Build the pre-filter Vectorize applies before selecting topK candidates. */
 export async function vectorFilterFor(filters = {}) {
+  const dates = validatedFilterDates(filters);
   const filter = {};
   for (const key of VECTOR_STRING_FILTERS) {
     const token = await metadataTokenFor(filters[key]);
@@ -441,14 +512,8 @@ export async function vectorFilterFor(filters = {}) {
     if (token !== null) filter.client = { $eq: token };
   }
   const range = {};
-  if (filters.from) {
-    const t = Date.parse(filters.from);
-    if (Number.isFinite(t)) range.$gte = t;
-  }
-  if (filters.to) {
-    const t = Date.parse(filters.to);
-    if (Number.isFinite(t)) range.$lte = t;
-  }
+  if (dates.from !== null) range.$gte = dates.from;
+  if (dates.to !== null) range.$lte = dates.to;
   if (Object.keys(range).length) filter.document_date = range;
   return filter;
 }
@@ -697,24 +762,29 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
 export async function search(env, {
   query, embedding, limit = 10, filters = {}, weights = {}, rrfK = RRF_K, access = null, scope = null,
 }) {
+  // Refuse malformed or schema-skewed scope before the first D1 or Vectorize
+  // call. If each modality caught this independently, the invalid scope could
+  // be misreported as an ordinary provider outage instead of being rejected.
+  validatedFilterDates(filters);
   const pool = RETRIEVAL_CANDIDATE_DEPTH;
   const fusionK = Math.min(Math.max(Number(rrfK) || RRF_K, 1), 1e3);
 
   const settleModality = (promise) => promise.then(
-    (results) => ({ results, error: null }),
-    (error) => ({ results: [], error }),
+    (results) => ({ attempted: true, results, error: null }),
+    (error) => ({ attempted: true, results: [], error }),
   );
+  const vectorEligible = Boolean(embedding) && access?.kind !== "grant" && scopeIsUnrestricted(scope);
   const [keywordAttempt, vectorAttempt, projection] = await Promise.all([
     settleModality(searchKeyword(env, query, { limit: pool, filters, access, scope })),
-    embedding && access?.kind !== "grant" && scopeIsUnrestricted(scope)
+    vectorEligible
       ? settleModality(searchVector(env, embedding, { limit: pool, filters, scope }))
-      : Promise.resolve({ results: [], error: null }),
+      : Promise.resolve({ attempted: false, results: [], error: null }),
     // Vectorize may return some old/current candidates while a newer accepted
     // changeset is still processing. Non-empty semantic results therefore do
     // not prove the complete D1 corpus is query-visible. Reuse the exact
     // readiness contract that gates health and acceptance so every answer
     // advertises partial projection instead of looking fully healthy.
-    embedding && access?.kind !== "grant" && scopeIsUnrestricted(scope)
+    vectorEligible
       ? vectorReadiness(env).catch(() => ({ ready: false }))
       : Promise.resolve(null),
   ]);
@@ -726,21 +796,34 @@ export async function search(env, {
   if (integrityFailure) throw integrityFailure;
   const kw = keywordAttempt.results.map(assessStoredProvenance);
   const vec = vectorAttempt.results.map(assessStoredProvenance);
+  const keywordFailed = keywordAttempt.attempted && Boolean(keywordAttempt.error);
+  const vectorFailed = vectorAttempt.attempted && Boolean(vectorAttempt.error);
 
-  // Both empty is a real answer (nothing matched). Only ONE empty when both
-  // were attempted means a subsystem is down, and a caller that cannot tell
-  // those apart will report a degraded brain as an empty one.
+  // Empty is a valid result from either modality. A zero-row success must never
+  // be guessed into an outage, just as a caught query error must never be
+  // guessed into a clean empty corpus. The settled outcomes above carry the
+  // distinction explicitly.
   //
   // The first branch fires on every freshly installed brain while its index is
   // still projecting, which is exactly when the owner asks their first
   // questions, so this is the ordinary state of a new install rather than a
   // rare fault. `degraded_reason` names WHICH of the two it was, because "still
   // building, ask again shortly" and "the vector query failed" call for
-  // different sentences downstream. `degraded` keeps its existing values: it is
-  // a wire field older clients already read.
+  // different sentences downstream. Single-modality failures keep the existing
+  // wire values older clients already read; `retrieval` is reserved for the new
+  // explicit state where both attempted modalities failed.
   let degraded = null;
   let degradedReason = null;
-  if (access?.kind === "grant") {
+  if (keywordFailed && vectorFailed) {
+    degraded = "retrieval";
+    degradedReason = "keyword-and-vector-query-failed";
+  } else if (keywordFailed) {
+    degraded = "fts";
+    degradedReason = "keyword-query-failed";
+  } else if (vectorFailed) {
+    degraded = "vector";
+    degradedReason = "vector-query-failed";
+  } else if (access?.kind === "grant") {
     degraded = "scoped-vector";
     degradedReason = "document-scope-keyword-only";
   } else if (!scopeIsUnrestricted(scope)) {
@@ -749,14 +832,12 @@ export async function search(env, {
   } else if (embedding && projection?.ready !== true) {
     degraded = "vector";
     degradedReason = "projection-incomplete";
-  } else if (embedding && vec.length === 0 && kw.length > 0) {
-    degraded = "vector";
-    degradedReason = "vector-query-failed";
   } else if (!embedding) {
     degraded = "no-embedding";
     degradedReason = "embedding-unavailable";
   }
-  if (filters.entity_slug && access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
+  if (!keywordFailed && !vectorFailed &&
+      filters.entity_slug && access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
     degraded = "vector";
     degradedReason = "entity-vector-authority-unindexed";
   }

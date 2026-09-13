@@ -59,6 +59,11 @@ const assistedAcceptanceGuidance = [
 const support = JSON.parse(readFileSync(join(PACKET, "support-profile.example.json"), "utf8"));
 const schema = JSON.parse(readFileSync(join(PACKET, "support-profile.schema.json"), "utf8"));
 
+test("the top-level map guidance promises a bounded starting scope, not completeness", () => {
+  assert.match(topLevelReadme, /bounded, non-authoritative starting-map preview/i);
+  assert.doesNotMatch(topLevelReadme, /complete non-authoritative map preview/i);
+});
+
 test("the client packet covers the complete journey with realistic proof boundaries", () => {
   for (const phrase of [
     "Pre-interview",
@@ -187,13 +192,13 @@ test("technician source onboarding proves one exact item through four independen
   for (const text of [runbook, prompt]) {
     assert.match(text, /same approved low-sensitivity item/i);
     assert.match(text, /stop at the first (?:state that is not proved|unproven state)/i);
-    assert.match(text, /Accepted.*terminal source receipt.*accepted, refused, unreadable, failed, and retryable counts/is);
-    assert.match(text, /Stored (?:and|with) provenance.*exact same item.*logical family in D1.*chunks.*source and extraction provenance/is);
-    assert.match(text, /Projected.*exact generation.*confirmed Vectorize receipt.*no matching outbox/is);
+    assert.match(text, /Received.*terminal source receipt.*accepted, refused, unreadable, failed, and retryable counts/is);
+    assert.match(text, /Saved.*exact same item.*logical family in D1.*chunks.*source and extraction provenance/is);
+    assert.match(text, /Search ready.*exact generation.*confirmed Vectorize receipt.*no matching outbox/is);
     assert.match(text, /two health readings.*pending work.*declin(?:e|ing)|two health readings show pending work declining or zero/is);
-    assert.match(text, /Query-visible and cited.*distinctive phrase.*exact same item.*expected source citation and provenance/is);
+    assert.match(text, /Answer checked.*distinctive phrase.*exact same item.*expected source citation and provenance/is);
   }
-  assert.match(runbook, /Accepted is not stored, stored is not\s+projected, and projected is not query-visible/i);
+  assert.match(runbook, /Received is not Saved, Saved is not Search\s+ready, and Search ready is not Answer checked/i);
 });
 
 test("Financial Map reads are explained before host approval and writes stay outside Optimize", () => {
@@ -294,12 +299,25 @@ test("customer guidance bounds empty results to the evidence actually searched",
 test("source guidance requires same-item proof and keeps run failures bounded", () => {
   assert.match(failuresRunbook, /source-level clues[^.]*not proof that any exact file arrived/is);
   assert.match(failuresRunbook, /Stop at the first unproven checkpoint/i);
-  assert.match(failuresRunbook, /Accepted:[\s\S]*terminal source receipt[\s\S]*D1 stored and provenanced:[\s\S]*same item[\s\S]*expected\s+logical family in D1[\s\S]*chunks[\s\S]*source and\s+extraction provenance/i);
-  assert.match(failuresRunbook, /Projected:[\s\S]*exact generation[\s\S]*confirmed Vectorize receipt[\s\S]*no\s+matching outbox work remains/i);
-  assert.match(failuresRunbook, /Independently query-visible and cited:[\s\S]*distinctive phrase[\s\S]*same item[\s\S]*expected source\s+citation and provenance/i);
+  assert.match(failuresRunbook, /Received:[\s\S]*terminal source receipt[\s\S]*Saved:[\s\S]*same item[\s\S]*expected\s+logical family in D1[\s\S]*chunks[\s\S]*source and\s+extraction provenance/i);
+  assert.match(failuresRunbook, /Search ready:[\s\S]*exact generation[\s\S]*confirmed Vectorize receipt[\s\S]*no\s+matching outbox work remains/i);
+  assert.match(failuresRunbook, /Answer checked:[\s\S]*distinctive phrase[\s\S]*same item[\s\S]*expected source\s+citation and provenance/i);
   assert.match(sourceMatrix, /failed or unavailable status\s+means the source was not loaded successfully in this run/i);
   assert.match(sourceMatrix, /does not prove\s+D1 has no older records from an earlier run/i);
   assert.match(sourceMatrix, /authenticated\s+`brain sources <manifest>` inventory/i);
+  assert.match(failuresRunbook, /concise columns are `name`, `kind`, `zone`, `physical`, `readable`, and\s+`freshness`/i);
+  assert.match(failuresRunbook, /complete contract-v3 receipt/i);
+  assert.doesNotMatch(failuresRunbook, /status is still\s+`pending`/i);
+});
+
+test("the Windows pilot names one safe first source and does not offer unsupported credential ceremonies", () => {
+  const setupGuide = readFileSync(join(ROOT, "onboarding", "09-technician-setup-and-rehearsal.md"), "utf8");
+  assert.match(setupGuide, /deliberately refuses those three\s+steps on Windows/i);
+  assert.match(setupGuide, /Monday Windows x64 first-source lane/i);
+  assert.match(setupGuide, /one owner-approved, low-sensitivity, text-readable test\s+document/i);
+  assert.match(setupGuide, /preview sends nothing/i);
+  assert.match(setupGuide, /without `--dry-run`[\s\S]*Received, Saved, Search ready, and Answer\s+checked/i);
+  assert.match(topLevelReadme, /Windows path refuses those three credential ceremonies/i);
 });
 
 test("handoff treats original-file R2 storage as optional", () => {
@@ -308,6 +326,35 @@ test("handoff treats original-file R2 storage as optional", () => {
   assert.match(handoffGuide, /D1 holds extracted text and\s+metadata, not a backup of the original binary/i);
   assert.match(handoffGuide, /If configured, delete the R2 original-file copy/i);
   assert.match(handoffGuide, /Omit this step entirely when the\s+install has no R2 bucket/i);
+});
+
+test("handoff cleanup follows actual custody and the source-inventory v3 contract", () => {
+  assert.match(handoffGuide, /Only credentials and source access that were actually used are revoked or\s+removed at handoff/i);
+  assert.match(handoffGuide, /If that key never left owner-only custody[^.]*do not rotate it solely for handoff/is);
+  assert.match(handoffGuide, /If the admin key was exposed[\s\S]*reviewed owner-controlled secure\s+replacement path/i);
+  assert.match(handoffGuide, /If no\s+such path is available, stop and record the handoff as incomplete/i);
+  assert.match(handoffGuide, /Before any admin-key rotation[\s\S]*Every owner-app session on every device will be signed out/i);
+  assert.match(handoffGuide, /Passkeys,\s+enrolled-device records, and Brain data remain in place/i);
+  assert.match(handoffGuide, /Running it without a new value is not an\s+admin-key rotation/i);
+  assert.doesNotMatch(handoffGuide, /have the owner rotate the admin key/i);
+  assert.doesNotMatch(handoffGuide, /The Cloudflare and admin credentials used during the build are rotated or\s+revoked at handoff/i);
+
+  assert.match(handoffGuide, /node brain\.mjs sources <manifest> --json/);
+  assert.match(handoffGuide, /source-inventory contract v3/i);
+  for (const field of [
+    "connector kind",
+    "zone",
+    "physical and logical document counts",
+    "readable and unreadable counts",
+    "freshness evidence",
+    "extraction and OCR state",
+    "missing provenance fields",
+  ]) assert.match(handoffGuide, new RegExp(field, "i"), field);
+  assert.doesNotMatch(handoffGuide, /check the last ingest date on each line/i);
+
+  assert.match(topLevelReadme, /reapply durable secrets; rotates ADMIN_KEY only with a reviewed replacement/i);
+  assert.match(customerRuntimeSources, /apply durable secrets; ADMIN_KEY rotates only when a reviewed[\s\S]*owner-controlled path supplies a replacement/i);
+  assert.doesNotMatch(`${topLevelReadme}\n${customerRuntimeSources}`, /exact durable ADMIN_KEY rotation command|set secrets and durably rotate ADMIN_KEY/i);
 });
 
 test("the packet makes high-volume source onboarding and optimize proof explicit", () => {

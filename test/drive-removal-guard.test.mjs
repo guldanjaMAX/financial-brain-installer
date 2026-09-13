@@ -322,7 +322,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     md5Checksum: "migrated-current", parents: ["fixture-root"],
   };
   const environment = {};
-  for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
+  for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "USERNAME", "TEMP", "TMP", "TMPDIR"]) {
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
   Object.assign(environment, {

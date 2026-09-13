@@ -148,6 +148,18 @@ The live field recovery runner requires this package's exact current migration
 prefix on both source and restored target before it can export, promote the
 current Worker, or invoke the current drain protocol.
 
+The v0.4.8 disposable deployment seam has a shipped split dispatcher and a
+narrow Cloudflare transport. Source preparation opens only the source manifest;
+target preparation opens both only after the source and fixed seed receipts
+exist. Local preview has no provider access or writes. Preflight permits GETs
+and one private receipt; A2 can mutate only the source and A4 only the target.
+Every POST is preceded by a durable journal record. A confirmed prefix may be
+resumed explicitly, while `sent_unconfirmed` always refuses. The deployment
+POST identifiers are retained and matched through Cloudflare's exact
+deployment-ID GET before a phase receipt can finalize. The implementation is
+packaged and locally executable on macOS with Keychain custody, but that does
+not constitute live disposable field proof.
+
 ## Ingest lifecycle
 
 All producers converge on the same document envelope and batch write path:

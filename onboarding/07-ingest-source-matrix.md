@@ -490,15 +490,24 @@ If you are ever unsure whether a source is connected, do not consult this page. 
 node brain.mjs sources <manifest>
 ```
 
-One line per source: what it is, whether it is pending, loading, ready, or
-errored, how many documents it holds, and when it last took anything in. This is
-the authenticated current inventory available to the command. Its source-level
-status and count still do not prove that an exact file arrived, that history is
-complete, or that the item is query-visible.
+One line per source with the actual concise columns: `name`, `kind`, `zone`,
+`physical`, `readable`, and `freshness`. This is the authenticated current
+overview available to the command. Its source-level counts and freshness still
+do not prove that an exact file arrived, that history is complete, or that the
+item is query-visible.
 
-The same command also cross-checks the registry against the authenticated live
-document store whenever the install's durable admin key is available:
+For the detailed receipt and coverage evidence, use the machine-readable form:
 
 ```
-node brain.mjs sources <manifest>
+node brain.mjs sources <manifest> --json
 ```
+
+Require source-inventory `contract_version: 3`, `kind: source_inventory`,
+`complete: true`, `truncated: false`, `cursor: null`, and `returned` equal to
+`total`. Each row exposes only the reviewed fields: `source_id` and `name`,
+`kind`, `registered`, `zone`, `connector`, `configuration`, `storage`,
+`readability`, `provenance`, `recovery_plan`, `receipt`, `last_failure`, and
+`freshness`. Use `receipt.logical_matches_reported` with
+`storage.logical_documents` for registry-versus-D1 drift, and use the receipt
+and `freshness.coverage` fields for run and history claims. Do not reconstruct
+those claims from the concise terminal columns.

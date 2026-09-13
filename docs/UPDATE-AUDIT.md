@@ -161,7 +161,7 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The unreleased 0.4.8/schema45 field candidate carries 39 stable incident rows.
+The unreleased 0.4.8/schema46 field candidate carries 39 stable incident rows.
 The earlier held 0.4.7 candidate was never tagged, published, or offered as a
 customer update. Its identity and planning record remain historical and are not
 reused as proof for the changed 0.4.8 bytes. The

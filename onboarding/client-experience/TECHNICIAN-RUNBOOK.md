@@ -174,7 +174,7 @@ Optimize, and installer admin key cannot activate it. Never copy an internal
 review value into a URL or chat, and never open a raw API ceremony.
 
 If browser control is available, offer to open the owner app, choose **Financial
-Map**, and scroll through the complete review. Stop before the confirmation
+Map**, and scroll through the entire current review draft. Stop before the confirmation
 button. The owner alone decides whether to choose it and completes or cancels
 the device passkey window. If the installed release does not advertise this
 screen, stop and update through the supported release process instead of
@@ -214,22 +214,22 @@ Connect one source at a time. For every source:
 For that one item, record these states separately and stop at the first state
 that is not proved:
 
-1. **Accepted:** the source receipt reached a terminal state and names exact
+1. **Received:** the source receipt reached a terminal state and names exact
    accepted, refused, unreadable, failed, and retryable counts. A connector
    counter is not a storage receipt.
-2. **Stored and provenanced:** the exact same item exists as the expected
+2. **Saved:** the exact same item exists as the expected
    logical family in D1, has chunks, and carries the correct source and
    extraction provenance.
-3. **Projected:** that exact generation has a confirmed Vectorize receipt and
+3. **Search ready:** that exact generation has a confirmed Vectorize receipt and
    no matching outbox work remains. Read health twice and require pending work
    to decline or stay at zero with no competing drain lease.
-4. **Query-visible and cited:** a distinctive phrase from that exact same item
+4. **Answer checked:** a distinctive phrase from that exact same item
    is returned by the supported search path with the expected source citation
    and provenance.
 
 Do not substitute a green health response, an aggregate connector count, or a
-different document at a later stage. Accepted is not stored, stored is not
-projected, and projected is not query-visible.
+different document at a later stage. Received is not Saved, Saved is not Search
+ready, and Search ready is not Answer checked.
 
 Use one scorecard row for every authorized source. Keep these four readiness
 dimensions independent: **starter context**, **live updates**, **history**, and
@@ -239,8 +239,10 @@ meaning search while Vectorize catches up. A changing source without a proven
 refresh schedule cannot be marked live-ready.
 
 Each row also records the access zone, provenance label, items seen, retries,
-elapsed time, owner minutes, technician minutes, and the next gap. Compare the
-source receipt with the owner-visible `/optimize` display before accepting it.
+elapsed time, owner minutes, technician minutes, and the next gap. Open
+`https://financialbrain.ai/optimize` and give its request to the connected
+assistant. Compare only supported returned findings with the source receipt;
+the public page is assistant-launch guidance, not a signed-in source display.
 If a source appears in documents but has no registered source kind or access
 zone, record it as **unregistered** and stop scoped-sharing acceptance until it
 is assigned and tested.
@@ -282,7 +284,7 @@ explicit.
 ### Source onboarding prompt
 
 ```text
-Read onboarding/07-ingest-source-matrix.md and the current manifest. Begin read-only. Show me the sources that are configured, released but not connected, partial, unavailable, or export-only. Recommend one valuable low-risk source to preview first. Do not log in, connect, ingest, delete, schedule, or change a provider until I approve that exact action. Keep credentials and private source content out of this conversation. After an approved load, use the same approved low-sensitivity item for every checkpoint and stop at the first unproven state: Accepted means a terminal source receipt with exact accepted, refused, unreadable, failed, and retryable counts; Stored and provenanced means that exact same item is the expected logical family in D1 with chunks and correct source and extraction provenance; Projected means that exact generation has a confirmed Vectorize receipt, no matching outbox work, and two health readings show pending work declining or zero with no competing drain lease; Query-visible and cited means a distinctive phrase from that exact same item returns through the supported search path with the expected source citation and provenance. Never substitute a different item, a connector counter, or a green health response. Report freshness, proof level, and the next unproven checkpoint.
+Read onboarding/07-ingest-source-matrix.md and the current manifest. Begin read-only. Show me the sources that are configured, released but not connected, partial, unavailable, or export-only. Recommend one valuable low-risk source to preview first. Do not log in, connect, ingest, delete, schedule, or change a provider until I approve that exact action. Keep credentials and private source content out of this conversation. After an approved load, use the same approved low-sensitivity item for every checkpoint and stop at the first unproven state: Received means a terminal source receipt with exact accepted, refused, unreadable, failed, and retryable counts; Saved means that exact same item is the expected logical family in D1 with chunks and correct source and extraction provenance; Search ready means that exact generation has a confirmed Vectorize receipt, no matching outbox work, and two health readings show pending work declining or zero with no competing drain lease; Answer checked means a distinctive phrase from that exact same item returns through the supported search path with the expected source citation and provenance. Never substitute a different item, a connector counter, or a green health response. Report freshness, proof level, and the next unproven checkpoint.
 ```
 
 ## 6. Adaptive assisted acceptance

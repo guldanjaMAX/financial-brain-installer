@@ -8,7 +8,8 @@
     "node": ">=22"
   },
   "bin": {
-    "brain": "./brain.mjs"
+    "brain": "./brain.mjs",
+    "brain-v048-disposable-deploy": "./operations/disposable-recovery-field-deploy-cli.mjs"
   },
   "scripts": {
     "field:prepare": "node scripts/field-prepare.mjs",
@@ -53,6 +54,7 @@
     "docs/decisions/002-paused-bootstrap-acceleration.md",
     "docs/decisions/003-staged-source-onboarding.md",
     "docs/decisions/004-version-scoped-release-scope.md",
+    "docs/decisions/005-phased-disposable-deployment-proof.md",
     "docs/decisions/README.md",
     "doctor.mjs",
     "eval/brain-client.mjs",

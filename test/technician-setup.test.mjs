@@ -8,6 +8,7 @@ import { WRANGLER_PACKAGE } from "../doctor.mjs";
 
 import {
   TECHNICIAN_RUN_STEPS,
+  TECHNICIAN_SETUP_INTENTS,
   renderTechnicianPlan,
   renderTechnicianStepBriefing,
   runTechnicianStep,
@@ -39,8 +40,17 @@ const fixtureNodePath = resolve("/fixture/node");
 const safeBrainPath = resolve("/safe/lib/brain.mjs");
 const safeNodePath = resolve("/safe/bin/node");
 writeFileSync(manifestPath, JSON.stringify({
-  client: { slug: "fixture" },
-  brain: { domain: "brain.fixture.test" },
+  manifest_version: 1,
+  client: { slug: "fixture", display_name: "Fixture Brain" },
+  brain: { domain: "brain.fixture.test", worker_name: "fixture-brain" },
+  infrastructure: {
+    cloudflare: {
+      account_id: "a".repeat(32),
+      storage: "d1",
+      d1_database_id: "11111111-2222-4333-8444-555555555555",
+      vectorize_index: "fixture-brain",
+    },
+  },
   corpora: {
     google_drive: { enabled: true },
     gmail: { enabled: true },
@@ -505,14 +515,18 @@ test("update refreshes only an existing installer-managed Claude workspace guide
 
 test("the plan is read-only, ordered, honest about proof, and agent-readable", () => {
   const missing = join(sandbox, "not-created.json");
-  const plan = technicianPlan(missing);
-  assert.equal(plan.schema_version, 4);
+  const plan = technicianPlan(missing, { intent: "first_brain" });
+  assert.equal(plan.schema_version, 5);
   assert.equal(plan.mode, "read_only_plan");
   assert.equal(plan.proof_level, "workflow_only");
   assert.deepEqual(plan.steps.map((step) => step.id), TECHNICIAN_RUN_STEPS);
   assert.equal(plan.steps[0].state, "ready_to_start");
   assert.equal(plan.steps[0].dashboard_url, "https://financialbrain.ai/install");
-  assert.equal(plan.steps[1].state, "ready_after_local_tools");
+  assert.equal(plan.steps[1].state, "fresh_setup_ready");
+  assert.equal(plan.routing.intent, "first_brain");
+  assert.deepEqual(TECHNICIAN_SETUP_INTENTS, [
+    "first_brain", "existing_this_computer", "existing_new_computer", "resume_interrupted", "unsure",
+  ]);
   assert.match(plan.warning, /Live proof arrives/i);
   assert.equal(plan.interaction.one_action_at_a_time, true);
   assert.match(plan.interaction.browser_assistance, /non-secret form fields/i);
@@ -600,7 +614,7 @@ test("the retired Plaid technician entrypoint stops kindly before any access or 
 });
 
 test("the normal Cloudflare briefing uses owner browser sign-in and cannot assign token homework", () => {
-  const plan = technicianPlan(join(sandbox, "not-created.json"));
+  const plan = technicianPlan(join(sandbox, "not-created.json"), { intent: "first_brain" });
   const cloudflare = plan.steps.find((step) => step.id === "cloudflare");
   const text = renderTechnicianStepBriefing(cloudflare);
   assert.equal(cloudflare.dashboard_url, "https://dash.cloudflare.com/");
@@ -623,7 +637,7 @@ test("the passkey briefing explains the next secure window before enrollment", (
 
 test("the CLI prints a provider briefing before the selected child command starts", async () => {
   const order = [];
-  await cmdTechnician(join(sandbox, "not-created.json"), { run: "tools" }, {
+  await cmdTechnician(join(sandbox, "not-created.json"), { intent: "first_brain", run: "tools" }, {
     scriptPath: fixtureScriptPath,
     nodePath: fixtureNodePath,
     baseEnv: { PATH: "/safe/bin" },
@@ -647,19 +661,28 @@ test("the first technician step verifies local tools before any manifest or acco
   const receipt = await runTechnicianStep({
     step: "tools",
     manifestPath: join(sandbox, "not-created.json"),
+    flags: { intent: "first_brain" },
     scriptPath: fixtureScriptPath,
     nodePath: fixtureNodePath,
     baseEnv: { PATH: "/safe/bin", CLOUDFLARE_API_TOKEN: "ambient-secret" },
     spawn: (node, args, options) => { call = { node, args, options }; return { status: 0 }; },
   });
   assert.deepEqual(receipt, { step: "tools", completed: true, commands_run: 1 });
-  assert.deepEqual(call.args, [fixtureScriptPath, "tools", "--require-doctor"]);
+  assert.deepEqual(call.args, [
+    fixtureScriptPath,
+    "tools",
+    resolve(join(sandbox, "not-created.json")),
+    "--intent",
+    "first_brain",
+    "--require-doctor",
+  ]);
   assert.equal(call.options.env.CLOUDFLARE_API_TOKEN, undefined);
 });
 
 test("the Cloudflare technician step forwards the complete owner-reviewed browser ceremony", async () => {
   const freshManifest = join(sandbox, "fresh-cloudflare.json");
   const flags = {
+    intent: "first_brain",
     "browser-sign-in": true,
     name: "Example Owner Brain",
     slug: "example-owner-brain",
@@ -699,6 +722,7 @@ test("the Cloudflare technician step forwards the complete owner-reviewed browse
 
 test("the Cloudflare technician step refuses incomplete context before spawning", async () => {
   const complete = {
+    intent: "first_brain",
     "browser-sign-in": true,
     name: "Example Owner Brain",
     slug: "example-owner-brain",
@@ -735,6 +759,7 @@ test("the Cloudflare technician step forwards an approved no-connect switch", as
     step: "cloudflare",
     manifestPath: join(sandbox, "fresh-cloudflare-no-connect.json"),
     flags: {
+      intent: "first_brain",
       "browser-sign-in": true,
       name: "Example Owner Brain",
       slug: "example-owner-brain",
@@ -751,13 +776,13 @@ test("the Cloudflare technician step forwards an approved no-connect switch", as
 });
 
 test("an existing install record never advertises or launches fresh Cloudflare setup", async () => {
-  const plan = technicianPlan(manifestPath);
+  const plan = technicianPlan(manifestPath, { intent: "existing_this_computer" });
   const cloudflare = plan.steps.find((step) => step.id === "cloudflare");
-  assert.equal(cloudflare.state, "represented_by_install_record");
+  assert.equal(cloudflare.state, "continuity_check_ready");
   assert.equal(cloudflare.command, null);
   assert.equal(cloudflare.agent_after_owner_approval, undefined);
   assert.equal(cloudflare.owner_only_command, undefined);
-  assert.match(cloudflare.existing_install_guidance, /tools and MCP.*doctor.*update/i);
+  assert.match(cloudflare.existing_install_guidance, /provisioned resources.*machine-continuity/is);
   assert.doesNotMatch(renderTechnicianPlan(plan), /--browser-sign-in/i);
 
   let calls = 0;
@@ -765,6 +790,7 @@ test("an existing install record never advertises or launches fresh Cloudflare s
     step: "cloudflare",
     manifestPath,
     flags: {
+      intent: "first_brain",
       "browser-sign-in": true,
       name: "Example Owner Brain",
       slug: "example-owner-brain",
@@ -775,8 +801,54 @@ test("an existing install record never advertises or launches fresh Cloudflare s
     scriptPath: fixtureScriptPath,
     nodePath: fixtureNodePath,
     spawn: () => { calls++; return { status: 0 }; },
-  }), /already has an install record/i);
+  }), /already records provisioned Brain resources.*Fresh setup is blocked/is);
   assert.equal(calls, 0);
+});
+
+test("explicit setup intent separates first, new-computer, interrupted, and unsure routes", async () => {
+  const missing = join(sandbox, "routing-missing.json");
+  for (const intent of ["unsure", "existing_new_computer", "existing_this_computer", "resume_interrupted"]) {
+    const plan = technicianPlan(missing, { intent });
+    assert.equal(plan.routing.action, "stop", intent);
+    assert.equal(plan.routing.creates_new_brain, false, intent);
+    assert.equal(plan.steps.find((step) => step.id === "cloudflare").agent_after_owner_approval, undefined, intent);
+  }
+
+  const fresh = technicianPlan(missing, { intent: "first_brain" });
+  assert.equal(fresh.routing.action, "fresh_setup");
+  assert.equal(fresh.routing.creates_new_brain, true);
+
+  const partialPath = join(sandbox, "routing-partial.json");
+  writeFileSync(partialPath, JSON.stringify({
+    manifest_version: 1,
+    client: { slug: "routing-fixture", display_name: "Routing Fixture" },
+    brain: { worker_name: "routing-fixture-brain" },
+    infrastructure: { cloudflare: {
+      account_id: "c".repeat(32),
+      auth_profile: `financial-brain-${"d".repeat(24)}`,
+      storage: "d1",
+      d1_database_name: "routing-fixture-brain",
+    } },
+  }));
+  const resume = technicianPlan(partialPath, {
+    intent: "resume_interrupted",
+    cli: { command: fixtureNodePath, args: [fixtureScriptPath] },
+  });
+  assert.equal(resume.manifest.record_state, "owned_partial");
+  assert.equal(resume.routing.action, "resume_setup");
+  const resumeStep = resume.steps.find((step) => step.id === "cloudflare");
+  assert.doesNotMatch(resumeStep.agent_after_owner_approval.args.join(" "), /browser-sign-in|--name|--slug/);
+
+  let childArgs = null;
+  await runTechnicianStep({
+    step: "cloudflare",
+    manifestPath: partialPath,
+    flags: { intent: "resume_interrupted" },
+    scriptPath: fixtureScriptPath,
+    nodePath: fixtureNodePath,
+    spawn: (_node, args) => { childArgs = args; return { status: 0 }; },
+  });
+  assert.deepEqual(childArgs, [fixtureScriptPath, "setup", resolve(partialPath)]);
 });
 
 test("the technician tools contract cannot complete without the interactive Claude doctor", async () => {
@@ -865,6 +937,32 @@ test("the smoke step runs only the injected deployed proof contract", async () =
     }),
     (error) => error.code === "install_smoke_runner_unavailable" && /No source proof was created/i.test(error.message),
   );
+});
+
+test("the public technician dispatcher wires the deployed smoke proof", async () => {
+  const proof = Object.freeze({
+    document_status: "created",
+    source_status: "ready",
+    vector_remaining: 0,
+    contains_customer_data: false,
+    checked_via: "deployed_authenticated_ingest",
+    stored_identifiers: false,
+  });
+  const requests = [];
+  const receipt = await cmdTechnician(manifestPath, { run: "smoke" }, {
+    runInstallSmoke: async (request) => {
+      requests.push(request);
+      return proof;
+    },
+  });
+  assert.deepEqual(requests, [{ manifestPath }]);
+  assert.deepEqual(receipt, {
+    step: "smoke",
+    completed: true,
+    commands_run: 0,
+    proof_level: "live_data_plane_postconditions",
+    proof,
+  });
 });
 
 test("the child environment strips ambient credentials and unrelated application state", () => {

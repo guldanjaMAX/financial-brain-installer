@@ -6,7 +6,7 @@ Nothing runs on our infrastructure. Normal setup uses an owner-approved named
 Cloudflare browser profile in the owner's operating-system credential store; it
 does not create or copy an API token.
 
-**Status: unreleased 0.4.8/schema45 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.8/schema46 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
@@ -175,6 +175,20 @@ Worker versions and manually reviewed empty routes, and exact Keychain-backed
 Wrangler wrapper and private release golden bytes. See
 `docs/RECOVERY.md` for the private artifact rules and remaining live field
 gate.
+
+The sealed package exposes the fixed deployment proof as
+`brain-v048-disposable-deploy help`. Source preview/preflight/`--approve-a2`
+mutation and target preview/preflight/`--approve-a4` mutation are separate
+commands; there is no combined path. Source preparation does not open the
+target manifest. Preview performs no network access and no write. Each
+preflight performs bounded Cloudflare GETs and writes only its owner-private
+receipt. Mutations resolve the manifest account's token only through macOS
+Keychain, journal before every POST, resume only a fully confirmed prefix, and
+refuse `sent_unconfirmed`. Final deployment proof uses the exact deployment-ID
+GET and must match the ID returned by the journaled POST. Windows refuses this
+field-only command. Packaged and fixture-tested means executable, not
+field-proven; the field-readiness marker remains false until the exact live
+disposable run passes.
 
 Run `node brain.mjs` with no arguments for the full command list.
 
@@ -1038,8 +1052,10 @@ exact real-service or physical-device field gate still outstanding. Use
 `-- --list`, `-- --only <scenario>`, or `-- --json` for targeted and agent-led
 runs.
 
-`brain technician <manifest>` is the matching install-day coordinator. Its
-default and `--json` forms are read-only. A selected `--run` step launches the
+`brain technician <manifest> --intent <choice>` is the matching install-day
+coordinator. Its default and `--json` forms are read-only. The explicit intent
+keeps first-Brain, existing-computer, new-computer, interrupted, and unsure
+routes distinct; a missing local file never selects fresh setup. A selected `--run` step launches the
 existing command in a child process with an allowlisted environment. Google,
 Zoom, and IMAP values are collected by the shared hidden-input primitive, never
 placed in argv, and cleared from the coordinator's buffers and child environment
@@ -1064,7 +1080,7 @@ three bank-feed credential bindings. For an approved enabled feed, a complete
 existing binding set is preserved. A missing or partial set refuses before
 provider cleanup, local key mutation, core-key rotation, or any Worker write.
 
-Technician plan schema 4 also carries the owner briefing for every ceremony:
+Technician plan schema 5 also carries the owner briefing for every ceremony:
 what will open, why it is needed, the minimum access, the safe non-secret work
 a browser controller can do, the owner's handoff point, and the privacy
 boundary. The CLI renders that briefing before each provider command. The

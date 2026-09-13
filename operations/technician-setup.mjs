@@ -14,7 +14,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
+import {
+  BOOTSTRAP_SETUP_INTENTS,
+  normalizeBootstrapSetupIntent,
+} from "./bootstrap-status.mjs";
 import { renderCopyableCommand } from "./command-display.mjs";
+import { manifestHasProvisionedResourceBindings } from "./machine-continuity.mjs";
 
 function ownerGuidance({ before_action, why, minimum_access, browser_help, owner_only, privacy }) {
   return Object.freeze({ before_action, why, minimum_access, browser_help, owner_only, privacy });
@@ -182,6 +187,7 @@ export const TECHNICIAN_STEPS = Object.freeze([
 ]);
 
 export const TECHNICIAN_RUN_STEPS = Object.freeze(TECHNICIAN_STEPS.map((step) => step.id));
+export const TECHNICIAN_SETUP_INTENTS = BOOTSTRAP_SETUP_INTENTS;
 export const DEFERRED_PUBLIC_CONNECTOR_STEPS = Object.freeze([
   "google", "zoom", "imap",
 ]);
@@ -251,6 +257,24 @@ function finalBrainHostname(value) {
   return hostname;
 }
 
+function ownedPartialInstallRecord(manifest) {
+  const slug = String(manifest?.client?.slug || "").trim().toLowerCase();
+  const displayName = String(manifest?.client?.display_name || "").trim();
+  const workerName = String(manifest?.brain?.worker_name || "").trim().toLowerCase();
+  const cloudflare = manifest?.infrastructure?.cloudflare;
+  const accountId = String(cloudflare?.account_id || "").trim().toLowerCase();
+  const databaseName = String(cloudflare?.d1_database_name || "").trim().toLowerCase();
+  const authProfile = String(cloudflare?.auth_profile || "").trim().toLowerCase();
+  return manifest?.manifest_version === 1 &&
+    /^[a-z0-9][a-z0-9-]{1,40}$/.test(slug) &&
+    displayName.length > 0 &&
+    workerName === `${slug}-brain` &&
+    /^[a-f0-9]{32}$/.test(accountId) &&
+    (cloudflare?.storage ?? "d1") === "d1" &&
+    databaseName === `${slug}-brain` &&
+    /^financial-brain-[a-f0-9]{24}$/.test(authProfile);
+}
+
 function readManifestSummary(manifestPath, deps = {}) {
   const exists = deps.existsSync || existsSync;
   const read = deps.readFileSync || readFileSync;
@@ -259,6 +283,7 @@ function readManifestSummary(manifestPath, deps = {}) {
     return {
       path: absolute,
       exists: false,
+      record_state: "not_created",
       final_hostname: null,
       final_hostname_invalid: false,
       enabled_connectors: [],
@@ -267,8 +292,18 @@ function readManifestSummary(manifestPath, deps = {}) {
   let manifest;
   try {
     manifest = JSON.parse(read(absolute, "utf8"));
-  } catch (error) {
-    throw new Error(`could not read the technician manifest: ${error.message}`);
+    if (!manifest || Array.isArray(manifest) || typeof manifest !== "object") {
+      throw new Error("not an object");
+    }
+  } catch {
+    return {
+      path: absolute,
+      exists: true,
+      record_state: "unproven",
+      final_hostname: null,
+      final_hostname_invalid: false,
+      enabled_connectors: [],
+    };
   }
   const enabled = ["google_drive", "gmail", "calendar", "zoom", "imap"]
     .filter((name) => manifest?.corpora?.[name]?.enabled === true);
@@ -276,34 +311,217 @@ function readManifestSummary(manifestPath, deps = {}) {
     ? manifest.brain.domain.trim()
     : "";
   const finalHostname = finalBrainHostname(declaredDomain);
+  const provisioned = manifestHasProvisionedResourceBindings(manifest);
+  const recordState = provisioned
+    ? "provisioned"
+    : ownedPartialInstallRecord(manifest)
+      ? "owned_partial"
+      : "unproven";
   return {
     path: absolute,
     exists: true,
+    record_state: recordState,
     final_hostname: finalHostname,
     final_hostname_invalid: Boolean(declaredDomain && !finalHostname),
     enabled_connectors: enabled,
   };
 }
 
+function routeCommand(cli, args, platformName, details = {}) {
+  if (!cli) return null;
+  return Object.freeze({
+    command: cli.command,
+    args: Object.freeze([...cli.args, ...args]),
+    display: exactCommand(cli, args, platformName),
+    ...details,
+  });
+}
+
+export function technicianSetupRoute(manifest, intentValue, {
+  cli = null,
+  platformName = process.platform,
+  intentExplicit = intentValue !== undefined && intentValue !== null && intentValue !== "",
+} = {}) {
+  const intent = normalizeBootstrapSetupIntent(intentValue);
+  const state = manifest?.record_state || (manifest?.exists ? "unproven" : "not_created");
+  const stop = (status, issueCode, ownerMessage) => Object.freeze({
+    intent,
+    intent_explicit: intentExplicit,
+    observed_local_state: state,
+    status,
+    issue_code: issueCode,
+    action: "stop",
+    read_only_stop: true,
+    creates_new_brain: false,
+    next_command: null,
+    owner_message: ownerMessage,
+    boundaries: Object.freeze({
+      selects_existing_brain_by_name: false,
+      copies_credentials: false,
+      opens_browser_or_prompts: false,
+    }),
+  });
+
+  if (intent === "unsure") {
+    return stop(
+      "intent_required",
+      "SETUP_INTENT_REQUIRED",
+      "I could not safely choose a setup route from files on this computer. Confirm whether this is your first Brain, this Brain already works on this computer, you are reconnecting it on a new computer, or this computer's setup was interrupted. Nothing will be created while you are unsure.",
+    );
+  }
+  if (state === "unproven") {
+    return stop(
+      "local_state_unproven",
+      "INSTALL_RECORD_UNPROVEN",
+      "A local file exists, but it is not a proven Financial Brain install record. Review or restore the exact intended manifest before any setup, recovery, provider, or source action.",
+    );
+  }
+  if (intent === "first_brain") {
+    if (state !== "not_created") {
+      return stop(
+        "intent_conflict",
+        "INSTALL_RECORD_ALREADY_EXISTS",
+        state === "owned_partial"
+          ? "This computer has a saved partial install record. Fresh setup is blocked. If this is the interrupted install you recognize, choose resume_interrupted so the same record can continue without another fresh browser ceremony."
+          : "This manifest already records provisioned Brain resources. Fresh setup is blocked. Choose the existing-Brain route that matches this computer.",
+      );
+    }
+    const args = [
+      "technician", manifest.path, "--intent", "first_brain", "--run", "cloudflare",
+      "--browser-sign-in",
+      "--name", "<person-or-company>",
+      "--slug", "<short-name>",
+      "--cloudflare-account", "<create-or-existing>",
+      "--cloudflare-account-id", "<32-character-account-id>",
+      "--workers-paid-confirmed",
+    ];
+    return Object.freeze({
+      intent,
+      intent_explicit: intentExplicit,
+      observed_local_state: state,
+      status: "fresh_setup_ready",
+      issue_code: null,
+      action: "fresh_setup",
+      read_only_stop: false,
+      creates_new_brain: true,
+      next_command: routeCommand(cli, args, platformName, {
+        mutates_external_state: true,
+        requires_owner_approval: true,
+      }),
+      owner_message: "This is the owner's first Brain and no install record exists at the reviewed path. Fresh setup is available only after the owner approves the exact Cloudflare account and Paid-plan ceremony.",
+      boundaries: Object.freeze({
+        selects_existing_brain_by_name: false,
+        copies_credentials: false,
+        opens_browser_or_prompts: true,
+      }),
+    });
+  }
+  if (intent === "resume_interrupted") {
+    if (state === "not_created") {
+      return stop(
+        "resume_record_missing",
+        "INTERRUPTED_INSTALL_RECORD_MISSING",
+        "There is no saved install record at this path, so there is nothing exact to resume. Restore the interrupted manifest before continuing; do not create a replacement or identify a Brain by name.",
+      );
+    }
+    const args = ["technician", manifest.path, "--intent", "resume_interrupted", "--run", "cloudflare"];
+    return Object.freeze({
+      intent,
+      intent_explicit: intentExplicit,
+      observed_local_state: state,
+      status: "resume_setup_ready",
+      issue_code: null,
+      action: "resume_setup",
+      read_only_stop: false,
+      creates_new_brain: false,
+      next_command: routeCommand(cli, args, platformName, {
+        mutates_external_state: true,
+        requires_owner_approval: true,
+      }),
+      owner_message: "The exact saved install record will be reused. The resume does not rewrite the manifest from a name, repeat fresh browser sign-in, or ask anyone to copy a credential.",
+      boundaries: Object.freeze({
+        selects_existing_brain_by_name: false,
+        copies_credentials: false,
+        opens_browser_or_prompts: false,
+      }),
+    });
+  }
+  if (intent === "existing_new_computer" && state === "not_created") {
+    return stop(
+      "existing_brain_recovery_required",
+      "EXISTING_BRAIN_RECOVERY_REQUIRED",
+      "I could not find this Brain's install record on the new computer. Recover the exact manifest and owner-custody path from a surviving device or reviewed backup before running continuity checks. Missing files do not authorize a new Brain.",
+    );
+  }
+  if (intent === "existing_this_computer" && state === "not_created") {
+    return stop(
+      "expected_local_record_missing",
+      "EXPECTED_LOCAL_INSTALL_RECORD_MISSING",
+      "This route expects the Brain's exact install record on this computer, but it is missing at the reviewed path. Confirm or recover that path before continuing. Fresh setup is blocked.",
+    );
+  }
+  if (state === "owned_partial") {
+    return stop(
+      "interrupted_setup_confirmation_required",
+      "INTERRUPTED_INSTALL_CONFIRMATION_REQUIRED",
+      "This exact local record is partial. Confirm that setup was interrupted on this computer, then choose resume_interrupted. It will reuse this record without a fresh browser ceremony.",
+    );
+  }
+
+  const args = ["machine-continuity", manifest.path, "--json"];
+  return Object.freeze({
+    intent,
+    intent_explicit: intentExplicit,
+    observed_local_state: state,
+    status: "continuity_check_ready",
+    issue_code: null,
+    action: "machine_continuity",
+    read_only_stop: false,
+    creates_new_brain: false,
+    next_command: routeCommand(cli, args, platformName, {
+      mutates_external_state: false,
+      requires_owner_approval: false,
+    }),
+    owner_message: intent === "existing_new_computer"
+      ? "The recovered exact manifest can now be checked for this computer's local owner credential, assistant connection, sources, schedulers, and resume checkpoints. The check is read-only."
+      : "This Brain already has provisioned resources. Run the read-only continuity check before any local repair or update.",
+    boundaries: Object.freeze({
+      selects_existing_brain_by_name: false,
+      copies_credentials: false,
+      opens_browser_or_prompts: false,
+    }),
+  });
+}
+
 export function technicianPlan(manifestPath, deps = {}) {
   if (!manifestPath || String(manifestPath).startsWith("--")) {
-    throw new Error("usage: brain technician <manifest> [--json] [--run <step>]");
+    throw new Error("usage: brain technician <manifest> --intent <first_brain|existing_this_computer|existing_new_computer|resume_interrupted|unsure> [--json] [--run <step>]");
   }
   const manifest = readManifestSummary(manifestPath, deps);
   const platformName = deps.platformName ?? process.platform;
   const cli = cliLocator(deps.cli);
+  const intentValue = deps.intent;
+  const routing = technicianSetupRoute(manifest, intentValue, {
+    cli: cli || Object.freeze({ command: "<brain-cli>", args: Object.freeze([]) }),
+    platformName,
+    intentExplicit: intentValue !== undefined && intentValue !== null && intentValue !== "",
+  });
   const refresh = cli
     ? Object.freeze({
         command: cli.command,
-        args: Object.freeze([...cli.args, "technician", manifest.path, "--json"]),
+        args: Object.freeze([
+          ...cli.args,
+          "technician", manifest.path, "--intent", routing.intent, "--json",
+        ]),
         mutates_external_state: false,
       })
     : null;
   return {
-    schema_version: 4,
+    schema_version: 5,
     mode: "read_only_plan",
     proof_level: "workflow_only",
     manifest,
+    routing,
     cli,
     refresh,
     warning: "This plan prepares the workflow. Live proof arrives during the account, connector, webhook, mailbox, and physical passkey checks.",
@@ -390,8 +608,7 @@ export function technicianPlan(manifestPath, deps = {}) {
     steps: TECHNICIAN_STEPS.map((step, index) => {
       let state = "not_checked";
       if (step.id === "tools") state = "ready_to_start";
-      if (step.id === "cloudflare" && !manifest.exists) state = "ready_after_local_tools";
-      if (step.id === "cloudflare" && manifest.exists) state = "represented_by_install_record";
+      if (step.id === "cloudflare") state = routing.status;
       if (["smoke", "google", "zoom", "imap", "passkey", "verify"].includes(step.id) && !manifest.exists) {
         state = "waiting_for_install_record";
       }
@@ -415,26 +632,36 @@ export function technicianPlan(manifestPath, deps = {}) {
         state = "deferred_from_public_first_install";
       }
       const ownerOnly = step.id === "passkey";
-      const agentAfterOwnerApproval = step.id === "cloudflare" && !manifest.exists;
+      const agentAfterOwnerApproval = step.id === "cloudflare" &&
+        ["fresh_setup", "resume_setup"].includes(routing.action);
       const ownerCli = cli || Object.freeze({ command: "<brain-cli>", args: Object.freeze([]) });
       const ownerArgs = step.id === "passkey"
         ? ["invite", manifest.path]
-        : ["technician", manifest.path, "--run", step.id];
-      const approvedAgentArgs = [
-        "technician", manifest.path, "--run", "cloudflare",
-        "--browser-sign-in",
-        "--name", "<person-or-company>",
-        "--slug", "<short-name>",
-        "--cloudflare-account", "<create-or-existing>",
-        "--cloudflare-account-id", "<32-character-account-id>",
-        "--workers-paid-confirmed",
-      ];
+        : ["technician", manifest.path, "--intent", routing.intent, "--run", step.id];
+      const approvedAgentArgs = routing.next_command?.args.slice(ownerCli.args.length) || [];
+      const routedStep = step.id === "cloudflare" && routing.action === "resume_setup"
+        ? {
+            ...step,
+            title: "Resume this Brain's saved setup",
+            dashboard_url: null,
+            human_boundary: "The owner reviews and approves resuming the exact saved manifest. The installer reuses its saved account and protected sign-in profile, and stops on any mismatch or expired access instead of opening a fresh ceremony.",
+            automated_proof: "The same manifest-bound setup command verifies every saved resource and resumes its idempotent checkpoint. It does not select a Brain by name or copy a credential.",
+            owner_guidance: ownerGuidance({
+              before_action: "The installer will continue the exact saved setup record from its verified checkpoint. No fresh manifest or Cloudflare browser ceremony will be started.",
+              why: "This finishes the interrupted Brain without creating a second Brain or repeating already saved ownership steps.",
+              minimum_access: "Only the account and protected local sign-in profile already bound to this exact manifest.",
+              browser_help: "No browser should open. If any unexpected sign-in or account-selection page appears, stop and review it before continuing.",
+              owner_only: "The owner approves this exact resume. Any unexpected identity, account, billing, or sign-in request stops the step.",
+              privacy: "No credential is copied into chat, a command, or the manifest.",
+            }),
+          }
+        : step;
       return {
         order: index + 1,
-        ...step,
+        ...routedStep,
         command: DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step.id) || ownerOnly || step.id === "cloudflare"
           ? null
-          : technicianDisplayCommand(step.id, manifest.path, cli, platformName),
+          : technicianDisplayCommand(step.id, manifest.path, cli, platformName, routing.intent),
         state,
         ...(ownerOnly
           ? {
@@ -482,10 +709,16 @@ export function technicianPlan(manifestPath, deps = {}) {
               agent_after_owner_approval_display: exactCommand(ownerCli, approvedAgentArgs),
             }
           : {}),
-        ...(step.id === "cloudflare" && manifest.exists
+        ...(step.id === "cloudflare" && routing.action === "machine_continuity"
           ? {
               represented_by_install_record: true,
-              existing_install_guidance: "This Brain already has an install record. Do not run fresh setup. Check local tools and MCP on this computer, then use doctor and the live update guidance.",
+              existing_install_guidance: `${routing.owner_message} Run: ${routing.next_command?.display || "brain machine-continuity <manifest> --json"}`,
+            }
+          : {}),
+        ...(step.id === "cloudflare" && routing.action === "stop"
+          ? {
+              routing_stop: true,
+              existing_install_guidance: routing.owner_message,
             }
           : {}),
       };
@@ -493,13 +726,20 @@ export function technicianPlan(manifestPath, deps = {}) {
   };
 }
 
-export function technicianDisplayCommand(step, manifestPath, cli = null, platformName = process.platform) {
+export function technicianDisplayCommand(
+  step,
+  manifestPath,
+  cli = null,
+  platformName = process.platform,
+  intent = "unsure",
+) {
   const path = resolve(manifestPath);
   const locator = cli || Object.freeze({ command: "<brain-cli>", args: Object.freeze([]) });
-  if (step === "google") return exactCommand(locator, ["technician", path, "--run", "google"], platformName);
-  if (step === "imap") return exactCommand(locator, ["technician", path, "--run", "imap", "--host", "<imap-host>", "--user", "<email-address>"], platformName);
-  if (step === "passkey") return exactCommand(locator, ["technician", path, "--run", "passkey", "--confirm-host", "<final-hostname>"], platformName);
-  return exactCommand(locator, ["technician", path, "--run", step], platformName);
+  const routed = ["technician", path, "--intent", normalizeBootstrapSetupIntent(intent), "--run"];
+  if (step === "google") return exactCommand(locator, [...routed, "google"], platformName);
+  if (step === "imap") return exactCommand(locator, [...routed, "imap", "--host", "<imap-host>", "--user", "<email-address>"], platformName);
+  if (step === "passkey") return exactCommand(locator, [...routed, "passkey", "--confirm-host", "<final-hostname>"], platformName);
+  return exactCommand(locator, [...routed, step], platformName);
 }
 
 export function renderTechnicianPlan(plan) {
@@ -508,7 +748,9 @@ export function renderTechnicianPlan(plan) {
     "Financial Brain technician setup",
     "================================",
     `Manifest: ${plan.manifest.path}`,
-    `Install record: ${plan.manifest.exists ? "present, live state not checked" : "not created yet"}`,
+    `Install record: ${plan.manifest.record_state.replaceAll("_", " ")}, live state not checked`,
+    `Owner route: ${plan.routing.intent.replaceAll("_", " ")}`,
+    `Routing result: ${plan.routing.status.replaceAll("_", " ")}`,
     `Final hostname: ${plan.manifest.final_hostname || "not fixed yet"}`,
     "",
     "This screen prepares the visit. Each live check will add its own proof.",
@@ -517,6 +759,7 @@ export function renderTechnicianPlan(plan) {
     "The owner takes over for login, 2FA, consent, billing, credentials, and physical passkey prompts.",
     "Sensitive values stay in provider pages or hidden terminal prompts.",
     "Local configuration writes are named before approval. Setup can use --no-connect when the owner wants AI-tool files left unchanged.",
+    plan.routing.owner_message,
     plan.warning,
     plan.coverage.bank_connections.owner_message,
     "",
@@ -533,7 +776,7 @@ export function renderTechnicianPlan(plan) {
     else if (step.agent_after_owner_approval) {
       lines.push(`   Claude runs after your approval: ${step.agent_after_owner_approval_display}`);
     }
-    else if (step.represented_by_install_record) lines.push(`   ${step.existing_install_guidance}`);
+    else if (step.represented_by_install_record || step.routing_stop) lines.push(`   ${step.existing_install_guidance}`);
     else if (step.owner_only_command) lines.push(`   Owner-only direct terminal: ${step.owner_only_display}`);
     else lines.push("   No public first-install command is available for this deferred connector ceremony.");
     if (step.dashboard_url) lines.push(`   Dashboard: ${step.dashboard_url}`);
@@ -562,15 +805,36 @@ export function renderTechnicianStepBriefing(stepOrId) {
   ].join("\n");
 }
 
-function childCommands(step, manifestPath, flags, scriptPath) {
+function childCommands(step, manifestPath, flags, scriptPath, routing = null) {
   const path = resolve(manifestPath);
   const command = (...args) => [scriptPath, ...args];
   switch (step) {
     // The technician step is stricter than a read-only bootstrap snapshot. It
     // must not report completion from an agent shell when Claude's interactive
     // installation doctor was never able to run.
-    case "tools": return [command("tools", "--require-doctor")];
+    case "tools": return [command(
+      "tools",
+      path,
+      "--intent",
+      routing?.intent || "unsure",
+      "--require-doctor",
+    )];
     case "cloudflare": {
+      if (routing?.action === "resume_setup") {
+        const freshOnly = [
+          "browser-sign-in", "name", "slug", "cloudflare-account",
+          "cloudflare-account-id", "workers-paid-confirmed",
+        ].filter((name) => flags[name] !== undefined);
+        if (freshOnly.length) {
+          throw new Error(
+            `the resume route does not accept fresh-setup options: ${freshOnly.map((name) => `--${name}`).join(", ")}`,
+          );
+        }
+        if (flags["no-connect"] !== undefined && flags["no-connect"] !== true) {
+          throw new Error("--no-connect is an approval switch and does not take a value");
+        }
+        return [command("setup", path, ...(flags["no-connect"] === true ? ["--no-connect"] : []))];
+      }
       if (flags["browser-sign-in"] !== true) {
         throw new Error("the Cloudflare technician step requires the owner's approved --browser-sign-in ceremony");
       }
@@ -688,11 +952,12 @@ export async function runTechnicianStep({
     );
   }
   const summary = readManifestSummary(manifestPath, manifestDeps);
-  if (step === "cloudflare" && summary.exists) {
-    throw new Error(
-      "this Brain already has an install record, so the fresh Cloudflare setup ceremony is not available. " +
-        "Check tools and MCP on this computer, then use doctor and the live update guidance."
-    );
+  const routing = technicianSetupRoute(summary, flags.intent, {
+    intentExplicit: flags.intent !== undefined,
+    platformName,
+  });
+  if (step === "cloudflare" && !["fresh_setup", "resume_setup"].includes(routing.action)) {
+    throw codedError(routing.owner_message, routing.issue_code || "TECHNICIAN_ROUTE_BLOCKED");
   }
   if (!["tools", "cloudflare"].includes(step) && !summary.exists) {
     throw new Error("the install record is not ready yet. The Cloudflare step creates it, and then this step can continue.");
@@ -755,7 +1020,7 @@ export async function runTechnicianStep({
     }
 
     childEnv = technicianChildEnvironment(baseEnv, explicitEnv);
-    const commands = childCommands(step, manifestPath, flags, resolve(scriptPath));
+    const commands = childCommands(step, manifestPath, flags, resolve(scriptPath), routing);
     for (const args of commands) runOne(spawn, nodePath, args, childEnv);
     if (step === "smoke") {
       if (typeof runInstallSmoke !== "function") {

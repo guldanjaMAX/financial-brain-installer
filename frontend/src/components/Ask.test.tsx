@@ -31,6 +31,13 @@ describe("answer messages", () => {
     expect(notice).not.toContain("Nothing here means your brain is empty");
   });
 
+  it("states when neither search modality reached stored records", () => {
+    const notice = unavailableNotice("retrieval");
+    expect(notice).toContain("both exact-word search and meaning-based search failed");
+    expect(notice).toContain("no stored records were searched");
+    expect(notice).not.toContain("one part of search did not answer");
+  });
+
   it("gives a shared-access guest a safe retry and a named human path", () => {
     expect(SCOPED_SEARCH_UNAVAILABLE).toContain("does not mean the shared documents have no matches");
     expect(SCOPED_SEARCH_UNAVAILABLE).toContain("Nothing was changed");

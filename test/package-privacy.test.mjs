@@ -391,6 +391,7 @@ const expected = [
   "docs/decisions/002-paused-bootstrap-acceleration.md",
   "docs/decisions/003-staged-source-onboarding.md",
   "docs/decisions/004-version-scoped-release-scope.md",
+  "docs/decisions/005-phased-disposable-deployment-proof.md",
   "docs/decisions/README.md",
   "doctor.mjs",
   "eval/brain-client.mjs",
@@ -498,10 +499,23 @@ const expected = [
   // stores only hashes, counts, opaque provider version identities, and
   // reviewed resource-contract booleans; it owns no provider transport.
   "operations/disposable-recovery-deployment-receipt.mjs",
-  // Provider-neutral fixed-campaign orchestration core. It is not executable
-  // without an injected adapter and reserves owner-only ambiguity markers
-  // before that adapter can be created.
+  // Owner-only append journal for each fixed source/target mutation. Only
+  // request/result hashes and closed provider metadata cross this boundary.
+  "operations/disposable-recovery-deployment-journal.mjs",
+  // Narrow direct API transport for exact Worker version/deployment writes and
+  // bounded readback. It is not itself a field-run authorization surface.
+  "operations/cloudflare-disposable-deployment-transport.mjs",
+  // Fixed-campaign provider. It loads only package-pinned Worker modules,
+  // inherits the closed secret-name set, resolves the account token only from
+  // macOS Keychain, and uses the narrow transport above.
+  "operations/cloudflare-disposable-deployment-provider.mjs",
+  // Provider-neutral fixed-campaign orchestration core. It reserves
+  // owner-only ambiguity markers before its adapter can be created.
   "operations/disposable-recovery-field-deploy.mjs",
+  // Shipped split dispatcher. Preview is local-only, preflight is GET-only,
+  // and source A2 and target A4 mutations cannot be combined or exchange
+  // approvals. It accepts no credential or token argument and refuses Windows.
+  "operations/disposable-recovery-field-deploy-cli.mjs",
   // Exact 6,001-document field transport. It accepts no corpus/source selector,
   // reserves an owner-only pending receipt before credential/provider work,
   // and uses only the locked runtime plus manifest-bound disposable source.
@@ -753,6 +767,17 @@ const bundledConfig = Array.isArray(packageJson.bundleDependencies)
   : [];
 const expectedBundles = [...reviewedBundles.keys()].sort();
 const bundleConfigMismatch = !SCAN_ONLY && JSON.stringify(bundledConfig) !== JSON.stringify(expectedBundles);
+const expectedBins = {
+  brain: "./brain.mjs",
+  "brain-v048-disposable-deploy":
+    "./operations/disposable-recovery-field-deploy-cli.mjs",
+};
+const expectedLockBins = Object.fromEntries(Object.entries(expectedBins).map(
+  ([name, path]) => [name, path.replace(/^\.\//u, "")],
+));
+const binConfigMismatch = !SCAN_ONLY &&
+  (JSON.stringify(packageJson.bin) !== JSON.stringify(expectedBins) ||
+   JSON.stringify(lock.packages?.[""]?.bin) !== JSON.stringify(expectedLockBins));
 const dependencyMismatch = SCAN_ONLY ? [] : [...reviewedBundles].filter(([name, version]) =>
   packageJson.dependencies?.[name] !== version ||
   lock.packages?.[`node_modules/${name}`]?.version !== version ||
@@ -925,6 +950,18 @@ if (packageProbeDirectory) try {
       "operations",
       "provenance-target-cli.mjs",
     );
+    const disposableProviderPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "cloudflare-disposable-deployment-provider.mjs",
+    );
+    const disposableCliPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-field-deploy-cli.mjs",
+    );
     const skillModulePath = join(packageProbeDirectory, "package", "operations", "claude-skill.mjs");
     const skillSourcePath = join(
       packageProbeDirectory,
@@ -955,12 +992,32 @@ if (packageProbeDirectory) try {
               observerPath,
               targetRepairPath,
               targetCliPath,
+              disposableProviderPath,
+              disposableCliPath,
             ]),
           },
           timeout: 60_000,
         })
       : { status: null };
-    packedAdapterImportFailed = extracted.status !== 0 || importProbe.status !== 0;
+    const dispatcherHelpProbe = extracted.status === 0
+      ? spawnSync(process.execPath, [disposableCliPath, "help"], {
+          encoding: "utf-8",
+          env: {
+            PATH: process.env.PATH || "",
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
+          },
+          timeout: 60_000,
+        })
+      : { status: null, stdout: "" };
+    packedAdapterImportFailed = extracted.status !== 0 || importProbe.status !== 0 ||
+      dispatcherHelpProbe.status !== 0 ||
+      !dispatcherHelpProbe.stdout.includes("source-preflight") ||
+      !dispatcherHelpProbe.stdout.includes("--approve-a2") ||
+      !dispatcherHelpProbe.stdout.includes("target-preflight") ||
+      !dispatcherHelpProbe.stdout.includes("--approve-a4") ||
+      !dispatcherHelpProbe.stdout.includes("Windows is unsupported") ||
+      !dispatcherHelpProbe.stdout.includes("not field-proven");
     const skillInstallProbe = extracted.status === 0
       ? spawnSync(process.execPath, [
           "--input-type=module",
@@ -1008,7 +1065,8 @@ if (packageProbeDirectory) try {
 }
 
 if (packed.status !== 0 || (!SCAN_ONLY && !files.length) || forbidden.length || missing.length || unexpected.length ||
-    bundleConfigMismatch || dependencyMismatch.length || gitIgnoreFailures.length ||
+    bundleConfigMismatch || binConfigMismatch || dependencyMismatch.length ||
+    gitIgnoreFailures.length ||
     canaryFailures.length || trackedEnumerationFailed ||
     privateTextMatches.length || privatePathMatches.length ||
     packedAdapterImportFailed || packedSkillInstallFailed) {
@@ -1029,6 +1087,7 @@ if (packed.status !== 0 || (!SCAN_ONLY && !files.length) || forbidden.length || 
   if (missing.length) console.error(`required product paths are missing: ${missing.join(", ")}`);
   if (unexpected.length) console.error(`unreviewed package files would ship: ${unexpected.join(", ")}`);
   if (bundleConfigMismatch) console.error("bundleDependencies does not match the reviewed dependency set");
+  if (binConfigMismatch) console.error("package bin entries do not match the reviewed command set");
   if (dependencyMismatch.length) {
     console.error(`bundled dependency version or package mismatch: ${dependencyMismatch.map(([name]) => name).join(", ")}`);
   }
