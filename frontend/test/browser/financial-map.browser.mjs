@@ -377,7 +377,8 @@ try {
     await page.getByText(/not an empty review queue/).waitFor();
     const text = await page.locator("body").innerText();
     check("a missing Financial Map route is called unavailable and update-needed",
-      text.includes("ask the installer") && !text.includes("No Financial Map is waiting for review"));
+      text.toLowerCase().includes("ask the installer") &&
+      !text.includes("No Financial Map is waiting for review"));
     await page.close();
   }
 
