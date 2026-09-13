@@ -109,6 +109,6 @@
     "url": "git+https://github.com/guldanjaMAX/financial-brain-installer.git"
   },
   "devDependencies": {
-    "wrangler": "4.127.1"
+    "wrangler": "4.131.1"
   }
 }

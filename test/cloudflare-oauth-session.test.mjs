@@ -185,7 +185,7 @@ test("Wrangler OAuth environment is allowlisted and admits only mandatory keyrin
   assert.equal(Object.hasOwn(beforeSelection, "CLOUDFLARE_ACCOUNT_ID"), false);
 });
 
-test("profile authorization pins Wrangler 4.127.1, keyring, scopes, browser callback, and exact profile", () => {
+test("profile authorization pins Wrangler 4.131.1, keyring, scopes, browser callback, and exact profile", () => {
   const runner = processRecorder();
   const profile = createCloudflareOAuthProfile({
     installIdentity: INSTALL_ID,

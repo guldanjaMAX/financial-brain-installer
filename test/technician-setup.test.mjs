@@ -95,7 +95,7 @@ for (const platformName of ["darwin", "win32"]) test(`local tool readiness prove
       if (command === "powershell.exe") return { ok: true, out: "BRAIN_STANDARD_USER" };
       // 4.127+ is the floor now: isolated Wrangler auth profiles need it, and
       // the version the fixture reports is the version the check judges.
-      if (command === "npx") return { ok: true, out: "wrangler 4.127.1" };
+      if (command === "npx") return { ok: true, out: "wrangler 4.131.1" };
       if (args[0] === "--version") return { ok: true, out: "2.1.63 (Claude Code)" };
       if (args.join(" ") === "auth status") return { ok: true, out: "fixture status intentionally hidden" };
       return { ok: false, out: "unexpected fixture command" };
@@ -860,7 +860,7 @@ test("the technician tools contract cannot complete without the interactive Clau
       environment: { HOME: join(sandbox, "strict-tools-home"), PATH: "/usr/bin:/bin" },
       getEffectiveUserId: () => 501,
       runCommand: (command, args) => {
-        if (command === "npx") return { ok: true, out: "wrangler 4.127.1" };
+        if (command === "npx") return { ok: true, out: "wrangler 4.131.1" };
         if (args[0] === "--version") return { ok: true, out: "2.1.63 (Claude Code)" };
         if (args.join(" ") === "auth status") return { ok: true, out: "signed in" };
         return { ok: false, out: "unexpected fixture command" };

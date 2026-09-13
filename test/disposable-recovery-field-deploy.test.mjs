@@ -111,7 +111,7 @@ function bindingFixture(runId = "40000000-0000-4000-8000-000000000004") {
     target_manifest_fingerprint: digest("target-manifest"),
     target_resource_fingerprint: digest("target-resource"),
     runtime_contract_fingerprint: digest("runtime-contract"),
-    wrangler_version: "4.127.1",
+    wrangler_version: "4.131.1",
     wrangler_wrapper_sha256: digest("wrangler-wrapper"),
     wrangler_runtime_inventory_sha256: digest("wrangler-runtime"),
     wrangler_entrypoint_sha256: digest("wrangler-entrypoint"),

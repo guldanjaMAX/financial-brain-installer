@@ -35,7 +35,7 @@ import {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const IS_WINDOWS = process.platform === "win32";
-const WRANGLER_PACKAGE = "wrangler@4.127.1";
+const WRANGLER_PACKAGE = "wrangler@4.131.1";
 const FULL_PROFILE = Object.freeze([
   "full-suite",
   "frontend-test",

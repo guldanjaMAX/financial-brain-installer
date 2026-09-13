@@ -409,7 +409,7 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
     live_accounts_contacted: false,
     external_network_allowed: false,
     tooling: {
-      wrangler_package: "wrangler@4.127.1",
+      wrangler_package: "wrangler@4.131.1",
       wrangler_resolution: "locked_local_runtime_closure",
       wrangler_runtime_directory: LOCKED_WRANGLER_RUNTIME_DIRECTORY,
       wrangler_runtime_schema_version: lockedWranglerRuntime.schemaVersion,
@@ -1436,7 +1436,7 @@ function providerHarness({
   sourceVersionId = null,
   splitTargetDeployment = false,
   targetVersionId = null,
-  wranglerVersion = "4.127.1",
+  wranglerVersion = "4.131.1",
   sourceManifestFixture = sourceManifest,
   targetManifestFixture = targetManifest,
 } = {}) {
@@ -2855,7 +2855,7 @@ try {
     },
   });
   assert.equal(runtimeSmoke.status, 0, runtimeSmoke.stderr);
-  assert.equal(runtimeSmoke.stdout.trim(), "4.127.1");
+  assert.equal(runtimeSmoke.stdout.trim(), "4.131.1");
   rmSync(smokeRuntimePath, { recursive: true, force: true });
   writePrivateJson(
     fieldReceiptPath,

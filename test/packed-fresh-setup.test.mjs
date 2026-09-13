@@ -177,11 +177,11 @@ syncBuiltinESMExports();
     const fakeBin = join(sandbox, "fake-bin");
     mkdirSync(fakeBin, { recursive: true });
     if (IS_WIN) {
-      writeFileSync(join(fakeBin, "npx.cmd"), "@echo off\r\necho wrangler 4.127.1\r\n", "utf8");
+      writeFileSync(join(fakeBin, "npx.cmd"), "@echo off\r\necho wrangler 4.131.1\r\n", "utf8");
       writeFileSync(join(fakeBin, "claude.cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo 2.1.63 (Claude Code)& exit /b 0\r\nif \"%1 %2\"==\"auth status\" echo signed in& exit /b 0\r\nexit /b 1\r\n", "utf8");
     } else {
       const npx = join(fakeBin, "npx");
-      writeFileSync(npx, "#!/bin/sh\nprintf '%s\\n' 'wrangler 4.127.1'\n", "utf8");
+      writeFileSync(npx, "#!/bin/sh\nprintf '%s\\n' 'wrangler 4.131.1'\n", "utf8");
       chmodSync(npx, 0o755);
       const claude = join(fakeBin, "claude");
       writeFileSync(claude, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '2.1.63 (Claude Code)'; exit 0; fi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then printf '%s\\n' 'signed in'; exit 0; fi\nexit 1\n", "utf8");

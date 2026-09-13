@@ -244,7 +244,7 @@ posixTest("live Wrangler reads execute only pinned per-call wrapper and runtime 
           true,
         );
         return args[0] === "--version"
-          ? { status: 0, stdout: "4.127.1\n", stderr: "" }
+          ? { status: 0, stdout: "4.131.1\n", stderr: "" }
           : {
               status: 0,
               stdout: JSON.stringify([{ success: true, results: [{
@@ -305,7 +305,7 @@ posixTest("a per-call wrapper swap is refused after the child returns", async ()
       assertMaterializedWranglerRuntime: () => true,
       runWrangler: ({ command }) => {
         writeFileSync(command, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-        return { status: 0, stdout: "4.127.1\n", stderr: "" };
+        return { status: 0, stdout: "4.131.1\n", stderr: "" };
       },
     });
     await assert.rejects(

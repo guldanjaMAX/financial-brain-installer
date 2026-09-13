@@ -1540,7 +1540,7 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
     "wrangler_host_platform", "wrangler_host_arch", "wrangler_host_libc",
     "node_version", "node_executable_sha256",
   ], code);
-  if (receipt.tooling.wrangler_package !== "wrangler@4.127.1" ||
+  if (receipt.tooling.wrangler_package !== "wrangler@4.131.1" ||
       receipt.tooling.wrangler_resolution !== "locked_local_runtime_closure" ||
       receipt.tooling.wrangler_runtime_directory !== LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
       receipt.tooling.wrangler_runtime_schema_version !== wranglerRuntime.schemaVersion ||
