@@ -117,6 +117,16 @@ try {
   assert.doesNotMatch(moduleSource, /\bfetch\s*\(/, "support journal has no network call path");
   assert.doesNotMatch(moduleSource, /process\.(?:argv|env)/, "support journal never reads arguments or environment");
   assert.doesNotMatch(moduleSource.slice(0, 500), /telemetry/i);
+  assert.doesNotMatch(
+    moduleSource,
+    /sameReadableFileIdentity/,
+    "retention never treats size and mtime alone as proof that bytes stayed stable",
+  );
+  assert.match(
+    moduleSource,
+    /before = restrictWindowsSupportPath\([\s\S]*?sameFileIdentity\(before, opened\)[\s\S]*?sameFileIdentity\(opened, afterRead\)[\s\S]*?sameFileIdentity\(afterRead, current\)/,
+    "immutable reads establish a post-ACL baseline and preserve full identity through path readback",
+  );
 
   const publicCommands = [
     "setup", "ask", "assistant-repair", "provenance-repair", "doctor", "whatsnew", "verify", "provision", "deploy", "secrets", "financial-picture",

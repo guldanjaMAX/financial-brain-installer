@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   TeardownSafetyError,
@@ -36,7 +37,7 @@ const NAME = "brain-test-v048-field-source-recovery-gate-a48f1101";
 const TARGET_HASH = createHash("sha256").update(NAME).digest("hex");
 const NONCE = "ab".repeat(32);
 const NONCE_HASH = createHash("sha256").update(NONCE).digest("hex");
-const PROVIDER_PATH = new URL("../scripts/teardown-test-brain.mjs", import.meta.url).pathname;
+const PROVIDER_PATH = fileURLToPath(new URL("../scripts/teardown-test-brain.mjs", import.meta.url));
 const PROVIDER_SOURCE = readFileSync(PROVIDER_PATH, "utf8");
 const PROVIDER_HASH = createHash("sha256").update(PROVIDER_SOURCE).digest("hex");
 const PROVIDER_PROGRAM = Object.freeze({
@@ -680,7 +681,7 @@ test("caller-supplied nonce and token cannot reach provider mutation", async () 
 });
 
 test("CLI failures are one sanitized JSON code", () => {
-  const scriptPath = new URL("../scripts/teardown-test-brain.mjs", import.meta.url).pathname;
+  const scriptPath = fileURLToPath(new URL("../scripts/teardown-test-brain.mjs", import.meta.url));
   const privateNeedle = "private-account-id-and-https://example.invalid";
   const child = spawnSync(process.execPath, [
     scriptPath,

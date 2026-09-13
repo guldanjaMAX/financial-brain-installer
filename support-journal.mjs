@@ -515,6 +515,10 @@ function readImmutableEvent(path, expectedNameId, expectedUid) {
   let before = lstatIfPresent(path);
   if (!before) return null;
   verifyFile(path, "support journal event", { stat: before, expectedUid });
+  // Establish the read baseline after Windows DACL hardening. icacls updates
+  // NTFS ctime even when it leaves the file bytes alone, so comparing against
+  // the earlier lstat would either reject every Windows event or require a
+  // weakened identity check that could miss a same-length concurrent write.
   before = restrictWindowsSupportPath(path, "support journal event", before);
   if (before.size === 0 || before.size > MAX_CANONICAL_LINE_BYTES) return null;
   let descriptor;
@@ -522,6 +526,7 @@ function readImmutableEvent(path, expectedNameId, expectedUid) {
     descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
     const opened = fstatSync(descriptor);
     verifyFile(path, "support journal event", { stat: opened, expectedUid });
+    if (!sameFileIdentity(before, opened)) return null;
     if (opened.size === 0 || opened.size > MAX_CANONICAL_LINE_BYTES) return null;
     const buffer = Buffer.alloc(opened.size);
     let offset = 0;
@@ -531,12 +536,19 @@ function readImmutableEvent(path, expectedNameId, expectedUid) {
       offset += count;
     }
     if (offset !== buffer.length) return null;
+    const afterRead = fstatSync(descriptor);
+    verifyFile(path, "support journal event", { stat: afterRead, expectedUid });
+    if (!sameFileIdentity(opened, afterRead)) return null;
     const content = buffer.toString("utf8");
     if (!content.endsWith("\n") || content.slice(0, -1).includes("\n")) return null;
     let parsed;
     try { parsed = parseCanonicalEvent(JSON.parse(content)); } catch { return null; }
     if (!parsed || parsed.event_id !== expectedNameId || canonicalLine(parsed) !== content) return null;
-    return parsed;
+    const current = lstatIfPresent(path);
+    if (!current) return null;
+    verifyFile(path, "support journal event", { stat: current, expectedUid });
+    if (!sameFileIdentity(afterRead, current)) return null;
+    return { event: parsed, identity: current };
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
@@ -558,8 +570,8 @@ function loadEvents(paths, expectedUid) {
     verifyFile(path, "support journal event", { stat: entry, expectedUid });
     const match = EVENT_FILE_RE.exec(name);
     if (!match) continue;
-    const event = readImmutableEvent(path, match[1], expectedUid);
-    if (event) events.push(event);
+    const result = readImmutableEvent(path, match[1], expectedUid);
+    if (result) events.push(result.event);
   }
   return events;
 }
@@ -603,16 +615,9 @@ function enforcePhysicalRetention(paths, expectedUid, currentEvent, options) {
     const match = EVENT_FILE_RE.exec(name);
     if (!match) continue;
     const path = join(paths.eventsDir, name);
-    const before = lstatIfPresent(path);
-    if (!before) continue;
-    verifyFile(path, "support journal retention event", { stat: before, expectedUid });
-    const event = readImmutableEvent(path, match[1], expectedUid);
-    if (!event) continue;
-    const after = lstatIfPresent(path);
-    if (!after) continue;
-    verifyFile(path, "support journal retention event", { stat: after, expectedUid });
-    if (!sameFileIdentity(before, after)) continue;
-    candidates.push({ path, event, identity: after });
+    const result = readImmutableEvent(path, match[1], expectedUid);
+    if (!result) continue;
+    candidates.push({ path, event: result.event, identity: result.identity });
   }
 
   const ordered = candidates.sort((left, right) =>

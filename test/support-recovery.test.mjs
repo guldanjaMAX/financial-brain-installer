@@ -50,7 +50,7 @@ test("index recovery guidance chooses update or drain from the current Brain sta
   for (const code of ["INDEX_WRITE_FAILED", "VECTOR_DRAIN_FAILED"]) {
     const recovery = supportRecovery(code);
     assert.equal(recovery.retry, "review_first");
-    const rendered = renderSupportRecovery(recovery);
+    const rendered = renderCliCommands(renderSupportRecovery(recovery));
     assert.ok(rendered.includes(renderCliCommands(
       "Run brain health with the same manifest and read its current status.",
     )));
