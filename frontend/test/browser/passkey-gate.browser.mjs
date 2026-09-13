@@ -41,7 +41,11 @@ try {
   }));
 
   await page.goto(new URL("/test/browser/fixtures/passkey-gate.html", harness.origin).href);
-  await page.getByRole("heading", { name: "Morgan, your brain is ready", exact: true }).waitFor();
+  await harness.waitForBrowserBoot(
+    page,
+    page.getByRole("heading", { name: "Morgan, your brain is ready", exact: true }),
+    "owner passkey fixture",
+  );
 
   check("the owner sees what happens before the secure prompt",
     await page.getByRole("heading", { name: "Here is what happens next", exact: true }).isVisible()
@@ -100,7 +104,11 @@ try {
     },
   }));
   await documentPage.goto(new URL("/test/browser/fixtures/passkey-gate.html?kind=document", harness.origin).href);
-  await documentPage.getByRole("heading", { name: "Set up your shared document access", exact: true }).waitFor();
+  await harness.waitForBrowserBoot(
+    documentPage,
+    documentPage.getByRole("heading", { name: "Set up your shared document access", exact: true }),
+    "document passkey fixture",
+  );
   const documentText = await documentPage.locator("body").innerText();
   check("the mobile recipient sees exact-document scope before the secure prompt",
     documentText.includes("only the exact documents they chose")
@@ -139,6 +147,11 @@ try {
     });
   });
   await unavailablePage.goto(new URL("/test/browser/fixtures/passkey-gate.html", harness.origin).href);
+  await harness.waitForBrowserBoot(
+    unavailablePage,
+    unavailablePage.getByRole("button", { name: "Create my owner passkey", exact: true }),
+    "unavailable passkey fixture",
+  );
   await unavailablePage.getByRole("button", { name: "Create my owner passkey", exact: true }).click();
   await unavailablePage.getByText(/No passkey was enrolled in this Brain, and nothing changed here/).waitFor();
   const unavailableText = await unavailablePage.locator("body").innerText();

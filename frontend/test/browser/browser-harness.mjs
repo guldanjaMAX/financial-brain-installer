@@ -19,6 +19,8 @@ import { chromium } from "playwright";
 // failed on pull_request.
 const assertionTimeoutMs = Number(process.env.BRAIN_BROWSER_TIMEOUT_MS)
   || (process.env.CI ? 45_000 : 10_000);
+const bootDiagnosticsByPage = new WeakMap();
+const maxBootDiagnosticEvents = 8;
 
 export async function startBrowserHarness() {
   const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -47,6 +49,7 @@ export async function startBrowserHarness() {
       async newPage(options = {}) {
         const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, ...options });
         page.setDefaultTimeout(assertionTimeoutMs);
+        installBootDiagnostics(page, origin);
         // Nothing in this fixture needs a provider, analytics, external fonts
         // or the owner's browser session. API routes are mocked by each test.
         await page.route("**/*", route => {
@@ -55,6 +58,19 @@ export async function startBrowserHarness() {
           return route.continue();
         });
         return page;
+      },
+      async waitForBrowserBoot(page, ready, label) {
+        try {
+          await ready.waitFor();
+        } catch (error) {
+          const diagnostic = await browserBootDiagnostic(page, label);
+          const line = `BROWSER_BOOT_DIAGNOSTIC ${JSON.stringify(diagnostic)}`;
+          if (error instanceof Error) {
+            error.stack = `${error.stack || error.message}\n${line}`;
+            throw error;
+          }
+          throw new Error(line, { cause: error });
+        }
       },
       async close() {
         try { await browser.close(); }
@@ -77,6 +93,71 @@ export async function startBrowserHarness() {
     await rm(cacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     throw error;
   }
+}
+
+function installBootDiagnostics(page, origin) {
+  const state = { events: [], dropped: 0 };
+  bootDiagnosticsByPage.set(page, state);
+  const record = (event) => {
+    if (state.events.length < maxBootDiagnosticEvents) state.events.push(event);
+    else state.dropped += 1;
+  };
+  // CI logs are public. Record only structural state, never browser-provided
+  // message text that could contain owner data, credentials, or local paths.
+  page.on("pageerror", () => record({ kind: "page_error" }));
+  page.on("console", message => {
+    if (!["error", "warning"].includes(message.type())) return;
+    record({ kind: `console_${message.type()}` });
+  });
+  page.on("requestfailed", request => {
+    const url = safeSameOriginPath(request.url(), origin);
+    if (!url) return;
+    record({ kind: "request_failed", path: url });
+  });
+  page.on("response", response => {
+    if (response.status() < 400) return;
+    const url = safeSameOriginPath(response.url(), origin);
+    if (url) record({ kind: "http_response", path: url, status: response.status() });
+  });
+  page.on("crash", () => record({ kind: "page_crash" }));
+}
+
+async function browserBootDiagnostic(page, label) {
+  const recorded = bootDiagnosticsByPage.get(page) || { events: [], dropped: 0 };
+  let documentState = null;
+  try {
+    documentState = await bounded(page.evaluate(() => {
+      const root = document.querySelector("#root");
+      return {
+        ready_state: document.readyState,
+        path: location.pathname,
+        visibility_state: document.visibilityState,
+        root_present: Boolean(root),
+        root_child_count: root?.childElementCount ?? null,
+        root_text_characters: root?.textContent?.length ?? null,
+        body_text_characters: document.body?.textContent?.length ?? null,
+        script_paths: [...document.scripts].slice(0, 4).map(script => {
+          try { return new URL(script.src, location.href).pathname; }
+          catch { return "<invalid>"; }
+        }),
+      };
+    }), "Browser boot diagnostic snapshot timed out", 2_000);
+  } catch (error) {
+    documentState = { snapshot_error: true };
+  }
+  return {
+    label: String(label).slice(0, 120),
+    document: documentState,
+    events: recorded.events,
+    dropped_events: recorded.dropped,
+  };
+}
+
+function safeSameOriginPath(value, origin) {
+  try {
+    const url = new URL(value);
+    return url.origin === origin ? url.pathname : null;
+  } catch { return null; }
 }
 
 // Compile each fixture once, off the clock, so no assertion pays for it.
