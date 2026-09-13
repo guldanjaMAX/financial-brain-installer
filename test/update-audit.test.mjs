@@ -210,9 +210,9 @@ assert.deepEqual(timeoutSelections, [
     path: "test/cloudflare-recovery-adapter-extra.test.mjs",
     timeout: DEFAULT_REGRESSION_TIMEOUT_MS,
   },
-], "only the exact heavy adapter proof gets the reviewed ten-minute bound");
+], "only the exact heavy adapter proof gets the reviewed fifteen-minute bound");
 assert.equal(DEFAULT_REGRESSION_TIMEOUT_MS, 300_000);
-assert.equal(CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS, 600_000);
+assert.equal(CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS, 900_000);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: null, signal: "SIGTERM" }))[0].passed, false);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"], testPlatform: "win32" }], () => { throw new Error("must not run on this host"); }, "darwin")[0].skipped, true);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: 0, error: new Error("synthetic timeout") }))[0].passed, false);

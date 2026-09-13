@@ -21,14 +21,14 @@ const EXPECTED_FIXTURE_SHA256 = "7e8325d3014102e3509fd2f5dcc7ac78aded99dffac18c8
 const FIXED_TIME = "2026-09-12T12:00:00.000Z";
 const DIRECT_D1_FINGERPRINT = "a".repeat(64);
 const SOURCE_VERSION = "10000000-0000-4000-8000-000000000001";
-const PAUSED_VERSION = "20000000-0000-4000-8000-000000000002";
-const ACTIVE_VERSION = "30000000-0000-4000-8000-000000000003";
+const SOURCE_PHASE_RUN_ID = "20000000-0000-4000-8000-000000000002";
+const SOURCE_DEPLOYMENT_ID = "30000000-0000-4000-8000-000000000003";
 const SEED_BINDING_BASE = Object.freeze({
-  schema_version: 3,
+  schema_version: 4,
   candidate_sha: "1".repeat(40),
   candidate_tree_sha: "2".repeat(40),
   field_receipt_sha256: "3".repeat(64),
-  deployment_receipt_sha256: "d".repeat(64),
+  source_phase_receipt_sha256: "d".repeat(64),
   package_sha256: "4".repeat(64),
   package_file_count: 541,
   execution_inventory_sha256: "5".repeat(64),
@@ -38,14 +38,11 @@ const SEED_BINDING_BASE = Object.freeze({
   content_fingerprint_helper_sha256: "9".repeat(64),
   source_manifest_fingerprint: "a".repeat(64),
   source_resource_fingerprint: "b".repeat(64),
-  target_manifest_fingerprint: "1".repeat(64),
-  target_resource_fingerprint: "2".repeat(64),
+  source_phase_run_id: SOURCE_PHASE_RUN_ID,
+  source_a2_approval_fingerprint: "1".repeat(64),
   source_active_version_id: SOURCE_VERSION,
   source_script_etag: "3".repeat(64),
-  target_paused_version_id: PAUSED_VERSION,
-  target_paused_script_etag: "target-paused-etag-v048",
-  target_active_version_id: ACTIVE_VERSION,
-  target_active_script_etag: "target-active-etag-v048",
+  source_deployment_id: SOURCE_DEPLOYMENT_ID,
   runtime_contract_fingerprint: "c".repeat(64),
   wrangler_wrapper_sha256: "d".repeat(64),
   wrangler_runtime_inventory_sha256: "e".repeat(64),
@@ -60,19 +57,14 @@ const SEED_BINDING = Object.freeze({
 
 function deploymentProof() {
   return {
-    deployment_receipt_sha256: SEED_BINDING.deployment_receipt_sha256,
+    source_phase_receipt_sha256: SEED_BINDING.source_phase_receipt_sha256,
+    source_phase_run_id: SEED_BINDING.source_phase_run_id,
+    source_a2_approval_fingerprint: SEED_BINDING.source_a2_approval_fingerprint,
     source_resource_fingerprint: SEED_BINDING.source_resource_fingerprint,
     source_active_version_id: SOURCE_VERSION,
     source_script_etag: SEED_BINDING.source_script_etag,
+    source_deployment_id: SEED_BINDING.source_deployment_id,
     source_active_traffic_percent: 100,
-    target_resource_fingerprint: SEED_BINDING.target_resource_fingerprint,
-    target_paused_version_id: PAUSED_VERSION,
-    target_paused_script_etag: SEED_BINDING.target_paused_script_etag,
-    target_active_version_id: ACTIVE_VERSION,
-    target_active_script_etag: SEED_BINDING.target_active_script_etag,
-    target_paused_traffic_percent: 100,
-    target_active_not_promoted: true,
-    provider_readback: true,
   };
 }
 
@@ -166,6 +158,25 @@ function completeInventory(fixture = disposableRecoveryFixture()) {
       chunk_counts_exact: true,
       total: 6_001,
       embedded: 6_001,
+    }],
+  };
+}
+
+function prefixInventory(documents, fixture = disposableRecoveryFixture()) {
+  return {
+    version: "0.4.8",
+    backend: "d1",
+    vector_drain_mode: "active",
+    rows: [{
+      source_type: fixture[0].source_type,
+      documents,
+      logical_documents: documents,
+      stored_documents: documents,
+      document_counts_exact: true,
+      chunks: documents,
+      chunk_counts_exact: true,
+      total: documents,
+      embedded: 0,
     }],
   };
 }
@@ -388,6 +399,155 @@ test("projection settling and direct D1 proof occur only after the exact replay"
   assert.equal(receipt.d1.content_fingerprint, DIRECT_D1_FINGERPRINT);
 });
 
+test("resume continues at the exact confirmed batch prefix and still replays the full fixture", async () => {
+  let inventories = 0;
+  let calls = 0;
+  let firstCreatedOrdinal = null;
+  const receipt = await seedDisposableRecoveryFixtureCore({
+    binding: SEED_BINDING,
+    resume: {
+      opening_empty_verified: true,
+      verified_completed_batch_prefix: 2,
+      verified_completed_document_prefix: 100,
+      verified_replay_batch_prefix: 0,
+      verified_replay_document_prefix: 0,
+    },
+    readOpeningDirectD1: async () => ({
+      document_count: 100,
+      chunk_count: 100,
+      fts_count: 100,
+      pending_outbox: 100,
+      failed_vectors: 0,
+    }),
+    verifyDeployment: async () => deploymentProof(),
+    readInventory: async () => (++inventories === 1
+      ? prefixInventory(100)
+      : completeInventory()),
+    ingestBatch: async (documents) => {
+      calls += 1;
+      const created = calls <= DISPOSABLE_RECOVERY_SEED_BATCHES - 2;
+      if (created && firstCreatedOrdinal === null) {
+        firstCreatedOrdinal = documents[0].metadata.ordinal;
+      }
+      return fakeBatchReceipt(documents, created ? "created" : "unchanged");
+    },
+    settleProjection: async () => {},
+    readContentFingerprint: async () => directD1Proof(),
+    readIndependentProjection: async () => ({
+      vectorize_vectors: 6_001,
+      vector_dimensions: 768,
+      vector_metric: "cosine",
+      quarantined_vectors: 0,
+      independent_control_plane: true,
+    }),
+    runRetrievalChecks: async () => ({
+      supported_case_cited: true,
+      unsupported_case_refused: true,
+    }),
+    now: () => FIXED_TIME,
+  });
+  assert.equal(firstCreatedOrdinal, 100);
+  assert.equal(calls, (DISPOSABLE_RECOVERY_SEED_BATCHES - 2) + DISPOSABLE_RECOVERY_SEED_BATCHES);
+  assert.equal(receipt.ingest.created_documents, 6_001);
+  assert.equal(receipt.verification_replay.unchanged_documents, 6_001);
+});
+
+test("an interrupted replay repeats all 121 batches before issuing proof", async () => {
+  let replayCalls = 0;
+  let firstReplayedOrdinal = null;
+  const receipt = await seedDisposableRecoveryFixture({
+    resume: {
+      opening_empty_verified: true,
+      verified_completed_batch_prefix: DISPOSABLE_RECOVERY_SEED_BATCHES,
+      verified_completed_document_prefix: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      verified_replay_batch_prefix: 2,
+      verified_replay_document_prefix: 100,
+    },
+    readOpeningDirectD1: async () => ({
+      document_count: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      chunk_count: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      fts_count: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      pending_outbox: 0,
+      failed_vectors: 0,
+    }),
+    readInventory: async () => completeInventory(),
+    ingestBatch: async (documents) => {
+      replayCalls += 1;
+      firstReplayedOrdinal ??= documents[0].metadata.ordinal;
+      return fakeBatchReceipt(documents, "unchanged");
+    },
+    now: () => FIXED_TIME,
+  });
+
+  assert.equal(firstReplayedOrdinal, 0);
+  assert.equal(replayCalls, DISPOSABLE_RECOVERY_SEED_BATCHES);
+  assert.equal(receipt.verification_replay.batches, DISPOSABLE_RECOVERY_SEED_BATCHES);
+  assert.equal(receipt.verification_replay.unchanged_documents, DISPOSABLE_RECOVERY_SEED_DOCUMENTS);
+});
+
+test("an interrupted replay restarts at zero and catches count-stable prefix tampering", async () => {
+  let firstReplayedOrdinal = null;
+  let replayCalls = 0;
+  let fingerprintReads = 0;
+
+  await assert.rejects(seedDisposableRecoveryFixtureCore({
+    binding: SEED_BINDING,
+    resume: {
+      opening_empty_verified: true,
+      verified_completed_batch_prefix: DISPOSABLE_RECOVERY_SEED_BATCHES,
+      verified_completed_document_prefix: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      verified_replay_batch_prefix: 2,
+      verified_replay_document_prefix: 100,
+    },
+    readOpeningDirectD1: async () => ({
+      document_count: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      chunk_count: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      fts_count: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      pending_outbox: 0,
+      failed_vectors: 0,
+    }),
+    verifyDeployment: async () => deploymentProof(),
+    readInventory: async () => completeInventory(),
+    ingestBatch: async (documents) => {
+      replayCalls += 1;
+      firstReplayedOrdinal ??= documents[0].metadata.ordinal;
+      if (documents[0].metadata.ordinal !== 0) {
+        return fakeBatchReceipt(documents, "unchanged");
+      }
+      const receipt = fakeBatchReceipt(documents, "unchanged");
+      receipt.updated = 1;
+      receipt.unchanged -= 1;
+      receipt.results[0] = {
+        ...receipt.results[0],
+        status: "updated",
+        chunks: 1,
+      };
+      return receipt;
+    },
+    settleProjection: async () => {},
+    readContentFingerprint: async () => {
+      fingerprintReads += 1;
+      return directD1Proof();
+    },
+    readIndependentProjection: async () => ({
+      vectorize_vectors: 6_001,
+      vector_dimensions: 768,
+      vector_metric: "cosine",
+      quarantined_vectors: 0,
+      independent_control_plane: true,
+    }),
+    runRetrievalChecks: async () => ({
+      supported_case_cited: true,
+      unsupported_case_refused: true,
+    }),
+  }), (error) => error instanceof DisposableRecoverySeedError &&
+    error.code === "ingest_receipt_rejected");
+
+  assert.equal(firstReplayedOrdinal, 0);
+  assert.equal(replayCalls, 1);
+  assert.equal(fingerprintReads, 0);
+});
+
 test("a stale 3,201 contract or substituted direct D1 proof is refused", async () => {
   let inventories = 0;
   let batches = 0;
@@ -535,7 +695,7 @@ test("CLI exposes a no-write aggregate plan and refuses execution-shaped argumen
   assert.equal(planned.status, 0, planned.stderr);
   const plan = JSON.parse(planned.stdout);
   assert.equal(plan.writes, false);
-  assert.equal(plan.schema_version, 2);
+  assert.equal(plan.schema_version, 3);
   assert.equal(plan.fixture_documents, 6_001);
   assert.equal(plan.fixture_sha256, EXPECTED_FIXTURE_SHA256);
 

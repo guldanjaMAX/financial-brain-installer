@@ -94,7 +94,7 @@ Fifteen minutes each, one week apart. Same time each week. They are short on pur
 
 | Time | What happens |
 |---|---|
-| 0:00 to 0:08 | Start with `/optimize`; review any real issue the owner brings, or offer one evidence-derived check. Zero prepared examples is fine |
+| 0:00 to 0:08 | Start at `https://financialbrain.ai/optimize` and give its request to the connected assistant; review any real issue the owner brings, or offer one evidence-derived check. This is assistant-launch guidance, not a signed-in dashboard. Zero prepared examples is fine |
 | 0:08 to 0:13 | Decide whether the result is fixable or an honest gap in the records |
 | 0:13 to 0:15 | Choose one next action, or defer it |
 

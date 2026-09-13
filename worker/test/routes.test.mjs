@@ -17,6 +17,7 @@ const isUnavailableRefusal = (body) =>
 function mkEnv(rows, {
   vectorIds = [],
   vectorThrows = false,
+  keywordThrows = false,
   countRow = null,
   outboxRow = null,
   readinessRow = null,
@@ -39,6 +40,9 @@ function mkEnv(rows, {
           _args: [],
           bind(...b) { bound = b; this._args = b; seen.binds.push(b); return this; },
           all: async () => {
+            if (keywordThrows && /chunks_fts MATCH/.test(sql)) {
+              throw new Error("synthetic keyword query failure");
+            }
             if (/unchunked-tax-document-candidates/.test(sql)) {
               return { results: unchunkedRows };
             }
@@ -367,16 +371,135 @@ const call = (env, path) => {
 {
   const { env } = mkEnv([ROW]);
   check("supported filters are never flagged", unsupportedFilters({ client: "A", top_folder: "Clients", platform: "imessage", from: "2025-01-01" }).length === 0);
+  check("schema-skewed filters are named instead of disappearing",
+    unsupportedFilters({ year: 2025, role: "owner" }).join(",") === "role,year",
+    JSON.stringify(unsupportedFilters({ year: 2025, role: "owner" })));
+}
+
+/* ---- malformed or unknown scope is refused before the first retrieval read ---- */
+{
+  for (const field of ["year", "role"]) {
+    const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+    const route = field === "year" ? "/api/rag/unified" : "/api/rag/think";
+    const response = await call(env, `${route}?q=retainer&${field}=2025`);
+    const body = await response.json();
+    check(`unknown ${field} scope is refused rather than broadened`,
+      response.status === 400 && body.code === "unsupported_retrieval_parameter" &&
+        seen.sql.length === 0 && seen.vectorQueries.length === 0,
+      JSON.stringify({ status: response.status, body, seen }));
+  }
+}
+{
+  for (const [label, path, code] of [
+    ["impossible calendar day", "/api/rag/unified?q=retainer&from=2025-02-30", "invalid_date_filter"],
+    ["ambiguous date", "/api/rag/unified?q=retainer&to=03%2F04%2F2025", "invalid_date_filter"],
+    ["reversed date range", "/api/rag/unified?q=retainer&from=2025-12-31&to=2025-01-01", "reversed_date_range"],
+  ]) {
+    const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+    const response = await call(env, path);
+    const body = await response.json();
+    check(`${label} is refused before retrieval`,
+      response.status === 400 && body.code === code &&
+        seen.sql.length === 0 && seen.vectorQueries.length === 0,
+      JSON.stringify({ status: response.status, body, seen }));
+  }
+}
+{
+  const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  const response = await worker.fetch(new Request("https://b.example/api/rag/unified", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+    body: JSON.stringify({ q: "retainer", client: { name: "Acme" } }),
+  }), env, { waitUntil() {}, passThroughOnException() {} });
+  const body = await response.json();
+  check("schema-skewed filter types are refused rather than ignored",
+    response.status === 400 && body.code === "invalid_retrieval_parameter_type" &&
+      body.parameter === "client" && seen.sql.length === 0 && seen.vectorQueries.length === 0,
+    JSON.stringify({ status: response.status, body, seen }));
+}
+{
+  const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  const response = await worker.fetch(new Request("https://b.example/api/rag/think", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+    body: JSON.stringify({ q: "retainer", client: null }),
+  }), env, { waitUntil() {}, passThroughOnException() {} });
+  const body = await response.json();
+  check("an explicit null scope is refused rather than becoming an unfiltered search",
+    response.status === 400 && body.code === "invalid_filter_value" &&
+      body.parameter === "client" && seen.sql.length === 0 && seen.vectorQueries.length === 0,
+    JSON.stringify({ status: response.status, body, seen }));
 }
 
 /* ---- vector down is a degraded answer, not an empty corpus ---- */
 {
-  const { env } = mkEnv([ROW], { vectorIds: [] });
+  const { env } = mkEnv([ROW], { vectorIds: [], vectorThrows: true });
   const t = await (await call(env, "/api/rag/think?q=retainer")).json();
   check("vector outage surfaces as a gap", (t.gaps || []).some((g) => g.type === "vector_unavailable"), JSON.stringify(t.gaps));
+  check("vector outage names the failed modality rather than inferring from row counts",
+    t.degraded === "vector" && t.degraded_reason === "vector-query-failed", JSON.stringify(t));
+  check("vector query failure does not tell the owner that a healthy provider is merely building",
+    t.gaps?.some((gap) => gap.type === "vector_unavailable" &&
+      /meaning-based search failed/i.test(gap.detail || "") &&
+      !/index is still building/i.test(gap.detail || "")),
+    JSON.stringify(t.gaps));
   check("and results still come back", (t.results || []).length === 1);
   check("Workers AI writes the cited answer without a vendor key", /Cloudflare answer/.test(t.answer || ""), JSON.stringify(t));
   check("and reports the Cloudflare model", String(t.model || "").startsWith("@cf/"), String(t.model));
+}
+
+/* ---- explicit modality outcomes, not empty-list guesses, drive degradation ---- */
+{
+  const { env } = mkEnv([ROW], {
+    keywordThrows: true,
+    vectorIds: [ROW.chunk_uid],
+  });
+  const b = await (await call(env, "/api/rag/unified?q=retainer")).json();
+  check("keyword failure preserves semantic evidence with an exact FTS degradation",
+    b.results?.length === 1 && b.degraded === "fts" && b.degraded_reason === "keyword-query-failed",
+    JSON.stringify(b));
+}
+{
+  const { env } = mkEnv([ROW], {
+    keywordThrows: true,
+    vectorIds: [ROW.chunk_uid],
+  });
+  const b = await (await call(env, "/api/rag/think?q=retainer")).json();
+  check("think explains the recall lost when only keyword search fails",
+    b.results?.length === 1 && b.degraded === "fts" &&
+      b.gaps?.some((gap) => gap.type === "keyword_unavailable" &&
+        /exact names, identifiers, and phrases may be missing/i.test(gap.detail || "")),
+    JSON.stringify(b));
+}
+{
+  const { env } = mkEnv([], { keywordThrows: true, vectorThrows: true });
+  const b = await (await call(env, "/api/rag/think?q=retainer")).json();
+  check("both failed modalities can never become no_results",
+    b.status === "search_unavailable" && b.degraded === "retrieval" &&
+      b.degraded_reason === "keyword-and-vector-query-failed" &&
+      !b.gaps?.some((gap) => gap.type === "no_results"),
+    JSON.stringify(b));
+  check("both-modality failure tells the owner that no stored records were searched",
+    /both keyword search and meaning-based search failed/i.test(b.notice || ""),
+    String(b.notice));
+}
+{
+  const { env } = mkEnv([], { keywordThrows: true, vectorThrows: true });
+  const b = await (await call(env, "/api/rag/unified?q=retainer")).json();
+  check("unified also refuses to format two query failures as no_results",
+    b.status === "search_unavailable" && b.degraded === "retrieval" &&
+      b.degraded_reason === "keyword-and-vector-query-failed" && b.results?.length === 0 &&
+      !b.gaps?.some((gap) => gap.type === "no_results"),
+    JSON.stringify(b));
+}
+{
+  const { env } = mkEnv([], { vectorIds: [] });
+  const b = await (await call(env, "/api/rag/think?q=retainer")).json();
+  check("two successful zero-result modalities remain the honest no-results path",
+    b.degraded === undefined && b.status === undefined &&
+      b.gaps?.some((gap) => gap.type === "no_results") &&
+      !b.gaps?.some((gap) => gap.type === "search_unavailable"),
+    JSON.stringify(b));
 }
 
 /* A partially populated vector index is also degraded. A non-empty semantic
@@ -634,6 +757,7 @@ const call = (env, path) => {
   };
   const { env } = mkEnv([stale, billingOnly], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -664,6 +788,7 @@ const call = (env, path) => {
   });
   const answerEnv = (row, answer) => mkEnv([row], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -774,6 +899,7 @@ const call = (env, path) => {
   };
   const answerEnv = (answer, evidence) => mkEnv([stale, current], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -814,6 +940,7 @@ const call = (env, path) => {
   };
   const { env } = mkEnv([unreliable], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -851,6 +978,7 @@ const call = (env, path) => {
   const gatePrompts = [];
   const { env } = mkEnv([stale, current], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -878,6 +1006,7 @@ const call = (env, path) => {
   let modelCalls = 0;
   const { env } = mkEnv([ROW], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -901,6 +1030,7 @@ const call = (env, path) => {
   const second = { ...ROW, chunk_uid: "meeting:456#0", doc_uid: "meeting:456", source_id: "456", title: "Other record", text: "An unrelated extra claim." };
   const { env } = mkEnv([ROW, second], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -950,10 +1080,8 @@ const call = (env, path) => {
   });
   const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
   const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
-  check("a D1-injected matching filename cannot override a different taxpayer in the native body",
-    body.answer === "The documents do not answer the question." &&
-      body.citations.length === 0 &&
-      body.evidence_gate?.supported === false,
+  check("a D1-injected matching filename fails closed without claiming no evidence",
+    isUnavailableRefusal(body),
     JSON.stringify(body));
   check("the misnamed same-form return fails the deterministic entity boundary",
     /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
@@ -1418,6 +1546,7 @@ const zeroChunkExpectedReturn = {
     const evidence = rows.map((_, index) => index + 1);
     return mkEnv(rows, {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       BRAIN_OWNER: "Morgan Diaz",
       AI: {
@@ -1459,6 +1588,7 @@ const zeroChunkExpectedReturn = {
   }];
   const { env } = mkEnv(rows, {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       BRAIN_OWNER: "Morgan Diaz",
       AI: {
@@ -4181,7 +4311,7 @@ process.exit(fail ? 1 : 0);
     Array.isArray(body.confidence?.basis) && body.confidence.basis.some((b) => /^answer is partial/.test(b)) && body.confidence.percent < 75, JSON.stringify(body.confidence));
 }
 
-/* ---- unsupported still produces the verbatim refusal, with its reason beside it ---- */
+/* ---- unsupported generated text stays distinct from a true absence refusal ---- */
 {
   const rows = [{ ...ROW, chunk_uid: "policy:1#0", doc_uid: "policy:1", title: "Other Co handbook", client: null,
     text: "Other Co offers twelve weeks of parental leave." }];
@@ -4191,8 +4321,8 @@ process.exit(fail ? 1 : 0);
       ? ({ response: { supported: false, complete: false, evidence: [], reason: "cites another company's policy" }, usage: {} })
       : ({ response: "You offer twelve weeks of parental leave [1].", usage: {} }) } } });
   const body = await (await call(env, "/api/rag/think?q=What+is+our+parental+leave+policy")).json();
-  check("true absence keeps the verbatim refusal sentence",
-    body.answer === "The documents do not answer the question." && body.citations?.length === 0, JSON.stringify(body));
+  check("unsupported generated text fails closed without claiming no evidence",
+    isUnavailableRefusal(body), JSON.stringify(body));
   check("the refusal reason rides beside the sentence, never inside it",
     /another company/.test(body.evidence_gate?.reason || "") && body.evidence_gate?.partial !== true, JSON.stringify(body.evidence_gate));
 }

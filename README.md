@@ -126,13 +126,29 @@ synthetic setup, folder, connector, migration, search, owner-action, access, and
 technician scenarios. The final receipt separates automatic proof from the
 remaining live Cloudflare, provider, and physical-device checks.
 
-For an install day, `brain technician <manifest>` prints the eight-step read-only
-plan. Add `--json` when a local coding agent is guiding the session. Run one
+The package also ships the internal, fixed-campaign dispatcher
+`brain-v048-disposable-deploy`. Run it with `help` to see the separate source
+preview, source preflight, source A2 mutation, target preview, target preflight,
+and target A4 mutation commands. Preview has no network or write capability;
+preflight uses Cloudflare GETs only and writes one owner-private receipt. The
+two mutation commands cannot be combined or exchange approval fingerprints.
+They accept no token option, resolve the exact account token only from macOS
+Keychain, and refuse Windows. The entry point is packaged and fixture-tested,
+but remains **not field-proven** until the exact disposable campaign passes.
+
+For an install day, first select one explicit setup intent: `first_brain`,
+`existing_this_computer`, `existing_new_computer`, `resume_interrupted`, or
+`unsure`. Never infer `first_brain` from a missing file. `brain technician
+<manifest> --intent <choice>` prints the eight-step read-only plan. Add `--json`
+when a local coding agent is guiding the session. Keep the same explicit intent
+on every emitted technician command. Run one
 reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zoom`,
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages.
+pages. The v0.4.8 Windows path refuses those three credential ceremonies until
+its secure secret-entry bridge is physically proven. Its first owner source is
+one explicitly approved local folder, previewed first and loaded manually.
 
 **Bank connections are not part of ordinary onboarding yet.** They are still
 being tested. You did nothing wrong, and there is no bank password,
@@ -209,7 +225,7 @@ ciphertext; Linux uses an owner-only adjacent file. An existing legacy Mac
 The local Claude Code and Codex connection uses **Owner assistant** access. It
 can answer from the Brain, add or correct durable information when the owner
 asks, check that the connection is working, and review the Owner Financial Map.
-It may create a complete non-authoritative map preview after an owner interview.
+It may create a bounded, non-authoritative starting-map preview after an owner interview.
 It cannot activate that map, delete records, or change who has access. Setup
 verifies that the expected tools are actually present,
 so a silently read-only owner connection is a failed setup, not a success.
@@ -237,8 +253,8 @@ will change, and the assistant may still show an approval prompt for the read.
 Before any financial-completeness conclusion, it offers an optional guided,
 session-only interview, one short question at a time. It does not start the
 interview automatically. If the owner declines, completeness remains unproven.
-Structured records remain possible mentions until the owner confirms a complete
-map. The interview submits nothing and changes nothing. Optimize ends before a
+Structured records remain possible mentions until the owner confirms the
+intended scope. The interview submits nothing and changes nothing. Optimize ends before a
 separately explained and approved preview may write one expiring,
 non-authoritative review copy. The owner can add expected entities and accounts
 that do not yet have ledger rows. Each entity-year separately records filing
@@ -887,7 +903,7 @@ step, or worth reviewing with the technician first.
 brain doctor                          # what is wrong with this machine
 brain health ./brain.manifest.json    # what is wrong with the brain
 brain diagnose ./brain.manifest.json  # what is missing or stored incorrectly
-brain secrets ./brain.manifest.json   # exact durable ADMIN_KEY rotation command
+brain secrets ./brain.manifest.json   # reapply durable secrets; rotates ADMIN_KEY only with a reviewed replacement
 ```
 
 Fresh setup and `brain tools` require signed-in Claude Code. Once a manifest

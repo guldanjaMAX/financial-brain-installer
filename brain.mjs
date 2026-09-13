@@ -5,7 +5,7 @@
  *   brain verify      <manifest>   check the token and resolve the account
  *   brain provision   <manifest>   create D1 (and R2/KV), write IDs back
  *   brain deploy      <manifest>   upload the worker with its bindings
- *   brain secrets     <manifest>   set secrets and persist ADMIN_KEY rotation
+ *   brain secrets     <manifest>   apply durable secrets; ADMIN_KEY rotates only with an approved replacement
  *   brain health      <manifest>   prove the install actually works
  *
  * DESIGN RULES
@@ -208,6 +208,7 @@ import {
   bootstrapManifestObservation,
   bootstrapStatusFilePath,
   buildBootstrapStatus,
+  normalizeBootstrapSetupIntent,
   writeBootstrapStatusFile,
 } from "./operations/bootstrap-status.mjs";
 import { createContinuousObservationClock } from "./operations/continuous-observation-clock.mjs";
@@ -20844,7 +20845,9 @@ export function schedulePlatformLimitation(
   } else {
     lines.push(`      For example with cron:     0 * * * * ${manualCommand}`);
   }
-  lines.push("      Confirm on the next check that `brain sources <manifest>` shows the last-ingest time moving.");
+  lines.push(
+    "      Confirm the next run with `brain sources <manifest> --json`: require `contract_version: 3` and verify that the named source's `receipt.last_successful_run_at` advanced.",
+  );
   return lines.join("\n");
 }
 
@@ -21658,6 +21661,7 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
     flags,
     [
       "json", "run", "host", "user", "port", "source", "scopes", "confirm-host",
+      "intent",
       "browser-sign-in", "name", "slug", "cloudflare-account", "cloudflare-account-id",
       "workers-paid-confirmed", "no-connect",
     ],
@@ -21669,6 +21673,7 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
   const plan = technicianPlan(manifestPath, {
     ...(options.manifestDeps || {}),
     cli,
+    intent: flags.intent,
   });
   if (!step) {
     if (flags.json) console.log(JSON.stringify(plan, null, 2));
@@ -21684,7 +21689,9 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
   // can appear.
   if (step !== "passkey") {
     const writeBriefing = options.writeBriefing || ((text) => console.log(renderCliCommands(text)));
-    writeBriefing(renderTechnicianStepBriefing(step));
+    writeBriefing(renderTechnicianStepBriefing(
+      plan.steps.find((candidate) => candidate.id === step) || step,
+    ));
   }
 
   const readHidden = options.readHidden || (({ prompt, noun, optional }) => readHiddenInput({
@@ -21709,9 +21716,11 @@ export async function cmdTechnician(manifestPath, flags = {}, options = {}) {
       nodePath,
       manifestDeps: options.manifestDeps || {},
       platformName,
+      runInstallSmoke: options.runInstallSmoke || (({ manifestPath: smokeManifestPath }) =>
+        runPublicInstallSmoke(smokeManifestPath)),
     });
     ok(`${step} technician step completed`);
-    info("rerun `brain technician <manifest>` to see the full plan; live proof still comes from the final field checklist");
+    info(`rerun the technician plan with --intent ${plan.routing.intent}; live proof still comes from the final field checklist`);
     return receipt;
   } catch (error) {
     die(String(error?.message || error));
@@ -21803,6 +21812,8 @@ export async function cmdLocalTools(options = {}) {
   const handoff = options.handoff === true;
   const deepDpapi = options.deepDpapi === true;
   const requireDoctor = options.requireDoctor === true;
+  const setupIntentInput = options.setupIntent;
+  normalizeBootstrapSetupIntent(setupIntentInput);
   const cloudflareAccountPath = String(options.cloudflareAccountPath || "").trim().toLowerCase() || null;
   if (cloudflareAccountPath && !["create", "existing"].includes(cloudflareAccountPath)) {
     die("--cloudflare-account accepts create or existing");
@@ -21886,6 +21897,7 @@ export async function cmdLocalTools(options = {}) {
     claudeDoctor,
     deepDpapi,
     cloudflareAccountPath,
+    setupIntent: setupIntentInput,
     statusFile: shouldWriteStatus ? intendedStatusPath : null,
   });
   const persistStatus = (status) => {
@@ -21971,7 +21983,7 @@ export async function cmdLocalTools(options = {}) {
       if (json) throw new JsonFatal(status);
       die(
         "the technician tools step is not complete because Claude Code's installation doctor needs a directly controlled interactive terminal.\n" +
-          "      Run the same `brain technician <manifest> --run tools` step in Terminal or PowerShell, then return here.\n" +
+          `      Run the same technician tools step in Terminal or PowerShell with --intent ${base.setup_intent.value}, then return here.\n` +
           "      No Cloudflare provisioning action was started."
       );
     }
@@ -22074,6 +22086,9 @@ export async function cmdLocalTools(options = {}) {
     const starter =
       `/financial-brain-technician Read the local bootstrap status at ${JSON.stringify(bootstrapStatus.status_file)} ` +
       `and use the intended manifest at ${JSON.stringify(targetManifest)}. ` +
+      (bootstrapStatus.setup_intent.owner_selected
+        ? `The owner selected setup intent ${bootstrapStatus.setup_intent.value}. `
+        : "No setup intent was selected. Ask the one routing question and keep the route at unsure until the owner answers. ") +
       `${cloudflareAccountPath ? `The owner selected the ${cloudflareAccountPath} Cloudflare account path. ` : ""}` +
       "Begin read-only and keep every credential in a hidden prompt or provider page.";
     const launch = options.launchClaude ?? spawnSync;
@@ -22111,7 +22126,7 @@ export async function cmdLocalTools(options = {}) {
 
 async function cmdLocalToolsInteractive(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
-  assertKnownFlags(flags, ["json", "handoff", "deep-dpapi", "cloudflare-account", "require-doctor"], "brain tools");
+  assertKnownFlags(flags, ["json", "handoff", "deep-dpapi", "cloudflare-account", "require-doctor", "intent"], "brain tools");
   if (flags.json && flags.handoff) die("--json and --handoff are separate bootstrap modes");
   const target = typeof manifestPath === "string" && !manifestPath.startsWith("--")
     ? manifestPath
@@ -22122,6 +22137,7 @@ async function cmdLocalToolsInteractive(manifestPath) {
     handoff: flags.handoff === true,
     deepDpapi: flags["deep-dpapi"] === true,
     requireDoctor: flags["require-doctor"] === true,
+    setupIntent: flags.intent,
     cloudflareAccountPath: flags["cloudflare-account"],
     writeStatus: true,
   });
@@ -24107,13 +24123,17 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            Brain, local connectors, schedules, checkpoints,
                                            technician skill, and Claude Code/Codex MCP wiring
     brain doctor     [manifest]            check this machine has everything it needs
-    brain tools      [manifest]            prepare local tools: install the reviewed technician skill,
-                                           check PATH, and write machine-readable bootstrap status
-    brain tools      [manifest] --handoff  open Claude Code in the owner workspace with that status
-    brain tools      [manifest] --json     print the same stable status for an agent or test
+    brain tools      [manifest] --intent <choice>
+                                           prepare local tools, preserve first/existing/new-computer/
+                                           resume/unsure routing, and write bootstrap status
+    brain tools      [manifest] --intent <choice> --handoff
+                                           open Claude Code in the owner workspace with that status
+    brain tools      [manifest] --intent <choice> --json
+                                           print the same stable status for an agent or test
     brain verify     <manifest>            check the saved Cloudflare access and exact account
     brain provision  <manifest>            create D1 (and R2), write IDs back
-    brain secrets    <manifest>            set secrets and durably rotate ADMIN_KEY
+    brain secrets    <manifest>            apply durable secrets; ADMIN_KEY rotates only when a reviewed
+                                           owner-controlled path supplies a replacement
     brain migrate    <manifest>            apply pending schema migrations
     brain deploy     <manifest>            upload the worker with its bindings
     brain health     <manifest>            prove the install actually works
@@ -24126,7 +24146,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain eval       <manifest>            score an optional private question suite; add --corpus-contract for source coverage
     brain eval       <manifest> --golden-20  optionally build a 20-question private regression set, then score it
     brain token      <manifest>            describe browser sign-in and legacy recovery-token custody
-    brain technician <manifest>            read-only account setup plan; --run <step> launches one safe ceremony
+    brain technician <manifest> --intent <choice>
+                                           read-only routed plan; choices: first_brain,
+                                           existing_this_computer, existing_new_computer,
+                                           resume_interrupted, or unsure; --run <step> launches one ceremony
     brain grant      <manifest> --name "X" --can ask,file   give one person scoped access; prints the token once
     brain grants     <manifest>            who has access; --revoke <id> ends one
     brain zone       <manifest>            what is in which zone; --source X --zone Y to set one

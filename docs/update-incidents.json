@@ -757,5 +757,25 @@
     "acceptance": "An owner upgrading from a version with no credential-scanner fingerprint must be told, before their next ingest, that every previously indexed document will be re-sent, and told to pause any watched folder until one full sweep completes. Prove the warning fires on a state file written without a fingerprint, and that it does not fire on a 0.4.x to 0.4.x upgrade where GATE_VERSION is unchanged.",
     "findings": "credentialScannerFingerprint did not exist at v0.3.5, so a state file written by 0.3.x carries no credential_scanner_fingerprint and scannerPolicyChanged is `undefined !== <hash>`, always true. Every 'this document is unchanged, skip it' branch is guarded on it (brain.mjs around 7046 and 7098), so every document is re-prepared and re-sent. Reported by a client on 2026-09-09: a dry run after upgrading 0.3.5 to 0.4.1 showed 11,217 documents to send and 0 unchanged, on a brain already carrying a 164,000 chunk backlog. Her agent unloaded the watched-folder LaunchAgent to stop the sync roughly doubling the queue, which is the only reason it was caught. Rechecking after a scanner change is correct behaviour; shipping it with no warning is not. GATE_VERSION in worker/src/lib/secret-scan.js has been 5 since v0.4.0, so 0.4.x to 0.4.x does not re-trigger it, but the fingerprint commits only after a complete sweep, so anyone who has not finished one is still in the re-send state.",
     "evidence": []
+  },
+  {
+    "id": "UPDATE-043",
+    "title": "Legacy reviewed Wrangler runtime carries an affected local image decoder",
+    "status": "local-only",
+    "scopes": [
+      "fresh",
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "test/cloudflare-oauth-session.test.mjs",
+      "test/cloudflare-recovery-adapter.test.mjs",
+      "test/doctor.test.mjs",
+      "test/wrangler-oauth.test.mjs",
+      "test/wrangler-spec-pinned.test.mjs"
+    ],
+    "acceptance": "Remove the affected decoder from every reviewed Wrangler runtime the product can invoke. Pin one patched Wrangler contract across package metadata, doctor, named OAuth profiles, legacy compatibility, locked recovery runtime, tests and owner instructions; prove the exact lock and runtime inventory, both OAuth/config parsers, packed setup, the full test and CI matrix, and renewed field-runtime evidence. Until that candidate is accepted, any narrow field exception must exclude Linux, wrangler dev, local Miniflare Images or cf.image, untrusted HEIF or AVIF, and the legacy wrangler@4.73.0 route.",
+    "findings": "A live npm audit on 2026-09-12 at candidate aa1937a reported three high-severity nodes through the direct development pin wrangler 4.127.1, Miniflare and sharp 0.35.2 under GHSA-rgj7-g3m4-5g8c. The offline audit cache had reported zero and was not current evidence. The selected setup and locked field-runtime pin is now 4.131.1, which resolves patched sharp 0.35.4; the live installed-tree audit is clean and focused OAuth, doctor, runtime, deployment, package and privacy checks pass locally. A second dynamically fetched legacy pin, wrangler@4.73.0, remains in the compatibility path and keeps this incident open. The affected sharp decoder is dynamically loaded only by Miniflare's local Images and cf.image paths; the frozen Monday pilot uses the patched selected path for remote Cloudflare commands on macOS and Windows, no Linux, no wrangler dev or Images binding, no untrusted HEIF or AVIF, and no legacy path. Exact-SHA CI and provider behavior remain unproved.",
+    "evidence": []
   }
 ]

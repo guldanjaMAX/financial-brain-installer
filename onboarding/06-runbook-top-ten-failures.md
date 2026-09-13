@@ -52,16 +52,22 @@ node brain.mjs health <manifest>
 And the one that answers "what is actually in there, and is each part current":
 
 ```
-node brain.mjs sources <manifest>
+node brain.mjs sources <manifest> --json
 ```
 
-That prints one line per source with its status (pending, indexing, ready, or
-error), how many documents it holds, and when it last took anything in. When
-the durable admin key is available it also cross-checks those counts against
-what your brain actually holds and flags any gap, because the registry's number
-is its last receipt and the brain is the authority. These are source-level clues,
-not proof that any exact file arrived or is searchable. **A drift of thousands
-is the cheapest signal available that a load died halfway.**
+That returns source-inventory `contract_version: 3`, `kind: source_inventory`
+after the CLI has collected every page into one stable snapshot. Require
+`complete: true`, `truncated: false`, `cursor: null`, and `returned` equal to
+`total`. Each source row separates
+`storage.physical_documents`, `storage.logical_documents`,
+`storage.readable_documents`, receipt history, provenance, recovery needs, and
+freshness. A false `receipt.logical_matches_reported` value is the exact signal
+to compare `receipt.reported_logical_documents` with
+`storage.logical_documents`; those are the registry receipt and current D1
+logical count. These are still source-level clues, not proof that any exact file arrived
+or is searchable.
+**A drift of thousands is the cheapest signal available that a load died
+halfway.**
 
 And the one that checks the parts of the install that are not questions and answers at all:
 
@@ -392,7 +398,11 @@ Before raising it, check **why** you hit it. A cap hit on a quiet day is a loop,
 node brain.mjs sources <manifest>
 ```
 
-One line per source. Look at the `last ingest` column. A source that is days behind while the others are current tells you where to look, and a source stuck on `indexing` has stalled mid-load rather than finished.
+One line per source. The columns are `name`, `kind`, `zone`, `physical`,
+`readable`, and `freshness`. A source whose `freshness` is `stale`, `broken`, or
+`never_synced` while the others are `ok` tells you where to look. `indexing`
+means a run is currently open; if it runs too long, the same column changes to
+`broken` rather than asking you to infer a stall from a timestamp.
 
 **Why, most likely first:**
 
@@ -421,7 +431,7 @@ node brain.mjs schedule <manifest> --install
 node brain.mjs sources <manifest>
 ```
 
-**This is the most dangerous failure in this document**, because it is the only one with no error message. A stale brain does not warn you mid-answer. It answers with old information in exactly the same confident voice. **The freshness line is the number to watch every month.**
+**This is the most dangerous failure in this document**, because it is the only one with no error message. A stale brain does not warn you mid-answer. It answers with old information in exactly the same confident voice. **The `freshness` column is the value to watch every month.**
 
 **Who:** you for the re-share, me for the Google publishing step if it is still within the engagement.
 
@@ -439,30 +449,36 @@ node brain.mjs sources <manifest>
 node brain.mjs sources <manifest>
 ```
 
-If the source you expected is missing, its count is zero, or its status is still
-`pending`, the source load needs attention. Those source-level clues do not
-prove that this exact file never arrived. A ready source and a nonzero count do
-not prove that it did.
+The concise columns are `name`, `kind`, `zone`, `physical`, `readable`, and
+`freshness`. If the source is missing or one of those observed states is not
+ready, the source load needs attention. Those source-level clues do not prove
+that this exact file never arrived. A fresh source and a nonzero physical count
+do not prove that it did.
 
 The same command cross-checks the registry against the authenticated live
 document store whenever the install's durable admin key is available:
 
 ```
-node brain.mjs sources <manifest>
+node brain.mjs sources <manifest> --json
 ```
+
+Use only the complete contract-v3 receipt. Its
+`storage.logical_documents`, `storage.physical_documents`,
+`receipt.logical_matches_reported`, `readability`, `provenance`, and
+`freshness` fields are evidence; zero is not proof that a source run occurred.
 
 Choose one approved low-sensitivity item and follow it through this exact chain.
 Stop at the first unproven checkpoint:
 
-1. **Accepted:** a terminal source receipt names exact accepted, refused,
+1. **Received:** a terminal source receipt names exact accepted, refused,
    unreadable, failed, and retryable counts for the run.
-2. **D1 stored and provenanced:** that same item is represented as the expected
+2. **Saved:** that same item is represented as the expected
    logical family in D1, has chunks, and carries the correct source and
    extraction provenance. This is not proof that an original file or binary was
    copied or backed up.
-3. **Projected:** that exact generation has a confirmed Vectorize receipt and no
-   matching outbox work remains.
-4. **Independently query-visible and cited:** a distinctive phrase from that
+3. **Search ready:** that exact generation has a confirmed Vectorize receipt and
+   no matching outbox work remains.
+4. **Answer checked:** a distinctive phrase from that
    same item returns through the supported search path with the expected source
    citation and provenance.
 

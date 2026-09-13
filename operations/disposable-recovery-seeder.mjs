@@ -12,7 +12,9 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
-export const DISPOSABLE_RECOVERY_SEED_PROTOCOL = "disposable-recovery-seed-v1";
+export const DISPOSABLE_RECOVERY_FIXTURE_PROTOCOL = "disposable-recovery-seed-v1";
+export const DISPOSABLE_RECOVERY_SEED_PROTOCOL =
+  "disposable-recovery-seed-receipt-v2";
 export const DISPOSABLE_RECOVERY_SEED_DOCUMENTS = 6_001;
 export const DISPOSABLE_RECOVERY_SEED_BATCH_SIZE = 50;
 export const DISPOSABLE_RECOVERY_SEED_BATCHES = Math.ceil(
@@ -29,6 +31,7 @@ const FIXTURE_SOURCE_TYPE = "recovery_field_v048";
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const COMMIT_RE = /^[a-f0-9]{40}$/u;
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9-]{1,127}$/u;
+const PROVIDER_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -61,7 +64,7 @@ function fixtureDocument(index) {
     content,
     metadata: {
       platform: "synthetic",
-      fixture_protocol: DISPOSABLE_RECOVERY_SEED_PROTOCOL,
+      fixture_protocol: DISPOSABLE_RECOVERY_FIXTURE_PROTOCOL,
       ordinal: index,
     },
   }, { textSource: "native", textReliable: true }));
@@ -99,13 +102,27 @@ function safeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+function documentsForBatchPrefix(batches) {
+  if (!safeInteger(batches) || batches > DISPOSABLE_RECOVERY_SEED_BATCHES) {
+    return null;
+  }
+  return Math.min(
+    batches * DISPOSABLE_RECOVERY_SEED_BATCH_SIZE,
+    DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+  );
+}
+
 function exactKeys(value, fields) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const keys = Object.keys(value);
   return keys.length === fields.length && fields.every((field) => keys.includes(field));
 }
 
-function validateRuntimeInventory(body, { final = false, errorState } = {}) {
+function validateRuntimeInventory(body, {
+  final = false,
+  expectedDocuments = 0,
+  errorState,
+} = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body) ||
       body.version !== DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION ||
       body.backend !== "d1" || body.vector_drain_mode !== "active" ||
@@ -114,10 +131,27 @@ function validateRuntimeInventory(body, { final = false, errorState } = {}) {
   }
 
   if (!final) {
-    if (body.rows.length !== 0) {
-      fail("inventory_not_disposable", "The destination was not an empty disposable Brain, so nothing was seeded.");
+    if (expectedDocuments === 0) {
+      if (body.rows.length !== 0) {
+        fail("inventory_not_disposable", "The destination was not an empty disposable Brain, so nothing was seeded.");
+      }
+      return null;
     }
-    return null;
+    const matches = body.rows.filter((row) => row?.source_type === FIXTURE_SOURCE_TYPE);
+    const row = matches[0] || null;
+    if (body.rows.length !== 1 || matches.length !== 1 ||
+        row.document_counts_exact !== true || row.chunk_counts_exact !== true ||
+        row.documents !== expectedDocuments || row.logical_documents !== expectedDocuments ||
+        row.stored_documents !== expectedDocuments || row.chunks !== expectedDocuments ||
+        row.total !== expectedDocuments || !safeInteger(row.embedded) ||
+        row.embedded > expectedDocuments) {
+      fail(
+        "resume_inventory_mismatch",
+        "The disposable Brain did not match the exact confirmed seed prefix, so resume stopped before another batch.",
+        errorState,
+      );
+    }
+    return row;
   }
 
   const matches = body.rows.filter((row) => row?.source_type === FIXTURE_SOURCE_TYPE);
@@ -171,43 +205,96 @@ function validateDirectD1Proof(value, row, errorState) {
   return Object.freeze({ ...value });
 }
 
-function validateOpeningDirectD1Proof(value) {
+function validateOpeningDirectD1Proof(value, expectedDocuments = 0) {
   if (!exactKeys(value, [
     "document_count", "chunk_count", "fts_count", "pending_outbox", "failed_vectors",
-  ]) || value.document_count !== 0 || value.chunk_count !== 0 || value.fts_count !== 0 ||
-      value.pending_outbox !== 0 || value.failed_vectors !== 0) {
+  ]) || value.document_count !== expectedDocuments ||
+      value.chunk_count !== expectedDocuments || value.fts_count !== expectedDocuments ||
+      !safeInteger(value.pending_outbox) || value.pending_outbox > expectedDocuments ||
+      value.failed_vectors !== 0) {
     fail(
-      "opening_direct_d1_not_empty",
-      "Independent D1 counts did not prove an empty disposable source, so nothing was seeded.",
+      expectedDocuments === 0
+        ? "opening_direct_d1_not_empty"
+        : "resume_direct_d1_mismatch",
+      expectedDocuments === 0
+        ? "Independent D1 counts did not prove an empty disposable source, so nothing was seeded."
+        : "Independent D1 counts did not match the exact confirmed seed prefix, so resume stopped before another batch.",
       { safeToRetry: false },
     );
   }
   return Object.freeze({ ...value });
 }
 
-function validateDeploymentProof(value, binding) {
+/** Validate the content-free progress needed to resume the deterministic seed. */
+export function assertDisposableRecoverySeedResumeState(value) {
   if (!exactKeys(value, [
-    "deployment_receipt_sha256", "source_resource_fingerprint",
-    "source_active_version_id", "source_script_etag", "source_active_traffic_percent",
-    "target_resource_fingerprint", "target_paused_version_id",
-    "target_paused_script_etag", "target_active_version_id",
-    "target_active_script_etag", "target_paused_traffic_percent",
-    "target_active_not_promoted", "provider_readback",
-  ]) || value.deployment_receipt_sha256 !== binding.deployment_receipt_sha256 ||
+    "opening_empty_verified",
+    "verified_completed_batch_prefix", "verified_completed_document_prefix",
+    "verified_replay_batch_prefix", "verified_replay_document_prefix",
+  ]) || typeof value.opening_empty_verified !== "boolean" ||
+      !safeInteger(value.verified_completed_batch_prefix) ||
+      !safeInteger(value.verified_completed_document_prefix) ||
+      !safeInteger(value.verified_replay_batch_prefix) ||
+      !safeInteger(value.verified_replay_document_prefix) ||
+      documentsForBatchPrefix(value.verified_completed_batch_prefix) !==
+        value.verified_completed_document_prefix ||
+      documentsForBatchPrefix(value.verified_replay_batch_prefix) !==
+        value.verified_replay_document_prefix ||
+      value.verified_replay_batch_prefix > value.verified_completed_batch_prefix ||
+      (value.verified_replay_batch_prefix > 0 &&
+        value.verified_completed_batch_prefix !== DISPOSABLE_RECOVERY_SEED_BATCHES) ||
+      ((value.verified_completed_batch_prefix > 0 ||
+        value.verified_replay_batch_prefix > 0) &&
+        value.opening_empty_verified !== true)) {
+    fail(
+      "seed_resume_state_invalid",
+      "The private synthetic seed resume state is invalid.",
+      { safeToRetry: false },
+    );
+  }
+  return deepFreeze({ ...value });
+}
+
+function initialResumeState() {
+  return assertDisposableRecoverySeedResumeState({
+    opening_empty_verified: false,
+    verified_completed_batch_prefix: 0,
+    verified_completed_document_prefix: 0,
+    verified_replay_batch_prefix: 0,
+    verified_replay_document_prefix: 0,
+  });
+}
+
+async function checkpointThrough(checkpoint, state, errorState = {}) {
+  if (!checkpoint) return;
+  try {
+    await checkpoint(deepFreeze(structuredClone(state)));
+  } catch {
+    fail(
+      "seed_resume_checkpoint_failed",
+      "The private seed resume checkpoint could not be written and read back exactly.",
+      errorState,
+    );
+  }
+}
+
+function validateSourceDeploymentProof(value, binding) {
+  if (!exactKeys(value, [
+    "source_phase_receipt_sha256", "source_phase_run_id",
+    "source_a2_approval_fingerprint", "source_resource_fingerprint",
+    "source_active_version_id", "source_script_etag", "source_deployment_id",
+    "source_active_traffic_percent",
+  ]) || value.source_phase_receipt_sha256 !== binding.source_phase_receipt_sha256 ||
+      value.source_phase_run_id !== binding.source_phase_run_id ||
+      value.source_a2_approval_fingerprint !== binding.source_a2_approval_fingerprint ||
       value.source_resource_fingerprint !== binding.source_resource_fingerprint ||
       value.source_active_version_id !== binding.source_active_version_id ||
       value.source_script_etag !== binding.source_script_etag ||
-      value.source_active_traffic_percent !== 100 ||
-      value.target_resource_fingerprint !== binding.target_resource_fingerprint ||
-      value.target_paused_version_id !== binding.target_paused_version_id ||
-      value.target_paused_script_etag !== binding.target_paused_script_etag ||
-      value.target_active_version_id !== binding.target_active_version_id ||
-      value.target_active_script_etag !== binding.target_active_script_etag ||
-      value.target_paused_traffic_percent !== 100 ||
-      value.target_active_not_promoted !== true || value.provider_readback !== true) {
+      value.source_deployment_id !== binding.source_deployment_id ||
+      value.source_active_traffic_percent !== 100) {
     fail(
-      "deployment_identity_invalid",
-      "The live disposable Worker versions did not match the exact package deployment receipt.",
+      "source_deployment_identity_invalid",
+      "The live disposable source Worker did not match the exact source-phase receipt.",
       { safeToRetry: false },
     );
   }
@@ -249,25 +336,23 @@ export function assertDisposableRecoverySeedBinding(binding) {
     value.length >= 1 && value.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(value);
   if (!exactKeys(binding, [
     "schema_version", "candidate_sha", "candidate_tree_sha",
-    "field_receipt_sha256", "deployment_receipt_sha256",
+    "field_receipt_sha256", "source_phase_receipt_sha256",
     "package_sha256", "package_file_count",
     "execution_inventory_sha256", "installed_execution_inventory_sha256",
     "runner_sha256", "seeder_sha256", "content_fingerprint_helper_sha256",
     "source_manifest_fingerprint", "source_resource_fingerprint",
-    "target_manifest_fingerprint", "target_resource_fingerprint",
-    "source_active_version_id", "source_script_etag",
-    "target_paused_version_id", "target_paused_script_etag",
-    "target_active_version_id", "target_active_script_etag",
+    "source_phase_run_id", "source_a2_approval_fingerprint",
+    "source_active_version_id", "source_script_etag", "source_deployment_id",
     "runtime_contract_fingerprint", "wrangler_wrapper_sha256",
     "wrangler_runtime_inventory_sha256", "wrangler_entrypoint_sha256",
     "node_executable_sha256", "execution_approval_fingerprint",
-  ]) || binding.schema_version !== 3 ||
+  ]) || binding.schema_version !== 4 ||
       !COMMIT_RE.test(String(binding.candidate_sha || "")) ||
       !COMMIT_RE.test(String(binding.candidate_tree_sha || "")) ||
       !Number.isSafeInteger(binding.package_file_count) || binding.package_file_count < 1 ||
       [
         binding.field_receipt_sha256,
-        binding.deployment_receipt_sha256,
+        binding.source_phase_receipt_sha256,
         binding.package_sha256,
         binding.execution_inventory_sha256,
         binding.installed_execution_inventory_sha256,
@@ -276,8 +361,7 @@ export function assertDisposableRecoverySeedBinding(binding) {
         binding.content_fingerprint_helper_sha256,
         binding.source_manifest_fingerprint,
         binding.source_resource_fingerprint,
-        binding.target_manifest_fingerprint,
-        binding.target_resource_fingerprint,
+        binding.source_a2_approval_fingerprint,
         binding.runtime_contract_fingerprint,
         binding.wrangler_wrapper_sha256,
         binding.wrangler_runtime_inventory_sha256,
@@ -286,16 +370,9 @@ export function assertDisposableRecoverySeedBinding(binding) {
         binding.execution_approval_fingerprint,
       ].some((value) => !SHA256_RE.test(String(value || ""))) ||
       !opaqueProviderEtag(binding.source_script_etag) ||
-      !opaqueProviderEtag(binding.target_paused_script_etag) ||
-      !opaqueProviderEtag(binding.target_active_script_etag) ||
       !VERSION_RE.test(String(binding.source_active_version_id || "")) ||
-      !VERSION_RE.test(String(binding.target_paused_version_id || "")) ||
-      !VERSION_RE.test(String(binding.target_active_version_id || "")) ||
-      new Set([
-        binding.source_active_version_id,
-        binding.target_paused_version_id,
-        binding.target_active_version_id,
-      ]).size !== 3) {
+      !PROVIDER_ID_RE.test(String(binding.source_phase_run_id || "")) ||
+      !PROVIDER_ID_RE.test(String(binding.source_deployment_id || ""))) {
     fail("seed_binding_invalid", "The private synthetic seed binding is invalid.");
   }
   if (binding.execution_approval_fingerprint !==
@@ -370,7 +447,7 @@ function completionTime(now, errorState) {
 
 export function disposableRecoverySeedPlan() {
   return deepFreeze({
-    schema_version: 2,
+    schema_version: 3,
     protocol: DISPOSABLE_RECOVERY_SEED_PROTOCOL,
     operation: "plan",
     data_class: DATA_CLASS,
@@ -384,7 +461,7 @@ export function disposableRecoverySeedPlan() {
     minimum_d1_chunks: DISPOSABLE_RECOVERY_MINIMUM_D1_CHUNKS,
     authenticated_d1_inventory_required: true,
     opening_direct_d1_empty_required: true,
-    deployment_receipt_and_live_identity_required: true,
+    source_phase_receipt_and_live_identity_required: true,
     settled_vector_projection_required: true,
     direct_d1_content_fingerprint_required: true,
     independent_vectorize_projection_required: true,
@@ -407,6 +484,7 @@ export async function seedDisposableRecoveryFixture(options) {
     "binding", "verifyDeployment", "ingestBatch", "readInventory",
     "readOpeningDirectD1", "settleProjection",
     "readContentFingerprint", "readIndependentProjection", "runRetrievalChecks", "now",
+    "resume", "checkpoint",
   ]);
   if (!options || typeof options !== "object" || Array.isArray(options) ||
       Object.keys(options).some((key) => !allowed.has(key)) ||
@@ -417,6 +495,7 @@ export async function seedDisposableRecoveryFixture(options) {
       typeof options.readContentFingerprint !== "function" ||
       typeof options.readIndependentProjection !== "function" ||
       typeof options.runRetrievalChecks !== "function" ||
+      (options.checkpoint !== undefined && typeof options.checkpoint !== "function") ||
       (options.now !== undefined && typeof options.now !== "function")) {
     fail(
       "invalid_dependencies",
@@ -424,10 +503,26 @@ export async function seedDisposableRecoveryFixture(options) {
     );
   }
   const binding = assertDisposableRecoverySeedBinding(options.binding);
+  let progress = options.resume === undefined
+    ? initialResumeState()
+    : assertDisposableRecoverySeedResumeState(options.resume);
+  const checkpoint = options.checkpoint;
+
+  await checkpointThrough(checkpoint, {
+    ...progress,
+    pending_seed_action: "verify_opening_direct_d1",
+    ambiguous_write_boundary: null,
+  }, {
+    safeToRetry: true,
+    confirmedDocuments: progress.verified_completed_document_prefix,
+  });
 
   let openingDirectD1;
   try {
-    openingDirectD1 = validateOpeningDirectD1Proof(await options.readOpeningDirectD1());
+    openingDirectD1 = validateOpeningDirectD1Proof(
+      await options.readOpeningDirectD1(),
+      progress.verified_completed_document_prefix,
+    );
   } catch (error) {
     if (error instanceof DisposableRecoverySeedError) throw error;
     fail(
@@ -436,28 +531,75 @@ export async function seedDisposableRecoveryFixture(options) {
       { safeToRetry: false },
     );
   }
-  let deployment;
+  await checkpointThrough(checkpoint, {
+    ...progress,
+    pending_seed_action: "verify_source_deployment",
+    ambiguous_write_boundary: null,
+  }, {
+    safeToRetry: true,
+    confirmedDocuments: progress.verified_completed_document_prefix,
+  });
+  let sourceDeployment;
   try {
-    deployment = validateDeploymentProof(await options.verifyDeployment(), binding);
+    sourceDeployment = validateSourceDeploymentProof(await options.verifyDeployment(), binding);
   } catch (error) {
     if (error instanceof DisposableRecoverySeedError) throw error;
     fail(
-      "deployment_identity_failed",
-      "The live disposable Worker versions could not be rebound to the exact package deployment receipt.",
+      "source_deployment_identity_failed",
+      "The live disposable source Worker could not be rebound to the exact source-phase receipt.",
       { safeToRetry: false },
     );
   }
-  const opening = await inventoryThrough(options.readInventory, { safeToRetry: true });
-  validateRuntimeInventory(opening);
+  await checkpointThrough(checkpoint, {
+    ...progress,
+    pending_seed_action: "verify_opening_inventory",
+    ambiguous_write_boundary: null,
+  }, {
+    safeToRetry: true,
+    confirmedDocuments: progress.verified_completed_document_prefix,
+  });
+  const opening = await inventoryThrough(options.readInventory, {
+    safeToRetry: true,
+    confirmedDocuments: progress.verified_completed_document_prefix,
+  });
+  validateRuntimeInventory(opening, {
+    expectedDocuments: progress.verified_completed_document_prefix,
+    errorState: {
+      safeToRetry: false,
+      confirmedDocuments: progress.verified_completed_document_prefix,
+    },
+  });
+  progress = assertDisposableRecoverySeedResumeState({
+    ...progress,
+    opening_empty_verified: true,
+  });
 
-  for (let offset = 0; offset < FIXTURE.length; offset += DISPOSABLE_RECOVERY_SEED_BATCH_SIZE) {
+  for (
+    let offset = progress.verified_completed_document_prefix;
+    offset < FIXTURE.length;
+    offset += DISPOSABLE_RECOVERY_SEED_BATCH_SIZE
+  ) {
     const documents = Object.freeze(FIXTURE.slice(offset, offset + DISPOSABLE_RECOVERY_SEED_BATCH_SIZE));
+    const batchNumber = progress.verified_completed_batch_prefix + 1;
     const errorState = {
       mayHaveWritten: true,
       safeToRetry: false,
       confirmedDocuments: offset,
       ambiguousDocuments: documents.length,
     };
+    await checkpointThrough(checkpoint, {
+      ...progress,
+      pending_seed_action: "ingest_fixture_batch",
+      ambiguous_write_boundary: {
+        action: "ingest_fixture_batch",
+        batch_number: batchNumber,
+        document_prefix_start: offset,
+        document_count: documents.length,
+      },
+    }, {
+      safeToRetry: true,
+      confirmedDocuments: offset,
+    });
     let body;
     try {
       body = await options.ingestBatch(documents);
@@ -465,6 +607,18 @@ export async function seedDisposableRecoveryFixture(options) {
       fail("ingest_transport_failed", "A synthetic ingest batch could not be confirmed. Recreate the disposable destination before retrying.", errorState);
     }
     validateBatchReceipt(body, documents, "created", errorState);
+    progress = assertDisposableRecoverySeedResumeState({
+      ...progress,
+      verified_completed_batch_prefix: batchNumber,
+      verified_completed_document_prefix: offset + documents.length,
+    });
+    await checkpointThrough(checkpoint, {
+      ...progress,
+      pending_seed_action: progress.verified_completed_document_prefix === FIXTURE.length
+        ? "verify_seeded_inventory"
+        : "ingest_fixture_batch",
+      ambiguous_write_boundary: null,
+    }, errorState);
   }
 
   const seededState = {
@@ -472,15 +626,47 @@ export async function seedDisposableRecoveryFixture(options) {
     safeToRetry: false,
     confirmedDocuments: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
   };
+  await checkpointThrough(checkpoint, {
+    ...progress,
+    pending_seed_action: "verify_seeded_inventory",
+    ambiguous_write_boundary: null,
+  }, seededState);
   const inventory = await inventoryThrough(options.readInventory, seededState);
   validateRuntimeInventory(inventory, { final: true, errorState: seededState });
 
-  // A second full pass is intentionally mandatory. Exact unchanged receipts
-  // bind the final D1 identities and content hashes to the sealed fixture; a
-  // generated document count or an unrelated 6,001-row corpus cannot pass.
-  for (let offset = 0; offset < FIXTURE.length; offset += DISPOSABLE_RECOVERY_SEED_BATCH_SIZE) {
+  // Replay progress is a crash diagnostic, not content proof. Its counters are
+  // not bound to the exact D1 bytes, so a later invocation must start this
+  // proof at zero even when an earlier invocation confirmed a replay prefix.
+  // Otherwise count-stable tampering inside that skipped prefix could survive
+  // while the remaining batches and a syntactically valid final fingerprint
+  // still produce a false full-fixture receipt.
+  progress = assertDisposableRecoverySeedResumeState({
+    ...progress,
+    verified_replay_batch_prefix: 0,
+    verified_replay_document_prefix: 0,
+  });
+
+  // A full pass in this invocation is intentionally mandatory. Exact unchanged
+  // receipts bind every final D1 identity and content hash to the sealed fixture;
+  // a generated document count or an unrelated 6,001-row corpus cannot pass.
+  for (
+    let offset = progress.verified_replay_document_prefix;
+    offset < FIXTURE.length;
+    offset += DISPOSABLE_RECOVERY_SEED_BATCH_SIZE
+  ) {
     const documents = Object.freeze(FIXTURE.slice(offset, offset + DISPOSABLE_RECOVERY_SEED_BATCH_SIZE));
+    const batchNumber = progress.verified_replay_batch_prefix + 1;
     const errorState = { ...seededState, ambiguousDocuments: documents.length };
+    await checkpointThrough(checkpoint, {
+      ...progress,
+      pending_seed_action: "verification_replay_batch",
+      ambiguous_write_boundary: {
+        action: "verification_replay_batch",
+        batch_number: batchNumber,
+        document_prefix_start: offset,
+        document_count: documents.length,
+      },
+    }, seededState);
     let body;
     try {
       body = await options.ingestBatch(documents);
@@ -488,8 +674,25 @@ export async function seedDisposableRecoveryFixture(options) {
       fail("replay_transport_failed", "The synthetic verification replay could not be confirmed, so no field proof was issued.", errorState);
     }
     validateBatchReceipt(body, documents, "unchanged", errorState);
+    progress = assertDisposableRecoverySeedResumeState({
+      ...progress,
+      verified_replay_batch_prefix: batchNumber,
+      verified_replay_document_prefix: offset + documents.length,
+    });
+    await checkpointThrough(checkpoint, {
+      ...progress,
+      pending_seed_action: progress.verified_replay_document_prefix === FIXTURE.length
+        ? "settle_projection"
+        : "verification_replay_batch",
+      ambiguous_write_boundary: null,
+    }, errorState);
   }
 
+  await checkpointThrough(checkpoint, {
+    ...progress,
+    pending_seed_action: "settle_projection",
+    ambiguous_write_boundary: null,
+  }, seededState);
   try {
     await options.settleProjection();
   } catch {
@@ -500,17 +703,32 @@ export async function seedDisposableRecoveryFixture(options) {
     );
   }
 
+  await checkpointThrough(checkpoint, {
+    ...progress,
+    pending_seed_action: "verify_settled_inventory",
+    ambiguous_write_boundary: null,
+  }, seededState);
   const verifiedInventory = await inventoryThrough(options.readInventory, seededState);
   const row = validateRuntimeInventory(verifiedInventory, { final: true, errorState: seededState });
   validateProjectionReadyInventory(verifiedInventory, row, seededState);
   let independentProjection;
   let evaluation;
   try {
+    await checkpointThrough(checkpoint, {
+      ...progress,
+      pending_seed_action: "verify_independent_projection",
+      ambiguous_write_boundary: null,
+    }, seededState);
     independentProjection = validateIndependentProjection(
       await options.readIndependentProjection(),
       row,
       seededState,
     );
+    await checkpointThrough(checkpoint, {
+      ...progress,
+      pending_seed_action: "verify_retrieval",
+      ambiguous_write_boundary: null,
+    }, seededState);
     evaluation = validateRetrievalChecks(await options.runRetrievalChecks(), seededState);
   } catch (error) {
     if (error instanceof DisposableRecoverySeedError) throw error;
@@ -522,6 +740,11 @@ export async function seedDisposableRecoveryFixture(options) {
   }
   let directD1;
   try {
+    await checkpointThrough(checkpoint, {
+      ...progress,
+      pending_seed_action: "capture_direct_d1_fingerprint",
+      ambiguous_write_boundary: null,
+    }, seededState);
     directD1 = validateDirectD1Proof(
       await options.readContentFingerprint(),
       row,
@@ -535,6 +758,11 @@ export async function seedDisposableRecoveryFixture(options) {
       seededState,
     );
   }
+  await checkpointThrough(checkpoint, {
+    ...progress,
+    pending_seed_action: "verify_closing_inventory",
+    ambiguous_write_boundary: null,
+  }, seededState);
   const closingInventory = await inventoryThrough(options.readInventory, seededState);
   const closingRow = validateRuntimeInventory(
     closingInventory,
@@ -550,13 +778,13 @@ export async function seedDisposableRecoveryFixture(options) {
     );
   }
   const receipt = {
-    schema_version: 3,
+    schema_version: 4,
     protocol: DISPOSABLE_RECOVERY_SEED_PROTOCOL,
     status: "passed",
     completed_at: completionTime(options.now || Date.now, seededState),
     data_class: DATA_CLASS,
     binding,
-    deployment,
+    source_deployment: sourceDeployment,
     fixture: {
       sha256: DISPOSABLE_RECOVERY_FIXTURE_SHA256,
       documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
@@ -577,11 +805,14 @@ export async function seedDisposableRecoveryFixture(options) {
       exact_identity_and_content_replay: true,
     },
     opening_d1: {
-      documents: openingDirectD1.document_count,
-      chunks: openingDirectD1.chunk_count,
-      fts: openingDirectD1.fts_count,
-      pending_outbox: openingDirectD1.pending_outbox,
-      failed_vectors: openingDirectD1.failed_vectors,
+      // A resumed invocation observes the verified prefix rather than the
+      // original zero. The durable resume chain can advance only after the
+      // first invocation proved all five opening counts were zero.
+      documents: 0,
+      chunks: 0,
+      fts: 0,
+      pending_outbox: 0,
+      failed_vectors: 0,
       independently_verified_empty: true,
     },
     d1: {
@@ -616,10 +847,15 @@ export async function seedDisposableRecoveryFixture(options) {
     fail("fixture_digest_invalid", "The fixed synthetic fixture digest was invalid.");
   }
   assertDisposableRecoverySeedReceipt(receipt);
+  await checkpointThrough(checkpoint, {
+    ...progress,
+    pending_seed_action: "finalize_seed_receipt",
+    ambiguous_write_boundary: null,
+  }, seededState);
   return deepFreeze(receipt);
 }
 
-/** Strictly validate one persisted private schema-3 seed receipt. */
+/** Strictly validate one persisted private schema-4 seed receipt. */
 export function assertDisposableRecoverySeedReceipt(receipt) {
   let completedAtValid = false;
   try {
@@ -627,16 +863,16 @@ export function assertDisposableRecoverySeedReceipt(receipt) {
   } catch { /* fixed refusal below */ }
   if (!exactKeys(receipt, [
     "schema_version", "protocol", "status", "completed_at", "data_class",
-    "binding", "deployment", "fixture", "ingest", "verification_replay", "opening_d1", "d1",
+    "binding", "source_deployment", "fixture", "ingest", "verification_replay", "opening_d1", "d1",
     "projection", "evaluation", "proof_boundary",
-  ]) || receipt.schema_version !== 3 ||
+  ]) || receipt.schema_version !== 4 ||
       receipt.protocol !== DISPOSABLE_RECOVERY_SEED_PROTOCOL ||
       receipt.status !== "passed" || receipt.data_class !== DATA_CLASS ||
       !completedAtValid) {
     fail("seed_receipt_invalid", "The private synthetic seed receipt is invalid.");
   }
   assertDisposableRecoverySeedBinding(receipt.binding);
-  validateDeploymentProof(receipt.deployment, receipt.binding);
+  validateSourceDeploymentProof(receipt.source_deployment, receipt.binding);
   if (!exactKeys(receipt.fixture, [
     "sha256", "documents", "batches", "maximum_batch_documents",
   ]) || receipt.fixture.sha256 !== DISPOSABLE_RECOVERY_FIXTURE_SHA256 ||

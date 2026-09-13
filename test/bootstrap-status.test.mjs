@@ -47,6 +47,7 @@ function status(overrides = {}) {
     checks: okChecks,
     skill: { status: "installed" },
     claudeDoctor: "passed",
+    setupIntent: "first_brain",
     ...overrides,
   });
 }
@@ -62,6 +63,16 @@ test("a clean machine needs no manifest or external test kit to reach the review
   assert.equal(result.cli.command, resolve(process.execPath));
   assert.equal(result.cli.args[0], resolve("brain.mjs"));
   assert.match(result.next_action, /manifest-creating setup command/i);
+});
+
+test("missing local files require explicit owner intent and never authorize existing-Brain provisioning", () => {
+  const unknown = status({ setupIntent: null });
+  assert.equal(unknown.issue_code, "SETUP_INTENT_REQUIRED");
+  assert.equal(unknown.setup_intent.owner_selected, false);
+
+  const newComputer = status({ setupIntent: "existing_new_computer" });
+  assert.equal(newComputer.issue_code, "EXISTING_BRAIN_RECOVERY_REQUIRED");
+  assert.match(newComputer.recovery, /Do not create a new Brain.*adopt resources.*copy a credential/is);
 });
 
 test("manifest inspection distinguishes missing, partial, corrupt, unsafe, and complete local state", () => {
@@ -104,11 +115,11 @@ test("partial v0.2.0 state and a version difference produce distinct recovery ou
   assert.equal(partial.issue_code, "INSTALL_RECORD_PARTIAL");
   assert.equal(partial.retry_safe, true);
 
-  const update = status({ manifest: manifest("present", "0.2.0") });
+  const update = status({ manifest: manifest("present", "0.2.0"), setupIntent: "existing_this_computer" });
   assert.equal(update.status, "ready_for_update_review");
   assert.equal(update.issue_code, "INSTALLED_VERSION_DIFFERS");
 
-  const same = status({ manifest: manifest("present", "0.2.1") });
+  const same = status({ manifest: manifest("present", "0.2.1"), setupIntent: "existing_this_computer" });
   assert.equal(same.status, "ready");
   assert.equal(same.issue_code, null);
 });
@@ -156,6 +167,7 @@ test("Cloudflare identity and capability failures never become an invalid-token 
 
   const reachable = status({
     manifest: manifest("present", "0.2.1"),
+    setupIntent: "existing_this_computer",
     observations: { cloudflare_token: "account_capabilities_reachable" },
   });
   assert.equal(reachable.status, "ready");

@@ -33,6 +33,7 @@ import {
   readPrivateAggregateReceipt,
   readPrivateReceiptDescriptor,
   reservePrivateAggregateReceipt,
+  resumePrivateAggregateReceiptReservation,
   syncPrivateReceiptDirectory,
   validatePrivateAggregateReceiptReservation,
   writePrivateReceiptDescriptor,
@@ -230,6 +231,53 @@ receiptTest("reserve, finalize, and read preserve one exact owner-only aggregate
   } finally {
     cleanupReservation(reservation);
     rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("an exact unfinished marker can be explicitly resumed without recreating it", () => {
+  const fixture = outputFixture("brain-private-receipt-resume-");
+  const marker = { schema_version: 1, status: "provider_result_unconfirmed" };
+  const receipt = { schema_version: 1, status: "passed" };
+  let initial;
+  let resumed;
+  try {
+    initial = reservePrivateAggregateReceipt(fixture.output, marker);
+    const finalBefore = lstatSync(fixture.path);
+    const pendingBefore = lstatSync(fixture.output.pendingPath);
+    abandonPrivateAggregateReceipt(initial);
+    resumed = resumePrivateAggregateReceiptReservation(fixture.output, marker);
+    assert.equal(resumed.closed, false);
+    assert.equal(lstatSync(fixture.path).ino, finalBefore.ino);
+    assert.equal(lstatSync(fixture.output.pendingPath).ino, pendingBefore.ino);
+    assert.equal(finalizePrivateAggregateReceipt(resumed, receipt), true);
+    assert.deepEqual(readPrivateAggregateReceipt(fixture.path).value, receipt);
+  } finally {
+    cleanupReservation(resumed);
+    cleanupReservation(initial);
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("resume refuses a changed final or pending marker", () => {
+  for (const changed of ["final", "pending"]) {
+    const fixture = outputFixture(`brain-private-receipt-resume-${changed}-`);
+    const marker = { schema_version: 1, status: "provider_result_unconfirmed" };
+    let reservation;
+    try {
+      reservation = reservePrivateAggregateReceipt(fixture.output, marker);
+      abandonPrivateAggregateReceipt(reservation);
+      const changedPath = changed === "final" ? fixture.path : fixture.output.pendingPath;
+      privateWrite(changedPath, '{"status":"changed-but-same-purpose"}\n');
+      assert.throws(
+        () => resumePrivateAggregateReceiptReservation(fixture.output, marker),
+        receiptError("PRIVATE_AGGREGATE_RECEIPT_RESUME_INVALID"),
+      );
+      assert.equal(existsSync(fixture.path), true);
+      assert.equal(existsSync(fixture.output.pendingPath), true);
+    } finally {
+      cleanupReservation(reservation);
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
   }
 });
 

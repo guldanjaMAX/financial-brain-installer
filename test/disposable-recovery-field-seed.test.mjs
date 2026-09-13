@@ -16,6 +16,7 @@ import test from "node:test";
 
 import {
   DisposableRecoveryFieldSeedError,
+  assertDisposableRecoverySeedResumeRecord,
   createDisposableRecoveryLiveTransports,
   runDisposableRecoveryFieldSeed,
 } from "../operations/disposable-recovery-field-seed.mjs";
@@ -32,17 +33,18 @@ import {
 
 const FIXED_TIME = "2026-09-12T12:00:00.000Z";
 const RECEIPT_NAME = "v048-disposable-seed-receipt.json";
+const RESUME_NAME = "v048-disposable-seed-resume.json";
 const SOURCE_VERSION = "10000000-0000-4000-8000-000000000001";
-const PAUSED_VERSION = "20000000-0000-4000-8000-000000000002";
-const ACTIVE_VERSION = "30000000-0000-4000-8000-000000000003";
+const SOURCE_PHASE_RUN_ID = "20000000-0000-4000-8000-000000000002";
+const SOURCE_DEPLOYMENT_ID = "30000000-0000-4000-8000-000000000003";
 
 function bindingFixture() {
   const base = {
-    schema_version: 3,
+    schema_version: 4,
     candidate_sha: "1".repeat(40),
     candidate_tree_sha: "2".repeat(40),
     field_receipt_sha256: "3".repeat(64),
-    deployment_receipt_sha256: "4".repeat(64),
+    source_phase_receipt_sha256: "4".repeat(64),
     package_sha256: "4".repeat(64),
     package_file_count: 541,
     execution_inventory_sha256: "5".repeat(64),
@@ -52,14 +54,11 @@ function bindingFixture() {
     content_fingerprint_helper_sha256: "9".repeat(64),
     source_manifest_fingerprint: "a".repeat(64),
     source_resource_fingerprint: "b".repeat(64),
-    target_manifest_fingerprint: "1".repeat(64),
-    target_resource_fingerprint: "2".repeat(64),
+    source_phase_run_id: SOURCE_PHASE_RUN_ID,
+    source_a2_approval_fingerprint: "1".repeat(64),
     source_active_version_id: SOURCE_VERSION,
     source_script_etag: "3".repeat(64),
-    target_paused_version_id: PAUSED_VERSION,
-    target_paused_script_etag: "target-paused-etag-v048",
-    target_active_version_id: ACTIVE_VERSION,
-    target_active_script_etag: "target-active-etag-v048",
+    source_deployment_id: SOURCE_DEPLOYMENT_ID,
     runtime_contract_fingerprint: "c".repeat(64),
     wrangler_wrapper_sha256: "d".repeat(64),
     wrangler_runtime_inventory_sha256: "e".repeat(64),
@@ -149,19 +148,14 @@ function completeTransports(events) {
       events.push("deployment");
       const binding = bindingFixture();
       return {
-        deployment_receipt_sha256: binding.deployment_receipt_sha256,
+        source_phase_receipt_sha256: binding.source_phase_receipt_sha256,
+        source_phase_run_id: binding.source_phase_run_id,
+        source_a2_approval_fingerprint: binding.source_a2_approval_fingerprint,
         source_resource_fingerprint: binding.source_resource_fingerprint,
         source_active_version_id: SOURCE_VERSION,
         source_script_etag: binding.source_script_etag,
+        source_deployment_id: binding.source_deployment_id,
         source_active_traffic_percent: 100,
-        target_resource_fingerprint: binding.target_resource_fingerprint,
-        target_paused_version_id: PAUSED_VERSION,
-        target_paused_script_etag: binding.target_paused_script_etag,
-        target_active_version_id: ACTIVE_VERSION,
-        target_active_script_etag: binding.target_active_script_etag,
-        target_paused_traffic_percent: 100,
-        target_active_not_promoted: true,
-        provider_readback: true,
       };
     },
     ingestBatch: async (documents) => {
@@ -250,7 +244,7 @@ posixTest("live Wrangler reads execute only pinned per-call wrapper and runtime 
           true,
         );
         return args[0] === "--version"
-          ? { status: 0, stdout: "4.127.1\n", stderr: "" }
+          ? { status: 0, stdout: "4.131.1\n", stderr: "" }
           : {
               status: 0,
               stdout: JSON.stringify([{ success: true, results: [{
@@ -311,7 +305,7 @@ posixTest("a per-call wrapper swap is refused after the child returns", async ()
       assertMaterializedWranglerRuntime: () => true,
       runWrangler: ({ command }) => {
         writeFileSync(command, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-        return { status: 0, stdout: "4.127.1\n", stderr: "" };
+        return { status: 0, stdout: "4.131.1\n", stderr: "" };
       },
     });
     await assert.rejects(
@@ -328,6 +322,7 @@ posixTest("a per-call wrapper swap is refused after the child returns", async ()
 posixTest("the field runner reserves first, seals exactly 6,001, and removes only the pending guard", async () => {
   const directory = privateDirectory("brain-v048-field-seed-success-");
   const receiptPath = join(directory, RECEIPT_NAME);
+  const resumePath = join(directory, RESUME_NAME);
   const pendingPath = join(directory, "v048-disposable-seed-receipt.pending.json");
   const events = [];
   try {
@@ -345,6 +340,8 @@ posixTest("the field runner reserves first, seals exactly 6,001, and removes onl
         assert.equal(marker.fixture_sha256, DISPOSABLE_RECOVERY_FIXTURE_SHA256);
         assert.equal(marker.expected_documents, DISPOSABLE_RECOVERY_SEED_DOCUMENTS);
         assert.equal(marker.expected_batches, 121);
+        assert.equal(marker.binding, undefined);
+        assert.equal(marker.identity.source_phase_receipt_sha256, bindingFixture().source_phase_receipt_sha256);
         await beforeBoundary();
         return completeTransports(events);
       },
@@ -356,6 +353,7 @@ posixTest("the field runner reserves first, seals exactly 6,001, and removes onl
     assert.equal(result.receipt.completed_at, FIXED_TIME);
     assert.equal(existsSync(receiptPath), true);
     assert.equal(existsSync(pendingPath), false);
+    assert.equal(existsSync(resumePath), true);
     assert.equal(events.indexOf("create-transports") > events.indexOf("revalidate"), true);
     assert.equal(events.indexOf("opening-direct-d1") < events.indexOf("inventory-1"), true);
     assert.equal(events.indexOf("opening-direct-d1") < events.indexOf("deployment"), true);
@@ -366,16 +364,29 @@ posixTest("the field runner reserves first, seals exactly 6,001, and removes onl
     assert.equal(events.filter((event) => event.includes("-created")).length, 121);
     assert.equal(events.filter((event) => event.includes("-unchanged")).length, 121);
     assert.equal(readPrivateAggregateReceipt(receiptPath).sha256, result.receiptSha256);
+    const resume = readPrivateAggregateReceipt(resumePath).value;
+    assert.equal(assertDisposableRecoverySeedResumeRecord(resume, bindingFixture()).status, "complete");
+    assert.equal(resume.verified_completed_batch_prefix, 121);
+    assert.equal(resume.verified_completed_document_prefix, 6_001);
+    assert.equal(resume.verified_replay_batch_prefix, 121);
+    assert.equal(resume.verified_replay_document_prefix, 6_001);
+    assert.equal(resume.final_seed_receipt_sha256, result.receiptSha256);
+    assert.doesNotMatch(
+      JSON.stringify(resume),
+      /source_id|doc_uid|title|content|path|credential|admin_key|raw_error|10000000-0000-4000-8000-000000000001|30000000-0000-4000-8000-000000000003/iu,
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-posixTest("a post-boundary failure closes the descriptor but preserves both ambiguity markers", async () => {
+posixTest("an ambiguous batch persists an exact private stop record and blocks blind retry", async () => {
   const directory = privateDirectory("brain-v048-field-seed-ambiguous-");
   const receiptPath = join(directory, RECEIPT_NAME);
+  const resumePath = join(directory, RESUME_NAME);
   const pendingPath = join(directory, "v048-disposable-seed-receipt.pending.json");
   let providerBoundaryReached = false;
+  const privateSentinel = "PRIVATE_AMBIGUOUS_PROVIDER_SENTINEL";
   try {
     await assert.rejects(
       () => runDisposableRecoveryFieldSeed({
@@ -386,20 +397,125 @@ posixTest("a post-boundary failure closes the descriptor but preserves both ambi
           providerBoundaryReached = true;
           return {
             ...completeTransports([]),
-            ingestBatch: async () => { throw new Error("ambiguous provider result"); },
+            ingestBatch: async () => { throw new Error(privateSentinel); },
           };
         },
       }),
-      (error) => error?.code === "ingest_transport_failed" && error?.may_have_written === true,
+      (error) => error?.code === "ingest_transport_failed" &&
+        error?.may_have_written === true &&
+        error?.resume_record?.status === "write_confirmation_ambiguous",
     );
     assert.equal(providerBoundaryReached, true);
     assert.equal(existsSync(receiptPath), true);
     assert.equal(existsSync(pendingPath), true);
+    assert.equal(existsSync(resumePath), true);
+    const resume = readPrivateAggregateReceipt(resumePath).value;
+    assertDisposableRecoverySeedResumeRecord(resume, bindingFixture());
+    assert.equal(resume.status, "write_confirmation_ambiguous");
+    assert.equal(resume.pending_seed_action, "ingest_fixture_batch");
+    assert.equal(resume.verified_completed_batch_prefix, 0);
+    assert.equal(resume.verified_completed_document_prefix, 0);
+    assert.deepEqual(resume.ambiguous_write_boundary, {
+      action: "ingest_fixture_batch",
+      batch_number: 1,
+      document_prefix_start: 0,
+      document_count: 50,
+    });
+    assert.equal(resume.next_actor, "technician");
+    assert.match(resume.safe_next_step, /^do_not_retry_pending_batch/u);
+    assert.equal(JSON.stringify(resume).includes(privateSentinel), false);
     assert.throws(
       () => readPrivateAggregateReceipt(receiptPath),
       (error) => error instanceof PrivateAggregateReceiptError &&
         error.code === "PRIVATE_AGGREGATE_RECEIPT_READ_REFUSED",
     );
+    let retriedTransports = 0;
+    await assert.rejects(
+      () => runDisposableRecoveryFieldSeed({
+        binding: bindingFixture(),
+        receiptPath,
+        expectedReceiptDirectory: directory,
+        createTransports: async () => {
+          retriedTransports += 1;
+          return completeTransports([]);
+        },
+      }),
+      (error) => error?.code ===
+          "DISPOSABLE_RECOVERY_SEED_AMBIGUOUS_WRITE_REVIEW_REQUIRED" &&
+        error?.resume_record?.ambiguous_write_boundary?.batch_number === 1,
+    );
+    assert.equal(retriedTransports, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+posixTest("a safe interruption resumes after the exact confirmed document prefix", async () => {
+  const directory = privateDirectory("brain-v048-field-seed-resume-");
+  const receiptPath = join(directory, RECEIPT_NAME);
+  const resumePath = join(directory, RESUME_NAME);
+  let firstBatchCalls = 0;
+  try {
+    await assert.rejects(
+      () => runDisposableRecoveryFieldSeed({
+        binding: bindingFixture(),
+        receiptPath,
+        expectedReceiptDirectory: directory,
+        createTransports: async () => {
+          let inventoryReads = 0;
+          return {
+            ...completeTransports([]),
+            readInventory: async () => {
+              inventoryReads += 1;
+              if (inventoryReads === 1) return inventory();
+              throw new Error("PRIVATE_POST_PREFIX_READ_SENTINEL");
+            },
+            ingestBatch: async (documents) => {
+              firstBatchCalls += 1;
+              return batchReceipt(documents, "created");
+            },
+          };
+        },
+      }),
+      (error) => error?.code === "inventory_transport_failed" &&
+        error?.resume_record?.status === "execution_in_progress" &&
+        error?.resume_record?.verified_completed_document_prefix === 6_001 &&
+        error?.resume_record?.ambiguous_write_boundary === null,
+    );
+    assert.equal(firstBatchCalls, DISPOSABLE_RECOVERY_SEED_BATCHES);
+    const interrupted = readPrivateAggregateReceipt(resumePath).value;
+    assert.equal(interrupted.pending_seed_action, "verify_seeded_inventory");
+    assert.equal(interrupted.verified_completed_batch_prefix, 121);
+    assert.equal(interrupted.verified_replay_batch_prefix, 0);
+
+    let resumedBatchCalls = 0;
+    const result = await runDisposableRecoveryFieldSeed({
+      binding: bindingFixture(),
+      receiptPath,
+      expectedReceiptDirectory: directory,
+      createTransports: async () => ({
+        ...completeTransports([]),
+        readOpeningDirectD1: async () => ({
+          document_count: 6_001,
+          chunk_count: 6_001,
+          fts_count: 6_001,
+          pending_outbox: 6_001,
+          failed_vectors: 0,
+        }),
+        readInventory: async () => inventory({ complete: true }),
+        ingestBatch: async (documents) => {
+          resumedBatchCalls += 1;
+          return batchReceipt(documents, "unchanged");
+        },
+      }),
+      now: () => FIXED_TIME,
+    });
+    assert.equal(resumedBatchCalls, DISPOSABLE_RECOVERY_SEED_BATCHES);
+    assert.equal(result.receipt.ingest.created_documents, 6_001);
+    assert.equal(result.receipt.verification_replay.unchanged_documents, 6_001);
+    const completed = readPrivateAggregateReceipt(resumePath).value;
+    assert.equal(completed.status, "complete");
+    assert.equal(completed.final_seed_receipt_sha256, result.receiptSha256);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

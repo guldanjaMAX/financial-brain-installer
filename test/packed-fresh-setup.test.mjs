@@ -177,11 +177,11 @@ syncBuiltinESMExports();
     const fakeBin = join(sandbox, "fake-bin");
     mkdirSync(fakeBin, { recursive: true });
     if (IS_WIN) {
-      writeFileSync(join(fakeBin, "npx.cmd"), "@echo off\r\necho wrangler 4.127.1\r\n", "utf8");
+      writeFileSync(join(fakeBin, "npx.cmd"), "@echo off\r\necho wrangler 4.131.1\r\n", "utf8");
       writeFileSync(join(fakeBin, "claude.cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo 2.1.63 (Claude Code)& exit /b 0\r\nif \"%1 %2\"==\"auth status\" echo signed in& exit /b 0\r\nexit /b 1\r\n", "utf8");
     } else {
       const npx = join(fakeBin, "npx");
-      writeFileSync(npx, "#!/bin/sh\nprintf '%s\\n' 'wrangler 4.127.1'\n", "utf8");
+      writeFileSync(npx, "#!/bin/sh\nprintf '%s\\n' 'wrangler 4.131.1'\n", "utf8");
       chmodSync(npx, 0o755);
       const claude = join(fakeBin, "claude");
       writeFileSync(claude, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '2.1.63 (Claude Code)'; exit 0; fi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then printf '%s\\n' 'signed in'; exit 0; fi\nexit 1\n", "utf8");
@@ -191,7 +191,7 @@ syncBuiltinESMExports();
       ...baseEnvironment,
       PATH: [fakeBin, dirname(process.execPath), "/usr/bin", "/bin"].join(IS_WIN ? ";" : ":"),
     };
-    const bootstrap = run(wrapper, ["tools", manifestPath, "--json"], {
+    const bootstrap = run(wrapper, ["tools", manifestPath, "--intent", "first_brain", "--json"], {
       cwd: scratch,
       env: toolEnvironment,
       timeout: IS_WIN ? 300_000 : 90_000,
@@ -199,6 +199,7 @@ syncBuiltinESMExports();
     assert.equal(bootstrap.status, 0, `${bootstrap.stdout}\n${bootstrap.stderr}`);
     const bootstrapStatus = JSON.parse(bootstrap.stdout);
     assert.equal(bootstrapStatus.issue_code, "BOOTSTRAP_READY_NO_MANIFEST");
+    assert.deepEqual(bootstrapStatus.setup_intent, { value: "first_brain", owner_selected: true });
     assert.equal(bootstrapStatus.release.external_test_kit_required, false);
     assert.equal(bootstrapStatus.manifest.state, "not_created");
     assert.equal(bootstrapStatus.manifest.path, manifestPath);
@@ -220,7 +221,7 @@ syncBuiltinESMExports();
     });
     const technician = run(bootstrapStatus.cli.command, [
       ...bootstrapStatus.cli.args,
-      "technician", manifestPath, "--json",
+      "technician", manifestPath, "--intent", "first_brain", "--json",
     ], { cwd: scratch, env: normalClientEnvironment });
     assert.equal(technician.status, 0, `${technician.stdout}\n${technician.stderr}`);
     const plan = JSON.parse(technician.stdout);
@@ -229,7 +230,7 @@ syncBuiltinESMExports();
     assert.deepEqual(plan.cli, bootstrapStatus.cli);
     assert.deepEqual(plan.refresh, {
       command: bootstrapStatus.cli.command,
-      args: [...bootstrapStatus.cli.args, "technician", manifestPath, "--json"],
+      args: [...bootstrapStatus.cli.args, "technician", manifestPath, "--intent", "first_brain", "--json"],
       mutates_external_state: false,
     });
     assert.ok(plan.steps.filter((step) => step.command).every((step) =>
@@ -242,7 +243,7 @@ syncBuiltinESMExports();
       command: bootstrapStatus.cli.command,
       args: [
         ...bootstrapStatus.cli.args,
-        "technician", manifestPath, "--run", "cloudflare",
+        "technician", manifestPath, "--intent", "first_brain", "--run", "cloudflare",
         "--browser-sign-in",
         "--name", "<person-or-company>",
         "--slug", "<short-name>",
@@ -270,6 +271,8 @@ syncBuiltinESMExports();
     });
     assert.deepEqual(plan.steps.find((step) => step.id === "passkey").owner_only_command.args,
       [...bootstrapStatus.cli.args, "invite", manifestPath]);
+    assert.ok(plan.steps.filter((step) => step.command).every((step) =>
+      step.command.includes("--intent") && step.command.includes("first_brain")));
     assert.doesNotMatch(JSON.stringify(plan.steps), /(^|[^\w/.-])brain technician\b/i);
     assert.match(JSON.stringify(plan.coverage), /watched-folder scheduling ceremony/i);
     const accountId = "a".repeat(32);

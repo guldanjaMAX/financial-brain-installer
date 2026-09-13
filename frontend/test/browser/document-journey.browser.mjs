@@ -55,7 +55,11 @@ try {
   for (const rehearsal of paths) {
     const href = new URL(`/document-journey${rehearsal.search ? `?${rehearsal.search}` : ""}`, harness.origin).href;
     await page.goto(href);
-    await page.getByRole("heading", { name: "How one document becomes searchable", exact: true }).waitFor();
+    await harness.waitForBrowserBoot(
+      page,
+      page.getByRole("heading", { name: "How one document becomes searchable", exact: true }),
+      "document journey fixture",
+    );
     const body = await page.locator("body").innerText();
     check(`${rehearsal.label}: all four proof labels remain visible`,
       DOCUMENT_JOURNEY_STAGES.every(({ label }) => body.includes(label)));
@@ -73,7 +77,11 @@ try {
   }
 
   await page.goto(new URL("/document-journey", harness.origin).href);
-  await page.getByRole("heading", { name: "How one document becomes searchable", exact: true }).waitFor();
+  await harness.waitForBrowserBoot(
+    page,
+    page.getByRole("heading", { name: "How one document becomes searchable", exact: true }),
+    "document journey screenshot fixture",
+  );
   await page.screenshot({ path: path.join(output, "document-journey-desktop.png"), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await renderSettled(page);

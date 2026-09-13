@@ -34,7 +34,7 @@ async function fresh(options={}){
   try{await route.fulfill({json:response});}catch{}
  });
  await page.goto(new URL('/test/browser/fixtures/owner-upload.html',harness.origin).href);
- await page.getByRole('button',{name:'Company alpha',exact:true}).waitFor();
+ await harness.waitForBrowserBoot(page,page.getByRole('button',{name:'Company alpha',exact:true}),'owner upload fixture');
  await page.waitForFunction(()=>document.querySelector('input[type=file]')?.disabled===false);
  return {page,state};
 }

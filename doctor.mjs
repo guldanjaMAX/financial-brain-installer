@@ -28,7 +28,7 @@ import { manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js
 export const OK = "ok";
 export const WARN = "warn";
 export const FAIL = "fail";
-export const WRANGLER_PACKAGE = "wrangler@4.127.1";
+export const WRANGLER_PACKAGE = "wrangler@4.131.1";
 export const WRANGLER_AUTH_PROFILE_PATTERN = /^financial-brain-[a-f0-9]{24}$/;
 export const MIN_INSTALL_FREE_BYTES = 2n * 1024n * 1024n * 1024n;
 

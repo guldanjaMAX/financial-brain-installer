@@ -4,7 +4,7 @@ import { ApiError } from "../lib/api";
 import type { FinancialMapReview, MapReviewField } from "../lib/financial-map";
 import {
   copyFinancialMapAssistantPrompt, exactReviewedMapIsActive, financialMapAssistantPrompt,
-  financialMapReadFailure, FinancialMapAssistantPath,
+  financialMapReadFailure, FinancialMap, FinancialMapAssistantPath,
   FinancialMapCorrectionChoice, FinancialMapFieldList,
 } from "./FinancialMap";
 
@@ -16,7 +16,16 @@ describe("Financial Map review clarity", () => {
 
     expect(state.kind).toBe("unavailable");
     expect(state.message).toContain("not an empty review queue");
-    expect(state.message).toContain("ask the installer");
+    expect(state.message).toMatch(/ask the installer/i);
+    expect(state.message).not.toContain("Update the Brain");
+  });
+
+  it("frames the map as bounded owner scope rather than a completeness claim", () => {
+    const html = renderToStaticMarkup(<FinancialMap />);
+
+    expect(html).toContain("you want this review to cover");
+    expect(html).toContain("Unknown or later items remain open");
+    expect(html).not.toContain("complete financial picture");
   });
 
   it("never presents a bare HTTP detail as Financial Map guidance", () => {
@@ -113,6 +122,9 @@ describe("Financial Map review clarity", () => {
     expect(writeText).toHaveBeenCalledWith(financialMapAssistantPrompt("correct"));
     expect(financialMapAssistantPrompt("correct")).toContain("read mode first");
     expect(financialMapAssistantPrompt("correct")).toContain("ask for my approval before using it");
+    expect(financialMapAssistantPrompt("correct")).toContain("useful starting Owner Financial Map");
+    expect(financialMapAssistantPrompt("correct")).toContain("possible mentions until I confirm them");
+    expect(financialMapAssistantPrompt("correct")).not.toContain("my complete Owner Financial Map");
   });
 
   it("fails closed when clipboard access is unavailable", async () => {

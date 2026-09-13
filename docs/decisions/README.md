@@ -12,3 +12,4 @@ code it governs.
 - [002: Accelerate exact legacy projection bootstrap only behind the paused barrier](002-paused-bootstrap-acceleration.md)
 - [003: Make source onboarding useful before historical backfill completes](003-staged-source-onboarding.md)
 - [004: Scope the incident release gate to the version being cut](004-version-scoped-release-scope.md)
+- [005: Split disposable deployment proof across causal approval phases](005-phased-disposable-deployment-proof.md)

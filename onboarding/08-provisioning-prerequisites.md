@@ -35,10 +35,13 @@ Brain technician skill and may write local bootstrap status and may update the
 current user's PATH to include the Brain CLI folder. Ask the owner to
 approve those local changes. Optimize never runs `brain tools`; it uses the
 non-writing machine-continuity, MCP discovery, and configuration checks instead.
-After approval, run:
+First ask whether this is the owner's first Brain, an existing Brain on this
+computer, an existing Brain being reconnected on a new computer, an interrupted
+setup on this computer, or whether they are unsure. Never infer a first Brain
+from a missing file. After approval, run the matching explicit intent:
 
 ```bash
-brain tools
+brain tools "/absolute/path/to/brain.manifest.json" --intent <selected-intent>
 ```
 
 The automated part then proves the Claude version, `claude auth status`, and

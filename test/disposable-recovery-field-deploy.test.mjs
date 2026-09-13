@@ -1,363 +1,1025 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
-  chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync,
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
+  DISPOSABLE_RECOVERY_DEPLOYMENT_PROTOCOL,
   DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME,
+  DISPOSABLE_RECOVERY_SOURCE_PHASE_PROTOCOL,
+  DISPOSABLE_RECOVERY_SOURCE_PHASE_RECEIPT_NAME,
+  DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_PROTOCOL,
+  DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
+  DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_PROTOCOL,
+  DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_RECEIPT_NAME,
   assertDisposableRecoveryDeploymentBinding,
-  assertDisposableRecoveryDeploymentReceipt,
-  disposableRecoveryDeploymentApprovalFingerprint,
+  assertDisposableRecoveryDeploymentReceiptChain,
+  assertDisposableRecoverySourcePhaseReceipt,
+  assertDisposableRecoverySourcePreflightReceipt,
+  assertDisposableRecoveryTargetPhaseReceipt,
+  assertDisposableRecoveryTargetPreflightReceipt,
+  disposableRecoveryDeploymentCampaignFingerprint,
+  disposableRecoverySourceA2Fingerprint,
+  disposableRecoveryTargetA4Fingerprint,
   readDisposableRecoveryDeploymentReceipt,
+  readDisposableRecoverySourcePhaseReceipt,
+  readDisposableRecoverySourcePreflightReceipt,
+  readDisposableRecoveryTargetPreflightReceipt,
 } from "../operations/disposable-recovery-deployment-receipt.mjs";
 import {
   DISPOSABLE_RECOVERY_DEPLOYMENT_EXECUTABLE_PROVIDER_READY,
-  runDisposableRecoveryFieldDeployment,
+  DISPOSABLE_RECOVERY_DEPLOYMENT_PROVIDER_ENTRYPOINT_AVAILABLE,
+  DISPOSABLE_RECOVERY_FIELD_DEPLOYMENT_RECEIPT_NAMES,
+  DISPOSABLE_RECOVERY_SOURCE_JOURNAL_NAME,
+  DISPOSABLE_RECOVERY_TARGET_JOURNAL_NAME,
   disposableRecoveryDeploymentRequestPlan,
+  runDisposableRecoveryFieldDeployment,
+  runDisposableRecoverySourcePhase,
+  runDisposableRecoverySourcePreflight,
+  runDisposableRecoveryTargetPhase,
+  runDisposableRecoveryTargetPreflight,
 } from "../operations/disposable-recovery-field-deploy.mjs";
-import { privateAggregateReceiptPendingPath } from
-  "../operations/private-aggregate-receipt.mjs";
+import {
+  disposableRecoveryDeploymentJournalSha256,
+  readDisposableRecoveryDeploymentJournal,
+  runJournaledDisposableRecoveryDeploymentMutation,
+  summarizeDisposableRecoveryDeploymentJournal,
+} from "../operations/disposable-recovery-deployment-journal.mjs";
+import {
+  DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION,
+  DISPOSABLE_RECOVERY_FIXTURE_SHA256,
+  DISPOSABLE_RECOVERY_MINIMUM_D1_CHUNKS,
+  DISPOSABLE_RECOVERY_SEED_BATCHES,
+  DISPOSABLE_RECOVERY_SEED_BATCH_SIZE,
+  DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+  DISPOSABLE_RECOVERY_SEED_PROTOCOL,
+  DISPOSABLE_RECOVERY_VECTOR_DIMENSIONS,
+  DISPOSABLE_RECOVERY_VECTOR_METRIC,
+  assertDisposableRecoverySeedReceipt,
+  disposableRecoverySeedExecutionApprovalFingerprint,
+} from "../operations/disposable-recovery-seeder.mjs";
+import {
+  abandonPrivateAggregateReceipt,
+  assertPrivateAggregateOutputPath,
+  finalizePrivateAggregateReceipt,
+  privateAggregateReceiptPendingPath,
+  readPrivateAggregateReceipt,
+  reservePrivateAggregateReceipt,
+} from "../operations/private-aggregate-receipt.mjs";
 
-const H = (value) => value.repeat(64);
-const SOURCE_VERSION = "10000000-0000-4000-8000-000000000001";
-const PAUSED_VERSION = "20000000-0000-4000-8000-000000000002";
-const ACTIVE_VERSION = "30000000-0000-4000-8000-000000000003";
-const SOURCE_SCRIPT_ETAG = "source-etag-v048";
-const PAUSED_SCRIPT_ETAG = "target-paused-etag-v048";
-const ACTIVE_SCRIPT_ETAG = "target-active-etag-v048";
+const FIXED_DAY = "2026-09-12";
+const MODULE_INVENTORY_SHA256 = digest("reviewed-module-inventory");
+const SOURCE_VERSION_ID = "10000000-0000-4000-8000-000000000001";
+const SOURCE_DEPLOYMENT_ID = "10000000-0000-4000-8000-000000000002";
+const TARGET_PAUSED_VERSION_ID = "20000000-0000-4000-8000-000000000001";
+const TARGET_ACTIVE_VERSION_ID = "30000000-0000-4000-8000-000000000001";
+const TARGET_DEPLOYMENT_ID = "20000000-0000-4000-8000-000000000002";
+const SOURCE_SCRIPT_ETAG = "source-active-etag-v048";
+const TARGET_PAUSED_SCRIPT_ETAG = "target-paused-etag-v048";
+const TARGET_ACTIVE_SCRIPT_ETAG = "target-active-etag-v048";
 
-function bindingFixture() {
+function digest(label) {
+  return createHash("sha256").update(String(label)).digest("hex");
+}
+
+function bindingFixture(runId = "40000000-0000-4000-8000-000000000004") {
   const base = {
-    schema_version: 1,
-    plan_fingerprint: H("0"),
+    schema_version: 2,
+    run_id: runId,
+    plan_fingerprint: digest("plan"),
     candidate_sha: "1".repeat(40),
     candidate_tree_sha: "2".repeat(40),
-    field_receipt_sha256: H("3"),
-    field_receipt_run_id: "40000000-0000-4000-8000-000000000004",
+    field_receipt_sha256: digest("field-receipt"),
+    field_receipt_run_id: "50000000-0000-4000-8000-000000000005",
     package_filename: "brain-installer-0.4.8.tgz",
-    package_bytes: 123456,
-    package_sha256: H("4"),
+    package_bytes: 123_456,
+    package_sha256: digest("package"),
     package_file_count: 541,
-    execution_inventory_sha256: H("5"),
-    installed_execution_inventory_sha256: H("5"),
-    source_manifest_fingerprint: H("6"),
-    source_resource_fingerprint: H("7"),
-    target_manifest_fingerprint: H("8"),
-    target_resource_fingerprint: H("9"),
-    runtime_contract_fingerprint: H("a"),
-    wrangler_version: "4.127.1",
-    wrangler_wrapper_sha256: H("b"),
-    wrangler_runtime_inventory_sha256: H("c"),
-    wrangler_entrypoint_sha256: H("d"),
+    execution_inventory_sha256: digest("execution-inventory"),
+    installed_execution_inventory_sha256: digest("execution-inventory"),
+    source_manifest_fingerprint: digest("source-manifest"),
+    source_resource_fingerprint: digest("source-resource"),
+    target_manifest_fingerprint: digest("target-manifest"),
+    target_resource_fingerprint: digest("target-resource"),
+    runtime_contract_fingerprint: digest("runtime-contract"),
+    wrangler_version: "4.131.1",
+    wrangler_wrapper_sha256: digest("wrangler-wrapper"),
+    wrangler_runtime_inventory_sha256: digest("wrangler-runtime"),
+    wrangler_entrypoint_sha256: digest("wrangler-entrypoint"),
     node_version: "v22.22.0",
-    node_executable_sha256: H("e"),
+    node_executable_sha256: digest("node-executable"),
   };
   return Object.freeze({
-    ...base,
-    execution_approval_fingerprint:
-      disposableRecoveryDeploymentApprovalFingerprint(base),
+    schema_version: 2,
+    run_id: base.run_id,
+    campaign_fingerprint:
+      disposableRecoveryDeploymentCampaignFingerprint(base),
+    ...Object.fromEntries(Object.entries(base).slice(2)),
   });
 }
 
-function execution(binding) {
-  return {
-    schema_version: 1,
-    fresh_call_directory: true,
-    fresh_wrapper_copy: true,
-    copied_package_source: true,
-    package_execution_inventory_sha256: binding.execution_inventory_sha256,
-    wrangler_wrapper_sha256: binding.wrangler_wrapper_sha256,
-    wrangler_runtime_inventory_sha256: binding.wrangler_runtime_inventory_sha256,
-    wrangler_entrypoint_sha256: binding.wrangler_entrypoint_sha256,
-    node_executable_sha256: binding.node_executable_sha256,
-    source_revalidated_before_and_after: true,
-    wrapper_revalidated_before_and_after: true,
-    runtime_revalidated_before_and_after: true,
-  };
+function privateDirectory(prefix) {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  if (process.platform !== "win32") chmodSync(directory, 0o700);
+  return directory;
 }
 
-function version(mode, versionId) {
-  const target = versionId !== SOURCE_VERSION;
-  return {
-    version_id: versionId,
-    mode,
-    script_etag: versionId === SOURCE_VERSION
-      ? SOURCE_SCRIPT_ETAG
-      : versionId === PAUSED_VERSION
-        ? PAUSED_SCRIPT_ETAG
-        : ACTIVE_SCRIPT_ETAG,
-    bindings_sha256: mode === "paused-for-upgrade" ? H("1") :
-      target ? H("2") : H("3"),
-    bindings_without_mode_sha256: target ? H("4") : H("5"),
-    code_exact: true,
-    bindings_exact: true,
-    resources_exact: true,
-    compatibility_date: "2026-01-01",
-    handlers: ["fetch", "scheduled"],
-  };
+function artifactPaths(directory) {
+  return Object.freeze({
+    sourcePreflight: join(
+      directory,
+      DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
+    ),
+    sourcePhase: join(directory, DISPOSABLE_RECOVERY_SOURCE_PHASE_RECEIPT_NAME),
+    sourceJournal: join(directory, DISPOSABLE_RECOVERY_SOURCE_JOURNAL_NAME),
+    seed: join(directory, DISPOSABLE_RECOVERY_FIELD_DEPLOYMENT_RECEIPT_NAMES.seed),
+    targetPreflight: join(
+      directory,
+      DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_RECEIPT_NAME,
+    ),
+    targetPhase: join(directory, DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME),
+    targetJournal: join(directory, DISPOSABLE_RECOVERY_TARGET_JOURNAL_NAME),
+  });
 }
 
-function resource(binding, role) {
+function resource(binding, role, vectorCount) {
   return {
+    custom_domains_count: 0,
+    d1_exists: true,
+    d1_name_and_id_exact: true,
+    previews_enabled: false,
+    routes_count: 0,
+    schedules_count: 0,
+    vector_count: vectorCount,
+    vector_dimensions: 768,
+    vector_metric: "cosine",
+    vectorize_exists: true,
+    vectorize_name_exact: true,
+    worker_exists: true,
+    workers_dev_enabled: true,
     resource_fingerprint: role === "source"
       ? binding.source_resource_fingerprint
       : binding.target_resource_fingerprint,
-    worker_exists: true,
-    d1_exists: true,
-    vectorize_exists: true,
-    d1_name_and_id_exact: true,
-    vectorize_name_exact: true,
-    vector_dimensions: 768,
-    vector_metric: "cosine",
-    workers_dev_enabled: true,
-    routes_count: 0,
-    custom_domains_count: 0,
-    provider_readback: true,
   };
 }
 
-function providerHarness(binding, events, { failAt = null } = {}) {
-  const envelope = (value) => ({ execution: execution(binding), value });
-  const record = (method, request, value) => {
-    events.push({ method, request });
-    if (events.length === failAt) throw new Error("ambiguous-provider-result");
-    return envelope(value);
-  };
+function resourceContract(binding, role, vectorCount) {
+  const { resource_fingerprint: _fingerprint, ...contract } =
+    resource(binding, role, vectorCount);
+  return contract;
+}
+
+function baseline(binding, role) {
+  const prefix = role === "source" ? "60000000" : "70000000";
   return {
-    uploadVersion(request) {
-      const id = request.role === "source" ? SOURCE_VERSION :
-        request.mode === "paused-for-upgrade" ? PAUSED_VERSION : ACTIVE_VERSION;
-      return record("uploadVersion", request, { version_id: id });
-    },
-    readVersion(request) {
-      return record("readVersion", request, version(request.mode, request.version_id));
-    },
-    deployVersion(request) {
-      return record("deployVersion", request, { accepted: true });
-    },
-    readDeployment(request) {
-      const id = request.role === "source" ? SOURCE_VERSION : PAUSED_VERSION;
-      return record("readDeployment", request, {
-        versions: [{ version_id: id, percentage: 100 }],
-      });
-    },
-    readResourceContract(request) {
-      return record("readResourceContract", request, resource(binding, request.role));
-    },
+    baseline_deployment_id: `${prefix}-0000-4000-8000-000000000002`,
+    baseline_script_etag: `${role}-baseline-etag-v048`,
+    baseline_traffic_percent: 100,
+    baseline_version_id: `${prefix}-0000-4000-8000-000000000001`,
+    resource: resourceContract(binding, role, 0),
+    resource_fingerprint: role === "source"
+      ? binding.source_resource_fingerprint
+      : binding.target_resource_fingerprint,
   };
 }
 
-function privateDirectory() {
-  const path = realpathSync(mkdtempSync(join(tmpdir(), "v048-deployment-receipt-")));
-  if (process.platform !== "win32") chmodSync(path, 0o700);
-  return path;
+const VERSION_EVIDENCE = Object.freeze({
+  source: Object.freeze({
+    bindings_sha256: digest("source-bindings"),
+    bindings_without_mode_sha256: digest("source-bindings-without-mode"),
+    script_etag: SOURCE_SCRIPT_ETAG,
+    version_id: SOURCE_VERSION_ID,
+  }),
+  targetPaused: Object.freeze({
+    bindings_sha256: digest("target-paused-bindings"),
+    bindings_without_mode_sha256: digest("target-bindings-without-mode"),
+    script_etag: TARGET_PAUSED_SCRIPT_ETAG,
+    version_id: TARGET_PAUSED_VERSION_ID,
+  }),
+  targetActive: Object.freeze({
+    bindings_sha256: digest("target-active-bindings"),
+    bindings_without_mode_sha256: digest("target-bindings-without-mode"),
+    script_etag: TARGET_ACTIVE_SCRIPT_ETAG,
+    version_id: TARGET_ACTIVE_VERSION_ID,
+  }),
+});
+
+function versionReadback(version) {
+  return {
+    bindings_sha256: version.bindings_sha256,
+    bindings_without_mode_sha256: version.bindings_without_mode_sha256,
+    handlers: ["fetch", "scheduled"],
+    named_handlers_count: 0,
+    script_etag: version.script_etag,
+    version_id: version.version_id,
+  };
 }
 
-test("deployment binding and review plan accept only the fixed campaign", () => {
-  assert.equal(DISPOSABLE_RECOVERY_DEPLOYMENT_EXECUTABLE_PROVIDER_READY, false);
-  const binding = bindingFixture();
-  assert.deepEqual(assertDisposableRecoveryDeploymentBinding(binding), binding);
-  const plan = disposableRecoveryDeploymentRequestPlan(binding);
-  assert.equal(plan.length, 12);
-  assert.deepEqual(plan.map((entry) => `${entry.operation}:${entry.role}:${entry.mode}`), [
-    "upload_version:source:active",
-    "read_version:source:active",
-    "deploy_version:source:active",
-    "read_deployment:source:null",
-    "read_resource_contract:source:null",
-    "upload_version:target:paused-for-upgrade",
-    "read_version:target:paused-for-upgrade",
-    "upload_version:target:active",
-    "read_version:target:active",
-    "deploy_version:target:paused-for-upgrade",
-    "read_deployment:target:null",
-    "read_resource_contract:target:null",
-  ]);
-  assert.equal(plan.some((entry) =>
-    Object.keys(entry).some((key) =>
-      /^(?:account_id|worker_name|database_id|database_name|vectorize_index|domain|routes)$/u
-        .test(key))), false);
-  assert.throws(() => assertDisposableRecoveryDeploymentBinding({
-    ...binding,
-    package_filename: "other.tgz",
-  }), /DISPOSABLE_RECOVERY_DEPLOYMENT_BINDING_INVALID/);
-  assert.throws(() => assertDisposableRecoveryDeploymentBinding({
-    ...binding,
-    plan_fingerprint: H("f"),
-  }), /DISPOSABLE_RECOVERY_DEPLOYMENT_BINDING_INVALID/);
-});
+function sourcePin(binding, vectorCount) {
+  return {
+    active_deployment_id: SOURCE_DEPLOYMENT_ID,
+    active_script_etag: SOURCE_SCRIPT_ETAG,
+    active_traffic_percent: 100,
+    active_version_id: SOURCE_VERSION_ID,
+    resource: resourceContract(binding, "source", vectorCount),
+    resource_fingerprint: binding.source_resource_fingerprint,
+  };
+}
 
-test("provider creation follows both durable markers and exact readback finalizes", {
-  skip: process.platform !== "darwin",
-}, async () => {
-  const directory = privateDirectory();
-  const receiptPath = join(directory, DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME);
-  const pendingPath = privateAggregateReceiptPendingPath(receiptPath);
-  const binding = bindingFixture();
-  const events = [];
-  let revalidations = 0;
-  try {
-    const result = await runDisposableRecoveryFieldDeployment({
-      binding,
-      receiptPath,
-      expectedReceiptDirectory: directory,
-      revalidate: async () => { revalidations += 1; return true; },
-      now: () => new Date("2026-09-12T12:00:00.000Z"),
-      createProvider: async () => {
-        assert.equal(existsSync(receiptPath), true,
-          "the reserved final marker must precede provider creation");
-        assert.equal(existsSync(pendingPath), true,
-          "the explicit pending marker must precede provider creation");
-        return providerHarness(binding, events);
+function providerHarness(binding, { failMutation = null } = {}) {
+  const calls = [];
+  const contexts = [];
+  const state = { sourceVectors: 0 };
+
+  const semanticFor = (request) => {
+    if (request.stage === "source_preflight") {
+      return { source: baseline(binding, "source") };
+    }
+    if (request.stage === "source_final") {
+      return {
+        source: {
+          active_deployment: {
+            deployment_id: SOURCE_DEPLOYMENT_ID,
+            traffic_percent: 100,
+            version_id: SOURCE_VERSION_ID,
+          },
+          active_version: versionReadback(VERSION_EVIDENCE.source),
+          resource: resourceContract(binding, "source", state.sourceVectors),
+          resource_fingerprint: binding.source_resource_fingerprint,
+        },
+      };
+    }
+    if (request.stage === "target_preflight") {
+      return {
+        source: sourcePin(binding, state.sourceVectors),
+        target: baseline(binding, "target"),
+      };
+    }
+    if (request.stage === "target_final") {
+      return {
+        source: sourcePin(binding, state.sourceVectors),
+        target: {
+          active_version: versionReadback(VERSION_EVIDENCE.targetActive),
+          paused_deployment: {
+            deployment_id: TARGET_DEPLOYMENT_ID,
+            traffic_percent: 100,
+            version_id: TARGET_PAUSED_VERSION_ID,
+          },
+          paused_version: versionReadback(VERSION_EVIDENCE.targetPaused),
+          resource: resourceContract(binding, "target", 0),
+          resource_fingerprint: binding.target_resource_fingerprint,
+        },
+      };
+    }
+    throw new Error("unexpected synthetic snapshot stage");
+  };
+
+  const uploadVersion = async (request, openingSemantic) => {
+    assert.equal(Object.isFrozen(request), true);
+    assert.equal(Object.isFrozen(openingSemantic), true);
+    const version = request.phase === "source"
+      ? VERSION_EVIDENCE.source
+      : request.mode === "paused-for-upgrade"
+        ? VERSION_EVIDENCE.targetPaused
+        : VERSION_EVIDENCE.targetActive;
+    calls.push({ method: "uploadVersion", request, version_id: version.version_id });
+    if (failMutation === `${request.phase}:upload_version:${request.mode}`) {
+      throw new Error("synthetic ambiguous upload");
+    }
+    return {
+      deployed: false,
+      operation: "upload_version",
+      request: {
+        bindings_sha256: version.bindings_sha256,
+        body_sha256: digest(`upload-body:${version.version_id}`),
+        metadata_sha256: digest(`upload-metadata:${version.version_id}`),
+        module_count: 3,
+        module_inventory_sha256: request.module_inventory_sha256,
       },
-    });
-    assert.equal(events.length, 12);
-    assert.ok(revalidations >= 27);
-    assert.equal(existsSync(pendingPath), false);
-    assert.equal(result.receipt.source.active_version.version_id, SOURCE_VERSION);
-    assert.equal(result.receipt.target.paused_version.version_id, PAUSED_VERSION);
-    assert.equal(result.receipt.target.active_version.version_id, ACTIVE_VERSION);
-    assert.equal(result.receipt.source.active_version.script_etag, SOURCE_SCRIPT_ETAG);
-    assert.equal(result.receipt.target.paused_version.script_etag, PAUSED_SCRIPT_ETAG);
-    assert.equal(result.receipt.target.active_version.script_etag, ACTIVE_SCRIPT_ETAG);
-    assertDisposableRecoveryDeploymentReceipt(result.receipt);
-    const loaded = readDisposableRecoveryDeploymentReceipt(receiptPath);
-    assert.equal(loaded.sha256, result.receiptSha256);
-    assert.equal(loaded.value.execution.provider_calls, 12);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("an ambiguous provider result retains both owner-only markers", {
-  skip: process.platform !== "darwin",
-}, async () => {
-  const directory = privateDirectory();
-  const receiptPath = join(directory, DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME);
-  const pendingPath = privateAggregateReceiptPendingPath(receiptPath);
-  const binding = bindingFixture();
-  const events = [];
-  try {
-    await assert.rejects(runDisposableRecoveryFieldDeployment({
-      binding,
-      receiptPath,
-      expectedReceiptDirectory: directory,
-      createProvider: async () => providerHarness(binding, events, { failAt: 8 }),
-    }), /DISPOSABLE_RECOVERY_DEPLOYMENT_PROVIDER_AMBIGUOUS/);
-    assert.equal(events.length, 8);
-    assert.equal(existsSync(receiptPath), true);
-    assert.equal(existsSync(pendingPath), true);
-    const finalMarker = JSON.parse(readFileSync(receiptPath, "utf8"));
-    const pendingMarker = JSON.parse(readFileSync(pendingPath, "utf8"));
-    assert.deepEqual(finalMarker, pendingMarker);
-    assert.equal(finalMarker.status, "provider_result_unconfirmed");
-    assert.throws(() => readDisposableRecoveryDeploymentReceipt(receiptPath),
-      /DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_READ_FAILED/);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("a negative evidence revalidation retains markers before provider creation", {
-  skip: process.platform !== "darwin",
-}, async () => {
-  const directory = privateDirectory();
-  const receiptPath = join(directory, DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME);
-  const pendingPath = privateAggregateReceiptPendingPath(receiptPath);
-  const binding = bindingFixture();
-  let revalidations = 0;
-  let providerCreated = false;
-  try {
-    await assert.rejects(runDisposableRecoveryFieldDeployment({
-      binding,
-      receiptPath,
-      expectedReceiptDirectory: directory,
-      revalidate: async () => {
-        revalidations += 1;
-        return revalidations === 1;
+      response: {
+        body_sha256: digest(`upload-response:${version.version_id}`),
+        content_type: "application/json",
+        schema_version: 1,
+        status: 200,
       },
-      createProvider: async () => {
-        providerCreated = true;
-        return providerHarness(binding, []);
-      },
-    }), /DISPOSABLE_RECOVERY_DEPLOYMENT_EVIDENCE_CHANGED/);
-    assert.equal(providerCreated, false);
-    assert.equal(existsSync(receiptPath), true);
-    assert.equal(existsSync(pendingPath), true);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+      schema_version: 1,
+      script_etag: version.script_etag,
+      version_id: version.version_id,
+    };
+  };
 
-test("receipt validation rejects unproved traffic and malformed per-version etags", () => {
-  const binding = bindingFixture();
+  const deployVersion = async (request, versionId, openingSemantic) => {
+    assert.equal(Object.isFrozen(request), true);
+    assert.equal(Object.isFrozen(openingSemantic), true);
+    const deploymentId = request.phase === "source"
+      ? SOURCE_DEPLOYMENT_ID
+      : TARGET_DEPLOYMENT_ID;
+    calls.push({ method: "deployVersion", request, version_id: versionId });
+    if (failMutation === `${request.phase}:deploy_version:${request.mode}`) {
+      throw new Error("synthetic ambiguous deployment");
+    }
+    return {
+      accepted: true,
+      deployment_id: deploymentId,
+      operation: "deploy_version",
+      percentage: 100,
+      request_body_sha256: digest(`deploy-body:${deploymentId}`),
+      response: {
+        body_sha256: digest(`deploy-response:${deploymentId}`),
+        content_type: "application/json; charset=utf-8",
+        schema_version: 1,
+        status: 200,
+      },
+      schema_version: 1,
+      version_id: versionId,
+    };
+  };
+
+  const readSnapshot = async (request) => {
+    const semantic = semanticFor(request);
+    calls.push({ method: "readSnapshot", request, semantic });
+    return {
+      evidence: [{
+        body_sha256: digest(
+          `snapshot:${request.phase}:${request.stage}:${request.read_ordinal}`,
+        ),
+        content_type: "application/json",
+        operation: "read_snapshot_evidence",
+        schema_version: 1,
+        status: 200,
+      }],
+      phase: request.phase,
+      read_ordinal: request.read_ordinal,
+      schema_version: 1,
+      semantic,
+      stage: request.stage,
+    };
+  };
+
+  return Object.freeze({
+    calls,
+    contexts,
+    markSeeded() { state.sourceVectors = DISPOSABLE_RECOVERY_SEED_DOCUMENTS; },
+    createProvider: async (_beforeBoundary, context) => {
+      assert.equal(Object.isFrozen(context), true);
+      assert.equal(Object.isFrozen(context.binding), true);
+      assert.equal(Object.isFrozen(context.requests), true);
+      contexts.push(context);
+      return Object.freeze({ deployVersion, readSnapshot, uploadVersion });
+    },
+  });
+}
+
+function seedReceiptFixture(binding, sourcePhaseLoaded) {
+  const sourcePhase = sourcePhaseLoaded.value;
+  const seedBindingBase = {
+    schema_version: 4,
+    candidate_sha: binding.candidate_sha,
+    candidate_tree_sha: binding.candidate_tree_sha,
+    field_receipt_sha256: binding.field_receipt_sha256,
+    source_phase_receipt_sha256: sourcePhaseLoaded.sha256,
+    package_sha256: binding.package_sha256,
+    package_file_count: binding.package_file_count,
+    execution_inventory_sha256: binding.execution_inventory_sha256,
+    installed_execution_inventory_sha256:
+      binding.installed_execution_inventory_sha256,
+    runner_sha256: digest("field-seed-runner"),
+    seeder_sha256: digest("fixed-seeder"),
+    content_fingerprint_helper_sha256: digest("content-fingerprint-helper"),
+    source_manifest_fingerprint: binding.source_manifest_fingerprint,
+    source_resource_fingerprint: binding.source_resource_fingerprint,
+    source_phase_run_id: binding.run_id,
+    source_a2_approval_fingerprint: sourcePhase.a2_approval_fingerprint,
+    source_active_version_id: sourcePhase.source.active_version.version_id,
+    source_script_etag: sourcePhase.source.active_version.script_etag,
+    source_deployment_id: sourcePhase.source.active_deployment.deployment_id,
+    runtime_contract_fingerprint: binding.runtime_contract_fingerprint,
+    wrangler_wrapper_sha256: binding.wrangler_wrapper_sha256,
+    wrangler_runtime_inventory_sha256:
+      binding.wrangler_runtime_inventory_sha256,
+    wrangler_entrypoint_sha256: binding.wrangler_entrypoint_sha256,
+    node_executable_sha256: binding.node_executable_sha256,
+  };
+  const seedBinding = {
+    ...seedBindingBase,
+    execution_approval_fingerprint:
+      disposableRecoverySeedExecutionApprovalFingerprint(seedBindingBase),
+  };
   const receipt = {
-    schema_version: 1,
-    protocol: "v048-disposable-recovery-deployment-v1",
+    schema_version: 4,
+    protocol: DISPOSABLE_RECOVERY_SEED_PROTOCOL,
     status: "passed",
-    completed_at: "2026-09-12T12:00:00.000Z",
-    campaign: {
-      release: "0.4.8",
-      client_slug: "v048-field-proof",
-      source_resource: "brain-test-v048-field-source-recovery-gate-a48f1101",
-      target_resource: "brain-test-v048-field-target-recovery-gate-a48f1102",
+    completed_at: `${FIXED_DAY}T12:02:00.000Z`,
+    data_class: "deterministic_fictional_synthetic_only",
+    binding: seedBinding,
+    source_deployment: {
+      source_phase_receipt_sha256: sourcePhaseLoaded.sha256,
+      source_phase_run_id: binding.run_id,
+      source_a2_approval_fingerprint: sourcePhase.a2_approval_fingerprint,
+      source_resource_fingerprint: binding.source_resource_fingerprint,
+      source_active_version_id: sourcePhase.source.active_version.version_id,
+      source_script_etag: sourcePhase.source.active_version.script_etag,
+      source_deployment_id: sourcePhase.source.active_deployment.deployment_id,
+      source_active_traffic_percent: 100,
     },
-    binding,
-    source: {
-      resource_fingerprint: binding.source_resource_fingerprint,
-      active_version: version("active", SOURCE_VERSION),
-      active_traffic_percent: 100,
-      resource_contract: resource(binding, "source"),
+    fixture: {
+      sha256: DISPOSABLE_RECOVERY_FIXTURE_SHA256,
+      documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      batches: DISPOSABLE_RECOVERY_SEED_BATCHES,
+      maximum_batch_documents: DISPOSABLE_RECOVERY_SEED_BATCH_SIZE,
     },
-    target: {
-      resource_fingerprint: binding.target_resource_fingerprint,
-      initially_paused: true,
-      paused_version: version("paused-for-upgrade", PAUSED_VERSION),
-      active_version: version("active", ACTIVE_VERSION),
-      paused_traffic_percent: 100,
-      active_not_promoted: true,
-      resource_contract: resource(binding, "target"),
+    ingest: {
+      accepted_documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      created_documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      unchanged_documents: 0,
+      updated_documents: 0,
+      refused_documents: 0,
+      failed_documents: 0,
     },
-    execution: {
-      provider_calls: 12,
-      fresh_wrapper_copy_per_call: true,
-      copied_package_source_per_call: true,
-      materialized_runtime_per_call: true,
-      revalidated_before_and_after_each_call: true,
-      package_execution_inventory_sha256: binding.execution_inventory_sha256,
-      wrangler_wrapper_sha256: binding.wrangler_wrapper_sha256,
-      wrangler_runtime_inventory_sha256: binding.wrangler_runtime_inventory_sha256,
-      wrangler_entrypoint_sha256: binding.wrangler_entrypoint_sha256,
-      node_executable_sha256: binding.node_executable_sha256,
+    verification_replay: {
+      batches: DISPOSABLE_RECOVERY_SEED_BATCHES,
+      unchanged_documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      exact_identity_and_content_replay: true,
+    },
+    opening_d1: {
+      documents: 0,
+      chunks: 0,
+      fts: 0,
+      pending_outbox: 0,
+      failed_vectors: 0,
+      independently_verified_empty: true,
+    },
+    d1: {
+      worker_version: DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION,
+      documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      chunks: DISPOSABLE_RECOVERY_MINIMUM_D1_CHUNKS,
+      fts: DISPOSABLE_RECOVERY_MINIMUM_D1_CHUNKS,
+      minimum_chunks: DISPOSABLE_RECOVERY_MINIMUM_D1_CHUNKS,
+      document_counts_exact: true,
+      chunk_counts_exact: true,
+      minimum_chunk_count_met: true,
+      pending_outbox: 0,
+      failed_vectors: 0,
+      content_fingerprint: digest("synthetic-d1-content"),
+      content_fingerprint_source: "direct_d1_normalized_export",
+    },
+    projection: {
+      vectorize_vectors: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+      vector_dimensions: DISPOSABLE_RECOVERY_VECTOR_DIMENSIONS,
+      vector_metric: DISPOSABLE_RECOVERY_VECTOR_METRIC,
+      quarantined_vectors: 0,
+      independent_control_plane: true,
+    },
+    evaluation: {
+      supported_case_cited: true,
+      unsupported_case_refused: true,
     },
     proof_boundary: {
+      external_source_input: false,
       aggregate_only: true,
-      synthetic_disposable_only: true,
-      exact_package_proven: true,
-      exact_provider_readback_proven: true,
-      source_active_proven: true,
-      target_paused_proven: true,
-      target_active_uploaded_not_promoted_proven: true,
-      routes_and_custom_domains_empty_proven: true,
-      recovery_run: false,
-      teardown_run: false,
-      release_authorized: false,
-      customer_data_read: false,
+      authenticated_d1_inventory_verified: true,
+      direct_d1_opening_empty_verified: true,
+      worker_vector_readiness_verified: true,
+      direct_d1_content_fingerprint_verified: true,
+      vectorize_proven: true,
+      retrieval_proven: true,
+      recovery_proven: false,
     },
   };
-  assert.doesNotThrow(() => assertDisposableRecoveryDeploymentReceipt(receipt));
-  assert.throws(() => assertDisposableRecoveryDeploymentReceipt({
-    ...receipt,
-    source: { ...receipt.source, active_traffic_percent: 99 },
-  }), /DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_INVALID/);
-  assert.throws(() => assertDisposableRecoveryDeploymentReceipt({
-    ...receipt,
-    target: {
-      ...receipt.target,
-      active_version: { ...receipt.target.active_version, script_etag: "bad\netag" },
+  assert.equal(assertDisposableRecoverySeedReceipt(receipt), true);
+  return receipt;
+}
+
+function persistPrivateReceipt(path, receipt) {
+  const output = assertPrivateAggregateOutputPath(path);
+  const reservation = reservePrivateAggregateReceipt(output, {
+    schema_version: 1,
+    kind: "synthetic_test_receipt_pending",
+    status: "unconfirmed",
+  });
+  try {
+    assert.equal(finalizePrivateAggregateReceipt(reservation, receipt), true);
+  } catch (error) {
+    abandonPrivateAggregateReceipt(reservation);
+    throw error;
+  }
+  return readPrivateAggregateReceipt(path);
+}
+
+function phaseOptions(directory, paths, binding, harness) {
+  return {
+    sourcePreflight: {
+      binding,
+      moduleInventorySha256: MODULE_INVENTORY_SHA256,
+      receiptPath: paths.sourcePreflight,
+      expectedReceiptDirectory: directory,
+      createProvider: harness.createProvider,
+      now: () => `${FIXED_DAY}T12:00:00.000Z`,
     },
-  }), /DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_INVALID/);
+    sourcePhase: {
+      binding,
+      moduleInventorySha256: MODULE_INVENTORY_SHA256,
+      sourcePreflightReceiptPath: paths.sourcePreflight,
+      journalPath: paths.sourceJournal,
+      receiptPath: paths.sourcePhase,
+      expectedReceiptDirectory: directory,
+      createProvider: harness.createProvider,
+      now: () => `${FIXED_DAY}T12:01:00.000Z`,
+    },
+    targetPreflight: {
+      binding,
+      moduleInventorySha256: MODULE_INVENTORY_SHA256,
+      sourcePhaseReceiptPath: paths.sourcePhase,
+      seedReceiptPath: paths.seed,
+      receiptPath: paths.targetPreflight,
+      expectedReceiptDirectory: directory,
+      createProvider: harness.createProvider,
+      now: () => `${FIXED_DAY}T12:03:00.000Z`,
+    },
+    targetPhase: {
+      binding,
+      moduleInventorySha256: MODULE_INVENTORY_SHA256,
+      sourcePhaseReceiptPath: paths.sourcePhase,
+      seedReceiptPath: paths.seed,
+      targetPreflightReceiptPath: paths.targetPreflight,
+      journalPath: paths.targetJournal,
+      receiptPath: paths.targetPhase,
+      expectedReceiptDirectory: directory,
+      createProvider: harness.createProvider,
+      now: () => `${FIXED_DAY}T12:04:00.000Z`,
+    },
+  };
+}
+
+test("the public plan is the fixed five-request phased semantic plan", () => {
+  assert.equal(DISPOSABLE_RECOVERY_DEPLOYMENT_EXECUTABLE_PROVIDER_READY, false);
+  assert.equal(DISPOSABLE_RECOVERY_DEPLOYMENT_PROVIDER_ENTRYPOINT_AVAILABLE, true);
+  const binding = bindingFixture();
+  assert.deepEqual(assertDisposableRecoveryDeploymentBinding(binding), binding);
+
+  const plan = disposableRecoveryDeploymentRequestPlan(
+    binding,
+    MODULE_INVENTORY_SHA256,
+  );
+  assert.deepEqual(Object.keys(plan), [
+    "source_active_deployment",
+    "source_active_upload",
+    "target_active_upload",
+    "target_paused_deployment",
+    "target_paused_upload",
+  ]);
+  assert.deepEqual([
+    plan.source_active_upload,
+    plan.source_active_deployment,
+    plan.target_paused_upload,
+    plan.target_active_upload,
+    plan.target_paused_deployment,
+  ].map(({ phase, operation, role, mode }) =>
+    `${phase}:${operation}:${role}:${mode}`), [
+    "source:upload_version:source:active",
+    "source:deploy_version:source:active",
+    "target:upload_version:target:paused-for-upgrade",
+    "target:upload_version:target:active",
+    "target:deploy_version:target:paused-for-upgrade",
+  ]);
+  assert.equal(Object.isFrozen(plan), true);
+  assert.equal(Object.values(plan).every(Object.isFrozen), true);
+  assert.equal(JSON.stringify(plan).includes(MODULE_INVENTORY_SHA256), true);
+  assert.doesNotMatch(JSON.stringify(plan),
+    /"(?:account_id|authorization|body|content|credentials|headers|modules|token)"\s*:/iu);
+  assert.throws(
+    () => disposableRecoveryDeploymentRequestPlan(binding),
+    /DISPOSABLE_RECOVERY_DEPLOYMENT_HASH_INVALID/,
+  );
+});
+
+test("source and target phases preserve separate approvals, journals, and exact receipt links", {
+  skip: process.platform === "win32",
+}, async () => {
+  const directory = privateDirectory("v048-phased-deployment-");
+  const paths = artifactPaths(directory);
+  const binding = bindingFixture();
+  const plan = disposableRecoveryDeploymentRequestPlan(binding, MODULE_INVENTORY_SHA256);
+  const harness = providerHarness(binding);
+  const options = phaseOptions(directory, paths, binding, harness);
+  try {
+    const sourcePreflightResult = await runDisposableRecoverySourcePreflight(
+      options.sourcePreflight,
+    );
+    assert.equal(sourcePreflightResult.receipt.protocol,
+      DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_PROTOCOL);
+    assert.equal(sourcePreflightResult.receipt.planned_requests
+      .source_active_upload_sha256,
+    disposableRecoveryDeploymentJournalSha256(plan.source_active_upload));
+    assert.equal(sourcePreflightResult.receipt.planned_requests
+      .source_active_deployment_sha256,
+    disposableRecoveryDeploymentJournalSha256(plan.source_active_deployment));
+    assert.equal(existsSync(paths.sourceJournal), false);
+    assert.equal(existsSync(paths.targetJournal), false);
+    assert.deepEqual(harness.calls.map(({ method }) => method), [
+      "readSnapshot",
+      "readSnapshot",
+    ]);
+    assert.deepEqual(harness.calls.map(({ request }) => request.read_ordinal), [1, 2]);
+
+    const callsBeforeWrongA2 = harness.calls.length;
+    await assert.rejects(
+      runDisposableRecoverySourcePhase({
+        ...options.sourcePhase,
+        a2ApprovalFingerprint: digest("wrong-a2"),
+      }),
+      (error) => error?.code === "DISPOSABLE_RECOVERY_SOURCE_APPROVAL_INVALID",
+    );
+    assert.equal(harness.calls.length, callsBeforeWrongA2);
+    assert.equal(existsSync(paths.sourcePhase), false);
+
+    const sourcePreflightLoaded =
+      readDisposableRecoverySourcePreflightReceipt(paths.sourcePreflight);
+    assert.equal(sourcePreflightLoaded.sha256, sourcePreflightResult.receiptSha256);
+    const a2ApprovalFingerprint = disposableRecoverySourceA2Fingerprint(
+      binding,
+      sourcePreflightLoaded.sha256,
+    );
+    const sourcePhaseResult = await runDisposableRecoverySourcePhase({
+      ...options.sourcePhase,
+      a2ApprovalFingerprint,
+    });
+    assert.equal(sourcePhaseResult.receipt.protocol,
+      DISPOSABLE_RECOVERY_SOURCE_PHASE_PROTOCOL);
+    assert.equal(sourcePhaseResult.receipt.source_preflight_receipt_sha256,
+      sourcePreflightLoaded.sha256);
+    assert.equal(sourcePhaseResult.receipt.a2_approval_fingerprint,
+      a2ApprovalFingerprint);
+    assertDisposableRecoverySourcePreflightReceipt(sourcePreflightResult.receipt);
+    assertDisposableRecoverySourcePhaseReceipt(sourcePhaseResult.receipt);
+
+    const sourceRecords = readDisposableRecoveryDeploymentJournal(
+      paths.sourceJournal,
+      { expectedJournalDirectory: directory },
+    );
+    assert.equal(sourceRecords.length, 4);
+    assert.deepEqual(sourceRecords.map(({ phase, step, record_type }) =>
+      `${phase}:${step}:${record_type}`), [
+      "source:upload_active_version:prepared",
+      "source:upload_active_version:confirmed",
+      "source:deploy_active_version:prepared",
+      "source:deploy_active_version:confirmed",
+    ]);
+    assert.equal(sourceRecords[0].request_sha256,
+      disposableRecoveryDeploymentJournalSha256(plan.source_active_upload));
+    assert.equal(sourceRecords[2].request_sha256,
+      disposableRecoveryDeploymentJournalSha256(plan.source_active_deployment));
+    const sourceSummary = summarizeDisposableRecoveryDeploymentJournal(
+      paths.sourceJournal,
+      {
+        expectedBinding: binding,
+        expectedJournalDirectory: directory,
+        expectedPhase: "source",
+      },
+    );
+    assert.deepEqual(sourcePhaseResult.receipt.journal, {
+      run_id: binding.run_id,
+      through_sequence: sourceSummary.through_sequence,
+      event_count: sourceSummary.event_count,
+      head_sha256: sourceSummary.head_sha256,
+      event_manifest_sha256: sourceSummary.event_manifest_sha256,
+    });
+
+    const sourcePhaseLoaded =
+      readDisposableRecoverySourcePhaseReceipt(paths.sourcePhase);
+    assert.equal(sourcePhaseLoaded.sha256, sourcePhaseResult.receiptSha256);
+    const seedLoaded = persistPrivateReceipt(
+      paths.seed,
+      seedReceiptFixture(binding, sourcePhaseLoaded),
+    );
+    assert.equal(seedLoaded.value.binding.source_phase_receipt_sha256,
+      sourcePhaseLoaded.sha256);
+    harness.markSeeded();
+
+    const targetPreflightResult = await runDisposableRecoveryTargetPreflight(
+      options.targetPreflight,
+    );
+    assert.equal(targetPreflightResult.receipt.protocol,
+      DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_PROTOCOL);
+    assert.equal(targetPreflightResult.receipt.source_phase_receipt_sha256,
+      sourcePhaseLoaded.sha256);
+    assert.equal(targetPreflightResult.receipt.seed_receipt_sha256, seedLoaded.sha256);
+    assert.equal(targetPreflightResult.receipt.planned_requests
+      .target_paused_upload_sha256,
+    disposableRecoveryDeploymentJournalSha256(plan.target_paused_upload));
+    assert.equal(targetPreflightResult.receipt.planned_requests
+      .target_active_upload_sha256,
+    disposableRecoveryDeploymentJournalSha256(plan.target_active_upload));
+    assert.equal(targetPreflightResult.receipt.planned_requests
+      .target_paused_deployment_sha256,
+    disposableRecoveryDeploymentJournalSha256(plan.target_paused_deployment));
+    assert.equal(existsSync(paths.targetJournal), false);
+    assertDisposableRecoveryTargetPreflightReceipt(targetPreflightResult.receipt);
+
+    const targetPreflightLoaded =
+      readDisposableRecoveryTargetPreflightReceipt(paths.targetPreflight);
+    assert.equal(targetPreflightLoaded.sha256,
+      targetPreflightResult.receiptSha256);
+    const callsBeforeWrongA4 = harness.calls.length;
+    await assert.rejects(
+      runDisposableRecoveryTargetPhase({
+        ...options.targetPhase,
+        a4ApprovalFingerprint: a2ApprovalFingerprint,
+      }),
+      (error) => error?.code === "DISPOSABLE_RECOVERY_TARGET_APPROVAL_INVALID",
+    );
+    assert.equal(harness.calls.length, callsBeforeWrongA4);
+    assert.equal(existsSync(paths.targetPhase), false);
+
+    const a4ApprovalFingerprint = disposableRecoveryTargetA4Fingerprint(
+      binding,
+      sourcePhaseLoaded.sha256,
+      seedLoaded.sha256,
+      targetPreflightLoaded.sha256,
+    );
+    assert.notEqual(a4ApprovalFingerprint, a2ApprovalFingerprint);
+    const targetPhaseResult = await runDisposableRecoveryTargetPhase({
+      ...options.targetPhase,
+      a4ApprovalFingerprint,
+    });
+    assert.equal(targetPhaseResult.receipt.protocol,
+      DISPOSABLE_RECOVERY_DEPLOYMENT_PROTOCOL);
+    assert.equal(targetPhaseResult.receipt.source_phase_receipt_sha256,
+      sourcePhaseLoaded.sha256);
+    assert.equal(targetPhaseResult.receipt.seed_receipt_sha256, seedLoaded.sha256);
+    assert.equal(targetPhaseResult.receipt.target_preflight_receipt_sha256,
+      targetPreflightLoaded.sha256);
+    assert.equal(targetPhaseResult.receipt.a4_approval_fingerprint,
+      a4ApprovalFingerprint);
+    assertDisposableRecoveryTargetPhaseReceipt(targetPhaseResult.receipt);
+
+    const targetRecords = readDisposableRecoveryDeploymentJournal(
+      paths.targetJournal,
+      { expectedJournalDirectory: directory },
+    );
+    assert.equal(targetRecords.length, 6);
+    assert.deepEqual(targetRecords.map(({ phase, step, record_type }) =>
+      `${phase}:${step}:${record_type}`), [
+      "target:upload_paused_version:prepared",
+      "target:upload_paused_version:confirmed",
+      "target:upload_active_version:prepared",
+      "target:upload_active_version:confirmed",
+      "target:deploy_paused_version:prepared",
+      "target:deploy_paused_version:confirmed",
+    ]);
+    assert.deepEqual([
+      targetRecords[0].request_sha256,
+      targetRecords[2].request_sha256,
+      targetRecords[4].request_sha256,
+    ], [
+      disposableRecoveryDeploymentJournalSha256(plan.target_paused_upload),
+      disposableRecoveryDeploymentJournalSha256(plan.target_active_upload),
+      disposableRecoveryDeploymentJournalSha256(plan.target_paused_deployment),
+    ]);
+    const targetSummary = summarizeDisposableRecoveryDeploymentJournal(
+      paths.targetJournal,
+      {
+        expectedBinding: binding,
+        expectedJournalDirectory: directory,
+        expectedPhase: "target",
+      },
+    );
+    assert.deepEqual(targetPhaseResult.receipt.journal, {
+      run_id: binding.run_id,
+      through_sequence: targetSummary.through_sequence,
+      event_count: targetSummary.event_count,
+      source_prefix_head_sha256: sourceSummary.head_sha256,
+      head_sha256: targetSummary.head_sha256,
+      event_manifest_sha256: targetSummary.event_manifest_sha256,
+    });
+    assert.notEqual(targetSummary.head_sha256, sourceSummary.head_sha256);
+    assert.notEqual(targetSummary.event_manifest_sha256,
+      sourceSummary.event_manifest_sha256);
+
+    const targetPhaseLoaded =
+      readDisposableRecoveryDeploymentReceipt(paths.targetPhase);
+    assert.equal(targetPhaseLoaded.sha256, targetPhaseResult.receiptSha256);
+    const chain = assertDisposableRecoveryDeploymentReceiptChain({
+      source_preflight: sourcePreflightLoaded,
+      source_phase: sourcePhaseLoaded,
+      seed_receipt_sha256: seedLoaded.sha256,
+      target_preflight: targetPreflightLoaded,
+      target_phase: targetPhaseLoaded,
+    });
+    assert.equal(chain.source_phase.sha256, sourcePhaseLoaded.sha256);
+    assert.equal(chain.target_phase.sha256, targetPhaseLoaded.sha256);
+
+    assert.deepEqual(harness.contexts.map(({ stage }) => stage), [
+      "source_preflight",
+      "source_phase",
+      "target_preflight",
+      "target_phase",
+    ]);
+    assert.deepEqual(harness.calls
+      .filter(({ method }) => method !== "readSnapshot")
+      .map(({ method, request }) => `${request.phase}:${method}:${request.mode}`), [
+      "source:uploadVersion:active",
+      "source:deployVersion:active",
+      "target:uploadVersion:paused-for-upgrade",
+      "target:uploadVersion:active",
+      "target:deployVersion:paused-for-upgrade",
+    ]);
+    for (const [phase, stage] of [
+      ["source", "source_final"],
+      ["target", "target_final"],
+    ]) {
+      const finalReads = harness.calls.filter(({ method, request }) =>
+        method === "readSnapshot" && request.phase === phase &&
+        request.stage === stage);
+      assert.equal(finalReads.length, 2);
+      assert.deepEqual(finalReads.map(({ request }) => request.read_ordinal), [1, 2]);
+      assert.deepEqual(finalReads[0].semantic, finalReads[1].semantic);
+      const finalReceipt = phase === "source"
+        ? sourcePhaseResult.receipt.final_snapshot
+        : targetPhaseResult.receipt.final_snapshot;
+      assert.equal(finalReceipt.first_semantic_sha256,
+        finalReceipt.second_semantic_sha256);
+      assert.notEqual(finalReceipt.first_raw_evidence_manifest_sha256,
+        finalReceipt.second_raw_evidence_manifest_sha256);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an unconfirmed provider mutation remains ambiguous and cannot be blindly retried", {
+  skip: process.platform === "win32",
+}, async () => {
+  const directory = privateDirectory("v048-phased-ambiguous-");
+  const paths = artifactPaths(directory);
+  const binding = bindingFixture("80000000-0000-4000-8000-000000000008");
+  const harness = providerHarness(binding, {
+    failMutation: "source:deploy_version:active",
+  });
+  const options = phaseOptions(directory, paths, binding, harness);
+  try {
+    const preflight = await runDisposableRecoverySourcePreflight(
+      options.sourcePreflight,
+    );
+    const approval = disposableRecoverySourceA2Fingerprint(
+      binding,
+      preflight.receiptSha256,
+    );
+    await assert.rejects(
+      runDisposableRecoverySourcePhase({
+        ...options.sourcePhase,
+        a2ApprovalFingerprint: approval,
+      }),
+      (error) => error?.code ===
+        "DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS",
+    );
+
+    const mutationCalls = harness.calls.filter(({ method }) =>
+      method === "uploadVersion" || method === "deployVersion");
+    assert.deepEqual(mutationCalls.map(({ method }) => method), [
+      "uploadVersion",
+      "deployVersion",
+    ]);
+    const records = readDisposableRecoveryDeploymentJournal(paths.sourceJournal, {
+      expectedJournalDirectory: directory,
+    });
+    assert.deepEqual(records.map(({ record_type, step, effect_state }) =>
+      `${step}:${record_type}:${effect_state}`), [
+      "upload_active_version:prepared:sent_unconfirmed",
+      "upload_active_version:confirmed:confirmed",
+      "deploy_active_version:prepared:sent_unconfirmed",
+    ]);
+    assert.equal(existsSync(paths.sourcePhase), true);
+    assert.equal(existsSync(privateAggregateReceiptPendingPath(paths.sourcePhase)), true);
+    assert.equal(
+      JSON.parse(readFileSync(paths.sourcePhase, "utf8")).status,
+      "provider_result_unconfirmed",
+    );
+
+    const callsBeforeRetry = harness.calls.length;
+    const factoriesBeforeRetry = harness.contexts.length;
+    await assert.rejects(
+      runDisposableRecoverySourcePhase({
+        ...options.sourcePhase,
+        a2ApprovalFingerprint: approval,
+      }),
+      (error) => error?.code ===
+        "DISPOSABLE_RECOVERY_DEPLOYMENT_RESUME_REQUIRED",
+    );
+    assert.equal(harness.calls.length, callsBeforeRetry);
+    assert.equal(harness.contexts.length, factoriesBeforeRetry);
+    assert.equal(harness.calls.filter(({ method }) => method === "deployVersion").length, 1);
+
+    await assert.rejects(
+      runDisposableRecoverySourcePhase({
+        ...options.sourcePhase,
+        a2ApprovalFingerprint: approval,
+        resume: true,
+      }),
+      (error) => error?.code ===
+        "DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS",
+    );
+    assert.equal(harness.calls.length, callsBeforeRetry,
+      "explicit resume must adjudicate an ambiguous journal before provider I/O");
+    assert.equal(harness.contexts.length, factoriesBeforeRetry);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit resume replays a confirmed prefix and continues only the next mutation", {
+  skip: process.platform === "win32",
+}, async () => {
+  const directory = privateDirectory("v048-phased-resume-");
+  const paths = artifactPaths(directory);
+  const binding = bindingFixture("90000000-0000-4000-8000-000000000009");
+  const harness = providerHarness(binding);
+  const options = phaseOptions(directory, paths, binding, harness);
+  let reservation;
+  try {
+    const preflight = await runDisposableRecoverySourcePreflight(
+      options.sourcePreflight,
+    );
+    const approval = disposableRecoverySourceA2Fingerprint(
+      binding,
+      preflight.receiptSha256,
+    );
+    reservation = reservePrivateAggregateReceipt(
+      assertPrivateAggregateOutputPath(paths.sourcePhase),
+      {
+        schema_version: 2,
+        kind: "v048_disposable_recovery_source_phase_pending",
+        status: "provider_result_unconfirmed",
+        binding,
+      },
+    );
+    abandonPrivateAggregateReceipt(reservation);
+    const requests = disposableRecoveryDeploymentRequestPlan(
+      binding,
+      MODULE_INVENTORY_SHA256,
+    );
+    await runJournaledDisposableRecoveryDeploymentMutation({
+      binding,
+      effect: "create_worker_version",
+      expectedJournalDirectory: directory,
+      journalPath: paths.sourceJournal,
+      mutate: async () => ({ version_id: SOURCE_VERSION_ID }),
+      phase: "source",
+      request: requests.source_active_upload,
+      step: "upload_active_version",
+      validate: async () => ({
+        provider_metadata: {
+          body_sha256: digest("resumed-source-upload-response"),
+          content_type: "application/json",
+          schema_version: 1,
+          status: 200,
+        },
+        result: { version_id: SOURCE_VERSION_ID },
+      }),
+    });
+
+    const result = await runDisposableRecoverySourcePhase({
+      ...options.sourcePhase,
+      a2ApprovalFingerprint: approval,
+      resume: true,
+    });
+    assert.equal(result.receipt.status, "passed");
+    assert.equal(existsSync(privateAggregateReceiptPendingPath(paths.sourcePhase)), false);
+    assert.deepEqual(harness.calls
+      .filter(({ method }) => method === "uploadVersion" || method === "deployVersion")
+      .map(({ method }) => method), ["deployVersion"]);
+    const records = readDisposableRecoveryDeploymentJournal(paths.sourceJournal, {
+      expectedJournalDirectory: directory,
+    });
+    assert.equal(records.length, 4);
+    assert.deepEqual(records[3].result, {
+      accepted: true,
+      deployment_id: SOURCE_DEPLOYMENT_ID,
+      version_id: SOURCE_VERSION_ID,
+    });
+  } finally {
+    if (reservation && !reservation.closed) abandonPrivateAggregateReceipt(reservation);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the legacy combined deployment runner is an unconditional refusal", async () => {
+  await assert.rejects(
+    runDisposableRecoveryFieldDeployment({
+      createProvider: async () => {
+        throw new Error("legacy runner must never create a provider");
+      },
+    }),
+    (error) => error?.code ===
+      "DISPOSABLE_RECOVERY_DEPLOYMENT_PHASE_SPLIT_REQUIRED",
+  );
 });

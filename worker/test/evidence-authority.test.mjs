@@ -932,6 +932,15 @@ test("equally newest disagreeing owner confirmations fail as an operative confli
   assert.match(body.notice || "", /search could not be completed/i);
   assert.equal(body.evidence_gate?.reason, "equally current owner-confirmed operative records disagree");
   assert.equal(body.gaps?.some((gap) => gap.type === "operative_conflict"), true);
+
+  const refused = await askRoute(routeEnv(
+    "The documents do not answer the question.",
+    { rows: [first, second] },
+  ));
+  assert.equal(refused.answer, null, "a model refusal cannot relabel a known evidence conflict as absence");
+  assert.equal(refused.status, SEARCH_UNAVAILABLE);
+  assert.equal(refused.confidence, undefined);
+  assert.equal(refused.gaps?.some((gap) => gap.type === "operative_conflict"), true);
 });
 
 test("equally newest matching owner confirmations select one deterministic record", async () => {

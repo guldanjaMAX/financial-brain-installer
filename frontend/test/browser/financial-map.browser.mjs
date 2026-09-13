@@ -183,7 +183,11 @@ async function fresh({
   const fixtureUrl = new URL("/test/browser/fixtures/financial-map.html", harness.origin);
   if (rehearsal) fixtureUrl.searchParams.set("state", "financial-map");
   await page.goto(fixtureUrl.href);
-  await page.getByRole("heading", { name: "Financial Map", exact: true }).waitFor();
+  await harness.waitForBrowserBoot(
+    page,
+    page.getByRole("heading", { name: "Financial Map", exact: true }),
+    "Financial Map fixture",
+  );
   await page.getByText("Form 1120-S", { exact: true }).waitFor();
   return { page, state };
 }
@@ -374,10 +378,15 @@ try {
       json: { error: "not found" },
     }));
     await page.goto(new URL("/test/browser/fixtures/financial-map.html", harness.origin).href);
-    await page.getByText(/not an empty review queue/).waitFor();
+    await harness.waitForBrowserBoot(
+      page,
+      page.getByText(/not an empty review queue/),
+      "missing-route Financial Map fixture",
+    );
     const text = await page.locator("body").innerText();
     check("a missing Financial Map route is called unavailable and update-needed",
-      text.includes("ask the installer") && !text.includes("No Financial Map is waiting for review"));
+      text.toLowerCase().includes("ask the installer") &&
+      !text.includes("No Financial Map is waiting for review"));
     await page.close();
   }
 
@@ -391,7 +400,11 @@ try {
       owner_message: "No Financial Map is waiting for review.",
     } }));
     await page.goto(new URL("/test/browser/fixtures/financial-map.html", harness.origin).href);
-    await page.getByText(/no longer matches the Brain's current records/).waitFor();
+    await harness.waitForBrowserBoot(
+      page,
+      page.getByText(/no longer matches the Brain's current records/),
+      "stale-map Financial Map fixture",
+    );
     const text = await page.locator("body").innerText();
     check("a stale confirmed map is not presented as current for completeness checks",
       text.includes("Create a corrected review") &&
@@ -421,7 +434,11 @@ try {
       } });
     });
     await page.goto(new URL("/test/browser/fixtures/financial-map.html", harness.origin).href);
-    await page.getByRole("button", { name: "Copy request", exact: true }).waitFor();
+    await harness.waitForBrowserBoot(
+      page,
+      page.getByRole("button", { name: "Copy request", exact: true }),
+      "no-active-map Financial Map fixture",
+    );
     const before = await page.locator("body").innerText();
     check("the copy action explains that it cannot create or confirm a map",
       before.includes("does not contact the Brain, create a preview, or confirm a map"));

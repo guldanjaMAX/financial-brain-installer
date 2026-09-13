@@ -72,23 +72,42 @@ still remains. Use `npm run rehearse:hiccups -- --list` to see the scenarios or
 
 ## The one technician command
 
+First ask the owner which situation describes today and keep the matching value
+in every setup command:
+
+- `first_brain`: they confirm they have no existing Brain.
+- `existing_this_computer`: this Brain already works on this computer.
+- `existing_new_computer`: they are reconnecting it on another computer.
+- `resume_interrupted`: setup for this exact Brain stopped on this computer.
+- `unsure`: they cannot yet tell. This stops read-only and creates nothing.
+
+Never infer `first_brain` because a local file is missing. An existing-Brain
+route with no exact manifest pauses for owner-custody recovery instead of
+searching Cloudflare by name or starting over.
+
 After installing the released CLI, start with the read-only plan:
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json"
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent first_brain
 ```
+
+That example is only for an owner who confirmed this is their first Brain. Use
+the matching value above for every other route.
 
 For a local coding agent, use the JSON form:
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --json
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent first_brain --json
 ```
 
 The JSON contains workflow state, dashboard links, proof boundaries, and the
 next reviewed command. It contains no credentials. An agent may guide the
-browser and explain each page. For the supported Google, Zoom, and IMAP steps,
-the owner enters every token or secret into the provider page or hidden
-terminal prompt.
+browser and explain each page. On macOS and Linux, for supported Google, Zoom,
+and IMAP steps, the owner enters every token or secret into the provider page
+or hidden terminal prompt. This candidate deliberately refuses those three
+steps on Windows because its secure secret-entry bridge has not been physically
+proven there. Do not route around that refusal with a visible prompt, command
+flag, environment variable, or chat message.
 
 **Bank connections are not part of ordinary onboarding yet.** They are still
 being tested. You did nothing wrong, and there is no bank password,
@@ -118,7 +137,7 @@ or Run as administrator. The owner signs in to Claude in their own browser.
 Then run:
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run tools
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent first_brain --run tools
 ```
 
 On Windows, open PowerShell from the Start menu for the Brain installation.
@@ -150,9 +169,20 @@ technician plan.
 
 ### 2. Cloudflare install
 
+Begin by refreshing the read-only plan:
+
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run cloudflare
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent first_brain
 ```
+
+The bare `--run cloudflare` command is not a complete setup command. After the
+owner confirms the person or company name, short Brain name, new or existing
+Cloudflare account, exact account ID, Workers Paid status, and whether local AI
+connections may change, Claude constructs the exact command from the plan. Read
+that complete command back before approval. It must include the browser-sign-in,
+name, slug, account choice, account ID, and Paid-confirmation flags. Add
+`--no-connect` when the owner has not approved local MCP or workspace-guide
+changes.
 
 Before opening Cloudflare, explain that the official browser sign-in lets the
 installer create and verify this Brain's Worker, D1 database, Vectorize index,
@@ -166,7 +196,9 @@ proof. Any plan change or billing approval belongs to the owner. Normal fresh
 setup creates, reveals, and copies no API token. The protected named profile
 stays in the owner's operating-system credential store. The setup command
 performs the account check, provisioning, migrations, deploy, key persistence,
-and health proof. It is safe to rerun after an interruption.
+and health proof. After an interruption, refresh the plan and use only the exact
+resume action it returns for that same Brain. When completion is unknown or no
+resume action is available, pause for support instead of starting a fresh setup.
 
 Describe the least-privilege hidden token path only if the released CLI says
 browser sign-in is unavailable and the owner explicitly selects that recovery
@@ -180,7 +212,7 @@ With the owner present to approve the fixed public sample and its small Workers
 AI embedding cost, run:
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run smoke
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent existing_this_computer --run smoke
 ```
 
 This sends only the package's fixed, non-customer smoke document through the
@@ -190,10 +222,15 @@ the Brain as durable first-install evidence.
 
 ### 4. Google
 
+For the Monday supervised Windows x64 pilot, do not start this credential
+ceremony. Use the manual local-folder source lane below. The Google, Zoom, and
+IMAP instructions in the following sections apply only where the released CLI
+reports their secure credential entry as supported.
+
 Enable `google_drive`, `gmail`, and `calendar` in the manifest, then run:
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run google
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent existing_this_computer --run google
 ```
 
 The owner creates a Desktop OAuth client in their Google Cloud project. The
@@ -204,13 +241,30 @@ Browser control may navigate, fill non-secret project and app labels, choose
 Desktop app, and enable only the APIs already approved in the manifest. The
 owner takes over for Google sign-in, 2FA, credential reveal, and OAuth consent.
 
+### Monday Windows x64 first-source lane
+
+Ask what the owner wants the Brain to help with first. Create one dedicated
+folder and place in it one owner-approved, low-sensitivity, text-readable test
+document that can answer one distinctive question. Keep everything else out of
+the folder. Preview it first:
+
+```powershell
+& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" ingest "$HOME\Financial Brain\brain.manifest.json" --path "C:\path\to\the\approved-folder" --dry-run
+```
+
+The preview sends nothing. Show the proposed source, items, exclusions, and OCR
+state, then obtain exact approval. Repeat the same command without `--dry-run`
+and prove that same document through Received, Saved, Search ready, and Answer
+checked. The Windows lane is manual in this pilot; do not claim that it is
+scheduled or silently substitute a different item for a failed checkpoint.
+
 ### 5. Zoom
 
 Enable `zoom` in the manifest. A paid Zoom seat with cloud recording is
 required. Then run:
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run zoom
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent existing_this_computer --run zoom
 ```
 
 The Zoom admin creates a Server-to-Server OAuth app with
@@ -228,7 +282,7 @@ Enable `imap` in the manifest. Use the provider's IMAP host and an app password,
 not the normal mailbox password:
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run imap \
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent existing_this_computer --run imap \
   --host imap.example.com --user owner@example.com
 ```
 
@@ -245,7 +299,7 @@ Settle the final Brain hostname first. With the owner and intended device
 present, run:
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run passkey \
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent existing_this_computer --run passkey \
   --confirm-host brain.example.com
 ```
 
@@ -267,7 +321,7 @@ point where a physical passkey becomes proven.
 ### 8. Handoff checks
 
 ```bash
-brain technician "$HOME/Financial Brain/brain.manifest.json" --run verify
+brain technician "$HOME/Financial Brain/brain.manifest.json" --intent existing_this_computer --run verify
 ```
 
 This runs doctor, health, source freshness, and enrolled-device checks in order.

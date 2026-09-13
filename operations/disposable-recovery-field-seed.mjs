@@ -10,6 +10,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -19,6 +20,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  renameSync,
   realpathSync,
   rmSync,
   unlinkSync,
@@ -43,9 +45,12 @@ import {
   DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION,
   DISPOSABLE_RECOVERY_FIXTURE_SHA256,
   DISPOSABLE_RECOVERY_SEED_BATCHES,
+  DISPOSABLE_RECOVERY_SEED_BATCH_SIZE,
   DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+  DISPOSABLE_RECOVERY_SEED_PROTOCOL,
   assertDisposableRecoverySeedBinding,
   assertDisposableRecoverySeedReceipt,
+  assertDisposableRecoverySeedResumeState,
   disposableRecoveryFixture,
   seedDisposableRecoveryFixture,
 } from "./disposable-recovery-seeder.mjs";
@@ -58,20 +63,24 @@ import {
 import {
   abandonPrivateAggregateReceipt,
   assertNoDarwinReceiptAcl,
+  assertPrivateAggregateReceiptDirectory,
   assertPrivateAggregateOutputPath,
   finalizePrivateAggregateReceipt,
+  privateAggregateReceiptPendingPath,
   readPrivateAggregateReceipt,
   reservePrivateAggregateReceipt,
+  resumePrivateAggregateReceiptReservation,
+  syncPrivateReceiptDirectory,
   validatePrivateAggregateReceiptReservation,
 } from "./private-aggregate-receipt.mjs";
 import {
-  inspectVerifiedRecoveryManifestBindings,
+  inspectVerifiedRecoverySourceManifestBinding,
   loadVerifiedRecoveryPlan,
 } from "./verified-recovery.mjs";
 
 const RECEIPT_NAME = "v048-disposable-seed-receipt.json";
+const RESUME_NAME = "v048-disposable-seed-resume.json";
 const SOURCE_RESOURCE = "brain-test-v048-field-source-recovery-gate-a48f1101";
-const TARGET_RESOURCE = "brain-test-v048-field-target-recovery-gate-a48f1102";
 const CLIENT_SLUG = "v048-field-proof";
 const CLIENT_DISPLAY_NAME = "Synthetic Field Gate v0.4.8";
 const SCHEMA_VERSION = 46;
@@ -121,6 +130,333 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function exactKeys(value, fields) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === fields.length && fields.every((field) => keys.includes(field));
+}
+
+const RESUME_ACTIONS = new Set([
+  "reserve_final_receipt",
+  "verify_opening_direct_d1",
+  "verify_source_deployment",
+  "verify_opening_inventory",
+  "ingest_fixture_batch",
+  "verify_seeded_inventory",
+  "verification_replay_batch",
+  "settle_projection",
+  "verify_settled_inventory",
+  "verify_independent_projection",
+  "verify_retrieval",
+  "capture_direct_d1_fingerprint",
+  "verify_closing_inventory",
+  "finalize_seed_receipt",
+]);
+const WRITE_ACTIONS = new Set([
+  "ingest_fixture_batch",
+  "verification_replay_batch",
+]);
+const SAFE_RESUME_STEP = "rerun_exact_approved_seed_command";
+const AMBIGUOUS_RESUME_STEP =
+  "do_not_retry_pending_batch; technician_must_reconcile_or_recreate_disposable_destination";
+const COMPLETE_RESUME_STEP = "use_exact_verified_seed_receipt";
+
+function resumeIdentity(binding) {
+  const checked = assertDisposableRecoverySeedBinding(binding);
+  return Object.freeze({
+    schema_version: 1,
+    candidate_sha: checked.candidate_sha,
+    package_sha256: checked.package_sha256,
+    field_receipt_sha256: checked.field_receipt_sha256,
+    source_phase_receipt_sha256: checked.source_phase_receipt_sha256,
+    seed_execution_approval_fingerprint: checked.execution_approval_fingerprint,
+    seed_binding_sha256: sha256(canonical(checked)),
+    fixture_sha256: DISPOSABLE_RECOVERY_FIXTURE_SHA256,
+    seed_receipt_protocol: DISPOSABLE_RECOVERY_SEED_PROTOCOL,
+    seed_receipt_schema_version: 4,
+  });
+}
+
+function resumableProgress(record) {
+  return assertDisposableRecoverySeedResumeState({
+    opening_empty_verified: record.opening_empty_verified,
+    verified_completed_batch_prefix: record.verified_completed_batch_prefix,
+    verified_completed_document_prefix: record.verified_completed_document_prefix,
+    verified_replay_batch_prefix: record.verified_replay_batch_prefix,
+    verified_replay_document_prefix: record.verified_replay_document_prefix,
+  });
+}
+
+export function assertDisposableRecoverySeedResumeRecord(record, binding) {
+  if (!exactKeys(record, [
+    "schema_version", "kind", "status", "checkpoint_sequence", "identity",
+    "opening_empty_verified",
+    "verified_completed_batch_prefix", "verified_completed_document_prefix",
+    "verified_replay_batch_prefix", "verified_replay_document_prefix",
+    "pending_seed_action", "ambiguous_write_boundary", "next_actor",
+    "safe_next_step", "final_seed_receipt_sha256",
+  ]) || record.schema_version !== 1 ||
+      record.kind !== "v048_disposable_recovery_seed_resume" ||
+      !["execution_in_progress", "write_confirmation_ambiguous", "complete"]
+        .includes(record.status) ||
+      !Number.isSafeInteger(record.checkpoint_sequence) || record.checkpoint_sequence < 0 ||
+      canonical(record.identity) !== canonical(resumeIdentity(binding))) {
+    refuse("DISPOSABLE_RECOVERY_SEED_RESUME_INVALID");
+  }
+  const progress = resumableProgress(record);
+  const ambiguity = record.ambiguous_write_boundary;
+  if (ambiguity !== null) {
+    if (!exactKeys(ambiguity, [
+      "action", "batch_number", "document_prefix_start", "document_count",
+    ]) || !WRITE_ACTIONS.has(ambiguity.action) ||
+        !Number.isSafeInteger(ambiguity.batch_number) || ambiguity.batch_number < 1 ||
+        ambiguity.batch_number > DISPOSABLE_RECOVERY_SEED_BATCHES ||
+        !Number.isSafeInteger(ambiguity.document_prefix_start) ||
+        !Number.isSafeInteger(ambiguity.document_count) || ambiguity.document_count < 1 ||
+        ambiguity.document_prefix_start + ambiguity.document_count >
+          DISPOSABLE_RECOVERY_SEED_DOCUMENTS) {
+      refuse("DISPOSABLE_RECOVERY_SEED_RESUME_INVALID");
+    }
+    const expectedBatch = ambiguity.action === "ingest_fixture_batch"
+      ? progress.verified_completed_batch_prefix + 1
+      : progress.verified_replay_batch_prefix + 1;
+    const expectedStart = ambiguity.action === "ingest_fixture_batch"
+      ? progress.verified_completed_document_prefix
+      : progress.verified_replay_document_prefix;
+    const expectedCount = Math.min(
+      DISPOSABLE_RECOVERY_SEED_BATCH_SIZE,
+      DISPOSABLE_RECOVERY_SEED_DOCUMENTS - expectedStart,
+    );
+    if (ambiguity.batch_number !== expectedBatch ||
+        ambiguity.document_prefix_start !== expectedStart ||
+        ambiguity.document_count !== expectedCount) {
+      refuse("DISPOSABLE_RECOVERY_SEED_RESUME_INVALID");
+    }
+  }
+  if (record.status === "execution_in_progress") {
+    if (!RESUME_ACTIONS.has(record.pending_seed_action) || ambiguity !== null ||
+        record.next_actor !== "field_runner" || record.safe_next_step !== SAFE_RESUME_STEP ||
+        record.final_seed_receipt_sha256 !== null) {
+      refuse("DISPOSABLE_RECOVERY_SEED_RESUME_INVALID");
+    }
+  } else if (record.status === "write_confirmation_ambiguous") {
+    if (!WRITE_ACTIONS.has(record.pending_seed_action) || ambiguity === null ||
+        ambiguity.action !== record.pending_seed_action ||
+        record.next_actor !== "technician" ||
+        record.safe_next_step !== AMBIGUOUS_RESUME_STEP ||
+        record.final_seed_receipt_sha256 !== null) {
+      refuse("DISPOSABLE_RECOVERY_SEED_RESUME_INVALID");
+    }
+  } else if (record.pending_seed_action !== null || ambiguity !== null ||
+      record.next_actor !== "none" || record.safe_next_step !== COMPLETE_RESUME_STEP ||
+      progress.verified_completed_batch_prefix !== DISPOSABLE_RECOVERY_SEED_BATCHES ||
+      progress.verified_replay_batch_prefix !== DISPOSABLE_RECOVERY_SEED_BATCHES ||
+      !/^[a-f0-9]{64}$/u.test(String(record.final_seed_receipt_sha256 || ""))) {
+    refuse("DISPOSABLE_RECOVERY_SEED_RESUME_INVALID");
+  }
+  return Object.freeze(structuredClone(record));
+}
+
+function initialResumeRecord(binding) {
+  return assertDisposableRecoverySeedResumeRecord({
+    schema_version: 1,
+    kind: "v048_disposable_recovery_seed_resume",
+    status: "execution_in_progress",
+    checkpoint_sequence: 0,
+    identity: resumeIdentity(binding),
+    opening_empty_verified: false,
+    verified_completed_batch_prefix: 0,
+    verified_completed_document_prefix: 0,
+    verified_replay_batch_prefix: 0,
+    verified_replay_document_prefix: 0,
+    pending_seed_action: "reserve_final_receipt",
+    ambiguous_write_boundary: null,
+    next_actor: "field_runner",
+    safe_next_step: SAFE_RESUME_STEP,
+    final_seed_receipt_sha256: null,
+  }, binding);
+}
+
+function checkpointResumeRecord(previous, checkpoint, binding) {
+  const progress = assertDisposableRecoverySeedResumeState({
+    opening_empty_verified: checkpoint?.opening_empty_verified,
+    verified_completed_batch_prefix: checkpoint?.verified_completed_batch_prefix,
+    verified_completed_document_prefix: checkpoint?.verified_completed_document_prefix,
+    verified_replay_batch_prefix: checkpoint?.verified_replay_batch_prefix,
+    verified_replay_document_prefix: checkpoint?.verified_replay_document_prefix,
+  });
+  const ambiguous = checkpoint?.ambiguous_write_boundary ?? null;
+  const record = {
+    schema_version: 1,
+    kind: "v048_disposable_recovery_seed_resume",
+    status: ambiguous === null
+      ? "execution_in_progress"
+      : "write_confirmation_ambiguous",
+    checkpoint_sequence: previous.checkpoint_sequence + 1,
+    identity: resumeIdentity(binding),
+    ...progress,
+    pending_seed_action: checkpoint?.pending_seed_action,
+    ambiguous_write_boundary: ambiguous,
+    next_actor: ambiguous === null ? "field_runner" : "technician",
+    safe_next_step: ambiguous === null ? SAFE_RESUME_STEP : AMBIGUOUS_RESUME_STEP,
+    final_seed_receipt_sha256: null,
+  };
+  return assertDisposableRecoverySeedResumeRecord(record, binding);
+}
+
+function completeResumeRecord(previous, receiptSha256, binding) {
+  return assertDisposableRecoverySeedResumeRecord({
+    ...previous,
+    status: "complete",
+    checkpoint_sequence: previous.checkpoint_sequence + 1,
+    pending_seed_action: null,
+    ambiguous_write_boundary: null,
+    next_actor: "none",
+    safe_next_step: COMPLETE_RESUME_STEP,
+    final_seed_receipt_sha256: receiptSha256,
+  }, binding);
+}
+
+function resumeSummary(record) {
+  return Object.freeze({
+    status: record.status,
+    pending_seed_action: record.pending_seed_action,
+    verified_completed_batch_prefix: record.verified_completed_batch_prefix,
+    verified_completed_document_prefix: record.verified_completed_document_prefix,
+    verified_replay_batch_prefix: record.verified_replay_batch_prefix,
+    verified_replay_document_prefix: record.verified_replay_document_prefix,
+    ambiguous_write_boundary: record.ambiguous_write_boundary,
+    next_actor: record.next_actor,
+    safe_next_step: record.safe_next_step,
+  });
+}
+
+function readBoundResumeRecord(path, binding) {
+  try {
+    const readback = readPrivateAggregateReceipt(path, {
+      code: "DISPOSABLE_RECOVERY_SEED_RESUME_READBACK_FAILED",
+    });
+    return Object.freeze({
+      ...readback,
+      value: assertDisposableRecoverySeedResumeRecord(readback.value, binding),
+    });
+  } catch (error) {
+    if (error instanceof DisposableRecoveryFieldSeedError) throw error;
+    refuse("DISPOSABLE_RECOVERY_SEED_RESUME_READBACK_FAILED");
+  }
+}
+
+function persistResumeRecord(path, record, binding, expectedSha256 = null) {
+  const code = "DISPOSABLE_RECOVERY_SEED_RESUME_WRITE_FAILED";
+  const absolute = resolve(path);
+  let reservation = null;
+  let stagingPath = null;
+  try {
+    const parent = assertPrivateAggregateReceiptDirectory(dirname(absolute), { code });
+    if (absolute !== join(parent.path, RESUME_NAME)) refuse(code);
+    if (expectedSha256 === null) {
+      if (existsSync(absolute)) refuse(code);
+    } else {
+      const current = readBoundResumeRecord(absolute, binding);
+      if (current.sha256 !== expectedSha256) refuse(code);
+    }
+    const checked = assertDisposableRecoverySeedResumeRecord(record, binding);
+    stagingPath = join(
+      parent.path,
+      `.v048-disposable-seed-resume-${randomBytes(12).toString("hex")}.json`,
+    );
+    const output = assertPrivateAggregateOutputPath(stagingPath, { code });
+    reservation = reservePrivateAggregateReceipt(output, {
+      schema_version: 1,
+      kind: "v048_disposable_recovery_seed_resume_update_pending",
+      record_sha256: sha256(canonical(checked)),
+    });
+    finalizePrivateAggregateReceipt(reservation, checked);
+    reservation = null;
+    const staged = readPrivateAggregateReceipt(stagingPath, { code });
+    if (canonical(staged.value) !== canonical(checked)) refuse(code);
+    if (expectedSha256 === null) {
+      if (existsSync(absolute)) refuse(code);
+    } else if (readBoundResumeRecord(absolute, binding).sha256 !== expectedSha256) {
+      refuse(code);
+    }
+    renameSync(stagingPath, absolute);
+    stagingPath = null;
+    const renamedInfo = lstatSync(absolute);
+    syncPrivateReceiptDirectory(
+      parent.path,
+      parent.info,
+      absolute,
+      renamedInfo,
+      code,
+    );
+    const final = readBoundResumeRecord(absolute, binding);
+    if (canonical(final.value) !== canonical(checked)) refuse(code);
+    return final;
+  } catch (error) {
+    if (reservation) abandonPrivateAggregateReceipt(reservation);
+    if (error instanceof DisposableRecoveryFieldSeedError) throw error;
+    throw new DisposableRecoveryFieldSeedError(code);
+  }
+}
+
+function reservationMarker(binding) {
+  const identity = resumeIdentity(binding);
+  return Object.freeze({
+    schema_version: 2,
+    kind: "v048_disposable_recovery_seed_pending",
+    status: "execution_in_progress",
+    fixture_sha256: DISPOSABLE_RECOVERY_FIXTURE_SHA256,
+    expected_documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
+    expected_batches: DISPOSABLE_RECOVERY_SEED_BATCHES,
+    identity,
+    resume_record_kind: "v048_disposable_recovery_seed_resume",
+  });
+}
+
+function withResumeSummary(error, record) {
+  const wrapped = error && typeof error === "object"
+    ? error
+    : new DisposableRecoveryFieldSeedError("DISPOSABLE_RECOVERY_SEED_FAILED");
+  try {
+    Object.defineProperty(wrapped, "resume_record", {
+      value: resumeSummary(record),
+      enumerable: true,
+      configurable: true,
+    });
+  } catch { /* the durable record remains authoritative */ }
+  return wrapped;
+}
+
+function requireAmbiguousWriteReview(record) {
+  throw withResumeSummary(
+    new DisposableRecoveryFieldSeedError(
+      "DISPOSABLE_RECOVERY_SEED_AMBIGUOUS_WRITE_REVIEW_REQUIRED",
+    ),
+    record,
+  );
+}
+
+function readExistingSeedReceipt(path, binding) {
+  try {
+    const readback = readPrivateAggregateReceipt(path, {
+      code: "DISPOSABLE_RECOVERY_SEED_RECEIPT_READBACK_FAILED",
+    });
+    assertDisposableRecoverySeedReceipt(readback.value);
+    if (canonical(readback.value.binding) !== canonical(binding)) {
+      refuse("DISPOSABLE_RECOVERY_SEED_RECEIPT_READBACK_FAILED");
+    }
+    return readback;
+  } catch (error) {
+    if (error instanceof DisposableRecoveryFieldSeedError) throw error;
+    refuse("DISPOSABLE_RECOVERY_SEED_RECEIPT_READBACK_FAILED");
+  }
+}
+
 function readStablePrivateWrapper(path, expectedSha256) {
   try {
     const code = "DISPOSABLE_RECOVERY_SEED_WRANGLER_WRAPPER_INVALID";
@@ -153,9 +489,7 @@ function assertStablePrivateWrapper(pin) {
   return true;
 }
 
-function assertExactCampaign(bindings) {
-  const source = bindings?.source;
-  const target = bindings?.target;
+function assertExactSourceCampaign(source) {
   const exact = (value, expected) => value === expected;
   const exactRuntime = (binding) =>
     binding?.embeddingModel === "@cf/baai/bge-base-en-v1.5" &&
@@ -171,28 +505,21 @@ function assertExactCampaign(bindings) {
     return labels[0] === resource && labels.length >= 4 &&
       labels.slice(-2).join(".") === "workers.dev";
   };
-  if (!source || !target ||
+  if (!source ||
       !exact(source.clientSlug, CLIENT_SLUG) ||
-      !exact(target.clientSlug, CLIENT_SLUG) ||
       !exact(source.clientDisplayName, CLIENT_DISPLAY_NAME) ||
-      !exact(target.clientDisplayName, CLIENT_DISPLAY_NAME) ||
       !exact(source.productVersion, DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION) ||
-      !exact(target.productVersion, DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION) ||
       !exact(source.adminKeySecret, `keychain://${SOURCE_RESOURCE}/owner`) ||
-      !exact(target.adminKeySecret, `keychain://${TARGET_RESOURCE}/owner`) ||
       source.recoveryArtifactKeySecret !== null ||
-      !exact(target.recoveryArtifactKeySecret, `keychain://${TARGET_RESOURCE}/artifact-v1`) ||
-      source.recoveryFieldGate !== null || target.recoveryFieldGate !== null ||
-      !exactRuntime(source) || !exactRuntime(target) ||
-      !noConnectors(source) || !noConnectors(target) ||
+      source.recoveryFieldGate !== null ||
+      !exactRuntime(source) ||
+      !noConnectors(source) ||
       ![source.workerName, source.databaseName, source.vectorizeIndex]
         .every((value) => value === SOURCE_RESOURCE) ||
-      ![target.workerName, target.databaseName, target.vectorizeIndex]
-        .every((value) => value === TARGET_RESOURCE) ||
-      !exactWorkerDomain(source, SOURCE_RESOURCE) || !exactWorkerDomain(target, TARGET_RESOURCE)) {
+      !exactWorkerDomain(source, SOURCE_RESOURCE)) {
     refuse("DISPOSABLE_RECOVERY_SEED_CAMPAIGN_INVALID");
   }
-  return bindings;
+  return source;
 }
 
 function boundedJson(value, code) {
@@ -261,10 +588,9 @@ function validateUnsupported(body) {
 
 export function createDisposableRecoveryLiveTransports({
   source,
-  target,
   seedBinding,
-  deploymentReceipt,
-  deploymentReceiptSha256,
+  sourcePhaseReceipt,
+  sourcePhaseReceiptSha256,
   sourceManifestPath,
   receiptDirectory,
   wranglerWrapperPath,
@@ -462,12 +788,13 @@ export function createDisposableRecoveryLiveTransports({
     return true;
   };
 
-  const liveDeployment = async (binding, versionId) => {
+  const liveDeployment = async (binding, versionId, deploymentId) => {
     await ensureWrangler();
     const deployment = object(await wrangler(binding, [
       "deployments", "status", "--name", binding.workerName, "--json",
     ]), "DISPOSABLE_RECOVERY_SEED_DEPLOYMENT_CHANGED");
-    if (!Array.isArray(deployment.versions) || deployment.versions.length !== 1 ||
+    if (deployment.id !== deploymentId ||
+        !Array.isArray(deployment.versions) || deployment.versions.length !== 1 ||
         deployment.versions[0]?.version_id !== versionId ||
         Number(deployment.versions[0]?.percentage) !== 100) {
       refuse("DISPOSABLE_RECOVERY_SEED_DEPLOYMENT_CHANGED");
@@ -478,45 +805,37 @@ export function createDisposableRecoveryLiveTransports({
   return Object.freeze({
     readOpeningDirectD1: directCounts,
     verifyDeployment: async () => {
-      const sourceVersion = deploymentReceipt?.source?.active_version;
-      const pausedVersion = deploymentReceipt?.target?.paused_version;
-      const activeVersion = deploymentReceipt?.target?.active_version;
-      if (!target || !seedBinding ||
-          deploymentReceiptSha256 !== seedBinding.deployment_receipt_sha256 ||
-          deploymentReceipt?.binding?.source_resource_fingerprint !==
+      const sourceVersion = sourcePhaseReceipt?.source?.active_version;
+      const sourceDeployment = sourcePhaseReceipt?.source?.active_deployment;
+      if (!seedBinding ||
+          sourcePhaseReceiptSha256 !== seedBinding.source_phase_receipt_sha256 ||
+          sourcePhaseReceipt?.binding?.source_resource_fingerprint !==
             seedBinding.source_resource_fingerprint ||
-          deploymentReceipt?.binding?.target_resource_fingerprint !==
-            seedBinding.target_resource_fingerprint ||
+          sourcePhaseReceipt?.binding?.run_id !== seedBinding.source_phase_run_id ||
+          sourcePhaseReceipt?.a2_approval_fingerprint !==
+            seedBinding.source_a2_approval_fingerprint ||
           sourceVersion?.version_id !== seedBinding.source_active_version_id ||
           sourceVersion?.script_etag !== seedBinding.source_script_etag ||
-          pausedVersion?.version_id !== seedBinding.target_paused_version_id ||
-          pausedVersion?.script_etag !== seedBinding.target_paused_script_etag ||
-          activeVersion?.version_id !== seedBinding.target_active_version_id ||
-          activeVersion?.script_etag !== seedBinding.target_active_script_etag ||
-          deploymentReceipt?.source?.active_traffic_percent !== 100 ||
-          deploymentReceipt?.target?.paused_traffic_percent !== 100 ||
-          deploymentReceipt?.target?.active_not_promoted !== true) {
+          sourceDeployment?.deployment_id !== seedBinding.source_deployment_id ||
+          sourceDeployment?.version_id !== sourceVersion?.version_id ||
+          sourceDeployment?.traffic_percent !== 100) {
         refuse("DISPOSABLE_RECOVERY_SEED_DEPLOYMENT_INVALID");
       }
       await liveVersion(source, sourceVersion.version_id, sourceVersion.script_etag);
-      await liveDeployment(source, sourceVersion.version_id);
-      await liveVersion(target, pausedVersion.version_id, pausedVersion.script_etag);
-      await liveVersion(target, activeVersion.version_id, activeVersion.script_etag);
-      await liveDeployment(target, pausedVersion.version_id);
+      await liveDeployment(
+        source,
+        sourceVersion.version_id,
+        sourceDeployment.deployment_id,
+      );
       return Object.freeze({
-        deployment_receipt_sha256: deploymentReceiptSha256,
+        source_phase_receipt_sha256: sourcePhaseReceiptSha256,
+        source_phase_run_id: seedBinding.source_phase_run_id,
+        source_a2_approval_fingerprint: seedBinding.source_a2_approval_fingerprint,
         source_resource_fingerprint: seedBinding.source_resource_fingerprint,
         source_active_version_id: sourceVersion.version_id,
         source_script_etag: sourceVersion.script_etag,
+        source_deployment_id: sourceDeployment.deployment_id,
         source_active_traffic_percent: 100,
-        target_resource_fingerprint: seedBinding.target_resource_fingerprint,
-        target_paused_version_id: pausedVersion.version_id,
-        target_paused_script_etag: pausedVersion.script_etag,
-        target_active_version_id: activeVersion.version_id,
-        target_active_script_etag: activeVersion.script_etag,
-        target_paused_traffic_percent: 100,
-        target_active_not_promoted: true,
-        provider_readback: true,
       });
     },
     ingestBatch: async (documents) => {
@@ -663,27 +982,79 @@ export async function runDisposableRecoveryFieldSeed({
   const abandon = dependencies.abandon ?? abandonPrivateAggregateReceipt;
   const readReceipt = dependencies.readReceipt ?? readPrivateAggregateReceipt;
   await revalidate();
-  const output = assertOutput(resolve(receiptPath));
   let expectedDirectory;
   try { expectedDirectory = realpathSync(resolve(expectedReceiptDirectory)); }
   catch { refuse("DISPOSABLE_RECOVERY_SEED_RECEIPT_PATH_INVALID"); }
-  if (output.path !== join(expectedDirectory, RECEIPT_NAME) ||
-      output.parent.path !== expectedDirectory) {
+  const absoluteReceiptPath = resolve(receiptPath);
+  if (absoluteReceiptPath !== join(expectedDirectory, RECEIPT_NAME)) {
     refuse("DISPOSABLE_RECOVERY_SEED_RECEIPT_PATH_INVALID");
   }
-  const marker = Object.freeze({
-    schema_version: 1,
-    kind: "v048_disposable_recovery_seed_pending",
-    status: "execution_in_progress",
-    fixture_sha256: DISPOSABLE_RECOVERY_FIXTURE_SHA256,
-    expected_documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
-    expected_batches: DISPOSABLE_RECOVERY_SEED_BATCHES,
-    binding: checkedBinding,
+  const parent = assertPrivateAggregateReceiptDirectory(expectedDirectory, {
+    code: "DISPOSABLE_RECOVERY_SEED_RECEIPT_PATH_INVALID",
   });
+  const resumePath = join(expectedDirectory, RESUME_NAME);
+  const pendingPath = privateAggregateReceiptPendingPath(absoluteReceiptPath);
+  let resumeReadback;
+  if (existsSync(resumePath)) {
+    resumeReadback = readBoundResumeRecord(resumePath, checkedBinding);
+  } else {
+    if (existsSync(absoluteReceiptPath) || existsSync(pendingPath)) {
+      refuse("DISPOSABLE_RECOVERY_SEED_RESUME_MISSING");
+    }
+    resumeReadback = persistResumeRecord(
+      resumePath,
+      initialResumeRecord(checkedBinding),
+      checkedBinding,
+    );
+  }
+  if (resumeReadback.value.status === "write_confirmation_ambiguous") {
+    requireAmbiguousWriteReview(resumeReadback.value);
+  }
+
+  const receiptExists = existsSync(absoluteReceiptPath);
+  const pendingExists = existsSync(pendingPath);
+  if (receiptExists && !pendingExists) {
+    const existing = readExistingSeedReceipt(absoluteReceiptPath, checkedBinding);
+    if (resumeReadback.value.status === "complete") {
+      if (resumeReadback.value.final_seed_receipt_sha256 !== existing.sha256) {
+        refuse("DISPOSABLE_RECOVERY_SEED_RECEIPT_READBACK_FAILED");
+      }
+    } else {
+      const completed = completeResumeRecord(
+        resumeReadback.value,
+        existing.sha256,
+        checkedBinding,
+      );
+      resumeReadback = persistResumeRecord(
+        resumePath,
+        completed,
+        checkedBinding,
+        resumeReadback.sha256,
+      );
+    }
+    return Object.freeze({ receipt: existing.value, receiptSha256: existing.sha256 });
+  }
+  if (!receiptExists && pendingExists) {
+    refuse("DISPOSABLE_RECOVERY_SEED_RESERVATION_INCOMPLETE");
+  }
+
+  const marker = reservationMarker(checkedBinding);
   let reservation = null;
   let finalized = false;
   try {
-    reservation = reserve(output, marker);
+    if (receiptExists && pendingExists) {
+      reservation = resumePrivateAggregateReceiptReservation({
+        path: absoluteReceiptPath,
+        pendingPath,
+        parent,
+      }, marker);
+    } else {
+      const output = assertOutput(absoluteReceiptPath);
+      if (output.path !== absoluteReceiptPath || output.parent.path !== expectedDirectory) {
+        refuse("DISPOSABLE_RECOVERY_SEED_RECEIPT_PATH_INVALID");
+      }
+      reservation = reserve(output, marker);
+    }
     const beforeBoundary = async () => {
       await revalidate();
       validateReservation(reservation, {
@@ -692,9 +1063,24 @@ export async function runDisposableRecoveryFieldSeed({
     };
     await beforeBoundary();
     const transports = await createTransports(beforeBoundary);
+    const checkpoint = async (state) => {
+      const next = checkpointResumeRecord(
+        resumeReadback.value,
+        state,
+        checkedBinding,
+      );
+      resumeReadback = persistResumeRecord(
+        resumePath,
+        next,
+        checkedBinding,
+        resumeReadback.sha256,
+      );
+    };
     const receipt = await seedDisposableRecoveryFixture({
       binding: checkedBinding,
       ...transports,
+      resume: resumableProgress(resumeReadback.value),
+      checkpoint,
       now,
     });
     assertDisposableRecoverySeedReceipt(receipt);
@@ -703,14 +1089,27 @@ export async function runDisposableRecoveryFieldSeed({
       refuse("DISPOSABLE_RECOVERY_SEED_RECEIPT_FINALIZATION_FAILED");
     }
     finalized = true;
-    const readback = readReceipt(output.path, {
+    const readback = readReceipt(absoluteReceiptPath, {
       code: "DISPOSABLE_RECOVERY_SEED_RECEIPT_READBACK_FAILED",
     });
     assertDisposableRecoverySeedReceipt(readback.value);
     if (canonical(readback.value) !== canonical(receipt)) {
       refuse("DISPOSABLE_RECOVERY_SEED_RECEIPT_READBACK_FAILED");
     }
+    const completed = completeResumeRecord(
+      resumeReadback.value,
+      readback.sha256,
+      checkedBinding,
+    );
+    resumeReadback = persistResumeRecord(
+      resumePath,
+      completed,
+      checkedBinding,
+      resumeReadback.sha256,
+    );
     return Object.freeze({ receipt, receiptSha256: readback.sha256 });
+  } catch (error) {
+    throw withResumeSummary(error, resumeReadback.value);
   } finally {
     if (reservation && !finalized) abandon(reservation);
   }
@@ -722,8 +1121,8 @@ function parseArgs(argv) {
   }
   const command = argv[0];
   const allowed = new Set([
-    "candidate-sha", "source-manifest", "target-manifest", "plan",
-    "field-receipt", "deployment-receipt", "package", "wrangler-wrapper", "receipt", "approve",
+    "candidate-sha", "source-manifest", "plan", "field-receipt",
+    "source-phase-receipt", "package", "wrangler-wrapper", "receipt", "approve",
   ]);
   const values = {};
   for (let index = 1; index < argv.length; index += 2) {
@@ -737,8 +1136,8 @@ function parseArgs(argv) {
     values[flag.slice(2)] = value;
   }
   const required = [
-    "candidate-sha", "source-manifest", "target-manifest", "plan",
-    "field-receipt", "deployment-receipt", "package", "wrangler-wrapper",
+    "candidate-sha", "source-manifest", "plan", "field-receipt",
+    "source-phase-receipt", "package", "wrangler-wrapper",
     ...(command === "execute" ? ["receipt", "approve"] : []),
   ];
   if (argv.length % 2 !== 1 || required.some((key) => !values[key]) ||
@@ -750,7 +1149,7 @@ function parseArgs(argv) {
 
 function usage() {
   return `Usage:
-  node operations/disposable-recovery-field-seed.mjs preview --candidate-sha <40-hex> --source-manifest <private-file> --target-manifest <private-file> --plan <private-file> --field-receipt <private-file> --deployment-receipt <private-file> --package <exact-tarball> --wrangler-wrapper <private-wrapper>
+  node operations/disposable-recovery-field-seed.mjs preview --candidate-sha <40-hex> --source-manifest <private-file> --plan <private-file> --field-receipt <private-file> --source-phase-receipt <private-file> --package <exact-tarball> --wrangler-wrapper <private-wrapper>
   node operations/disposable-recovery-field-seed.mjs execute <same-flags> --receipt <private-dir>/${RECEIPT_NAME} --approve <preview-fingerprint>`;
 }
 
@@ -766,15 +1165,14 @@ export async function main(argv = process.argv.slice(2), {
   const parsed = parseArgs(argv);
   const values = parsed.values;
   const plan = loadVerifiedRecoveryPlan(resolve(values.plan));
-  const manifestBindings = assertExactCampaign(inspectVerifiedRecoveryManifestBindings(
+  const source = assertExactSourceCampaign(inspectVerifiedRecoverySourceManifestBinding(
     plan,
     resolve(values["source-manifest"]),
-    resolve(values["target-manifest"]),
-  ));
+  ).source);
   const preparation = inspectDisposableRecoverySeedPreparation({
     candidateSha: values["candidate-sha"],
     fieldReceiptPath: values["field-receipt"],
-    deploymentReceiptPath: values["deployment-receipt"],
+    sourcePhaseReceiptPath: values["source-phase-receipt"],
     packagePath: values.package,
     wranglerWrapperPath: values["wrangler-wrapper"],
     plan,
@@ -799,11 +1197,10 @@ export async function main(argv = process.argv.slice(2), {
   const receiptDirectory = resolve(dirname(values.receipt));
   const revalidate = async () => {
     preparation.revalidate();
-    assertExactCampaign(inspectVerifiedRecoveryManifestBindings(
+    assertExactSourceCampaign(inspectVerifiedRecoverySourceManifestBinding(
       plan,
       resolve(values["source-manifest"]),
-      resolve(values["target-manifest"]),
-    ));
+    ).source);
     return true;
   };
   const result = await runDisposableRecoveryFieldSeed({
@@ -812,11 +1209,10 @@ export async function main(argv = process.argv.slice(2), {
     expectedReceiptDirectory: resolve(dirname(values["field-receipt"])),
     revalidate,
     createTransports: async (beforeBoundary) => createDisposableRecoveryLiveTransports({
-      source: manifestBindings.source,
-      target: manifestBindings.target,
+      source,
       seedBinding: preparation.binding,
-      deploymentReceipt: preparation.deploymentReceipt,
-      deploymentReceiptSha256: preparation.binding.deployment_receipt_sha256,
+      sourcePhaseReceipt: preparation.sourcePhaseReceipt,
+      sourcePhaseReceiptSha256: preparation.binding.source_phase_receipt_sha256,
       sourceManifestPath: resolve(values["source-manifest"]),
       receiptDirectory,
       wranglerWrapperPath: resolve(values["wrangler-wrapper"]),
@@ -849,7 +1245,15 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
     const code = typeof error?.code === "string"
       ? error.code
       : "DISPOSABLE_RECOVERY_SEED_FAILED";
-    process.stderr.write(`${code}\n`);
+    if (error?.resume_record) {
+      process.stderr.write(`${JSON.stringify({
+        status: "incomplete",
+        code,
+        resume: error.resume_record,
+      }, null, 2)}\n`);
+    } else {
+      process.stderr.write(`${code}\n`);
+    }
     process.exitCode = 1;
   });
 }

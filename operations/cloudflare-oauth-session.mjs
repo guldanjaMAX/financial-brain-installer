@@ -17,11 +17,11 @@ import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = "wrangler@4.127.1";
+export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = "wrangler@4.131.1";
 export const CLOUDFLARE_OAUTH_CALLBACK_HOST = "localhost";
 export const CLOUDFLARE_OAUTH_CALLBACK_PORT = 8976;
 
-// These are the narrow Wrangler 4.127.1 OAuth scope keys available for the
+// These are the narrow Wrangler 4.131.1 OAuth scope keys available for the
 // current standard install: enumerate memberships, deploy/configure Workers,
 // manage D1, and configure Workers AI. Wrangler exposes no separate Vectorize
 // OAuth key, so the exact Vectorize read below is the fail-closed proof that
@@ -354,7 +354,7 @@ function skipWhitespace(bytes, start) {
   return index;
 }
 
-// Wrangler 4.127.1 emits these fields through JSON.stringify. Reject escaped
+// Wrangler 4.131.1 emits these fields through JSON.stringify. Reject escaped
 // or non-ASCII fields rather than using JSON.parse, which would create an
 // immutable JavaScript string containing the access token.
 function readSimpleJsonString(bytes, start) {
@@ -378,7 +378,7 @@ function segmentEquals(bytes, segment, ascii) {
 }
 
 /**
- * Strictly parse Wrangler 4.127.1 `{ "type": "oauth", "token": "..." }`
+ * Strictly parse Wrangler 4.131.1 `{ "type": "oauth", "token": "..." }`
  * bytes without materializing the token as an immutable string.
  * The returned Buffer belongs to the caller and must be zeroed.
  */

@@ -78,7 +78,8 @@ const STATE_KEYS = new Set([
 ]);
 const FIELD_PROOF_KEYS = new Set([
   "schema_version", "kind", "candidate_sha", "package_sha256",
-  "field_receipt_sha256", "deployment_receipt_sha256", "seed_receipt_sha256", "fixture_sha256",
+  "field_receipt_sha256", "source_phase_receipt_sha256",
+  "deployment_receipt_sha256", "seed_receipt_sha256", "fixture_sha256",
   "seed_d1_content_fingerprint", "expected_documents", "expected_chunks",
   "expected_fts", "seed_replay_unchanged_documents", "paired_stop_stage", "bound_at",
 ]);
@@ -86,6 +87,7 @@ const FIELD_PROOF_BINDING_KEYS = new Set(
   [...FIELD_PROOF_KEYS].filter((key) => key !== "bound_at"),
 );
 const REBUILD_FIELD_PROOF_KEYS = Object.freeze([
+  "source_phase_receipt_sha256",
   "deployment_receipt_sha256",
   "seed_receipt_sha256",
   "bootstrap_interruption_checkpoint_sha256",
@@ -401,26 +403,8 @@ export function buildVerifiedRecoveryPlan(sourceManifestPath, targetManifestPath
  * checked against the reviewed plan instead of reopening a path after choosing
  * where a credential or write will go.
  */
-export function inspectVerifiedRecoveryManifestBindings(
-  planInput,
-  sourceManifestPath,
-  targetManifestPath,
-) {
-  const plan = validateVerifiedRecoveryPlan(planInput);
-  const sourceLoaded = readRecoveryManifest(sourceManifestPath, "source");
-  const targetLoaded = readRecoveryManifest(targetManifestPath, "target");
-  const source = recoveryResourceContract(sourceLoaded.manifest, "source");
-  const target = recoveryResourceContract(targetLoaded.manifest, "target");
-  assertIsolatedRecoveryTarget(source, target);
-  if (sourceLoaded.fingerprint !== plan.source_manifest_fingerprint ||
-      targetLoaded.fingerprint !== plan.target_manifest_fingerprint ||
-      source.resourceFingerprint !== plan.source_resource_fingerprint ||
-      target.resourceFingerprint !== plan.target_resource_fingerprint ||
-      source.runtimeFingerprint !== plan.runtime_contract_fingerprint ||
-      target.runtimeFingerprint !== plan.runtime_contract_fingerprint) {
-    fail("verified recovery manifest binding changed after plan review");
-  }
-  const ephemeral = (loaded, contract) => Object.freeze({
+function ephemeralRecoveryProviderBinding(loaded, contract) {
+  return Object.freeze({
     ...contract.identity,
     clientSlug: contract.slug,
     clientDisplayName: boundedIdentity(
@@ -459,12 +443,58 @@ export function inspectVerifiedRecoveryManifestBindings(
       ? null
       : structuredClone(loaded.manifest.operations.recovery_field_gate),
   });
+}
+
+/**
+ * Re-read only the source manifest and return its exact ephemeral provider
+ * binding. This deliberately does not require or open the target manifest, so
+ * the source deployment and synthetic seeding phase cannot observe target
+ * credentials or provider identity before the target approval phase.
+ */
+export function inspectVerifiedRecoverySourceManifestBinding(
+  planInput,
+  sourceManifestPath,
+) {
+  const plan = validateVerifiedRecoveryPlan(planInput);
+  const sourceLoaded = readRecoveryManifest(sourceManifestPath, "source");
+  const source = recoveryResourceContract(sourceLoaded.manifest, "source");
+  if (sourceLoaded.fingerprint !== plan.source_manifest_fingerprint ||
+      source.resourceFingerprint !== plan.source_resource_fingerprint ||
+      source.runtimeFingerprint !== plan.runtime_contract_fingerprint) {
+    fail("verified recovery source manifest binding changed after plan review");
+  }
+  return Object.freeze({
+    planFingerprint: plan.plan_fingerprint,
+    sourceManifestFingerprint: sourceLoaded.fingerprint,
+    source: ephemeralRecoveryProviderBinding(sourceLoaded, source),
+  });
+}
+
+export function inspectVerifiedRecoveryManifestBindings(
+  planInput,
+  sourceManifestPath,
+  targetManifestPath,
+) {
+  const plan = validateVerifiedRecoveryPlan(planInput);
+  const sourceLoaded = readRecoveryManifest(sourceManifestPath, "source");
+  const targetLoaded = readRecoveryManifest(targetManifestPath, "target");
+  const source = recoveryResourceContract(sourceLoaded.manifest, "source");
+  const target = recoveryResourceContract(targetLoaded.manifest, "target");
+  assertIsolatedRecoveryTarget(source, target);
+  if (sourceLoaded.fingerprint !== plan.source_manifest_fingerprint ||
+      targetLoaded.fingerprint !== plan.target_manifest_fingerprint ||
+      source.resourceFingerprint !== plan.source_resource_fingerprint ||
+      target.resourceFingerprint !== plan.target_resource_fingerprint ||
+      source.runtimeFingerprint !== plan.runtime_contract_fingerprint ||
+      target.runtimeFingerprint !== plan.runtime_contract_fingerprint) {
+    fail("verified recovery manifest binding changed after plan review");
+  }
   return Object.freeze({
     planFingerprint: plan.plan_fingerprint,
     sourceManifestFingerprint: sourceLoaded.fingerprint,
     targetManifestFingerprint: targetLoaded.fingerprint,
-    source: ephemeral(sourceLoaded, source),
-    target: ephemeral(targetLoaded, target),
+    source: ephemeralRecoveryProviderBinding(sourceLoaded, source),
+    target: ephemeralRecoveryProviderBinding(targetLoaded, target),
   });
 }
 
@@ -599,8 +629,8 @@ function validateRecoveryFieldProof(input, completed) {
     fail("verified recovery field proof binding is invalid");
   }
   for (const key of [
-    "package_sha256", "field_receipt_sha256", "deployment_receipt_sha256",
-    "seed_receipt_sha256",
+    "package_sha256", "field_receipt_sha256", "source_phase_receipt_sha256",
+    "deployment_receipt_sha256", "seed_receipt_sha256",
     "seed_d1_content_fingerprint",
   ]) {
     hashValue(input[key], `verified recovery field proof ${key}`);
@@ -691,7 +721,9 @@ function validateStageEvidence(stage, input, plan, completed, fieldProof = null)
       for (const key of REBUILD_FIELD_PROOF_KEYS) {
         hashValue(evidence[key], `verified recovery rebuild ${key}`);
       }
-      if (evidence.deployment_receipt_sha256 !== fieldProof.deployment_receipt_sha256 ||
+      if (evidence.source_phase_receipt_sha256 !==
+            fieldProof.source_phase_receipt_sha256 ||
+          evidence.deployment_receipt_sha256 !== fieldProof.deployment_receipt_sha256 ||
           evidence.seed_receipt_sha256 !== fieldProof.seed_receipt_sha256 ||
           evidence.chunk_count !== fieldProof.expected_chunks) {
         fail("verified recovery rebuild proof does not match its field proof binding");

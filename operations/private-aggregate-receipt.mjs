@@ -701,6 +701,64 @@ export function reservePrivateAggregateReceipt(output, marker) {
   }
 }
 
+/**
+ * Reopen the two exact conservative marker files left by an interrupted run.
+ * The caller must separately prove that resuming the external operation is
+ * safe. This helper grants no retry authority; it only restores the local
+ * descriptor needed to finalize the same aggregate receipt later.
+ */
+export function resumePrivateAggregateReceiptReservation(output, marker) {
+  const code = "PRIVATE_AGGREGATE_RECEIPT_RESUME_INVALID";
+  assertSupportedReceiptPlatform(process.platform, code);
+  if (!output?.path || !output?.pendingPath || !output?.parent?.path ||
+      dirname(output.path) !== output.parent.path ||
+      dirname(output.pendingPath) !== output.parent.path ||
+      output.pendingPath !== pendingReceiptPath(output.path)) {
+    refuse(code);
+  }
+  const parent = assertPrivateDirectory(output.parent.path, code);
+  if (!sameInode(parent.info, output.parent.info)) refuse(code);
+  let bytes;
+  let descriptor;
+  const reservation = {
+    path: output.path,
+    pendingPath: output.pendingPath,
+    parentPath: parent.path,
+    parentInfo: parent.info,
+    descriptor: undefined,
+    info: null,
+    pendingInfo: null,
+    markerSize: null,
+    markerHash: null,
+    closed: false,
+  };
+  try {
+    bytes = Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8");
+    if (bytes.length < 1 || bytes.length > MAX_RECEIPT_BYTES) refuse(code);
+    reservation.markerSize = bytes.length;
+    reservation.markerHash = sha256(bytes);
+    reservation.pendingInfo = lstatSync(output.pendingPath);
+    descriptor = openSync(
+      output.path,
+      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW || 0),
+    );
+    reservation.descriptor = descriptor;
+    reservation.info = fstatSync(descriptor);
+    validateReservation(reservation, code);
+    return reservation;
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* preserve both markers */ }
+    }
+    reservation.descriptor = undefined;
+    reservation.closed = true;
+    if (error instanceof PrivateAggregateReceiptError) throw error;
+    refuse(code);
+  } finally {
+    if (bytes) bytes.fill(0);
+  }
+}
+
 /** Replace a reserved marker with one exact, durably read-back JSON receipt. */
 export function finalizePrivateAggregateReceipt(reservation, receipt, {
   writeBytes = writePrivateReceiptDescriptor,

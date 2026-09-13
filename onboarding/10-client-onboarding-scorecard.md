@@ -168,10 +168,14 @@ Complete this before owner handoff.
 - [ ] The owner can name what is ready, loading, partial, and not configured.
 - [ ] Every live connector has its named sanitized acceptance receipt.
 
-## `/optimize` review
+## Optimize review
 
-Open `/optimize` with the owner after handoff. Compare what the page shows with
-the source scorecard above.
+Open `https://financialbrain.ai/optimize` with the owner after handoff and give
+its request to the connected assistant. This public page launches the reviewed
+assistant guidance; it is not a signed-in source dashboard. Compare only the
+supported findings the assistant can actually read with the source scorecard
+above. Mark unavailable dimensions unavailable instead of reconstructing them
+from ranked search.
 
 | Review | Day 1 | Day 15 | Day 22 | Day 29 |
 |---|---|---|---|---|

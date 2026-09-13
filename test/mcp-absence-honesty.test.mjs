@@ -289,4 +289,61 @@ function assertMapOpeningSequence(text, label) {
   console.log("PASS raw search keeps date and extraction provenance");
 }
 
+// 5. A failed vector query is not the same state as a projection that is still
+//    building. The closed reason token must survive the MCP boundary so the
+//    consuming assistant receives the Worker's reviewed cause and remedy.
+{
+  const out = await thinkReturns({
+    status: "search_unavailable",
+    degraded: "vector",
+    degraded_reason: "vector-query-failed",
+    notice: "untrusted worker notice",
+    answer: null,
+    citations: [],
+    results: [],
+    gaps: [],
+  });
+  assert.equal(out.search_status, "search_unavailable");
+  assert.equal(out.degraded, "vector");
+  assert.equal(out.degraded_reason, "vector-query-failed");
+  assert.match(out.note, /meaning-based search failed/i);
+  assert.doesNotMatch(out.note, /index is still building/i);
+  assert.match(out.gaps[0]?.detail ?? "", /meaning-based search failed/i);
+  console.log("PASS MCP preserves the reviewed vector-query failure state");
+}
+
+// 6. When both attempted modalities fail, raw search carries the distinct
+//    public reason rather than collapsing it into a one-sided degradation.
+{
+  const out = await thinkReturns({
+    status: "search_unavailable",
+    degraded: "retrieval",
+    degraded_reason: "keyword-and-vector-query-failed",
+    results: [],
+    gaps: [],
+  }, "brain_search");
+  assert.equal(out.search_status, "search_unavailable");
+  assert.equal(out.degraded, "retrieval");
+  assert.equal(out.degraded_reason, "keyword-and-vector-query-failed");
+  assert.match(out.note, /both keyword search and meaning-based search failed/i);
+  console.log("PASS MCP preserves the both-modalities-failed state");
+}
+
+// 7. Reason is a closed product field, not a path for raw provider text.
+{
+  const privateCanary = "provider-private-trace-fixture-123";
+  const out = await thinkReturns({
+    status: "search_unavailable",
+    degraded: "vector",
+    degraded_reason: privateCanary,
+    answer: null,
+    citations: [],
+    results: [],
+    gaps: [],
+  });
+  assert.equal("degraded_reason" in out, false, "unknown reason must be omitted");
+  assert.doesNotMatch(JSON.stringify(out), new RegExp(privateCanary));
+  console.log("PASS MCP does not relay arbitrary degraded reason text");
+}
+
 console.log("mcp-absence-honesty: all assertions passed");

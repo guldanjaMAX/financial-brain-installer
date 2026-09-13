@@ -37,7 +37,7 @@ import { TextDecoder } from "node:util";
 import { gunzipSync } from "node:zlib";
 
 export const LOCKED_WRANGLER_PACKAGE = "wrangler";
-export const LOCKED_WRANGLER_VERSION = "4.127.1";
+export const LOCKED_WRANGLER_VERSION = "4.131.1";
 export const LOCKED_WRANGLER_RUNTIME_DIRECTORY = "wrangler-runtime-v1";
 export const LOCKED_WRANGLER_ENTRYPOINT = "node_modules/wrangler/bin/wrangler.js";
 export const LOCKED_WRANGLER_RESOLUTION_GUARD = "resolution-guard.cjs";

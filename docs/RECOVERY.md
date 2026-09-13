@@ -387,7 +387,7 @@ It exists only for the exact synthetic v0.4.8 disposable field identity named
 in `docs/release-evidence/v0.4.8-disposable-vector-field-plan.md`. A preview must
 also receive the fixed test mode, the candidate SHA, the owner-only complete
 `field-prepare-receipt.json`, and the exact owner-only npm archive recorded by
-that receipt. Field preparation also reconstructs `wrangler 4.127.1` and its
+that receipt. Field preparation also reconstructs `wrangler 4.131.1` and its
 complete host-compatible dependency closure from the exact SHA-512 npm cache
 objects named by `package-lock.json`. It refuses a missing or corrupt cache
 object and refuses when those trusted bytes differ from the checkout install
@@ -418,7 +418,7 @@ failure path, so the recovery state remains retryable and the field lock is
 released. No active-version promotion can occur before that stop.
 
 Resume requires the same plan, state, manifests, artifact, wrapper, golden,
-receipt, npm archive, exact prepared `wrangler 4.127.1` runtime closure and Node
+receipt, npm archive, exact prepared `wrangler 4.131.1` runtime closure and Node
 executable, six recovery approvals,
 and seventh interruption approval. Before the first resumed bootstrap POST,
 the observer must prove the same paused target, epoch, ordinal cut, corpus,

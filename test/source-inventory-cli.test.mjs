@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,6 +9,7 @@ import {
   cmdSources,
   collectSourceInventoryPages,
   runCliCommandWithCredentialBoundary,
+  schedulePlatformLimitation,
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
@@ -359,4 +360,26 @@ test("CLI help advertises the read-only inventory and recovery preview without a
   assert.match(result.stdout, new RegExp(`${shownSources} <manifest> --json`));
   assert.match(result.stdout, /--json --recovery/);
   assert.match(result.stdout, /without Cloudflare sign-in or a control-plane/);
+});
+
+test("shipped source guidance uses v3 JSON or the actual concise human columns", () => {
+  const failures = readFileSync(join(process.cwd(), "onboarding", "06-runbook-top-ten-failures.md"), "utf8");
+  const matrix = readFileSync(join(process.cwd(), "onboarding", "07-ingest-source-matrix.md"), "utf8");
+  const shippedGuidance = `${failures}\n${matrix}`;
+
+  for (const obsoleteClaim of [
+    /status \(pending, indexing, ready, or error\).*how many documents.*when it last took/is,
+    /whether it is pending, loading, ready, or errored.*how many documents.*when it last took/is,
+    /look at the `last ingest` column/i,
+  ]) {
+    assert.doesNotMatch(shippedGuidance, obsoleteClaim);
+  }
+  assert.match(failures, /columns are `name`, `kind`, `zone`, `physical`,\s*`readable`, and `freshness`/i);
+  assert.match(matrix, /actual concise columns: `name`, `kind`, `zone`,\s*`physical`, `readable`, and `freshness`/i);
+  assert.match(shippedGuidance, /source-inventory `contract_version: 3`/i);
+  assert.match(shippedGuidance, /`receipt\.logical_matches_reported`.*`storage\.logical_documents`/is);
+
+  const scheduler = schedulePlatformLimitation("win32", String.raw`C:\Users\owner\brain.manifest.json`);
+  assert.match(scheduler, /brain sources <manifest> --json.*`contract_version: 3`.*receipt\.last_successful_run_at/is);
+  assert.doesNotMatch(scheduler, /last-ingest time moving|`last ingest` column/i);
 });

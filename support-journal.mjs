@@ -33,6 +33,7 @@ import {
 import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { restrictWindowsFileToCurrentUser } from "./operations/current-user-file.mjs";
 
 export const SUPPORT_SCHEMA_VERSION = 1;
 export const SUPPORT_MAX_EVENTS = 200;
@@ -176,6 +177,20 @@ function supportError(message, code = "SUPPORT_JOURNAL_UNSAFE_PATH") {
   return error;
 }
 
+function restrictWindowsSupportPath(path, label, before) {
+  if (process.platform !== "win32") return before;
+  try {
+    restrictWindowsFileToCurrentUser(path, { label });
+  } catch {
+    throw supportError(`${label} could not be restricted to the current Windows user`);
+  }
+  const current = lstatIfPresent(path);
+  if (!sameNodeIdentity(before, current)) {
+    throw supportError(`${label} changed while its Windows access was being secured`);
+  }
+  return current;
+}
+
 function nowDate(options = {}) {
   const supplied = typeof options.now === "function" ? options.now() : options.now;
   const date = supplied === undefined ? new Date() : new Date(supplied);
@@ -303,7 +318,7 @@ function verifyDirectory(path, label, {
   return stat;
 }
 
-function secureDirectory(path, label, expectedUid) {
+function secureDirectory(path, label, expectedUid, { windowsPrivate = true } = {}) {
   const existing = lstatIfPresent(path);
   if (existing) verifyDirectory(path, label, { stat: existing, expectedUid });
   else {
@@ -317,9 +332,9 @@ function secureDirectory(path, label, expectedUid) {
   const before = lstatIfPresent(path);
   verifyDirectory(path, label, { stat: before, expectedUid });
   if (process.platform === "win32") {
-    // Windows has no POSIX directory modes. The real-directory checks still
-    // refuse links and special files before the journal uses this path.
-    return before;
+    if (!windowsPrivate) return before;
+    const current = restrictWindowsSupportPath(path, label, before);
+    return verifyDirectory(path, label, { stat: current, expectedUid });
   }
 
   let descriptor;
@@ -373,7 +388,7 @@ function verifyFile(path, label, {
 function prepareSupportDirectory(options, expectedUid) {
   const paths = supportJournalPaths(options);
   verifyDirectory(paths.userRoot, "support journal root");
-  secureDirectory(paths.brainRoot, "support journal .brain directory", expectedUid);
+  secureDirectory(paths.brainRoot, "support journal .brain directory", expectedUid, { windowsPrivate: false });
   secureDirectory(paths.supportRoot, "support journal directory", expectedUid);
   secureDirectory(paths.eventsDir, "support journal events directory", expectedUid);
   return paths;
@@ -464,6 +479,9 @@ function exclusivePrivateWrite(path, content, label, expectedUid) {
       throw supportError(`${label} was not created as a private regular file`);
     }
     try { fchmodSync(descriptor, 0o600); } catch { /* Windows has no POSIX file modes. */ }
+    if (process.platform === "win32") {
+      restrictWindowsSupportPath(path, label, identity);
+    }
     const afterMode = fstatSync(descriptor);
     if (process.platform !== "win32" && (afterMode.mode & 0o777) !== 0o600) {
       throw supportError(`${label} was not created with private mode 0600`);
@@ -494,15 +512,21 @@ function exclusivePrivateWrite(path, content, label, expectedUid) {
 }
 
 function readImmutableEvent(path, expectedNameId, expectedUid) {
-  const before = lstatIfPresent(path);
+  let before = lstatIfPresent(path);
   if (!before) return null;
   verifyFile(path, "support journal event", { stat: before, expectedUid });
+  // Establish the read baseline after Windows DACL hardening. icacls updates
+  // NTFS ctime even when it leaves the file bytes alone, so comparing against
+  // the earlier lstat would either reject every Windows event or require a
+  // weakened identity check that could miss a same-length concurrent write.
+  before = restrictWindowsSupportPath(path, "support journal event", before);
   if (before.size === 0 || before.size > MAX_CANONICAL_LINE_BYTES) return null;
   let descriptor;
   try {
     descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
     const opened = fstatSync(descriptor);
     verifyFile(path, "support journal event", { stat: opened, expectedUid });
+    if (!sameFileIdentity(before, opened)) return null;
     if (opened.size === 0 || opened.size > MAX_CANONICAL_LINE_BYTES) return null;
     const buffer = Buffer.alloc(opened.size);
     let offset = 0;
@@ -512,12 +536,19 @@ function readImmutableEvent(path, expectedNameId, expectedUid) {
       offset += count;
     }
     if (offset !== buffer.length) return null;
+    const afterRead = fstatSync(descriptor);
+    verifyFile(path, "support journal event", { stat: afterRead, expectedUid });
+    if (!sameFileIdentity(opened, afterRead)) return null;
     const content = buffer.toString("utf8");
     if (!content.endsWith("\n") || content.slice(0, -1).includes("\n")) return null;
     let parsed;
     try { parsed = parseCanonicalEvent(JSON.parse(content)); } catch { return null; }
     if (!parsed || parsed.event_id !== expectedNameId || canonicalLine(parsed) !== content) return null;
-    return parsed;
+    const current = lstatIfPresent(path);
+    if (!current) return null;
+    verifyFile(path, "support journal event", { stat: current, expectedUid });
+    if (!sameFileIdentity(afterRead, current)) return null;
+    return { event: parsed, identity: current };
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
@@ -539,8 +570,8 @@ function loadEvents(paths, expectedUid) {
     verifyFile(path, "support journal event", { stat: entry, expectedUid });
     const match = EVENT_FILE_RE.exec(name);
     if (!match) continue;
-    const event = readImmutableEvent(path, match[1], expectedUid);
-    if (event) events.push(event);
+    const result = readImmutableEvent(path, match[1], expectedUid);
+    if (result) events.push(result.event);
   }
   return events;
 }
@@ -584,16 +615,9 @@ function enforcePhysicalRetention(paths, expectedUid, currentEvent, options) {
     const match = EVENT_FILE_RE.exec(name);
     if (!match) continue;
     const path = join(paths.eventsDir, name);
-    const before = lstatIfPresent(path);
-    if (!before) continue;
-    verifyFile(path, "support journal retention event", { stat: before, expectedUid });
-    const event = readImmutableEvent(path, match[1], expectedUid);
-    if (!event) continue;
-    const after = lstatIfPresent(path);
-    if (!after) continue;
-    verifyFile(path, "support journal retention event", { stat: after, expectedUid });
-    if (!sameFileIdentity(before, after)) continue;
-    candidates.push({ path, event, identity: after });
+    const result = readImmutableEvent(path, match[1], expectedUid);
+    if (!result) continue;
+    candidates.push({ path, event: result.event, identity: result.identity });
   }
 
   const ordered = candidates.sort((left, right) =>
@@ -676,7 +700,7 @@ function canonicalSupportJournal(options, expectedUid) {
   verifyDirectory(paths.userRoot, "support journal root", { stat: userRoot });
   const brain = lstatIfPresent(paths.brainRoot);
   if (!brain) return "";
-  secureDirectory(paths.brainRoot, "support journal .brain directory", expectedUid);
+  secureDirectory(paths.brainRoot, "support journal .brain directory", expectedUid, { windowsPrivate: false });
   const support = lstatIfPresent(paths.supportRoot);
   if (!support) return "";
   secureDirectory(paths.supportRoot, "support journal directory", expectedUid);
@@ -715,16 +739,11 @@ export function clearSupportJournal(options = {}) {
   if (!support) return false;
   const brain = lstatIfPresent(paths.brainRoot);
   if (!brain) throw supportError("support journal parent does not exist");
-  verifyDirectory(paths.brainRoot, "support journal .brain directory", {
-    stat: brain,
-    expectedUid,
-    privateMode: true,
-  });
-  verifyDirectory(paths.supportRoot, "support journal directory", {
-    stat: support,
-    expectedUid,
-    privateMode: true,
-  });
+  secureDirectory(paths.brainRoot, "support journal .brain directory", expectedUid, { windowsPrivate: false });
+  secureDirectory(paths.supportRoot, "support journal directory", expectedUid);
+  if (lstatIfPresent(paths.eventsDir)) {
+    secureDirectory(paths.eventsDir, "support journal events directory", expectedUid);
+  }
   loadEvents(paths, expectedUid);
   const expected = join(resolve(paths.userRoot), ".brain", "support");
   if (paths.supportRoot !== expected || basename(paths.supportRoot) !== "support" || !paths.supportRoot.endsWith(`${sep}.brain${sep}support`)) {

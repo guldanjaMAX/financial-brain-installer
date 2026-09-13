@@ -1,7 +1,8 @@
 import {
   D1_QUERY_BIND_LIMIT, RETRIEVAL_CANDIDATE_DEPTH, collapseRankedDocuments, forget,
   fuseRRF, search, searchVector, upsertChunks, replaceDocumentChunks,
-  canStageDocumentRevision, stageDocumentRevision, metadataTokenFor, vectorFilterFor,
+  canStageDocumentRevision, stageDocumentRevision, filterSql, metadataTokenFor,
+  unsupportedFilters, vectorFilterFor,
 } from "../src/lib/store-d1.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, matchesEntityAnchors,
@@ -101,6 +102,52 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
   check("the query hashes a long value with the same token", f.client.$eq === a, JSON.stringify(f));
   check("all exact filter dimensions reach Vectorize", ["source", "client", "category", "top_folder", "platform"].every((k) => f[k]?.$eq), JSON.stringify(f));
   check("both date bounds reach Vectorize", f.document_date.$gte === Date.parse("2025-01-01") && f.document_date.$lte === Date.parse("2025-12-31"), JSON.stringify(f));
+}
+
+/* ---- filter validation is also enforced below the HTTP boundary ---- */
+{
+  const syncRefusal = (filters, code) => {
+    try {
+      filterSql(filters);
+      return false;
+    } catch (error) {
+      return error?.code === code;
+    }
+  };
+  check("unknown storage filters are reported deterministically",
+    unsupportedFilters({ year: 2025, role: "owner" }).join(",") === "role,year");
+  check("an unknown direct filter is refused", syncRefusal({ year: "2025" }, "unsupported_filter"));
+  check("a null direct scope is refused", syncRefusal({ entity_slug: null }, "invalid_filter_value"));
+  check("an impossible direct date is refused", syncRefusal({ from: "2025-02-30" }, "invalid_date_filter"));
+  check("a reversed direct range is refused",
+    syncRefusal({ from: "2025-12-31", to: "2025-01-01" }, "reversed_date_range"));
+
+  let vectorFilterRefused = false;
+  try {
+    await vectorFilterFor({ to: "next Tuesday" });
+  } catch (error) {
+    vectorFilterRefused = error?.code === "invalid_date_filter";
+  }
+  check("Vectorize cannot silently omit a malformed date either", vectorFilterRefused);
+
+  let providerCalls = 0;
+  const env = {
+    DB: { prepare: () => { providerCalls++; throw new Error("must not query"); } },
+    VECTORIZE: {
+      query: async () => { providerCalls++; return { matches: [] }; },
+      describe: async () => { providerCalls++; return { vectorCount: 0 }; },
+    },
+  };
+  let searchRefused = false;
+  try {
+    await search(env, {
+      query: "records", embedding: [0.1], limit: 5, filters: { role: "owner" },
+    });
+  } catch (error) {
+    searchRefused = error?.code === "unsupported_filter";
+  }
+  check("search rejects schema skew before the first provider read",
+    searchRefused && providerCalls === 0, JSON.stringify({ searchRefused, providerCalls }));
 }
 
 /* ---- degraded detection: one system down is NOT an empty corpus ---- */

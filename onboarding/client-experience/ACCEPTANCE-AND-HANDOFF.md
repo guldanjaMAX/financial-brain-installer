@@ -124,18 +124,20 @@ Before closing the session, the owner should be able to:
 8. explain who can access the Brain, which source zones a named grant includes,
    and how to remove that access;
 9. find the approved support profile and update page;
-10. open `/optimize` and explain each source's starter context, live updates,
-    history, meaning search, provenance, access zone, and reading quality.
+10. open `https://financialbrain.ai/optimize`, give its request to the connected
+    assistant, and understand which source dimensions it could and could not
+    inspect. This is assistant-launch guidance, not a signed-in dashboard.
 
 ## Optimize check-ins
 
-Open `/optimize` with the owner at handoff and again on days 15, 22, and 29.
-Reconcile every displayed source with the private
+Open `https://financialbrain.ai/optimize` with the owner at handoff and again on
+days 15, 22, and 29, then give its request to the connected assistant. Reconcile
+only the supported findings it actually returns with the private
 [client onboarding scorecard](../10-client-onboarding-scorecard.md) and its
-latest receipt. Review all readiness dimensions independently. Check the
-provenance label, access zone, unregistered-source warnings, vector backlog,
-refresh schedule, OCR or unknown reading state, and unresolved history
-boundary. A combined percentage must not hide an incomplete dimension.
+latest receipt. This public route is assistant-launch guidance, not a signed-in
+source dashboard. Keep every unreadable or unavailable dimension explicit. A
+combined percentage must not hide an incomplete dimension, and ranked search
+must not be used as a complete source inventory.
 
 Optimize is read-only. It may report a missing or outdated Brain CLI,
 technician skill, or MCP registration on a new computer. It does not install or

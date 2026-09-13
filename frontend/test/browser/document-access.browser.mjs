@@ -249,11 +249,23 @@ async function fresh(options = {}) {
   await page.goto(new URL("/test/browser/fixtures/document-access.html", harness.origin).href);
   if (options.holdSnapshot) {
     await bounded(state.snapshotArrived, "Synthetic entity inventory was not requested");
-    await page.getByText("Checking your financial list", { exact: true }).waitFor();
+    await harness.waitForBrowserBoot(
+      page,
+      page.getByText("Checking your financial list", { exact: true }),
+      "pending-inventory document access fixture",
+    );
   } else if (options.zeroEntities) {
-    await page.getByText("Add your first financial entity", { exact: true }).waitFor();
+    await harness.waitForBrowserBoot(
+      page,
+      page.getByText("Add your first financial entity", { exact: true }),
+      "zero-entity document access fixture",
+    );
   } else {
-    await page.getByRole("button", { name: "Company alpha", exact: true }).waitFor();
+    await harness.waitForBrowserBoot(
+      page,
+      page.getByRole("button", { name: "Company alpha", exact: true }),
+      "document access fixture",
+    );
   }
   await page.getByText("No document access has been created.", { exact: true }).waitFor();
   return { page, state };

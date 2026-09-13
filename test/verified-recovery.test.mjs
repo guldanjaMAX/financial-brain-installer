@@ -25,6 +25,7 @@ import {
   buildVerifiedRecoveryPlan,
   initializeVerifiedRecovery,
   inspectVerifiedRecoveryManifestBindings,
+  inspectVerifiedRecoverySourceManifestBinding,
   loadVerifiedRecoveryPlan,
   loadVerifiedRecoveryState,
   parseVerifiedRecoveryCliArguments,
@@ -142,6 +143,7 @@ const fieldProofInput = Object.freeze({
   candidate_sha: "1".repeat(40),
   package_sha256: "2".repeat(64),
   field_receipt_sha256: "3".repeat(64),
+  source_phase_receipt_sha256: "9".repeat(64),
   deployment_receipt_sha256: "8".repeat(64),
   seed_receipt_sha256: "4".repeat(64),
   fixture_sha256: fieldFixtureHash,
@@ -153,6 +155,7 @@ const fieldProofInput = Object.freeze({
   paired_stop_stage: "rebuild_vectorize",
 });
 const fieldRebuildProof = Object.freeze({
+  source_phase_receipt_sha256: fieldProofInput.source_phase_receipt_sha256,
   deployment_receipt_sha256: fieldProofInput.deployment_receipt_sha256,
   seed_receipt_sha256: fieldProofInput.seed_receipt_sha256,
   bootstrap_interruption_checkpoint_sha256: "5".repeat(64),
@@ -286,6 +289,16 @@ try {
     sourcePath,
     targetPath,
   );
+  const exactSourceManifestBinding = inspectVerifiedRecoverySourceManifestBinding(
+    plan,
+    sourcePath,
+  );
+  assert.equal(exactSourceManifestBinding.planFingerprint, plan.plan_fingerprint);
+  assert.equal(
+    exactSourceManifestBinding.sourceManifestFingerprint,
+    plan.source_manifest_fingerprint,
+  );
+  assert.deepEqual(exactSourceManifestBinding.source, exactManifestBindings.source);
   for (const binding of [exactManifestBindings.source, exactManifestBindings.target]) {
     assert.equal(binding.clientSlug, "fixture-brain");
     assert.equal(binding.productVersion, "0.1.12");
@@ -804,6 +817,7 @@ try {
 
   for (const mutate of [
     (proof) => { delete proof.package_sha256; },
+    (proof) => { delete proof.source_phase_receipt_sha256; },
     (proof) => { delete proof.deployment_receipt_sha256; },
     (proof) => { proof.unreviewed = true; },
     (proof) => { proof.kind = "v048_disposable_bootstrap_interruption"; },
@@ -923,6 +937,7 @@ try {
 
   for (const mutate of [
     (state) => { delete state.completed[6].evidence.bootstrap_resume_authorization_sha256; },
+    (state) => { state.completed[6].evidence.source_phase_receipt_sha256 = "8".repeat(64); },
     (state) => { state.completed[6].evidence.deployment_receipt_sha256 = "invalid"; },
     (state) => { state.completed[6].evidence.bootstrap_promotion_authorization_sha256 = "invalid"; },
     (state) => { state.completed[6].evidence.seed_receipt_sha256 = "8".repeat(64); },

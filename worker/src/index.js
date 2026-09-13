@@ -58,6 +58,7 @@ import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outbox
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
+  parseCanonicalEvidenceDate,
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import {
@@ -75,7 +76,7 @@ import {
   normalizeIngestEnvelopeProvenance, restampFirstPartySourceProvenance,
 } from "./lib/provenance-receipt.js";
 import {
-  COVERAGE_INCOMPLETE, coverageIncompleteNotice, emptyRetrievalDisclosure,
+  COVERAGE_INCOMPLETE, SEARCH_UNAVAILABLE, coverageIncompleteNotice, emptyRetrievalDisclosure,
 } from "./lib/retrieval-status.js";
 import { answerGenerationError } from "./lib/answer-render.js";
 import {
@@ -132,6 +133,20 @@ const RAG_PARAMETER_KEYS = new Set([
   "weight_curated", "weight_drive", "weight_message",
   "source", "entity_slug", "client", "category", "from", "to", "top_folder", "platform",
 ]);
+const RAG_FILTER_PARAMETER_KEYS = new Set([
+  "source", "entity_slug", "client", "category", "from", "to", "top_folder", "platform",
+]);
+
+function invalidRagParameters(code, parameter = null) {
+  return {
+    searchParams: new URLSearchParams(),
+    parameter_error: {
+      error: "Invalid retrieval request",
+      code,
+      ...(parameter ? { parameter } : {}),
+    },
+  };
+}
 
 /**
  * Parse retrieval input without ever placing a private question in a URL.
@@ -147,11 +162,40 @@ async function privateRagParameters(request) {
     return null;
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  if (Object.keys(body).some((key) => !RAG_PARAMETER_KEYS.has(key))) {
+    return invalidRagParameters("unsupported_retrieval_parameter");
+  }
   const searchParams = new URLSearchParams();
   for (const [key, value] of Object.entries(body)) {
-    if (!RAG_PARAMETER_KEYS.has(key) || value === undefined || value === null) continue;
-    if (!["string", "number", "boolean"].includes(typeof value)) continue;
+    if (value === undefined || value === null) {
+      if (RAG_FILTER_PARAMETER_KEYS.has(key)) {
+        return invalidRagParameters("invalid_filter_value", key);
+      }
+      continue;
+    }
+    if (!["string", "number", "boolean"].includes(typeof value)) {
+      return invalidRagParameters("invalid_retrieval_parameter_type", key);
+    }
+    if (RAG_FILTER_PARAMETER_KEYS.has(key) &&
+        (typeof value !== "string" || !value.trim())) {
+      return invalidRagParameters("invalid_filter_value", key);
+    }
     searchParams.set(key, String(value));
+  }
+  const dateBound = (key) => {
+    if (!searchParams.has(key)) return null;
+    return parseCanonicalEvidenceDate(searchParams.get(key));
+  };
+  const from = dateBound("from");
+  const to = dateBound("to");
+  if (searchParams.has("from") && from === null) {
+    return invalidRagParameters("invalid_date_filter", "from");
+  }
+  if (searchParams.has("to") && to === null) {
+    return invalidRagParameters("invalid_date_filter", "to");
+  }
+  if (from !== null && to !== null && from > to) {
+    return invalidRagParameters("reversed_date_range");
   }
   return { searchParams };
 }
@@ -580,6 +624,7 @@ async function handleUnified(
 ) {
   const url = await privateRagParameters(request);
   if (!url) return jsonResponse({ error: "Expected a JSON request body" }, 400);
+  if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = url.searchParams.get("q");
   if (!q || !q.trim()) return jsonResponse({ error: "Missing q" }, 400);
   const scope = await applyBusinessScope(env, url);
@@ -616,7 +661,7 @@ async function handleUnified(
   // search is still provisional when declared source history is incomplete.
   // Keep both conditions on the raw route so its UI, MCP, and check consumers
   // do not have to infer corpus coverage from a result count.
-  const disclosure = emptyRetrievalDisclosure(degraded);
+  const disclosure = emptyRetrievalDisclosure(degraded, degradedReason);
   const searchTruth = (rows) => {
     if (rows.length === 0 && disclosure.unavailable) {
       return {
@@ -691,6 +736,7 @@ const TAX_QUESTION_SCOPE_UNRESOLVED_GAP = Object.freeze({
 });
 const TAX_EVIDENCE_UNREADABLE_NOTICE = "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete.";
 const TAX_DOCUMENT_INVENTORY_NOTICE = "The requested tax filing could not be checked against the complete document inventory. This is not proof that the filing is absent or omits the answer. Finish document extraction or use an exact business scope before treating the result as complete.";
+const ANSWER_VALIDATION_UNAVAILABLE_NOTICE = "The search could not be completed safely because the generated answer did not pass the evidence check. This is not proof that your brain has nothing on this question. Review the evidence-check reason or try again.";
 
 async function taxDocumentCoverageForRead(env, {
   question, filters, access, scope,
@@ -732,6 +778,7 @@ async function handleThink(
   const unsupportedAnswer = "The documents do not answer the question.";
   const url = await privateRagParameters(request);
   if (!url) return jsonResponse({ error: "Expected a JSON request body" }, 400);
+  if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = (url.searchParams.get("q") || "").trim();
   if (!q) return jsonResponse({ error: "Missing q" }, 400);
   const scope = await applyBusinessScope(env, url);
@@ -794,7 +841,7 @@ async function handleThink(
     // keeps the honest refusal below, unchanged. A search that could not run
     // knows nothing about the corpus, so its gap must forbid the absence claim
     // rather than issue it. See worker/src/lib/retrieval-status.js.
-    const disclosure = emptyRetrievalDisclosure(degraded);
+    const disclosure = emptyRetrievalDisclosure(degraded, degradedReason);
     let gaps = disclosure.unavailable
       ? [...sourceCoverageGaps, ...disclosure.gaps]
       : sourceCoverageGaps.length
@@ -867,7 +914,15 @@ async function handleThink(
       type: degraded === "scoped-vector" ? "scoped_vector_unavailable" : "vector_unavailable",
       detail: degraded === "scoped-vector"
         ? scopedDetail
-        : "The vector index is not fully query-ready. Keyword evidence remains available, but new or differently phrased evidence may be missing until `brain drain` confirms the complete projection.",
+        : degradedReason === "vector-query-failed"
+          ? "Meaning-based search failed. Keyword evidence remains available, but differently phrased evidence may be missing. Try again shortly, and run `brain health` if it keeps happening."
+          : "The vector index is not fully query-ready. Keyword evidence remains available, but new or differently phrased evidence may be missing until `brain drain` confirms the complete projection.",
+    });
+  }
+  if (degraded === "fts") {
+    gaps.unshift({
+      type: "keyword_unavailable",
+      detail: "Keyword search failed. Meaning-based evidence remains available, but exact names, identifiers, and phrases may be missing. Try again shortly, and run `brain health` if it keeps happening.",
     });
   }
   const docs = results.slice(0, 12).map(citationCandidateForResult);
@@ -1001,6 +1056,7 @@ async function handleThink(
   let answer = null;
   let answerError = null;
   let model = null;
+  let modelDeclaredNoEvidence = false;
   try {
     const data = await callLLM(env, {
       model: env.ANSWER_MODEL || "claude-sonnet-4-5",
@@ -1039,6 +1095,7 @@ async function handleThink(
     const firstAnswerLine = answer.split(/\r?\n/, 1)[0].trim();
     const alreadyRefused = /^(?:the )?(?:documents|sources|provided (?:documents|sources)) (?:do not|don't|cannot|can't|does not|doesn't) (?:actually )?(?:answer|contain|provide)|^there (?:is|isn't|is not) (?:not )?enough (?:information|evidence)/i.test(firstAnswerLine);
     if (alreadyRefused) {
+      modelDeclaredNoEvidence = true;
       answer = unsupportedAnswer;
       approvedDocs = [];
       evidenceGate = { supported: false, complete: false, evidence: [], reason: "answer model found no direct support" };
@@ -1258,14 +1315,17 @@ async function handleThink(
   const categoricalRefusal = !answerError &&
     (!answer || answer === unsupportedAnswer || !approvedDocs.length);
   const refusalSearchDisclosure = categoricalRefusal && degraded
-    ? emptyRetrievalDisclosure(degraded)
+    ? emptyRetrievalDisclosure(degraded, degradedReason)
     : null;
   const sourceCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
     sourceCoverageGaps.length > 0;
   const taxDocumentCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
     Boolean(documentTaxGap);
   const incompleteCoverageBlocksAbsence = sourceCoverageBlocksAbsence || taxDocumentCoverageBlocksAbsence;
-  const confidence = answerError || refusalSearchDisclosure || incompleteCoverageBlocksAbsence
+  const evidenceConflictBlocksAbsence = operativeConflict || newerAuthoritativeEvidence.length > 0;
+  const answerValidationBlocksAbsence = categoricalRefusal &&
+    (!modelDeclaredNoEvidence || evidenceConflictBlocksAbsence);
+  const confidence = answerError || refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence
     ? undefined
     : answer === unsupportedAnswer || !approvedDocs.length
       ? refusalConfidence({
@@ -1283,15 +1343,21 @@ async function handleThink(
     degraded_reason: degradedReason || undefined,
     retrieval_scope: retrievalScope,
     access: accessSummary,
-    status: refusalSearchDisclosure?.status || (incompleteCoverageBlocksAbsence ? COVERAGE_INCOMPLETE : undefined),
+    status: refusalSearchDisclosure?.status || (incompleteCoverageBlocksAbsence
+      ? COVERAGE_INCOMPLETE
+      : answerValidationBlocksAbsence
+        ? SEARCH_UNAVAILABLE
+        : undefined),
     notice: refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence && unreadableRequestedTaxEvidence
       ? TAX_EVIDENCE_UNREADABLE_NOTICE
       : taxDocumentCoverageBlocksAbsence
         ? TAX_DOCUMENT_INVENTORY_NOTICE
       : sourceCoverageBlocksAbsence
         ? coverageIncompleteNotice(coverage.unavailable, results.length > 0)
-        : undefined),
-    answer: refusalSearchDisclosure || incompleteCoverageBlocksAbsence ? null : answer,
+        : answerValidationBlocksAbsence
+          ? ANSWER_VALIDATION_UNAVAILABLE_NOTICE
+          : undefined),
+    answer: refusalSearchDisclosure || incompleteCoverageBlocksAbsence || answerValidationBlocksAbsence ? null : answer,
     answer_error: answerError || undefined,
     model: model || undefined,
     evidence_gate: evidenceGate || undefined,

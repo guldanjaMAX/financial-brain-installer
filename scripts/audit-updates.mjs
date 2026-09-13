@@ -11,11 +11,14 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 // Keep ordinary audit regressions bounded at five minutes. The disposable
 // recovery adapter is intentionally heavier: it exercises the exact 6,001-row
 // replay and cryptographically bound recovery fixture, and a hosted macOS
-// Node 22 run completed normally just under the ordinary ceiling. Give only
-// that exact proof a reviewed ten-minute ceiling; a lookalike path does not
-// inherit the exception.
+// Node 22 run completed normally just under the ordinary ceiling. The exact
+// current candidate also passed this proof earlier in the same hosted
+// macOS/Node 24 job and in its concurrent exact-SHA push run, while the later
+// isolated duplicate reached its exact ten-minute parent ceiling.
+// Give only that exact proof a reviewed fifteen-minute ceiling; a lookalike
+// path does not inherit the exception.
 export const DEFAULT_REGRESSION_TIMEOUT_MS = 300_000;
-export const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS = 600_000;
+export const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS = 900_000;
 const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION = "test/cloudflare-recovery-adapter.test.mjs";
 
 function regressionTimeoutMs(path) {

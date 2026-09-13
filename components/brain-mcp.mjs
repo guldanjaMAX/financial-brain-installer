@@ -243,6 +243,39 @@ const TOOLS = ALL_TOOLS.filter((tool) => {
   return true;
 });
 
+// `degraded_reason` is useful only as a closed product state. Never echo an
+// arbitrary value from a remote response into an assistant transcript: older
+// or skewed Workers could otherwise turn provider text into customer-visible
+// output. Keep every currently emitted Worker pair explicit here.
+const PUBLIC_DEGRADED_REASONS = Object.freeze({
+  vector: new Set([
+    "vector-query-failed",
+    "projection-incomplete",
+    "entity-vector-authority-unindexed",
+  ]),
+  "no-embedding": new Set(["embedding-unavailable"]),
+  fts: new Set(["keyword-query-failed", "keyword-search-unavailable"]),
+  retrieval: new Set(["keyword-and-vector-query-failed"]),
+  "scoped-vector": new Set([
+    "document-scope-keyword-only",
+    "zone-scope-keyword-only",
+  ]),
+});
+
+function publicDegradation(body) {
+  const candidate = typeof body?.degraded === "string" ? body.degraded.trim() : "";
+  const degraded = Object.prototype.hasOwnProperty.call(PUBLIC_DEGRADED_REASONS, candidate)
+    ? candidate
+    : undefined;
+  const reasonCandidate = typeof body?.degraded_reason === "string"
+    ? body.degraded_reason.trim()
+    : "";
+  const degradedReason = degraded && PUBLIC_DEGRADED_REASONS[degraded].has(reasonCandidate)
+    ? reasonCandidate
+    : undefined;
+  return { degraded, degradedReason };
+}
+
 async function runTool(name, args = {}) {
   if (name === "brain_remember" && !profileHas(PROFILE, "curated:write")) {
     throw new Error("the active agent profile cannot write; reconnect as owner-assistant or structured-contributor");
@@ -266,11 +299,13 @@ async function runTool(name, args = {}) {
       const unavailable = retrievalUnavailable(d);
       const coverageIncomplete = d.status === COVERAGE_INCOMPLETE;
       const cannotSupportAbsence = unavailable || coverageIncomplete;
+      const { degraded, degradedReason } = publicDegradation(d);
       const refused = typeof d.answer === "string" && /^The documents do not answer/i.test(d.answer);
       const out = {
         answer: d.answer ?? null,
         answer_error: d.answer_error ?? undefined,
-        degraded: d.degraded ?? undefined,
+        degraded,
+        degraded_reason: degradedReason,
         search_status: cannotSupportAbsence
           ? (coverageIncomplete ? COVERAGE_INCOMPLETE : SEARCH_UNAVAILABLE)
           : undefined,
@@ -311,10 +346,10 @@ async function runTool(name, args = {}) {
         // false negative this guards against. Replacing it means an older
         // worker plus a current MCP is safe.
         out.gaps = [
-          unavailableGap(d.degraded),
+          unavailableGap(degraded || "unknown", degradedReason),
           ...out.gaps.filter((gap) => gap?.type !== "no_results"),
         ];
-        out.note = unavailableNotice(d.degraded) +
+        out.note = unavailableNotice(degraded || "unknown", degradedReason) +
           " Do NOT report this as the brain having nothing on the question. Report that the search could not be completed, name the cause, and offer to retry.";
       } else if (coverageIncomplete) {
         const coverageUnavailable = out.gaps.some((gap) => gap?.type === "coverage_unavailable");
@@ -352,9 +387,11 @@ async function runTool(name, args = {}) {
       // acts on.
       const unavailable = retrievalUnavailable({ ...d, results: rows });
       const coverageIncomplete = d.status === COVERAGE_INCOMPLETE;
+      const { degraded, degradedReason } = publicDegradation(d);
       return {
         count: rows.length,
-        degraded: d.degraded ?? undefined,
+        degraded,
+        degraded_reason: degradedReason,
         search_status: unavailable
           ? SEARCH_UNAVAILABLE
           : coverageIncomplete
@@ -381,7 +418,7 @@ async function runTool(name, args = {}) {
         })),
         ...(unavailable
           ? {
-            note: unavailableNotice(d.degraded) +
+            note: unavailableNotice(degraded || "unknown", degradedReason) +
               ' Do NOT report "nothing recorded on this". Report that the search could not be completed.',
           }
           : coverageIncomplete

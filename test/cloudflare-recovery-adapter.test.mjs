@@ -29,7 +29,9 @@ import {
   RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
   createCloudflareRecoveryFieldGateAdapters,
   assertDisposableRecoveryFieldCampaignIdentity,
+  assertDisposableRecoverySourceFieldCampaignIdentity,
   inspectDisposableRecoveryDeploymentPreparation,
+  inspectDisposableRecoverySourceDeploymentPreparation,
   inspectDisposableRecoverySeedPreparation,
   normalizedInstallStateExport,
   parseCloudflareRecoveryCliArguments,
@@ -41,7 +43,19 @@ import {
 } from "../operations/cloudflare-recovery-adapter.mjs";
 import {
   DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME,
+  DISPOSABLE_RECOVERY_DEPLOYMENT_PROTOCOL,
+  DISPOSABLE_RECOVERY_SOURCE_PHASE_PROTOCOL,
+  DISPOSABLE_RECOVERY_SOURCE_PHASE_RECEIPT_NAME,
+  DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_PROTOCOL,
+  DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
+  DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_PROTOCOL,
+  DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_RECEIPT_NAME,
   assertDisposableRecoveryDeploymentReceipt,
+  assertDisposableRecoverySourcePhaseReceipt,
+  assertDisposableRecoverySourcePreflightReceipt,
+  assertDisposableRecoveryTargetPreflightReceipt,
+  disposableRecoverySourceA2Fingerprint,
+  disposableRecoveryTargetA4Fingerprint,
 } from "../operations/disposable-recovery-deployment-receipt.mjs";
 import {
   DISPOSABLE_RECOVERY_FIXTURE_SHA256,
@@ -133,6 +147,18 @@ const goldenPath = join(sandbox, "brain.golden.json");
 const fieldPreparationDirectory = join(sandbox, "private-v048-field-preparation");
 const fieldReceiptPath = join(fieldPreparationDirectory, "field-prepare-receipt.json");
 const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.8.tgz");
+const fieldSourcePreflightReceiptPath = join(
+  fieldPreparationDirectory,
+  DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
+);
+const fieldSourcePhaseReceiptPath = join(
+  fieldPreparationDirectory,
+  DISPOSABLE_RECOVERY_SOURCE_PHASE_RECEIPT_NAME,
+);
+const fieldTargetPreflightReceiptPath = join(
+  fieldPreparationDirectory,
+  DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_RECEIPT_NAME,
+);
 const fieldDeploymentReceiptPath = join(
   fieldPreparationDirectory,
   DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME,
@@ -162,6 +188,8 @@ const sourceWorkerScriptEtag = "b".repeat(64);
 const fieldSourceWorkerVersionId = "10000000-0000-4000-8000-000000000001";
 const fieldPausedWorkerVersionId = "20000000-0000-4000-8000-000000000002";
 const fieldActiveWorkerVersionId = "30000000-0000-4000-8000-000000000003";
+const fieldSourceDeploymentId = "40000000-0000-4000-8000-000000000004";
+const fieldTargetDeploymentId = "50000000-0000-4000-8000-000000000005";
 
 const sourceManifest = {
   manifest_version: 1,
@@ -381,7 +409,7 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
     live_accounts_contacted: false,
     external_network_allowed: false,
     tooling: {
-      wrangler_package: "wrangler@4.127.1",
+      wrangler_package: "wrangler@4.131.1",
       wrangler_resolution: "locked_local_runtime_closure",
       wrangler_runtime_directory: LOCKED_WRANGLER_RUNTIME_DIRECTORY,
       wrangler_runtime_schema_version: lockedWranglerRuntime.schemaVersion,
@@ -596,104 +624,260 @@ const aggregateTemplate = aggregateFromSql(
 const deterministicDataExport = "-- deterministic data-only fixture\n";
 const deterministicDataFingerprint = hash(normalizedInstallStateSql + deterministicDataExport);
 
-function fullDisposableDeploymentReceipt(binding) {
-  const sourceScriptEtag = "source-etag-v048";
-  const pausedScriptEtag = "target-paused-etag-v048";
-  const activeScriptEtag = "target-active-etag-v048";
-  const version = (mode, versionId, scriptEtag, bindingHash, withoutModeHash) => ({
-    version_id: versionId,
-    mode,
+function fixedReceiptHash(index) {
+  return Number(index).toString(16).padStart(64, "0");
+}
+
+function receiptSnapshot(start) {
+  return {
+    first_raw_evidence_manifest_sha256: fixedReceiptHash(start),
+    second_raw_evidence_manifest_sha256: fixedReceiptHash(start + 1),
+    first_semantic_sha256: fixedReceiptHash(start + 2),
+    second_semantic_sha256: fixedReceiptHash(start + 2),
+    stable_semantic_sha256: fixedReceiptHash(start + 2),
+  };
+}
+
+function receiptVersion({
+  bindingHash,
+  id,
+  moduleHash,
+  requestHash,
+  responseHash,
+  readbackHash,
+  scriptEtag,
+  withoutModeHash,
+}) {
+  return {
+    version_id: id,
     script_etag: scriptEtag,
+    upload_request_sha256: requestHash,
+    module_inventory_sha256: moduleHash,
     bindings_sha256: bindingHash,
     bindings_without_mode_sha256: withoutModeHash,
-    code_exact: true,
-    bindings_exact: true,
-    resources_exact: true,
-    compatibility_date: "2026-01-01",
-    handlers: ["fetch", "scheduled"],
-  });
-  const resource = (fingerprint) => ({
-    resource_fingerprint: fingerprint,
-    worker_exists: true,
-    d1_exists: true,
-    vectorize_exists: true,
-    d1_name_and_id_exact: true,
-    vectorize_name_exact: true,
-    vector_dimensions: 768,
-    vector_metric: "cosine",
-    workers_dev_enabled: true,
-    routes_count: 0,
-    custom_domains_count: 0,
-    provider_readback: true,
-  });
-  const sourceVersion = version(
-    "active", fieldSourceWorkerVersionId, sourceScriptEtag,
-    "1".repeat(64), "2".repeat(64),
-  );
-  const pausedVersion = version(
-    "paused-for-upgrade", fieldPausedWorkerVersionId, pausedScriptEtag,
-    "3".repeat(64), "4".repeat(64),
-  );
-  const activeVersion = version(
-    "active", fieldActiveWorkerVersionId, activeScriptEtag,
-    "5".repeat(64), "4".repeat(64),
-  );
+    upload_response_evidence_manifest_sha256: responseHash,
+    version_readback_evidence_manifest_sha256: readbackHash,
+  };
+}
+
+function receiptDeployment({
+  id,
+  requestHash,
+  responseHash,
+  readbackHash,
+  versionId,
+}) {
+  return {
+    deployment_id: id,
+    version_id: versionId,
+    traffic_percent: 100,
+    deployment_request_sha256: requestHash,
+    deployment_response_evidence_manifest_sha256: responseHash,
+    deployment_readback_evidence_manifest_sha256: readbackHash,
+  };
+}
+
+function fullDisposableSourcePreflightReceipt(binding) {
   const receipt = {
-    schema_version: 1,
-    protocol: "v048-disposable-recovery-deployment-v1",
+    schema_version: 2,
+    protocol: DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_PROTOCOL,
+    kind: "source_preflight",
+    status: "passed",
+    completed_at: "2026-09-11T13:35:00.000Z",
+    binding,
+    planned_requests: {
+      source_active_upload_sha256: fixedReceiptHash(1),
+      source_active_deployment_sha256: fixedReceiptHash(2),
+      seed_fixture_sha256: DISPOSABLE_RECOVERY_FIXTURE_SHA256,
+    },
+    snapshot: receiptSnapshot(10),
+  };
+  assertDisposableRecoverySourcePreflightReceipt(receipt);
+  return receipt;
+}
+
+function fullDisposableSourcePhaseReceipt(binding, sourcePreflightReceiptSha256) {
+  const sourceVersion = receiptVersion({
+    id: fieldSourceWorkerVersionId,
+    scriptEtag: "source-etag-v048",
+    requestHash: fixedReceiptHash(1),
+    moduleHash: fixedReceiptHash(20),
+    bindingHash: fixedReceiptHash(21),
+    withoutModeHash: fixedReceiptHash(22),
+    responseHash: fixedReceiptHash(23),
+    readbackHash: fixedReceiptHash(24),
+  });
+  const receipt = {
+    schema_version: 2,
+    protocol: DISPOSABLE_RECOVERY_SOURCE_PHASE_PROTOCOL,
+    kind: "source_phase",
     status: "passed",
     completed_at: "2026-09-11T13:40:00.000Z",
-    campaign: {
-      release: "0.4.8",
-      client_slug: "v048-field-proof",
-      source_resource: syntheticFieldSourceResource,
-      target_resource: syntheticFieldTargetResource,
-    },
     binding,
+    source_preflight_receipt_sha256: sourcePreflightReceiptSha256,
+    a2_approval_fingerprint:
+      disposableRecoverySourceA2Fingerprint(binding, sourcePreflightReceiptSha256),
+    journal: {
+      run_id: binding.run_id,
+      through_sequence: 4,
+      event_count: 4,
+      head_sha256: fixedReceiptHash(25),
+      event_manifest_sha256: fixedReceiptHash(26),
+    },
     source: {
       resource_fingerprint: binding.source_resource_fingerprint,
       active_version: sourceVersion,
-      active_traffic_percent: 100,
-      resource_contract: resource(binding.source_resource_fingerprint),
+      active_deployment: receiptDeployment({
+        id: fieldSourceDeploymentId,
+        versionId: sourceVersion.version_id,
+        requestHash: fixedReceiptHash(2),
+        responseHash: fixedReceiptHash(27),
+        readbackHash: fixedReceiptHash(28),
+      }),
+    },
+    final_snapshot: receiptSnapshot(30),
+  };
+  assertDisposableRecoverySourcePhaseReceipt(receipt);
+  return receipt;
+}
+
+function fullDisposableTargetPreflightReceipt(
+  binding,
+  sourcePhaseReceiptSha256,
+  seedReceiptSha256,
+) {
+  const receipt = {
+    schema_version: 2,
+    protocol: DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_PROTOCOL,
+    kind: "target_preflight",
+    status: "passed",
+    completed_at: "2026-09-11T13:50:00.000Z",
+    binding,
+    source_phase_receipt_sha256: sourcePhaseReceiptSha256,
+    seed_receipt_sha256: seedReceiptSha256,
+    planned_requests: {
+      target_paused_upload_sha256: fixedReceiptHash(40),
+      target_active_upload_sha256: fixedReceiptHash(41),
+      target_paused_deployment_sha256: fixedReceiptHash(42),
+    },
+    snapshot: receiptSnapshot(50),
+  };
+  assertDisposableRecoveryTargetPreflightReceipt(receipt);
+  return receipt;
+}
+
+function fullDisposableDeploymentReceipt(
+  binding,
+  sourcePhaseReceipt,
+  sourcePhaseReceiptSha256,
+  seedReceiptSha256,
+  targetPreflightReceiptSha256,
+) {
+  const pausedVersion = receiptVersion({
+    id: fieldPausedWorkerVersionId,
+    scriptEtag: "target-paused-etag-v048",
+    requestHash: fixedReceiptHash(40),
+    moduleHash: fixedReceiptHash(60),
+    bindingHash: fixedReceiptHash(61),
+    withoutModeHash: fixedReceiptHash(62),
+    responseHash: fixedReceiptHash(63),
+    readbackHash: fixedReceiptHash(64),
+  });
+  const activeVersion = receiptVersion({
+    id: fieldActiveWorkerVersionId,
+    scriptEtag: "target-active-etag-v048",
+    requestHash: fixedReceiptHash(41),
+    moduleHash: fixedReceiptHash(60),
+    bindingHash: fixedReceiptHash(65),
+    withoutModeHash: fixedReceiptHash(62),
+    responseHash: fixedReceiptHash(66),
+    readbackHash: fixedReceiptHash(67),
+  });
+  const receipt = {
+    schema_version: 2,
+    protocol: DISPOSABLE_RECOVERY_DEPLOYMENT_PROTOCOL,
+    kind: "target_phase",
+    status: "passed",
+    completed_at: "2026-09-11T13:55:00.000Z",
+    binding,
+    source_phase_receipt_sha256: sourcePhaseReceiptSha256,
+    seed_receipt_sha256: seedReceiptSha256,
+    target_preflight_receipt_sha256: targetPreflightReceiptSha256,
+    a4_approval_fingerprint: disposableRecoveryTargetA4Fingerprint(
+      binding,
+      sourcePhaseReceiptSha256,
+      seedReceiptSha256,
+      targetPreflightReceiptSha256,
+    ),
+    journal: {
+      run_id: binding.run_id,
+      through_sequence: 6,
+      event_count: 6,
+      source_prefix_head_sha256: sourcePhaseReceipt.journal.head_sha256,
+      head_sha256: fixedReceiptHash(68),
+      event_manifest_sha256: fixedReceiptHash(69),
+    },
+    source: {
+      resource_fingerprint: binding.source_resource_fingerprint,
+      active_version_id: sourcePhaseReceipt.source.active_version.version_id,
+      active_script_etag: sourcePhaseReceipt.source.active_version.script_etag,
+      active_deployment_id:
+        sourcePhaseReceipt.source.active_deployment.deployment_id,
     },
     target: {
       resource_fingerprint: binding.target_resource_fingerprint,
-      initially_paused: true,
       paused_version: pausedVersion,
       active_version: activeVersion,
-      paused_traffic_percent: 100,
-      active_not_promoted: true,
-      resource_contract: resource(binding.target_resource_fingerprint),
+      paused_deployment: receiptDeployment({
+        id: fieldTargetDeploymentId,
+        versionId: pausedVersion.version_id,
+        requestHash: fixedReceiptHash(42),
+        responseHash: fixedReceiptHash(70),
+        readbackHash: fixedReceiptHash(71),
+      }),
     },
-    execution: {
-      provider_calls: 12,
-      fresh_wrapper_copy_per_call: true,
-      copied_package_source_per_call: true,
-      materialized_runtime_per_call: true,
-      revalidated_before_and_after_each_call: true,
-      package_execution_inventory_sha256: binding.execution_inventory_sha256,
-      wrangler_wrapper_sha256: binding.wrangler_wrapper_sha256,
-      wrangler_runtime_inventory_sha256: binding.wrangler_runtime_inventory_sha256,
-      wrangler_entrypoint_sha256: binding.wrangler_entrypoint_sha256,
-      node_executable_sha256: binding.node_executable_sha256,
-    },
-    proof_boundary: {
-      aggregate_only: true,
-      synthetic_disposable_only: true,
-      exact_package_proven: true,
-      exact_provider_readback_proven: true,
-      source_active_proven: true,
-      target_paused_proven: true,
-      target_active_uploaded_not_promoted_proven: true,
-      routes_and_custom_domains_empty_proven: true,
-      recovery_run: false,
-      teardown_run: false,
-      release_authorized: false,
-      customer_data_read: false,
-    },
+    final_snapshot: receiptSnapshot(80),
   };
   assertDisposableRecoveryDeploymentReceipt(receipt);
   return receipt;
+}
+
+function writeDisposableTargetReceiptPair({
+  binding,
+  deploymentReceiptPath,
+  seedReceiptPath,
+  sourcePhaseReceipt,
+  sourcePhaseReceiptPath,
+  targetPreflightReceiptPath,
+}) {
+  const sourcePhaseReceiptSha256 = hash(readFileSync(sourcePhaseReceiptPath));
+  const seedReceiptSha256 = hash(readFileSync(seedReceiptPath));
+  writePrivateJson(
+    targetPreflightReceiptPath,
+    fullDisposableTargetPreflightReceipt(
+      binding,
+      sourcePhaseReceiptSha256,
+      seedReceiptSha256,
+    ),
+  );
+  const targetPreflightReceiptSha256 =
+    hash(readFileSync(targetPreflightReceiptPath));
+  writePrivateJson(
+    deploymentReceiptPath,
+    fullDisposableDeploymentReceipt(
+      binding,
+      sourcePhaseReceipt,
+      sourcePhaseReceiptSha256,
+      seedReceiptSha256,
+      targetPreflightReceiptSha256,
+    ),
+  );
+  return Object.freeze({
+    sourcePhaseReceiptSha256,
+    seedReceiptSha256,
+    targetPreflightReceiptSha256,
+    deploymentReceiptSha256: hash(readFileSync(deploymentReceiptPath)),
+  });
 }
 
 function fullDisposableSeedReceipt(binding, {
@@ -701,26 +885,21 @@ function fullDisposableSeedReceipt(binding, {
   contentFingerprint = deterministicDataFingerprint,
 } = {}) {
   const receipt = {
-    schema_version: 3,
-    protocol: "disposable-recovery-seed-v1",
+    schema_version: 4,
+    protocol: "disposable-recovery-seed-receipt-v2",
     status: "passed",
     completed_at: "2026-09-11T13:45:00.000Z",
     data_class: "deterministic_fictional_synthetic_only",
     binding,
-    deployment: {
-      deployment_receipt_sha256: binding.deployment_receipt_sha256,
+    source_deployment: {
+      source_phase_receipt_sha256: binding.source_phase_receipt_sha256,
+      source_phase_run_id: binding.source_phase_run_id,
+      source_a2_approval_fingerprint: binding.source_a2_approval_fingerprint,
       source_resource_fingerprint: binding.source_resource_fingerprint,
       source_active_version_id: binding.source_active_version_id,
       source_script_etag: binding.source_script_etag,
+      source_deployment_id: binding.source_deployment_id,
       source_active_traffic_percent: 100,
-      target_resource_fingerprint: binding.target_resource_fingerprint,
-      target_paused_version_id: binding.target_paused_version_id,
-      target_paused_script_etag: binding.target_paused_script_etag,
-      target_active_version_id: binding.target_active_version_id,
-      target_active_script_etag: binding.target_active_script_etag,
-      target_paused_traffic_percent: 100,
-      target_active_not_promoted: true,
-      provider_readback: true,
     },
     fixture: {
       sha256: DISPOSABLE_RECOVERY_FIXTURE_SHA256,
@@ -1257,7 +1436,7 @@ function providerHarness({
   sourceVersionId = null,
   splitTargetDeployment = false,
   targetVersionId = null,
-  wranglerVersion = "4.127.1",
+  wranglerVersion = "4.131.1",
   sourceManifestFixture = sourceManifest,
   targetManifestFixture = targetManifest,
 } = {}) {
@@ -2417,7 +2596,7 @@ try {
   ]);
   assert.equal(parsedStop.stopAfterStage, "restore_d1");
   assert.equal(parsedStop.approveGolden, preview.golden_approval_fingerprint);
-  const parsedTestInterruption = parseCloudflareRecoveryCliArguments([
+  const testInterruptionCliArguments = [
     "run",
     "--source-manifest", sourceManifestPath,
     "--target-manifest", targetManifestPath,
@@ -2437,10 +2616,14 @@ try {
     "--test-bootstrap-candidate-sha", "c".repeat(40),
     "--test-bootstrap-field-receipt", fieldReceiptPath,
     "--test-bootstrap-package", fieldPackagePath,
+    "--test-bootstrap-source-phase-receipt", fieldSourcePhaseReceiptPath,
     "--test-bootstrap-deployment-receipt", fieldDeploymentReceiptPath,
     "--test-bootstrap-seed-receipt", fieldSeedReceiptPath,
     "--approve-test-bootstrap-interruption", "d".repeat(64),
-  ]);
+  ];
+  const parsedTestInterruption = parseCloudflareRecoveryCliArguments(
+    testInterruptionCliArguments,
+  );
   assert.equal(
     parsedTestInterruption.testInterruptMidBootstrap,
     RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
@@ -2450,11 +2633,26 @@ try {
   assert.equal(parsedTestInterruption.testBootstrapFieldReceiptPath, fieldReceiptPath);
   assert.equal(parsedTestInterruption.testBootstrapPackagePath, fieldPackagePath);
   assert.equal(
+    parsedTestInterruption.testBootstrapSourcePhaseReceiptPath,
+    fieldSourcePhaseReceiptPath,
+  );
+  assert.equal(
     parsedTestInterruption.testBootstrapDeploymentReceiptPath,
     fieldDeploymentReceiptPath,
   );
   assert.equal(parsedTestInterruption.testBootstrapSeedReceiptPath, fieldSeedReceiptPath);
   assert.equal(parsedTestInterruption.approveTestBootstrapInterruption, "d".repeat(64));
+  const sourcePhaseFlagIndex = testInterruptionCliArguments.indexOf(
+    "--test-bootstrap-source-phase-receipt",
+  );
+  assert.throws(
+    () => parseCloudflareRecoveryCliArguments([
+      ...testInterruptionCliArguments.slice(0, sourcePhaseFlagIndex),
+      ...testInterruptionCliArguments.slice(sourcePhaseFlagIndex + 2),
+    ]),
+    (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_ARGUMENTS_INVALID",
+    "the complete test-bootstrap chain requires an explicit source-phase receipt",
+  );
   assert.throws(
     () => parseCloudflareRecoveryCliArguments([
       "preview",
@@ -2657,7 +2855,7 @@ try {
     },
   });
   assert.equal(runtimeSmoke.status, 0, runtimeSmoke.stderr);
-  assert.equal(runtimeSmoke.stdout.trim(), "4.127.1");
+  assert.equal(runtimeSmoke.stdout.trim(), "4.131.1");
   rmSync(smokeRuntimePath, { recursive: true, force: true });
   writePrivateJson(
     fieldReceiptPath,
@@ -2677,6 +2875,7 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: fieldReceiptPath,
       testBootstrapPackagePath: fieldPackagePath,
+      testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
       testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
       testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
       approveTestBootstrapInterruption: "e".repeat(64),
@@ -2764,14 +2963,46 @@ try {
     targetManifestPath: fieldTargetManifestPath,
     plan: fieldInitialized.plan,
   });
-  writePrivateJson(
-    fieldDeploymentReceiptPath,
-    fullDisposableDeploymentReceipt(deploymentPreparation.binding),
+  const sourceDeploymentPreparation =
+    inspectDisposableRecoverySourceDeploymentPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+      sourceManifestPath: fieldSourceManifestPath,
+      plan: fieldInitialized.plan,
+    });
+  assert.equal(
+    assertDisposableRecoverySourceFieldCampaignIdentity(
+      sourceDeploymentPreparation.manifestBindings,
+    ),
+    true,
   );
+  assert.deepEqual(Object.keys(sourceDeploymentPreparation.manifestBindings).sort(), [
+    "planFingerprint", "source", "sourceManifestFingerprint",
+  ]);
+  assert.equal(sourceDeploymentPreparation.binding.campaign_fingerprint,
+    deploymentPreparation.binding.campaign_fingerprint);
+  writePrivateJson(
+    fieldSourcePreflightReceiptPath,
+    fullDisposableSourcePreflightReceipt(deploymentPreparation.binding),
+  );
+  const fieldSourcePreflightReceiptSha256 =
+    hash(readFileSync(fieldSourcePreflightReceiptPath));
+  const fieldSourcePhaseReceipt = fullDisposableSourcePhaseReceipt(
+    deploymentPreparation.binding,
+    fieldSourcePreflightReceiptSha256,
+  );
+  writePrivateJson(
+    fieldSourcePhaseReceiptPath,
+    fieldSourcePhaseReceipt,
+  );
+  const fieldSourcePhaseReceiptSha256 =
+    hash(readFileSync(fieldSourcePhaseReceiptPath));
   const seedPreparation = inspectDisposableRecoverySeedPreparation({
     candidateSha: testCandidateSha,
     fieldReceiptPath,
-    deploymentReceiptPath: fieldDeploymentReceiptPath,
+    sourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
     packagePath: fieldPackagePath,
     wranglerWrapperPath: wrapperPath,
     plan: fieldInitialized.plan,
@@ -2779,6 +3010,27 @@ try {
   writePrivateJson(
     fieldSeedReceiptPath,
     fullDisposableSeedReceipt(seedPreparation.binding),
+  );
+  const fieldSeedReceiptSha256 = hash(readFileSync(fieldSeedReceiptPath));
+  writePrivateJson(
+    fieldTargetPreflightReceiptPath,
+    fullDisposableTargetPreflightReceipt(
+      deploymentPreparation.binding,
+      fieldSourcePhaseReceiptSha256,
+      fieldSeedReceiptSha256,
+    ),
+  );
+  const fieldTargetPreflightReceiptSha256 =
+    hash(readFileSync(fieldTargetPreflightReceiptPath));
+  writePrivateJson(
+    fieldDeploymentReceiptPath,
+    fullDisposableDeploymentReceipt(
+      deploymentPreparation.binding,
+      fieldSourcePhaseReceipt,
+      fieldSourcePhaseReceiptSha256,
+      fieldSeedReceiptSha256,
+      fieldTargetPreflightReceiptSha256,
+    ),
   );
   assert.equal(
     readPrivateAggregateReceipt(fieldSeedReceiptPath).value.d1.documents,
@@ -2862,6 +3114,7 @@ try {
     testBootstrapCandidateSha: testCandidateSha,
     testBootstrapFieldReceiptPath: fieldReceiptPath,
     testBootstrapPackagePath: fieldPackagePath,
+    testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
     testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
     testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
   });
@@ -2965,6 +3218,7 @@ try {
         testBootstrapCandidateSha: testCandidateSha,
         testBootstrapFieldReceiptPath: fieldReceiptPath,
         testBootstrapPackagePath: fieldPackagePath,
+        testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
         testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
         testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
       }, prefixedWrapperHarness.dependencies),
@@ -2996,6 +3250,26 @@ try {
     fieldPreview.test_bootstrap_interruption.field_receipt_sha256,
     hash(readFileSync(fieldReceiptPath)),
   );
+  assert.equal(
+    fieldPreview.test_bootstrap_interruption.source_preflight_receipt_sha256,
+    hash(readFileSync(fieldSourcePreflightReceiptPath)),
+  );
+  assert.equal(
+    fieldPreview.test_bootstrap_interruption.source_phase_receipt_sha256,
+    hash(readFileSync(fieldSourcePhaseReceiptPath)),
+  );
+  assert.equal(
+    fieldPreview.test_bootstrap_interruption.seed_receipt_sha256,
+    hash(readFileSync(fieldSeedReceiptPath)),
+  );
+  assert.equal(
+    fieldPreview.test_bootstrap_interruption.target_preflight_receipt_sha256,
+    hash(readFileSync(fieldTargetPreflightReceiptPath)),
+  );
+  assert.equal(
+    fieldPreview.test_bootstrap_interruption.deployment_receipt_sha256,
+    hash(readFileSync(fieldDeploymentReceiptPath)),
+  );
   assert.match(fieldPreview.test_bootstrap_interruption.approval_fingerprint, /^[0-9a-f]{64}$/);
   const approvedFieldConfig = Object.freeze({
     ...fieldBaseConfig,
@@ -3009,11 +3283,152 @@ try {
     testBootstrapCandidateSha: testCandidateSha,
     testBootstrapFieldReceiptPath: fieldReceiptPath,
     testBootstrapPackagePath: fieldPackagePath,
+    testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
     testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
     testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     approveTestBootstrapInterruption:
       fieldPreview.test_bootstrap_interruption.approval_fingerprint,
   });
+
+  // Individually valid receipts from a different causal chain cannot be
+  // substituted into the full bootstrap evidence. Re-sealing the final A4
+  // receipt around the substituted target preflight still fails closed when
+  // the adapter independently reloads and validates every receipt edge.
+  const validFieldTargetPreflightReceipt = JSON.parse(
+    readFileSync(fieldTargetPreflightReceiptPath, "utf8"),
+  );
+  const validFieldDeploymentReceipt = JSON.parse(
+    readFileSync(fieldDeploymentReceiptPath, "utf8"),
+  );
+  try {
+    const swappedTargetPreflightReceipt = structuredClone(
+      validFieldTargetPreflightReceipt,
+    );
+    swappedTargetPreflightReceipt.source_phase_receipt_sha256 =
+      fieldSourcePreflightReceiptSha256;
+    assertDisposableRecoveryTargetPreflightReceipt(swappedTargetPreflightReceipt);
+    writePrivateJson(
+      fieldTargetPreflightReceiptPath,
+      swappedTargetPreflightReceipt,
+    );
+    const swappedTargetPreflightReceiptSha256 = hash(
+      readFileSync(fieldTargetPreflightReceiptPath),
+    );
+    const resealedDeploymentReceipt = structuredClone(validFieldDeploymentReceipt);
+    resealedDeploymentReceipt.target_preflight_receipt_sha256 =
+      swappedTargetPreflightReceiptSha256;
+    resealedDeploymentReceipt.a4_approval_fingerprint =
+      disposableRecoveryTargetA4Fingerprint(
+        resealedDeploymentReceipt.binding,
+        resealedDeploymentReceipt.source_phase_receipt_sha256,
+        resealedDeploymentReceipt.seed_receipt_sha256,
+        swappedTargetPreflightReceiptSha256,
+      );
+    assertDisposableRecoveryDeploymentReceipt(resealedDeploymentReceipt);
+    writePrivateJson(fieldDeploymentReceiptPath, resealedDeploymentReceipt);
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate(fieldRequestConfig, {
+        platform: "darwin",
+      }),
+      (error) => error.code ===
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+      "a valid target preflight from another receipt prefix must be rejected",
+    );
+  } finally {
+    writePrivateJson(
+      fieldTargetPreflightReceiptPath,
+      validFieldTargetPreflightReceipt,
+    );
+    writePrivateJson(fieldDeploymentReceiptPath, validFieldDeploymentReceipt);
+  }
+
+  // Recomputing A4 after tampering with the final source-phase link proves
+  // only that the final object is internally well formed. The independently
+  // re-read source receipt must still be the exact hash linked by that object.
+  try {
+    const relinkedDeploymentReceipt = structuredClone(validFieldDeploymentReceipt);
+    relinkedDeploymentReceipt.source_phase_receipt_sha256 =
+      fieldSourcePreflightReceiptSha256;
+    relinkedDeploymentReceipt.a4_approval_fingerprint =
+      disposableRecoveryTargetA4Fingerprint(
+        relinkedDeploymentReceipt.binding,
+        relinkedDeploymentReceipt.source_phase_receipt_sha256,
+        relinkedDeploymentReceipt.seed_receipt_sha256,
+        relinkedDeploymentReceipt.target_preflight_receipt_sha256,
+      );
+    assertDisposableRecoveryDeploymentReceipt(relinkedDeploymentReceipt);
+    writePrivateJson(fieldDeploymentReceiptPath, relinkedDeploymentReceipt);
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate(fieldRequestConfig, {
+        platform: "darwin",
+      }),
+      (error) => error.code ===
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+      "a re-signed final receipt cannot relink an unverified source phase",
+    );
+  } finally {
+    writePrivateJson(fieldDeploymentReceiptPath, validFieldDeploymentReceipt);
+  }
+
+  // Both phase receipts are pinned again at every later provider or credential
+  // boundary. A valid receipt that changes after gate construction is rejected
+  // as changed evidence, including the terminal receipt whose hash has no later
+  // receipt edge.
+  for (const {
+    label,
+    path,
+    receipt,
+    mutate,
+    validate,
+  } of [
+    {
+      label: "source phase",
+      path: fieldSourcePhaseReceiptPath,
+      receipt: fieldSourcePhaseReceipt,
+      mutate: (value) => {
+        value.final_snapshot.first_raw_evidence_manifest_sha256 =
+          fixedReceiptHash(95);
+      },
+      validate: assertDisposableRecoverySourcePhaseReceipt,
+    },
+    {
+      label: "final target phase",
+      path: fieldDeploymentReceiptPath,
+      receipt: validFieldDeploymentReceipt,
+      mutate: (value) => {
+        value.final_snapshot.first_raw_evidence_manifest_sha256 =
+          fixedReceiptHash(96);
+      },
+      validate: assertDisposableRecoveryDeploymentReceipt,
+    },
+  ]) {
+    const receiptPinHarness = providerHarness({
+      sourceManifestFixture: syntheticFieldSourceManifest,
+      targetManifestFixture: syntheticFieldTargetManifest,
+    });
+    const receiptPinGate = createCloudflareRecoveryFieldGateAdapters({
+      ...approvedFieldConfig,
+      plan: fieldInitialized.plan,
+      state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+    }, receiptPinHarness.dependencies);
+    try {
+      const changedReceipt = structuredClone(receipt);
+      mutate(changedReceipt);
+      validate(changedReceipt);
+      writePrivateJson(path, changedReceipt);
+      assert.throws(
+        () => receiptPinGate.revalidate(),
+        (error) => error.code ===
+          "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_CHANGED",
+        `${label} is independently re-read before later boundaries`,
+      );
+      assert.equal(receiptPinHarness.wranglerCalls.length, 0, label);
+      assert.equal(receiptPinHarness.adminReads, 0, label);
+      assert.equal(receiptPinHarness.fetchCalls.length, 0, label);
+    } finally {
+      writePrivateJson(path, receipt);
+    }
+  }
 
   const fieldExportContext = Object.freeze({
     stage: "export_d1",
@@ -3146,12 +3561,21 @@ try {
   const wrongFingerprintSeedReceipt = structuredClone(validFieldSeedReceipt);
   wrongFingerprintSeedReceipt.d1.content_fingerprint = "f".repeat(64);
   writePrivateJson(fieldSeedReceiptPath, wrongFingerprintSeedReceipt);
+  writeDisposableTargetReceiptPair({
+    binding: deploymentPreparation.binding,
+    deploymentReceiptPath: fieldDeploymentReceiptPath,
+    seedReceiptPath: fieldSeedReceiptPath,
+    sourcePhaseReceipt: fieldSourcePhaseReceipt,
+    sourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
+    targetPreflightReceiptPath: fieldTargetPreflightReceiptPath,
+  });
   const wrongFingerprintPreview = previewCloudflareRecoveryFieldGate({
     ...fieldBaseConfig,
     testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
     testBootstrapCandidateSha: testCandidateSha,
     testBootstrapFieldReceiptPath: fieldReceiptPath,
     testBootstrapPackagePath: fieldPackagePath,
+    testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
     testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
     testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
   }, { platform: "darwin" });
@@ -3164,6 +3588,8 @@ try {
   await assert.rejects(
     runCloudflareRecoveryFieldGate({
       ...approvedFieldConfig,
+      approveTargetExecution:
+        wrongFingerprintPreview.target_execution_approval_fingerprint,
       approveTestBootstrapInterruption:
         wrongFingerprintPreview.test_bootstrap_interruption.approval_fingerprint,
     }, wrongFingerprintHarness.dependencies),
@@ -3180,6 +3606,14 @@ try {
     false,
   );
   writePrivateJson(fieldSeedReceiptPath, validFieldSeedReceipt);
+  writeDisposableTargetReceiptPair({
+    binding: deploymentPreparation.binding,
+    deploymentReceiptPath: fieldDeploymentReceiptPath,
+    seedReceiptPath: fieldSeedReceiptPath,
+    sourcePhaseReceipt: fieldSourcePhaseReceipt,
+    sourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
+    targetPreflightReceiptPath: fieldTargetPreflightReceiptPath,
+  });
 
   // The receipt and approval bind the clean, cache-integrity-derived runtime.
   // Replacing either the entrypoint or a transitive package with changed bytes
@@ -3509,6 +3943,7 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: mismatchedRuntimeReceiptPath,
       testBootstrapPackagePath: mismatchedRuntimePackagePath,
+      testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
       testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
       testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     }, { platform: "darwin" }),
@@ -3553,6 +3988,7 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: omittedRuntimeReceiptPath,
       testBootstrapPackagePath: omittedRuntimePackagePath,
+      testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
       testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
       testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     }, { platform: "darwin" }),
@@ -3593,6 +4029,18 @@ try {
   const replayReceiptDirectory = join(sandbox, "private-v048-field-preparation-replay");
   const replayReceiptPath = join(replayReceiptDirectory, "field-prepare-receipt.json");
   const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.8.tgz");
+  const replaySourcePreflightReceiptPath = join(
+    replayReceiptDirectory,
+    DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
+  );
+  const replaySourcePhaseReceiptPath = join(
+    replayReceiptDirectory,
+    DISPOSABLE_RECOVERY_SOURCE_PHASE_RECEIPT_NAME,
+  );
+  const replayTargetPreflightReceiptPath = join(
+    replayReceiptDirectory,
+    DISPOSABLE_RECOVERY_TARGET_PREFLIGHT_RECEIPT_NAME,
+  );
   const replayDeploymentReceiptPath = join(
     replayReceiptDirectory,
     DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME,
@@ -3625,13 +4073,25 @@ try {
     plan: fieldInitialized.plan,
   });
   writePrivateJson(
-    replayDeploymentReceiptPath,
-    fullDisposableDeploymentReceipt(replayDeploymentPreparation.binding),
+    replaySourcePreflightReceiptPath,
+    fullDisposableSourcePreflightReceipt(replayDeploymentPreparation.binding),
   );
+  const replaySourcePreflightReceiptSha256 =
+    hash(readFileSync(replaySourcePreflightReceiptPath));
+  const replaySourcePhaseReceipt = fullDisposableSourcePhaseReceipt(
+    replayDeploymentPreparation.binding,
+    replaySourcePreflightReceiptSha256,
+  );
+  writePrivateJson(
+    replaySourcePhaseReceiptPath,
+    replaySourcePhaseReceipt,
+  );
+  const replaySourcePhaseReceiptSha256 =
+    hash(readFileSync(replaySourcePhaseReceiptPath));
   const replaySeedPreparation = inspectDisposableRecoverySeedPreparation({
     candidateSha: testCandidateSha,
     fieldReceiptPath: replayReceiptPath,
-    deploymentReceiptPath: replayDeploymentReceiptPath,
+    sourcePhaseReceiptPath: replaySourcePhaseReceiptPath,
     packagePath: replayPackagePath,
     wranglerWrapperPath: wrapperPath,
     plan: fieldInitialized.plan,
@@ -3639,6 +4099,27 @@ try {
   writePrivateJson(
     replaySeedReceiptPath,
     fullDisposableSeedReceipt(replaySeedPreparation.binding),
+  );
+  const replaySeedReceiptSha256 = hash(readFileSync(replaySeedReceiptPath));
+  writePrivateJson(
+    replayTargetPreflightReceiptPath,
+    fullDisposableTargetPreflightReceipt(
+      replayDeploymentPreparation.binding,
+      replaySourcePhaseReceiptSha256,
+      replaySeedReceiptSha256,
+    ),
+  );
+  const replayTargetPreflightReceiptSha256 =
+    hash(readFileSync(replayTargetPreflightReceiptPath));
+  writePrivateJson(
+    replayDeploymentReceiptPath,
+    fullDisposableDeploymentReceipt(
+      replayDeploymentPreparation.binding,
+      replaySourcePhaseReceipt,
+      replaySourcePhaseReceiptSha256,
+      replaySeedReceiptSha256,
+      replayTargetPreflightReceiptSha256,
+    ),
   );
   const replayReceiptHarness = providerHarness({
     sourceManifestFixture: syntheticFieldSourceManifest,
@@ -3650,6 +4131,7 @@ try {
       fieldDeploymentReceiptPath: replayDeploymentReceiptPath,
       testBootstrapFieldReceiptPath: replayReceiptPath,
       testBootstrapPackagePath: replayPackagePath,
+      testBootstrapSourcePhaseReceiptPath: replaySourcePhaseReceiptPath,
       testBootstrapDeploymentReceiptPath: replayDeploymentReceiptPath,
       testBootstrapSeedReceiptPath: replaySeedReceiptPath,
     }, replayReceiptHarness.dependencies),
@@ -3689,6 +4171,7 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: fieldReceiptPath,
       testBootstrapPackagePath: fieldPackagePath,
+      testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
       testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
       testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     }, { platform: "darwin" }),
@@ -3705,13 +4188,25 @@ try {
     plan: replayInitialized.plan,
   });
   writePrivateJson(
-    replayDeploymentReceiptPath,
-    fullDisposableDeploymentReceipt(replayPlanDeploymentPreparation.binding),
+    replaySourcePreflightReceiptPath,
+    fullDisposableSourcePreflightReceipt(replayPlanDeploymentPreparation.binding),
   );
+  const replayPlanSourcePreflightReceiptSha256 =
+    hash(readFileSync(replaySourcePreflightReceiptPath));
+  const replayPlanSourcePhaseReceipt = fullDisposableSourcePhaseReceipt(
+    replayPlanDeploymentPreparation.binding,
+    replayPlanSourcePreflightReceiptSha256,
+  );
+  writePrivateJson(
+    replaySourcePhaseReceiptPath,
+    replayPlanSourcePhaseReceipt,
+  );
+  const replayPlanSourcePhaseReceiptSha256 =
+    hash(readFileSync(replaySourcePhaseReceiptPath));
   const replayPlanSeedPreparation = inspectDisposableRecoverySeedPreparation({
     candidateSha: testCandidateSha,
     fieldReceiptPath: replayReceiptPath,
-    deploymentReceiptPath: replayDeploymentReceiptPath,
+    sourcePhaseReceiptPath: replaySourcePhaseReceiptPath,
     packagePath: replayPackagePath,
     wranglerWrapperPath: wrapperPath,
     plan: replayInitialized.plan,
@@ -3720,6 +4215,27 @@ try {
     replaySeedReceiptPath,
     fullDisposableSeedReceipt(replayPlanSeedPreparation.binding),
   );
+  const replayPlanSeedReceiptSha256 = hash(readFileSync(replaySeedReceiptPath));
+  writePrivateJson(
+    replayTargetPreflightReceiptPath,
+    fullDisposableTargetPreflightReceipt(
+      replayPlanDeploymentPreparation.binding,
+      replayPlanSourcePhaseReceiptSha256,
+      replayPlanSeedReceiptSha256,
+    ),
+  );
+  const replayPlanTargetPreflightReceiptSha256 =
+    hash(readFileSync(replayTargetPreflightReceiptPath));
+  writePrivateJson(
+    replayDeploymentReceiptPath,
+    fullDisposableDeploymentReceipt(
+      replayPlanDeploymentPreparation.binding,
+      replayPlanSourcePhaseReceipt,
+      replayPlanSourcePhaseReceiptSha256,
+      replayPlanSeedReceiptSha256,
+      replayPlanTargetPreflightReceiptSha256,
+    ),
+  );
   const replayRequestConfig = Object.freeze({
     ...replayBase,
     fieldDeploymentReceiptPath: replayDeploymentReceiptPath,
@@ -3727,6 +4243,7 @@ try {
     testBootstrapCandidateSha: testCandidateSha,
     testBootstrapFieldReceiptPath: replayReceiptPath,
     testBootstrapPackagePath: replayPackagePath,
+    testBootstrapSourcePhaseReceiptPath: replaySourcePhaseReceiptPath,
     testBootstrapDeploymentReceiptPath: replayDeploymentReceiptPath,
     testBootstrapSeedReceiptPath: replaySeedReceiptPath,
   });
@@ -3841,7 +4358,7 @@ try {
   assert.equal(checkpointText.includes("fixture:chunk#"), false);
   assert.equal(checkpointText.includes(privateSentinel), false);
   const checkpointReceipt = JSON.parse(checkpointText);
-  assert.equal(checkpointReceipt.schema_version, 6);
+  assert.equal(checkpointReceipt.schema_version, 7);
   assert.equal(checkpointReceipt.plan_fingerprint, fieldInitialized.plan.plan_fingerprint);
   assert.equal(checkpointReceipt.candidate_sha, testCandidateSha);
   assert.equal(checkpointReceipt.field_receipt_sha256, hash(readFileSync(fieldReceiptPath)));
@@ -3849,8 +4366,24 @@ try {
   assert.equal(checkpointReceipt.package_file_count, fieldPackage.fileCount);
   assert.match(checkpointReceipt.execution_inventory_sha256, /^[0-9a-f]{64}$/);
   assert.equal(
+    checkpointReceipt.source_preflight_receipt_sha256,
+    hash(readFileSync(fieldSourcePreflightReceiptPath)),
+  );
+  assert.equal(
+    checkpointReceipt.source_phase_receipt_sha256,
+    hash(readFileSync(fieldSourcePhaseReceiptPath)),
+  );
+  assert.equal(
     checkpointReceipt.seed_receipt_sha256,
     hash(readFileSync(fieldSeedReceiptPath)),
+  );
+  assert.equal(
+    checkpointReceipt.target_preflight_receipt_sha256,
+    hash(readFileSync(fieldTargetPreflightReceiptPath)),
+  );
+  assert.equal(
+    checkpointReceipt.deployment_receipt_sha256,
+    hash(readFileSync(fieldDeploymentReceiptPath)),
   );
   assert.equal(
     checkpointReceipt.seed_fixture_sha256,
@@ -4083,6 +4616,7 @@ try {
         testBootstrapCandidateSha: testCandidateSha,
         testBootstrapFieldReceiptPath: fieldReceiptPath,
         testBootstrapPackagePath: fieldPackagePath,
+        testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
         testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
         testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
       }, { platform: "darwin" }),
@@ -4377,6 +4911,7 @@ try {
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: fieldReceiptPath,
       testBootstrapPackagePath: fieldPackagePath,
+      testBootstrapSourcePhaseReceiptPath: fieldSourcePhaseReceiptPath,
       testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
       testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
     }, { platform: "darwin" }),

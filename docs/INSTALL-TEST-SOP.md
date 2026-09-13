@@ -28,8 +28,10 @@ live in the operator's private bench note, outside this repo. What matters publi
 
 - The token lives in the operator's OS keychain, never in a file, an argument,
   or a shell history line. The scripts read it from there.
-- The planned live provisioning lane will read it from the repository secret
-  `BRAIN_TEST_CF_TOKEN`; the package-contract matrix uses no Cloudflare secret.
+- The v0.4.8 disposable deployment dispatcher resolves the exact manifest
+  account's token only through the reviewed macOS Keychain store. It has no
+  credential argument or environment fallback. The package-contract matrix
+  uses no Cloudflare secret and performs no field action.
 - Proven 2026-08-27 and again 2026-08-28 on two separate accounts: those four
   permissions are sufficient for everything an install does, INCLUDING creating
   the Vectorize index. No `wrangler login` is required anywhere in the flow.
@@ -38,7 +40,9 @@ live in the operator's private bench note, outside this repo. What matters publi
 teardown and cleanup MUST target test resources by exact name (allowlist), and
 must never sweep the account. `scripts/teardown-test-brain.mjs` enforces this:
 it refuses any name that does not look like a test resource, refuses any name
-matching `BRAIN_TEARDOWN_PROTECTED`, and dry-runs unless `--commit` is passed.
+matching `BRAIN_TEARDOWN_PROTECTED`, binds its preview to opaque exact-account
+and exact-resource-instance hashes, and performs no deletion. Its `--commit`
+path currently refuses with `TEARDOWN_COMMIT_DISABLED` before provider access.
 
 Start on the Free plan with a small rehearsal corpus (about 50 documents).
 Free-tier limits are themselves a scheduled break-test; if the corpus
@@ -50,12 +54,20 @@ never touches a test install.
 
 ## Teardown
 
-The installer has no uninstall command, but every resource it creates can be
-deleted with the same token (Worker script, D1 database, Vectorize index).
-`scripts/teardown-test-brain.mjs` does this in one run. Run it after every
-cold-install test so the account stays clean. The installer also adopts
-existing resources by name, so an interrupted run can always be re-run
-safely before teardown.
+The installer has no uninstall command. The disposable Worker script, D1
+database, and Vectorize index can be deleted through Cloudflare, but this
+candidate does not yet contain an accepted mutation-capable teardown path.
+`scripts/teardown-test-brain.mjs` is a read-only exact-instance preview. Its
+automatic commit path is intentionally disabled after review found that name
+binding alone could not safely establish the resource instances or executable
+bytes receiving deletion authority.
+
+Do not begin a cold-install or field campaign until its exact cleanup path is
+reviewed and separately approved. That path must bind the account and all
+three provider resource instances, retain an ambiguity-safe deletion record,
+and verify exact absence afterward. An interrupted install may resume only
+from its matching durable checkpoint; resource-name reuse alone is not proof
+that rerunning is safe.
 
 ---
 
@@ -95,13 +107,17 @@ This gate does **not** run `brain setup`, provision a Worker, D1 database, or
 Vectorize index, query a deployed Brain, open a browser, or exercise a physical
 passkey. Calling it an end-to-end install or provisioning gate would be false.
 
-## Tier 1B: disposable Cloudflare provisioning (open)
+## Tier 1B: disposable Cloudflare recovery campaign (implemented, field blocked)
 
-The next job must create one allowlisted disposable Worker, D1 database, and
-Vectorize index, ingest only the package's public `CHANGELOG.md`, prove one
-supported answer and one refusal, and run the exact protected teardown. It
-remains absent until the required repository secrets and live-resource lock are
-available and the cleanup path is reviewed. A skipped green job is not proof.
+The candidate contains a packaged split deployment dispatcher, exact
+6,001-document synthetic seeder, paused-bootstrap interruption/resume path,
+aggregate observer, and private receipt chain. Source preview/preflight/A2 and
+target preview/preflight/A4 remain separate; an unconfirmed provider write
+stops instead of retrying. The full campaign still has no field receipt. It
+must use only the two allowlisted disposable Brains, pass the exact protected
+teardown preview, have a separately reviewed exact-instance deletion path, and
+receive separate approval before each provider or mutation rung. Local and CI
+success are not Tier 1B proof.
 
 ## Tier 2: deployed-browser matrix against the /app surface (open)
 
@@ -155,7 +171,8 @@ The short list automation cannot cover:
 
 1. Real passkey enrolment with Face ID on an actual iPhone against the test
    brain (domain settled first; passkeys bind to the exact host).
-2. One real `brain eval --golden-20` guided session end to end.
+2. One owner-approved low-sensitivity item followed through Received, Saved,
+   Search ready, and Answer checked on the selected source path.
 3. Read the latest Tier 1A Actions logs and contract artifacts, plus the latest
    completed Tier 1B receipt when that gate exists, for anything a client would
    ask about.
@@ -174,9 +191,9 @@ offboarding). File defect write-ups with the gate id in the title.
 |---|---|
 | Tier 0 suite | BUILT (`npm test`) |
 | Test account + keychain-held scoped token | BUILT 2026-08-27 (token verified; Vectorize create/delete probe passed). Identifiers in the private bench note. |
-| `scripts/teardown-test-brain.mjs` | BUILT 2026-08-28. Allowlist-only, dry-run by default, refuses protected and non-test names; create/detect/delete verified live. |
+| `scripts/teardown-test-brain.mjs` | PREVIEW ONLY. Exact-name and protected-prefix refusal plus exact opaque account/resource and wrapper/provider-byte binding are locally tested. Automatic commit returns `TEARDOWN_COMMIT_DISABLED`; the earlier historical live delete does not prove this new exact-instance contract. |
 | `install-matrix.yml` (Tier 1A) | BUILT 2026-09-09. Required by `release.yml`; verifies the current public kit and package install on four hosted runners. It does not provision Cloudflare or prove the tagged candidate is already public. |
-| Disposable Cloudflare provisioning (Tier 1B) | TODO. Required secrets, protected-resource lock, exact setup/retrieval/refusal receipt, and teardown proof remain open. |
+| Disposable Cloudflare recovery campaign (Tier 1B) | IMPLEMENTED LOCALLY, FIELD BLOCKED. The split dispatcher, 6,001-document seed/replay, interruption/resume, exact retrieval/refusal, and private receipts have fixture proof. Exact-candidate Cloudflare evidence and an accepted mutation-capable teardown path remain open. |
 | Deployed test-Brain Playwright suite (Tier 2) | TODO. Local synthetic browser regressions in ordinary CI are not this live gate. |
 | Tart bench (Tier 3, Mac) | BUILT 2026-08-28. Tart 2.32.1 + `macos-tahoe-base` (26.6.2); clone boots, SSH drivable, full install verified end to end in 8s. ⚠️ Requires WARP disconnected. |
 | UTM bench (Tier 3, Windows) | TODO (disk now available: 35GB free after 2026-08-27 cleanup) |

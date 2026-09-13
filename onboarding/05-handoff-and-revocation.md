@@ -1,6 +1,9 @@
 # Handoff and revocation
 
-Template. Fill every bracket before sending. Delivered at the end of the kickoff session, immediately after the revocation is performed live.
+Template. Fill every bracket before sending. Mark anything that was not used as
+not applicable. Deliver this at the end of the kickoff session only after every
+applicable access cleanup has been performed and verified live. Never claim a
+revocation or rotation that did not occur.
 
 ---
 
@@ -17,27 +20,46 @@ At **[TIME] on [DATE]**, with you watching:
 
 | What | Action | Result |
 |---|---|---|
-| My Cloudflare API token for your account | Deleted | I can no longer see, deploy to, or delete anything in your Cloudflare account |
-| The stored copy of that token on my computer | Removed with `brain token <manifest> --forget`, with you watching | My machine's keychain holds nothing for your account — a revoked token must also stop existing locally, not linger as clutter |
-| My access to your [Google Drive folders / source] | Removed by you | I can no longer read any of your source material |
-| Your admin key | Rotated by you, to a value I have never seen | I cannot query your brain, even at its public address |
+| A fallback Cloudflare API token for your account, only if one was used | [Not used / Revoked by you] | [No token existed / The exact token used for this work no longer authorizes account changes] |
+| The protected local copy of that token, only if one was used | [Not used / Removed with `brain token <manifest> --forget`, with you watching] | [Nothing was stored / The encrypted recovery copy no longer remains on this computer] |
+| Temporary access to your [Google Drive folders / source], only if granted | [Not granted / Removed by you] | [No temporary access existed / I can no longer read that source material] |
+| Your admin key | [Not rotated because it was generated directly into your protected store and never left your custody / Rotated by you through the reviewed owner-controlled secure replacement path after exposure] | [No unnecessary credential change / I no longer know a key that can query your Brain] |
 
-The Cloudflare and admin credentials used during the build are rotated or
-revoked at handoff. Written answers use the Cloudflare AI binding, so there is
-no separate model-provider key to transfer or revoke.
+Only credentials and source access that were actually used are revoked or
+removed at handoff. Normal fresh setup uses the owner's Cloudflare browser
+sign-in and generates the admin key directly into the owner's protected store.
+If that key never left owner-only custody and the installer never saw, copied,
+or retained it, do not rotate it solely for handoff.
 
-Once those steps are done I hold **no credential of any kind** to your infrastructure, your material, or your brain.
+If the admin key was exposed to an installer, technician, shared terminal,
+chat, command line, shell history, persistent environment, log, or other party,
+rotation is required. Proceed only through a reviewed owner-controlled secure
+replacement path that keeps the new value out of all of those places. If no
+such path is available, stop and record the handoff as incomplete rather than
+asking the owner to improvise secret entry.
+
+Before any admin-key rotation, explain that it also replaces the session-signing
+key. Every owner-app session on every device will be signed out. Passkeys,
+enrolled-device records, and Brain data remain in place; the owner signs in
+again with an existing passkey after the rotation. Written answers use the
+Cloudflare AI binding, so there is no separate model-provider key to transfer
+or revoke.
+
+Once the applicable steps are done, and the admin key was either never exposed
+or was safely replaced after exposure, I hold **no credential of any kind** to
+your infrastructure, your material, or your Brain.
 
 This is not a policy I am promising to follow. It is a fact about what keys exist. There is no support account, no vendor backdoor, and no copy of your data on any machine I control, because there never was one. Your material was read in your account, indexed into your account, and answered from your account.
 
 ### Verify it yourself, today
 
-Do not take my word for any of the above. All three are checkable in about five minutes:
+Do not take my word for any of the above. Verify only the checks that actually
+apply:
 
-1. **Cloudflare.** Log in, go to **My Profile, then API Tokens**. The token named `[TOKEN NAME]` should not be listed. If it is, delete it now and tell me.
-2. **Google.** Open the sharing settings on the folders you granted, or the service account list at [LOCATION]. My access should not appear.
-3. **Your admin key.** You rotated it during our session. I was not shown the new value and it exists only in your own store.
-After all three, run `node brain.mjs test <manifest>` yourself. Then complete
+1. **Cloudflare, only if a fallback token was used.** Log in, go to **My Profile, then API Tokens**. The exact token used for this work should not be listed. If it remains, the cleanup is incomplete.
+2. **Source sharing, only if temporary access was granted.** Open the sharing settings on the source you granted. My access should not appear.
+3. **Your admin key.** If it never left your protected store, confirm that no installer or technician received it and leave it unchanged. If exposure required a reviewed rotation, confirm that the rotation succeeded without showing the new value, then sign back in with an existing passkey.
+After every applicable check, run `node brain.mjs test <manifest>` yourself. Then complete
 one adaptive evidence-derived check and confirm the expected citation and
 provenance. No prepared question list is required. If both checks pass, the
 remaining credentials, answer path, and Cloudflare AI binding are working.
@@ -90,19 +112,32 @@ Then, from the installer folder:
 |---|---|
 | Run the five automated acceptance layers | `node brain.mjs test <manifest>` |
 | Quick "is it up" check | `node brain.mjs health <manifest>` |
-| See what it holds, per source, and when each last updated | `node brain.mjs sources <manifest>` |
+| Read the complete source-inventory contract v3 receipt | `node brain.mjs sources <manifest> --json` |
 | Remove one source and everything it brought in | `node brain.mjs forget <manifest> --source <name>` |
 | See what version you are on, and the update history | `node brain.mjs status <manifest>` |
 | Reconnect your AI tools, or add a new machine | `node brain.mjs mcp-config <manifest>` |
-| Change a key or password | `node brain.mjs secrets <manifest>` |
+| Reapply the current durable admin key, or rotate it only through a reviewed secure replacement path | `node brain.mjs secrets <manifest>` |
 
-`brain secrets` is the exact admin-key rotation command. It normally reads the
-existing value from the manifest's durable local storage. A deliberate new
-replacement must be supplied through the installer/operator's approved
-no-history credential launcher; never paste it into a shell command. The
-command reports success only after the durable local value reads back exactly
-and the Worker accepts it. If the remote update fails, rerun the same command
-without supplying the key again; the verified durable copy is the retry source.
+`brain secrets` normally reads and reapplies the existing value from the
+manifest's durable local storage. Running it without a new value is not an
+admin-key rotation. A deliberate replacement rotates the key only when it is
+supplied through a reviewed owner-controlled no-history credential path; never
+paste it into a shell command, chat, log, or persistent environment. If that
+secure replacement path is unavailable, stop without attempting a rotation.
+Before supplying a replacement, tell the owner that every owner-app session on
+every device will be signed out while passkeys, enrolled-device records, and
+Brain data remain. The command reports success only after the durable local
+value reads back exactly and the Worker accepts it. If the remote update fails,
+rerun the same command without supplying the key again; the verified durable
+copy is the retry source.
+
+`brain sources <manifest> --json` returns source-inventory contract v3 rather
+than a fixed human column list. For each registered source it reports a safe
+source identity and connector kind, zone, physical and logical document counts,
+readable and unreadable counts, first and last ingest evidence,
+complete-history-through and freshness evidence, extraction and OCR state,
+lineage, and exact missing provenance fields. A missing field is not zero, and
+an older contract version must not be interpreted as v3.
 
 Existing installer-owned Claude Code and Codex registrations are refreshed with
 the non-secret manifest locator during rotation. Claude Desktop is not changed
@@ -128,7 +163,7 @@ unproven state. A green automated test does not replace that evidence gate.
 
 1. Run `node brain.mjs test <manifest>`.
 2. Read the failures and warnings at the bottom. The freshness line is the one to watch: a brain that quietly stops taking in new material still answers confidently, using old information.
-3. Run `node brain.mjs sources <manifest>` and check the last ingest date on each line.
+3. Run `node brain.mjs sources <manifest> --json` and review the v3 receipt for each source's freshness, history coverage, readability, OCR state, and missing provenance. Do not look for the old fixed `status`, `documents`, or `last ingest` columns.
 4. Check your Cloudflare bill against the numbers in section 2.
 
 ### When something breaks
