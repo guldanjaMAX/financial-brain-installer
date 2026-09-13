@@ -1,8 +1,9 @@
 # UPDATE-043 Wrangler and Sharp advisory evidence
 
 - Observed: 2026-09-12
-- Candidate checked: `aa1937a52c47e299ae649b9acaa4794816ef7946`
-- Incident status: open
+- Candidate where discovered: `aa1937a52c47e299ae649b9acaa4794816ef7946`
+- Selected-pin fix commit: `515b78e`
+- Incident status: local-only; the legacy compatibility pin remains open
 - Pilot decision: bounded non-applicability requires explicit release-owner
   acceptance; broader beta and public release remain blocked on a requalified
   patched runtime
@@ -16,7 +17,8 @@ and field-tooling dependency chain:
 
 The advisory is `GHSA-rgj7-g3m4-5g8c`. Sharp versions below 0.35.4 are affected.
 Wrangler 4.131.1 resolves Miniflare to a patched Sharp 0.35.4. The Node floor
-remains version 22.
+remains version 22. The selected setup, doctor, named OAuth profile, locked
+field runtime, recovery receipt, tests, and instructions now use 4.131.1.
 
 The earlier `npm audit --offline` result of zero findings came from a stale
 local advisory cache and is not current vulnerability evidence.
@@ -37,8 +39,8 @@ local advisory cache and is not current vulnerability evidence.
   also in the affected range. The pilot cannot use that path under this
   exception.
 
-These facts make the affected decoder unreachable in the exact frozen pilot.
-They do not make the dependency generally acceptable.
+The current selected path no longer carries the affected decoder. The legacy
+path remains excluded from the exact frozen pilot and prevents general closure.
 
 ## Bounded pilot exception
 
@@ -50,20 +52,36 @@ true:
 3. no local Miniflare Images binding or `cf.image`;
 4. no untrusted HEIF or AVIF processing;
 5. no legacy `wrangler@4.73.0` route; and
-6. the release owner accepts this exact exception before the first field rung.
+6. the release owner accepts the legacy-path exclusion before the first field
+   rung.
 
 Any violation stops the pilot. This exception is not general release evidence.
 
 ## Closure requirement
 
-Before broader beta or public release, update every product-invoked Wrangler
-pin to a patched reviewed contract. Then rerun the exact lock/runtime inventory,
+Before broader beta or public release, remove or update the remaining legacy
+Wrangler pin to the patched reviewed contract. Then rerun both OAuth/config
+parsers, the exact lock/runtime inventory,
 named and legacy OAuth/config parsers, packed setup, full test chain, package and
 privacy gates, six-job CI matrix, and field-runtime evidence. Historical
 runtime hashes and receipts do not carry forward.
+
+## Local selected-pin verification
+
+- `npm ci --ignore-scripts`: passed.
+- live `npm audit --json`: zero vulnerabilities in the installed tree.
+- OAuth, doctor, pin, and technician checks: 71 of 71 passed.
+- provisioning guards: 202 of 202 passed.
+- locked runtime and recovery checks: 25 of 25 passed.
+- disposable deployment and recovery checks: 96 passed, one native-Windows
+  check skipped on macOS, zero failed.
+- package privacy and dry-run package checks: passed.
+- all 14 invoked Wrangler command-help surfaces compared byte-identically
+  between 4.127.1 and 4.131.1.
+
+This is local evidence. It does not replace exact-SHA CI or provider evidence.
 
 Official references:
 
 - https://github.com/advisories/GHSA-rgj7-g3m4-5g8c
 - https://github.com/cloudflare/workers-sdk/releases/tag/wrangler%404.131.1
-
