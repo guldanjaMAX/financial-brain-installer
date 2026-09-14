@@ -204,7 +204,7 @@ jobs:
             }
             process.stdout.write(String(value.artifact_bytes));
           ' "$runtime_identity_metadata_path")"
-          expected_reviewed_sha256="25ae11e12738cee2f99462d96479cffbba32dee0196074872aba7fd1ab5a9aae"
+          expected_reviewed_sha256="87949df49685a6acd7f464f6f077867e4f045f3fe83907f5cbded155362b5838"
           if [[ "$package_sha256" != "$expected_reviewed_sha256" ]]; then
             echo "::error::package bytes differ from the locally reviewed package"
             exit 1
