@@ -121,6 +121,7 @@ test("every child environment drops credentials and customer-home access", () =>
       QUICKBOOKS_CLIENT_SECRET: "fixture-qbo-secret",
       GOOGLE_CLIENT_SECRET: "fixture-google-secret",
       NODE_OPTIONS: "--import=/private/customer-hook.mjs",
+      BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT: "/private/untrusted-runtime",
     }, temporary);
     assert.equal(safe.PATH, "/fixture/bin");
     assert.equal(safe.HOME, temporary);
@@ -130,6 +131,7 @@ test("every child environment drops credentials and customer-home access", () =>
     assert.equal(safe.QUICKBOOKS_CLIENT_SECRET, undefined);
     assert.equal(safe.GOOGLE_CLIENT_SECRET, undefined);
     assert.equal(safe.NODE_OPTIONS, undefined);
+    assert.equal(safe.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT, undefined);
     assert.equal(safe.NPM_CONFIG_CACHE, join(temporary, "npm-cache"));
     assert.equal(safe.NPM_CONFIG_GLOBALCONFIG, join(temporary, "npm-globalrc"));
     assert.equal(safe.NPM_CONFIG_USERCONFIG, join(temporary, "npmrc"));
@@ -613,7 +615,10 @@ test("source identity hashes the parsed package bytes and refuses a closing-byte
 
 function gitEnvironment() {
   const environment = {};
-  for (const name of ["PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT"]) {
+  for (const name of [
+    "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC",
+    "PATHEXT", "TMPDIR", "TMP", "TEMP",
+  ]) {
     if (process.env[name]) environment[name] = process.env[name];
   }
   return environment;

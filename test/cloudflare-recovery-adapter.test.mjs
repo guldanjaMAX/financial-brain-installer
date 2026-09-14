@@ -110,6 +110,7 @@ import {
   LOCKED_WRANGLER_ENTRYPOINT,
   LOCKED_WRANGLER_RESOLUTION_GUARD,
   LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+  assertLockedWranglerRuntimeUnchanged,
   inspectLockedWranglerRuntime,
   materializeLockedWranglerRuntime,
   prepareLockedWranglerRuntimeFromCache,
@@ -3367,6 +3368,19 @@ try {
   const fieldPackageBytes = fieldPackage.bytes;
   if (process.platform !== "win32") chmodSync(fieldPackagePath, 0o600);
   const npmCacheContentRoot = resolveNpmCacheContentRoot(process.env);
+  const fieldPreparedWranglerRuntime = process.env.BRAIN_FIELD_PREPARE === "1"
+    ? inspectLockedWranglerRuntime(
+      process.env.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT || "",
+      { ownerOnly: true, exactRoot: true },
+    )
+    : null;
+  if (fieldPreparedWranglerRuntime) {
+    assert.equal(
+      fieldPreparedWranglerRuntime.inventorySha256,
+      lockedWranglerRuntime.inventorySha256,
+      "field-prepared Wrangler runtime must match the child checkout installation",
+    );
+  }
   const installedWranglerEntrypoint = join(process.cwd(), LOCKED_WRANGLER_ENTRYPOINT);
   const installedWranglerEntrypointBytes = readFileSync(installedWranglerEntrypoint);
   const installedWranglerEntrypointMode = statSync(installedWranglerEntrypoint).mode & 0o777;
@@ -3376,15 +3390,27 @@ try {
       installedWranglerEntrypointBytes,
       Buffer.from("\n// same-version synthetic source corruption\n"),
     ]));
-    assert.throws(
-      () => prepareLockedWranglerRuntimeFromCache({
-        sourceRoot: process.cwd(),
-        destination: join(fieldPreparationDirectory, "corrupt-source-runtime"),
-        cacheContentRoot: npmCacheContentRoot,
-      }),
-      (error) => error.code === "LOCKED_WRANGLER_RUNTIME_SOURCE_MISMATCH",
-      "a same-version installed entrypoint cannot be blessed into field preparation",
-    );
+    if (process.env.BRAIN_FIELD_PREPARE === "1") {
+      // The field orchestrator already rebuilt and verified this runtime from
+      // the ambient content cache before entering its isolated child home. Its
+      // deliberate empty npm cache must not weaken this mutation proof or turn
+      // a missing archive into the result under test.
+      assert.throws(
+        () => assertLockedWranglerRuntimeUnchanged(lockedWranglerRuntime),
+        (error) => error.code === "LOCKED_WRANGLER_RUNTIME_CHANGED",
+        "a same-version installed entrypoint cannot change after field preparation pins it",
+      );
+    } else {
+      assert.throws(
+        () => prepareLockedWranglerRuntimeFromCache({
+          sourceRoot: process.cwd(),
+          destination: join(fieldPreparationDirectory, "corrupt-source-runtime"),
+          cacheContentRoot: npmCacheContentRoot,
+        }),
+        (error) => error.code === "LOCKED_WRANGLER_RUNTIME_SOURCE_MISMATCH",
+        "a same-version installed entrypoint cannot be blessed into field preparation",
+      );
+    }
     assert.equal(corruptSourceHarness.wranglerCalls.length, 0);
     assert.equal(corruptSourceHarness.adminReads, 0);
     assert.equal(corruptSourceHarness.fetchCalls.length, 0);
@@ -3394,11 +3420,18 @@ try {
       chmodSync(installedWranglerEntrypoint, installedWranglerEntrypointMode);
     }
   }
-  lockedWranglerRuntime = prepareLockedWranglerRuntimeFromCache({
-    sourceRoot: process.cwd(),
-    destination: join(fieldPreparationDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
-    cacheContentRoot: npmCacheContentRoot,
-  });
+  if (fieldPreparedWranglerRuntime) {
+    lockedWranglerRuntime = materializeLockedWranglerRuntime(
+      fieldPreparedWranglerRuntime,
+      join(fieldPreparationDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+    ).descriptor;
+  } else {
+    lockedWranglerRuntime = prepareLockedWranglerRuntimeFromCache({
+      sourceRoot: process.cwd(),
+      destination: join(fieldPreparationDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+      cacheContentRoot: npmCacheContentRoot,
+    });
+  }
   const smokeRuntimePath = join(fieldPreparationDirectory, "wrangler-runtime-smoke");
   const smokeRuntime = materializeLockedWranglerRuntime(
     lockedWranglerRuntime,

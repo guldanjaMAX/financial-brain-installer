@@ -30,6 +30,7 @@ import {
 import { fileURLToPath } from "node:url";
 import {
   LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+  assertLockedWranglerRuntimeUnchanged,
   prepareLockedWranglerRuntimeFromCache,
 } from "../operations/locked-wrangler-runtime.mjs";
 
@@ -259,6 +260,7 @@ export function buildStepPlan(options) {
 const ALLOWED_ENVIRONMENT = Object.freeze([
   "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC",
   "PATHEXT", "LANG", "LANGUAGE", "LC_ALL", "SHELL", "TERM",
+  "TMPDIR", "TMP", "TEMP",
 ]);
 
 export function createSafeEnvironment(source, privateHome) {
@@ -877,6 +879,19 @@ export async function runFieldPrepare(options, dependencies = {}) {
       destination: join(output, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
       cacheContentRoot: cacheRoot,
     })))();
+  const preparedWranglerRuntimeRoot = realpathSync(
+    join(output, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+  );
+  if (!wranglerRuntime?.exactRoot || !wranglerRuntime?.ownerOnly ||
+      realpathSync(dirname(wranglerRuntime.lockPin?.path || "")) !==
+        preparedWranglerRuntimeRoot) {
+    throw new Error("prepared_wrangler_runtime_identity_invalid");
+  }
+  // This path is created and verified by the parent before the child receives
+  // its fresh npm cache. It lets the isolated suite reuse that exact runtime
+  // without exposing or mutating the user's ambient cache.
+  environment.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT =
+    preparedWranglerRuntimeRoot;
   const receipt = baseReceipt(options, plan, wranglerRuntime);
   let archive = null;
   let privateHomeRemoved = false;
@@ -918,6 +933,7 @@ export async function runFieldPrepare(options, dependencies = {}) {
             finalIdentity.package_json_sha256 !== receipt.source.package_json_sha256 ||
             finalIdentity.package_lock_sha256 !== receipt.source.package_lock_sha256
           )) throw new Error("source_identity_changed_during_run");
+          assertLockedWranglerRuntimeUnchanged(wranglerRuntime);
           if (receipt.source) receipt.source = { ...receipt.source, end_clean: true };
         }
         else if (step.id === "package-build") {
