@@ -34,6 +34,7 @@ import {
   assertDisposableRecoveryFieldCampaignIdentity,
   assertDisposableRecoverySourceFieldCampaignIdentity,
   inspectDisposableRecoveryDeploymentPreparation,
+  inspectDisposableRecoveryProvisioningPreparation,
   inspectDisposableRecoverySourceDeploymentPreparation,
   inspectDisposableRecoverySeedPreparation,
   normalizedInstallStateExport,
@@ -115,6 +116,13 @@ import {
   materializeLockedWranglerRuntime,
   prepareLockedWranglerRuntimeFromCache,
 } from "../operations/locked-wrangler-runtime.mjs";
+import {
+  inspectNpmArchiveBytes,
+} from "../operations/package-bundle-verifier.mjs";
+import {
+  UPDATE_RUNTIME_IDENTITY_SCHEME,
+  deriveUpdateRuntimePayloadSha256,
+} from "../operations/update-preview.mjs";
 import { ZOOM_CREDENTIAL_ENV } from "../connectors/zoom.mjs";
 import Worker from "../worker/src/index.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET, encryptAccessReference } from "../worker/src/lib/bank-feed.js";
@@ -485,6 +493,13 @@ function packageWithRenamedMember(packageBytes, wantedPath, replacementPath) {
 function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCount, {
   runId = "11111111-1111-4111-8111-111111111111",
 } = {}) {
+  const runtimePayloadSha256 = deriveUpdateRuntimePayloadSha256(
+    inspectNpmArchiveBytes(packageBytes).rows.map(({ path, bytes, sha256 }) => ({
+      path,
+      bytes,
+      sha256,
+    })),
+  );
   return {
     schema_version: 1,
     run_id: runId,
@@ -543,6 +558,8 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       filename: "brain-installer-0.4.8.tgz",
       bytes: packageBytes.length,
       sha256: hash(packageBytes),
+      identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
+      runtime_payload_sha256: runtimePayloadSha256,
       file_count: packageFileCount,
     },
     steps: fullFieldPreparationSteps.map((id) => ({
@@ -3456,9 +3473,53 @@ try {
   assert.equal(runtimeSmoke.status, 0, runtimeSmoke.stderr);
   assert.equal(runtimeSmoke.stdout.trim(), "4.131.1");
   rmSync(smokeRuntimePath, { recursive: true, force: true });
-  writePrivateJson(
-    fieldReceiptPath,
-    fullFieldPreparationReceipt(testCandidateSha, fieldPackageBytes, fieldPackage.fileCount),
+  const exactFieldReceipt = fullFieldPreparationReceipt(
+    testCandidateSha,
+    fieldPackageBytes,
+    fieldPackage.fileCount,
+  );
+  writePrivateJson(fieldReceiptPath, exactFieldReceipt);
+  for (const [label, mutate] of [
+    ["legacy four-field package receipt", (value) => {
+      delete value.package.identity_scheme;
+      delete value.package.runtime_payload_sha256;
+    }],
+    ["missing package-derived runtime identity", (value) => {
+      delete value.package.runtime_payload_sha256;
+    }],
+    ["wrong runtime identity scheme", (value) => {
+      value.package.identity_scheme = "legacy.package.fingerprint.v0";
+    }],
+    ["wrong package-derived runtime identity", (value) => {
+      value.package.runtime_payload_sha256 = "f".repeat(64);
+    }],
+  ]) {
+    const changed = structuredClone(exactFieldReceipt);
+    mutate(changed);
+    writePrivateJson(fieldReceiptPath, changed);
+    assert.throws(
+      () => inspectDisposableRecoveryProvisioningPreparation({
+        candidateSha: testCandidateSha,
+        fieldReceiptPath,
+        packagePath: fieldPackagePath,
+        wranglerWrapperPath: wrapperPath,
+      }),
+      (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+      label,
+    );
+  }
+  writePrivateJson(fieldReceiptPath, exactFieldReceipt);
+  const exactProvisioningPreparation =
+    inspectDisposableRecoveryProvisioningPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+    });
+  assert.equal(
+    exactProvisioningPreparation.binding.package_sha256,
+    hash(fieldPackageBytes),
+    "the six-field producer receipt must bind the independently inspected package",
   );
   const fieldK0Binding = Object.freeze({
     candidate_sha: testCandidateSha,

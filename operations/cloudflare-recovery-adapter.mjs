@@ -122,6 +122,10 @@ import {
   isRecoveryArtifactResiduePathComponent,
 } from "./recovery-artifact-residue-policy.mjs";
 import {
+  UPDATE_RUNTIME_IDENTITY_SCHEME,
+  deriveUpdateRuntimePayloadSha256,
+} from "./update-preview.mjs";
+import {
   RecoveryContentFingerprintError,
   captureDirectD1ContentFingerprint,
   hashNormalizedRecoveryDataExport,
@@ -344,6 +348,7 @@ const RECOVERY_TEST_PACKAGE_REQUIRED_MEMBERS = Object.freeze([
   "operations/private-aggregate-receipt.mjs",
   "operations/recovery-artifact-crypto.mjs",
   "operations/recovery-content-fingerprint.mjs",
+  "operations/update-preview.mjs",
   "operations/v048-d1-deletion-state-contract.mjs",
   "operations/v048-target-eval-immutability-contract.mjs",
   "operations/v048-worker-version-contract.mjs",
@@ -1479,6 +1484,14 @@ function inspectNpmPackedExecutionInventory(raw, code) {
       version: packageJson.version,
       fileCount: ordered.length,
       inventorySha256: sha256(canonical(ordered)),
+      identityScheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
+      runtimePayloadSha256: deriveUpdateRuntimePayloadSha256(
+        ordered.map(({ path, size, hash }) => ({
+          path,
+          bytes: size,
+          sha256: hash,
+        })),
+      ),
       executionPins: Object.freeze(executionPins),
     });
   } catch (error) {
@@ -1759,12 +1772,18 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
   }
 
   const packed = receipt.package;
-  exactAggregateReceiptFields(packed, ["filename", "bytes", "sha256", "file_count"], code);
+  exactAggregateReceiptFields(packed, [
+    "filename", "bytes", "sha256", "identity_scheme",
+    "runtime_payload_sha256", "file_count",
+  ], code);
   const expectedFilename = `${source.package_name}-${source.package_version}.tgz`;
   if (packed.filename !== expectedFilename || basename(request.packagePath) !== expectedFilename ||
       !Number.isSafeInteger(packed.bytes) || packed.bytes < 1 ||
       !Number.isSafeInteger(packed.file_count) || packed.file_count < 1 ||
       !SHA256_RE.test(String(packed.sha256 || "")) ||
+      !SHA256_RE.test(String(packed.runtime_payload_sha256 || "")) ||
+      packed.identity_scheme !== packageIdentity.identityScheme ||
+      packed.runtime_payload_sha256 !== packageIdentity.runtimePayloadSha256 ||
       packageIdentity.name !== source.package_name ||
       packageIdentity.version !== source.package_version ||
       packageIdentity.fileCount !== packed.file_count ||
