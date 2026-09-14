@@ -3,8 +3,8 @@
  *
  * This module deliberately has no manifest discovery, credential, network,
  * browser, support-journal, package-install, workspace, or skill dependency.
- * The eventual CLI adapter must resolve those concerns outside this module and
- * must supply the independently reviewed runtime file allowlist and digest.
+ * The CLI adapter owns the one authenticated read-only request and gives this
+ * module only its in-memory response. Raw rows are never copied into a receipt.
  */
 import { createHash } from "node:crypto";
 import {
@@ -59,6 +59,20 @@ export const UPDATE_PREVIEW_FAILURE_CODES = Object.freeze([
   "UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED",
   "UPDATE_PREVIEW_RUNTIME_PAYLOAD_MISMATCH",
   "UPDATE_PREVIEW_DOWNGRADE_REFUSED",
+  "UPDATE_PREVIEW_BRAIN_DOMAIN_INVALID",
+  "UPDATE_PREVIEW_ADMIN_KEY_UNAVAILABLE",
+  "UPDATE_PREVIEW_READINESS_UNAVAILABLE",
+  "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID",
+  "UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID",
+  "UPDATE_PREVIEW_QUEUE_TIMESTAMP_INVALID",
+  "UPDATE_PREVIEW_VECTOR_READINESS_INVALID",
+  "UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH",
+  "UPDATE_PREVIEW_DEPLOYED_BACKEND_MISMATCH",
+  "UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED",
+  "UPDATE_PREVIEW_PROJECTION_EXCESS",
+  "UPDATE_PREVIEW_PROJECTION_WORK_INSUFFICIENT",
+  "UPDATE_PREVIEW_PROJECTION_WORK_MISSING",
+  "UPDATE_PREVIEW_PROJECTION_VISIBILITY_PENDING",
   "UPDATE_PREVIEW_PLAN_INVALID",
 ]);
 
@@ -87,16 +101,21 @@ const ZERO_EFFECTS = Object.freeze({
   manifest_writes: 0,
   credential_reads: 0,
   network_requests: 0,
+  brain_writes: 0,
+  cloudflare_control_requests: 0,
+  deployments: 0,
   browser_launches: 0,
   package_installs: 0,
+  support_journal_writes: 0,
   workspace_writes: 0,
   skill_writes: 0,
 });
 const PROOF_BOUNDARY = Object.freeze({
   public_release_authenticity: "unproven",
-  credential_custody: "not_accessed",
+  credential_custody: "durable_admin_key_read",
+  brain_domain_identity: "pinned_manifest_assertion",
   cloudflare_account_ownership: "not_accessed",
-  deployed_install_state: "not_accessed",
+  deployed_install_state: "authenticated_aggregate_observed",
   schema_compatibility: "not_accessed",
   restore_bookmark: "not_created",
   deployment: "not_started",
@@ -1107,6 +1126,246 @@ function compareVersion(left, right) {
   return 0;
 }
 
+/** Refuse a locally provable downgrade before any private read is reachable. */
+export function updatePreviewVersionRelation(recordedVersion, candidateVersion) {
+  parseVersion(recordedVersion);
+  parseVersion(candidateVersion);
+  const comparison = compareVersion(recordedVersion, candidateVersion);
+  if (comparison > 0) refuse("UPDATE_PREVIEW_DOWNGRADE_REFUSED");
+  return comparison < 0 ? "upgrade" : "same";
+}
+
+const READINESS_REASONS = new Set([
+  "accepted_mutation_needs_confirmation",
+  "accepted_mutation_processing",
+  "projection_bootstrap_required",
+  "projection_unverified",
+  "vector_count_mismatch",
+  "vector_work_queued",
+]);
+
+function readinessReasonIsCoherent({
+  ready,
+  reason,
+  expected,
+  actual,
+  pending,
+  submitted,
+}) {
+  const countsMatch = actual === expected;
+  if (ready) return pending === 0 && countsMatch && reason === null;
+  if (typeof reason !== "string" || !READINESS_REASONS.has(reason)) return false;
+  // The Worker reports bootstrap state before queue/fence state, so this reason
+  // is compatible with either an empty or populated queue.
+  if (reason === "projection_bootstrap_required") return true;
+  if (pending > 0) {
+    if (submitted === 0) return reason === "vector_work_queued";
+    return reason === "accepted_mutation_processing" ||
+      reason === "accepted_mutation_needs_confirmation";
+  }
+  // With no durable outbox row, only an outstanding provider fence, a count
+  // mismatch, or the final exactness marker can explain non-readiness.
+  if (reason === "accepted_mutation_processing") return true;
+  if (!countsMatch) return reason === "vector_count_mismatch";
+  return reason === "projection_unverified";
+}
+
+/**
+ * Validate the aggregate projection fields carried together by the existing
+ * authenticated /api/admin/brain/documents response. The route also contains
+ * source rows; this function deliberately neither validates nor returns them.
+ *
+ * Health and update preview share this validator so a queue cannot be accepted
+ * under one command and rejected under the other because their count rules
+ * drifted apart.
+ */
+export function validateVectorProjectionAggregateReceipt(inventory, options = {}) {
+  const expectedVersion = options?.expectedVersion;
+  const expectedBackend = options?.expectedBackend ?? "d1";
+  const expectedDrainMode = options?.expectedDrainMode ?? "active";
+  if (!inventory || typeof inventory !== "object" || Array.isArray(inventory) ||
+      typeof expectedVersion !== "string" || !VERSION_RE.test(expectedVersion) ||
+      expectedBackend !== "d1" ||
+      !["active", "paused-for-upgrade"].includes(expectedDrainMode)) {
+    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+  }
+
+  if (typeof inventory.version !== "string" || !VERSION_RE.test(inventory.version)) {
+    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+  }
+  if (inventory.version !== expectedVersion) {
+    refuse("UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH");
+  }
+
+  if (inventory.backend !== expectedBackend) {
+    refuse("UPDATE_PREVIEW_DEPLOYED_BACKEND_MISMATCH");
+  }
+  if (!["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode)) {
+    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+  }
+  if (inventory.vector_drain_mode !== expectedDrainMode) {
+    if (inventory.vector_drain_mode === "paused-for-upgrade" && expectedDrainMode === "active") {
+      refuse("UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED");
+    }
+    refuse("UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH");
+  }
+
+  const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
+  const backlog = inventory.vector_backlog;
+  if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
+      Object.hasOwn(backlog, "error") || !validCount(backlog.pending) ||
+      !validCount(backlog.upserts) || !validCount(backlog.deletes) ||
+      !validCount(backlog.submitted) || backlog.upserts + backlog.deletes !== backlog.pending ||
+      backlog.submitted > backlog.pending) {
+    refuse("UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID");
+  }
+  const oldestQueuedAt = backlog.oldest_queued_at;
+  if (!Object.hasOwn(backlog, "oldest_queued_at") ||
+      (backlog.pending > 0 && !validCount(oldestQueuedAt)) ||
+      (backlog.pending === 0 && oldestQueuedAt !== null)) {
+    refuse("UPDATE_PREVIEW_QUEUE_TIMESTAMP_INVALID");
+  }
+
+  const readiness = inventory.vector_readiness;
+  if (!readiness || typeof readiness !== "object" || Array.isArray(readiness) ||
+      Object.hasOwn(readiness, "error") || typeof readiness.ready !== "boolean" ||
+      !validCount(readiness.expected_vectors) || !validCount(readiness.actual_vectors) ||
+      !validCount(readiness.pending) || !validCount(readiness.submitted) ||
+      readiness.pending !== backlog.pending || readiness.submitted !== backlog.submitted ||
+      readiness.submitted > readiness.pending) {
+    refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
+  }
+  const readinessOldestQueuedAt = readiness.oldest_queued_at;
+  if (!Object.hasOwn(readiness, "oldest_queued_at") ||
+      readinessOldestQueuedAt !== oldestQueuedAt) {
+    refuse("UPDATE_PREVIEW_QUEUE_TIMESTAMP_INVALID");
+  }
+  if (!readinessReasonIsCoherent({
+    ready: readiness.ready,
+    reason: readiness.reason,
+    expected: readiness.expected_vectors,
+    actual: readiness.actual_vectors,
+    pending: readiness.pending,
+    submitted: readiness.submitted,
+  })) {
+    refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
+  }
+
+  return immutable({
+    worker_version: inventory.version,
+    backend: expectedBackend,
+    vector_drain_mode: inventory.vector_drain_mode,
+    expected_vectors: readiness.expected_vectors,
+    actual_vectors: readiness.actual_vectors,
+    queue: {
+      pending: backlog.pending,
+      upserts: backlog.upserts,
+      deletes: backlog.deletes,
+      submitted: backlog.submitted,
+      oldest_queued_at: backlog.pending > 0 ? oldestQueuedAt : null,
+    },
+    query_ready: readiness.ready,
+    readiness_reason: readiness.reason,
+  });
+}
+
+function checkedProjectionProof(value) {
+  if (!exactKeys(value, [
+    "worker_version", "backend", "vector_drain_mode", "expected_vectors",
+    "actual_vectors", "queue", "query_ready", "readiness_reason", "verdict",
+  ]) || typeof value.worker_version !== "string" || !VERSION_RE.test(value.worker_version) ||
+      value.backend !== "d1" || value.vector_drain_mode !== "active" ||
+      typeof value.query_ready !== "boolean" ||
+      !exactKeys(value.queue, [
+        "pending", "upserts", "deletes", "submitted", "oldest_queued_at",
+      ])) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  for (const count of [
+    value.expected_vectors, value.actual_vectors, value.queue.pending,
+    value.queue.upserts, value.queue.deletes, value.queue.submitted,
+  ]) {
+    safeInteger(count, 0, Number.MAX_SAFE_INTEGER, "UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  const pending = value.queue.pending;
+  if (value.queue.upserts + value.queue.deletes !== pending ||
+      value.queue.submitted > pending ||
+      (pending > 0 && (!Number.isSafeInteger(value.queue.oldest_queued_at) ||
+        value.queue.oldest_queued_at < 0)) ||
+      (pending === 0 && value.queue.oldest_queued_at !== null)) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  const relation = value.actual_vectors < value.expected_vectors
+    ? "short"
+    : value.actual_vectors === value.expected_vectors ? "exact" : "excess";
+  const deficit = relation === "short"
+    ? value.expected_vectors - value.actual_vectors
+    : 0;
+  const reasonIsQueued = [
+    "accepted_mutation_needs_confirmation",
+    "accepted_mutation_processing",
+    "projection_bootstrap_required",
+    "vector_work_queued",
+  ].includes(value.readiness_reason);
+  const reasonIsCoherent = readinessReasonIsCoherent({
+    ready: value.query_ready,
+    reason: value.readiness_reason,
+    expected: value.expected_vectors,
+    actual: value.actual_vectors,
+    pending,
+    submitted: value.queue.submitted,
+  });
+  const verdictMatches =
+    reasonIsCoherent &&
+    ((value.verdict === "ready" && pending === 0 && relation === "exact" &&
+      value.query_ready === true && value.readiness_reason === null) ||
+    (value.verdict === "recoverable_queued_work" && pending > 0 && relation === "short" &&
+      value.queue.upserts >= deficit && value.query_ready === false && reasonIsQueued) ||
+    (value.verdict === "projection_work_insufficient" && pending > 0 && relation === "short" &&
+      value.queue.upserts < deficit && value.query_ready === false && reasonIsQueued) ||
+    (value.verdict === "queued_work_present" && pending > 0 && relation === "exact" &&
+      value.query_ready === false && reasonIsQueued) ||
+    (value.verdict === "projection_work_missing" && pending === 0 && relation === "short" &&
+      value.query_ready === false && ["vector_count_mismatch", "projection_bootstrap_required"]
+        .includes(value.readiness_reason)) ||
+    (value.verdict === "projection_visibility_pending" && pending === 0 && relation === "short" &&
+      value.query_ready === false && value.readiness_reason === "accepted_mutation_processing") ||
+    (value.verdict === "projection_excess" && relation === "excess" &&
+      value.query_ready === false && typeof value.readiness_reason === "string"));
+  if (!verdictMatches) refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  return value;
+}
+
+/**
+ * Convert one coherent private inventory response into the only aggregate
+ * states update preview may expose. A missing or insufficient upsert queue and
+ * a short projection is refused because that work cannot repair the deficit.
+ */
+export function classifyUpdatePreviewProjectionReceipt(inventory, options = {}) {
+  const aggregate = validateVectorProjectionAggregateReceipt(inventory, {
+    expectedVersion: options?.expectedVersion,
+    expectedBackend: options?.expectedBackend ?? "d1",
+    expectedDrainMode: "active",
+  });
+  const shouldBeReady = aggregate.queue.pending === 0 &&
+    aggregate.actual_vectors === aggregate.expected_vectors;
+  if (aggregate.query_ready !== shouldBeReady) {
+    refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
+  }
+  const verdict = aggregate.actual_vectors > aggregate.expected_vectors
+    ? "projection_excess"
+    : aggregate.actual_vectors < aggregate.expected_vectors
+      ? aggregate.queue.pending > 0
+        ? aggregate.queue.upserts >= aggregate.expected_vectors - aggregate.actual_vectors
+          ? "recoverable_queued_work"
+          : "projection_work_insufficient"
+        : aggregate.readiness_reason === "accepted_mutation_processing"
+          ? "projection_visibility_pending"
+          : "projection_work_missing"
+      : aggregate.queue.pending > 0 ? "queued_work_present" : "ready";
+  return checkedProjectionProof(immutable({ ...aggregate, verdict }));
+}
+
 function checkedRuntimeProof(value) {
   if (!exactKeys(value, [
     "schema_version", "identity_scheme", "runtime_payload_sha256", "file_count",
@@ -1123,9 +1382,12 @@ function checkedRuntimeProof(value) {
   return value;
 }
 
-/** Build the closed, aggregate-only local plan that the fingerprint binds. */
+/** Build the closed, aggregate-only plan that binds both local and live proof. */
 export function createUpdatePreviewPlan(options = {}) {
-  const required = ["manifestSha256", "manifestSource", "candidateVersion", "runtimeProof"];
+  const required = [
+    "manifestSha256", "manifestSource", "candidateVersion", "runtimeProof",
+    "deployedProjection",
+  ];
   const allowed = new Set([...required, "recordedVersion"]);
   if (!options || typeof options !== "object" || Array.isArray(options) ||
       required.some((name) => !Object.hasOwn(options, name)) ||
@@ -1138,18 +1400,16 @@ export function createUpdatePreviewPlan(options = {}) {
     recordedVersion = null,
     candidateVersion,
     runtimeProof,
+    deployedProjection,
   } = options;
   safeSha256(manifestSha256, "UPDATE_PREVIEW_PLAN_INVALID");
   if (!MANIFEST_SOURCES.has(manifestSource)) refuse("UPDATE_PREVIEW_PLAN_INVALID");
-  parseVersion(candidateVersion);
-  if (recordedVersion !== null) parseVersion(recordedVersion);
-  const relation = recordedVersion === null
-    ? "unrecorded"
-    : compareVersion(recordedVersion, candidateVersion) < 0
-      ? "upgrade"
-      : compareVersion(recordedVersion, candidateVersion) === 0 ? "same" : "downgrade";
-  if (relation === "downgrade") refuse("UPDATE_PREVIEW_DOWNGRADE_REFUSED");
+  const relation = updatePreviewVersionRelation(recordedVersion, candidateVersion);
   const runtime = checkedRuntimeProof(runtimeProof);
+  const projection = checkedProjectionProof(deployedProjection);
+  if (projection.worker_version !== recordedVersion) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
   return immutable({
     schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
     operation: "brain.update",
@@ -1166,6 +1426,7 @@ export function createUpdatePreviewPlan(options = {}) {
       file_count: runtime.file_count,
       total_bytes: runtime.total_bytes,
     },
+    deployed_projection: projection,
     version_relation: relation,
     live_verification_required: true,
   });
@@ -1173,8 +1434,8 @@ export function createUpdatePreviewPlan(options = {}) {
 
 function checkedPlan(plan) {
   if (!exactKeys(plan, [
-    "schema_version", "operation", "manifest", "candidate", "version_relation",
-    "live_verification_required",
+    "schema_version", "operation", "manifest", "candidate", "deployed_projection",
+    "version_relation", "live_verification_required",
   ]) || plan.schema_version !== UPDATE_PREVIEW_SCHEMA_VERSION || plan.operation !== "brain.update" ||
       plan.live_verification_required !== true ||
       !exactKeys(plan.manifest, ["source", "sha256", "recorded_version"]) ||
@@ -1198,6 +1459,7 @@ function checkedPlan(plan) {
       expected_runtime_sha256: plan.candidate.expected_runtime_sha256,
       verified_passes: 2,
     },
+    deployedProjection: plan.deployed_projection,
   });
   if (canonical(rebuilt) !== canonical(plan)) refuse("UPDATE_PREVIEW_PLAN_INVALID");
   return rebuilt;
@@ -1209,23 +1471,79 @@ export function updatePreviewPlanFingerprint(plan) {
   return createHash("sha256").update(FINGERPRINT_DOMAIN).update(canonical(checked)).digest("hex");
 }
 
-/** Return a success receipt whose wording cannot imply live update readiness. */
-export function createUpdatePreviewSuccessReceipt(plan) {
+function receiptEffects(observed = {}, { requireLiveRead = false } = {}) {
+  const credentialReads = observed?.credential_reads;
+  const networkRequests = observed?.network_requests;
+  if (![credentialReads, networkRequests].every((value) =>
+    Number.isSafeInteger(value) && value >= 0 && value <= 1) ||
+      (requireLiveRead && (credentialReads !== 1 || networkRequests !== 1))) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  return { ...ZERO_EFFECTS, credential_reads: credentialReads, network_requests: networkRequests };
+}
+
+/** Return a non-authorizing receipt that includes one live aggregate proof. */
+export function createUpdatePreviewSuccessReceipt(plan, observedEffects) {
   const checked = checkedPlan(plan);
+  if ([
+    "projection_work_insufficient", "projection_work_missing",
+    "projection_visibility_pending", "projection_excess",
+  ]
+      .includes(checked.deployed_projection.verdict)) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
   return immutable({
     schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
     operation: UPDATE_PREVIEW_OPERATION,
-    status: "local_preflight_passed",
+    status: "pre_update_check_complete",
     read_only: true,
+    authorizes_update: false,
+    projection_ready: checked.deployed_projection.verdict === "ready",
     plan: checked,
     plan_fingerprint: updatePreviewPlanFingerprint(checked),
     proof_boundary: { ...PROOF_BOUNDARY },
-    effects: { ...ZERO_EFFECTS },
+    effects: receiptEffects(observedEffects, { requireLiveRead: true }),
+  });
+}
+
+/**
+ * Preserve a trustworthy aggregate refusal under the same plan fingerprint as
+ * a successful check. The queued count is evidence, not a detail that can be
+ * replaced while retaining the receipt identity.
+ */
+export function createUpdatePreviewProjectionFailureReceipt(plan, observedEffects) {
+  const checked = checkedPlan(plan);
+  const verdict = checked.deployed_projection.verdict;
+  const errorCode = verdict === "projection_work_insufficient"
+    ? "UPDATE_PREVIEW_PROJECTION_WORK_INSUFFICIENT"
+    : verdict === "projection_work_missing"
+      ? "UPDATE_PREVIEW_PROJECTION_WORK_MISSING"
+    : verdict === "projection_visibility_pending"
+      ? "UPDATE_PREVIEW_PROJECTION_VISIBILITY_PENDING"
+      : verdict === "projection_excess"
+        ? "UPDATE_PREVIEW_PROJECTION_EXCESS"
+        : null;
+  if (!errorCode) refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  return immutable({
+    schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+    operation: UPDATE_PREVIEW_OPERATION,
+    status: "failed",
+    read_only: true,
+    authorizes_update: false,
+    projection_ready: false,
+    error_code: errorCode,
+    plan: checked,
+    plan_fingerprint: updatePreviewPlanFingerprint(checked),
+    proof_boundary: { ...PROOF_BOUNDARY },
+    effects: receiptEffects(observedEffects, { requireLiveRead: true }),
   });
 }
 
 /** Collapse every failure to a closed code; raw Error messages are never copied. */
-export function createUpdatePreviewFailureReceipt(errorOrCode) {
+export function createUpdatePreviewFailureReceipt(errorOrCode, observedEffects = {
+  credential_reads: 0,
+  network_requests: 0,
+}) {
   const requested = typeof errorOrCode === "string"
     ? errorOrCode
     : errorOrCode instanceof UpdatePreviewError ? errorOrCode.code : null;
@@ -1235,7 +1553,9 @@ export function createUpdatePreviewFailureReceipt(errorOrCode) {
     operation: UPDATE_PREVIEW_OPERATION,
     status: "failed",
     read_only: true,
+    authorizes_update: false,
+    projection_ready: false,
     error_code: errorCode,
-    effects: { ...ZERO_EFFECTS },
+    effects: receiptEffects(observedEffects),
   });
 }

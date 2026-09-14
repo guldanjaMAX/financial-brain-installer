@@ -10,6 +10,16 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **The held update preview now checks whether vector work actually exists.**
+  After it verifies the exact candidate package and saved manifest locally, it
+  makes one private read from the Brain and reports only aggregate vector and
+  queue state. A short projection is recoverable only when queued upserts cover
+  the full numeric deficit, and remains non-ready. Missing or insufficient
+  queued upserts stop instead of sending the owner into an update that cannot
+  help it. The preview changes nothing and never authorizes an update. This
+  behavior has local fixture coverage only; it has not passed immutable package
+  or supervised Brain field proof.
+
 - **Every disposable provider-changing phase now remains bound to K0.** A1
   through A4 require the exact campaign account and K0 receipt, then revalidate
   all four campaign Keychain values at each provider boundary.

@@ -7,15 +7,19 @@ import { test } from "node:test";
 import {
   classifyCliCredentialBoundary,
   cmdUpdatePreview,
+  readUpdatePreviewAggregateResponse,
   runCliCommandWithCredentialBoundary,
+  supportSourceForCommand,
   validateLocalUpdatePreviewManifest,
+  updatePreviewDocumentsUrl,
 } from "../brain.mjs";
 import * as previewCore from "../operations/update-preview.mjs";
 
 const SHA = "a".repeat(64);
 const OTHER_SHA = "b".repeat(64);
+const MANIFEST_PATH = resolve("test-fixture", "brain.manifest.json");
 const MANIFEST = Object.freeze({
-  brain: Object.freeze({ version: "0.4.7" }),
+  brain: Object.freeze({ version: "0.4.7", domain: "brain.example.invalid" }),
   infrastructure: Object.freeze({
     cloudflare: Object.freeze({
       account_id: "1".repeat(32),
@@ -36,6 +40,106 @@ function runtimeProof(runtime = SHA) {
     expected_runtime_sha256: SHA,
     verified_passes: 2,
   });
+}
+
+function readinessInventory(overrides = {}) {
+  const expected = overrides.expected ?? 10;
+  const actual = overrides.actual ?? expected;
+  const pending = overrides.pending ?? 0;
+  const ready = overrides.ready ?? (pending === 0 && actual === expected);
+  return {
+    version: overrides.version ?? "0.4.7",
+    backend: overrides.backend ?? "d1",
+    vector_drain_mode: overrides.drainMode ?? "active",
+    rows: [{ source_type: "private-source-must-not-escape" }],
+    vector_backlog: {
+      pending,
+      upserts: overrides.upserts ?? pending,
+      deletes: overrides.deletes ?? 0,
+      submitted: overrides.submitted ?? 0,
+      oldest_queued_at: pending > 0 ? 1_750_000_000_000 : null,
+    },
+    vector_readiness: {
+      ready,
+      reason: Object.hasOwn(overrides, "reason")
+        ? overrides.reason
+        : ready ? null : pending > 0 ? "vector_work_queued" : "vector_count_mismatch",
+      expected_vectors: expected,
+      actual_vectors: actual,
+      pending,
+      submitted: overrides.submitted ?? 0,
+      oldest_queued_at: pending > 0 ? 1_750_000_000_000 : null,
+    },
+  };
+}
+
+function streamedResponse(body, {
+  status = 200,
+  contentLength,
+  onRead = () => {},
+  onCancel = () => {},
+} = {}) {
+  const bytes = body instanceof Uint8Array ? body : Buffer.from(String(body), "utf8");
+  let sent = false;
+  const headers = new Headers();
+  if (contentLength !== undefined) headers.set("content-length", String(contentLength));
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (sent) return { done: true, value: undefined };
+            sent = true;
+            onRead();
+            return { done: false, value: bytes };
+          },
+          async cancel() { onCancel(); },
+          releaseLock() {},
+        };
+      },
+    },
+  };
+}
+
+function inventoryResponse(inventory, options = {}) {
+  return streamedResponse(JSON.stringify(inventory), options);
+}
+
+function previewOptions(overrides = {}) {
+  const raw = JSON.stringify(overrides.manifest ?? MANIFEST);
+  const manifest = overrides.manifest ?? MANIFEST;
+  return {
+    previewLib: previewCore,
+    runtimeRoot: "/reviewed-runtime",
+    runtimeAllowlist: ["brain.mjs"],
+    verifyRuntime: overrides.verifyRuntime ?? (() => runtimeProof()),
+    pinRuntimePackage: overrides.pinRuntimePackage ?? (() => ({
+      manifest: { name: "brain-installer", version: "0.4.8" },
+    })),
+    discoverInstalledManifest: overrides.discoverInstalledManifest ?? (() => ({
+      path: MANIFEST_PATH,
+      source: "explicit",
+    })),
+    pinManifest: overrides.pinManifest ?? (() => ({
+      target: MANIFEST_PATH,
+      raw,
+      fingerprint: OTHER_SHA,
+      manifest,
+    })),
+    validateManifest: overrides.validateManifest ?? (() => ({
+      recordedVersion: manifest.brain.version,
+      credential_reference: "present",
+    })),
+    revalidateManifest: overrides.revalidateManifest ?? (() => {}),
+    revalidateRuntimePackage: overrides.revalidateRuntimePackage ?? (() => {}),
+    resolveAdminKey: overrides.resolveAdminKey ?? (() => "unit-test-admin-key"),
+    request: overrides.request ?? (async () =>
+      inventoryResponse(overrides.inventory ?? readinessInventory())),
+    write: overrides.write ?? (() => {}),
+  };
 }
 
 test("credential boundary classifies only the exact historical update grammar as live", () => {
@@ -79,26 +183,99 @@ test("credential boundary classifies only the exact historical update grammar as
 test("local update manifest validation inspects references without reading a credential", () => {
   assert.deepEqual(validateLocalUpdatePreviewManifest(MANIFEST), {
     recordedVersion: "0.4.7",
-    credential_reference: "present",
+    credential_reference: "adjacent_protected_file",
   });
   const legacy = structuredClone(MANIFEST);
   delete legacy.infrastructure.cloudflare.auth_profile;
-  legacy.brain.version = null;
   assert.deepEqual(validateLocalUpdatePreviewManifest(legacy), {
-    recordedVersion: null,
-    credential_reference: "legacy_absent",
+    recordedVersion: "0.4.7",
+    credential_reference: "adjacent_protected_file",
   });
+  const keychain = structuredClone(MANIFEST);
+  keychain.operations = {
+    admin_key_secret: "keychain://fixture-brain-admin/fixture-owner",
+  };
+  assert.deepEqual(validateLocalUpdatePreviewManifest(keychain, { platform: "darwin" }), {
+    recordedVersion: "0.4.7",
+    credential_reference: "keychain",
+  });
+  assert.throws(() => validateLocalUpdatePreviewManifest(keychain, { platform: "win32" }));
+  keychain.operations.admin_key_secret = "keychain://missing-account";
+  assert.throws(() => validateLocalUpdatePreviewManifest(keychain, { platform: "darwin" }));
+  keychain.operations.admin_key_secret = ["keychain://fixture-brain-admin/fixture-owner"];
+  assert.throws(() => validateLocalUpdatePreviewManifest(keychain, { platform: "darwin" }));
   for (const mutate of [
     (value) => { value.infrastructure.cloudflare.account_id = "placeholder"; },
+    (value) => { value.infrastructure.cloudflare.account_id = ["1".repeat(32)]; },
     (value) => { value.infrastructure.cloudflare.storage = "supabase"; },
     (value) => { value.infrastructure.cloudflare.d1_database_id = "filled_in_by_provisioner"; },
+    (value) => {
+      value.infrastructure.cloudflare.d1_database_id = ["11111111-2222-4333-8444-555555555555"];
+    },
     (value) => { value.infrastructure.cloudflare.auth_profile = "default"; },
     (value) => { value.brain.version = "04.8.0"; },
+    (value) => { value.brain.version = null; },
   ]) {
     const invalid = structuredClone(MANIFEST);
     mutate(invalid);
     assert.throws(() => validateLocalUpdatePreviewManifest(invalid));
   }
+});
+
+test("update preview derives only the permanent HTTPS documents endpoint", () => {
+  assert.equal(
+    updatePreviewDocumentsUrl(MANIFEST),
+    "https://brain.example.invalid/api/admin/brain/documents",
+  );
+  for (const domain of [
+    "", " brain.example.invalid ", "http://brain.example.invalid",
+    "https://brain.example.invalid",
+    "https://owner@example.invalid",
+    "https://brain.example.invalid:8443", "https://brain.example.invalid/private",
+    "127.0.0.1", "brain.localhost", "brain.local", "metadata.google.internal",
+    "brain.home.arpa", `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(62)}.com`,
+  ]) {
+    const invalid = structuredClone(MANIFEST);
+    invalid.brain.domain = domain;
+    assert.throws(() => updatePreviewDocumentsUrl(invalid));
+  }
+  for (const domain of [["brain.example.invalid"], { toString: () => "brain.example.invalid" }]) {
+    const invalid = structuredClone(MANIFEST);
+    invalid.brain.domain = domain;
+    assert.throws(() => updatePreviewDocumentsUrl(invalid));
+  }
+});
+
+test("update preview bounds the streamed response even when Content-Length is absent or false", async () => {
+  const parsed = await readUpdatePreviewAggregateResponse(
+    streamedResponse('{"ready":true}'),
+    { maxBytes: 32 },
+  );
+  assert.deepEqual(parsed, { ready: true });
+
+  let cancelled = false;
+  await assert.rejects(
+    readUpdatePreviewAggregateResponse(
+      streamedResponse("x".repeat(33), {
+        contentLength: 2,
+        onCancel() { cancelled = true; },
+      }),
+      { maxBytes: 32 },
+    ),
+  );
+  assert.equal(cancelled, true);
+
+  let bodyOpened = false;
+  const oversizedHeader = streamedResponse("{}", { contentLength: 33 });
+  const originalGetReader = oversizedHeader.body.getReader;
+  oversizedHeader.body.getReader = () => {
+    bodyOpened = true;
+    return originalGetReader();
+  };
+  await assert.rejects(
+    readUpdatePreviewAggregateResponse(oversizedHeader, { maxBytes: 32 }),
+  );
+  assert.equal(bodyOpened, false);
 });
 
 test("update preview verifies runtime before private discovery and closes both identities", async () => {
@@ -128,12 +305,17 @@ test("update preview verifies runtime before private discovery and closes both i
     discoverInstalledManifest(path) {
       order.push("discover");
       assert.equal(path, "brain.manifest.json");
-      return { path: "/private/brain.manifest.json", source: "explicit" };
+      return { path: MANIFEST_PATH, source: "explicit" };
     },
     pinManifest(path) {
       order.push("pin");
-      assert.equal(path, "/private/brain.manifest.json");
-      return { fingerprint: OTHER_SHA, manifest: MANIFEST };
+      assert.equal(path, MANIFEST_PATH);
+      return {
+        target: MANIFEST_PATH,
+        raw: JSON.stringify(MANIFEST),
+        fingerprint: OTHER_SHA,
+        manifest: MANIFEST,
+      };
     },
     validateManifest(manifest) {
       order.push("manifest");
@@ -145,6 +327,23 @@ test("update preview verifies runtime before private discovery and closes both i
     },
     revalidateRuntimePackage(_pin, stage) {
       order.push(`revalidate-runtime:${stage}`);
+    },
+    resolveAdminKey(path, options) {
+      order.push("credential");
+      assert.equal(path, MANIFEST_PATH);
+      assert.equal(options.ignoreEnvironment, true);
+      assert.equal(options.read(path), JSON.stringify(MANIFEST));
+      return "unit-test-admin-key";
+    },
+    async request(url, init) {
+      order.push("request");
+      assert.equal(url, "https://brain.example.invalid/api/admin/brain/documents");
+      assert.equal(init.method, "GET");
+      assert.equal(init.headers["X-Admin-Key"], "unit-test-admin-key");
+      assert.equal(Object.hasOwn(init, "body"), false);
+      return inventoryResponse(readinessInventory(), {
+        onRead() { order.push("response"); },
+      });
     },
     write(value) {
       order.push("write");
@@ -160,14 +359,36 @@ test("update preview verifies runtime before private discovery and closes both i
     "revalidate:local update preview",
     "runtime",
     "revalidate-runtime:update runtime preview",
+    "revalidate:update preview credential boundary",
+    "credential",
+    "revalidate-runtime:update preview live request",
+    "revalidate:update preview live request",
+    "request",
+    "response",
+    "runtime",
+    "revalidate-runtime:update runtime live receipt",
+    "revalidate:update preview live receipt",
     "revalidate-runtime:update runtime receipt",
     "revalidate:update preview receipt",
+    "runtime",
     "write",
   ]);
-  assert.equal(receipt.status, "local_preflight_passed");
+  assert.equal(receipt.status, "pre_update_check_complete");
   assert.equal(receipt.read_only, true);
+  assert.equal(receipt.authorizes_update, false);
+  assert.equal(receipt.projection_ready, true);
   assert.equal(receipt.plan.manifest.sha256, OTHER_SHA);
   assert.equal(receipt.plan.candidate.expected_runtime_sha256, SHA);
+  assert.equal(receipt.plan.deployed_projection.verdict, "ready");
+  assert.equal(receipt.plan.deployed_projection.queue.pending, 0);
+  assert.equal(receipt.effects.credential_reads, 1);
+  assert.equal(receipt.effects.network_requests, 1);
+  assert.equal(receipt.effects.brain_writes, 0);
+  assert.equal(receipt.effects.cloudflare_control_requests, 0);
+  assert.equal(receipt.effects.deployments, 0);
+  assert.equal(receipt.effects.support_journal_writes, 0);
+  assert.equal(supportSourceForCommand("update-preview"), "brain-data-plane");
+  assert.doesNotMatch(output[0], /private-source-must-not-escape|unit-test-admin-key/u);
   assert.deepEqual(JSON.parse(output[0]), receipt);
 });
 
@@ -199,15 +420,395 @@ test("runtime mismatch refuses before manifest discovery and emits no private de
   assert.equal(discovered, false);
 });
 
+test("a locally provable downgrade refuses before credential and network access", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.brain.version = "0.4.9";
+  let credentialReads = 0;
+  let requests = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      manifest,
+      resolveAdminKey() { credentialReads += 1; },
+      async request() { requests += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_DOWNGRADE_REFUSED");
+      assert.equal(error.payload?.effects.credential_reads, 0);
+      assert.equal(error.payload?.effects.network_requests, 0);
+      return true;
+    },
+  );
+  assert.equal(credentialReads, 0);
+  assert.equal(requests, 0);
+});
+
+test("an overlong local version refuses before credential and network access", async () => {
+  let credentialReads = 0;
+  let requests = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      pinRuntimePackage: () => ({
+        manifest: { name: "brain-installer", version: `${"1".repeat(129)}.0.0` },
+      }),
+      resolveAdminKey() { credentialReads += 1; },
+      async request() { requests += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_PLAN_INVALID");
+      assert.equal(error.payload?.effects.credential_reads, 0);
+      assert.equal(error.payload?.effects.network_requests, 0);
+      return true;
+    },
+  );
+  assert.equal(credentialReads, 0);
+  assert.equal(requests, 0);
+});
+
+test("an invalid durable-key locator refuses before the credential boundary", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.operations = { admin_key_secret: "keychain://missing-account" };
+  let credentialReads = 0;
+  let requests = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      manifest,
+      validateManifest: (value) => validateLocalUpdatePreviewManifest(value, {
+        platform: "darwin",
+      }),
+      resolveAdminKey() { credentialReads += 1; },
+      async request() { requests += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_FAILED");
+      assert.equal(error.payload?.effects.credential_reads, 0);
+      assert.equal(error.payload?.effects.network_requests, 0);
+      assert.equal(error.payload?.authorizes_update, false);
+      return true;
+    },
+  );
+  assert.equal(credentialReads, 0);
+  assert.equal(requests, 0);
+});
+
+test("unsafe or absent Brain domain refuses before credential and network access", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.brain.domain = "http://private-owner.example.invalid/path";
+  let credentialReads = 0;
+  let requests = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      manifest,
+      resolveAdminKey() { credentialReads += 1; },
+      async request() { requests += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_BRAIN_DOMAIN_INVALID");
+      assert.equal(error.payload?.effects.credential_reads, 0);
+      assert.equal(error.payload?.effects.network_requests, 0);
+      assert.doesNotMatch(error.message, /private-owner|example\.invalid/u);
+      return true;
+    },
+  );
+  assert.equal(credentialReads, 0);
+  assert.equal(requests, 0);
+});
+
+test("missing durable admin key records one credential read and no request", async () => {
+  let requests = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      resolveAdminKey(_path, options) {
+        assert.equal(options.ignoreEnvironment, true);
+        return undefined;
+      },
+      async request() { requests += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_ADMIN_KEY_UNAVAILABLE");
+      assert.equal(error.payload?.effects.credential_reads, 1);
+      assert.equal(error.payload?.effects.network_requests, 0);
+      assert.equal(error.payload?.effects.brain_writes, 0);
+      return true;
+    },
+  );
+  assert.equal(requests, 0);
+});
+
+test("manifest drift after credential lookup stops before the live request", async () => {
+  let requests = 0;
+  let validations = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      revalidateManifest() {
+        validations += 1;
+        if (validations === 3) throw new Error("private manifest replacement");
+      },
+      async request() { requests += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_FAILED");
+      assert.equal(error.payload?.effects.credential_reads, 1);
+      assert.equal(error.payload?.effects.network_requests, 0);
+      assert.doesNotMatch(error.message, /private manifest replacement/u);
+      return true;
+    },
+  );
+  assert.equal(requests, 0);
+});
+
+test("transport and malformed response failures report the crossed read boundaries", async () => {
+  for (const request of [
+    async () => { throw new Error("private transport and customer hostname"); },
+    async () => streamedResponse("private non-json customer response"),
+  ]) {
+    await assert.rejects(
+      cmdUpdatePreview([
+        "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+      ], previewOptions({ request })),
+      (error) => {
+        assert.equal(error.payload?.effects.credential_reads, 1);
+        assert.equal(error.payload?.effects.network_requests, 1);
+        assert.equal(error.payload?.effects.brain_writes, 0);
+        assert.equal(error.payload?.effects.cloudflare_control_requests, 0);
+        assert.equal(error.payload?.effects.deployments, 0);
+        assert.equal(error.payload?.effects.support_journal_writes, 0);
+        assert.doesNotMatch(error.message, /private|customer hostname|non-json/u);
+        return true;
+      },
+    );
+  }
+});
+
+test("a transport refusal cannot hide runtime, package, or manifest drift in postflight", async () => {
+  const cases = [
+    {
+      expectedCode: "UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED",
+      options: {
+        verifyRuntime: (() => {
+          let checks = 0;
+          return () => runtimeProof(++checks === 3 ? OTHER_SHA : SHA);
+        })(),
+      },
+    },
+    {
+      expectedCode: "UPDATE_PREVIEW_FAILED",
+      options: {
+        revalidateRuntimePackage(_pin, stage) {
+          if (stage === "update runtime live receipt") {
+            throw new Error("private package drift");
+          }
+        },
+      },
+    },
+    {
+      expectedCode: "UPDATE_PREVIEW_FAILED",
+      options: {
+        revalidateManifest(_pin, stage) {
+          if (stage === "update preview live receipt") {
+            throw new Error("private manifest drift");
+          }
+        },
+      },
+    },
+  ];
+  for (const { expectedCode, options } of cases) {
+    await assert.rejects(
+      cmdUpdatePreview([
+        "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+      ], previewOptions({
+        ...options,
+        async request() { throw new Error("private transport detail"); },
+      })),
+      (error) => {
+        assert.equal(error.payload?.error_code, expectedCode);
+        assert.equal(error.payload?.effects.credential_reads, 1);
+        assert.equal(error.payload?.effects.network_requests, 1);
+        assert.doesNotMatch(error.message, /private|package drift|manifest drift|transport detail/u);
+        return true;
+      },
+    );
+  }
+});
+
+test("update preview requires exact HTTP 200 and bounds a false-length body", async () => {
+  for (const [request, expectedCode] of [
+    [async () => inventoryResponse(readinessInventory(), { status: 201 }),
+      "UPDATE_PREVIEW_READINESS_UNAVAILABLE"],
+    [async () => streamedResponse(new Uint8Array((4 * 1024 * 1024) + 1), {
+      contentLength: 2,
+    }), "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID"],
+  ]) {
+    await assert.rejects(
+      cmdUpdatePreview([
+        "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+      ], previewOptions({ request })),
+      (error) => {
+        assert.equal(error.payload?.error_code, expectedCode);
+        assert.equal(error.payload?.effects.credential_reads, 1);
+        assert.equal(error.payload?.effects.network_requests, 1);
+        assert.equal(error.payload?.effects.brain_writes, 0);
+        return true;
+      },
+    );
+  }
+});
+
+test("zero-queue projection shortfall emits a fingerprinted non-authorizing refusal", async () => {
+  let successWrites = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      inventory: readinessInventory({
+        expected: 1_151_274,
+        actual: 62_439,
+        reason: "vector_count_mismatch",
+      }),
+      write() { successWrites += 1; },
+    })),
+    (error) => {
+      const receipt = error.payload;
+      assert.equal(receipt.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_MISSING");
+      assert.equal(receipt.authorizes_update, false);
+      assert.equal(receipt.plan.deployed_projection.queue.pending, 0);
+      assert.equal(receipt.plan.deployed_projection.expected_vectors, 1_151_274);
+      assert.equal(receipt.plan.deployed_projection.actual_vectors, 62_439);
+      assert.match(receipt.plan_fingerprint, /^[a-f0-9]{64}$/u);
+      assert.equal(receipt.effects.credential_reads, 1);
+      assert.equal(receipt.effects.network_requests, 1);
+      assert.doesNotMatch(error.message, /private-source-must-not-escape|unit-test-admin-key/u);
+      return true;
+    },
+  );
+  assert.equal(successWrites, 0);
+});
+
+test("queued shortfall is reported as recoverable work, never as readiness", async () => {
+  let output = "";
+  const receipt = await cmdUpdatePreview([
+    "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+  ], previewOptions({
+    inventory: readinessInventory({ expected: 10, actual: 2, pending: 8 }),
+    write(value) { output = value; },
+  }));
+  assert.equal(receipt.status, "pre_update_check_complete");
+  assert.equal(receipt.authorizes_update, false);
+  assert.equal(receipt.projection_ready, false);
+  assert.equal(receipt.plan.deployed_projection.verdict, "recoverable_queued_work");
+  assert.equal(receipt.plan.deployed_projection.query_ready, false);
+  assert.equal(receipt.plan.deployed_projection.queue.pending, 8);
+  assert.doesNotMatch(output, /private-source-must-not-escape|unit-test-admin-key/u);
+});
+
+test("delete-only and undersized upsert queues emit fingerprinted insufficiency refusals", async () => {
+  for (const queue of [
+    { pending: 8, upserts: 0, deletes: 8 },
+    { pending: 8, upserts: 7, deletes: 1 },
+  ]) {
+    let successWrites = 0;
+    await assert.rejects(
+      cmdUpdatePreview([
+        "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+      ], previewOptions({
+        inventory: readinessInventory({ expected: 10, actual: 2, ...queue }),
+        write() { successWrites += 1; },
+      })),
+      (error) => {
+        const receipt = error.payload;
+        assert.equal(receipt.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_INSUFFICIENT");
+        assert.equal(receipt.authorizes_update, false);
+        assert.equal(receipt.projection_ready, false);
+        assert.equal(receipt.plan.deployed_projection.verdict, "projection_work_insufficient");
+        assert.equal(receipt.plan.deployed_projection.queue.upserts, queue.upserts);
+        assert.match(receipt.plan_fingerprint, /^[a-f0-9]{64}$/u);
+        assert.equal(receipt.effects.credential_reads, 1);
+        assert.equal(receipt.effects.network_requests, 1);
+        return true;
+      },
+    );
+    assert.equal(successWrites, 0);
+  }
+});
+
+test("runtime drift after the live read fails with honest 1/1 effects", async () => {
+  let checks = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      verifyRuntime() {
+        checks += 1;
+        return runtimeProof(checks === 3 ? OTHER_SHA : SHA);
+      },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+      assert.equal(error.payload?.effects.credential_reads, 1);
+      assert.equal(error.payload?.effects.network_requests, 1);
+      return true;
+    },
+  );
+  assert.equal(checks, 3);
+});
+
+test("runtime drift at final receipt construction fails with honest 1/1 effects", async () => {
+  let checks = 0;
+  let successWrites = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      verifyRuntime() {
+        checks += 1;
+        return runtimeProof(checks === 4 ? OTHER_SHA : SHA);
+      },
+      write() { successWrites += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+      assert.equal(error.payload?.effects.credential_reads, 1);
+      assert.equal(error.payload?.effects.network_requests, 1);
+      return true;
+    },
+  );
+  assert.equal(checks, 4);
+  assert.equal(successWrites, 0);
+});
+
 test("the update-preview wrapper never calls the Wrangler-session boundary", async () => {
   let wrapperCalls = 0;
   const result = await runCliCommandWithCredentialBoundary(
     "update-preview",
-    () => "local-only",
+    () => "data-plane-only",
     { withWranglerSession() { wrapperCalls += 1; } },
   );
-  assert.equal(result, "local-only");
+  assert.equal(result, "data-plane-only");
   assert.equal(wrapperCalls, 0);
+});
+
+test("CLI help describes the authenticated aggregate read without claiming local-only access", () => {
+  const result = spawnSync(process.execPath, [resolve("brain.mjs"), "help"], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const previewHelp = result.stdout.slice(result.stdout.indexOf("brain update     [manifest] --preview"));
+  assert.match(previewHelp, /one authenticated aggregate\s+Brain read/u);
+  assert.match(previewHelp, /no control-plane request, write, deploy/u);
+  assert.doesNotMatch(previewHelp.slice(0, 400), /local preflight|no credential,\s+network/u);
 });
 
 test("malformed preview CLI returns one fixed JSON refusal with no support journal", () => {
@@ -230,6 +831,8 @@ test("malformed preview CLI returns one fixed JSON refusal with no support journ
     const receipt = JSON.parse(result.stdout);
     assert.equal(receipt.operation, "brain.update.preview");
     assert.equal(receipt.status, "failed");
+    assert.equal(receipt.authorizes_update, false);
+    assert.equal(receipt.projection_ready, false);
     assert.equal(receipt.effects.credential_reads, 0);
     assert.equal(receipt.effects.network_requests, 0);
     assert.equal(existsSync(join(privateHome, ".brain", "support")), false);

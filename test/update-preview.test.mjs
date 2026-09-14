@@ -24,14 +24,17 @@ import {
   UPDATE_RUNTIME_IDENTITY_SCHEME,
   WINDOWS_NODE_LAUNCHER_TEMPLATE,
   UpdatePreviewError,
+  classifyUpdatePreviewProjectionReceipt,
   createUpdatePreviewFailureReceipt,
   createUpdatePreviewPlan,
+  createUpdatePreviewProjectionFailureReceipt,
   createUpdatePreviewSuccessReceipt,
   deriveUpdateRuntimePayloadSha256,
   expectedWindowsNodeLauncherBytes,
   inventoryUpdateRuntimePayload,
   parseUpdatePreviewArgv,
   updatePreviewPlanFingerprint,
+  validateVectorProjectionAggregateReceipt,
   verifyUpdateRuntimePayload,
 } from "../operations/update-preview.mjs";
 import { inspectNpmArchiveBytes } from "../operations/package-bundle-verifier.mjs";
@@ -220,15 +223,68 @@ function syntheticRuntimeProof({ hash = HASH_A, files = 3, bytes = 42 } = {}) {
   });
 }
 
+function projectionInventory(overrides = {}) {
+  const expected = overrides.expected ?? 10;
+  const actual = overrides.actual ?? expected;
+  const pending = overrides.pending ?? 0;
+  const upserts = overrides.upserts ?? pending;
+  const deletes = overrides.deletes ?? 0;
+  const submitted = overrides.submitted ?? 0;
+  const ready = overrides.ready ?? (pending === 0 && actual === expected);
+  const reason = Object.hasOwn(overrides, "reason")
+    ? overrides.reason
+    : ready ? null : pending > 0 ? "vector_work_queued" : "vector_count_mismatch";
+  return {
+    version: overrides.version ?? "0.4.7",
+    backend: overrides.backend ?? "d1",
+    vector_drain_mode: overrides.drainMode ?? "active",
+    rows: overrides.rows ?? [{ private_source: "must-not-escape" }],
+    vector_backlog: {
+      pending,
+      upserts,
+      deletes,
+      submitted,
+      oldest_queued_at: Object.hasOwn(overrides, "oldestQueuedAt")
+        ? overrides.oldestQueuedAt
+        : pending > 0 ? 1_750_000_000_000 : null,
+    },
+    vector_readiness: {
+      ready,
+      reason,
+      expected_vectors: expected,
+      actual_vectors: actual,
+      pending: overrides.readinessPending ?? pending,
+      submitted: overrides.readinessSubmitted ?? submitted,
+      oldest_queued_at: Object.hasOwn(overrides, "readinessOldestQueuedAt")
+        ? overrides.readinessOldestQueuedAt
+        : Object.hasOwn(overrides, "oldestQueuedAt")
+          ? overrides.oldestQueuedAt
+          : pending > 0 ? 1_750_000_000_000 : null,
+    },
+  };
+}
+
+function syntheticProjection(overrides = {}) {
+  const inventory = projectionInventory(overrides);
+  return classifyUpdatePreviewProjectionReceipt(inventory, {
+    expectedVersion: overrides.expectedVersion ?? inventory.version,
+    expectedBackend: "d1",
+  });
+}
+
 function syntheticPlan(overrides = {}) {
+  const recordedVersion = Object.hasOwn(overrides, "recordedVersion")
+    ? overrides.recordedVersion
+    : "0.4.7";
   return createUpdatePreviewPlan({
     manifestSha256: overrides.manifestSha256 ?? HASH_B,
     manifestSource: overrides.manifestSource ?? "explicit",
-    recordedVersion: Object.hasOwn(overrides, "recordedVersion")
-      ? overrides.recordedVersion
-      : "0.4.7",
+    recordedVersion,
     candidateVersion: overrides.candidateVersion ?? "0.4.8",
     runtimeProof: overrides.runtimeProof ?? syntheticRuntimeProof(),
+    deployedProjection: overrides.deployedProjection ?? syntheticProjection({
+      version: recordedVersion ?? "0.4.7",
+    }),
   });
 }
 
@@ -931,7 +987,118 @@ test("runtime failures never include private paths or contents", (t) => {
   assert.doesNotMatch(visible, /Private Client|account and customer|brain-update-preview/i);
 });
 
-test("preview plan and success receipt are deterministic, closed, and locally scoped", () => {
+test("authenticated projection validation returns only one frozen aggregate cut", () => {
+  const inventory = projectionInventory({
+    rows: [{ source_type: "private-payroll", title: "Private Customer File" }],
+  });
+  const aggregate = validateVectorProjectionAggregateReceipt(inventory, {
+    expectedVersion: "0.4.7",
+    expectedBackend: "d1",
+    expectedDrainMode: "active",
+  });
+  assert.deepEqual(aggregate, {
+    worker_version: "0.4.7",
+    backend: "d1",
+    vector_drain_mode: "active",
+    expected_vectors: 10,
+    actual_vectors: 10,
+    queue: {
+      pending: 0,
+      upserts: 0,
+      deletes: 0,
+      submitted: 0,
+      oldest_queued_at: null,
+    },
+    query_ready: true,
+    readiness_reason: null,
+  });
+  assert.ok(Object.isFrozen(aggregate));
+  assert.ok(Object.isFrozen(aggregate.queue));
+  assert.doesNotMatch(JSON.stringify(aggregate), /private-payroll|Private Customer File/u);
+});
+
+test("projection classifier distinguishes ready, sufficient, insufficient, missing, and excess", () => {
+  const cases = [
+    [{}, "ready"],
+    [{ expected: 10, actual: 2, pending: 8 }, "recoverable_queued_work"],
+    [{ expected: 10, actual: 2, pending: 8, upserts: 0, deletes: 8 },
+      "projection_work_insufficient"],
+    [{ expected: 10, actual: 2, pending: 8, upserts: 7, deletes: 1 },
+      "projection_work_insufficient"],
+    [{ expected: 10, actual: 10, pending: 2 }, "queued_work_present"],
+    [{ expected: 10, actual: 2, pending: 8, reason: "projection_bootstrap_required" },
+      "recoverable_queued_work"],
+    [{ expected: 10, actual: 2, reason: "vector_count_mismatch" },
+      "projection_work_missing"],
+    [{ expected: 10, actual: 2, reason: "projection_bootstrap_required" },
+      "projection_work_missing"],
+    [{ expected: 10, actual: 2, reason: "accepted_mutation_processing" },
+      "projection_visibility_pending"],
+    [{ expected: 10, actual: 11 }, "projection_excess"],
+    [{ expected: 10, actual: 11, pending: 1, upserts: 0, deletes: 1 },
+      "projection_excess"],
+  ];
+  for (const [fixture, verdict] of cases) {
+    const proof = syntheticProjection(fixture);
+    assert.equal(proof.verdict, verdict);
+    assert.equal(proof.queue.pending, fixture.pending ?? 0);
+    assert.ok(Object.isFrozen(proof));
+  }
+});
+
+test("projection validation fails closed on mixed or incoherent same-response fields", () => {
+  const cases = [
+    [projectionInventory({ version: "0.4.6" }), "UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH"],
+    [projectionInventory({ backend: "supabase" }), "UPDATE_PREVIEW_DEPLOYED_BACKEND_MISMATCH"],
+    [projectionInventory({ backend: "D1" }), "UPDATE_PREVIEW_DEPLOYED_BACKEND_MISMATCH"],
+    [projectionInventory({ drainMode: "paused-for-upgrade" }), "UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED"],
+    [projectionInventory({ pending: 2, upserts: 1, deletes: 0 }),
+      "UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID"],
+    [projectionInventory({ pending: 2, oldestQueuedAt: null }),
+      "UPDATE_PREVIEW_QUEUE_TIMESTAMP_INVALID"],
+    [projectionInventory({ pending: 2, readinessOldestQueuedAt: 1_750_000_000_001 }),
+      "UPDATE_PREVIEW_QUEUE_TIMESTAMP_INVALID"],
+    [projectionInventory({ pending: 2, readinessPending: 1 }),
+      "UPDATE_PREVIEW_VECTOR_READINESS_INVALID"],
+    [projectionInventory({ pending: 2, submitted: 0, reason: "accepted_mutation_processing" }),
+      "UPDATE_PREVIEW_VECTOR_READINESS_INVALID"],
+    [projectionInventory({ pending: 2, submitted: 1, reason: "vector_work_queued" }),
+      "UPDATE_PREVIEW_VECTOR_READINESS_INVALID"],
+    [projectionInventory({ expected: 10, actual: 11, reason: "vector_work_queued" }),
+      "UPDATE_PREVIEW_VECTOR_READINESS_INVALID"],
+    [projectionInventory({ expected: 10, actual: 11, pending: 1,
+      reason: "projection_unverified" }), "UPDATE_PREVIEW_VECTOR_READINESS_INVALID"],
+    [projectionInventory({ expected: 10, actual: 10, ready: false, reason: "unknown" }),
+      "UPDATE_PREVIEW_VECTOR_READINESS_INVALID"],
+  ];
+  for (const [inventory, code] of cases) {
+    assert.throws(
+      () => classifyUpdatePreviewProjectionReceipt(inventory, {
+        expectedVersion: "0.4.7",
+        expectedBackend: "d1",
+      }),
+      expectCode(code),
+    );
+  }
+
+  const exactButUnverified = projectionInventory({
+    expected: 10,
+    actual: 10,
+    ready: false,
+    reason: "projection_unverified",
+  });
+  assert.equal(validateVectorProjectionAggregateReceipt(exactButUnverified, {
+    expectedVersion: "0.4.7",
+  }).query_ready, false, "health may still render this coherent transient state");
+  assert.throws(
+    () => classifyUpdatePreviewProjectionReceipt(exactButUnverified, {
+      expectedVersion: "0.4.7",
+    }),
+    expectCode("UPDATE_PREVIEW_VECTOR_READINESS_INVALID"),
+  );
+});
+
+test("preview plan and success receipt bind local identity plus live aggregate proof", () => {
   const plan = syntheticPlan();
   const fingerprint = updatePreviewPlanFingerprint(plan);
   assert.match(fingerprint, /^[a-f0-9]{64}$/u);
@@ -940,28 +1107,43 @@ test("preview plan and success receipt are deterministic, closed, and locally sc
   assert.ok(Object.isFrozen(plan));
   assert.ok(Object.isFrozen(plan.manifest));
   assert.ok(Object.isFrozen(plan.candidate));
+  assert.ok(Object.isFrozen(plan.deployed_projection));
+  assert.equal(plan.deployed_projection.verdict, "ready");
   assert.equal(plan.version_relation, "upgrade");
   assert.equal(syntheticPlan({ recordedVersion: "0.4.8" }).version_relation, "same");
-  assert.equal(syntheticPlan({ recordedVersion: null }).version_relation, "unrecorded");
+  assert.throws(
+    () => syntheticPlan({ recordedVersion: null }),
+    expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
+  );
 
-  const receipt = createUpdatePreviewSuccessReceipt(plan);
-  assert.equal(receipt.status, "local_preflight_passed");
+  const receipt = createUpdatePreviewSuccessReceipt(plan, {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.status, "pre_update_check_complete");
   assert.equal(receipt.read_only, true);
+  assert.equal(receipt.authorizes_update, false);
+  assert.equal(receipt.projection_ready, true);
   assert.equal(receipt.plan_fingerprint, fingerprint);
   assert.deepEqual(receipt.effects, {
     manifest_writes: 0,
-    credential_reads: 0,
-    network_requests: 0,
+    credential_reads: 1,
+    network_requests: 1,
+    brain_writes: 0,
+    cloudflare_control_requests: 0,
+    deployments: 0,
     browser_launches: 0,
     package_installs: 0,
+    support_journal_writes: 0,
     workspace_writes: 0,
     skill_writes: 0,
   });
   assert.deepEqual(receipt.proof_boundary, {
     public_release_authenticity: "unproven",
-    credential_custody: "not_accessed",
+    credential_custody: "durable_admin_key_read",
+    brain_domain_identity: "pinned_manifest_assertion",
     cloudflare_account_ownership: "not_accessed",
-    deployed_install_state: "not_accessed",
+    deployed_install_state: "authenticated_aggregate_observed",
     schema_compatibility: "not_accessed",
     restore_bookmark: "not_created",
     deployment: "not_started",
@@ -982,9 +1164,35 @@ test("plan fingerprint binds every variable plan field", () => {
     syntheticPlan({ runtimeProof: syntheticRuntimeProof({ hash: "d".repeat(64) }) }),
     syntheticPlan({ runtimeProof: syntheticRuntimeProof({ files: 4 }) }),
     syntheticPlan({ runtimeProof: syntheticRuntimeProof({ bytes: 43 }) }),
+    syntheticPlan({ deployedProjection: syntheticProjection({ expected: 11, actual: 11 }) }),
+    syntheticPlan({ deployedProjection: syntheticProjection({ expected: 10, actual: 9, pending: 1 }) }),
+    syntheticPlan({ deployedProjection: syntheticProjection({
+      expected: 10,
+      actual: 9,
+      pending: 1,
+      submitted: 1,
+      reason: "accepted_mutation_processing",
+    }) }),
   ];
   for (const variant of variants) {
     assert.notEqual(updatePreviewPlanFingerprint(variant), baseline);
+  }
+});
+
+test("completed queued-work diagnostics exit as checks, never as projection readiness", () => {
+  for (const deployedProjection of [
+    syntheticProjection({ expected: 10, actual: 2, pending: 8 }),
+    syntheticProjection({ expected: 10, actual: 10, pending: 2 }),
+  ]) {
+    const receipt = createUpdatePreviewSuccessReceipt(
+      syntheticPlan({ deployedProjection }),
+      { credential_reads: 1, network_requests: 1 },
+    );
+    assert.equal(receipt.status, "pre_update_check_complete");
+    assert.equal(receipt.projection_ready, false);
+    assert.equal(receipt.authorizes_update, false);
+    assert.equal(receipt.plan.deployed_projection.query_ready, false);
+    assert.match(receipt.plan.deployed_projection.verdict, /queued_work/u);
   }
 });
 
@@ -1017,6 +1225,85 @@ test("success plans reject downgrade, unverified runtime, drift, and extra field
     }),
     expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
   );
+  const missingPlan = syntheticPlan({
+    deployedProjection: syntheticProjection({ expected: 10, actual: 2 }),
+  });
+  assert.throws(
+    () => createUpdatePreviewSuccessReceipt(missingPlan, {
+      credential_reads: 1,
+      network_requests: 1,
+    }),
+    expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
+  );
+  const arbitraryReason = structuredClone(syntheticPlan());
+  arbitraryReason.deployed_projection.expected_vectors = 10;
+  arbitraryReason.deployed_projection.actual_vectors = 11;
+  arbitraryReason.deployed_projection.query_ready = false;
+  arbitraryReason.deployed_projection.readiness_reason = "private-detail-must-not-pass";
+  arbitraryReason.deployed_projection.verdict = "projection_excess";
+  assert.throws(
+    () => createUpdatePreviewPlan({
+      manifestSha256: arbitraryReason.manifest.sha256,
+      manifestSource: arbitraryReason.manifest.source,
+      recordedVersion: arbitraryReason.manifest.recorded_version,
+      candidateVersion: arbitraryReason.candidate.version,
+      runtimeProof: syntheticRuntimeProof(),
+      deployedProjection: arbitraryReason.deployed_projection,
+    }),
+    expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
+  );
+});
+
+test("evaluated projection refusals retain zero queued proof under the plan fingerprint", () => {
+  const missingPlan = syntheticPlan({
+    deployedProjection: syntheticProjection({
+      expected: 1_151_274,
+      actual: 62_439,
+      reason: "vector_count_mismatch",
+    }),
+  });
+  const receipt = createUpdatePreviewProjectionFailureReceipt(missingPlan, {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.status, "failed");
+  assert.equal(receipt.authorizes_update, false);
+  assert.equal(receipt.projection_ready, false);
+  assert.equal(receipt.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_MISSING");
+  assert.equal(receipt.plan.deployed_projection.queue.pending, 0);
+  assert.equal(receipt.plan.deployed_projection.expected_vectors, 1_151_274);
+  assert.equal(receipt.plan.deployed_projection.actual_vectors, 62_439);
+  assert.equal(receipt.plan_fingerprint, updatePreviewPlanFingerprint(missingPlan));
+  const changed = syntheticPlan({
+    deployedProjection: syntheticProjection({
+      expected: 1_151_274,
+      actual: 62_440,
+      reason: "vector_count_mismatch",
+    }),
+  });
+  assert.notEqual(updatePreviewPlanFingerprint(changed), receipt.plan_fingerprint);
+  assert.equal(receipt.effects.brain_writes, 0);
+  assert.equal(receipt.effects.deployments, 0);
+  assert.equal(receipt.effects.support_journal_writes, 0);
+
+  const insufficientPlan = syntheticPlan({
+    deployedProjection: syntheticProjection({
+      expected: 10,
+      actual: 2,
+      pending: 8,
+      upserts: 7,
+      deletes: 1,
+    }),
+  });
+  const insufficient = createUpdatePreviewProjectionFailureReceipt(insufficientPlan, {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(insufficient.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_INSUFFICIENT");
+  assert.equal(insufficient.plan.deployed_projection.verdict, "projection_work_insufficient");
+  assert.equal(insufficient.plan.deployed_projection.queue.upserts, 7);
+  assert.equal(insufficient.plan_fingerprint, updatePreviewPlanFingerprint(insufficientPlan));
+  assert.notEqual(insufficient.plan_fingerprint, receipt.plan_fingerprint);
 });
 
 test("failure receipts collapse raw errors and unknown codes without copying details", () => {
@@ -1026,13 +1313,19 @@ test("failure receipts collapse raw errors and unknown codes without copying det
     operation: "brain.update.preview",
     status: "failed",
     read_only: true,
+    authorizes_update: false,
+    projection_ready: false,
     error_code: "UPDATE_PREVIEW_FAILED",
     effects: {
       manifest_writes: 0,
       credential_reads: 0,
       network_requests: 0,
+      brain_writes: 0,
+      cloudflare_control_requests: 0,
+      deployments: 0,
       browser_launches: 0,
       package_installs: 0,
+      support_journal_writes: 0,
       workspace_writes: 0,
       skill_writes: 0,
     },

@@ -344,9 +344,9 @@ assert.doesNotMatch(installedRuntimeStep,
   /if \(\$previewExit -ne 1\)[\s\S]*?\n\s+\}\n\s+\}\n\s+try \{ \$previewReceipt/,
   "the installed Windows step must not contain a stray closing brace before receipt parsing");
 assert.match(installedRuntimeStep,
-  /\$expectedPreviewKeys = @\([\s\S]*?operation -cne 'brain\.update\.preview'[\s\S]*?read_only -ne \$true[\s\S]*?error_code -cne 'UPDATE_PREVIEW_FAILED'/);
+  /\$expectedPreviewKeys = @\([\s\S]*?'authorizes_update'[\s\S]*?'projection_ready'[\s\S]*?operation -cne 'brain\.update\.preview'[\s\S]*?read_only -ne \$true[\s\S]*?authorizes_update -ne \$false[\s\S]*?projection_ready -ne \$false[\s\S]*?error_code -cne 'UPDATE_PREVIEW_FAILED'/);
 assert.match(installedRuntimeStep,
-  /'browser_launches', 'credential_reads', 'manifest_writes',[\s\S]*?'network_requests', 'package_installs', 'skill_writes', 'workspace_writes'/);
+  /'brain_writes', 'browser_launches', 'cloudflare_control_requests',[\s\S]*?'credential_reads', 'deployments', 'manifest_writes', 'network_requests',[\s\S]*?'package_installs', 'skill_writes', 'support_journal_writes', 'workspace_writes'/);
 assert.match(installedRuntimeStep,
   /if \(Test-Path -LiteralPath \$emptyRoot\)[\s\S]*?wrote inside its isolated no-manifest home/);
 assert.doesNotMatch(installedRuntimeStep, /brain\.manifest\.json['"]?\s+--preview/,

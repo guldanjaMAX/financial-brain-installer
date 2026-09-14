@@ -111,6 +111,39 @@ node brain.mjs ingest     ./acme.manifest.json --path ~/Documents --source clien
 node brain.mjs test       ./acme.manifest.json   # full acceptance suite
 ```
 
+The held v0.4.8 existing-Brain gate is:
+
+```bash
+brain update [manifest] --preview --expect-runtime-sha256 <64hex> --json
+```
+
+This adapter completes exact runtime, package, manifest, D1, version, and bare
+`brain.domain` validation before the credential or network boundary. It then
+ignores ambient `ADMIN_KEY`, resolves only the durable admin-key store selected
+by the pinned manifest, and makes one authenticated HTTP 200 GET to the saved
+Brain's existing `/api/admin/brain/documents` contract. It does not enter the
+Wrangler or Cloudflare control plane. The bounded response reader discards
+document rows and binds only the same-response version, D1 backend, active
+drain mode, vector counts, queue aggregates, readiness reason, and verdict into
+the plan fingerprint. `brain_domain_identity: pinned_manifest_assertion` is an
+explicit proof boundary: the command does not independently prove Cloudflare
+account or domain ownership, so the supervised field rung must reconcile the
+target before live use.
+
+The diagnostic exits successfully for a coherent `ready`,
+`recoverable_queued_work`, or `queued_work_present` observation because the
+check itself completed. Only the first has `projection_ready: true`; every
+receipt has `authorizes_update: false`, and pending work is never called ready.
+`recoverable_queued_work` requires queued upserts at least equal to the numeric
+shortfall. A smaller or delete-only queue is fingerprinted as
+`projection_work_insufficient` and returns a failure receipt, as does a short
+projection with zero pending work, a zero-queue provider-visibility gap, an
+excess projection, a paused or mixed generation, or malformed fields. Both
+successful and post-boundary failure receipts report the credential and network
+reads actually attempted, while Brain, control-plane, deployment, manifest,
+workspace, install, browser, support, and skill effects remain zero. These local
+rules and fixture tests are not package, CI, field, or live-Brain proof.
+
 The supported beginner update is `brain update [manifest]`. It verifies the
 account, requires a pre-change D1 bookmark, deploys and verifies a paused
 compatibility Worker, waits the declared 20-minute old-invocation window, and

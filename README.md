@@ -634,10 +634,36 @@ The SHA-256 value must come from the independently sealed package receipt. A
 valid receipt names `identity_scheme: brain.runtime-payload.sha256.v1` and
 provides its package-derived `runtime_payload_sha256` as the command's
 `expected_runtime_sha256`; those names are not interchangeable with the whole
-tarball SHA-256. A
-successful result is not an update, approval to update, release evidence, or
-live-Brain proof. Candidate code and tests still have to prove this contract
-before field use; its appearance in this guide does not establish readiness.
+tarball SHA-256. The command finishes and rechecks the exact runtime, package,
+manifest, D1 binding, recorded version, and bare `brain.domain` before reading
+a credential or using the network. Only then does it ignore ambient
+`ADMIN_KEY`, read the durable admin key selected by the manifest, and make one
+authenticated HTTP 200 read from the saved Brain's existing
+`/api/admin/brain/documents` route. It makes no Cloudflare control-plane
+request. Document rows are discarded; the bounded receipt retains only the
+same-response Worker version, D1 backend, active drain mode, vector counts,
+queue aggregates, readiness reason, and classification. The hostname identity
+is the pinned manifest's assertion; this diagnostic does not independently
+prove Cloudflare account or domain ownership. The supervised field rung must
+reconcile that target before live use.
+
+`ready` means the counts are exact and the queue is empty.
+`recoverable_queued_work` means queued upserts cover the full projection
+shortfall;
+`queued_work_present` means counts are currently exact but pending work still
+makes the projection non-ready. `projection_work_insufficient` means pending
+work exists but its queued upserts cannot repair the full shortfall. That state,
+a short projection with no queued work, provider visibility still pending with
+no queue, an excess projection, a paused or mixed generation, or any malformed
+aggregate stops the preview. The aggregate observation and classification are
+part of the receipt fingerprint.
+A completed preview reports `projection_ready` explicitly and always reports
+`authorizes_update: false`; it performs zero Brain writes, Cloudflare control
+requests, deployments, manifest or workspace writes, installs, browser
+launches, or support-journal writes. It is not an update, approval to update,
+release evidence, or field proof. This candidate contract has only local
+fixture evidence until its immutable package, CI, and supervised field evidence
+are accepted.
 
 For an authorized stable release, that exact receipt is published as
 `brain-installer-<version>-runtime-identity.json` beside both package names.

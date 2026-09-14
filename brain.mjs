@@ -38,6 +38,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { TextDecoder } from "node:util";
 import { assertIngestionOutcome, ingestionOutcome } from "./ingest/outcome.mjs";
 import {
   PUBLIC_INSTALL_SMOKE_DOC_UID,
@@ -125,7 +126,7 @@ async function provenanceSourceAssessmentLib() {
   return await import("./operations/provenance-source-assessment.mjs");
 }
 
-/** Pure exact-runtime update preview, loaded only for that local-only lane. */
+/** Pure exact-runtime and aggregate-readiness rules for update preview. */
 async function updatePreviewLib() {
   return await import("./operations/update-preview.mjs");
 }
@@ -403,8 +404,8 @@ let currentSupportCommand = "";
 export function supportSourceForCommand(command = "") {
   if (command === "schedule") return "scheduler";
   if (command === "ocr-preflight" || command === "provenance-assess" ||
-      command === "update-preview" || command === "ingest-file-preview") return "local";
-  if (command === "ingest-file-apply") return "brain-data-plane";
+      command === "ingest-file-preview") return "local";
+  if (command === "update-preview" || command === "ingest-file-apply") return "brain-data-plane";
   if (["financial-picture", "machine-continuity"].includes(command)) return "brain-data-plane";
   if (command === "ingest") {
     const index = process.argv.indexOf("--from");
@@ -3151,25 +3152,33 @@ export async function cmdHealth(manifestPath, {
         const vectorDrainMode = inventory.vector_drain_mode;
         const pausedForUpgrade = vectorDrainMode === "paused-for-upgrade";
         const backlog = inventory.vector_backlog;
-        const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
-        if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
-            Object.prototype.hasOwnProperty.call(backlog, "error") ||
-            !validCount(backlog.pending) || !validCount(backlog.upserts) ||
-            !validCount(backlog.deletes) || !validCount(backlog.submitted) ||
-            backlog.upserts + backlog.deletes !== backlog.pending ||
-            backlog.submitted > backlog.pending) {
-          die(
-            "the documents endpoint could not prove a valid D1 vector backlog." + "\n" +
-              "      Health cannot pass because semantic indexing may be stalled or incomplete."
-          );
-        }
         const readiness = inventory.vector_readiness;
-        if (!readiness || typeof readiness !== "object" || Array.isArray(readiness) ||
-            Object.prototype.hasOwnProperty.call(readiness, "error") ||
-            typeof readiness.ready !== "boolean" || !validCount(readiness.expected_vectors) ||
-            !validCount(readiness.actual_vectors) || !validCount(readiness.pending) ||
-            !validCount(readiness.submitted) || readiness.pending !== backlog.pending ||
-            readiness.submitted !== backlog.submitted || readiness.submitted > readiness.pending) {
+        try {
+          const projection = await updatePreviewLib();
+          projection.validateVectorProjectionAggregateReceipt(inventory, {
+            expectedVersion: boundVersion,
+            expectedBackend,
+            expectedDrainMode: boundDrainMode,
+          });
+        } catch (error) {
+          if (error?.code === "UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID") {
+            die(
+              "the documents endpoint could not prove a valid D1 vector backlog." + "\n" +
+                "      Health cannot pass because semantic indexing may be stalled or incomplete."
+            );
+          }
+          if (error?.code === "UPDATE_PREVIEW_QUEUE_TIMESTAMP_INVALID") {
+            die(
+              "the documents endpoint reported queued vector work without a valid oldest timestamp." + "\n" +
+                "      Health cannot determine whether semantic indexing is stalled."
+            );
+          }
+          if (error?.code === "UPDATE_PREVIEW_DEPLOYED_BACKEND_MISMATCH") {
+            die(
+              "the documents endpoint did not report the exact D1 backend label." + "\n" +
+                "      Health cannot normalize a malformed storage identity into readiness."
+            );
+          }
           die(
             "the documents endpoint could not prove Vectorize query readiness." + "\n" +
               "      Health cannot pass from queue depth alone because Vectorize mutations are asynchronous."
@@ -3177,12 +3186,6 @@ export async function cmdHealth(manifestPath, {
         }
         if (backlog.pending > 0) {
           const queuedAt = backlog.oldest_queued_at;
-          if (!Number.isSafeInteger(queuedAt) || queuedAt < 0) {
-            die(
-              "the documents endpoint reported queued vector work without a valid oldest timestamp." + "\n" +
-                "      Health cannot determine whether semantic indexing is stalled."
-            );
-          }
           const oldest = Math.max(0, Math.floor((Date.now() - queuedAt) / 60000));
           if (oldest > 30) {
             die(
@@ -22978,6 +22981,7 @@ const UPDATE_PREVIEW_SEMVER_RE =
 const UPDATE_PREVIEW_D1_ID_RE =
   /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu;
 const UPDATE_PREVIEW_AUTH_PROFILE_RE = /^financial-brain-[a-f0-9]{24}$/u;
+const UPDATE_PREVIEW_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 function updatePreviewFallbackFailure() {
   return Object.freeze({
@@ -22985,13 +22989,19 @@ function updatePreviewFallbackFailure() {
     operation: "brain.update.preview",
     status: "failed",
     read_only: true,
+    authorizes_update: false,
+    projection_ready: false,
     error_code: "UPDATE_PREVIEW_FAILED",
     effects: Object.freeze({
       manifest_writes: 0,
       credential_reads: 0,
       network_requests: 0,
+      brain_writes: 0,
+      cloudflare_control_requests: 0,
+      deployments: 0,
       browser_launches: 0,
       package_installs: 0,
+      support_journal_writes: 0,
       workspace_writes: 0,
       skill_writes: 0,
     }),
@@ -22999,22 +23009,26 @@ function updatePreviewFallbackFailure() {
 }
 
 /** Validate only locally provable update prerequisites. No credential is read. */
-export function validateLocalUpdatePreviewManifest(manifest) {
+export function validateLocalUpdatePreviewManifest(manifest, {
+  platform = process.platform,
+  validateKeychainReference = parseAdminKeySecretReference,
+} = {}) {
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) ||
       !manifest.brain || typeof manifest.brain !== "object" || Array.isArray(manifest.brain) ||
       !Object.hasOwn(manifest.brain, "version")) {
     throw new TypeError("the installed manifest is outside the update preview contract");
   }
   const recordedVersion = manifest.brain.version;
-  if (recordedVersion !== null &&
-      (typeof recordedVersion !== "string" || !UPDATE_PREVIEW_SEMVER_RE.test(recordedVersion))) {
+  if (typeof recordedVersion !== "string" || !UPDATE_PREVIEW_SEMVER_RE.test(recordedVersion)) {
     throw new TypeError("the installed manifest has an invalid recorded version");
   }
   const cloudflare = manifest.infrastructure?.cloudflare;
   if (!cloudflare || typeof cloudflare !== "object" || Array.isArray(cloudflare) ||
-      !/^[a-f0-9]{32}$/iu.test(String(cloudflare.account_id || "")) ||
+      typeof cloudflare.account_id !== "string" ||
+      !/^[a-f0-9]{32}$/iu.test(cloudflare.account_id) ||
       cloudflare.storage !== "d1" ||
-      !UPDATE_PREVIEW_D1_ID_RE.test(String(cloudflare.d1_database_id || ""))) {
+      typeof cloudflare.d1_database_id !== "string" ||
+      !UPDATE_PREVIEW_D1_ID_RE.test(cloudflare.d1_database_id)) {
     throw new TypeError("the installed manifest lacks one exact D1 account binding");
   }
   const authProfile = cloudflare.auth_profile;
@@ -23022,10 +23036,118 @@ export function validateLocalUpdatePreviewManifest(manifest) {
       (typeof authProfile !== "string" || !UPDATE_PREVIEW_AUTH_PROFILE_RE.test(authProfile))) {
     throw new TypeError("the installed manifest has an invalid credential reference label");
   }
+  const operations = manifest.operations;
+  if (operations !== undefined && operations !== null &&
+      (typeof operations !== "object" || Array.isArray(operations))) {
+    throw new TypeError("the installed manifest has an invalid operations contract");
+  }
+  const adminKeyReference = operations?.admin_key_secret;
+  if (adminKeyReference !== undefined && adminKeyReference !== null) {
+    if (typeof adminKeyReference !== "string" || platform !== "darwin") {
+      throw new TypeError("the installed manifest selects an unsupported admin key store");
+    }
+    try {
+      validateKeychainReference(adminKeyReference);
+    } catch {
+      throw new TypeError("the installed manifest has an invalid admin key reference");
+    }
+  }
   return Object.freeze({
     recordedVersion,
-    credential_reference: authProfile == null ? "legacy_absent" : "present",
+    credential_reference: adminKeyReference == null ? "adjacent_protected_file" : "keychain",
   });
+}
+
+/**
+ * Build the one private data-plane URL without consulting Cloudflare's control
+ * plane. The manifest must already carry its permanent deployed hostname.
+ */
+export function updatePreviewDocumentsUrl(manifest) {
+  const rawDomain = manifest?.brain?.domain;
+  if (typeof rawDomain !== "string" || rawDomain !== rawDomain.trim()) {
+    throw new TypeError("the installed manifest has no safe Brain hostname");
+  }
+  const declared = rawDomain;
+  let candidate;
+  try {
+    candidate = new URL(`https://${declared}`);
+  } catch {
+    throw new TypeError("the installed manifest has no safe Brain hostname");
+  }
+  const hostname = candidate.hostname.toLowerCase();
+  const reservedLocalName = hostname === "localhost" || hostname.endsWith(".localhost") ||
+    hostname.endsWith(".local") || hostname.endsWith(".internal") ||
+    hostname.endsWith(".home.arpa");
+  const validHostname = candidate.hostname.length <= 253 && candidate.hostname.includes(".") &&
+    !/^\d+(?:\.\d+){3}$/u.test(candidate.hostname) &&
+    candidate.hostname.split(".").every((label) =>
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu.test(label));
+  if (!declared || !validHostname || reservedLocalName || declared.toLowerCase() !== hostname ||
+      candidate.protocol !== "https:" || candidate.username || candidate.password ||
+      candidate.port || candidate.pathname !== "/" || candidate.search || candidate.hash) {
+    throw new TypeError("the installed manifest has no safe Brain hostname");
+  }
+  const safe = secureBrainRequestUrl(candidate);
+  return new URL("/api/admin/brain/documents", safe.origin).href;
+}
+
+/**
+ * Read one JSON response without ever buffering more than the fixed aggregate
+ * diagnostic ceiling. Content-Length is an early refusal only; the streamed
+ * byte count remains authoritative when the header is absent or false.
+ */
+export async function readUpdatePreviewAggregateResponse(response, {
+  maxBytes = UPDATE_PREVIEW_MAX_RESPONSE_BYTES,
+} = {}) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 ||
+      maxBytes > UPDATE_PREVIEW_MAX_RESPONSE_BYTES) {
+    throw new TypeError("the update preview response limit is invalid");
+  }
+  const lengthHeader = response?.headers?.get?.("content-length");
+  if (lengthHeader !== null && lengthHeader !== undefined) {
+    const normalized = String(lengthHeader).trim();
+    if (!/^(?:0|[1-9]\d*)$/u.test(normalized) || Number(normalized) > maxBytes) {
+      throw new TypeError("the update preview response is outside its byte limit");
+    }
+  }
+  const reader = response?.body?.getReader?.();
+  if (!reader || typeof reader.read !== "function") {
+    throw new TypeError("the update preview response has no bounded body stream");
+  }
+  // Allocate the fixed ceiling once. A hostile peer cannot turn a legal
+  // byte count into millions of tiny retained chunk objects.
+  const bytes = new Uint8Array(maxBytes);
+  let total = 0;
+  let complete = false;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (!part || typeof part.done !== "boolean") {
+        throw new TypeError("the update preview response stream is invalid");
+      }
+      if (part.done) {
+        complete = true;
+        break;
+      }
+      if (!(part.value instanceof Uint8Array)) {
+        throw new TypeError("the update preview response stream is invalid");
+      }
+      total += part.value.byteLength;
+      if (total > maxBytes) {
+        throw new TypeError("the update preview response is outside its byte limit");
+      }
+      bytes.set(part.value, total - part.value.byteLength);
+    }
+  } finally {
+    if (!complete && typeof reader.cancel === "function") {
+      try { await reader.cancel(); } catch { /* best-effort stream disposal */ }
+    }
+    if (typeof reader.releaseLock === "function") {
+      try { reader.releaseLock(); } catch { /* the reader may already be detached */ }
+    }
+  }
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, total));
+  return JSON.parse(text);
 }
 
 function sameUpdateRuntimeProof(left, right) {
@@ -23062,6 +23184,7 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     throw new JsonFatal(updatePreviewFallbackFailure());
   }
 
+  const observedEffects = { credential_reads: 0, network_requests: 0 };
   try {
     const parsed = preview.parseUpdatePreviewArgv(argv);
     const runtimeRoot = options.runtimeRoot ?? HERE;
@@ -23095,30 +23218,131 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     const local = (options.validateManifest ?? validateLocalUpdatePreviewManifest)(
       manifestPin.manifest,
     );
+    preview.updatePreviewVersionRelation(local.recordedVersion, candidateVersion);
+    let documentsUrl;
+    try {
+      documentsUrl = (options.resolveDocumentsUrl ?? updatePreviewDocumentsUrl)(
+        manifestPin.manifest,
+      );
+    } catch {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_BRAIN_DOMAIN_INVALID");
+    }
     const revalidateManifest = options.revalidateManifest ?? revalidateUpdateManifest;
     revalidateManifest(manifestPin, "local update preview");
 
-    const closingRuntime = verifyRuntime(verifyOptions);
-    if (!sameUpdateRuntimeProof(openingRuntime, closingRuntime)) {
+    // The whole runtime, package metadata, manifest, and permanent data-plane
+    // URL are closed before the first durable credential lookup is reachable.
+    const boundaryRuntime = verifyRuntime(verifyOptions);
+    if (!sameUpdateRuntimeProof(openingRuntime, boundaryRuntime)) {
       throw new preview.UpdatePreviewError("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
     }
     const revalidateRuntimePackage = options.revalidateRuntimePackage ?? revalidateUpdateManifest;
     revalidateRuntimePackage(runtimePackagePin, "update runtime preview");
+    revalidateManifest(manifestPin, "update preview credential boundary");
+
+    const resolveCredential = options.resolveAdminKey ?? resolveAdminKey;
+    observedEffects.credential_reads += 1;
+    let adminKey = null;
+    try {
+      adminKey = resolveCredential(manifestPin.target, {
+        ignoreEnvironment: true,
+        read(path) {
+          if (resolve(path) !== manifestPin.target) {
+            throw new TypeError("the pinned manifest identity changed during credential lookup");
+          }
+          return manifestPin.raw;
+        },
+      });
+    } catch {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_ADMIN_KEY_UNAVAILABLE");
+    }
+    if (typeof adminKey !== "string" || !adminKey) {
+      adminKey = null;
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_ADMIN_KEY_UNAVAILABLE");
+    }
+
+    // A manifest replacement during credential lookup must stop before the key
+    // is attached to a request. Package metadata is rechecked for the same
+    // reason; neither check opens a browser or reads Cloudflare control state.
+    revalidateRuntimePackage(runtimePackagePin, "update preview live request");
+    revalidateManifest(manifestPin, "update preview live request");
+
+    let response;
+    const request = options.request ?? ((url, init) => http(url, init, {
+      timeoutMs: HTTP_TIMEOUT_MS,
+      what: "the update preview readiness check",
+    }));
+    observedEffects.network_requests += 1;
+    let requestErrorCode = null;
+    try {
+      response = await request(documentsUrl, {
+        method: "GET",
+        headers: { "X-Admin-Key": adminKey },
+      });
+    } catch {
+      requestErrorCode = "UPDATE_PREVIEW_READINESS_UNAVAILABLE";
+    } finally {
+      // Strings cannot be wiped in place, but do not retain this reference past
+      // the single request. The key is never added to a receipt or error.
+      adminKey = null;
+    }
+    let inventory;
+    let responseErrorCode = requestErrorCode;
+    if (!responseErrorCode && (!response || response.ok !== true || response.status !== 200)) {
+      responseErrorCode = "UPDATE_PREVIEW_READINESS_UNAVAILABLE";
+    } else if (!responseErrorCode) {
+      try {
+        inventory = await readUpdatePreviewAggregateResponse(response);
+      } catch {
+        responseErrorCode = "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID";
+      }
+    }
+
+    // The authenticated read is evidence only if the exact candidate runtime
+    // and installed manifest are still the identities checked before it. This
+    // postflight also runs after an HTTP or bounded-body refusal, so crossing
+    // the live boundary can never bypass the closing local identity checks.
+    const closingRuntime = verifyRuntime(verifyOptions);
+    if (!sameUpdateRuntimeProof(boundaryRuntime, closingRuntime)) {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+    revalidateRuntimePackage(runtimePackagePin, "update runtime live receipt");
+    revalidateManifest(manifestPin, "update preview live receipt");
+    if (responseErrorCode) throw new preview.UpdatePreviewError(responseErrorCode);
+    const deployedProjection = preview.classifyUpdatePreviewProjectionReceipt(inventory, {
+      expectedVersion: local.recordedVersion,
+      expectedBackend: "d1",
+    });
+    revalidateRuntimePackage(runtimePackagePin, "update runtime receipt");
+    revalidateManifest(manifestPin, "update preview receipt");
+    // Close the last concurrency seam after classification. No asynchronous
+    // work occurs between this fourth complete proof and receipt emission.
+    const finalRuntime = verifyRuntime(verifyOptions);
+    if (!sameUpdateRuntimeProof(closingRuntime, finalRuntime)) {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
     const plan = preview.createUpdatePreviewPlan({
       manifestSha256: manifestPin.fingerprint,
       manifestSource: installed.source,
       recordedVersion: local.recordedVersion,
       candidateVersion,
-      runtimeProof: closingRuntime,
+      runtimeProof: finalRuntime,
+      deployedProjection,
     });
-    revalidateRuntimePackage(runtimePackagePin, "update runtime receipt");
-    revalidateManifest(manifestPin, "update preview receipt");
-    const receipt = preview.createUpdatePreviewSuccessReceipt(plan);
+    const projectionFailed = [
+      "projection_work_insufficient", "projection_work_missing",
+      "projection_visibility_pending", "projection_excess",
+    ]
+      .includes(deployedProjection.verdict);
+    const receipt = projectionFailed
+      ? preview.createUpdatePreviewProjectionFailureReceipt(plan, observedEffects)
+      : preview.createUpdatePreviewSuccessReceipt(plan, observedEffects);
+    if (projectionFailed) throw new JsonFatal(receipt);
     (options.write ?? console.log)(JSON.stringify(receipt, null, 2));
     return receipt;
   } catch (error) {
     if (error instanceof JsonFatal) throw error;
-    throw new JsonFatal(preview.createUpdatePreviewFailureReceipt(error));
+    throw new JsonFatal(preview.createUpdatePreviewFailureReceipt(error, observedEffects));
   }
 }
 
@@ -25314,8 +25538,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   operate
     brain update     [manifest]            one safe update: snapshot, test, verify
     brain update     [manifest] --preview --expect-runtime-sha256 <sha256> --json
-                                           read-only exact-package local preflight; no credential,
-                                           network, browser, manifest write, or update authorization
+                                           local identity gates, then one authenticated aggregate
+                                           Brain read; no control-plane request, write, deploy,
+                                           install, browser, or update authorization
     brain update     [manifest] --adopt-cloudflare-profile  approve the one-time Cloudflare
                                            browser sign-in from a session with no terminal
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1

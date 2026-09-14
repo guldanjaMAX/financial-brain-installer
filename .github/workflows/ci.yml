@@ -925,21 +925,24 @@ jobs:
           catch { throw 'installed brain.cmd did not emit one JSON update-preview receipt' }
           $previewKeys = @($previewReceipt.PSObject.Properties.Name | Sort-Object)
           $expectedPreviewKeys = @(
-            'effects', 'error_code', 'operation', 'read_only',
-            'schema_version', 'status'
+            'authorizes_update', 'effects', 'error_code', 'operation',
+            'projection_ready', 'read_only', 'schema_version', 'status'
           ) | Sort-Object
           if (($previewKeys -join ',') -cne ($expectedPreviewKeys -join ',') -or
               $previewReceipt.schema_version -ne 1 -or
               $previewReceipt.operation -cne 'brain.update.preview' -or
               $previewReceipt.status -cne 'failed' -or
               $previewReceipt.read_only -ne $true -or
+              $previewReceipt.authorizes_update -ne $false -or
+              $previewReceipt.projection_ready -ne $false -or
               $previewReceipt.error_code -cne 'UPDATE_PREVIEW_FAILED') {
             throw 'installed brain.cmd emitted an unexpected no-manifest preview receipt'
           }
           $effectKeys = @($previewReceipt.effects.PSObject.Properties.Name | Sort-Object)
           $expectedEffectKeys = @(
-            'browser_launches', 'credential_reads', 'manifest_writes',
-            'network_requests', 'package_installs', 'skill_writes', 'workspace_writes'
+            'brain_writes', 'browser_launches', 'cloudflare_control_requests',
+            'credential_reads', 'deployments', 'manifest_writes', 'network_requests',
+            'package_installs', 'skill_writes', 'support_journal_writes', 'workspace_writes'
           ) | Sort-Object
           if (($effectKeys -join ',') -cne ($expectedEffectKeys -join ',')) {
             throw 'the installed update-preview effect receipt shape is not closed'

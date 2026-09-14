@@ -97,8 +97,28 @@ its `runtime_payload_sha256` as this command's `expected_runtime_sha256`. Do
 not substitute the whole package SHA-256. This is a diagnostic only. It does
 not update the Brain, approve an update, or carry
 approval into a later command. A runtime mismatch, incomplete local manifest,
-or failed readback stops the pilot. The candidate still needs separate code,
-test, package, CI, and field evidence before this documented path may be used.
+invalid bare `brain.domain`, or changed local state stops before credential or
+network access. After those local gates pass, it ignores ambient `ADMIN_KEY`,
+uses the pinned manifest's durable administrator key for exactly one
+authenticated HTTP 200 read from `/api/admin/brain/documents`, and makes no
+Cloudflare control-plane request. It discards document rows and reports only a
+bounded, fingerprinted aggregate of Worker version, active D1 writer state,
+vector counts, pending queue, readiness reason, and verdict. That hostname is a
+pinned manifest assertion, not independent proof of Cloudflare account or
+domain ownership; the supervised field rung must reconcile the target.
+
+Only `projection_ready: true` means the projection is ready. A short projection
+is reported as `recoverable_queued_work`, not readiness, only when queued
+upserts cover its full numeric deficit; a smaller or delete-only queue is
+`projection_work_insufficient` and stops. Exact counts with pending work are
+also non-ready. Zero queued against a short projection, visibility pending with
+no queue, excess vectors, a paused or mixed generation, or malformed fields
+stop. Every result says
+`authorizes_update: false` and performs no Brain write, control-plane request,
+deploy, install, browser launch, manifest or workspace write, skill write, or
+support-journal write. The implementation and fixture tests in this working
+tree remain local-only; immutable package, CI, and supervised field evidence
+are still required before live use.
 
 After installing the released CLI, start with the read-only plan:
 
