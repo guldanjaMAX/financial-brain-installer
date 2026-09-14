@@ -4,8 +4,11 @@ const CLAUDE_UPDATE_PROMPT =
   "Open https://financialbrain.ai/update, read the whole page, and help me safely update my Financial Brain.";
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_INSTALLER_BYTES = 20 * 1024 * 1024;
+const MAX_RUNTIME_IDENTITY_BYTES = 4096;
 const STABLE_VERSION = /^\d+\.\d+\.\d+$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const SOURCE_SHA = /^[0-9a-f]{40}$/;
+const RUNTIME_IDENTITY_SCHEME = "brain.runtime-payload.sha256.v1";
 
 function stableParts(version) {
   if (!STABLE_VERSION.test(String(version || ""))) return null;
@@ -73,7 +76,8 @@ function validatedV2Manifest(value) {
   if (value.release_state !== "stable") {
     const reason = typeof value.held_reason === "string" ? value.held_reason.trim() : "";
     if (value.available !== false || value.release !== null || value.published_at !== null ||
-        value.installer !== null || !Array.isArray(value.changes) || value.changes.length !== 0 ||
+        value.installer !== null || value.runtime_identity != null ||
+        !Array.isArray(value.changes) || value.changes.length !== 0 ||
         reason.length < 1 || reason.length > 400 ||
         value.proof.archive_release_gate !== "not_passed" ||
         value.proof.automated_release_suite !== "pending" ||
@@ -89,12 +93,25 @@ function validatedV2Manifest(value) {
   const release = String(value.release || "");
   const changes = boundedStrings(value.changes, { maxItems: 12, maxLength: 400 });
   const installer = value.installer;
+  const runtimeIdentity = value.runtime_identity;
   const expectedAsset = `https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v${release}/brain-installer-${release}.tgz`;
+  const expectedRuntimeIdentityAsset =
+    `https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v${release}/brain-installer-${release}-runtime-identity.json`;
   if (value.available !== true || !stableParts(release) ||
       !/^\d{4}-\d{2}-\d{2}$/.test(String(value.published_at || "")) ||
       value.held_reason !== null || !changes || !installer || typeof installer !== "object" ||
       installer.url !== expectedAsset || !SHA256.test(String(installer.sha256 || "")) ||
       !Number.isSafeInteger(installer.bytes) || installer.bytes < 1 || installer.bytes > MAX_INSTALLER_BYTES ||
+      !runtimeIdentity || typeof runtimeIdentity !== "object" || Array.isArray(runtimeIdentity) ||
+      runtimeIdentity.url !== expectedRuntimeIdentityAsset ||
+      !SHA256.test(String(runtimeIdentity.sha256 || "")) ||
+      !Number.isSafeInteger(runtimeIdentity.bytes) || runtimeIdentity.bytes < 1 ||
+      runtimeIdentity.bytes > MAX_RUNTIME_IDENTITY_BYTES ||
+      !SOURCE_SHA.test(String(runtimeIdentity.source_sha || "")) ||
+      !Number.isSafeInteger(runtimeIdentity.package_file_count) ||
+      runtimeIdentity.package_file_count < 1 ||
+      runtimeIdentity.identity_scheme !== RUNTIME_IDENTITY_SCHEME ||
+      !SHA256.test(String(runtimeIdentity.runtime_payload_sha256 || "")) ||
       value.proof.archive_release_gate !== "passed" ||
       value.proof.automated_release_suite !== "passed" ||
       value.proof.live_client_acceptance !== "required") {
@@ -106,6 +123,15 @@ function validatedV2Manifest(value) {
     published_at: value.published_at,
     changes,
     installer: { url: installer.url, sha256: installer.sha256, bytes: installer.bytes },
+    runtime_identity: {
+      url: runtimeIdentity.url,
+      sha256: runtimeIdentity.sha256,
+      bytes: runtimeIdentity.bytes,
+      source_sha: runtimeIdentity.source_sha,
+      package_file_count: runtimeIdentity.package_file_count,
+      identity_scheme: runtimeIdentity.identity_scheme,
+      runtime_payload_sha256: runtimeIdentity.runtime_payload_sha256,
+    },
   };
 }
 
@@ -171,6 +197,7 @@ export async function readUpdateStatus({ installedVersion, fetchImpl = fetch, no
       changes: manifest.changes,
       ...(manifest.released_connectors ? { released_connectors: manifest.released_connectors } : {}),
       installer: manifest.installer,
+      ...(manifest.runtime_identity ? { runtime_identity: manifest.runtime_identity } : {}),
     };
   } catch {
     return unavailable(installedVersion, checkedAt);

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -8,6 +10,8 @@ import { strFromU8, unzipSync } from "fflate";
 
 import {
   ARTIFACT_KIND,
+  ARTIFACT_SCHEMA_VERSION,
+  INTENDED_ARCHITECTURE,
   LAUNCHER_PATH,
   LOOPBACK_ORIGIN,
   PURPOSE,
@@ -17,18 +21,28 @@ import {
   REQUIRED_CI_JOBS,
   buildKitArtifacts,
   createKitCommandEnvironment,
+  downloadRuntimeIdentityArtifact,
   loadCiEvidence,
   normalizeRepositoryUrl,
   parseWindowsOnboardingKitArgs,
   runWindowsOnboardingKit,
   validateCiRun,
 } from "../scripts/build-windows-onboarding-kit.mjs";
+import {
+  createRuntimeIdentityReceipt,
+  runtimeIdentityArtifactName,
+  runtimeIdentityReceiptBytes,
+} from "../scripts/runtime-identity-receipt.mjs";
 
 const SHA = "a".repeat(40);
 const TREE = "b".repeat(40);
 const RUN_ID = "456789";
 const VERSION = "0.4.8";
 const PACKAGE_SHA = "c".repeat(64);
+const RUNTIME_SHA = "9".repeat(64);
+const PACKAGE_BYTES = 123456;
+const PACKAGE_FILE_COUNT = 678;
+const IDENTITY_SCHEME = "brain.runtime-payload.sha256.v1";
 const LAUNCHER_BYTES = Buffer.from("# reviewed synthetic launcher fixture\r\n");
 const CHECKED_AT = new Date("2026-09-12T19:00:00.000Z");
 
@@ -91,27 +105,57 @@ function ciRun({
   };
 }
 
+function runtimeIdentityBytes() {
+  return runtimeIdentityReceiptBytes(createRuntimeIdentityReceipt({
+    sourceSha: SHA,
+    packageFilename: `brain-installer-${VERSION}.tgz`,
+    packageVersion: VERSION,
+    packageBytes: PACKAGE_BYTES,
+    packageFileCount: PACKAGE_FILE_COUNT,
+    packageSha256: PACKAGE_SHA,
+    identityScheme: IDENTITY_SCHEME,
+    runtimePayloadSha256: RUNTIME_SHA,
+  }));
+}
+
 function artifactResponse({ digest = `sha256:${PACKAGE_SHA}`, expired = false } = {}) {
+  const identityBytes = runtimeIdentityBytes();
   return {
-    total_count: 1,
-    artifacts: [{
-      id: 8100,
-      name: `brain-installer-${VERSION}.tgz`,
-      size_in_bytes: 123456,
-      digest,
-      expired,
-      workflow_run: { id: Number(RUN_ID), head_sha: SHA },
-    }],
+    total_count: 2,
+    artifacts: [
+      {
+        id: 8100,
+        name: `brain-installer-${VERSION}.tgz`,
+        size_in_bytes: PACKAGE_BYTES,
+        digest,
+        expired,
+        workflow_run: { id: Number(RUN_ID), head_sha: SHA },
+      },
+      {
+        id: 8101,
+        name: runtimeIdentityArtifactName(VERSION),
+        size_in_bytes: identityBytes.length,
+        digest: `sha256:${createHash("sha256").update(identityBytes).digest("hex")}`,
+        expired,
+        workflow_run: { id: Number(RUN_ID), head_sha: SHA },
+      },
+    ],
+  };
+}
+
+function ciValidationOptions(extra = {}) {
+  return {
+    expectedSha: SHA,
+    version: VERSION,
+    ciRunId: RUN_ID,
+    runtimeIdentityBytes: runtimeIdentityBytes(),
+    now: CHECKED_AT,
+    ...extra,
   };
 }
 
 function ciEvidence() {
-  return validateCiRun(ciRun(), artifactResponse(), {
-    expectedSha: SHA,
-    version: VERSION,
-    ciRunId: RUN_ID,
-    now: CHECKED_AT,
-  });
+  return validateCiRun(ciRun(), artifactResponse(), ciValidationOptions());
 }
 
 function dependencies(overrides = {}) {
@@ -126,6 +170,9 @@ function dependencies(overrides = {}) {
     fileReader(path) {
       assert.match(path, /onboarding[\\/]start-windows-rehearsal\.ps1$/);
       return LAUNCHER_BYTES;
+    },
+    identityArtifactReader() {
+      return runtimeIdentityBytes();
     },
     ...overrides,
   };
@@ -174,6 +221,14 @@ test("the installed technician skill routes this synthetic receipt before instal
   assert.match(skill, /replaces \*\*Start\s+here\*\*/i);
   assert.match(skill, /do not run\s+`brain --version`, `brain tools`, the packaged preflight/i);
   assert.match(skill, /do not compare its digest to\s+an installed package/i);
+  assert.match(skill, /Require schema version 3/i);
+  assert.match(skill, /`intended_architecture: x64`/i);
+  assert.match(skill, /x64 Node process emulated by Windows ARM64 does not\s+qualify/i);
+  assert.match(skill, /Native Windows OS architecture: x64 confirmed/i);
+  assert.match(skill, /Node process architecture: x64 confirmed/i);
+  assert.match(skill, /`tested_package\.identity_scheme`/i);
+  assert.match(skill, /`runtime_payload_sha256` to match\s+`update_preview\.expected_runtime_sha256`/i);
+  assert.match(skill, /did not observe an\s+installed runtime or run update preview/i);
   assert.match(skill, /Never infer an install-kit contract from the filename\s+`release\.json` alone/i);
 });
 
@@ -190,6 +245,8 @@ test("plan mode checks exact identity but creates no output and never calls GitH
     }),
   );
   assert.equal(result.status, "plan_only");
+  assert.equal(result.schema_version, ARTIFACT_SCHEMA_VERSION);
+  assert.equal(result.intended_architecture, INTENDED_ARCHITECTURE);
   assert.equal(result.ready_to_send, false);
   assert.equal(result.output_created, false);
   assert.equal(result.source.head_sha, SHA);
@@ -204,35 +261,49 @@ test("GitHub evidence must be one successful exact-SHA ci run with every require
   assert.equal(evidence.conclusion, "success");
   assert.deepEqual(evidence.required_jobs.map(({ name }) => name), REQUIRED_CI_JOBS);
   assert.equal(evidence.package.sha256, PACKAGE_SHA);
+  assert.equal(evidence.package.bytes, PACKAGE_BYTES);
+  assert.equal(evidence.package.file_count, PACKAGE_FILE_COUNT);
+  assert.equal(evidence.package.identity_scheme, IDENTITY_SCHEME);
+  assert.equal(evidence.package.runtime_payload_sha256, RUNTIME_SHA);
   assert.equal(evidence.package.digest_scope, "github_actions_raw_file_artifact");
-  assert.equal(evidence.package.github_artifact_api_size_bytes, 123456);
-  assert.equal(evidence.package.bytes, undefined);
+  assert.equal(evidence.package.github_artifact_api_size_bytes, PACKAGE_BYTES);
+  assert.equal(
+    evidence.package.runtime_identity_artifact.filename,
+    runtimeIdentityArtifactName(VERSION),
+  );
+  assert.equal(evidence.package.runtime_identity_artifact.receipt_schema_version, 1);
   assert.equal(evidence.package.used_by_rehearsal, false);
 
-  assert.throws(() => validateCiRun(ciRun({ headSha: "9".repeat(40) }), artifactResponse(), {
-    expectedSha: SHA, version: VERSION, ciRunId: RUN_ID, now: CHECKED_AT,
-  }), /ci_head_sha_mismatch/);
-  assert.throws(() => validateCiRun({ ...ciRun(), event: "pull_request" }, artifactResponse(), {
-    expectedSha: SHA, version: VERSION, ciRunId: RUN_ID, now: CHECKED_AT,
-  }), /ci_event_mismatch/);
-  assert.throws(() => validateCiRun(ciRun({ conclusion: "failure" }), artifactResponse(), {
-    expectedSha: SHA, version: VERSION, ciRunId: RUN_ID, now: CHECKED_AT,
-  }), /ci_run_not_successful/);
-  assert.throws(() => validateCiRun(ciRun({ jobs: ciRun().jobs.slice(1) }), artifactResponse(), {
-    expectedSha: SHA, version: VERSION, ciRunId: RUN_ID, now: CHECKED_AT,
-  }), /ci_required_job_missing/);
+  assert.throws(() => validateCiRun(ciRun({ headSha: "9".repeat(40) }), artifactResponse(),
+    ciValidationOptions()), /ci_head_sha_mismatch/);
+  assert.throws(() => validateCiRun({ ...ciRun(), event: "pull_request" }, artifactResponse(),
+    ciValidationOptions()), /ci_event_mismatch/);
+  assert.throws(() => validateCiRun(ciRun({ conclusion: "failure" }), artifactResponse(),
+    ciValidationOptions()), /ci_run_not_successful/);
+  assert.throws(() => validateCiRun(ciRun({ jobs: ciRun().jobs.slice(1) }), artifactResponse(),
+    ciValidationOptions()), /ci_required_job_missing/);
   const failedJobs = ciRun().jobs.map((job, index) => index === 3
     ? { ...job, conclusion: "failure" }
     : job);
-  assert.throws(() => validateCiRun(ciRun({ jobs: failedJobs }), artifactResponse(), {
-    expectedSha: SHA, version: VERSION, ciRunId: RUN_ID, now: CHECKED_AT,
-  }), /ci_required_job_not_successful/);
-  assert.throws(() => validateCiRun(ciRun(), artifactResponse({ digest: null }), {
-    expectedSha: SHA, version: VERSION, ciRunId: RUN_ID, now: CHECKED_AT,
-  }), /ci_package_digest_missing/);
-  assert.throws(() => validateCiRun({ ...ciRun(), updatedAt: "2026-09-01T00:00:00.000Z" }, artifactResponse(), {
-    expectedSha: SHA, version: VERSION, ciRunId: RUN_ID, now: CHECKED_AT,
-  }), /ci_run_stale/);
+  assert.throws(() => validateCiRun(ciRun({ jobs: failedJobs }), artifactResponse(),
+    ciValidationOptions()), /ci_required_job_not_successful/);
+  assert.throws(() => validateCiRun(ciRun(), artifactResponse({ digest: null }),
+    ciValidationOptions()), /ci_package_digest_missing/);
+  const missingIdentity = artifactResponse();
+  missingIdentity.artifacts = missingIdentity.artifacts.slice(0, 1);
+  missingIdentity.total_count = 1;
+  assert.throws(() => validateCiRun(ciRun(), missingIdentity, ciValidationOptions()),
+    /ci_runtime_identity_artifact_missing/);
+  const changedIdentity = Buffer.from(runtimeIdentityBytes());
+  changedIdentity[changedIdentity.length - 2] ^= 1;
+  assert.throws(() => validateCiRun(ciRun(), artifactResponse(),
+    ciValidationOptions({ runtimeIdentityBytes: changedIdentity })),
+  /ci_runtime_identity_receipt_invalid/);
+  assert.throws(() => validateCiRun(
+    { ...ciRun(), updatedAt: "2026-09-01T00:00:00.000Z" },
+    artifactResponse(),
+    ciValidationOptions(),
+  ), /ci_run_stale/);
 });
 
 test("production evidence is fetched only through gh for the named repository and run", () => {
@@ -246,6 +317,11 @@ test("production evidence is fetched only through gh for the named repository an
     },
     environment: { PATH: "/fixture/bin" },
     clock: () => CHECKED_AT,
+    identityArtifactReader({ artifact, environment }) {
+      assert.equal(artifact.filename, runtimeIdentityArtifactName(VERSION));
+      assert.deepEqual(environment, { PATH: "/fixture/bin" });
+      return runtimeIdentityBytes();
+    },
   });
   assert.equal(evidence.run_id, RUN_ID);
   assert.equal(calls.length, 2);
@@ -255,6 +331,42 @@ test("production evidence is fetched only through gh for the named repository an
   assert.deepEqual(calls[1].args.slice(0, 3), ["api", "--hostname", "github.com"]);
   assert.equal(calls[1].args[3], `repos/${REPOSITORY_SLUG}/actions/runs/${RUN_ID}/artifacts?per_page=100`);
   assert.equal(calls.every(({ options }) => options.shell === false), true);
+});
+
+test("the runtime identity artifact download is exact-name, raw, and private-temp bounded", () => {
+  const bytes = runtimeIdentityBytes();
+  const response = artifactResponse();
+  const source = response.artifacts.find(({ name }) =>
+    name === runtimeIdentityArtifactName(VERSION));
+  const artifact = {
+    artifact_id: String(source.id),
+    filename: source.name,
+    bytes: source.size_in_bytes,
+    sha256: source.digest.slice("sha256:".length),
+  };
+  const received = [];
+  const downloaded = downloadRuntimeIdentityArtifact({
+    ciRunId: RUN_ID,
+    artifact,
+    environment: { PATH: "/fixture/bin" },
+    temporaryRoot: tmpdir(),
+    commandRunner(command, args, options) {
+      received.push({ command, args, options });
+      const directory = args[args.indexOf("--dir") + 1];
+      writeFileSync(join(directory, artifact.filename), bytes, { mode: 0o600 });
+      return { status: 0, stdout: "" };
+    },
+  });
+  assert.deepEqual(downloaded, bytes);
+  downloaded.fill(0);
+  assert.equal(received.length, 1);
+  assert.equal(received[0].command, "gh");
+  assert.deepEqual(received[0].args.slice(0, 6), [
+    "run", "download", RUN_ID, "--repo", REPOSITORY_GH_TARGET,
+    "--name",
+  ]);
+  assert.equal(received[0].args[6], runtimeIdentityArtifactName(VERSION));
+  assert.equal(received[0].options.shell, false);
 });
 
 test("Git and gh receive the same credential-minimized command environment", async () => {
@@ -340,14 +452,22 @@ test("the sealed archive and receipts are deterministic, generic, and synthetic 
   assert.equal(first.release.ready_to_send, true);
   assert.equal(first.release.ready_for_live_accounts, false);
   assert.equal(first.release.physical_windows_execution, "pending");
+  assert.equal(first.release.schema_version, ARTIFACT_SCHEMA_VERSION);
   assert.equal(first.release.purpose, PURPOSE);
   assert.equal(first.release.artifact_kind, ARTIFACT_KIND);
+  assert.equal(first.release.intended_architecture, INTENDED_ARCHITECTURE);
   assert.equal(first.release.intended_loopback_origin, LOOPBACK_ORIGIN);
   assert.equal(first.release.launcher.digest_scope, "checked_in_file_in_reviewed_checkout");
   assert.equal(first.release.launcher.included_in_handoff_archive, false);
   assert.equal(first.release.archive.sha256.length, 64);
   assert.equal(first.release.tested_package.sha256, PACKAGE_SHA);
-  assert.equal(first.release.tested_package.github_artifact_api_size_bytes, 123456);
+  assert.equal(first.release.tested_package.github_artifact_api_size_bytes, PACKAGE_BYTES);
+  assert.equal(first.release.tested_package.identity_scheme, IDENTITY_SCHEME);
+  assert.equal(first.release.tested_package.runtime_payload_sha256, RUNTIME_SHA);
+  assert.equal(first.release.update_preview.identity_scheme, IDENTITY_SCHEME);
+  assert.equal(first.release.update_preview.expected_runtime_sha256, RUNTIME_SHA);
+  assert.equal(first.release.update_preview.observed_installed_runtime, false);
+  assert.equal(first.release.update_preview.preview_executed, false);
   assert.equal(first.release.boundaries.customer_data_allowed, false);
   assert.equal(first.release.boundaries.credentials_allowed, false);
   assert.equal(first.release.boundaries.live_actions_allowed, false);
@@ -366,15 +486,28 @@ test("the sealed archive and receipts are deterministic, generic, and synthetic 
   const instructions = strFromU8(unzipped[instructionName]);
   const manifest = JSON.parse(strFromU8(unzipped[manifestName]));
   assert.equal(manifest.ready_to_send, true);
+  assert.equal(manifest.schema_version, ARTIFACT_SCHEMA_VERSION);
+  assert.equal(manifest.intended_architecture, INTENDED_ARCHITECTURE);
+  assert.equal(manifest.intended_architecture, first.release.intended_architecture);
+  assert.deepEqual(manifest.update_preview, first.release.update_preview);
   assert.equal(manifest.source.head_sha, SHA);
   assert.equal(manifest.launcher.path, LAUNCHER_PATH);
   assert.equal(manifest.launcher.digest_scope, "checked_in_file_in_reviewed_checkout");
   assert.equal(manifest.launcher.included_in_handoff_archive, false);
   assert.match(instructions, /normal PowerShell window opened from the Windows Start menu/i);
   assert.match(instructions, /artifact_kind is financial_brain_windows_onboarding_rehearsal/i);
+  assert.match(instructions, /schema_version is 3/i);
+  assert.match(instructions, /intended_architecture is x64/i);
+  assert.match(instructions, /native x64 Windows computer/i);
+  assert.match(instructions, /native Windows OS architecture x64.*Node process architecture x64/i);
+  assert.match(instructions, /Windows on ARM64 does not qualify.*emulate x64 Node/i);
   assert.match(instructions, /successful CI event is push for exact source SHA/i);
   assert.match(instructions, /detached-HEAD mode/i);
-  assert.match(instructions, /start-windows-rehearsal\.ps1.*-ExpectedSha/i);
+  assert.match(instructions,
+    /start-windows-rehearsal\.ps1.*-ExpectedSha.*-ExpectedRuntimeIdentityScheme.*-ExpectedRuntimeSha256/i);
+  assert.match(instructions, new RegExp(`expected_runtime_sha256 is ${RUNTIME_SHA}`, "i"));
+  assert.match(instructions,
+    /preserved the expected runtime identity but did not observe an installed runtime or run update preview/i);
   assert.match(instructions, /Do not paste or reconstruct the PowerShell script body/i);
   assert.match(instructions, /launcher digest in release\.json describes this file in the reviewed checkout/i);
   assert.match(instructions, /launcher is not an entry inside the ZIP/i);
@@ -384,6 +517,7 @@ test("the sealed archive and receipts are deterministic, generic, and synthetic 
   assert.match(instructions, /Guide them through one synthetic screen at a time/i);
   assert.match(instructions, /browser closes.*reopen http:\/\/127\.0\.0\.1:4176\/.*do not rerun the launcher/i);
   assert.match(instructions, /three biggest points of confusion/i);
+  assert.match(instructions, /verified native Windows OS architecture.*verified Node process architecture/i);
   assert.doesNotMatch(
     `${instructions}\n${JSON.stringify(first.release)}`,
     /private-person-fixture|private@example\.test|\/Users\//i,

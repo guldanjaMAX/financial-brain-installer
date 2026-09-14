@@ -634,7 +634,7 @@ test("accepted_resolution verify fails for stale family, outbox, and deployment 
     );
     const verify = await body(verifyResponse);
     assert.equal(verifyResponse.status, 409, JSON.stringify(verify));
-    assert.equal(verify.code, "source_original_result_family_retrieval_unready");
+    assert.equal(verify.code, "source_original_result_family_vector_unready");
     assert.equal(acceptedCounts(fixture).current, 0);
   });
 

@@ -36,11 +36,16 @@ import {
   createTestDisposableRecoveryK0Capability,
 } from "./helpers/disposable-recovery-k0-capability.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable recovery field deployment CLI suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
+const MACOS_PRIVATE_RECEIPT_SKIP =
+  "requires a verifier-minted K0 capability and private receipt ACL proof";
+function testWithMacosPrivateReceipt(name, optionsOrFn, maybeFn) {
+  const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  return test(name, {
+    ...options,
+    skip: process.platform === "win32" ? MACOS_PRIVATE_RECEIPT_SKIP : options.skip,
+  }, fn);
+}
 
 const digest = (value) => createHash("sha256").update(String(value)).digest("hex");
 const canonical = (value) => {
@@ -52,20 +57,22 @@ const canonical = (value) => {
   return JSON.stringify(value);
 };
 const TEST_ACCOUNT_ID = "a".repeat(32);
-const DEPLOY_K0 = await createTestDisposableRecoveryK0Capability({
-  candidate_sha: "1".repeat(40),
-  candidate_tree_sha: "2".repeat(40),
-  package_sha256: digest("package"),
-  field_receipt_sha256: digest("field-receipt"),
-  account_id: TEST_ACCOUNT_ID,
-});
-const PROVISION_K0 = await createTestDisposableRecoveryK0Capability({
-  candidate_sha: "1".repeat(40),
-  candidate_tree_sha: "2".repeat(40),
-  package_sha256: digest("package"),
-  field_receipt_sha256: digest("field"),
-  account_id: TEST_ACCOUNT_ID,
-});
+const DEPLOY_K0 = process.platform === "win32" ? null
+  : await createTestDisposableRecoveryK0Capability({
+    candidate_sha: "1".repeat(40),
+    candidate_tree_sha: "2".repeat(40),
+    package_sha256: digest("package"),
+    field_receipt_sha256: digest("field-receipt"),
+    account_id: TEST_ACCOUNT_ID,
+  });
+const PROVISION_K0 = process.platform === "win32" ? null
+  : await createTestDisposableRecoveryK0Capability({
+    candidate_sha: "1".repeat(40),
+    candidate_tree_sha: "2".repeat(40),
+    package_sha256: digest("package"),
+    field_receipt_sha256: digest("field"),
+    account_id: TEST_ACCOUNT_ID,
+  });
 const runDisposableRecoveryProvisionPreflight = (input) =>
   runDisposableRecoveryProvisionPreflightImpl({
     ...input,
@@ -294,7 +301,7 @@ test("Windows refusal happens before files, provider, or credentials are touched
   assert.equal(touched, false);
 });
 
-test("preview is local-only and invokes no phase runner", async () => {
+testWithMacosPrivateReceipt("preview is local-only and invokes no phase runner", async () => {
   const calls = [];
   const parsed = parseDisposableRecoveryFieldDeployArguments([
     "target-preview", ...TARGET_COMMON,
@@ -317,7 +324,7 @@ test("preview is local-only and invokes no phase runner", async () => {
   ]);
 });
 
-test("source and target commands dispatch only their named phase with fixed paths", async () => {
+testWithMacosPrivateReceipt("source and target commands dispatch only their named phase with fixed paths", async () => {
   for (const item of [
     {
       command: "source-preflight",
@@ -375,7 +382,7 @@ test("source and target commands dispatch only their named phase with fixed path
   }
 });
 
-test("A2/A4 commands require K0 before preparation can reach the provider", async () => {
+test("A2/A4 commands require the K0 receipt before preparation", async () => {
   const withoutKeychainReceipt = COMMON.filter((value, index, values) =>
     value !== "--keychain-receipt" && values[index - 1] !== "--keychain-receipt");
   let touched = false;
@@ -394,7 +401,9 @@ test("A2/A4 commands require K0 before preparation can reach the provider", asyn
     (error) => error.code === "DISPOSABLE_RECOVERY_DEPLOY_CLI_ARGUMENTS_INVALID",
   );
   assert.equal(touched, false);
+});
 
+testWithMacosPrivateReceipt("A2/A4 reject invalid K0 evidence before provider preparation", async () => {
   let providerPrepared = false;
   const calls = [];
   const deps = dependencies(calls);
@@ -443,7 +452,7 @@ test("A2/A4 commands require K0 before preparation can reach the provider", asyn
   assert.equal(accountMismatchPreparedProvider, false);
 });
 
-test("A2/A4 mutation boundary revalidates preparation and all K0 values", async () => {
+testWithMacosPrivateReceipt("A2/A4 mutation boundary revalidates preparation and all K0 values", async () => {
   const calls = [];
   const binding = bindingFixture();
   let preparationRevalidations = 0;
@@ -488,7 +497,7 @@ test("A2/A4 mutation boundary revalidates preparation and all K0 values", async 
   );
 });
 
-test("main emits only a closed error code on a failed command", async () => {
+testWithMacosPrivateReceipt("main emits only a closed error code on a failed command", async () => {
   const stdout = [];
   const stderr = [];
   const calls = [];
@@ -781,7 +790,7 @@ function provisioningProvider(role, calls, collision = null, { failOnceAt = null
   return provider;
 }
 
-test("provision parser and preview expose A1/A3 without plan, manifest, or credentials", async () => {
+test("provision parser exposes A1/A3 without plan, manifest, or credentials", () => {
   for (const [command, approval] of [
     ["source-provision-mutate", ["--approve-a1", "a".repeat(64)]],
     ["target-provision-mutate", ["--approve-a3", "b".repeat(64)]],
@@ -797,7 +806,9 @@ test("provision parser and preview expose A1/A3 without plan, manifest, or crede
     "source-provision-mutate", ...PROVISION_COMMON,
     "--approve-a1", "a".repeat(64), "--resume",
   ]).resume, true);
+});
 
+testWithMacosPrivateReceipt("provision preview is local-only", async () => {
   const calls = [];
   const result = await executeDisposableRecoveryFieldDeploy(
     parseDisposableRecoveryFieldDeployArguments([
@@ -865,7 +876,7 @@ test("an invalid K0 proof refuses before the provisioning provider is prepared",
   assert.equal(providerPrepared, false);
 });
 
-test("the provisioning mutation boundary invokes preparation and K0 revalidation", async () => {
+testWithMacosPrivateReceipt("the provisioning mutation boundary invokes preparation and K0 revalidation", async () => {
   const calls = [];
   const preparation = provisioningPreparation();
   let preparationRevalidations = 0;
@@ -910,7 +921,7 @@ test("the provisioning mutation boundary invokes preparation and K0 revalidation
   );
 });
 
-test("A1/A3 provision phases journal metadata indexes, preserve target emptiness, and bind Worker ID", async (t) => {
+testWithMacosPrivateReceipt("A1/A3 provision phases journal metadata indexes, preserve target emptiness, and bind Worker ID", async (t) => {
   for (const role of ["source", "target"]) {
     await t.test(role, async () => {
       const directory = realpathSync(mkdtempSync(join(tmpdir(), `v048-${role}-provision-`)));
@@ -968,7 +979,7 @@ test("A1/A3 provision phases journal metadata indexes, preserve target emptiness
   }
 });
 
-test("provision collision and wrong approval refuse before every mutation", async () => {
+testWithMacosPrivateReceipt("provision collision and wrong approval refuse before every mutation", async () => {
   for (const collisionKey of ["worker", "d1", "vectorize"]) {
     const directory = realpathSync(mkdtempSync(join(tmpdir(), `v048-collision-${collisionKey}-`)));
     chmodSync(directory, 0o700);
@@ -1024,7 +1035,7 @@ test("provision collision and wrong approval refuse before every mutation", asyn
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("A1 and A3 resume every sent-unconfirmed boundary without blind retry", async (t) => {
+testWithMacosPrivateReceipt("A1 and A3 resume every sent-unconfirmed boundary without blind retry", async (t) => {
   const commonSteps = [
     "create_d1",
     "create_vectorize",
@@ -1099,7 +1110,7 @@ test("A1 and A3 resume every sent-unconfirmed boundary without blind retry", asy
   }
 });
 
-test("provision output pair resumes every reservation and finalization boundary", async (t) => {
+testWithMacosPrivateReceipt("provision output pair resumes every reservation and finalization boundary", async (t) => {
   for (const stoppedAt of [
     "receipt_reserved", "manifest_reserved", "manifest_finalized", "receipt_finalized",
   ]) {
@@ -1160,7 +1171,7 @@ test("provision output pair resumes every reservation and finalization boundary"
   }
 });
 
-test("A1/A3 recover a durable final left with its guard for either output", async (t) => {
+testWithMacosPrivateReceipt("A1/A3 recover a durable final left with its guard for either output", async (t) => {
   for (const role of ["source", "target"]) {
     for (const artifact of ["manifest", "receipt"]) {
       await t.test(`${role}:${artifact}`, async () => {
@@ -1238,7 +1249,7 @@ test("A1/A3 recover a durable final left with its guard for either output", asyn
   }
 });
 
-test("generated A1 and A3 manifests build the full verified-recovery plan without null locators", async () => {
+testWithMacosPrivateReceipt("generated A1 and A3 manifests build the full verified-recovery plan without null locators", async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "v048-provision-plan-")));
   chmodSync(directory, 0o700);
   try {
@@ -1290,5 +1301,3 @@ test("generated A1 and A3 manifests build the full verified-recovery plan withou
     rmSync(directory, { recursive: true, force: true });
   }
 });
-
-}

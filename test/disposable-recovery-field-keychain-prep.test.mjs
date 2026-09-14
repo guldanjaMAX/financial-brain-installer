@@ -47,11 +47,16 @@ import {
   verifyDisposableRecoveryFieldKeychainResetJournal,
 } from "../operations/disposable-recovery-field-keychain-prep.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable recovery field Keychain preparation suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
+const MACOS_PRIVATE_RECEIPT_SKIP =
+  "requires private aggregate receipt ACL proof";
+function testWithMacosPrivateReceipt(name, optionsOrFn, maybeFn) {
+  const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  return test(name, {
+    ...options,
+    skip: process.platform === "win32" ? MACOS_PRIVATE_RECEIPT_SKIP : options.skip,
+  }, fn);
+}
 
 const HASH = (character) => character.repeat(64);
 const ACCOUNT_ID = "a".repeat(32);
@@ -332,7 +337,24 @@ test("preview is macOS-only and binds one strict immutable preparation approval"
   }
 });
 
-test("partial or power-loss state requires a separate reset and is never overwritten", async () => {
+test("partial state is identified before any reset or overwrite", async () => {
+  const checkedBinding = binding();
+  const keychain = fakeKeychain({
+    initial: { [REFERENCES[0]]: "preexisting-value" },
+  });
+  await assert.rejects(
+    previewDisposableRecoveryFieldKeychainPrep({
+      binding: checkedBinding,
+      keychain: keychain.adapter,
+      platform: "darwin",
+    }),
+    prepError("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_PREP_RESET_REQUIRED"),
+  );
+  assert.equal(keychain.events.some(([event]) => event === "write"), false);
+  assert.equal(keychain.state.get(REFERENCES[0]).toString("utf8"), "preexisting-value");
+});
+
+testWithMacosPrivateReceipt("partial or power-loss state requires a separate reset and is never overwritten", async () => {
   const checkedBinding = binding();
   const keychain = fakeKeychain({
     initial: { [REFERENCES[0]]: "preexisting-value" },
@@ -389,7 +411,7 @@ test("wrong K0 approval or missing single-operator confirmation performs no writ
   }
 });
 
-test("execute generates four independent exact formats and writes a private hash-only receipt", async () => {
+testWithMacosPrivateReceipt("execute generates four independent exact formats and writes a private hash-only receipt", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -449,7 +471,7 @@ test("execute generates four independent exact formats and writes a private hash
   }
 });
 
-test("admin-key collision stops before the first Keychain write", async () => {
+testWithMacosPrivateReceipt("admin-key collision stops before the first Keychain write", async () => {
   const directory = workspace();
   try {
     const keychain = fakeKeychain();
@@ -468,7 +490,7 @@ test("admin-key collision stops before the first Keychain write", async () => {
   }
 });
 
-test("normal caught failure rolls back only exact values created in this run", async () => {
+testWithMacosPrivateReceipt("normal caught failure rolls back only exact values created in this run", async () => {
   const directory = workspace();
   try {
     const keychain = fakeKeychain({ failWriteAt: 2 });
@@ -497,7 +519,7 @@ test("normal caught failure rolls back only exact values created in this run", a
   }
 });
 
-test("unprovable rollback leaves a clear stop-ship and never deletes the unknown value", async () => {
+testWithMacosPrivateReceipt("unprovable rollback leaves a clear stop-ship and never deletes the unknown value", async () => {
   const directory = workspace();
   try {
     const keychain = fakeKeychain({ corruptAndFailAt: 2 });
@@ -522,7 +544,7 @@ test("unprovable rollback leaves a clear stop-ship and never deletes the unknown
   }
 });
 
-test("post-write revalidation failure rolls back the exact created value", async () => {
+testWithMacosPrivateReceipt("post-write revalidation failure rolls back the exact created value", async () => {
   const directory = workspace();
   try {
     const keychain = fakeKeychain();
@@ -551,7 +573,7 @@ test("post-write revalidation failure rolls back the exact created value", async
   }
 });
 
-test("reservation drift after a write is detected and the exact value is rolled back", async () => {
+testWithMacosPrivateReceipt("reservation drift after a write is detected and the exact value is rolled back", async () => {
   const directory = workspace();
   try {
     const keychain = fakeKeychain();
@@ -590,7 +612,7 @@ test("reservation drift after a write is detected and the exact value is rolled 
   }
 });
 
-test("invalid completion clock rolls back all exact created values and leaves review markers", async () => {
+testWithMacosPrivateReceipt("invalid completion clock rolls back all exact created values and leaves review markers", async () => {
   const directory = workspace();
   try {
     const keychain = fakeKeychain();
@@ -617,7 +639,7 @@ test("invalid completion clock rolls back all exact created values and leaves re
   }
 });
 
-test("process death at every mutation boundary leaves a durable marker and reentry fail-closed", async () => {
+testWithMacosPrivateReceipt("process death at every mutation boundary leaves a durable marker and reentry fail-closed", async () => {
   const transitions = [
     "pending_reserved",
     ...PURPOSES.flatMap((purpose) => [
@@ -726,7 +748,7 @@ test("process death at every mutation boundary leaves a durable marker and reent
   }
 });
 
-test("an exact all-written interruption resumes without regenerating or rewriting values", async () => {
+testWithMacosPrivateReceipt("an exact all-written interruption resumes without regenerating or rewriting values", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -764,7 +786,7 @@ test("an exact all-written interruption resumes without regenerating or rewritin
   }
 });
 
-test("a partial-write interruption cannot use full resume and performs no new mutation", async () => {
+testWithMacosPrivateReceipt("a partial-write interruption cannot use full resume and performs no new mutation", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -803,7 +825,7 @@ test("a partial-write interruption cannot use full resume and performs no new mu
   }
 });
 
-test("finalization commitment crashes recover exact receipt without rolling back keys", async () => {
+testWithMacosPrivateReceipt("finalization commitment crashes recover exact receipt without rolling back keys", async () => {
   for (const crash of ["before_rename", "after_final_sync"]) {
     const directory = workspace();
     try {
@@ -845,7 +867,7 @@ test("finalization commitment crashes recover exact receipt without rolling back
   }
 });
 
-test("partial K0 reset preview binds exact current states and refuses a replaced value", async () => {
+testWithMacosPrivateReceipt("partial K0 reset preview binds exact current states and refuses a replaced value", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -914,7 +936,7 @@ test("partial K0 reset preview binds exact current states and refuses a replaced
   }
 });
 
-test("exact-approved partial K0 reset deletes only matching campaign values and retains proof", async () => {
+testWithMacosPrivateReceipt("exact-approved partial K0 reset deletes only matching campaign values and retains proof", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -1017,7 +1039,7 @@ test("exact-approved partial K0 reset deletes only matching campaign values and 
   }
 });
 
-test("partial K0 reset resumes after deletion and marker-cleanup crash boundaries", async () => {
+testWithMacosPrivateReceipt("partial K0 reset resumes after deletion and marker-cleanup crash boundaries", async () => {
   for (const crashAt of [
     ...PURPOSES.flatMap((purpose) => [
       `before_reset_delete:${purpose}`,
@@ -1098,7 +1120,7 @@ test("partial K0 reset resumes after deletion and marker-cleanup crash boundarie
   }
 });
 
-test("K0 reset refuses completion when a deleted value reappears during final marker cleanup", async () => {
+testWithMacosPrivateReceipt("K0 reset refuses completion when a deleted value reappears during final marker cleanup", async () => {
   for (const recreateAt of [
     "reset_final_marker_removed",
     "reset_pending_marker_removed",
@@ -1178,7 +1200,7 @@ test("K0 reset refuses completion when a deleted value reappears during final ma
   }
 });
 
-test("K0_RESET never retries an ambiguous delete and reconciles only proven absence", async () => {
+testWithMacosPrivateReceipt("K0_RESET never retries an ambiguous delete and reconciles only proven absence", async () => {
   for (const deletionOutcome of ["present", "absent"]) {
     const directory = workspace();
     try {
@@ -1231,7 +1253,7 @@ test("K0_RESET never retries an ambiguous delete and reconciles only proven abse
   }
 });
 
-test("sent_unconfirmed and terminal journal states reject recreated values with zero new deletes", async () => {
+testWithMacosPrivateReceipt("sent_unconfirmed and terminal journal states reject recreated values with zero new deletes", async () => {
   for (const terminalState of ["sent_unconfirmed", "confirmed", "reconciled"]) {
     const directory = workspace();
     try {
@@ -1332,7 +1354,7 @@ test("sent_unconfirmed and terminal journal states reject recreated values with 
   }
 });
 
-test("K0_RESET journal power cuts never duplicate a deletion", async () => {
+testWithMacosPrivateReceipt("K0_RESET journal power cuts never duplicate a deletion", async () => {
   for (const crashAt of [
     "before_reset_journal:0:planned",
     "after_reset_journal:0:planned",
@@ -1373,7 +1395,7 @@ test("K0_RESET journal power cuts never duplicate a deletion", async () => {
   }
 });
 
-test("K0_RESET journal write and fsync failures happen before Keychain deletion", async () => {
+testWithMacosPrivateReceipt("K0_RESET journal write and fsync failures happen before Keychain deletion", async () => {
   for (const failure of ["write", "sync"]) {
     const directory = workspace();
     try {
@@ -1428,7 +1450,7 @@ test("K0_RESET journal write and fsync failures happen before Keychain deletion"
   }
 });
 
-test("the last reset boundary rejects post-sent journal removal, truncation, substitution, and ACL drift", async () => {
+testWithMacosPrivateReceipt("the last reset boundary rejects post-sent journal removal, truncation, substitution, and ACL drift", async () => {
   for (const mutation of ["remove", "truncate", "substitute", "acl"]) {
     const directory = workspace();
     try {
@@ -1480,7 +1502,7 @@ test("the last reset boundary rejects post-sent journal removal, truncation, sub
   }
 });
 
-test("reset authorization cannot be transplanted under another valid receipt suffix", async () => {
+testWithMacosPrivateReceipt("reset authorization cannot be transplanted under another valid receipt suffix", async () => {
   const directory = workspace();
   try {
     const fixture = await preparedResetFixture(directory);
@@ -1534,7 +1556,7 @@ test("reset authorization cannot be transplanted under another valid receipt suf
   }
 });
 
-test("offline reset-journal verification enforces exact event and aggregate caps", async () => {
+testWithMacosPrivateReceipt("offline reset-journal verification enforces exact event and aggregate caps", async () => {
   for (const boundary of ["event_count", "event_bytes", "aggregate_bytes"]) {
     const directory = workspace();
     try {
@@ -1595,7 +1617,7 @@ test("offline reset-journal verification enforces exact event and aggregate caps
   }
 });
 
-test("reset resume refuses a non-private receipt directory before any deletion", async () => {
+testWithMacosPrivateReceipt("reset resume refuses a non-private receipt directory before any deletion", async () => {
   const directory = workspace();
   try {
     const fixture = await preparedResetFixture(directory);
@@ -1633,7 +1655,7 @@ test("reset resume refuses a non-private receipt directory before any deletion",
   }
 });
 
-test("same-path receipt-directory inode replacement is refused at reset authorization and journal boundaries", async () => {
+testWithMacosPrivateReceipt("same-path receipt-directory inode replacement is refused at reset authorization and journal boundaries", async () => {
   for (const boundary of ["authorization", "journal"]) {
     const directory = workspace();
     const originalDirectory = `${directory}-original`;
@@ -1686,7 +1708,7 @@ test("same-path receipt-directory inode replacement is refused at reset authoriz
   }
 });
 
-test("K0 exactly cancels pending-only reservation power loss without touching Keychain", async () => {
+testWithMacosPrivateReceipt("K0 exactly cancels pending-only reservation power loss without touching Keychain", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -1742,7 +1764,7 @@ test("K0 exactly cancels pending-only reservation power loss without touching Ke
   }
 });
 
-test("reset re-hashes the exact locator after approval and immediately before delete", async () => {
+testWithMacosPrivateReceipt("reset re-hashes the exact locator after approval and immediately before delete", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -1795,7 +1817,7 @@ test("reset re-hashes the exact locator after approval and immediately before de
   }
 });
 
-test("reset authorization resumes across every reservation and commit boundary", async () => {
+testWithMacosPrivateReceipt("reset authorization resumes across every reservation and commit boundary", async () => {
   for (const crashAt of [
     "authorization_reserved",
     "before_rename",
@@ -1881,7 +1903,7 @@ test("reset authorization resumes across every reservation and commit boundary",
   }
 });
 
-test("pending-only reset authorization is cancelled without deletion and requires a fresh run", async () => {
+testWithMacosPrivateReceipt("pending-only reset authorization is cancelled without deletion and requires a fresh run", async () => {
   const directory = workspace();
   try {
     const fixture = await preparedResetFixture(directory);
@@ -1949,7 +1971,7 @@ test("pending-only reset authorization is cancelled without deletion and require
   }
 });
 
-test("full pre-receipt readback catches earlier-key drift and refuses unsafe rollback", async () => {
+testWithMacosPrivateReceipt("full pre-receipt readback catches earlier-key drift and refuses unsafe rollback", async () => {
   const directory = workspace();
   try {
     const keychain = fakeKeychain({ corruptReadAt: 5 });
@@ -1972,7 +1994,7 @@ test("full pre-receipt readback catches earlier-key drift and refuses unsafe rol
   }
 });
 
-test("full post-finalization readback catches drift without deleting finalized values", async () => {
+testWithMacosPrivateReceipt("full post-finalization readback catches drift without deleting finalized values", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -2005,7 +2027,7 @@ test("full post-finalization readback catches drift without deleting finalized v
   }
 });
 
-test("completed reuse rereads exact hashes, performs no write, and refuses changed binding or value", async () => {
+testWithMacosPrivateReceipt("completed reuse rereads exact hashes, performs no write, and refuses changed binding or value", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -2054,7 +2076,7 @@ test("completed reuse rereads exact hashes, performs no write, and refuses chang
   }
 });
 
-test("offline K0 prepared-receipt capability is fixed-path, hash-only, and unforgeable", async () => {
+testWithMacosPrivateReceipt("offline K0 prepared-receipt capability is fixed-path, hash-only, and unforgeable", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -2190,7 +2212,7 @@ test("offline K0 prepared-receipt capability is fixed-path, hash-only, and unfor
   }
 });
 
-test("completed K0 verification returns hash-only evidence and revalidates exact receipt and values", async () => {
+testWithMacosPrivateReceipt("completed K0 verification returns hash-only evidence and revalidates exact receipt and values", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -2283,7 +2305,7 @@ test("completed K0 verification returns hash-only evidence and revalidates exact
   }
 });
 
-test("completed K0 verification allows exact missing values only for teardown resume", async () => {
+testWithMacosPrivateReceipt("completed K0 verification allows exact missing values only for teardown resume", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -2443,5 +2465,3 @@ test("default Keychain transport keeps values out of argv, env, and child output
   secret.fill(0);
   snapshots.forEach((value) => value.fill(0));
 });
-
-}

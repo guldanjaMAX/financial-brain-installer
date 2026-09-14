@@ -61,7 +61,10 @@ registered Financial Brain MCP server before reaching for Cloudflare directly.
 - Before any setup route, ask whether this is the owner's first Brain, an existing Brain on this computer, an existing Brain on a new computer, an interrupted setup, or whether they are unsure. Never infer a first Brain from a missing file. Pass the matching explicit intent to \`${brain} tools ${manifest} --intent <selected-intent>\`; \`unsure\` creates nothing. This proves Node 22+, at least 2 GiB free on the actual per-user install drive (LOCALAPPDATA on Windows), and a normal session without sudo, root, or Run as administrator.
 - Complete the named Cloudflare sign-in so the installer verifies the exact account, then let it open that account's Workers & Pages > Plans page. Require the owner to confirm it says Paid before provisioning. The narrow session cannot read billing status, so do not infer the plan from product access. Apply the same prerequisite to a prepared manifest, recovery lane, or approved automation; unattended setup needs the exact release's account-bound confirmation for the manifest account.
 - Start with the folder or connected-drive root the owner names. Use \`claude --add-dir <approved-folder>\` for that approved root.
-- Preview a discovered source and invite the owner to approve the exact folder before ingestion.
+- For the held Windows x64 pilot, use one dedicated manifest source root with exactly one direct regular file. Refuse subdirectories, links, junctions, additional files, and broader source trees. The architecture gate fails closed unless both the native Windows operating-system probe and the Node process prove x64 before manifest, source, credential, or network access.
+- Preview only that canonical source-relative file with the held \`ingest-file\` command form. The matching apply needs the unchanged source and file plus the preview's exact 64-character approval fingerprint. OCR, removal, reconciliation, scheduling, and a full-source walk remain excluded.
+- The held candidate's \`update --preview\` form is read-only and diagnostic. It does not update the Brain, authorize an update, or carry approval into another command. Package, CI, field, and live proof remain separate.
+- Call any protected recovery export an encrypted provenance artifact in owner-facing copy.
 - Pause for the owner's specific approval before a deploy, deletion, data-forget action, key rotation, access revocation, or billing change.
 - Optimize has one total owner-question budget per response across the optional goal, evidence clarification, and zoning. Resolve the installed Brain first. If discovery needs a choice, use this response's one question there and defer every audit blocker. Otherwise, ask only the highest-priority pending blocker: a material evidence conflict, then a whole-source zoning decision, then the optional goal. Skip the goal whenever a material evidence conflict or any zoning decision is pending. Only when neither is pending and the owner has not already stated a goal may you ask: "What would you most like your Financial Brain to help you understand or keep current?" Once one question is asked, state and defer every other blocker. Never split goal, clarification, and zoning into separate question budgets. Keep the audit read-only.
 - For zoning, recommend a mapping only when source-specific evidence supports the whole source. A source label, connector kind, document count, or plausible guess is not enough. Without that evidence, do not propose or recommend a zone. State the available whole-source choices and consequences, including leaving it unzoned, and say the records do not determine the choice. If zoning is the highest-priority blocker, ask the owner to choose with the response's one question. If a material evidence conflict has higher priority, defer zoning to the next response.
@@ -80,7 +83,15 @@ registered Financial Brain MCP server before reaching for Cloudflare directly.
 - Readiness: \`${brain} doctor ${manifest}\`
 - Source status: \`${brain} sources ${manifest}\`
 - Ask privately: \`${brain} ask ${manifest}\`
-- Load one approved folder: \`${brain} ingest ${manifest} --path <approved-folder> --source documents\`
+- Held update diagnostic: \`${brain} update ${manifest} --preview --expect-runtime-sha256 <64hex> --json\`
+- Exact first-source preview: \`${brain} ingest-file ${manifest} --source <id> --file <canonical-relative> --expect-runtime-sha256 <64hex> --json\`
+- Exact first-source apply after matching approval: \`${brain} ingest-file ${manifest} --source <id> --file <canonical-relative> --expect-runtime-sha256 <64hex> --apply --approve <64hex>\`
+
+For both first-source commands, copy the runtime value from the exact sealed package receipt's \`runtime_payload_sha256\` under \`identity_scheme: brain.runtime-payload.sha256.v1\`. Keep it unchanged from preview to apply and do not substitute the whole tarball SHA-256.
+
+Those held-pilot forms define the required operator boundary. Their presence in
+this guide is not implementation, test, package, CI, physical Windows, or live
+Brain proof.
 
 Named-profile Wrangler uses the reviewed exact version \`npx ${CLOUDFLARE_OAUTH_WRANGLER_PACKAGE}\`.
 Prefer the Brain CLI because it applies account pinning, migration safety, key

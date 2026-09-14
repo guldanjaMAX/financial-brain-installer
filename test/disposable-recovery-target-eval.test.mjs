@@ -34,12 +34,6 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable recovery target evaluation suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
-
 const SOURCE_VERSION_ID = "10000000-0000-4000-8000-000000000001";
 const SOURCE_DEPLOYMENT_ID = "10000000-0000-4000-8000-000000000002";
 const TARGET_PAUSED_VERSION_ID = "20000000-0000-4000-8000-000000000001";
@@ -54,14 +48,16 @@ const keychainBinding = Object.freeze({
   field_receipt_sha256: "4".repeat(64),
   account_id: "e".repeat(32),
 });
-const K0 = await createTestDisposableRecoveryK0Capability(keychainBinding);
+const K0 = process.platform === "win32"
+  ? null
+  : await createTestDisposableRecoveryK0Capability(keychainBinding);
 const binding = Object.freeze({
   candidate_sha: keychainBinding.candidate_sha,
   candidate_tree_sha: keychainBinding.candidate_tree_sha,
   package_sha256: keychainBinding.package_sha256,
   field_receipt_sha256: keychainBinding.field_receipt_sha256,
   campaign_fingerprint: "5".repeat(64),
-  keychain_binding_sha256: K0.proof.keychain_binding_sha256,
+  keychain_binding_sha256: K0?.proof.keychain_binding_sha256 ?? "b".repeat(64),
   recovery_plan_fingerprint: "6".repeat(64),
   recovery_state_sha256: "7".repeat(64),
   golden_sha256: "8".repeat(64),
@@ -188,8 +184,11 @@ async function run(path, overrides = {}) {
   });
 }
 
-test("writes only the validated aggregate direct-target receipt", async () => {
-  if (process.platform === "win32") return;
+test("writes only the validated aggregate direct-target receipt", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   try {
     const events = [];
@@ -221,8 +220,11 @@ test("writes only the validated aggregate direct-target receipt", async () => {
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("rejects extra answer material before it can reach the receipt", async () => {
-  if (process.platform === "win32") return;
+test("rejects extra answer material before it can reach the receipt", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   try {
     await assert.rejects(
@@ -310,7 +312,11 @@ test("target binding refuses collapsed identities and malformed provider version
   }
 });
 
-test("target evaluation requires the exact K0 binding and an explicit revalidator", async () => {
+test("target evaluation requires the exact K0 binding and an explicit revalidator", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   try {
     for (const overrides of [
@@ -350,8 +356,11 @@ test("target evaluation requires the exact K0 binding and an explicit revalidato
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("forged or cross-bound K0 proof is refused before transport or reservation", async () => {
-  if (process.platform === "win32") return;
+test("forged or cross-bound K0 proof is refused before transport or reservation", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   for (const candidate of [
     Object.freeze({ ...K0.proof }),
     (await createTestDisposableRecoveryK0Capability({
@@ -381,8 +390,11 @@ test("forged or cross-bound K0 proof is refused before transport or reservation"
   }
 });
 
-test("changed K0 evidence stops the next target operation", async () => {
-  if (process.platform === "win32") return;
+test("changed K0 evidence stops the next target operation", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const localK0 = await createTestDisposableRecoveryK0Capability(keychainBinding);
   const localBinding = Object.freeze({
     ...binding,
@@ -438,8 +450,11 @@ test("the target-evaluation content snapshot excludes only the mutable usage led
   );
 });
 
-test("fails closed when projection or active identity changes", async () => {
-  if (process.platform === "win32") return;
+test("fails closed when projection or active identity changes", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   for (const changed of [
     observation({ snapshot_sha256: "c".repeat(64) }),
     observation({ worker_version_id: "other-version" }),
@@ -460,8 +475,11 @@ test("fails closed when projection or active identity changes", async () => {
   }
 });
 
-test("route or custom-domain drift stops A12 before evaluation", async () => {
-  if (process.platform === "win32") return;
+test("route or custom-domain drift stops A12 before evaluation", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   for (const field of ["routes", "custom_domains"]) {
     const path = workspace();
     const changed = structuredClone(A12_CAMPAIGN_AUTHORITY);
@@ -494,8 +512,11 @@ test("route or custom-domain drift stops A12 before evaluation", async () => {
   }
 });
 
-test("noncampaign binding drift across the A12 bracket leaves no receipt", async () => {
-  if (process.platform === "win32") return;
+test("noncampaign binding drift across the A12 bracket leaves no receipt", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   const changed = campaignAuthority("active", "changed-binding");
   let censusReads = 0;
@@ -527,8 +548,11 @@ test("noncampaign binding drift across the A12 bracket leaves no receipt", async
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("same-name Vectorize replacement with the expected count fails the A12 bracket", async () => {
-  if (process.platform === "win32") return;
+test("same-name Vectorize replacement with the expected count fails the A12 bracket", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   const replacement = campaignAuthority("active", "stable-binding", {
     targetVectorizeCreatedOn: "2026-09-13T12:00:00.000Z",
@@ -569,8 +593,11 @@ test("same-name Vectorize replacement with the expected count fails the A12 brac
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("permits only append-shaped aggregate usage while keeping the corpus snapshot exact", async () => {
-  if (process.platform === "win32") return;
+test("permits only append-shaped aggregate usage while keeping the corpus snapshot exact", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   let reads = 0;
   try {
@@ -587,8 +614,11 @@ test("permits only append-shaped aggregate usage while keeping the corpus snapsh
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("rejects deletion- or rewrite-shaped aggregate usage drift", async () => {
-  if (process.platform === "win32") return;
+test("rejects deletion- or rewrite-shaped aggregate usage drift", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   for (const candidate of [
     { before: { records: 4, max_id: 4 }, after: { records: 3, max_id: 4 } },
     { before: { records: 4, max_id: 4 }, after: { records: 4, max_id: 5 } },
@@ -612,8 +642,11 @@ test("rejects deletion- or rewrite-shaped aggregate usage drift", async () => {
   }
 });
 
-test("rejects failed eval, uncited support, false-answer case, and wrong approval", async () => {
-  if (process.platform === "win32") return;
+test("rejects failed eval, uncited support, false-answer case, and wrong approval", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const cases = [
     transport({ runReleaseEval: async () => ({
       profile: "release", status: "fail", critical_failures: 1,
@@ -637,8 +670,11 @@ test("rejects failed eval, uncited support, false-answer case, and wrong approva
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("reuses a completed bound receipt without repeating the live evaluation", async () => {
-  if (process.platform === "win32") return;
+test("reuses a completed bound receipt without repeating the live evaluation", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   try {
     const first = await run(path);
@@ -651,8 +687,11 @@ test("reuses a completed bound receipt without repeating the live evaluation", a
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("revalidates evidence around completed-receipt reuse", async () => {
-  if (process.platform === "win32") return;
+test("revalidates evidence around completed-receipt reuse", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   try {
     await run(path);
@@ -669,8 +708,11 @@ test("revalidates evidence around completed-receipt reuse", async () => {
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("safely resumes an exact unfinished read-only reservation", async () => {
-  if (process.platform === "win32") return;
+test("safely resumes an exact unfinished read-only reservation", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const path = workspace();
   try {
     await assert.rejects(
@@ -692,8 +734,11 @@ test("safely resumes an exact unfinished read-only reservation", async () => {
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("recovers an exact post-rename target receipt without repeating live evaluation", async () => {
-  if (process.platform === "win32") return;
+test("recovers an exact post-rename target receipt without repeating live evaluation", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const source = workspace();
   const target = workspace();
   const receiptPath = join(target, "v048-disposable-target-eval-receipt.json");
@@ -733,5 +778,3 @@ test("recovers an exact post-rename target receipt without repeating live evalua
     rmSync(target, { recursive: true, force: true });
   }
 });
-
-}

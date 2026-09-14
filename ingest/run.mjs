@@ -171,7 +171,17 @@ function regularFileSnapshot(st) {
   return {
     dev: String(st.dev),
     ino: String(st.ino),
+    nlink: String(st.nlink),
     size: String(st.size),
+    mtimeNs: String(st.mtimeNs ?? BigInt(Math.trunc(Number(st.mtimeMs) * 1e6))),
+    ctimeNs: String(st.ctimeNs ?? BigInt(Math.trunc(Number(st.ctimeMs) * 1e6))),
+  };
+}
+
+function directorySnapshot(st) {
+  return {
+    dev: String(st.dev),
+    ino: String(st.ino),
     mtimeNs: String(st.mtimeNs ?? BigInt(Math.trunc(Number(st.mtimeMs) * 1e6))),
     ctimeNs: String(st.ctimeNs ?? BigInt(Math.trunc(Number(st.ctimeMs) * 1e6))),
   };
@@ -181,6 +191,11 @@ const sameFileIdentity = (left, right) => left.dev === right.dev && left.ino ===
 
 const sameFileVersion = (left, right) =>
   sameFileIdentity(left, right) && left.size === right.size &&
+  left.nlink === right.nlink && left.mtimeNs === right.mtimeNs &&
+  left.ctimeNs === right.ctimeNs;
+
+const sameDirectoryVersion = (left, right) =>
+  left.dev === right.dev && left.ino === right.ino &&
   left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 
 function inspectRegularPath(path) {
@@ -194,6 +209,9 @@ function inspectRegularPath(path) {
     localFileFail("LOCAL_FILE_LINK_REFUSED", "symbolic links and junctions are not ingested");
   }
   if (!st.isFile()) localFileFail("LOCAL_FILE_NOT_REGULAR", "the path is not a regular file");
+  if (st.nlink !== 1n) {
+    localFileFail("LOCAL_FILE_LINK_REFUSED", "files with multiple hard links are not ingested");
+  }
   return regularFileSnapshot(st);
 }
 
@@ -312,6 +330,9 @@ function readApprovedLocalFile(file, { maxBytes }) {
     try {
       const st = fstatSync(fd, { bigint: true });
       if (!st.isFile()) localFileFail("LOCAL_FILE_NOT_REGULAR", "the opened path is not a regular file");
+      if (st.nlink !== 1n) {
+        localFileFail("LOCAL_FILE_LINK_REFUSED", "files with multiple hard links are not ingested");
+      }
       before = regularFileSnapshot(st);
     } catch (error) {
       if (error instanceof LocalFileSafetyError) throw error;
@@ -330,6 +351,9 @@ function readApprovedLocalFile(file, { maxBytes }) {
       after = regularFileSnapshot(fstatSync(fd, { bigint: true }));
     } catch (error) {
       localFileFail("LOCAL_FILE_METADATA_UNAVAILABLE", `opened-file metadata could not be rechecked: ${error.code || "unavailable"}`);
+    }
+    if (after.nlink !== "1") {
+      localFileFail("LOCAL_FILE_LINK_REFUSED", "the file gained another hard link while it was being read");
     }
     if (!sameFileVersion(before, after) || BigInt(after.size) !== BigInt(bytes.length)) {
       localFileFail("LOCAL_FILE_CHANGED_DURING_READ", "the file changed while it was being read; retry the ingest");
@@ -382,6 +406,9 @@ function* streamApprovedLocalFile(file) {
     try {
       const st = fstatSync(fd, { bigint: true });
       if (!st.isFile()) localFileFail("LOCAL_FILE_NOT_REGULAR", "the opened path is not a regular file");
+      if (st.nlink !== 1n) {
+        localFileFail("LOCAL_FILE_LINK_REFUSED", "files with multiple hard links are not ingested");
+      }
       before = regularFileSnapshot(st);
     } catch (error) {
       if (error instanceof LocalFileSafetyError) throw error;
@@ -416,6 +443,9 @@ function* streamApprovedLocalFile(file) {
       after = regularFileSnapshot(fstatSync(fd, { bigint: true }));
     } catch (error) {
       localFileFail("LOCAL_FILE_METADATA_UNAVAILABLE", `opened-file metadata could not be rechecked: ${error.code || "unavailable"}`);
+    }
+    if (after.nlink !== "1") {
+      localFileFail("LOCAL_FILE_LINK_REFUSED", "the file gained another hard link while it was being read");
     }
     if (!sameFileVersion(before, after) || BigInt(after.size) !== BigInt(total)) {
       localFileFail("LOCAL_FILE_CHANGED_DURING_READ", "the file changed while it was being read; retry the ingest");
@@ -946,6 +976,129 @@ export function canonicalLocalAssessmentLocator(value) {
     throw new TypeError("local assessment targets may not contain empty, dot, or parent segments");
   }
   return locator;
+}
+
+/**
+ * Resolve the deliberately tiny first-source pilot scope without walking the
+ * source tree. The reviewed pilot uses a dedicated root containing one direct
+ * file. Listing that one directory is enough to prove the scope has not grown;
+ * no unrelated file is opened or extracted.
+ *
+ * The returned handle is private execution input for prepare(). It contains a
+ * locator and filesystem identities and must never be printed in a public
+ * receipt.
+ */
+export function resolveExactLocalFile(root, {
+  relativeLocator,
+  privatePrefixes = [],
+  maxBytes = MAX_FILE_BYTES,
+  requireDedicatedRoot = true,
+} = {}) {
+  if (typeof root !== "string" || !root || !isAbsolute(root)) {
+    localFileFail("LOCAL_ROOT_NOT_ABSOLUTE", "the exact-file source root must be one absolute folder");
+  }
+  if (!Array.isArray(privatePrefixes) ||
+      privatePrefixes.some((prefix) => typeof prefix !== "string")) {
+    localFileFail("LOCAL_PRIVATE_PREFIX_POLICY_INVALID", "the private path-prefix policy is invalid");
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_FILE_BYTES) {
+    localFileFail("LOCAL_FILE_LIMIT_INVALID", "the exact-file size limit is invalid");
+  }
+
+  const locator = canonicalLocalAssessmentLocator(relativeLocator);
+  const segments = locator.split("/");
+  const loweredPrefixes = privatePrefixes.map((prefix) => prefix.toLowerCase());
+  if (segments.some((segment) =>
+    loweredPrefixes.some((prefix) => segment.toLowerCase().startsWith(prefix)))) {
+    localFileFail("LOCAL_FILE_PRIVATE_PREFIX", "the exact file matches a private path prefix");
+  }
+  if (multiRecordKind(locator) !== null) {
+    localFileFail("LOCAL_FILE_MULTI_RECORD_REFUSED", "the exact-file pilot accepts one native document, not a multi-record container");
+  }
+
+  const rootPath = resolve(root);
+  let rootBefore;
+  try {
+    const info = lstatSync(rootPath, { bigint: true });
+    if (info.isSymbolicLink()) {
+      localFileFail("LOCAL_ROOT_LINK_REFUSED", "the exact-file source root is a symbolic link or junction");
+    }
+    if (!info.isDirectory()) {
+      localFileFail("LOCAL_ROOT_NOT_DIRECTORY", "the exact-file source root is not a directory");
+    }
+    rootBefore = directorySnapshot(info);
+  } catch (error) {
+    if (error instanceof LocalFileSafetyError) throw error;
+    localFileFail("LOCAL_ROOT_METADATA_UNAVAILABLE", "the exact-file source root could not be inspected");
+  }
+
+  let rootReal;
+  try { rootReal = nativeRealpath(rootPath); }
+  catch { localFileFail("LOCAL_ROOT_REALPATH_UNAVAILABLE", "the exact-file source root identity could not be resolved"); }
+  if (comparablePath(rootReal) !== comparablePath(rootPath)) {
+    localFileFail("LOCAL_ROOT_LINK_REFUSED", "the exact-file source root or one of its ancestors is a symbolic link or junction");
+  }
+
+  let entries;
+  try { entries = readdirSync(rootPath, { withFileTypes: true }); }
+  catch { localFileFail("LOCAL_ROOT_LIST_UNAVAILABLE", "the exact-file source root could not be listed"); }
+  if (requireDedicatedRoot !== true) {
+    localFileFail("LOCAL_ROOT_SCOPE_INVALID", "the exact-file pilot requires one dedicated source root");
+  }
+  if (segments.length !== 1 || entries.length !== 1 || entries[0].name !== locator) {
+    localFileFail("LOCAL_ROOT_SCOPE_CHANGED", "the exact-file source root must contain only the one approved direct file");
+  }
+  if (entries[0].isSymbolicLink() || !entries[0].isFile()) {
+    localFileFail("LOCAL_FILE_NOT_REGULAR", "the approved source entry is not one direct regular file");
+  }
+
+  const full = join(rootPath, ...segments);
+  if (!pathIsWithin(rootPath, full) || comparablePath(full) === comparablePath(rootPath)) {
+    localFileFail("LOCAL_FILE_OUTSIDE_ROOT", "the exact file is outside the approved source root");
+  }
+  const approval = approveWalkedFile(full, { rootPath, rootReal });
+  const size = Number(approval.identity.size);
+  if (!Number.isSafeInteger(size) || size < 1) {
+    localFileFail(
+      size === 0 ? "LOCAL_FILE_EMPTY" : "LOCAL_FILE_SIZE_UNREPRESENTABLE",
+      size === 0 ? "the exact-file pilot does not ingest an empty file" : "the exact file size is unavailable",
+    );
+  }
+  if (size > maxBytes) {
+    localFileFail("LOCAL_FILE_TOO_LARGE", "the exact file exceeds the reviewed pilot size bound");
+  }
+
+  let rootAfter;
+  let finalEntries;
+  try {
+    const info = lstatSync(rootPath, { bigint: true });
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      localFileFail("LOCAL_ROOT_IDENTITY_CHANGED", "the exact-file source root changed during validation");
+    }
+    rootAfter = directorySnapshot(info);
+    finalEntries = readdirSync(rootPath, { withFileTypes: true });
+  } catch (error) {
+    if (error instanceof LocalFileSafetyError) throw error;
+    localFileFail("LOCAL_ROOT_IDENTITY_CHANGED", "the exact-file source root changed during validation");
+  }
+  if (!sameDirectoryVersion(rootBefore, rootAfter) || finalEntries.length !== 1 ||
+      finalEntries[0].name !== locator || finalEntries[0].isSymbolicLink() ||
+      !finalEntries[0].isFile() || nativeRealpath(rootPath) !== rootReal) {
+    localFileFail("LOCAL_ROOT_IDENTITY_CHANGED", "the exact-file source root changed during validation");
+  }
+
+  return Object.freeze({
+    full,
+    rel: locator,
+    name: locator,
+    size,
+    sizeLimit: maxBytes,
+    _localApproval: Object.freeze(approval),
+    root_identity: Object.freeze({
+      realpath: rootReal,
+      ...rootAfter,
+    }),
+  });
 }
 
 function localAssessmentMarker(locator, state, reasonCode) {

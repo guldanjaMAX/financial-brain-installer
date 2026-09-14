@@ -54,20 +54,27 @@ import {
   registerTestDisposableRecoveryFieldCloseoutRuntime,
 } from "./helpers/disposable-recovery-closeout-keychain.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable recovery field closeout suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
+const MACOS_PRIVATE_RECEIPT_SKIP =
+  "requires private aggregate receipt ACL proof";
+function testWithMacosPrivateReceipt(name, optionsOrFn, maybeFn) {
+  const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  return test(name, {
+    ...options,
+    skip: process.platform === "win32" ? MACOS_PRIVATE_RECEIPT_SKIP : options.skip,
+  }, fn);
+}
 
-const BASE = await createDisposableRecoveryCloseoutFixture({
-  prefix: "brain-v048-closeout-base-",
-});
+const BASE = process.platform === "win32"
+  ? null
+  : await createDisposableRecoveryCloseoutFixture({
+    prefix: "brain-v048-closeout-base-",
+  });
 const CHILD = fileURLToPath(new URL(
   "./helpers/disposable-recovery-closeout-child.mjs",
   import.meta.url,
 ));
-const createdRoots = new Set([BASE.root]);
+const createdRoots = new Set(BASE ? [BASE.root] : []);
 process.once("exit", () => {
   for (const root of createdRoots) {
     try { rmSync(root, { recursive: true, force: true }); }
@@ -157,7 +164,7 @@ function acceptanceError(code) {
     error.code === code;
 }
 
-test("A17 public contracts accept only current physical evidence capabilities", async () => {
+testWithMacosPrivateReceipt("A17 public contracts accept only current physical evidence capabilities", async () => {
   const current = await fixture();
   try {
     const runtime = register(current);
@@ -201,23 +208,26 @@ test("A17 public contracts accept only current physical evidence capabilities", 
   }
 });
 
-test("no destructive low-level API is exported and only the approved runner deletes", async () => {
+test("no destructive low-level closeout API is exported", () => {
+  assert.equal(
+    Object.hasOwn(
+      closeoutApi,
+      "createDisposableRecoveryFieldKeychainCloseout",
+    ),
+    false,
+  );
+  assert.equal(
+    Object.values(closeoutApi).some((value) => value &&
+      typeof value === "object" &&
+      (typeof value.delete === "function" ||
+       typeof value.authorizeDelete === "function")),
+    false,
+  );
+});
+
+testWithMacosPrivateReceipt("only the approved closeout runner deletes", async () => {
   const current = await fixture();
   try {
-    assert.equal(
-      Object.hasOwn(
-        closeoutApi,
-        "createDisposableRecoveryFieldKeychainCloseout",
-      ),
-      false,
-    );
-    assert.equal(
-      Object.values(closeoutApi).some((value) => value &&
-        typeof value === "object" &&
-        (typeof value.delete === "function" ||
-         typeof value.authorizeDelete === "function")),
-      false,
-    );
     const runtime = register(current);
     await assert.rejects(
       () => runDisposableRecoveryFieldCloseout({
@@ -254,7 +264,7 @@ test("no destructive low-level API is exported and only the approved runner dele
   }
 });
 
-test("a genuine A17 run deletes four items and requires stable F+A+J thereafter", async () => {
+testWithMacosPrivateReceipt("a genuine A17 run deletes four items and requires stable F+A+J thereafter", async () => {
   const current = await fixture();
   const substituted = await fixture("brain-v048-closeout-substituted-");
   try {
@@ -420,7 +430,7 @@ test("a genuine A17 run deletes four items and requires stable F+A+J thereafter"
   }
 });
 
-test("the final retained recensus rehashes K0 reset receipts and journal events", async () => {
+testWithMacosPrivateReceipt("the final retained recensus rehashes K0 reset receipts and journal events", async () => {
   const current = await createDisposableRecoveryCloseoutFixture({
     prefix: "brain-v048-closeout-final-recensus-",
     includeK0ResetHistory: true,
@@ -470,7 +480,7 @@ test("the final retained recensus rehashes K0 reset receipts and journal events"
   }
 });
 
-test("copied, stale, wrong-account, and changed K0 evidence are refused", async () => {
+testWithMacosPrivateReceipt("copied, stale, wrong-account, and changed K0 evidence are refused", async () => {
   const stale = await fixture();
   const wrongAccount = await fixture();
   const changedK0 = await fixture();
@@ -507,7 +517,7 @@ test("copied, stale, wrong-account, and changed K0 evidence are refused", async 
   }
 });
 
-test("every recovery residue form is rejected before Keychain construction", async () => {
+testWithMacosPrivateReceipt("every recovery residue form is rejected before Keychain construction", async () => {
   const cases = [
     (current) => {
       privateWrite(join(current.receiptDirectory,
@@ -553,7 +563,7 @@ test("every recovery residue form is rejected before Keychain construction", asy
   }
 });
 
-test("mutations across awaited K0, transition, and delete boundaries fail closed", async () => {
+testWithMacosPrivateReceipt("mutations across awaited K0, transition, and delete boundaries fail closed", async () => {
   const duringK0 = await fixture();
   const afterJournal = await fixture();
   const afterDelete = await fixture();
@@ -617,7 +627,7 @@ test("mutations across awaited K0, transition, and delete boundaries fail closed
   }
 });
 
-test("final, anchor, and journal tamper plus final-only or anchor-only states refuse", async () => {
+testWithMacosPrivateReceipt("final, anchor, and journal tamper plus final-only or anchor-only states refuse", async () => {
   const current = await fixture();
   try {
     const runtime = register(current);
@@ -796,7 +806,7 @@ test("final, anchor, and journal tamper plus final-only or anchor-only states re
   }
 });
 
-test("fresh-process SIGKILL resumes every recoverable stage and preserves the zero-byte refusal", {
+testWithMacosPrivateReceipt("fresh-process SIGKILL resumes every recoverable stage and preserves the zero-byte refusal", {
   timeout: 15 * 60 * 1000,
 }, async () => {
   const stages = [
@@ -990,5 +1000,3 @@ test("fresh-process SIGKILL resumes every recoverable stage and preserves the ze
     }
   }
 });
-
-}

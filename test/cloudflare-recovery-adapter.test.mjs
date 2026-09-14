@@ -6288,6 +6288,7 @@ try {
     assert.equal(JSON.parse(completedCli.stdout).status, "complete");
   } else {
     assert.equal(completedCli.status, 1);
+    assert.equal(completedCli.stdout, "");
     assert.match(
       completedCli.stderr,
       /RECOVERY_FIELD_GATE_REQUIRES_MACOS_KEYCHAIN/,

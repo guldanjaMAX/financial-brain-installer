@@ -21,6 +21,8 @@ import {
 import { vectorReadiness } from "./store-d1.js";
 
 export const SOURCE_ORIGINAL_RESULT_FAMILY_CONTRACT_VERSION = 1;
+export const SOURCE_ORIGINAL_RESULT_FAMILY_UNRELATED_BACKLOG_CODE =
+  "first_source_result_family_unrelated_backlog";
 
 const MAX_DOCUMENTS = 256;
 // One JSON-bound member insert plus the two seals keeps the write transaction
@@ -399,9 +401,19 @@ async function projectionReceipt(env, originalId, expectedReadiness) {
   ];
   const mutationPairValid = (receipt.vector_projection_mutation_id === null) ===
     (receipt.vector_projection_submitted_at === null);
+  const countsValid = numbers.every((value) => Number.isSafeInteger(value) && value >= 0) &&
+    receipt.target_outbox_count <= receipt.global_outbox_count;
+  if (countsValid && receipt.target_outbox_count === 0 &&
+      receipt.global_outbox_count > 0) {
+    refuse(
+      SOURCE_ORIGINAL_RESULT_FAMILY_UNRELATED_BACKLOG_CODE,
+      "unrelated vector work prevents an exact global result-family proof",
+      409,
+    );
+  }
   if (expectedReadiness?.ready !== true || expectedReadiness.pending !== 0 ||
       expectedReadiness.submitted !== 0 || expectedReadiness.projection_status !== "verified" ||
-      numbers.some((value) => !Number.isSafeInteger(value) || value < 0) ||
+      !countsValid ||
       !mutationPairValid || receipt.vector_projection_status !== "verified" ||
       receipt.target_outbox_count !== 0 || receipt.global_outbox_count !== 0 ||
       receipt.expected_vector_count !== receipt.actual_vector_count ||
@@ -896,6 +908,12 @@ export async function buildSourceOriginalResultFamilyProof(env, body, {
       "the vector projection readiness proof is unavailable",
     );
   }
+  // Classify the queue before retrieval. Production retrieval correctly marks
+  // any incomplete global projection as degraded, which would otherwise hide
+  // whether this exact family is still queued or only unrelated work remains.
+  // A second complete projection receipt below preserves the original
+  // after-probe fence; neither check drains or changes the queue.
+  const openingProjection = await projectionReceipt(env, originalId, readiness);
   const retrievalProbeId = await probeId(signingKey, originalId, request.query);
   const memberKeys = new Set(family.members.map((member) =>
     `${member.document_revision_id}\0${member.chunk_ix}\0${member.chunk_receipt_hash}`
@@ -909,7 +927,8 @@ export async function buildSourceOriginalResultFamilyProof(env, body, {
     refuse("source_original_result_family_retrieval_nondeterministic", "identical production retrieval probes did not produce the same result and citation", 409);
   }
   const projection = await projectionReceipt(env, originalId, readiness);
-  if (projection.retrieval_generation !== retrievalGenerationBefore) {
+  if (projection.retrieval_generation !== retrievalGenerationBefore ||
+      canonical(projection) !== canonical(openingProjection)) {
     refuse(
       "source_original_result_family_retrieval_changed",
       "the retrieval corpus changed during production probes",

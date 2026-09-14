@@ -84,11 +84,16 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable recovery field teardown suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
+const MACOS_PRIVATE_RECEIPT_SKIP =
+  "requires a verifier-minted K0 capability and private receipt ACL proof";
+function testWithMacosPrivateReceipt(name, optionsOrFn, maybeFn) {
+  const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  return test(name, {
+    ...options,
+    skip: process.platform === "win32" ? MACOS_PRIVATE_RECEIPT_SKIP : options.skip,
+  }, fn);
+}
 
 const ACCOUNT = "a".repeat(32);
 const SOURCE_WORKER_ID = "b".repeat(32);
@@ -111,13 +116,14 @@ process.once("exit", () => {
     catch { /* temporary capability evidence only */ }
   }
 });
-const CORE_TEST_K0 = await createTestDisposableRecoveryK0Capability({
-  candidate_sha: "a".repeat(40),
-  candidate_tree_sha: "b".repeat(40),
-  package_sha256: HASH("a"),
-  field_receipt_sha256: HASH("b"),
-  account_id: ACCOUNT,
-});
+const CORE_TEST_K0 = process.platform === "win32" ? null
+  : await createTestDisposableRecoveryK0Capability({
+    candidate_sha: "a".repeat(40),
+    candidate_tree_sha: "b".repeat(40),
+    package_sha256: HASH("a"),
+    field_receipt_sha256: HASH("b"),
+    account_id: ACCOUNT,
+  });
 
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -2063,7 +2069,9 @@ async function genuineProvisionCapabilities() {
   });
 }
 
-const GENUINE_PROVISIONS = await genuineProvisionCapabilities();
+const GENUINE_PROVISIONS = process.platform === "win32"
+  ? null
+  : await genuineProvisionCapabilities();
 
 function deploymentSnapshot(label, semantic = null) {
   const semanticSha256 = semantic === null
@@ -2619,7 +2627,9 @@ async function genuineA12Capability() {
   });
 }
 
-const GENUINE_A12 = await genuineA12Capability();
+const GENUINE_A12 = process.platform === "win32"
+  ? null
+  : await genuineA12Capability();
 
 function rereadGenuineProvisionCapabilities(completedAt) {
   const directory = realpathSync(mkdtempSync(join(
@@ -2654,14 +2664,16 @@ function rereadGenuineProvisionCapabilities(completedAt) {
   return Object.freeze(capabilities);
 }
 
-const REVERSED_PROVISIONS = rereadGenuineProvisionCapabilities({
-  source: "2026-09-13T00:21:00.000Z",
-  target: "2026-09-13T00:20:00.000Z",
-});
-const TARGET_AFTER_DEPLOYMENT_PROVISIONS = rereadGenuineProvisionCapabilities({
-  source: "2026-09-13T00:10:00.000Z",
-  target: "2026-09-13T00:25:00.000Z",
-});
+const REVERSED_PROVISIONS = process.platform === "win32" ? null
+  : rereadGenuineProvisionCapabilities({
+    source: "2026-09-13T00:21:00.000Z",
+    target: "2026-09-13T00:20:00.000Z",
+  });
+const TARGET_AFTER_DEPLOYMENT_PROVISIONS = process.platform === "win32" ? null
+  : rereadGenuineProvisionCapabilities({
+    source: "2026-09-13T00:10:00.000Z",
+    target: "2026-09-13T00:25:00.000Z",
+  });
 
 function fakeProvisionManifest(role) {
   const name = DISPOSABLE_TEARDOWN_NAMES[role];
@@ -2958,7 +2970,7 @@ function manualTeardownClosureFixture(preparation) {
   };
 }
 
-test("final acceptance cannot pass on storage 404s without bound inventory proof", () => {
+testWithMacosPrivateReceipt("final acceptance cannot pass on storage 404s without bound inventory proof", () => {
   const { provider } = fakePins();
   const preparation = fakePreparation(provider);
   const baseline = manualTeardownClosureFixture(preparation);
@@ -3003,7 +3015,7 @@ test("final acceptance cannot pass on storage 404s without bound inventory proof
   }
 });
 
-test("actual A1/A3 producer bindings preserve microsecond identity through teardown", async () => {
+testWithMacosPrivateReceipt("actual A1/A3 producer bindings preserve microsecond identity through teardown", async () => {
   const directory = realpathSync(mkdtempSync(join(
     tmpdir(),
     "brain-v048-vector-created-on-",
@@ -3065,7 +3077,7 @@ test("actual A1/A3 producer bindings preserve microsecond identity through teard
   }
 });
 
-test("both A1 and A3 receipts stay fully bound before any teardown provider access", async () => {
+testWithMacosPrivateReceipt("both A1 and A3 receipts stay fully bound before any teardown provider access", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   const variants = [];
@@ -3166,7 +3178,7 @@ test("both A1 and A3 receipts stay fully bound before any teardown provider acce
   }
 });
 
-test("a minimal self-consistent provision forgery has no reader capability", async () => {
+testWithMacosPrivateReceipt("a minimal self-consistent provision forgery has no reader capability", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   const original = preparation.provisionArtifacts.source;
@@ -3232,7 +3244,7 @@ test("a minimal self-consistent provision forgery has no reader capability", asy
   assert.equal(providerAccess, 0);
 });
 
-test("reader-owned A1, A3, and A12 evidence is revalidated from disk", async () => {
+testWithMacosPrivateReceipt("reader-owned A1, A3, and A12 evidence is revalidated from disk", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   const cases = [
@@ -3287,7 +3299,7 @@ test("reader-owned A1, A3, and A12 evidence is revalidated from disk", async () 
   }
 });
 
-test("A14 capability is uncopyable and revalidates its fixed receipt", async () => {
+testWithMacosPrivateReceipt("A14 capability is uncopyable and revalidates its fixed receipt", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   const fixture = mintSourceTeardownReceiptCapability(preparation);
@@ -3344,7 +3356,7 @@ test("A14 capability is uncopyable and revalidates its fixed receipt", async () 
   }
 });
 
-test("A13 and A14 require the exact completed A12 receipt before any provider call", async () => {
+testWithMacosPrivateReceipt("A13 and A14 require the exact completed A12 receipt before any provider call", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   const changedValue = structuredClone(preparation.targetEvalReceipt.value);
@@ -3443,7 +3455,7 @@ test("A13 and A14 require the exact completed A12 receipt before any provider ca
   }
 });
 
-test("teardown core requires a genuine K0 capability before provider access", async () => {
+testWithMacosPrivateReceipt("teardown core requires a genuine K0 capability before provider access", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   for (const keychainProof of [
@@ -3470,7 +3482,7 @@ test("teardown core requires a genuine K0 capability before provider access", as
   }
 });
 
-test("teardown core refuses unrelated genuine K0 capabilities before provider access", async () => {
+testWithMacosPrivateReceipt("teardown core refuses unrelated genuine K0 capabilities before provider access", async () => {
   const { provider, wrapper } = fakePins();
   for (const binding of [
     {
@@ -3514,7 +3526,7 @@ test("teardown core refuses unrelated genuine K0 capabilities before provider ac
   }
 });
 
-test("async preparation and K0 revalidation failures stop before provider access", async () => {
+testWithMacosPrivateReceipt("async preparation and K0 revalidation failures stop before provider access", async () => {
   const { provider, wrapper } = fakePins();
   const valid = fakePreparation(provider);
   for (const [label, changes] of [
@@ -3549,7 +3561,7 @@ test("async preparation and K0 revalidation failures stop before provider access
   }
 });
 
-test("committed recovery awaits full async revalidation before recovery mutation", async () => {
+testWithMacosPrivateReceipt("committed recovery awaits full async revalidation before recovery mutation", async () => {
   const directory = realpathSync(mkdtempSync(join(
     tmpdir(),
     "brain-v048-async-recovery-",
@@ -3613,7 +3625,7 @@ test("committed recovery awaits full async revalidation before recovery mutation
   }
 });
 
-test("a future-dated A12 is rejected before wrapper or provider access", async () => {
+testWithMacosPrivateReceipt("a future-dated A12 is rejected before wrapper or provider access", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   const futureValue = structuredClone(preparation.targetEvalReceipt.value);
@@ -3645,7 +3657,7 @@ test("a future-dated A12 is rejected before wrapper or provider access", async (
   assert.equal(providerAccess, 0);
 });
 
-test("core rejects A12 state, deployment, active-version, and chronology drift", async () => {
+testWithMacosPrivateReceipt("core rejects A12 state, deployment, active-version, and chronology drift", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   const mutations = [
@@ -3682,7 +3694,7 @@ test("core rejects A12 state, deployment, active-version, and chronology drift",
   }
 });
 
-test("target teardown requires the exact completed source receipt before provider access", async () => {
+testWithMacosPrivateReceipt("target teardown requires the exact completed source receipt before provider access", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   let providerCalls = 0;
@@ -3705,7 +3717,7 @@ test("target teardown requires the exact completed source receipt before provide
   assert.equal(providerCalls, 0);
 });
 
-test("preview finalization recovers every commit boundary with exact validation", async () => {
+testWithMacosPrivateReceipt("preview finalization recovers every commit boundary with exact validation", async () => {
   for (const stage of [
     "post_commit_pre_rename",
     "post_final_sync",
@@ -3768,7 +3780,7 @@ test("preview finalization recovers every commit boundary with exact validation"
   }
 });
 
-test("target teardown persists exact source receipt binding and rejects substitution or chronology", async () => {
+testWithMacosPrivateReceipt("target teardown persists exact source receipt binding and rejects substitution or chronology", async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-v048-target-order-")));
   chmodSync(directory, 0o700);
   try {
@@ -3953,7 +3965,7 @@ test("target teardown persists exact source receipt binding and rejects substitu
   }
 });
 
-test("broker persists planned and sent_unconfirmed before every ordered delete", async () => {
+testWithMacosPrivateReceipt("broker persists planned and sent_unconfirmed before every ordered delete", async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-v048-teardown-core-")));
   chmodSync(directory, 0o700);
   try {
@@ -4058,7 +4070,7 @@ test("broker persists planned and sent_unconfirmed before every ordered delete",
   }
 });
 
-test("journal records recover every commit boundary without a second DELETE", async () => {
+testWithMacosPrivateReceipt("journal records recover every commit boundary without a second DELETE", async () => {
   for (const journalState of ["planned", "sent_unconfirmed", "confirmed"]) {
     for (const stage of [
       "post_commit_pre_rename",
@@ -4199,7 +4211,7 @@ test("journal records recover every commit boundary without a second DELETE", as
   }
 });
 
-test("broker never retries a sent-unconfirmed delete and can reconcile it on resume", async () => {
+testWithMacosPrivateReceipt("broker never retries a sent-unconfirmed delete and can reconcile it on resume", async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-v048-teardown-resume-")));
   chmodSync(directory, 0o700);
   try {
@@ -4287,7 +4299,7 @@ test("broker never retries a sent-unconfirmed delete and can reconcile it on res
   }
 });
 
-test("resume closes the final receipt after a crash following durable absent preview", async () => {
+testWithMacosPrivateReceipt("resume closes the final receipt after a crash following durable absent preview", async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "brain-v048-teardown-absent-resume-")));
   chmodSync(directory, 0o700);
   try {
@@ -4371,7 +4383,7 @@ test("resume closes the final receipt after a crash following durable absent pre
   }
 });
 
-test("absent and final receipts recover every commit boundary without another DELETE", async () => {
+testWithMacosPrivateReceipt("absent and final receipts recover every commit boundary without another DELETE", async () => {
   for (const artifact of ["absent", "final"]) {
     for (const stage of [
       "post_commit_pre_rename",
@@ -4483,7 +4495,7 @@ test("absent and final receipts recover every commit boundary without another DE
   }
 });
 
-test("preview-file hash and plan fingerprint drift are rejected before mutation", async () => {
+testWithMacosPrivateReceipt("preview-file hash and plan fingerprint drift are rejected before mutation", async () => {
   const { provider, wrapper } = fakePins();
   const preparation = fakePreparation(provider);
   const snapshot = semanticSnapshot("source", {
@@ -4574,7 +4586,7 @@ test("wrapper contract carries the credential only over stdin and pins provider 
   assert.doesNotMatch(wrapper, /export CLOUDFLARE|API_TOKEN|Bearer/u);
 });
 
-test("wrapper refuses the wrong Keychain account or service before provider access", async () => {
+test("wrapper validation refuses the wrong Keychain account or service", () => {
   const providerHash = HASH("a");
   const wrapperProgram = (accountId, service) => [
     "#!/bin/sh",
@@ -4602,7 +4614,22 @@ test("wrapper refuses the wrong Keychain account or service before provider acce
     ),
     (error) => error.code === "TEARDOWN_WRAPPER_UNSAFE",
   );
+});
 
+testWithMacosPrivateReceipt("wrong wrapper locator refuses before provider access", async () => {
+  const providerHash = HASH("a");
+  const wrapperProgram = (accountId, service) => [
+    "#!/bin/sh",
+    "set -eu",
+    "exec 3<&0",
+    'BRAIN_TEARDOWN_PROVIDER_ACTUAL_SHA="$(printf \'%s\' "${BRAIN_TEARDOWN_PROVIDER_SOURCE:?}" | /usr/bin/shasum -a 256)" || exit 126',
+    `[ "\${BRAIN_TEARDOWN_PROVIDER_ACTUAL_SHA%% *}" = '${providerHash}' ] || exit 126`,
+    "unset BRAIN_TEARDOWN_PROVIDER_ACTUAL_SHA",
+    '[ -n "${BRAIN_TEARDOWN_NODE:?}" ]',
+    '[ -n "${BRAIN_TEARDOWN_PROVIDER_SOURCE:?}" ]',
+    `/usr/bin/security find-generic-password -a '${accountId}' -s '${service}' -w | exec "\${BRAIN_TEARDOWN_NODE:?}" --input-type=module --eval "\${BRAIN_TEARDOWN_PROVIDER_SOURCE:?}" -- --campaign-teardown-provider-child 3<&3`,
+    "",
+  ].join("\n");
   const provider = fakePins().provider;
   const preparation = fakePreparation(provider);
   for (const [accountId, service] of [
@@ -4723,7 +4750,7 @@ test("teardown CLI keeps approvals separate and has no credential option", () =>
   );
 });
 
-test("teardown CLI cross-binds both provisioning receipts and returns aggregates only", async () => {
+testWithMacosPrivateReceipt("teardown CLI cross-binds both provisioning receipts and returns aggregates only", async () => {
   const { provider } = fakePins();
   const k0 = CORE_TEST_K0;
   const fullPreparation = fakePreparation(provider, k0.proof);
@@ -4848,7 +4875,7 @@ test("teardown CLI cross-binds both provisioning receipts and returns aggregates
   }
 });
 
-test("production adapter rejects a copied K0 proof before other preparation", async () => {
+testWithMacosPrivateReceipt("production adapter rejects a copied K0 proof before other preparation", async () => {
   const k0 = await createTestDisposableRecoveryK0Capability({
     candidate_sha: "a".repeat(40),
     candidate_tree_sha: "b".repeat(40),
@@ -4885,5 +4912,3 @@ test("production adapter rejects a copied K0 proof before other preparation", as
     "a genuine verifier-minted capability must reach the next production check",
   );
 });
-
-}

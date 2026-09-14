@@ -110,7 +110,10 @@ On Windows, use the sealed ZIP and matching `release.json` from
 instead of sending a repository link, bare SHA, guide, or script. The sealed
 instructions have Claude Code obtain the exact reviewed checkout and use its
 checked-in launcher. The launcher verifies the recorded SHA, clean repository
-root, non-administrator PowerShell, and Node.js 22+, then starts Node directly.
+root, non-administrator PowerShell, Node.js 22+, and the carried non-secret
+`identity_scheme` plus `expected_runtime_sha256`, then starts Node directly.
+That synthetic route preserves the sealed update identity but does not observe
+an installed runtime or run update preview.
 The first run may download one additional small set of public frontend packages
 and can be quiet for several minutes.
 
@@ -426,7 +429,7 @@ but different raw bytes with identical extracted text create a distinct
 revision and cannot inherit the prior binding. Structural `#partNofM` families
 are supported; ambiguous
 multi-record `family_of` exports and legacy rows remain explicitly unbound.
-This is a full-admin-authorized assertion, not cryptographic proof of the
+This is a full-admin-authorized assertion, not independent verification of the
 producer binary or a server-side recomputation over uploaded raw bytes. Both
 the schema-43 D1 guard and the Worker still reject every accepted observation,
 and no OCR, backfill, repair, or deployment is implied.
@@ -620,6 +623,28 @@ First install the exact release named on `financialbrain.ai/update`. Then run
 the update command from any folder. It uses the manifest location saved by
 setup, even after Terminal has been closed and reopened.
 
+The held v0.4.8 pilot evidence plan requires this exact read-only diagnostic
+before any internal-owner update rung:
+
+```bash
+brain update [manifest] --preview --expect-runtime-sha256 <64hex> --json
+```
+
+The SHA-256 value must come from the independently sealed package receipt. A
+valid receipt names `identity_scheme: brain.runtime-payload.sha256.v1` and
+provides its package-derived `runtime_payload_sha256` as the command's
+`expected_runtime_sha256`; those names are not interchangeable with the whole
+tarball SHA-256. A
+successful result is not an update, approval to update, release evidence, or
+live-Brain proof. Candidate code and tests still have to prove this contract
+before field use; its appearance in this guide does not establish readiness.
+
+For an authorized stable release, that exact receipt is published as
+`brain-installer-<version>-runtime-identity.json` beside both package names.
+The stable update manifest binds its URL, size, SHA-256, source commit, package
+file count, identity scheme, and runtime payload SHA-256. Do not reconstruct
+the receipt from an ambient install or substitute a short-lived CI artifact.
+
 Mac or Linux:
 
 ```bash
@@ -679,6 +704,31 @@ brain will not know.
 
 Then drop `--dry-run` to load it for real. Large loads are resumable: if it is
 interrupted, run the same command again and it continues from where it stopped.
+
+The held v0.4.8 Windows x64 pilot does not use that general folder command. Its
+bounded contract requires a dedicated manifest source root containing exactly
+one direct native-text regular file. Subdirectories, links, junctions,
+additional files, and broader source trees stop the pilot. The architecture
+gate fails closed unless both the native Windows operating-system probe and the
+Node process prove x64 before any manifest, source, credential, or network
+access. Use the exact sealed package receipt's `runtime_payload_sha256` under
+`identity_scheme: brain.runtime-payload.sha256.v1` for `<64hex>`, not the whole
+tarball SHA-256. Preview exactly the canonical source-relative file:
+
+```bash
+brain ingest-file <manifest> --source <id> --file <canonical-relative> --expect-runtime-sha256 <64hex> --json
+```
+
+Keep that expected runtime value unchanged. Apply only after approval of that
+unchanged preview fingerprint:
+
+```bash
+brain ingest-file <manifest> --source <id> --file <canonical-relative> --expect-runtime-sha256 <64hex> --apply --approve <64hex>
+```
+
+That one-file lane excludes OCR, removal, reconciliation, scheduling, and a
+full-source walk. Documentation of the required boundary is not implementation,
+test, package, CI, physical Windows, or live-Brain proof.
 
 Drive, Gmail, IMAP, and local-folder refreshes may discover material that was
 deleted, newly excluded, or no longer readable. Each refresh combines every

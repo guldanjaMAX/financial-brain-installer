@@ -111,7 +111,7 @@ function readyDocuments() {
   };
 }
 
-function adapterHarness() {
+function adapterHarness({ proofRefusalCode = null } = {}) {
   const state = {
     held: false,
     assertedSinceIo: false,
@@ -191,6 +191,12 @@ function adapterHarness() {
         }, { onText: () => guardedIo("body:observations") });
       }
       state.proofRequests.push(body);
+      if (proofRefusalCode) {
+        return jsonResponse({
+          error: "private Worker detail must not cross the adapter boundary",
+          code: proofRefusalCode,
+        }, { status: 409, onText: () => guardedIo("body:proof") });
+      }
       return jsonResponse({ accepted: true }, { onText: () => guardedIo("body:proof") });
     }
     assert.fail(`unexpected managed request ${path}`);
@@ -469,6 +475,43 @@ test("real Brain adapter refuses widened target, OCR, family, drain, and generat
     }),
     /requires the global vector drain/,
   );
+  lease.release();
+});
+
+test("real Brain adapter preserves the unrelated-backlog code without private detail", async () => {
+  const code = "first_source_result_family_unrelated_backlog";
+  const { state, dependencies, assertOwned } = adapterHarness({ proofRefusalCode: code });
+  const lease = dependencies.acquireSourceLease({
+    manifestPath: "/synthetic/brain.manifest.json",
+    source: SOURCE,
+  });
+  const adminAccess = await dependencies.resolveDurableAdminAccess({
+    manifestPath: "/synthetic/brain.manifest.json",
+    manifest: { brain: { domain: "brain.example.invalid" } },
+    assertOwned,
+  });
+  const proofRequest = {
+    contract_version: 1,
+    mode: "result_family",
+    operation: "record",
+    source: SOURCE,
+    retrieval_query: "private query must not appear in the error",
+  };
+  await assert.rejects(
+    dependencies.recordResultFamily({
+      request: proofRequest,
+      adminAccess,
+      assertOwned,
+      requestTimeoutMs: 10_000,
+    }),
+    (error) => {
+      assert.equal(error.code, code);
+      assert.equal(error.message.includes(proofRequest.retrieval_query), false);
+      assert.equal(error.message.includes("private Worker detail"), false);
+      return true;
+    },
+  );
+  assert.deepEqual(state.proofRequests, [proofRequest]);
   lease.release();
 });
 

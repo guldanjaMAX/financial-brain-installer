@@ -27,11 +27,15 @@ export function verifyRelease({ phase, release, tag, assetPaths }) {
   const requiredNames = new Set([
     `brain-installer-${tagMatch[1]}.tgz`,
     "brain-installer.tgz",
+    `brain-installer-${tagMatch[1]}-runtime-identity.json`,
   ]);
   const suppliedNames = new Set(assetPaths.map((path) => basename(path)));
-  if (assetPaths.length !== 2 || suppliedNames.size !== 2 ||
+  if (assetPaths.length !== 3 || suppliedNames.size !== 3 ||
       [...requiredNames].some((name) => !suppliedNames.has(name))) {
-    throw new Error(`asset paths must be brain-installer-${tagMatch[1]}.tgz and brain-installer.tgz`);
+    throw new Error(
+      `asset paths must be brain-installer-${tagMatch[1]}.tgz, ` +
+      `brain-installer.tgz, and brain-installer-${tagMatch[1]}-runtime-identity.json`,
+    );
   }
   if (phase === "draft" && isDraft !== true) {
     throw new Error("release must remain a draft during byte verification");
@@ -69,15 +73,22 @@ export function verifyRelease({ phase, release, tag, assetPaths }) {
     }
   }
 
-  if (expected.length !== 2 || expected[0].size !== expected[1].size || expected[0].digest !== expected[1].digest) {
+  const expectedByName = new Map(expected.map((item) => [item.name, item]));
+  const versioned = expectedByName.get(`brain-installer-${tagMatch[1]}.tgz`);
+  const canonical = expectedByName.get("brain-installer.tgz");
+  if (!versioned || !canonical || versioned.size !== canonical.size ||
+      versioned.digest !== canonical.digest) {
     throw new Error("canonical and versioned assets are not byte-identical");
   }
   return expected;
 }
 
 function main(argv) {
-  if (argv.length !== 5) {
-    throw new Error("usage: verify-release-assets.mjs <draft|published> <release.json> <tag> <versioned.tgz> <canonical.tgz>");
+  if (argv.length !== 6) {
+    throw new Error(
+      "usage: verify-release-assets.mjs <draft|published> <release.json> <tag> " +
+      "<versioned.tgz> <canonical.tgz> <runtime-identity.json>",
+    );
   }
   const [phase, jsonPath, tag, ...assetPaths] = argv;
   const release = JSON.parse(readFileSync(jsonPath, "utf8"));

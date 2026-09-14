@@ -1,0 +1,1241 @@
+/**
+ * Pure, read-only primitives for an exact-runtime `brain update --preview`.
+ *
+ * This module deliberately has no manifest discovery, credential, network,
+ * browser, support-journal, package-install, workspace, or skill dependency.
+ * The eventual CLI adapter must resolve those concerns outside this module and
+ * must supply the independently reviewed runtime file allowlist and digest.
+ */
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  readlinkSync,
+  readdirSync,
+  realpathSync,
+} from "node:fs";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+
+export const UPDATE_PREVIEW_SCHEMA_VERSION = 1;
+export const UPDATE_PREVIEW_OPERATION = "brain.update.preview";
+export const UPDATE_RUNTIME_IDENTITY_SCHEME = "brain.runtime-payload.sha256.v1";
+export const WINDOWS_NODE_LAUNCHER_TEMPLATE = "npm.cmd-shim-8.windows-node.v1";
+
+export const UPDATE_PREVIEW_LIMITS = Object.freeze({
+  arguments: 5,
+  argument_bytes: 4 * 1024,
+  files: 20_000,
+  directories: 20_000,
+  path_bytes: 1024,
+  allowlist_bytes: 4 * 1024 * 1024,
+  file_bytes: 128 * 1024 * 1024,
+  total_bytes: 512 * 1024 * 1024,
+  generated_entries: 512,
+  generated_file_bytes: 64 * 1024,
+  generated_total_bytes: 4 * 1024 * 1024,
+  package_metadata_bytes: 4 * 1024 * 1024,
+});
+
+export const UPDATE_PREVIEW_FAILURE_CODES = Object.freeze([
+  "UPDATE_PREVIEW_FAILED",
+  "UPDATE_PREVIEW_ARGUMENTS_INVALID",
+  "UPDATE_PREVIEW_ARGUMENT_TOO_LONG",
+  "UPDATE_PREVIEW_EQUALS_SYNTAX_FORBIDDEN",
+  "UPDATE_PREVIEW_UNKNOWN_OPTION",
+  "UPDATE_PREVIEW_DUPLICATE_OPTION",
+  "UPDATE_PREVIEW_ADOPTION_FORBIDDEN",
+  "UPDATE_PREVIEW_MANIFEST_ARGUMENT_INVALID",
+  "UPDATE_PREVIEW_EXTRA_POSITIONAL",
+  "UPDATE_PREVIEW_FLAGS_INCOMPLETE",
+  "UPDATE_PREVIEW_EXPECTED_RUNTIME_SHA256_INVALID",
+  "UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID",
+  "UPDATE_PREVIEW_RUNTIME_ROOT_INVALID",
+  "UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID",
+  "UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT",
+  "UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED",
+  "UPDATE_PREVIEW_RUNTIME_PAYLOAD_MISMATCH",
+  "UPDATE_PREVIEW_DOWNGRADE_REFUSED",
+  "UPDATE_PREVIEW_PLAN_INVALID",
+]);
+
+const FAILURE_CODES = new Set(UPDATE_PREVIEW_FAILURE_CODES);
+const SHA256_RE = /^[a-f0-9]{64}$/u;
+const CONTROL_RE = /[\u0000-\u001f\u007f]/u;
+const WINDOWS_FORBIDDEN_RE = /[<>:"|?*]/u;
+const WINDOWS_RESERVED_RE =
+  /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu;
+const VERSION_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+const MANIFEST_SOURCES = new Set(["explicit", "remembered", "standard", "legacy_local"]);
+const PREVIEW_FLAGS = new Set(["--preview", "--json", "--expect-runtime-sha256"]);
+const INVENTORY_OPTION_KEYS = new Set([
+  "root", "allowlist", "io", "platform", "maxFiles", "maxDirectories", "maxFileBytes",
+  "maxTotalBytes",
+]);
+const RUNTIME_PLATFORMS = new Set(["posix", "win32"]);
+const BUNDLED_PACKAGE_NAME_RE =
+  /^(?:@[a-z0-9][a-z0-9._-]{0,63}\/)?[a-z0-9][a-z0-9._-]{0,127}$/u;
+const BIN_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const BIN_TARGET_RE = /^[A-Za-z0-9@._/-]+$/u;
+const NODE_SHEBANG_RE = /^#!\/usr\/bin\/env node$/u;
+const GENERATED_BIN_DIRECTORY = "node_modules/.bin";
+const ZERO_EFFECTS = Object.freeze({
+  manifest_writes: 0,
+  credential_reads: 0,
+  network_requests: 0,
+  browser_launches: 0,
+  package_installs: 0,
+  workspace_writes: 0,
+  skill_writes: 0,
+});
+const PROOF_BOUNDARY = Object.freeze({
+  public_release_authenticity: "unproven",
+  credential_custody: "not_accessed",
+  cloudflare_account_ownership: "not_accessed",
+  deployed_install_state: "not_accessed",
+  schema_compatibility: "not_accessed",
+  restore_bookmark: "not_created",
+  deployment: "not_started",
+  acceptance: "not_run",
+});
+const FINGERPRINT_DOMAIN = Buffer.from("brain.update.preview.plan.v1\0", "utf8");
+const RUNTIME_DOMAIN = Buffer.from("brain.update.runtime-payload.v1\0", "utf8");
+
+const DEFAULT_IO = Object.freeze({
+  close: closeSync,
+  fstat: fstatSync,
+  lstat: lstatSync,
+  open: openSync,
+  read: readSync,
+  readlink: readlinkSync,
+  readdir: readdirSync,
+  realpath: (path) => realpathSync.native(path),
+});
+
+export class UpdatePreviewError extends Error {
+  constructor(code) {
+    super(code);
+    this.name = "UpdatePreviewError";
+    this.code = code;
+  }
+}
+
+function refuse(code = "UPDATE_PREVIEW_FAILED") {
+  throw new UpdatePreviewError(code);
+}
+
+function immutable(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) immutable(item);
+  } else if (value && typeof value === "object" && !Buffer.isBuffer(value)) {
+    for (const item of Object.values(value)) immutable(item);
+  }
+  return Object.freeze(value);
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function exactKeys(value, expected) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
+    canonical(Object.keys(value).sort()) === canonical([...expected].sort());
+}
+
+function safeInteger(value, minimum, maximum, code) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) refuse(code);
+  return value;
+}
+
+function safeSha256(value, code) {
+  if (typeof value !== "string" || !SHA256_RE.test(value)) refuse(code);
+  return value;
+}
+
+/**
+ * Parse only the tokens after `brain update`.
+ *
+ * The optional manifest must be the first token. Options do not accept `=`,
+ * aliases, repetitions, or implicit values. This parser is preview-only, so an
+ * ordinary update invocation and every incomplete preview flag set are refused.
+ */
+export function parseUpdatePreviewArgv(argv) {
+  if (!Array.isArray(argv) || argv.length > UPDATE_PREVIEW_LIMITS.arguments ||
+      argv.some((value) => typeof value !== "string")) {
+    refuse("UPDATE_PREVIEW_ARGUMENTS_INVALID");
+  }
+  for (const value of argv) {
+    if (Buffer.byteLength(value, "utf8") > UPDATE_PREVIEW_LIMITS.argument_bytes ||
+        CONTROL_RE.test(value)) {
+      refuse("UPDATE_PREVIEW_ARGUMENT_TOO_LONG");
+    }
+  }
+
+  let index = 0;
+  let manifestPath = null;
+  if (argv[0] !== undefined && !argv[0].startsWith("-")) {
+    if (!argv[0] || argv[0].normalize("NFC") !== argv[0]) {
+      refuse("UPDATE_PREVIEW_MANIFEST_ARGUMENT_INVALID");
+    }
+    manifestPath = argv[0];
+    index = 1;
+  }
+
+  const seen = new Set();
+  let expectedRuntimeSha256 = null;
+  for (; index < argv.length; index++) {
+    const token = argv[index];
+    if (!token.startsWith("--")) refuse("UPDATE_PREVIEW_EXTRA_POSITIONAL");
+    if (token.includes("=")) refuse("UPDATE_PREVIEW_EQUALS_SYNTAX_FORBIDDEN");
+    if (token === "--adopt-cloudflare-profile") {
+      refuse("UPDATE_PREVIEW_ADOPTION_FORBIDDEN");
+    }
+    if (!PREVIEW_FLAGS.has(token)) refuse("UPDATE_PREVIEW_UNKNOWN_OPTION");
+    if (seen.has(token)) refuse("UPDATE_PREVIEW_DUPLICATE_OPTION");
+    seen.add(token);
+    if (token === "--expect-runtime-sha256") {
+      index += 1;
+      if (index >= argv.length || !SHA256_RE.test(argv[index])) {
+        refuse("UPDATE_PREVIEW_EXPECTED_RUNTIME_SHA256_INVALID");
+      }
+      expectedRuntimeSha256 = argv[index];
+    }
+  }
+
+  if (!["--preview", "--json", "--expect-runtime-sha256"].every((flag) => seen.has(flag))) {
+    refuse("UPDATE_PREVIEW_FLAGS_INCOMPLETE");
+  }
+  return immutable({
+    manifestPath,
+    preview: true,
+    json: true,
+    expectedRuntimeSha256,
+  });
+}
+
+function selectedIo(io) {
+  if (io !== undefined && (!io || typeof io !== "object" || Array.isArray(io))) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  if (io && Object.keys(io).some((name) => !Object.hasOwn(DEFAULT_IO, name))) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const selected = {};
+  for (const [name, implementation] of Object.entries(DEFAULT_IO)) {
+    selected[name] = io?.[name] ?? implementation;
+    if (typeof selected[name] !== "function") {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+  }
+  return selected;
+}
+
+function statIdentity(info) {
+  return {
+    dev: info.dev,
+    ino: info.ino,
+    nlink: info.nlink,
+    size: info.size,
+    mode: info.mode,
+    uid: info.uid,
+    gid: info.gid,
+    mtimeMs: info.mtimeMs,
+    ctimeMs: info.ctimeMs,
+  };
+}
+
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino &&
+    left.nlink === right.nlink && left.size === right.size &&
+    left.mode === right.mode && left.uid === right.uid && left.gid === right.gid &&
+    left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function within(root, path) {
+  const suffix = relative(root, path);
+  return suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) &&
+    !isAbsolute(suffix));
+}
+
+function checkedCanonicalRoot(root, io) {
+  try {
+    if (typeof root !== "string" || !root || CONTROL_RE.test(root)) {
+      refuse("UPDATE_PREVIEW_RUNTIME_ROOT_INVALID");
+    }
+    const lexical = resolve(root);
+    const before = io.lstat(lexical);
+    if (!before.isDirectory() || before.isSymbolicLink()) {
+      refuse("UPDATE_PREVIEW_RUNTIME_ROOT_INVALID");
+    }
+    const canonicalRoot = io.realpath(lexical);
+    const after = io.lstat(canonicalRoot);
+    if (!after.isDirectory() || after.isSymbolicLink() ||
+        !sameIdentity(statIdentity(before), statIdentity(after))) {
+      refuse("UPDATE_PREVIEW_RUNTIME_ROOT_INVALID");
+    }
+    return canonicalRoot;
+  } catch (error) {
+    if (error instanceof UpdatePreviewError) throw error;
+    refuse("UPDATE_PREVIEW_RUNTIME_ROOT_INVALID");
+  }
+}
+
+function checkedPayloadPath(value) {
+  if (typeof value !== "string" || !value || value !== value.normalize("NFC") ||
+      Buffer.byteLength(value, "utf8") > UPDATE_PREVIEW_LIMITS.path_bytes ||
+      value.startsWith("/") || value.includes("\\") || CONTROL_RE.test(value) ||
+      WINDOWS_FORBIDDEN_RE.test(value)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID");
+  }
+  const parts = value.split("/");
+  if (parts.length > 64 || parts.some((part) => !part || part === "." || part === ".." ||
+      Buffer.byteLength(part, "utf8") > 255 || /[. ]$/u.test(part) ||
+      WINDOWS_RESERVED_RE.test(part))) {
+    refuse("UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID");
+  }
+  return value;
+}
+
+function checkedAllowlist(allowlist, maxFiles, maxDirectories) {
+  if (!Array.isArray(allowlist) || allowlist.length < 1 || allowlist.length > maxFiles) {
+    refuse("UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID");
+  }
+  const files = new Set();
+  const directories = new Set();
+  const canonicalFiles = new Set();
+  const canonicalDirectories = new Set();
+  const directorySpellings = new Map();
+  let allowlistBytes = 0;
+  for (const input of allowlist) {
+    const path = checkedPayloadPath(input);
+    allowlistBytes += Buffer.byteLength(path, "utf8");
+    if (allowlistBytes > UPDATE_PREVIEW_LIMITS.allowlist_bytes || files.has(path)) {
+      refuse("UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID");
+    }
+    const key = path.toLowerCase().normalize("NFC");
+    if (canonicalFiles.has(key) || canonicalDirectories.has(key)) {
+      refuse("UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID");
+    }
+    const parts = path.split("/");
+    const keyParts = key.split("/");
+    for (let index = 1; index < parts.length; index++) {
+      const directory = parts.slice(0, index).join("/");
+      const directoryKey = keyParts.slice(0, index).join("/");
+      if (canonicalFiles.has(directoryKey)) refuse("UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID");
+      if (directorySpellings.has(directoryKey) &&
+          directorySpellings.get(directoryKey) !== directory) {
+        refuse("UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID");
+      }
+      directories.add(directory);
+      canonicalDirectories.add(directoryKey);
+      directorySpellings.set(directoryKey, directory);
+      if (directories.size > maxDirectories) refuse("UPDATE_PREVIEW_RUNTIME_ALLOWLIST_INVALID");
+    }
+    files.add(path);
+    canonicalFiles.add(key);
+  }
+  return {
+    files,
+    directories,
+    orderedFiles: [...files].sort(),
+  };
+}
+
+function checkedLimits(options) {
+  const code = "UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT";
+  return {
+    maxFiles: safeInteger(options.maxFiles ?? UPDATE_PREVIEW_LIMITS.files,
+      1, UPDATE_PREVIEW_LIMITS.files, code),
+    maxDirectories: safeInteger(options.maxDirectories ?? UPDATE_PREVIEW_LIMITS.directories,
+      0, UPDATE_PREVIEW_LIMITS.directories, code),
+    maxFileBytes: safeInteger(options.maxFileBytes ?? UPDATE_PREVIEW_LIMITS.file_bytes,
+      1, UPDATE_PREVIEW_LIMITS.file_bytes, code),
+    maxTotalBytes: safeInteger(options.maxTotalBytes ?? UPDATE_PREVIEW_LIMITS.total_bytes,
+      1, UPDATE_PREVIEW_LIMITS.total_bytes, code),
+  };
+}
+
+function stableRegularFile(path, root, maximumBytes, io) {
+  let descriptor;
+  let bytes;
+  try {
+    const before = io.lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
+        !Number.isSafeInteger(before.size) || before.size < 0) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    if (before.size > maximumBytes) refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT");
+    const canonicalPath = io.realpath(path);
+    if (!within(root, canonicalPath)) refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    descriptor = io.open(path, fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW || 0) | (fsConstants.O_NONBLOCK || 0));
+    const opened = io.fstat(descriptor);
+    if (!opened.isFile() || opened.nlink !== 1 ||
+        !sameIdentity(statIdentity(before), statIdentity(opened))) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+
+    bytes = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = io.read(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (!Number.isSafeInteger(count) || count < 1 || count > bytes.length - offset) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+      }
+      offset += count;
+    }
+    const probe = Buffer.alloc(1);
+    try {
+      if (io.read(descriptor, probe, 0, 1, bytes.length) !== 0) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+      }
+    } finally {
+      probe.fill(0);
+    }
+
+    const afterDescriptor = io.fstat(descriptor);
+    const afterPath = io.lstat(path);
+    if (!afterDescriptor.isFile() || afterDescriptor.nlink !== 1 ||
+        !afterPath.isFile() || afterPath.isSymbolicLink() || afterPath.nlink !== 1 ||
+        !sameIdentity(statIdentity(opened), statIdentity(afterDescriptor)) ||
+        !sameIdentity(statIdentity(opened), statIdentity(afterPath)) ||
+        io.realpath(path) !== canonicalPath) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+    io.close(descriptor);
+    descriptor = undefined;
+    return bytes;
+  } catch (error) {
+    bytes?.fill(0);
+    if (error instanceof UpdatePreviewError) throw error;
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  } finally {
+    if (descriptor !== undefined) {
+      try { io.close(descriptor); } catch { /* the closed error above remains sanitized */ }
+    }
+  }
+}
+
+function checkedRuntimePlatform(value) {
+  const platform = value ?? (process.platform === "win32" ? "win32" : "posix");
+  if (!RUNTIME_PLATFORMS.has(platform)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  return platform;
+}
+
+function stableJsonFile(path, root, maximumBytes, io) {
+  const bytes = stableRegularFile(path, root, maximumBytes, io);
+  try {
+    const value = JSON.parse(bytes.toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    return value;
+  } catch (error) {
+    if (error instanceof UpdatePreviewError) throw error;
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+function checkedBundledPackageName(value) {
+  if (typeof value !== "string" || value !== value.normalize("NFC") ||
+      !BUNDLED_PACKAGE_NAME_RE.test(value)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  return value;
+}
+
+function checkedBinName(value) {
+  if (typeof value !== "string" || value !== value.normalize("NFC") ||
+      !BIN_NAME_RE.test(value) || /[. ]$/u.test(value) || WINDOWS_RESERVED_RE.test(value)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  try { checkedPayloadPath(`${GENERATED_BIN_DIRECTORY}/${value}`); }
+  catch { refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"); }
+  return value;
+}
+
+function checkedBinTarget(dependencyName, value, expectedFiles) {
+  if (typeof value !== "string" || !value || value !== value.normalize("NFC") ||
+      CONTROL_RE.test(value) || !BIN_TARGET_RE.test(value)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const unprefixed = value.startsWith("./") ? value.slice(2) : value;
+  if (!unprefixed || unprefixed.startsWith("/") || unprefixed.includes("//")) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const payloadTarget = `node_modules/${dependencyName}/${unprefixed}`;
+  try { checkedPayloadPath(payloadTarget); }
+  catch { refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"); }
+  if (!expectedFiles.has(payloadTarget)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  return payloadTarget;
+}
+
+function dependencyBinDeclarations(manifest, dependencyName, expectedFiles) {
+  const raw = manifest.bin;
+  if (raw === undefined || raw === null) return [];
+  if (typeof raw === "string") {
+    return [{
+      name: checkedBinName(dependencyName.split("/").at(-1)),
+      target: checkedBinTarget(dependencyName, raw, expectedFiles),
+    }];
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const rows = Object.entries(raw);
+  if (rows.length > UPDATE_PREVIEW_LIMITS.generated_entries) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT");
+  }
+  return rows.map(([name, target]) => ({
+    name: checkedBinName(name),
+    target: checkedBinTarget(dependencyName, target, expectedFiles),
+  }));
+}
+
+/*
+ * npm 11.8.0 uses cmd-shim 8 for Windows. Keep this deliberately narrower
+ * than cmd-shim itself: reviewed executables must use the canonical
+ * `#!/usr/bin/env node` entrypoint, and all three generated bytestrings must
+ * match the pinned template exactly. A different npm template fails closed.
+ *
+ * `launcherDirectory` and `payloadTarget` are package-root-relative POSIX
+ * paths. The root-level launcher directory is represented by `.`. Every call
+ * returns fresh buffers so the verifier can wipe them after comparison.
+ */
+export function expectedWindowsNodeLauncherBytes(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options) ||
+      Object.keys(options).length !== 3 ||
+      Object.keys(options).some((name) =>
+        !["launcherDirectory", "payloadTarget", "targetBytes"].includes(name))) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const { launcherDirectory, payloadTarget, targetBytes } = options;
+  try {
+    if (launcherDirectory !== ".") checkedPayloadPath(launcherDirectory);
+    checkedPayloadPath(payloadTarget);
+  } catch {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  if (!Buffer.isBuffer(targetBytes) || targetBytes.length < 1 ||
+      targetBytes.length > UPDATE_PREVIEW_LIMITS.package_metadata_bytes) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const firstLine = targetBytes.toString("utf8").trim().split(/\r*\n/u)[0];
+  if (!NODE_SHEBANG_RE.test(firstLine)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const shRelative = posix.relative(launcherDirectory, payloadTarget);
+  if (!shRelative || shRelative === "." || shRelative.startsWith("/") ||
+      shRelative.includes("\\") || CONTROL_RE.test(shRelative) ||
+      Buffer.byteLength(shRelative, "utf8") > UPDATE_PREVIEW_LIMITS.path_bytes) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const batchRelative = shRelative.replaceAll("/", "\\");
+  const batchTarget = `"%dp0%\\${batchRelative}"`;
+  const shellTarget = `"$basedir/${shRelative}"`;
+
+  const plain = Buffer.from(
+    "#!/bin/sh\n" +
+    "basedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n" +
+    "\n" +
+    "case `uname` in\n" +
+    "    *CYGWIN*|*MINGW*|*MSYS*)\n" +
+    "        if command -v cygpath > /dev/null 2>&1; then\n" +
+    "            basedir=`cygpath -w \"$basedir\"`\n" +
+    "        fi\n" +
+    "    ;;\n" +
+    "esac\n" +
+    "\n" +
+    "if [ -x \"$basedir/node\" ]; then\n" +
+    `  exec \"$basedir/node\"  ${shellTarget} \"$@\"\n` +
+    "else \n" +
+    `  exec node  ${shellTarget} \"$@\"\n` +
+    "fi\n",
+    "utf8",
+  );
+  const cmd = Buffer.from(
+    "@ECHO off\r\n" +
+    "GOTO start\r\n" +
+    ":find_dp0\r\n" +
+    "SET dp0=%~dp0\r\n" +
+    "EXIT /b\r\n" +
+    ":start\r\n" +
+    "SETLOCAL\r\n" +
+    "CALL :find_dp0\r\n" +
+    "\r\n" +
+    "IF EXIST \"%dp0%\\node.exe\" (\r\n" +
+    "  SET \"_prog=%dp0%\\node.exe\"\r\n" +
+    ") ELSE (\r\n" +
+    "  SET \"_prog=node\"\r\n" +
+    "  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n" +
+    ")\r\n" +
+    "\r\n" +
+    "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & " +
+    `\"%_prog%\"  ${batchTarget} %*\r\n`,
+    "utf8",
+  );
+  const powershell = Buffer.from(
+    "#!/usr/bin/env pwsh\n" +
+    "$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent\n" +
+    "\n" +
+    "$exe=\"\"\n" +
+    "if ($PSVersionTable.PSVersion -lt \"6.0\" -or $IsWindows) {\n" +
+    "  # Fix case when both the Windows and Linux builds of Node\n" +
+    "  # are installed in the same directory\n" +
+    "  $exe=\".exe\"\n" +
+    "}\n" +
+    "$ret=0\n" +
+    "if (Test-Path \"$basedir/node$exe\") {\n" +
+    "  # Support pipeline input\n" +
+    "  if ($MyInvocation.ExpectingInput) {\n" +
+    `    $input | & \"$basedir/node$exe\"  ${shellTarget} $args\n` +
+    "  } else {\n" +
+    `    & \"$basedir/node$exe\"  ${shellTarget} $args\n` +
+    "  }\n" +
+    "  $ret=$LASTEXITCODE\n" +
+    "} else {\n" +
+    "  # Support pipeline input\n" +
+    "  if ($MyInvocation.ExpectingInput) {\n" +
+    `    $input | & \"node$exe\"  ${shellTarget} $args\n` +
+    "  } else {\n" +
+    `    & \"node$exe\"  ${shellTarget} $args\n` +
+    "  }\n" +
+    "  $ret=$LASTEXITCODE\n" +
+    "}\n" +
+    "exit $ret\n",
+    "utf8",
+  );
+  return Object.freeze({ plain, cmd, powershell });
+}
+
+function buildGeneratedEntryContract({ root, expected, io, platform, limits }) {
+  const entries = new Map();
+  const directories = new Set();
+  const expectedCanonical = new Set(
+    [...expected.files, ...expected.directories].map((path) => path.toLowerCase().normalize("NFC")),
+  );
+  if (!expected.files.has("package.json")) {
+    return { entries, directories, wipe() {} };
+  }
+
+  const metadataMaximum = Math.min(
+    limits.maxFileBytes,
+    UPDATE_PREVIEW_LIMITS.package_metadata_bytes,
+  );
+  const rootManifest = stableJsonFile(join(root, "package.json"), root, metadataMaximum, io);
+  if (Object.hasOwn(rootManifest, "bundleDependencies") &&
+      Object.hasOwn(rootManifest, "bundledDependencies")) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const rawDependencies = rootManifest.bundleDependencies ?? rootManifest.bundledDependencies ?? [];
+  if (!Array.isArray(rawDependencies) ||
+      rawDependencies.length > UPDATE_PREVIEW_LIMITS.generated_entries) {
+    refuse(rawDependencies?.length > UPDATE_PREVIEW_LIMITS.generated_entries
+      ? "UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT"
+      : "UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+
+  const dependencyNames = new Set();
+  const dependencyCanonical = new Set();
+  for (const rawName of rawDependencies) {
+    const dependencyName = checkedBundledPackageName(rawName);
+    const key = dependencyName.toLowerCase().normalize("NFC");
+    if (dependencyNames.has(dependencyName) || dependencyCanonical.has(key)) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    dependencyNames.add(dependencyName);
+    dependencyCanonical.add(key);
+  }
+
+  const commandNames = new Set();
+  const generatedCanonical = new Set();
+  let generatedBytes = 0;
+  const addEntry = (path, entry) => {
+    const key = path.toLowerCase().normalize("NFC");
+    try { checkedPayloadPath(path); }
+    catch { refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"); }
+    if (entries.has(path) || generatedCanonical.has(key) || expectedCanonical.has(key) ||
+        entries.size >= UPDATE_PREVIEW_LIMITS.generated_entries) {
+      refuse(entries.size >= UPDATE_PREVIEW_LIMITS.generated_entries
+        ? "UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT"
+        : "UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    if (entry.bytes) {
+      if (entry.bytes.length > UPDATE_PREVIEW_LIMITS.generated_file_bytes ||
+          generatedBytes > UPDATE_PREVIEW_LIMITS.generated_total_bytes - entry.bytes.length) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT");
+      }
+      generatedBytes += entry.bytes.length;
+    }
+    entries.set(path, entry);
+    generatedCanonical.add(key);
+  };
+
+  try {
+    for (const dependencyName of [...dependencyNames].sort()) {
+      const manifestRelative = `node_modules/${dependencyName}/package.json`;
+      if (!expected.files.has(manifestRelative)) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      }
+      const dependencyManifest = stableJsonFile(
+        join(root, ...manifestRelative.split("/")), root, metadataMaximum, io,
+      );
+      if (dependencyManifest.name !== dependencyName) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      }
+      const declarations = dependencyBinDeclarations(
+        dependencyManifest, dependencyName, expected.files,
+      );
+      for (const declaration of declarations) {
+        const commandKey = declaration.name.toLowerCase().normalize("NFC");
+        if (commandNames.has(commandKey)) {
+          refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+        }
+        commandNames.add(commandKey);
+        const basePath = `${GENERATED_BIN_DIRECTORY}/${declaration.name}`;
+        if (platform === "posix") {
+          const target = posix.relative(GENERATED_BIN_DIRECTORY, declaration.target);
+          if (!target.startsWith("../") || target.includes("\\") ||
+              Buffer.byteLength(target, "utf8") > UPDATE_PREVIEW_LIMITS.path_bytes) {
+            refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+          }
+          addEntry(basePath, { type: "symlink", target, payloadTarget: declaration.target });
+        } else {
+          const targetBytes = stableRegularFile(
+            join(root, ...declaration.target.split("/")), root,
+            Math.min(limits.maxFileBytes, UPDATE_PREVIEW_LIMITS.package_metadata_bytes), io,
+          );
+          let shims;
+          try {
+            shims = expectedWindowsNodeLauncherBytes({
+              launcherDirectory: GENERATED_BIN_DIRECTORY,
+              payloadTarget: declaration.target,
+              targetBytes,
+            });
+          }
+          finally { targetBytes.fill(0); }
+          try {
+            addEntry(basePath, { type: "file", bytes: shims.plain });
+            addEntry(`${basePath}.cmd`, { type: "file", bytes: shims.cmd });
+            addEntry(`${basePath}.ps1`, { type: "file", bytes: shims.powershell });
+          } catch (error) {
+            shims.plain.fill(0);
+            shims.cmd.fill(0);
+            shims.powershell.fill(0);
+            throw error;
+          }
+        }
+      }
+    }
+
+    if (entries.size) {
+      const directoryKey = GENERATED_BIN_DIRECTORY.toLowerCase().normalize("NFC");
+      if (expectedCanonical.has(directoryKey)) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      }
+      directories.add(GENERATED_BIN_DIRECTORY);
+    }
+  } catch (error) {
+    for (const entry of entries.values()) entry.bytes?.fill(0);
+    throw error;
+  }
+  return {
+    entries,
+    directories,
+    wipe() {
+      for (const entry of entries.values()) entry.bytes?.fill(0);
+    },
+  };
+}
+
+function verifyGeneratedSymlink(path, root, expected, io) {
+  try {
+    const before = io.lstat(path);
+    if (!before.isSymbolicLink() || before.nlink !== 1 ||
+        !Number.isSafeInteger(before.size) || before.size < 1 ||
+        before.size > UPDATE_PREVIEW_LIMITS.path_bytes) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    const target = io.readlink(path);
+    if (typeof target !== "string" || target !== expected.target || CONTROL_RE.test(target)) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    const expectedAbsolute = join(root, ...expected.payloadTarget.split("/"));
+    if (resolve(dirname(path), target) !== expectedAbsolute) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    const targetInfo = io.lstat(expectedAbsolute);
+    if (!targetInfo.isFile() || targetInfo.isSymbolicLink() || targetInfo.nlink !== 1 ||
+        io.realpath(expectedAbsolute) !== expectedAbsolute || io.realpath(path) !== expectedAbsolute) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    const after = io.lstat(path);
+    if (!after.isSymbolicLink() || after.nlink !== 1 ||
+        !sameIdentity(statIdentity(before), statIdentity(after)) ||
+        io.readlink(path) !== target || io.realpath(path) !== expectedAbsolute) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+  } catch (error) {
+    if (error instanceof UpdatePreviewError) throw error;
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+}
+
+function verifyGeneratedFile(path, root, expected, io) {
+  const bytes = stableRegularFile(
+    path, root, UPDATE_PREVIEW_LIMITS.generated_file_bytes, io,
+  );
+  try {
+    if (bytes.length !== expected.bytes.length || !bytes.equals(expected.bytes)) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+function lengthPrefix(value) {
+  const buffer = Buffer.alloc(8);
+  buffer.writeBigUInt64BE(BigInt(value));
+  return buffer;
+}
+
+/**
+ * Derive the canonical runtime identity from content-digest rows.
+ *
+ * Package inspection can use this same framing without materializing files or
+ * duplicating the identity algorithm. Rows are sorted canonically by `path`;
+ * `bytes` is the exact file length and `sha256` is the exact content digest.
+ */
+export function deriveUpdateRuntimePayloadSha256(rows) {
+  if (!Array.isArray(rows) || rows.length < 1 || rows.length > UPDATE_PREVIEW_LIMITS.files) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const checked = [];
+  let totalBytes = 0;
+  for (const row of rows) {
+    if (!exactKeys(row, ["path", "bytes", "sha256"])) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    const path = checkedPayloadPath(row.path);
+    const bytes = safeInteger(row.bytes, 0, UPDATE_PREVIEW_LIMITS.file_bytes,
+      "UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT");
+    const sha256 = safeSha256(row.sha256, "UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    if (totalBytes > UPDATE_PREVIEW_LIMITS.total_bytes - bytes) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT");
+    }
+    totalBytes += bytes;
+    checked.push({ path, bytes, sha256 });
+  }
+  checkedAllowlist(checked.map((row) => row.path),
+    UPDATE_PREVIEW_LIMITS.files, UPDATE_PREVIEW_LIMITS.directories);
+  checked.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+
+  const hash = createHash("sha256").update(RUNTIME_DOMAIN);
+  const countPrefix = lengthPrefix(checked.length);
+  hash.update(countPrefix);
+  countPrefix.fill(0);
+  for (const row of checked) {
+    const pathBytes = Buffer.from(row.path, "utf8");
+    const pathLength = lengthPrefix(pathBytes.length);
+    const contentLength = lengthPrefix(row.bytes);
+    const contentDigest = Buffer.from(row.sha256, "hex");
+    try {
+      hash.update(pathLength).update(pathBytes).update(contentLength).update(contentDigest);
+    } finally {
+      pathLength.fill(0);
+      contentLength.fill(0);
+      pathBytes.fill(0);
+      contentDigest.fill(0);
+    }
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * Hash one exact allowlisted runtime tree without returning paths or bytes.
+ * npm-generated bundled dependency shims are validated separately and never
+ * enter the archive-derived identity. Every other link, special, or extra
+ * directory entry fails, including empty directories outside the contract.
+ */
+export function inventoryUpdateRuntimePayload(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options) ||
+      Object.keys(options).some((name) => !INVENTORY_OPTION_KEYS.has(name))) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const { root, allowlist, io: ioInput, platform: platformInput, ...limitOptions } = options;
+  const limits = checkedLimits(limitOptions);
+  const io = selectedIo(ioInput);
+  const platform = checkedRuntimePlatform(platformInput);
+  const expected = checkedAllowlist(allowlist, limits.maxFiles, limits.maxDirectories);
+  const canonicalRoot = checkedCanonicalRoot(root, io);
+  const generated = buildGeneratedEntryContract({
+    root: canonicalRoot,
+    expected,
+    io,
+    platform,
+    limits,
+  });
+  const seenFiles = new Set();
+  const seenDirectories = new Set();
+  const seenGeneratedEntries = new Set();
+  const seenGeneratedDirectories = new Set();
+  const contentDigests = new Map();
+  let totalBytes = 0;
+
+  const visit = (directory, relativeDirectory = "") => {
+    let before;
+    let canonicalDirectory;
+    let names;
+    try {
+      before = io.lstat(directory);
+      if (!before.isDirectory() || before.isSymbolicLink()) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      }
+      canonicalDirectory = io.realpath(directory);
+      if (!within(canonicalRoot, canonicalDirectory)) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      }
+      names = io.readdir(directory);
+      if (!Array.isArray(names)) refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      if (names.length > limits.maxFiles + limits.maxDirectories +
+          UPDATE_PREVIEW_LIMITS.generated_entries + generated.directories.size) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT");
+      }
+    } catch (error) {
+      if (error instanceof UpdatePreviewError) throw error;
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    names.sort();
+    for (const name of names) {
+      if (typeof name !== "string") refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      const childRelative = relativeDirectory ? `${relativeDirectory}/${name}` : name;
+      try { checkedPayloadPath(childRelative); }
+      catch { refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"); }
+      const child = join(directory, name);
+      let info;
+      try { info = io.lstat(child); }
+      catch { refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"); }
+      const generatedEntry = generated.entries.get(childRelative);
+      if (info.isSymbolicLink()) {
+        if (!generatedEntry || generatedEntry.type !== "symlink" ||
+            seenGeneratedEntries.has(childRelative)) {
+          refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+        }
+        verifyGeneratedSymlink(child, canonicalRoot, generatedEntry, io);
+        seenGeneratedEntries.add(childRelative);
+      } else if (info.isDirectory()) {
+        const payloadDirectory = expected.directories.has(childRelative);
+        const generatedDirectory = generated.directories.has(childRelative);
+        if (payloadDirectory === generatedDirectory ||
+            (payloadDirectory && (seenDirectories.has(childRelative) ||
+              seenDirectories.size >= limits.maxDirectories)) ||
+            (generatedDirectory && seenGeneratedDirectories.has(childRelative))) {
+          refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+        }
+        if (payloadDirectory) seenDirectories.add(childRelative);
+        else seenGeneratedDirectories.add(childRelative);
+        visit(child, childRelative);
+      } else if (info.isFile()) {
+        if (generatedEntry) {
+          if (generatedEntry.type !== "file" || seenGeneratedEntries.has(childRelative)) {
+            refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+          }
+          verifyGeneratedFile(child, canonicalRoot, generatedEntry, io);
+          seenGeneratedEntries.add(childRelative);
+        } else {
+          if (!expected.files.has(childRelative) || seenFiles.has(childRelative) ||
+              seenFiles.size >= limits.maxFiles) {
+            refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+          }
+          const bytes = stableRegularFile(child, canonicalRoot, limits.maxFileBytes, io);
+          if (totalBytes > limits.maxTotalBytes - bytes.length) {
+            bytes.fill(0);
+            refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_LIMIT");
+          }
+          totalBytes += bytes.length;
+          seenFiles.add(childRelative);
+          contentDigests.set(childRelative, {
+            length: bytes.length,
+            sha256: createHash("sha256").update(bytes).digest(),
+          });
+          bytes.fill(0);
+        }
+      } else {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      }
+    }
+    let after;
+    try { after = io.lstat(directory); }
+    catch { refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED"); }
+    if (!after.isDirectory() || after.isSymbolicLink() ||
+        !sameIdentity(statIdentity(before), statIdentity(after)) ||
+        io.realpath(directory) !== canonicalDirectory) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+  };
+
+  try {
+    visit(canonicalRoot);
+    if (seenFiles.size !== expected.files.size ||
+        seenDirectories.size !== expected.directories.size ||
+        seenGeneratedEntries.size !== generated.entries.size ||
+        seenGeneratedDirectories.size !== generated.directories.size) {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+    const digestRows = [];
+    for (const path of expected.orderedFiles) {
+      const content = contentDigests.get(path);
+      if (!content || !Buffer.isBuffer(content.sha256) || content.sha256.length !== 32) {
+        refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+      }
+      digestRows.push({ path, bytes: content.length, sha256: content.sha256.toString("hex") });
+      content.sha256.fill(0);
+      contentDigests.delete(path);
+    }
+    return immutable({
+      schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+      identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
+      runtime_payload_sha256: deriveUpdateRuntimePayloadSha256(digestRows),
+      file_count: seenFiles.size,
+      total_bytes: totalBytes,
+    });
+  } finally {
+    generated.wipe();
+    for (const content of contentDigests.values()) content.sha256?.fill(0);
+    contentDigests.clear();
+  }
+}
+
+function sameInventory(left, right) {
+  return left.schema_version === right.schema_version &&
+    left.identity_scheme === right.identity_scheme &&
+    left.runtime_payload_sha256 === right.runtime_payload_sha256 &&
+    left.file_count === right.file_count && left.total_bytes === right.total_bytes;
+}
+
+/**
+ * Require the independently supplied digest on two complete tree passes.
+ * `betweenPasses` is an injectable synchronous test seam; production callers
+ * should omit it. It cannot authorize or perform an update.
+ */
+export function verifyUpdateRuntimePayload(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const { expectedRuntimeSha256, betweenPasses, ...inventoryOptions } = options;
+  safeSha256(expectedRuntimeSha256, "UPDATE_PREVIEW_EXPECTED_RUNTIME_SHA256_INVALID");
+  if (betweenPasses !== undefined && typeof betweenPasses !== "function") {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+  }
+  const first = inventoryUpdateRuntimePayload(inventoryOptions);
+  if (first.runtime_payload_sha256 !== expectedRuntimeSha256) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_MISMATCH");
+  }
+  if (betweenPasses) {
+    let result;
+    try { result = betweenPasses(Object.freeze({ pass: 1 })); }
+    catch (error) {
+      if (error instanceof UpdatePreviewError) throw error;
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+    if (result && typeof result.then === "function") {
+      refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID");
+    }
+  }
+  const second = inventoryUpdateRuntimePayload(inventoryOptions);
+  if (!sameInventory(first, second) || second.runtime_payload_sha256 !== expectedRuntimeSha256) {
+    refuse("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+  }
+  return immutable({
+    ...second,
+    expected_runtime_sha256: expectedRuntimeSha256,
+    verified_passes: 2,
+  });
+}
+
+function parseVersion(value) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 128) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  const match = VERSION_RE.exec(value);
+  if (!match) refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  const prerelease = match[4] ? match[4].split(".") : [];
+  if (prerelease.some((item) => /^\d+$/u.test(item) && item.length > 1 && item.startsWith("0"))) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  return { core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])], prerelease };
+}
+
+function compareVersion(left, right) {
+  const a = parseVersion(left);
+  const b = parseVersion(right);
+  for (let index = 0; index < a.core.length; index++) {
+    if (a.core[index] !== b.core[index]) return a.core[index] < b.core[index] ? -1 : 1;
+  }
+  if (!a.prerelease.length && !b.prerelease.length) return 0;
+  if (!a.prerelease.length) return 1;
+  if (!b.prerelease.length) return -1;
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let index = 0; index < length; index++) {
+    const leftPart = a.prerelease[index];
+    const rightPart = b.prerelease[index];
+    if (leftPart === undefined) return -1;
+    if (rightPart === undefined) return 1;
+    if (leftPart === rightPart) continue;
+    const leftNumeric = /^\d+$/u.test(leftPart);
+    const rightNumeric = /^\d+$/u.test(rightPart);
+    if (leftNumeric && rightNumeric) return BigInt(leftPart) < BigInt(rightPart) ? -1 : 1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+function checkedRuntimeProof(value) {
+  if (!exactKeys(value, [
+    "schema_version", "identity_scheme", "runtime_payload_sha256", "file_count",
+    "total_bytes", "expected_runtime_sha256", "verified_passes",
+  ]) || value.schema_version !== UPDATE_PREVIEW_SCHEMA_VERSION ||
+      value.identity_scheme !== UPDATE_RUNTIME_IDENTITY_SCHEME || value.verified_passes !== 2 ||
+      safeSha256(value.runtime_payload_sha256, "UPDATE_PREVIEW_PLAN_INVALID") !==
+        safeSha256(value.expected_runtime_sha256, "UPDATE_PREVIEW_PLAN_INVALID")) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  safeInteger(value.file_count, 1, UPDATE_PREVIEW_LIMITS.files, "UPDATE_PREVIEW_PLAN_INVALID");
+  safeInteger(value.total_bytes, 0, UPDATE_PREVIEW_LIMITS.total_bytes,
+    "UPDATE_PREVIEW_PLAN_INVALID");
+  return value;
+}
+
+/** Build the closed, aggregate-only local plan that the fingerprint binds. */
+export function createUpdatePreviewPlan(options = {}) {
+  const required = ["manifestSha256", "manifestSource", "candidateVersion", "runtimeProof"];
+  const allowed = new Set([...required, "recordedVersion"]);
+  if (!options || typeof options !== "object" || Array.isArray(options) ||
+      required.some((name) => !Object.hasOwn(options, name)) ||
+      Object.keys(options).some((name) => !allowed.has(name))) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  const {
+    manifestSha256,
+    manifestSource,
+    recordedVersion = null,
+    candidateVersion,
+    runtimeProof,
+  } = options;
+  safeSha256(manifestSha256, "UPDATE_PREVIEW_PLAN_INVALID");
+  if (!MANIFEST_SOURCES.has(manifestSource)) refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  parseVersion(candidateVersion);
+  if (recordedVersion !== null) parseVersion(recordedVersion);
+  const relation = recordedVersion === null
+    ? "unrecorded"
+    : compareVersion(recordedVersion, candidateVersion) < 0
+      ? "upgrade"
+      : compareVersion(recordedVersion, candidateVersion) === 0 ? "same" : "downgrade";
+  if (relation === "downgrade") refuse("UPDATE_PREVIEW_DOWNGRADE_REFUSED");
+  const runtime = checkedRuntimeProof(runtimeProof);
+  return immutable({
+    schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+    operation: "brain.update",
+    manifest: {
+      source: manifestSource,
+      sha256: manifestSha256,
+      recorded_version: recordedVersion,
+    },
+    candidate: {
+      version: candidateVersion,
+      identity_scheme: runtime.identity_scheme,
+      expected_runtime_sha256: runtime.expected_runtime_sha256,
+      observed_runtime_sha256: runtime.runtime_payload_sha256,
+      file_count: runtime.file_count,
+      total_bytes: runtime.total_bytes,
+    },
+    version_relation: relation,
+    live_verification_required: true,
+  });
+}
+
+function checkedPlan(plan) {
+  if (!exactKeys(plan, [
+    "schema_version", "operation", "manifest", "candidate", "version_relation",
+    "live_verification_required",
+  ]) || plan.schema_version !== UPDATE_PREVIEW_SCHEMA_VERSION || plan.operation !== "brain.update" ||
+      plan.live_verification_required !== true ||
+      !exactKeys(plan.manifest, ["source", "sha256", "recorded_version"]) ||
+      !exactKeys(plan.candidate, [
+        "version", "identity_scheme", "expected_runtime_sha256", "observed_runtime_sha256",
+        "file_count", "total_bytes",
+      ])) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  const rebuilt = createUpdatePreviewPlan({
+    manifestSha256: plan.manifest.sha256,
+    manifestSource: plan.manifest.source,
+    recordedVersion: plan.manifest.recorded_version,
+    candidateVersion: plan.candidate.version,
+    runtimeProof: {
+      schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+      identity_scheme: plan.candidate.identity_scheme,
+      runtime_payload_sha256: plan.candidate.observed_runtime_sha256,
+      file_count: plan.candidate.file_count,
+      total_bytes: plan.candidate.total_bytes,
+      expected_runtime_sha256: plan.candidate.expected_runtime_sha256,
+      verified_passes: 2,
+    },
+  });
+  if (canonical(rebuilt) !== canonical(plan)) refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  return rebuilt;
+}
+
+/** Fingerprint only the closed plan, never raw paths, manifest fields, or file bytes. */
+export function updatePreviewPlanFingerprint(plan) {
+  const checked = checkedPlan(plan);
+  return createHash("sha256").update(FINGERPRINT_DOMAIN).update(canonical(checked)).digest("hex");
+}
+
+/** Return a success receipt whose wording cannot imply live update readiness. */
+export function createUpdatePreviewSuccessReceipt(plan) {
+  const checked = checkedPlan(plan);
+  return immutable({
+    schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+    operation: UPDATE_PREVIEW_OPERATION,
+    status: "local_preflight_passed",
+    read_only: true,
+    plan: checked,
+    plan_fingerprint: updatePreviewPlanFingerprint(checked),
+    proof_boundary: { ...PROOF_BOUNDARY },
+    effects: { ...ZERO_EFFECTS },
+  });
+}
+
+/** Collapse every failure to a closed code; raw Error messages are never copied. */
+export function createUpdatePreviewFailureReceipt(errorOrCode) {
+  const requested = typeof errorOrCode === "string"
+    ? errorOrCode
+    : errorOrCode instanceof UpdatePreviewError ? errorOrCode.code : null;
+  const errorCode = FAILURE_CODES.has(requested) ? requested : "UPDATE_PREVIEW_FAILED";
+  return immutable({
+    schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+    operation: UPDATE_PREVIEW_OPERATION,
+    status: "failed",
+    read_only: true,
+    error_code: errorCode,
+    effects: { ...ZERO_EFFECTS },
+  });
+}

@@ -298,13 +298,17 @@ is planning only until a reviewed change binds it to the final candidate SHA.
    the credential in source, artifacts, command lines, or logs.
 7. The workflow downloads the already-tested artifact without repacking, makes
    byte-identical brain-installer-<version>.tgz and brain-installer.tgz names,
-   creates a private draft, and verifies both assets. It pins the draft's numeric
+   and downloads the exact raw runtime-identity receipt produced by the same CI
+   run. It creates one private draft with all three assets and verifies each
+   asset's server-computed byte count and digest. It pins the draft's numeric
    identity and run marker before publishing. Failed cleanup can remove only
    its owned draft and never deletes the Git tag or a published release.
 8. Publication is followed by immutable-state and independent byte checks and a
    fresh-prefix installed CLI check. Only the reviewed exact archive, version,
-   digest, and byte count may enter stable website metadata afterward. A green
-   held-page check means the hold is working, not that promotion is allowed.
+   digest, byte count, source commit, package file count, runtime identity
+   scheme, and runtime payload digest may enter stable website metadata
+   afterward. A green held-page check means the hold is working, not that
+   promotion is allowed.
 
 Public doorway monitoring uses the schema-2 /update/manifest.json and matching
 /update/agent.md. The unlisted /install/agent.md separately pins its supervised
@@ -314,10 +318,13 @@ of releases/latest. Do not rewrite or resync a sealed field kit casually.
 
 Run `node scripts/check-install-page-version.mjs` to check the current public
 contracts. `--require-stable` additionally refuses held/candidate states. In
-stable mode it requires the matching latest immutable release, both asset
-receipts, and the independently downloaded versioned archive digest. It does
-not prove a client's update or physical acceptance. Verify final website
-behavior at desktop and mobile widths after authorized deployment.
+stable mode it requires the matching latest immutable release, both package
+names, the versioned runtime-identity receipt, and independent downloads of the
+archive and canonical receipt bytes. The stable manifest binds the receipt's
+URL, size, digest, source commit, package file count, identity scheme, and
+runtime payload digest. It does not prove a client's update or physical
+acceptance. Verify final website behavior at desktop and mobile widths after
+authorized deployment.
 
 ## Close the held disposable recovery gate
 

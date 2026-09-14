@@ -20,8 +20,33 @@ export const PROVENANCE_SOURCE_ASSESSMENT_VERSION = 1;
 export const PROVENANCE_SOURCE_ASSESSMENT_MAX_ORIGINALS = MAX_LOCAL_ASSESSMENT_ORIGINALS;
 export const PROVENANCE_SOURCE_ASSESSMENT_STATES = ORIGINAL_EXTRACTION_STATES;
 export const PROVENANCE_SOURCE_ASSESSMENT_REASON_CODE_BY_STATE = ORIGINAL_REASON_CODE_BY_STATE;
+export const PROVENANCE_SOURCE_ASSESSMENT_FAILURE_CODES = Object.freeze([
+  "INVALID_REQUEST",
+  "MANIFEST_UNAVAILABLE",
+  "MANIFEST_POLICY_INVALID",
+  "SOURCE_UNAVAILABLE",
+  "ASSESSMENT_FAILED",
+]);
 
 const STATE_SET = new Set(PROVENANCE_SOURCE_ASSESSMENT_STATES);
+const SOURCE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const FAILURE_BLOCKER_BY_CODE = Object.freeze({
+  INVALID_REQUEST: "invalid_request",
+  MANIFEST_UNAVAILABLE: "manifest_unavailable",
+  MANIFEST_POLICY_INVALID: "manifest_policy_invalid",
+  SOURCE_UNAVAILABLE: "source_unavailable",
+  ASSESSMENT_FAILED: "assessment_failed",
+});
+const PUBLIC_SOURCE_KIND_SET = new Set(["upload", "unsupported", "unavailable"]);
+const PUBLIC_BLOCKER_SET = new Set([
+  "source_kind_not_local_upload",
+  "source_traversal_unavailable",
+  "source_traversal_incomplete",
+  "exact_target_resolution_incomplete",
+  "multi_record_ambiguity",
+  "original_unavailable",
+  ...Object.values(FAILURE_BLOCKER_BY_CODE),
+]);
 
 const safeFormat = (value) => {
   const normalized = String(value || "").toLowerCase().replace(/^\./, "");
@@ -198,6 +223,116 @@ function validatedTargets(relativeLocators) {
     throw new TypeError("provenance source assessment locators must be unique");
   }
   return Object.freeze(targets);
+}
+
+/**
+ * Parse the complete standalone assessment argv before any manifest boundary.
+ * Exact private values are returned to the caller but never interpolated into
+ * errors, so a fixed public failure receipt can replace every rejected form.
+ */
+export function parseProvenanceSourceAssessmentArgv(argv = []) {
+  if (!Array.isArray(argv) || argv.some((value) => typeof value !== "string")) {
+    throw new TypeError("provenance source assessment arguments must be a string list");
+  }
+  if (!argv.length || !argv[0] || argv[0].startsWith("--")) {
+    throw new TypeError("provenance source assessment needs exactly one manifest path first");
+  }
+
+  const manifest = argv[0];
+  let source = null;
+  let json = false;
+  const targets = [];
+  for (let index = 1; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (!token.startsWith("--") || token === "--") {
+      throw new TypeError("unexpected positional argument in provenance source assessment");
+    }
+    if (token.includes("=")) {
+      throw new TypeError("provenance source assessment options require separate values");
+    }
+    if (token === "--json") {
+      if (json) throw new TypeError("duplicate option in provenance source assessment");
+      json = true;
+      continue;
+    }
+    if (token !== "--source" && token !== "--target") {
+      throw new TypeError("unknown option in provenance source assessment");
+    }
+    const value = argv[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new TypeError("provenance source assessment option needs a separate value");
+    }
+    if (token === "--source") {
+      if (source !== null) throw new TypeError("duplicate option in provenance source assessment");
+      source = value;
+    } else {
+      targets.push(value);
+    }
+    index += 1;
+  }
+
+  if (typeof source !== "string" || !SOURCE_RE.test(source)) {
+    throw new TypeError("--source needs one canonical manifest source id");
+  }
+  const canonicalTargets = validatedTargets(targets);
+  if (!json) throw new TypeError("provenance source assessment requires --json");
+  return Object.freeze({
+    manifest,
+    source,
+    targets: canonicalTargets,
+    json: true,
+  });
+}
+
+/**
+ * Re-project an assessment through the public allowlist before serialization.
+ * Unexpected private fields are ignored; unknown public vocabulary fails
+ * closed rather than being copied into output.
+ */
+export function publicProvenanceSourceAssessmentResult(assessment) {
+  if (!assessment || typeof assessment !== "object" || Array.isArray(assessment) ||
+      !PUBLIC_SOURCE_KIND_SET.has(assessment.source_kind) ||
+      !Array.isArray(assessment.originals) ||
+      assessment.originals.length > PROVENANCE_SOURCE_ASSESSMENT_MAX_ORIGINALS ||
+      !Array.isArray(assessment.blockers) ||
+      assessment.blockers.some((blocker) => !PUBLIC_BLOCKER_SET.has(blocker)) ||
+      !assessment.traversal || typeof assessment.traversal !== "object" ||
+      Array.isArray(assessment.traversal) ||
+      !assessment.target_resolution || typeof assessment.target_resolution !== "object" ||
+      Array.isArray(assessment.target_resolution)) {
+    throw new TypeError("provenance source assessment result is outside the public contract");
+  }
+  const targetCount = assessment.target_count;
+  if (targetCount !== null && (!Number.isInteger(targetCount) || targetCount < 1 ||
+      targetCount > PROVENANCE_SOURCE_ASSESSMENT_MAX_ORIGINALS)) {
+    throw new TypeError("provenance source assessment result is outside the public contract");
+  }
+  return publicReceipt({
+    sourceKind: assessment.source_kind,
+    targetCount,
+    traversalComplete: assessment.traversal.complete,
+    traversalGapCount: assessment.traversal.gap_count,
+    targetResolutionComplete: assessment.target_resolution.complete,
+    missingTargetCount: assessment.target_resolution.missing_count,
+    originals: assessment.originals.map((original, index) => publicOriginal(original, index + 1)),
+    blockers: assessment.blockers,
+  });
+}
+
+/** Build one fixed, identity-free public receipt for a CLI boundary failure. */
+export function provenanceSourceAssessmentFailureReceipt(code) {
+  const blocker = FAILURE_BLOCKER_BY_CODE[code];
+  if (!blocker) throw new TypeError("unknown provenance source assessment failure code");
+  return publicReceipt({
+    sourceKind: "unavailable",
+    targetCount: null,
+    traversalComplete: false,
+    traversalGapCount: null,
+    targetResolutionComplete: false,
+    missingTargetCount: null,
+    originals: [],
+    blockers: [blocker],
+  });
 }
 
 const ORIGINAL_ID_RE = /^hmac-sha256:[a-f0-9]{64}$/;

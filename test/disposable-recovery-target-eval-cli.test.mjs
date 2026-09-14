@@ -18,11 +18,16 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable recovery target evaluation CLI suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
+const MACOS_PRIVATE_RECEIPT_SKIP =
+  "requires a verifier-minted K0 capability and private receipt ACL proof";
+function testWithMacosPrivateReceipt(name, optionsOrFn, maybeFn) {
+  const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  return test(name, {
+    ...options,
+    skip: process.platform === "win32" ? MACOS_PRIVATE_RECEIPT_SKIP : options.skip,
+  }, fn);
+}
 
 function networkIsolation(role) {
   return {
@@ -79,7 +84,9 @@ const keychainBinding = Object.freeze({
   field_receipt_sha256: "d".repeat(64),
   account_id: "e".repeat(32),
 });
-const K0 = await createTestDisposableRecoveryK0Capability(keychainBinding);
+const K0 = process.platform === "win32"
+  ? null
+  : await createTestDisposableRecoveryK0Capability(keychainBinding);
 
 const hashes = Object.freeze({
   eval: "1".repeat(64),
@@ -89,7 +96,7 @@ const hashes = Object.freeze({
   source: "5".repeat(64),
   wrapper: "6".repeat(64),
   golden: "7".repeat(64),
-  keychain: K0.proof.keychain_binding_sha256,
+  keychain: K0?.proof.keychain_binding_sha256 ?? "a".repeat(64),
 });
 
 const common = Object.freeze({
@@ -168,7 +175,7 @@ function k0Dependencies() {
   };
 }
 
-test("preview is local-only and prints every independently reviewed fingerprint", async () => {
+testWithMacosPrivateReceipt("preview is local-only and prints every independently reviewed fingerprint", async () => {
   let output = "";
   const result = await main(argv("preview"), {
     ...k0Dependencies(),
@@ -187,7 +194,7 @@ test("preview is local-only and prints every independently reviewed fingerprint"
   assert.equal(JSON.parse(output).golden_approval_fingerprint, hashes.golden);
 });
 
-test("execute binds all approvals, holds the field lock, and emits only aggregate identity", async () => {
+testWithMacosPrivateReceipt("execute binds all approvals, holds the field lock, and emits only aggregate identity", async () => {
   const events = [];
   let output = "";
   const result = await main(argv("execute", {
@@ -226,7 +233,7 @@ test("execute binds all approvals, holds the field lock, and emits only aggregat
   });
 });
 
-test("wrong approval stops before lock or evaluation", async () => {
+testWithMacosPrivateReceipt("wrong approval stops before lock or evaluation", async () => {
   const events = [];
   await assert.rejects(
     () => main(argv("execute", {
@@ -250,7 +257,7 @@ test("wrong approval stops before lock or evaluation", async () => {
   assert.deepEqual(events, []);
 });
 
-test("changed evidence or a cross-campaign golden stops before lock", async () => {
+testWithMacosPrivateReceipt("changed evidence or a cross-campaign golden stops before lock", async () => {
   for (const candidate of [
     {
       preparation: { ...preparation(), revalidate: () => false },
@@ -290,7 +297,7 @@ test("changed evidence or a cross-campaign golden stops before lock", async () =
   }
 });
 
-test("CLI rejects a copied K0 proof before gate, lock, or evaluation", async () => {
+testWithMacosPrivateReceipt("CLI rejects a copied K0 proof before gate, lock, or evaluation", async () => {
   const events = [];
   await assert.rejects(
     () => main(argv("preview"), {
@@ -325,8 +332,31 @@ test("parser rejects omissions, extras, duplicates, and execute flags on preview
   );
 });
 
+test("non-macOS refusal occurs before evidence files, Keychain, gate, or evaluation", async (t) => {
+  for (const platform of ["win32", "linux"]) {
+    await t.test(platform, async () => {
+      const events = [];
+      await assert.rejects(
+        () => main(argv("preview"), {
+          platform,
+          inspectPreparation: () => { events.push("files"); },
+          createKeychain: () => { events.push("keychain"); },
+          verifyKeychainPrep: () => { events.push("verify-k0"); },
+          createGate: () => { events.push("gate"); },
+          runEvaluation: () => { events.push("evaluate"); },
+        }),
+        (error) => error instanceof DisposableRecoveryTargetEvalCliError &&
+          error.code === "DISPOSABLE_RECOVERY_TARGET_EVAL_CLI_MACOS_REQUIRED",
+      );
+      assert.deepEqual(events, []);
+    });
+  }
+});
+
 test("direct invocation works through a canonicalized symlink path", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32"
+    ? "requires POSIX symlink execution semantics"
+    : false,
 }, () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "target-eval-cli-link-")));
   try {
@@ -353,5 +383,3 @@ test("direct invocation works through a canonicalized symlink path", {
     rmSync(directory, { recursive: true, force: true });
   }
 });
-
-}

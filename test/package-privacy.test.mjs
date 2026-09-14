@@ -46,6 +46,12 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import {
+  PackageBundleVerificationError,
+  assertPackedBundleArchive,
+  assertPackedBundleMetadata,
+  resolveNpmCacheContentRoot,
+} from "../operations/package-bundle-verifier.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -336,12 +342,31 @@ const packed = SCAN_ONLY ? { status: 0, stdout: "[]" } : spawnSync("npm", ["pack
   timeout: 60_000,
 });
 
+let packMetadata = null;
 let files = [];
 try {
-  files = JSON.parse(packed.stdout)?.[0]?.files?.map((entry) => entry.path) || [];
+  packMetadata = JSON.parse(packed.stdout)?.[0] || null;
+  files = packMetadata?.files?.map((entry) => entry.path) || [];
 } catch {
   // The failure below includes npm's own diagnostic without inventing a second
   // parse error that hides the useful cause.
+}
+let bundleMetadataFailure = null;
+let bundleCacheContentRoot = null;
+if (!SCAN_ONLY && packMetadata) {
+  try {
+    bundleCacheContentRoot = resolveNpmCacheContentRoot(process.env);
+    assertPackedBundleMetadata({
+      root: ROOT,
+      metadata: packMetadata,
+      cacheContentRoot: bundleCacheContentRoot,
+    });
+  }
+  catch (error) {
+    bundleMetadataFailure = error instanceof PackageBundleVerificationError
+      ? error.code
+      : "PACKAGE_BUNDLE_METADATA_INVALID";
+  }
 }
 
 // Structural path denials, plus the identity rules applied to the path itself.
@@ -492,6 +517,15 @@ const expected = [
   "operations/provenance-target-repair.mjs",
   "operations/provenance-target-cli.mjs",
   "operations/provenance-source-assessment.mjs",
+  // Held Windows x64 first-source lane. The pure orchestrator owns no I/O; its
+  // public receipts omit manifest, source, locator, query, and content. The
+  // native gate runs one fixed system PowerShell probe before private reads.
+  "operations/first-source-file.mjs",
+  "operations/windows-native-architecture.mjs",
+  // Local-only exact installed-package preview. It accepts one sealed runtime
+  // digest and emits only bounded version/runtime/plan identities; it has no
+  // credential, network, browser, update, or workspace-write capability.
+  "operations/update-preview.mjs",
   // Fixed fictional field fixture. It has no corpus/path/credential input or
   // live transport and emits only an aggregate plan or D1-count receipt.
   "operations/disposable-recovery-seeder.mjs",
@@ -598,6 +632,11 @@ const expected = [
   "scripts/reproduce-frozen-vector-fence.mjs",
   "scripts/run-test-chain.mjs",
   "scripts/test-release-workflow-contract.mjs",
+  // Minimal non-secret CI transport for the exact archive-derived update
+  // runtime identity. Its schema contains only source/package digests, counts,
+  // and the fixed identity scheme; it owns no credential or provider access.
+  "scripts/runtime-identity-receipt.mjs",
+  "scripts/verify-package-bundles.mjs",
   "scripts/verify-release-assets.mjs",
   "tools/preflight.ps1",
   "tools/preflight.sh",
@@ -678,6 +717,7 @@ const expected = [
   "privacy/credential-dispositions.json",
   "privacy/history-baseline.json",
   "privacy/public-refs.json",
+  "privacy/reviewed-package-bundles.json",
   "scripts/build-windows-onboarding-kit.mjs",
   "scripts/build-worker-bank-export.mjs",
   "scripts/build-worker-upload-extract.mjs",
@@ -739,6 +779,7 @@ const expected = [
   "operations/aggregate-field-observer.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
   "operations/locked-wrangler-runtime.mjs",
+  "operations/package-bundle-verifier.mjs",
   "operations/verified-recovery.mjs",
   "operations/windows-dpapi.ps1",
   "operations/windows-dpapi-bridge.mjs",
@@ -959,6 +1000,7 @@ for (const path of privateScanPaths) {
 // are local-only and cannot reach Keychain, credentials, or the network.
 let packedAdapterImportFailed = false;
 let packedSkillInstallFailed = false;
+let packedBundleFailure = bundleMetadataFailure;
 const packageProbeDirectory = SCAN_ONLY ? null : mkdtempSync(join(tmpdir(), "brain-package-probe-"));
 if (packageProbeDirectory) try {
   const actualPack = spawnSync(
@@ -971,18 +1013,36 @@ if (packageProbeDirectory) try {
       timeout: 60_000,
     },
   );
+  let actualMetadata = null;
   let filename = null;
-  try { filename = JSON.parse(actualPack.stdout)?.[0]?.filename || null; } catch { /* fixed failure below */ }
+  try {
+    actualMetadata = JSON.parse(actualPack.stdout)?.[0] || null;
+    filename = actualMetadata?.filename || null;
+  } catch { /* fixed failure below */ }
   if (actualPack.status !== 0 || !filename) {
     packedAdapterImportFailed = true;
   } else {
-    const extracted = spawnSync("tar", [
-      "-xzf", join(packageProbeDirectory, filename), "-C", packageProbeDirectory,
-    ], {
-      encoding: "utf-8",
-      shell: process.platform === "win32",
-      timeout: 60_000,
-    });
+    try {
+      assertPackedBundleArchive({
+        root: ROOT,
+        metadata: actualMetadata,
+        archivePath: join(packageProbeDirectory, filename),
+        cacheContentRoot: bundleCacheContentRoot,
+      });
+    } catch (error) {
+      packedBundleFailure = error instanceof PackageBundleVerificationError
+        ? error.code
+        : "PACKAGE_BUNDLE_ARCHIVE_INVALID";
+    }
+    const extracted = packedBundleFailure
+      ? { status: null }
+      : spawnSync("tar", [
+          "-xzf", join(packageProbeDirectory, filename), "-C", packageProbeDirectory,
+        ], {
+          encoding: "utf-8",
+          shell: process.platform === "win32",
+          timeout: 60_000,
+        });
     const consumerRoot = join(packageProbeDirectory, "consumer");
     const installedPackagePath = join(
       consumerRoot,
@@ -1353,6 +1413,7 @@ if (packageProbeDirectory) try {
 
 if (packed.status !== 0 || (!SCAN_ONLY && !files.length) || forbidden.length || missing.length || unexpected.length ||
     bundleConfigMismatch || binConfigMismatch || closedExportsMismatch || dependencyMismatch.length ||
+    packedBundleFailure ||
     gitIgnoreFailures.length ||
     canaryFailures.length || trackedEnumerationFailed ||
     privateTextMatches.length || privatePathMatches.length ||
@@ -1379,6 +1440,7 @@ if (packed.status !== 0 || (!SCAN_ONLY && !files.length) || forbidden.length || 
   if (dependencyMismatch.length) {
     console.error(`bundled dependency version or package mismatch: ${dependencyMismatch.map(([name]) => name).join(", ")}`);
   }
+  if (packedBundleFailure) console.error(`strict bundled dependency verification failed: ${packedBundleFailure}`);
   if (gitIgnoreFailures.length) {
     console.error(`private admin-key paths are not ignored by Git: ${gitIgnoreFailures.join(", ")}`);
   }

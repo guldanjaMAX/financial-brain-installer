@@ -54,6 +54,15 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_name: ${{ steps.pack.outputs.artifact_name }}
       package_sha256: ${{ steps.pack.outputs.package_sha256 }}
+      package_version: ${{ steps.pack.outputs.package_version }}
+      package_bytes: ${{ steps.pack.outputs.package_bytes }}
+      package_file_count: ${{ steps.pack.outputs.package_file_count }}
+      runtime_identity_artifact_id: ${{ steps.upload_runtime_identity.outputs.artifact-id }}
+      runtime_identity_artifact_name: ${{ steps.pack.outputs.runtime_identity_artifact_name }}
+      runtime_identity_artifact_sha256: ${{ steps.pack.outputs.runtime_identity_artifact_sha256 }}
+      runtime_identity_artifact_bytes: ${{ steps.pack.outputs.runtime_identity_artifact_bytes }}
+      identity_scheme: ${{ steps.pack.outputs.identity_scheme }}
+      runtime_payload_sha256: ${{ steps.pack.outputs.runtime_payload_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,11 +71,22 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: '24.13.1'
           package-manager-cache: false
 
+      - name: assert exact package producer toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_node="$(node --version)"
+          actual_npm="$(npm --version)"
+          if [[ "$actual_node" != "v24.13.1" || "$actual_npm" != "11.8.0" ]]; then
+            echo "::error::package producer is $actual_node / npm $actual_npm, expected v24.13.1 / npm 11.8.0"
+            exit 1
+          fi
+
       - name: install exact locked dependencies
-        run: npm ci --ignore-scripts
+        run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
       - name: reject private package inputs before upload
         run: node test/package-privacy.test.mjs --scan-only
@@ -89,6 +109,10 @@ jobs:
             > "$package_dir/npm-pack.json"
 
           package_version="$(node -p "require('./package.json').version")"
+          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::package version is malformed"
+            exit 1
+          fi
           expected_name="brain-installer-$package_version.tgz"
           artifact_name="$(node -e '
             const fs = require("node:fs");
@@ -104,16 +128,83 @@ jobs:
           fi
 
           package_path="$package_dir/$artifact_name"
+          bundle_proof_path="$package_dir/package-bundle-proof.json"
+          node scripts/verify-package-bundles.mjs \
+            --package "$package_path" \
+            --metadata "$package_dir/npm-pack.json" \
+            --json > "$bundle_proof_path"
           package_sha256="$(node -e '
             const fs = require("node:fs");
-            const crypto = require("node:crypto");
-            process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));
-          ' "$package_path")"
+            const proof = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (proof.status !== "passed" || typeof proof.archive_sha256 !== "string") {
+              throw new Error("bundle verifier did not return a package digest");
+            }
+            process.stdout.write(proof.archive_sha256);
+          ' "$bundle_proof_path")"
           if [[ ! "$package_sha256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::package SHA-256 is malformed"
             exit 1
           fi
-          expected_reviewed_sha256="bd6e02082aece9ae642dbe216da0b96ef68b399876a7707567f6d36b0c0cb3df"
+          package_bytes="$(node -e '
+            const fs = require("node:fs");
+            const proof = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (!Number.isSafeInteger(proof.archive_bytes) || proof.archive_bytes < 1) {
+              throw new Error("bundle verifier did not return a package byte count");
+            }
+            process.stdout.write(String(proof.archive_bytes));
+          ' "$bundle_proof_path")"
+          package_file_count="$(node -e '
+            const fs = require("node:fs");
+            const proof = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (!Number.isSafeInteger(proof.archive_file_count) || proof.archive_file_count < 1) {
+              throw new Error("bundle verifier did not return a package file count");
+            }
+            process.stdout.write(String(proof.archive_file_count));
+          ' "$bundle_proof_path")"
+          runtime_identity_artifact_name="brain-installer-$package_version-runtime-identity.json"
+          runtime_identity_artifact_path="$package_dir/$runtime_identity_artifact_name"
+          runtime_identity_metadata_path="$package_dir/runtime-identity-artifact-metadata.json"
+          node scripts/runtime-identity-receipt.mjs \
+            --create receipt \
+            --proof "$bundle_proof_path" \
+            --source-sha "$checkout_commit" \
+            --package-filename "$artifact_name" \
+            --package-version "$package_version" \
+            --output "$runtime_identity_artifact_path" \
+            > "$runtime_identity_metadata_path"
+          identity_scheme="$(node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (value.status !== "passed" || value.identity_scheme !== "brain.runtime-payload.sha256.v1") {
+              throw new Error("runtime identity scheme is missing or unexpected");
+            }
+            process.stdout.write(value.identity_scheme);
+          ' "$runtime_identity_metadata_path")"
+          runtime_payload_sha256="$(node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (!/^[0-9a-f]{64}$/.test(String(value.runtime_payload_sha256 || ""))) {
+              throw new Error("runtime payload SHA-256 is malformed");
+            }
+            process.stdout.write(value.runtime_payload_sha256);
+          ' "$runtime_identity_metadata_path")"
+          runtime_identity_artifact_sha256="$(node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (!/^[0-9a-f]{64}$/.test(String(value.artifact_sha256 || ""))) {
+              throw new Error("runtime identity artifact SHA-256 is malformed");
+            }
+            process.stdout.write(value.artifact_sha256);
+          ' "$runtime_identity_metadata_path")"
+          runtime_identity_artifact_bytes="$(node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (!Number.isSafeInteger(value.artifact_bytes) || value.artifact_bytes < 1) {
+              throw new Error("runtime identity artifact byte count is malformed");
+            }
+            process.stdout.write(String(value.artifact_bytes));
+          ' "$runtime_identity_metadata_path")"
+          expected_reviewed_sha256="25ae11e12738cee2f99462d96479cffbba32dee0196074872aba7fd1ab5a9aae"
           if [[ "$package_sha256" != "$expected_reviewed_sha256" ]]; then
             echo "::error::package bytes differ from the locally reviewed package"
             exit 1
@@ -122,7 +213,16 @@ jobs:
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
           echo "package_path=$package_path" >> "$GITHUB_OUTPUT"
           echo "package_sha256=$package_sha256" >> "$GITHUB_OUTPUT"
-          echo "packed $artifact_name at sha256:$package_sha256"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "package_bytes=$package_bytes" >> "$GITHUB_OUTPUT"
+          echo "package_file_count=$package_file_count" >> "$GITHUB_OUTPUT"
+          echo "runtime_identity_artifact_name=$runtime_identity_artifact_name" >> "$GITHUB_OUTPUT"
+          echo "runtime_identity_artifact_path=$runtime_identity_artifact_path" >> "$GITHUB_OUTPUT"
+          echo "runtime_identity_artifact_sha256=$runtime_identity_artifact_sha256" >> "$GITHUB_OUTPUT"
+          echo "runtime_identity_artifact_bytes=$runtime_identity_artifact_bytes" >> "$GITHUB_OUTPUT"
+          echo "identity_scheme=$identity_scheme" >> "$GITHUB_OUTPUT"
+          echo "runtime_payload_sha256=$runtime_payload_sha256" >> "$GITHUB_OUTPUT"
+          echo "packed $artifact_name: version $package_version, $package_bytes bytes, $package_file_count files, sha256:$package_sha256, runtime $identity_scheme sha256:$runtime_payload_sha256"
 
       # v7 can store one file without a ZIP wrapper. The artifact digest is
       # therefore the package's digest, not the digest of a transport archive.
@@ -140,11 +240,25 @@ jobs:
           overwrite: true
           retention-days: 5
 
+      - name: upload the raw runtime identity receipt
+        id: upload_runtime_identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.pack.outputs.runtime_identity_artifact_name }}
+          path: ${{ steps.pack.outputs.runtime_identity_artifact_path }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 5
+
       - name: verify the uploaded raw digest
         env:
           ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           LOCAL_SHA256: ${{ steps.pack.outputs.package_sha256 }}
           UPLOAD_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          RUNTIME_IDENTITY_ARTIFACT_ID: ${{ steps.upload_runtime_identity.outputs.artifact-id }}
+          LOCAL_RUNTIME_IDENTITY_SHA256: ${{ steps.pack.outputs.runtime_identity_artifact_sha256 }}
+          RUNTIME_IDENTITY_UPLOAD_DIGEST: ${{ steps.upload_runtime_identity.outputs.artifact-digest }}
         shell: bash
         run: |
           set -euo pipefail
@@ -155,6 +269,15 @@ jobs:
           uploaded_sha256="${UPLOAD_DIGEST#sha256:}"
           if [[ "$uploaded_sha256" != "$LOCAL_SHA256" ]]; then
             echo "::error::uploaded artifact digest does not match the package bytes"
+            exit 1
+          fi
+          if [[ ! "$RUNTIME_IDENTITY_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::uploaded runtime identity artifact ID is malformed"
+            exit 1
+          fi
+          uploaded_runtime_identity_sha256="${RUNTIME_IDENTITY_UPLOAD_DIGEST#sha256:}"
+          if [[ "$uploaded_runtime_identity_sha256" != "$LOCAL_RUNTIME_IDENTITY_SHA256" ]]; then
+            echo "::error::uploaded runtime identity digest does not match the receipt bytes"
             exit 1
           fi
 
@@ -174,6 +297,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 2
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -226,11 +350,27 @@ jobs:
           skip-decompress: true
           digest-mismatch: error
 
+      - name: download the matching raw runtime identity receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.package.outputs.runtime_identity_artifact_id }}
+          path: .release-runtime-identity
+          skip-decompress: true
+          digest-mismatch: error
+
       - name: verify exact shared package bytes
         id: verify_package
         env:
           ARTIFACT_NAME: ${{ needs.package.outputs.artifact_name }}
           EXPECTED_SHA256: ${{ needs.package.outputs.package_sha256 }}
+          EXPECTED_PACKAGE_VERSION: ${{ needs.package.outputs.package_version }}
+          EXPECTED_PACKAGE_BYTES: ${{ needs.package.outputs.package_bytes }}
+          EXPECTED_PACKAGE_FILE_COUNT: ${{ needs.package.outputs.package_file_count }}
+          RUNTIME_IDENTITY_ARTIFACT_NAME: ${{ needs.package.outputs.runtime_identity_artifact_name }}
+          EXPECTED_RUNTIME_IDENTITY_ARTIFACT_SHA256: ${{ needs.package.outputs.runtime_identity_artifact_sha256 }}
+          EXPECTED_RUNTIME_IDENTITY_ARTIFACT_BYTES: ${{ needs.package.outputs.runtime_identity_artifact_bytes }}
+          EXPECTED_IDENTITY_SCHEME: ${{ needs.package.outputs.identity_scheme }}
+          EXPECTED_RUNTIME_PAYLOAD_SHA256: ${{ needs.package.outputs.runtime_payload_sha256 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -238,12 +378,46 @@ jobs:
           node -e '
             const fs = require("node:fs");
             const crypto = require("node:crypto");
-            const [path, expected] = process.argv.slice(1);
+            const [path, expected, expectedBytes] = process.argv.slice(1);
             if (!/^[0-9a-f]{64}$/.test(expected)) throw new Error("expected package SHA-256 is malformed");
+            if (!/^[1-9][0-9]*$/.test(expectedBytes)) throw new Error("expected package byte count is malformed");
+            const byteCount = Number(expectedBytes);
+            if (!Number.isSafeInteger(byteCount) || fs.statSync(path).size !== byteCount) {
+              throw new Error("package byte count does not match the producer receipt");
+            }
             const actual = crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex");
             if (actual !== expected) throw new Error(`package SHA-256 ${actual} does not match ${expected}`);
-          ' "$tgz" "$EXPECTED_SHA256"
+          ' "$tgz" "$EXPECTED_SHA256" "$EXPECTED_PACKAGE_BYTES"
+          if [[ ! "$EXPECTED_PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ||
+                "$ARTIFACT_NAME" != "brain-installer-$EXPECTED_PACKAGE_VERSION.tgz" ||
+                "$RUNTIME_IDENTITY_ARTIFACT_NAME" != "brain-installer-$EXPECTED_PACKAGE_VERSION-runtime-identity.json" ||
+                ! "$EXPECTED_PACKAGE_FILE_COUNT" =~ ^[1-9][0-9]*$ ||
+                "$EXPECTED_IDENTITY_SCHEME" != "brain.runtime-payload.sha256.v1" ||
+                ! "$EXPECTED_RUNTIME_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::shared package identity outputs are malformed or inconsistent"
+            exit 1
+          fi
+          node scripts/runtime-identity-receipt.mjs \
+            --verify receipt \
+            --receipt ".release-runtime-identity/$RUNTIME_IDENTITY_ARTIFACT_NAME" \
+            --artifact-sha256 "$EXPECTED_RUNTIME_IDENTITY_ARTIFACT_SHA256" \
+            --artifact-bytes "$EXPECTED_RUNTIME_IDENTITY_ARTIFACT_BYTES" \
+            --source-sha "$GITHUB_SHA" \
+            --package-filename "$ARTIFACT_NAME" \
+            --package-version "$EXPECTED_PACKAGE_VERSION" \
+            --package-bytes "$EXPECTED_PACKAGE_BYTES" \
+            --package-file-count "$EXPECTED_PACKAGE_FILE_COUNT" \
+            --package-sha256 "$EXPECTED_SHA256" \
+            --identity-scheme "$EXPECTED_IDENTITY_SCHEME" \
+            --runtime-payload-sha256 "$EXPECTED_RUNTIME_PAYLOAD_SHA256"
           echo "TARBALL=$tgz" >> "$GITHUB_ENV"
+          echo "BRAIN_TESTED_PACKAGE_FILENAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
+          echo "BRAIN_TESTED_PACKAGE_VERSION=$EXPECTED_PACKAGE_VERSION" >> "$GITHUB_ENV"
+          echo "BRAIN_TESTED_PACKAGE_BYTES=$EXPECTED_PACKAGE_BYTES" >> "$GITHUB_ENV"
+          echo "BRAIN_TESTED_PACKAGE_FILE_COUNT=$EXPECTED_PACKAGE_FILE_COUNT" >> "$GITHUB_ENV"
+          echo "BRAIN_TESTED_PACKAGE_SHA256=$EXPECTED_SHA256" >> "$GITHUB_ENV"
+          echo "BRAIN_TESTED_RUNTIME_IDENTITY_SCHEME=$EXPECTED_IDENTITY_SCHEME" >> "$GITHUB_ENV"
+          echo "BRAIN_TESTED_RUNTIME_PAYLOAD_SHA256=$EXPECTED_RUNTIME_PAYLOAD_SHA256" >> "$GITHUB_ENV"
           echo "verified $ARTIFACT_NAME at sha256:$EXPECTED_SHA256"
 
       # The operator runs preflight from the installed release, not from a
@@ -552,10 +726,26 @@ jobs:
           skip-decompress: true
           digest-mismatch: error
 
+      - name: download the matching raw runtime identity receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.package.outputs.runtime_identity_artifact_id }}
+          path: .release-runtime-identity
+          skip-decompress: true
+          digest-mismatch: error
+
       - name: verify exact shared package bytes
         env:
           ARTIFACT_NAME: ${{ needs.package.outputs.artifact_name }}
           EXPECTED_SHA256: ${{ needs.package.outputs.package_sha256 }}
+          EXPECTED_PACKAGE_VERSION: ${{ needs.package.outputs.package_version }}
+          EXPECTED_PACKAGE_BYTES: ${{ needs.package.outputs.package_bytes }}
+          EXPECTED_PACKAGE_FILE_COUNT: ${{ needs.package.outputs.package_file_count }}
+          RUNTIME_IDENTITY_ARTIFACT_NAME: ${{ needs.package.outputs.runtime_identity_artifact_name }}
+          EXPECTED_RUNTIME_IDENTITY_ARTIFACT_SHA256: ${{ needs.package.outputs.runtime_identity_artifact_sha256 }}
+          EXPECTED_RUNTIME_IDENTITY_ARTIFACT_BYTES: ${{ needs.package.outputs.runtime_identity_artifact_bytes }}
+          EXPECTED_IDENTITY_SCHEME: ${{ needs.package.outputs.identity_scheme }}
+          EXPECTED_RUNTIME_PAYLOAD_SHA256: ${{ needs.package.outputs.runtime_payload_sha256 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -563,11 +753,29 @@ jobs:
           node -e '
             const fs = require("node:fs");
             const crypto = require("node:crypto");
-            const [path, expected] = process.argv.slice(1);
+            const [path, expected, expectedBytes] = process.argv.slice(1);
             if (!/^[0-9a-f]{64}$/.test(expected)) throw new Error("expected package SHA-256 is malformed");
+            if (!/^[1-9][0-9]*$/.test(expectedBytes)) throw new Error("expected package byte count is malformed");
+            const byteCount = Number(expectedBytes);
+            if (!Number.isSafeInteger(byteCount) || fs.statSync(path).size !== byteCount) {
+              throw new Error("package byte count does not match the producer receipt");
+            }
             const actual = crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex");
             if (actual !== expected) throw new Error(`package SHA-256 ${actual} does not match ${expected}`);
-          ' "$tgz" "$EXPECTED_SHA256"
+          ' "$tgz" "$EXPECTED_SHA256" "$EXPECTED_PACKAGE_BYTES"
+          node scripts/runtime-identity-receipt.mjs \
+            --verify receipt \
+            --receipt ".release-runtime-identity/$RUNTIME_IDENTITY_ARTIFACT_NAME" \
+            --artifact-sha256 "$EXPECTED_RUNTIME_IDENTITY_ARTIFACT_SHA256" \
+            --artifact-bytes "$EXPECTED_RUNTIME_IDENTITY_ARTIFACT_BYTES" \
+            --source-sha "$GITHUB_SHA" \
+            --package-filename "$ARTIFACT_NAME" \
+            --package-version "$EXPECTED_PACKAGE_VERSION" \
+            --package-bytes "$EXPECTED_PACKAGE_BYTES" \
+            --package-file-count "$EXPECTED_PACKAGE_FILE_COUNT" \
+            --package-sha256 "$EXPECTED_SHA256" \
+            --identity-scheme "$EXPECTED_IDENTITY_SCHEME" \
+            --runtime-payload-sha256 "$EXPECTED_RUNTIME_PAYLOAD_SHA256"
           echo "TARBALL=$tgz" >> "$GITHUB_ENV"
           echo "verified $ARTIFACT_NAME at sha256:$EXPECTED_SHA256"
 

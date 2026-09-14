@@ -32,11 +32,16 @@ import {
   createTestDisposableRecoveryK0Capability,
 } from "./helpers/disposable-recovery-k0-capability.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable Cloudflare deployment provider suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
+const MACOS_PRIVATE_RECEIPT_SKIP =
+  "requires a verifier-minted K0 capability and private receipt ACL proof";
+function testWithMacosPrivateReceipt(name, optionsOrFn, maybeFn) {
+  const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  return test(name, {
+    ...options,
+    skip: process.platform === "win32" ? MACOS_PRIVATE_RECEIPT_SKIP : options.skip,
+  }, fn);
+}
 
 const HASH = "a".repeat(64);
 const SOURCE_ACCOUNT = "1".repeat(32);
@@ -94,10 +99,10 @@ const PROVIDER_K0_BINDING = Object.freeze({
   field_receipt_sha256: digest("provider-field-receipt"),
   account_id: SOURCE_ACCOUNT,
 });
-const PROVIDER_K0 = await createTestDisposableRecoveryK0Capability(
-  PROVIDER_K0_BINDING,
-);
-const PROVIDER_K0_PROOF = PROVIDER_K0.proof;
+const PROVIDER_K0 = process.platform === "win32"
+  ? null
+  : await createTestDisposableRecoveryK0Capability(PROVIDER_K0_BINDING);
+const PROVIDER_K0_PROOF = PROVIDER_K0?.proof;
 
 function manifestBinding(role) {
   const source = role === "source";
@@ -686,7 +691,7 @@ test("provider refuses non-macOS before credential or transport setup", () => {
   assert.equal(touched, false);
 });
 
-test("provider rejects a copied K0 proof before credential or transport setup", () => {
+testWithMacosPrivateReceipt("provider rejects a copied K0 proof before credential or transport setup", () => {
   const fixture = moduleFixture();
   let touched = false;
   try {
@@ -730,7 +735,7 @@ test("provider rejects a copied K0 proof before credential or transport setup", 
   }
 });
 
-test("provisioning provider resolves bounded Keychain values before writes and confirms six ACTIVE indexes", async () => {
+testWithMacosPrivateReceipt("provisioning provider resolves bounded Keychain values before writes and confirms six ACTIVE indexes", async () => {
   const fixture = provisioningModuleFixture();
   const calls = [];
   const metadataIndexes = [];
@@ -852,7 +857,7 @@ test("provisioning provider resolves bounded Keychain values before writes and c
   }
 });
 
-test("real provisioning provider reconciles each resource state without issuing a second mutation", async () => {
+testWithMacosPrivateReceipt("real provisioning provider reconciles each resource state without issuing a second mutation", async () => {
   const fixture = provisioningModuleFixture();
   const resourceName = "brain-test-v048-field-target-recovery-gate-a48f1102";
   const workerId = "9".repeat(32);
@@ -1027,7 +1032,7 @@ test("real provisioning provider reconciles each resource state without issuing 
   }
 });
 
-test("baseline reconciliation never duplicates an orphaned upload and binds one exact campaign version", async () => {
+testWithMacosPrivateReceipt("baseline reconciliation never duplicates an orphaned upload and binds one exact campaign version", async () => {
   const fixture = provisioningModuleFixture();
   const resourceName = "brain-test-v048-field-target-recovery-gate-a48f1102";
   const workerId = "9".repeat(32);
@@ -1239,7 +1244,7 @@ test("baseline reconciliation never duplicates an orphaned upload and binds one 
   }
 });
 
-test("source final read proves valid independent key-state rows without returning salts", async () => {
+testWithMacosPrivateReceipt("source final read proves valid independent key-state rows without returning salts", async () => {
   const fixture = provisioningModuleFixture();
   const resourceName = "brain-test-v048-field-source-recovery-gate-a48f1101";
   const workerId = "7".repeat(32);
@@ -1397,7 +1402,7 @@ test("source final read proves valid independent key-state rows without returnin
   }
 });
 
-test("source schema initialization reconciles an exact committed migration prefix and resumes pending work", async () => {
+testWithMacosPrivateReceipt("source schema initialization reconciles an exact committed migration prefix and resumes pending work", async () => {
   const fixture = provisioningModuleFixture();
   const applied = [];
   const statementCalls = new Map();
@@ -1496,7 +1501,7 @@ test("source schema initialization reconciles an exact committed migration prefi
   }
 });
 
-test("source schema resumes every committed bootstrap and postlude boundary without rotating salts", async (t) => {
+testWithMacosPrivateReceipt("source schema resumes every committed bootstrap and postlude boundary without rotating salts", async (t) => {
   const fixture = provisioningModuleFixture();
   const prepare = (transport) => prepareCloudflareDisposableProvisioningProvider({
     executionPins: fixture.executionPins,
@@ -1583,7 +1588,7 @@ test("source schema resumes every committed bootstrap and postlude boundary with
   }
 });
 
-test("real schema 46 resumes every migration statement and ledger boundary exactly", {
+testWithMacosPrivateReceipt("real schema 46 resumes every migration statement and ledger boundary exactly", {
   timeout: 120_000,
 }, async () => {
   const fixture = realProvisioningExecutionFixture();
@@ -1669,7 +1674,7 @@ test("real schema 46 resumes every migration statement and ledger boundary exact
   }
 });
 
-test("provider rejects cross-account manifests before transport or token access", () => {
+testWithMacosPrivateReceipt("provider rejects cross-account manifests before transport or token access", () => {
   const fixture = moduleFixture();
   let touched = false;
   try {
@@ -1700,7 +1705,7 @@ test("provider rejects cross-account manifests before transport or token access"
   }
 });
 
-test("provider stops before the next operation when K0 revalidation changes", async () => {
+testWithMacosPrivateReceipt("provider stops before the next operation when K0 revalidation changes", async () => {
   const fixture = moduleFixture();
   const driftBinding = Object.freeze({
     candidate_sha: "3".repeat(40),
@@ -1758,7 +1763,7 @@ test("provider stops before the next operation when K0 revalidation changes", as
   }
 });
 
-test("provider pins modules and wires only the account-bound Keychain resolver", async () => {
+testWithMacosPrivateReceipt("provider pins modules and wires only the account-bound Keychain resolver", async () => {
   const fixture = moduleFixture();
   const resolverRecords = [];
   const transportRecords = [];
@@ -1815,7 +1820,7 @@ test("provider pins modules and wires only the account-bound Keychain resolver",
   }
 });
 
-test("provider preflight uses current discovery plus exact deployment GET and keeps phases split", async () => {
+testWithMacosPrivateReceipt("provider preflight uses current discovery plus exact deployment GET and keeps phases split", async () => {
   const fixture = moduleFixture();
   const calls = [];
   try {
@@ -1900,7 +1905,7 @@ test("provider preflight uses current discovery plus exact deployment GET and ke
   }
 });
 
-test("target provider inherits only the reviewed target secrets and deploys paused only", async () => {
+testWithMacosPrivateReceipt("target provider inherits only the reviewed target secrets and deploys paused only", async () => {
   const fixture = moduleFixture();
   const calls = [];
   const roles = ["source", "target"];
@@ -1946,7 +1951,7 @@ test("target provider inherits only the reviewed target secrets and deploys paus
   }
 });
 
-test("target preflight binds aggregate campaign custody and quiescence into the semantic snapshot", async () => {
+testWithMacosPrivateReceipt("target preflight binds aggregate campaign custody and quiescence into the semantic snapshot", async () => {
   const fixture = moduleFixture();
   const calls = [];
   const roles = ["source", "target"];
@@ -2002,7 +2007,7 @@ test("target preflight binds aggregate campaign custody and quiescence into the 
   }
 });
 
-test("target preflight refuses a custody worker identity mismatch", async () => {
+testWithMacosPrivateReceipt("target preflight refuses a custody worker identity mismatch", async () => {
   const fixture = moduleFixture();
   const roles = ["source", "target"];
   try {
@@ -2049,5 +2054,3 @@ test("target preflight refuses a custody worker identity mismatch", async () => 
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
-
-}

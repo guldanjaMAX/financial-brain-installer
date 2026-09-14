@@ -32,6 +32,8 @@ import {
   adoptCloudflareAuthProfile,
   cloudflareOAuthInstallIdentity,
   cmdSetup,
+  cmdUpdate,
+  dispatchUpdateCli,
   manifestCloudflareControlBinding,
   probeExistingWorkerHealth,
 } from "../brain.mjs";
@@ -250,6 +252,10 @@ try {
   // brain.mjs's static import closure, by directory. connectors/ is reached
   // only through dynamic import from a named provider command, never from
   // update; google-auth is the one connector brain.mjs loads at module level.
+  const dynamicFirstSourceArchitectureFiles = new Set([
+    join("operations", "first-source-file.mjs"),
+    join("operations", "windows-native-architecture.mjs"),
+  ]);
   const updatePathFiles = [
     "brain.mjs", "doctor.mjs", "support-journal.mjs", "support-recovery.mjs",
     "acceptance.mjs", "report.mjs", join("connectors", "google-auth.mjs"),
@@ -257,7 +263,7 @@ try {
     ...inDirectory("components", ".mjs"),
     ...inDirectory("ingest", ".mjs"),
     ...inDirectory(join("worker", "src", "lib"), ".js"),
-  ];
+  ].filter((relativePath) => !dynamicFirstSourceArchitectureFiles.has(relativePath));
   // support-journal.mjs is the single allowed reader: it RECORDS the value in a
   // support event and never decides anything on it. That is asserted below by
   // calling it, not by trusting the exemption.
@@ -267,6 +273,18 @@ try {
     archPattern.test(readFileSync(join(ROOT, relativePath), "utf8")));
   check(`no file the update path loads branches on CPU architecture (${updatePathFiles.length} scanned)`,
     archBranches.length === 0, JSON.stringify(archBranches));
+
+  const brainSource = readFileSync(join(ROOT, "brain.mjs"), "utf8");
+  check("the Windows-only pilot and native gate are explicit lazy imports, never update-path imports",
+    !/^import[^;]*(?:first-source-file|windows-native-architecture)\.mjs/m.test(brainSource) &&
+      /return await import\("\.\/operations\/first-source-file\.mjs"\)/u.test(brainSource) &&
+      /return await import\("\.\/operations\/windows-native-architecture\.mjs"\)/u.test(brainSource),
+    "brain.mjs did not preserve both exact dynamic-only module boundaries");
+  const updateEntrypoints = `${dispatchUpdateCli.toString()}\n${cmdUpdate.toString()}`;
+  check("the update entrypoints cannot reach either first-source architecture loader",
+    !/(?:firstSourceFileLib|windowsNativeArchitectureLib|firstSourceArchitectureIdentity|inspectArchitecture)/u
+      .test(updateEntrypoints),
+    "an update entrypoint references the first-source architecture route");
 
   const { previewSupportEvent } = await import("../support-journal.mjs");
   const armEvent = previewSupportEvent(
@@ -285,7 +303,6 @@ try {
   // The one module that does read process.arch ships a native daemon and is
   // not on this path. Prove both halves: brain.mjs never imports it, and its
   // own mapping does not treat arm64 as an x64 alias.
-  const brainSource = readFileSync(join(ROOT, "brain.mjs"), "utf8");
   check("the one arch-aware module, the WhatsApp daemon resolver, is never statically imported here",
     !/^import[^;]*connectors\/whatsapp\.mjs/m.test(brainSource),
     "brain.mjs imports connectors/whatsapp.mjs");

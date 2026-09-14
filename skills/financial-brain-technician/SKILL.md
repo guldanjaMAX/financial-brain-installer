@@ -630,28 +630,48 @@ here** and the private install-kit check below:
    test the walkthrough. It does not install or inspect their Brain. Do not run
    `brain --version`, `brain tools`, the packaged preflight, setup, update,
    provisioning, or any connector command for this route.
-2. Require schema version 1, `status: sealed_for_supervised_rehearsal`,
+2. Require schema version 3, `status: sealed_for_supervised_rehearsal`,
    `ready_to_send: true`, `ready_for_live_accounts: false`, purpose
-   `synthetic_local_owner_experience_only`, physical Windows execution
-   `pending`, and loopback origin exactly `http://127.0.0.1:4176`. Stop if the
-   receipt is expired or any boundary allows customer data, credentials, or a
-   live action.
+   `synthetic_local_owner_experience_only`, `intended_architecture: x64`,
+   physical Windows execution `pending`, and loopback origin exactly
+   `http://127.0.0.1:4176`. Stop if the receipt is expired, its architecture is
+   absent or different, or any boundary allows customer data, credentials, or
+   a live action. This route requires native x64 Windows and an x64 Node.js
+   process separately. An x64 Node process emulated by Windows ARM64 does not
+   qualify.
 3. Verify that the adjacent ZIP has the exact filename, byte count, and SHA-256
    in `archive`. Require the exact public Financial Brain repository, one
    40-character source SHA, a successful exact-SHA `ci` push run, and the
    checked-in launcher path `onboarding/start-windows-rehearsal.ps1`. This
    rehearsal ZIP is not the tested npm package, so do not compare its digest to
    an installed package and do not require an intended hostname.
-4. Inspect the ZIP before extracting it. It must contain only
+4. Require `tested_package.identity_scheme` to be exactly
+   `brain.runtime-payload.sha256.v1` and its `runtime_payload_sha256` to match
+   `update_preview.expected_runtime_sha256`. Require the tested package and its
+   separate raw runtime identity artifact to belong to the same successful CI
+   run and exact source SHA. The runtime identity receipt must carry only its
+   exact schema keys and bind that source SHA, package filename, version, byte
+   count, file count, package SHA-256, identity scheme, and runtime payload
+   SHA-256. A missing, extra, malformed, expired, or mismatched value stops.
+5. Inspect the ZIP before extracting it. It must contain only
    `REHEARSAL-MANIFEST.json` and `RUN-WITH-CLAUDE-CODE.txt` beneath one folder.
    Verify the inner manifest path, bytes, and SHA-256 from the receipt, and
-   require its source, launcher, CI, expiry, and safety boundaries to match the
-   outer receipt. Extract only into a new empty local folder.
-5. Follow `RUN-WITH-CLAUDE-CODE.txt` exactly. Handle its repository, detached
+   require its schema, intended architecture, source, launcher, CI, expiry, and
+   safety boundaries to match the outer receipt. Extract only into a new empty
+   local folder.
+6. Follow `RUN-WITH-CLAUDE-CODE.txt` exactly. Handle its repository, detached
    checkout, hash checks, launcher, and local browser steps for the owner. Ask
-   the owner only for the small choices and feedback named there. Stop at the
-   first mismatch. Never request a credential, real passkey, provider login,
-   live account, or customer record.
+   the owner only for the small choices and feedback named there. Require the
+   launcher to print both `Native Windows OS architecture: x64 confirmed` and
+   `Node process architecture: x64 confirmed`; missing either keeps physical
+   x64 execution pending. Require it also to print the exact carried
+   `identity_scheme` and `expected_runtime_sha256` from the receipt. Record that
+   this synthetic route preserved those expected values but did not observe an
+   installed runtime or run update preview. Include both verified architecture
+   fields and the carried runtime identity fields in the sanitized feedback
+   named by the instructions. Stop at the first mismatch.
+   Never request a credential, real passkey, provider login, live account, or
+   customer record.
 
 If the receipt has another artifact kind, continue below and apply that kit's
 own contract. Never infer an install-kit contract from the filename

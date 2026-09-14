@@ -17,6 +17,8 @@ const version = packageJson.version;
 const escapedVersion = version.replaceAll(".", "\\.");
 const currentEvidencePlan = read(`docs/release-evidence/v${version}-candidate-release-evidence-plan.md`);
 const retiredEvidencePlan = read("docs/release-evidence/v0.4.7-candidate-release-evidence-plan.md");
+const ciWorkflow = read(".github/workflows/ci.yml");
+const windowsRehearsalWorkflow = read(".github/workflows/windows-rehearsal.yml");
 
 assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable semantic version");
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
@@ -33,6 +35,52 @@ assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate re
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
   "the current plan must not imply final-SHA or field proof before either exists");
+const ciTestJob = ciWorkflow.slice(
+  ciWorkflow.indexOf("  test:"),
+  ciWorkflow.indexOf("  preflight-traps:"),
+);
+const windowsRehearsalTestJob = windowsRehearsalWorkflow.slice(
+  windowsRehearsalWorkflow.indexOf("  test:"),
+  windowsRehearsalWorkflow.indexOf("  preflight-traps:"),
+);
+for (const [label, job] of [
+  ["main CI", ciTestJob],
+  ["Windows rehearsal", windowsRehearsalTestJob],
+]) {
+  assert.match(job,
+    /actions\/checkout@[0-9a-f]+[\s\S]*?ref: \$\{\{ github\.sha \}\}[\s\S]*?fetch-depth: 2[\s\S]*?persist-credentials: false/,
+    `${label} must fetch the candidate parent for the evidence-anchor shape check`);
+  for (const output of [
+    "package_version", "package_bytes", "package_file_count",
+  ]) {
+    assert.match(job, new RegExp(
+      `EXPECTED_PACKAGE_${output.slice("package_".length).toUpperCase()}: \\$\\{\\{ needs\\.package\\.outputs\\.${output} \\}\\}`,
+    ), `${label} must consume the producer's ${output} output`);
+  }
+  for (const [environmentName, output] of [
+    ["EXPECTED_RUNTIME_IDENTITY_ARTIFACT_SHA256", "runtime_identity_artifact_sha256"],
+    ["EXPECTED_RUNTIME_IDENTITY_ARTIFACT_BYTES", "runtime_identity_artifact_bytes"],
+    ["EXPECTED_IDENTITY_SCHEME", "identity_scheme"],
+    ["EXPECTED_RUNTIME_PAYLOAD_SHA256", "runtime_payload_sha256"],
+  ]) {
+    assert.match(job, new RegExp(
+      `${environmentName}: \\$\\{\\{ needs\\.package\\.outputs\\.${output} \\}\\}`,
+    ), `${label} must consume the producer's ${output} output`);
+  }
+  for (const name of [
+    "FILENAME", "VERSION", "BYTES", "FILE_COUNT", "SHA256",
+  ]) {
+    assert.match(job, new RegExp(
+      `echo "BRAIN_TESTED_PACKAGE_${name}=\\$[^"\\n]+" >> "\\$GITHUB_ENV"`,
+    ), `${label} must expose ${name.toLowerCase()} to the evidence-anchor test`);
+  }
+  assert.match(job,
+    /echo "BRAIN_TESTED_RUNTIME_IDENTITY_SCHEME=\$EXPECTED_IDENTITY_SCHEME" >> "\$GITHUB_ENV"/,
+    `${label} must expose the runtime identity scheme to the evidence-anchor test`);
+  assert.match(job,
+    /echo "BRAIN_TESTED_RUNTIME_PAYLOAD_SHA256=\$EXPECTED_RUNTIME_PAYLOAD_SHA256" >> "\$GITHUB_ENV"/,
+    `${label} must expose the runtime payload SHA-256 to the evidence-anchor test`);
+}
 assert.match(retiredEvidencePlan, /Status: superseded planning record; no field execution occurred/,
   "the consumed 0.4.7 planning identity must remain explicitly superseded and unexecuted");
 assert.match(retiredEvidencePlan, /Superseded by: \[v0\.4\.8 candidate release evidence plan\]/,

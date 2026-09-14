@@ -274,6 +274,10 @@ function gateConfig(values, preparation, execute) {
 export async function main(argv = process.argv.slice(2), dependencies = {}) {
   const parsed = parseDisposableRecoveryTargetEvalArguments(argv);
   const values = parsed.values;
+  const platform = dependencies.platform ?? process.platform;
+  if (platform !== "darwin") {
+    refuse("DISPOSABLE_RECOVERY_TARGET_EVAL_CLI_MACOS_REQUIRED");
+  }
   const preparation = (dependencies.inspectPreparation ?? assertPreparation)(values);
   const keychainBinding = Object.freeze({
     candidate_sha: preparation.binding.candidate_sha,
@@ -292,8 +296,8 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       binding: keychainBinding,
       receiptPath: resolve(values["keychain-receipt"]),
       expectedReceiptDirectory: resolve(values["artifact-directory"]),
-      keychain: createKeychain({ platform: dependencies.platform ?? process.platform }),
-      platform: dependencies.platform ?? process.platform,
+      keychain: createKeychain({ platform }),
+      platform,
     });
     assertDisposableRecoveryFieldKeychainVerificationBinding(
       keychainProof,

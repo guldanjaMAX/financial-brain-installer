@@ -190,9 +190,10 @@ function cleanProvisionWorkerId(
 
 function cleanWorkersDevDomain(value, workerName, code) {
   const domain = cleanText(value, 253, code);
-  if (domain.endsWith(".") || domain.split(".").some((label) => !DNS_LABEL_RE.test(label)) ||
-      !domain.startsWith(`${workerName}.`) || !domain.endsWith(".workers.dev") ||
-      domain === `${workerName}.workers.dev`) {
+  const labels = domain.split(".");
+  if (domain.endsWith(".") || labels.length !== 4 ||
+      labels.some((label) => !DNS_LABEL_RE.test(label)) ||
+      labels[0] !== workerName || labels[2] !== "workers" || labels[3] !== "dev") {
     refuse(code);
   }
   return domain;

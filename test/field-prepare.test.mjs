@@ -32,6 +32,7 @@ import {
   createPlanEnvironment,
   createSafeEnvironment,
   makeOutputDirectory,
+  packageSource,
   parseFieldPrepareArgs,
   readSourceIdentity,
   renderFieldChecklist,
@@ -121,7 +122,10 @@ test("every child environment drops credentials and customer-home access", () =>
       QUICKBOOKS_CLIENT_SECRET: "fixture-qbo-secret",
       GOOGLE_CLIENT_SECRET: "fixture-google-secret",
       NODE_OPTIONS: "--import=/private/customer-hook.mjs",
+      NPM_CONFIG_CACHE: "/private/untrusted-uppercase-cache",
+      npm_config_cache: "/private/untrusted-lowercase-cache",
       BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT: "/private/untrusted-runtime",
+      BRAIN_FIELD_BUNDLE_CACHE_CONTENT_ROOT: "/private/untrusted-bundle-cache",
     }, temporary);
     assert.equal(safe.PATH, "/fixture/bin");
     assert.equal(safe.HOME, temporary);
@@ -131,7 +135,9 @@ test("every child environment drops credentials and customer-home access", () =>
     assert.equal(safe.QUICKBOOKS_CLIENT_SECRET, undefined);
     assert.equal(safe.GOOGLE_CLIENT_SECRET, undefined);
     assert.equal(safe.NODE_OPTIONS, undefined);
+    assert.equal(safe.npm_config_cache, undefined);
     assert.equal(safe.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT, undefined);
+    assert.equal(safe.BRAIN_FIELD_BUNDLE_CACHE_CONTENT_ROOT, undefined);
     assert.equal(safe.NPM_CONFIG_CACHE, join(temporary, "npm-cache"));
     assert.equal(safe.NPM_CONFIG_GLOBALCONFIG, join(temporary, "npm-globalrc"));
     assert.equal(safe.NPM_CONFIG_USERCONFIG, join(temporary, "npmrc"));
@@ -158,6 +164,70 @@ test("the integrity cache locator follows npm and Windows cache semantics", () =
     resolve("C:\\Users\\fixture\\AppData\\Local", "npm-cache", "_cacache",
       "content-v2", "sha512"),
   );
+});
+
+test("field package verification is pinned to the scrubbed private npm cache", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "brain-field-package-cache-"));
+  const output = join(fixture, "output");
+  mkdirSync(output);
+  const environment = createSafeEnvironment({
+    PATH: process.env.PATH || "",
+    NPM_CONFIG_CACHE: "/private/untrusted-cache",
+    BRAIN_FIELD_BUNDLE_CACHE_CONTENT_ROOT: "/private/untrusted-bundle-cache",
+  }, join(fixture, "home"));
+  const filename = "brain-installer-9.9.9.tgz";
+  const archive = join(output, filename);
+  const bytes = Buffer.from("x");
+  writeFileSync(archive, bytes);
+  let verified = null;
+  try {
+    const packed = packageSource(output, environment, {
+      package_name: "brain-installer",
+      package_version: "9.9.9",
+    }, {
+      runNpm(args, options) {
+        assert.deepEqual(args, [
+          "pack", "--json", "--ignore-scripts", "--pack-destination", output,
+        ]);
+        assert.equal(options.env, environment);
+        return {
+          ok: true,
+          stdout: JSON.stringify([{ filename, size: bytes.length, files: [{
+            path: "package.json", size: bytes.length, mode: 0o644,
+          }], entryCount: 1 }]),
+        };
+      },
+      assertPackedBundleArchive(options) {
+        verified = options;
+        return {
+          archive_bytes: bytes.length,
+          archive_sha256: createHash("sha256").update(bytes).digest("hex"),
+          identity_scheme: "brain.runtime-payload.sha256.v1",
+          runtime_payload_sha256: "b".repeat(64),
+          archive_file_count: 1,
+          bundle_count: 4,
+          bundle_file_count: 226,
+          bundle_bytes: 11_340_570,
+          inventory_sha256: "a".repeat(64),
+        };
+      },
+    });
+    assert.equal(
+      verified.cacheContentRoot,
+      resolveNpmCacheContentRoot(environment),
+    );
+    assert.notEqual(verified.cacheContentRoot, "/private/untrusted-cache");
+    assert.notEqual(verified.cacheContentRoot, "/private/untrusted-bundle-cache");
+    assert.deepEqual(Object.keys(packed.receipt).sort(), [
+      "bytes", "file_count", "filename", "identity_scheme",
+      "runtime_payload_sha256", "sha256",
+    ]);
+    assert.equal(packed.receipt.identity_scheme, "brain.runtime-payload.sha256.v1");
+    assert.equal(packed.receipt.runtime_payload_sha256, "b".repeat(64));
+  } finally {
+    bytes.fill(0);
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("the locked Wrangler guard rejects ambient module resolution in parent and child Node processes", {
@@ -458,13 +528,21 @@ test("the generated checklist keeps offline proof separate from human field gate
       head_sha: "a".repeat(40), tree_sha: "b".repeat(40),
       package_name: "brain-installer", package_version: "0.2.1",
     },
-    package: { filename: "brain-installer-0.2.1.tgz", bytes: 123, sha256: "c".repeat(64) },
+    package: {
+      filename: "brain-installer-0.2.1.tgz",
+      bytes: 123,
+      sha256: "c".repeat(64),
+      identity_scheme: "brain.runtime-payload.sha256.v1",
+      runtime_payload_sha256: "d".repeat(64),
+    },
   });
   assert.match(checklist, /Clean Windows owner profile/);
   assert.match(checklist, /Disposable Cloudflare Brain/);
   assert.match(checklist, /schema 46/);
   assert.match(checklist, /Plaid Sandbox through the deployed Brain/);
   assert.match(checklist, /QuickBooks Online Sandbox/);
+  assert.match(checklist, /Runtime identity scheme: brain\.runtime-payload\.sha256\.v1/);
+  assert.match(checklist, new RegExp(`Runtime payload SHA-256: ${"d".repeat(64)}`));
   assert.match(checklist, /does not prove Cloudflare/i);
   assert.doesNotMatch(checklist, /--execute|--live/);
 });
@@ -661,6 +739,14 @@ function makeCleanPlanFixture() {
   writeFileSync(
     join(root, "operations", "locked-wrangler-runtime.mjs"),
     readFileSync(join(ROOT, "operations", "locked-wrangler-runtime.mjs")),
+  );
+  writeFileSync(
+    join(root, "operations", "package-bundle-verifier.mjs"),
+    readFileSync(join(ROOT, "operations", "package-bundle-verifier.mjs")),
+  );
+  writeFileSync(
+    join(root, "operations", "update-preview.mjs"),
+    readFileSync(join(ROOT, "operations", "update-preview.mjs")),
   );
   writeFileSync(join(root, "package.json"), `${JSON.stringify({
     name: "brain-installer",

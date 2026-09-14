@@ -1915,6 +1915,7 @@ test("Worker identity creation and exact-ID readback bind the campaign tag", asy
     tag,
   });
   assert.equal(created.worker_id, workerId);
+  assert.equal(created.hostname, WORKER_DOMAIN);
   assert.equal(created.tag_sha256, digest(tag));
   assert.deepEqual(JSON.parse(calls[0].body.toString("utf8")), {
     name: SCRIPT_NAME,
@@ -1928,6 +1929,7 @@ test("Worker identity creation and exact-ID readback bind the campaign tag", asy
     expected_tag: tag,
   });
   assert.equal(read.worker_id, workerId);
+  assert.equal(read.hostname, WORKER_DOMAIN);
   assert.equal(read.tag_sha256, digest(tag));
   assert.deepEqual(calls.map(({ method }) => method), ["POST", "GET"]);
   assert.equal(tokens.length, 2);
@@ -1953,6 +1955,7 @@ test("Worker identity readback accepts only its canonical expected workers.dev U
   const tag = "v048-field-source-fixture";
   const invalidUrls = [
     ["different Worker", "https://different-worker.fixture.workers.dev"],
+    ["extra account label", `https://${SCRIPT_NAME}.extra.fixture.workers.dev`],
     ["empty userinfo", `https://@${WORKER_DOMAIN}`],
     ["username userinfo", `https://fixture-user@${WORKER_DOMAIN}`],
     ["explicit default port", `https://${WORKER_DOMAIN}:443`],
@@ -1981,6 +1984,26 @@ test("Worker identity readback accepts only its canonical expected workers.dev U
         error.code === "CF_DISPOSABLE_TRANSPORT_PROVISION_RESPONSE_INVALID");
     });
   }
+});
+
+test("Worker identity creation treats a malformed workers.dev host as an ambiguous mutation", async () => {
+  const calls = [];
+  const workerId = "e".repeat(32);
+  const tag = "v048-field-source-fixture";
+  const response = provisionWorker({ id: workerId, tag });
+  response.subdomain.url = `https://${SCRIPT_NAME}.extra.fixture.workers.dev`;
+  const transport = createCloudflareDisposableDeploymentTransport({
+    fetchImpl: capturedFetch([jsonResponse(envelope(response))], calls),
+    resolveToken: tokenResolver([]),
+  });
+  await assert.rejects(transport.createWorkerIdentity({
+    account_id: ACCOUNT_ID,
+    name: SCRIPT_NAME,
+    tag,
+  }), (error) => error instanceof CloudflareDisposableDeploymentTransportError &&
+    error.code === "CF_DISPOSABLE_TRANSPORT_MUTATION_AMBIGUOUS");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "POST");
 });
 
 test("bootstrap upload keeps secret-derived hashes out of results and validates exact settings", async () => {

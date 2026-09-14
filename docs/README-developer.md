@@ -1088,12 +1088,19 @@ manifest or credential store and makes no live service call.
 Physical Windows owner rehearsals are handed off only as the content-addressed
 ZIP and matching `release.json` produced by
 `scripts/build-windows-onboarding-kit.mjs` from one successful exact-SHA `ci`
-push run. The archive contains instructions and a manifest, not executable
+push run. That CI run publishes the exact package plus a separate minimal raw
+runtime identity receipt. The latter has one exact key set and binds the same
+source SHA and package identity to `identity_scheme` and
+`runtime_payload_sha256`; the kit carries that digest as
+`update_preview.expected_runtime_sha256`. The archive contains instructions and a manifest, not executable
 code. Those instructions have Claude Code obtain a fresh detached checkout and
 start its checked-in `onboarding/start-windows-rehearsal.ps1`, never an emailed
 or pasted script body and never the `npm.cmd` package-script shim. The launcher
-requires the sealed SHA, a clean current directory equal to the checkout root,
-Node.js 22+, and a non-administrator PowerShell window. After frontend
+requires the sealed SHA, fixed runtime identity scheme and expected runtime
+SHA-256, a clean current directory equal to the checkout root, Node.js 22+, and
+a non-administrator PowerShell window. It preserves and prints that non-secret
+expected identity but does not observe an installed package or run update
+preview. After frontend
 preparation it invokes the Node rehearsal entrypoint directly, which keeps
 Control-C out of `cmd.exe` batch job handling. The first run may download a
 separate small public frontend dependency set and may be quiet for several
@@ -1103,6 +1110,13 @@ minutes.
 scenario routing, and absence of credential fields. This is browser-contract
 and layout evidence only. Cloudflare install, provider OAuth, webhook delivery,
 mailbox access, and physical WebAuthn remain field gates.
+
+If the candidate is later authorized and published, the same receipt bytes are
+also a third, versioned release asset. Stable website metadata must bind that
+asset's exact URL, byte count, SHA-256, source commit, package file count,
+identity scheme, and runtime payload SHA-256. The public contract checker then
+downloads and parses the receipt independently; a transient CI artifact or a
+reconstructed receipt is not release evidence.
 
 Every npm, Vite, fixture, and browser child in this rehearsal receives a strict
 operating-system allowlist instead of the desktop environment. npm also reads

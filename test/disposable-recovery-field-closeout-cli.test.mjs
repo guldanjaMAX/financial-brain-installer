@@ -31,20 +31,27 @@ import {
   registerNextTestDisposableRecoveryFieldCloseoutRuntime,
 } from "./helpers/disposable-recovery-closeout-keychain.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable recovery field closeout CLI suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
+const MACOS_PRIVATE_RECEIPT_SKIP =
+  "requires private aggregate receipt ACL proof";
+function testWithMacosPrivateReceipt(name, optionsOrFn, maybeFn) {
+  const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+  const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
+  return test(name, {
+    ...options,
+    skip: process.platform === "win32" ? MACOS_PRIVATE_RECEIPT_SKIP : options.skip,
+  }, fn);
+}
 
 const CLI = fileURLToPath(new URL(
   "../operations/disposable-recovery-field-closeout-cli.mjs",
   import.meta.url,
 ));
-const BASE = await createDisposableRecoveryCloseoutFixture({
-  prefix: "brain-v048-closeout-cli-base-",
-});
-const createdRoots = new Set([BASE.root]);
+const BASE = process.platform === "win32"
+  ? null
+  : await createDisposableRecoveryCloseoutFixture({
+    prefix: "brain-v048-closeout-cli-base-",
+  });
+const createdRoots = new Set(BASE ? [BASE.root] : []);
 process.once("exit", () => {
   for (const root of createdRoots) {
     try { rmSync(root, { recursive: true, force: true }); }
@@ -146,7 +153,7 @@ test("parser, help, and direct entry point expose no operational injection", asy
   assert.equal(direct.stderr, "");
 });
 
-test("CLI preview mints genuine evidence and returns only sanitized A17 authority", async () => {
+testWithMacosPrivateReceipt("CLI preview mints genuine evidence and returns only sanitized A17 authority", async () => {
   const current = await fixture();
   try {
     const explicitSentinel = "private-client-explicit-sentinel.tgz";
@@ -193,7 +200,7 @@ test("CLI preview mints genuine evidence and returns only sanitized A17 authorit
   }
 });
 
-test("CLI execute returns the anchor hash and the third run performs zero mutations", async () => {
+testWithMacosPrivateReceipt("CLI execute returns the anchor hash and the third run performs zero mutations", async () => {
   const current = await fixture();
   try {
     const approval = await disposableRecoveryFieldCloseoutApprovalFingerprint(
@@ -234,7 +241,7 @@ test("CLI execute returns the anchor hash and the third run performs zero mutati
   }
 });
 
-test("CLI refuses wrong approval and nested residue before constructing Keychain", async () => {
+testWithMacosPrivateReceipt("CLI refuses wrong approval and nested residue before constructing Keychain", async () => {
   const wrongApproval = await fixture();
   const residue = await fixture();
   try {
@@ -270,5 +277,3 @@ test("CLI refuses wrong approval and nested residue before constructing Keychain
     dispose(residue);
   }
 });
-
-}

@@ -92,12 +92,6 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
-if (process.platform === "win32") {
-  test("macOS-only disposable recovery field deployment suite", {
-    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
-  }, () => {});
-} else {
-
 const FIXED_DAY = "2026-09-12";
 const MODULE_INVENTORY_SHA256 = digest("reviewed-module-inventory");
 const SOURCE_VERSION_ID = "10000000-0000-4000-8000-000000000001";
@@ -129,13 +123,15 @@ const DEPLOY_K0_BINDING = Object.freeze({
   field_receipt_sha256: digest("field-receipt"),
   account_id: "a".repeat(32),
 });
-const DEPLOY_K0 = await createTestDisposableRecoveryK0Capability(
-  DEPLOY_K0_BINDING,
-);
+const DEPLOY_K0 = process.platform === "win32"
+  ? null
+  : await createTestDisposableRecoveryK0Capability(DEPLOY_K0_BINDING);
+const STATIC_KEYCHAIN_BINDING_SHA256 = digest("static-keychain-binding");
 
 function bindingFixture(
   runId = "40000000-0000-4000-8000-000000000004",
-  keychainBindingSha256 = DEPLOY_K0.proof.keychain_binding_sha256,
+  keychainBindingSha256 = DEPLOY_K0?.proof.keychain_binding_sha256 ??
+    STATIC_KEYCHAIN_BINDING_SHA256,
 ) {
   const base = {
     schema_version: 2,
@@ -983,7 +979,11 @@ test("the public plan is the fixed five-request phased semantic plan", () => {
   );
 });
 
-test("lower-level phase runners refuse missing or mismatched K0 authority", async () => {
+test("lower-level phase runners refuse missing or mismatched K0 authority", {
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
+}, async () => {
   const binding = bindingFixture();
   const mismatchedK0 = await createTestDisposableRecoveryK0Capability({
     candidate_sha: "3".repeat(40),
@@ -1026,7 +1026,9 @@ test("lower-level phase runners refuse missing or mismatched K0 authority", asyn
 });
 
 test("a changed K0 proof stops the next phase before provider access", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
 }, async () => {
   const driftBinding = Object.freeze({
     candidate_sha: DEPLOY_K0_BINDING.candidate_sha,
@@ -1078,7 +1080,9 @@ test("a changed K0 proof stops the next phase before provider access", {
 });
 
 test("source and target phases preserve separate approvals, journals, and exact receipt links", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
 }, async () => {
   const directory = privateDirectory("v048-phased-deployment-");
   const paths = artifactPaths(directory);
@@ -1332,7 +1336,9 @@ test("source and target phases preserve separate approvals, journals, and exact 
 });
 
 test("production provider target preflight is accepted before A4 authority exists", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
 }, async () => {
   const directory = privateDirectory("v048-production-provider-preflight-");
   const paths = artifactPaths(directory);
@@ -1388,7 +1394,9 @@ test("production provider target preflight is accepted before A4 authority exist
 });
 
 test("an unconfirmed provider mutation remains ambiguous and cannot be blindly retried", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
 }, async () => {
   const directory = privateDirectory("v048-phased-ambiguous-");
   const paths = artifactPaths(directory);
@@ -1468,7 +1476,9 @@ test("an unconfirmed provider mutation remains ambiguous and cannot be blindly r
 });
 
 test("explicit resume replays a confirmed prefix and continues only the next mutation", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32"
+    ? "requires verifier-minted K0 and private receipt ACL proof"
+    : false,
 }, async () => {
   const directory = privateDirectory("v048-phased-resume-");
   const paths = artifactPaths(directory);
@@ -1554,5 +1564,3 @@ test("the legacy combined deployment runner is an unconditional refusal", async 
       "DISPOSABLE_RECOVERY_DEPLOYMENT_PHASE_SPLIT_REQUIRED",
   );
 });
-
-}
