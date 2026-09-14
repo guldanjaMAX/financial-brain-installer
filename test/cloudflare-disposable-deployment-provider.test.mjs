@@ -32,6 +32,12 @@ import {
   createTestDisposableRecoveryK0Capability,
 } from "./helpers/disposable-recovery-k0-capability.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable Cloudflare deployment provider suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 const HASH = "a".repeat(64);
 const SOURCE_ACCOUNT = "1".repeat(32);
 const TARGET_ACCOUNT = SOURCE_ACCOUNT;
@@ -2043,3 +2049,5 @@ test("target preflight refuses a custody worker identity mismatch", async () => 
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
+
+}

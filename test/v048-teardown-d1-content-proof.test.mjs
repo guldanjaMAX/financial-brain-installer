@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   truncateSync,
@@ -370,9 +371,12 @@ test("replacement, symlink, hardlink, mode, oversize, and directory races fail c
     if (process.platform !== "win32") chmodSync(externalTarget, 0o600);
     const cases = [
       ["replaced inode", "V048_TEARDOWN_D1_EXPORT_UNSAFE", ({ outputPath }) => {
+        const replacementPath = join(attackRoot, "replacement-export.sql");
+        // Allocate the replacement while the original exists so its identity must differ.
+        writeFileSync(replacementPath, BASE_EXPORT, { mode: 0o600 });
+        if (process.platform !== "win32") chmodSync(replacementPath, 0o600);
         unlinkSync(outputPath);
-        writeFileSync(outputPath, BASE_EXPORT, { mode: 0o600 });
-        if (process.platform !== "win32") chmodSync(outputPath, 0o600);
+        renameSync(replacementPath, outputPath);
       }],
       ...(process.platform === "win32" ? [] : [
         ["symlink", "V048_TEARDOWN_D1_EXPORT_UNSAFE", ({ outputPath }) => {

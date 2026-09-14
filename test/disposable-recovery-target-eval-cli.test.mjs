@@ -18,6 +18,12 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable recovery target evaluation CLI suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 function networkIsolation(role) {
   return {
     worker_identity_proved: true,
@@ -347,3 +353,5 @@ test("direct invocation works through a canonicalized symlink path", {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+}

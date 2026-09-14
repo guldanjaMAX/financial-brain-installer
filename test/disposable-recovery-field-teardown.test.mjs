@@ -84,6 +84,12 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable recovery field teardown suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 const ACCOUNT = "a".repeat(32);
 const SOURCE_WORKER_ID = "b".repeat(32);
 const TARGET_WORKER_ID = "c".repeat(32);
@@ -4879,3 +4885,5 @@ test("production adapter rejects a copied K0 proof before other preparation", as
     "a genuine verifier-minted capability must reach the next production check",
   );
 });
+
+}

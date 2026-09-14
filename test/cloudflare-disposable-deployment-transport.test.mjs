@@ -200,7 +200,7 @@ function provisionWorker({
     subdomain: {
       enabled: true,
       previews_enabled: false,
-      url: `https://${name}.fixture.workers.dev/`,
+      url: `https://${name}.fixture.workers.dev`,
     },
     tags: [tag],
   };
@@ -1946,6 +1946,41 @@ test("Worker identity creation and exact-ID readback bind the campaign tag", asy
     expected_tag: tag,
   }), (error) => error instanceof CloudflareDisposableDeploymentTransportError &&
     error.code === "CF_DISPOSABLE_TRANSPORT_PROVISION_RESPONSE_INVALID");
+});
+
+test("Worker identity readback accepts only its canonical expected workers.dev URL", async (t) => {
+  const workerId = "e".repeat(32);
+  const tag = "v048-field-source-fixture";
+  const invalidUrls = [
+    ["different Worker", "https://different-worker.fixture.workers.dev"],
+    ["empty userinfo", `https://@${WORKER_DOMAIN}`],
+    ["username userinfo", `https://fixture-user@${WORKER_DOMAIN}`],
+    ["explicit default port", `https://${WORKER_DOMAIN}:443`],
+    ["nondefault port", `https://${WORKER_DOMAIN}:8443`],
+    ["trailing slash", `https://${WORKER_DOMAIN}/`],
+    ["path", `https://${WORKER_DOMAIN}/path`],
+    ["query", `https://${WORKER_DOMAIN}?fixture=1`],
+    ["fragment", `https://${WORKER_DOMAIN}#fixture`],
+    ["non-HTTPS scheme", `http://${WORKER_DOMAIN}`],
+    ["noncanonical case", `HTTPS://${WORKER_DOMAIN.toUpperCase()}`],
+  ];
+  for (const [name, url] of invalidUrls) {
+    await t.test(name, async () => {
+      const response = provisionWorker({ id: workerId, tag });
+      response.subdomain.url = url;
+      const transport = createCloudflareDisposableDeploymentTransport({
+        fetchImpl: capturedFetch([jsonResponse(envelope(response))], []),
+        resolveToken: tokenResolver([]),
+      });
+      await assert.rejects(transport.readWorkerIdentity({
+        account_id: ACCOUNT_ID,
+        worker_id: workerId,
+        expected_name: SCRIPT_NAME,
+        expected_tag: tag,
+      }), (error) => error instanceof CloudflareDisposableDeploymentTransportError &&
+        error.code === "CF_DISPOSABLE_TRANSPORT_PROVISION_RESPONSE_INVALID");
+    });
+  }
 });
 
 test("bootstrap upload keeps secret-derived hashes out of results and validates exact settings", async () => {

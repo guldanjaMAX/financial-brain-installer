@@ -36,6 +36,12 @@ import {
   createTestDisposableRecoveryK0Capability,
 } from "./helpers/disposable-recovery-k0-capability.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable recovery field deployment CLI suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 const digest = (value) => createHash("sha256").update(String(value)).digest("hex");
 const canonical = (value) => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -1284,3 +1290,5 @@ test("generated A1 and A3 manifests build the full verified-recovery plan withou
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+}

@@ -31,6 +31,12 @@ import {
   registerNextTestDisposableRecoveryFieldCloseoutRuntime,
 } from "./helpers/disposable-recovery-closeout-keychain.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable recovery field closeout CLI suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 const CLI = fileURLToPath(new URL(
   "../operations/disposable-recovery-field-closeout-cli.mjs",
   import.meta.url,
@@ -264,3 +270,5 @@ test("CLI refuses wrong approval and nested residue before constructing Keychain
     dispose(residue);
   }
 });
+
+}

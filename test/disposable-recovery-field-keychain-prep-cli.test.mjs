@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -12,6 +13,10 @@ import {
 const HASH = (character) => character.repeat(64);
 const SHA = "1".repeat(40);
 const ACCOUNT = "a".repeat(32);
+const EXPECTED_RECEIPT_PATH = join(
+  resolve("/private/receipts"),
+  "v048-disposable-field-keychain-prep.json",
+);
 const COMMON = Object.freeze([
   "--account-id", ACCOUNT,
   "--candidate-sha", SHA,
@@ -76,8 +81,7 @@ function dependencies(events = []) {
       assert.equal(input.singleOperatorConfirmed, true);
       assert.equal(typeof input.resume, "boolean");
       assert.equal(input.keychain.marker, true);
-      assert.equal(input.receiptPath,
-        "/private/receipts/v048-disposable-field-keychain-prep.json");
+      assert.equal(input.receiptPath, EXPECTED_RECEIPT_PATH);
       assert.equal(input.revalidate(), true);
       return Object.freeze({
         receipt: Object.freeze({ status: "prepared" }),
@@ -197,8 +201,7 @@ test("preview binds sealed candidate evidence and performs fixed-item inspection
   assert.equal(result.keychain_mutation, false);
   assert.equal(result.provider_access, false);
   assert.equal(result.keychain_access, "fixed_item_presence_only");
-  assert.equal(result.receipt_path,
-    "/private/receipts/v048-disposable-field-keychain-prep.json");
+  assert.equal(result.receipt_path, EXPECTED_RECEIPT_PATH);
   assert.deepEqual(events.map(([name]) => name), [
     "directory", "evidence", "keychain", "preview",
   ]);

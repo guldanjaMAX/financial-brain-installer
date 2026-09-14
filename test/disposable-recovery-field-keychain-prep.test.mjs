@@ -47,6 +47,12 @@ import {
   verifyDisposableRecoveryFieldKeychainResetJournal,
 } from "../operations/disposable-recovery-field-keychain-prep.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable recovery field Keychain preparation suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 const HASH = (character) => character.repeat(64);
 const ACCOUNT_ID = "a".repeat(32);
 const REFERENCES = Object.freeze([
@@ -2437,3 +2443,5 @@ test("default Keychain transport keeps values out of argv, env, and child output
   secret.fill(0);
   snapshots.forEach((value) => value.fill(0));
 });
+
+}

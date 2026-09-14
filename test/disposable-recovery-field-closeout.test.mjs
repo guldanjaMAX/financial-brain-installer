@@ -54,6 +54,12 @@ import {
   registerTestDisposableRecoveryFieldCloseoutRuntime,
 } from "./helpers/disposable-recovery-closeout-keychain.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable recovery field closeout suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 const BASE = await createDisposableRecoveryCloseoutFixture({
   prefix: "brain-v048-closeout-base-",
 });
@@ -984,3 +990,5 @@ test("fresh-process SIGKILL resumes every recoverable stage and preserves the ze
     }
   }
 });
+
+}

@@ -92,6 +92,12 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable recovery field deployment suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 const FIXED_DAY = "2026-09-12";
 const MODULE_INVENTORY_SHA256 = digest("reviewed-module-inventory");
 const SOURCE_VERSION_ID = "10000000-0000-4000-8000-000000000001";
@@ -1548,3 +1554,5 @@ test("the legacy combined deployment runner is an unconditional refusal", async 
       "DISPOSABLE_RECOVERY_DEPLOYMENT_PHASE_SPLIT_REQUIRED",
   );
 });
+
+}

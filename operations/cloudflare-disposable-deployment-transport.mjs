@@ -1673,17 +1673,20 @@ function normalizeProvisionWorker(value, expectedName, expectedTag, code) {
       subdomain.previews_enabled !== false) {
     refuse(code);
   }
-  let url;
-  try { url = new URL(subdomain.url); } catch { refuse(code); }
-  if (url.protocol !== "https:" || url.username || url.password || url.port ||
-      url.pathname !== "/" || url.search || url.hash ||
-      !url.hostname.endsWith(".workers.dev")) {
+  // Validate the provider's literal canonical origin. Parsing first can erase
+  // an explicit default port or other noncanonical syntax before comparison.
+  const urlPrefix = "https://";
+  const rawUrl = cleanText(subdomain.url, urlPrefix.length + 253, code);
+  if (!rawUrl.startsWith(urlPrefix) || rawUrl.includes("/", urlPrefix.length)) {
     refuse(code);
   }
+  const hostname = cleanWorkersDevDomain(
+    rawUrl.slice(urlPrefix.length), expectedName, code,
+  );
   return {
     workerId: cleanProvisionWorkerId(value.id, code),
     createdOn: cleanIsoTimestamp(value.created_on, code),
-    hostname: url.hostname,
+    hostname,
   };
 }
 

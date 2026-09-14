@@ -5659,17 +5659,27 @@ try {
   assert.equal(existsSync(promotionAuthorizationPath), false);
   assert.equal(existsSync(completedResumeAuthorizationPath), true);
   assert.equal(existsSync(completedPromotionAuthorizationPath), true);
-  const retiredProof = readCompletedTestBootstrapProof({
+  const readRetiredProof = () => readCompletedTestBootstrapProof({
     artifactsDirectory: fieldArtifactDirectory,
     plan: fieldInitialized.plan,
     state: completedField.state,
     deploymentReceipt: readPrivateAggregateReceipt(fieldDeploymentReceiptPath),
   });
-  assert.equal(retiredProof.actual_chunks_admitted_to_epoch, 7_202);
-  assert.equal(
-    retiredProof.candidate_evidence.packageSha256,
-    hash(fieldPackageBytes),
-  );
+  if (lockedWranglerRuntime.host.platform !== "darwin") {
+    assert.throws(
+      readRetiredProof,
+      (error) => error.code ===
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID",
+      "a completed non-macOS runtime is not valid retired field proof",
+    );
+  } else {
+    const retiredProof = readRetiredProof();
+    assert.equal(retiredProof.actual_chunks_admitted_to_epoch, 7_202);
+    assert.equal(
+      retiredProof.candidate_evidence.packageSha256,
+      hash(fieldPackageBytes),
+    );
+  }
 
   // Model the narrow crash after the verified runner durably records complete
   // but before the active interruption checkpoint is renamed. A bound special
@@ -6273,8 +6283,16 @@ try {
   const completedCli = runCompletedCli(completedCliArguments());
   assert.equal(completedCli.error, undefined);
   assert.equal(completedCli.signal, null);
-  assert.equal(completedCli.status, 0, completedCli.stderr);
-  assert.equal(JSON.parse(completedCli.stdout).status, "complete");
+  if (process.platform === "darwin") {
+    assert.equal(completedCli.status, 0, completedCli.stderr);
+    assert.equal(JSON.parse(completedCli.stdout).status, "complete");
+  } else {
+    assert.equal(completedCli.status, 1);
+    assert.match(
+      completedCli.stderr,
+      /RECOVERY_FIELD_GATE_REQUIRES_MACOS_KEYCHAIN/,
+    );
+  }
   assert.equal(hasExecutionSnapshotResidue(), false);
 
   const wrongImplementationCli = runCompletedCli(completedCliArguments(

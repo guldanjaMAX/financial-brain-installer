@@ -34,6 +34,12 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
+if (process.platform === "win32") {
+  test("macOS-only disposable recovery target evaluation suite", {
+    skip: "private aggregate receipt DACL proof is intentionally unavailable on Windows",
+  }, () => {});
+} else {
+
 const SOURCE_VERSION_ID = "10000000-0000-4000-8000-000000000001";
 const SOURCE_DEPLOYMENT_ID = "10000000-0000-4000-8000-000000000002";
 const TARGET_PAUSED_VERSION_ID = "20000000-0000-4000-8000-000000000001";
@@ -727,3 +733,5 @@ test("recovers an exact post-rename target receipt without repeating live evalua
     rmSync(target, { recursive: true, force: true });
   }
 });
+
+}
