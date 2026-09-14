@@ -167,28 +167,103 @@ Verified recovery uses the provider-neutral state machine in
 reviewed source, restore only an exact empty `recovery-gate-<nonce>` target,
 rebuild Vectorize while a reviewed paused Worker is deployed, promote only its
 separately reviewed immutable active version to 100 percent, and run health
-plus release evaluation. It cannot create, upload, route, delete, or destroy
-resources. The two versions must have the same reviewed script hash and exact
-bindings except for paused mode. The run requires six previewed approval
-fingerprints, including the blocking source-export window, both pinned target
-Worker versions and manually reviewed empty routes, and exact Keychain-backed
-Wrangler wrapper and private release golden bytes. See
-`docs/RECOVERY.md` for the private artifact rules and remaining live field
-gate.
+plus release evaluation. It cannot create, upload, route, or destroy resources.
+The D1 export is an encrypted provenance artifact; plaintext exists only in the
+owner-only directory while a bounded verifier or import callback owns it.
 
-The sealed package exposes the fixed deployment proof as
-`brain-v048-disposable-deploy help`. Source preview/preflight/`--approve-a2`
-mutation and target preview/preflight/`--approve-a4` mutation are separate
-commands; there is no combined path. Source preparation does not open the
-target manifest. Preview performs no network access and no write. Each
+For the exact v0.4.8 campaign, first review the fixed no-competing-writer scope
+with `verified-recovery.mjs derive-vectorize-mutation-quiescence`, then pass the
+derived fingerprint back to `init`. It is one continuous operator attestation
+from target Vectorize creation through the accepted final active proof. The
+recovery preview returns eight base approval fingerprints: plan, disposable
+target, target execution, blocking source export, wrapper, golden,
+implementation, and Vectorize mutation quiescence. The controlled 6,001-record
+mid-bootstrap rehearsal adds a ninth interruption approval. Every recovery run
+must also consume the final target deployment receipt.
+
+Count parity alone cannot promote the target. The adapter pages all D1 vector
+IDs and all provider Vectorize IDs and requires exact set equality. It brackets
+that proof with a stable provider processed-mutation watermark and requires the
+watermark's mutation ID to equal the Worker's verified barrier. It captures the
+same vector-set, watermark, barrier, D1, outbox, and exact Worker state before
+and after promotion. A private durable promotion-intent receipt is fsynced
+before the exact active-version request, so a lost response can reconcile only
+that reviewed already-active outcome.
+
+`verify_export` records the source D1 deletion-state fingerprint. `verify_eval`
+records the final target fingerprint and is intentionally classified as
+`isolated_target_audit_write`: all non-`llm_call_log` durable content and
+sequence state must remain byte-identical. That table may only append sequential
+rows within the reviewed labels, model, call bounds, and timestamps, and its
+SQLite sequence must match the final row ID. Each captured cost field must be
+nonnegative and is sealed into the transition receipt. The runner refuses an
+automatic second evaluation attempt because a lost result may already have
+appended rows and incurred usage. See `docs/RECOVERY.md` for the artifact,
+stage, and receipt contracts.
+
+The sealed package exposes five fixed-campaign entry points in this order:
+
+1. `brain-v048-disposable-keychain-prep help` for local K0 preview, exact
+   approval, execute, and the separately approved interrupted-K0 reset.
+2. `brain-v048-disposable-deploy help` for A1/A3 provisioning, plan freeze,
+   A2 source deployment, the fixed seed, and A4 target deployment.
+3. `brain-v048-disposable-target-eval preview|execute` for the closed A12
+   aggregate-evaluation lane after exact active promotion. Invalid or missing
+   arguments refuse with the fixed usage line. The lane changes neither corpus
+   nor provider state, although its private questions may create ordinary
+   aggregate usage records.
+4. `brain-v048-disposable-teardown help` for separate A13/A14 source and
+   A15/A16 target ceremonies.
+5. `brain-v048-disposable-closeout help` for the held A17 review surface. A17
+   is implemented offline and locally fixture-tested, but remains held,
+   unfielded, and uncertified. It has no field or live proof and grants no
+   release authority. It must retain the reviewed evidence, remove only four
+   campaign Keychain values, and preserve the shared token before a field
+   closure can be accepted.
+
+Source preview/preflight/`--approve-a2` mutation and target
+preview/preflight/`--approve-a4` mutation are separate commands; there is no
+combined path. Source preparation does not open the target manifest. Preview
+performs no network access and no write. Each
 preflight performs bounded Cloudflare GETs and writes only its owner-private
 receipt. Mutations resolve the manifest account's token only through macOS
 Keychain, journal before every POST, resume only a fully confirmed prefix, and
-refuse `sent_unconfirmed`. Final deployment proof uses the exact deployment-ID
-GET and must match the ID returned by the journaled POST. Windows refuses this
-field-only command. Packaged and fixture-tested means executable, not
-field-proven; the field-readiness marker remains false until the exact live
-disposable run passes.
+refuse `sent_unconfirmed`. `cloudflare-disposable-deployment-transport.mjs` is
+the only Cloudflare HTTP layer. Final deployment proof uses the exact
+deployment-ID GET and must match the ID returned by the journaled POST.
+
+Source and target receipts bind the exact Worker identity, provider version,
+script etag, reviewed code generation, runtime, and bindings. Their network
+isolation proof requires the workers.dev identity, previews disabled, cache
+disabled, and zero routes, custom domains, schedules, tails, extra Worker
+exports, assets, and logpush. Target preflight and final receipt also perform a complete campaign
+custody read: every traffic-bearing version of every non-campaign Worker is
+inspected so no other Worker can bind either campaign D1 database or Vectorize
+index. The semantic role records name these proofs `network_isolation` and
+`worker_generation`; target semantics add `campaign_custody`. Both target
+receipts repeat the plan's top-level `vectorize_mutation_quiescence` claim, and
+recovery checks the final receipt's `approval_fingerprint` before provider or
+credential work.
+
+The historical name-only teardown stays quarantined. The exact v0.4.8 teardown
+requires the completed recovery plan/state, source and final deployment
+receipts, exact Worker generations, both D1 deletion fingerprints, and the
+continuous Vectorize mutation approval. It adds a separate
+lifecycle-quiescence approval covering source preview through final target
+absence. The source role must commit and seal its private receipt before the
+target role can preview. Each role deletes Worker, then Vectorize, then D1, with
+full campaign custody reads around every mutation, exact absence after each,
+and a fresh double-captured D1 fingerprint immediately before D1 deletion.
+The source D1 must accept no writes from `verify_export` through source commit,
+and the target D1 must accept no writes from `verify_eval` through target commit;
+that includes model-audit appends and is separate from both quiescence proofs.
+Unknown provider outcomes or D1 drift remain ambiguous and do not become
+cleanup receipts.
+
+Windows refuses these field-only commands. Packaged and fixture-tested means
+executable, not field-proven; the field-readiness marker remains false until the
+exact live disposable campaign passes. None of this is release or live-action
+authority. A17 remains held, unfielded, and uncertified.
 
 Run `node brain.mjs` with no arguments for the full command list.
 
@@ -1359,9 +1434,10 @@ and reactivation returns `history_advanced`.
 
 `observation_hash` continues to digest the event receipt fields from the
 schema-42 contract. It is not a self-authenticating chain hash and does not
-include the predecessor edge. The authenticated whole recovery artifact and
-the independent recovery-close predecessor checks bind the portable version-one
-chain. A future receipt-contract version may digest that edge; schema 46 keeps
+include the predecessor edge. The encrypted provenance artifact authenticates
+the exported bytes as a whole, and the independent recovery-close predecessor
+checks bind the portable version-one chain. A future receipt-contract version
+may digest that edge; schema 46 keeps
 existing observation hashes stable.
 
 `brain provenance-repair <manifest> --source <name> --target

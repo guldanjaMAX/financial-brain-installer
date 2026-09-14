@@ -126,15 +126,40 @@ synthetic setup, folder, connector, migration, search, owner-action, access, and
 technician scenarios. The final receipt separates automatic proof from the
 remaining live Cloudflare, provider, and physical-device checks.
 
-The package also ships the internal, fixed-campaign dispatcher
-`brain-v048-disposable-deploy`. Run it with `help` to see the separate source
-preview, source preflight, source A2 mutation, target preview, target preflight,
-and target A4 mutation commands. Preview has no network or write capability;
-preflight uses Cloudflare GETs only and writes one owner-private receipt. The
-two mutation commands cannot be combined or exchange approval fingerprints.
-They accept no token option, resolve the exact account token only from macOS
-Keychain, and refuse Windows. The entry point is packaged and fixture-tested,
-but remains **not field-proven** until the exact disposable campaign passes.
+The package contains five internal, fixed-campaign entry points for the held
+v0.4.8 recovery proof. They are not customer install or update commands:
+
+1. `brain-v048-disposable-keychain-prep help` covers K0. Its local preview and
+   exact-approved execute prepare four campaign-only Keychain values before any
+   provider call. An interrupted K0 has a separately previewed and approved
+   reset. It never touches the shared Cloudflare token.
+2. `brain-v048-disposable-deploy help` covers A1 through A4. Source and target
+   provisioning and deployment keep separate approvals and ambiguity journals.
+   Preview has no network or write capability. Preflight uses bounded
+   Cloudflare GETs and writes one owner-private receipt.
+3. `brain-v048-disposable-target-eval preview|execute` is the aggregate A12
+   lane after recovery promotes the exact active target. It changes neither
+   corpus nor provider state, although its private questions may create
+   ordinary aggregate usage records. Its fixed receipt is retained for
+   teardown.
+4. `brain-v048-disposable-teardown help` covers the separate A13/A14 source and
+   A15/A16 target ceremonies. Each role removes only its named disposable
+   Worker, Vectorize index, and D1 database, in that order, after fresh
+   deletion-state proof.
+5. `brain-v048-disposable-closeout help` exposes the held A17 review surface.
+   A17 is implemented offline and locally fixture-tested, but remains held,
+   unfielded, and uncertified. It has no field or live proof and grants no
+   release authority. Any execution still requires separately accepted exact
+   retained-evidence, four campaign-only Keychain deletion, and shared-token
+   preservation gates.
+
+The matching recovery drill stores its D1 export as an encrypted provenance
+artifact. Before it promotes the reviewed active Worker, it requires the exact
+D1 vector-ID set to equal the provider's complete Vectorize ID set, the
+provider's processed mutation watermark to equal the Worker's verified barrier,
+and a durable promotion-intent receipt. These paths remain held and
+**not field-proven** until the exact disposable campaign passes. They do not
+authorize a provider call, release, customer action, or public change.
 
 For an install day, first select one explicit setup intent: `first_brain`,
 `existing_this_computer`, `existing_new_computer`, `resume_interrupted`, or

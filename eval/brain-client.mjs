@@ -1,9 +1,11 @@
 /**
  * brain-client — the only thing in eval/ that touches the network.
  *
- * Every endpoint is read-only. Private questions and family identities use
- * POST bodies so they never enter URLs. Aggregate corpus counts remain GET.
- * The eval must never be able to change a brain it is measuring.
+ * This client exposes no operational mutation route. Private questions and
+ * family identities use POST bodies so they never enter URLs. Aggregate corpus
+ * counts remain GET. An authenticated answer request may append bounded
+ * `llm_call_log` audit rows and incur model cost, but the eval cannot provision
+ * resources or change corpus, connector, configuration, or projection state.
  *
  * Two details that are load bearing rather than decorative:
  *

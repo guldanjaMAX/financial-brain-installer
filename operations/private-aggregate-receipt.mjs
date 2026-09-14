@@ -8,7 +8,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -25,10 +25,12 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 const MAX_RECEIPT_BYTES = 2 * 1024 * 1024;
+const MAX_FINALIZATION_COMMIT_BYTES = 4 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const FINALIZATION_COMMIT_KIND = "private_aggregate_receipt_finalization_commit";
 const MAX_ACL_INSPECTION_BYTES = 64 * 1024;
 const WINDOWS_DIRECTORY_SYNC_UNSUPPORTED = new Set([
   "EACCES", "EBADF", "EISDIR", "EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM",
@@ -79,6 +81,26 @@ function sameInode(left, right) {
 
 function assertOwner(info, code) {
   if (typeof process.getuid === "function" && info.uid !== process.getuid()) refuse(code);
+}
+
+function assertPrivateDirectoryInfo(info, expectedInfo, code, platform = process.platform) {
+  if (!info?.isDirectory?.() || info.isSymbolicLink?.() ||
+      !sameInode(info, expectedInfo) ||
+      (platform !== "win32" && (info.mode & 0o077) !== 0)) refuse(code);
+  assertOwner(info, code);
+  return info;
+}
+
+function assertBoundPrivateDirectory(path, expectedInfo, code, {
+  platform = process.platform,
+} = {}) {
+  const absolute = resolve(path);
+  let info;
+  try { info = lstatSync(absolute); } catch { refuse(code); }
+  assertPrivateDirectoryInfo(info, expectedInfo, code, platform);
+  if (realpathSync(absolute) !== absolute) refuse(code);
+  info = assertNoDarwinAcl(absolute, info, code, { platform });
+  return assertPrivateDirectoryInfo(info, expectedInfo, code, platform);
 }
 
 function assertNoDarwinAcl(path, expectedInfo, code, {
@@ -201,11 +223,38 @@ function pendingReceiptPath(path) {
     : `${path}.pending`;
 }
 
+function finalizationCommitPath(path) {
+  return path.endsWith(".json")
+    ? `${path.slice(0, -5)}.commit.json`
+    : `${path}.commit`;
+}
+
+function stagedReceiptPath(path) {
+  return path.endsWith(".json")
+    ? `${path.slice(0, -5)}.staged.json`
+    : `${path}.staged`;
+}
+
 export function privateAggregateReceiptPendingPath(path) {
   if (!isAbsolute(path || "")) {
     refuse("PRIVATE_AGGREGATE_RECEIPT_OUTPUT_REFUSED");
   }
   return pendingReceiptPath(resolve(path));
+}
+
+export function privateAggregateReceiptCommitPath(path) {
+  if (!isAbsolute(path || "")) {
+    refuse("PRIVATE_AGGREGATE_RECEIPT_OUTPUT_REFUSED");
+  }
+  return finalizationCommitPath(resolve(path));
+}
+
+/** Return the one deterministic private staging sibling for a final receipt. */
+export function privateAggregateReceiptStagedPath(path) {
+  if (!isAbsolute(path || "")) {
+    refuse("PRIVATE_AGGREGATE_RECEIPT_OUTPUT_REFUSED");
+  }
+  return stagedReceiptPath(resolve(path));
 }
 
 function assertPathAbsent(path, code) {
@@ -218,6 +267,16 @@ function assertPathAbsent(path, code) {
   }
 }
 
+function pathPresent(path, code) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    refuse(code);
+  }
+}
+
 /** Validate a new absolute receipt destination and bind its private parent. */
 export function assertPrivateAggregateOutputPath(path, {
   code = "PRIVATE_AGGREGATE_RECEIPT_OUTPUT_REFUSED",
@@ -227,9 +286,13 @@ export function assertPrivateAggregateOutputPath(path, {
   const absolute = resolve(path);
   const parent = assertPrivateDirectory(dirname(absolute), code);
   const pendingPath = pendingReceiptPath(absolute);
+  const commitPath = finalizationCommitPath(absolute);
+  const stagedPath = stagedReceiptPath(absolute);
   assertPathAbsent(absolute, "PRIVATE_AGGREGATE_RECEIPT_OUTPUT_EXISTS");
   assertPathAbsent(pendingPath, "PRIVATE_AGGREGATE_RECEIPT_OUTPUT_PENDING");
-  return Object.freeze({ path: absolute, pendingPath, parent });
+  assertPathAbsent(commitPath, "PRIVATE_AGGREGATE_RECEIPT_OUTPUT_PENDING");
+  assertPathAbsent(stagedPath, "PRIVATE_AGGREGATE_RECEIPT_OUTPUT_PENDING");
+  return Object.freeze({ path: absolute, pendingPath, commitPath, stagedPath, parent });
 }
 
 function windowsDirectorySyncUnsupported(error, platform) {
@@ -259,14 +322,9 @@ export function syncPrivateReceiptDirectory(
   const absoluteDirectory = resolve(directoryPath);
   const absoluteFinal = resolve(finalPath);
   if (dirname(absoluteFinal) !== absoluteDirectory) refuse(code);
-  const initialDirectory = lstatSync(absoluteDirectory);
-  if (!initialDirectory.isDirectory() || initialDirectory.isSymbolicLink() ||
-      realpathSync(absoluteDirectory) !== absoluteDirectory ||
-      !sameInode(initialDirectory, expectedDirectoryInfo)) refuse(code);
-  assertOwner(initialDirectory, code);
-  const aclCheckedDirectory = assertNoDarwinAcl(
+  const aclCheckedDirectory = assertBoundPrivateDirectory(
     absoluteDirectory,
-    initialDirectory,
+    expectedDirectoryInfo,
     code,
     { platform },
   );
@@ -292,7 +350,7 @@ export function syncPrivateReceiptDirectory(
     }
     if (directoryDescriptor !== undefined) {
       const opened = statDirectoryHandle(directoryDescriptor);
-      if (!opened.isDirectory() || !sameInode(opened, aclCheckedDirectory)) refuse(code);
+      assertPrivateDirectoryInfo(opened, aclCheckedDirectory, code, platform);
       try {
         syncDirectoryHandle(directoryDescriptor);
       } catch (error) {
@@ -300,14 +358,18 @@ export function syncPrivateReceiptDirectory(
         directoryFailure = error;
       }
       if (!directoryFailure) {
-        if (!sameInode(statDirectoryHandle(directoryDescriptor), expectedDirectoryInfo)) refuse(code);
-        const finalDirectory = lstatSync(absoluteDirectory);
+        const openedAfterSync = statDirectoryHandle(directoryDescriptor);
+        if (!sameStableDirectory(opened, openedAfterSync)) refuse(code);
+        assertPrivateDirectoryInfo(openedAfterSync, expectedDirectoryInfo, code, platform);
+        const finalDirectory = assertBoundPrivateDirectory(
+          absoluteDirectory,
+          expectedDirectoryInfo,
+          code,
+          { platform },
+        );
+        if (!sameStableDirectory(openedAfterSync, finalDirectory)) refuse(code);
         const finalFile = lstatSync(absoluteFinal);
-        if (!finalDirectory.isDirectory() || finalDirectory.isSymbolicLink() ||
-            realpathSync(absoluteDirectory) !== absoluteDirectory ||
-            !sameInode(finalDirectory, expectedDirectoryInfo) ||
-            !sameStableSingleFile(initialFinal, finalFile)) refuse(code);
-        assertNoDarwinAcl(absoluteDirectory, finalDirectory, code, { platform });
+        if (!sameStableSingleFile(initialFinal, finalFile)) refuse(code);
         assertNoDarwinAcl(absoluteFinal, finalFile, code, { platform });
       }
     }
@@ -331,13 +393,15 @@ export function syncPrivateReceiptDirectory(
     syncFinalHandle(finalDescriptor);
     const openedAfter = statFinalHandle(finalDescriptor);
     const finalAfter = lstatSync(absoluteFinal);
-    const directoryAfter = lstatSync(absoluteDirectory);
+    const directoryAfter = assertBoundPrivateDirectory(
+      absoluteDirectory,
+      expectedDirectoryInfo,
+      code,
+      { platform },
+    );
     if (!sameStableSingleFile(before, openedAfter) ||
         !sameStableSingleFile(before, finalAfter) ||
-        !directoryAfter.isDirectory() || directoryAfter.isSymbolicLink() ||
-        realpathSync(absoluteDirectory) !== absoluteDirectory ||
         !sameInode(directoryAfter, expectedDirectoryInfo)) refuse(code);
-    assertNoDarwinAcl(absoluteDirectory, directoryAfter, code, { platform });
     assertNoDarwinAcl(absoluteFinal, finalAfter, code, { platform });
   } catch (error) {
     finalFailure = error;
@@ -408,6 +472,51 @@ function assertPendingReceiptMarker(reservation, code) {
   }
 }
 
+function assertFinalReceiptForPendingCommit(
+  reservation,
+  expected,
+  code,
+  platform = process.platform,
+) {
+  if (!expected || !expected.info || !Number.isSafeInteger(expected.size) ||
+      expected.size < 1 || expected.size > MAX_RECEIPT_BYTES ||
+      !SHA256_RE.test(expected.sha256 || "")) refuse(code);
+  let before;
+  let descriptor;
+  let bytes;
+  try {
+    before = lstatSync(reservation.path);
+    if (!sameStableSingleFile(expected.info, before) || before.size !== expected.size ||
+        before.isSymbolicLink() || (platform !== "win32" && (before.mode & 0o077) !== 0)) {
+      refuse(code);
+    }
+    assertOwner(before, code);
+    before = assertNoDarwinAcl(reservation.path, before, code, { platform });
+    descriptor = openSync(
+      reservation.path,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0),
+    );
+    const opened = fstatSync(descriptor);
+    if (!sameStableSingleFile(before, opened) ||
+        (platform !== "win32" && (opened.mode & 0o077) !== 0)) refuse(code);
+    assertOwner(opened, code);
+    bytes = Buffer.alloc(expected.size);
+    readPrivateReceiptDescriptor(descriptor, bytes);
+    const openedAfter = fstatSync(descriptor);
+    const after = lstatSync(reservation.path);
+    if (sha256(bytes) !== expected.sha256 ||
+        !sameStableSingleFile(opened, openedAfter) ||
+        !sameStableSingleFile(opened, after)) refuse(code);
+    return after;
+  } catch (error) {
+    if (error instanceof PrivateAggregateReceiptError) throw error;
+    refuse(code);
+  } finally {
+    if (bytes) bytes.fill(0);
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
 function validateReservation(reservation, code) {
   if (!reservation || reservation.closed === true ||
       !Number.isSafeInteger(reservation.descriptor)) refuse(code);
@@ -427,6 +536,10 @@ function validateReservation(reservation, code) {
       reservation.markerSize > MAX_RECEIPT_BYTES || !SHA256_RE.test(reservation.markerHash || "") ||
       typeof reservation.pendingPath !== "string" ||
       reservation.pendingPath !== pendingReceiptPath(reservation.path) ||
+      typeof reservation.commitPath !== "string" ||
+      reservation.commitPath !== finalizationCommitPath(reservation.path) ||
+      typeof reservation.stagedPath !== "string" ||
+      reservation.stagedPath !== stagedReceiptPath(reservation.path) ||
       !current.isFile() || current.isSymbolicLink() || current.nlink !== 1 ||
       (process.platform !== "win32" && (current.mode & 0o077) !== 0) ||
       current.size !== reservation.markerSize ||
@@ -455,6 +568,8 @@ function validateReservation(reservation, code) {
   } finally {
     if (markerBytes) markerBytes.fill(0);
   }
+  assertPathAbsent(reservation.stagedPath, code);
+  assertPathAbsent(reservation.commitPath, code);
   assertPendingReceiptMarker(reservation, code);
   return true;
 }
@@ -467,7 +582,20 @@ export function validatePrivateAggregateReceiptReservation(reservation, {
   return validateReservation(reservation, code);
 }
 
-function removePendingReceiptMarker(reservation, code, platform = process.platform) {
+function removePendingReceiptMarker(
+  reservation,
+  code,
+  platform = process.platform,
+  expectedFinal = null,
+) {
+  if (!expectedFinal?.parentInfo) refuse(code);
+  const parentAtStart = assertBoundPrivateDirectory(
+    reservation.parentPath,
+    reservation.parentInfo,
+    code,
+    { platform },
+  );
+  if (!sameStableDirectory(expectedFinal.parentInfo, parentAtStart)) refuse(code);
   const before = assertPendingReceiptMarker(reservation, code);
   let descriptor;
   try {
@@ -480,11 +608,28 @@ function removePendingReceiptMarker(reservation, code, platform = process.platfo
     closeSync(descriptor);
     descriptor = undefined;
     if (!sameStableSingleFile(before, lstatSync(reservation.pendingPath))) refuse(code);
-    // This unlink is the commit point and deliberately the last fallible
-    // operation. The final receipt and its directory entry were already
-    // flushed and every descriptor was closed. A crash can conservatively
-    // resurrect this pending marker, but final-only can never mean an
-    // unverified post-rename failure.
+    const verifiedFinal = assertFinalReceiptForPendingCommit(
+      reservation,
+      expectedFinal,
+      code,
+      platform,
+    );
+    const parentAtCommit = assertBoundPrivateDirectory(
+      reservation.parentPath,
+      reservation.parentInfo,
+      code,
+      { platform },
+    );
+    if (!sameStableDirectory(parentAtStart, parentAtCommit)) refuse(code);
+    const finalAtCommit = lstatSync(reservation.path);
+    if (!sameStableSingleFile(verifiedFinal, finalAtCommit) ||
+        (platform !== "win32" && (finalAtCommit.mode & 0o077) !== 0) ||
+        !sameStableSingleFile(before, lstatSync(reservation.pendingPath))) refuse(code);
+    assertOwner(finalAtCommit, code);
+    assertNoDarwinAcl(reservation.path, finalAtCommit, code, { platform });
+    // The final receipt and its directory entry were already flushed and every
+    // descriptor was closed. The durable finalization commitment remains as a
+    // recovery guard until this removal is itself flushed.
     unlinkSync(reservation.pendingPath);
     return true;
   } catch (error) {
@@ -520,6 +665,8 @@ function validateClosedReservation(reservation, code, platform) {
       (platform !== "win32" && (parent.mode & 0o077) !== 0) ||
       !Number.isSafeInteger(reservation.markerSize) || reservation.markerSize < 1 ||
       reservation.markerSize > MAX_RECEIPT_BYTES || !SHA256_RE.test(reservation.markerHash || "") ||
+      reservation.commitPath !== finalizationCommitPath(reservation.path) ||
+      reservation.stagedPath !== stagedReceiptPath(reservation.path) ||
       !current.isFile() || current.isSymbolicLink() || current.nlink !== 1 ||
       (platform !== "win32" && (current.mode & 0o077) !== 0) ||
       current.size !== reservation.markerSize || reservation.info?.size !== reservation.markerSize ||
@@ -569,16 +716,594 @@ function syncReservationDirectory(reservation, code, expectedFinalInfo = null, o
   );
 }
 
+function exactDataObject(value, fields) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype ||
+      Object.getOwnPropertySymbols(value).length !== 0) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Object.keys(descriptors);
+  return keys.length === fields.length && fields.every((field) =>
+    Object.hasOwn(descriptors, field) && descriptors[field].enumerable === true &&
+    Object.hasOwn(descriptors[field], "value"));
+}
+
+function pathSha256(path) {
+  return sha256(resolve(path));
+}
+
+function finalizationCommitValue(
+  markerHash,
+  finalHash,
+  finalBytes,
+  finalPath,
+  stagedPath,
+) {
+  return Object.freeze({
+    schema_version: 1,
+    kind: FINALIZATION_COMMIT_KIND,
+    reservation_marker_sha256: markerHash,
+    final_receipt_sha256: finalHash,
+    final_receipt_bytes: finalBytes,
+    final_receipt_path_sha256: pathSha256(finalPath),
+    staged_receipt_path_sha256: pathSha256(stagedPath),
+  });
+}
+
+function assertFinalizationCommit(value, markerHash, finalPath, stagedPath, code) {
+  if (!exactDataObject(value, [
+    "schema_version", "kind", "reservation_marker_sha256",
+    "final_receipt_sha256", "final_receipt_bytes",
+    "final_receipt_path_sha256", "staged_receipt_path_sha256",
+  ]) || value.schema_version !== 1 || value.kind !== FINALIZATION_COMMIT_KIND ||
+      value.reservation_marker_sha256 !== markerHash ||
+      !SHA256_RE.test(String(value.final_receipt_sha256 || "")) ||
+      value.final_receipt_sha256 === markerHash ||
+      !Number.isSafeInteger(value.final_receipt_bytes) ||
+      value.final_receipt_bytes < 1 || value.final_receipt_bytes > MAX_RECEIPT_BYTES ||
+      value.final_receipt_path_sha256 !== pathSha256(finalPath) ||
+      value.staged_receipt_path_sha256 !== pathSha256(stagedPath)) {
+    refuse(code);
+  }
+  return Object.freeze(structuredClone(value));
+}
+
+function serializedPrivateJson(value, maxBytes, code) {
+  let bytes;
+  try { bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8"); }
+  catch { refuse(code); }
+  if (bytes.length < 1 || bytes.length > maxBytes) {
+    bytes.fill(0);
+    refuse(code);
+  }
+  return bytes;
+}
+
+function readFinalizationCommitRecord(path, markerHash, finalPath, stagedPath, code) {
+  const record = readPrivateAggregateReceiptFile(path, {
+    code,
+    maxBytes: MAX_FINALIZATION_COMMIT_BYTES,
+    absentPaths: [],
+  });
+  const value = assertFinalizationCommit(
+    record.value,
+    markerHash,
+    finalPath,
+    stagedPath,
+    code,
+  );
+  const expected = serializedPrivateJson(value, MAX_FINALIZATION_COMMIT_BYTES, code);
+  try {
+    if (record.info.size !== expected.length || record.sha256 !== sha256(expected)) refuse(code);
+  } finally {
+    expected.fill(0);
+  }
+  return Object.freeze({ ...record, value });
+}
+
+function writeFinalizationCommitRecord(binding, finalRecord, {
+  writeBytes,
+  readBytes,
+  syncFile,
+  syncCommitDirectory,
+  platform,
+  code = "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_COMMIT_INVALID",
+}) {
+  const finalHash = finalRecord?.sha256;
+  const finalBytes = finalRecord?.info?.size;
+  if (!SHA256_RE.test(finalHash || "") || finalHash === binding.markerHash ||
+      !Number.isSafeInteger(finalBytes) || finalBytes < 1 ||
+      finalBytes > MAX_RECEIPT_BYTES) refuse(code);
+  const value = finalizationCommitValue(
+    binding.markerHash,
+    finalHash,
+    finalBytes,
+    binding.path,
+    binding.stagedPath,
+  );
+  const bytes = serializedPrivateJson(value, MAX_FINALIZATION_COMMIT_BYTES, code);
+  let descriptor;
+  let readback;
+  try {
+    try {
+        descriptor = openSync(
+        binding.commitPath,
+        fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW || 0),
+        0o600,
+      );
+    } catch (error) {
+      if (error?.code === "EEXIST") refuse(code);
+      throw error;
+    }
+    assertPrivateEmptyReceiptFile(binding.commitPath, descriptor, code, platform);
+    writeBytes(descriptor, bytes);
+    fchmodSync(descriptor, 0o600);
+    syncFile(descriptor);
+    let info = fstatSync(descriptor);
+    let current = lstatSync(binding.commitPath);
+    if (!sameStableSingleFile(info, current) || info.size !== bytes.length) refuse(code);
+    assertOwner(info, code);
+    current = assertNoDarwinAcl(binding.commitPath, current, code, { platform });
+    if (!sameStableSingleFile(info, current)) refuse(code);
+    readback = Buffer.alloc(bytes.length);
+    readBytes(descriptor, readback);
+    if (!readback.equals(bytes) ||
+        !sameStableSingleFile(info, fstatSync(descriptor)) ||
+        !sameStableSingleFile(info, lstatSync(binding.commitPath))) refuse(code);
+    syncCommitDirectory(
+      binding.parentPath,
+      binding.parentInfo,
+      binding.commitPath,
+      info,
+      code,
+      { platform },
+    );
+    info = fstatSync(descriptor);
+    if (!sameStableSingleFile(info, lstatSync(binding.commitPath))) refuse(code);
+  } catch (error) {
+    if (error instanceof PrivateAggregateReceiptError) throw error;
+    refuse(code);
+  } finally {
+    bytes.fill(0);
+    if (readback) readback.fill(0);
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  return readFinalizationCommitRecord(
+    binding.commitPath,
+    binding.markerHash,
+    binding.path,
+    binding.stagedPath,
+    code,
+  );
+}
+
+function rereadExactPrivateRecord(record, code, { guarded = true } = {}) {
+  const current = readPrivateAggregateReceiptFile(record.path, {
+    code,
+    maxBytes: Math.max(record.info.size, 1),
+    absentPaths: guarded
+      ? [
+          pendingReceiptPath(record.path),
+          finalizationCommitPath(record.path),
+          stagedReceiptPath(record.path),
+        ]
+      : [],
+  });
+  if (current.sha256 !== record.sha256 || current.info.size !== record.info.size ||
+      !sameStableSingleFile(current.info, record.info)) refuse(code);
+  return current;
+}
+
+function removeExactPrivateRecord(record, code, {
+  guarded = true,
+  unlink = unlinkSync,
+} = {}) {
+  const current = rereadExactPrivateRecord(record, code, { guarded });
+  try {
+    if (!sameStableSingleFile(current.info, lstatSync(record.path))) refuse(code);
+    unlink(record.path);
+    assertPathAbsent(record.path, code);
+    return true;
+  } catch (error) {
+    if (error instanceof PrivateAggregateReceiptError) throw error;
+    refuse(code);
+  }
+}
+
+function fsyncAndRereadExactPrivateRecord(record, binding, code, {
+  readBytes = readPrivateReceiptDescriptor,
+  syncFile = fsyncSync,
+  syncDirectory = syncPrivateReceiptDirectory,
+} = {}) {
+  const parentBefore = assertBoundPrivateDirectory(
+    binding.parentPath,
+    binding.parentInfo,
+    code,
+    { platform: binding.platform },
+  );
+  if (!sameStableDirectory(record.parent.info, parentBefore)) refuse(code);
+  const before = rereadExactPrivateRecord(record, code, { guarded: false });
+  let descriptor;
+  let bytes;
+  try {
+    descriptor = openSync(
+      record.path,
+      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW || 0),
+    );
+    const opened = fstatSync(descriptor);
+    if (!sameStableSingleFile(before.info, opened)) refuse(code);
+    syncFile(descriptor);
+    const openedAfterSync = fstatSync(descriptor);
+    const pathAfterSync = lstatSync(record.path);
+    if (!sameStableSingleFile(opened, openedAfterSync) ||
+        !sameStableSingleFile(opened, pathAfterSync)) refuse(code);
+    bytes = Buffer.alloc(record.info.size);
+    readBytes(descriptor, bytes);
+    const openedAfterRead = fstatSync(descriptor);
+    const pathAfterRead = lstatSync(record.path);
+    if (sha256(bytes) !== record.sha256 ||
+        !sameStableSingleFile(opened, openedAfterRead) ||
+        !sameStableSingleFile(opened, pathAfterRead)) refuse(code);
+  } catch (error) {
+    if (error instanceof PrivateAggregateReceiptError) throw error;
+    refuse(code);
+  } finally {
+    if (bytes) bytes.fill(0);
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  syncDirectory(
+    binding.parentPath,
+    binding.parentInfo,
+    record.path,
+    record.info,
+    code,
+    { platform: binding.platform },
+  );
+  const durable = rereadExactPrivateRecord(record, code, { guarded: false });
+  const parentAfter = assertBoundPrivateDirectory(
+    binding.parentPath,
+    binding.parentInfo,
+    code,
+    { platform: binding.platform },
+  );
+  if (!sameStableDirectory(parentBefore, parentAfter) ||
+      !sameStableDirectory(durable.parent.info, parentAfter)) refuse(code);
+  return durable;
+}
+
+const FINALIZATION_STATE = Object.freeze({
+  STAGED: "marker_pending_staged",
+  STAGED_COMMITTED: "marker_pending_staged_committed",
+  FINAL_PENDING_COMMITTED: "final_pending_committed",
+  FINAL_COMMITTED: "final_committed",
+  TERMINAL: "terminal_final",
+});
+
+function samePresence(left, right) {
+  return left.main === right.main && left.pending === right.pending &&
+    left.staged === right.staged && left.commit === right.commit;
+}
+
+function finalizationPresence(binding, code) {
+  return Object.freeze({
+    main: pathPresent(binding.path, code),
+    pending: pathPresent(binding.pendingPath, code),
+    staged: pathPresent(binding.stagedPath, code),
+    commit: pathPresent(binding.commitPath, code),
+  });
+}
+
+function assertRecordParent(record, binding, code) {
+  if (!record?.parent || record.parent.path !== binding.parentPath ||
+      !sameInode(record.parent.info, binding.parentInfo)) refuse(code);
+  return record;
+}
+
+function assertFinalReceiptRecord(record, binding, code) {
+  if (record.sha256 === binding.markerHash || record.info.size > MAX_RECEIPT_BYTES) {
+    refuse(code);
+  }
+  if (binding.expectedFinal &&
+      (record.sha256 !== binding.expectedFinal.sha256 ||
+        record.info.size !== binding.expectedFinal.size)) refuse(code);
+  if (binding.validateFinalReceipt) {
+    try {
+      if (binding.validateFinalReceipt(record.value) !== true) refuse(code);
+    } catch (error) {
+      if (error instanceof PrivateAggregateReceiptError && error.code === code) throw error;
+      refuse(code);
+    }
+  }
+  return record;
+}
+
+function inspectPrivateAggregateFinalizationState(binding, code) {
+  const parentAtStart = assertBoundPrivateDirectory(
+    binding.parentPath,
+    binding.parentInfo,
+    code,
+    { platform: binding.platform },
+  );
+  const before = finalizationPresence(binding, code);
+  if (!before.main) refuse(code);
+  let kind;
+  if (before.pending && before.staged && !before.commit) {
+    kind = FINALIZATION_STATE.STAGED;
+  } else if (before.pending && before.staged && before.commit) {
+    kind = FINALIZATION_STATE.STAGED_COMMITTED;
+  } else if (before.pending && !before.staged && before.commit) {
+    kind = FINALIZATION_STATE.FINAL_PENDING_COMMITTED;
+  } else if (!before.pending && !before.staged && before.commit) {
+    kind = FINALIZATION_STATE.FINAL_COMMITTED;
+  } else if (!before.pending && !before.staged && !before.commit) {
+    kind = FINALIZATION_STATE.TERMINAL;
+  } else {
+    refuse(code);
+  }
+
+  const main = assertRecordParent(readPrivateAggregateReceiptFile(binding.path, {
+    code,
+    maxBytes: MAX_RECEIPT_BYTES,
+    absentPaths: [],
+  }), binding, code);
+  const mainIsMarker = main.sha256 === binding.markerHash &&
+    main.info.size === binding.markerSize;
+  const expectsMarker = kind === FINALIZATION_STATE.STAGED ||
+    kind === FINALIZATION_STATE.STAGED_COMMITTED;
+  if (mainIsMarker !== expectsMarker) refuse(code);
+
+  let pending = null;
+  if (before.pending) {
+    pending = assertRecordParent(readPrivateAggregateReceiptFile(binding.pendingPath, {
+      code,
+      maxBytes: binding.markerSize,
+      absentPaths: [],
+    }), binding, code);
+    if (pending.sha256 !== binding.markerHash ||
+        pending.info.size !== binding.markerSize) refuse(code);
+  }
+
+  let staged = null;
+  let final = null;
+  if (before.staged) {
+    staged = assertFinalReceiptRecord(
+      assertRecordParent(readPrivateAggregateReceiptFile(binding.stagedPath, {
+        code,
+        maxBytes: MAX_RECEIPT_BYTES,
+        absentPaths: [],
+      }), binding, code),
+      binding,
+      code,
+    );
+  } else if (!mainIsMarker) {
+    final = assertFinalReceiptRecord(main, binding, code);
+  }
+
+  let commit = null;
+  if (before.commit) {
+    commit = assertRecordParent(readFinalizationCommitRecord(
+      binding.commitPath,
+      binding.markerHash,
+      binding.path,
+      binding.stagedPath,
+      code,
+    ), binding, code);
+    const receiptRecord = staged ?? final;
+    if (!receiptRecord ||
+        receiptRecord.sha256 !== commit.value.final_receipt_sha256 ||
+        receiptRecord.info.size !== commit.value.final_receipt_bytes) refuse(code);
+  }
+
+  const parent = assertBoundPrivateDirectory(
+    binding.parentPath,
+    binding.parentInfo,
+    code,
+    { platform: binding.platform },
+  );
+  const after = finalizationPresence(binding, code);
+  if (!sameStableDirectory(parentAtStart, parent) ||
+      !samePresence(before, after)) refuse(code);
+  return Object.freeze({ kind, main, pending, staged, final, commit, parent });
+}
+
+function assertOpenReservationState(reservation, state, stagedDescriptor, code) {
+  if (!reservation || reservation.closed === true ||
+      !Number.isSafeInteger(reservation.descriptor) ||
+      !sameStableSingleFile(state.main.info, reservation.info) ||
+      !sameStableSingleFile(state.main.info, fstatSync(reservation.descriptor)) ||
+      !state.pending || !sameStableSingleFile(state.pending.info, reservation.pendingInfo)) {
+    refuse(code);
+  }
+  if (stagedDescriptor !== undefined &&
+      (!state.staged ||
+        !sameStableSingleFile(state.staged.info, fstatSync(stagedDescriptor)))) refuse(code);
+  return true;
+}
+
+function closeFinalizationHandles(context) {
+  if (context.stagedDescriptor !== undefined) {
+    const descriptor = context.stagedDescriptor;
+    context.closeStaged(descriptor);
+    context.stagedDescriptor = undefined;
+  }
+  if (context.reservation && !context.reservation.closed) {
+    closeReservationHandle(context.reservation, context.closeReservation);
+  }
+}
+
+function invokeTerminalAuthority(context, phase, finalReceipt, code) {
+  const request = Object.freeze({
+    phase,
+    finalReceipt,
+    finalPath: context.binding.path,
+    pendingPath: context.binding.pendingPath,
+    stagedPath: context.binding.stagedPath,
+    commitPath: context.binding.commitPath,
+  });
+  try {
+    if (context.validateTerminalAuthority(request) !== true) refuse(code);
+  } catch (error) {
+    if (error instanceof PrivateAggregateReceiptError && error.code === code) throw error;
+    refuse(code);
+  }
+  return true;
+}
+
+function completePrivateAggregateFinalization(context) {
+  let state = inspectPrivateAggregateFinalizationState(
+    context.binding,
+    context.codes.inspect,
+  );
+  while (true) {
+    if (state.kind === FINALIZATION_STATE.STAGED) {
+      if (context.reservation) {
+        assertOpenReservationState(
+          context.reservation,
+          state,
+          context.stagedDescriptor,
+          context.codes.commit,
+        );
+      }
+      const durableStaged = context.durablyRevalidateStaged(
+        state.staged,
+        context.codes.commit,
+      );
+      state = inspectPrivateAggregateFinalizationState(context.binding, context.codes.commit);
+      if (state.kind !== FINALIZATION_STATE.STAGED ||
+          !sameStableSingleFile(state.staged.info, durableStaged.info) ||
+          state.staged.sha256 !== durableStaged.sha256) refuse(context.codes.commit);
+      context.writeCommit(state.staged, context.codes.commit);
+      state = inspectPrivateAggregateFinalizationState(context.binding, context.codes.commit);
+      if (state.kind !== FINALIZATION_STATE.STAGED_COMMITTED) refuse(context.codes.commit);
+      context.onFinalizationTransition("finalization_commit_durable");
+      continue;
+    }
+
+    if (state.kind === FINALIZATION_STATE.STAGED_COMMITTED) {
+      if (context.reservation) {
+        assertOpenReservationState(
+          context.reservation,
+          state,
+          context.stagedDescriptor,
+          context.codes.final,
+        );
+      }
+      const parentBeforeCommitSync = state.parent;
+      context.syncSidecar(state.commit, context.codes.final);
+      state = inspectPrivateAggregateFinalizationState(context.binding, context.codes.final);
+      if (state.kind !== FINALIZATION_STATE.STAGED_COMMITTED ||
+          !sameStableDirectory(parentBeforeCommitSync, state.parent)) {
+        refuse(context.codes.final);
+      }
+      context.rename(context.binding.stagedPath, context.binding.path);
+      const renamed = lstatSync(context.binding.path);
+      if (!sameFile(state.staged.info, renamed) || renamed.nlink !== 1 ||
+          (context.binding.platform !== "win32" && (renamed.mode & 0o077) !== 0)) {
+        refuse(context.codes.final);
+      }
+      if (context.stagedDescriptor !== undefined &&
+          !sameStableSingleFile(renamed, fstatSync(context.stagedDescriptor))) {
+        refuse(context.codes.final);
+      }
+      if (context.reservation && !context.reservation.closed &&
+          fstatSync(context.reservation.descriptor).nlink !== 0) refuse(context.codes.final);
+      context.syncFinal(renamed, context.codes.parent);
+      state = inspectPrivateAggregateFinalizationState(context.binding, context.codes.final);
+      if (state.kind !== FINALIZATION_STATE.FINAL_PENDING_COMMITTED ||
+          !sameStableSingleFile(state.final.info, renamed)) refuse(context.codes.final);
+      if (context.stagedDescriptor !== undefined &&
+          !sameStableSingleFile(state.final.info, fstatSync(context.stagedDescriptor))) {
+        refuse(context.codes.final);
+      }
+      context.onFinalizationTransition("final_receipt_durable");
+      continue;
+    }
+
+    if (state.kind === FINALIZATION_STATE.FINAL_PENDING_COMMITTED) {
+      const parentBeforeClose = state.parent;
+      closeFinalizationHandles(context);
+      state = inspectPrivateAggregateFinalizationState(context.binding, context.codes.pending);
+      if (state.kind !== FINALIZATION_STATE.FINAL_PENDING_COMMITTED ||
+          !sameStableDirectory(parentBeforeClose, state.parent)) {
+        refuse(context.codes.pending);
+      }
+      rereadExactPrivateRecord(state.final, context.codes.pending, { guarded: false });
+      rereadExactPrivateRecord(state.commit, context.codes.pending, { guarded: false });
+      context.removePending(state, context.codes.pending);
+      context.syncFinal(state.final.info, context.codes.parent);
+      state = inspectPrivateAggregateFinalizationState(context.binding, context.codes.pending);
+      if (state.kind !== FINALIZATION_STATE.FINAL_COMMITTED) refuse(context.codes.pending);
+      context.onFinalizationTransition("pending_marker_removal_durable");
+      continue;
+    }
+
+    if (state.kind === FINALIZATION_STATE.FINAL_COMMITTED) {
+      closeFinalizationHandles(context);
+      rereadExactPrivateRecord(state.final, context.codes.commitRemoval, { guarded: false });
+      rereadExactPrivateRecord(state.commit, context.codes.commitRemoval, { guarded: false });
+      invokeTerminalAuthority(
+        context,
+        "before_commit_guard_removal",
+        state.final,
+        context.codes.commitRemoval,
+      );
+      const authorizedFinal = state.final;
+      const authorizedCommit = state.commit;
+      state = inspectPrivateAggregateFinalizationState(
+        context.binding,
+        context.codes.commitRemoval,
+      );
+      if (state.kind !== FINALIZATION_STATE.FINAL_COMMITTED ||
+          state.final.sha256 !== authorizedFinal.sha256 ||
+          !sameStableSingleFile(state.final.info, authorizedFinal.info) ||
+          state.commit.sha256 !== authorizedCommit.sha256 ||
+          !sameStableSingleFile(state.commit.info, authorizedCommit.info)) {
+        refuse(context.codes.commitRemoval);
+      }
+      context.removeCommit(state.commit, context.codes.commitRemoval);
+      context.syncFinal(state.final.info, context.codes.parent);
+      state = inspectPrivateAggregateFinalizationState(
+        context.binding,
+        context.codes.commitRemoval,
+      );
+      if (state.kind !== FINALIZATION_STATE.TERMINAL) {
+        refuse(context.codes.commitRemoval);
+      }
+      context.onFinalizationTransition("finalization_commit_removal_durable");
+      continue;
+    }
+
+    if (state.kind === FINALIZATION_STATE.TERMINAL) {
+      closeFinalizationHandles(context);
+      invokeTerminalAuthority(
+        context,
+        "accept_terminal_final",
+        state.final,
+        context.codes.commitRemoval,
+      );
+      return state.final;
+    }
+    refuse(context.codes.inspect);
+  }
+}
+
 /** Reserve the final path with a durable exact marker before external work. */
-export function reservePrivateAggregateReceipt(output, marker) {
+export function reservePrivateAggregateReceipt(output, marker, {
+  onTransition = () => {},
+} = {}) {
   assertSupportedReceiptPlatform(
     process.platform,
     "PRIVATE_AGGREGATE_RECEIPT_PLATFORM_UNSUPPORTED",
   );
   if (!output?.path || !output?.pendingPath || !output?.parent?.path ||
+      typeof onTransition !== "function" ||
       dirname(output.path) !== output.parent.path ||
       dirname(output.pendingPath) !== output.parent.path ||
-      output.pendingPath !== pendingReceiptPath(output.path)) {
+      output.pendingPath !== pendingReceiptPath(output.path) ||
+      (output.commitPath !== undefined &&
+        output.commitPath !== finalizationCommitPath(output.path)) ||
+      (output.stagedPath !== undefined &&
+        output.stagedPath !== stagedReceiptPath(output.path))) {
     refuse("PRIVATE_AGGREGATE_RECEIPT_RESERVATION_INVALID");
   }
   const parent = assertPrivateDirectory(
@@ -593,6 +1318,8 @@ export function reservePrivateAggregateReceipt(output, marker) {
   const reservation = {
     path: output.path,
     pendingPath: output.pendingPath,
+    commitPath: finalizationCommitPath(output.path),
+    stagedPath: stagedReceiptPath(output.path),
     parentPath: parent.path,
     parentInfo: parent.info,
     descriptor: undefined,
@@ -604,6 +1331,14 @@ export function reservePrivateAggregateReceipt(output, marker) {
   };
   let bytes;
   try {
+    assertPathAbsent(
+      reservation.commitPath,
+      "PRIVATE_AGGREGATE_RECEIPT_RESERVATION_COLLISION",
+    );
+    assertPathAbsent(
+      reservation.stagedPath,
+      "PRIVATE_AGGREGATE_RECEIPT_RESERVATION_COLLISION",
+    );
     bytes = Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8");
     if (bytes.length < 1 || bytes.length > MAX_RECEIPT_BYTES) {
       refuse("PRIVATE_AGGREGATE_RECEIPT_RESERVATION_INVALID");
@@ -649,6 +1384,10 @@ export function reservePrivateAggregateReceipt(output, marker) {
       reservation.pendingInfo,
       "PRIVATE_AGGREGATE_RECEIPT_PARENT_CHANGED",
     );
+    // A crash here leaves only the authenticated pending marker. Because this
+    // function has not returned, no caller can yet have received authority to
+    // begin external work; the exact marker may therefore be cancelled safely.
+    onTransition("pending_marker_durable");
     try {
       descriptor = openSync(
         output.path,
@@ -713,7 +1452,11 @@ export function resumePrivateAggregateReceiptReservation(output, marker) {
   if (!output?.path || !output?.pendingPath || !output?.parent?.path ||
       dirname(output.path) !== output.parent.path ||
       dirname(output.pendingPath) !== output.parent.path ||
-      output.pendingPath !== pendingReceiptPath(output.path)) {
+      output.pendingPath !== pendingReceiptPath(output.path) ||
+      (output.commitPath !== undefined &&
+        output.commitPath !== finalizationCommitPath(output.path)) ||
+      (output.stagedPath !== undefined &&
+        output.stagedPath !== stagedReceiptPath(output.path))) {
     refuse(code);
   }
   const parent = assertPrivateDirectory(output.parent.path, code);
@@ -723,6 +1466,8 @@ export function resumePrivateAggregateReceiptReservation(output, marker) {
   const reservation = {
     path: output.path,
     pendingPath: output.pendingPath,
+    commitPath: finalizationCommitPath(output.path),
+    stagedPath: stagedReceiptPath(output.path),
     parentPath: parent.path,
     parentInfo: parent.info,
     descriptor: undefined,
@@ -733,6 +1478,8 @@ export function resumePrivateAggregateReceiptReservation(output, marker) {
     closed: false,
   };
   try {
+    assertPathAbsent(reservation.commitPath, code);
+    assertPathAbsent(reservation.stagedPath, code);
     bytes = Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8");
     if (bytes.length < 1 || bytes.length > MAX_RECEIPT_BYTES) refuse(code);
     reservation.markerSize = bytes.length;
@@ -766,156 +1513,473 @@ export function finalizePrivateAggregateReceipt(reservation, receipt, {
   syncFile = fsyncSync,
   rename = renameSync,
   syncDirectory = syncReservationDirectory,
+  syncCommitDirectory = syncPrivateReceiptDirectory,
   removePending = removePendingReceiptMarker,
+  removeCommit = removeExactPrivateRecord,
   platform = process.platform,
   closeReservation = closeSync,
   closeTemporary = closeSync,
-  random = randomBytes,
+  onFinalizationTransition = () => {},
+  validateTerminalAuthority = () => true,
 } = {}) {
   assertSupportedReceiptPlatform(platform, "PRIVATE_AGGREGATE_RECEIPT_PLATFORM_UNSUPPORTED");
+  if (typeof onFinalizationTransition !== "function" ||
+      typeof validateTerminalAuthority !== "function") {
+    refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
+  }
   validateReservation(reservation, "PRIVATE_AGGREGATE_RECEIPT_RESERVATION_CHANGED");
-  const temporaryPath = join(
-    reservation.parentPath,
-    `.private-aggregate-receipt-${random(12).toString("hex")}.tmp`,
-  );
-  let temporaryDescriptor;
-  let temporaryIdentity = null;
-  let temporaryInfo = null;
-  let renamed = false;
+  let stagedDescriptor;
+  let context = null;
   let bytes;
   try {
-    bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, "utf8");
-    if (bytes.length < 1 || bytes.length > MAX_RECEIPT_BYTES) {
-      refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
-    }
-    temporaryDescriptor = openSync(
-      temporaryPath,
+    bytes = serializedPrivateJson(
+      receipt,
+      MAX_RECEIPT_BYTES,
+      "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID",
+    );
+    stagedDescriptor = openSync(
+      reservation.stagedPath,
       fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL |
         (fsConstants.O_NOFOLLOW || 0),
       0o600,
     );
-    temporaryIdentity = assertPrivateEmptyReceiptFile(
-      temporaryPath,
-      temporaryDescriptor,
+    assertPrivateEmptyReceiptFile(
+      reservation.stagedPath,
+      stagedDescriptor,
       "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID",
       platform,
     );
-    writeBytes(temporaryDescriptor, bytes);
-    syncFile(temporaryDescriptor);
-    fchmodSync(temporaryDescriptor, 0o600);
-    temporaryInfo = fstatSync(temporaryDescriptor);
-    const temporaryCurrent = lstatSync(temporaryPath);
-    if (!temporaryInfo.isFile() || temporaryInfo.nlink !== 1 ||
-        temporaryInfo.size !== bytes.length ||
-        (platform !== "win32" && (temporaryInfo.mode & 0o077) !== 0) ||
-        !sameFile(temporaryInfo, temporaryCurrent)) {
+    onFinalizationTransition("staged_receipt_created");
+    writeBytes(stagedDescriptor, bytes);
+    onFinalizationTransition("staged_receipt_written");
+    fchmodSync(stagedDescriptor, 0o600);
+    syncFile(stagedDescriptor);
+    let stagedInfo = fstatSync(stagedDescriptor);
+    let stagedCurrent = lstatSync(reservation.stagedPath);
+    if (!stagedInfo.isFile() || stagedInfo.nlink !== 1 ||
+        stagedInfo.size !== bytes.length ||
+        (platform !== "win32" && (stagedInfo.mode & 0o077) !== 0) ||
+        !sameStableSingleFile(stagedInfo, stagedCurrent)) {
       refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
     }
-    temporaryInfo = assertNoDarwinAcl(
-      temporaryPath,
-      temporaryInfo,
+    assertOwner(stagedInfo, "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
+    stagedCurrent = assertNoDarwinAcl(
+      reservation.stagedPath,
+      stagedCurrent,
       "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID",
       { platform },
     );
-    if (!sameStableSingleFile(temporaryInfo, fstatSync(temporaryDescriptor))) {
+    if (!sameStableSingleFile(stagedInfo, stagedCurrent) ||
+        !sameStableSingleFile(stagedInfo, fstatSync(stagedDescriptor))) {
       refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
     }
-    validateReservation(reservation, "PRIVATE_AGGREGATE_RECEIPT_RESERVATION_CHANGED");
-    let closedReservationInfo = null;
-    if (platform === "win32") {
-      closeReservationHandle(reservation, closeReservation);
-      closedReservationInfo = validateClosedReservation(
-        reservation,
-        "PRIVATE_AGGREGATE_RECEIPT_RESERVATION_CHANGED",
-        platform,
-      );
-      if (!sameStableSingleFile(temporaryInfo, lstatSync(temporaryPath)) ||
-          !sameStableSingleFile(closedReservationInfo, lstatSync(reservation.path))) {
-        refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED");
-      }
-    }
-    rename(temporaryPath, reservation.path);
-    renamed = true;
-    const finalCurrent = lstatSync(reservation.path);
-    const finalOpened = fstatSync(temporaryDescriptor);
-    if (!finalCurrent.isFile() || finalCurrent.isSymbolicLink() || finalCurrent.nlink !== 1 ||
-        !sameFile(temporaryInfo, finalCurrent) ||
-        !sameStableSingleFile(finalCurrent, finalOpened) ||
-        (platform !== "win32" && fstatSync(reservation.descriptor).nlink !== 0)) {
-      refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED");
-    }
-    assertNoDarwinAcl(
-      reservation.path,
-      finalCurrent,
-      "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED",
-      { platform },
-    );
     let readback;
-    let verifiedCurrent;
     try {
       readback = Buffer.alloc(bytes.length);
-      readBytes(temporaryDescriptor, readback);
-      if (!readback.equals(bytes)) refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED");
-      const openedAfterRead = fstatSync(temporaryDescriptor);
-      verifiedCurrent = lstatSync(reservation.path);
-      if (!sameStableSingleFile(finalOpened, openedAfterRead) ||
-          !sameStableSingleFile(finalCurrent, verifiedCurrent) ||
-          !sameStableSingleFile(verifiedCurrent, openedAfterRead)) {
-        refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED");
+      readBytes(stagedDescriptor, readback);
+      if (!readback.equals(bytes) ||
+          !sameStableSingleFile(stagedInfo, fstatSync(stagedDescriptor)) ||
+          !sameStableSingleFile(stagedInfo, lstatSync(reservation.stagedPath))) {
+        refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
       }
     } finally {
       if (readback) readback.fill(0);
     }
-    syncDirectory(
-      reservation,
+    onFinalizationTransition("staged_receipt_file_fsynced");
+    syncCommitDirectory(
+      reservation.parentPath,
+      reservation.parentInfo,
+      reservation.stagedPath,
+      stagedInfo,
       "PRIVATE_AGGREGATE_RECEIPT_PARENT_CHANGED",
-      verifiedCurrent,
+      { platform },
     );
-    const durableCurrent = lstatSync(reservation.path);
-    const durableParent = lstatSync(reservation.parentPath);
-    if (!sameStableSingleFile(verifiedCurrent, durableCurrent) ||
-        !sameInode(durableParent, reservation.parentInfo)) {
+    const expectedFinal = Object.freeze({
+      sha256: sha256(bytes),
+      size: bytes.length,
+    });
+    const binding = {
+      path: reservation.path,
+      pendingPath: reservation.pendingPath,
+      stagedPath: reservation.stagedPath,
+      commitPath: reservation.commitPath,
+      parentPath: reservation.parentPath,
+      parentInfo: reservation.parentInfo,
+      markerHash: reservation.markerHash,
+      markerSize: reservation.markerSize,
+      expectedFinal,
+      validateFinalReceipt: null,
+      platform,
+    };
+    const stagedRecord = assertRecordParent(readPrivateAggregateReceiptFile(
+      reservation.stagedPath,
+      {
+        code: "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID",
+        maxBytes: MAX_RECEIPT_BYTES,
+        absentPaths: [reservation.commitPath],
+      },
+    ), binding, "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
+    if (stagedRecord.sha256 !== expectedFinal.sha256 ||
+        stagedRecord.info.size !== expectedFinal.size ||
+        !sameStableSingleFile(stagedRecord.info, stagedInfo) ||
+        !sameStableSingleFile(stagedRecord.info, fstatSync(stagedDescriptor))) {
+      refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
+    }
+    const stagedState = inspectPrivateAggregateFinalizationState(
+      binding,
+      "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID",
+    );
+    if (stagedState.kind !== FINALIZATION_STATE.STAGED) {
+      refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_INVALID");
+    }
+    assertOpenReservationState(
+      reservation,
+      stagedState,
+      stagedDescriptor,
+      "PRIVATE_AGGREGATE_RECEIPT_RESERVATION_CHANGED",
+    );
+    onFinalizationTransition("staged_receipt_durable");
+
+    context = {
+      binding,
+      reservation,
+      stagedDescriptor,
+      closeStaged: closeTemporary,
+      closeReservation,
+      rename,
+      onFinalizationTransition,
+      validateTerminalAuthority,
+      codes: {
+        inspect: "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED",
+        commit: "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_COMMIT_INVALID",
+        final: "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED",
+        pending: "PRIVATE_AGGREGATE_RECEIPT_PENDING_CHANGED",
+        commitRemoval: "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_COMMIT_CHANGED",
+        parent: "PRIVATE_AGGREGATE_RECEIPT_PARENT_CHANGED",
+      },
+      syncSidecar(record, code) {
+        return syncCommitDirectory(
+          reservation.parentPath,
+          reservation.parentInfo,
+          record.path,
+          record.info,
+          code,
+          { platform },
+        );
+      },
+      durablyRevalidateStaged(record, code) {
+        return fsyncAndRereadExactPrivateRecord(record, binding, code, {
+          readBytes,
+          syncFile,
+          syncDirectory: syncCommitDirectory,
+        });
+      },
+      syncFinal(expectedInfo, code) {
+        return syncDirectory(reservation, code, expectedInfo);
+      },
+      writeCommit(record, code) {
+        return writeFinalizationCommitRecord(binding, record, {
+          writeBytes,
+          readBytes,
+          syncFile,
+          syncCommitDirectory,
+          platform,
+          code,
+        });
+      },
+      removePending(state, code) {
+        return removePending(reservation, code, platform, {
+          info: state.final.info,
+          parentInfo: state.parent,
+          size: state.final.info.size,
+          sha256: state.final.sha256,
+        });
+      },
+      removeCommit(record, code) {
+        return removeCommit(record, code, { guarded: false });
+      },
+    };
+    const finalRecord = completePrivateAggregateFinalization(context);
+    if (finalRecord.sha256 !== expectedFinal.sha256 ||
+        finalRecord.info.size !== expectedFinal.size) {
       refuse("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED");
     }
-    assertNoDarwinAcl(
-      reservation.parentPath,
-      durableParent,
-      "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED",
-      { platform },
-    );
-    assertNoDarwinAcl(
-      reservation.path,
-      durableCurrent,
-      "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED",
-      { platform },
-    );
-    closeTemporary(temporaryDescriptor);
-    temporaryDescriptor = undefined;
-    if (!reservation.closed) closeReservationHandle(reservation, closeReservation);
-    removePending(
-      reservation,
-      "PRIVATE_AGGREGATE_RECEIPT_PENDING_CHANGED",
-      platform,
-    );
     return true;
-  } catch (error) {
-    if (!renamed && temporaryIdentity) {
-      try {
-        const current = lstatSync(temporaryPath);
-        const opened = temporaryDescriptor === undefined ? null : fstatSync(temporaryDescriptor);
-        if (current.isFile() && !current.isSymbolicLink() && current.nlink === 1 &&
-            sameInode(temporaryIdentity, current) &&
-            (!opened || sameInode(temporaryIdentity, opened))) unlinkSync(temporaryPath);
-      } catch {
-        // Leave ambiguous private siblings untouched for review.
-      }
-    }
-    throw error;
   } finally {
     if (bytes) bytes.fill(0);
-    if (temporaryDescriptor !== undefined) {
-      try { closeSync(temporaryDescriptor); } catch { /* marker remains */ }
+    const openStagedDescriptor = context ? context.stagedDescriptor : stagedDescriptor;
+    if (openStagedDescriptor !== undefined) {
+      try { closeSync(openStagedDescriptor); } catch { /* guards remain */ }
     }
+  }
+}
+
+/**
+ * Resolve one exact crash residue left by the finalization commit protocol.
+ *
+ * The caller must hold its normal operation lock and supply a strict receipt
+ * validator. A staged receipt is reopened, file-synced, descriptor-read back,
+ * parent-synced, and exact-reread before any commitment can be created. A
+ * committed final receipt is exact-reread before the pending marker and then
+ * the commitment are removed. Every other partial or substituted state is
+ * refused without guard deletion. No receipt or marker content is returned.
+ */
+export function recoverPrivateAggregateReceiptFinalization(
+  output,
+  marker,
+  validateFinalReceipt,
+  {
+    code = "PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_RECOVERY_INVALID",
+    platform = process.platform,
+    syncDirectory = syncPrivateReceiptDirectory,
+    removeRecord = removeExactPrivateRecord,
+    rename = renameSync,
+    syncCommitDirectory = syncPrivateReceiptDirectory,
+    readStagedBytes = readPrivateReceiptDescriptor,
+    syncStagedFile = fsyncSync,
+    onFinalizationTransition = () => {},
+    validateTerminalAuthority = () => true,
+  } = {},
+) {
+  assertSupportedReceiptPlatform(platform, code);
+  if (!output?.path || !output?.pendingPath || !output?.parent?.path ||
+      typeof validateFinalReceipt !== "function" ||
+      typeof readStagedBytes !== "function" || typeof syncStagedFile !== "function" ||
+      typeof onFinalizationTransition !== "function" ||
+      typeof validateTerminalAuthority !== "function" ||
+      dirname(output.path) !== output.parent.path ||
+      dirname(output.pendingPath) !== output.parent.path ||
+      output.pendingPath !== pendingReceiptPath(output.path) ||
+      (output.commitPath !== undefined &&
+        output.commitPath !== finalizationCommitPath(output.path)) ||
+      (output.stagedPath !== undefined &&
+        output.stagedPath !== stagedReceiptPath(output.path))) {
+    refuse(code);
+  }
+  const path = resolve(output.path);
+  const pendingPath = resolve(output.pendingPath);
+  const commitPath = finalizationCommitPath(path);
+  const stagedPath = stagedReceiptPath(path);
+  const parent = assertPrivateDirectory(output.parent.path, code);
+  if (path !== output.path || pendingPath !== output.pendingPath ||
+      dirname(commitPath) !== parent.path || dirname(stagedPath) !== parent.path ||
+      !sameInode(parent.info, output.parent.info)) {
+    refuse(code);
+  }
+  const markerBytes = serializedPrivateJson(marker, MAX_RECEIPT_BYTES, code);
+  try {
+    const binding = {
+      path,
+      pendingPath,
+      stagedPath,
+      commitPath,
+      parentPath: parent.path,
+      parentInfo: output.parent.info,
+      markerHash: sha256(markerBytes),
+      markerSize: markerBytes.length,
+      expectedFinal: null,
+      validateFinalReceipt,
+      platform,
+    };
+    const finalReadback = completePrivateAggregateFinalization({
+      binding,
+      reservation: null,
+      stagedDescriptor: undefined,
+      closeStaged: closeSync,
+      closeReservation: closeSync,
+      rename,
+      onFinalizationTransition,
+      validateTerminalAuthority,
+      codes: {
+        inspect: code,
+        commit: code,
+        final: code,
+        pending: code,
+        commitRemoval: code,
+        parent: code,
+      },
+      syncSidecar(record, transitionCode) {
+        return syncCommitDirectory(
+          parent.path,
+          output.parent.info,
+          record.path,
+          record.info,
+          transitionCode,
+          { platform },
+        );
+      },
+      durablyRevalidateStaged(record, transitionCode) {
+        return fsyncAndRereadExactPrivateRecord(record, binding, transitionCode, {
+          readBytes: readStagedBytes,
+          syncFile: syncStagedFile,
+          syncDirectory: syncCommitDirectory,
+        });
+      },
+      syncFinal(expectedInfo, transitionCode) {
+        return syncDirectory(
+          parent.path,
+          output.parent.info,
+          path,
+          expectedInfo,
+          transitionCode,
+          { platform },
+        );
+      },
+      writeCommit(record, transitionCode) {
+        return writeFinalizationCommitRecord(binding, record, {
+          writeBytes: writePrivateReceiptDescriptor,
+          readBytes: readPrivateReceiptDescriptor,
+          syncFile: fsyncSync,
+          syncCommitDirectory,
+          platform,
+          code: transitionCode,
+        });
+      },
+      removePending(state, transitionCode) {
+        return removeRecord(state.pending, transitionCode, { guarded: false });
+      },
+      removeCommit(record, transitionCode) {
+        return removeRecord(record, transitionCode, { guarded: false });
+      },
+    });
+    return Object.freeze({
+      status: "finalized",
+      receipt_sha256: finalReadback.sha256,
+    });
+  } finally {
+    markerBytes.fill(0);
+  }
+}
+
+function syncPrivateReceiptParentOnly(
+  directoryPath,
+  expectedDirectoryInfo,
+  code,
+  {
+    platform = process.platform,
+    openDirectoryHandle = openSync,
+    statDirectoryHandle = fstatSync,
+    syncDirectoryHandle = fsyncSync,
+    closeDirectoryHandle = closeSync,
+  } = {},
+) {
+  assertSupportedReceiptPlatform(platform, code);
+  const absolute = resolve(directoryPath);
+  let before;
+  let descriptor;
+  try {
+    before = lstatSync(absolute);
+    if (!before.isDirectory() || before.isSymbolicLink() ||
+        realpathSync(absolute) !== absolute ||
+        !sameInode(before, expectedDirectoryInfo) ||
+        (platform !== "win32" && (before.mode & 0o077) !== 0)) refuse(code);
+    assertOwner(before, code);
+    before = assertNoDarwinAcl(absolute, before, code, { platform });
+    descriptor = openDirectoryHandle(
+      absolute,
+      fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY || 0) |
+        (fsConstants.O_NOFOLLOW || 0),
+    );
+    const opened = statDirectoryHandle(descriptor);
+    assertPrivateDirectoryInfo(opened, before, code, platform);
+    if (!sameStableDirectory(opened, before)) refuse(code);
+    syncDirectoryHandle(descriptor);
+    const openedAfter = statDirectoryHandle(descriptor);
+    const after = lstatSync(absolute);
+    assertPrivateDirectoryInfo(openedAfter, before, code, platform);
+    assertPrivateDirectoryInfo(after, before, code, platform);
+    if (realpathSync(absolute) !== absolute ||
+        !sameStableDirectory(opened, openedAfter) ||
+        !sameStableDirectory(opened, after)) refuse(code);
+    const aclCheckedAfter = assertNoDarwinAcl(absolute, after, code, { platform });
+    if (!sameStableDirectory(opened, aclCheckedAfter)) refuse(code);
+    return true;
+  } catch (error) {
+    if (error instanceof PrivateAggregateReceiptError) throw error;
+    refuse(code);
+  } finally {
+    if (descriptor !== undefined) closeDirectoryHandle(descriptor);
+  }
+}
+
+/**
+ * Remove only an exact reservation marker pair after the caller has separately
+ * proved cancellation authority. Either marker may already be absent after a
+ * prior interrupted cancellation, but every marker still present must match
+ * the supplied value byte-for-byte and a finalization commitment is refused.
+ * This helper performs no external mutation and grants no reset authority.
+ */
+export function clearPrivateAggregateReceiptReservation(
+  output,
+  marker,
+  {
+    code = "PRIVATE_AGGREGATE_RECEIPT_CANCELLATION_INVALID",
+    platform = process.platform,
+    removeRecord = removeExactPrivateRecord,
+    syncParent = syncPrivateReceiptParentOnly,
+    onTransition = () => {},
+  } = {},
+) {
+  assertSupportedReceiptPlatform(platform, code);
+  if (!output?.path || !output?.pendingPath || !output?.parent?.path ||
+      typeof removeRecord !== "function" || typeof syncParent !== "function" ||
+      typeof onTransition !== "function" ||
+      dirname(output.path) !== output.parent.path ||
+      dirname(output.pendingPath) !== output.parent.path ||
+      output.pendingPath !== pendingReceiptPath(output.path) ||
+      (output.commitPath !== undefined &&
+        output.commitPath !== finalizationCommitPath(output.path)) ||
+      (output.stagedPath !== undefined &&
+        output.stagedPath !== stagedReceiptPath(output.path))) refuse(code);
+  const path = resolve(output.path);
+  const pendingPath = resolve(output.pendingPath);
+  const commitPath = finalizationCommitPath(path);
+  const stagedPath = stagedReceiptPath(path);
+  const parent = assertPrivateDirectory(output.parent.path, code);
+  if (path !== output.path || pendingPath !== output.pendingPath ||
+      !sameInode(parent.info, output.parent.info)) refuse(code);
+  assertPathAbsent(commitPath, code);
+  assertPathAbsent(stagedPath, code);
+  const markerBytes = serializedPrivateJson(marker, MAX_RECEIPT_BYTES, code);
+  const markerHash = sha256(markerBytes);
+  try {
+    const present = [path, pendingPath].filter((candidate) => pathPresent(candidate, code));
+    const records = present.map((candidate) => {
+      const record = readPrivateAggregateReceiptFile(candidate, {
+        code,
+        maxBytes: markerBytes.length,
+        absentPaths: [commitPath, stagedPath],
+      });
+      if (record.sha256 !== markerHash || record.info.size !== markerBytes.length) refuse(code);
+      return record;
+    });
+    for (const record of records) rereadExactPrivateRecord(record, code, { guarded: false });
+    for (const record of records) {
+      assertPathAbsent(commitPath, code);
+      const current = rereadExactPrivateRecord(record, code, { guarded: false });
+      removeRecord(current, code, { guarded: false });
+      syncParent(parent.path, parent.info, code, { platform });
+      assertPathAbsent(record.path, code);
+      assertPathAbsent(commitPath, code);
+      assertPathAbsent(stagedPath, code);
+      for (const remaining of records) {
+        if (remaining.path !== record.path && pathPresent(remaining.path, code)) {
+          rereadExactPrivateRecord(remaining, code, { guarded: false });
+        }
+      }
+      onTransition(record.path === path ? "final_marker_removed" : "pending_marker_removed");
+    }
+    assertPathAbsent(path, code);
+    assertPathAbsent(pendingPath, code);
+    assertPathAbsent(commitPath, code);
+    assertPathAbsent(stagedPath, code);
+    syncParent(parent.path, parent.info, code, { platform });
+    return Object.freeze({ status: records.length ? "cleared" : "already_absent" });
+  } catch (error) {
+    if (error instanceof PrivateAggregateReceiptError) throw error;
+    refuse(code);
+  } finally {
+    markerBytes.fill(0);
   }
 }
 
@@ -925,23 +1989,24 @@ export function abandonPrivateAggregateReceipt(reservation) {
   try { closeReservationHandle(reservation); } catch { /* leave marker for review */ }
 }
 
-/** Read and parse one stable owner-only aggregate receipt without echoing it. */
-export function readPrivateAggregateReceipt(path, {
+function readPrivateAggregateReceiptFile(path, {
   code = "PRIVATE_AGGREGATE_RECEIPT_READ_REFUSED",
   maxBytes = MAX_RECEIPT_BYTES,
   readFile = readFileSync,
+  absentPaths = [],
 } = {}) {
   assertSupportedReceiptPlatform(process.platform, code);
-  if (!isAbsolute(path || "")) refuse(code);
+  if (!isAbsolute(path || "") || !Array.isArray(absentPaths) ||
+      absentPaths.some((entry) => !isAbsolute(entry || ""))) refuse(code);
   const absolute = resolve(path);
-  const pendingPath = pendingReceiptPath(absolute);
+  const guards = absentPaths.map((entry) => resolve(entry));
   let parent;
   let before;
   let descriptor;
   let raw;
   try {
     parent = assertPrivateDirectory(dirname(absolute), code);
-    assertPathAbsent(pendingPath, code);
+    for (const guard of guards) assertPathAbsent(guard, code);
     before = lstatSync(absolute);
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
         before.size < 1 || before.size > maxBytes ||
@@ -969,12 +2034,13 @@ export function readPrivateAggregateReceipt(path, {
     assertNoDarwinAcl(absolute, afterPath, code);
     const parentAfter = assertPrivateDirectory(parent.path, code);
     if (!sameInode(parent.info, parentAfter.info)) refuse(code);
-    assertPathAbsent(pendingPath, code);
+    for (const guard of guards) assertPathAbsent(guard, code);
     let value;
     try { value = JSON.parse(raw.toString("utf8")); } catch { refuse(code); }
     return Object.freeze({
       path: absolute,
       info: opened,
+      parent: Object.freeze({ path: parent.path, info: parent.info }),
       sha256: sha256(raw),
       value: Object.freeze(structuredClone(value)),
     });
@@ -985,4 +2051,20 @@ export function readPrivateAggregateReceipt(path, {
     if (raw) raw.fill(0);
     if (descriptor !== undefined) closeSync(descriptor);
   }
+}
+
+/** Read and parse one stable owner-only aggregate receipt without echoing it. */
+export function readPrivateAggregateReceipt(path, options = {}) {
+  if (!isAbsolute(path || "")) {
+    refuse(options.code ?? "PRIVATE_AGGREGATE_RECEIPT_READ_REFUSED");
+  }
+  const absolute = resolve(path);
+  return readPrivateAggregateReceiptFile(absolute, {
+    ...options,
+    absentPaths: [
+      pendingReceiptPath(absolute),
+      finalizationCommitPath(absolute),
+      stagedReceiptPath(absolute),
+    ],
+  });
 }

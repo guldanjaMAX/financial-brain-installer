@@ -496,6 +496,81 @@ journalTest("a prepared mutation remains ambiguous and is never called again", a
   }
 });
 
+journalTest("an exact read-only reconciliation confirms a pending effect without a second mutation", async () => {
+  const target = fixture("brain-deployment-journal-reconcile-confirmed-");
+  let mutations = 0;
+  let reconciliations = 0;
+  const options = uploadOptions(target, {
+    mutate: async () => {
+      mutations += 1;
+      throw new Error("lost response after remote commit");
+    },
+  });
+  try {
+    await assert.rejects(
+      runJournaledDisposableRecoveryDeploymentMutation(options),
+      journalError("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS"),
+    );
+    const result = await runJournaledDisposableRecoveryDeploymentMutation({
+      ...options,
+      reconcile: async () => {
+        reconciliations += 1;
+        return {
+          outcome: "confirmed",
+          value: {
+            provider_metadata: providerMetadata(),
+            result: { version_id: VERSION_ID },
+          },
+        };
+      },
+    });
+    assert.deepEqual(result, { version_id: VERSION_ID });
+    assert.equal(mutations, 1);
+    assert.equal(reconciliations, 1);
+    assert.deepEqual(readJournal(target).map(({ record_type }) => record_type), [
+      "prepared", "confirmed",
+    ]);
+  } finally {
+    rmSync(target.directory, { recursive: true, force: true });
+  }
+});
+
+journalTest("a closed resume-safe reconciliation authorizes one retry of the same prepared effect", async () => {
+  const target = fixture("brain-deployment-journal-reconcile-resume-safe-");
+  let mutations = 0;
+  let remoteAbsent = false;
+  const options = uploadOptions(target, {
+    mutate: async () => {
+      mutations += 1;
+      if (mutations === 1) throw new Error("request did not reach provider");
+      return { version: VERSION_ID };
+    },
+    validate: async (raw) => ({
+      provider_metadata: providerMetadata(),
+      result: { version_id: raw.version },
+    }),
+  });
+  try {
+    await assert.rejects(
+      runJournaledDisposableRecoveryDeploymentMutation(options),
+      journalError("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS"),
+    );
+    const result = await runJournaledDisposableRecoveryDeploymentMutation({
+      ...options,
+      reconcile: async () => {
+        remoteAbsent = true;
+        return { outcome: "resume_safe" };
+      },
+    });
+    assert.equal(remoteAbsent, true);
+    assert.deepEqual(result, { version_id: VERSION_ID });
+    assert.equal(mutations, 2);
+    assert.deepEqual(readJournal(target).map(({ sequence }) => sequence), [1, 2]);
+  } finally {
+    rmSync(target.directory, { recursive: true, force: true });
+  }
+});
+
 journalTest("phase, binding, request, effect, and step order conflicts call no provider", async () => {
   const target = fixture("brain-deployment-journal-conflict-");
   let mutationCalls = 0;

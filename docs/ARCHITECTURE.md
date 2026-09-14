@@ -75,6 +75,24 @@ should move toward focused command modules with explicit arguments and injected
 dependencies. Preserve behavior with characterization tests before extracting a
 live path.
 
+### Supported package surface and local trust boundary
+
+`brain-installer` is a CLI-only package. Its supported executable surface is the
+fixed `bin` map in `package.json`. The package has a closed `exports` map, so the
+package root and all package subpaths are unavailable through Node package
+resolution. Files under `operations/` and `scripts/` are implementation details,
+not supported import APIs. In particular, the v0.4.8 recovery ceremonies must be
+entered through their installed fixed command entry points. Direct internal
+imports and dependency-injected runners are test and implementation seams, not
+operator authorities.
+
+This boundary constrains package consumers. It is not an operating-system
+sandbox against arbitrary code already running as the owner account. Such code
+could call the credential store or provider independently of this package. Field
+proof therefore requires an owner-controlled machine, the reviewed package and
+commit, and the fixed command entry points. A same-user machine compromise is
+outside the ceremony's proof claim.
+
 ## Install and upgrade lifecycle
 
 `brain setup` is intentionally ordered:
@@ -125,40 +143,96 @@ transactionally restored with D1. It leaves the Worker paused until supervised
 recovery recreates/rebinds a clean Vectorize index, because reindex cannot
 enumerate provider-only post-bookmark ids.
 
-Verified recovery keeps orchestration provider-neutral and places all live
-Cloudflare access behind a separate disposable-only adapter. The adapter binds
-reviewed manifests to exact D1, Vectorize, Worker deployment, runtime values,
-and secret names before either source export or target access. Its target
-execution approval also binds the immutable Worker version and a manually
-reviewed empty route/custom-domain claim. A separate approval binds the exact
-private release golden SHA-256 across every supervised stop and resume. D1
-remains the durable authority. FTS and Vectorize are rebuilt derived state.
-Recovery control files contain
-fingerprints and bounded evidence only; the owner-only SQL export is the sole
-recovery artifact that contains corpus data. The Vectorize drain owner and
-expiry are invocation-local coordination, not recoverable state. Recovery
-therefore excludes `install_state` from the raw provider export, recreates its
-reviewed singleton row with lease and mutation fields forced to SQL `NULL`, a
-corpus-derived bootstrap status/epoch, and the exact `MAX(chunk_uid)` high-water,
-then resets the derived outbox generation and bulk-bootstrap base to zero,
-forces the bootstrap protocol to `NULL`, and excludes provider-specific queue
-and batch receipts before hashing the remaining durable data.
-Exact older migration prefixes remain inspectable by the offline verifier only.
-The live field recovery runner requires this package's exact current migration
-prefix on both source and restored target before it can export, promote the
-current Worker, or invoke the current drain protocol.
+Verified recovery keeps its stage machine provider-neutral. The disposable
+Cloudflare adapter supplies the live boundaries and binds the reviewed
+manifests to the exact D1, Vectorize, Worker deployments, runtime values, secret
+names, package, implementation snapshot, private release golden, and deployment
+receipt before source export or target access. For the fixed v0.4.8 campaign,
+the plan also carries an operator-approved continuous Vectorize
+mutation-quiescence claim. It covers the exact target from its creation or
+provisioning through acceptance of the final active composite proof and
+includes every dashboard, API, Wrangler, token, and non-campaign writer
+surface.
 
-The v0.4.8 disposable deployment seam has a shipped split dispatcher and a
-narrow Cloudflare transport. Source preparation opens only the source manifest;
-target preparation opens both only after the source and fixed seed receipts
-exist. Local preview has no provider access or writes. Preflight permits GETs
-and one private receipt; A2 can mutate only the source and A4 only the target.
-Every POST is preceded by a durable journal record. A confirmed prefix may be
-resumed explicitly, while `sent_unconfirmed` always refuses. The deployment
-POST identifiers are retained and matched through Cloudflare's exact
-deployment-ID GET before a phase receipt can finalize. The implementation is
-packaged and locally executable on macOS with Keychain custody, but that does
-not constitute live disposable field proof.
+D1 remains the durable authority. FTS and Vectorize are rebuilt derived state.
+Recovery control files contain fingerprints and bounded evidence only. The
+owner-only SQL export is the sole encrypted provenance artifact that contains
+corpus data. The Vectorize drain owner and expiry are invocation-local
+coordination, not recoverable state. Recovery therefore excludes `install_state`
+from the raw provider export, recreates its reviewed singleton row with lease
+and mutation fields forced to SQL `NULL`, a corpus-derived bootstrap
+status/epoch, and the exact `MAX(chunk_uid)` high-water. It resets the derived
+outbox generation and bulk-bootstrap base to zero, forces the bootstrap protocol
+to `NULL`, and excludes provider-specific queue and batch receipts before
+hashing the remaining durable data. Exact older migration prefixes remain
+offline-inspectable only. The field runner requires the package's exact current
+migration prefix on source and restored target before export, current bootstrap,
+or promotion.
+
+Projection completion is set equality, not count equality. The adapter pages
+all non-null D1 `chunks.vector_id` values and every provider Vectorize ID,
+requires the two complete sets to be identical, and fingerprints that set. It
+also brackets the check with the provider's processed mutation watermark and
+requires the stable watermark mutation ID to equal the Worker's verified
+projection barrier. The D1 snapshot, outbox, exact Worker execution, ID set,
+watermark, and barrier are captured repeatedly while paused and again after the
+active deployment. Before the promotion request, an owner-private durable
+promotion-intent receipt binds those proofs, the exact active version, command,
+plan, implementation, wrapper, and quiescence approval. A lost deployment
+response can be reconciled only to that exact already-active state; it never
+authorizes a blind retry.
+
+Source export verification and final target evaluation each capture a complete,
+role-and-resource-bound D1 deletion-state fingerprint. It includes migration
+checksums, integrity, table and schema inventory, raw durable and FTS
+shadow-table bytes, the exact reviewed SQLite sequence rows, and FTS count.
+Release evaluation is a declared `isolated_target_audit_write`: every
+non-`llm_call_log` durable table and sequence must remain byte-for-byte
+unchanged. `llm_call_log` may only append sequential rows within the reviewed
+labels, model, call bounds, and time window; its own SQLite sequence must match
+the final row ID, and every captured cost field must be nonnegative. Because a
+lost evaluation result can still have appended usage rows, the recovery journal
+refuses an automatic second attempt.
+
+The v0.4.8 deployment seam uses
+`cloudflare-disposable-deployment-transport.mjs` as its sole Cloudflare HTTP
+layer. The split `brain-v048-disposable-deploy` dispatcher opens only the source
+for the source phase, then opens the target only after the source and fixed-seed
+receipts exist. Local preview has no provider access or writes. Preflight uses
+GETs and writes one private receipt. A2 can mutate only the source and A4 only
+the target. Every POST is preceded by a durable ambiguity journal; a confirmed
+prefix may resume explicitly, while `sent_unconfirmed` always refuses. Exact
+version-ID readback closes uploads, while exact deployment-ID readback closes
+traffic deployments. The source and target semantic receipts bind the exact
+Worker identity and reviewed code generation and prove
+closed network surfaces: the workers.dev identity, previews disabled, and no
+routes, custom domains, schedules, tails, extra Worker exports, assets, or
+logpush. Target
+preflight and final receipt also prove complete campaign custody by checking
+that no traffic-bearing non-campaign Worker binds either campaign D1 database
+or Vectorize index, and they preserve the exact continuous mutation-quiescence
+claim.
+
+The separate v0.4.8 teardown is receipt-bound and mutation-capable only for the
+two fixed campaign roles. It requires the completed recovery plan and state,
+source and final deployment receipts, both stored D1 deletion fingerprints,
+the exact Worker generations, continuous Vectorize mutation quiescence, and a
+second operator-attested lifecycle-quiescence interval spanning the first
+source preview through final target absence proof. Source teardown must finish
+and seal its private receipt before target preview. Each role deletes strictly
+Worker, then Vectorize, then D1, with adjacent full-campaign custody reads and
+exact absence checks after each mutation. Immediately before D1 deletion it
+double-captures and matches the approved deletion-state fingerprint. The source
+D1 admits no writes from accepted `verify_export` evidence through its teardown
+commit; the target D1 admits no writes from accepted `verify_eval` evidence
+through its later commit. This separate D1 evidence freeze includes audit-log
+writes and is not implied by either lifecycle or Vectorize quiescence. Ambiguous
+provider results or any D1 drift stop without being reported as cleanup success.
+
+The deployment, recovery, evaluation, and teardown implementations are
+packaged or locally fixture-tested only. They have not completed the named live
+Cloudflare campaign and do not authorize deployment, deletion, release, or
+customer action.
 
 ## Ingest lifecycle
 
@@ -554,8 +628,9 @@ receipt readback, not pointer presence, is the verification boundary. Exact
 replay preserves the revision, while changed raw bytes create a new revision
 even when extracted text is identical. Structural parts can share one opaque
 original identity; `family_of` exports and legacy content remain unbound. This
-proves a full-admin-authorized local ingest assertion, not server-side raw-byte
-recomputation, and it does not cryptographically identify the producer binary.
+provides provenance protection for a full-admin-authorized local ingest
+assertion, not server-side raw-byte recomputation, and it does not establish the
+identity of the producer binary.
 Accepted outcomes remain blocked in both the Worker and the
 schema-43 D1 trigger until a separate reviewed change authorizes their use.
 Deletion, absence, replacement bytes, an unreadable original, or a changed or
@@ -648,9 +723,10 @@ The stable `observation_hash` remains an event-receipt digest over the original
 schema-42 canonical fields. It is not a self-authenticating chain digest and it
 does not cover `predecessor_observation_hash`. Schema 46 binds the chain through
 append-only D1 rows, transactional predecessor checks, and recovery-close
-validation; authenticated whole-artifact recovery protects those row bytes in
-transit and at rest. A future receipt-contract version may include the edge in
-its digest without changing the meaning of existing receipts.
+validation; the encrypted provenance artifact authenticates the exported row
+bytes as a whole and protects them while stored or transferred in artifact form.
+A future receipt-contract version may include the edge in its digest without
+changing the meaning of existing receipts.
 
 This dynamic SQL currentness is scoped to a fixed retrieval contract and
 supported Worker, D1, and outbox-mediated mutations. Direct FTS maintenance,

@@ -178,9 +178,9 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
       issue_code: "WINDOWS_DPAPI_CLEANUP_DEFERRED",
     }),
   });
-  check("Windows doctor separates cleanup hygiene from a DPAPI crypto failure",
+  check("Windows doctor separates cleanup hygiene from a DPAPI encryption failure",
     dpapiCleanupDeferred.status === FAIL && /25 DPAPI round trips passed/i.test(dpapiCleanupDeferred.detail) &&
-      /No credential write was classified as a crypto failure/i.test(dpapiCleanupDeferred.fix) &&
+      /No credential write was classified as an encryption failure/i.test(dpapiCleanupDeferred.fix) &&
       /WINDOWS_DPAPI_CLEANUP_DEFERRED/.test(dpapiCleanupDeferred.fix),
     JSON.stringify(dpapiCleanupDeferred));
   check("the profile-capable Wrangler release is a blocking requirement and is pinned through npx",

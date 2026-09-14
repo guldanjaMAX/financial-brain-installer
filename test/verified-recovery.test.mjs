@@ -29,6 +29,7 @@ import {
   loadVerifiedRecoveryPlan,
   loadVerifiedRecoveryState,
   parseVerifiedRecoveryCliArguments,
+  reviewVerifiedRecoveryVectorizeMutationQuiescence,
   runVerifiedRecovery,
   validateVerifiedRecoveryPlan,
   validateVerifiedRecoveryState,
@@ -37,6 +38,16 @@ import {
   writeVerifiedRecoveryPlan,
   writeVerifiedRecoveryState,
 } from "../operations/verified-recovery.mjs";
+import {
+  V048_DISPOSABLE_CAMPAIGN_ARTIFACT_KEY_LOCATOR,
+  V048_DISPOSABLE_CAMPAIGN_CLIENT_SLUG,
+  V048_DISPOSABLE_CAMPAIGN_CORPORA,
+  V048_DISPOSABLE_CAMPAIGN_DISPLAY_NAME,
+  V048_DISPOSABLE_CAMPAIGN_SOURCE_ADMIN_KEY_LOCATOR,
+  V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
+  V048_DISPOSABLE_CAMPAIGN_TARGET_ADMIN_KEY_LOCATOR,
+  V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
+} from "../operations/v048-disposable-campaign-contract.mjs";
 import {
   BACKUP_RPO_HOURS,
   BACKUP_RTO_HOURS,
@@ -106,6 +117,49 @@ const targetManifest = {
   },
 };
 
+const exactCampaignSourceManifest = {
+  ...structuredClone(sourceManifest),
+  client: {
+    slug: V048_DISPOSABLE_CAMPAIGN_CLIENT_SLUG,
+    display_name: V048_DISPOSABLE_CAMPAIGN_DISPLAY_NAME,
+  },
+  brain: {
+    version: "0.4.8",
+    worker_name: V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
+    domain: `${V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME}.fixture.workers.dev`,
+  },
+  infrastructure: { cloudflare: {
+    storage: "d1",
+    account_id: "a".repeat(32),
+    d1_database_name: V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
+    d1_database_id: "10000000-0000-4000-8000-000000000001",
+    vectorize_index: V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
+  } },
+  corpora: Object.fromEntries(
+    V048_DISPOSABLE_CAMPAIGN_CORPORA.map((name) => [name, { enabled: false }]),
+  ),
+  operations: { admin_key_secret: V048_DISPOSABLE_CAMPAIGN_SOURCE_ADMIN_KEY_LOCATOR },
+};
+const exactCampaignTargetManifest = {
+  ...structuredClone(exactCampaignSourceManifest),
+  brain: {
+    version: "0.4.8",
+    worker_name: V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
+    domain: `${V048_DISPOSABLE_CAMPAIGN_TARGET_NAME}.fixture.workers.dev`,
+  },
+  infrastructure: { cloudflare: {
+    ...exactCampaignSourceManifest.infrastructure.cloudflare,
+    d1_database_name: V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
+    d1_database_id: "20000000-0000-4000-8000-000000000002",
+    vectorize_index: V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
+  } },
+  operations: {
+    admin_key_secret: V048_DISPOSABLE_CAMPAIGN_TARGET_ADMIN_KEY_LOCATOR,
+    recovery_artifact_key_secret: V048_DISPOSABLE_CAMPAIGN_ARTIFACT_KEY_LOCATOR,
+    recovery_field_gate: { routes: [], custom_domains: [] },
+  },
+};
+
 function writeJson(path, value, mode = 0o600) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode });
   if (process.platform !== "win32") chmodSync(path, mode);
@@ -164,6 +218,16 @@ const fieldRebuildProof = Object.freeze({
 });
 const bankSecurityProof = { protocol: "bank-security-v1", reconciliation_at: "2026-08-25T12:00:00.000Z", rows: [] };
 const bankSecurityHash = createHash("sha256").update(JSON.stringify(bankSecurityProof)).digest("hex");
+const targetEvalLlmAppend = Object.freeze({
+  schema_version: 1,
+  kind: "v048_target_eval_llm_append_v1",
+  before_rows: 2,
+  appended_rows: 2,
+  after_rows: 4,
+  rag_think_rows: 1,
+  rag_evidence_gate_rows: 1,
+  transition_sha256: "e".repeat(64),
+});
 assert.equal(validateBankRecoveryProof(bankSecurityProof), bankSecurityProof);
 for (const mutate of [
   (proof) => { proof.protocol = "unknown"; },
@@ -192,6 +256,7 @@ function evidenceFor(stage, context, override = {}) {
       schema_fingerprint: schemaHash,
       aggregate_fingerprint: aggregateHash,
       content_fingerprint: contentHash,
+      source_d1_deletion_state_fingerprint: "f".repeat(64),
       document_count: 3,
       chunk_count: 5,
       fts_count: 5,
@@ -248,6 +313,9 @@ function evidenceFor(stage, context, override = {}) {
       status: "pass",
       critical_failures: 0,
       unauthorized_retrievals: 0,
+      final_d1_content_fingerprint: contentHash,
+      final_d1_deletion_state_fingerprint: "9".repeat(64),
+      target_eval_llm_append: targetEvalLlmAppend,
     },
   };
   return { ...values[stage], ...override };
@@ -312,6 +380,80 @@ try {
     assert.equal(binding.ocrEnabled, "0");
     assert.equal(binding.ocrModel, "@cf/google/gemma-4-26b-a4b-it");
   }
+
+  const exactCampaignSourcePath = join(sandbox, "v048-source.manifest.json");
+  const exactCampaignTargetPath = join(sandbox, "v048-target.manifest.json");
+  const exactCampaignPlanPath = join(sandbox, ".v048-recovery-plan.json");
+  const exactCampaignStatePath = join(sandbox, ".v048-recovery-state.json");
+  writeJson(exactCampaignSourcePath, exactCampaignSourceManifest);
+  writeJson(exactCampaignTargetPath, exactCampaignTargetManifest);
+  const quiescenceReview = reviewVerifiedRecoveryVectorizeMutationQuiescence(
+    exactCampaignSourcePath,
+    exactCampaignTargetPath,
+  );
+  assert.match(
+    quiescenceReview.vectorize_mutation_quiescence_sha256,
+    /^[0-9a-f]{64}$/,
+  );
+  assert.equal(quiescenceReview.scope.continuous, true);
+  assert.throws(
+    () => initializeVerifiedRecovery(
+      exactCampaignSourcePath,
+      exactCampaignTargetPath,
+      exactCampaignPlanPath,
+      exactCampaignStatePath,
+      { now: createdAt },
+    ),
+    /Vectorize mutation quiescence approval is required/,
+  );
+  const exactCampaignInitialized = initializeVerifiedRecovery(
+    exactCampaignSourcePath,
+    exactCampaignTargetPath,
+    exactCampaignPlanPath,
+    exactCampaignStatePath,
+    {
+      now: createdAt,
+      approveVectorizeMutationQuiescence:
+        quiescenceReview.vectorize_mutation_quiescence_sha256,
+    },
+  );
+  assert.equal(
+    exactCampaignInitialized.plan.vectorize_mutation_quiescence_sha256,
+    quiescenceReview.vectorize_mutation_quiescence_sha256,
+  );
+  const exactCampaignRun = await runVerifiedRecovery(
+    exactCampaignInitialized.plan,
+    exactCampaignInitialized.state,
+    goodAdapters([], {
+      rebuild_vectorize: {
+        vectorize_mutation_quiescence_sha256:
+          quiescenceReview.vectorize_mutation_quiescence_sha256,
+        vector_id_set_sha256: "1".repeat(64),
+        vector_watermark_sha256: "2".repeat(64),
+        vector_barrier_sha256: "3".repeat(64),
+        promotion_intent_sha256: "4".repeat(64),
+      },
+      verify_eval: {
+        vectorize_mutation_quiescence_sha256:
+          quiescenceReview.vectorize_mutation_quiescence_sha256,
+      },
+    }),
+    {
+      clock: clock(Date.parse("2026-08-25T11:01:00.000Z")),
+      revalidateManifests: async () => true,
+      approveVectorizeMutationQuiescence:
+        quiescenceReview.vectorize_mutation_quiescence_sha256,
+    },
+  );
+  assert.equal(exactCampaignRun.ok, true);
+  const accountMismatchPath = manifestVariant(
+    exactCampaignTargetManifest,
+    (value) => { value.infrastructure.cloudflare.account_id = "b".repeat(32); },
+  );
+  assert.throws(
+    () => buildVerifiedRecoveryPlan(exactCampaignSourcePath, accountMismatchPath),
+    /V048_CAMPAIGN_ACCOUNT_MISMATCH/,
+  );
 
   const planText = JSON.stringify(plan);
   for (const forbidden of [
@@ -391,6 +533,10 @@ try {
       /exact runtime contract/,
     );
   }
+  assert.equal(
+    VERIFIED_RECOVERY_STAGES.find((stage) => stage.id === "verify_eval")?.effect,
+    "isolated_target_audit_write",
+  );
 
   const wrongBackend = manifestVariant(targetManifest, (value) => {
     value.infrastructure.cloudflare.storage = "supabase";
@@ -541,6 +687,16 @@ try {
   ]) {
     const invalid = structuredClone(completed.state);
     mutate(invalid.completed.find((entry) => entry.id === "verify_d1").evidence);
+    assert.throws(() => validateVerifiedRecoveryState(invalid, initialized.plan));
+  }
+  for (const mutate of [
+    (evidence) => { delete evidence.target_eval_llm_append; },
+    (evidence) => { evidence.target_eval_llm_append.unreviewed = true; },
+    (evidence) => { evidence.target_eval_llm_append.after_rows++; },
+    (evidence) => { evidence.target_eval_llm_append.transition_sha256 = "invalid"; },
+  ]) {
+    const invalid = structuredClone(completed.state);
+    mutate(invalid.completed.find((entry) => entry.id === "verify_eval").evidence);
     assert.throws(() => validateVerifiedRecoveryState(invalid, initialized.plan));
   }
   assert.equal(readdirSync(sandbox).some((name) => name.includes(".tmp")), false);

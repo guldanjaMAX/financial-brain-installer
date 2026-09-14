@@ -10,6 +10,40 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Every disposable provider-changing phase now remains bound to K0.** A1
+  through A4 require the exact campaign account and K0 receipt, then revalidate
+  all four campaign Keychain values at each provider boundary.
+
+- **The held recovery proof now has one closed operator sequence through A16.**
+  The package contains separate entry points for local campaign-key setup,
+  source and target deployment, active-target evaluation, exact teardown, and
+  the A17 review surface. Every provider-changing step has its own preview,
+  approval fingerprint, durable ambiguity record, and exact readback. Source
+  teardown must close before target teardown. A17 is implemented offline and
+  locally fixture-tested, but remains held, unfielded, and uncertified. It has
+  no field or live proof and grants no release authority. Its implemented
+  contract removes only four disposable values, preserves the shared token,
+  and retains the encrypted provenance artifact and other reviewed private
+  evidence. None of these tools has run against Cloudflare or authorizes a
+  release, customer Brain, or provider action.
+
+- **The disposable recovery rehearsal now proves the restored Brain, not only
+  matching totals.** Its D1 export is an encrypted provenance artifact. Before
+  the reviewed active Worker can be promoted, the rehearsal requires every D1
+  vector identity to match the complete provider Vectorize identity set, the
+  provider's processed mutation watermark to match the Worker's verified
+  barrier, and a durable promotion-intent receipt. The target deployment
+  receipt also fixes the exact Worker versions and code generation, proves that
+  traffic surfaces are closed, proves that no other traffic-bearing Worker
+  binds the campaign D1 or Vectorize resources, and carries one continuous
+  no-competing-writer approval. Release evaluation must leave all non-audit
+  durable state unchanged; only its bounded model-usage audit append and
+  matching audit sequence may advance. Source and
+  final-target deletion fingerprints then gate a separate, receipt-bound
+  disposable cleanup in Worker, Vectorize, D1 order. These protections have
+  deterministic offline and fixture coverage only. No Cloudflare field run,
+  release, customer recovery, or deletion has been performed or authorized.
+
 - **You can now see the scanned-PDF work before choosing OCR.** `brain
   ocr-preflight <manifest> --path <folder> --json` reads local PDF structure
   without running OCR or making an application HTTP request, opening an
@@ -112,8 +146,8 @@ asset publication.
   family. Private locators, queries, document IDs, titles, and text do not enter
   the durable proof. Portable family evidence survives recovery, while the
   deployment-local retrieval check must be repeated after Vectorize is rebuilt.
-  Historical seals restore only inside an empty-target marker that the verified
-  artifact closes and checks before the recovery can advance.
+  Historical seals restore only inside an empty-target marker that the encrypted
+  provenance artifact closes and checks before the recovery can advance.
   Ordinary `result_family` remains non-authorizing. The separate schema-45 gate
   can consume the proof for one exact sealed target, but this still does not
   authorize OCR, reingest, deletion, or a whole-source completeness claim.
@@ -486,8 +520,9 @@ for availability.
 - Uploads accept PDFs and images, not only text, and read scanned pages when
   you turn that on. A document read that way is marked, so an answer resting
   on it says so.
-- The recovery drill's export is encrypted rather than plain SQL, and it now
-  counts the state of every bank reference it restored.
+- The recovery drill stores its export as an encrypted provenance artifact
+  rather than plain SQL, and it now counts the state of every bank reference it
+  restored.
 - Credential screening now recognizes the install's 64-character admin keys
   when they begin with a letter. The v5 safety marker makes local folders,
   Drive, Gmail, and IMAP run a complete recheck of previously accepted

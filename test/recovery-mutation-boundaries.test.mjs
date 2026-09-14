@@ -33,6 +33,16 @@ const BANK_SECURITY_PROOF = Object.freeze({
 });
 const BANK_SECURITY_HASH = createHash("sha256")
   .update(JSON.stringify(BANK_SECURITY_PROOF)).digest("hex");
+const TARGET_EVAL_LLM_APPEND = Object.freeze({
+  schema_version: 1,
+  kind: "v048_target_eval_llm_append_v1",
+  before_rows: 0,
+  appended_rows: 2,
+  after_rows: 2,
+  rag_think_rows: 1,
+  rag_evidence_gate_rows: 1,
+  transition_sha256: "e".repeat(64),
+});
 
 function manifest(suffix) {
   const safeSuffix = suffix.replaceAll("_", "-");
@@ -75,6 +85,7 @@ function evidenceFor(stage, context) {
     verify_export: {
       artifact_sha256: HASHES.artifact,
       artifact_bytes: 4096,
+      source_d1_deletion_state_fingerprint: "1".repeat(64),
       ...snapshot,
     },
     prove_target_clean: {
@@ -110,6 +121,9 @@ function evidenceFor(stage, context) {
       status: "pass",
       critical_failures: 0,
       unauthorized_retrievals: 0,
+      final_d1_content_fingerprint: HASHES.content,
+      final_d1_deletion_state_fingerprint: "2".repeat(64),
+      target_eval_llm_append: TARGET_EVAL_LLM_APPEND,
     },
   }[stage];
 }
@@ -120,7 +134,7 @@ function clock(start) {
 }
 
 const mutatingStages = VERIFIED_RECOVERY_STAGES
-  .filter((stage) => stage.effect !== "read_only")
+  .filter((stage) => ["local_sensitive_write", "isolated_target_write"].includes(stage.effect))
   .map((stage) => stage.id);
 
 for (const interruptedStage of mutatingStages) {
@@ -231,6 +245,64 @@ for (const checkpointStage of mutatingStages) {
     }
   });
 }
+
+test("an ambiguous target-eval write requires review and never executes a second eval", async () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-recovery-eval-retry-"));
+  const sourcePath = join(root, "source.json");
+  const targetPath = join(root, "target.json");
+  const planPath = join(root, "plan.json");
+  const statePath = join(root, "state.json");
+  try {
+    writeFileSync(sourcePath, JSON.stringify(manifest("eval-retry-source")), { mode: 0o600 });
+    writeFileSync(targetPath, JSON.stringify(manifest("eval-retry-target")), { mode: 0o600 });
+    const initialized = initializeVerifiedRecovery(
+      sourcePath,
+      targetPath,
+      planPath,
+      statePath,
+      { now: new Date("2026-08-30T13:30:00.000Z") },
+    );
+    let persisted = initialized.state;
+    let evalExecutions = 0;
+    const adapters = Object.fromEntries(VERIFIED_RECOVERY_STAGES.map(({ id }) => [
+      id,
+      async (context) => {
+        if (id !== "verify_eval") return evidenceFor(id, context);
+        if (context.attempt > 1) {
+          throw Object.assign(new Error("RECOVERY_TARGET_EVAL_RETRY_REVIEW_REQUIRED"), {
+            code: "RECOVERY_TARGET_EVAL_RETRY_REVIEW_REQUIRED",
+          });
+        }
+        evalExecutions++;
+        throw Object.assign(new Error("RECOVERY_RELEASE_EVAL_RESULT_AMBIGUOUS"), {
+          code: "RECOVERY_RELEASE_EVAL_RESULT_AMBIGUOUS",
+        });
+      },
+    ]));
+    const first = await runVerifiedRecovery(initialized.plan, initialized.state, adapters, {
+      clock: clock(Date.parse("2026-08-30T13:31:00.000Z")),
+      revalidateManifests: async () => true,
+      persistState: async (state) => { persisted = state; },
+    });
+    assert.equal(first.ok, false);
+    assert.equal(first.state.current_stage, "verify_eval");
+    assert.equal(first.state.attempt, 1);
+    assert.equal(evalExecutions, 1);
+
+    const retry = await runVerifiedRecovery(initialized.plan, persisted, adapters, {
+      clock: clock(Date.parse("2026-08-30T13:40:00.000Z")),
+      revalidateManifests: async () => true,
+      persistState: async (state) => { persisted = state; },
+    });
+    assert.equal(retry.ok, false);
+    assert.equal(retry.state.current_stage, "verify_eval");
+    assert.equal(retry.state.attempt, 2);
+    assert.equal(retry.cause, "RECOVERY_TARGET_EVAL_RETRY_REVIEW_REQUIRED");
+    assert.equal(evalExecutions, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function d1(db, extra = {}) {
   return {
@@ -348,4 +420,10 @@ test("the mutation matrix covers every declared recovery mutation", () => {
     "reconcile_security",
     "rebuild_vectorize",
   ]);
+  assert.deepEqual(
+    VERIFIED_RECOVERY_STAGES.filter(
+      (stage) => stage.effect === "isolated_target_audit_write",
+    ).map((stage) => stage.id),
+    ["verify_eval"],
+  );
 });
