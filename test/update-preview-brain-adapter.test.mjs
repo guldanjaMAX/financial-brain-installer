@@ -13,6 +13,7 @@ import {
   validateLocalUpdatePreviewManifest,
   updatePreviewDocumentsUrl,
 } from "../brain.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import * as previewCore from "../operations/update-preview.mjs";
 
 const SHA = "a".repeat(64);
@@ -805,7 +806,9 @@ test("CLI help describes the authenticated aggregate read without claiming local
     timeout: 30_000,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  const previewHelp = result.stdout.slice(result.stdout.indexOf("brain update     [manifest] --preview"));
+  const previewHelp = result.stdout.slice(result.stdout.indexOf(
+    renderCliCommands("brain update     [manifest] --preview"),
+  ));
   assert.match(previewHelp, /one authenticated aggregate\s+Brain read/u);
   assert.match(previewHelp, /no control-plane request, write, deploy/u);
   assert.doesNotMatch(previewHelp.slice(0, 400), /local preflight|no credential,\s+network/u);
