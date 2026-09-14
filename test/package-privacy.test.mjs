@@ -50,8 +50,14 @@ import {
   PackageBundleVerificationError,
   assertPackedBundleArchive,
   assertPackedBundleMetadata,
+  assertPackedBundleRows,
+  inspectNpmArchiveBytes,
   resolveNpmCacheContentRoot,
 } from "../operations/package-bundle-verifier.mjs";
+import {
+  normalizeWindowsLocalPackMetadata,
+  normalizeWindowsLocalPackRows,
+} from "./windows-local-pack-fixture.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -356,9 +362,10 @@ let bundleCacheContentRoot = null;
 if (!SCAN_ONLY && packMetadata) {
   try {
     bundleCacheContentRoot = resolveNpmCacheContentRoot(process.env);
+    const localFixture = normalizeWindowsLocalPackMetadata(packMetadata);
     assertPackedBundleMetadata({
       root: ROOT,
-      metadata: packMetadata,
+      metadata: localFixture.metadata,
       cacheContentRoot: bundleCacheContentRoot,
     });
   }
@@ -1023,12 +1030,42 @@ if (packageProbeDirectory) try {
     packedAdapterImportFailed = true;
   } else {
     try {
-      assertPackedBundleArchive({
-        root: ROOT,
-        metadata: actualMetadata,
-        archivePath: join(packageProbeDirectory, filename),
-        cacheContentRoot: bundleCacheContentRoot,
-      });
+      const packedArchivePath = join(packageProbeDirectory, filename);
+      const localMetadata = normalizeWindowsLocalPackMetadata(actualMetadata);
+      if (localMetadata.normalized) {
+        const localRows = normalizeWindowsLocalPackRows(
+          inspectNpmArchiveBytes(readFileSync(packedArchivePath)).rows,
+        );
+        if (!localRows.normalized) throw new Error("Windows local pack mode normalization disagreed");
+        let rawArchiveRefusal = null;
+        try {
+          assertPackedBundleArchive({
+            root: ROOT,
+            metadata: actualMetadata,
+            archivePath: packedArchivePath,
+            cacheContentRoot: bundleCacheContentRoot,
+          });
+        } catch (error) {
+          rawArchiveRefusal = error;
+        }
+        if (!(rawArchiveRefusal instanceof PackageBundleVerificationError) ||
+            rawArchiveRefusal.code !== "PACKAGE_BUNDLE_METADATA_INVENTORY_MISMATCH") {
+          throw new Error("Windows local pack archive had an unexpected reviewed-bundle delta");
+        }
+        assertPackedBundleRows({
+          root: ROOT,
+          metadata: localMetadata.metadata,
+          rows: localRows.rows,
+          cacheContentRoot: bundleCacheContentRoot,
+        });
+      } else {
+        assertPackedBundleArchive({
+          root: ROOT,
+          metadata: actualMetadata,
+          archivePath: packedArchivePath,
+          cacheContentRoot: bundleCacheContentRoot,
+        });
+      }
     } catch (error) {
       packedBundleFailure = error instanceof PackageBundleVerificationError
         ? error.code

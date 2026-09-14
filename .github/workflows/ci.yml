@@ -920,6 +920,7 @@ jobs:
           if ($previewExit -ne 1) {
             throw "no-manifest update preview exited $previewExit instead of its closed refusal"
           }
+          $global:LASTEXITCODE = 0
           try { $previewReceipt = $previewJson | ConvertFrom-Json }
           catch { throw 'installed brain.cmd did not emit one JSON update-preview receipt' }
           $previewKeys = @($previewReceipt.PSObject.Properties.Name | Sort-Object)

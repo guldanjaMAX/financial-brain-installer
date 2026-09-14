@@ -9829,11 +9829,19 @@ export function pinProvenanceAssessmentRoot(root) {
   }
   const requested = resolve(root);
   const before = provenanceAssessmentDirectoryStat(requested);
-  const canonical = (realpathSync.native || realpathSync)(requested);
-  if ((process.platform === "win32" ? canonical.toLowerCase() : canonical) !==
+  // The JavaScript Windows resolver still resolves linked ancestors while
+  // retaining a legitimate 8.3 spelling. The native resolver expands that
+  // spelling, so it cannot by itself prove that the requested path used a link.
+  const direct = (process.platform === "win32"
+    ? realpathSync
+    : (realpathSync.native || realpathSync))(requested);
+  if ((process.platform === "win32" ? direct.toLowerCase() : direct) !==
       (process.platform === "win32" ? requested.toLowerCase() : requested)) {
     throw new Error("assessment source root is not direct");
   }
+  const canonical = process.platform === "win32"
+    ? (realpathSync.native || realpathSync)(requested)
+    : direct;
   const after = provenanceAssessmentDirectoryStat(canonical);
   if (JSON.stringify(before) !== JSON.stringify(after)) {
     throw new Error("assessment source root changed during validation");

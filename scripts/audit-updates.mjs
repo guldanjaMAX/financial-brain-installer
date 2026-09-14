@@ -228,7 +228,7 @@ export function assertSourceInventoryV3ReleaseVersion(version) {
 // from running. No shell, no output pipes, no inherited success from a later
 // command. A signal, timeout, or spawn error is a failure too.
 export function regressionEnvironment(env = process.env) {
-  const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI"];
+  const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI", "NPM_CONFIG_CACHE", "npm_config_cache"];
   const clean = Object.fromEntries(keys.filter((key) => typeof env[key] === "string").map((key) => [key, env[key]]));
   // Packed install tests invoke npm through Node, so a Windows timeout cannot
   // leave a shell's npm grandchild holding the disposable prefix open.

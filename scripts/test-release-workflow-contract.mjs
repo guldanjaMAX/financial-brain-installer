@@ -338,8 +338,8 @@ assert.match(installedRuntimeStep,
 assert.match(installedRuntimeStep,
   /& \$brain update --preview --expect-runtime-sha256 \$env:BRAIN_TESTED_RUNTIME_PAYLOAD_SHA256 --json/);
 assert.match(installedRuntimeStep,
-  /if \(\$previewExit -ne 1\) \{\n\s+throw [^\n]+\n\s+\}\n\s+try \{ \$previewReceipt = \$previewJson \| ConvertFrom-Json \}/,
-  "the no-manifest refusal check must close exactly once before parsing its receipt");
+  /if \(\$previewExit -ne 1\) \{\n\s+throw [^\n]+\n\s+\}\n\s+\$global:LASTEXITCODE = 0\n\s+try \{ \$previewReceipt = \$previewJson \| ConvertFrom-Json \}/,
+  "the expected no-manifest refusal must be consumed exactly once before parsing its receipt");
 assert.doesNotMatch(installedRuntimeStep,
   /if \(\$previewExit -ne 1\)[\s\S]*?\n\s+\}\n\s+\}\n\s+try \{ \$previewReceipt/,
   "the installed Windows step must not contain a stray closing brace before receipt parsing");

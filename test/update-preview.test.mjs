@@ -41,6 +41,7 @@ const ROOT = resolve(HERE, "..");
 const MODULE_PATH = join(HERE, "..", "operations", "update-preview.mjs");
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const nativeRealpath = realpathSync.native || realpathSync;
 
 function expectCode(code) {
   return (error) => error instanceof UpdatePreviewError && error.code === code &&
@@ -48,7 +49,7 @@ function expectCode(code) {
 }
 
 function runtimeFixture(t) {
-  const temporary = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "brain-update-preview-")));
+  const temporary = nativeRealpath(mkdtempSync(join(nativeRealpath(tmpdir()), "brain-update-preview-")));
   const root = join(temporary, "runtime");
   mkdirSync(join(root, "operations"), { recursive: true });
   writeFileSync(join(root, "brain.mjs"), "private fixture entrypoint\n");
@@ -131,7 +132,7 @@ function mockWindowsNodeShims(target = MOCK_BIN_TARGET) {
 }
 
 function bundledBinFixture(t, platform) {
-  const temporary = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "brain-shim-fixture-")));
+  const temporary = nativeRealpath(mkdtempSync(join(nativeRealpath(tmpdir()), "brain-shim-fixture-")));
   const root = join(temporary, "runtime");
   const dependencyRoot = join(root, "node_modules", "@scope", "tool");
   const binDirectory = join(root, "node_modules", ".bin");
@@ -402,7 +403,9 @@ test("two-pass runtime proof binds the independently supplied exact digest", (t)
   );
 });
 
-test("POSIX bundled executable shim is exact and excluded from archive-derived identity", (t) => {
+test("POSIX bundled executable shim is exact and excluded from archive-derived identity", {
+  skip: process.platform === "win32",
+}, (t) => {
   const fixture = bundledBinFixture(t, "posix");
   const proof = verifyUpdateRuntimePayload({
     root: fixture.root,
@@ -418,7 +421,9 @@ test("POSIX bundled executable shim is exact and excluded from archive-derived i
     "public runtime proof remains aggregate-only");
 });
 
-test("POSIX generated shim contract refuses wrong, external, regular, and extra entries", async (t) => {
+test("POSIX generated shim contract refuses wrong, external, regular, and extra entries", {
+  skip: process.platform === "win32",
+}, async (t) => {
   await t.test("wrong allowlisted target", (t) => {
     const fixture = bundledBinFixture(t, "posix");
     rmSync(join(fixture.binDirectory, "tool"));
@@ -785,6 +790,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
   await t.test("special entry classification", (t) => {
     const fixture = runtimeFixture(t);
     const target = join(fixture.root, "empty.txt");
+    let classified = false;
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         ...fixture,
@@ -792,6 +798,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
           lstat(path) {
             const info = lstatSync(path);
             if (path !== target) return info;
+            classified = true;
             return {
               ...info,
               isDirectory: () => false,
@@ -803,6 +810,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
       }),
       expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"),
     );
+    assert.equal(classified, true, "the crafted special-entry seam must actually run");
   });
 });
 

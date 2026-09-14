@@ -36,6 +36,10 @@ import {
   resolveNpmCacheContentRoot,
 } from "../operations/package-bundle-verifier.mjs";
 import { deriveUpdateRuntimePayloadSha256 } from "../operations/update-preview.mjs";
+import {
+  normalizeWindowsLocalPackMetadata,
+  normalizeWindowsLocalPackRows,
+} from "./windows-local-pack-fixture.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CACHE_CONTENT_ROOT = resolveNpmCacheContentRoot(process.env);
@@ -45,11 +49,16 @@ const BUNDLE_COUNTS = Object.freeze({
   "postal-mime": 26,
   unpdf: 157,
 });
+const WINDOWS_LOCAL_ARCHIVE_SKIP = process.platform === "win32"
+  ? "Windows-local npm pack loses one reviewed dependency executable bit; exact archive proof runs on the Ubuntu package producer"
+  : false;
 
 let temporary;
 let metadata;
+let windowsLocalRawMetadata;
 let archivePath;
 let archiveRows;
+let windowsLocalModeNormalized = false;
 
 function safeEnvironment(root) {
   return {
@@ -172,16 +181,40 @@ before(() => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const report = JSON.parse(result.stdout);
   assert.equal(report.length, 1);
-  metadata = report[0];
-  archivePath = join(temporary, metadata.filename);
-  archiveRows = inspectNpmArchiveBytes(readFileSync(archivePath)).rows;
+  const localMetadata = report[0];
+  archivePath = join(temporary, localMetadata.filename);
+  windowsLocalRawMetadata = localMetadata;
+  const localRows = inspectNpmArchiveBytes(readFileSync(archivePath)).rows;
+  const normalizedMetadata = normalizeWindowsLocalPackMetadata(localMetadata);
+  const normalizedRows = normalizeWindowsLocalPackRows(localRows);
+  assert.equal(normalizedMetadata.normalized, normalizedRows.normalized);
+  metadata = normalizedMetadata.metadata;
+  archiveRows = normalizedRows.rows;
+  windowsLocalModeNormalized = normalizedMetadata.normalized;
 });
 
 after(() => {
   rmSync(temporary, { recursive: true, force: true });
 });
 
-test("the exact packed archive contains all four reviewed lock-derived bundles", () => {
+test("a Windows-local pack fixture differs only by the known nested executable mode", {
+  skip: process.platform !== "win32",
+}, () => {
+  assert.equal(windowsLocalModeNormalized, true);
+  assert.throws(
+    () => assertPackedBundleArchive(
+      verificationOptions({ metadata: windowsLocalRawMetadata, archivePath }),
+    ),
+    expectCode("PACKAGE_BUNDLE_METADATA_INVENTORY_MISMATCH"),
+  );
+  assert.equal(assertPackedBundleRows(
+    verificationOptions({ metadata, rows: archiveRows }),
+  ).bundle_count, 4);
+});
+
+test("the exact packed archive contains all four reviewed lock-derived bundles", {
+  skip: WINDOWS_LOCAL_ARCHIVE_SKIP,
+}, () => {
   const proof = assertPackedBundleArchive(verificationOptions({ metadata, archivePath }));
   const archive = readFileSync(archivePath);
   assert.equal(proof.archive_bytes, metadata.size);
@@ -236,7 +269,9 @@ test("the exact packed archive contains all four reviewed lock-derived bundles",
   }
 });
 
-test("the original npm receipt is digest-bound to the final compressed archive", () => {
+test("the original npm receipt is digest-bound to the final compressed archive", {
+  skip: WINDOWS_LOCAL_ARCHIVE_SKIP,
+}, () => {
   const fixture = privateTemporary("brain-bundle-archive-binding-");
   const changedArchivePath = join(fixture, metadata.filename);
   const originalReceipt = JSON.stringify(metadata);
@@ -520,7 +555,9 @@ test("the stable metadata reader rejects symlinks, hardlinks, directories, and o
   }
 });
 
-test("the CLI reads stable metadata and emits the complete verifier receipt", () => {
+test("the CLI reads stable metadata and emits the complete verifier receipt", {
+  skip: WINDOWS_LOCAL_ARCHIVE_SKIP,
+}, () => {
   const fixture = privateTemporary("brain-bundle-verifier-cli-");
   const metadataPath = join(fixture, "npm-pack.json");
   try {

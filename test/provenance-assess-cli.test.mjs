@@ -7,6 +7,7 @@ import {
   realpathSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -155,6 +156,23 @@ test("real root pinning detects a source-directory scope change", () => {
     const pin = pinProvenanceAssessmentRoot(fixture);
     writeFileSync(join(fixture, "new.txt"), "changed");
     assert.throws(() => revalidateProvenanceAssessmentRoot(pin), /changed during assessment/);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("real root pinning refuses a linked ancestor", () => {
+  const fixture = realpathSync(mkdtempSync(join(tmpdir(), "brain-provenance-assess-link-")));
+  const targetParent = join(fixture, "target");
+  const targetRoot = join(targetParent, "source");
+  const linkedParent = join(fixture, "linked");
+  try {
+    mkdirSync(targetRoot, { recursive: true });
+    symlinkSync(targetParent, linkedParent, process.platform === "win32" ? "junction" : "dir");
+    assert.throws(
+      () => pinProvenanceAssessmentRoot(join(linkedParent, "source")),
+      /assessment source root is not direct/,
+    );
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }

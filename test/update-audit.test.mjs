@@ -219,6 +219,16 @@ assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: 
 assert.deepEqual(regressionEnvironment({ PATH: "/synthetic-bin", CLOUDFLARE_API_TOKEN: "fixture", UNRELATED_PRIVATE_VALUE: "fixture" }), { PATH: "/synthetic-bin" });
 const windowsRuntime = { USERNAME: "fixture", USERDOMAIN: "LOCAL", HOMEDRIVE: "C:", HOMEPATH: "\\Users\\fixture", ComSpec: "C:\\Windows\\System32\\cmd.exe" };
 assert.deepEqual(regressionEnvironment({ ...windowsRuntime, NPM_TOKEN: "fixture" }), windowsRuntime);
+const npmCacheRuntime = {
+  ...windowsRuntime,
+  NPM_CONFIG_CACHE: "C:\\npm\\cache",
+  npm_config_cache: "C:\\npm\\cache",
+};
+assert.deepEqual(
+  regressionEnvironment({ ...npmCacheRuntime, NPM_TOKEN: "fixture", NODE_AUTH_TOKEN: "fixture" }),
+  npmCacheRuntime,
+  "the reviewed npm cache path survives while registry credentials remain scrubbed",
+);
 const npmFixture = mkdtempSync(join(tmpdir(), "brain-audit-npm-"));
 try {
   mkdirSync(join(npmFixture, "bin"));

@@ -74,7 +74,7 @@ const one = (rel) => walk(root, {}).files.find((f) => f.rel.split(/[\\/]/).join(
     });
     check("exact-file pilot resolves the only direct regular file",
       exact.rel === "first.txt" && exact.size === Buffer.byteLength(exactText) &&
-      exact._localApproval.rootReal === exactRoot &&
+      exact._localApproval.rootReal === (realpathSync.native || realpathSync)(exactRoot) &&
       exact._localApproval.identity.nlink === "1", JSON.stringify(exact));
     const prepared = await prepare(exact, { sourceName: "documents", ocr: null });
     check("exact-file pilot handle preserves the ordinary native ingest receipt",
@@ -89,6 +89,23 @@ const one = (rel) => walk(root, {}).files.find((f) => f.rel.split(/[\\/]/).join(
     check("exact-file pilot refuses a root that widened to a second entry", widened);
   } finally {
     rmSync(exactRoot, { recursive: true, force: true });
+  }
+}
+{
+  const fixture = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-linked-root-")));
+  const targetParent = join(fixture, "target");
+  const targetRoot = join(targetParent, "source");
+  const linkedParent = join(fixture, "linked");
+  try {
+    mkdirSync(targetRoot, { recursive: true });
+    writeFileSync(join(targetRoot, "first.txt"), "a linked ancestor must not enter the exact-file pilot");
+    symlinkSync(targetParent, linkedParent, process.platform === "win32" ? "junction" : "dir");
+    let linkedRoot = false;
+    try { resolveExactLocalFile(join(linkedParent, "source"), { relativeLocator: "first.txt" }); }
+    catch (error) { linkedRoot = error?.code === "LOCAL_ROOT_LINK_REFUSED"; }
+    check("exact-file pilot refuses a linked source-root ancestor", linkedRoot);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
   }
 }
 {

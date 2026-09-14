@@ -157,6 +157,11 @@ const localFileFail = (code, message) => {
 
 const nativeRealpath = realpathSync.native || realpathSync;
 
+// On Windows the JavaScript resolver preserves a legitimate 8.3 spelling but
+// still resolves linked ancestors. Native realpath remains the canonical
+// identity resolver after this direct-path check.
+const directRealpath = process.platform === "win32" ? realpathSync : nativeRealpath;
+
 const comparablePath = (value) => {
   const normalized = resolve(String(value));
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -1032,10 +1037,15 @@ export function resolveExactLocalFile(root, {
     localFileFail("LOCAL_ROOT_METADATA_UNAVAILABLE", "the exact-file source root could not be inspected");
   }
 
+  let rootDirect;
   let rootReal;
-  try { rootReal = nativeRealpath(rootPath); }
-  catch { localFileFail("LOCAL_ROOT_REALPATH_UNAVAILABLE", "the exact-file source root identity could not be resolved"); }
-  if (comparablePath(rootReal) !== comparablePath(rootPath)) {
+  try {
+    rootDirect = directRealpath(rootPath);
+    rootReal = process.platform === "win32" ? nativeRealpath(rootPath) : rootDirect;
+  } catch {
+    localFileFail("LOCAL_ROOT_REALPATH_UNAVAILABLE", "the exact-file source root identity could not be resolved");
+  }
+  if (comparablePath(rootDirect) !== comparablePath(rootPath)) {
     localFileFail("LOCAL_ROOT_LINK_REFUSED", "the exact-file source root or one of its ancestors is a symbolic link or junction");
   }
 

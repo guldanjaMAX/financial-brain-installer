@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   classifyCliCredentialBoundary,
@@ -25,6 +26,7 @@ const file = "first-source.txt";
 const privateText = "Synthetic uncommon reconciliation evidence for the exact same-item retrieval check.";
 const RUNTIME_SHA256 = digest("a");
 const RUNTIME_IDENTITY_SCHEME = "brain.runtime-payload.sha256.v1";
+const nativeRealpath = realpathSync.native || realpathSync;
 
 const architectureResult = Object.freeze({
   schema_version: 1,
@@ -39,7 +41,8 @@ const architectureResult = Object.freeze({
 });
 
 function fixture() {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), "brain-first-source-adapter-"));
+  const root = nativeRealpath(mkdtempSync(join(nativeRealpath(tmpdir()),
+    "brain-first-source-adapter-")));
   const sourceRoot = join(root, "source");
   mkdirSync(sourceRoot);
   writeFileSync(join(sourceRoot, file), privateText, { mode: 0o600 });
@@ -585,10 +588,12 @@ test("command-level runtime refusal emits only the fixed identity-free receipt",
   assert.deepEqual(writes, []);
 });
 
-test("spawned preview refuses non-Windows architecture before manifest access", () => {
+test("spawned preview refuses non-Windows architecture before manifest access", {
+  skip: process.platform === "win32",
+}, () => {
   const privateManifest = join(tmpdir(), "must-not-be-read-first-source.json");
   const result = spawnSync(process.execPath, [
-    new URL("../brain.mjs", import.meta.url).pathname,
+    fileURLToPath(new URL("../brain.mjs", import.meta.url)),
     "ingest-file",
     privateManifest,
     "--source", source,
@@ -596,7 +601,7 @@ test("spawned preview refuses non-Windows architecture before manifest access", 
     "--expect-runtime-sha256", RUNTIME_SHA256,
     "--json",
   ], {
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
     encoding: "utf8",
     env: { ...process.env },
   });
