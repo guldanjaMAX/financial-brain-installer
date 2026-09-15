@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -16,10 +18,14 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
+  assertLockedWranglerRuntimeUnchanged,
+  inspectLockedWranglerRuntime,
   LOCKED_WRANGLER_RESOLUTION_GUARD,
   LOCKED_WRANGLER_RESOLUTION_GUARD_MIN_NODE,
   LOCKED_WRANGLER_RESOLUTION_GUARD_SHA256,
   LOCKED_WRANGLER_RESOLUTION_GUARD_SOURCE,
+  materializeLockedWranglerRuntime,
+  prepareLockedWranglerRuntimeFromCache,
 } from "../operations/locked-wrangler-runtime.mjs";
 import {
   assertDirectPlanEntrypoint,
@@ -351,6 +357,55 @@ if (process.argv[2] === "child") {
         symlinkBlocked.stderr,
         /LOCKED_WRANGLER_RESOLUTION_OUTSIDE_RUNTIME/,
       );
+    }
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("long-lived Wrangler pins accept ctime-only system provenance metadata, not changed bytes", {
+  skip: process.platform === "win32",
+}, async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "brain-wrangler-ctime-"));
+  try {
+    const preparedRoot = process.env.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT;
+    const source = preparedRoot
+      ? inspectLockedWranglerRuntime(preparedRoot, { ownerOnly: true, exactRoot: true })
+      : prepareLockedWranglerRuntimeFromCache({
+          sourceRoot: ROOT,
+          destination: join(temporary, "source-runtime"),
+          cacheContentRoot: resolveNpmCacheContentRoot(process.env),
+        });
+    const materialized = materializeLockedWranglerRuntime(
+      source,
+      join(temporary, "runtime"),
+    );
+    const expected = materialized.descriptor;
+    const entrypoint = expected.entrypointPath;
+    const before = statSync(entrypoint);
+
+    // chmod to the already-effective mode models an extended-attribute update:
+    // ctime changes, while the executable's bytes and content mtime do not.
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    chmodSync(entrypoint, before.mode & 0o777);
+    const metadataOnly = statSync(entrypoint);
+    assert.equal(metadataOnly.mtimeMs, before.mtimeMs);
+    assert.notEqual(metadataOnly.ctimeMs, before.ctimeMs);
+    assert.doesNotThrow(() => assertLockedWranglerRuntimeUnchanged(expected));
+
+    const original = readFileSync(entrypoint);
+    try {
+      writeFileSync(entrypoint, Buffer.concat([
+        original,
+        Buffer.from("\n// changed runtime bytes\n"),
+      ]));
+      assert.throws(
+        () => assertLockedWranglerRuntimeUnchanged(expected),
+        (error) => error.code === "LOCKED_WRANGLER_RUNTIME_CHANGED",
+      );
+    } finally {
+      writeFileSync(entrypoint, original);
+      original.fill(0);
     }
   } finally {
     rmSync(temporary, { recursive: true, force: true });

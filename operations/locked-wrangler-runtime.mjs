@@ -137,6 +137,22 @@ function sameIdentity(left, right) {
     left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
 }
 
+/**
+ * Keep ctime as an in-read race detector, but do not make it a long-lived
+ * content pin. macOS adds com.apple.provenance extended attributes to newly
+ * materialized files asynchronously. That changes ctime without changing the
+ * inode, bytes, ownership, permissions, or source mtime. Every long-lived
+ * check below reopens and hashes every regular file and re-walks the exact
+ * directory tree, so accepting that one metadata-only transition does not
+ * accept a changed runtime.
+ */
+function samePinnedIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino &&
+    left.nlink === right.nlink && left.size === right.size &&
+    left.mode === right.mode && left.uid === right.uid &&
+    left.mtimeMs === right.mtimeMs;
+}
+
 function assertResolutionGuardSupport() {
   if (typeof nodeModule.registerHooks !== "function") {
     fail("LOCKED_WRANGLER_RESOLUTION_GUARD_UNSUPPORTED");
@@ -537,8 +553,8 @@ export function assertLockedWranglerRuntimeUnchanged(expected) {
   if (current.entrypointPath !== expected.entrypointPath ||
       current.resolutionGuardPath !== expected.resolutionGuardPath ||
       current.nodeExecPath !== expected.nodeExecPath ||
-      !sameIdentity(current.lockPin.identity, expected.lockPin.identity) ||
-      !sameIdentity(current.nodePin.identity, expected.nodePin.identity) ||
+      !samePinnedIdentity(current.lockPin.identity, expected.lockPin.identity) ||
+      !samePinnedIdentity(current.nodePin.identity, expected.nodePin.identity) ||
       current.filePins.length !== expected.filePins.length ||
       current.directoryPins.length !== expected.directoryPins.length) {
     fail("LOCKED_WRANGLER_RUNTIME_CHANGED");
@@ -547,14 +563,15 @@ export function assertLockedWranglerRuntimeUnchanged(expected) {
     const left = current.filePins[index];
     const right = expected.filePins[index];
     if (left.relative !== right.relative || left.hash !== right.hash ||
-        !sameIdentity(left.identity, right.identity)) {
+        !samePinnedIdentity(left.identity, right.identity)) {
       fail("LOCKED_WRANGLER_RUNTIME_CHANGED");
     }
   }
   for (let index = 0; index < current.directoryPins.length; index++) {
     const left = current.directoryPins[index];
     const right = expected.directoryPins[index];
-    if (left.relative !== right.relative || !sameIdentity(left.identity, right.identity)) {
+    if (left.relative !== right.relative ||
+        !samePinnedIdentity(left.identity, right.identity)) {
       fail("LOCKED_WRANGLER_RUNTIME_CHANGED");
     }
   }
