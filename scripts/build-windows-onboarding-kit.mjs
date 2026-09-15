@@ -11,14 +11,9 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
-  lstatSync,
-  mkdtempSync,
   readFileSync,
-  readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55,6 +50,13 @@ export const REQUIRED_CI_JOBS = Object.freeze([
 ]);
 const FIXED_ZIP_MTIME = new Date(1980, 0, 1, 0, 0, 0, 0);
 const READY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const RUNTIME_IDENTITY_DOWNLOAD_REFUSALS = new Set([
+  "ci_runtime_identity_download_failed",
+  "ci_runtime_identity_download_binary_output_required",
+  "ci_runtime_identity_download_stderr_not_empty",
+  "ci_runtime_identity_download_size_mismatch",
+  "ci_runtime_identity_download_digest_mismatch",
+]);
 
 export function createKitCommandEnvironment(source = process.env) {
   const environment = createPlanEnvironment(source);
@@ -368,53 +370,59 @@ export function downloadRuntimeIdentityArtifact({
   artifact,
   commandRunner = spawnSync,
   environment = createKitCommandEnvironment(process.env),
-  temporaryRoot = tmpdir(),
 } = {}) {
   const versionMatch = artifact?.filename?.match(
     /^brain-installer-(\d+\.\d+\.\d+)-runtime-identity\.json$/,
   );
   if (!artifact || !versionMatch ||
+      !/^[1-9][0-9]*$/.test(String(ciRunId || "")) ||
       !/^[1-9][0-9]*$/.test(String(artifact.artifact_id || "")) ||
-      artifact.filename !== runtimeIdentityArtifactName(versionMatch[1])) {
+      artifact.filename !== runtimeIdentityArtifactName(versionMatch[1]) ||
+      !Number.isSafeInteger(artifact.bytes) || artifact.bytes < 1 ||
+      artifact.bytes > 4096 || !/^[0-9a-f]{64}$/.test(String(artifact.sha256 || ""))) {
     throw refusal("ci_runtime_identity_artifact_metadata_invalid");
   }
-  const temporary = mkdtempSync(join(temporaryRoot, "brain-runtime-identity-"));
-  if (process.platform !== "win32") chmodSync(temporary, 0o700);
+  let stdout;
+  let stderr;
+  let bytes;
   try {
     const result = commandRunner("gh", [
-      "run", "download", String(ciRunId), "--repo", REPOSITORY_GH_TARGET,
-      "--name", artifact.filename, "--dir", temporary,
+      "api", "--hostname", "github.com",
+      `repos/${REPOSITORY_SLUG}/actions/artifacts/${artifact.artifact_id}/zip`,
     ], {
       cwd: ROOT,
       env: environment,
-      encoding: "utf8",
+      encoding: null,
       shell: false,
-      maxBuffer: 8 * 1024 * 1024,
+      maxBuffer: 8192,
+      windowsHide: true,
     });
-    if (!commandSucceeded(result)) throw refusal("ci_runtime_identity_download_failed");
-    const entries = readdirSync(temporary, { withFileTypes: true });
-    if (entries.length !== 1 || entries[0].name !== artifact.filename ||
-        !entries[0].isFile() || entries[0].isSymbolicLink()) {
-      throw refusal("ci_runtime_identity_download_shape_invalid");
+    stdout = result?.stdout;
+    stderr = result?.stderr;
+    if (result?.error || result?.signal || result?.status !== 0) {
+      throw refusal("ci_runtime_identity_download_failed");
     }
-    const path = join(temporary, artifact.filename);
-    const before = lstatSync(path);
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
-        before.size !== artifact.bytes || before.size < 1 || before.size > 4096) {
-      throw refusal("ci_runtime_identity_download_shape_invalid");
+    if (!Buffer.isBuffer(stdout)) {
+      throw refusal("ci_runtime_identity_download_binary_output_required");
     }
-    const bytes = Buffer.from(readFileSync(path));
-    const after = lstatSync(path);
-    if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 ||
-        before.dev !== after.dev || before.ino !== after.ino ||
-        before.size !== after.size || before.mtimeMs !== after.mtimeMs ||
-        before.ctimeMs !== after.ctimeMs) {
-      bytes.fill(0);
-      throw refusal("ci_runtime_identity_download_changed");
+    if (!Buffer.isBuffer(stderr) || stderr.length !== 0) {
+      throw refusal("ci_runtime_identity_download_stderr_not_empty");
     }
+    if (stdout.length !== artifact.bytes) {
+      throw refusal("ci_runtime_identity_download_size_mismatch");
+    }
+    if (sha256(stdout) !== artifact.sha256) {
+      throw refusal("ci_runtime_identity_download_digest_mismatch");
+    }
+    bytes = Buffer.from(stdout);
     return bytes;
+  } catch (error) {
+    bytes?.fill(0);
+    if (RUNTIME_IDENTITY_DOWNLOAD_REFUSALS.has(error?.code)) throw error;
+    throw refusal("ci_runtime_identity_download_failed");
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    if (Buffer.isBuffer(stdout)) stdout.fill(0);
+    if (Buffer.isBuffer(stderr)) stderr.fill(0);
   }
 }
 
@@ -423,7 +431,6 @@ export function loadCiEvidence({ ciRunId, expectedSha, version }, {
   environment = createKitCommandEnvironment(process.env),
   clock = () => new Date(),
   identityArtifactReader = downloadRuntimeIdentityArtifact,
-  temporaryRoot = tmpdir(),
 } = {}) {
   const run = runJson(commandRunner, [
     "run", "view", String(ciRunId), "--repo", REPOSITORY_GH_TARGET,
@@ -443,7 +450,6 @@ export function loadCiEvidence({ ciRunId, expectedSha, version }, {
     artifact,
     commandRunner,
     environment,
-    temporaryRoot,
   });
   try {
     return validateCiRun(run, artifacts, {

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -308,6 +307,7 @@ test("GitHub evidence must be one successful exact-SHA ci run with every require
 
 test("production evidence is fetched only through gh for the named repository and run", () => {
   const calls = [];
+  let identityBytes;
   const evidence = loadCiEvidence({ ciRunId: RUN_ID, expectedSha: SHA, version: VERSION }, {
     commandRunner(command, args, options) {
       calls.push({ command, args, options });
@@ -320,7 +320,8 @@ test("production evidence is fetched only through gh for the named repository an
     identityArtifactReader({ artifact, environment }) {
       assert.equal(artifact.filename, runtimeIdentityArtifactName(VERSION));
       assert.deepEqual(environment, { PATH: "/fixture/bin" });
-      return runtimeIdentityBytes();
+      identityBytes = runtimeIdentityBytes();
+      return identityBytes;
     },
   });
   assert.equal(evidence.run_id, RUN_ID);
@@ -331,9 +332,10 @@ test("production evidence is fetched only through gh for the named repository an
   assert.deepEqual(calls[1].args.slice(0, 3), ["api", "--hostname", "github.com"]);
   assert.equal(calls[1].args[3], `repos/${REPOSITORY_SLUG}/actions/runs/${RUN_ID}/artifacts?per_page=100`);
   assert.equal(calls.every(({ options }) => options.shell === false), true);
+  assert.equal(identityBytes.every((byte) => byte === 0), true);
 });
 
-test("the runtime identity artifact download is exact-name, raw, and private-temp bounded", () => {
+test("the runtime identity artifact download captures exact raw bytes by immutable ID", () => {
   const bytes = runtimeIdentityBytes();
   const response = artifactResponse();
   const source = response.artifacts.find(({ name }) =>
@@ -345,28 +347,126 @@ test("the runtime identity artifact download is exact-name, raw, and private-tem
     sha256: source.digest.slice("sha256:".length),
   };
   const received = [];
+  const commandStdout = Buffer.from(bytes);
+  const commandStderr = Buffer.alloc(0);
   const downloaded = downloadRuntimeIdentityArtifact({
     ciRunId: RUN_ID,
     artifact,
     environment: { PATH: "/fixture/bin" },
-    temporaryRoot: tmpdir(),
     commandRunner(command, args, options) {
       received.push({ command, args, options });
-      const directory = args[args.indexOf("--dir") + 1];
-      writeFileSync(join(directory, artifact.filename), bytes, { mode: 0o600 });
-      return { status: 0, stdout: "" };
+      return { status: 0, signal: null, stdout: commandStdout, stderr: commandStderr };
     },
   });
   assert.deepEqual(downloaded, bytes);
-  downloaded.fill(0);
+  assert.equal(commandStdout.every((byte) => byte === 0), true);
   assert.equal(received.length, 1);
   assert.equal(received[0].command, "gh");
-  assert.deepEqual(received[0].args.slice(0, 6), [
-    "run", "download", RUN_ID, "--repo", REPOSITORY_GH_TARGET,
-    "--name",
+  assert.deepEqual(received[0].args, [
+    "api", "--hostname", "github.com",
+    `repos/${REPOSITORY_SLUG}/actions/artifacts/${artifact.artifact_id}/zip`,
   ]);
-  assert.equal(received[0].args[6], runtimeIdentityArtifactName(VERSION));
+  assert.deepEqual(received[0].options.env, { PATH: "/fixture/bin" });
+  assert.equal(received[0].options.encoding, null);
   assert.equal(received[0].options.shell, false);
+  assert.equal(received[0].options.windowsHide, true);
+  downloaded.fill(0);
+});
+
+test("the raw artifact download fails closed and zeroes captured buffers", () => {
+  const source = artifactResponse().artifacts.find(({ name }) =>
+    name === runtimeIdentityArtifactName(VERSION));
+  const artifact = {
+    artifact_id: String(source.id),
+    filename: source.name,
+    bytes: source.size_in_bytes,
+    sha256: source.digest.slice("sha256:".length),
+  };
+  const cases = [
+    {
+      name: "nonzero exit",
+      code: /ci_runtime_identity_download_failed/,
+      result: () => ({
+        status: 1,
+        signal: null,
+        stdout: Buffer.from("partial private response"),
+        stderr: Buffer.from("private-token-must-not-escape"),
+      }),
+    },
+    {
+      name: "string stdout",
+      code: /ci_runtime_identity_download_binary_output_required/,
+      result: () => ({ status: 0, signal: null, stdout: "not raw bytes", stderr: Buffer.alloc(0) }),
+    },
+    {
+      name: "nonempty stderr",
+      code: /ci_runtime_identity_download_stderr_not_empty/,
+      result: () => ({
+        status: 0,
+        signal: null,
+        stdout: Buffer.from(runtimeIdentityBytes()),
+        stderr: Buffer.from("private-token-must-not-escape"),
+      }),
+    },
+    {
+      name: "wrong byte count",
+      code: /ci_runtime_identity_download_size_mismatch/,
+      result: () => ({
+        status: 0,
+        signal: null,
+        stdout: Buffer.concat([runtimeIdentityBytes(), Buffer.from([0])]),
+        stderr: Buffer.alloc(0),
+      }),
+    },
+    {
+      name: "wrong digest",
+      code: /ci_runtime_identity_download_digest_mismatch/,
+      result: () => {
+        const stdout = runtimeIdentityBytes();
+        stdout[0] ^= 1;
+        return { status: 0, signal: null, stdout, stderr: Buffer.alloc(0) };
+      },
+    },
+  ];
+  for (const fixture of cases) {
+    const result = fixture.result();
+    let error;
+    try {
+      downloadRuntimeIdentityArtifact({
+        ciRunId: RUN_ID,
+        artifact,
+        environment: { PATH: "/fixture/bin" },
+        commandRunner() { return result; },
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    assert.match(String(error?.message || ""), fixture.code, fixture.name);
+    assert.doesNotMatch(String(error?.message || ""), /private-token/, fixture.name);
+    if (Buffer.isBuffer(result.stdout)) {
+      assert.equal(result.stdout.every((byte) => byte === 0), true, fixture.name);
+    }
+    if (Buffer.isBuffer(result.stderr)) {
+      assert.equal(result.stderr.every((byte) => byte === 0), true, fixture.name);
+    }
+  }
+
+  assert.throws(() => downloadRuntimeIdentityArtifact({
+    ciRunId: RUN_ID,
+    artifact,
+    environment: { PATH: "/fixture/bin" },
+    commandRunner() { throw new Error("private-token-must-not-escape"); },
+  }), (error) => {
+    assert.match(error.message, /ci_runtime_identity_download_failed/);
+    assert.doesNotMatch(error.message, /private-token/);
+    return true;
+  });
+
+  assert.throws(() => downloadRuntimeIdentityArtifact({
+    ciRunId: RUN_ID,
+    artifact: { ...artifact, sha256: "not-a-digest" },
+    commandRunner() { throw new Error("must not run"); },
+  }), /ci_runtime_identity_artifact_metadata_invalid/);
 });
 
 test("Git and gh receive the same credential-minimized command environment", async () => {
