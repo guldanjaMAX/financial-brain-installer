@@ -1795,16 +1795,10 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
     "package.json",
     code,
   );
-  const executingPackageLock = readStableExecutingPackageMember(
-    "package-lock.json",
-    code,
-  );
   try {
-    if (executingPackageJson.hash !== source.package_json_sha256 ||
-        executingPackageLock.hash !== source.package_lock_sha256) refuse(code);
+    if (executingPackageJson.hash !== source.package_json_sha256) refuse(code);
   } finally {
     executingPackageJson.raw.fill(0);
-    executingPackageLock.raw.fill(0);
   }
 
   if (!Array.isArray(receipt.steps) ||
@@ -1878,7 +1872,6 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
     wranglerRuntime,
     executionPins: packageIdentity.executionPins,
     packageJsonInfo: executingPackageJson.info,
-    packageLockInfo: executingPackageLock.info,
     receiptInfo: receiptFile.info,
     packageInfo: packageFile.info,
     ...(sourcePreflightReceiptFile ? {
@@ -2284,7 +2277,6 @@ function assertTestBootstrapCandidateEvidenceUnchanged(
   const sourcePins = [
     ...expected.executionPins,
     { path: join(ROOT, "package.json"), info: expected.packageJsonInfo },
-    { path: join(ROOT, "package-lock.json"), info: expected.packageLockInfo },
   ];
   for (const pin of sourcePins) {
     let current;
@@ -8753,7 +8745,9 @@ function wipeImplementationGraph(graph) {
 
 /**
  * Bind approvals to every executable local import, the eval subprocess graph,
- * the package lock, and every checked-in D1 migration consumed by this runner.
+ * the packed package metadata, and every checked-in D1 migration consumed by
+ * this runner. The separately sealed Wrangler runtime continues to bind the
+ * source package lock used to materialize its dependency closure.
  */
 function loadRecoveryImplementationGraph() {
   const queue = [fileURLToPath(import.meta.url), EVAL_RUNNER];
@@ -8774,7 +8768,7 @@ function loadRecoveryImplementationGraph() {
       }
     }
 
-    for (const path of [join(ROOT, "package.json"), join(ROOT, "package-lock.json")]) {
+    for (const path of [join(ROOT, "package.json")]) {
       if (visited.has(path)) continue;
       const loaded = readStableImplementationFile(path);
       visited.add(path);

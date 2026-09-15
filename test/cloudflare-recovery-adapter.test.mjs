@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
@@ -434,6 +435,53 @@ function npmPackageFixture(destination) {
     bytes: readFileSync(join(destination, metadata[0].filename)),
     fileCount: metadata[0].files.length,
   });
+}
+
+function installNpmPackageFixture(packagePath, destination) {
+  const npmCli = process.env.npm_execpath;
+  const command = npmCli
+    ? process.execPath
+    : process.platform === "win32" ? "npm.cmd" : "npm";
+  const args = [
+    ...(npmCli ? [npmCli] : []),
+    "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
+    "--offline", "--cache", join(destination, "npm-cache"),
+    "--prefix", destination, packagePath,
+  ];
+  const environment = {
+    PATH: process.env.PATH || "",
+    LANG: "C",
+    LC_ALL: "C",
+    npm_config_update_notifier: "false",
+  };
+  for (const name of [
+    "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot", "WINDIR", "ComSpec",
+    "PATHEXT", "LOCALAPPDATA", "APPDATA", "USERPROFILE",
+  ]) {
+    if (typeof process.env[name] === "string" && process.env[name]) {
+      environment[name] = process.env[name];
+    }
+  }
+  const installed = spawnSync(command, args, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: environment,
+    shell: !npmCli && process.platform === "win32",
+    timeout: 120_000,
+    windowsHide: true,
+  });
+  assert.equal(
+    installed.status,
+    0,
+    "focused recovery test must install its exact npm tarball without network access",
+  );
+  const packageRoot = join(
+    destination,
+    ...(process.platform === "win32" ? [] : ["lib"]),
+    "node_modules",
+    "brain-installer",
+  );
+  return realpathSync(packageRoot);
 }
 
 function packageWithMutatedMember(packageBytes, wantedPath) {
@@ -3520,6 +3568,45 @@ try {
     exactProvisioningPreparation.binding.package_sha256,
     hash(fieldPackageBytes),
     "the six-field producer receipt must bind the independently inspected package",
+  );
+  const installedPackagePrefix = join(sandbox, "installed-package-probe");
+  mkdirSync(installedPackagePrefix, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(installedPackagePrefix, 0o700);
+  const installedPackageRoot = installNpmPackageFixture(
+    fieldPackagePath,
+    installedPackagePrefix,
+  );
+  assert.equal(
+    existsSync(join(installedPackageRoot, "package-lock.json")),
+    false,
+    "npm must not be assumed to install the source package lock inside the package",
+  );
+  const installedRecoveryAdapter = await import(pathToFileURL(join(
+    installedPackageRoot,
+    "operations",
+    "cloudflare-recovery-adapter.mjs",
+  )).href);
+  const installedProvisioningPreparation =
+    installedRecoveryAdapter.inspectDisposableRecoveryProvisioningPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+    });
+  assert.equal(
+    installedProvisioningPreparation.binding.package_sha256,
+    hash(fieldPackageBytes),
+    "the npm-installed adapter must accept the separately sealed package and runtime evidence",
+  );
+  assert.equal(
+    installedProvisioningPreparation.revalidate(),
+    true,
+    "the npm-installed adapter must revalidate without an impossible installed package-lock pin",
+  );
+  assert.match(
+    installedRecoveryAdapter.cloudflareRecoveryImplementationFingerprint(),
+    /^[a-f0-9]{64}$/u,
+    "the npm-installed implementation graph must be fingerprintable from shipped bytes",
   );
   const fieldK0Binding = Object.freeze({
     candidate_sha: testCandidateSha,
