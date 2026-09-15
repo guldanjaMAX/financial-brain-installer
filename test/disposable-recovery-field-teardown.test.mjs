@@ -145,8 +145,8 @@ function privateReceiptSha256(value) {
 const WORKER_MISSING_CODE_SHA256 = sha256(JSON.stringify({ codes: [10007] }));
 
 function injectedFinalizationCrash(stage, failure) {
-  if (stage === "post_commit_pre_rename") {
-    return { rename() { throw failure; } };
+  if (stage === "post_commit_pre_publish") {
+    return { publish() { throw failure; } };
   }
   if (stage === "post_final_sync") {
     return { removePending() { throw failure; } };
@@ -3593,7 +3593,7 @@ testWithMacosPrivateReceipt("committed recovery awaits full async revalidation b
         finalize: (reservation, receipt) => finalizePrivateAggregateReceipt(
           reservation,
           receipt,
-          injectedFinalizationCrash("post_commit_pre_rename", failure),
+          injectedFinalizationCrash("post_commit_pre_publish", failure),
         ),
       }),
       (error) => error === failure,
@@ -3719,7 +3719,7 @@ testWithMacosPrivateReceipt("target teardown requires the exact completed source
 
 testWithMacosPrivateReceipt("preview finalization recovers every commit boundary with exact validation", async () => {
   for (const stage of [
-    "post_commit_pre_rename",
+    "post_commit_pre_publish",
     "post_final_sync",
     "post_pending_removal",
     "post_commit_removal",
@@ -4073,7 +4073,7 @@ testWithMacosPrivateReceipt("broker persists planned and sent_unconfirmed before
 testWithMacosPrivateReceipt("journal records recover every commit boundary without a second DELETE", async () => {
   for (const journalState of ["planned", "sent_unconfirmed", "confirmed"]) {
     for (const stage of [
-      "post_commit_pre_rename",
+      "post_commit_pre_publish",
       "post_final_sync",
       "post_pending_removal",
       "post_commit_removal",
@@ -4386,7 +4386,7 @@ testWithMacosPrivateReceipt("resume closes the final receipt after a crash follo
 testWithMacosPrivateReceipt("absent and final receipts recover every commit boundary without another DELETE", async () => {
   for (const artifact of ["absent", "final"]) {
     for (const stage of [
-      "post_commit_pre_rename",
+      "post_commit_pre_publish",
       "post_final_sync",
       "post_pending_removal",
       "post_commit_removal",

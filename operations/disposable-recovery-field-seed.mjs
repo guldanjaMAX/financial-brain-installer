@@ -1034,7 +1034,7 @@ export async function runDisposableRecoveryFieldSeed({
     }
     return Object.freeze({ receipt: existing.value, receiptSha256: existing.sha256 });
   }
-  if (!receiptExists && pendingExists) {
+  if (receiptExists && pendingExists) {
     refuse("DISPOSABLE_RECOVERY_SEED_RESERVATION_INCOMPLETE");
   }
 
@@ -1042,7 +1042,7 @@ export async function runDisposableRecoveryFieldSeed({
   let reservation = null;
   let finalized = false;
   try {
-    if (receiptExists && pendingExists) {
+    if (!receiptExists && pendingExists) {
       reservation = resumePrivateAggregateReceiptReservation({
         path: absoluteReceiptPath,
         pendingPath,

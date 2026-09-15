@@ -86,7 +86,16 @@ import {
   disposableRecoveryTargetEvalApprovalFingerprint,
   runDisposableRecoveryTargetEvaluation,
 } from "../operations/disposable-recovery-target-eval.mjs";
-import { readPrivateAggregateReceipt } from "../operations/private-aggregate-receipt.mjs";
+import {
+  abandonPrivateAggregateReceipt,
+  assertPrivateAggregateOutputPath,
+  finalizePrivateAggregateReceipt,
+  privateAggregateReceiptCommitPath,
+  privateAggregateReceiptPendingPath,
+  privateAggregateReceiptStagedPath,
+  readPrivateAggregateReceipt,
+  reservePrivateAggregateReceipt,
+} from "../operations/private-aggregate-receipt.mjs";
 import {
   V048_DISPOSABLE_CAMPAIGN_CORPORA,
 } from "../operations/v048-disposable-campaign-contract.mjs";
@@ -4088,6 +4097,133 @@ try {
       ?.evidence.source_d1_deletion_state_fingerprint,
     /^[0-9a-f]{64}$/u,
   );
+
+  // The promotion intent is a local write-ahead authority. Exercise every
+  // primitive crash shape independently of the provider: attempt two must
+  // finish the exact attempt-one bytes before even its first Wrangler read,
+  // then refuse a paused-target replay with no promotion command.
+  const promotionIntentName = ".brain-recovery-target-promotion-intent-v1.json";
+  const promotionIntentContext = Object.freeze({
+    stage: "rebuild_vectorize",
+    attempt: 1,
+    planFingerprint: fieldInitialized.plan.plan_fingerprint,
+    targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+    completed: structuredClone(stagedFieldState.completed),
+  });
+  const promotionIntentHarnessOptions = Object.freeze({
+    initialTargetRestored: true,
+    initialVectorCount: 7_202,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 6_001,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const promotionIntentConfig = (directory) => Object.freeze({
+    ...approvedOrdinaryFieldConfig,
+    artifactDirectory: directory,
+    plan: fieldInitialized.plan,
+    state: stagedFieldState,
+  });
+  const prototypeIntentDirectory = join(sandbox, "private-promotion-intent-prototype");
+  mkdirSync(prototypeIntentDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(prototypeIntentDirectory, 0o700);
+  const prototypeIntentHarness = providerHarness({
+    ...promotionIntentHarnessOptions,
+    initialVectorCount: 0,
+    failPromotionBeforeApplyOnce: true,
+  });
+  const prototypeIntentGate = createCloudflareRecoveryFieldGateAdapters(
+    promotionIntentConfig(prototypeIntentDirectory),
+    prototypeIntentHarness.dependencies,
+  );
+  await assert.rejects(
+    prototypeIntentGate.adapters.rebuild_vectorize(promotionIntentContext),
+    (error) => error.code === "RECOVERY_WRANGLER_CALL_FAILED",
+  );
+  assert.equal(prototypeIntentHarness.promotionCalls, 1);
+  const prototypeIntentPath = join(prototypeIntentDirectory, promotionIntentName);
+  const prototypeIntent = readPrivateAggregateReceipt(prototypeIntentPath).value;
+  assert.equal(prototypeIntent.rebuild_attempt, 1);
+  const prototypeMarker = Object.freeze({
+    schema_version: 1,
+    kind: "v048_target_worker_promotion_intent_reservation_v1",
+    status: "promotion_intent_reserved",
+    receipt: prototypeIntent,
+  });
+
+  for (const cut of [
+    "pending_marker_durable",
+    "staged_receipt_durable",
+    "finalization_commit_durable",
+    "final_receipt_link_durable",
+    "final_receipt_durable",
+    "pending_marker_removal_durable",
+  ]) {
+    const directory = join(sandbox, `private-promotion-intent-${cut}`);
+    mkdirSync(directory, { mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(directory, 0o700);
+    const intentPath = join(directory, promotionIntentName);
+    const output = assertPrivateAggregateOutputPath(intentPath);
+    let reservation = null;
+    try {
+      if (cut === "pending_marker_durable") {
+        assert.throws(
+          () => reservePrivateAggregateReceipt(output, prototypeMarker, {
+            onTransition(name) {
+              if (name === cut) throw new Error(`synthetic ${cut} stop`);
+            },
+          }),
+          new RegExp(`synthetic ${cut} stop`, "u"),
+        );
+      } else {
+        reservation = reservePrivateAggregateReceipt(output, prototypeMarker);
+        assert.throws(
+          () => finalizePrivateAggregateReceipt(reservation, prototypeIntent, {
+            onFinalizationTransition(name) {
+              if (name === cut) throw new Error(`synthetic ${cut} stop`);
+            },
+          }),
+          new RegExp(`synthetic ${cut} stop`, "u"),
+        );
+        abandonPrivateAggregateReceipt(reservation);
+      }
+
+      const retryHarness = providerHarness(promotionIntentHarnessOptions);
+      const underlyingRunWrangler = retryHarness.dependencies.runWrangler;
+      let firstWranglerChecked = false;
+      const retryDependencies = {
+        ...retryHarness.dependencies,
+        runWrangler(request) {
+          if (!firstWranglerChecked) {
+            firstWranglerChecked = true;
+            assert.equal(existsSync(intentPath), true, cut);
+            assert.equal(existsSync(privateAggregateReceiptPendingPath(intentPath)), false, cut);
+            assert.equal(existsSync(privateAggregateReceiptStagedPath(intentPath)), false, cut);
+            assert.equal(existsSync(privateAggregateReceiptCommitPath(intentPath)), false, cut);
+            assert.deepEqual(readPrivateAggregateReceipt(intentPath).value, prototypeIntent, cut);
+          }
+          return underlyingRunWrangler(request);
+        },
+      };
+      const retryGate = createCloudflareRecoveryFieldGateAdapters(
+        promotionIntentConfig(directory),
+        retryDependencies,
+      );
+      await assert.rejects(
+        retryGate.adapters.rebuild_vectorize({
+          ...promotionIntentContext,
+          attempt: 2,
+        }),
+        (error) => error.code === "RECOVERY_TARGET_PROMOTION_INTENT_AMBIGUOUS",
+        cut,
+      );
+      assert.equal(firstWranglerChecked, true, cut);
+      assert.equal(retryHarness.promotionCalls, 0, cut);
+      assert.equal(readPrivateAggregateReceipt(intentPath).value.rebuild_attempt, 1, cut);
+    } finally {
+      if (reservation && !reservation.closed) abandonPrivateAggregateReceipt(reservation);
+    }
+  }
   const verifyD1ResumeState = {
     ...structuredClone(stagedFieldState),
     status: "running",

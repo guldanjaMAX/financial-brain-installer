@@ -592,9 +592,9 @@ const expected = [
   // reserves an owner-only pending receipt before credential/provider work,
   // and uses only the locked runtime plus manifest-bound disposable source.
   "operations/disposable-recovery-field-seed.mjs",
-  // Owner-only aggregate field receipts. The helper reserves both final and
-  // pending paths before any live action, pins inode/owner/mode, and refuses
-  // ambiguous replacement or durability state.
+  // Owner-only aggregate field receipts. The helper durably reserves one
+  // pending path before any live action, leaves the final path absent until
+  // no-replace publication, and refuses ambiguous replacement or recovery state.
   "operations/private-aggregate-receipt.mjs",
   // Shared byte contract for a normalized install-state prefix plus one direct
   // D1 data export. It owns no credential, provider, or command transport.

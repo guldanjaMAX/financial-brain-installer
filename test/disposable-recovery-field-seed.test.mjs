@@ -333,9 +333,9 @@ posixTest("the field runner reserves first, seals exactly 6,001, and removes onl
       revalidate: async () => events.push("revalidate"),
       createTransports: async (beforeBoundary) => {
         events.push("create-transports");
-        assert.equal(existsSync(receiptPath), true);
+        assert.equal(existsSync(receiptPath), false);
         assert.equal(existsSync(pendingPath), true);
-        const marker = JSON.parse(readFileSync(receiptPath, "utf8"));
+        const marker = JSON.parse(readFileSync(pendingPath, "utf8"));
         assert.equal(marker.status, "execution_in_progress");
         assert.equal(marker.fixture_sha256, DISPOSABLE_RECOVERY_FIXTURE_SHA256);
         assert.equal(marker.expected_documents, DISPOSABLE_RECOVERY_SEED_DOCUMENTS);
@@ -406,7 +406,7 @@ posixTest("an ambiguous batch persists an exact private stop record and blocks b
         error?.resume_record?.status === "write_confirmation_ambiguous",
     );
     assert.equal(providerBoundaryReached, true);
-    assert.equal(existsSync(receiptPath), true);
+    assert.equal(existsSync(receiptPath), false);
     assert.equal(existsSync(pendingPath), true);
     assert.equal(existsSync(resumePath), true);
     const resume = readPrivateAggregateReceipt(resumePath).value;

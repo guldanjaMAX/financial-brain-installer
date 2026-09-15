@@ -389,10 +389,10 @@ export async function runDisposableRecoveryTargetEvaluation({
     await assertEvidenceUnchanged(revalidateBoundEvidence);
     return existing;
   }
-  if (!existsSync(outputPath) && existsSync(pendingPath)) {
+  if (existsSync(outputPath) && existsSync(pendingPath)) {
     refuse("DISPOSABLE_RECOVERY_TARGET_EVAL_RESERVATION_INCOMPLETE");
   }
-  const resuming = existsSync(outputPath) && existsSync(pendingPath);
+  const resuming = !existsSync(outputPath) && existsSync(pendingPath);
   let output;
   if (resuming) {
     output = recoveryOutput;

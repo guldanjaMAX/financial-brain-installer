@@ -105,11 +105,16 @@ import {
 import {
   abandonPrivateAggregateReceipt,
   assertNoDarwinReceiptAcl,
+  assertPrivateAggregateReceiptDirectory,
   assertPrivateAggregateOutputPath,
   finalizePrivateAggregateReceipt,
+  privateAggregateReceiptCommitPath,
   privateAggregateReceiptPendingPath,
+  privateAggregateReceiptStagedPath,
   readPrivateAggregateReceipt,
+  recoverPrivateAggregateReceiptFinalization,
   reservePrivateAggregateReceipt,
+  resumePrivateAggregateReceiptReservation,
 } from "./private-aggregate-receipt.mjs";
 import {
   assertNoRecoveryArtifactResidue,
@@ -307,6 +312,7 @@ const RECOVERY_TEST_BOOTSTRAP_COMPLETED_RESUME_AUTHORIZATION_NAME =
 const MAX_RECOVERY_TEST_BOOTSTRAP_CHECKPOINT_BYTES = 16 * 1024;
 const MAX_RECOVERY_TEST_BOOTSTRAP_PROMOTION_AUTHORIZATION_BYTES = 16 * 1024;
 const MAX_RECOVERY_TEST_BOOTSTRAP_RESUME_AUTHORIZATION_BYTES = 16 * 1024;
+const MAX_TARGET_PROMOTION_INTENT_BYTES = 16 * 1024;
 const MAX_RECOVERY_TEST_FIELD_RECEIPT_BYTES = 1024 * 1024;
 const MAX_RECOVERY_TEST_DEPLOYMENT_RECEIPT_BYTES = 1024 * 1024;
 const MAX_RECOVERY_TEST_SEED_RECEIPT_BYTES = 1024 * 1024;
@@ -5369,6 +5375,12 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
   const targetPromotionIntentPendingPath = privateAggregateReceiptPendingPath(
     targetPromotionIntentPath,
   );
+  const targetPromotionIntentCommitPath = privateAggregateReceiptCommitPath(
+    targetPromotionIntentPath,
+  );
+  const targetPromotionIntentStagedPath = privateAggregateReceiptStagedPath(
+    targetPromotionIntentPath,
+  );
   let fieldDeploymentReceiptRecord = null;
   if (fieldDeploymentReceiptPath) {
     assertDisposableRecoveryFieldCampaignIdentity(pins.binding);
@@ -7770,9 +7782,54 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     return Object.freeze({ receipt: Object.freeze(structuredClone(value)), vectorState });
   }
 
+  function targetPromotionIntentReservationMarker(receipt) {
+    return Object.freeze({
+      schema_version: 1,
+      kind: "v048_target_worker_promotion_intent_reservation_v1",
+      status: "promotion_intent_reserved",
+      receipt: Object.freeze(structuredClone(receipt)),
+    });
+  }
+
+  function validateTargetPromotionIntentReservationMarker(value, expectedState = null) {
+    const code = "RECOVERY_TARGET_PROMOTION_INTENT_INVALID";
+    exactAggregateReceiptFields(value, [
+      "schema_version", "kind", "status", "receipt",
+    ], code);
+    if (value.schema_version !== 1 ||
+        value.kind !== "v048_target_worker_promotion_intent_reservation_v1" ||
+        value.status !== "promotion_intent_reserved") refuse(code);
+    const validated = validateTargetPromotionIntent(value.receipt, expectedState);
+    return Object.freeze({
+      marker: targetPromotionIntentReservationMarker(validated.receipt),
+      ...validated,
+    });
+  }
+
+  function targetPromotionIntentOutput(code) {
+    return Object.freeze({
+      path: targetPromotionIntentPath,
+      pendingPath: targetPromotionIntentPendingPath,
+      commitPath: targetPromotionIntentCommitPath,
+      stagedPath: targetPromotionIntentStagedPath,
+      parent: assertPrivateAggregateReceiptDirectory(pins.artifacts.path, { code }),
+    });
+  }
+
+  function targetPromotionIntentPresence() {
+    return Object.freeze({
+      final: existsSync(targetPromotionIntentPath),
+      pending: existsSync(targetPromotionIntentPendingPath),
+      staged: existsSync(targetPromotionIntentStagedPath),
+      commit: existsSync(targetPromotionIntentCommitPath),
+    });
+  }
+
   function loadTargetPromotionIntent(expectedState = null) {
     const code = "RECOVERY_TARGET_PROMOTION_INTENT_INVALID";
-    if (existsSync(targetPromotionIntentPendingPath)) refuse(code);
+    if (existsSync(targetPromotionIntentPendingPath) ||
+        existsSync(targetPromotionIntentStagedPath) ||
+        existsSync(targetPromotionIntentCommitPath)) refuse(code);
     if (!existsSync(targetPromotionIntentPath)) return null;
     try {
       const loaded = readPrivateAggregateReceipt(targetPromotionIntentPath, { code });
@@ -7783,10 +7840,89 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     }
   }
 
+  function reconcileTargetPromotionIntent(expectedState) {
+    const code = "RECOVERY_TARGET_PROMOTION_INTENT_INVALID";
+    const before = targetPromotionIntentPresence();
+    if (!before.final && !before.pending && !before.staged && !before.commit) return null;
+    if (before.final && !before.pending && !before.staged && !before.commit) {
+      return loadTargetPromotionIntent(expectedState);
+    }
+    let reserved;
+    if (before.pending) {
+      let pending;
+      try {
+        pending = readPrivateAggregateReceipt(targetPromotionIntentPendingPath, {
+          code,
+          absentPaths: [],
+        });
+      } catch {
+        refuse(code);
+      }
+      reserved = validateTargetPromotionIntentReservationMarker(
+        pending.value,
+        expectedState,
+      );
+    } else if (before.final && !before.staged && before.commit) {
+      // The pending guard is removed only after the final receipt is durable.
+      // Reconstruct the exact marker preimage from that bound final so the
+      // primitive can authenticate and retire the remaining commit guard.
+      let checked;
+      let finalValue;
+      try {
+        checked = readStablePrivateFile(targetPromotionIntentPath, {
+          code,
+          maxBytes: MAX_TARGET_PROMOTION_INTENT_BYTES,
+        });
+        finalValue = JSON.parse(checked.raw.toString("utf8"));
+      } catch {
+        refuse(code);
+      } finally {
+        if (checked?.raw) checked.raw.fill(0);
+      }
+      const validated = validateTargetPromotionIntent(finalValue, expectedState);
+      reserved = Object.freeze({
+        marker: targetPromotionIntentReservationMarker(validated.receipt),
+        ...validated,
+      });
+    } else {
+      refuse(code);
+    }
+    const output = targetPromotionIntentOutput(code);
+    try {
+      if (!before.final && before.pending && !before.staged && !before.commit) {
+        const reservation = resumePrivateAggregateReceiptReservation(
+          output,
+          reserved.marker,
+          { code },
+        );
+        try {
+          finalizePrivateAggregateReceipt(reservation, reserved.receipt);
+        } finally {
+          abandonPrivateAggregateReceipt(reservation);
+        }
+      } else {
+        recoverPrivateAggregateReceiptFinalization(
+          output,
+          reserved.marker,
+          (candidate) => {
+            const validated = validateTargetPromotionIntent(candidate, expectedState);
+            return canonical(validated.receipt) === canonical(reserved.receipt);
+          },
+          { code },
+        );
+      }
+    } catch {
+      refuse(code);
+    }
+    const loaded = loadTargetPromotionIntent(expectedState);
+    if (!loaded || canonical(loaded.receipt) !== canonical(reserved.receipt)) refuse(code);
+    return loaded;
+  }
+
   function persistTargetPromotionIntent(expectedState, rebuildAttempt) {
     const code = "RECOVERY_TARGET_PROMOTION_INTENT_WRITE_FAILED";
-    if (existsSync(targetPromotionIntentPath) ||
-        existsSync(targetPromotionIntentPendingPath)) {
+    if (Object.values(targetPromotionIntentPresence()).some(Boolean)) {
+      reconcileTargetPromotionIntent(expectedState);
       refuse("RECOVERY_TARGET_PROMOTION_INTENT_AMBIGUOUS");
     }
     const normalized = normalizeTargetPromotionState(expectedState);
@@ -7826,12 +7962,10 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
     let reservation = null;
     try {
       const output = assertPrivateAggregateOutputPath(targetPromotionIntentPath, { code });
-      reservation = reservePrivateAggregateReceipt(output, {
-        schema_version: 1,
-        kind: "v048_target_worker_promotion_intent_reservation",
-        plan_fingerprint: plan.plan_fingerprint,
-        target_resource_fingerprint: plan.target_resource_fingerprint,
-      });
+      reservation = reservePrivateAggregateReceipt(
+        output,
+        targetPromotionIntentReservationMarker(receipt),
+      );
       finalizePrivateAggregateReceipt(reservation, receipt);
       const loaded = loadTargetPromotionIntent(expectedState);
       if (!loaded || canonical(loaded.receipt) !== canonical(receipt)) refuse(code);
@@ -8149,6 +8283,12 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
            restored?.fts_count !== restored?.chunk_count)) {
         refuse("RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_SCALE_INVALID");
       }
+      // Finish any exact local intent publication before the first provider
+      // read. A pending or committed intent may already authorize an attempt,
+      // so provider mode must not decide whether those bytes are recoverable.
+      let targetPromotionIntent = pins.vectorizeMutationQuiescenceFingerprint
+        ? reconcileTargetPromotionIntent(restored)
+        : null;
       // Recheck on every resumed rebuild. An old journal checkpoint or an
       // out-of-band target replacement must never route schema-prefix data to
       // the current bulk bootstrap endpoint.
@@ -8180,9 +8320,6 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         refuse("RECOVERY_VECTORIZE_TARGET_AMBIGUOUS");
       }
       let trustedPromotionVectorState = null;
-      let targetPromotionIntent = pins.vectorizeMutationQuiescenceFingerprint
-        ? loadTargetPromotionIntent(restored)
-        : null;
       if (pins.vectorizeMutationQuiescenceFingerprint) {
         if (resources.targetMode === "active") {
           if (context.attempt <= 1 || !targetPromotionIntent ||

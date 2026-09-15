@@ -25,6 +25,7 @@ import {
   assertPrivateAggregateOutputPath,
   finalizePrivateAggregateReceipt,
   privateAggregateReceiptCommitPath,
+  privateAggregateReceiptPendingPath,
   reservePrivateAggregateReceipt,
 } from "../operations/private-aggregate-receipt.mjs";
 import {
@@ -502,10 +503,10 @@ test("route or custom-domain drift stops A12 before evaluation", {
           error.code === "DISPOSABLE_RECOVERY_TARGET_EVAL_CAMPAIGN_CHANGED",
       );
       assert.equal(evalCalls, 0);
-      const residue = JSON.parse(readFileSync(join(
+      const residue = JSON.parse(readFileSync(privateAggregateReceiptPendingPath(join(
         path,
         "v048-disposable-target-eval-receipt.json",
-      ), "utf8"));
+      )), "utf8"));
       assert.equal(residue.status, "read_only_evaluation_in_progress");
       assert.equal(Object.hasOwn(residue, "campaign_protection"), false);
     } finally { rmSync(path, { recursive: true, force: true }); }
@@ -539,10 +540,10 @@ test("noncampaign binding drift across the A12 bracket leaves no receipt", {
     );
     assert.equal(censusReads, 2);
     assert.equal(evalCalls, 1);
-    const residue = JSON.parse(readFileSync(join(
+    const residue = JSON.parse(readFileSync(privateAggregateReceiptPendingPath(join(
       path,
       "v048-disposable-target-eval-receipt.json",
-    ), "utf8"));
+    )), "utf8"));
     assert.equal(residue.status, "read_only_evaluation_in_progress");
     assert.equal(Object.hasOwn(residue, "campaign_protection"), false);
   } finally { rmSync(path, { recursive: true, force: true }); }
@@ -584,10 +585,10 @@ test("same-name Vectorize replacement with the expected count fails the A12 brac
     assert.equal(targetReads, 2,
       "both physical observations retain the expected 7,202-vector count");
     assert.equal(evalCalls, 1);
-    const residue = JSON.parse(readFileSync(join(
+    const residue = JSON.parse(readFileSync(privateAggregateReceiptPendingPath(join(
       path,
       "v048-disposable-target-eval-receipt.json",
-    ), "utf8"));
+    )), "utf8"));
     assert.equal(residue.status, "read_only_evaluation_in_progress");
     assert.equal(Object.hasOwn(residue, "campaign_protection"), false);
   } finally { rmSync(path, { recursive: true, force: true }); }
@@ -734,7 +735,7 @@ test("safely resumes an exact unfinished read-only reservation", {
   } finally { rmSync(path, { recursive: true, force: true }); }
 });
 
-test("recovers an exact post-rename target receipt without repeating live evaluation", {
+test("recovers an exact post-link target receipt without repeating live evaluation", {
   skip: process.platform === "win32"
     ? "requires verifier-minted K0 and private receipt ACL proof"
     : false,
@@ -757,9 +758,9 @@ test("recovers an exact post-rename target receipt without repeating live evalua
     reservation = reservePrivateAggregateReceipt(output, marker);
     assert.throws(
       () => finalizePrivateAggregateReceipt(reservation, produced.receipt, {
-        removePending() { throw new Error("synthetic_post_rename_death"); },
+        removePending() { throw new Error("synthetic_post_link_death"); },
       }),
-      /synthetic_post_rename_death/u,
+      /synthetic_post_link_death/u,
     );
     assert.equal(existsSync(output.pendingPath), true);
     assert.equal(existsSync(privateAggregateReceiptCommitPath(receiptPath)), true);

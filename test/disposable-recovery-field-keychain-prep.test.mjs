@@ -354,7 +354,7 @@ test("partial state is identified before any reset or overwrite", async () => {
   assert.equal(keychain.state.get(REFERENCES[0]).toString("utf8"), "preexisting-value");
 });
 
-testWithMacosPrivateReceipt("partial or power-loss state requires a separate reset and is never overwritten", async () => {
+testWithMacosPrivateReceipt("partial or interrupted-process state requires a separate reset and is never overwritten", async () => {
   const checkedBinding = binding();
   const keychain = fakeKeychain({
     initial: { [REFERENCES[0]]: "preexisting-value" },
@@ -508,7 +508,7 @@ testWithMacosPrivateReceipt("normal caught failure rolls back only exact values 
       [REFERENCES[2], REFERENCES[1], REFERENCES[0]],
     );
     for (const item of REFERENCES) assert.equal(keychain.state.get(item), null);
-    assert.equal(existsSync(paths(directory).receiptPath), true,
+    assert.equal(existsSync(paths(directory).receiptPath), false,
       "the exact durable start marker precedes every Keychain write");
     assert.equal(
       existsSync(privateAggregateReceiptPendingPath(paths(directory).receiptPath)),
@@ -631,7 +631,7 @@ testWithMacosPrivateReceipt("invalid completion clock rolls back all exact creat
       [...REFERENCES].reverse(),
     );
     for (const item of REFERENCES) assert.equal(keychain.state.get(item), null);
-    assert.equal(existsSync(paths(directory).receiptPath), true);
+    assert.equal(existsSync(paths(directory).receiptPath), false);
     assert.equal(existsSync(
       privateAggregateReceiptPendingPath(paths(directory).receiptPath)), true);
   } finally {
@@ -688,10 +688,10 @@ testWithMacosPrivateReceipt("process death at every mutation boundary leaves a d
       const finalPath = paths(directory).receiptPath;
       const pendingPath = privateAggregateReceiptPendingPath(finalPath);
       const finalized = target === "after_finalization";
-      assert.equal(existsSync(finalPath), true, target);
+      assert.equal(existsSync(finalPath), finalized, target);
       assert.equal(existsSync(pendingPath), !finalized, target);
       if (!finalized) {
-        const marker = JSON.parse(readFileSync(finalPath, "utf8"));
+        const marker = JSON.parse(readFileSync(pendingPath, "utf8"));
         assert.equal(marker.kind,
           "v048_disposable_recovery_field_keychain_prep_pending");
         assert.equal(marker.binding.preparation_fingerprint,
@@ -825,8 +825,8 @@ testWithMacosPrivateReceipt("a partial-write interruption cannot use full resume
   }
 });
 
-testWithMacosPrivateReceipt("finalization commitment crashes recover exact receipt without rolling back keys", async () => {
-  for (const crash of ["before_rename", "after_final_sync"]) {
+testWithMacosPrivateReceipt("finalization commitment stops recover exact receipt without rolling back keys", async () => {
+  for (const crash of ["before_publish", "after_final_sync"]) {
     const directory = workspace();
     try {
       const checkedBinding = binding();
@@ -840,8 +840,8 @@ testWithMacosPrivateReceipt("finalization commitment crashes recover exact recei
           {
             finalizeReceipt(reservation, receipt) {
               return finalizePrivateAggregateReceipt(reservation, receipt,
-                crash === "before_rename"
-                  ? { rename: () => { throw new Error("simulated death"); } }
+                crash === "before_publish"
+                  ? { publish: () => { throw new Error("simulated death"); } }
                   : { removePending: () => { throw new Error("simulated death"); } });
             },
           },
@@ -1045,7 +1045,6 @@ testWithMacosPrivateReceipt("partial K0 reset resumes after deletion and marker-
       `before_reset_delete:${purpose}`,
       `after_reset_delete:${purpose}`,
     ]),
-    "reset_final_marker_removed",
     "reset_pending_marker_removed",
   ]) {
     const directory = workspace();
@@ -1122,7 +1121,6 @@ testWithMacosPrivateReceipt("partial K0 reset resumes after deletion and marker-
 
 testWithMacosPrivateReceipt("K0 reset refuses completion when a deleted value reappears during final marker cleanup", async () => {
   for (const recreateAt of [
-    "reset_final_marker_removed",
     "reset_pending_marker_removed",
     "final_revalidate",
   ]) {
@@ -1217,7 +1215,7 @@ testWithMacosPrivateReceipt("K0_RESET never retries an ambiguous delete and reco
       assert.equal(journalBefore.some((name) => name.endsWith(
         "-01-sent-unconfirmed.json",
       )), true);
-      assert.equal(existsSync(paths(directory).receiptPath), true);
+      assert.equal(existsSync(paths(directory).receiptPath), false);
       assert.equal(existsSync(privateAggregateReceiptPendingPath(
         paths(directory).receiptPath)), true);
 
@@ -1234,7 +1232,7 @@ testWithMacosPrivateReceipt("K0_RESET never retries an ambiguous delete and reco
           event === "delete" && locator === REFERENCES[0]).length, 1,
         "an ambiguous present value must never be retried");
         assert.deepEqual(resetJournalNames(directory), journalBefore);
-        assert.equal(existsSync(paths(directory).receiptPath), true);
+        assert.equal(existsSync(paths(directory).receiptPath), false);
       } else {
         const resumed = await runDisposableRecoveryFieldKeychainReset(
           resetRunArguments(directory, fixture, { resume: true }),
@@ -1344,7 +1342,7 @@ testWithMacosPrivateReceipt("sent_unconfirmed and terminal journal states reject
       );
       assert.equal(fixture.keychain.events.filter(([event]) =>
         event === "delete").length, deletesBefore);
-      assert.equal(existsSync(paths(directory).receiptPath), true);
+      assert.equal(existsSync(paths(directory).receiptPath), false);
       assert.equal(existsSync(privateAggregateReceiptPendingPath(
         paths(directory).receiptPath)), true);
       assert.equal(resetJournalNames(directory).length >= 2, true);
@@ -1354,7 +1352,7 @@ testWithMacosPrivateReceipt("sent_unconfirmed and terminal journal states reject
   }
 });
 
-testWithMacosPrivateReceipt("K0_RESET journal power cuts never duplicate a deletion", async () => {
+testWithMacosPrivateReceipt("injected K0_RESET journal stops never duplicate a deletion", async () => {
   for (const crashAt of [
     "before_reset_journal:0:planned",
     "after_reset_journal:0:planned",
@@ -1373,7 +1371,7 @@ testWithMacosPrivateReceipt("K0_RESET journal power cuts never duplicate a delet
           fixture,
           {
             onTransition(name) {
-              if (name === crashAt) throw new Error("simulated journal power cut");
+              if (name === crashAt) throw new Error("simulated journal process stop");
             },
           },
         )),
@@ -1419,7 +1417,7 @@ testWithMacosPrivateReceipt("K0_RESET journal write and fsync failures happen be
         )),
       );
       assert.equal(fixture.keychain.events.some(([event]) => event === "delete"), false);
-      assert.equal(existsSync(paths(directory).receiptPath), true);
+      assert.equal(existsSync(paths(directory).receiptPath), false);
       assert.equal(resetJournalNames(directory).some((name) =>
         name.includes("-01-sent-unconfirmed")), true);
       assert.equal(resetJournalNames(directory).some((name) =>
@@ -1436,13 +1434,17 @@ testWithMacosPrivateReceipt("K0_RESET journal write and fsync failures happen be
       );
       assert.equal(fixture.keychain.events.some(([event]) => event === "delete"), false,
         "a recovered sent intent must not authorize a retry");
-      assert.equal(resetJournalNames(directory).some((name) =>
-        name.endsWith("-01-sent-unconfirmed.json")), true,
-      "the sent-intent guard must remain after the ambiguous-delete refusal");
       if (failure === "write") {
+        assert.equal(resetJournalNames(directory).some((name) =>
+          name.endsWith("-01-sent-unconfirmed.pending.json")), true,
+        "the conservative pending guard must remain after an unwritten stage");
         assert.equal(resetJournalNames(directory).some((name) =>
           name.endsWith("-01-sent-unconfirmed.staged.json")), true,
         "an invalid partial staged receipt must remain available for manual review");
+      } else {
+        assert.equal(resetJournalNames(directory).some((name) =>
+          name.endsWith("-01-sent-unconfirmed.json")), true,
+        "the recovered exact sent-intent guard must remain after refusal");
       }
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -1493,7 +1495,7 @@ testWithMacosPrivateReceipt("the last reset boundary rejects post-sent journal r
       assert.equal(mutated, true, mutation);
       assert.equal(fixture.keychain.events.some(([event]) => event === "delete"), false,
         mutation);
-      assert.equal(existsSync(paths(directory).receiptPath), true, mutation);
+      assert.equal(existsSync(paths(directory).receiptPath), false, mutation);
       assert.equal(existsSync(privateAggregateReceiptPendingPath(
         paths(directory).receiptPath)), true, mutation);
     } finally {
@@ -1550,7 +1552,7 @@ testWithMacosPrivateReceipt("reset authorization cannot be transplanted under an
     );
     assert.equal(fixture.keychain.events.filter(([event]) =>
       event === "delete").length, deletesBefore);
-    assert.equal(existsSync(paths(directory).receiptPath), true);
+    assert.equal(existsSync(paths(directory).receiptPath), false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -1695,11 +1697,11 @@ testWithMacosPrivateReceipt("same-path receipt-directory inode replacement is re
       assert.equal(replaced, true, boundary);
       assert.equal(fixture.keychain.events.some(([event]) => event === "delete"), false,
         boundary);
-      assert.equal(existsSync(paths(directory).receiptPath), true, boundary);
-      assert.equal(existsSync(join(
+      assert.equal(existsSync(paths(directory).receiptPath), false, boundary);
+      assert.equal(existsSync(privateAggregateReceiptPendingPath(join(
         originalDirectory,
         DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_PREP_RECEIPT_NAME,
-      )), true, boundary);
+      ))), true, boundary);
     } finally {
       if (existsSync(directory)) chmodSync(directory, 0o700);
       rmSync(directory, { recursive: true, force: true });
@@ -1708,7 +1710,7 @@ testWithMacosPrivateReceipt("same-path receipt-directory inode replacement is re
   }
 });
 
-testWithMacosPrivateReceipt("K0 exactly cancels pending-only reservation power loss without touching Keychain", async () => {
+testWithMacosPrivateReceipt("K0 exactly cancels a pending-only reservation after an injected process stop without touching Keychain", async () => {
   const directory = workspace();
   try {
     const checkedBinding = binding();
@@ -1724,7 +1726,7 @@ testWithMacosPrivateReceipt("K0 exactly cancels pending-only reservation power l
             return reservePrivateAggregateReceipt(output, marker, {
               onTransition(name) {
                 if (name === "pending_marker_durable") {
-                  throw new Error("simulated reservation power loss");
+                  throw new Error("simulated reservation process stop");
                 }
               },
             });
@@ -1820,7 +1822,7 @@ testWithMacosPrivateReceipt("reset re-hashes the exact locator after approval an
 testWithMacosPrivateReceipt("reset authorization resumes across every reservation and commit boundary", async () => {
   for (const crashAt of [
     "authorization_reserved",
-    "before_rename",
+    "before_publish",
     "after_final_sync",
     "authorization_finalized",
   ]) {
@@ -1856,10 +1858,10 @@ testWithMacosPrivateReceipt("reset authorization resumes across every reservatio
         ...paths(directory),
         keychain: keychain.adapter,
         platform: "darwin",
-        ...(crashAt === "before_rename" ? {
+        ...(crashAt === "before_publish" ? {
           finalizeReceipt: (reservation, receipt) =>
             finalizePrivateAggregateReceipt(reservation, receipt, {
-              rename: () => { throw new Error("simulated death"); },
+              publish: () => { throw new Error("simulated death"); },
             }),
         } : {}),
         ...(crashAt === "after_final_sync" ? {
@@ -1903,7 +1905,7 @@ testWithMacosPrivateReceipt("reset authorization resumes across every reservatio
   }
 });
 
-testWithMacosPrivateReceipt("pending-only reset authorization is cancelled without deletion and requires a fresh run", async () => {
+testWithMacosPrivateReceipt("pending-only reset authorization resumes before any deletion", async () => {
   const directory = workspace();
   try {
     const fixture = await preparedResetFixture(directory);
@@ -1917,7 +1919,7 @@ testWithMacosPrivateReceipt("pending-only reset authorization is cancelled witho
             return reservePrivateAggregateReceipt(output, marker, {
               onTransition(name) {
                 if (name === "pending_marker_durable") {
-                  throw new Error("simulated reset authorization power loss");
+                  throw new Error("simulated reset authorization process stop");
                 }
               },
             });
@@ -1933,34 +1935,12 @@ testWithMacosPrivateReceipt("pending-only reset authorization is cancelled witho
       false,
     );
 
-    await assert.rejects(
-      runDisposableRecoveryFieldKeychainReset(resetRunArguments(
-        directory,
-        fixture,
-        { resume: true },
-      )),
-      prepError(
-        "DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_AUTHORIZATION_RESTART_REQUIRED",
-      ),
+    const completed = await runDisposableRecoveryFieldKeychainReset(
+      resetRunArguments(directory, fixture, { resume: true }),
     );
-    assert.equal(existsSync(resetPath), false);
-    assert.equal(existsSync(privateAggregateReceiptPendingPath(resetPath)), false);
-    assert.equal(
-      fixture.keychain.events.some(([event]) => event === "delete"),
-      false,
-    );
-
-    const freshPreview = await previewDisposableRecoveryFieldKeychainReset({
-      binding: fixture.checkedBinding,
-      ...paths(directory),
-      keychain: fixture.keychain.adapter,
-      platform: "darwin",
-    });
-    const completed = await runDisposableRecoveryFieldKeychainReset({
-      ...resetRunArguments(directory, fixture),
-      approvalFingerprint: freshPreview.reset_approval_fingerprint,
-    });
     assert.equal(completed.status, "reset_complete");
+    assert.equal(existsSync(resetPath), true);
+    assert.equal(existsSync(privateAggregateReceiptPendingPath(resetPath)), false);
     assert.deepEqual(
       fixture.keychain.events.filter(([event]) => event === "delete")
         .map(([, item]) => item),

@@ -31,6 +31,7 @@ import {
   finalizePrivateAggregateReceipt,
   privateAggregateReceiptCommitPath,
   privateAggregateReceiptPendingPath,
+  privateAggregateReceiptStagedPath,
   readPrivateAggregateReceipt,
   recoverPrivateAggregateReceiptFinalization,
   reservePrivateAggregateReceipt,
@@ -1453,8 +1454,9 @@ export async function runDisposableRecoveryTeardownPreview({
     });
   }
   const hasReservation = recovery?.status === "reservation_resumable" ||
-    existsSync(absoluteReceiptPath) &&
+    !existsSync(absoluteReceiptPath) &&
       existsSync(privateAggregateReceiptPendingPath(absoluteReceiptPath)) &&
+      !existsSync(privateAggregateReceiptStagedPath(absoluteReceiptPath)) &&
       !existsSync(privateAggregateReceiptCommitPath(absoluteReceiptPath));
   if (hasReservation && !resume) refuse("TEARDOWN_PREVIEW_RESUME_REQUIRED");
   const output = hasReservation
@@ -1597,11 +1599,21 @@ async function readJournalRecords(directory, preview, {
         if (recovery?.status === "finalized") found.push(candidate);
         else if (recovery?.status === "reservation_resumable") {
           resumable.push(candidate);
-        } else if (existsSync(path)) {
-          if (existsSync(privateAggregateReceiptPendingPath(path))) {
+        } else {
+          const mainPresent = existsSync(path);
+          const pendingPresent = existsSync(privateAggregateReceiptPendingPath(path));
+          const stagedPresent = existsSync(privateAggregateReceiptStagedPath(path));
+          const commitPresent = existsSync(privateAggregateReceiptCommitPath(path));
+          if (pendingPresent) {
+            if (mainPresent || stagedPresent || commitPresent) {
+              refuse("TEARDOWN_JOURNAL_INVALID");
+            }
             resumable.push(candidate);
-          } else {
+          } else if (mainPresent) {
+            if (stagedPresent || commitPresent) refuse("TEARDOWN_JOURNAL_INVALID");
             found.push(candidate);
+          } else if (stagedPresent || commitPresent) {
+            refuse("TEARDOWN_JOURNAL_INVALID");
           }
         }
       }
@@ -1694,7 +1706,9 @@ async function writeJournalRecord(directory, preview, records, kind, state, now,
     return records.at(-1);
   }
   const hasReservation = recovery?.status === "reservation_resumable" ||
-    existsSync(path) && existsSync(privateAggregateReceiptPendingPath(path));
+    !existsSync(path) && existsSync(privateAggregateReceiptPendingPath(path)) &&
+      !existsSync(privateAggregateReceiptStagedPath(path)) &&
+      !existsSync(privateAggregateReceiptCommitPath(path));
   if (hasReservation && !resume) refuse("TEARDOWN_JOURNAL_INVALID");
   const output = hasReservation
     ? recoveryOutput
@@ -1740,8 +1754,9 @@ function resumableJournalFinalState(directory, preview, records, kind) {
       directory,
       journalRecordName(preview.role, sequence, kind, state),
     );
-    return existsSync(path) &&
+    return !existsSync(path) &&
       existsSync(privateAggregateReceiptPendingPath(path)) &&
+      !existsSync(privateAggregateReceiptStagedPath(path)) &&
       !existsSync(privateAggregateReceiptCommitPath(path));
   });
   if (candidates.length > 1) refuse("TEARDOWN_JOURNAL_INVALID");

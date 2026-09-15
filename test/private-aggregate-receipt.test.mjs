@@ -16,8 +16,9 @@ import {
   readSync,
   readdirSync,
   realpathSync,
-  renameSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -313,10 +314,11 @@ receiptTest("reserve, finalize, and read preserve one exact owner-only aggregate
       fixture.output.stagedPath,
       privateAggregateReceiptStagedPath(fixture.path),
     );
-    assert.deepEqual(JSON.parse(readFileSync(fixture.path, "utf8")), marker);
+    assert.equal(existsSync(fixture.path), false);
+    assert.deepEqual(JSON.parse(readFileSync(fixture.output.pendingPath, "utf8")), marker);
     if (process.platform !== "win32") {
       assert.equal(lstatSync(fixture.directory).mode & 0o077, 0);
-      assert.equal(lstatSync(fixture.path).mode & 0o077, 0);
+      assert.equal(lstatSync(fixture.output.pendingPath).mode & 0o077, 0);
     }
 
     assert.equal(finalizePrivateAggregateReceipt(reservation, receipt), true);
@@ -343,6 +345,7 @@ receiptTest("reserve, finalize, and read preserve one exact owner-only aggregate
     if (process.platform !== "win32") {
       assert.equal(lstatSync(fixture.path).mode & 0o077, 0);
     }
+    assert.equal(lstatSync(fixture.path).nlink, 1);
     persistedBytes.fill(0);
   } finally {
     cleanupReservation(reservation);
@@ -357,11 +360,12 @@ receiptTest("deterministic staging and transition hooks expose only exact durabl
   const commitPath = privateAggregateReceiptCommitPath(fixture.path);
   const stagedPath = privateAggregateReceiptStagedPath(fixture.path);
   const expectedPresence = {
-    staged_receipt_created: [true, true, true, false],
-    staged_receipt_written: [true, true, true, false],
-    staged_receipt_file_fsynced: [true, true, true, false],
-    staged_receipt_durable: [true, true, true, false],
-    finalization_commit_durable: [true, true, true, true],
+    staged_receipt_created: [false, true, true, false],
+    staged_receipt_written: [false, true, true, false],
+    staged_receipt_file_fsynced: [false, true, true, false],
+    staged_receipt_durable: [false, true, true, false],
+    finalization_commit_durable: [false, true, true, true],
+    final_receipt_link_durable: [true, true, true, true],
     final_receipt_durable: [true, true, false, true],
     pending_marker_removal_durable: [true, false, false, true],
     finalization_commit_removal_durable: [true, false, false, false],
@@ -381,8 +385,20 @@ receiptTest("deterministic staging and transition hooks expose only exact durabl
         ], expectedPresence[name]);
         if (existsSync(stagedPath) && name !== "staged_receipt_created") {
           assert.deepEqual(JSON.parse(readFileSync(stagedPath, "utf8")), receipt);
-          assert.equal(lstatSync(stagedPath).nlink, 1);
+          const expectedLinks = name === "final_receipt_link_durable" ? 2 : 1;
+          assert.equal(lstatSync(stagedPath).nlink, expectedLinks);
           assert.equal(lstatSync(stagedPath).mode & 0o077, 0);
+        }
+        if (name === "final_receipt_link_durable") {
+          const stagedInfo = lstatSync(stagedPath);
+          const finalInfo = lstatSync(fixture.path);
+          assert.equal(finalInfo.dev, stagedInfo.dev);
+          assert.equal(finalInfo.ino, stagedInfo.ino);
+          assert.equal(finalInfo.nlink, 2);
+          assert.deepEqual(JSON.parse(readFileSync(fixture.path, "utf8")), receipt);
+        }
+        if (name === "final_receipt_durable") {
+          assert.equal(lstatSync(fixture.path).nlink, 1);
         }
         if (name === "finalization_commit_durable") {
           const commitment = JSON.parse(readFileSync(commitPath, "utf8"));
@@ -497,12 +513,12 @@ receiptTest("an exact unfinished marker can be explicitly resumed without recrea
   let resumed;
   try {
     initial = reservePrivateAggregateReceipt(fixture.output, marker);
-    const finalBefore = lstatSync(fixture.path);
     const pendingBefore = lstatSync(fixture.output.pendingPath);
+    assert.equal(existsSync(fixture.path), false);
     abandonPrivateAggregateReceipt(initial);
     resumed = resumePrivateAggregateReceiptReservation(fixture.output, marker);
     assert.equal(resumed.closed, false);
-    assert.equal(lstatSync(fixture.path).ino, finalBefore.ino);
+    assert.equal(existsSync(fixture.path), false);
     assert.equal(lstatSync(fixture.output.pendingPath).ino, pendingBefore.ino);
     assert.equal(finalizePrivateAggregateReceipt(resumed, receipt), true);
     assert.deepEqual(readPrivateAggregateReceipt(fixture.path).value, receipt);
@@ -525,7 +541,7 @@ receiptTest("an exactly authorized cancellation clears only matching reservation
       onTransition: (name) => transitions.push(name),
     });
     assert.deepEqual(result, { status: "cleared" });
-    assert.deepEqual(transitions, ["final_marker_removed", "pending_marker_removed"]);
+    assert.deepEqual(transitions, ["pending_marker_removed"]);
     assert.equal(existsSync(fixture.path), false);
     assert.equal(existsSync(fixture.output.pendingPath), false);
     assert.equal(existsSync(privateAggregateReceiptCommitPath(fixture.path)), false);
@@ -539,7 +555,7 @@ receiptTest("an exactly authorized cancellation clears only matching reservation
   }
 });
 
-receiptTest("an interrupted exact cancellation resumes from one remaining marker", () => {
+receiptTest("an interrupted exact cancellation remains idempotent after pending removal", () => {
   const fixture = outputFixture("brain-private-receipt-cancel-resume-");
   const marker = { schema_version: 1, status: "cancel_exact_reservation" };
   let reservation;
@@ -549,16 +565,16 @@ receiptTest("an interrupted exact cancellation resumes from one remaining marker
     assert.throws(
       () => clearPrivateAggregateReceiptReservation(fixture.output, marker, {
         onTransition(name) {
-          if (name === "final_marker_removed") throw new Error("simulated power loss");
+          if (name === "pending_marker_removed") throw new Error("simulated process stop");
         },
       }),
       receiptError("PRIVATE_AGGREGATE_RECEIPT_CANCELLATION_INVALID"),
     );
     assert.equal(existsSync(fixture.path), false);
-    assert.equal(existsSync(fixture.output.pendingPath), true);
+    assert.equal(existsSync(fixture.output.pendingPath), false);
     assert.deepEqual(
       clearPrivateAggregateReceiptReservation(fixture.output, marker),
-      { status: "cleared" },
+      { status: "already_absent" },
     );
     assert.equal(existsSync(fixture.output.pendingPath), false);
   } finally {
@@ -567,32 +583,29 @@ receiptTest("an interrupted exact cancellation resumes from one remaining marker
   }
 });
 
-receiptTest("a power cut after the pending marker is durable can be exactly cancelled", () => {
-  const fixture = outputFixture("brain-private-receipt-pending-only-cancel-");
-  const marker = { schema_version: 1, status: "pending_only_power_cut" };
+receiptTest("an injected stop after the pending marker is durable resumes conservatively", () => {
+  const fixture = outputFixture("brain-private-receipt-pending-only-resume-");
+  const marker = { schema_version: 1, status: "pending_only_process_stop" };
+  const receipt = { schema_version: 1, status: "resumed_complete" };
+  let resumed;
   try {
     assert.throws(
       () => reservePrivateAggregateReceipt(fixture.output, marker, {
         onTransition(name) {
-          if (name === "pending_marker_durable") throw new Error("simulated power cut");
+          if (name === "pending_marker_durable") throw new Error("simulated process stop");
         },
       }),
-      /simulated power cut/u,
+      /simulated process stop/u,
     );
     assert.equal(existsSync(fixture.path), false);
     assert.equal(existsSync(fixture.output.pendingPath), true);
     assert.equal(existsSync(privateAggregateReceiptCommitPath(fixture.path)), false);
-    assert.throws(
-      () => resumePrivateAggregateReceiptReservation(fixture.output, marker),
-      receiptError("PRIVATE_AGGREGATE_RECEIPT_RESUME_INVALID"),
-    );
-    assert.deepEqual(
-      clearPrivateAggregateReceiptReservation(fixture.output, marker),
-      { status: "cleared" },
-    );
+    resumed = resumePrivateAggregateReceiptReservation(fixture.output, marker);
+    assert.equal(finalizePrivateAggregateReceipt(resumed, receipt), true);
     assert.equal(existsSync(fixture.output.pendingPath), false);
-    assert.equal(existsSync(fixture.path), false);
+    assert.deepEqual(readPrivateAggregateReceipt(fixture.path).value, receipt);
   } finally {
+    cleanupReservation(resumed);
     rmSync(fixture.directory, { recursive: true, force: true });
   }
 });
@@ -613,7 +626,7 @@ receiptTest("cancellation refuses changed markers or a finalization commitment",
           () => finalizePrivateAggregateReceipt(
             reservation,
             { schema_version: 1, status: "final" },
-            { rename: () => { throw new Error("simulated pre-rename death"); } },
+            { publish: () => { throw new Error("simulated pre-publish death"); } },
           ),
         );
       }
@@ -621,7 +634,7 @@ receiptTest("cancellation refuses changed markers or a finalization commitment",
         () => clearPrivateAggregateReceiptReservation(fixture.output, marker),
         receiptError("PRIVATE_AGGREGATE_RECEIPT_CANCELLATION_INVALID"),
       );
-      assert.equal(existsSync(fixture.path), true);
+      assert.equal(existsSync(fixture.path), false);
       assert.equal(existsSync(fixture.output.pendingPath), true);
     } finally {
       cleanupReservation(reservation);
@@ -644,7 +657,7 @@ receiptTest("resume refuses a changed final or pending marker", () => {
         () => resumePrivateAggregateReceiptReservation(fixture.output, marker),
         receiptError("PRIVATE_AGGREGATE_RECEIPT_RESUME_INVALID"),
       );
-      assert.equal(existsSync(fixture.path), true);
+      assert.equal(existsSync(fixture.path), changed === "final");
       assert.equal(existsSync(fixture.output.pendingPath), true);
     } finally {
       cleanupReservation(reservation);
@@ -662,7 +675,10 @@ receiptTest("a stale output binding cannot reserve the same final path twice", (
       () => reservePrivateAggregateReceipt(fixture.output, { status: "second" }),
       receiptError("PRIVATE_AGGREGATE_RECEIPT_RESERVATION_COLLISION"),
     );
-    assert.deepEqual(JSON.parse(readFileSync(fixture.path, "utf8")), { status: "first" });
+    assert.equal(existsSync(fixture.path), false);
+    assert.deepEqual(JSON.parse(readFileSync(fixture.output.pendingPath, "utf8")), {
+      status: "first",
+    });
   } finally {
     cleanupReservation(reservation);
     rmSync(fixture.directory, { recursive: true, force: true });
@@ -674,9 +690,9 @@ receiptTest("reservation revalidation rejects in-place marker tampering", () => 
   let reservation;
   try {
     reservation = reservePrivateAggregateReceipt(fixture.output, { status: "reserved" });
-    const marker = readFileSync(fixture.path);
+    const marker = readFileSync(fixture.output.pendingPath);
     marker[0] ^= 1;
-    writeFileSync(fixture.path, marker);
+    writeFileSync(fixture.output.pendingPath, marker);
     marker.fill(0);
     assert.throws(
       () => validatePrivateAggregateReceiptReservation(reservation),
@@ -728,7 +744,8 @@ receiptTest("recovery commits one exact staged receipt left before commitment", 
     );
     assert.equal(existsSync(fixture.output.stagedPath), true);
     assert.equal(existsSync(fixture.output.commitPath), false);
-    assert.deepEqual(JSON.parse(readFileSync(fixture.path, "utf8")), marker);
+    assert.equal(existsSync(fixture.path), false);
+    assert.deepEqual(JSON.parse(readFileSync(fixture.output.pendingPath, "utf8")), marker);
     abandonPrivateAggregateReceipt(reservation);
     const recovered = recoverPrivateAggregateReceiptFinalization(
       fixture.output,
@@ -762,7 +779,8 @@ receiptTest("a failed finalization retains the conservative marker", () => {
       (error) => error === failure,
     );
     assert.equal(reservation.closed, false);
-    assert.deepEqual(JSON.parse(readFileSync(fixture.path, "utf8")), marker);
+    assert.equal(existsSync(fixture.path), false);
+    assert.deepEqual(JSON.parse(readFileSync(fixture.output.pendingPath, "utf8")), marker);
     assert.equal(existsSync(fixture.output.pendingPath), true);
     assert.equal(existsSync(privateAggregateReceiptCommitPath(fixture.path)), false);
     assert.equal(existsSync(fixture.output.stagedPath), true);
@@ -779,7 +797,7 @@ receiptTest("a failed finalization retains the conservative marker", () => {
       ),
       receiptError("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_RECOVERY_INVALID"),
     );
-    assert.equal(existsSync(fixture.path), true);
+    assert.equal(existsSync(fixture.path), false);
     assert.equal(existsSync(fixture.output.pendingPath), true);
     assert.equal(existsSync(fixture.output.stagedPath), true);
   } finally {
@@ -788,10 +806,10 @@ receiptTest("a failed finalization retains the conservative marker", () => {
   }
 });
 
-receiptTest("a post-rename directory-sync death recovers only the exact committed final", () => {
-  const fixture = outputFixture("brain-private-receipt-post-rename-sync-");
+receiptTest("a post-publication directory-sync stop recovers only the exact committed final", () => {
+  const fixture = outputFixture("brain-private-receipt-post-publish-sync-");
   const receipt = { schema_version: 1, status: "must_not_look_committed" };
-  const failure = Object.assign(new Error("synthetic_post_rename_sync_failure"), {
+  const failure = Object.assign(new Error("synthetic_post_publish_sync_failure"), {
     code: "EIO",
   });
   let reservation;
@@ -874,20 +892,20 @@ receiptTest("a death after final sync but before pending removal recovers exact 
 });
 
 receiptTest("a death after the finalization commitment recovers the exact staged receipt", () => {
-  const fixture = outputFixture("brain-private-receipt-before-rename-");
+  const fixture = outputFixture("brain-private-receipt-before-publish-");
   const marker = { schema_version: 1, status: "execution_in_progress" };
   const receipt = { schema_version: 1, status: "must_be_recomputed" };
-  const failure = new Error("synthetic_pre_rename_death");
+  const failure = new Error("synthetic_pre_publish_death");
   let reservation;
   try {
     reservation = reservePrivateAggregateReceipt(fixture.output, marker);
     assert.throws(
       () => finalizePrivateAggregateReceipt(reservation, receipt, {
-        rename() { throw failure; },
+        publish() { throw failure; },
       }),
       (error) => error === failure,
     );
-    assert.deepEqual(JSON.parse(readFileSync(fixture.path, "utf8")), marker);
+    assert.equal(existsSync(fixture.path), false);
     assert.deepEqual(JSON.parse(readFileSync(fixture.output.pendingPath, "utf8")), marker);
     assert.equal(existsSync(privateAggregateReceiptCommitPath(fixture.path)), true);
     assert.equal(existsSync(fixture.output.stagedPath), true);
@@ -956,7 +974,7 @@ receiptTest("a death after commitment removal leaves an exact readable final", (
       () => finalizePrivateAggregateReceipt(reservation, receipt, {
         syncDirectory(...args) {
           directorySyncs += 1;
-          if (directorySyncs === 3) throw failure;
+          if (directorySyncs === 5) throw failure;
           return syncPrivateReceiptDirectory(
             args[0].parentPath,
             args[0].parentInfo,
@@ -968,7 +986,7 @@ receiptTest("a death after commitment removal leaves an exact readable final", (
       }),
       (error) => error === failure,
     );
-    assert.equal(directorySyncs, 3);
+    assert.equal(directorySyncs, 5);
     assert.equal(existsSync(fixture.output.pendingPath), false);
     assert.equal(existsSync(privateAggregateReceiptCommitPath(fixture.path)), false);
     assert.deepEqual(readPrivateAggregateReceipt(fixture.path).value, receipt);
@@ -1104,16 +1122,18 @@ receiptTest("parent SIGKILL and fresh subprocess recovery cover every durability
     "staged_receipt_file_fsynced",
     "staged_receipt_durable",
     "finalization_commit_durable",
+    "final_receipt_link_durable",
     "final_receipt_durable",
     "pending_marker_removal_durable",
     "finalization_commit_removal_durable",
   ];
   const expectedPresence = {
-    staged_receipt_created: [true, true, true, false],
-    staged_receipt_written: [true, true, true, false],
-    staged_receipt_file_fsynced: [true, true, true, false],
-    staged_receipt_durable: [true, true, true, false],
-    finalization_commit_durable: [true, true, true, true],
+    staged_receipt_created: [false, true, true, false],
+    staged_receipt_written: [false, true, true, false],
+    staged_receipt_file_fsynced: [false, true, true, false],
+    staged_receipt_durable: [false, true, true, false],
+    finalization_commit_durable: [false, true, true, true],
+    final_receipt_link_durable: [true, true, true, true],
     final_receipt_durable: [true, true, false, true],
     pending_marker_removal_durable: [true, false, false, true],
     finalization_commit_removal_durable: [true, false, false, false],
@@ -1229,6 +1249,7 @@ receiptTest("parent SIGKILL and fresh subprocess recovery cover every durability
       if (transition === "staged_receipt_durable") {
         for (const recoveryTransition of [
           "finalization_commit_durable",
+          "final_receipt_link_durable",
           "final_receipt_durable",
           "pending_marker_removal_durable",
           "finalization_commit_removal_durable",
@@ -1329,7 +1350,7 @@ receiptTest("an unsupported Windows finalization is refused before staging recei
   const fixture = outputFixture("brain-private-receipt-windows-order-");
   let reservation = reservePrivateAggregateReceipt(fixture.output, { status: "reserved" });
   try {
-    const namesBefore = new Set(["receipt.json", "receipt.pending.json"]);
+    const namesBefore = new Set(["receipt.pending.json"]);
     assert.throws(
       () => finalizePrivateAggregateReceipt(
         reservation,
@@ -1339,7 +1360,10 @@ receiptTest("an unsupported Windows finalization is refused before staging recei
       receiptError("PRIVATE_AGGREGATE_RECEIPT_PLATFORM_UNSUPPORTED"),
     );
     assert.equal(reservation.closed, false);
-    assert.deepEqual(JSON.parse(readFileSync(fixture.path, "utf8")), { status: "reserved" });
+    assert.equal(existsSync(fixture.path), false);
+    assert.deepEqual(JSON.parse(readFileSync(fixture.output.pendingPath, "utf8")), {
+      status: "reserved",
+    });
     assert.equal(existsSync(fixture.output.pendingPath), true);
     assert.deepEqual(
       new Set(readdirSync(fixture.directory)),
@@ -1367,7 +1391,8 @@ receiptTest("an unsupported-platform refusal leaves the marker and handle retrya
     );
     assert.equal(reservation.closed, false);
     assert.equal(reservation.descriptor, originalDescriptor);
-    assert.deepEqual(JSON.parse(readFileSync(fixture.path, "utf8")), marker);
+    assert.equal(existsSync(fixture.path), false);
+    assert.deepEqual(JSON.parse(readFileSync(fixture.output.pendingPath, "utf8")), marker);
 
     assert.equal(finalizePrivateAggregateReceipt(
       reservation,
@@ -1655,7 +1680,7 @@ receiptTest("pending-marker commit rejects a substituted finalized receipt", {
   }
 });
 
-receiptTest("hard links and a finalization path replacement are refused", () => {
+receiptTest("hard-linked pending markers and concurrent final destinations are preserved", () => {
   const hardLinkFixture = outputFixture("brain-private-receipt-hard-link-");
   const hardLinkPath = join(hardLinkFixture.directory, "receipt-hard-link.json");
   let hardLinkReservation;
@@ -1664,22 +1689,22 @@ receiptTest("hard links and a finalization path replacement are refused", () => 
       hardLinkFixture.output,
       { status: "reserved" },
     );
-    linkSync(hardLinkFixture.path, hardLinkPath);
+    linkSync(hardLinkFixture.output.pendingPath, hardLinkPath);
     assert.throws(
       () => finalizePrivateAggregateReceipt(hardLinkReservation, { status: "must_not_commit" }),
       receiptError("PRIVATE_AGGREGATE_RECEIPT_RESERVATION_CHANGED"),
     );
-    assert.equal(lstatSync(hardLinkFixture.path).nlink, 2);
+    assert.equal(lstatSync(hardLinkFixture.output.pendingPath).nlink, 2);
   } finally {
     cleanupReservation(hardLinkReservation);
     rmSync(hardLinkFixture.directory, { recursive: true, force: true });
   }
 
-  const replacementFixture = outputFixture("brain-private-receipt-path-replacement-");
-  const displacedPath = join(replacementFixture.directory, "original-marker.json");
+  const replacementFixture = outputFixture("brain-private-receipt-final-collision-");
   const marker = { schema_version: 1, status: "reserved" };
-  const markerBytes = Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8");
+  const sentinelBytes = Buffer.from('{"owner":"concurrent","must":"survive"}\n', "utf8");
   let replacementReservation;
+  let sentinelInfo;
   try {
     replacementReservation = reservePrivateAggregateReceipt(replacementFixture.output, marker);
     assert.throws(
@@ -1687,10 +1712,10 @@ receiptTest("hard links and a finalization path replacement are refused", () => 
         replacementReservation,
         { schema_version: 1, status: "must_not_commit" },
         {
-          rename(from, to) {
-            renameSync(replacementFixture.path, displacedPath);
-            privateWrite(replacementFixture.path, markerBytes);
-            renameSync(from, to);
+          publish(from, to) {
+            privateWrite(to, sentinelBytes);
+            sentinelInfo = lstatSync(to);
+            linkSync(from, to);
           },
         },
       ),
@@ -1698,20 +1723,337 @@ receiptTest("hard links and a finalization path replacement are refused", () => 
     );
     assert.equal(replacementReservation.closed, false);
     assert.equal(Number.isSafeInteger(replacementReservation.descriptor), true);
-    assert.equal(existsSync(displacedPath), true);
-    assert.deepEqual(JSON.parse(readFileSync(replacementFixture.path, "utf8")), {
-      schema_version: 1,
-      status: "must_not_commit",
-    });
+    const sentinelAfter = lstatSync(replacementFixture.path);
+    assert.equal(sentinelAfter.dev, sentinelInfo.dev);
+    assert.equal(sentinelAfter.ino, sentinelInfo.ino);
+    assert.equal(sentinelAfter.nlink, 1);
+    assert.equal(sentinelAfter.mode, sentinelInfo.mode);
+    assert.equal(sentinelAfter.mtimeMs, sentinelInfo.mtimeMs);
+    assert.equal(sentinelAfter.ctimeMs, sentinelInfo.ctimeMs);
+    assert.deepEqual(readFileSync(replacementFixture.path), sentinelBytes);
     assert.equal(existsSync(replacementFixture.output.pendingPath), true);
+    assert.equal(existsSync(replacementFixture.output.stagedPath), true);
+    assert.equal(existsSync(replacementFixture.output.commitPath), true);
+    const preserved = [
+      replacementFixture.path,
+      replacementFixture.output.pendingPath,
+      replacementFixture.output.stagedPath,
+      replacementFixture.output.commitPath,
+    ].map((path) => ({ path, info: lstatSync(path), bytes: readFileSync(path) }));
+    abandonPrivateAggregateReceipt(replacementReservation);
+    assert.equal(replacementReservation.closed, true);
+    for (const record of preserved) {
+      const current = lstatSync(record.path);
+      assert.equal(current.dev, record.info.dev);
+      assert.equal(current.ino, record.info.ino);
+      assert.deepEqual(readFileSync(record.path), record.bytes);
+      record.bytes.fill(0);
+    }
     assert.throws(
       () => readPrivateAggregateReceipt(replacementFixture.path),
       receiptError("PRIVATE_AGGREGATE_RECEIPT_READ_REFUSED"),
     );
   } finally {
-    markerBytes.fill(0);
+    sentinelBytes.fill(0);
     cleanupReservation(replacementReservation);
     rmSync(replacementFixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("macOS refuses a staged-source symlink swap after publication and retains every guard", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const fixture = outputFixture("brain-private-receipt-source-symlink-");
+  const marker = { schema_version: 1, status: "execution_in_progress" };
+  const receipt = { schema_version: 1, status: "must_not_accept_symlink_source" };
+  const attackerPath = join(fixture.directory, "attacker.json");
+  const attackerBytes = Buffer.from('{"owner":"attacker"}\n', "utf8");
+  let reservation;
+  try {
+    privateWrite(attackerPath, attackerBytes);
+    reservation = reservePrivateAggregateReceipt(fixture.output, marker);
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(reservation, receipt, {
+        publish(from, to) {
+          unlinkSync(from);
+          symlinkSync(attackerPath, from);
+          linkSync(from, to);
+        },
+      }),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED"),
+    );
+    for (const path of [
+      fixture.path,
+      fixture.output.pendingPath,
+      fixture.output.stagedPath,
+      fixture.output.commitPath,
+    ]) {
+      assert.equal(existsSync(path), true, path);
+    }
+    assert.equal(lstatSync(fixture.output.stagedPath).isSymbolicLink(), true);
+    const finalInfo = lstatSync(fixture.path);
+    const finalBytes = readFileSync(fixture.path);
+    abandonPrivateAggregateReceipt(reservation);
+    assert.equal(lstatSync(fixture.path).dev, finalInfo.dev);
+    assert.equal(lstatSync(fixture.path).ino, finalInfo.ino);
+    assert.deepEqual(readFileSync(fixture.path), finalBytes);
+    finalBytes.fill(0);
+  } finally {
+    attackerBytes.fill(0);
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("publication refuses an unexpected third hard link without deleting guards", () => {
+  const fixture = outputFixture("brain-private-receipt-third-link-");
+  const extraPath = join(fixture.directory, "extra-link.json");
+  const marker = { schema_version: 1, status: "execution_in_progress" };
+  let reservation;
+  try {
+    reservation = reservePrivateAggregateReceipt(fixture.output, marker);
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(reservation, { status: "must_not_commit" }, {
+        publish(from, to) {
+          linkSync(from, to);
+          linkSync(from, extraPath);
+        },
+      }),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED"),
+    );
+    for (const path of [fixture.path, fixture.output.stagedPath, extraPath]) {
+      assert.equal(lstatSync(path).nlink, 3);
+    }
+    assert.equal(existsSync(fixture.output.pendingPath), true);
+    assert.equal(existsSync(fixture.output.commitPath), true);
+    abandonPrivateAggregateReceipt(reservation);
+    assert.equal(lstatSync(fixture.path).nlink, 3);
+    assert.equal(lstatSync(fixture.output.stagedPath).nlink, 3);
+  } finally {
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("fresh recovery repeats each directory barrier before cleanup or terminal acceptance", () => {
+  const marker = { schema_version: 1, status: "execution_in_progress" };
+  const receipt = { schema_version: 1, status: "complete_after_barrier_recovery" };
+
+  const linkedFixture = outputFixture("brain-private-receipt-linked-barrier-");
+  let linkedReservation;
+  try {
+    linkedReservation = reservePrivateAggregateReceipt(linkedFixture.output, marker);
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(linkedReservation, receipt, {
+        onFinalizationTransition(name) {
+          if (name === "final_receipt_link_durable") throw new Error("linked stop");
+        },
+      }),
+      /linked stop/u,
+    );
+    abandonPrivateAggregateReceipt(linkedReservation);
+    let linkedBarrierObserved = false;
+    recoverPrivateAggregateReceiptFinalization(
+      linkedFixture.output,
+      marker,
+      exactReceiptValidator(receipt),
+      {
+        syncCommitDirectory(...args) {
+          const options = args[5] || {};
+          if (options.expectedLinkCount === 2) {
+            assert.equal(lstatSync(linkedFixture.path).nlink, 2);
+            assert.equal(lstatSync(linkedFixture.output.stagedPath).nlink, 2);
+            linkedBarrierObserved = true;
+          }
+          return syncPrivateReceiptDirectory(...args);
+        },
+        removeStaged(stagedRecord, finalRecord) {
+          assert.equal(linkedBarrierObserved, true);
+          assert.equal(lstatSync(stagedRecord.path).nlink, 2);
+          unlinkSync(stagedRecord.path);
+          const info = lstatSync(finalRecord.path);
+          assert.equal(info.nlink, 1);
+          return Object.freeze({ ...finalRecord, info });
+        },
+      },
+    );
+    assert.equal(linkedBarrierObserved, true);
+  } finally {
+    cleanupReservation(linkedReservation);
+    rmSync(linkedFixture.directory, { recursive: true, force: true });
+  }
+
+  const guardFixture = outputFixture("brain-private-receipt-guard-barriers-");
+  let guardReservation;
+  try {
+    guardReservation = reservePrivateAggregateReceipt(guardFixture.output, marker);
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(guardReservation, receipt, {
+        onFinalizationTransition(name) {
+          if (name === "final_receipt_durable") throw new Error("guard stop");
+        },
+      }),
+      /guard stop/u,
+    );
+    abandonPrivateAggregateReceipt(guardReservation);
+    let finalBarriers = 0;
+    recoverPrivateAggregateReceiptFinalization(
+      guardFixture.output,
+      marker,
+      exactReceiptValidator(receipt),
+      {
+        syncDirectory(...args) {
+          finalBarriers += 1;
+          return syncPrivateReceiptDirectory(...args);
+        },
+        removeRecord(record) {
+          if (record.path === guardFixture.output.pendingPath) {
+            assert.ok(finalBarriers >= 1, "final barrier must precede pending deletion");
+          } else if (record.path === guardFixture.output.commitPath) {
+            assert.ok(finalBarriers >= 3, "final barrier must precede commit deletion");
+          } else {
+            assert.fail(`unexpected recovery deletion: ${record.path}`);
+          }
+          unlinkSync(record.path);
+          return true;
+        },
+        validateTerminalAuthority(request) {
+          if (request.phase === "before_commit_guard_removal") {
+            assert.ok(finalBarriers >= 3);
+          }
+          if (request.phase === "accept_terminal_final") {
+            assert.ok(finalBarriers >= 5, "terminal acceptance must follow its own barrier");
+          }
+          return true;
+        },
+      },
+    );
+    assert.ok(finalBarriers >= 5);
+  } finally {
+    cleanupReservation(guardReservation);
+    rmSync(guardFixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("cancellation preserves a same-byte different-inode final collision", () => {
+  const fixture = outputFixture("brain-private-receipt-cancel-final-collision-");
+  const marker = { schema_version: 1, status: "cancel_exact_reservation" };
+  const markerBytes = Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8");
+  let reservation;
+  try {
+    reservation = reservePrivateAggregateReceipt(fixture.output, marker);
+    abandonPrivateAggregateReceipt(reservation);
+    privateWrite(fixture.path, markerBytes);
+    const finalBefore = lstatSync(fixture.path);
+    const pendingBefore = lstatSync(fixture.output.pendingPath);
+    assert.notEqual(finalBefore.ino, pendingBefore.ino);
+    assert.throws(
+      () => clearPrivateAggregateReceiptReservation(fixture.output, marker),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_CANCELLATION_INVALID"),
+    );
+    const finalAfter = lstatSync(fixture.path);
+    const pendingAfter = lstatSync(fixture.output.pendingPath);
+    assert.equal(finalAfter.dev, finalBefore.dev);
+    assert.equal(finalAfter.ino, finalBefore.ino);
+    assert.equal(pendingAfter.dev, pendingBefore.dev);
+    assert.equal(pendingAfter.ino, pendingBefore.ino);
+    assert.deepEqual(readFileSync(fixture.path), markerBytes);
+    assert.deepEqual(readFileSync(fixture.output.pendingPath), markerBytes);
+  } finally {
+    markerBytes.fill(0);
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("an ambiguous throw after hard-link publication retains both names for recovery", () => {
+  const fixture = outputFixture("brain-private-receipt-ambiguous-link-");
+  const marker = { schema_version: 1, status: "execution_in_progress" };
+  const receipt = { schema_version: 1, status: "complete_after_recovery" };
+  const failure = new Error("synthetic_ambiguous_link_result");
+  let reservation;
+  try {
+    reservation = reservePrivateAggregateReceipt(fixture.output, marker);
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(reservation, receipt, {
+        publish(from, to) {
+          linkSync(from, to);
+          throw failure;
+        },
+      }),
+      (error) => error === failure,
+    );
+    const finalInfo = lstatSync(fixture.path);
+    const stagedInfo = lstatSync(fixture.output.stagedPath);
+    assert.equal(finalInfo.dev, stagedInfo.dev);
+    assert.equal(finalInfo.ino, stagedInfo.ino);
+    assert.equal(finalInfo.nlink, 2);
+    assert.equal(stagedInfo.nlink, 2);
+    assert.equal(existsSync(fixture.output.pendingPath), true);
+    assert.equal(existsSync(fixture.output.commitPath), true);
+    abandonPrivateAggregateReceipt(reservation);
+    assert.equal(lstatSync(fixture.path).ino, finalInfo.ino);
+    assert.equal(lstatSync(fixture.output.stagedPath).ino, stagedInfo.ino);
+
+    const recovered = recoverPrivateAggregateReceiptFinalization(
+      fixture.output,
+      marker,
+      exactReceiptValidator(receipt),
+    );
+    assert.equal(recovered.status, "finalized");
+    assert.equal(lstatSync(fixture.path).nlink, 1);
+    assert.equal(existsSync(fixture.output.pendingPath), false);
+    assert.equal(existsSync(fixture.output.stagedPath), false);
+    assert.equal(existsSync(fixture.output.commitPath), false);
+    assert.deepEqual(readPrivateAggregateReceipt(fixture.path).value, receipt);
+  } finally {
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+receiptTest("same-byte linked substitution before cleanup is refused without deletion", () => {
+  const fixture = outputFixture("brain-private-receipt-linked-substitution-");
+  const receipt = { schema_version: 1, status: "must_remain_guarded" };
+  const substitutePath = join(fixture.directory, "substitute.json");
+  let reservation;
+  let substituteInfo;
+  let substituteBytes;
+  try {
+    reservation = reservePrivateAggregateReceipt(fixture.output, { status: "reserved" });
+    assert.throws(
+      () => finalizePrivateAggregateReceipt(reservation, receipt, {
+        onFinalizationTransition(name) {
+          if (name !== "final_receipt_link_durable") return;
+          substituteBytes = readFileSync(fixture.path);
+          unlinkSync(fixture.path);
+          unlinkSync(fixture.output.stagedPath);
+          privateWrite(substitutePath, substituteBytes);
+          linkSync(substitutePath, fixture.path);
+          linkSync(substitutePath, fixture.output.stagedPath);
+          unlinkSync(substitutePath);
+          substituteInfo = lstatSync(fixture.path);
+          assert.equal(substituteInfo.nlink, 2);
+        },
+      }),
+      receiptError("PRIVATE_AGGREGATE_RECEIPT_FINALIZATION_CHANGED"),
+    );
+    for (const path of [fixture.path, fixture.output.stagedPath]) {
+      const current = lstatSync(path);
+      assert.equal(current.dev, substituteInfo.dev);
+      assert.equal(current.ino, substituteInfo.ino);
+      assert.equal(current.nlink, 2);
+      assert.deepEqual(readFileSync(path), substituteBytes);
+    }
+    assert.equal(existsSync(fixture.output.pendingPath), true);
+    assert.equal(existsSync(fixture.output.commitPath), true);
+    abandonPrivateAggregateReceipt(reservation);
+    assert.equal(lstatSync(fixture.path).ino, substituteInfo.ino);
+    assert.equal(lstatSync(fixture.output.stagedPath).ino, substituteInfo.ino);
+  } finally {
+    if (substituteBytes) substituteBytes.fill(0);
+    cleanupReservation(reservation);
+    rmSync(fixture.directory, { recursive: true, force: true });
   }
 });
 

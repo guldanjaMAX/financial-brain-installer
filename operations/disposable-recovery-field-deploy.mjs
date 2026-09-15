@@ -839,7 +839,7 @@ async function reserveAndFinalizePhase({
   if (!resume && (existsSync(expectedPath) || existsSync(pendingPath))) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_RESUME_REQUIRED");
   }
-  if (resume && (!existsSync(expectedPath) || !existsSync(pendingPath))) {
+  if (resume && (existsSync(expectedPath) || !existsSync(pendingPath))) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_RESUME_NOT_AVAILABLE");
   }
   let output;

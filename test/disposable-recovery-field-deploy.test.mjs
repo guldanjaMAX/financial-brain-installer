@@ -1437,10 +1437,13 @@ test("an unconfirmed provider mutation remains ambiguous and cannot be blindly r
       "upload_active_version:confirmed:confirmed",
       "deploy_active_version:prepared:sent_unconfirmed",
     ]);
-    assert.equal(existsSync(paths.sourcePhase), true);
+    assert.equal(existsSync(paths.sourcePhase), false);
     assert.equal(existsSync(privateAggregateReceiptPendingPath(paths.sourcePhase)), true);
     assert.equal(
-      JSON.parse(readFileSync(paths.sourcePhase, "utf8")).status,
+      JSON.parse(readFileSync(
+        privateAggregateReceiptPendingPath(paths.sourcePhase),
+        "utf8",
+      )).status,
       "provider_result_unconfirmed",
     );
 

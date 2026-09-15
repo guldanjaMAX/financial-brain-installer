@@ -567,28 +567,17 @@ function resetOutputContext(output, markerSha256) {
   });
 }
 
-function readResidueMarker(output, binding, approvalFingerprint, { allowSingle = false } = {}) {
+function readResidueMarker(output, binding, approvalFingerprint) {
   if (existsSync(output.commitPath)) {
     refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_FINALIZATION_IN_PROGRESS");
   }
   const mainPresent = existsSync(output.path);
   const pendingPresent = existsSync(output.pendingPath);
   if (!mainPresent && !pendingPresent) return null;
-  if (!allowSingle && (!mainPresent || !pendingPresent)) {
+  if (mainPresent || !pendingPresent) {
     refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_EVIDENCE_INVALID");
   }
-  if (mainPresent && pendingPresent) {
-    return readPendingMarker(output, binding, approvalFingerprint);
-  }
-  const path = pendingPresent ? output.pendingPath : output.path;
-  try {
-    const loaded = readPrivateAggregateReceipt(path, {
-      code: "DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_EVIDENCE_INVALID",
-    });
-    return assertPendingMarker(loaded.value, binding, approvalFingerprint);
-  } catch {
-    refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_EVIDENCE_INVALID");
-  }
+  return readPendingMarker(output, binding, approvalFingerprint);
 }
 
 async function inspectResetItems(keychain, marker, originalItems = null) {
@@ -1183,13 +1172,7 @@ function recoverResetJournalEvent({
   const { journalOutput, data } = expected;
   const marker = resetJournalMarker(data);
   const receipt = resetJournalReceipt(data);
-  if (!group.main && group.pending && !group.staged && !group.commit) {
-    clearJournalReservation(journalOutput, marker, {
-      code: "DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_JOURNAL_INVALID",
-    });
-    return null;
-  }
-  if (!group.main) {
+  if (!group.main && !group.pending) {
     refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_JOURNAL_INVALID");
   }
   if (group.staged || group.commit) {
@@ -1405,9 +1388,7 @@ export async function previewDisposableRecoveryFieldKeychainReset({
   const checked = checkedBinding(binding);
   const adapter = checkedAdapter(keychain);
   const output = outputContext(receiptPath, expectedReceiptDirectory);
-  const marker = readResidueMarker(output, checked, approvalFor(checked), {
-    allowSingle: true,
-  });
+  const marker = readResidueMarker(output, checked, approvalFor(checked));
   if (!marker) refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_NOT_REQUIRED");
   const items = await inspectResetItems(adapter, marker);
   const markerSha256 = reservationMarkerSha256(marker);
@@ -1482,9 +1463,7 @@ export async function runDisposableRecoveryFieldKeychainReset({
   if (existsSync(output.commitPath)) {
     refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_FINALIZATION_IN_PROGRESS");
   }
-  let marker = readResidueMarker(output, checked, approvalFor(checked), {
-    allowSingle: true,
-  });
+  let marker = readResidueMarker(output, checked, approvalFor(checked));
   const residueMarkerPresentAtStart = marker !== null;
   let resetOutput;
   let authorization;
@@ -1529,19 +1508,6 @@ export async function runDisposableRecoveryFieldKeychainReset({
       output,
       expectedApproval,
     );
-    if (!existsSync(resetOutput.path) && existsSync(resetOutput.pendingPath) &&
-        !existsSync(resetOutput.commitPath)) {
-      try {
-        clearPrivateAggregateReceiptReservation(resetOutput, authorizationMarker, {
-          code: "DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_RECEIPT_INVALID",
-        });
-      } catch {
-        refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_RECEIPT_INVALID");
-      }
-      refuse(
-        "DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_RESET_AUTHORIZATION_RESTART_REQUIRED",
-      );
-    }
     if (existsSync(resetOutput.commitPath)) {
       try {
         recoverPrivateAggregateReceiptFinalization(
@@ -1563,7 +1529,7 @@ export async function runDisposableRecoveryFieldKeychainReset({
       let reservation;
       let finalized = false;
       try {
-        reservation = existsSync(resetOutput.path) || existsSync(resetOutput.pendingPath)
+        reservation = existsSync(resetOutput.pendingPath)
           ? resumePrivateAggregateReceiptReservation(resetOutput, authorizationMarker)
           : reserveReceipt(
               assertPrivateAggregateOutputPath(resetOutput.path, {
@@ -2347,7 +2313,7 @@ export async function runDisposableRecoveryFieldKeychainPrep({
         return completed;
       }
     } else {
-      if (!existsSync(output.path) || !existsSync(output.pendingPath)) {
+      if (existsSync(output.path) || !existsSync(output.pendingPath)) {
         refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_PREP_RESET_REQUIRED");
       }
       marker = readPendingMarker(output, checked, expectedApproval);
@@ -2356,7 +2322,7 @@ export async function runDisposableRecoveryFieldKeychainPrep({
         marker.campaign_keychain_value_sha256,
       );
     }
-    if (!existsSync(output.path) || !existsSync(output.pendingPath) ||
+    if (existsSync(output.path) || !existsSync(output.pendingPath) ||
         existsSync(output.commitPath)) {
       for (const secret of secrets) secret.fill(0);
       refuse("DISPOSABLE_RECOVERY_FIELD_KEYCHAIN_PREP_RESERVATION_CHANGED");

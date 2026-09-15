@@ -1208,7 +1208,7 @@ testWithMacosPrivateReceipt("A1/A3 recover a durable final left with its guard f
                 injected = true;
                 return finalizePrivateAggregateReceipt(reservation, value, {
                   removePending() {
-                    throw new Error(`synthetic ${artifact} post-rename death`);
+                    throw new Error(`synthetic ${artifact} post-link death`);
                   },
                 });
               }
