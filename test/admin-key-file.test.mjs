@@ -607,6 +607,9 @@ try {
     mkdirSync(looseFileRoot, { mode: 0o700 });
     const looseFilePath = join(looseFileRoot, ".brain-admin-key");
     writeFileSync(looseFilePath, `${secretA}\n`, { mode: 0o644 });
+    chmodSync(looseFilePath, 0o644);
+    assert.equal(statSync(looseFilePath).mode & 0o777, 0o644,
+      "the fixture explicitly creates a file readable by other users");
     assert.throws(
       () => writeAdminKeyFile(looseFilePath, secretB, { randomBytes: entropy(20) }),
       /readable only by the current user/,

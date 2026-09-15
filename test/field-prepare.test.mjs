@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chownSync,
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import * as nodeModule from "node:module";
@@ -363,9 +368,7 @@ if (process.argv[2] === "child") {
   }
 });
 
-test("long-lived Wrangler pins accept ctime-only system provenance metadata, not changed bytes", {
-  skip: process.platform === "win32",
-}, async () => {
+test("long-lived Wrangler pins preserve structure while isolating POSIX metadata tolerance", async (t) => {
   const temporary = mkdtempSync(join(tmpdir(), "brain-wrangler-ctime-"));
   try {
     const preparedRoot = process.env.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT;
@@ -380,33 +383,236 @@ test("long-lived Wrangler pins accept ctime-only system provenance metadata, not
       source,
       join(temporary, "runtime"),
     );
-    const expected = materialized.descriptor;
-    const entrypoint = expected.entrypointPath;
-    const before = statSync(entrypoint);
+    // Normalize the repeatedly mutated fixture file to whole-second times so
+    // filesystems with sub-millisecond stat precision can restore it exactly.
+    const initialStableTime = new Date(Math.floor(Date.now() / 1_000) * 1_000 - 20_000);
+    utimesSync(materialized.entrypointPath, initialStableTime, initialStableTime);
+    let expected = inspectLockedWranglerRuntime(materialized.root, {
+      ownerOnly: materialized.descriptor.ownerOnly,
+      exactRoot: materialized.descriptor.exactRoot,
+      ...materialized.descriptor.host,
+    });
+    const refusesChange = (message, codes = [
+      "LOCKED_WRANGLER_RUNTIME_INVALID",
+      "LOCKED_WRANGLER_RUNTIME_CHANGED",
+    ]) => assert.throws(
+      () => assertLockedWranglerRuntimeUnchanged(expected),
+      (error) => codes.includes(error.code),
+      message,
+    );
+    const assertRestored = () => assert.doesNotThrow(
+      () => assertLockedWranglerRuntimeUnchanged(expected),
+      "each structural probe must restore the exact pinned runtime",
+    );
 
-    // chmod to the already-effective mode models an extended-attribute update:
-    // ctime changes, while the executable's bytes and content mtime do not.
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-    chmodSync(entrypoint, before.mode & 0o777);
-    const metadataOnly = statSync(entrypoint);
-    assert.equal(metadataOnly.mtimeMs, before.mtimeMs);
-    assert.notEqual(metadataOnly.ctimeMs, before.ctimeMs);
-    assert.doesNotThrow(() => assertLockedWranglerRuntimeUnchanged(expected));
+    await t.test("cross-platform exact-tree, inode, link, byte, and file-mtime pins", () => {
+      const entrypoint = expected.entrypointPath;
+      const leafDirectoryPin = expected.directoryPins.find((candidate) => {
+        const prefix = `${candidate.relative}/`;
+        return !expected.directoryPins.some((other) =>
+          other !== candidate && other.relative.startsWith(prefix)) &&
+          expected.filePins.some((file) => {
+            if (!file.relative.startsWith(prefix)) return false;
+            return !file.relative.slice(prefix.length).includes("/");
+          });
+      });
+      assert(leafDirectoryPin, "the prepared runtime must contain a leaf package directory");
+      const directory = leafDirectoryPin.path;
 
-    const original = readFileSync(entrypoint);
-    try {
-      writeFileSync(entrypoint, Buffer.concat([
-        original,
-        Buffer.from("\n// changed runtime bytes\n"),
-      ]));
-      assert.throws(
-        () => assertLockedWranglerRuntimeUnchanged(expected),
-        (error) => error.code === "LOCKED_WRANGLER_RUNTIME_CHANGED",
-      );
-    } finally {
-      writeFileSync(entrypoint, original);
-      original.fill(0);
-    }
+      const unexpectedFile = join(directory, "unexpected-runtime-entry");
+      writeFileSync(unexpectedFile, "unexpected exact-tree entry\n");
+      try {
+        refusesChange("an added file must change the exact tree");
+      } finally {
+        rmSync(unexpectedFile);
+      }
+      assertRestored();
+
+      const unexpectedDirectory = join(directory, "unexpected-runtime-directory");
+      mkdirSync(unexpectedDirectory);
+      try {
+        refusesChange("an added directory must change the exact tree");
+      } finally {
+        rmSync(unexpectedDirectory, { recursive: true, force: true });
+      }
+      assertRestored();
+
+      const removedFileBackup = join(temporary, "removed-file-backup");
+      renameSync(entrypoint, removedFileBackup);
+      try {
+        refusesChange("a removed file must change the exact tree");
+      } finally {
+        renameSync(removedFileBackup, entrypoint);
+      }
+      assertRestored();
+
+      const removedDirectoryBackup = join(temporary, "removed-directory-backup");
+      renameSync(directory, removedDirectoryBackup);
+      try {
+        refusesChange("a removed directory must change the exact tree");
+      } finally {
+        renameSync(removedDirectoryBackup, directory);
+      }
+      assertRestored();
+
+      const hardLink = join(directory, "unexpected-runtime-hardlink");
+      linkSync(entrypoint, hardLink);
+      try {
+        refusesChange("a hard link must change both the exact tree and file link count");
+      } finally {
+        rmSync(hardLink);
+      }
+      assertRestored();
+
+      const fileBeforeMtime = statSync(entrypoint);
+      utimesSync(entrypoint, fileBeforeMtime.atime, new Date(fileBeforeMtime.mtimeMs + 2_000));
+      try {
+        refusesChange(
+          "directory timestamp tolerance must not weaken a regular-file mtime pin",
+          ["LOCKED_WRANGLER_RUNTIME_CHANGED"],
+        );
+      } finally {
+        utimesSync(entrypoint, fileBeforeMtime.atime, fileBeforeMtime.mtime);
+      }
+      assertRestored();
+
+      const originalBytes = readFileSync(entrypoint);
+      const originalMetadata = statSync(entrypoint);
+      try {
+        writeFileSync(entrypoint, Buffer.concat([
+          originalBytes,
+          Buffer.from("\n// changed runtime bytes\n"),
+        ]));
+        refusesChange("changed runtime bytes must be refused");
+      } finally {
+        writeFileSync(entrypoint, originalBytes);
+        utimesSync(entrypoint, originalMetadata.atime, originalMetadata.mtime);
+        originalBytes.fill(0);
+      }
+      assertRestored();
+
+      const directoryBackup = join(temporary, "directory-replacement-backup");
+      const directoryBefore = statSync(directory);
+      renameSync(directory, directoryBackup);
+      mkdirSync(directory);
+      chmodSync(directory, directoryBefore.mode & 0o777);
+      for (const name of readdirSync(directoryBackup)) {
+        renameSync(join(directoryBackup, name), join(directory, name));
+      }
+      try {
+        assert.notEqual(statSync(directory).ino, directoryBefore.ino);
+        refusesChange("a same-tree directory inode replacement must be refused", [
+          "LOCKED_WRANGLER_RUNTIME_CHANGED",
+        ]);
+      } finally {
+        for (const name of readdirSync(directory)) {
+          renameSync(join(directory, name), join(directoryBackup, name));
+        }
+        rmSync(directory, { recursive: true, force: true });
+        renameSync(directoryBackup, directory);
+      }
+      assertRestored();
+
+      const replacement = join(temporary, "same-byte-file-replacement");
+      const originalBackup = join(temporary, "same-byte-file-original");
+      const replacementBytes = readFileSync(entrypoint);
+      const wholeSecond = new Date(Math.floor(Date.now() / 1_000) * 1_000 - 10_000);
+      writeFileSync(replacement, replacementBytes);
+      chmodSync(replacement, statSync(entrypoint).mode & 0o777);
+      utimesSync(replacement, wholeSecond, wholeSecond);
+      utimesSync(entrypoint, wholeSecond, wholeSecond);
+      expected = inspectLockedWranglerRuntime(materialized.root, {
+        ownerOnly: expected.ownerOnly,
+        exactRoot: expected.exactRoot,
+        ...expected.host,
+      });
+      const originalIdentity = statSync(entrypoint);
+      const replacementIdentity = statSync(replacement);
+      for (const key of ["dev", "nlink", "size", "mode", "uid", "mtimeMs"]) {
+        assert.equal(replacementIdentity[key], originalIdentity[key],
+          `same-byte replacement precondition differs at ${key}`);
+      }
+      renameSync(entrypoint, originalBackup);
+      renameSync(replacement, entrypoint);
+      try {
+        assert.notEqual(statSync(entrypoint).ino, originalIdentity.ino);
+        refusesChange("a same-byte regular-file inode replacement must be refused", [
+          "LOCKED_WRANGLER_RUNTIME_CHANGED",
+        ]);
+      } finally {
+        rmSync(entrypoint);
+        renameSync(originalBackup, entrypoint);
+        replacementBytes.fill(0);
+      }
+      assertRestored();
+    });
+
+    await t.test("POSIX provenance timestamps, symlinks, and mode pins", {
+      skip: process.platform === "win32",
+    }, async () => {
+      const entrypoint = expected.entrypointPath;
+      const before = statSync(entrypoint);
+
+      // Reapplying the effective mode models a provenance xattr update: ctime
+      // changes while the executable's bytes and source mtime do not.
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      chmodSync(entrypoint, before.mode & 0o777);
+      const metadataOnly = statSync(entrypoint);
+      assert.equal(metadataOnly.mtimeMs, before.mtimeMs);
+      assert.notEqual(metadataOnly.ctimeMs, before.ctimeMs);
+      assertRestored();
+
+      const directory = expected.directoryPins.at(-1).path;
+      const directoryBefore = statSync(directory);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      utimesSync(directory, directoryBefore.atime, new Date(directoryBefore.mtimeMs + 2_000));
+      assert.notEqual(statSync(directory).mtimeMs, directoryBefore.mtimeMs);
+      assertRestored();
+
+      const symlink = join(directory, "unexpected-runtime-symlink");
+      symlinkSync(entrypoint, symlink, "file");
+      try {
+        refusesChange("a symlink must never enter the exact runtime tree");
+      } finally {
+        rmSync(symlink);
+      }
+      assertRestored();
+
+      const fileMode = statSync(entrypoint).mode & 0o777;
+      chmodSync(entrypoint, fileMode ^ 0o100);
+      try {
+        refusesChange("a regular-file mode change must be refused");
+      } finally {
+        chmodSync(entrypoint, fileMode);
+      }
+      assertRestored();
+
+      const directoryMode = statSync(directory).mode & 0o777;
+      chmodSync(directory, directoryMode ^ 0o200);
+      try {
+        refusesChange("a directory mode change must be refused", [
+          "LOCKED_WRANGLER_RUNTIME_CHANGED",
+        ]);
+      } finally {
+        chmodSync(directory, directoryMode);
+      }
+      assertRestored();
+    });
+
+    await t.test("POSIX owner pins reject a real owner transition when privileged", {
+      skip: typeof process.getuid !== "function" || process.getuid() !== 0,
+    }, () => {
+      const entrypoint = expected.entrypointPath;
+      const before = statSync(entrypoint);
+      const replacementUid = before.uid === 1 ? 2 : 1;
+      chownSync(entrypoint, replacementUid, before.gid);
+      try {
+        refusesChange("a regular-file owner change must be refused");
+      } finally {
+        chownSync(entrypoint, before.uid, before.gid);
+      }
+      assertRestored();
+    });
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

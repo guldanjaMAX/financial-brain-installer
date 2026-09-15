@@ -139,18 +139,29 @@ function sameIdentity(left, right) {
 
 /**
  * Keep ctime as an in-read race detector, but do not make it a long-lived
- * content pin. macOS adds com.apple.provenance extended attributes to newly
- * materialized files asynchronously. That changes ctime without changing the
- * inode, bytes, ownership, permissions, or source mtime. Every long-lived
- * check below reopens and hashes every regular file and re-walks the exact
- * directory tree, so accepting that one metadata-only transition does not
- * accept a changed runtime.
+ * file-content pin. macOS adds com.apple.provenance extended attributes to
+ * newly materialized files asynchronously. That changes ctime without changing
+ * the inode, bytes, ownership, permissions, or source mtime.
  */
-function samePinnedIdentity(left, right) {
+function samePinnedFileIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino &&
     left.nlink === right.nlink && left.size === right.size &&
     left.mode === right.mode && left.uid === right.uid &&
     left.mtimeMs === right.mtimeMs;
+}
+
+/**
+ * The same macOS provenance pass updates directory mtime as it traverses a new
+ * tree, even though its final entry set is unchanged. Directory timestamps are
+ * therefore within-walk race evidence, not a long-lived tree identity. The
+ * strict sameIdentity checks inside each walk still bracket every directory;
+ * the closing inspection also re-enumerates the exact tree and reopens and
+ * hashes every regular file before this comparison is reached.
+ */
+function samePinnedDirectoryIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino &&
+    left.nlink === right.nlink && left.size === right.size &&
+    left.mode === right.mode && left.uid === right.uid;
 }
 
 function assertResolutionGuardSupport() {
@@ -553,8 +564,8 @@ export function assertLockedWranglerRuntimeUnchanged(expected) {
   if (current.entrypointPath !== expected.entrypointPath ||
       current.resolutionGuardPath !== expected.resolutionGuardPath ||
       current.nodeExecPath !== expected.nodeExecPath ||
-      !samePinnedIdentity(current.lockPin.identity, expected.lockPin.identity) ||
-      !samePinnedIdentity(current.nodePin.identity, expected.nodePin.identity) ||
+      !samePinnedFileIdentity(current.lockPin.identity, expected.lockPin.identity) ||
+      !samePinnedFileIdentity(current.nodePin.identity, expected.nodePin.identity) ||
       current.filePins.length !== expected.filePins.length ||
       current.directoryPins.length !== expected.directoryPins.length) {
     fail("LOCKED_WRANGLER_RUNTIME_CHANGED");
@@ -563,7 +574,7 @@ export function assertLockedWranglerRuntimeUnchanged(expected) {
     const left = current.filePins[index];
     const right = expected.filePins[index];
     if (left.relative !== right.relative || left.hash !== right.hash ||
-        !samePinnedIdentity(left.identity, right.identity)) {
+        !samePinnedFileIdentity(left.identity, right.identity)) {
       fail("LOCKED_WRANGLER_RUNTIME_CHANGED");
     }
   }
@@ -571,7 +582,7 @@ export function assertLockedWranglerRuntimeUnchanged(expected) {
     const left = current.directoryPins[index];
     const right = expected.directoryPins[index];
     if (left.relative !== right.relative ||
-        !samePinnedIdentity(left.identity, right.identity)) {
+        !samePinnedDirectoryIdentity(left.identity, right.identity)) {
       fail("LOCKED_WRANGLER_RUNTIME_CHANGED");
     }
   }

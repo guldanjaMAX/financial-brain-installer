@@ -12,33 +12,64 @@ import {
 import { CONFIRMED, scan as scanCredentialShapes } from "../worker/src/lib/secret-scan.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export const GIT_HISTORY_TIMEOUT_MS = 120_000;
+export const GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
+const GIT_HISTORY_BATCH_OUTPUT_LIMIT_BYTES = 1024 * 1024 * 1024;
 
-function childEnvironment() {
+export function createHistoryGitEnvironment(environment = process.env) {
   return {
-    PATH: process.env.PATH || "",
+    PATH: environment.PATH || "",
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_NO_LAZY_FETCH: "1",
+    GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
     LC_ALL: "C",
-    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
-    ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
-    ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
-    ...(process.env.TMP ? { TMP: process.env.TMP } : {}),
-    ...(process.env.TEMP ? { TEMP: process.env.TEMP } : {}),
+    ...(environment.SystemRoot ? { SystemRoot: environment.SystemRoot } : {}),
+    ...(environment.WINDIR ? { WINDIR: environment.WINDIR } : {}),
+    ...(environment.TMPDIR ? { TMPDIR: environment.TMPDIR } : {}),
+    ...(environment.TMP ? { TMP: environment.TMP } : {}),
+    ...(environment.TEMP ? { TEMP: environment.TEMP } : {}),
   };
 }
 
-function git(repo, args, { input = undefined, encoding = "utf8", maxBuffer = 512 * 1024 * 1024 } = {}) {
+function safeGitOperation(args) {
+  const operation = String(args?.[0] || "command");
+  return /^[a-z][a-z0-9-]*$/.test(operation) ? operation : "command";
+}
+
+export function gitFailureDiagnostic(args, result, {
+  timeoutMs = GIT_HISTORY_TIMEOUT_MS,
+  maxBuffer = GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES,
+} = {}) {
+  const operation = safeGitOperation(args);
+  if (result?.error?.code === "ETIMEDOUT") {
+    return `git ${operation} timed out after ${timeoutMs} ms`;
+  }
+  if (result?.error?.code === "ENOBUFS") {
+    return `git ${operation} exceeded the ${maxBuffer}-byte output limit`;
+  }
+  if (Number.isInteger(result?.status)) {
+    return `git ${operation} failed with exit status ${result.status}`;
+  }
+  if (result?.signal) return `git ${operation} was terminated by a signal`;
+  return `git ${operation} failed`;
+}
+
+function git(repo, args, {
+  input = undefined,
+  encoding = "utf8",
+  maxBuffer = GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES,
+} = {}) {
   const result = spawnSync("git", args, {
     cwd: repo,
     encoding,
     input,
-    env: childEnvironment(),
+    env: createHistoryGitEnvironment(),
     maxBuffer,
-    timeout: 120_000,
+    timeout: GIT_HISTORY_TIMEOUT_MS,
   });
   if (result.status !== 0) {
-    const diagnostic = String(result.stderr || result.stdout || result.error?.message || "git failed").trim();
-    throw new Error(`git ${args[0]} failed: ${diagnostic}`);
+    throw new Error(gitFailureDiagnostic(args, result, { maxBuffer }));
   }
   return result.stdout;
 }
@@ -47,19 +78,21 @@ function isAncestor(repo, ancestor, descendant) {
   const result = spawnSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
     cwd: repo,
     encoding: "utf8",
-    env: childEnvironment(),
+    env: createHistoryGitEnvironment(),
+    maxBuffer: GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES,
     timeout: 30_000,
   });
   if (result.status === 0) return true;
   if (result.status === 1) return false;
-  throw new Error(`git merge-base failed: ${String(result.stderr || result.error?.message || "unknown error").trim()}`);
+  throw new Error(gitFailureDiagnostic(["merge-base"], result, { timeoutMs: 30_000 }));
 }
 
 function resolveLocalRemoteRevision(repo, localName, objectId) {
   const local = spawnSync("git", ["rev-parse", "--verify", localName], {
     cwd: repo,
     encoding: "utf8",
-    env: childEnvironment(),
+    env: createHistoryGitEnvironment(),
+    maxBuffer: GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES,
     timeout: 30_000,
   });
   if (local.status === 0) {
@@ -77,7 +110,8 @@ function resolveLocalRemoteRevision(repo, localName, objectId) {
   const object = spawnSync("git", ["cat-file", "-e", `${objectId}^{object}`], {
     cwd: repo,
     encoding: "utf8",
-    env: childEnvironment(),
+    env: createHistoryGitEnvironment(),
+    maxBuffer: GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES,
     timeout: 30_000,
   });
   if (object.status !== 0) {
@@ -173,7 +207,9 @@ function publicRefs(repo, prefixes, explicitRefs, remote = null, refManifest = n
     const { objectId, publicName, revisionName = name } = value;
     let commitId = null;
     try {
-      commitId = git(repo, ["rev-parse", "--verify", `${revisionName}^{commit}`]).trim();
+      // Peel the exact object captured above, rather than resolving a ref name
+      // for a second time after the public-ref snapshot has been established.
+      commitId = git(repo, ["rev-parse", "--verify", `${objectId}^{commit}`]).trim();
     } catch {
       // A public ref can legally point at a non-commit object. It is still
       // inventoried and scanned, but has no commit graph to traverse.
@@ -189,21 +225,45 @@ function publicRefs(repo, prefixes, explicitRefs, remote = null, refManifest = n
   return refs;
 }
 
-function objectInventory(repo, refs) {
-  const revisionInput = `${refs.map((ref) => ref.name).join("\n")}\n`;
-  const raw = git(repo, ["rev-list", "--objects", "--stdin"], { input: revisionInput });
+function enumerateReachableObjectIds(repo, revisions, malformedContext) {
+  if (!Array.isArray(revisions) || !revisions.length ||
+      revisions.some((revision) => !/^[0-9a-f]{40,64}$/.test(revision))) {
+    throw new Error("history object enumeration received an invalid revision set");
+  }
+  // Paths are reconstructed from the tree objects below. Asking rev-list for
+  // object names only creates a second private-path surface, including in a
+  // timed-out child's partial stdout. --missing=print makes a partial clone a
+  // fixed offline refusal instead of allowing an implicit promisor fetch.
+  const raw = git(repo, [
+    "rev-list", "--objects", "--missing=print", "--no-object-names", "--stdin",
+  ], { input: `${revisions.join("\n")}\n` });
   const objectIds = new Set();
-  const pathFindings = new Map();
+  let missingObjectCount = 0;
   for (const line of raw.split("\n")) {
     if (!line) continue;
-    const separator = line.indexOf(" ");
-    const objectId = separator === -1 ? line : line.slice(0, separator);
+    if (/^\?[0-9a-f]{40,64}$/.test(line)) {
+      missingObjectCount++;
+      continue;
+    }
+    const objectId = line;
     if (!/^[0-9a-f]{40,64}$/.test(objectId)) {
-      throw new Error("git returned a malformed object id during history enumeration");
+      throw new Error(`git returned a malformed object id during ${malformedContext}`);
     }
     objectIds.add(objectId);
   }
+  if (missingObjectCount > 0) {
+    throw new Error("full-history privacy scanning requires every selected object to be present locally");
+  }
+  return objectIds;
+}
 
+function objectInventory(repo, refs) {
+  const objectIds = enumerateReachableObjectIds(
+    repo,
+    refs.map((ref) => ref.object_id),
+    "history enumeration",
+  );
+  const pathFindings = new Map();
   const ids = [...objectIds].sort();
   const checked = git(repo, ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], {
     input: `${ids.join("\n")}\n`,
@@ -225,12 +285,14 @@ function readBatch(repo, objects) {
     cwd: repo,
     encoding: null,
     input: Buffer.from(`${objects.map((object) => object.object_id).join("\n")}\n`, "utf8"),
-    env: childEnvironment(),
-    maxBuffer: 1024 * 1024 * 1024,
-    timeout: 120_000,
+    env: createHistoryGitEnvironment(),
+    maxBuffer: GIT_HISTORY_BATCH_OUTPUT_LIMIT_BYTES,
+    timeout: GIT_HISTORY_TIMEOUT_MS,
   });
   if (result.status !== 0) {
-    throw new Error(`git cat-file failed: ${String(result.stderr || result.error?.message || "unknown error").trim()}`);
+    throw new Error(gitFailureDiagnostic(["cat-file"], result, {
+      maxBuffer: GIT_HISTORY_BATCH_OUTPUT_LIMIT_BYTES,
+    }));
   }
   const output = result.stdout;
   const contents = new Map();
@@ -303,7 +365,27 @@ function parseTreeEntries(buffer, objectIdLength) {
   return entries;
 }
 
-function addCompleteTreePathFindings(inventory, contents, identityIndex) {
+function commitRootTree(objectId, contents) {
+  const firstLine = contents.get(objectId)?.toString("utf8", 0, 96).split("\n", 1)[0];
+  const match = /^tree ([0-9a-f]{40,64})$/.exec(firstLine || "");
+  if (!match) throw new Error("git commit object has no valid root tree");
+  return match[1];
+}
+
+function tagTarget(object, contents, objectById) {
+  const header = contents.get(object.object_id)?.toString("utf8").split("\n\n", 1)[0] || "";
+  const lines = header.split("\n");
+  const objectMatch = /^object ([0-9a-f]{40,64})$/.exec(lines[0] || "");
+  const typeMatch = /^type (blob|commit|tag|tree)$/.exec(lines[1] || "");
+  if (!objectMatch || !typeMatch) throw new Error("git tag object has no valid target");
+  const target = objectById.get(objectMatch[1]);
+  if (!target || target.type !== typeMatch[1]) {
+    throw new Error("git tag object has no valid target");
+  }
+  return target;
+}
+
+function addCompleteTreePathFindings(inventory, contents, identityIndex, refs) {
   const objectById = new Map(inventory.objects.map((object) => [object.object_id, object]));
   const treeEntries = new Map();
   for (const object of inventory.objects) {
@@ -313,10 +395,29 @@ function addCompleteTreePathFindings(inventory, contents, identityIndex) {
   const rootTrees = new Set();
   for (const object of inventory.objects) {
     if (object.type !== "commit") continue;
-    const firstLine = contents.get(object.object_id).toString("utf8", 0, 96).split("\n", 1)[0];
-    const match = /^tree ([0-9a-f]{40,64})$/.exec(firstLine);
-    if (!match) throw new Error("git commit object has no valid root tree");
-    rootTrees.add(match[1]);
+    rootTrees.add(commitRootTree(object.object_id, contents));
+  }
+  // rev-list traverses direct tree/blob refs and annotated tags, but commits
+  // are the only objects that inherently define a filesystem root. Treat only
+  // selected refs peeled through tag chains as additional roots. This covers a
+  // public ref that intentionally points at a tree without treating every
+  // reachable subtree as an independent path namespace.
+  for (const ref of refs) {
+    let target = objectById.get(ref.object_id);
+    const seenTags = new Set();
+    if (!target) throw new Error("a selected public ref references a missing object");
+    while (target.type === "tag") {
+      if (seenTags.has(target.object_id)) throw new Error("git tag object chain is cyclic");
+      seenTags.add(target.object_id);
+      target = tagTarget(target, contents, objectById);
+    }
+    if (target.type === "commit") {
+      rootTrees.add(commitRootTree(target.object_id, contents));
+    } else if (target.type === "tree") {
+      rootTrees.add(target.object_id);
+    } else if (target.type !== "blob") {
+      throw new Error("a selected public ref has an unsupported object type");
+    }
   }
 
   const visited = new Set();
@@ -328,14 +429,29 @@ function addCompleteTreePathFindings(inventory, contents, identityIndex) {
     if (!entries) throw new Error("reachable commit references a missing tree object");
     for (const entry of entries) {
       const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const findings = scanPathMaterial(fullPath, identityIndex);
+      const entryObject = objectById.get(entry.objectId);
+      const isTree = entry.mode === "40000" || entry.mode === "040000" ||
+        entryObject?.type === "tree";
+      const isGitlink = entry.mode === "160000";
+      // A non-empty directory component is represented in every descendant's
+      // complete path, so adding a finding to the subtree as well would create
+      // duplicate baseline objects. Empty trees have no descendant on which to
+      // retain their name. Gitlink targets are intentionally not traversed by
+      // rev-list and are commonly absent locally, so their defining parent tree
+      // is the only stable, selected object to which the path can be attached.
+      const findingObjectId = isGitlink || !entryObject
+        ? treeId
+        : isTree && (treeEntries.get(entry.objectId)?.length || 0) > 0
+          ? null
+          : entry.objectId;
+      const findings = findingObjectId ? scanPathMaterial(fullPath, identityIndex) : [];
       if (findings.length) {
-        const existing = inventory.pathFindings.get(entry.objectId) || [];
+        const existing = inventory.pathFindings.get(findingObjectId) || [];
         const combined = new Map([...existing, ...findings].map((finding) =>
           [`${finding.kind}:${finding.label}`, finding]));
-        inventory.pathFindings.set(entry.objectId, [...combined.values()]);
+        inventory.pathFindings.set(findingObjectId, [...combined.values()]);
       }
-      if (entry.mode === "40000" || entry.mode === "040000" || objectById.get(entry.objectId)?.type === "tree") {
+      if (isTree) {
         scanTree(entry.objectId, fullPath);
       }
     }
@@ -349,10 +465,10 @@ function addClassification(target, finding, location) {
   target.locations.add(location);
 }
 
-function scanObjects(repo, inventory, identityIndex) {
+function scanObjects(repo, inventory, identityIndex, refs) {
   const readableObjects = inventory.objects.filter((object) => ["blob", "commit", "tag"].includes(object.type));
   const contents = readBatch(repo, inventory.objects);
-  addCompleteTreePathFindings(inventory, contents, identityIndex);
+  addCompleteTreePathFindings(inventory, contents, identityIndex, refs);
   const findings = new Map();
   const ensure = (object) => {
     if (!findings.has(object.object_id)) {
@@ -367,10 +483,12 @@ function scanObjects(repo, inventory, identityIndex) {
   };
 
   let binaryBlobCount = 0;
-  for (const object of readableObjects) {
+  for (const object of inventory.objects) {
     const pathHits = inventory.pathFindings.get(object.object_id) || [];
     for (const finding of pathHits) addClassification(ensure(object), finding, "path");
+  }
 
+  for (const object of readableObjects) {
     const buffer = contents.get(object.object_id);
     if (object.type === "blob" && looksBinary(buffer)) {
       binaryBlobCount++;
@@ -404,16 +522,11 @@ function scanObjects(repo, inventory, identityIndex) {
 function addReachability(repo, refs, findings) {
   const byObject = new Map(findings.map((finding) => [finding.object_id, finding]));
   for (const ref of refs) {
-    const ids = new Set();
-    if (ref.commit_id) {
-      const raw = git(repo, ["rev-list", "--objects", ref.name]);
-      for (const line of raw.split("\n")) {
-        if (!line) continue;
-        ids.add(line.split(" ", 1)[0]);
-      }
-    } else {
-      ids.add(ref.object_id);
-    }
+    const ids = enumerateReachableObjectIds(
+      repo,
+      [ref.object_id],
+      "history reachability",
+    );
     for (const objectId of ids) {
       const finding = byObject.get(objectId);
       if (finding) finding.reachable_from.push(ref.display_name);
@@ -527,10 +640,10 @@ export function scanRepository({
   if (shallow) throw new Error("full-history privacy scanning refuses a shallow repository");
   const refs = publicRefs(root, refPrefixes, explicitRefs, remote, refManifest);
   const inventory = objectInventory(root, refs);
-  const scanned = scanObjects(root, inventory, identityIndex);
+  const scanned = scanObjects(root, inventory, identityIndex, refs);
   addReachability(root, refs, scanned.findings);
 
-  const commitIds = refs.filter((ref) => ref.commit_id).map((ref) => ref.name);
+  const commitIds = refs.filter((ref) => ref.commit_id).map((ref) => ref.commit_id);
   const commits = commitIds.length
     ? git(root, ["rev-list", "--count", ...commitIds]).trim()
     : "0";
