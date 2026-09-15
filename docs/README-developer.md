@@ -1338,7 +1338,9 @@ public receipt contains only ordinals and closed outcome fields; the private
 handoff retains exact locators and original-byte hashes for the Worker contract
 and must never be printed or persisted as a public artifact. Multi-record
 archives remain an explicit ambiguity rather than being matched by filename or
-content similarity.
+content similarity. The private root pin brackets its directory identity with
+an exact hash of direct entry names and types, so a same-timestamp NTFS entry
+change still invalidates the assessment without reading file bytes.
 
 Migration 0042 adds the independent opaque-ID key and append-only
 `source_original_observations` ledger. `POST

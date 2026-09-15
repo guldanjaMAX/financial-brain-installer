@@ -9825,7 +9825,38 @@ function provenanceAssessmentDirectoryStat(path) {
   });
 }
 
-/** Pin only a local directory identity; no source file or credential is read. */
+function provenanceAssessmentDirectEntries(path) {
+  const records = readdirSync(path, { encoding: "buffer", withFileTypes: true })
+    .map((entry) => {
+      const name = Buffer.isBuffer(entry.name)
+        ? entry.name
+        : Buffer.from(String(entry.name), "utf8");
+      const type = entry.isFile() ? 1
+        : entry.isDirectory() ? 2
+          : entry.isSymbolicLink() ? 3
+            : entry.isBlockDevice() ? 4
+              : entry.isCharacterDevice() ? 5
+                : entry.isFIFO() ? 6
+                  : entry.isSocket() ? 7
+                    : 0;
+      return Buffer.concat([Buffer.from([type]), name]);
+    })
+    .sort((left, right) => Buffer.compare(left, right));
+  const hash = createHash("sha256");
+  hash.update("financial-brain:provenance-assessment-direct-entries:v1\0");
+  for (const record of records) {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(record.length);
+    hash.update(length);
+    hash.update(record);
+  }
+  return Object.freeze({
+    count: records.length,
+    sha256: hash.digest("hex"),
+  });
+}
+
+/** Pin one local directory identity and its direct metadata; no file bytes or credential are read. */
 export function pinProvenanceAssessmentRoot(root) {
   if (typeof root !== "string" || !root || !isAbsolute(root)) {
     throw new Error("assessment source root is unavailable");
@@ -9846,15 +9877,23 @@ export function pinProvenanceAssessmentRoot(root) {
     ? (realpathSync.native || realpathSync)(requested)
     : direct;
   const after = provenanceAssessmentDirectoryStat(canonical);
-  if (JSON.stringify(before) !== JSON.stringify(after)) {
+  const entriesBefore = provenanceAssessmentDirectEntries(canonical);
+  const checked = provenanceAssessmentDirectoryStat(canonical);
+  const entriesAfter = provenanceAssessmentDirectEntries(canonical);
+  const final = provenanceAssessmentDirectoryStat(canonical);
+  if (JSON.stringify(before) !== JSON.stringify(after) ||
+      JSON.stringify(after) !== JSON.stringify(checked) ||
+      JSON.stringify(checked) !== JSON.stringify(final) ||
+      JSON.stringify(entriesBefore) !== JSON.stringify(entriesAfter)) {
     throw new Error("assessment source root changed during validation");
   }
-  return Object.freeze({ path: canonical, stat: after });
+  return Object.freeze({ path: canonical, stat: final, directEntries: entriesAfter });
 }
 
 export function revalidateProvenanceAssessmentRoot(pin) {
   const current = pinProvenanceAssessmentRoot(pin?.path);
-  if (JSON.stringify(current.stat) !== JSON.stringify(pin?.stat)) {
+  if (JSON.stringify(current.stat) !== JSON.stringify(pin?.stat) ||
+      JSON.stringify(current.directEntries) !== JSON.stringify(pin?.directEntries)) {
     throw new Error("assessment source root changed during assessment");
   }
   return current;

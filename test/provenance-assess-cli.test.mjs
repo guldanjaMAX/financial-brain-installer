@@ -155,7 +155,15 @@ test("real root pinning detects a source-directory scope change", () => {
   try {
     const pin = pinProvenanceAssessmentRoot(fixture);
     writeFileSync(join(fixture, "new.txt"), "changed");
-    assert.throws(() => revalidateProvenanceAssessmentRoot(pin), /changed during assessment/);
+    const changed = pinProvenanceAssessmentRoot(fixture);
+    assert.notDeepEqual(changed.directEntries, pin.directEntries);
+    // NTFS may not expose an immediate parent-directory timestamp change. Make
+    // that observed blind spot explicit and prove the entry fingerprint closes it.
+    const timestampBlindPin = Object.freeze({ ...pin, stat: changed.stat });
+    assert.throws(
+      () => revalidateProvenanceAssessmentRoot(timestampBlindPin),
+      /changed during assessment/,
+    );
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
