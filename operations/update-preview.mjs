@@ -63,6 +63,7 @@ export const UPDATE_PREVIEW_FAILURE_CODES = Object.freeze([
   "UPDATE_PREVIEW_ADMIN_KEY_UNAVAILABLE",
   "UPDATE_PREVIEW_READINESS_UNAVAILABLE",
   "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID",
+  "UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND",
   "UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID",
   "UPDATE_PREVIEW_QUEUE_TIMESTAMP_INVALID",
   "UPDATE_PREVIEW_VECTOR_READINESS_INVALID",
@@ -121,7 +122,23 @@ const PROOF_BOUNDARY = Object.freeze({
   deployment: "not_started",
   acceptance: "not_run",
 });
+const LEGACY_OBSERVATION_PROOF_BOUNDARY = Object.freeze({
+  public_release_authenticity: "unproven",
+  credential_custody: "durable_admin_key_read",
+  brain_domain_identity: "pinned_manifest_assertion",
+  cloudflare_account_ownership: "not_accessed",
+  authenticated_projection_aggregate: "observed",
+  deployed_worker_generation: "unproven",
+  deployed_drain_mode: "unproven",
+  mixed_generation_excluded: false,
+  schema_compatibility: "legacy_generation_fields_absent",
+  restore_bookmark: "not_created",
+  deployment: "not_started",
+  acceptance: "not_run",
+});
 const FINGERPRINT_DOMAIN = Buffer.from("brain.update.preview.plan.v1\0", "utf8");
+const LEGACY_OBSERVATION_FINGERPRINT_DOMAIN =
+  Buffer.from("brain.update.preview.legacy-observation.v1\0", "utf8");
 const RUNTIME_DOMAIN = Buffer.from("brain.update.runtime-payload.v1\0", "utf8");
 
 const DEFAULT_IO = Object.freeze({
@@ -1179,37 +1196,10 @@ function readinessReasonIsCoherent({
  * under one command and rejected under the other because their count rules
  * drifted apart.
  */
-export function validateVectorProjectionAggregateReceipt(inventory, options = {}) {
-  const expectedVersion = options?.expectedVersion;
-  const expectedBackend = options?.expectedBackend ?? "d1";
-  const expectedDrainMode = options?.expectedDrainMode ?? "active";
-  if (!inventory || typeof inventory !== "object" || Array.isArray(inventory) ||
-      typeof expectedVersion !== "string" || !VERSION_RE.test(expectedVersion) ||
-      expectedBackend !== "d1" ||
-      !["active", "paused-for-upgrade"].includes(expectedDrainMode)) {
-    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
-  }
-
-  if (typeof inventory.version !== "string" || !VERSION_RE.test(inventory.version)) {
-    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
-  }
-  if (inventory.version !== expectedVersion) {
-    refuse("UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH");
-  }
-
+function validateProjectionAggregateFields(inventory, expectedBackend) {
   if (inventory.backend !== expectedBackend) {
     refuse("UPDATE_PREVIEW_DEPLOYED_BACKEND_MISMATCH");
   }
-  if (!["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode)) {
-    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
-  }
-  if (inventory.vector_drain_mode !== expectedDrainMode) {
-    if (inventory.vector_drain_mode === "paused-for-upgrade" && expectedDrainMode === "active") {
-      refuse("UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED");
-    }
-    refuse("UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH");
-  }
-
   const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
   const backlog = inventory.vector_backlog;
   if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
@@ -1251,10 +1241,8 @@ export function validateVectorProjectionAggregateReceipt(inventory, options = {}
     refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
   }
 
-  return immutable({
-    worker_version: inventory.version,
+  return {
     backend: expectedBackend,
-    vector_drain_mode: inventory.vector_drain_mode,
     expected_vectors: readiness.expected_vectors,
     actual_vectors: readiness.actual_vectors,
     queue: {
@@ -1266,7 +1254,66 @@ export function validateVectorProjectionAggregateReceipt(inventory, options = {}
     },
     query_ready: readiness.ready,
     readiness_reason: readiness.reason,
+  };
+}
+
+export function validateVectorProjectionAggregateReceipt(inventory, options = {}) {
+  const expectedVersion = options?.expectedVersion;
+  const expectedBackend = options?.expectedBackend ?? "d1";
+  const expectedDrainMode = options?.expectedDrainMode ?? "active";
+  if (!inventory || typeof inventory !== "object" || Array.isArray(inventory) ||
+      typeof expectedVersion !== "string" || !VERSION_RE.test(expectedVersion) ||
+      expectedBackend !== "d1" ||
+      !["active", "paused-for-upgrade"].includes(expectedDrainMode)) {
+    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+  }
+
+  if (typeof inventory.version !== "string" || !VERSION_RE.test(inventory.version)) {
+    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+  }
+  if (inventory.version !== expectedVersion) {
+    refuse("UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH");
+  }
+  if (!["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode)) {
+    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+  }
+  if (inventory.vector_drain_mode !== expectedDrainMode) {
+    if (inventory.vector_drain_mode === "paused-for-upgrade" && expectedDrainMode === "active") {
+      refuse("UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED");
+    }
+    refuse("UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH");
+  }
+
+  const aggregate = validateProjectionAggregateFields(inventory, expectedBackend);
+  return immutable({
+    worker_version: inventory.version,
+    backend: aggregate.backend,
+    vector_drain_mode: inventory.vector_drain_mode,
+    expected_vectors: aggregate.expected_vectors,
+    actual_vectors: aggregate.actual_vectors,
+    queue: aggregate.queue,
+    query_ready: aggregate.query_ready,
+    readiness_reason: aggregate.readiness_reason,
   });
+}
+
+function projectionAggregateVerdict(aggregate) {
+  const shouldBeReady = aggregate.queue.pending === 0 &&
+    aggregate.actual_vectors === aggregate.expected_vectors;
+  if (aggregate.query_ready !== shouldBeReady) {
+    refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
+  }
+  return aggregate.actual_vectors > aggregate.expected_vectors
+    ? "projection_excess"
+    : aggregate.actual_vectors < aggregate.expected_vectors
+      ? aggregate.queue.pending > 0
+        ? aggregate.queue.upserts >= aggregate.expected_vectors - aggregate.actual_vectors
+          ? "recoverable_queued_work"
+          : "projection_work_insufficient"
+        : aggregate.readiness_reason === "accepted_mutation_processing"
+          ? "projection_visibility_pending"
+          : "projection_work_missing"
+      : aggregate.queue.pending > 0 ? "queued_work_present" : "ready";
 }
 
 function checkedProjectionProof(value) {
@@ -1347,23 +1394,35 @@ export function classifyUpdatePreviewProjectionReceipt(inventory, options = {}) 
     expectedBackend: options?.expectedBackend ?? "d1",
     expectedDrainMode: "active",
   });
-  const shouldBeReady = aggregate.queue.pending === 0 &&
-    aggregate.actual_vectors === aggregate.expected_vectors;
-  if (aggregate.query_ready !== shouldBeReady) {
-    refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
-  }
-  const verdict = aggregate.actual_vectors > aggregate.expected_vectors
-    ? "projection_excess"
-    : aggregate.actual_vectors < aggregate.expected_vectors
-      ? aggregate.queue.pending > 0
-        ? aggregate.queue.upserts >= aggregate.expected_vectors - aggregate.actual_vectors
-          ? "recoverable_queued_work"
-          : "projection_work_insufficient"
-        : aggregate.readiness_reason === "accepted_mutation_processing"
-          ? "projection_visibility_pending"
-          : "projection_work_missing"
-      : aggregate.queue.pending > 0 ? "queued_work_present" : "ready";
+  const verdict = projectionAggregateVerdict(aggregate);
   return checkedProjectionProof(immutable({ ...aggregate, verdict }));
+}
+
+/**
+ * Validate only the authenticated aggregate envelope associated with a
+ * manifest-recorded v0.4.6 target. The response does not bind Worker
+ * generation or drain mode, so this function returns an observation and can
+ * never produce projection readiness.
+ */
+export function classifyLegacyV046ProjectionObservation(inventory, options = {}) {
+  const expectedVersion = options?.expectedVersion;
+  const expectedBackend = options?.expectedBackend ?? "d1";
+  if (expectedVersion !== "0.4.6" || expectedBackend !== "d1" ||
+      !exactKeys(inventory, ["backend", "rows", "vector_backlog", "vector_readiness"]) ||
+      !Array.isArray(inventory.rows)) {
+    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+  }
+  const aggregate = validateProjectionAggregateFields(inventory, expectedBackend);
+  const verdict = projectionAggregateVerdict(aggregate);
+  return immutable({
+    backend: aggregate.backend,
+    expected_vectors: aggregate.expected_vectors,
+    actual_vectors: aggregate.actual_vectors,
+    queue: aggregate.queue,
+    worker_reported_query_ready: aggregate.query_ready,
+    worker_reported_readiness_reason: aggregate.readiness_reason,
+    worker_reported_verdict: verdict,
+  });
 }
 
 function checkedRuntimeProof(value) {
@@ -1380,6 +1439,144 @@ function checkedRuntimeProof(value) {
   safeInteger(value.total_bytes, 0, UPDATE_PREVIEW_LIMITS.total_bytes,
     "UPDATE_PREVIEW_PLAN_INVALID");
   return value;
+}
+
+function checkedLegacyProjectionObservation(value) {
+  if (!exactKeys(value, [
+    "backend", "expected_vectors", "actual_vectors", "queue",
+    "worker_reported_query_ready", "worker_reported_readiness_reason",
+    "worker_reported_verdict",
+  ]) || !exactKeys(value.queue, [
+    "pending", "upserts", "deletes", "submitted", "oldest_queued_at",
+  ])) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  let rebuilt;
+  try {
+    rebuilt = classifyLegacyV046ProjectionObservation({
+      backend: value.backend,
+      rows: [],
+      vector_backlog: {
+        pending: value.queue.pending,
+        upserts: value.queue.upserts,
+        deletes: value.queue.deletes,
+        submitted: value.queue.submitted,
+        oldest_queued_at: value.queue.oldest_queued_at,
+      },
+      vector_readiness: {
+        ready: value.worker_reported_query_ready,
+        reason: value.worker_reported_readiness_reason,
+        expected_vectors: value.expected_vectors,
+        actual_vectors: value.actual_vectors,
+        pending: value.queue.pending,
+        submitted: value.queue.submitted,
+        oldest_queued_at: value.queue.oldest_queued_at,
+      },
+    }, { expectedVersion: "0.4.6", expectedBackend: "d1" });
+  } catch {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  if (canonical(rebuilt) !== canonical(value)) refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  return rebuilt;
+}
+
+/**
+ * Bind a manifest-recorded-v0.4.6 aggregate observation to the exact local
+ * candidate.
+ * This is deliberately not an update plan because the live response omits the
+ * fields needed to exclude a mixed Worker generation.
+ */
+export function createLegacyV046UpdatePreviewObservation(options = {}) {
+  const required = [
+    "manifestSha256", "manifestSource", "candidateVersion", "runtimeProof",
+    "deployedObservation",
+  ];
+  const allowed = new Set([...required, "recordedVersion"]);
+  if (!options || typeof options !== "object" || Array.isArray(options) ||
+      required.some((name) => !Object.hasOwn(options, name)) ||
+      Object.keys(options).some((name) => !allowed.has(name))) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  const {
+    manifestSha256,
+    manifestSource,
+    recordedVersion = null,
+    candidateVersion,
+    runtimeProof,
+    deployedObservation,
+  } = options;
+  safeSha256(manifestSha256, "UPDATE_PREVIEW_PLAN_INVALID");
+  if (!MANIFEST_SOURCES.has(manifestSource) || recordedVersion !== "0.4.6") {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  const relation = updatePreviewVersionRelation(recordedVersion, candidateVersion);
+  const runtime = checkedRuntimeProof(runtimeProof);
+  const projection = checkedLegacyProjectionObservation(deployedObservation);
+  return immutable({
+    schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+    operation: "brain.update.legacy-observation",
+    manifest: {
+      source: manifestSource,
+      sha256: manifestSha256,
+      recorded_version: recordedVersion,
+    },
+    candidate: {
+      version: candidateVersion,
+      identity_scheme: runtime.identity_scheme,
+      expected_runtime_sha256: runtime.expected_runtime_sha256,
+      observed_runtime_sha256: runtime.runtime_payload_sha256,
+      file_count: runtime.file_count,
+      total_bytes: runtime.total_bytes,
+    },
+    response_contract: "brain.documents.v0.4.6.legacy",
+    deployed_projection_observation: projection,
+    generation_binding: "absent_from_authenticated_response",
+    drain_mode_binding: "absent_from_authenticated_response",
+    mixed_generation_excluded: false,
+    version_relation: relation,
+    live_verification_required: true,
+    update_gate_satisfied: false,
+  });
+}
+
+function checkedLegacyV046UpdatePreviewObservation(value) {
+  if (!exactKeys(value, [
+    "schema_version", "operation", "manifest", "candidate", "response_contract",
+    "deployed_projection_observation", "generation_binding", "drain_mode_binding",
+    "mixed_generation_excluded", "version_relation", "live_verification_required",
+    "update_gate_satisfied",
+  ]) || value.schema_version !== UPDATE_PREVIEW_SCHEMA_VERSION ||
+      value.operation !== "brain.update.legacy-observation" ||
+      value.response_contract !== "brain.documents.v0.4.6.legacy" ||
+      value.generation_binding !== "absent_from_authenticated_response" ||
+      value.drain_mode_binding !== "absent_from_authenticated_response" ||
+      value.mixed_generation_excluded !== false ||
+      value.live_verification_required !== true || value.update_gate_satisfied !== false ||
+      !exactKeys(value.manifest, ["source", "sha256", "recorded_version"]) ||
+      !exactKeys(value.candidate, [
+        "version", "identity_scheme", "expected_runtime_sha256", "observed_runtime_sha256",
+        "file_count", "total_bytes",
+      ])) {
+    refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  }
+  const rebuilt = createLegacyV046UpdatePreviewObservation({
+    manifestSha256: value.manifest.sha256,
+    manifestSource: value.manifest.source,
+    recordedVersion: value.manifest.recorded_version,
+    candidateVersion: value.candidate.version,
+    runtimeProof: {
+      schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+      identity_scheme: value.candidate.identity_scheme,
+      runtime_payload_sha256: value.candidate.observed_runtime_sha256,
+      file_count: value.candidate.file_count,
+      total_bytes: value.candidate.total_bytes,
+      expected_runtime_sha256: value.candidate.expected_runtime_sha256,
+      verified_passes: 2,
+    },
+    deployedObservation: value.deployed_projection_observation,
+  });
+  if (canonical(rebuilt) !== canonical(value)) refuse("UPDATE_PREVIEW_PLAN_INVALID");
+  return rebuilt;
 }
 
 /** Build the closed, aggregate-only plan that binds both local and live proof. */
@@ -1471,6 +1668,15 @@ export function updatePreviewPlanFingerprint(plan) {
   return createHash("sha256").update(FINGERPRINT_DOMAIN).update(canonical(checked)).digest("hex");
 }
 
+/** Fingerprint legacy evidence under a domain that cannot be mistaken for a plan. */
+export function legacyV046UpdatePreviewObservationFingerprint(observation) {
+  const checked = checkedLegacyV046UpdatePreviewObservation(observation);
+  return createHash("sha256")
+    .update(LEGACY_OBSERVATION_FINGERPRINT_DOMAIN)
+    .update(canonical(checked))
+    .digest("hex");
+}
+
 function receiptEffects(observed = {}, { requireLiveRead = false } = {}) {
   const credentialReads = observed?.credential_reads;
   const networkRequests = observed?.network_requests;
@@ -1480,6 +1686,29 @@ function receiptEffects(observed = {}, { requireLiveRead = false } = {}) {
     refuse("UPDATE_PREVIEW_PLAN_INVALID");
   }
   return { ...ZERO_EFFECTS, credential_reads: credentialReads, network_requests: networkRequests };
+}
+
+/**
+ * Return a closed, non-green receipt for the manifest-recorded-v0.4.6 legacy
+ * contract.
+ * A complete aggregate observation is useful evidence, but it cannot satisfy
+ * the update gate without same-response generation and drain-mode fields.
+ */
+export function createLegacyV046UpdatePreviewReceipt(observation, observedEffects) {
+  const checked = checkedLegacyV046UpdatePreviewObservation(observation);
+  return immutable({
+    schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
+    operation: UPDATE_PREVIEW_OPERATION,
+    status: "legacy_observation_complete",
+    read_only: true,
+    authorizes_update: false,
+    projection_ready: false,
+    error_code: "UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND",
+    legacy_observation: checked,
+    observation_fingerprint: legacyV046UpdatePreviewObservationFingerprint(checked),
+    proof_boundary: { ...LEGACY_OBSERVATION_PROOF_BOUNDARY },
+    effects: receiptEffects(observedEffects, { requireLiveRead: true }),
+  });
 }
 
 /** Return a non-authorizing receipt that includes one live aggregate proof. */

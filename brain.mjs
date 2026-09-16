@@ -23021,6 +23021,7 @@ const UPDATE_PREVIEW_D1_ID_RE =
   /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu;
 const UPDATE_PREVIEW_AUTH_PROFILE_RE = /^financial-brain-[a-f0-9]{24}$/u;
 const UPDATE_PREVIEW_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const UPDATE_PREVIEW_HTTP_TIMEOUT_MS = 120_000;
 
 function updatePreviewFallbackFailure() {
   return Object.freeze({
@@ -23307,8 +23308,9 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     revalidateManifest(manifestPin, "update preview live request");
 
     let response;
-    const request = options.request ?? ((url, init) => http(url, init, {
-      timeoutMs: HTTP_TIMEOUT_MS,
+    const httpRequest = options.httpRequest ?? http;
+    const request = options.request ?? ((url, init) => httpRequest(url, init, {
+      timeoutMs: UPDATE_PREVIEW_HTTP_TIMEOUT_MS,
       what: "the update preview readiness check",
     }));
     observedEffects.network_requests += 1;
@@ -23348,10 +23350,21 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     revalidateRuntimePackage(runtimePackagePin, "update runtime live receipt");
     revalidateManifest(manifestPin, "update preview live receipt");
     if (responseErrorCode) throw new preview.UpdatePreviewError(responseErrorCode);
-    const deployedProjection = preview.classifyUpdatePreviewProjectionReceipt(inventory, {
-      expectedVersion: local.recordedVersion,
-      expectedBackend: "d1",
-    });
+    const legacyV046Shape = local.recordedVersion === "0.4.6" &&
+      !Object.hasOwn(inventory, "version") &&
+      !Object.hasOwn(inventory, "vector_drain_mode");
+    const deployedObservation = legacyV046Shape
+      ? preview.classifyLegacyV046ProjectionObservation(inventory, {
+        expectedVersion: local.recordedVersion,
+        expectedBackend: "d1",
+      })
+      : null;
+    const deployedProjection = legacyV046Shape
+      ? null
+      : preview.classifyUpdatePreviewProjectionReceipt(inventory, {
+        expectedVersion: local.recordedVersion,
+        expectedBackend: "d1",
+      });
     revalidateRuntimePackage(runtimePackagePin, "update runtime receipt");
     revalidateManifest(manifestPin, "update preview receipt");
     // Close the last concurrency seam after classification. No asynchronous
@@ -23359,6 +23372,21 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     const finalRuntime = verifyRuntime(verifyOptions);
     if (!sameUpdateRuntimeProof(closingRuntime, finalRuntime)) {
       throw new preview.UpdatePreviewError("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+    if (legacyV046Shape) {
+      const observation = preview.createLegacyV046UpdatePreviewObservation({
+        manifestSha256: manifestPin.fingerprint,
+        manifestSource: installed.source,
+        recordedVersion: local.recordedVersion,
+        candidateVersion,
+        runtimeProof: finalRuntime,
+        deployedObservation,
+      });
+      const receipt = preview.createLegacyV046UpdatePreviewReceipt(
+        observation,
+        observedEffects,
+      );
+      throw new JsonFatal(receipt);
     }
     const plan = preview.createUpdatePreviewPlan({
       manifestSha256: manifestPin.fingerprint,

@@ -647,6 +647,20 @@ is the pinned manifest's assertion; this diagnostic does not independently
 prove Cloudflare account or domain ownership. The supervised field rung must
 reconcile that target before live use.
 
+For a target whose manifest records exactly v0.4.6, the same CLI has one narrow
+legacy-observation fallback. When that authenticated top-level legacy
+`/api/admin/brain/documents` response lacks both `version` and
+`vector_drain_mode`, the preview validates only the sanitized D1 backlog and
+readiness fields. It returns `status: legacy_observation_complete`,
+`error_code: UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND`,
+`projection_ready: false`, and `authorizes_update: false`, then exits nonzero.
+The Worker generation and drain mode remain unproven, and mixed generations
+are not excluded. This is useful test evidence only and does not satisfy the
+update gate. The fallback does not stitch in public `/health` or any other
+response. It uses one durable credential read and one authenticated network
+request, with zero Brain writes, Cloudflare control requests, deployments, or
+installs. Modern same-response behavior is unchanged.
+
 `ready` means the counts are exact and the queue is empty.
 `recoverable_queued_work` means queued upserts cover the full projection
 shortfall;

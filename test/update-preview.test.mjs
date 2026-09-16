@@ -24,7 +24,10 @@ import {
   UPDATE_RUNTIME_IDENTITY_SCHEME,
   WINDOWS_NODE_LAUNCHER_TEMPLATE,
   UpdatePreviewError,
+  classifyLegacyV046ProjectionObservation,
   classifyUpdatePreviewProjectionReceipt,
+  createLegacyV046UpdatePreviewObservation,
+  createLegacyV046UpdatePreviewReceipt,
   createUpdatePreviewFailureReceipt,
   createUpdatePreviewPlan,
   createUpdatePreviewProjectionFailureReceipt,
@@ -32,6 +35,7 @@ import {
   deriveUpdateRuntimePayloadSha256,
   expectedWindowsNodeLauncherBytes,
   inventoryUpdateRuntimePayload,
+  legacyV046UpdatePreviewObservationFingerprint,
   parseUpdatePreviewArgv,
   updatePreviewPlanFingerprint,
   validateVectorProjectionAggregateReceipt,
@@ -269,6 +273,32 @@ function syntheticProjection(overrides = {}) {
   return classifyUpdatePreviewProjectionReceipt(inventory, {
     expectedVersion: overrides.expectedVersion ?? inventory.version,
     expectedBackend: "d1",
+  });
+}
+
+function legacyV046Inventory(overrides = {}) {
+  const inventory = projectionInventory({
+    version: "0.4.6",
+    ...overrides,
+  });
+  delete inventory.version;
+  delete inventory.vector_drain_mode;
+  return inventory;
+}
+
+function syntheticLegacyV046Observation(overrides = {}) {
+  const deployedObservation = overrides.deployedObservation ??
+    classifyLegacyV046ProjectionObservation(legacyV046Inventory(overrides.projection), {
+      expectedVersion: "0.4.6",
+      expectedBackend: "d1",
+    });
+  return createLegacyV046UpdatePreviewObservation({
+    manifestSha256: overrides.manifestSha256 ?? HASH_B,
+    manifestSource: overrides.manifestSource ?? "explicit",
+    recordedVersion: overrides.recordedVersion ?? "0.4.6",
+    candidateVersion: overrides.candidateVersion ?? "0.4.8",
+    runtimeProof: overrides.runtimeProof ?? syntheticRuntimeProof(),
+    deployedObservation,
   });
 }
 
@@ -1015,6 +1045,217 @@ test("authenticated projection validation returns only one frozen aggregate cut"
   assert.ok(Object.isFrozen(aggregate));
   assert.ok(Object.isFrozen(aggregate.queue));
   assert.doesNotMatch(JSON.stringify(aggregate), /private-payroll|Private Customer File/u);
+});
+
+test("legacy v0.4.6 projection observation accepts only the exact aggregate envelope", () => {
+  const inventory = legacyV046Inventory({
+    rows: [{ source_type: "private-payroll", title: "Private Customer File" }],
+  });
+  const observation = classifyLegacyV046ProjectionObservation(inventory, {
+    expectedVersion: "0.4.6",
+    expectedBackend: "d1",
+  });
+  assert.deepEqual(observation, {
+    backend: "d1",
+    expected_vectors: 10,
+    actual_vectors: 10,
+    queue: {
+      pending: 0,
+      upserts: 0,
+      deletes: 0,
+      submitted: 0,
+      oldest_queued_at: null,
+    },
+    worker_reported_query_ready: true,
+    worker_reported_readiness_reason: null,
+    worker_reported_verdict: "ready",
+  });
+  assert.ok(Object.isFrozen(observation));
+  assert.ok(Object.isFrozen(observation.queue));
+  assert.doesNotMatch(JSON.stringify(observation), /private-payroll|Private Customer File/u);
+
+  const invalid = [];
+  for (const key of ["backend", "rows", "vector_backlog", "vector_readiness"]) {
+    const missing = structuredClone(inventory);
+    delete missing[key];
+    invalid.push(missing);
+  }
+  invalid.push(
+    { ...structuredClone(inventory), version: "0.4.6" },
+    { ...structuredClone(inventory), vector_drain_mode: "active" },
+    { ...structuredClone(inventory), private_provider_detail: "must-not-pass" },
+    { ...structuredClone(inventory), rows: { length: 0 } },
+  );
+  for (const candidate of invalid) {
+    assert.throws(
+      () => classifyLegacyV046ProjectionObservation(candidate, {
+        expectedVersion: "0.4.6",
+        expectedBackend: "d1",
+      }),
+      expectCode("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID"),
+    );
+  }
+  assert.throws(
+    () => classifyLegacyV046ProjectionObservation(inventory, {
+      expectedVersion: "0.4.7",
+      expectedBackend: "d1",
+    }),
+    expectCode("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID"),
+    "only an installed v0.4.6 manifest may enter the unbound legacy observation lane",
+  );
+});
+
+test("legacy v0.4.6 observation and receipt bind local identity without becoming a plan", () => {
+  const observation = syntheticLegacyV046Observation({
+    projection: {
+      rows: [{ source_type: "private-source", title: "Private Owner Record" }],
+    },
+  });
+  assert.deepEqual(observation, {
+    schema_version: 1,
+    operation: "brain.update.legacy-observation",
+    manifest: {
+      source: "explicit",
+      sha256: HASH_B,
+      recorded_version: "0.4.6",
+    },
+    candidate: {
+      version: "0.4.8",
+      identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
+      expected_runtime_sha256: HASH_A,
+      observed_runtime_sha256: HASH_A,
+      file_count: 3,
+      total_bytes: 42,
+    },
+    response_contract: "brain.documents.v0.4.6.legacy",
+    deployed_projection_observation: {
+      backend: "d1",
+      expected_vectors: 10,
+      actual_vectors: 10,
+      queue: {
+        pending: 0,
+        upserts: 0,
+        deletes: 0,
+        submitted: 0,
+        oldest_queued_at: null,
+      },
+      worker_reported_query_ready: true,
+      worker_reported_readiness_reason: null,
+      worker_reported_verdict: "ready",
+    },
+    generation_binding: "absent_from_authenticated_response",
+    drain_mode_binding: "absent_from_authenticated_response",
+    mixed_generation_excluded: false,
+    version_relation: "upgrade",
+    live_verification_required: true,
+    update_gate_satisfied: false,
+  });
+  assert.ok(Object.isFrozen(observation));
+  assert.ok(Object.isFrozen(observation.manifest));
+  assert.ok(Object.isFrozen(observation.candidate));
+  assert.ok(Object.isFrozen(observation.deployed_projection_observation));
+  assert.doesNotMatch(JSON.stringify(observation), /private-source|Private Owner Record/u);
+
+  const fingerprint = legacyV046UpdatePreviewObservationFingerprint(observation);
+  assert.match(fingerprint, /^[a-f0-9]{64}$/u);
+  assert.equal(legacyV046UpdatePreviewObservationFingerprint(observation), fingerprint);
+  const receipt = createLegacyV046UpdatePreviewReceipt(observation, {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.deepEqual(receipt, {
+    schema_version: 1,
+    operation: "brain.update.preview",
+    status: "legacy_observation_complete",
+    read_only: true,
+    authorizes_update: false,
+    projection_ready: false,
+    error_code: "UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND",
+    legacy_observation: observation,
+    observation_fingerprint: fingerprint,
+    proof_boundary: {
+      public_release_authenticity: "unproven",
+      credential_custody: "durable_admin_key_read",
+      brain_domain_identity: "pinned_manifest_assertion",
+      cloudflare_account_ownership: "not_accessed",
+      authenticated_projection_aggregate: "observed",
+      deployed_worker_generation: "unproven",
+      deployed_drain_mode: "unproven",
+      mixed_generation_excluded: false,
+      schema_compatibility: "legacy_generation_fields_absent",
+      restore_bookmark: "not_created",
+      deployment: "not_started",
+      acceptance: "not_run",
+    },
+    effects: {
+      manifest_writes: 0,
+      credential_reads: 1,
+      network_requests: 1,
+      brain_writes: 0,
+      cloudflare_control_requests: 0,
+      deployments: 0,
+      browser_launches: 0,
+      package_installs: 0,
+      support_journal_writes: 0,
+      workspace_writes: 0,
+      skill_writes: 0,
+    },
+  });
+  assert.ok(Object.isFrozen(receipt));
+  assert.ok(Object.isFrozen(receipt.effects));
+  assert.ok(Object.isFrozen(receipt.proof_boundary));
+  assert.equal(Object.hasOwn(receipt, "plan"), false);
+  assert.equal(Object.hasOwn(receipt, "plan_fingerprint"), false);
+  assert.throws(
+    () => createLegacyV046UpdatePreviewReceipt(observation, {
+      credential_reads: 1,
+      network_requests: 0,
+    }),
+    expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
+  );
+});
+
+test("legacy observation fingerprint binds every variable and is domain-separated", () => {
+  const baselineObservation = syntheticLegacyV046Observation();
+  const baseline = legacyV046UpdatePreviewObservationFingerprint(baselineObservation);
+  const variants = [
+    syntheticLegacyV046Observation({ manifestSha256: "c".repeat(64) }),
+    syntheticLegacyV046Observation({ manifestSource: "remembered" }),
+    syntheticLegacyV046Observation({ candidateVersion: "0.4.9" }),
+    syntheticLegacyV046Observation({
+      runtimeProof: syntheticRuntimeProof({ hash: "d".repeat(64) }),
+    }),
+    syntheticLegacyV046Observation({ runtimeProof: syntheticRuntimeProof({ files: 4 }) }),
+    syntheticLegacyV046Observation({ runtimeProof: syntheticRuntimeProof({ bytes: 43 }) }),
+    syntheticLegacyV046Observation({ projection: { expected: 11, actual: 11 } }),
+    syntheticLegacyV046Observation({ projection: { expected: 10, actual: 10, pending: 1 } }),
+  ];
+  for (const variant of variants) {
+    assert.notEqual(legacyV046UpdatePreviewObservationFingerprint(variant), baseline);
+  }
+  const comparableModernPlan = syntheticPlan({
+    recordedVersion: "0.4.6",
+    deployedProjection: syntheticProjection({ version: "0.4.6" }),
+  });
+  assert.notEqual(baseline, updatePreviewPlanFingerprint(comparableModernPlan));
+  assert.throws(
+    () => syntheticLegacyV046Observation({ recordedVersion: "0.4.7" }),
+    expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
+  );
+  assert.throws(
+    () => createLegacyV046UpdatePreviewObservation({
+      manifestSha256: HASH_B,
+      manifestSource: "explicit",
+      recordedVersion: "0.4.6",
+      candidateVersion: "0.4.8",
+      runtimeProof: syntheticRuntimeProof(),
+      deployedObservation: {
+        ...baselineObservation.deployed_projection_observation,
+        private_provider_detail: "must-not-pass",
+      },
+    }),
+    expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
+  );
 });
 
 test("projection classifier distinguishes ready, sufficient, insufficient, missing, and excess", () => {

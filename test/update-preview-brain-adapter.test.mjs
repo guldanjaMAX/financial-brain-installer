@@ -74,6 +74,13 @@ function readinessInventory(overrides = {}) {
   };
 }
 
+function legacyV046Inventory(overrides = {}) {
+  const inventory = readinessInventory({ version: "0.4.6", ...overrides });
+  delete inventory.version;
+  delete inventory.vector_drain_mode;
+  return inventory;
+}
+
 function streamedResponse(body, {
   status = 200,
   contentLength,
@@ -393,6 +400,156 @@ test("update preview verifies runtime before private discovery and closes both i
   assert.deepEqual(JSON.parse(output[0]), receipt);
 });
 
+test("recorded v0.4.6 emits one closed legacy observation only after final revalidation", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.brain.version = "0.4.6";
+  const inventory = legacyV046Inventory({
+    rows: [{ source_type: "private-source-must-not-escape", title: "Private Owner Record" }],
+  });
+  const runtimeStages = [];
+  const manifestStages = [];
+  let runtimeChecks = 0;
+  let credentialReads = 0;
+  let networkRequests = 0;
+  let successWrites = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      manifest,
+      inventory,
+      verifyRuntime() {
+        runtimeChecks += 1;
+        return runtimeProof();
+      },
+      revalidateRuntimePackage(_pin, stage) {
+        runtimeStages.push(stage);
+      },
+      revalidateManifest(_pin, stage) {
+        manifestStages.push(stage);
+      },
+      resolveAdminKey() {
+        credentialReads += 1;
+        return "unit-test-admin-key";
+      },
+      async request() {
+        networkRequests += 1;
+        return inventoryResponse(inventory);
+      },
+      write() { successWrites += 1; },
+    })),
+    (error) => {
+      assert.equal(error.constructor.name, "JsonFatal");
+      const receipt = error.payload;
+      assert.equal(receipt.status, "legacy_observation_complete");
+      assert.equal(receipt.error_code, "UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND");
+      assert.equal(receipt.read_only, true);
+      assert.equal(receipt.authorizes_update, false);
+      assert.equal(receipt.projection_ready, false);
+      assert.equal(receipt.legacy_observation.manifest.recorded_version, "0.4.6");
+      assert.equal(receipt.legacy_observation.manifest.sha256, OTHER_SHA);
+      assert.equal(receipt.legacy_observation.candidate.version, "0.4.8");
+      assert.equal(receipt.legacy_observation.candidate.observed_runtime_sha256, SHA);
+      assert.equal(
+        receipt.legacy_observation.response_contract,
+        "brain.documents.v0.4.6.legacy",
+      );
+      assert.equal(
+        receipt.legacy_observation.generation_binding,
+        "absent_from_authenticated_response",
+      );
+      assert.equal(
+        receipt.legacy_observation.drain_mode_binding,
+        "absent_from_authenticated_response",
+      );
+      assert.equal(receipt.legacy_observation.mixed_generation_excluded, false);
+      assert.equal(receipt.legacy_observation.update_gate_satisfied, false);
+      assert.equal(
+        receipt.legacy_observation.deployed_projection_observation.worker_reported_verdict,
+        "ready",
+      );
+      assert.match(receipt.observation_fingerprint, /^[a-f0-9]{64}$/u);
+      assert.equal(Object.hasOwn(receipt, "plan"), false);
+      assert.equal(Object.hasOwn(receipt, "plan_fingerprint"), false);
+      for (const [name, value] of Object.entries(receipt.effects)) {
+        assert.equal(
+          value,
+          name === "credential_reads" || name === "network_requests" ? 1 : 0,
+          `${name} must report the exact read-only boundary`,
+        );
+      }
+      assert.doesNotMatch(
+        `${error.message}\n${JSON.stringify(receipt)}`,
+        /private-source-must-not-escape|Private Owner Record|unit-test-admin-key/u,
+      );
+      return true;
+    },
+  );
+  assert.equal(runtimeChecks, 4);
+  assert.deepEqual(runtimeStages, [
+    "update runtime preview",
+    "update preview live request",
+    "update runtime live receipt",
+    "update runtime receipt",
+  ]);
+  assert.deepEqual(manifestStages, [
+    "local update preview",
+    "update preview credential boundary",
+    "update preview live request",
+    "update preview live receipt",
+    "update preview receipt",
+  ]);
+  assert.equal(credentialReads, 1);
+  assert.equal(networkRequests, 1);
+  assert.equal(successWrites, 0, "the non-green legacy receipt cannot use the success writer");
+});
+
+test("an unversioned response cannot enter the v0.4.6 legacy lane for another manifest", async () => {
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({ inventory: legacyV046Inventory() })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+      assert.equal(error.payload?.effects.credential_reads, 1);
+      assert.equal(error.payload?.effects.network_requests, 1);
+      assert.equal(Object.hasOwn(error.payload, "legacy_observation"), false);
+      assert.equal(Object.hasOwn(error.payload, "observation_fingerprint"), false);
+      return true;
+    },
+  );
+});
+
+test("partial or extended v0.4.6 envelopes fail as ordinary invalid receipts", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.brain.version = "0.4.6";
+  const missingVersion = readinessInventory({ version: "0.4.6" });
+  delete missingVersion.version;
+  const missingDrainMode = readinessInventory({ version: "0.4.6" });
+  delete missingDrainMode.vector_drain_mode;
+  const extraLegacyField = {
+    ...legacyV046Inventory(),
+    private_provider_detail: "must-not-pass",
+  };
+  for (const inventory of [missingVersion, missingDrainMode, extraLegacyField]) {
+    await assert.rejects(
+      cmdUpdatePreview([
+        "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+      ], previewOptions({ manifest, inventory })),
+      (error) => {
+        assert.equal(error.payload?.status, "failed");
+        assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+        assert.equal(error.payload?.effects.credential_reads, 1);
+        assert.equal(error.payload?.effects.network_requests, 1);
+        assert.equal(Object.hasOwn(error.payload, "legacy_observation"), false);
+        assert.equal(Object.hasOwn(error.payload, "observation_fingerprint"), false);
+        assert.doesNotMatch(error.message, /private_provider_detail|must-not-pass/u);
+        return true;
+      },
+    );
+  }
+});
+
 test("runtime mismatch refuses before manifest discovery and emits no private detail", async () => {
   let discovered = false;
   await assert.rejects(
@@ -590,6 +747,36 @@ test("transport and malformed response failures report the crossed read boundari
       },
     );
   }
+});
+
+test("the default preview transport uses one 120-second request with no retry", async () => {
+  let calls = 0;
+  const options = previewOptions();
+  delete options.request;
+  options.httpRequest = async (url, init, transport) => {
+    calls += 1;
+    assert.equal(url, "https://brain.example.invalid/api/admin/brain/documents");
+    assert.equal(init.method, "GET");
+    assert.equal(init.headers["X-Admin-Key"], "unit-test-admin-key");
+    assert.deepEqual(transport, {
+      timeoutMs: 120_000,
+      what: "the update preview readiness check",
+    });
+    throw new Error("private one-shot transport refusal");
+  };
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], options),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_READINESS_UNAVAILABLE");
+      assert.equal(error.payload?.effects.credential_reads, 1);
+      assert.equal(error.payload?.effects.network_requests, 1);
+      assert.doesNotMatch(error.message, /private one-shot transport refusal/u);
+      return true;
+    },
+  );
+  assert.equal(calls, 1);
 });
 
 test("a transport refusal cannot hide runtime, package, or manifest drift in postflight", async () => {
