@@ -111,6 +111,41 @@ const cutoverBody = (v, mode, protocol = "lease-v1") => JSON.stringify({
   vector_drain_mode: mode,
 });
 const body = (v) => cutoverBody(v, "active");
+const readyProjectionInventory = (overrides = {}) => {
+  const expected = overrides.expectedVectors ?? 1_700_726;
+  const actual = overrides.actualVectors ?? expected;
+  const pending = overrides.pending ?? 0;
+  const submitted = overrides.submitted ?? 0;
+  const upserts = overrides.upserts ?? pending;
+  const deletes = overrides.deletes ?? 0;
+  const oldestQueuedAt = pending > 0 ? (overrides.oldestQueuedAt ?? Date.now()) : null;
+  return {
+    backend: overrides.backend ?? "d1",
+    rows: overrides.rows ?? [],
+    version: overrides.version ?? RUNNING_VERSION,
+    vector_drain_mode: overrides.drainMode ?? "paused-for-upgrade",
+    vector_backlog: {
+      pending,
+      upserts,
+      deletes,
+      submitted,
+      oldest_queued_at: oldestQueuedAt,
+    },
+    vector_readiness: {
+      ready: overrides.ready ?? (pending === 0 && actual === expected),
+      reason: Object.hasOwn(overrides, "reason")
+        ? overrides.reason
+        : pending > 0
+          ? "vector_work_queued"
+          : actual === expected ? null : "vector_count_mismatch",
+      expected_vectors: expected,
+      actual_vectors: actual,
+      pending,
+      submitted,
+      oldest_queued_at: oldestQueuedAt,
+    },
+  };
+};
 
 /* ---- the mandatory writer grace cannot look like a hung installer ---- */
 {
@@ -363,6 +398,80 @@ const bootstrapCompletion = () => ({
     });
     check("expected-paused reachOnly retries a stale versionless documents edge, then accepts one exact generation",
       documentCalls === 2 && waits.join(",") === "4000", JSON.stringify({ documentCalls, waits }));
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- paused update migration requires one exact authenticated aggregate ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-paused-projection-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      client: { slug: "fixture" },
+      brain: { domain: "fixture.invalid", worker_name: "fixture" },
+      infrastructure: { cloudflare: { storage: "d1" } },
+    }));
+    const runGate = async (inventory) => {
+      let documentCalls = 0;
+      let authenticated = false;
+      const waits = [];
+      let error = null;
+      try {
+        await cmdHealth(manifestPath, {
+          expectVersion: RUNNING_VERSION,
+          expectDrainMode: "paused-for-upgrade",
+          reachOnly: true,
+          requireProjectionReady: true,
+          resolveKey: () => "fixture-admin-label",
+          wait: async (milliseconds) => { waits.push(milliseconds); },
+          request: async (url, init = {}) => {
+            const path = new URL(url).pathname;
+            if (path === "/health") {
+              return new Response(cutoverBody(RUNNING_VERSION, "paused-for-upgrade"), { status: 200 });
+            }
+            if (path !== "/api/admin/brain/documents") throw new Error(`unexpected request ${path}`);
+            documentCalls++;
+            authenticated = init.headers?.["X-Admin-Key"] === "fixture-admin-label";
+            return new Response(JSON.stringify(inventory), { status: 200 });
+          },
+        });
+      } catch (caught) { error = caught; }
+      return { authenticated, documentCalls, waits, error };
+    };
+
+    const exact = await runGate(readyProjectionInventory());
+    check("the paused pre-migration gate accepts one same-response exact D1 projection",
+      exact.error === null && exact.authenticated && exact.documentCalls === 1 && exact.waits.length === 0,
+      JSON.stringify({ ...exact, error: exact.error?.message }));
+
+    const mismatches = [
+      ["worker version", readyProjectionInventory({ version: "0.0.0-fixture-old" })],
+      ["writer mode", readyProjectionInventory({ drainMode: "active" })],
+      ["D1 backend", readyProjectionInventory({ backend: "supabase" })],
+      ["vector totals", readyProjectionInventory({ expectedVectors: 9, actualVectors: 8 })],
+      ["non-empty queue", readyProjectionInventory({
+        expectedVectors: 9,
+        actualVectors: 8,
+        pending: 1,
+        submitted: 0,
+        upserts: 1,
+      })],
+      ["query readiness", readyProjectionInventory({ ready: false, reason: "projection_unverified" })],
+    ];
+    for (const [name, inventory] of mismatches) {
+      const result = await runGate(inventory);
+      check(`the paused pre-migration gate fails once on a ${name} mismatch`,
+        result.error !== null && result.authenticated &&
+          result.documentCalls === 1 && result.waits.length === 0,
+        JSON.stringify({
+          name,
+          documentCalls: result.documentCalls,
+          waits: result.waits,
+          error: result.error?.message,
+        }));
+    }
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
@@ -1007,11 +1116,13 @@ const bootstrapCompletion = () => ({
             : "health-active-final");
         check("upgrade health requires the running package version", options.expectVersion === RUNNING_VERSION);
         if (options.expectDrainMode === "paused-for-upgrade") {
-          check("the compatibility health probe is paused-mode and reach-only",
-            options.reachOnly === true, JSON.stringify(options));
+          check("the compatibility health probe requires one exact paused projection before migration",
+            options.reachOnly === true && options.requireProjectionReady === true,
+            JSON.stringify(options));
         } else if (options.reachOnly) {
           check("the cutover health probe proves active mode before convergence",
-            options.expectDrainMode === "active", JSON.stringify(options));
+            options.expectDrainMode === "active" && options.requireProjectionReady !== true,
+            JSON.stringify(options));
         } else {
           check("the final health probe proves vector draining is active",
             options.expectDrainMode === "active", JSON.stringify(options));
@@ -1033,6 +1144,10 @@ const bootstrapCompletion = () => ({
       events.join(",") === "state,bookmark,deploy-paused,health-paused,quiescence,migrate,bootstrap,deploy-active,health-active-cutover,reconcile,drain,health-active-final,test,version,readback,manifest,log",
       events.join(","),
     );
+    check("one green paused aggregate advances each remaining update stage exactly once",
+      ["health-paused", "quiescence", "migrate", "bootstrap", "deploy-active"]
+        .every((event) => events.filter((observed) => observed === event).length === 1),
+      events.join(","));
     check("remote account revalidation is lifecycle-bounded, not bootstrap-round-bounded",
       accountChecks >= 10 && accountChecks < 30, String(accountChecks));
     check(
@@ -1222,13 +1337,36 @@ const bootstrapCompletion = () => ({
 
 /* ---- cutover failures stay fail-closed and never advance versions ---- */
 {
+  const privateRowSentinel = "private-row-must-never-enter-failure-output";
+  const pausedAggregateFailures = new Map([
+    ["paused-generation", readyProjectionInventory({
+      version: "0.0.0-fixture-old",
+      rows: [{ source: privateRowSentinel }],
+    })],
+    ["paused-mode", readyProjectionInventory({ drainMode: "active" })],
+    ["paused-backend", readyProjectionInventory({ backend: "supabase" })],
+    ["paused-totals", readyProjectionInventory({ expectedVectors: 9, actualVectors: 8 })],
+    ["paused-queue", readyProjectionInventory({
+      expectedVectors: 9,
+      actualVectors: 8,
+      pending: 1,
+      submitted: 0,
+      upserts: 1,
+    })],
+    ["paused-readiness", readyProjectionInventory({ ready: false, reason: "projection_unverified" })],
+  ]);
   const runFailure = async (failureStage) => {
     const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), `brain-cutover-${failureStage}-`)));
     const manifestPath = join(sandbox, "brain.manifest.json");
-    writeFileSync(manifestPath, JSON.stringify(manifestFixture()));
+    const manifest = manifestFixture();
+    if (pausedAggregateFailures.has(failureStage)) manifest.brain.domain = "fixture.invalid";
+    writeFileSync(manifestPath, JSON.stringify(manifest));
     const events = [];
     let versionWrites = 0;
     let manifestWrites = 0;
+    let pausedDocumentCalls = 0;
+    let pausedHealthWaits = 0;
+    let pausedRequestAuthenticated = false;
     let error = null;
     try {
       await cmdUpgrade(manifestPath, {
@@ -1255,6 +1393,30 @@ const bootstrapCompletion = () => ({
         cmdHealth: async (_path, options) => {
           const mode = options.expectDrainMode === "paused-for-upgrade" ? "paused" : "active";
           events.push(`health-${mode}${options.reachOnly ? "-reach" : "-full"}`);
+          if (mode === "paused") {
+            check("every D1 update requires the exact paused projection gate before migration",
+              options.reachOnly === true && options.requireProjectionReady === true,
+              JSON.stringify(options));
+          }
+          if (mode === "paused" && pausedAggregateFailures.has(failureStage)) {
+            return cmdHealth(_path, {
+              ...options,
+              resolveKey: () => "fixture-admin-label",
+              wait: async () => { pausedHealthWaits++; },
+              request: async (url, init = {}) => {
+                const requestPath = new URL(url).pathname;
+                if (requestPath === "/health") {
+                  return new Response(cutoverBody(RUNNING_VERSION, "paused-for-upgrade"), { status: 200 });
+                }
+                if (requestPath !== "/api/admin/brain/documents") {
+                  throw new Error(`unexpected request ${requestPath}`);
+                }
+                pausedDocumentCalls++;
+                pausedRequestAuthenticated = init.headers?.["X-Admin-Key"] === "fixture-admin-label";
+                return new Response(JSON.stringify(pausedAggregateFailures.get(failureStage)), { status: 200 });
+              },
+            });
+          }
           if (failureStage === "active-health" && mode === "active" && options.reachOnly) {
             throw new Error("synthetic paused deployment still serving");
           }
@@ -1295,7 +1457,16 @@ const bootstrapCompletion = () => ({
     } catch (caught) { error = caught; }
     const manifestVersion = JSON.parse(readFileSync(manifestPath, "utf8")).brain.version;
     rmSync(sandbox, { recursive: true, force: true });
-    return { events, error, versionWrites, manifestWrites, manifestVersion };
+    return {
+      events,
+      error,
+      versionWrites,
+      manifestWrites,
+      manifestVersion,
+      pausedDocumentCalls,
+      pausedHealthWaits,
+      pausedRequestAuthenticated,
+    };
   };
 
   const prePauseFailure = await runFailure("paused-deploy");
@@ -1305,6 +1476,25 @@ const bootstrapCompletion = () => ({
       !/reindex and drain are\s+refused|remain unavailable/i.test(prePauseFailure.error?.message || "") &&
       /does not claim that reindex or drain are blocked/i.test(prePauseFailure.error?.message || ""),
     prePauseFailure.error?.message);
+
+  for (const failureStage of pausedAggregateFailures.keys()) {
+    const pausedProjectionFailure = await runFailure(failureStage);
+    check(`${failureStage} stops after one authenticated response and before every later update stage`,
+      pausedProjectionFailure.events.join(",") === "deploy-paused,health-paused-reach" &&
+        pausedProjectionFailure.pausedDocumentCalls === 1 &&
+        pausedProjectionFailure.pausedHealthWaits === 0 &&
+        pausedProjectionFailure.pausedRequestAuthenticated === true &&
+        pausedProjectionFailure.versionWrites === 0 && pausedProjectionFailure.manifestWrites === 0 &&
+        pausedProjectionFailure.manifestVersion === "0.1.9" &&
+        /paused vector-drain health verification/.test(pausedProjectionFailure.error?.message || "") &&
+        new RegExp(`${failureStage}-bookmark`).test(pausedProjectionFailure.error?.message || ""),
+      JSON.stringify({ ...pausedProjectionFailure, error: pausedProjectionFailure.error?.message }));
+    check(`${failureStage} leaves the compatibility Worker paused without exposing document rows`,
+      /CANNOT ACCEPT DOCUMENTS/i.test(pausedProjectionFailure.error?.message || "") &&
+        /do not clear VECTOR_DRAIN_MODE by hand/i.test(pausedProjectionFailure.error?.message || "") &&
+        !(pausedProjectionFailure.error?.message || "").includes(privateRowSentinel),
+      pausedProjectionFailure.error?.message);
+  }
 
   const migrationFailure = await runFailure("migration");
   check("migration failure leaves the compatibility Worker paused and versions uncommitted",

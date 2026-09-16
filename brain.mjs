@@ -2896,6 +2896,7 @@ export async function cmdHealth(manifestPath, {
   expectDrainMode = null,
   durableAdminKeyOnly = false,
   reachOnly = false,
+  requireProjectionReady = false,
   request = http,
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   resolveKey = resolveAdminKey,
@@ -3065,7 +3066,13 @@ export async function cmdHealth(manifestPath, {
       // Explicit update/setup checks are deploy waiters: the public endpoint
       // can reach the new Worker one request before this authenticated route.
       // Ordinary health remains a one-snapshot fail-closed check.
-      const receiptAttempts = (expectVersion || expectDrainMode) ? attempts : 1;
+      // The paused pre-migration gate is one fail-closed observation. Once the
+      // authenticated route answers, a generation, writer-mode, backend, or
+      // projection mismatch must stop this update instead of being retried into
+      // a different snapshot that could hide the state which blocked migration.
+      const receiptAttempts = requireProjectionReady
+        ? 1
+        : (expectVersion || expectDrainMode) ? attempts : 1;
       const missingVersion = typeof inventory.version !== "string" || !inventory.version.trim();
       const missingMode = !["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode);
       if ((missingVersion || missingMode) && i < receiptAttempts) {
@@ -3138,7 +3145,7 @@ export async function cmdHealth(manifestPath, {
       }
       ok(`/health and authenticated inventory agree on ${boundVersion}/${boundDrainMode}`);
       ok(`documents endpoint ${docs.status}; authenticated inventory confirmed`);
-      if (reachOnly) return;
+      if (reachOnly && !requireProjectionReady) return;
 
       // D1 and Vectorize cannot share a transaction. Both systems can be up
       // while semantic search is behind or stale, so the operation backlog is
@@ -3231,6 +3238,11 @@ export async function cmdHealth(manifestPath, {
           );
         }
         ok(`vector index is query-ready (${readiness.actual_vectors} confirmed vector(s))`);
+      } else if (requireProjectionReady) {
+        die(
+          "the pre-migration projection gate requires the exact D1 backend." + "\n" +
+            "      The Worker remains paused and no migration was started."
+        );
       }
       return;
     }
@@ -5454,6 +5466,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             expectVersion: toVersion,
             expectDrainMode: "paused-for-upgrade",
             reachOnly: true,
+            requireProjectionReady: true,
           }));
         // A brain on the lease schema can be asked whether its writers are
         // done instead of being made to wait the full grace. Older brains

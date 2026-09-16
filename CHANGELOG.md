@@ -10,6 +10,14 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **An update cannot migrate a Brain whose starting projection is already
+  uncertain.** After the exact new Worker is serving in paused mode, update now
+  requires one private response to prove D1, equal vector totals, an empty
+  queue, and query readiness before it waits for old requests or changes the
+  database. Any mismatch stops on that response, leaves writes paused, and
+  starts no migration. This protection has local fixture coverage only; it has
+  not authorized or performed an owner update.
+
 - **The held update preview now checks whether vector work actually exists.**
   After it verifies the exact candidate package and saved manifest locally, it
   makes one private read from the Brain and reports only aggregate vector and

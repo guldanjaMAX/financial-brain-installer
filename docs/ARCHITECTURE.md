@@ -109,8 +109,11 @@ outside the ceremony's proof claim.
    and automation setup paths. A new install with no existing Worker can migrate
    and deploy directly. A resumed D1 install with an existing Worker first
    captures a required bookmark, deploys and verifies the paused compatibility
-   Worker, waits the declared 20-minute old-invocation window, migrates, and
-   deploys active mode.
+   Worker, and requires one authenticated same-response proof of the exact new
+   version, paused writer mode, D1 binding, equal vector totals, empty queue,
+   and query readiness. A mismatch stops before the old-invocation wait and
+   migration and leaves that Worker paused. Only an exact proof permits the
+   declared 20-minute old-invocation window, migration, and active deployment.
 4. Persist and read back the admin key, set Worker secrets, and verify health.
 5. Register locator-only MCP entries for supported AI tools with the local-only
    `owner-assistant` profile, then verify the advertised tool list includes
@@ -128,7 +131,8 @@ Provisioning adopts only resources whose identity and stored install state prove
 they belong to this client. Migrations are checksum-protected, append-only, and
 restart-safe after every independently committed statement. A D1 upgrade
 captures a required bookmark, deploys and verifies the paused compatibility
-Worker, waits the same old-invocation window, migrates, deploys active mode,
+Worker, accepts one exact authenticated aggregate as the pre-migration gate,
+waits the same old-invocation window, migrates, deploys active mode,
 reconciles allowed provider secrets, waits for the new version, and records
 success. Schema 13 changes that ordering only for an existing legacy
 projection: after migration, the verified write barrier stays active while the

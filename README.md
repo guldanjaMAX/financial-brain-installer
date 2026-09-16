@@ -711,8 +711,13 @@ On Windows, use:
 ```
 
 The update verifies the Cloudflare account, requires a D1 restore bookmark,
-deploys and verifies a temporary paused Worker, waits for older Worker requests
-to finish, and applies migrations. A legacy corpus is then rebuilt in durable
+and deploys a temporary paused Worker. Before waiting for older Worker requests
+or applying any migration, one authenticated documents response must bind the
+exact new Worker version,
+`paused-for-upgrade`, D1, equal expected and actual vector totals, an empty
+queue, and query readiness. A mismatch stops on that response without retrying
+it into a different snapshot; the Worker remains paused and migration does not
+start. A legacy corpus is then rebuilt in durable
 1,000-vector batches while writes remain paused. Several disjoint batches may
 be accepted at once, but exact-generation readback is what confirms each vector
 before its batch is acknowledged. An interrupted run resumes from D1 instead of

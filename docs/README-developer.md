@@ -162,9 +162,14 @@ rules and fixture tests are not package, CI, field, or live-Brain proof.
 
 The supported beginner update is `brain update [manifest]`. It verifies the
 account, requires a pre-change D1 bookmark, deploys and verifies a paused
-compatibility Worker, waits the declared 20-minute old-invocation window, and
-migrates. While the write barrier remains active, schema 13 rebuilds a legacy
-projection through durable 1,000-row batches with a bounded number of disjoint
+compatibility Worker, then requires one authenticated documents response to
+bind the exact new version, `paused-for-upgrade`, D1, equal vector totals, an
+empty queue, and query readiness. A responded mismatch is not retried: update
+stops before the old-invocation wait and every migration, with the Worker still
+paused. Only that exact aggregate permits the declared 20-minute
+old-invocation window and migration. While the write barrier remains active,
+schema 13 rebuilds a legacy projection through durable 1,000-row batches with a
+bounded number of disjoint
 mutations in flight. Exact `getByIds` generation readback acknowledges each
 batch, and D1 receipts make interruption resumable. Update deploys active mode
 only after the whole projection is verified, then reconciles allowed Worker
