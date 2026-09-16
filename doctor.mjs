@@ -697,7 +697,7 @@ export function checkWindowsCredentialProtection({
         FAIL,
         `${result.rounds || 0} DPAPI round trips passed, but exact temporary-helper cleanup is still deferred`,
         `Issue code: ${result.issue_code || "WINDOWS_DPAPI_CLEANUP_DEFERRED"}. ` +
-          "No credential write was classified as a crypto failure. Close antivirus or file-indexing holds, then rerun `brain doctor` in the same Windows user profile so the captured helper identity can be removed exactly.",
+          "No credential write was classified as an encryption failure. Close antivirus or file-indexing holds, then rerun `brain doctor` in the same Windows user profile so the captured helper identity can be removed exactly.",
       ),
       rounds: result.rounds || 0,
       issue_code: result.issue_code || "WINDOWS_DPAPI_CLEANUP_DEFERRED",

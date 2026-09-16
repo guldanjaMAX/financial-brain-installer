@@ -1,6 +1,10 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$ExpectedSha
+  [string]$ExpectedSha,
+  [Parameter(Mandatory = $true)]
+  [string]$ExpectedRuntimeIdentityScheme,
+  [Parameter(Mandatory = $true)]
+  [string]$ExpectedRuntimeSha256
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,8 +28,27 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
   Stop-Rehearsal "this launcher is only for a Windows PowerShell rehearsal. Run the supplied Windows rehearsal on the intended Windows computer"
 }
 
+try {
+  $nativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+} catch {
+  Stop-Rehearsal "Windows could not verify the native OS architecture. This sealed rehearsal runs only on native x64 Windows with x64 Node.js; stop and send the technician only this short error"
+}
+
+# RuntimeInformation reports the operating-system architecture even when this
+# PowerShell process is emulated. Environment architecture variables and
+# Node's process.arch are not substitutes for this independent OS check.
+if ($nativeArchitecture -cne "X64") {
+  Stop-Rehearsal "this sealed rehearsal runs only on native x64 Windows with x64 Node.js. Windows on ARM64 does not qualify even when it emulates x64 Node, and x86 or 32-bit Windows is outside this reviewed path"
+}
+
 if ($ExpectedSha -cnotmatch '^[0-9a-f]{40}$') {
   Stop-Rehearsal "the technician's exact 40-character lowercase commit SHA is required. Ask your technician to resend the exact SHA, then replace only the placeholder in the supplied command"
+}
+if ($ExpectedRuntimeIdentityScheme -cne "brain.runtime-payload.sha256.v1") {
+  Stop-Rehearsal "the sealed update runtime identity scheme is missing or different. Stop here and ask the technician for a newly sealed ZIP and matching release.json"
+}
+if ($ExpectedRuntimeSha256 -cnotmatch '^[0-9a-f]{64}$') {
+  Stop-Rehearsal "the sealed expected runtime SHA-256 is missing or malformed. Stop here and ask the technician for a newly sealed ZIP and matching release.json"
 }
 
 try {
@@ -76,6 +99,11 @@ $node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
 if (-not $node) {
   Stop-Rehearsal "Node.js is not available. Install Node.js 22 or newer, then open a new normal PowerShell window"
 }
+$nodeArchitectureOutput = @(& $node.Source -p "process.arch" 2>$null)
+$nodeArchitectureExit = $LASTEXITCODE
+if ($nodeArchitectureExit -ne 0 -or $nodeArchitectureOutput.Count -ne 1 -or ([string]$nodeArchitectureOutput[0]).Trim() -cne "x64") {
+  Stop-Rehearsal "the exact Node.js executable in this PowerShell window is not verified x64. Install 64-bit x64 Node.js 22 or newer on native x64 Windows, open a new normal PowerShell window, and try again"
+}
 $nodeVersionOutput = @(& $node.Source -p "process.versions.node" 2>$null)
 $nodeVersionExit = $LASTEXITCODE
 if ($nodeVersionExit -ne 0 -or $nodeVersionOutput.Count -ne 1) {
@@ -99,6 +127,11 @@ Write-Host ""
 Write-Host "Financial Brain safe local rehearsal"
 Write-Host "  Exact reviewed commit: confirmed"
 Write-Host "  Normal non-administrator PowerShell: confirmed"
+Write-Host "  Native Windows OS architecture: x64 confirmed"
+Write-Host "  Node process architecture: x64 confirmed"
+Write-Host "  Sealed runtime identity scheme: $ExpectedRuntimeIdentityScheme"
+Write-Host "  Expected runtime payload SHA-256: $ExpectedRuntimeSha256"
+Write-Host "  Installed runtime observation: not run by this synthetic rehearsal"
 Write-Host "  Local-only synthetic data: confirmed"
 Write-Host ""
 Write-Host "Do not run npm ci or any npm command yourself. This launcher handles its own local UI preparation."

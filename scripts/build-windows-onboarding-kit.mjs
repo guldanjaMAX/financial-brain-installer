@@ -9,7 +9,11 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,13 +22,19 @@ import {
   makeOutputDirectory,
   readSourceIdentity,
 } from "./field-prepare.mjs";
+import {
+  runtimeIdentityArtifactName,
+  verifyRuntimeIdentityArtifact,
+} from "./runtime-identity-receipt.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const REPOSITORY_URL = "https://github.com/guldanjaMAX/financial-brain-installer";
 export const REPOSITORY_SLUG = "guldanjaMAX/financial-brain-installer";
 export const REPOSITORY_GH_TARGET = `github.com/${REPOSITORY_SLUG}`;
 export const ARTIFACT_KIND = "financial_brain_windows_onboarding_rehearsal";
+export const ARTIFACT_SCHEMA_VERSION = 3;
 export const PURPOSE = "synthetic_local_owner_experience_only";
+export const INTENDED_ARCHITECTURE = "x64";
 export const LOOPBACK_ORIGIN = "http://127.0.0.1:4176";
 export const LAUNCHER_PATH = "onboarding/start-windows-rehearsal.ps1";
 export const REQUIRED_CI_JOBS = Object.freeze([
@@ -40,6 +50,13 @@ export const REQUIRED_CI_JOBS = Object.freeze([
 ]);
 const FIXED_ZIP_MTIME = new Date(1980, 0, 1, 0, 0, 0, 0);
 const READY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const RUNTIME_IDENTITY_DOWNLOAD_REFUSALS = new Set([
+  "ci_runtime_identity_download_failed",
+  "ci_runtime_identity_download_binary_output_required",
+  "ci_runtime_identity_download_stderr_not_empty",
+  "ci_runtime_identity_download_size_mismatch",
+  "ci_runtime_identity_download_digest_mismatch",
+]);
 
 export function createKitCommandEnvironment(source = process.env) {
   const environment = createPlanEnvironment(source);
@@ -160,10 +177,80 @@ function jobReceipt(job) {
   });
 }
 
+function selectExactArtifact(artifactsResponse, name, duplicateCode, missingCode) {
+  const artifacts = Array.isArray(artifactsResponse?.artifacts)
+    ? artifactsResponse.artifacts
+    : [];
+  if (Number(artifactsResponse?.total_count) !== artifacts.length) {
+    throw refusal("ci_artifact_page_incomplete");
+  }
+  const matching = artifacts.filter((artifact) => artifact?.name === name);
+  if (matching.length !== 1) {
+    throw refusal(matching.length ? duplicateCode : missingCode);
+  }
+  return matching[0];
+}
+
+function validateArtifactMetadata(artifact, {
+  ciRunId,
+  expectedSha,
+  digestMissingCode,
+  idMissingCode,
+  sizeMissingCode,
+  expiredCode,
+  runMismatchCode,
+  headMismatchCode,
+}) {
+  if (artifact.expired !== false) throw refusal(expiredCode);
+  const digest = String(artifact.digest || "");
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw refusal(digestMissingCode);
+  if (!Number.isInteger(Number(artifact.id)) || Number(artifact.id) < 1) {
+    throw refusal(idMissingCode);
+  }
+  if (!Number.isInteger(Number(artifact.size_in_bytes)) ||
+      Number(artifact.size_in_bytes) < 1) {
+    throw refusal(sizeMissingCode);
+  }
+  if (artifact.workflow_run?.id != null &&
+      String(artifact.workflow_run.id) !== String(ciRunId)) {
+    throw refusal(runMismatchCode);
+  }
+  if (artifact.workflow_run?.head_sha != null &&
+      artifact.workflow_run.head_sha !== expectedSha) {
+    throw refusal(headMismatchCode);
+  }
+  return Object.freeze({
+    artifact_id: String(artifact.id),
+    filename: artifact.name,
+    bytes: Number(artifact.size_in_bytes),
+    sha256: digest.slice("sha256:".length),
+  });
+}
+
+function runtimeIdentityArtifactMetadata(artifactsResponse, options) {
+  const name = runtimeIdentityArtifactName(options.version);
+  const artifact = selectExactArtifact(
+    artifactsResponse,
+    name,
+    "ci_runtime_identity_artifact_duplicated",
+    "ci_runtime_identity_artifact_missing",
+  );
+  return validateArtifactMetadata(artifact, {
+    ...options,
+    digestMissingCode: "ci_runtime_identity_digest_missing",
+    idMissingCode: "ci_runtime_identity_artifact_id_missing",
+    sizeMissingCode: "ci_runtime_identity_size_missing",
+    expiredCode: "ci_runtime_identity_artifact_expired",
+    runMismatchCode: "ci_runtime_identity_run_mismatch",
+    headMismatchCode: "ci_runtime_identity_head_sha_mismatch",
+  });
+}
+
 export function validateCiRun(run, artifactsResponse, {
   expectedSha,
   version,
   ciRunId,
+  runtimeIdentityBytes,
   now = new Date(),
 }) {
   if (String(run?.databaseId) !== String(ciRunId)) throw refusal("ci_run_id_mismatch");
@@ -196,24 +283,43 @@ export function validateCiRun(run, artifactsResponse, {
     return jobReceipt(job);
   });
 
-  const artifacts = Array.isArray(artifactsResponse?.artifacts) ? artifactsResponse.artifacts : [];
-  if (Number(artifactsResponse?.total_count) !== artifacts.length) throw refusal("ci_artifact_page_incomplete");
   const expectedPackageName = `brain-installer-${version}.tgz`;
-  const matching = artifacts.filter((artifact) => artifact?.name === expectedPackageName);
-  if (matching.length !== 1) throw refusal(matching.length ? "ci_package_artifact_duplicated" : "ci_package_artifact_missing");
-  const artifact = matching[0];
-  if (artifact.expired !== false) throw refusal("ci_package_artifact_expired");
-  const digest = String(artifact.digest || "");
-  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw refusal("ci_package_digest_missing");
-  if (!Number.isInteger(Number(artifact.id)) || Number(artifact.id) < 1) throw refusal("ci_package_artifact_id_missing");
-  if (!Number.isInteger(Number(artifact.size_in_bytes)) || Number(artifact.size_in_bytes) < 1) {
-    throw refusal("ci_package_size_missing");
-  }
-  if (artifact.workflow_run?.id != null && String(artifact.workflow_run.id) !== String(ciRunId)) {
-    throw refusal("ci_package_run_mismatch");
-  }
-  if (artifact.workflow_run?.head_sha != null && artifact.workflow_run.head_sha !== expectedSha) {
-    throw refusal("ci_package_head_sha_mismatch");
+  const packageArtifact = validateArtifactMetadata(selectExactArtifact(
+    artifactsResponse,
+    expectedPackageName,
+    "ci_package_artifact_duplicated",
+    "ci_package_artifact_missing",
+  ), {
+    ciRunId,
+    expectedSha,
+    digestMissingCode: "ci_package_digest_missing",
+    idMissingCode: "ci_package_artifact_id_missing",
+    sizeMissingCode: "ci_package_size_missing",
+    expiredCode: "ci_package_artifact_expired",
+    runMismatchCode: "ci_package_run_mismatch",
+    headMismatchCode: "ci_package_head_sha_mismatch",
+  });
+  const runtimeArtifact = runtimeIdentityArtifactMetadata(artifactsResponse, {
+    ciRunId,
+    expectedSha,
+    version,
+  });
+  let runtimeIdentity;
+  try {
+    runtimeIdentity = verifyRuntimeIdentityArtifact({
+      bytes: runtimeIdentityBytes,
+      artifactSha256: runtimeArtifact.sha256,
+      artifactBytes: runtimeArtifact.bytes,
+      expected: {
+        sourceSha: expectedSha,
+        packageFilename: expectedPackageName,
+        packageVersion: version,
+        packageBytes: packageArtifact.bytes,
+        packageSha256: packageArtifact.sha256,
+      },
+    });
+  } catch {
+    throw refusal("ci_runtime_identity_receipt_invalid");
   }
   const completedAt = new Date(run.updatedAt);
   if (!Number.isFinite(completedAt.getTime())) throw refusal("ci_completion_time_missing");
@@ -237,22 +343,94 @@ export function validateCiRun(run, artifactsResponse, {
     completed_at: completedAt.toISOString(),
     required_jobs: Object.freeze(requiredJobs),
     package: Object.freeze({
-      artifact_id: String(artifact.id),
+      artifact_id: packageArtifact.artifact_id,
       filename: expectedPackageName,
-      sha256: digest.slice("sha256:".length),
+      bytes: runtimeIdentity.package_bytes,
+      file_count: runtimeIdentity.package_file_count,
+      sha256: packageArtifact.sha256,
+      identity_scheme: runtimeIdentity.identity_scheme,
+      runtime_payload_sha256: runtimeIdentity.runtime_payload_sha256,
       digest_scope: "github_actions_raw_file_artifact",
       raw_package_equivalence_proof: "successful exact-package job verified the archive:false upload digest against the locally hashed package",
-      github_artifact_api_size_bytes: Number(artifact.size_in_bytes),
+      github_artifact_api_size_bytes: packageArtifact.bytes,
       expired: false,
       used_by_rehearsal: false,
+      runtime_identity_artifact: Object.freeze({
+        ...runtimeArtifact,
+        digest_scope: "github_actions_raw_file_artifact",
+        receipt_schema_version: runtimeIdentity.schema_version,
+        receipt_artifact_kind: runtimeIdentity.artifact_kind,
+      }),
     }),
   });
+}
+
+export function downloadRuntimeIdentityArtifact({
+  ciRunId,
+  artifact,
+  commandRunner = spawnSync,
+  environment = createKitCommandEnvironment(process.env),
+} = {}) {
+  const versionMatch = artifact?.filename?.match(
+    /^brain-installer-(\d+\.\d+\.\d+)-runtime-identity\.json$/,
+  );
+  if (!artifact || !versionMatch ||
+      !/^[1-9][0-9]*$/.test(String(ciRunId || "")) ||
+      !/^[1-9][0-9]*$/.test(String(artifact.artifact_id || "")) ||
+      artifact.filename !== runtimeIdentityArtifactName(versionMatch[1]) ||
+      !Number.isSafeInteger(artifact.bytes) || artifact.bytes < 1 ||
+      artifact.bytes > 4096 || !/^[0-9a-f]{64}$/.test(String(artifact.sha256 || ""))) {
+    throw refusal("ci_runtime_identity_artifact_metadata_invalid");
+  }
+  let stdout;
+  let stderr;
+  let bytes;
+  try {
+    const result = commandRunner("gh", [
+      "api", "--hostname", "github.com",
+      `repos/${REPOSITORY_SLUG}/actions/artifacts/${artifact.artifact_id}/zip`,
+    ], {
+      cwd: ROOT,
+      env: environment,
+      encoding: null,
+      shell: false,
+      maxBuffer: 8192,
+      windowsHide: true,
+    });
+    stdout = result?.stdout;
+    stderr = result?.stderr;
+    if (result?.error || result?.signal || result?.status !== 0) {
+      throw refusal("ci_runtime_identity_download_failed");
+    }
+    if (!Buffer.isBuffer(stdout)) {
+      throw refusal("ci_runtime_identity_download_binary_output_required");
+    }
+    if (!Buffer.isBuffer(stderr) || stderr.length !== 0) {
+      throw refusal("ci_runtime_identity_download_stderr_not_empty");
+    }
+    if (stdout.length !== artifact.bytes) {
+      throw refusal("ci_runtime_identity_download_size_mismatch");
+    }
+    if (sha256(stdout) !== artifact.sha256) {
+      throw refusal("ci_runtime_identity_download_digest_mismatch");
+    }
+    bytes = Buffer.from(stdout);
+    return bytes;
+  } catch (error) {
+    bytes?.fill(0);
+    if (RUNTIME_IDENTITY_DOWNLOAD_REFUSALS.has(error?.code)) throw error;
+    throw refusal("ci_runtime_identity_download_failed");
+  } finally {
+    if (Buffer.isBuffer(stdout)) stdout.fill(0);
+    if (Buffer.isBuffer(stderr)) stderr.fill(0);
+  }
 }
 
 export function loadCiEvidence({ ciRunId, expectedSha, version }, {
   commandRunner = spawnSync,
   environment = createKitCommandEnvironment(process.env),
   clock = () => new Date(),
+  identityArtifactReader = downloadRuntimeIdentityArtifact,
 } = {}) {
   const run = runJson(commandRunner, [
     "run", "view", String(ciRunId), "--repo", REPOSITORY_GH_TARGET,
@@ -262,9 +440,28 @@ export function loadCiEvidence({ ciRunId, expectedSha, version }, {
     "api", "--hostname", "github.com",
     `repos/${REPOSITORY_SLUG}/actions/runs/${ciRunId}/artifacts?per_page=100`,
   ], "ci_artifacts", environment);
-  return validateCiRun(run, artifacts, {
-    expectedSha, version, ciRunId, now: clock(),
+  const artifact = runtimeIdentityArtifactMetadata(artifacts, {
+    ciRunId,
+    expectedSha,
+    version,
   });
+  const runtimeIdentityBytes = identityArtifactReader({
+    ciRunId,
+    artifact,
+    commandRunner,
+    environment,
+  });
+  try {
+    return validateCiRun(run, artifacts, {
+      expectedSha,
+      version,
+      ciRunId,
+      runtimeIdentityBytes,
+      now: clock(),
+    });
+  } finally {
+    runtimeIdentityBytes?.fill(0);
+  }
 }
 
 function readRepositoryUrl(commandRunner, environment) {
@@ -306,21 +503,24 @@ export function collectCandidate(expectSha, {
 
 export function renderShareableInstructions(candidate, ci) {
   const expiry = ci ? new Date(new Date(ci.completed_at).getTime() + READY_WINDOW_MS).toISOString() : null;
+  const identityScheme = ci?.package?.identity_scheme || "DRAFT-NOT-SEALED";
+  const expectedRuntimeSha256 = ci?.package?.runtime_payload_sha256 ||
+    "DRAFT-NOT-SEALED";
   return `Financial Brain Windows onboarding rehearsal\n\n` +
     `PURPOSE: ${PURPOSE}\n` +
     `This is a local synthetic owner-experience rehearsal. It is not an install and is not permission to use a live account or customer data.\n\n` +
     `Give this complete file and the release.json kept beside its ZIP to Claude Code. Claude Code should perform the checks and commands below; the owner should only need to answer questions, review the synthetic screens, and click when guided.\n\n` +
     `Before starting\n` +
-    `1. Keep release.json beside the downloaded ZIP. Continue only when its artifact_kind is ${ARTIFACT_KIND}, ready_to_send is true, ready_for_live_accounts is false, its filename, byte count, and SHA-256 match the ZIP, its successful CI event is push for exact source SHA ${candidate.head_sha}, and valid_until has not passed.\n` +
-    `2. Use Claude Code launched from a normal PowerShell window opened from the Windows Start menu. Do not use an embedded app terminal and do not choose Run as administrator.\n` +
+    `1. Keep release.json beside the downloaded ZIP. Continue only when its schema_version is ${ARTIFACT_SCHEMA_VERSION}, artifact_kind is ${ARTIFACT_KIND}, intended_architecture is ${INTENDED_ARCHITECTURE}, ready_to_send is true, ready_for_live_accounts is false, its filename, byte count, and SHA-256 match the ZIP, its successful CI event is push for exact source SHA ${candidate.head_sha}, its update_preview identity_scheme is ${identityScheme}, its expected_runtime_sha256 is ${expectedRuntimeSha256}, and valid_until has not passed.\n` +
+    `2. Use Claude Code launched from a normal PowerShell window opened from the Windows Start menu on a native x64 Windows computer. The launcher must separately confirm native Windows OS architecture x64 and Node process architecture x64. Windows on ARM64 does not qualify even when it can emulate x64 Node. Do not use an embedded app terminal and do not choose Run as administrator.\n` +
     `3. Start in a new empty folder. Clone only ${candidate.repository_url}, then check out ${candidate.head_sha} in detached-HEAD mode. Do not reuse an older clone or switch to main.\n` +
     `4. Confirm the checkout is clean and the checked-in launcher ${candidate.launcher.path} has SHA-256 ${candidate.launcher.sha256}. The launcher digest in release.json describes this file in the reviewed checkout; the launcher is not an entry inside the ZIP.\n\n` +
     `From the top-level folder of that exact checkout, run this one line, replacing nothing:\n\n` +
-    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\onboarding\\start-windows-rehearsal.ps1" -ExpectedSha "${candidate.head_sha}"\n\n` +
+    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\onboarding\\start-windows-rehearsal.ps1" -ExpectedSha "${candidate.head_sha}" -ExpectedRuntimeIdentityScheme "${identityScheme}" -ExpectedRuntimeSha256 "${expectedRuntimeSha256}"\n\n` +
     `Do not paste or reconstruct the PowerShell script body. Do not run npm install, npm ci, or another npm command yourself; the checked-in launcher handles the local UI preparation it needs.\n\n` +
     `Do not run setup, provision, deploy, update, connect, ingest, OCR, repair, reindex, drain, forget, zone, grant, invite, or any live Cloudflare or provider command. Do not enter a token, password, authentication code, billing approval, consent, or real passkey. Stop at the first refusal or mismatch.\n\n` +
     `When the browser opens, remind the owner that every record is invented. Guide them through one synthetic screen at a time and ask what feels clear, confusing, too technical, or surprising. Pay special attention to the first passkey explanation, healthy-empty versus unavailable wording, partial data, conflicts, retries, guest access, and the Owner Financial Map review. If the browser closes, reopen ${LOOPBACK_ORIGIN}/ while the original PowerShell window remains open; do not rerun the launcher.\n\n` +
-    `At the end, have the owner close the browser tab, return to the same PowerShell window, and press Control-C once. Then provide a short feedback note containing only: the exact commit SHA, Windows version, Node version, whether the browser opened automatically, which synthetic screens were reviewed, the three biggest points of confusion, what felt reassuring, and any step where the owner did not know what to click. Do not include the Windows username, local paths, account names, private data, credentials, or full environment output.\n\n` +
+    `At the end, have the owner close the browser tab, return to the same PowerShell window, and press Control-C once. Then provide a short feedback note containing only: the exact commit SHA, Windows version, verified native Windows OS architecture, Node version, verified Node process architecture, the carried runtime identity_scheme and expected_runtime_sha256, whether the browser opened automatically, which synthetic screens were reviewed, the three biggest points of confusion, what felt reassuring, and any step where the owner did not know what to click. State that this synthetic rehearsal preserved the expected runtime identity but did not observe an installed runtime or run update preview. Do not include the Windows username, local paths, account names, private data, credentials, or full environment output.\n\n` +
     `Expected local address: ${LOOPBACK_ORIGIN}/\n` +
     `CI evidence: ${ci ? ci.url : "not supplied; this draft is not ready to send"}\n` +
     `Valid until: ${expiry || "not applicable; this draft is not ready to send"}\n`;
@@ -332,9 +532,10 @@ function receiptCore(candidate, ci) {
     ? new Date(new Date(ci.completed_at).getTime() + READY_WINDOW_MS).toISOString()
     : null;
   return {
-    schema_version: 1,
+    schema_version: ARTIFACT_SCHEMA_VERSION,
     artifact_kind: ARTIFACT_KIND,
     purpose: PURPOSE,
+    intended_architecture: INTENDED_ARCHITECTURE,
     status: ready ? "sealed_for_supervised_rehearsal" : "draft_not_ready",
     ready_to_send: ready,
     ready_for_live_accounts: false,
@@ -355,6 +556,13 @@ function receiptCore(candidate, ci) {
     },
     ci,
     tested_package: ci?.package || null,
+    update_preview: ci ? {
+      identity_scheme: ci.package.identity_scheme,
+      expected_runtime_sha256: ci.package.runtime_payload_sha256,
+      authority: "exact_ci_package_runtime_identity_receipt",
+      observed_installed_runtime: false,
+      preview_executed: false,
+    } : null,
     intended_loopback_origin: LOOPBACK_ORIGIN,
     valid_until: validUntil,
     stale_reuse_guards: {
@@ -362,6 +570,7 @@ function receiptCore(candidate, ci) {
       fresh_detached_checkout_required: true,
       clean_checkout_required: true,
       source_identity_rechecked_before_output: true,
+      exact_runtime_identity_receipt_required: true,
       content_addressed_archive_name: true,
       expires_after_ci_days: 7,
     },
@@ -441,10 +650,11 @@ export async function runWindowsOnboardingKit(options, dependencies = {}) {
   const candidate = collectCandidate(options.expectSha, scopedDependencies);
   if (options.mode === "plan") {
     return Object.freeze({
-      schema_version: 1,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       status: "plan_only",
       ready_to_send: false,
       output_created: false,
+      intended_architecture: INTENDED_ARCHITECTURE,
       source: candidate,
       required_ci_workflow: "ci",
       required_ci_jobs: REQUIRED_CI_JOBS,

@@ -316,7 +316,8 @@ test("the Windows pilot names one safe first source and does not offer unsupport
   assert.match(setupGuide, /Monday Windows x64 first-source lane/i);
   assert.match(setupGuide, /one owner-approved, low-sensitivity, text-readable test\s+document/i);
   assert.match(setupGuide, /preview sends nothing/i);
-  assert.match(setupGuide, /without `--dry-run`[\s\S]*Received, Saved, Search ready, and Answer\s+checked/i);
+  assert.match(setupGuide, /--apply --approve <64hex>[\s\S]*Received, Saved, Search ready, and\s+Answer\s+checked/i);
+  assert.match(setupGuide, /No subdirectory, link, junction, second file, or broader source tree is\s+allowed/i);
   assert.match(topLevelReadme, /Windows path refuses those three credential ceremonies/i);
 });
 

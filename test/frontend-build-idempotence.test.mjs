@@ -16,6 +16,10 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FRONTEND = join(ROOT, "frontend");
 const REVIEWED_BUNDLE = join(ROOT, "worker", "src", "lib", "app-assets.js");
+// A freshly installed dependency tree can spend most of its first build in
+// host file validation, especially on macOS. Keep the byte-for-byte assertions
+// strict while allowing that cold start to finish under a loaded review host.
+const BUILD_TIMEOUT_MS = 300_000;
 
 function copyFrontend(source, target) {
   cpSync(source, target, {
@@ -59,9 +63,9 @@ function runBuild(frontend, environment) {
     encoding: "utf8",
     env: environment,
     shell: invocation.shell,
-    timeout: 120_000,
+    timeout: BUILD_TIMEOUT_MS,
   });
-  assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
+  assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
 }
 
 test("two consecutive owner-app builds reproduce the reviewed Worker bundle", () => {

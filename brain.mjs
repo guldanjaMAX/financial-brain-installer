@@ -38,6 +38,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { TextDecoder } from "node:util";
 import { assertIngestionOutcome, ingestionOutcome } from "./ingest/outcome.mjs";
 import {
   PUBLIC_INSTALL_SMOKE_DOC_UID,
@@ -52,6 +53,8 @@ import {
   SOURCE_FAILURE_EVIDENCE_VERSION,
 } from "./worker/src/lib/source-receipt.js";
 import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
+import { ingestEnvelopeValidationError } from "./worker/src/lib/ingest-envelope.js";
+import { normalizeSourceOriginalReceipt } from "./worker/src/lib/source-original-binding.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import {
   financialPictureRequestFromFlags,
@@ -116,6 +119,25 @@ async function provenanceTargetCliLib() {
     }
     throw error;
   }
+}
+
+/** Standalone public provenance assessment, kept lazy with the ingest stack. */
+async function provenanceSourceAssessmentLib() {
+  return await import("./operations/provenance-source-assessment.mjs");
+}
+
+/** Pure exact-runtime and aggregate-readiness rules for update preview. */
+async function updatePreviewLib() {
+  return await import("./operations/update-preview.mjs");
+}
+
+/** Exact-one-file pilot orchestration and its native Windows gate stay lazy. */
+async function firstSourceFileLib() {
+  return await import("./operations/first-source-file.mjs");
+}
+
+async function windowsNativeArchitectureLib() {
+  return await import("./operations/windows-native-architecture.mjs");
 }
 import { authorize, fetchConnectedAccountEmail, inspectGoogleTokenStorage, loadTokens, loadTokensReadOnly, saveTokens, createTokenProvider, tokenStorageDescription, tokenStorageStatus, SCOPES, DEFAULT_PORT, openBrowser } from "./connectors/google-auth.mjs";
 import {
@@ -381,7 +403,9 @@ let currentSupportCommand = "";
 
 export function supportSourceForCommand(command = "") {
   if (command === "schedule") return "scheduler";
-  if (command === "ocr-preflight") return "local";
+  if (command === "ocr-preflight" || command === "provenance-assess" ||
+      command === "ingest-file-preview") return "local";
+  if (command === "update-preview" || command === "ingest-file-apply") return "brain-data-plane";
   if (["financial-picture", "machine-continuity"].includes(command)) return "brain-data-plane";
   if (command === "ingest") {
     const index = process.argv.indexOf("--from");
@@ -499,7 +523,9 @@ function recordSupportFailure(error, { unexpected = false } = {}) {
   // These machine-readable audits promise a filesystem-zero boundary,
   // including failure paths. Do not create a local support journal entry.
   if (!command || command === "support" ||
-      command === "machine-continuity" || command === "ocr-preflight") return null;
+      command === "machine-continuity" || command === "ocr-preflight" ||
+      command === "provenance-assess" || command === "update-preview" ||
+      command === "ingest-file-preview") return null;
   const errorCode = supportErrorCode(error, { command, unexpected });
   try {
     const productRelativeLocation = supportProductRelativeLocation(error);
@@ -2870,6 +2896,7 @@ export async function cmdHealth(manifestPath, {
   expectDrainMode = null,
   durableAdminKeyOnly = false,
   reachOnly = false,
+  requireProjectionReady = false,
   request = http,
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   resolveKey = resolveAdminKey,
@@ -3039,7 +3066,13 @@ export async function cmdHealth(manifestPath, {
       // Explicit update/setup checks are deploy waiters: the public endpoint
       // can reach the new Worker one request before this authenticated route.
       // Ordinary health remains a one-snapshot fail-closed check.
-      const receiptAttempts = (expectVersion || expectDrainMode) ? attempts : 1;
+      // The paused pre-migration gate is one fail-closed observation. Once the
+      // authenticated route answers, a generation, writer-mode, backend, or
+      // projection mismatch must stop this update instead of being retried into
+      // a different snapshot that could hide the state which blocked migration.
+      const receiptAttempts = requireProjectionReady
+        ? 1
+        : (expectVersion || expectDrainMode) ? attempts : 1;
       const missingVersion = typeof inventory.version !== "string" || !inventory.version.trim();
       const missingMode = !["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode);
       if ((missingVersion || missingMode) && i < receiptAttempts) {
@@ -3112,7 +3145,7 @@ export async function cmdHealth(manifestPath, {
       }
       ok(`/health and authenticated inventory agree on ${boundVersion}/${boundDrainMode}`);
       ok(`documents endpoint ${docs.status}; authenticated inventory confirmed`);
-      if (reachOnly) return;
+      if (reachOnly && !requireProjectionReady) return;
 
       // D1 and Vectorize cannot share a transaction. Both systems can be up
       // while semantic search is behind or stale, so the operation backlog is
@@ -3126,25 +3159,33 @@ export async function cmdHealth(manifestPath, {
         const vectorDrainMode = inventory.vector_drain_mode;
         const pausedForUpgrade = vectorDrainMode === "paused-for-upgrade";
         const backlog = inventory.vector_backlog;
-        const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
-        if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
-            Object.prototype.hasOwnProperty.call(backlog, "error") ||
-            !validCount(backlog.pending) || !validCount(backlog.upserts) ||
-            !validCount(backlog.deletes) || !validCount(backlog.submitted) ||
-            backlog.upserts + backlog.deletes !== backlog.pending ||
-            backlog.submitted > backlog.pending) {
-          die(
-            "the documents endpoint could not prove a valid D1 vector backlog." + "\n" +
-              "      Health cannot pass because semantic indexing may be stalled or incomplete."
-          );
-        }
         const readiness = inventory.vector_readiness;
-        if (!readiness || typeof readiness !== "object" || Array.isArray(readiness) ||
-            Object.prototype.hasOwnProperty.call(readiness, "error") ||
-            typeof readiness.ready !== "boolean" || !validCount(readiness.expected_vectors) ||
-            !validCount(readiness.actual_vectors) || !validCount(readiness.pending) ||
-            !validCount(readiness.submitted) || readiness.pending !== backlog.pending ||
-            readiness.submitted !== backlog.submitted || readiness.submitted > readiness.pending) {
+        try {
+          const projection = await updatePreviewLib();
+          projection.validateVectorProjectionAggregateReceipt(inventory, {
+            expectedVersion: boundVersion,
+            expectedBackend,
+            expectedDrainMode: boundDrainMode,
+          });
+        } catch (error) {
+          if (error?.code === "UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID") {
+            die(
+              "the documents endpoint could not prove a valid D1 vector backlog." + "\n" +
+                "      Health cannot pass because semantic indexing may be stalled or incomplete."
+            );
+          }
+          if (error?.code === "UPDATE_PREVIEW_QUEUE_TIMESTAMP_INVALID") {
+            die(
+              "the documents endpoint reported queued vector work without a valid oldest timestamp." + "\n" +
+                "      Health cannot determine whether semantic indexing is stalled."
+            );
+          }
+          if (error?.code === "UPDATE_PREVIEW_DEPLOYED_BACKEND_MISMATCH") {
+            die(
+              "the documents endpoint did not report the exact D1 backend label." + "\n" +
+                "      Health cannot normalize a malformed storage identity into readiness."
+            );
+          }
           die(
             "the documents endpoint could not prove Vectorize query readiness." + "\n" +
               "      Health cannot pass from queue depth alone because Vectorize mutations are asynchronous."
@@ -3152,12 +3193,6 @@ export async function cmdHealth(manifestPath, {
         }
         if (backlog.pending > 0) {
           const queuedAt = backlog.oldest_queued_at;
-          if (!Number.isSafeInteger(queuedAt) || queuedAt < 0) {
-            die(
-              "the documents endpoint reported queued vector work without a valid oldest timestamp." + "\n" +
-                "      Health cannot determine whether semantic indexing is stalled."
-            );
-          }
           const oldest = Math.max(0, Math.floor((Date.now() - queuedAt) / 60000));
           if (oldest > 30) {
             die(
@@ -3203,6 +3238,11 @@ export async function cmdHealth(manifestPath, {
           );
         }
         ok(`vector index is query-ready (${readiness.actual_vectors} confirmed vector(s))`);
+      } else if (requireProjectionReady) {
+        die(
+          "the pre-migration projection gate requires the exact D1 backend." + "\n" +
+            "      The Worker remains paused and no migration was started."
+        );
       }
       return;
     }
@@ -5426,6 +5466,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             expectVersion: toVersion,
             expectDrainMode: "paused-for-upgrade",
             reachOnly: true,
+            requireProjectionReady: true,
           }));
         // A brain on the lease schema can be asked whether its writers are
         // done instead of being made to wait the full grace. Older brains
@@ -9197,14 +9238,20 @@ export function provenanceTargetDependencies(options = {}) {
     return Object.freeze({ complete: true, readiness });
   };
 
-  const sourceOriginalRequest = async ({ request, adminAccess, assertOwned }) => {
+  const sourceOriginalRequest = async ({ request, adminAccess, assertOwned, requestTimeoutMs }) => {
     const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
+    const timeoutMs = requestTimeoutMs === undefined
+      ? 180_000
+      : requestTimeoutMs;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 180_000) {
+      throw new TypeError("the exact provenance proof timeout is invalid");
+    }
     const response = await provenanceTargetCapabilityJson(
       state,
       PROVENANCE_TARGET_OBSERVATION_PATH,
       {
         body: request,
-        timeoutMs: 180_000,
+        timeoutMs,
         what: "the exact provenance proof request",
         assertOwned,
       },
@@ -9730,6 +9777,201 @@ export async function cmdProvenanceRepair(manifestPath, options = {}) {
   }
   ok(`provenance recovery verified for source "${source}": ${comparison.fixed_count} approved candidate(s) are no longer present`);
   info("the proof is the new completed full-source receipt plus a fresh exact recovery readback; no legacy metadata was relabelled");
+  return receipt;
+}
+
+function provenanceAssessmentFallbackFailure() {
+  return Object.freeze({
+    schema_version: 1,
+    operation: "provenance-source-assessment",
+    mode: "read_only",
+    read_only: true,
+    source_kind: "unavailable",
+    supported: false,
+    complete: false,
+    coverage_complete: false,
+    assessment_complete: false,
+    status: "blocked",
+    max_originals: 10,
+    target_count: null,
+    assessed_original_count: 0,
+    gap_count: 0,
+    adjudicated_exclusion_count: 0,
+    truncated: false,
+    traversal: Object.freeze({ complete: false, gap_count: null }),
+    target_resolution: Object.freeze({ complete: false, missing_count: null, equality_only: true }),
+    ocr: Object.freeze({ enabled: false, attempted: false }),
+    candidate_matching: Object.freeze({ attempted: false, filename_similarity: false, content_similarity: false }),
+    accepted_repair: Object.freeze({
+      attempted: false,
+      available: false,
+      reason_code: "complete_acceptance_chain_unavailable",
+    }),
+    originals: Object.freeze([]),
+    blockers: Object.freeze(["assessment_failed"]),
+    coverage_blockers: Object.freeze([
+      "candidate_matching_not_attempted",
+      "complete_acceptance_chain_unavailable",
+    ]),
+    limitations: Object.freeze([
+      "local_upload_only",
+      "one_to_ten_exact_relative_locators",
+      "ocr_disabled",
+      "no_filename_or_content_similarity_matching",
+      "no_raw_paths_content_errors_or_hashes_in_public_output",
+      "multi_record_originals_require_separate_identity_evidence",
+      "raw_original_binding_alone_is_not_accepted_repair_evidence",
+    ]),
+  });
+}
+
+function provenanceAssessmentDirectoryStat(path) {
+  const info = lstatSync(path, { bigint: true });
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error("assessment source root is not one direct directory");
+  }
+  return Object.freeze({
+    dev: String(info.dev),
+    ino: String(info.ino),
+    mtimeNs: String(info.mtimeNs ?? BigInt(Math.trunc(Number(info.mtimeMs) * 1e6))),
+    ctimeNs: String(info.ctimeNs ?? BigInt(Math.trunc(Number(info.ctimeMs) * 1e6))),
+  });
+}
+
+function provenanceAssessmentDirectEntries(path) {
+  const records = readdirSync(path, { encoding: "buffer", withFileTypes: true })
+    .map((entry) => {
+      const name = Buffer.isBuffer(entry.name)
+        ? entry.name
+        : Buffer.from(String(entry.name), "utf8");
+      const type = entry.isFile() ? 1
+        : entry.isDirectory() ? 2
+          : entry.isSymbolicLink() ? 3
+            : entry.isBlockDevice() ? 4
+              : entry.isCharacterDevice() ? 5
+                : entry.isFIFO() ? 6
+                  : entry.isSocket() ? 7
+                    : 0;
+      return Buffer.concat([Buffer.from([type]), name]);
+    })
+    .sort((left, right) => Buffer.compare(left, right));
+  const hash = createHash("sha256");
+  hash.update("financial-brain:provenance-assessment-direct-entries:v1\0");
+  for (const record of records) {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(record.length);
+    hash.update(length);
+    hash.update(record);
+  }
+  return Object.freeze({
+    count: records.length,
+    sha256: hash.digest("hex"),
+  });
+}
+
+/** Pin one local directory identity and its direct metadata; no file bytes or credential are read. */
+export function pinProvenanceAssessmentRoot(root) {
+  if (typeof root !== "string" || !root || !isAbsolute(root)) {
+    throw new Error("assessment source root is unavailable");
+  }
+  const requested = resolve(root);
+  const before = provenanceAssessmentDirectoryStat(requested);
+  // The JavaScript Windows resolver still resolves linked ancestors while
+  // retaining a legitimate 8.3 spelling. The native resolver expands that
+  // spelling, so it cannot by itself prove that the requested path used a link.
+  const direct = (process.platform === "win32"
+    ? realpathSync
+    : (realpathSync.native || realpathSync))(requested);
+  if ((process.platform === "win32" ? direct.toLowerCase() : direct) !==
+      (process.platform === "win32" ? requested.toLowerCase() : requested)) {
+    throw new Error("assessment source root is not direct");
+  }
+  const canonical = process.platform === "win32"
+    ? (realpathSync.native || realpathSync)(requested)
+    : direct;
+  const after = provenanceAssessmentDirectoryStat(canonical);
+  const entriesBefore = provenanceAssessmentDirectEntries(canonical);
+  const checked = provenanceAssessmentDirectoryStat(canonical);
+  const entriesAfter = provenanceAssessmentDirectEntries(canonical);
+  const final = provenanceAssessmentDirectoryStat(canonical);
+  if (JSON.stringify(before) !== JSON.stringify(after) ||
+      JSON.stringify(after) !== JSON.stringify(checked) ||
+      JSON.stringify(checked) !== JSON.stringify(final) ||
+      JSON.stringify(entriesBefore) !== JSON.stringify(entriesAfter)) {
+    throw new Error("assessment source root changed during validation");
+  }
+  return Object.freeze({ path: canonical, stat: final, directEntries: entriesAfter });
+}
+
+export function revalidateProvenanceAssessmentRoot(pin) {
+  const current = pinProvenanceAssessmentRoot(pin?.path);
+  if (JSON.stringify(current.stat) !== JSON.stringify(pin?.stat) ||
+      JSON.stringify(current.directEntries) !== JSON.stringify(pin?.directEntries)) {
+    throw new Error("assessment source root changed during assessment");
+  }
+  return current;
+}
+
+/**
+ * Public local-only assessment. It parses before manifest IO, reads no
+ * credential, performs no HTTP or OCR, and serializes only the module's closed
+ * identity-free receipt.
+ */
+export async function cmdProvenanceAssess(argv = process.argv.slice(3), options = {}) {
+  let assessmentLib;
+  try {
+    assessmentLib = options.assessmentLib ?? await provenanceSourceAssessmentLib();
+  } catch {
+    throw new JsonFatal(provenanceAssessmentFallbackFailure());
+  }
+
+  let parsed;
+  try {
+    parsed = assessmentLib.parseProvenanceSourceAssessmentArgv(argv);
+  } catch {
+    throw new JsonFatal(assessmentLib.provenanceSourceAssessmentFailureReceipt("INVALID_REQUEST"));
+  }
+
+  let manifestPin;
+  try {
+    manifestPin = (options.pinManifest ?? pinUpdateManifest)(parsed.manifest);
+  } catch {
+    throw new JsonFatal(assessmentLib.provenanceSourceAssessmentFailureReceipt("MANIFEST_UNAVAILABLE"));
+  }
+  const local = manifestPin?.manifest?.corpora?.local_folder;
+  const privatePrefixes = manifestPin?.manifest?.safety?.private_path_prefixes ?? [];
+  if (!local || typeof local !== "object" || Array.isArray(local) ||
+      local.enabled !== true || local.source !== parsed.source ||
+      typeof local.path !== "string" || !isAbsolute(local.path) ||
+      !Array.isArray(privatePrefixes) ||
+      privatePrefixes.some((prefix) => typeof prefix !== "string")) {
+    throw new JsonFatal(assessmentLib.provenanceSourceAssessmentFailureReceipt("MANIFEST_POLICY_INVALID"));
+  }
+
+  let rootPin;
+  try {
+    rootPin = (options.pinRoot ?? pinProvenanceAssessmentRoot)(local.path);
+  } catch {
+    throw new JsonFatal(assessmentLib.provenanceSourceAssessmentFailureReceipt("SOURCE_UNAVAILABLE"));
+  }
+
+  let receipt;
+  try {
+    const assess = options.assess ?? assessmentLib.assessLocalProvenanceSource;
+    const raw = await assess({
+      sourceKind: "upload",
+      root: rootPin.path,
+      relativeLocators: parsed.targets,
+      privatePrefixes,
+    });
+    (options.revalidateRoot ?? revalidateProvenanceAssessmentRoot)(rootPin);
+    receipt = assessmentLib.publicProvenanceSourceAssessmentResult(raw);
+  } catch {
+    throw new JsonFatal(assessmentLib.provenanceSourceAssessmentFailureReceipt("ASSESSMENT_FAILED"));
+  }
+
+  if (receipt.assessment_complete !== true) throw new JsonFatal(receipt);
+  (options.write ?? console.log)(JSON.stringify(receipt, null, 2));
   return receipt;
 }
 
@@ -19784,7 +20026,8 @@ const IS_MAIN = (() => {
 })();
 
 const [, , cmd, manifestPath] = process.argv;
-currentSupportCommand = String(cmd || "");
+const cliBoundaryCommand = classifyCliCredentialBoundary(cmd, process.argv.slice(3));
+currentSupportCommand = cliBoundaryCommand;
 /**
  * Drive the vector drain to completion instead of waiting for the cron.
  *
@@ -21063,6 +21306,91 @@ export function cloudflareAdoptionConsent(flags = {}, env = process.env) {
   if (flagged !== undefined && flagged !== false) return true;
   const raw = String(env?.[CLOUDFLARE_ADOPTION_CONSENT_ENV] ?? "").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes";
+}
+
+/**
+ * Classify credential ownership from argv alone, before any wrapper can inspect
+ * a Wrangler session. Only the historical update grammar is allowed to cross
+ * that outer control-plane boundary. A preview hint, typo, duplicate, malformed
+ * value, or extra positional stays in the local parser and fails without a
+ * credential read, browser launch, or support-journal write.
+ */
+export function classifyCliCredentialBoundary(command, argv = []) {
+  const name = String(command || "");
+  if (name === "ingest-file") {
+    if (!Array.isArray(argv) || argv.length !== 10 ||
+        argv.some((value) => typeof value !== "string" || !value ||
+          value.length > 4_096 || /[\u0000-\u001f\u007f]/u.test(value)) ||
+        argv[0].startsWith("--")) return "ingest-file-preview";
+    const seen = new Set();
+    const values = new Map();
+    for (let index = 1; index < argv.length; index += 1) {
+      const token = argv[index];
+      if (!token.startsWith("--") || token.includes("=")) return "ingest-file-preview";
+      const key = token.slice(2);
+      if (!new Set([
+        "source",
+        "file",
+        "expect-runtime-sha256",
+        "apply",
+        "approve",
+      ]).has(key) || seen.has(key)) {
+        return "ingest-file-preview";
+      }
+      seen.add(key);
+      if (key === "apply") continue;
+      const value = argv[index + 1];
+      if (typeof value !== "string" || !value || value.startsWith("--")) {
+        return "ingest-file-preview";
+      }
+      if (["approve", "expect-runtime-sha256"].includes(key) &&
+          !/^[a-f0-9]{64}$/u.test(value)) {
+        return "ingest-file-preview";
+      }
+      values.set(key, value);
+      index += 1;
+    }
+    const source = values.get("source");
+    const file = values.get("file");
+    const fileStem = typeof file === "string" ? file.split(".", 1)[0].toUpperCase() : "";
+    const exactValues = typeof source === "string" &&
+      /^[a-z0-9][a-z0-9_-]{0,63}$/u.test(source) &&
+      typeof file === "string" && file === file.normalize("NFC") &&
+      Buffer.byteLength(file, "utf8") <= 1_024 &&
+      file !== "." && file !== ".." && !file.includes("/") && !file.includes("\\") &&
+      !/[\u0000-\u001f\u007f<>:"|?*]/u.test(file) && !/[ .]$/u.test(file) &&
+      !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(fileStem);
+    return exactValues && seen.size === 5 && [...[
+      "source",
+      "file",
+      "expect-runtime-sha256",
+      "apply",
+      "approve",
+    ]]
+      .every((key) => seen.has(key))
+      ? "ingest-file-apply"
+      : "ingest-file-preview";
+  }
+  if (name !== "update") return name;
+  if (!Array.isArray(argv) || argv.some((value) => typeof value !== "string")) {
+    return "update-preview";
+  }
+  let adoptionSeen = false;
+  let positionalCount = 0;
+  for (const token of argv) {
+    if (!token || token.length > 4_096 || /[\u0000-\u001f\u007f]/u.test(token)) {
+      return "update-preview";
+    }
+    if (token === "--adopt-cloudflare-profile") {
+      if (adoptionSeen) return "update-preview";
+      adoptionSeen = true;
+      continue;
+    }
+    if (token.startsWith("-")) return "update-preview";
+    positionalCount += 1;
+    if (positionalCount > 1) return "update-preview";
+  }
+  return "update";
 }
 
 /**
@@ -22700,6 +23028,1069 @@ export function refreshTechnicianSkillsAfterUpdate(options = {}) {
   }
 }
 
+const UPDATE_PREVIEW_SEMVER_RE =
+  /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+const UPDATE_PREVIEW_D1_ID_RE =
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu;
+const UPDATE_PREVIEW_AUTH_PROFILE_RE = /^financial-brain-[a-f0-9]{24}$/u;
+const UPDATE_PREVIEW_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const UPDATE_PREVIEW_HTTP_TIMEOUT_MS = 120_000;
+
+function updatePreviewFallbackFailure() {
+  return Object.freeze({
+    schema_version: 1,
+    operation: "brain.update.preview",
+    status: "failed",
+    read_only: true,
+    authorizes_update: false,
+    projection_ready: false,
+    error_code: "UPDATE_PREVIEW_FAILED",
+    effects: Object.freeze({
+      manifest_writes: 0,
+      credential_reads: 0,
+      network_requests: 0,
+      brain_writes: 0,
+      cloudflare_control_requests: 0,
+      deployments: 0,
+      browser_launches: 0,
+      package_installs: 0,
+      support_journal_writes: 0,
+      workspace_writes: 0,
+      skill_writes: 0,
+    }),
+  });
+}
+
+/** Validate only locally provable update prerequisites. No credential is read. */
+export function validateLocalUpdatePreviewManifest(manifest, {
+  platform = process.platform,
+  validateKeychainReference = parseAdminKeySecretReference,
+} = {}) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) ||
+      !manifest.brain || typeof manifest.brain !== "object" || Array.isArray(manifest.brain) ||
+      !Object.hasOwn(manifest.brain, "version")) {
+    throw new TypeError("the installed manifest is outside the update preview contract");
+  }
+  const recordedVersion = manifest.brain.version;
+  if (typeof recordedVersion !== "string" || !UPDATE_PREVIEW_SEMVER_RE.test(recordedVersion)) {
+    throw new TypeError("the installed manifest has an invalid recorded version");
+  }
+  const cloudflare = manifest.infrastructure?.cloudflare;
+  if (!cloudflare || typeof cloudflare !== "object" || Array.isArray(cloudflare) ||
+      typeof cloudflare.account_id !== "string" ||
+      !/^[a-f0-9]{32}$/iu.test(cloudflare.account_id) ||
+      cloudflare.storage !== "d1" ||
+      typeof cloudflare.d1_database_id !== "string" ||
+      !UPDATE_PREVIEW_D1_ID_RE.test(cloudflare.d1_database_id)) {
+    throw new TypeError("the installed manifest lacks one exact D1 account binding");
+  }
+  const authProfile = cloudflare.auth_profile;
+  if (authProfile !== undefined && authProfile !== null &&
+      (typeof authProfile !== "string" || !UPDATE_PREVIEW_AUTH_PROFILE_RE.test(authProfile))) {
+    throw new TypeError("the installed manifest has an invalid credential reference label");
+  }
+  const operations = manifest.operations;
+  if (operations !== undefined && operations !== null &&
+      (typeof operations !== "object" || Array.isArray(operations))) {
+    throw new TypeError("the installed manifest has an invalid operations contract");
+  }
+  const adminKeyReference = operations?.admin_key_secret;
+  if (adminKeyReference !== undefined && adminKeyReference !== null) {
+    if (typeof adminKeyReference !== "string" || platform !== "darwin") {
+      throw new TypeError("the installed manifest selects an unsupported admin key store");
+    }
+    try {
+      validateKeychainReference(adminKeyReference);
+    } catch {
+      throw new TypeError("the installed manifest has an invalid admin key reference");
+    }
+  }
+  return Object.freeze({
+    recordedVersion,
+    credential_reference: adminKeyReference == null ? "adjacent_protected_file" : "keychain",
+  });
+}
+
+/**
+ * Build the one private data-plane URL without consulting Cloudflare's control
+ * plane. The manifest must already carry its permanent deployed hostname.
+ */
+export function updatePreviewDocumentsUrl(manifest) {
+  const rawDomain = manifest?.brain?.domain;
+  if (typeof rawDomain !== "string" || rawDomain !== rawDomain.trim()) {
+    throw new TypeError("the installed manifest has no safe Brain hostname");
+  }
+  const declared = rawDomain;
+  let candidate;
+  try {
+    candidate = new URL(`https://${declared}`);
+  } catch {
+    throw new TypeError("the installed manifest has no safe Brain hostname");
+  }
+  const hostname = candidate.hostname.toLowerCase();
+  const reservedLocalName = hostname === "localhost" || hostname.endsWith(".localhost") ||
+    hostname.endsWith(".local") || hostname.endsWith(".internal") ||
+    hostname.endsWith(".home.arpa");
+  const validHostname = candidate.hostname.length <= 253 && candidate.hostname.includes(".") &&
+    !/^\d+(?:\.\d+){3}$/u.test(candidate.hostname) &&
+    candidate.hostname.split(".").every((label) =>
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu.test(label));
+  if (!declared || !validHostname || reservedLocalName || declared.toLowerCase() !== hostname ||
+      candidate.protocol !== "https:" || candidate.username || candidate.password ||
+      candidate.port || candidate.pathname !== "/" || candidate.search || candidate.hash) {
+    throw new TypeError("the installed manifest has no safe Brain hostname");
+  }
+  const safe = secureBrainRequestUrl(candidate);
+  return new URL("/api/admin/brain/documents", safe.origin).href;
+}
+
+/**
+ * Read one JSON response without ever buffering more than the fixed aggregate
+ * diagnostic ceiling. Content-Length is an early refusal only; the streamed
+ * byte count remains authoritative when the header is absent or false.
+ */
+export async function readUpdatePreviewAggregateResponse(response, {
+  maxBytes = UPDATE_PREVIEW_MAX_RESPONSE_BYTES,
+} = {}) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 ||
+      maxBytes > UPDATE_PREVIEW_MAX_RESPONSE_BYTES) {
+    throw new TypeError("the update preview response limit is invalid");
+  }
+  const lengthHeader = response?.headers?.get?.("content-length");
+  if (lengthHeader !== null && lengthHeader !== undefined) {
+    const normalized = String(lengthHeader).trim();
+    if (!/^(?:0|[1-9]\d*)$/u.test(normalized) || Number(normalized) > maxBytes) {
+      throw new TypeError("the update preview response is outside its byte limit");
+    }
+  }
+  const reader = response?.body?.getReader?.();
+  if (!reader || typeof reader.read !== "function") {
+    throw new TypeError("the update preview response has no bounded body stream");
+  }
+  // Allocate the fixed ceiling once. A hostile peer cannot turn a legal
+  // byte count into millions of tiny retained chunk objects.
+  const bytes = new Uint8Array(maxBytes);
+  let total = 0;
+  let complete = false;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (!part || typeof part.done !== "boolean") {
+        throw new TypeError("the update preview response stream is invalid");
+      }
+      if (part.done) {
+        complete = true;
+        break;
+      }
+      if (!(part.value instanceof Uint8Array)) {
+        throw new TypeError("the update preview response stream is invalid");
+      }
+      total += part.value.byteLength;
+      if (total > maxBytes) {
+        throw new TypeError("the update preview response is outside its byte limit");
+      }
+      bytes.set(part.value, total - part.value.byteLength);
+    }
+  } finally {
+    if (!complete && typeof reader.cancel === "function") {
+      try { await reader.cancel(); } catch { /* best-effort stream disposal */ }
+    }
+    if (typeof reader.releaseLock === "function") {
+      try { reader.releaseLock(); } catch { /* the reader may already be detached */ }
+    }
+  }
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, total));
+  return JSON.parse(text);
+}
+
+function sameUpdateRuntimeProof(left, right) {
+  return left?.schema_version === right?.schema_version &&
+    left?.identity_scheme === right?.identity_scheme &&
+    left?.runtime_payload_sha256 === right?.runtime_payload_sha256 &&
+    left?.file_count === right?.file_count && left?.total_bytes === right?.total_bytes &&
+    left?.expected_runtime_sha256 === right?.expected_runtime_sha256 &&
+    left?.verified_passes === right?.verified_passes;
+}
+
+/** Pin the candidate version from the same package tree the runtime proof hashes. */
+export function pinUpdateRuntimePackage(root = HERE) {
+  const pin = pinUpdateManifest(join(root, "package.json"));
+  const manifest = pin.manifest;
+  if (manifest?.name !== "brain-installer" ||
+      typeof manifest.version !== "string" ||
+      !UPDATE_PREVIEW_SEMVER_RE.test(manifest.version)) {
+    throw new TypeError("the update runtime package identity is invalid");
+  }
+  return pin;
+}
+
+/**
+ * Read-only exact-package update preview. Runtime bytes are verified before
+ * manifest discovery; both runtime and manifest are rechecked before the one
+ * aggregate JSON receipt is emitted.
+ */
+export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {}) {
+  let preview;
+  try {
+    preview = options.previewLib ?? await updatePreviewLib();
+  } catch {
+    throw new JsonFatal(updatePreviewFallbackFailure());
+  }
+
+  const observedEffects = { credential_reads: 0, network_requests: 0 };
+  try {
+    const parsed = preview.parseUpdatePreviewArgv(argv);
+    const runtimeRoot = options.runtimeRoot ?? HERE;
+    const runtimeAllowlist = options.runtimeAllowlist ??
+      (options.runtimeFiles ?? provenanceTargetRuntimePackageFiles)({
+        root: runtimeRoot,
+        ...(options.runtimeFileOptions || {}),
+      });
+    const verifyRuntime = options.verifyRuntime ?? preview.verifyUpdateRuntimePayload;
+    const verifyOptions = {
+      ...(options.runtimeVerificationOptions || {}),
+      root: runtimeRoot,
+      allowlist: runtimeAllowlist,
+      expectedRuntimeSha256: parsed.expectedRuntimeSha256,
+    };
+
+    // This complete proof deliberately precedes even the private installed
+    // manifest pointer read. A different package cannot learn which Brain this
+    // machine owns through the preview lane.
+    const openingRuntime = verifyRuntime(verifyOptions);
+    const pinRuntimePackage = options.pinRuntimePackage ?? pinUpdateRuntimePackage;
+    const runtimePackagePin = pinRuntimePackage(runtimeRoot);
+    const candidateVersion = runtimePackagePin.manifest.version;
+    const discoverManifest = options.discoverInstalledManifest ?? discoverInstalledManifest;
+    const installed = discoverManifest(parsed.manifestPath, options.installedManifestOptions || {});
+    if (!installed || typeof installed.path !== "string") {
+      throw new TypeError("no installed manifest is available for update preview");
+    }
+    const pinManifest = options.pinManifest ?? pinUpdateManifest;
+    const manifestPin = pinManifest(installed.path);
+    const local = (options.validateManifest ?? validateLocalUpdatePreviewManifest)(
+      manifestPin.manifest,
+    );
+    preview.updatePreviewVersionRelation(local.recordedVersion, candidateVersion);
+    let documentsUrl;
+    try {
+      documentsUrl = (options.resolveDocumentsUrl ?? updatePreviewDocumentsUrl)(
+        manifestPin.manifest,
+      );
+    } catch {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_BRAIN_DOMAIN_INVALID");
+    }
+    const revalidateManifest = options.revalidateManifest ?? revalidateUpdateManifest;
+    revalidateManifest(manifestPin, "local update preview");
+
+    // The whole runtime, package metadata, manifest, and permanent data-plane
+    // URL are closed before the first durable credential lookup is reachable.
+    const boundaryRuntime = verifyRuntime(verifyOptions);
+    if (!sameUpdateRuntimeProof(openingRuntime, boundaryRuntime)) {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+    const revalidateRuntimePackage = options.revalidateRuntimePackage ?? revalidateUpdateManifest;
+    revalidateRuntimePackage(runtimePackagePin, "update runtime preview");
+    revalidateManifest(manifestPin, "update preview credential boundary");
+
+    const resolveCredential = options.resolveAdminKey ?? resolveAdminKey;
+    observedEffects.credential_reads += 1;
+    let adminKey = null;
+    try {
+      adminKey = resolveCredential(manifestPin.target, {
+        ignoreEnvironment: true,
+        read(path) {
+          if (resolve(path) !== manifestPin.target) {
+            throw new TypeError("the pinned manifest identity changed during credential lookup");
+          }
+          return manifestPin.raw;
+        },
+      });
+    } catch {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_ADMIN_KEY_UNAVAILABLE");
+    }
+    if (typeof adminKey !== "string" || !adminKey) {
+      adminKey = null;
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_ADMIN_KEY_UNAVAILABLE");
+    }
+
+    // A manifest replacement during credential lookup must stop before the key
+    // is attached to a request. Package metadata is rechecked for the same
+    // reason; neither check opens a browser or reads Cloudflare control state.
+    revalidateRuntimePackage(runtimePackagePin, "update preview live request");
+    revalidateManifest(manifestPin, "update preview live request");
+
+    let response;
+    const httpRequest = options.httpRequest ?? http;
+    const request = options.request ?? ((url, init) => httpRequest(url, init, {
+      timeoutMs: UPDATE_PREVIEW_HTTP_TIMEOUT_MS,
+      what: "the update preview readiness check",
+    }));
+    observedEffects.network_requests += 1;
+    let requestErrorCode = null;
+    try {
+      response = await request(documentsUrl, {
+        method: "GET",
+        headers: { "X-Admin-Key": adminKey },
+      });
+    } catch {
+      requestErrorCode = "UPDATE_PREVIEW_READINESS_UNAVAILABLE";
+    } finally {
+      // Strings cannot be wiped in place, but do not retain this reference past
+      // the single request. The key is never added to a receipt or error.
+      adminKey = null;
+    }
+    let inventory;
+    let responseErrorCode = requestErrorCode;
+    if (!responseErrorCode && (!response || response.ok !== true || response.status !== 200)) {
+      responseErrorCode = "UPDATE_PREVIEW_READINESS_UNAVAILABLE";
+    } else if (!responseErrorCode) {
+      try {
+        inventory = await readUpdatePreviewAggregateResponse(response);
+      } catch {
+        responseErrorCode = "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID";
+      }
+    }
+
+    // The authenticated read is evidence only if the exact candidate runtime
+    // and installed manifest are still the identities checked before it. This
+    // postflight also runs after an HTTP or bounded-body refusal, so crossing
+    // the live boundary can never bypass the closing local identity checks.
+    const closingRuntime = verifyRuntime(verifyOptions);
+    if (!sameUpdateRuntimeProof(boundaryRuntime, closingRuntime)) {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+    revalidateRuntimePackage(runtimePackagePin, "update runtime live receipt");
+    revalidateManifest(manifestPin, "update preview live receipt");
+    if (responseErrorCode) throw new preview.UpdatePreviewError(responseErrorCode);
+    const legacyV046Shape = local.recordedVersion === "0.4.6" &&
+      !Object.hasOwn(inventory, "version") &&
+      !Object.hasOwn(inventory, "vector_drain_mode");
+    const deployedObservation = legacyV046Shape
+      ? preview.classifyLegacyV046ProjectionObservation(inventory, {
+        expectedVersion: local.recordedVersion,
+        expectedBackend: "d1",
+      })
+      : null;
+    const deployedProjection = legacyV046Shape
+      ? null
+      : preview.classifyUpdatePreviewProjectionReceipt(inventory, {
+        expectedVersion: local.recordedVersion,
+        expectedBackend: "d1",
+      });
+    revalidateRuntimePackage(runtimePackagePin, "update runtime receipt");
+    revalidateManifest(manifestPin, "update preview receipt");
+    // Close the last concurrency seam after classification. No asynchronous
+    // work occurs between this fourth complete proof and receipt emission.
+    const finalRuntime = verifyRuntime(verifyOptions);
+    if (!sameUpdateRuntimeProof(closingRuntime, finalRuntime)) {
+      throw new preview.UpdatePreviewError("UPDATE_PREVIEW_RUNTIME_PAYLOAD_CHANGED");
+    }
+    if (legacyV046Shape) {
+      const observation = preview.createLegacyV046UpdatePreviewObservation({
+        manifestSha256: manifestPin.fingerprint,
+        manifestSource: installed.source,
+        recordedVersion: local.recordedVersion,
+        candidateVersion,
+        runtimeProof: finalRuntime,
+        deployedObservation,
+      });
+      const receipt = preview.createLegacyV046UpdatePreviewReceipt(
+        observation,
+        observedEffects,
+      );
+      throw new JsonFatal(receipt);
+    }
+    const plan = preview.createUpdatePreviewPlan({
+      manifestSha256: manifestPin.fingerprint,
+      manifestSource: installed.source,
+      recordedVersion: local.recordedVersion,
+      candidateVersion,
+      runtimeProof: finalRuntime,
+      deployedProjection,
+    });
+    const projectionFailed = [
+      "projection_work_insufficient", "projection_work_missing",
+      "projection_visibility_pending", "projection_excess",
+    ]
+      .includes(deployedProjection.verdict);
+    const receipt = projectionFailed
+      ? preview.createUpdatePreviewProjectionFailureReceipt(plan, observedEffects)
+      : preview.createUpdatePreviewSuccessReceipt(plan, observedEffects);
+    if (projectionFailed) throw new JsonFatal(receipt);
+    (options.write ?? console.log)(JSON.stringify(receipt, null, 2));
+    return receipt;
+  } catch (error) {
+    if (error instanceof JsonFatal) throw error;
+    throw new JsonFatal(preview.createUpdatePreviewFailureReceipt(error, observedEffects));
+  }
+}
+
+export function dispatchUpdateCli(argv = process.argv.slice(3), options = {}) {
+  const boundary = options.boundaryCommand ?? classifyCliCredentialBoundary("update", argv);
+  if (boundary !== "update") return cmdUpdatePreview(argv, options.previewOptions || {});
+  const flags = parseFlags(argv);
+  return cmdUpdate(updateCommandTarget(argv[0], flags), {
+    ...(options.updateOptions || {}),
+    adoptConsent: cloudflareAdoptionConsent(flags),
+  });
+}
+
+function firstSourceFileFallbackFailure(mode = "preview", stage = "request_validation") {
+  return Object.freeze({
+    schema_version: 1,
+    operation: "first-source-file",
+    mode,
+    scope: Object.freeze({
+      kind: "one_exact_local_file",
+      file_count: 1,
+      whole_source_complete: false,
+    }),
+    effects: Object.freeze({
+      exact_file_count: 1,
+      manual_windows_x64_only: true,
+      ocr: false,
+      whole_source_walk: false,
+      whole_source_complete: false,
+      removal_inference: false,
+      family_reconciliation: false,
+      vector_drain: false,
+      resume_state: false,
+      scheduling: false,
+    }),
+    privacy: Object.freeze({
+      manifest_path_printed: false,
+      source_id_printed: false,
+      file_locator_printed: false,
+      retrieval_query_printed: false,
+      content_printed: false,
+    }),
+    status: "incomplete",
+    complete: false,
+    failed_stage: stage,
+    completed_stages: Object.freeze([]),
+    proof: Object.freeze({
+      received: false,
+      saved: false,
+      search_ready: false,
+      answer_checked: false,
+    }),
+  });
+}
+
+function firstSourceFilesystemFingerprint(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("the exact-file filesystem identity is unavailable");
+  }
+  return fingerprintProvenanceValue(Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, String(value[key])]),
+  ));
+}
+
+function firstSourceManifestStat(path) {
+  const stat = lstatSync(path, { bigint: true });
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n ||
+      stat.size < 1n || stat.size > 4_194_304n) {
+    throw new TypeError("the exact-file manifest must be one bounded regular file");
+  }
+  return Object.freeze({
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    size: String(stat.size),
+    nlink: String(stat.nlink),
+    mtime_ns: String(stat.mtimeNs),
+    ctime_ns: String(stat.ctimeNs),
+  });
+}
+
+function sameFirstSourceManifestStat(left, right) {
+  return fingerprintProvenanceValue(left) === fingerprintProvenanceValue(right);
+}
+
+/** BigInt-safe manifest pin for the NTFS-only first-source field route. */
+export function pinFirstSourceManifest(manifestPath) {
+  if (typeof manifestPath !== "string" || !manifestPath) {
+    throw new TypeError("the exact-file manifest path is unavailable");
+  }
+  const lexical = resolve(manifestPath);
+  let descriptor;
+  try {
+    const lexicalBefore = firstSourceManifestStat(lexical);
+    const target = join((realpathSync.native || realpathSync)(dirname(lexical)), basename(lexical));
+    const before = firstSourceManifestStat(target);
+    if (before.dev !== lexicalBefore.dev || before.ino !== lexicalBefore.ino) {
+      throw new TypeError("the exact-file manifest path changed during resolution");
+    }
+    descriptor = openSync(target, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    const openedInfo = fstatSync(descriptor, { bigint: true });
+    const opened = Object.freeze({
+      dev: String(openedInfo.dev),
+      ino: String(openedInfo.ino),
+      size: String(openedInfo.size),
+      nlink: String(openedInfo.nlink),
+      mtime_ns: String(openedInfo.mtimeNs),
+      ctime_ns: String(openedInfo.ctimeNs),
+    });
+    if (!openedInfo.isFile() || openedInfo.nlink !== 1n ||
+        !sameFirstSourceManifestStat(before, opened)) {
+      throw new TypeError("the exact-file manifest changed while opening");
+    }
+    const bytes = readFileSync(descriptor);
+    const afterDescriptorInfo = fstatSync(descriptor, { bigint: true });
+    const afterDescriptor = Object.freeze({
+      dev: String(afterDescriptorInfo.dev),
+      ino: String(afterDescriptorInfo.ino),
+      size: String(afterDescriptorInfo.size),
+      nlink: String(afterDescriptorInfo.nlink),
+      mtime_ns: String(afterDescriptorInfo.mtimeNs),
+      ctime_ns: String(afterDescriptorInfo.ctimeNs),
+    });
+    const afterPath = firstSourceManifestStat(target);
+    if (bytes.byteLength !== Number(openedInfo.size) ||
+        !sameFirstSourceManifestStat(opened, afterDescriptor) ||
+        !sameFirstSourceManifestStat(opened, afterPath)) {
+      throw new TypeError("the exact-file manifest changed while reading");
+    }
+    const manifest = JSON.parse(bytes.toString("utf8"));
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+      throw new TypeError("the exact-file manifest is not one JSON object");
+    }
+    return Object.freeze({
+      target,
+      fingerprint: createHash("sha256").update(bytes).digest("hex"),
+      byteCount: bytes.byteLength,
+      stat: opened,
+      manifest,
+    });
+  } catch {
+    throw new TypeError("the exact-file manifest safety check failed");
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+export function revalidateFirstSourceManifest(pin) {
+  const current = pinFirstSourceManifest(pin?.target);
+  if (current.fingerprint !== pin?.fingerprint ||
+      !sameFirstSourceManifestStat(current.stat, pin?.stat)) {
+    throw new TypeError("the exact-file manifest changed during the operation");
+  }
+  return current;
+}
+
+function firstSourceManifestFilesystemIdentity(pin) {
+  const stat = pin?.stat;
+  if (!stat) throw new TypeError("the exact-file manifest identity is unavailable");
+  return firstSourceFilesystemFingerprint(stat);
+}
+
+function firstSourcePrivateQuery(content) {
+  if (typeof content !== "string" || content.normalize("NFC") !== content) {
+    throw new TypeError("the exact file did not produce canonical native text");
+  }
+  const words = content.replace(/\s+/gu, " ").trim().split(" ").filter(Boolean).slice(0, 64);
+  if (!words.length) throw new TypeError("the exact file did not produce a retrieval query");
+  const candidate = words.join(" ");
+  let query = "";
+  for (const character of candidate) {
+    const next = `${query}${character}`;
+    if (Buffer.byteLength(next, "utf8") > 768) break;
+    query = next;
+  }
+  query = query.trim();
+  if (!query) throw new TypeError("the exact file did not produce a bounded retrieval query");
+  return query;
+}
+
+/**
+ * Bind the injection-only first-source core to the real local and Brain
+ * boundaries. Preview owns only a no-write in-memory snapshot. Apply acquires
+ * the existing source-ingest lease before it opens the manifest or source.
+ */
+export function firstSourceFileDependencies(options = {}) {
+  const guardStates = new Map();
+  const target = options.targetDependencies ?? provenanceTargetDependencies(
+    options.targetDependencyOptions || {},
+  );
+  const loadIngest = options.ingestLib ?? ingestLib;
+  const pinManifest = options.pinManifest ?? pinFirstSourceManifest;
+  const revalidateManifest = options.revalidateManifest ?? revalidateFirstSourceManifest;
+  const runtimeRoot = options.runtimeRoot ?? HERE;
+
+  const openRuntimeBoundary = async (expectedRuntimeSha256) => {
+    if (!/^[a-f0-9]{64}$/u.test(String(expectedRuntimeSha256 || ""))) {
+      throw new TypeError("the expected runtime payload identity is invalid");
+    }
+    const configuredLibrary = options.updatePreviewLib;
+    const runtimeLibrary = configuredLibrary === undefined
+      ? await updatePreviewLib()
+      : typeof configuredLibrary === "function"
+        ? await configuredLibrary()
+        : configuredLibrary;
+    if (!runtimeLibrary || typeof runtimeLibrary !== "object") {
+      throw new TypeError("the runtime payload verifier is unavailable");
+    }
+    const runtimeAllowlist = options.runtimeAllowlist ??
+      (options.runtimeFiles ?? provenanceTargetRuntimePackageFiles)({
+        root: runtimeRoot,
+        ...(options.runtimeFileOptions || {}),
+      });
+    if (!Array.isArray(runtimeAllowlist) || !runtimeAllowlist.length) {
+      throw new TypeError("the runtime payload allowlist is unavailable");
+    }
+    const verifyRuntime = options.verifyRuntime ?? runtimeLibrary.verifyUpdateRuntimePayload;
+    if (typeof verifyRuntime !== "function") {
+      throw new TypeError("the runtime payload verifier is unavailable");
+    }
+    const boundary = {
+      runtimeLibrary,
+      verifyRuntime,
+      verifyOptions: Object.freeze({
+        ...(options.runtimeVerificationOptions || {}),
+        root: runtimeRoot,
+        allowlist: runtimeAllowlist,
+        expectedRuntimeSha256,
+      }),
+    };
+    const openingProof = exactRuntimeProof(
+      verifyRuntime(boundary.verifyOptions),
+      runtimeLibrary,
+      expectedRuntimeSha256,
+    );
+    const pinRuntimePackage = options.pinRuntimePackage ?? pinUpdateRuntimePackage;
+    const runtimePackagePin = pinRuntimePackage(runtimeRoot);
+    if (runtimePackagePin?.manifest?.name !== "brain-installer" ||
+        typeof runtimePackagePin.manifest.version !== "string" ||
+        !UPDATE_PREVIEW_SEMVER_RE.test(runtimePackagePin.manifest.version)) {
+      throw new TypeError("the runtime package version identity is invalid");
+    }
+    return Object.freeze({
+      ...boundary,
+      openingProof,
+      runtimePackagePin,
+      productVersion: runtimePackagePin.manifest.version,
+    });
+  };
+
+  const exactRuntimeProof = (value, runtimeLibrary, expectedRuntimeSha256) => {
+    const limits = runtimeLibrary?.UPDATE_PREVIEW_LIMITS;
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        Object.keys(value).sort().join("\0") !== [
+          "expected_runtime_sha256",
+          "file_count",
+          "identity_scheme",
+          "runtime_payload_sha256",
+          "schema_version",
+          "total_bytes",
+          "verified_passes",
+        ].sort().join("\0") ||
+        value.schema_version !== runtimeLibrary.UPDATE_PREVIEW_SCHEMA_VERSION ||
+        value.schema_version !== 1 ||
+        value.identity_scheme !== runtimeLibrary.UPDATE_RUNTIME_IDENTITY_SCHEME ||
+        value.identity_scheme !== "brain.runtime-payload.sha256.v1" ||
+        value.runtime_payload_sha256 !== expectedRuntimeSha256 ||
+        value.expected_runtime_sha256 !== expectedRuntimeSha256 ||
+        value.verified_passes !== 2 ||
+        !limits || !Number.isSafeInteger(limits.files) || !Number.isSafeInteger(limits.total_bytes) ||
+        !Number.isSafeInteger(value.file_count) || value.file_count < 1 ||
+        value.file_count > limits.files ||
+        !Number.isSafeInteger(value.total_bytes) || value.total_bytes < 1 ||
+        value.total_bytes > limits.total_bytes) {
+      throw new TypeError("the installed runtime payload proof is invalid");
+    }
+    return Object.freeze({
+      schema_version: 1,
+      identity_scheme: value.identity_scheme,
+      runtime_payload_sha256: value.runtime_payload_sha256,
+      file_count: value.file_count,
+      total_bytes: value.total_bytes,
+      expected_runtime_sha256: value.expected_runtime_sha256,
+      verified_passes: 2,
+    });
+  };
+
+  const pinLocalCut = async ({
+    manifestPath,
+    source,
+    file,
+    expectedRuntimeSha256,
+    library,
+    runtime,
+  }) => {
+    const manifestPin = pinManifest(manifestPath);
+    const local = manifestPin?.manifest?.corpora?.local_folder;
+    const privatePrefixes = manifestPin?.manifest?.safety?.private_path_prefixes ?? [];
+    if (!local || typeof local !== "object" || Array.isArray(local) ||
+        local.enabled !== true || local.source !== source ||
+        typeof local.path !== "string" || !isAbsolute(local.path) ||
+        !Array.isArray(privatePrefixes) ||
+        privatePrefixes.some((prefix) => typeof prefix !== "string")) {
+      throw new TypeError("the manifest does not declare the exact dedicated local source");
+    }
+    const handle = library.resolveExactLocalFile(local.path, {
+      relativeLocator: file,
+      privatePrefixes,
+      requireDedicatedRoot: true,
+    });
+    revalidateManifest(manifestPin, "first-source local cut");
+    const runtimeAfter = exactRuntimeProof(
+      runtime.verifyRuntime(runtime.verifyOptions),
+      runtime.runtimeLibrary,
+      expectedRuntimeSha256,
+    );
+    if (!sameUpdateRuntimeProof(runtime.openingProof, runtimeAfter)) {
+      throw new TypeError("the installed runtime changed during exact-file validation");
+    }
+    const revalidateRuntimePackage = options.revalidateRuntimePackage ?? revalidateUpdateManifest;
+    revalidateRuntimePackage(runtime.runtimePackagePin, "first-source runtime package");
+    const fileStat = handle?._localApproval?.identity;
+    const rootStat = handle?.root_identity;
+    if (!fileStat || !rootStat || handle.rel !== file || handle.name !== file ||
+        handle.size !== Number(fileStat.size) || fileStat.nlink !== "1") {
+      throw new TypeError("the exact-file resolver returned an invalid identity");
+    }
+    const manifestIdentity = Object.freeze({
+      content_sha256: manifestPin.fingerprint,
+      byte_count: manifestPin.byteCount,
+      filesystem_identity_sha256: firstSourceManifestFilesystemIdentity(manifestPin),
+    });
+    const rootIdentity = Object.freeze({
+      filesystem_identity_sha256: firstSourceFilesystemFingerprint({
+        dev: rootStat.dev,
+        ino: rootStat.ino,
+        mtime_ns: rootStat.mtimeNs,
+        ctime_ns: rootStat.ctimeNs,
+      }),
+      realpath_sha256: createHash("sha256").update(rootStat.realpath).digest("hex"),
+    });
+    const fileRealpath = (realpathSync.native || realpathSync)(handle.full);
+    const fileIdentity = Object.freeze({
+      filesystem_identity_sha256: firstSourceFilesystemFingerprint(fileStat),
+      realpath_sha256: createHash("sha256").update(fileRealpath).digest("hex"),
+      byte_count: handle.size,
+      link_count: Number(fileStat.nlink),
+      mtime_ns: String(fileStat.mtimeNs),
+      ctime_ns: String(fileStat.ctimeNs),
+    });
+    const runtimeIdentity = Object.freeze({
+      identity_scheme: runtimeAfter.identity_scheme,
+      runtime_payload_sha256: runtimeAfter.runtime_payload_sha256,
+      expected_runtime_sha256: runtimeAfter.expected_runtime_sha256,
+      product_version: runtime.productVersion,
+    });
+    const fingerprint = fingerprintProvenanceValue({
+      manifestIdentity,
+      rootIdentity,
+      fileIdentity,
+      runtimeIdentity,
+    });
+    return Object.freeze({
+      fingerprint,
+      manifestPin,
+      handle,
+      manifestIdentity,
+      rootIdentity,
+      fileIdentity,
+      runtimeIdentity,
+    });
+  };
+
+  const assertGuardCurrent = async (state) => {
+    await state.baseAssert();
+    if (!state.cut) return;
+    const runtime = await openRuntimeBoundary(state.expectedRuntimeSha256);
+    const current = await pinLocalCut({
+      manifestPath: state.manifestPath,
+      source: state.source,
+      file: state.file,
+      expectedRuntimeSha256: state.expectedRuntimeSha256,
+      library: state.library,
+      runtime,
+    });
+    if (current.fingerprint !== state.cut.fingerprint) {
+      throw new TypeError("the exact-file local cut changed during the operation");
+    }
+    await state.baseAssert();
+  };
+
+  const createGuard = ({ baseRelease, fingerprint, state }) => {
+    const assertOwned = async () => assertGuardCurrent(state);
+    guardStates.set(assertOwned, state);
+    return Object.freeze({
+      fingerprint,
+      assertOwned,
+      release: async () => {
+        guardStates.delete(assertOwned);
+        await baseRelease();
+      },
+    });
+  };
+
+  return Object.freeze({
+    inspectArchitecture: async () => {
+      const pilot = options.pilotLib ?? await firstSourceFileLib();
+      if (typeof pilot?.firstSourceArchitectureIdentity !== "function") {
+        throw new TypeError("the first-source architecture identity validator is unavailable");
+      }
+      const architecture = options.architectureLib ?? await windowsNativeArchitectureLib();
+      const result = (options.probeArchitecture ?? architecture.probeWindowsNativeArchitecture)(
+        options.architectureOptions || {},
+      );
+      return pilot.firstSourceArchitectureIdentity(
+        result,
+        architecture.assertWindowsNativeArchitectureResult,
+      );
+    },
+    openReadOnlySnapshot: async ({ manifest, source, file, expectedRuntimeSha256 }) => {
+      // The runtime proof precedes loading the ingest implementation, as well
+      // as every customer-private manifest and source read.
+      const runtime = await openRuntimeBoundary(expectedRuntimeSha256);
+      const library = await loadIngest();
+      const state = {
+        manifestPath: manifest,
+        source,
+        file,
+        expectedRuntimeSha256,
+        library,
+        runtime,
+        cut: null,
+        baseAssert: async () => {},
+      };
+      state.cut = await pinLocalCut({
+        manifestPath: manifest,
+        source,
+        file,
+        expectedRuntimeSha256,
+        library,
+        runtime,
+      });
+      const guard = createGuard({
+        baseRelease: async () => {},
+        fingerprint: state.cut.fingerprint,
+        state,
+      });
+      return Object.freeze({
+        read_only: true,
+        fingerprint: guard.fingerprint,
+        assertCurrent: guard.assertOwned,
+        close: guard.release,
+      });
+    },
+    acquireSourceLease: async ({ manifest, source, file, expectedRuntimeSha256 }) => {
+      const lease = await target.acquireSourceLease({ manifestPath: manifest, source });
+      try {
+        const runtime = await openRuntimeBoundary(expectedRuntimeSha256);
+        const library = await loadIngest();
+        const state = {
+          manifestPath: manifest,
+          source,
+          file,
+          expectedRuntimeSha256,
+          library,
+          runtime,
+          cut: null,
+          baseAssert: lease.assertOwned,
+        };
+        state.cut = await pinLocalCut({
+          manifestPath: manifest,
+          source,
+          file,
+          expectedRuntimeSha256,
+          library,
+          runtime,
+        });
+        return createGuard({
+          baseRelease: lease.release,
+          fingerprint: lease.fingerprint,
+          state,
+        });
+      } catch (error) {
+        await lease.release();
+        throw error;
+      }
+    },
+    loadExactContext: async ({
+      manifest,
+      source,
+      file,
+      expectedRuntimeSha256,
+      assertOwned,
+    }) => {
+      const state = guardStates.get(assertOwned);
+      if (!state || state.manifestPath !== manifest || state.source !== source ||
+          state.file !== file || state.expectedRuntimeSha256 !== expectedRuntimeSha256) {
+        throw new TypeError("the exact-file guard does not match this invocation");
+      }
+      await state.baseAssert();
+      if (!state.cut) throw new TypeError("the exact-file local cut is unavailable");
+      await assertOwned();
+      const prepared = await state.library.prepare(state.cut.handle, { sourceName: source, ocr: null });
+      await assertOwned();
+      if (!prepared || prepared.skip || prepared.envelopes || !prepared.envelope) {
+        throw new TypeError("the exact file did not produce one native document");
+      }
+      const sanitized = sanitizeIngestEnvelope(prepared.envelope);
+      const stamped = restampFirstPartySourceProvenance(sanitized, {
+        sourceType: source,
+        textSource: sanitized.text_source,
+        textReliable: sanitized.text_reliable,
+      });
+      const envelopes = state.library.splitOversized(stamped);
+      if (!Array.isArray(envelopes) || envelopes.length !== 1) {
+        throw new TypeError("the exact file exceeds the one-envelope pilot boundary");
+      }
+      const envelope = envelopes[0];
+      if (ingestEnvelopeValidationError(envelope)) {
+        throw new TypeError("the exact file failed the ingest envelope contract");
+      }
+      if (envelope.source_type !== source || envelope.source_id !== file ||
+          envelope.text_source !== "native" || envelope.text_reliable !== true ||
+          Object.hasOwn(envelope, "ocr") || Object.hasOwn(envelope.metadata, "ocr") ||
+          ["part", "part_count", "part_of", "family_of"].some((key) =>
+            Object.hasOwn(envelope.metadata, key)) ||
+          envelope.metadata?.provenance_receipt?.version !== 1 ||
+          envelope.metadata?.provenance_receipt?.status !== "complete" ||
+          envelope.metadata?.provenance_receipt?.reason !== "lineage_and_text_recorded") {
+        throw new TypeError("the exact file is not one native reliable item");
+      }
+      let original;
+      let preparedOriginal;
+      try {
+        original = normalizeSourceOriginalReceipt(envelope.source_original_receipt);
+        preparedOriginal = normalizeSourceOriginalReceipt(prepared.envelope.source_original_receipt);
+      } catch {
+        throw new TypeError("the exact file has no immutable original-byte receipt");
+      }
+      if (fingerprintProvenanceValue(original) !== fingerprintProvenanceValue(preparedOriginal) ||
+          original.locator_kind !== "source_relative_path" ||
+          original.original_byte_count !== state.cut.fileIdentity.byte_count) {
+        throw new TypeError("the exact file has no immutable original-byte receipt");
+      }
+      if (credentialRefusalOf(envelope, true)) {
+        throw new TypeError("the exact file was refused by the credential boundary");
+      }
+      const content = Buffer.from(envelope.content, "utf8");
+      await assertOwned();
+      return Object.freeze({
+        manifestIdentity: state.cut.manifestIdentity,
+        rootIdentity: state.cut.rootIdentity,
+        fileIdentity: state.cut.fileIdentity,
+        runtimeIdentity: state.cut.runtimeIdentity,
+        originalIdentity: Object.freeze({
+          content_sha256: original.original_content_sha256,
+          byte_count: original.original_byte_count,
+        }),
+        envelopeIdentity: Object.freeze({
+          source_type: source,
+          source_id: file,
+          doc_uid: `${source}:${file}`,
+          envelope_sha256: fingerprintProvenanceValue(envelope),
+          content_sha256: createHash("sha256").update(content).digest("hex"),
+          content_byte_count: content.byteLength,
+        }),
+        envelopes: Object.freeze([envelope]),
+        retrievalQuery: firstSourcePrivateQuery(envelope.content),
+        boundary: Object.freeze({
+          kind: "one_exact_local_file",
+          exact_file_resolved: true,
+          root_entry_count: 1,
+          walked: false,
+          unrelated_content_read: false,
+          removal_inferred: false,
+          ocr_attempted: false,
+          credential_scan: "passed",
+        }),
+      });
+    },
+    resolveAdminAccess: async ({ manifest, assertOwned }) => {
+      const state = guardStates.get(assertOwned);
+      if (!state?.cut || state.manifestPath !== manifest) {
+        throw new TypeError("the exact-file local cut is unavailable at the credential boundary");
+      }
+      await assertOwned();
+      return target.resolveDurableAdminAccess({
+        manifest: state.cut.manifestPin.manifest,
+        manifestPath: state.cut.manifestPin.target,
+        assertOwned,
+      });
+    },
+    ingestExact: async ({ envelope, adminAccess, assertOwned }) => {
+      const receipt = await target.ingestPrepared({ envelopes: [envelope], adminAccess, assertOwned });
+      if (!Array.isArray(receipt?.results) || receipt.results.length !== 1) return receipt;
+      const result = receipt.results[0];
+      const expectedDocUid = `${envelope.source_type}:${envelope.source_id}`;
+      if (!result || typeof result !== "object" || Array.isArray(result) ||
+          result.source_type !== envelope.source_type ||
+          result.source_id !== envelope.source_id || result.doc_uid !== expectedDocUid) {
+        throw new TypeError("the exact target ingest returned a different item identity");
+      }
+      return Object.freeze({
+        ...receipt,
+        results: Object.freeze([Object.freeze({ ...result })]),
+      });
+    },
+    verifySourceRegistration: async ({ source, policy, adminAccess, assertOwned }) => {
+      if (policy?.mode !== "read_only" || policy.require_pre_existing !== true ||
+          policy.required_kind !== "upload" || policy.expected_match_count !== 1 ||
+          policy.registration_allowed !== false) {
+        throw new TypeError("the exact-file source registration policy is invalid");
+      }
+      await assertOwned();
+      return target.readSourceInventory({ source, adminAccess, assertOwned });
+    },
+    recordResultFamily: ({ attemptContext, ...payload }) => {
+      if (!attemptContext || !Number.isSafeInteger(attemptContext.request_timeout_ms)) {
+        throw new TypeError("the exact-file result-family attempt is unbounded");
+      }
+      return target.recordResultFamily({
+        ...payload,
+        requestTimeoutMs: attemptContext.request_timeout_ms,
+      });
+    },
+    verifyResultFamily: (payload) => target.verifyResultFamily(payload),
+    passiveReadinessWait: async ({ waitMs, assertOwned }) => {
+      if (!Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 10_000) {
+        throw new TypeError("the exact-file passive readiness wait is invalid");
+      }
+      const sleep = options.passiveReadinessSleep ?? ((milliseconds) =>
+        new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+      await assertOwned();
+      await sleep(waitMs);
+      await assertOwned();
+    },
+  });
+}
+
+/** Strict first-source CLI adapter. Public output is always identity-free. */
+export async function cmdFirstSourceFile(argv = process.argv.slice(3), options = {}) {
+  const boundary = options.boundaryCommand ?? classifyCliCredentialBoundary("ingest-file", argv);
+  const mode = boundary === "ingest-file-apply" ? "apply" : "preview";
+  let pilot;
+  let parsed;
+  try {
+    pilot = options.pilotLib ?? await firstSourceFileLib();
+    parsed = pilot.parseFirstSourceFileArgv(argv);
+  } catch {
+    if (mode === "preview") throw new JsonFatal(firstSourceFileFallbackFailure(mode));
+    throw new Fatal("The first-source exact-file apply request is invalid. Nothing was read or changed.");
+  }
+  const dependencies = options.dependencies ?? firstSourceFileDependencies(
+    options.dependencyOptions || {},
+  );
+  try {
+    const receipt = await pilot.runFirstSourceFile(parsed, dependencies);
+    if (parsed.apply) say(pilot.renderFirstSourceFileReceipt(receipt));
+    else (options.write ?? console.log)(JSON.stringify(receipt, null, 2));
+    return receipt;
+  } catch (error) {
+    const receipt = error instanceof pilot.FirstSourceFileError
+      ? error.receipt
+      : firstSourceFileFallbackFailure(parsed.apply ? "apply" : "preview", "orchestration");
+    if (!parsed.apply) throw new JsonFatal(receipt);
+    throw new Fatal(pilot.renderFirstSourceFileReceipt(receipt));
+  }
+}
+
 /** Beginner update path: verify custody first, then run the fully gated upgrade. */
 export async function cmdUpdate(manifestPath, options = {}) {
   let installed;
@@ -24024,10 +25415,14 @@ const commands = {
   "mcp-config": cmdMcpConfig,
   "assistant-repair": cmdAssistantRepairInteractive,
   "machine-continuity": cmdMachineContinuity,
+  "provenance-assess": (_path) => cmdProvenanceAssess(process.argv.slice(3)),
   "provenance-repair": cmdProvenanceRepairInteractive,
   migrate: (path) => withManifestCloudflareControl(path, () => cmdMigrate(path)),
   "ocr-preflight": cmdOcrPreflightInteractive,
   ingest: cmdIngest,
+  "ingest-file": (_path) => cmdFirstSourceFile(process.argv.slice(3), {
+    boundaryCommand: cliBoundaryCommand,
+  }),
   import: cmdImport,
   load: cmdLoad,
   connect: cmdConnect,
@@ -24046,12 +25441,9 @@ const commands = {
   invite: cmdInvite,
   devices: cmdDevices,
   token: cmdToken,
-  update: (path) => {
-    const flags = parseFlags(process.argv.slice(3));
-    return cmdUpdate(updateCommandTarget(path, flags), {
-      adoptConsent: cloudflareAdoptionConsent(flags),
-    });
-  },
+  update: (_path) => dispatchUpdateCli(process.argv.slice(3), {
+    boundaryCommand: cliBoundaryCommand,
+  }),
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
   schedule: cmdSchedule,
@@ -24075,7 +25467,11 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "sources",
   "financial-picture",
   "machine-continuity",
+  "provenance-assess",
   "provenance-repair",
+  "update-preview",
+  "ingest-file-preview",
+  "ingest-file-apply",
   "assistant-repair",
   "ocr-preflight",
 ]);
@@ -24172,6 +25568,12 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            shared-budget and local file-provider unknowns; no OCR,
                                            app HTTP/key-store, Brain, or local-state write
     brain ingest     <manifest> --path <dir>  load a folder into the brain
+    brain ingest-file <manifest> --source <id> --file <direct-name> --expect-runtime-sha256 <64hex> --json
+                                           read-only Windows x64 preview of exactly one direct
+                                           native-text file in its dedicated manifest source root
+    brain ingest-file <manifest> --source <id> --file <direct-name> --expect-runtime-sha256 <64hex> --apply --approve <64hex>
+                                           ingest only that unchanged approved item and prove
+                                           Received, Saved, Search ready, and Answer checked
     brain ingest     <manifest> --from drive  load from a connected remote source
                                            add --dry-run --json for one bounded,
                                            aggregate-only assistant preview
@@ -24196,6 +25598,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain provenance-repair <manifest> --source <name>  read-only whole-source provenance recovery preview
                                            schema 1 is inventory-only; repair apply requires a future
                                            candidate-resolution ledger and is intentionally unavailable
+    brain provenance-assess <manifest> --source <name> --target <relative-file> --json
+                                           local-only public assessment for one to ten exact originals;
+                                           no credential, network, OCR, Brain read, or write
     brain provenance-repair <manifest> --source <name> --target <relative-file>
                                            read-only preview for one exact native-readable local original;
                                            hides the private locator and keeps OCR off
@@ -24212,6 +25617,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
 
   operate
     brain update     [manifest]            one safe update: snapshot, test, verify
+    brain update     [manifest] --preview --expect-runtime-sha256 <sha256> --json
+                                           local identity gates, then one authenticated aggregate
+                                           Brain read; no control-plane request, write, deploy,
+                                           install, browser, or update authorization
     brain update     [manifest] --adopt-cloudflare-profile  approve the one-time Cloudflare
                                            browser sign-in from a session with no terminal
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
@@ -24294,7 +25703,7 @@ if (IS_MAIN) {
 
   // Wrapped so a client who signed in with `wrangler login` never has to mint
   // or paste a token. Scoped to this one invocation.
-  runCliCommandWithCredentialBoundary(cmd, () => commands[cmd](manifestPath)).catch((e) => {
+  runCliCommandWithCredentialBoundary(cliBoundaryCommand, () => commands[cmd](manifestPath)).catch((e) => {
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a

@@ -10,6 +10,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -17,30 +18,41 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
   CloudflareRecoveryAdapterError,
+  RECOVERY_ADAPTER_RESIDUE_POLICY_INVENTORY,
   RECOVERY_DURABLE_TABLES,
   RECOVERY_EXPORT_TABLES,
   RECOVERY_FIELD_GATE_STOP_STAGES,
   RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_CODE,
   RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
+  assertSealedExecutionSnapshotUnchanged,
   createCloudflareRecoveryFieldGateAdapters,
   assertDisposableRecoveryFieldCampaignIdentity,
   assertDisposableRecoverySourceFieldCampaignIdentity,
   inspectDisposableRecoveryDeploymentPreparation,
+  inspectDisposableRecoveryProvisioningPreparation,
   inspectDisposableRecoverySourceDeploymentPreparation,
   inspectDisposableRecoverySeedPreparation,
   normalizedInstallStateExport,
   parseCloudflareRecoveryCliArguments,
   previewCloudflareRecoveryFieldGate,
+  readCompletedTestBootstrapProof,
   recoveryExportTables,
   recoveryVectorProtocolSupported,
+  removeExecutionSnapshot,
   runCloudflareRecoveryFieldGate,
+  stageSealedExecutionSnapshot,
   verifyRecoverySqlArtifact,
 } from "../operations/cloudflare-recovery-adapter.mjs";
+import {
+  hasRecoveryArtifactResiduePathComponent,
+  isRecoveryArtifactResiduePathComponent,
+} from "../operations/recovery-artifact-residue-policy.mjs";
 import {
   DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_NAME,
   DISPOSABLE_RECOVERY_DEPLOYMENT_PROTOCOL,
@@ -54,20 +66,54 @@ import {
   assertDisposableRecoverySourcePhaseReceipt,
   assertDisposableRecoverySourcePreflightReceipt,
   assertDisposableRecoveryTargetPreflightReceipt,
+  disposableRecoveryVectorizeMutationQuiescenceClaim,
   disposableRecoverySourceA2Fingerprint,
   disposableRecoveryTargetA4Fingerprint,
 } from "../operations/disposable-recovery-deployment-receipt.mjs";
 import {
+  DISPOSABLE_RECOVERY_MARKER,
   DISPOSABLE_RECOVERY_FIXTURE_SHA256,
   DISPOSABLE_RECOVERY_SEED_BATCHES,
   DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
   assertDisposableRecoverySeedReceipt,
+  disposableRecoveryFixture,
 } from "../operations/disposable-recovery-seeder.mjs";
-import { readPrivateAggregateReceipt } from "../operations/private-aggregate-receipt.mjs";
+import {
+  DISPOSABLE_RECOVERY_TARGET_EVAL_RECEIPT_NAME,
+} from "../operations/disposable-recovery-field-acceptance.mjs";
+import {
+  assertDisposableRecoveryTargetEvalBinding,
+  disposableRecoveryTargetEvalApprovalFingerprint,
+  runDisposableRecoveryTargetEvaluation,
+} from "../operations/disposable-recovery-target-eval.mjs";
+import {
+  abandonPrivateAggregateReceipt,
+  assertPrivateAggregateOutputPath,
+  finalizePrivateAggregateReceipt,
+  privateAggregateReceiptCommitPath,
+  privateAggregateReceiptPendingPath,
+  privateAggregateReceiptStagedPath,
+  readPrivateAggregateReceipt,
+  reservePrivateAggregateReceipt,
+} from "../operations/private-aggregate-receipt.mjs";
+import {
+  V048_DISPOSABLE_CAMPAIGN_CORPORA,
+} from "../operations/v048-disposable-campaign-contract.mjs";
+import {
+  V048_D1_DELETION_STATE_FTS_COUNT_SQL,
+  V048_D1_DELETION_STATE_FTS_SHADOW_TABLES,
+  V048_D1_DELETION_STATE_INVENTORY_SQL,
+  V048_D1_DELETION_STATE_SCHEMA_SQL,
+  V048_D1_DELETION_STATE_SEQUENCE_SQL,
+} from "../operations/v048-d1-deletion-state-contract.mjs";
+import {
+  v048VectorizeMutationQuiescenceApprovalFingerprint,
+} from "../operations/v048-vectorize-mutation-quiescence-contract.mjs";
 import {
   initializeVerifiedRecovery,
   inspectVerifiedRecoveryManifestBindings,
   loadVerifiedRecoveryState,
+  reviewVerifiedRecoveryVectorizeMutationQuiescence,
   writeVerifiedRecoveryState,
 } from "../operations/verified-recovery.mjs";
 import { withDecryptedRecoveryArtifact } from "../operations/recovery-artifact-crypto.mjs";
@@ -75,15 +121,76 @@ import {
   LOCKED_WRANGLER_ENTRYPOINT,
   LOCKED_WRANGLER_RESOLUTION_GUARD,
   LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+  assertLockedWranglerRuntimeUnchanged,
   inspectLockedWranglerRuntime,
   materializeLockedWranglerRuntime,
   prepareLockedWranglerRuntimeFromCache,
 } from "../operations/locked-wrangler-runtime.mjs";
+import {
+  inspectNpmArchiveBytes,
+} from "../operations/package-bundle-verifier.mjs";
+import {
+  UPDATE_RUNTIME_IDENTITY_SCHEME,
+  deriveUpdateRuntimePayloadSha256,
+} from "../operations/update-preview.mjs";
 import { ZOOM_CREDENTIAL_ENV } from "../connectors/zoom.mjs";
 import Worker from "../worker/src/index.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET, encryptAccessReference } from "../worker/src/lib/bank-feed.js";
 import { resolveNpmCacheContentRoot } from "../scripts/field-prepare.mjs";
+import {
+  createTestDisposableRecoveryK0Capability,
+} from "./helpers/disposable-recovery-k0-capability.mjs";
+import {
+  createDisposableCampaignAuthorityFixture,
+} from "./helpers/disposable-campaign-authority.mjs";
 
+const residuePolicyOnly =
+  process.env.FINANCIAL_BRAIN_ADAPTER_RESIDUE_POLICY_TEST === "1";
+const classifiedResidueNames = (directory) => readdirSync(directory)
+  .filter(isRecoveryArtifactResiduePathComponent)
+  .sort();
+for (const component of RECOVERY_ADAPTER_RESIDUE_POLICY_INVENTORY) {
+  assert.equal(isRecoveryArtifactResiduePathComponent(component), true);
+  assert.equal(
+    hasRecoveryArtifactResiduePathComponent(join(tmpdir(), "fixture-private", component)),
+    true,
+  );
+}
+
+if (residuePolicyOnly) {
+  const residueSandbox = realpathSync(mkdtempSync(
+    join(tmpdir(), "brain-cloudflare-recovery-residue-policy-"),
+  ));
+  if (process.platform !== "win32") chmodSync(residueSandbox, 0o700);
+  try {
+    const successful = stageSealedExecutionSnapshot(residueSandbox);
+    assert.equal(isRecoveryArtifactResiduePathComponent(basename(successful.path)), true);
+    assert.equal(hasRecoveryArtifactResiduePathComponent(successful.path), true);
+    removeExecutionSnapshot(successful);
+    assert.deepEqual(classifiedResidueNames(residueSandbox), []);
+
+    const failed = stageSealedExecutionSnapshot(residueSandbox);
+    const failedAdapterPath = join(
+      failed.path,
+      "operations",
+      "cloudflare-recovery-adapter.mjs",
+    );
+    if (process.platform !== "win32") chmodSync(failedAdapterPath, 0o600);
+    writeFileSync(failedAdapterPath, "synthetic residue-policy failure\n");
+    assert.throws(
+      () => assertSealedExecutionSnapshotUnchanged(failed),
+      (error) => error.code === "RECOVERY_EXECUTION_SNAPSHOT_CHANGED",
+    );
+    removeExecutionSnapshot(failed);
+    assert.deepEqual(classifiedResidueNames(residueSandbox), []);
+    console.log(
+      `PASS  Cloudflare recovery adapter residue policy classifies ${RECOVERY_ADAPTER_RESIDUE_POLICY_INVENTORY.length} producer names and cleans success/failure snapshots`,
+    );
+  } finally {
+    rmSync(residueSandbox, { recursive: true, force: true });
+  }
+  process.exit(0);
+}
 const sandbox = realpathSync(mkdtempSync(join(tmpdir(), "brain-cloudflare-recovery-adapter-")));
 if (process.platform !== "win32") chmodSync(sandbox, 0o700);
 
@@ -263,12 +370,15 @@ const syntheticFieldSourceManifest = {
   infrastructure: {
     cloudflare: {
       ...sourceManifest.infrastructure.cloudflare,
-      account_id: "fixture-v048-field-source-account",
+      account_id: "a".repeat(32),
       d1_database_name: syntheticFieldSourceResource,
-      d1_database_id: "fixture-v048-field-source-database-id",
+      d1_database_id: "10000000-0000-4000-8000-000000000001",
       vectorize_index: syntheticFieldSourceResource,
     },
   },
+  corpora: Object.fromEntries(
+    V048_DISPOSABLE_CAMPAIGN_CORPORA.map((name) => [name, { enabled: false }]),
+  ),
   operations: {
     admin_key_secret: `keychain://${syntheticFieldSourceResource}/owner`,
   },
@@ -283,15 +393,16 @@ const syntheticFieldTargetManifest = {
   infrastructure: {
     cloudflare: {
       ...syntheticFieldSourceManifest.infrastructure.cloudflare,
-      account_id: "fixture-v048-field-target-account",
+      account_id: "a".repeat(32),
       d1_database_name: syntheticFieldTargetResource,
-      d1_database_id: "fixture-v048-field-target-database-id",
+      d1_database_id: "20000000-0000-4000-8000-000000000002",
       vectorize_index: syntheticFieldTargetResource,
     },
   },
   operations: {
     admin_key_secret: `keychain://${syntheticFieldTargetResource}/owner`,
     recovery_artifact_key_secret: `keychain://${syntheticFieldTargetResource}/artifact-v1`,
+    recovery_field_gate: { routes: [], custom_domains: [] },
   },
 };
 
@@ -333,6 +444,53 @@ function npmPackageFixture(destination) {
     bytes: readFileSync(join(destination, metadata[0].filename)),
     fileCount: metadata[0].files.length,
   });
+}
+
+function installNpmPackageFixture(packagePath, destination) {
+  const npmCli = process.env.npm_execpath;
+  const command = npmCli
+    ? process.execPath
+    : process.platform === "win32" ? "npm.cmd" : "npm";
+  const args = [
+    ...(npmCli ? [npmCli] : []),
+    "install", "--global", "--ignore-scripts", "--no-audit", "--no-fund",
+    "--offline", "--cache", join(destination, "npm-cache"),
+    "--prefix", destination, packagePath,
+  ];
+  const environment = {
+    PATH: process.env.PATH || "",
+    LANG: "C",
+    LC_ALL: "C",
+    npm_config_update_notifier: "false",
+  };
+  for (const name of [
+    "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot", "WINDIR", "ComSpec",
+    "PATHEXT", "LOCALAPPDATA", "APPDATA", "USERPROFILE",
+  ]) {
+    if (typeof process.env[name] === "string" && process.env[name]) {
+      environment[name] = process.env[name];
+    }
+  }
+  const installed = spawnSync(command, args, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: environment,
+    shell: !npmCli && process.platform === "win32",
+    timeout: 120_000,
+    windowsHide: true,
+  });
+  assert.equal(
+    installed.status,
+    0,
+    "focused recovery test must install its exact npm tarball without network access",
+  );
+  const packageRoot = join(
+    destination,
+    ...(process.platform === "win32" ? [] : ["lib"]),
+    "node_modules",
+    "brain-installer",
+  );
+  return realpathSync(packageRoot);
 }
 
 function packageWithMutatedMember(packageBytes, wantedPath) {
@@ -392,6 +550,13 @@ function packageWithRenamedMember(packageBytes, wantedPath, replacementPath) {
 function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCount, {
   runId = "11111111-1111-4111-8111-111111111111",
 } = {}) {
+  const runtimePayloadSha256 = deriveUpdateRuntimePayloadSha256(
+    inspectNpmArchiveBytes(packageBytes).rows.map(({ path, bytes, sha256 }) => ({
+      path,
+      bytes,
+      sha256,
+    })),
+  );
   return {
     schema_version: 1,
     run_id: runId,
@@ -450,6 +615,8 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       filename: "brain-installer-0.4.8.tgz",
       bytes: packageBytes.length,
       sha256: hash(packageBytes),
+      identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
+      runtime_payload_sha256: runtimePayloadSha256,
       file_count: packageFileCount,
     },
     steps: fullFieldPreparationSteps.map((id) => ({
@@ -522,6 +689,11 @@ assert.equal(recoveryExportTables(appliedMigrations.slice(0, 44)).includes("sour
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolutions"), true);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_activations"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_admissions"), false);
+assert.equal(
+  recoveryExportTables(appliedMigrations, { excludeLlmCallLog: true })
+    .includes("llm_call_log"),
+  false,
+);
 const installStateColumns = Object.freeze([
   ["id", "INTEGER"],
   ["client_slug", "TEXT"],
@@ -593,6 +765,17 @@ const schemaRows = Object.freeze([
     sql: "CREATE VIRTUAL TABLE chunks_fts USING fts5(text)",
   },
 ].sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name)));
+const deletionSchemaRows = Object.freeze([
+  ...schemaRows,
+  ...V048_D1_DELETION_STATE_FTS_SHADOW_TABLES.map((name) => ({
+    type: "table",
+    name,
+    tbl_name: name,
+    sql: `CREATE TABLE ${name} (fixture BLOB)`,
+  })),
+].sort((a, b) => a.type < b.type ? -1 : a.type > b.type ? 1
+  : a.name < b.name ? -1 : a.name > b.name ? 1
+    : a.tbl_name < b.tbl_name ? -1 : a.tbl_name > b.tbl_name ? 1 : 0));
 
 function aggregateFromSql(sql) {
   const aggregate = {};
@@ -628,13 +811,104 @@ function fixedReceiptHash(index) {
   return Number(index).toString(16).padStart(64, "0");
 }
 
-function receiptSnapshot(start) {
+function receiptSnapshot(start, semantic = null) {
+  const semanticSha256 = semantic === null
+    ? fixedReceiptHash(start + 2)
+    : hash(canonical(semantic));
   return {
     first_raw_evidence_manifest_sha256: fixedReceiptHash(start),
     second_raw_evidence_manifest_sha256: fixedReceiptHash(start + 1),
-    first_semantic_sha256: fixedReceiptHash(start + 2),
-    second_semantic_sha256: fixedReceiptHash(start + 2),
-    stable_semantic_sha256: fixedReceiptHash(start + 2),
+    first_semantic_sha256: semanticSha256,
+    second_semantic_sha256: semanticSha256,
+    stable_semantic_sha256: semanticSha256,
+  };
+}
+
+function fieldCampaignNetworkIsolation(role) {
+  return {
+    worker_identity_proved: true,
+    worker_identity_sha256: hash(`field-${role}-worker-identity`),
+    workers_dev_identity_proved: true,
+    worker_previews_disabled: true,
+    worker_cache_enabled: false,
+    worker_extra_exports: 0,
+    worker_tail_consumers: 0,
+    worker_assets: false,
+    worker_logpush: false,
+    cron_triggers: 0,
+    routes: 0,
+    custom_domains: 0,
+  };
+}
+
+function fieldCampaignAuthority(
+  targetMode = "paused",
+  nonCampaignBindingText = "stable-noncampaign-binding",
+) {
+  return createDisposableCampaignAuthorityFixture({
+    source: {
+      workerName: syntheticFieldSourceResource,
+      databaseId:
+        syntheticFieldSourceManifest.infrastructure.cloudflare.d1_database_id,
+      vectorizeIndexName:
+        syntheticFieldSourceManifest.infrastructure.cloudflare.vectorize_index,
+      deploymentId: fieldSourceDeploymentId,
+      versionId: fieldSourceWorkerVersionId,
+      scriptEtag: "source-etag-v048",
+      reviewedGenerationSha256: hash("field-source-reviewed-generation"),
+    },
+    target: {
+      workerName: syntheticFieldTargetResource,
+      databaseId:
+        syntheticFieldTargetManifest.infrastructure.cloudflare.d1_database_id,
+      vectorizeIndexName:
+        syntheticFieldTargetManifest.infrastructure.cloudflare.vectorize_index,
+      paused: {
+        deploymentId: fieldTargetDeploymentId,
+        versionId: fieldPausedWorkerVersionId,
+        scriptEtag: "target-paused-etag-v048",
+        reviewedGenerationSha256: hash("field-target-paused-reviewed-generation"),
+      },
+      active: {
+        deploymentId: "60000000-0000-4000-8000-000000000006",
+        versionId: fieldActiveWorkerVersionId,
+        scriptEtag: "target-active-etag-v048",
+        reviewedGenerationSha256: hash("field-target-active-reviewed-generation"),
+      },
+    },
+    sourceNetworkIsolation: fieldCampaignNetworkIsolation("source"),
+    targetNetworkIsolation: fieldCampaignNetworkIsolation("target"),
+    targetMode,
+    nonCampaignBindingText,
+  });
+}
+
+function receiptSemanticVersion(version) {
+  return {
+    bindings_sha256: version.bindings_sha256,
+    bindings_without_mode_sha256: version.bindings_without_mode_sha256,
+    handlers: ["fetch", "scheduled"],
+    named_handlers_count: 0,
+    script_etag: version.script_etag,
+    version_id: version.version_id,
+  };
+}
+
+function receiptSemanticResource(vectorCount = 0) {
+  return {
+    custom_domains_count: 0,
+    d1_exists: true,
+    d1_name_and_id_exact: true,
+    previews_enabled: false,
+    routes_count: 0,
+    schedules_count: 0,
+    vector_count: vectorCount,
+    vector_dimensions: 768,
+    vector_metric: "cosine",
+    vectorize_exists: true,
+    vectorize_name_exact: true,
+    worker_exists: true,
+    workers_dev_enabled: true,
   };
 }
 
@@ -675,6 +949,19 @@ function receiptDeployment({
     deployment_response_evidence_manifest_sha256: responseHash,
     deployment_readback_evidence_manifest_sha256: readbackHash,
   };
+}
+
+function fieldVectorizeMutationQuiescence(binding) {
+  const approvalFingerprint =
+    v048VectorizeMutationQuiescenceApprovalFingerprint({
+      sourceManifestSha256: binding.source_manifest_fingerprint,
+      targetManifestSha256: binding.target_manifest_fingerprint,
+      targetResourceFingerprint: binding.target_resource_fingerprint,
+    });
+  return disposableRecoveryVectorizeMutationQuiescenceClaim(
+    binding,
+    approvalFingerprint,
+  );
 }
 
 function fullDisposableSourcePreflightReceipt(binding) {
@@ -755,6 +1042,8 @@ function fullDisposableTargetPreflightReceipt(
     binding,
     source_phase_receipt_sha256: sourcePhaseReceiptSha256,
     seed_receipt_sha256: seedReceiptSha256,
+    vectorize_mutation_quiescence:
+      fieldVectorizeMutationQuiescence(binding),
     planned_requests: {
       target_paused_upload_sha256: fixedReceiptHash(40),
       target_active_upload_sha256: fixedReceiptHash(41),
@@ -809,6 +1098,8 @@ function fullDisposableDeploymentReceipt(
       seedReceiptSha256,
       targetPreflightReceiptSha256,
     ),
+    vectorize_mutation_quiescence:
+      fieldVectorizeMutationQuiescence(binding),
     journal: {
       run_id: binding.run_id,
       through_sequence: 6,
@@ -836,8 +1127,50 @@ function fullDisposableDeploymentReceipt(
         readbackHash: fixedReceiptHash(71),
       }),
     },
-    final_snapshot: receiptSnapshot(80),
   };
+  const campaign = fieldCampaignAuthority("paused");
+  const finalSemantic = {
+    campaign_authority: campaign.authority,
+    campaign_custody: campaign.custody,
+    source: {
+      active_deployment_id: receipt.source.active_deployment_id,
+      active_script_etag: receipt.source.active_script_etag,
+      active_traffic_percent: 100,
+      active_version_id: receipt.source.active_version_id,
+      network_isolation: fieldCampaignNetworkIsolation("source"),
+      resource: receiptSemanticResource(DISPOSABLE_RECOVERY_SEED_DOCUMENTS),
+      resource_fingerprint: binding.source_resource_fingerprint,
+      worker_generation: {
+        schema_version: 1,
+        worker_identity_proved: true,
+        worker_generation_proved: true,
+        worker_generation_sha256: campaign.custody.roles.source
+          .worker_protection.worker_generation_sha256,
+      },
+    },
+    target: {
+      active_version: receiptSemanticVersion(activeVersion),
+      network_isolation: fieldCampaignNetworkIsolation("target"),
+      paused_deployment: {
+        deployment_id: receipt.target.paused_deployment.deployment_id,
+        traffic_percent: 100,
+        version_id: receipt.target.paused_deployment.version_id,
+      },
+      paused_version: receiptSemanticVersion(pausedVersion),
+      resource: receiptSemanticResource(),
+      resource_fingerprint: binding.target_resource_fingerprint,
+      worker_generation: {
+        schema_version: 1,
+        worker_identity_proved: true,
+        worker_generation_proved: true,
+        worker_generation_sha256: campaign.custody.roles.target
+          .worker_protection.worker_generation_sha256,
+      },
+    },
+    vectorize_mutation_quiescence: receipt.vectorize_mutation_quiescence,
+  };
+  receipt.final_semantic = finalSemantic;
+  receipt.final_snapshot = receiptSnapshot(80, finalSemantic);
   assertDisposableRecoveryDeploymentReceipt(receipt);
   return receipt;
 }
@@ -1387,6 +1720,7 @@ function providerHarness({
   bankKeyProofMismatch = false,
   bankFixture = null,
   bankProofTransform = (proof) => proof,
+  campaignAuthorityTransform = (authority) => authority,
   bootstrapMutatesCorpus = false,
   bootstrapBusyOnce = false,
   bootstrapPageSize = 3_000,
@@ -1400,6 +1734,7 @@ function providerHarness({
   failEvalOnce = false,
   failBootstrapOnce = false,
   failBootstrapAfterProgressOnce = false,
+  failPromotionBeforeApplyOnce = false,
   failPromotionAfterApplyOnce = false,
   healthModeOverride = null,
   healthProtocolOverride = null,
@@ -1409,10 +1744,13 @@ function providerHarness({
   initialTargetRestored = false,
   initialVectorCount = 0,
   missingVectorCount = false,
+  omitVectorCursorExpiration = false,
   pausedVersionMode = "paused-for-upgrade",
   pausedScriptEtag = null,
   plainTextOverrides = {},
   promotionNoop = false,
+  promotionBoundaryRace = null,
+  activeCompletionRace = null,
   readinessLagAfterBootstrap = false,
   recoveryArtifactKey = fixtureRecoveryArtifactKey,
   sourceDrainLease = false,
@@ -1468,6 +1806,8 @@ function providerHarness({
   let corpusMutated = false;
   let evalCalls = 0;
   let evalFailuresRemaining = failEvalOnce ? 1 : 0;
+  let llmCallLogRows = [];
+  let llmCallLogSequence = 0;
   let adminReads = 0;
   let importCalls = 0;
   let bootstrapFailuresRemaining = failBootstrapOnce ? 1 : 0;
@@ -1475,6 +1815,7 @@ function providerHarness({
   let bootstrapBusyRemaining = bootstrapBusyOnce ? 1 : 0;
   let readinessLagRemaining = readinessLagAfterBootstrap ? 1 : 0;
   let promotionFailuresRemaining = failPromotionAfterApplyOnce ? 1 : 0;
+  let promotionPreApplyFailuresRemaining = failPromotionBeforeApplyOnce ? 1 : 0;
   let bootstrapCalls = 0;
   let holdBootstrapProgressOnce = false;
   let mutateBootstrapCursorWithoutOrdinalOnce = null;
@@ -1483,23 +1824,74 @@ function providerHarness({
   let observedBootstrapBaseCount = 0;
   let observedBootstrapBatchRows = null;
   let promotionCalls = 0;
+  let completedPromotionOutboxReads = 0;
+  let promotionBoundaryRaceApplied = false;
+  let activeCompletionOutboxReads = 0;
+  let activeCompletionRaceApplied = false;
   let sleepCalls = 0;
   let normalizedLeaseSelections = 0;
   let wranglerRuntimeMaterializations = 0;
   const wranglerCalls = [];
   const fetchCalls = [];
+  const campaignAuthorityObservations = [];
   const observerSnapshots = [];
   const openingSnapshots = [];
   const sensitiveBuffers = [];
   const sourceSnapshot = snapshotForCounts(sourceDocumentCount, sourceChunkCount);
 
-  const bindingForAccount = (accountId) => accountId === sourceManifestFixture.infrastructure.cloudflare.account_id
-    ? sourceManifestFixture.infrastructure.cloudflare
-    : targetManifestFixture.infrastructure.cloudflare;
-  const migrationVersionForAccount = (accountId) =>
-    accountId === sourceManifestFixture.infrastructure.cloudflare.account_id
-      ? sourceMigrationVersion
-      : targetMigrationVersion;
+  const expectedTargetVectorIds = Array.from({ length: targetChunkCount }, (_, index) =>
+    `fixture:vector#${String(index).padStart(8, "0")}`);
+  let providerVectorIds = expectedTargetVectorIds.slice(0, initialVectorCount);
+  const bootstrapMutationId = "fixture-bootstrap-mutation-0001";
+  let processedVectorMutationId = initialVectorCount > 0 ? bootstrapMutationId : null;
+  let processedVectorMutationAt = initialVectorCount > 0
+    ? "2026-08-25T12:59:00.000Z"
+    : null;
+
+  const applyPromotionRace = (race) => {
+    if (race === "d1") {
+      corpusMutated = true;
+    } else if (race === "outbox") {
+      outbox = 1;
+    } else if (race === "vector-count") {
+      providerVectorIds = [...expectedTargetVectorIds, "fixture:rogue-vector"];
+      vectorCount = providerVectorIds.length;
+    } else if (race === "vector-id") {
+      providerVectorIds = [...expectedTargetVectorIds];
+      providerVectorIds[0] = "fixture:rogue-same-count-vector";
+    } else if (race === "watermark") {
+      processedVectorMutationId = "fixture-unapproved-vector-mutation";
+      processedVectorMutationAt = "2026-08-25T13:00:01.000Z";
+    } else {
+      assert.fail(`unknown promotion race: ${race}`);
+    }
+  };
+
+  const sourceCloudflare = sourceManifestFixture.infrastructure.cloudflare;
+  const targetCloudflare = targetManifestFixture.infrastructure.cloudflare;
+  const sharedCloudflareAccount = sourceCloudflare.account_id === targetCloudflare.account_id;
+  const callTargetsRole = (args, role) => {
+    const manifest = role === "source" ? sourceManifestFixture : targetManifestFixture;
+    const cloudflare = manifest.infrastructure.cloudflare;
+    const exactValues = new Set([
+      manifest.brain.worker_name,
+      cloudflare.d1_database_name,
+      cloudflare.d1_database_id,
+      cloudflare.vectorize_index,
+    ]);
+    return args.some((value) => exactValues.has(value));
+  };
+  const roleForCall = (args, accountId) => {
+    const sourceTargeted = callTargetsRole(args, "source");
+    const targetTargeted = callTargetsRole(args, "target");
+    if (sourceTargeted !== targetTargeted) return sourceTargeted ? "source" : "target";
+    if (!sharedCloudflareAccount) {
+      return accountId === sourceCloudflare.account_id ? "source" : "target";
+    }
+    return null;
+  };
+  const migrationVersionForRole = (role) =>
+    role === "source" ? sourceMigrationVersion : targetMigrationVersion;
   const mapTables = new Set([
     "owner_financial_map_key_state",
     "owner_financial_map_inventory_state",
@@ -1573,27 +1965,79 @@ function providerHarness({
     // package or skill installation path.
     assert.equal(args.includes("--install-skills=false"), false);
 
-    const cloudflare = bindingForAccount(env.CLOUDFLARE_ACCOUNT_ID);
+    const callRole = roleForCall(args, env.CLOUDFLARE_ACCOUNT_ID);
+    const isSource = callRole === "source";
+    const cloudflare = isSource ? sourceCloudflare : targetCloudflare;
     if (args[0] === "d1" && args[1] === "list") {
-      const row = { name: cloudflare.d1_database_name, uuid: cloudflare.d1_database_id };
-      return ok(ambiguousSourceD1 && env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id
-        ? [row, { ...row }]
-        : [row]);
+      const sourceRow = {
+        name: sourceCloudflare.d1_database_name,
+        uuid: sourceCloudflare.d1_database_id,
+      };
+      const targetRow = {
+        name: targetCloudflare.d1_database_name,
+        uuid: targetCloudflare.d1_database_id,
+      };
+      const rows = sharedCloudflareAccount
+        ? [sourceRow, targetRow]
+        : [isSource ? sourceRow : targetRow];
+      if (ambiguousSourceD1 && (isSource || sharedCloudflareAccount)) {
+        rows.push({ ...sourceRow });
+      }
+      return ok(rows);
     }
     if (args[0] === "vectorize" && args[1] === "list") {
-      return ok([{ name: cloudflare.vectorize_index, config: { dimensions: 768, metric: "cosine" } }]);
+      const row = (binding) => ({
+        name: binding.vectorize_index,
+        config: { dimensions: 768, metric: "cosine" },
+      });
+      return ok(sharedCloudflareAccount
+        ? [row(sourceCloudflare), row(targetCloudflare)]
+        : [row(cloudflare)]);
     }
     if (args[0] === "vectorize" && args[1] === "info") {
-      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
       return ok({
         dimensions: 768,
         ...(!isSource && missingVectorCount
           ? {}
-          : { vectorCount: isSource ? 5 : vectorCount }),
+          : { vectorCount: isSource ? sourceChunkCount : vectorCount }),
+        ...(!isSource && processedVectorMutationId !== null
+          ? {
+              processedUpToMutation: processedVectorMutationId,
+              processedUpToDatetime: processedVectorMutationAt,
+            }
+          : {}),
+      });
+    }
+    if (args[0] === "vectorize" && args[1] === "list-vectors") {
+      assert.equal(callRole, "target");
+      assert.equal(args[2], targetCloudflare.vectorize_index);
+      assert.equal(args[args.indexOf("--count") + 1], "1000");
+      assert.equal(args.includes("--json"), true);
+      const cursorIndex = args.indexOf("--cursor");
+      const start = cursorIndex === -1
+        ? 0
+        : Number(args[cursorIndex + 1].replace(/^fixture-vector-cursor-/, ""));
+      assert.equal(Number.isSafeInteger(start) && start >= 0, true);
+      const vectors = providerVectorIds.slice(start, start + 1_000)
+        .map((id) => ({ id }));
+      const next = start + vectors.length;
+      const isTruncated = next < providerVectorIds.length;
+      return ok({
+        count: vectors.length,
+        totalCount: providerVectorIds.length,
+        isTruncated,
+        vectors,
+        ...(isTruncated
+          ? {
+              nextCursor: `fixture-vector-cursor-${next}`,
+              ...(!omitVectorCursorExpiration
+                ? { cursorExpirationTimestamp: "2026-08-25T14:00:00.000Z" }
+                : {}),
+            }
+          : {}),
       });
     }
     if (args[0] === "deployments" && args[1] === "status") {
-      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
       if (!isSource && splitTargetDeployment) {
         return ok({ versions: [
           { version_id: pausedVersion, percentage: 50 },
@@ -1606,7 +2050,6 @@ function providerHarness({
       }] });
     }
     if (args[0] === "versions" && args[1] === "view") {
-      const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
       const manifest = isSource ? sourceManifestFixture : targetManifestFixture;
       const requestedVersionId = args[2];
       const targetMode = requestedVersionId === pausedVersion
@@ -1703,6 +2146,14 @@ function providerHarness({
       ]);
       assert.equal(env.CLOUDFLARE_ACCOUNT_ID, targetManifestFixture.infrastructure.cloudflare.account_id);
       promotionCalls++;
+      if (promotionPreApplyFailuresRemaining > 0) {
+        promotionPreApplyFailuresRemaining--;
+        return {
+          status: 1,
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.from("synthetic refused promotion response"),
+        };
+      }
       if (!promotionNoop) currentTargetVersionId = activeVersion;
       if (promotionFailuresRemaining > 0) {
         promotionFailuresRemaining--;
@@ -1718,18 +2169,34 @@ function providerHarness({
       const exportedTables = args
         .map((value, index) => value === "--table" ? args[index + 1] : null)
         .filter(Boolean);
+      const deletionStateTables = [
+        ...RECOVERY_DURABLE_TABLES,
+        ...V048_D1_DELETION_STATE_FTS_SHADOW_TABLES,
+      ];
+      const isDeletionStateExport =
+        canonical(exportedTables) === canonical(deletionStateTables);
       const includesBank = exportedTables.includes("bank_feed_items");
-      const present = new Set(durableTablesForVersion(migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID)));
-      assert.deepEqual(exportedTables, RECOVERY_EXPORT_TABLES.filter((table) =>
-        present.has(table) && (includesBank || table !== "bank_feed_items")));
-      assert.equal(exportedTables.includes("vector_outbox"), false);
-      assert.equal(exportedTables.includes("vector_bootstrap_batches"), false);
-      assert.equal(exportedTables.includes("install_state"), false);
-      assert.equal(exportedTables.includes("document_source_inventory"), false);
-      assert.equal(exportedTables.includes("agent_action_receipts"), false);
+      const includesLlmCallLog = exportedTables.includes("llm_call_log");
+      const present = new Set(durableTablesForVersion(migrationVersionForRole(callRole)));
+      if (isDeletionStateExport) {
+        assert.equal([sourceCloudflare.d1_database_id, targetCloudflare.d1_database_id]
+          .includes(args[2]), true);
+      } else {
+        assert.deepEqual(exportedTables, RECOVERY_EXPORT_TABLES.filter((table) =>
+          present.has(table) && (includesBank || table !== "bank_feed_items") &&
+            (includesLlmCallLog || table !== "llm_call_log")));
+        assert.equal(exportedTables.includes("vector_outbox"), false);
+        assert.equal(exportedTables.includes("vector_bootstrap_batches"), false);
+        assert.equal(exportedTables.includes("install_state"), false);
+        assert.equal(exportedTables.includes("document_source_inventory"), false);
+        assert.equal(exportedTables.includes("agent_action_receipts"), false);
+      }
       writeFileSync(
         output,
-        `${includesBank && bankFixture ? bankFixture.exportData() : dataExport}${corpusMutated ? "\n-- synthetic corpus mutation\n" : ""}`,
+        `${isDeletionStateExport
+          ? `${dataExport}-- complete ${callRole} deletion-state fixture\n`
+          : includesBank && bankFixture ? bankFixture.exportData() : dataExport}` +
+          `${corpusMutated ? "\n-- synthetic corpus mutation\n" : ""}`,
         { mode: 0o600 },
       );
       return ok();
@@ -1761,6 +2228,9 @@ function providerHarness({
       bootstrapCursor = null;
       bootstrapProtocol = null;
       vectorCount = 0;
+      providerVectorIds = [];
+      processedVectorMutationId = null;
+      processedVectorMutationAt = null;
       return ok();
     }
     if (args[0] === "d1" && args[1] === "execute" && args.includes("--command")) {
@@ -1854,7 +2324,25 @@ function providerHarness({
           ? durableTablesForVersion(targetMigrationVersion).length + 1
           : 0 }];
       } else if (/pending_outbox/.test(sql)) {
-        rows = [{ pending_outbox: outbox, failed_vectors: 0 }];
+        const observedOutbox = outbox;
+        if (!promotionBoundaryRaceApplied && promotionBoundaryRace !== null &&
+            callRole === "target" && targetRestored && !bootstrapRequired &&
+            currentTargetVersionId === pausedVersion &&
+            vectorCount === targetChunkCount &&
+            ++completedPromotionOutboxReads === 2) {
+          promotionBoundaryRaceApplied = true;
+          applyPromotionRace(promotionBoundaryRace);
+        }
+        if (!activeCompletionRaceApplied && activeCompletionRace !== null &&
+            callRole === "target" && targetRestored &&
+            currentTargetVersionId === activeVersion &&
+            ++activeCompletionOutboxReads === 2) {
+          activeCompletionRaceApplied = true;
+          applyPromotionRace(activeCompletionRace);
+        }
+        rows = [{ pending_outbox: observedOutbox, failed_vectors: 0 }];
+      } else if (/COUNT\(\*\) AS records[\s\S]+MAX\(id\)[\s\S]+FROM llm_call_log/.test(sql)) {
+        rows = [{ records: llmCallLogRows.length, max_id: llmCallLogSequence }];
       } else if (/COUNT\(\*\) AS agent_action_receipts FROM agent_action_receipts/.test(sql)) {
         rows = [{ agent_action_receipts: agentActionReceipts }];
       } else if (/integrity-check/.test(sql)) {
@@ -1862,18 +2350,68 @@ function providerHarness({
       } else if (/PRAGMA quick_check/.test(sql)) {
         rows = [{ quick_check: "ok" }];
       } else if (/COUNT\(\*\) AS active_imports FROM source_original_result_family_recovery_state/.test(sql)) {
-        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
         rows = [{ active_imports: isSource
           ? (sourceFamilyRecoveryStateActive ? 1 : 0)
           : (targetFamilyRecoveryStateActive ? 1 : 0) }];
+      } else if (/^SELECT id,ts,day,label,model,status,est_cost_usd_micros FROM llm_call_log ORDER BY id ASC$/.test(sql)) {
+        rows = llmCallLogRows.map((row) => ({ ...row }));
+      } else if (sql === V048_D1_DELETION_STATE_SEQUENCE_SQL) {
+        const chunksSequence = callRole === "target" && targetRestored
+          ? targetChunkCount
+          : sourceChunkCount;
+        rows = [
+          {
+            name: "chunks",
+            name_type: "text",
+            name_quote: "'chunks'",
+            seq: chunksSequence,
+            seq_type: "integer",
+            seq_quote: String(chunksSequence),
+          },
+          {
+            name: "llm_call_log",
+            name_type: "text",
+            name_quote: "'llm_call_log'",
+            seq: llmCallLogSequence,
+            seq_type: "integer",
+            seq_quote: String(llmCallLogSequence),
+          },
+        ];
+      } else if (sql === V048_D1_DELETION_STATE_FTS_COUNT_SQL) {
+        rows = [{
+          fts_count: callRole === "target" && targetRestored
+            ? targetChunkCount
+            : sourceChunkCount,
+        }];
+      } else if (sql === V048_D1_DELETION_STATE_INVENTORY_SQL) {
+        rows = [
+          ...durableTablesForVersion(migrationVersionForRole(callRole)),
+          "chunks_fts",
+          ...V048_D1_DELETION_STATE_FTS_SHADOW_TABLES,
+        ].sort().map((name) => ({ name }));
+      } else if (sql === V048_D1_DELETION_STATE_SCHEMA_SQL) {
+        rows = deletionSchemaRows;
+      } else if (/^SELECT COUNT\(\*\) AS chunks,COUNT\(vector_id\) AS vector_ids,COUNT\(DISTINCT vector_id\) AS distinct_vector_ids FROM chunks$/.test(sql)) {
+        rows = [{
+          chunks: targetChunkCount,
+          vector_ids: targetChunkCount,
+          distinct_vector_ids: targetChunkCount,
+        }];
+      } else if (/^SELECT source_rows\.vector_id AS vector_id FROM chunks AS source_rows /.test(sql)) {
+        assert.equal(callRole, "target");
+        const cursor = sql.match(/source_rows\.vector_id > '((?:''|[^'])*)' COLLATE BINARY/u)?.[1]
+          ?.replaceAll("''", "'") ?? null;
+        const start = cursor === null
+          ? 0
+          : expectedTargetVectorIds.findIndex((id) => id > cursor);
+        rows = (start < 0 ? [] : expectedTargetVectorIds.slice(start, start + 1_000))
+          .map((vector_id) => ({ vector_id }));
       } else if (/SELECT version,name,checksum/.test(sql)) {
-        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
         const latest = isSource ? sourceMigrationVersion : targetMigrationVersion;
         rows = appliedMigrations.filter((row) => row.version <= latest);
       } else if (/PRAGMA table_info\(install_state\)/.test(sql)) {
         rows = installStateColumns.map(([name, type], cid) => ({ cid, name, type }));
       } else if (/^SELECT[\s\S]+FROM install_state ORDER BY id$/.test(sql)) {
-        const isSource = env.CLOUDFLARE_ACCOUNT_ID === sourceManifestFixture.infrastructure.cloudflare.account_id;
         assert.match(sql, /NULL AS "vector_drain_lease_owner"/);
         assert.match(sql, /NULL AS "vector_drain_lease_expires_at"/);
         assert.match(sql, /0 AS "outbox_generation"/);
@@ -1915,10 +2453,10 @@ function providerHarness({
           source_original_retrieval_generation: 0,
         }];
       } else if (/SELECT name FROM sqlite_schema/.test(sql)) {
-        rows = durableTablesForVersion(migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID))
+        rows = durableTablesForVersion(migrationVersionForRole(callRole))
           .sort().map((name) => ({ name }));
       } else if (/SELECT type,name,tbl_name/.test(sql)) {
-        const version = migrationVersionForAccount(env.CLOUDFLARE_ACCOUNT_ID);
+        const version = migrationVersionForRole(callRole);
         rows = schemaRows.filter((row) =>
           (version >= 37 || (row.name !== "memory_supersessions" && row.tbl_name !== "memory_supersessions")) &&
           (version >= 41 || (!mapTables.has(row.name) && !mapTables.has(row.tbl_name))));
@@ -1927,8 +2465,7 @@ function providerHarness({
           sql,
           /CAST\(\(SELECT 0\) AS TEXT\) AS "vector_bootstrap_batches"/,
         );
-        const isTarget = env.CLOUDFLARE_ACCOUNT_ID ===
-          targetManifestFixture.infrastructure.cloudflare.account_id;
+        const isTarget = callRole === "target";
         const documentCount = isTarget && targetRestored
           ? targetDocumentCount
           : sourceDocumentCount;
@@ -2002,7 +2539,7 @@ function providerHarness({
       return response(healthTransform({
         ...health,
         ...(mode === "active"
-          ? { schema_version: migrationVersionForAccount(targetManifestFixture.infrastructure.cloudflare.account_id) }
+          ? { schema_version: targetMigrationVersion }
           : {}),
         vector_drain_mode: healthModeOverride ?? health.vector_drain_mode,
         vector_writer_protocol: healthProtocolOverride ?? health.vector_writer_protocol,
@@ -2034,6 +2571,7 @@ function providerHarness({
           bootstrapConfirmed + bootstrapPageSize,
         );
         vectorCount = bootstrapConfirmed;
+        providerVectorIds = expectedTargetVectorIds.slice(0, bootstrapConfirmed);
         bootstrapCursor = `fixture:chunk#${String(Math.max(0, bootstrapConfirmed - 1)).padStart(8, "0")}`;
       }
       if (mutateBootstrapCursorWithoutOrdinalOnce !== null) {
@@ -2055,7 +2593,11 @@ function providerHarness({
       const visibilityLagged = countComplete && readinessLagRemaining > 0;
       if (visibilityLagged) readinessLagRemaining--;
       const complete = countComplete && !visibilityLagged;
-      if (complete) bootstrapRequired = false;
+      if (complete) {
+        bootstrapRequired = false;
+        processedVectorMutationId = bootstrapMutationId;
+        processedVectorMutationAt = "2026-08-25T12:59:00.000Z";
+      }
       if (complete && bootstrapMutatesCorpus) corpusMutated = true;
       return response(bootstrapReceiptTransform({
         protocol: "bootstrap-v2",
@@ -2133,8 +2675,51 @@ function providerHarness({
           actual_vectors: ready ? targetChunkCount : Math.max(0, vectorCount - 1),
           pending: outbox,
           submitted: 0,
+          outbox_generation: 1,
+          mutation_id: ready ? bootstrapMutationId : null,
+          mutation_submitted_at: ready
+            ? Date.parse("2026-08-25T12:58:59.000Z")
+            : null,
+          projection_status: ready ? "verified" : "bootstrap_required",
+          bootstrap_epoch: bootstrapEpoch,
           action: ready ? null : "Wait briefly, then run brain drain again.",
         },
+      });
+    }
+    if (path === "/api/rag/think") {
+      assert.equal(options.method, "POST");
+      assert.equal(options.headers["X-Admin-Key"], fixtureAdminKey);
+      const request = JSON.parse(options.body);
+      const marker = disposableRecoveryFixture()[0];
+      assert.equal(request.source, marker.source_type);
+      assert.equal(request.limit, 8);
+      const timestamp = "2026-08-25T13:00:00.000Z";
+      llmCallLogSequence++;
+      llmCallLogRows.push({
+        id: llmCallLogSequence,
+        ts: timestamp,
+        day: timestamp.slice(0, 10),
+        label: "rag-think",
+        model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        status: "ok",
+        est_cost_usd_micros: 1,
+      });
+      if (/orchid ledger field marker/u.test(request.q)) {
+        return response({
+          mode: "think",
+          answer: `The marker is ${DISPOSABLE_RECOVERY_MARKER}.`,
+          citations: [{ source: marker.source_type, title: marker.title }],
+          evidence_gate: { supported: true, complete: true },
+          provider_private_body: privateSentinel,
+        });
+      }
+      assert.match(request.q, /cobalt glacier souffle/u);
+      return response({
+        mode: "think",
+        answer: "The documents do not answer the question.",
+        citations: [],
+        evidence_gate: { supported: false, complete: false },
+        provider_private_body: privateSentinel,
       });
     }
     if (path === "/api/rag/unified") return response({ error: "unauthorized" }, 401);
@@ -2143,6 +2728,7 @@ function providerHarness({
 
   return {
     dependencies: {
+      allowUnsealedTestExecution: true,
       platform: "darwin",
       environment: {
         HOME: sandbox,
@@ -2188,6 +2774,17 @@ function providerHarness({
         return true;
       },
       fetchImpl,
+      createCampaignObserver: () => Object.freeze({
+        observe: async ({ a4_authority: a4Authority, target_mode: targetMode }) => {
+          campaignAuthorityObservations.push(targetMode);
+          const fresh = fieldCampaignAuthority(targetMode).authority;
+          return campaignAuthorityTransform(structuredClone(fresh), Object.freeze({
+            a4Authority,
+            ordinal: campaignAuthorityObservations.length,
+            targetMode,
+          }));
+        },
+      }),
       readAdminKey: () => {
         adminReads++;
         return fixtureAdminKey;
@@ -2208,6 +2805,19 @@ function providerHarness({
         assert.equal(env.BRAIN_ADMIN_KEY_STDIN, "1");
         assert.equal(args.includes("--profile"), true);
         assert.equal(args[args.indexOf("--profile") + 1], "release");
+        const timestamp = "2026-08-25T13:00:00.000Z";
+        for (let index = 0; index < 30; index++) {
+          llmCallLogSequence++;
+          llmCallLogRows.push({
+            id: llmCallLogSequence,
+            ts: timestamp,
+            day: timestamp.slice(0, 10),
+            label: "rag-think",
+            model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            status: "ok",
+            est_cost_usd_micros: 1,
+          });
+        }
         if (deploymentChangesDuringEval) currentTargetVersionId = "fixture-unreviewed-version-id";
         if (evalFailuresRemaining > 0) {
           evalFailuresRemaining--;
@@ -2232,10 +2842,13 @@ function providerHarness({
     get sleepCalls() { return sleepCalls; },
     get wranglerCalls() { return wranglerCalls; },
     get fetchCalls() { return fetchCalls; },
+    get campaignAuthorityObservations() { return campaignAuthorityObservations; },
     get observerSnapshots() { return observerSnapshots; },
     get openingSnapshots() { return openingSnapshots; },
     get sensitiveBuffers() { return sensitiveBuffers; },
     get normalizedLeaseSelections() { return normalizedLeaseSelections; },
+    get usageRecords() { return llmCallLogRows.length; },
+    get usageMaxId() { return llmCallLogSequence; },
     get wranglerRuntimeMaterializations() { return wranglerRuntimeMaterializations; },
     get bootstrapEpoch() { return bootstrapEpoch; },
     get bootstrapCursor() { return bootstrapCursor; },
@@ -2315,12 +2928,13 @@ try {
   );
   assert.match(preview.wrapper_approval_fingerprint, /^[0-9a-f]{64}$/);
   assert.equal(preview.golden_approval_fingerprint, hash(readFileSync(goldenPath)));
+  assert.match(preview.implementation_approval_fingerprint, /^[0-9a-f]{64}$/);
   assert.notEqual(
     targetManifest.operations.recovery_field_gate.paused_worker_script_etag,
     targetManifest.operations.recovery_field_gate.active_worker_script_etag,
   );
   assert.deepEqual(RECOVERY_FIELD_GATE_STOP_STAGES, [
-    "export_d1", "restore_d1", "reconcile_security", "rebuild_vectorize",
+    "export_d1", "restore_d1", "reconcile_security", "rebuild_vectorize", "verify_eval",
   ]);
   const approvedAdapterConfig = Object.freeze({
     ...baseConfig,
@@ -2331,6 +2945,9 @@ try {
     approveSourceExportBlocking: preview.source_export_blocking_approval_fingerprint,
     approveWrapper: preview.wrapper_approval_fingerprint,
     approveGolden: preview.golden_approval_fingerprint,
+    approveImplementation: preview.implementation_approval_fingerprint,
+    approveVectorizeMutationQuiescence:
+      preview.vectorize_mutation_quiescence_approval_fingerprint,
   });
 
   const legacyTargetManifestPath = join(sandbox, "legacy-one-etag-target.manifest.json");
@@ -2402,6 +3019,21 @@ try {
     const bank = await recoveryBankFixture();
     const harness = providerHarness({ bankFixture: bank, initialTargetRestored: true });
     const gate = createCloudflareRecoveryFieldGateAdapters(approvedAdapterConfig, harness.dependencies);
+    assert.equal(
+      approvedAdapterConfig.approveTargetExecution,
+      gate.targetExecutionApprovalFingerprint,
+      "the bank fixture must retain the previewed target-execution approval",
+    );
+    assert.equal(
+      approvedAdapterConfig.approveImplementation,
+      gate.implementationApprovalFingerprint,
+      "the bank fixture must retain the previewed implementation approval",
+    );
+    assert.equal(
+      approvedAdapterConfig.approveVectorizeMutationQuiescence ?? null,
+      gate.vectorizeMutationQuiescenceApprovalFingerprint,
+      "the bank fixture must retain the previewed Vectorize-quiescence approval",
+    );
     const restored = await gate.adapters.verify_d1(stageContext("verify_d1"));
     assert.equal(restored.bank_security_proof.rows.length, 4);
     assert.equal(JSON.stringify(restored).includes("synthetic-item"), false);
@@ -2592,10 +3224,15 @@ try {
     "--approve-source-export-blocking", preview.source_export_blocking_approval_fingerprint,
     "--approve-wrapper", preview.wrapper_approval_fingerprint,
     "--approve-golden", preview.golden_approval_fingerprint,
+    "--approve-implementation", preview.implementation_approval_fingerprint,
     "--stop-after-stage", "restore_d1",
   ]);
   assert.equal(parsedStop.stopAfterStage, "restore_d1");
   assert.equal(parsedStop.approveGolden, preview.golden_approval_fingerprint);
+  assert.equal(
+    parsedStop.approveImplementation,
+    preview.implementation_approval_fingerprint,
+  );
   const testInterruptionCliArguments = [
     "run",
     "--source-manifest", sourceManifestPath,
@@ -2611,6 +3248,7 @@ try {
     "--approve-source-export-blocking", preview.source_export_blocking_approval_fingerprint,
     "--approve-wrapper", preview.wrapper_approval_fingerprint,
     "--approve-golden", preview.golden_approval_fingerprint,
+    "--approve-implementation", preview.implementation_approval_fingerprint,
     "--field-deployment-receipt", fieldDeploymentReceiptPath,
     "--test-interrupt-mid-bootstrap", RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
     "--test-bootstrap-candidate-sha", "c".repeat(40),
@@ -2698,6 +3336,7 @@ try {
         "--approve-source-export-blocking", preview.source_export_blocking_approval_fingerprint,
         "--approve-wrapper", preview.wrapper_approval_fingerprint,
         "--approve-golden", preview.golden_approval_fingerprint,
+        "--approve-implementation", preview.implementation_approval_fingerprint,
       ],
       "--stop-after-stage", "verify_health",
     ]),
@@ -2727,6 +3366,7 @@ try {
       approveSourceExportBlocking: preview.source_export_blocking_approval_fingerprint,
       approveWrapper: preview.wrapper_approval_fingerprint,
       approveGolden: preview.golden_approval_fingerprint,
+      approveImplementation: preview.implementation_approval_fingerprint,
     }, replacedWrapperHarness.dependencies),
     (error) => error.code === "RECOVERY_FIELD_GATE_APPROVAL_MISMATCH",
   );
@@ -2775,6 +3415,7 @@ try {
       approveSourceExportBlocking: preview.source_export_blocking_approval_fingerprint,
       approveWrapper: preview.wrapper_approval_fingerprint,
       approveGolden: preview.golden_approval_fingerprint,
+      approveImplementation: preview.implementation_approval_fingerprint,
       stopAfterStage: "verify_health",
     }, invalidStopHarness.dependencies),
     (error) => error.code === "RECOVERY_FIELD_GATE_STOP_STAGE_INVALID",
@@ -2801,6 +3442,19 @@ try {
   const fieldPackageBytes = fieldPackage.bytes;
   if (process.platform !== "win32") chmodSync(fieldPackagePath, 0o600);
   const npmCacheContentRoot = resolveNpmCacheContentRoot(process.env);
+  const fieldPreparedWranglerRuntime = process.env.BRAIN_FIELD_PREPARE === "1"
+    ? inspectLockedWranglerRuntime(
+      process.env.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT || "",
+      { ownerOnly: true, exactRoot: true },
+    )
+    : null;
+  if (fieldPreparedWranglerRuntime) {
+    assert.equal(
+      fieldPreparedWranglerRuntime.inventorySha256,
+      lockedWranglerRuntime.inventorySha256,
+      "field-prepared Wrangler runtime must match the child checkout installation",
+    );
+  }
   const installedWranglerEntrypoint = join(process.cwd(), LOCKED_WRANGLER_ENTRYPOINT);
   const installedWranglerEntrypointBytes = readFileSync(installedWranglerEntrypoint);
   const installedWranglerEntrypointMode = statSync(installedWranglerEntrypoint).mode & 0o777;
@@ -2810,15 +3464,27 @@ try {
       installedWranglerEntrypointBytes,
       Buffer.from("\n// same-version synthetic source corruption\n"),
     ]));
-    assert.throws(
-      () => prepareLockedWranglerRuntimeFromCache({
-        sourceRoot: process.cwd(),
-        destination: join(fieldPreparationDirectory, "corrupt-source-runtime"),
-        cacheContentRoot: npmCacheContentRoot,
-      }),
-      (error) => error.code === "LOCKED_WRANGLER_RUNTIME_SOURCE_MISMATCH",
-      "a same-version installed entrypoint cannot be blessed into field preparation",
-    );
+    if (process.env.BRAIN_FIELD_PREPARE === "1") {
+      // The field orchestrator already rebuilt and verified this runtime from
+      // the ambient content cache before entering its isolated child home. Its
+      // deliberate empty npm cache must not weaken this mutation proof or turn
+      // a missing archive into the result under test.
+      assert.throws(
+        () => assertLockedWranglerRuntimeUnchanged(lockedWranglerRuntime),
+        (error) => error.code === "LOCKED_WRANGLER_RUNTIME_CHANGED",
+        "a same-version installed entrypoint cannot change after field preparation pins it",
+      );
+    } else {
+      assert.throws(
+        () => prepareLockedWranglerRuntimeFromCache({
+          sourceRoot: process.cwd(),
+          destination: join(fieldPreparationDirectory, "corrupt-source-runtime"),
+          cacheContentRoot: npmCacheContentRoot,
+        }),
+        (error) => error.code === "LOCKED_WRANGLER_RUNTIME_SOURCE_MISMATCH",
+        "a same-version installed entrypoint cannot be blessed into field preparation",
+      );
+    }
     assert.equal(corruptSourceHarness.wranglerCalls.length, 0);
     assert.equal(corruptSourceHarness.adminReads, 0);
     assert.equal(corruptSourceHarness.fetchCalls.length, 0);
@@ -2828,11 +3494,18 @@ try {
       chmodSync(installedWranglerEntrypoint, installedWranglerEntrypointMode);
     }
   }
-  lockedWranglerRuntime = prepareLockedWranglerRuntimeFromCache({
-    sourceRoot: process.cwd(),
-    destination: join(fieldPreparationDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
-    cacheContentRoot: npmCacheContentRoot,
-  });
+  if (fieldPreparedWranglerRuntime) {
+    lockedWranglerRuntime = materializeLockedWranglerRuntime(
+      fieldPreparedWranglerRuntime,
+      join(fieldPreparationDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+    ).descriptor;
+  } else {
+    lockedWranglerRuntime = prepareLockedWranglerRuntimeFromCache({
+      sourceRoot: process.cwd(),
+      destination: join(fieldPreparationDirectory, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+      cacheContentRoot: npmCacheContentRoot,
+    });
+  }
   const smokeRuntimePath = join(fieldPreparationDirectory, "wrangler-runtime-smoke");
   const smokeRuntime = materializeLockedWranglerRuntime(
     lockedWranglerRuntime,
@@ -2857,10 +3530,101 @@ try {
   assert.equal(runtimeSmoke.status, 0, runtimeSmoke.stderr);
   assert.equal(runtimeSmoke.stdout.trim(), "4.131.1");
   rmSync(smokeRuntimePath, { recursive: true, force: true });
-  writePrivateJson(
-    fieldReceiptPath,
-    fullFieldPreparationReceipt(testCandidateSha, fieldPackageBytes, fieldPackage.fileCount),
+  const exactFieldReceipt = fullFieldPreparationReceipt(
+    testCandidateSha,
+    fieldPackageBytes,
+    fieldPackage.fileCount,
   );
+  writePrivateJson(fieldReceiptPath, exactFieldReceipt);
+  for (const [label, mutate] of [
+    ["legacy four-field package receipt", (value) => {
+      delete value.package.identity_scheme;
+      delete value.package.runtime_payload_sha256;
+    }],
+    ["missing package-derived runtime identity", (value) => {
+      delete value.package.runtime_payload_sha256;
+    }],
+    ["wrong runtime identity scheme", (value) => {
+      value.package.identity_scheme = "legacy.package.fingerprint.v0";
+    }],
+    ["wrong package-derived runtime identity", (value) => {
+      value.package.runtime_payload_sha256 = "f".repeat(64);
+    }],
+  ]) {
+    const changed = structuredClone(exactFieldReceipt);
+    mutate(changed);
+    writePrivateJson(fieldReceiptPath, changed);
+    assert.throws(
+      () => inspectDisposableRecoveryProvisioningPreparation({
+        candidateSha: testCandidateSha,
+        fieldReceiptPath,
+        packagePath: fieldPackagePath,
+        wranglerWrapperPath: wrapperPath,
+      }),
+      (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_EVIDENCE_INVALID",
+      label,
+    );
+  }
+  writePrivateJson(fieldReceiptPath, exactFieldReceipt);
+  const exactProvisioningPreparation =
+    inspectDisposableRecoveryProvisioningPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+    });
+  assert.equal(
+    exactProvisioningPreparation.binding.package_sha256,
+    hash(fieldPackageBytes),
+    "the six-field producer receipt must bind the independently inspected package",
+  );
+  const installedPackagePrefix = join(sandbox, "installed-package-probe");
+  mkdirSync(installedPackagePrefix, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(installedPackagePrefix, 0o700);
+  const installedPackageRoot = installNpmPackageFixture(
+    fieldPackagePath,
+    installedPackagePrefix,
+  );
+  assert.equal(
+    existsSync(join(installedPackageRoot, "package-lock.json")),
+    false,
+    "npm must not be assumed to install the source package lock inside the package",
+  );
+  const installedRecoveryAdapter = await import(pathToFileURL(join(
+    installedPackageRoot,
+    "operations",
+    "cloudflare-recovery-adapter.mjs",
+  )).href);
+  const installedProvisioningPreparation =
+    installedRecoveryAdapter.inspectDisposableRecoveryProvisioningPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+    });
+  assert.equal(
+    installedProvisioningPreparation.binding.package_sha256,
+    hash(fieldPackageBytes),
+    "the npm-installed adapter must accept the separately sealed package and runtime evidence",
+  );
+  assert.equal(
+    installedProvisioningPreparation.revalidate(),
+    true,
+    "the npm-installed adapter must revalidate without an impossible installed package-lock pin",
+  );
+  assert.match(
+    installedRecoveryAdapter.cloudflareRecoveryImplementationFingerprint(),
+    /^[a-f0-9]{64}$/u,
+    "the npm-installed implementation graph must be fingerprintable from shipped bytes",
+  );
+  const fieldK0Binding = Object.freeze({
+    candidate_sha: testCandidateSha,
+    candidate_tree_sha: "b".repeat(40),
+    package_sha256: hash(fieldPackageBytes),
+    field_receipt_sha256: hash(readFileSync(fieldReceiptPath)),
+    account_id: "a".repeat(32),
+  });
+  const fieldK0 = await createTestDisposableRecoveryK0Capability(fieldK0Binding);
   const copiedFlagHarness = providerHarness();
   await assert.rejects(
     runCloudflareRecoveryFieldGate({
@@ -2871,6 +3635,7 @@ try {
       approveSourceExportBlocking: preview.source_export_blocking_approval_fingerprint,
       approveWrapper: preview.wrapper_approval_fingerprint,
       approveGolden: preview.golden_approval_fingerprint,
+      approveImplementation: preview.implementation_approval_fingerprint,
       testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
       testBootstrapCandidateSha: testCandidateSha,
       testBootstrapFieldReceiptPath: fieldReceiptPath,
@@ -2879,10 +3644,7 @@ try {
       testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
       testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
       approveTestBootstrapInterruption: "e".repeat(64),
-    }, {
-      ...copiedFlagHarness.dependencies,
-      observeBootstrapInterruptionPoint: async () => assert.fail("observer must remain unreachable"),
-    }),
+    }, copiedFlagHarness.dependencies),
     (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_IDENTITY_INVALID",
   );
   assert.equal(copiedFlagHarness.wranglerCalls.length, 0);
@@ -2898,12 +3660,21 @@ try {
   writePrivateJson(fieldTargetManifestPath, syntheticFieldTargetManifest);
   mkdirSync(fieldArtifactDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(fieldArtifactDirectory, 0o700);
+  const fieldQuiescenceReview =
+    reviewVerifiedRecoveryVectorizeMutationQuiescence(
+      fieldSourceManifestPath,
+      fieldTargetManifestPath,
+    );
   const fieldInitialized = initializeVerifiedRecovery(
     fieldSourceManifestPath,
     fieldTargetManifestPath,
     fieldPlanPath,
     fieldStatePath,
-    { now: new Date("2026-09-11T14:00:00.000Z") },
+    {
+      now: new Date("2026-09-11T14:00:00.000Z"),
+      approveVectorizeMutationQuiescence:
+        fieldQuiescenceReview.vectorize_mutation_quiescence_sha256,
+    },
   );
   const exactFieldManifestBindings = inspectVerifiedRecoveryManifestBindings(
     fieldInitialized.plan,
@@ -2949,10 +3720,56 @@ try {
       wranglerWrapperPath: wrapperPath,
       sourceManifestPath,
       targetManifestPath,
+      keychainProof: fieldK0.proof,
       plan: initialized.plan,
     }),
     (error) => error.code === "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_IDENTITY_INVALID",
     "deployment preparation must reject non-campaign manifests before provider creation",
+  );
+  assert.throws(
+    () => inspectDisposableRecoveryDeploymentPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+      sourceManifestPath: fieldSourceManifestPath,
+      targetManifestPath: fieldTargetManifestPath,
+      plan: fieldInitialized.plan,
+    }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_KEYCHAIN_BINDING_INVALID",
+    "deployment preparation must refuse before campaign fingerprinting without K0",
+  );
+  assert.throws(
+    () => inspectDisposableRecoveryDeploymentPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+      sourceManifestPath: fieldSourceManifestPath,
+      targetManifestPath: fieldTargetManifestPath,
+      keychainProof: Object.freeze({ ...fieldK0.proof }),
+      plan: fieldInitialized.plan,
+    }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_KEYCHAIN_BINDING_INVALID",
+    "a frozen spread copy cannot reconstruct the verifier-minted K0 capability",
+  );
+  const crossAccountK0 = await createTestDisposableRecoveryK0Capability({
+    ...fieldK0Binding,
+    account_id: "b".repeat(32),
+  });
+  assert.throws(
+    () => inspectDisposableRecoveryDeploymentPreparation({
+      candidateSha: testCandidateSha,
+      fieldReceiptPath,
+      packagePath: fieldPackagePath,
+      wranglerWrapperPath: wrapperPath,
+      sourceManifestPath: fieldSourceManifestPath,
+      targetManifestPath: fieldTargetManifestPath,
+      keychainProof: crossAccountK0.proof,
+      plan: fieldInitialized.plan,
+    }),
+    (error) => error.code === "RECOVERY_FIELD_GATE_KEYCHAIN_BINDING_INVALID",
+    "a genuine K0 capability for another account cannot bind either manifest",
   );
   const deploymentPreparation = inspectDisposableRecoveryDeploymentPreparation({
     candidateSha: testCandidateSha,
@@ -2961,8 +3778,13 @@ try {
     wranglerWrapperPath: wrapperPath,
     sourceManifestPath: fieldSourceManifestPath,
     targetManifestPath: fieldTargetManifestPath,
+    keychainProof: fieldK0.proof,
     plan: fieldInitialized.plan,
   });
+  assert.equal(
+    deploymentPreparation.vectorizeMutationQuiescenceFingerprint,
+    fieldQuiescenceReview.vectorize_mutation_quiescence_sha256,
+  );
   const sourceDeploymentPreparation =
     inspectDisposableRecoverySourceDeploymentPreparation({
       candidateSha: testCandidateSha,
@@ -2970,6 +3792,7 @@ try {
       packagePath: fieldPackagePath,
       wranglerWrapperPath: wrapperPath,
       sourceManifestPath: fieldSourceManifestPath,
+      keychainProof: fieldK0.proof,
       plan: fieldInitialized.plan,
     });
   assert.equal(
@@ -2983,6 +3806,34 @@ try {
   ]);
   assert.equal(sourceDeploymentPreparation.binding.campaign_fingerprint,
     deploymentPreparation.binding.campaign_fingerprint);
+  const revalidationK0 = await createTestDisposableRecoveryK0Capability(
+    fieldK0Binding,
+  );
+  const revalidationPreparation = inspectDisposableRecoveryDeploymentPreparation({
+    candidateSha: testCandidateSha,
+    fieldReceiptPath,
+    packagePath: fieldPackagePath,
+    wranglerWrapperPath: wrapperPath,
+    sourceManifestPath: fieldSourceManifestPath,
+    targetManifestPath: fieldTargetManifestPath,
+    keychainProof: revalidationK0.proof,
+    plan: fieldInitialized.plan,
+  });
+  const [changedKeychainReference] = revalidationK0.keychain.values.keys();
+  revalidationK0.keychain.values.get(changedKeychainReference)?.fill(0);
+  revalidationK0.keychain.values.set(
+    changedKeychainReference,
+    Buffer.from("9".repeat(48), "utf8"),
+  );
+  await assert.rejects(
+    revalidationPreparation.revalidate(),
+    (error) => error.code === "RECOVERY_FIELD_GATE_KEYCHAIN_BINDING_INVALID",
+    "changed K0 values must stop the next adapter boundary",
+  );
+  assert.equal(
+    sourceDeploymentPreparation.vectorizeMutationQuiescenceFingerprint,
+    null,
+  );
   writePrivateJson(
     fieldSourcePreflightReceiptPath,
     fullDisposableSourcePreflightReceipt(deploymentPreparation.binding),
@@ -3045,10 +3896,16 @@ try {
     wranglerWrapperPath: wrapperPath,
     goldenPath,
     fieldDeploymentReceiptPath,
+    approveVectorizeMutationQuiescence:
+      fieldQuiescenceReview.vectorize_mutation_quiescence_sha256,
   };
   const ordinaryFieldPreview = previewCloudflareRecoveryFieldGate(
     fieldBaseConfig,
     { platform: "darwin" },
+  );
+  assert.equal(
+    ordinaryFieldPreview.vectorize_mutation_quiescence_approval_fingerprint,
+    fieldQuiescenceReview.vectorize_mutation_quiescence_sha256,
   );
   // A receipt-backed ordinary stage must pin the source deployment even when
   // the later fault-hook bundle is not active. Version or opaque-etag drift is
@@ -3073,6 +3930,7 @@ try {
         ordinaryFieldPreview.source_export_blocking_approval_fingerprint,
       approveWrapper: ordinaryFieldPreview.wrapper_approval_fingerprint,
       approveGolden: ordinaryFieldPreview.golden_approval_fingerprint,
+      approveImplementation: ordinaryFieldPreview.implementation_approval_fingerprint,
       plan: fieldInitialized.plan,
       state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
     }, sourceDriftHarness.dependencies);
@@ -3093,14 +3951,105 @@ try {
     assert.equal(sourceDriftHarness.adminReads, 0, label);
     assert.equal(sourceDriftHarness.fetchCalls.length, 0, label);
     assert.equal(sourceDriftHarness.wranglerCalls.some((call) =>
-      call.env.CLOUDFLARE_ACCOUNT_ID ===
-        syntheticFieldTargetManifest.infrastructure.cloudflare.account_id), false, label);
+      call.args.some((value) => [
+        syntheticFieldTargetManifest.brain.worker_name,
+        syntheticFieldTargetManifest.infrastructure.cloudflare.d1_database_name,
+        syntheticFieldTargetManifest.infrastructure.cloudflare.d1_database_id,
+        syntheticFieldTargetManifest.infrastructure.cloudflare.vectorize_index,
+      ].includes(value))), false, label);
     assert.equal(sourceDriftHarness.wranglerCalls.some((call) =>
       call.args[0] === "d1" && call.args[1] === "export"), false, label);
   }
+
+  const approvedOrdinaryFieldConfig = Object.freeze({
+    ...fieldBaseConfig,
+    approvePlan: fieldInitialized.plan.plan_fingerprint,
+    approveDisposableTarget: fieldInitialized.plan.target_resource_fingerprint,
+    approveTargetExecution: ordinaryFieldPreview.target_execution_approval_fingerprint,
+    approveSourceExportBlocking:
+      ordinaryFieldPreview.source_export_blocking_approval_fingerprint,
+    approveWrapper: ordinaryFieldPreview.wrapper_approval_fingerprint,
+    approveGolden: ordinaryFieldPreview.golden_approval_fingerprint,
+    approveImplementation: ordinaryFieldPreview.implementation_approval_fingerprint,
+  });
+
+  // A5 is under the field lock and precedes both source export and every
+  // disposable-target mutation. Even a rehashed outer receipt cannot conceal
+  // route/custom-domain drift because the semantic preimage is revalidated.
+  const a5RouteDriftHarness = providerHarness({
+    campaignAuthorityTransform: (authority, { ordinal }) => {
+      if (ordinal === 1) {
+        authority.network_isolation.target.routes = 1;
+        authority.authority_sha256 = "f".repeat(64);
+      }
+      return authority;
+    },
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate(
+      approvedOrdinaryFieldConfig,
+      a5RouteDriftHarness.dependencies,
+    ),
+    (error) => error.code === "RECOVERY_CAMPAIGN_AUTHORITY_CHANGED",
+    "A5 must reject route drift after lock and before export",
+  );
+  assert.deepEqual(a5RouteDriftHarness.campaignAuthorityObservations, ["paused"]);
+  assert.equal(a5RouteDriftHarness.wranglerCalls.some((call) =>
+    call.args[0] === "d1" && call.args[1] === "export"), false);
+  assert.equal(a5RouteDriftHarness.importCalls, 0);
+  assert.equal(a5RouteDriftHarness.bootstrapCalls, 0);
+  assert.equal(a5RouteDriftHarness.promotionCalls, 0);
+
+  // A7 performs another complete, individually valid two-role census adjacent
+  // to export. Changing only an unrelated Worker's binding between A5 and A7
+  // must therefore stop before source bytes leave D1.
+  const preA7State = loadVerifiedRecoveryState(
+    fieldStatePath,
+    fieldInitialized.plan,
+  );
+  const a7NonCampaignDriftHarness = providerHarness({
+    campaignAuthorityTransform: (authority, { ordinal, targetMode }) =>
+      ordinal === 2
+        ? fieldCampaignAuthority(
+          targetMode,
+          "changed-after-a5-before-a7",
+        ).authority
+        : authority,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  try {
+    const a7NonCampaignDrift = await runCloudflareRecoveryFieldGate(
+      approvedOrdinaryFieldConfig,
+      a7NonCampaignDriftHarness.dependencies,
+    );
+    assert.equal(a7NonCampaignDrift.ok, false);
+    assert.equal(
+      a7NonCampaignDrift.cause,
+      "RECOVERY_CAMPAIGN_AUTHORITY_CHANGED",
+      "A7 must reject noncampaign binding drift immediately before export",
+    );
+    assert.deepEqual(
+      a7NonCampaignDriftHarness.campaignAuthorityObservations,
+      ["paused", "paused"],
+    );
+    assert.equal(a7NonCampaignDriftHarness.wranglerCalls.some((call) =>
+      call.args[0] === "d1" && call.args[1] === "export"), false);
+    assert.equal(a7NonCampaignDriftHarness.importCalls, 0);
+    assert.equal(a7NonCampaignDriftHarness.bootstrapCalls, 0);
+    assert.equal(a7NonCampaignDriftHarness.promotionCalls, 0);
+  } finally {
+    writeVerifiedRecoveryState(
+      fieldStatePath,
+      preA7State,
+      fieldInitialized.plan,
+    );
+  }
+
   const fieldHarness = providerHarness({
     bootstrapPageSize: 3_000,
-    failEvalOnce: true,
     failPromotionAfterApplyOnce: true,
     targetChunkCount: 7_202,
     targetDocumentCount: 6_001,
@@ -3118,10 +4067,8 @@ try {
     testBootstrapDeploymentReceiptPath: fieldDeploymentReceiptPath,
     testBootstrapSeedReceiptPath: fieldSeedReceiptPath,
   });
-  let stagedFieldError = null;
-  let stagedFieldResult = null;
-  try {
-    stagedFieldResult = await runCloudflareRecoveryFieldGate({
+  await assert.rejects(
+    runCloudflareRecoveryFieldGate({
       ...fieldBaseConfig,
       approvePlan: fieldInitialized.plan.plan_fingerprint,
       approveDisposableTarget: fieldInitialized.plan.target_resource_fingerprint,
@@ -3130,14 +4077,10 @@ try {
         ordinaryFieldPreview.source_export_blocking_approval_fingerprint,
       approveWrapper: ordinaryFieldPreview.wrapper_approval_fingerprint,
       approveGolden: ordinaryFieldPreview.golden_approval_fingerprint,
+      approveImplementation: ordinaryFieldPreview.implementation_approval_fingerprint,
       stopAfterStage: "reconcile_security",
-    }, fieldDependencies);
-  } catch (error) {
-    stagedFieldError = error;
-  }
-  assert.equal(
-    stagedFieldError?.code ?? stagedFieldResult?.cause,
-    "RECOVERY_FIELD_GATE_INTENTIONAL_INTERRUPTION",
+    }, fieldDependencies),
+    (error) => error.code === "RECOVERY_FIELD_GATE_INTENTIONAL_INTERRUPTION",
   );
   const stagedFieldState = loadVerifiedRecoveryState(
     fieldStatePath,
@@ -3149,6 +4092,138 @@ try {
     "export_d1", "verify_export", "prove_target_clean", "restore_d1",
     "verify_d1", "reconcile_security",
   ]);
+  assert.match(
+    stagedFieldState.completed.find((entry) => entry.id === "verify_export")
+      ?.evidence.source_d1_deletion_state_fingerprint,
+    /^[0-9a-f]{64}$/u,
+  );
+
+  // The promotion intent is a local write-ahead authority. Exercise every
+  // primitive crash shape independently of the provider: attempt two must
+  // finish the exact attempt-one bytes before even its first Wrangler read,
+  // then refuse a paused-target replay with no promotion command.
+  const promotionIntentName = ".brain-recovery-target-promotion-intent-v1.json";
+  const promotionIntentContext = Object.freeze({
+    stage: "rebuild_vectorize",
+    attempt: 1,
+    planFingerprint: fieldInitialized.plan.plan_fingerprint,
+    targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
+    completed: structuredClone(stagedFieldState.completed),
+  });
+  const promotionIntentHarnessOptions = Object.freeze({
+    initialTargetRestored: true,
+    initialVectorCount: 7_202,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 6_001,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const promotionIntentConfig = (directory) => Object.freeze({
+    ...approvedOrdinaryFieldConfig,
+    artifactDirectory: directory,
+    plan: fieldInitialized.plan,
+    state: stagedFieldState,
+  });
+  const prototypeIntentDirectory = join(sandbox, "private-promotion-intent-prototype");
+  mkdirSync(prototypeIntentDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(prototypeIntentDirectory, 0o700);
+  const prototypeIntentHarness = providerHarness({
+    ...promotionIntentHarnessOptions,
+    initialVectorCount: 0,
+    failPromotionBeforeApplyOnce: true,
+  });
+  const prototypeIntentGate = createCloudflareRecoveryFieldGateAdapters(
+    promotionIntentConfig(prototypeIntentDirectory),
+    prototypeIntentHarness.dependencies,
+  );
+  await assert.rejects(
+    prototypeIntentGate.adapters.rebuild_vectorize(promotionIntentContext),
+    (error) => error.code === "RECOVERY_WRANGLER_CALL_FAILED",
+  );
+  assert.equal(prototypeIntentHarness.promotionCalls, 1);
+  const prototypeIntentPath = join(prototypeIntentDirectory, promotionIntentName);
+  const prototypeIntent = readPrivateAggregateReceipt(prototypeIntentPath).value;
+  assert.equal(prototypeIntent.rebuild_attempt, 1);
+  const prototypeMarker = Object.freeze({
+    schema_version: 1,
+    kind: "v048_target_worker_promotion_intent_reservation_v1",
+    status: "promotion_intent_reserved",
+    receipt: prototypeIntent,
+  });
+
+  for (const cut of [
+    "pending_marker_durable",
+    "staged_receipt_durable",
+    "finalization_commit_durable",
+    "final_receipt_link_durable",
+    "final_receipt_durable",
+    "pending_marker_removal_durable",
+  ]) {
+    const directory = join(sandbox, `private-promotion-intent-${cut}`);
+    mkdirSync(directory, { mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(directory, 0o700);
+    const intentPath = join(directory, promotionIntentName);
+    const output = assertPrivateAggregateOutputPath(intentPath);
+    let reservation = null;
+    try {
+      if (cut === "pending_marker_durable") {
+        assert.throws(
+          () => reservePrivateAggregateReceipt(output, prototypeMarker, {
+            onTransition(name) {
+              if (name === cut) throw new Error(`synthetic ${cut} stop`);
+            },
+          }),
+          new RegExp(`synthetic ${cut} stop`, "u"),
+        );
+      } else {
+        reservation = reservePrivateAggregateReceipt(output, prototypeMarker);
+        assert.throws(
+          () => finalizePrivateAggregateReceipt(reservation, prototypeIntent, {
+            onFinalizationTransition(name) {
+              if (name === cut) throw new Error(`synthetic ${cut} stop`);
+            },
+          }),
+          new RegExp(`synthetic ${cut} stop`, "u"),
+        );
+        abandonPrivateAggregateReceipt(reservation);
+      }
+
+      const retryHarness = providerHarness(promotionIntentHarnessOptions);
+      const underlyingRunWrangler = retryHarness.dependencies.runWrangler;
+      let firstWranglerChecked = false;
+      const retryDependencies = {
+        ...retryHarness.dependencies,
+        runWrangler(request) {
+          if (!firstWranglerChecked) {
+            firstWranglerChecked = true;
+            assert.equal(existsSync(intentPath), true, cut);
+            assert.equal(existsSync(privateAggregateReceiptPendingPath(intentPath)), false, cut);
+            assert.equal(existsSync(privateAggregateReceiptStagedPath(intentPath)), false, cut);
+            assert.equal(existsSync(privateAggregateReceiptCommitPath(intentPath)), false, cut);
+            assert.deepEqual(readPrivateAggregateReceipt(intentPath).value, prototypeIntent, cut);
+          }
+          return underlyingRunWrangler(request);
+        },
+      };
+      const retryGate = createCloudflareRecoveryFieldGateAdapters(
+        promotionIntentConfig(directory),
+        retryDependencies,
+      );
+      await assert.rejects(
+        retryGate.adapters.rebuild_vectorize({
+          ...promotionIntentContext,
+          attempt: 2,
+        }),
+        (error) => error.code === "RECOVERY_TARGET_PROMOTION_INTENT_AMBIGUOUS",
+        cut,
+      );
+      assert.equal(firstWranglerChecked, true, cut);
+      assert.equal(retryHarness.promotionCalls, 0, cut);
+      assert.equal(readPrivateAggregateReceipt(intentPath).value.rebuild_attempt, 1, cut);
+    } finally {
+      if (reservation && !reservation.closed) abandonPrivateAggregateReceipt(reservation);
+    }
+  }
   const verifyD1ResumeState = {
     ...structuredClone(stagedFieldState),
     status: "running",
@@ -3185,6 +4260,7 @@ try {
           ordinaryFieldPreview.source_export_blocking_approval_fingerprint,
         approveWrapper: ordinaryFieldPreview.wrapper_approval_fingerprint,
         approveGolden: ordinaryFieldPreview.golden_approval_fingerprint,
+        approveImplementation: ordinaryFieldPreview.implementation_approval_fingerprint,
       }, resumedSourceDriftHarness.dependencies),
       (error) => error.code === "RECOVERY_WORKER_CODE_INVALID",
       `${stage} resume must rebind the receipt-pinned source before target access`,
@@ -3195,8 +4271,12 @@ try {
     assert.equal(resumedSourceDriftHarness.adminReads, 0, stage);
     assert.equal(resumedSourceDriftHarness.fetchCalls.length, 0, stage);
     assert.equal(resumedSourceDriftHarness.wranglerCalls.some((call) =>
-      call.env.CLOUDFLARE_ACCOUNT_ID ===
-        syntheticFieldTargetManifest.infrastructure.cloudflare.account_id), false, stage);
+      call.args.some((value) => [
+        syntheticFieldTargetManifest.brain.worker_name,
+        syntheticFieldTargetManifest.infrastructure.cloudflare.d1_database_name,
+        syntheticFieldTargetManifest.infrastructure.cloudflare.d1_database_id,
+        syntheticFieldTargetManifest.infrastructure.cloudflare.vectorize_index,
+      ].includes(value))), false, stage);
   }
   writeVerifiedRecoveryState(fieldStatePath, stagedFieldState, fieldInitialized.plan);
   const prefixedWrapperHarness = providerHarness({
@@ -3279,6 +4359,7 @@ try {
     approveSourceExportBlocking: fieldPreview.source_export_blocking_approval_fingerprint,
     approveWrapper: fieldPreview.wrapper_approval_fingerprint,
     approveGolden: fieldPreview.golden_approval_fingerprint,
+    approveImplementation: fieldPreview.implementation_approval_fingerprint,
     testInterruptMidBootstrap: RECOVERY_TEST_BOOTSTRAP_INTERRUPTION_MODE,
     testBootstrapCandidateSha: testCandidateSha,
     testBootstrapFieldReceiptPath: fieldReceiptPath,
@@ -3437,55 +4518,75 @@ try {
     targetResourceFingerprint: fieldInitialized.plan.target_resource_fingerprint,
     completed: Object.freeze([]),
   });
-  for (const [name, value] of Object.entries({
-    CHUNK_SIZE: "1499",
-    CHUNK_OVERLAP: "299",
-    DAILY_LLM_CAP_USD: "9.5",
-    BRAIN_OWNER: "Synthetic Field Gate altered owner",
-    ANSWER_MODEL: "@cf/example/altered-answer-model",
-    CREDENTIAL_SCANNER: "off",
-    OCR_ENABLED: "1",
-    OCR_MODEL: "@cf/example/altered-ocr-model",
-  })) {
-    const mismatchHarness = providerHarness({
-      plainTextOverrides: { [name]: value },
+  // The earlier staged run intentionally produced the encrypted artifact.
+  // Hold that exact file outside the artifact directory while exercising
+  // first-attempt direct export refusals, then restore the same bytes. This
+  // keeps artifact-first fail-closed production ordering intact while giving
+  // each binding test the empty-output precondition it is specifically about.
+  const stagedFieldArtifactPath = join(
+    fieldArtifactDirectory,
+    fieldInitialized.plan.artifact.relative_name,
+  );
+  const heldFieldArtifactPath = join(sandbox, "held-v048-field-artifact.enc");
+  const heldFieldArtifactSha256 = hash(readFileSync(stagedFieldArtifactPath));
+  renameSync(stagedFieldArtifactPath, heldFieldArtifactPath);
+  try {
+    assert.equal(existsSync(stagedFieldArtifactPath), false);
+    for (const [name, value] of Object.entries({
+      CHUNK_SIZE: "1499",
+      CHUNK_OVERLAP: "299",
+      DAILY_LLM_CAP_USD: "9.5",
+      BRAIN_OWNER: "Synthetic Field Gate altered owner",
+      ANSWER_MODEL: "@cf/example/altered-answer-model",
+      CREDENTIAL_SCANNER: "off",
+      OCR_ENABLED: "1",
+      OCR_MODEL: "@cf/example/altered-ocr-model",
+    })) {
+      const mismatchHarness = providerHarness({
+        plainTextOverrides: { [name]: value },
+        sourceManifestFixture: syntheticFieldSourceManifest,
+        targetManifestFixture: syntheticFieldTargetManifest,
+      });
+      const mismatchGate = createCloudflareRecoveryFieldGateAdapters({
+        ...approvedFieldConfig,
+        plan: fieldInitialized.plan,
+        state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
+      }, mismatchHarness.dependencies);
+      await assert.rejects(
+        mismatchGate.adapters.export_d1(fieldExportContext),
+        (error) => error.code === "RECOVERY_WORKER_BINDINGS_INVALID",
+        `fixed campaign must reject a mismatched ${name} readback`,
+      );
+      assert.equal(mismatchHarness.adminReads, 0, name);
+      assert.equal(mismatchHarness.fetchCalls.length, 0, name);
+      assert.equal(mismatchHarness.wranglerCalls.some((call) =>
+        call.args[0] === "d1" && call.args[1] === "export"), false, name);
+    }
+    const optionalSecretHarness = providerHarness({
+      zoomSecretGroup: true,
       sourceManifestFixture: syntheticFieldSourceManifest,
       targetManifestFixture: syntheticFieldTargetManifest,
     });
-    const mismatchGate = createCloudflareRecoveryFieldGateAdapters({
+    const optionalSecretGate = createCloudflareRecoveryFieldGateAdapters({
       ...approvedFieldConfig,
       plan: fieldInitialized.plan,
       state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
-    }, mismatchHarness.dependencies);
+    }, optionalSecretHarness.dependencies);
     await assert.rejects(
-      mismatchGate.adapters.export_d1(fieldExportContext),
+      optionalSecretGate.adapters.export_d1(fieldExportContext),
       (error) => error.code === "RECOVERY_WORKER_BINDINGS_INVALID",
-      `fixed campaign must reject a mismatched ${name} readback`,
+      "the fictional campaign refuses even generally supported optional connector secrets",
     );
-    assert.equal(mismatchHarness.adminReads, 0, name);
-    assert.equal(mismatchHarness.fetchCalls.length, 0, name);
-    assert.equal(mismatchHarness.wranglerCalls.some((call) =>
-      call.args[0] === "d1" && call.args[1] === "export"), false, name);
+    assert.equal(optionalSecretHarness.adminReads, 0);
+    assert.equal(optionalSecretHarness.fetchCalls.length, 0);
+    assert.equal(optionalSecretHarness.wranglerCalls.some((call) =>
+      call.args[0] === "d1" && call.args[1] === "export"), false);
+    assert.equal(existsSync(stagedFieldArtifactPath), false);
+  } finally {
+    if (existsSync(stagedFieldArtifactPath)) unlinkSync(stagedFieldArtifactPath);
+    renameSync(heldFieldArtifactPath, stagedFieldArtifactPath);
   }
-  const optionalSecretHarness = providerHarness({
-    zoomSecretGroup: true,
-    sourceManifestFixture: syntheticFieldSourceManifest,
-    targetManifestFixture: syntheticFieldTargetManifest,
-  });
-  const optionalSecretGate = createCloudflareRecoveryFieldGateAdapters({
-    ...approvedFieldConfig,
-    plan: fieldInitialized.plan,
-    state: loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan),
-  }, optionalSecretHarness.dependencies);
-  await assert.rejects(
-    optionalSecretGate.adapters.export_d1(fieldExportContext),
-    (error) => error.code === "RECOVERY_WORKER_BINDINGS_INVALID",
-    "the fictional campaign refuses even generally supported optional connector secrets",
-  );
-  assert.equal(optionalSecretHarness.adminReads, 0);
-  assert.equal(optionalSecretHarness.fetchCalls.length, 0);
-  assert.equal(optionalSecretHarness.wranglerCalls.some((call) =>
-    call.args[0] === "d1" && call.args[1] === "export"), false);
+  assert.equal(hash(readFileSync(stagedFieldArtifactPath)), heldFieldArtifactSha256);
 
   // A durable deployment pending sibling means a provider mutation may have
   // crossed its response boundary. It blocks the adapter before Wrangler,
@@ -4063,6 +5164,13 @@ try {
     fieldPackage.fileCount,
     { runId: "22222222-2222-4222-8222-222222222222" },
   ));
+  const replayK0 = await createTestDisposableRecoveryK0Capability({
+    candidate_sha: testCandidateSha,
+    candidate_tree_sha: "b".repeat(40),
+    package_sha256: hash(fieldPackageBytes),
+    field_receipt_sha256: hash(readFileSync(replayReceiptPath)),
+    account_id: "a".repeat(32),
+  });
   const replayDeploymentPreparation = inspectDisposableRecoveryDeploymentPreparation({
     candidateSha: testCandidateSha,
     fieldReceiptPath: replayReceiptPath,
@@ -4070,6 +5178,7 @@ try {
     wranglerWrapperPath: wrapperPath,
     sourceManifestPath: fieldSourceManifestPath,
     targetManifestPath: fieldTargetManifestPath,
+    keychainProof: replayK0.proof,
     plan: fieldInitialized.plan,
   });
   writePrivateJson(
@@ -4156,7 +5265,11 @@ try {
     fieldTargetManifestPath,
     replayPlanPath,
     replayStatePath,
-    { now: new Date("2026-09-11T14:01:00.000Z") },
+    {
+      now: new Date("2026-09-11T14:01:00.000Z"),
+      approveVectorizeMutationQuiescence:
+        fieldQuiescenceReview.vectorize_mutation_quiescence_sha256,
+    },
   );
   const replayBase = {
     ...fieldBaseConfig,
@@ -4185,6 +5298,7 @@ try {
     wranglerWrapperPath: wrapperPath,
     sourceManifestPath: fieldSourceManifestPath,
     targetManifestPath: fieldTargetManifestPath,
+    keychainProof: replayK0.proof,
     plan: replayInitialized.plan,
   });
   writePrivateJson(
@@ -4272,6 +5386,7 @@ try {
         replayStagePreview.source_export_blocking_approval_fingerprint,
       approveWrapper: replayStagePreview.wrapper_approval_fingerprint,
       approveGolden: replayStagePreview.golden_approval_fingerprint,
+      approveImplementation: replayStagePreview.implementation_approval_fingerprint,
       stopAfterStage: "reconcile_security",
     }, replayHarness.dependencies);
   } catch (error) {
@@ -4299,6 +5414,7 @@ try {
       approveSourceExportBlocking: replayPreview.source_export_blocking_approval_fingerprint,
       approveWrapper: replayPreview.wrapper_approval_fingerprint,
       approveGolden: replayPreview.golden_approval_fingerprint,
+      approveImplementation: replayPreview.implementation_approval_fingerprint,
       approveTestBootstrapInterruption:
         fieldPreview.test_bootstrap_interruption.approval_fingerprint,
     }, replayHarness.dependencies),
@@ -4741,29 +5857,56 @@ try {
 
   // The fsynced promotion authorization distinguishes that lost response from
   // the out-of-band active bypass rejected above. Resume reconciles exact
-  // active evidence, sends no second bootstrap POST or deploy, and continues
-  // through health/eval before retiring the interruption checkpoint.
-  const laterStageFailure = await runCloudflareRecoveryFieldGate(
-    approvedFieldConfig,
-    fieldDependencies,
-  );
-  assert.equal(laterStageFailure.ok, false);
-  assert.equal(laterStageFailure.cause, "RECOVERY_RELEASE_EVAL_FAILED");
-  assert.equal(laterStageFailure.state.current_stage, "verify_eval");
-  assert.equal(laterStageFailure.state.stage_status, "failed");
-  assert.equal(laterStageFailure.state.completed.at(-2).id, "rebuild_vectorize");
-  assert.equal(laterStageFailure.state.completed.at(-1).id, "verify_health");
-  assert.equal(existsSync(interruptionCheckpointPath), true,
-    "later-stage failure keeps the campaign checkpoint retryable");
-  assert.equal(fieldHarness.bootstrapCalls, 7);
-  assert.equal(fieldHarness.promotionCalls, 1);
-
+  // active evidence, sends no second bootstrap POST or deploy, and completes
+  // one health/eval pass before retiring the interruption checkpoint.
   const completedField = await runCloudflareRecoveryFieldGate(
     approvedFieldConfig,
     fieldDependencies,
   );
   assert.equal(completedField.ok, true);
   assert.equal(completedField.status.status, "complete");
+  const completedFieldState = loadVerifiedRecoveryState(
+    fieldStatePath,
+    fieldInitialized.plan,
+  );
+  const fieldEvidence = (id) => completedFieldState.completed
+    .find((entry) => entry.id === id)?.evidence;
+  assert.match(
+    fieldEvidence("verify_export").source_d1_deletion_state_fingerprint,
+    /^[0-9a-f]{64}$/u,
+  );
+  assert.equal(
+    fieldEvidence("rebuild_vectorize").vectorize_mutation_quiescence_sha256,
+    fieldInitialized.plan.vectorize_mutation_quiescence_sha256,
+  );
+  for (const name of [
+    "vector_id_set_sha256",
+    "vector_watermark_sha256",
+    "vector_barrier_sha256",
+    "promotion_intent_sha256",
+  ]) {
+    assert.match(fieldEvidence("rebuild_vectorize")[name], /^[0-9a-f]{64}$/u, name);
+  }
+  assert.equal(
+    fieldEvidence("verify_eval").vectorize_mutation_quiescence_sha256,
+    fieldInitialized.plan.vectorize_mutation_quiescence_sha256,
+  );
+  assert.match(
+    fieldEvidence("verify_eval").final_d1_deletion_state_fingerprint,
+    /^[0-9a-f]{64}$/u,
+  );
+  assert.deepEqual(
+    Object.keys(fieldEvidence("verify_eval").target_eval_llm_append).sort(),
+    [
+      "after_rows", "appended_rows", "before_rows", "kind",
+      "rag_evidence_gate_rows", "rag_think_rows", "schema_version",
+      "transition_sha256",
+    ],
+  );
+  assert.equal(
+    fieldEvidence("verify_eval").target_eval_llm_append.kind,
+    "v048_target_eval_llm_append_v1",
+  );
   assert.deepEqual(fieldHarness.observerSnapshots.slice(22, 25), [
     { bootstrapCalls: 6, confirmed: 7_202, epoch: 1 },
     { bootstrapCalls: 6, confirmed: 7_202, epoch: 1 },
@@ -4800,6 +5943,27 @@ try {
   assert.equal(existsSync(promotionAuthorizationPath), false);
   assert.equal(existsSync(completedResumeAuthorizationPath), true);
   assert.equal(existsSync(completedPromotionAuthorizationPath), true);
+  const readRetiredProof = () => readCompletedTestBootstrapProof({
+    artifactsDirectory: fieldArtifactDirectory,
+    plan: fieldInitialized.plan,
+    state: completedField.state,
+    deploymentReceipt: readPrivateAggregateReceipt(fieldDeploymentReceiptPath),
+  });
+  if (lockedWranglerRuntime.host.platform !== "darwin") {
+    assert.throws(
+      readRetiredProof,
+      (error) => error.code ===
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_COMPLETION_INVALID",
+      "a completed non-macOS runtime is not valid retired field proof",
+    );
+  } else {
+    const retiredProof = readRetiredProof();
+    assert.equal(retiredProof.actual_chunks_admitted_to_epoch, 7_202);
+    assert.equal(
+      retiredProof.candidate_evidence.packageSha256,
+      hash(fieldPackageBytes),
+    );
+  }
 
   // Model the narrow crash after the verified runner durably records complete
   // but before the active interruption checkpoint is renamed. A bound special
@@ -4856,6 +6020,142 @@ try {
     { platform: "darwin" },
   );
   assert.equal(ordinaryCompletedPreview.status, "complete");
+
+  // Compose the target evaluator from the real receipt-backed adapter rather
+  // than a stub transport. This exercises the complete read-only boundary:
+  // exact active deployment and health, D1/content/Vectorize projection,
+  // release eval, supported and unsupported direct questions, postchecks, and
+  // append-only usage. Raw response material must never reach the receipt.
+  const completedState = loadVerifiedRecoveryState(fieldStatePath, fieldInitialized.plan);
+  const deploymentRecord = readPrivateAggregateReceipt(fieldDeploymentReceiptPath);
+  const deploymentBinding = deploymentRecord.value.binding;
+  const targetEvalBinding = assertDisposableRecoveryTargetEvalBinding({
+    candidate_sha: deploymentBinding.candidate_sha,
+    candidate_tree_sha: deploymentBinding.candidate_tree_sha,
+    package_sha256: deploymentBinding.package_sha256,
+    field_receipt_sha256: deploymentBinding.field_receipt_sha256,
+    campaign_fingerprint: deploymentBinding.campaign_fingerprint,
+    keychain_binding_sha256: deploymentBinding.keychain_binding_sha256,
+    recovery_plan_fingerprint: fieldInitialized.plan.plan_fingerprint,
+    recovery_state_sha256: hash(readFileSync(fieldStatePath)),
+    golden_sha256: hash(readFileSync(goldenPath)),
+    source_resource_fingerprint: fieldInitialized.plan.source_resource_fingerprint,
+    target_resource_fingerprint: fieldInitialized.plan.target_resource_fingerprint,
+    active_worker_version_id: deploymentRecord.value.target.active_version.version_id,
+  });
+  const completedTargetConfig = Object.freeze({
+    ...fieldBaseConfig,
+    plan: fieldInitialized.plan,
+    state: completedState,
+    approvePlan: fieldInitialized.plan.plan_fingerprint,
+    approveDisposableTarget: fieldInitialized.plan.target_resource_fingerprint,
+    approveTargetExecution: ordinaryCompletedPreview.target_execution_approval_fingerprint,
+    approveSourceExportBlocking:
+      ordinaryCompletedPreview.source_export_blocking_approval_fingerprint,
+    approveWrapper: ordinaryCompletedPreview.wrapper_approval_fingerprint,
+    approveGolden: ordinaryCompletedPreview.golden_approval_fingerprint,
+    approveImplementation: ordinaryCompletedPreview.implementation_approval_fingerprint,
+  });
+  const targetEvalHarness = providerHarness({
+    initialTargetRestored: true,
+    initialVectorCount: 7_202,
+    targetVersionId: fieldActiveWorkerVersionId,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 6_001,
+    sourceChunkCount: 7_202,
+    sourceDocumentCount: 6_001,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const targetEvalGate = createCloudflareRecoveryFieldGateAdapters(
+    completedTargetConfig,
+    targetEvalHarness.dependencies,
+  );
+  const targetEvalReceiptPath = join(
+    fieldArtifactDirectory,
+    DISPOSABLE_RECOVERY_TARGET_EVAL_RECEIPT_NAME,
+  );
+  const targetEvalProviderStart = targetEvalHarness.wranglerCalls.length;
+  const targetEvalFetchStart = targetEvalHarness.fetchCalls.length;
+  const targetEvalResult = await runDisposableRecoveryTargetEvaluation({
+    binding: targetEvalBinding,
+    a4CampaignAuthority: targetEvalGate.a4CampaignAuthority,
+    keychainBinding: fieldK0Binding,
+    keychainProof: fieldK0.proof,
+    approvalFingerprint: disposableRecoveryTargetEvalApprovalFingerprint(targetEvalBinding),
+    receiptPath: targetEvalReceiptPath,
+    expectedReceiptDirectory: fieldArtifactDirectory,
+    transport: targetEvalGate.targetEvaluationTransport,
+    revalidate: targetEvalGate.revalidate,
+    now: () => new Date("2026-09-13T12:00:00.000Z"),
+  });
+  assert.equal(targetEvalResult.receipt.status, "passed");
+  assert.equal(targetEvalHarness.evalCalls, 1);
+  assert.equal(targetEvalHarness.usageRecords, 32);
+  assert.equal(targetEvalHarness.usageMaxId, 32);
+  const targetEvalFetches = targetEvalHarness.fetchCalls.slice(targetEvalFetchStart);
+  assert.equal(targetEvalFetches.filter((call) =>
+    new URL(call.url).pathname === "/api/rag/think").length, 2);
+  assert.ok(targetEvalFetches.filter((call) =>
+    new URL(call.url).pathname === "/health").length >= 6);
+  const targetEvalProviderCalls = targetEvalHarness.wranglerCalls.slice(targetEvalProviderStart);
+  assert.ok(targetEvalProviderCalls.filter((call) =>
+    call.args[0] === "deployments" && call.args[1] === "status").length >= 6);
+  const targetEvalExports = targetEvalProviderCalls.filter((call) =>
+    call.args[0] === "d1" && call.args[1] === "export");
+  assert.equal(targetEvalExports.length, 2);
+  assert.equal(targetEvalExports.every((call) => !call.args.includes("llm_call_log")), true);
+  const targetEvalSerialized = readFileSync(targetEvalReceiptPath, "utf8");
+  for (const privateValue of [
+    "orchid ledger field marker",
+    "cobalt glacier souffle",
+    DISPOSABLE_RECOVERY_MARKER,
+    disposableRecoveryFixture()[0].title,
+    disposableRecoveryFixture()[0].source_type,
+    fixtureAdminKey,
+    privateSentinel,
+    "provider_private_body",
+  ]) assert.equal(targetEvalSerialized.includes(privateValue), false, privateValue);
+
+  const driftDirectory = join(sandbox, "private-v048-target-eval-drift");
+  mkdirSync(driftDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(driftDirectory, 0o700);
+  const targetEvalDriftHarness = providerHarness({
+    deploymentChangesDuringEval: true,
+    initialTargetRestored: true,
+    initialVectorCount: 7_202,
+    targetVersionId: fieldActiveWorkerVersionId,
+    targetChunkCount: 7_202,
+    targetDocumentCount: 6_001,
+    sourceChunkCount: 7_202,
+    sourceDocumentCount: 6_001,
+    sourceManifestFixture: syntheticFieldSourceManifest,
+    targetManifestFixture: syntheticFieldTargetManifest,
+  });
+  const targetEvalDriftGate = createCloudflareRecoveryFieldGateAdapters(
+    completedTargetConfig,
+    targetEvalDriftHarness.dependencies,
+  );
+  await assert.rejects(
+    runDisposableRecoveryTargetEvaluation({
+      binding: targetEvalBinding,
+      a4CampaignAuthority: targetEvalDriftGate.a4CampaignAuthority,
+      keychainBinding: fieldK0Binding,
+      keychainProof: fieldK0.proof,
+      approvalFingerprint: disposableRecoveryTargetEvalApprovalFingerprint(targetEvalBinding),
+      receiptPath: join(driftDirectory, DISPOSABLE_RECOVERY_TARGET_EVAL_RECEIPT_NAME),
+      expectedReceiptDirectory: driftDirectory,
+      transport: targetEvalDriftGate.targetEvaluationTransport,
+      revalidate: targetEvalDriftGate.revalidate,
+      now: () => new Date("2026-09-13T12:00:00.000Z"),
+    }),
+    (error) => error.code === "RECOVERY_TARGET_EXECUTION_CHANGED",
+    "active-version drift during release evaluation must fail before direct questions",
+  );
+  assert.equal(targetEvalDriftHarness.evalCalls, 1);
+  assert.equal(targetEvalDriftHarness.fetchCalls.some((call) =>
+    new URL(call.url).pathname === "/api/rag/think"), false);
+
   const completedControlHarness = providerHarness({
     sourceManifestFixture: syntheticFieldSourceManifest,
     targetManifestFixture: syntheticFieldTargetManifest,
@@ -4973,6 +6273,7 @@ try {
     approveSourceExportBlocking: drillPreview.source_export_blocking_approval_fingerprint,
     approveWrapper: drillPreview.wrapper_approval_fingerprint,
     approveGolden: drillPreview.golden_approval_fingerprint,
+    approveImplementation: drillPreview.implementation_approval_fingerprint,
   });
   const openFamilyImportHarness = providerHarness({ sourceFamilyRecoveryStateActive: true });
   const openFamilyImportGate = createCloudflareRecoveryFieldGateAdapters(
@@ -5073,9 +6374,14 @@ try {
   );
 
   const drillHarness = providerHarness();
+  // The replay assertion protects the primary artifact export. Verify-export
+  // also performs three intentional read-only exports: two deletion-state
+  // captures around one direct durable-content fingerprint.
   const exportCalls = () => drillHarness.wranglerCalls.filter((call) =>
     call.env.CLOUDFLARE_ACCOUNT_ID === sourceManifest.infrastructure.cloudflare.account_id &&
-      call.args[0] === "d1" && call.args[1] === "export").length;
+      call.args[0] === "d1" && call.args[1] === "export" &&
+      String(call.args[call.args.indexOf("--output") + 1] || "")
+        .endsWith(".brain-recovery-export.sql.tmp-data")).length;
   const rebuildCalls = () => drillHarness.fetchCalls.filter((call) =>
     new URL(call.url).pathname === "/api/admin/brain/reindex" &&
       JSON.parse(call.options.body).confirm === true).length;
@@ -5189,6 +6495,7 @@ try {
     approveSourceExportBlocking: preview.source_export_blocking_approval_fingerprint,
     approveWrapper: preview.wrapper_approval_fingerprint,
     approveGolden: preview.golden_approval_fingerprint,
+    approveImplementation: preview.implementation_approval_fingerprint,
   }, harness.dependencies);
   assert.equal(completed.ok, true);
   assert.equal(completed.status.status, "complete");
@@ -5213,6 +6520,121 @@ try {
     call.args.includes("integrity-check")), false);
   assert.equal(harness.sensitiveBuffers.every((buffer) => buffer.every((byte) => byte === 0)), true);
 
+  const recoveryCliPath = join(
+    process.cwd(),
+    "operations",
+    "cloudflare-recovery-adapter.mjs",
+  );
+  const completedCliArguments = (candidateStatePath = statePath, implementationApproval =
+    preview.implementation_approval_fingerprint) => [
+    "--no-warnings",
+    recoveryCliPath,
+    "run",
+    "--source-manifest", sourceManifestPath,
+    "--target-manifest", targetManifestPath,
+    "--plan", planPath,
+    "--state", candidateStatePath,
+    "--artifact-directory", artifactDirectory,
+    "--wrangler-wrapper", wrapperPath,
+    "--golden", goldenPath,
+    "--approve-plan", initialized.plan.plan_fingerprint,
+    "--approve-disposable-target", initialized.plan.target_resource_fingerprint,
+    "--approve-target-execution", preview.target_execution_approval_fingerprint,
+    "--approve-source-export-blocking", preview.source_export_blocking_approval_fingerprint,
+    "--approve-wrapper", preview.wrapper_approval_fingerprint,
+    "--approve-golden", preview.golden_approval_fingerprint,
+    "--approve-implementation", implementationApproval,
+  ];
+  const cleanCliEnvironment = {
+    HOME: sandbox,
+    USER: "fixture",
+    LOGNAME: "fixture",
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: process.env.PATH || "/usr/bin:/bin",
+  };
+  const runCompletedCli = (args) => spawnSync(process.execPath, args, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: cleanCliEnvironment,
+    maxBuffer: 2 * 1024 * 1024,
+    timeout: 120_000,
+    windowsHide: true,
+  });
+  const hasExecutionSnapshotResidue = () => readdirSync(artifactDirectory)
+    .some((name) => name.startsWith(".brain-recovery-runtime-execution-v1-"));
+
+  const completedCli = runCompletedCli(completedCliArguments());
+  assert.equal(completedCli.error, undefined);
+  assert.equal(completedCli.signal, null);
+  if (process.platform === "darwin") {
+    assert.equal(completedCli.status, 0, completedCli.stderr);
+    assert.equal(JSON.parse(completedCli.stdout).status, "complete");
+  } else {
+    assert.equal(completedCli.status, 1);
+    assert.equal(completedCli.stdout, "");
+    assert.match(
+      completedCli.stderr,
+      /RECOVERY_FIELD_GATE_REQUIRES_MACOS_KEYCHAIN/,
+    );
+  }
+  assert.equal(hasExecutionSnapshotResidue(), false);
+
+  const wrongImplementationCli = runCompletedCli(completedCliArguments(
+    statePath,
+    "0".repeat(64),
+  ));
+  assert.equal(wrongImplementationCli.status, 1);
+  assert.match(
+    wrongImplementationCli.stderr,
+    /RECOVERY_FIELD_GATE_APPROVAL_MISMATCH/,
+  );
+  assert.equal(hasExecutionSnapshotResidue(), false);
+
+  const invalidCliStatePath = join(sandbox, ".brain-recovery-invalid-cli-state.json");
+  writePrivateJson(invalidCliStatePath, {});
+  const invalidStateCli = runCompletedCli(completedCliArguments(invalidCliStatePath));
+  assert.equal(invalidStateCli.status, 1);
+  assert.match(invalidStateCli.stderr, /RECOVERY_FIELD_GATE_PREFLIGHT_FAILED/);
+  assert.equal(hasExecutionSnapshotResidue(), false);
+
+  const stagedSnapshot = stageSealedExecutionSnapshot(artifactDirectory);
+  try {
+    assert.equal(assertSealedExecutionSnapshotUnchanged(stagedSnapshot), true);
+    const stagedAdapterPath = join(
+      stagedSnapshot.path,
+      "operations",
+      "cloudflare-recovery-adapter.mjs",
+    );
+    if (process.platform !== "win32") chmodSync(stagedAdapterPath, 0o600);
+    writeFileSync(stagedAdapterPath, "tampered sealed recovery adapter\n");
+    assert.throws(
+      () => assertSealedExecutionSnapshotUnchanged(stagedSnapshot),
+      (error) => error.code === "RECOVERY_EXECUTION_SNAPSHOT_CHANGED",
+    );
+  } finally {
+    removeExecutionSnapshot(stagedSnapshot);
+  }
+  assert.equal(hasExecutionSnapshotResidue(), false);
+
+  const staleSnapshotPath = join(
+    artifactDirectory,
+    ".brain-recovery-runtime-execution-v1-stale-review-required",
+  );
+  mkdirSync(staleSnapshotPath, { mode: 0o700 });
+  if (process.platform !== "win32") chmodSync(staleSnapshotPath, 0o700);
+  try {
+    const staleSnapshotCli = runCompletedCli(completedCliArguments());
+    assert.equal(staleSnapshotCli.status, 1);
+    assert.match(
+      staleSnapshotCli.stderr,
+      /RECOVERY_EXECUTION_SNAPSHOT_STALE_REVIEW_REQUIRED/,
+    );
+  } finally {
+    rmSync(staleSnapshotPath, { recursive: true, force: false });
+  }
+  assert.equal(hasExecutionSnapshotResidue(), false);
+
   const artifactPath = join(artifactDirectory, initialized.plan.artifact.relative_name);
   assert.equal(existsSync(artifactPath), true);
   if (process.platform !== "win32") assert.equal(statSync(artifactPath).mode & 0o777, 0o600);
@@ -5228,10 +6650,7 @@ try {
   assert.equal(recoveredSql.includes("Financial Brain verified recovery artifact"), true);
   assert.equal(recoveredSql.includes(deterministicDataExport.trim()), true);
   assert.equal(existsSync(join(artifactDirectory, ".brain-recovery-field-gate.lock")), false);
-  assert.equal(readdirSync(artifactDirectory).some((name) =>
-    name.startsWith(".brain-recovery-plaintext.tmp-") ||
-      name.startsWith(".brain-recovery-encrypted.tmp-")), false);
-  assert.equal(readdirSync(artifactDirectory).some((name) => name.startsWith(".brain-recovery-runtime-")), false);
+  assert.deepEqual(classifiedResidueNames(artifactDirectory), []);
   const stateText = readFileSync(statePath, "utf8");
   for (const forbidden of [
     privateSentinel,
@@ -5264,10 +6683,9 @@ try {
         },
       }],
     }),
-    (error) => error.code === "RECOVERY_ARTIFACT_CRYPTO_REFUSED",
+    (error) => error.code === "RECOVERY_ENCRYPTED_PROVENANCE_ARTIFACT_REFUSED",
   );
-  assert.equal(readdirSync(artifactDirectory).some((name) =>
-    name.startsWith(".brain-recovery-plaintext.tmp-")), false);
+  assert.deepEqual(classifiedResidueNames(artifactDirectory), []);
 
   const unexpectedArtifactHarness = providerHarness();
   const unexpectedArtifactGate = createCloudflareRecoveryFieldGateAdapters(
@@ -5309,15 +6727,20 @@ try {
   );
   assert.equal(existsSync(residueData), true);
   assert.equal(existsSync(residueCombined), true);
+  assert.deepEqual(classifiedResidueNames(artifactDirectory), [
+    ".brain-recovery-export.sql.tmp-combined",
+    ".brain-recovery-export.sql.tmp-data",
+  ]);
   unlinkSync(residueData);
   unlinkSync(residueCombined);
   const reconciledArtifact = await residueGate.adapters.export_d1(residueContext);
   assert.equal(reconciledArtifact.artifact_sha256, hash(readFileSync(artifactPath)));
   assert.equal(statSync(artifactPath).nlink, 1);
+  assert.deepEqual(classifiedResidueNames(artifactDirectory), []);
 
   const readbackResidue = join(
     artifactDirectory,
-    ".brain-recovery-export.sql.tmp-readback",
+    ".brain-recovery-runtime-readback.sql",
   );
   writeFileSync(readbackResidue, "synthetic interrupted readback partial\n", { mode: 0o600 });
   const readbackResidueHarness = providerHarness({ initialTargetRestored: true });
@@ -5336,44 +6759,59 @@ try {
     (error) => error.code === "RECOVERY_EXPORT_PLAINTEXT_RESIDUE_REVIEW_REQUIRED",
   );
   assert.equal(existsSync(readbackResidue), true);
+  assert.deepEqual(classifiedResidueNames(artifactDirectory), [
+    ".brain-recovery-runtime-readback.sql",
+  ]);
   unlinkSync(readbackResidue);
+  assert.deepEqual(classifiedResidueNames(artifactDirectory), []);
 
-  const ambiguousHarness = providerHarness({ ambiguousSourceD1: true });
-  const ambiguousGate = createCloudflareRecoveryFieldGateAdapters(
-    approvedAdapterConfig,
-    ambiguousHarness.dependencies,
-  );
-  await assert.rejects(
-    ambiguousGate.adapters.export_d1({
-      stage: "export_d1",
-      planFingerprint: initialized.plan.plan_fingerprint,
-      targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
-      completed: [],
-    }),
-    (error) => error.code === "RECOVERY_D1_RESOURCE_AMBIGUOUS",
-  );
+  const heldOrdinaryArtifactPath = join(sandbox, "held-ordinary-artifact.enc");
+  const heldOrdinaryArtifactSha256 = hash(readFileSync(artifactPath));
+  renameSync(artifactPath, heldOrdinaryArtifactPath);
+  try {
+    assert.equal(existsSync(artifactPath), false);
+    const ambiguousHarness = providerHarness({ ambiguousSourceD1: true });
+    const ambiguousGate = createCloudflareRecoveryFieldGateAdapters(
+      approvedAdapterConfig,
+      ambiguousHarness.dependencies,
+    );
+    await assert.rejects(
+      ambiguousGate.adapters.export_d1({
+        stage: "export_d1",
+        planFingerprint: initialized.plan.plan_fingerprint,
+        targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
+        completed: [],
+      }),
+      (error) => error.code === "RECOVERY_D1_RESOURCE_AMBIGUOUS",
+    );
 
-  // Schema 44 has the reviewed result-family protocol, but the current Worker
-  // reads schema-45 accepted-resolution state. It must be updated before export;
-  // restoring the older prefix would otherwise produce a healthy-looking brain
-  // whose next ordinary write fails.
-  const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 44 });
-  const prefixSourceGate = createCloudflareRecoveryFieldGateAdapters(
-    approvedAdapterConfig,
-    prefixSourceHarness.dependencies,
-  );
-  await assert.rejects(
-    prefixSourceGate.adapters.export_d1({
-      stage: "export_d1",
-      attempt: 1,
-      planFingerprint: initialized.plan.plan_fingerprint,
-      targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
-      completed: [],
-    }),
-    (error) => error.code === "RECOVERY_SOURCE_UPGRADE_REQUIRED",
-  );
-  assert.equal(prefixSourceHarness.wranglerCalls.some((call) =>
-    call.args[0] === "d1" && call.args[1] === "export"), false);
+    // Schema 44 has the reviewed result-family protocol, but the current Worker
+    // reads schema-45 accepted-resolution state. It must be updated before export;
+    // restoring the older prefix would otherwise produce a healthy-looking brain
+    // whose next ordinary write fails.
+    const prefixSourceHarness = providerHarness({ sourceMigrationVersion: 44 });
+    const prefixSourceGate = createCloudflareRecoveryFieldGateAdapters(
+      approvedAdapterConfig,
+      prefixSourceHarness.dependencies,
+    );
+    await assert.rejects(
+      prefixSourceGate.adapters.export_d1({
+        stage: "export_d1",
+        attempt: 1,
+        planFingerprint: initialized.plan.plan_fingerprint,
+        targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
+        completed: [],
+      }),
+      (error) => error.code === "RECOVERY_SOURCE_UPGRADE_REQUIRED",
+    );
+    assert.equal(prefixSourceHarness.wranglerCalls.some((call) =>
+      call.args[0] === "d1" && call.args[1] === "export"), false);
+    assert.equal(existsSync(artifactPath), false);
+  } finally {
+    if (existsSync(artifactPath)) unlinkSync(artifactPath);
+    renameSync(heldOrdinaryArtifactPath, artifactPath);
+  }
+  assert.equal(hash(readFileSync(artifactPath)), heldOrdinaryArtifactSha256);
 
   const leasePlanPath = join(sandbox, ".brain-recovery-lease-plan.json");
   const leaseStatePath = join(sandbox, ".brain-recovery-lease-state.json");
@@ -5403,6 +6841,7 @@ try {
     approveSourceExportBlocking: leasePreview.source_export_blocking_approval_fingerprint,
     approveWrapper: leasePreview.wrapper_approval_fingerprint,
     approveGolden: leasePreview.golden_approval_fingerprint,
+    approveImplementation: leasePreview.implementation_approval_fingerprint,
   });
   const leasedSourceHarness = providerHarness({ sourceDrainLease: true });
   const leasedSourceGate = createCloudflareRecoveryFieldGateAdapters(
@@ -6026,6 +7465,7 @@ try {
   await assert.rejects(
     pausedFinalGate.adapters.verify_eval({
       stage: "verify_eval",
+      attempt: 1,
       planFingerprint: initialized.plan.plan_fingerprint,
       targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
       completed: [],
@@ -6044,6 +7484,7 @@ try {
   await assert.rejects(
     changingEvalGate.adapters.verify_eval({
       stage: "verify_eval",
+      attempt: 1,
       planFingerprint: initialized.plan.plan_fingerprint,
       targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
       completed: [],
@@ -6051,6 +7492,34 @@ try {
     (error) => error.code === "RECOVERY_TARGET_EXECUTION_CHANGED",
   );
   assert.equal(changingEvalHarness.evalCalls, 1);
+
+  const evalRetryHarness = providerHarness({ targetVersionId: activeWorkerVersionId });
+  const evalRetryGate = createCloudflareRecoveryFieldGateAdapters(
+    approvedAdapterConfig,
+    evalRetryHarness.dependencies,
+  );
+  const evalRetryBefore = {
+    wrangler: evalRetryHarness.wranglerCalls.length,
+    fetch: evalRetryHarness.fetchCalls.length,
+    admin: evalRetryHarness.adminReads,
+    eval: evalRetryHarness.evalCalls,
+  };
+  await assert.rejects(
+    evalRetryGate.adapters.verify_eval({
+      stage: "verify_eval",
+      attempt: 2,
+      planFingerprint: initialized.plan.plan_fingerprint,
+      targetResourceFingerprint: initialized.plan.target_resource_fingerprint,
+      completed: [],
+    }),
+    (error) => error.code === "RECOVERY_TARGET_EVAL_RETRY_REVIEW_REQUIRED",
+  );
+  assert.deepEqual({
+    wrangler: evalRetryHarness.wranglerCalls.length,
+    fetch: evalRetryHarness.fetchCalls.length,
+    admin: evalRetryHarness.adminReads,
+    eval: evalRetryHarness.evalCalls,
+  }, evalRetryBefore, "retry refusal occurs before provider, credential, or eval access");
 
   const activeFirstAttemptHarness = providerHarness({
     initialTargetRestored: true,
@@ -6086,6 +7555,7 @@ try {
     ambiguousPromotionGate.adapters.rebuild_vectorize({ ...rebuildContext, attempt: 1 }),
     (error) => error.code === "RECOVERY_WRANGLER_CALL_FAILED",
   );
+  assert.deepEqual(classifiedResidueNames(artifactDirectory), []);
   assert.equal(ambiguousPromotionHarness.currentTargetVersionId, activeWorkerVersionId);
   const reconciledPromotion = await ambiguousPromotionGate.adapters.rebuild_vectorize({
     ...rebuildContext,

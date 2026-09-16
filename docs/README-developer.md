@@ -111,11 +111,65 @@ node brain.mjs ingest     ./acme.manifest.json --path ~/Documents --source clien
 node brain.mjs test       ./acme.manifest.json   # full acceptance suite
 ```
 
+The held v0.4.8 existing-Brain gate is:
+
+```bash
+brain update [manifest] --preview --expect-runtime-sha256 <64hex> --json
+```
+
+This adapter completes exact runtime, package, manifest, D1, version, and bare
+`brain.domain` validation before the credential or network boundary. It then
+ignores ambient `ADMIN_KEY`, resolves only the durable admin-key store selected
+by the pinned manifest, and makes one authenticated HTTP 200 GET to the saved
+Brain's existing `/api/admin/brain/documents` contract. It does not enter the
+Wrangler or Cloudflare control plane. The bounded response reader discards
+document rows and binds only the same-response version, D1 backend, active
+drain mode, vector counts, queue aggregates, readiness reason, and verdict into
+the plan fingerprint. `brain_domain_identity: pinned_manifest_assertion` is an
+explicit proof boundary: the command does not independently prove Cloudflare
+account or domain ownership, so the supervised field rung must reconcile the
+target before live use.
+
+Targets whose manifest records exactly v0.4.6 have one narrow
+legacy-observation fallback in the same CLI. If the authenticated top-level
+legacy `/api/admin/brain/documents` response
+omits both `version` and `vector_drain_mode`, the adapter validates only the
+sanitized D1 backlog and readiness fields from that response. It returns
+`status: legacy_observation_complete`,
+`error_code: UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND`,
+`projection_ready: false`, and `authorizes_update: false`, and exits nonzero.
+Generation and drain mode remain unproven, so mixed generations are not
+excluded. The receipt is useful test evidence only and cannot satisfy the
+existing-Brain update gate. The adapter does not stitch in public `/health` or
+another response. This fallback performs one durable credential read and one
+authenticated network request, with zero Brain writes, Cloudflare control
+requests, deployments, or installs. Modern same-response behavior is
+unchanged.
+
+The diagnostic exits successfully for a coherent `ready`,
+`recoverable_queued_work`, or `queued_work_present` observation because the
+check itself completed. Only the first has `projection_ready: true`; every
+receipt has `authorizes_update: false`, and pending work is never called ready.
+`recoverable_queued_work` requires queued upserts at least equal to the numeric
+shortfall. A smaller or delete-only queue is fingerprinted as
+`projection_work_insufficient` and returns a failure receipt, as does a short
+projection with zero pending work, a zero-queue provider-visibility gap, an
+excess projection, a paused or mixed generation, or malformed fields. Both
+successful and post-boundary failure receipts report the credential and network
+reads actually attempted, while Brain, control-plane, deployment, manifest,
+workspace, install, browser, support, and skill effects remain zero. These local
+rules and fixture tests are not package, CI, field, or live-Brain proof.
+
 The supported beginner update is `brain update [manifest]`. It verifies the
 account, requires a pre-change D1 bookmark, deploys and verifies a paused
-compatibility Worker, waits the declared 20-minute old-invocation window, and
-migrates. While the write barrier remains active, schema 13 rebuilds a legacy
-projection through durable 1,000-row batches with a bounded number of disjoint
+compatibility Worker, then requires one authenticated documents response to
+bind the exact new version, `paused-for-upgrade`, D1, equal vector totals, an
+empty queue, and query readiness. A responded mismatch is not retried: update
+stops before the old-invocation wait and every migration, with the Worker still
+paused. Only that exact aggregate permits the declared 20-minute
+old-invocation window and migration. While the write barrier remains active,
+schema 13 rebuilds a legacy projection through durable 1,000-row batches with a
+bounded number of disjoint
 mutations in flight. Exact `getByIds` generation readback acknowledges each
 batch, and D1 receipts make interruption resumable. Update deploys active mode
 only after the whole projection is verified, then reconciles allowed Worker
@@ -167,28 +221,103 @@ Verified recovery uses the provider-neutral state machine in
 reviewed source, restore only an exact empty `recovery-gate-<nonce>` target,
 rebuild Vectorize while a reviewed paused Worker is deployed, promote only its
 separately reviewed immutable active version to 100 percent, and run health
-plus release evaluation. It cannot create, upload, route, delete, or destroy
-resources. The two versions must have the same reviewed script hash and exact
-bindings except for paused mode. The run requires six previewed approval
-fingerprints, including the blocking source-export window, both pinned target
-Worker versions and manually reviewed empty routes, and exact Keychain-backed
-Wrangler wrapper and private release golden bytes. See
-`docs/RECOVERY.md` for the private artifact rules and remaining live field
-gate.
+plus release evaluation. It cannot create, upload, route, or destroy resources.
+The D1 export is an encrypted provenance artifact; plaintext exists only in the
+owner-only directory while a bounded verifier or import callback owns it.
 
-The sealed package exposes the fixed deployment proof as
-`brain-v048-disposable-deploy help`. Source preview/preflight/`--approve-a2`
-mutation and target preview/preflight/`--approve-a4` mutation are separate
-commands; there is no combined path. Source preparation does not open the
-target manifest. Preview performs no network access and no write. Each
+For the exact v0.4.8 campaign, first review the fixed no-competing-writer scope
+with `verified-recovery.mjs derive-vectorize-mutation-quiescence`, then pass the
+derived fingerprint back to `init`. It is one continuous operator attestation
+from target Vectorize creation through the accepted final active proof. The
+recovery preview returns eight base approval fingerprints: plan, disposable
+target, target execution, blocking source export, wrapper, golden,
+implementation, and Vectorize mutation quiescence. The controlled 6,001-record
+mid-bootstrap rehearsal adds a ninth interruption approval. Every recovery run
+must also consume the final target deployment receipt.
+
+Count parity alone cannot promote the target. The adapter pages all D1 vector
+IDs and all provider Vectorize IDs and requires exact set equality. It brackets
+that proof with a stable provider processed-mutation watermark and requires the
+watermark's mutation ID to equal the Worker's verified barrier. It captures the
+same vector-set, watermark, barrier, D1, outbox, and exact Worker state before
+and after promotion. A private durable promotion-intent receipt is fsynced
+before the exact active-version request, so a lost response can reconcile only
+that reviewed already-active outcome.
+
+`verify_export` records the source D1 deletion-state fingerprint. `verify_eval`
+records the final target fingerprint and is intentionally classified as
+`isolated_target_audit_write`: all non-`llm_call_log` durable content and
+sequence state must remain byte-identical. That table may only append sequential
+rows within the reviewed labels, model, call bounds, and timestamps, and its
+SQLite sequence must match the final row ID. Each captured cost field must be
+nonnegative and is sealed into the transition receipt. The runner refuses an
+automatic second evaluation attempt because a lost result may already have
+appended rows and incurred usage. See `docs/RECOVERY.md` for the artifact,
+stage, and receipt contracts.
+
+The sealed package exposes five fixed-campaign entry points in this order:
+
+1. `brain-v048-disposable-keychain-prep help` for local K0 preview, exact
+   approval, execute, and the separately approved interrupted-K0 reset.
+2. `brain-v048-disposable-deploy help` for A1/A3 provisioning, plan freeze,
+   A2 source deployment, the fixed seed, and A4 target deployment.
+3. `brain-v048-disposable-target-eval preview|execute` for the closed A12
+   aggregate-evaluation lane after exact active promotion. Invalid or missing
+   arguments refuse with the fixed usage line. The lane changes neither corpus
+   nor provider state, although its private questions may create ordinary
+   aggregate usage records.
+4. `brain-v048-disposable-teardown help` for separate A13/A14 source and
+   A15/A16 target ceremonies.
+5. `brain-v048-disposable-closeout help` for the held A17 review surface. A17
+   is implemented offline and locally fixture-tested, but remains held,
+   unfielded, and uncertified. It has no field or live proof and grants no
+   release authority. It must retain the reviewed evidence, remove only four
+   campaign Keychain values, and preserve the shared token before a field
+   closure can be accepted.
+
+Source preview/preflight/`--approve-a2` mutation and target
+preview/preflight/`--approve-a4` mutation are separate commands; there is no
+combined path. Source preparation does not open the target manifest. Preview
+performs no network access and no write. Each
 preflight performs bounded Cloudflare GETs and writes only its owner-private
 receipt. Mutations resolve the manifest account's token only through macOS
 Keychain, journal before every POST, resume only a fully confirmed prefix, and
-refuse `sent_unconfirmed`. Final deployment proof uses the exact deployment-ID
-GET and must match the ID returned by the journaled POST. Windows refuses this
-field-only command. Packaged and fixture-tested means executable, not
-field-proven; the field-readiness marker remains false until the exact live
-disposable run passes.
+refuse `sent_unconfirmed`. `cloudflare-disposable-deployment-transport.mjs` is
+the only Cloudflare HTTP layer. Final deployment proof uses the exact
+deployment-ID GET and must match the ID returned by the journaled POST.
+
+Source and target receipts bind the exact Worker identity, provider version,
+script etag, reviewed code generation, runtime, and bindings. Their network
+isolation proof requires the workers.dev identity, previews disabled, cache
+disabled, and zero routes, custom domains, schedules, tails, extra Worker
+exports, assets, and logpush. Target preflight and final receipt also perform a complete campaign
+custody read: every traffic-bearing version of every non-campaign Worker is
+inspected so no other Worker can bind either campaign D1 database or Vectorize
+index. The semantic role records name these proofs `network_isolation` and
+`worker_generation`; target semantics add `campaign_custody`. Both target
+receipts repeat the plan's top-level `vectorize_mutation_quiescence` claim, and
+recovery checks the final receipt's `approval_fingerprint` before provider or
+credential work.
+
+The historical name-only teardown stays quarantined. The exact v0.4.8 teardown
+requires the completed recovery plan/state, source and final deployment
+receipts, exact Worker generations, both D1 deletion fingerprints, and the
+continuous Vectorize mutation approval. It adds a separate
+lifecycle-quiescence approval covering source preview through final target
+absence. The source role must commit and seal its private receipt before the
+target role can preview. Each role deletes Worker, then Vectorize, then D1, with
+full campaign custody reads around every mutation, exact absence after each,
+and a fresh double-captured D1 fingerprint immediately before D1 deletion.
+The source D1 must accept no writes from `verify_export` through source commit,
+and the target D1 must accept no writes from `verify_eval` through target commit;
+that includes model-audit appends and is separate from both quiescence proofs.
+Unknown provider outcomes or D1 drift remain ambiguous and do not become
+cleanup receipts.
+
+Windows refuses these field-only commands. Packaged and fixture-tested means
+executable, not field-proven; the field-readiness marker remains false until the
+exact live disposable campaign passes. None of this is release or live-action
+authority. A17 remains held, unfielded, and uncertified.
 
 Run `node brain.mjs` with no arguments for the full command list.
 
@@ -1013,12 +1142,19 @@ manifest or credential store and makes no live service call.
 Physical Windows owner rehearsals are handed off only as the content-addressed
 ZIP and matching `release.json` produced by
 `scripts/build-windows-onboarding-kit.mjs` from one successful exact-SHA `ci`
-push run. The archive contains instructions and a manifest, not executable
+push run. That CI run publishes the exact package plus a separate minimal raw
+runtime identity receipt. The latter has one exact key set and binds the same
+source SHA and package identity to `identity_scheme` and
+`runtime_payload_sha256`; the kit carries that digest as
+`update_preview.expected_runtime_sha256`. The archive contains instructions and a manifest, not executable
 code. Those instructions have Claude Code obtain a fresh detached checkout and
 start its checked-in `onboarding/start-windows-rehearsal.ps1`, never an emailed
 or pasted script body and never the `npm.cmd` package-script shim. The launcher
-requires the sealed SHA, a clean current directory equal to the checkout root,
-Node.js 22+, and a non-administrator PowerShell window. After frontend
+requires the sealed SHA, fixed runtime identity scheme and expected runtime
+SHA-256, a clean current directory equal to the checkout root, Node.js 22+, and
+a non-administrator PowerShell window. It preserves and prints that non-secret
+expected identity but does not observe an installed package or run update
+preview. After frontend
 preparation it invokes the Node rehearsal entrypoint directly, which keeps
 Control-C out of `cmd.exe` batch job handling. The first run may download a
 separate small public frontend dependency set and may be quiet for several
@@ -1028,6 +1164,13 @@ minutes.
 scenario routing, and absence of credential fields. This is browser-contract
 and layout evidence only. Cloudflare install, provider OAuth, webhook delivery,
 mailbox access, and physical WebAuthn remain field gates.
+
+If the candidate is later authorized and published, the same receipt bytes are
+also a third, versioned release asset. Stable website metadata must bind that
+asset's exact URL, byte count, SHA-256, source commit, package file count,
+identity scheme, and runtime payload SHA-256. The public contract checker then
+downloads and parses the receipt independently; a transient CI artifact or a
+reconstructed receipt is not release evidence.
 
 Every npm, Vite, fixture, and browser child in this rehearsal receives a strict
 operating-system allowlist instead of the desktop environment. npm also reads
@@ -1216,7 +1359,9 @@ public receipt contains only ordinals and closed outcome fields; the private
 handoff retains exact locators and original-byte hashes for the Worker contract
 and must never be printed or persisted as a public artifact. Multi-record
 archives remain an explicit ambiguity rather than being matched by filename or
-content similarity.
+content similarity. The private root pin brackets its directory identity with
+an exact hash of direct entry names and types, so a same-timestamp NTFS entry
+change still invalidates the assessment without reading file bytes.
 
 Migration 0042 adds the independent opaque-ID key and append-only
 `source_original_observations` ledger. `POST
@@ -1359,9 +1504,10 @@ and reactivation returns `history_advanced`.
 
 `observation_hash` continues to digest the event receipt fields from the
 schema-42 contract. It is not a self-authenticating chain hash and does not
-include the predecessor edge. The authenticated whole recovery artifact and
-the independent recovery-close predecessor checks bind the portable version-one
-chain. A future receipt-contract version may digest that edge; schema 46 keeps
+include the predecessor edge. The encrypted provenance artifact authenticates
+the exported bytes as a whole, and the independent recovery-close predecessor
+checks bind the portable version-one chain. A future receipt-contract version
+may digest that edge; schema 46 keeps
 existing observation hashes stable.
 
 `brain provenance-repair <manifest> --source <name> --target

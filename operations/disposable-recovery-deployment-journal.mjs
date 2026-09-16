@@ -87,6 +87,32 @@ const SENSITIVE_FIELD_NAMES = new Set([
 ]);
 
 const PHASE_PLAN = Object.freeze({
+  source_provision: Object.freeze([
+    Object.freeze({ step: "create_d1", effect: "create_d1_database" }),
+    Object.freeze({ step: "create_vectorize", effect: "create_vectorize_index" }),
+    ...["source", "client", "category", "top_folder", "platform", "document_date"]
+      .map((name) => Object.freeze({
+        step: `create_metadata_${name}`,
+        effect: "create_vectorize_metadata_index",
+      })),
+    Object.freeze({ step: "create_worker_identity", effect: "create_worker_identity" }),
+    Object.freeze({
+      step: "initialize_source_schema",
+      effect: "initialize_d1_schema",
+    }),
+    Object.freeze({ step: "create_active_baseline", effect: "create_worker_baseline" }),
+  ]),
+  target_provision: Object.freeze([
+    Object.freeze({ step: "create_d1", effect: "create_d1_database" }),
+    Object.freeze({ step: "create_vectorize", effect: "create_vectorize_index" }),
+    ...["source", "client", "category", "top_folder", "platform", "document_date"]
+      .map((name) => Object.freeze({
+        step: `create_metadata_${name}`,
+        effect: "create_vectorize_metadata_index",
+      })),
+    Object.freeze({ step: "create_worker_identity", effect: "create_worker_identity" }),
+    Object.freeze({ step: "create_active_baseline", effect: "create_worker_baseline" }),
+  ]),
   source: Object.freeze([
     Object.freeze({
       step: "upload_active_version",
@@ -666,6 +692,57 @@ function assertProviderMetadata(value) {
 }
 
 function assertResult(value, effect) {
+  if (effect === "create_d1_database") {
+    if (!exactKeys(value, ["database_id"]) ||
+        !UUID_RE.test(String(value.database_id || ""))) {
+      refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_RESULT_INVALID");
+    }
+    return Object.freeze({ database_id: value.database_id });
+  }
+  if (effect === "create_vectorize_index") {
+    if (!exactKeys(value, ["accepted", "created_on"]) || value.accepted !== true ||
+        typeof value.created_on !== "string" || !Number.isFinite(Date.parse(value.created_on))) {
+      refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_RESULT_INVALID");
+    }
+    return Object.freeze({ accepted: true, created_on: value.created_on });
+  }
+  if (effect === "create_vectorize_metadata_index") {
+    if (!exactKeys(value, ["index_type", "property_name"]) ||
+        !["string", "number"].includes(value.index_type) ||
+        !["source", "client", "category", "top_folder", "platform", "document_date"]
+          .includes(value.property_name)) {
+      refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_RESULT_INVALID");
+    }
+    return Object.freeze({
+      property_name: value.property_name,
+      index_type: value.index_type,
+    });
+  }
+  if (effect === "create_worker_identity") {
+    if (!exactKeys(value, ["worker_id"]) ||
+        !/^[a-f0-9]{32}$/iu.test(String(value.worker_id || ""))) {
+      refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_RESULT_INVALID");
+    }
+    return Object.freeze({ worker_id: String(value.worker_id).toLowerCase() });
+  }
+  if (effect === "create_worker_baseline") {
+    if (!exactKeys(value, ["version_id"]) ||
+        !UUID_RE.test(String(value.version_id || ""))) {
+      refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_RESULT_INVALID");
+    }
+    return Object.freeze({ version_id: value.version_id });
+  }
+  if (effect === "initialize_d1_schema") {
+    if (!exactKeys(value, ["migration_inventory_sha256", "schema_version"]) ||
+        value.schema_version !== 46 ||
+        !SHA256_RE.test(String(value.migration_inventory_sha256 || ""))) {
+      refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_RESULT_INVALID");
+    }
+    return Object.freeze({
+      migration_inventory_sha256: value.migration_inventory_sha256,
+      schema_version: 46,
+    });
+  }
   if (effect === "create_worker_version") {
     if (!exactKeys(value, ["version_id"]) ||
         !UUID_RE.test(String(value.version_id || ""))) {
@@ -740,7 +817,7 @@ function assertRecord(record, index) {
 }
 
 function analyzeRecords(records) {
-  if (!Array.isArray(records) || records.length > 6) {
+  if (!Array.isArray(records) || records.length > 24) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_MALFORMED");
   }
   if (records.length === 0) {
@@ -1123,7 +1200,7 @@ export async function runJournaledDisposableRecoveryDeploymentMutation(
   if (unexpectedDependencies.length !== 0) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_DEPENDENCY_INVALID");
   }
-  if (!exactKeys(options, [
+  const requiredKeys = [
     "binding",
     "effect",
     "expectedJournalDirectory",
@@ -1133,7 +1210,9 @@ export async function runJournaledDisposableRecoveryDeploymentMutation(
     "request",
     "step",
     "validate",
-  ])) {
+  ];
+  if (!isPlainObject(options) || requiredKeys.some((key) => !Object.hasOwn(options, key)) ||
+      Object.keys(options).some((key) => ![...requiredKeys, "reconcile"].includes(key))) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_INPUT_INVALID");
   }
   const {
@@ -1144,11 +1223,13 @@ export async function runJournaledDisposableRecoveryDeploymentMutation(
     mutate,
     phase,
     request,
+    reconcile,
     step,
     validate,
   } = options;
   assertOperation(phase, step, effect);
-  if (typeof mutate !== "function" || typeof validate !== "function") {
+  if (typeof mutate !== "function" || typeof validate !== "function" ||
+      reconcile !== undefined && typeof reconcile !== "function") {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_DEPENDENCY_INVALID");
   }
   // Journal identity is a one-time immutable semantic projection. Raw bodies,
@@ -1181,56 +1262,102 @@ export async function runJournaledDisposableRecoveryDeploymentMutation(
       assertLeaseStable(lease);
       output = immutableClone(replay.confirmed.result);
     } else {
+      let prepared = null;
+      let retryAfterConfirmedAbsence = false;
       if (state.pending) {
         if (state.pending.step === step &&
             state.pending.request_sha256 !== requestSha256) {
           refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_CONFLICT");
         }
-        refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
-      }
-      const expected = PHASE_PLAN[phase][state.completed.length];
-      if (!expected || expected.step !== step || expected.effect !== effect) {
-        refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_CONFLICT");
-      }
-      const prepared = preparedRecord({
-        phase,
-        step,
-        effect,
-        bindingSha256,
-        requestSha256,
-        sequence: records.length + 1,
-      });
-      try {
-        records = appendRecord(context, records, prepared);
-      } catch (error) {
-        if (error instanceof DisposableRecoveryDeploymentJournalError) throw error;
-        refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_WRITE_FAILED");
+        if (state.pending.step !== step || state.pending.effect !== effect ||
+            reconcile === undefined) {
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+        }
+        prepared = state.pending;
+        let reconciliation;
+        try {
+          assertLeaseStable(lease);
+          reconciliation = await reconcile(requestSnapshot.value);
+          assertLeaseStable(lease);
+        } catch {
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+        }
+        if (exactKeys(reconciliation, ["outcome", "value"]) &&
+            reconciliation.outcome === "confirmed") {
+          let confirmedValue;
+          try {
+            confirmedValue = assertConfirmedValue(
+              await validate(reconciliation.value), effect,
+            );
+            assertLeaseStable(lease);
+          } catch {
+            refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+          }
+          try {
+            appendRecord(context, records, confirmedRecord(prepared, confirmedValue));
+          } catch {
+            refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+          }
+          output = immutableClone(confirmedValue.result);
+        } else if (exactKeys(reconciliation, ["outcome"]) &&
+            reconciliation.outcome === "resume_safe") {
+          retryAfterConfirmedAbsence = true;
+        } else {
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+        }
+      } else {
+        const expected = PHASE_PLAN[phase][state.completed.length];
+        if (!expected || expected.step !== step || expected.effect !== effect) {
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_CONFLICT");
+        }
+        prepared = preparedRecord({
+          phase,
+          step,
+          effect,
+          bindingSha256,
+          requestSha256,
+          sequence: records.length + 1,
+        });
+        try {
+          records = appendRecord(context, records, prepared);
+        } catch (error) {
+          if (error instanceof DisposableRecoveryDeploymentJournalError) throw error;
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_WRITE_FAILED");
+        }
       }
 
-      let providerResult;
-      try {
-        assertLeaseStable(lease);
-        providerResult = await mutate(requestSnapshot.value);
-        assertLeaseStable(lease);
-      } catch {
-        refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
-      }
+      if (output === undefined) {
+        // A repeated call is authorized only after the caller's read-only
+        // reconciler returned the closed `resume_safe` result. Provider-side
+        // uniqueness still has to reject a competing create in the gap.
+        if (state.pending && !retryAfterConfirmedAbsence) {
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+        }
+        let providerResult;
+        try {
+          assertLeaseStable(lease);
+          providerResult = await mutate(requestSnapshot.value);
+          assertLeaseStable(lease);
+        } catch {
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+        }
 
-      let confirmedValue;
-      try {
-        confirmedValue = assertConfirmedValue(await validate(providerResult), effect);
-        assertLeaseStable(lease);
-      } catch {
-        refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
-      }
+        let confirmedValue;
+        try {
+          confirmedValue = assertConfirmedValue(await validate(providerResult), effect);
+          assertLeaseStable(lease);
+        } catch {
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+        }
 
-      const confirmed = confirmedRecord(prepared, confirmedValue);
-      try {
-        appendRecord(context, records, confirmed);
-      } catch {
-        refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+        const confirmed = confirmedRecord(prepared, confirmedValue);
+        try {
+          appendRecord(context, records, confirmed);
+        } catch {
+          refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_AMBIGUOUS");
+        }
+        output = immutableClone(confirmedValue.result);
       }
-      output = immutableClone(confirmedValue.result);
     }
   } catch (error) {
     failure = error;

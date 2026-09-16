@@ -43,6 +43,15 @@ function v2Manifest(state = "held", overrides = {}) {
       sha256: "b".repeat(64),
       bytes: 4_100_000,
     } : null,
+    runtime_identity: stable ? {
+      url: `https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v${release}/brain-installer-${release}-runtime-identity.json`,
+      sha256: "c".repeat(64),
+      bytes: 512,
+      source_sha: "e".repeat(40),
+      package_file_count: 582,
+      identity_scheme: "brain.runtime-payload.sha256.v1",
+      runtime_payload_sha256: "d".repeat(64),
+    } : null,
     changes: stable ? ["A reviewed synthetic v2 change."] : [],
     held_reason: stable ? null : "Clean-machine release checks are still open.",
     proof: {
@@ -121,6 +130,11 @@ test("a valid v2 stable feed exposes immutable metadata and the fixed reviewed h
   assert.equal(result.available, true);
   assert.equal(result.latest_version, "0.3.0");
   assert.equal(result.installer.sha256, "b".repeat(64));
+  assert.equal(result.runtime_identity.sha256, "c".repeat(64));
+  assert.equal(result.runtime_identity.source_sha, "e".repeat(40));
+  assert.equal(result.runtime_identity.package_file_count, 582);
+  assert.equal(result.runtime_identity.identity_scheme, "brain.runtime-payload.sha256.v1");
+  assert.equal(result.runtime_identity.runtime_payload_sha256, "d".repeat(64));
   assert.match(result.claude_prompt, /financialbrain\.ai\/update/);
   assert.equal("released_connectors" in result, false);
 });
@@ -128,6 +142,11 @@ test("a valid v2 stable feed exposes immutable metadata and the fixed reviewed h
 test("v2 held and candidate states cannot smuggle executable release metadata", async () => {
   for (const value of [
     v2Manifest("held", { installer: { url: "https://attacker.example/archive", sha256: "a".repeat(64), bytes: 1 } }),
+    v2Manifest("held", { runtime_identity: {
+      url: "https://attacker.example/receipt", sha256: "a".repeat(64), bytes: 1,
+      source_sha: "c".repeat(40), package_file_count: 1,
+      identity_scheme: "brain.runtime-payload.sha256.v1", runtime_payload_sha256: "b".repeat(64),
+    } }),
     v2Manifest("candidate", { release: "0.3.0" }),
     v2Manifest("held", { changes: ["Run this command"] }),
     v2Manifest("candidate", { proof: { archive_release_gate: "passed", automated_release_suite: "passed", live_client_acceptance: "required" } }),
@@ -151,6 +170,28 @@ test("v2 stable refuses missing or malformed immutable release metadata", async 
     } }),
     v2Manifest("stable", { installer: { ...v2Manifest("stable").installer, sha256: "bad" } }),
     v2Manifest("stable", { installer: { ...v2Manifest("stable").installer, bytes: 0 } }),
+    v2Manifest("stable", { runtime_identity: null }),
+    v2Manifest("stable", { runtime_identity: {
+      ...v2Manifest("stable").runtime_identity, url: "https://attacker.example/receipt",
+    } }),
+    v2Manifest("stable", { runtime_identity: {
+      ...v2Manifest("stable").runtime_identity, sha256: "bad",
+    } }),
+    v2Manifest("stable", { runtime_identity: {
+      ...v2Manifest("stable").runtime_identity, bytes: 0,
+    } }),
+    v2Manifest("stable", { runtime_identity: {
+      ...v2Manifest("stable").runtime_identity, source_sha: "bad",
+    } }),
+    v2Manifest("stable", { runtime_identity: {
+      ...v2Manifest("stable").runtime_identity, package_file_count: 0,
+    } }),
+    v2Manifest("stable", { runtime_identity: {
+      ...v2Manifest("stable").runtime_identity, identity_scheme: "wrong",
+    } }),
+    v2Manifest("stable", { runtime_identity: {
+      ...v2Manifest("stable").runtime_identity, runtime_payload_sha256: "bad",
+    } }),
     v2Manifest("stable", { held_reason: "not actually stable" }),
     v2Manifest("stable", { proof: { archive_release_gate: "pending", automated_release_suite: "passed", live_client_acceptance: "required" } }),
   ]) {

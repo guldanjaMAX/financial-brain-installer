@@ -354,6 +354,11 @@ test("the Windows owner guide requires a fresh clean checkout and exact SHA equa
   assert.match(guide, /can be quiet for several minutes/i);
   assert.match(guide, /browser closes.*127\.0\.0\.1:4176.*do not rerun the launcher/is);
   assert.match(guide, /Do not run `npm ci`/i);
+  assert.match(guide, /schema version 3/i);
+  assert.match(guide, /`intended_architecture: x64`/i);
+  assert.match(guide, /native x64 Windows.*x64 Node\.js process/is);
+  assert.match(guide, /Windows on ARM64 does not qualify.*emulation/is);
+  assert.match(guide, /verified native Windows OS architecture.*verified Node process architecture/is);
   assert.match(guide, /Terminate batch job \(Y\/N\)\?/);
   assert.match(guide, /npm\.cmd run rehearse:onboarding/);
 
@@ -361,10 +366,26 @@ test("the Windows owner guide requires a fresh clean checkout and exact SHA equa
     const powerShellBlocks = [...renderedGuide.matchAll(/```powershell\r?\n([\s\S]*?)```/g)];
     assert.equal(powerShellBlocks[0][1].trim().split(/\r?\n/).length, 1,
       "the owner launcher must remain one copy-safe command with LF or CRLF");
-    assert.match(powerShellBlocks[0][1], /-ExpectedSha "<EXACT 40-CHARACTER LOWERCASE SHA FROM THE TECHNICIAN>"/);
+    assert.match(powerShellBlocks[0][1],
+      /-ExpectedSha "<EXACT 40-CHARACTER LOWERCASE SHA FROM THE TECHNICIAN>".*-ExpectedRuntimeIdentityScheme "brain\.runtime-payload\.sha256\.v1".*-ExpectedRuntimeSha256 "<EXACT 64-CHARACTER LOWERCASE SHA-256 FROM RELEASE\.JSON>"/);
   }
 
   assert.match(launcher, /WindowsBuiltInRole\]::Administrator/);
+  assert.match(launcher, /RuntimeInformation\]::OSArchitecture/);
+  assert.match(launcher, /\$nativeArchitecture -cne "X64"/);
+  assert.match(launcher, /& \$node\.Source -p "process\.arch"/);
+  assert.match(launcher, /\$nodeArchitectureOutput\[0\]\)\.Trim\(\) -cne "x64"/);
+  assert.match(launcher, /Windows on ARM64 does not qualify even when it emulates x64 Node/i);
+  assert.match(launcher, /Native Windows OS architecture: x64 confirmed/i);
+  assert.match(launcher, /Node process architecture: x64 confirmed/i);
+  assert.match(launcher,
+    /\$ExpectedRuntimeIdentityScheme -cne "brain\.runtime-payload\.sha256\.v1"/);
+  assert.match(launcher, /\$ExpectedRuntimeSha256 -cnotmatch '\^\[0-9a-f\]\{64\}\$'/);
+  assert.match(launcher, /Sealed runtime identity scheme: \$ExpectedRuntimeIdentityScheme/);
+  assert.match(launcher, /Expected runtime payload SHA-256: \$ExpectedRuntimeSha256/);
+  assert.match(launcher, /Installed runtime observation: not run by this synthetic rehearsal/);
+  assert.doesNotMatch(launcher, /Add-Type|GetNativeSystemInfo/);
+  assert.doesNotMatch(launcher, /\$env:PROCESSOR_ARCHITECTURE|\$env:PROCESSOR_ARCHITEW6432/i);
   assert.match(launcher, /OrdinalIgnoreCase/);
   assert.match(launcher, /rev-parse HEAD/);
   assert.match(launcher, /status --porcelain=v1 --untracked-files=all/);
@@ -381,6 +402,14 @@ test("the Windows owner guide requires a fresh clean checkout and exact SHA equa
   assert.ok(
     launcher.indexOf('$env:BRAIN_VISUAL_PORT = "4177"') < launcher.indexOf("& $node.Source $rehearsal"),
     "the launcher must bind its reviewed fixture port before starting Node",
+  );
+  assert.ok(
+    launcher.indexOf("$nativeArchitectureCode -ne 9") < launcher.indexOf("& $node.Source $rehearsal"),
+    "the native Windows x64 refusal must run before the rehearsal starts",
+  );
+  assert.ok(
+    launcher.indexOf('$node.Source -p "process.arch"') < launcher.indexOf("& $node.Source $rehearsal"),
+    "the exact Node process architecture refusal must run before the rehearsal starts",
   );
   assert.match(launcher, /Do not run npm ci or any npm command yourself/i);
   assert.match(launcher, /Local-only synthetic data: confirmed/i);

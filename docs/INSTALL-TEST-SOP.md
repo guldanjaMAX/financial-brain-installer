@@ -37,12 +37,12 @@ live in the operator's private bench note, outside this repo. What matters publi
   the Vectorize index. No `wrangler login` is required anywhere in the flow.
 
 ⚠️ **The test account is not empty.** It also hosts a live preview brain. Every
-teardown and cleanup MUST target test resources by exact name (allowlist), and
-must never sweep the account. `scripts/teardown-test-brain.mjs` enforces this:
-it refuses any name that does not look like a test resource, refuses any name
-matching `BRAIN_TEARDOWN_PROTECTED`, binds its preview to opaque exact-account
-and exact-resource-instance hashes, and performs no deletion. Its `--commit`
-path currently refuses with `TEARDOWN_COMMIT_DISABLED` before provider access.
+teardown and cleanup MUST target the fixed campaign resources and must never
+sweep the account. The installed `brain-v048-disposable-teardown` broker binds
+each role to exact account and resource-instance evidence, a fresh preview,
+its own approval, the required predecessor receipt, and a durable ambiguity-safe
+journal. The historical `scripts/teardown-test-brain.mjs` path is retired and
+refuses every preview or mutation form before credential or provider access.
 
 Start on the Free plan with a small rehearsal corpus (about 50 documents).
 Free-tier limits are themselves a scheduled break-test; if the corpus
@@ -55,12 +55,22 @@ never touches a test install.
 ## Teardown
 
 The installer has no uninstall command. The disposable Worker script, D1
-database, and Vectorize index can be deleted through Cloudflare, but this
-candidate does not yet contain an accepted mutation-capable teardown path.
-`scripts/teardown-test-brain.mjs` is a read-only exact-instance preview. Its
-automatic commit path is intentionally disabled after review found that name
-binding alone could not safely establish the resource instances or executable
-bytes receiving deletion authority.
+database, and Vectorize index can be deleted through Cloudflare. The current
+offline candidate provides only the installed
+`brain-v048-disposable-teardown` broker. It validates the completed recovery
+plan and state, exact deployment and source-phase receipts, immutable
+implementation bytes, continuous campaign custody and Vectorize mutation
+quiescence, exact resource identities, and a fresh double-captured D1
+deletion-state fingerprint. Source and target use separate ceremonies. The
+target cannot be approved before a verified source teardown receipt. Each
+ceremony deletes Worker, then Vectorize, then D1, with a durable
+ambiguity-safe journal and exact absence checks between actions.
+
+This broker is fixture-tested only. It has not been run against the test
+account and it is not approval to delete, deploy, release, or touch a customer
+Brain. Inspect its fixed command contract with
+`brain-v048-disposable-teardown help`. The historical script cannot perform a
+Cloudflare read or mutation.
 
 Do not begin a cold-install or field campaign until its exact cleanup path is
 reviewed and separately approved. That path must bind the account and all
@@ -191,14 +201,14 @@ offboarding). File defect write-ups with the gate id in the title.
 |---|---|
 | Tier 0 suite | BUILT (`npm test`) |
 | Test account + keychain-held scoped token | BUILT 2026-08-27 (token verified; Vectorize create/delete probe passed). Identifiers in the private bench note. |
-| `scripts/teardown-test-brain.mjs` | PREVIEW ONLY. Exact-name and protected-prefix refusal plus exact opaque account/resource and wrapper/provider-byte binding are locally tested. Automatic commit returns `TEARDOWN_COMMIT_DISABLED`; the earlier historical live delete does not prove this new exact-instance contract. |
+| Disposable teardown | FIXED BROKER IMPLEMENTED LOCALLY, NOT LIVE-TESTED OR APPROVED. The installed `brain-v048-disposable-teardown` entry point provides separate A13 through A16 ceremonies with exact receipt, implementation, custody, quiescence, D1 deletion-state, source-before-target, journal, and approval gates. The retired `scripts/teardown-test-brain.mjs` path refuses before credential or provider access. |
 | `install-matrix.yml` (Tier 1A) | BUILT 2026-09-09. Required by `release.yml`; verifies the current public kit and package install on four hosted runners. It does not provision Cloudflare or prove the tagged candidate is already public. |
-| Disposable Cloudflare recovery campaign (Tier 1B) | IMPLEMENTED LOCALLY, FIELD BLOCKED. The split dispatcher, 6,001-document seed/replay, interruption/resume, exact retrieval/refusal, and private receipts have fixture proof. Exact-candidate Cloudflare evidence and an accepted mutation-capable teardown path remain open. |
+| Disposable Cloudflare recovery campaign (Tier 1B) | IMPLEMENTED LOCALLY, FIELD BLOCKED. The split dispatcher, 6,001-document seed/replay, interruption/resume, exact retrieval/refusal, private receipts, and receipt-bound teardown have fixture proof. Exact-candidate Cloudflare evidence, explicit provider-action approvals, and supervised live execution remain open. |
 | Deployed test-Brain Playwright suite (Tier 2) | TODO. Local synthetic browser regressions in ordinary CI are not this live gate. |
 | Tart bench (Tier 3, Mac) | BUILT 2026-08-28. Tart 2.32.1 + `macos-tahoe-base` (26.6.2); clone boots, SSH drivable, full install verified end to end in 8s. ⚠️ Requires WARP disconnected. |
 | UTM bench (Tier 3, Windows) | TODO (disk now available: 35GB free after 2026-08-27 cleanup) |
 | Golden-20 eval harness | BUILT (`brain eval <manifest> --golden-20`) |
-| `scripts/check-install-page-version.mjs` | BUILT 2026-08-28. Compares the live install page's pinned version to the latest GitHub release. On 2026-08-29 it exits 1 because the page ships v0.1.19 while GitHub latest is v0.1.23. Not in `npm test` because it needs the network. |
+| `scripts/check-install-page-version.mjs` | BUILT 2026-08-28; CURRENT CONTRACT UPDATED. Validates the public update manifest and machine-readable update/install guides. In stable mode it also checks the matching latest immutable release and independently downloaded archive receipt. It does not fetch or render the visible install page, prove deployed owner-app bytes, or replace a cache-busted desktop/mobile visual check after an authorized deployment. Not in `npm test` because it needs the network. |
 
 ---
 

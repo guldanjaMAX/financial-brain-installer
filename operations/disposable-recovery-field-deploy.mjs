@@ -27,6 +27,7 @@ import {
   assertDisposableRecoverySourcePreflightReceipt,
   assertDisposableRecoveryTargetPhaseReceipt,
   assertDisposableRecoveryTargetPreflightReceipt,
+  disposableRecoveryVectorizeMutationQuiescenceClaim,
   disposableRecoverySourceA2Fingerprint,
   disposableRecoveryTargetA4Fingerprint,
   readDisposableRecoveryDeploymentReceipt,
@@ -58,6 +59,15 @@ import {
   resumePrivateAggregateReceiptReservation,
   validatePrivateAggregateReceiptReservation,
 } from "./private-aggregate-receipt.mjs";
+import {
+  assertDisposableRecoveryFieldKeychainVerificationBinding,
+} from "./disposable-recovery-field-keychain-prep.mjs";
+import {
+  assertCloudflareDisposableCampaignCustodyProof,
+} from "./cloudflare-disposable-deployment-transport.mjs";
+import {
+  assertCloudflareDisposableCampaignSemanticAuthority,
+} from "./cloudflare-disposable-deployment-provider.mjs";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const PROVIDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -69,6 +79,20 @@ const TARGET_PAUSED_TAG = "v048-field-target-paused";
 const TARGET_ACTIVE_TAG = "v048-field-target-active";
 const SEED_RECEIPT_NAME = "v048-disposable-seed-receipt.json";
 const MAX_SEED_RECEIPT_BYTES = 2 * 1024 * 1024;
+const NETWORK_ISOLATION_FIELDS = Object.freeze([
+  "worker_identity_proved", "worker_identity_sha256",
+  "workers_dev_identity_proved", "worker_previews_disabled",
+  "worker_cache_enabled", "worker_extra_exports", "worker_tail_consumers",
+  "worker_assets", "worker_logpush", "cron_triggers", "routes",
+  "custom_domains",
+]);
+const CAMPAIGN_CUSTODY_COUNT_FIELDS = Object.freeze([
+  "account_workers", "campaign_workers_reviewed", "campaign_workers_present",
+  "campaign_workers_absent", "non_campaign_workers",
+  "deployed_non_campaign_workers", "traffic_versions_inspected",
+  "bindings_inspected", "d1_bindings_inspected", "vectorize_bindings_inspected",
+  "campaign_d1_bindings", "campaign_vectorize_bindings",
+]);
 
 export const DISPOSABLE_RECOVERY_SOURCE_JOURNAL_NAME =
   "v048-disposable-source-deployment-journal.jsonl";
@@ -231,6 +255,54 @@ function assertModuleInventorySha256(value) {
   return hash(value);
 }
 
+function assertKeychainBoundExecution(
+  bindingInput,
+  keychainBinding,
+  keychainProof,
+  evidenceRevalidate,
+) {
+  const binding = assertDisposableRecoveryDeploymentBinding(bindingInput);
+  let proof;
+  try {
+    proof = assertDisposableRecoveryFieldKeychainVerificationBinding(
+      keychainProof,
+      keychainBinding,
+      binding.keychain_binding_sha256,
+    );
+  } catch {
+    refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_KEYCHAIN_BINDING_INVALID");
+  }
+  if (keychainBinding.candidate_sha !== binding.candidate_sha ||
+      keychainBinding.candidate_tree_sha !== binding.candidate_tree_sha ||
+      keychainBinding.package_sha256 !== binding.package_sha256 ||
+      keychainBinding.field_receipt_sha256 !== binding.field_receipt_sha256 ||
+      typeof evidenceRevalidate !== "function") {
+    refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_KEYCHAIN_BINDING_INVALID");
+  }
+  const revalidate = async () => {
+    let evidenceValid;
+    let keychainValid;
+    try {
+      evidenceValid = await evidenceRevalidate();
+      if (evidenceValid === true) keychainValid = await proof.revalidate();
+      if (evidenceValid === true && keychainValid === true) {
+        assertDisposableRecoveryFieldKeychainVerificationBinding(
+          proof,
+          keychainBinding,
+          binding.keychain_binding_sha256,
+        );
+      }
+    } catch {
+      refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_KEYCHAIN_BINDING_INVALID");
+    }
+    if (evidenceValid !== true || keychainValid !== true) {
+      refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_KEYCHAIN_BINDING_INVALID");
+    }
+    return true;
+  };
+  return Object.freeze({ binding, keychainProof: proof, revalidate });
+}
+
 function requestBase(binding, phase, operation, role, mode) {
   return {
     schema_version: 2,
@@ -240,6 +312,7 @@ function requestBase(binding, phase, operation, role, mode) {
     role,
     mode,
     campaign_fingerprint: binding.campaign_fingerprint,
+    keychain_binding_sha256: binding.keychain_binding_sha256,
     package_sha256: binding.package_sha256,
     runtime_contract_fingerprint: binding.runtime_contract_fingerprint,
     resource_fingerprint: role === "source"
@@ -394,6 +467,44 @@ function assertResource(value, { empty }) {
   return immutableClone(value);
 }
 
+function assertNetworkIsolation(value) {
+  if (!exactKeys(value, NETWORK_ISOLATION_FIELDS) ||
+      value.worker_identity_proved !== true ||
+      value.workers_dev_identity_proved !== true ||
+      value.worker_previews_disabled !== true ||
+      value.worker_cache_enabled !== false || value.worker_extra_exports !== 0 ||
+      value.worker_tail_consumers !== 0 || value.worker_assets !== false ||
+      value.worker_logpush !== false || value.cron_triggers !== 0 ||
+      value.routes !== 0 || value.custom_domains !== 0) {
+    refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_NETWORK_ISOLATION_INVALID");
+  }
+  hash(value.worker_identity_sha256);
+  return immutableClone(value);
+}
+
+function assertWorkerGeneration(value) {
+  if (!exactKeys(value, [
+    "schema_version", "worker_identity_proved", "worker_generation_proved",
+    "worker_generation_sha256",
+  ]) || value.schema_version !== 1 || value.worker_identity_proved !== true ||
+      value.worker_generation_proved !== true) {
+    refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_WORKER_GENERATION_INVALID");
+  }
+  hash(value.worker_generation_sha256);
+  return immutableClone(value);
+}
+
+function assertRoleProtection(value) {
+  assertNetworkIsolation(value.network_isolation);
+  assertWorkerGeneration(value.worker_generation);
+  return true;
+}
+
+function assertCampaignCustody(value) {
+  try { return immutableClone(assertCloudflareDisposableCampaignCustodyProof(value)); }
+  catch { refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_CAMPAIGN_CUSTODY_INVALID"); }
+}
+
 function assertVersion(value) {
   if (!exactKeys(value, [
     "bindings_sha256", "bindings_without_mode_sha256", "handlers",
@@ -425,7 +536,8 @@ function assertDeployment(value) {
 function assertSourcePin(value, binding, expected = null) {
   if (!exactKeys(value, [
     "active_deployment_id", "active_script_etag", "active_traffic_percent",
-    "active_version_id", "resource", "resource_fingerprint",
+    "active_version_id", "network_isolation", "resource", "resource_fingerprint",
+    "worker_generation",
   ]) || value.resource_fingerprint !== binding.source_resource_fingerprint ||
       value.active_traffic_percent !== 100) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_SOURCE_PIN_INVALID");
@@ -434,6 +546,7 @@ function assertSourcePin(value, binding, expected = null) {
   providerId(value.active_version_id);
   etag(value.active_script_etag);
   assertResource(value.resource, { empty: false });
+  assertRoleProtection(value);
   if (expected && (value.active_version_id !== expected.active_version_id ||
       value.active_script_etag !== expected.active_script_etag ||
       value.active_deployment_id !== expected.active_deployment_id)) {
@@ -445,7 +558,8 @@ function assertSourcePin(value, binding, expected = null) {
 function assertBaseline(value, binding, role) {
   if (!exactKeys(value, [
     "baseline_deployment_id", "baseline_script_etag", "baseline_traffic_percent",
-    "baseline_version_id", "resource", "resource_fingerprint",
+    "baseline_version_id", "network_isolation", "resource", "resource_fingerprint",
+    "worker_generation",
   ]) || value.resource_fingerprint !== (role === "source"
     ? binding.source_resource_fingerprint
     : binding.target_resource_fingerprint) || value.baseline_traffic_percent !== 100) {
@@ -455,6 +569,7 @@ function assertBaseline(value, binding, role) {
   providerId(value.baseline_version_id);
   etag(value.baseline_script_etag);
   assertResource(value.resource, { empty: true });
+  assertRoleProtection(value);
   return immutableClone(value);
 }
 
@@ -468,13 +583,15 @@ function assertSourcePreflightSemantic(value, binding) {
 
 function assertSourceFinalSemantic(value, binding, sourceVersionId) {
   if (!exactKeys(value, ["source"]) || !exactKeys(value.source, [
-    "active_deployment", "active_version", "resource", "resource_fingerprint",
+    "active_deployment", "active_version", "network_isolation", "resource",
+    "resource_fingerprint", "worker_generation",
   ]) || value.source.resource_fingerprint !== binding.source_resource_fingerprint) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_SOURCE_FINAL_INVALID");
   }
   const version = assertVersion(value.source.active_version);
   const deployment = assertDeployment(value.source.active_deployment);
   assertResource(value.source.resource, { empty: true });
+  assertRoleProtection(value.source);
   if (version.version_id !== sourceVersionId ||
       deployment.version_id !== sourceVersionId) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_SOURCE_FINAL_INVALID");
@@ -490,10 +607,22 @@ function sourceReceiptPin(sourcePhaseReceipt) {
   });
 }
 
-function assertTargetPreflightSemantic(value, binding, sourcePhaseReceipt, seedReceipt) {
-  if (!exactKeys(value, ["source", "target"])) {
+function assertTargetPreflightSemantic(
+  value,
+  binding,
+  sourcePhaseReceipt,
+  seedReceipt,
+  vectorizeMutationQuiescence,
+) {
+  if (!exactKeys(value, [
+    "campaign_custody", "source", "target", "vectorize_mutation_quiescence",
+  ]) || !sameValue(
+    value.vectorize_mutation_quiescence,
+    vectorizeMutationQuiescence,
+  )) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_TARGET_PREFLIGHT_INVALID");
   }
+  assertCampaignCustody(value.campaign_custody);
   const source = assertSourcePin(
     value.source,
     binding,
@@ -514,10 +643,18 @@ function assertTargetFinalSemantic(
   seedReceipt,
   pausedVersionId,
   activeVersionId,
+  vectorizeMutationQuiescence,
 ) {
-  if (!exactKeys(value, ["source", "target"]) || !exactKeys(value.target, [
-    "active_version", "paused_deployment", "paused_version", "resource",
-    "resource_fingerprint",
+  if (!exactKeys(value, [
+    "campaign_authority", "campaign_custody", "source", "target",
+    "vectorize_mutation_quiescence",
+  ]) || !sameValue(
+    value.vectorize_mutation_quiescence,
+    vectorizeMutationQuiescence,
+  ) ||
+      !exactKeys(value.target, [
+    "active_version", "network_isolation", "paused_deployment", "paused_version",
+    "resource", "resource_fingerprint", "worker_generation",
   ]) || value.target.resource_fingerprint !== binding.target_resource_fingerprint) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_TARGET_FINAL_INVALID");
   }
@@ -530,6 +667,20 @@ function assertTargetFinalSemantic(
   const activeVersion = assertVersion(value.target.active_version);
   const deployment = assertDeployment(value.target.paused_deployment);
   assertResource(value.target.resource, { empty: true });
+  assertRoleProtection(value.target);
+  assertCampaignCustody(value.campaign_custody);
+  let campaignAuthority;
+  try {
+    campaignAuthority = assertCloudflareDisposableCampaignSemanticAuthority(
+      value.campaign_authority,
+    );
+  } catch {
+    refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_TARGET_FINAL_INVALID");
+  }
+  if (canonical(campaignAuthority.campaign_custody) !==
+      canonical(value.campaign_custody)) {
+    refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_TARGET_FINAL_INVALID");
+  }
   if (source.resource.vector_count !== seedReceipt.projection.vectorize_vectors ||
       pausedVersion.version_id !== pausedVersionId ||
       activeVersion.version_id !== activeVersionId ||
@@ -688,7 +839,7 @@ async function reserveAndFinalizePhase({
   if (!resume && (existsSync(expectedPath) || existsSync(pendingPath))) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_RESUME_REQUIRED");
   }
-  if (resume && (!existsSync(expectedPath) || !existsSync(pendingPath))) {
+  if (resume && (existsSync(expectedPath) || !existsSync(pendingPath))) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_RESUME_NOT_AVAILABLE");
   }
   let output;
@@ -984,14 +1135,22 @@ async function runJournalMutation({
 /** Read-only source preflight. It performs no mutation and creates no journal. */
 export async function runDisposableRecoverySourcePreflight({
   binding: bindingInput,
+  keychainBinding,
+  keychainProof,
   moduleInventorySha256,
   receiptPath,
   expectedReceiptDirectory,
   createProvider,
-  revalidate = () => true,
+  revalidate: evidenceRevalidate,
   now = () => new Date(),
 }) {
-  const binding = assertDisposableRecoveryDeploymentBinding(bindingInput);
+  const authorization = assertKeychainBoundExecution(
+    bindingInput,
+    keychainBinding,
+    keychainProof,
+    evidenceRevalidate,
+  );
+  const { binding, revalidate } = authorization;
   const requests = disposableRecoveryDeploymentRequestPlan(
     binding,
     moduleInventorySha256,
@@ -1044,6 +1203,8 @@ export async function runDisposableRecoverySourcePreflight({
 /** A2 source-only mutation phase. The synthetic seed must run after this. */
 export async function runDisposableRecoverySourcePhase({
   binding: bindingInput,
+  keychainBinding,
+  keychainProof,
   moduleInventorySha256,
   sourcePreflightReceiptPath,
   a2ApprovalFingerprint,
@@ -1051,11 +1212,17 @@ export async function runDisposableRecoverySourcePhase({
   receiptPath,
   expectedReceiptDirectory,
   createProvider,
-  revalidate = () => true,
+  revalidate: evidenceRevalidate,
   now = () => new Date(),
   resume = false,
 }) {
-  const binding = assertDisposableRecoveryDeploymentBinding(bindingInput);
+  const authorization = assertKeychainBoundExecution(
+    bindingInput,
+    keychainBinding,
+    keychainProof,
+    evidenceRevalidate,
+  );
+  const { binding, revalidate } = authorization;
   const directory = assertExpectedDirectory(expectedReceiptDirectory);
   const preflight = readSourcePreflight(sourcePreflightReceiptPath, directory);
   if (!sameBinding(preflight.value.binding, binding) ||
@@ -1240,16 +1407,30 @@ export async function runDisposableRecoverySourcePhase({
 /** Read-only target preflight, bound to the completed source and seed. */
 export async function runDisposableRecoveryTargetPreflight({
   binding: bindingInput,
+  keychainBinding,
+  keychainProof,
   moduleInventorySha256,
   sourcePhaseReceiptPath,
   seedReceiptPath,
   receiptPath,
   expectedReceiptDirectory,
   createProvider,
-  revalidate = () => true,
+  vectorizeMutationQuiescenceFingerprint,
+  revalidate: evidenceRevalidate,
   now = () => new Date(),
 }) {
-  const binding = assertDisposableRecoveryDeploymentBinding(bindingInput);
+  const authorization = assertKeychainBoundExecution(
+    bindingInput,
+    keychainBinding,
+    keychainProof,
+    evidenceRevalidate,
+  );
+  const { binding, revalidate } = authorization;
+  const vectorizeMutationQuiescence =
+    disposableRecoveryVectorizeMutationQuiescenceClaim(
+      binding,
+      vectorizeMutationQuiescenceFingerprint,
+    );
   const directory = assertExpectedDirectory(expectedReceiptDirectory);
   const sourcePhase = readSourcePhase(sourcePhaseReceiptPath, directory);
   const seed = readSeed(seedReceiptPath, directory);
@@ -1285,6 +1466,7 @@ export async function runDisposableRecoveryTargetPreflight({
         requests,
         source_phase_receipt_sha256: sourcePhase.sha256,
         seed_receipt_sha256: seed.sha256,
+        vectorize_mutation_quiescence: vectorizeMutationQuiescence,
       });
       const snapshot = await doubleReadSnapshot({
         provider,
@@ -1297,6 +1479,7 @@ export async function runDisposableRecoveryTargetPreflight({
           binding,
           sourcePhase.value,
           seed.value,
+          vectorizeMutationQuiescence,
         ),
       });
       return {
@@ -1308,6 +1491,7 @@ export async function runDisposableRecoveryTargetPreflight({
         binding,
         source_phase_receipt_sha256: sourcePhase.sha256,
         seed_receipt_sha256: seed.sha256,
+        vectorize_mutation_quiescence: vectorizeMutationQuiescence,
         planned_requests: {
           target_paused_upload_sha256: hashes.target_paused_upload_sha256,
           target_active_upload_sha256: hashes.target_active_upload_sha256,
@@ -1323,6 +1507,8 @@ export async function runDisposableRecoveryTargetPreflight({
 /** A4 target-only phase. It uploads active but deploys only paused. */
 export async function runDisposableRecoveryTargetPhase({
   binding: bindingInput,
+  keychainBinding,
+  keychainProof,
   moduleInventorySha256,
   sourcePhaseReceiptPath,
   seedReceiptPath,
@@ -1332,11 +1518,23 @@ export async function runDisposableRecoveryTargetPhase({
   receiptPath,
   expectedReceiptDirectory,
   createProvider,
-  revalidate = () => true,
+  vectorizeMutationQuiescenceFingerprint,
+  revalidate: evidenceRevalidate,
   now = () => new Date(),
   resume = false,
 }) {
-  const binding = assertDisposableRecoveryDeploymentBinding(bindingInput);
+  const authorization = assertKeychainBoundExecution(
+    bindingInput,
+    keychainBinding,
+    keychainProof,
+    evidenceRevalidate,
+  );
+  const { binding, revalidate } = authorization;
+  const vectorizeMutationQuiescence =
+    disposableRecoveryVectorizeMutationQuiescenceClaim(
+      binding,
+      vectorizeMutationQuiescenceFingerprint,
+    );
   const directory = assertExpectedDirectory(expectedReceiptDirectory);
   const sourcePhase = readSourcePhase(sourcePhaseReceiptPath, directory);
   const seed = readSeed(seedReceiptPath, directory);
@@ -1355,6 +1553,12 @@ export async function runDisposableRecoveryTargetPhase({
   if (a4ApprovalFingerprint !== expectedApproval ||
       preflight.value.source_phase_receipt_sha256 !== sourcePhase.sha256 ||
       preflight.value.seed_receipt_sha256 !== seed.sha256) {
+    refuse("DISPOSABLE_RECOVERY_TARGET_APPROVAL_INVALID");
+  }
+  if (!sameValue(
+    preflight.value.vectorize_mutation_quiescence,
+    vectorizeMutationQuiescence,
+  )) {
     refuse("DISPOSABLE_RECOVERY_TARGET_APPROVAL_INVALID");
   }
   const requests = disposableRecoveryDeploymentRequestPlan(
@@ -1411,6 +1615,7 @@ export async function runDisposableRecoveryTargetPhase({
         source_phase_receipt_sha256: sourcePhase.sha256,
         seed_receipt_sha256: seed.sha256,
         target_preflight_receipt_sha256: preflight.sha256,
+        vectorize_mutation_quiescence: vectorizeMutationQuiescence,
       });
       const opening = await doubleReadSnapshot({
         provider,
@@ -1423,6 +1628,7 @@ export async function runDisposableRecoveryTargetPhase({
           binding,
           sourcePhase.value,
           seed.value,
+          vectorizeMutationQuiescence,
         ),
       });
       if (opening.receipt.stable_semantic_sha256 !==
@@ -1496,6 +1702,7 @@ export async function runDisposableRecoveryTargetPhase({
           seed.value,
           pausedVersionId,
           activeVersionId,
+          vectorizeMutationQuiescence,
         ),
       });
       const records = readJournal(exactJournalPath, directory);
@@ -1544,6 +1751,7 @@ export async function runDisposableRecoveryTargetPhase({
         seed_receipt_sha256: seed.sha256,
         target_preflight_receipt_sha256: preflight.sha256,
         a4_approval_fingerprint: a4ApprovalFingerprint,
+        vectorize_mutation_quiescence: vectorizeMutationQuiescence,
         journal: {
           run_id: binding.run_id,
           through_sequence: summary.through_sequence,
@@ -1583,6 +1791,7 @@ export async function runDisposableRecoveryTargetPhase({
               readbackManifestSha256("target_paused_deployment", final.receipt),
           },
         },
+        final_semantic: final.semantic,
         final_snapshot: final.receipt,
       };
       assertDisposableRecoveryDeploymentReceiptChain({

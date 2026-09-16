@@ -210,15 +210,25 @@ assert.deepEqual(timeoutSelections, [
     path: "test/cloudflare-recovery-adapter-extra.test.mjs",
     timeout: DEFAULT_REGRESSION_TIMEOUT_MS,
   },
-], "only the exact heavy adapter proof gets the reviewed fifteen-minute bound");
+], "only the exact heavy adapter proof gets the reviewed forty-five-minute bound");
 assert.equal(DEFAULT_REGRESSION_TIMEOUT_MS, 300_000);
-assert.equal(CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS, 900_000);
+assert.equal(CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS, 45 * 60 * 1000);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: null, signal: "SIGTERM" }))[0].passed, false);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"], testPlatform: "win32" }], () => { throw new Error("must not run on this host"); }, "darwin")[0].skipped, true);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: 0, error: new Error("synthetic timeout") }))[0].passed, false);
 assert.deepEqual(regressionEnvironment({ PATH: "/synthetic-bin", CLOUDFLARE_API_TOKEN: "fixture", UNRELATED_PRIVATE_VALUE: "fixture" }), { PATH: "/synthetic-bin" });
 const windowsRuntime = { USERNAME: "fixture", USERDOMAIN: "LOCAL", HOMEDRIVE: "C:", HOMEPATH: "\\Users\\fixture", ComSpec: "C:\\Windows\\System32\\cmd.exe" };
 assert.deepEqual(regressionEnvironment({ ...windowsRuntime, NPM_TOKEN: "fixture" }), windowsRuntime);
+const npmCacheRuntime = {
+  ...windowsRuntime,
+  NPM_CONFIG_CACHE: "C:\\npm\\cache",
+  npm_config_cache: "C:\\npm\\cache",
+};
+assert.deepEqual(
+  regressionEnvironment({ ...npmCacheRuntime, NPM_TOKEN: "fixture", NODE_AUTH_TOKEN: "fixture" }),
+  npmCacheRuntime,
+  "the reviewed npm cache path survives while registry credentials remain scrubbed",
+);
 const npmFixture = mkdtempSync(join(tmpdir(), "brain-audit-npm-"));
 try {
   mkdirSync(join(npmFixture, "bin"));

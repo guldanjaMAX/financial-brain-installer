@@ -298,13 +298,17 @@ is planning only until a reviewed change binds it to the final candidate SHA.
    the credential in source, artifacts, command lines, or logs.
 7. The workflow downloads the already-tested artifact without repacking, makes
    byte-identical brain-installer-<version>.tgz and brain-installer.tgz names,
-   creates a private draft, and verifies both assets. It pins the draft's numeric
+   and downloads the exact raw runtime-identity receipt produced by the same CI
+   run. It creates one private draft with all three assets and verifies each
+   asset's server-computed byte count and digest. It pins the draft's numeric
    identity and run marker before publishing. Failed cleanup can remove only
    its owned draft and never deletes the Git tag or a published release.
 8. Publication is followed by immutable-state and independent byte checks and a
    fresh-prefix installed CLI check. Only the reviewed exact archive, version,
-   digest, and byte count may enter stable website metadata afterward. A green
-   held-page check means the hold is working, not that promotion is allowed.
+   digest, byte count, source commit, package file count, runtime identity
+   scheme, and runtime payload digest may enter stable website metadata
+   afterward. A green held-page check means the hold is working, not that
+   promotion is allowed.
 
 Public doorway monitoring uses the schema-2 /update/manifest.json and matching
 /update/agent.md. The unlisted /install/agent.md separately pins its supervised
@@ -314,10 +318,61 @@ of releases/latest. Do not rewrite or resync a sealed field kit casually.
 
 Run `node scripts/check-install-page-version.mjs` to check the current public
 contracts. `--require-stable` additionally refuses held/candidate states. In
-stable mode it requires the matching latest immutable release, both asset
-receipts, and the independently downloaded versioned archive digest. It does
-not prove a client's update or physical acceptance. Verify final website
-behavior at desktop and mobile widths after authorized deployment.
+stable mode it requires the matching latest immutable release, both package
+names, the versioned runtime-identity receipt, and independent downloads of the
+archive and canonical receipt bytes. The stable manifest binds the receipt's
+URL, size, digest, source commit, package file count, identity scheme, and
+runtime payload digest. It does not prove a client's update or physical
+acceptance. Verify final website behavior at desktop and mobile widths after
+authorized deployment.
+
+## Close the held disposable recovery gate
+
+Use only the exact installed-package entry points documented in
+[`v0.4.8-disposable-vector-field-plan.md`](./release-evidence/v0.4.8-disposable-vector-field-plan.md).
+Read each supported help surface from that package before preparing private
+arguments:
+
+```bash
+brain-v048-disposable-keychain-prep help
+brain-v048-disposable-deploy help
+brain-v048-disposable-teardown help
+brain-v048-disposable-closeout help
+```
+
+Target evaluation accepts only the fully specified `preview` and `execute`
+forms in the field plan. An incomplete or unknown invocation refuses before it
+reads private evidence.
+
+The fixed causal order is K0; A1 source provisioning; separately approved A3
+target provisioning; full plan freeze; A2 source deployment; the synthetic
+seed; A4 target deployment; provider-neutral recovery through exact active
+promotion; target evaluation and private A12 retention; source A13 preview and
+separately approved A14 deletion; target A15 preview and separately approved
+A16 deletion; then the held A17 Keychain closeout. Aggregate publication is a
+later independent decision. No command in this ladder authorizes it.
+
+K0 has no provider path. It prepares only four fixed campaign Keychain values
+under one exact approval and has a separate previewed reset for interrupted
+work. Every A1 through A4 provider boundary revalidates the same K0 receipt and
+four values. Target evaluation changes neither corpus nor provider state,
+although its private questions may create ordinary aggregate usage records.
+Its fixed A12 receipt remains in the campaign receipt directory for teardown.
+
+The source and target teardown ceremonies have separate approvals, exact
+receipt-bound identities, ambiguity journals, source-before-target ordering,
+and Worker, Vectorize, D1 deletion order. A17 is implemented offline and
+locally fixture-tested, but remains held, unfielded, and uncertified. It has no
+field or live proof and grants no release authority. Any execution must still
+prove that it retains the exact manifests, plan, state, package, field receipt,
+recovery wrapper, golden, receipt directory, and encrypted provenance artifact
+while deleting only the four campaign values
+and preserving the shared token. Transient provider runtime directories are
+not retained evidence.
+
+These paths remain held and unapproved until the exact candidate passes its
+offline and live gates. Their presence in a package is not authority for a
+provider call, release, customer update, or public change.
 
 ## Update an existing Brain
 

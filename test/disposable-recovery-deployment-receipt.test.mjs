@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -20,10 +21,23 @@ import {
   disposableRecoveryDeploymentCampaignFingerprint,
   disposableRecoverySourceA2Fingerprint,
   disposableRecoveryTargetA4Fingerprint,
+  disposableRecoveryVectorizeMutationQuiescenceClaim,
   legacyDisposableRecoveryDeploymentApprovalFingerprint,
   readDisposableRecoveryDeploymentReceipt,
   readDisposableRecoverySourcePreflightReceipt,
 } from "../operations/disposable-recovery-deployment-receipt.mjs";
+import {
+  v048VectorizeMutationQuiescenceApprovalFingerprint,
+} from "../operations/v048-vectorize-mutation-quiescence-contract.mjs";
+import {
+  createDisposableCampaignAuthorityFixture,
+} from "./helpers/disposable-campaign-authority.mjs";
+
+const SOURCE_VERSION_ID = "10000000-0000-4000-8000-000000000001";
+const SOURCE_DEPLOYMENT_ID = "10000000-0000-4000-8000-000000000002";
+const TARGET_PAUSED_VERSION_ID = "20000000-0000-4000-8000-000000000001";
+const TARGET_ACTIVE_VERSION_ID = "30000000-0000-4000-8000-000000000001";
+const TARGET_DEPLOYMENT_ID = "20000000-0000-4000-8000-000000000002";
 
 function hash(index) {
   return Number(index).toString(16).padStart(64, "0");
@@ -38,6 +52,7 @@ function bindingFixture(runId = "10000000-0000-4000-8000-000000000001") {
     candidate_tree_sha: "2".repeat(40),
     field_receipt_sha256: hash(2),
     field_receipt_run_id: "20000000-0000-4000-8000-000000000002",
+    keychain_binding_sha256: hash(14),
     package_filename: "brain-installer-0.4.8.tgz",
     package_bytes: 123_456,
     package_sha256: hash(3),
@@ -65,14 +80,83 @@ function bindingFixture(runId = "10000000-0000-4000-8000-000000000001") {
   };
 }
 
-function snapshot(start) {
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function digest(value) {
+  return createHash("sha256").update(String(value)).digest("hex");
+}
+
+function snapshot(start, semantic = null) {
+  const semanticSha256 = semantic === null ? hash(start + 2) : digest(canonical(semantic));
   return {
     first_raw_evidence_manifest_sha256: hash(start),
     second_raw_evidence_manifest_sha256: hash(start + 1),
-    first_semantic_sha256: hash(start + 2),
-    second_semantic_sha256: hash(start + 2),
-    stable_semantic_sha256: hash(start + 2),
+    first_semantic_sha256: semanticSha256,
+    second_semantic_sha256: semanticSha256,
+    stable_semantic_sha256: semanticSha256,
   };
+}
+
+function networkIsolation(role) {
+  return {
+    worker_identity_proved: true,
+    worker_identity_sha256: digest(`${role}-worker-identity`),
+    workers_dev_identity_proved: true,
+    worker_previews_disabled: true,
+    worker_cache_enabled: false,
+    worker_extra_exports: 0,
+    worker_tail_consumers: 0,
+    worker_assets: false,
+    worker_logpush: false,
+    cron_triggers: 0,
+    routes: 0,
+    custom_domains: 0,
+  };
+}
+
+function semanticVersion(evidence) {
+  return {
+    bindings_sha256: evidence.bindings_sha256,
+    bindings_without_mode_sha256: evidence.bindings_without_mode_sha256,
+    handlers: ["fetch", "scheduled"],
+    named_handlers_count: 0,
+    script_etag: evidence.script_etag,
+    version_id: evidence.version_id,
+  };
+}
+
+function semanticResource() {
+  return {
+    custom_domains_count: 0,
+    d1_exists: true,
+    d1_name_and_id_exact: true,
+    previews_enabled: false,
+    routes_count: 0,
+    schedules_count: 0,
+    vector_count: 0,
+    vector_dimensions: 768,
+    vector_metric: "cosine",
+    vectorize_exists: true,
+    vectorize_name_exact: true,
+    worker_exists: true,
+    workers_dev_enabled: true,
+  };
+}
+
+function quiescenceClaim(binding) {
+  const approval = v048VectorizeMutationQuiescenceApprovalFingerprint({
+    sourceManifestSha256: binding.source_manifest_fingerprint,
+    targetManifestSha256: binding.target_manifest_fingerprint,
+    targetResourceFingerprint: binding.target_resource_fingerprint,
+  });
+  return disposableRecoveryVectorizeMutationQuiescenceClaim(binding, approval);
 }
 
 function versionEvidence({
@@ -155,7 +239,7 @@ function chainFixture() {
     source: {
       resource_fingerprint: binding.source_resource_fingerprint,
       active_version: versionEvidence({
-        id: "source-version-1",
+        id: SOURCE_VERSION_ID,
         scriptEtag: "\"source-etag\"",
         request: 110,
         module: 132,
@@ -165,8 +249,8 @@ function chainFixture() {
         readback: 136,
       }),
       active_deployment: deploymentEvidence({
-        id: "source-deployment-1",
-        versionId: "source-version-1",
+        id: SOURCE_DEPLOYMENT_ID,
+        versionId: SOURCE_VERSION_ID,
         request: 111,
         response: 137,
         readback: 138,
@@ -183,6 +267,7 @@ function chainFixture() {
     binding,
     source_phase_receipt_sha256: sourcePhaseSha256,
     seed_receipt_sha256: seedReceiptSha256,
+    vectorize_mutation_quiescence: quiescenceClaim(binding),
     planned_requests: {
       target_paused_upload_sha256: hash(150),
       target_active_upload_sha256: hash(151),
@@ -206,6 +291,7 @@ function chainFixture() {
       seedReceiptSha256,
       targetPreflightSha256,
     ),
+    vectorize_mutation_quiescence: quiescenceClaim(binding),
     journal: {
       run_id: binding.run_id,
       through_sequence: 6,
@@ -223,7 +309,7 @@ function chainFixture() {
     target: {
       resource_fingerprint: binding.target_resource_fingerprint,
       paused_version: versionEvidence({
-        id: "target-paused-version-1",
+        id: TARGET_PAUSED_VERSION_ID,
         scriptEtag: "opaque-paused-etag",
         request: 150,
         module: 172,
@@ -233,7 +319,7 @@ function chainFixture() {
         readback: 176,
       }),
       active_version: versionEvidence({
-        id: "target-active-version-1",
+        id: TARGET_ACTIVE_VERSION_ID,
         scriptEtag: "opaque-active-etag",
         request: 151,
         module: 172,
@@ -243,15 +329,88 @@ function chainFixture() {
         readback: 179,
       }),
       paused_deployment: deploymentEvidence({
-        id: "target-deployment-1",
-        versionId: "target-paused-version-1",
+        id: TARGET_DEPLOYMENT_ID,
+        versionId: TARGET_PAUSED_VERSION_ID,
         request: 152,
         response: 180,
         readback: 181,
       }),
     },
-    final_snapshot: snapshot(190),
   };
+  const campaign = createDisposableCampaignAuthorityFixture({
+    source: {
+      workerName: "brain-test-v048-field-source-recovery-gate-a48f1101",
+      databaseId: "10000000-0000-4000-8000-000000000011",
+      vectorizeIndexName:
+        "brain-test-v048-field-source-recovery-gate-a48f1101",
+      deploymentId: SOURCE_DEPLOYMENT_ID,
+      versionId: SOURCE_VERSION_ID,
+      scriptEtag: sourcePhase.source.active_version.script_etag,
+      reviewedGenerationSha256: digest("source-reviewed-generation"),
+    },
+    target: {
+      workerName: "brain-test-v048-field-target-recovery-gate-a48f1102",
+      databaseId: "20000000-0000-4000-8000-000000000012",
+      vectorizeIndexName:
+        "brain-test-v048-field-target-recovery-gate-a48f1102",
+      paused: {
+        deploymentId: TARGET_DEPLOYMENT_ID,
+        versionId: TARGET_PAUSED_VERSION_ID,
+        scriptEtag: targetPhase.target.paused_version.script_etag,
+        reviewedGenerationSha256: digest("target-paused-reviewed-generation"),
+      },
+      active: {
+        deploymentId: "30000000-0000-4000-8000-000000000002",
+        versionId: TARGET_ACTIVE_VERSION_ID,
+        scriptEtag: targetPhase.target.active_version.script_etag,
+        reviewedGenerationSha256: digest("target-active-reviewed-generation"),
+      },
+    },
+    sourceNetworkIsolation: networkIsolation("source"),
+    targetNetworkIsolation: networkIsolation("target"),
+  });
+  const finalSemantic = {
+    campaign_authority: campaign.authority,
+    campaign_custody: campaign.custody,
+    source: {
+      active_deployment_id: targetPhase.source.active_deployment_id,
+      active_script_etag: targetPhase.source.active_script_etag,
+      active_traffic_percent: 100,
+      active_version_id: targetPhase.source.active_version_id,
+      network_isolation: networkIsolation("source"),
+      resource: semanticResource(),
+      resource_fingerprint: binding.source_resource_fingerprint,
+      worker_generation: {
+        schema_version: 1,
+        worker_identity_proved: true,
+        worker_generation_proved: true,
+        worker_generation_sha256: campaign.custody.roles.source
+          .worker_protection.worker_generation_sha256,
+      },
+    },
+    target: {
+      active_version: semanticVersion(targetPhase.target.active_version),
+      network_isolation: networkIsolation("target"),
+      paused_deployment: {
+        deployment_id: TARGET_DEPLOYMENT_ID,
+        traffic_percent: 100,
+        version_id: TARGET_PAUSED_VERSION_ID,
+      },
+      paused_version: semanticVersion(targetPhase.target.paused_version),
+      resource: semanticResource(),
+      resource_fingerprint: binding.target_resource_fingerprint,
+      worker_generation: {
+        schema_version: 1,
+        worker_identity_proved: true,
+        worker_generation_proved: true,
+        worker_generation_sha256: campaign.custody.roles.target
+          .worker_protection.worker_generation_sha256,
+      },
+    },
+    vectorize_mutation_quiescence: targetPhase.vectorize_mutation_quiescence,
+  };
+  targetPhase.final_semantic = finalSemantic;
+  targetPhase.final_snapshot = snapshot(190, finalSemantic);
   return {
     binding,
     sourcePreflightSha256,
@@ -440,6 +599,40 @@ test("strict v2 receipts and their full causal chain validate", () => {
   );
 });
 
+test("target receipts refuse quiescence approval or campaign drift", () => {
+  const fixture = chainFixture();
+  assert.deepEqual(
+    fixture.targetPhase.vectorize_mutation_quiescence,
+    fixture.targetPreflight.vectorize_mutation_quiescence,
+  );
+
+  const approvalDrift = structuredClone(fixture.targetPreflight);
+  approvalDrift.vectorize_mutation_quiescence.approval_fingerprint = hash(245);
+  assert.throws(
+    () => assertDisposableRecoveryTargetPreflightReceipt(approvalDrift),
+    /DISPOSABLE_RECOVERY_VECTORIZE_QUIESCENCE_INVALID/,
+  );
+
+  const campaignDrift = structuredClone(fixture.targetPhase);
+  campaignDrift.vectorize_mutation_quiescence.campaign_identity_sha256 = hash(246);
+  assert.throws(
+    () => assertDisposableRecoveryTargetPhaseReceipt(campaignDrift),
+    /DISPOSABLE_RECOVERY_VECTORIZE_QUIESCENCE_INVALID/,
+  );
+
+  const arbitraryOuterHashes = structuredClone(fixture.targetPhase);
+  arbitraryOuterHashes.final_semantic.campaign_authority.network_isolation
+    .target.routes = 1;
+  arbitraryOuterHashes.final_semantic.campaign_authority.authority_sha256 = hash(247);
+  arbitraryOuterHashes.final_snapshot.first_semantic_sha256 = hash(248);
+  arbitraryOuterHashes.final_snapshot.second_semantic_sha256 = hash(248);
+  arbitraryOuterHashes.final_snapshot.stable_semantic_sha256 = hash(248);
+  assert.throws(
+    () => assertDisposableRecoveryTargetPhaseReceipt(arbitraryOuterHashes),
+    /DISPOSABLE_RECOVERY_TARGET_PHASE_RECEIPT_INVALID/,
+  );
+});
+
 test("campaign identity is stable across run IDs but approvals are run-bound", () => {
   const first = bindingFixture();
   const second = bindingFixture("90000000-0000-4000-8000-000000000009");
@@ -447,6 +640,41 @@ test("campaign identity is stable across run IDs but approvals are run-bound", (
   assert.notEqual(
     disposableRecoverySourceA2Fingerprint(first, hash(220)),
     disposableRecoverySourceA2Fingerprint(second, hash(220)),
+  );
+});
+
+test("K0 identity changes the campaign and both deployment approvals", () => {
+  const first = bindingFixture();
+  const changedBase = structuredClone(first);
+  delete changedBase.campaign_fingerprint;
+  changedBase.keychain_binding_sha256 = hash(15);
+  const second = {
+    schema_version: 2,
+    run_id: changedBase.run_id,
+    campaign_fingerprint:
+      disposableRecoveryDeploymentCampaignFingerprint(changedBase),
+    ...Object.fromEntries(Object.entries(changedBase).slice(2)),
+  };
+  assert.notEqual(first.campaign_fingerprint, second.campaign_fingerprint);
+  assert.notEqual(
+    disposableRecoverySourceA2Fingerprint(first, hash(220)),
+    disposableRecoverySourceA2Fingerprint(second, hash(220)),
+  );
+  assert.notEqual(
+    disposableRecoveryTargetA4Fingerprint(first, hash(221), hash(222), hash(223)),
+    disposableRecoveryTargetA4Fingerprint(second, hash(221), hash(222), hash(223)),
+  );
+  const missing = structuredClone(first);
+  delete missing.keychain_binding_sha256;
+  assert.throws(
+    () => assertDisposableRecoveryDeploymentBinding(missing),
+    /DISPOSABLE_RECOVERY_DEPLOYMENT_BINDING_INVALID/u,
+  );
+  const mutated = structuredClone(first);
+  mutated.keychain_binding_sha256 = hash(15);
+  assert.throws(
+    () => assertDisposableRecoveryDeploymentBinding(mutated),
+    /DISPOSABLE_RECOVERY_DEPLOYMENT_BINDING_INVALID/u,
   );
 });
 
@@ -591,7 +819,7 @@ test("journal prefix, source pins, and planned request hashes are causal", () =>
   pinDrift.target_phase.value.source.active_version_id = "another-version";
   assert.throws(
     () => assertDisposableRecoveryDeploymentReceiptChain(pinDrift),
-    /DISPOSABLE_RECOVERY_DEPLOYMENT_RECEIPT_CHAIN_INVALID/,
+    /DISPOSABLE_RECOVERY_TARGET_PHASE_RECEIPT_INVALID/,
   );
 
   const requestDrift = completeChain(fixture);

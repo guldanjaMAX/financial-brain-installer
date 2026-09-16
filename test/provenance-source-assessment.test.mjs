@@ -14,12 +14,16 @@ import {
   originalObservationFromExtraction,
 } from "../ingest/run.mjs";
 import {
+  PROVENANCE_SOURCE_ASSESSMENT_FAILURE_CODES,
   PROVENANCE_SOURCE_ASSESSMENT_MAX_ORIGINALS,
   PROVENANCE_SOURCE_ASSESSMENT_REASON_CODE_BY_STATE,
   PROVENANCE_SOURCE_ASSESSMENT_STATES,
   assessLocalProvenanceSource,
   collectPrivateLocalProvenanceAssessment,
   formatPrivateDiscoveryObservationTarget,
+  parseProvenanceSourceAssessmentArgv,
+  provenanceSourceAssessmentFailureReceipt,
+  publicProvenanceSourceAssessmentResult,
 } from "../operations/provenance-source-assessment.mjs";
 import { SOURCE_ORIGINAL_OBSERVATION_VOCABULARY } from
   "../worker/src/lib/source-original-observation.js";
@@ -58,6 +62,151 @@ assert.deepEqual(ORIGINAL_REASON_CODE_BY_STATE, {
 });
 for (const reasonCode of Object.values(ORIGINAL_REASON_CODE_BY_STATE)) {
   assert(SOURCE_ORIGINAL_OBSERVATION_VOCABULARY.reason_codes.includes(reasonCode));
+}
+
+/* Standalone CLI parsing is complete and pure before any manifest boundary. */
+{
+  const manifest = "/synthetic/private/manifest.json";
+  const parsed = parseProvenanceSourceAssessmentArgv([
+    manifest,
+    "--source", "localdocs",
+    "--target", "first/record.pdf",
+    "--json",
+    "--target", "second/record.md",
+  ]);
+  assert.deepEqual(parsed, {
+    manifest,
+    source: "localdocs",
+    targets: ["first/record.pdf", "second/record.md"],
+    json: true,
+  });
+  assert.equal(Object.isFrozen(parsed), true);
+  assert.equal(Object.isFrozen(parsed.targets), true);
+
+  const tenTargets = Array.from({ length: 10 }, (_, index) => `record-${index}.txt`);
+  assert.deepEqual(parseProvenanceSourceAssessmentArgv([
+    manifest,
+    "--source", "localdocs",
+    ...tenTargets.flatMap((target) => ["--target", target]),
+    "--json",
+  ]).targets, tenTargets);
+}
+
+/* Ambiguous, mutating, non-JSON, and noncanonical forms fail without echoing values. */
+{
+  const manifest = "/synthetic/private/manifest.json";
+  const privateValue = "private-target-do-not-echo";
+  const base = [manifest, "--source", "localdocs", "--target", "record.pdf", "--json"];
+  const invalidArgv = [
+    [],
+    ["--source", "localdocs", "--target", "record.pdf", "--json"],
+    [manifest, "extra", "--source", "localdocs", "--target", "record.pdf", "--json"],
+    [manifest, "--source", "localdocs", "--source", "other", "--target", "record.pdf", "--json"],
+    [manifest, "--source=localdocs", "--target", "record.pdf", "--json"],
+    [manifest, "--source", "INVALID", "--target", "record.pdf", "--json"],
+    [manifest, "--source", "localdocs", "--json"],
+    [manifest, "--source", "localdocs", "--target", "same.pdf", "--target", "same.pdf", "--json"],
+    [manifest, "--source", "localdocs", ...Array.from({ length: 11 }, (_, index) =>
+      ["--target", `record-${index}.pdf`]).flat(), "--json"],
+    [manifest, "--source", "localdocs", "--target", "/absolute.pdf", "--json"],
+    [manifest, "--source", "localdocs", "--target", "parent/../record.pdf", "--json"],
+    [manifest, "--source", "localdocs", "--target=record.pdf", "--json"],
+    [manifest, "--source", "localdocs", "--target", "record.pdf"],
+    [...base, "--json"],
+    [...base, "--apply"],
+    [...base, "--approve", privateValue],
+    [...base, "--ocr"],
+    [...base, "--root", privateValue],
+    [...base, "--output", privateValue],
+    [...base, "--candidate", privateValue],
+    [...base, "--similarity"],
+    [manifest, "--source", "localdocs", "--target", privateValue, "--json", "--unknown-private-option"],
+  ];
+  for (const argv of invalidArgv) {
+    let thrown;
+    try {
+      parseProvenanceSourceAssessmentArgv(argv);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(thrown instanceof TypeError, JSON.stringify(argv));
+    assert.equal(String(thrown.message).includes(privateValue), false);
+    assert.equal(String(thrown.message).includes(manifest), false);
+  }
+}
+
+/* Fixed failures and public re-projection have no field that can carry identity. */
+{
+  const privateValue = "/synthetic/private/source/record.pdf";
+  assert.deepEqual(PROVENANCE_SOURCE_ASSESSMENT_FAILURE_CODES, [
+    "INVALID_REQUEST",
+    "MANIFEST_UNAVAILABLE",
+    "MANIFEST_POLICY_INVALID",
+    "SOURCE_UNAVAILABLE",
+    "ASSESSMENT_FAILED",
+  ]);
+  for (const code of PROVENANCE_SOURCE_ASSESSMENT_FAILURE_CODES) {
+    const receipt = provenanceSourceAssessmentFailureReceipt(code);
+    assert.equal(receipt.status, "blocked");
+    assert.equal(receipt.assessment_complete, false);
+    assert.equal(receipt.target_count, null);
+    assert.deepEqual(receipt.originals, []);
+    assert.equal(receipt.blockers.length, 1);
+    assert.equal(JSON.stringify(receipt).includes(privateValue), false);
+  }
+  let invalidCodeError;
+  try {
+    provenanceSourceAssessmentFailureReceipt(privateValue);
+  } catch (error) {
+    invalidCodeError = error;
+  }
+  assert(invalidCodeError instanceof TypeError);
+  assert.equal(invalidCodeError.message.includes(privateValue), false);
+
+  const assessment = await assessLocalProvenanceSource({
+    root: privateValue,
+    relativeLocators: ["record.pdf"],
+  }, {
+    listOriginals: async () => ({
+      originals: [{ _assessmentLocator: "record.pdf" }],
+      traversal_complete: true,
+      traversal_gap_count: 0,
+      target_resolution_complete: true,
+      missing_target_count: 0,
+    }),
+    observeOriginal: async () => ({
+      state: "native_readable",
+      format: "pdf",
+      text_reliable: true,
+      extraction_complete: true,
+      original_content_sha256: "c".repeat(64),
+      original_byte_count: 321,
+      private_path: privateValue,
+      content: privateValue,
+      error: privateValue,
+    }),
+  });
+  const projected = publicProvenanceSourceAssessmentResult({
+    ...assessment,
+    private_path: privateValue,
+    originals: assessment.originals.map((original) => ({
+      ...original,
+      locator: privateValue,
+      content: privateValue,
+      error: privateValue,
+    })),
+  });
+  assert.deepEqual(projected, assessment);
+  assert.equal(JSON.stringify(projected).includes(privateValue), false);
+
+  let privateBlockerError;
+  try {
+    publicProvenanceSourceAssessmentResult({ ...assessment, blockers: [privateValue] });
+  } catch (error) {
+    privateBlockerError = error;
+  }
+  assert(privateBlockerError instanceof TypeError);
+  assert.equal(privateBlockerError.message.includes(privateValue), false);
 }
 
 /* PDF facts are structured at the parser boundary, not recovered from prose. */

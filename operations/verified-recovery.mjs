@@ -37,7 +37,22 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const VERIFIED_RECOVERY_PLAN_VERSION = 1;
+import {
+  validateV048TargetEvalLlmAppendReceipt,
+} from "./v048-target-eval-immutability-contract.mjs";
+import {
+  V048_DISPOSABLE_CAMPAIGN_CLIENT_SLUG,
+  V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
+  V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
+  assertV048DisposableCampaignManifestPair,
+} from "./v048-disposable-campaign-contract.mjs";
+import {
+  V048_VECTORIZE_MUTATION_QUIESCENCE_SCOPE,
+  v048TargetResourceFingerprint,
+  v048VectorizeMutationQuiescenceApprovalFingerprint,
+} from "./v048-vectorize-mutation-quiescence-contract.mjs";
+
+export const VERIFIED_RECOVERY_PLAN_VERSION = 2;
 export const VERIFIED_RECOVERY_STATE_VERSION = 1;
 
 const MAX_MANIFEST_BYTES = 5 * 1024 * 1024;
@@ -61,7 +76,7 @@ export const VERIFIED_RECOVERY_STAGES = Object.freeze([
   Object.freeze({ id: "reconcile_security", effect: "isolated_target_write" }),
   Object.freeze({ id: "rebuild_vectorize", effect: "isolated_target_write" }),
   Object.freeze({ id: "verify_health", effect: "read_only" }),
-  Object.freeze({ id: "verify_eval", effect: "read_only" }),
+  Object.freeze({ id: "verify_eval", effect: "isolated_target_audit_write" }),
 ]);
 
 const STAGE_IDS = Object.freeze(VERIFIED_RECOVERY_STAGES.map((stage) => stage.id));
@@ -70,7 +85,8 @@ const PLAN_KEYS = new Set([
   "schema_version", "created_at", "plan_fingerprint",
   "source_manifest_fingerprint", "target_manifest_fingerprint",
   "source_resource_fingerprint", "target_resource_fingerprint",
-  "runtime_contract_fingerprint", "artifact", "isolation", "gates", "stages",
+  "runtime_contract_fingerprint", "vectorize_mutation_quiescence_sha256",
+  "artifact", "isolation", "gates", "stages",
 ]);
 const STATE_KEYS = new Set([
   "schema_version", "plan_fingerprint", "status", "current_stage",
@@ -93,6 +109,13 @@ const REBUILD_FIELD_PROOF_KEYS = Object.freeze([
   "bootstrap_interruption_checkpoint_sha256",
   "bootstrap_resume_authorization_sha256",
   "bootstrap_promotion_authorization_sha256",
+]);
+const VECTORIZE_QUIESCENCE_KEY = "vectorize_mutation_quiescence_sha256";
+const REBUILD_VECTORIZE_EXACT_PROOF_KEYS = Object.freeze([
+  "vector_id_set_sha256",
+  "vector_watermark_sha256",
+  "vector_barrier_sha256",
+  "promotion_intent_sha256",
 ]);
 const COMPLETED_KEYS = new Set(["id", "completed_at", "evidence"]);
 const FAILURE_KEYS = new Set(["stage", "code", "at", "cause", "detail"]);
@@ -346,6 +369,51 @@ function planWithoutFingerprint(plan) {
   return copy;
 }
 
+function isV048CampaignCandidate(sourceLoaded, targetLoaded, source, target) {
+  const manifests = [sourceLoaded.manifest, targetLoaded.manifest];
+  const identities = [source.identity, target.identity];
+  return manifests.some((manifest) =>
+    manifest.client?.slug === V048_DISPOSABLE_CAMPAIGN_CLIENT_SLUG) ||
+    identities.some((identity) => [
+      identity.databaseName,
+      identity.vectorizeIndex,
+      identity.workerName,
+    ].some((name) => [
+      V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
+      V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
+    ].includes(name)));
+}
+
+/**
+ * Bind the one disposable v0.4.8 campaign to a continuous operator attestation.
+ * A partial or malformed campaign identity is rejected rather than silently
+ * falling back to the generic recovery contract.
+ */
+function v048PlanVectorizeMutationQuiescence(sourceLoaded, targetLoaded, source, target) {
+  if (!isV048CampaignCandidate(sourceLoaded, targetLoaded, source, target)) return null;
+  const pair = assertV048DisposableCampaignManifestPair(
+    sourceLoaded.manifest,
+    targetLoaded.manifest,
+  );
+  const targetIdentity = Object.freeze({
+    accountId: pair.target.accountId,
+    databaseId: pair.target.databaseId,
+    databaseName: pair.target.databaseName,
+    vectorizeIndex: pair.target.vectorizeIndex,
+    workerName: pair.target.workerName,
+    domain: pair.target.domain,
+  });
+  const targetResourceFingerprint = v048TargetResourceFingerprint(targetIdentity);
+  if (targetResourceFingerprint !== target.resourceFingerprint) {
+    fail("v0.4.8 recovery target resource fingerprint is inconsistent");
+  }
+  return v048VectorizeMutationQuiescenceApprovalFingerprint({
+    sourceManifestSha256: sourceLoaded.fingerprint,
+    targetManifestSha256: targetLoaded.fingerprint,
+    targetResourceFingerprint,
+  });
+}
+
 /** Build a canonical plan containing hashes and policy, never private locators. */
 export function buildVerifiedRecoveryPlan(sourceManifestPath, targetManifestPath, options = {}) {
   const sourceLoaded = readRecoveryManifest(sourceManifestPath, "source");
@@ -354,6 +422,19 @@ export function buildVerifiedRecoveryPlan(sourceManifestPath, targetManifestPath
   const target = recoveryResourceContract(targetLoaded.manifest, "target");
   assertIsolatedRecoveryTarget(source, target);
   const createdAt = nowIso(options);
+  const vectorizeMutationQuiescenceSha256 =
+    v048PlanVectorizeMutationQuiescence(
+      sourceLoaded,
+      targetLoaded,
+      source,
+      target,
+    );
+  if (options.approveVectorizeMutationQuiescence !== undefined &&
+      options.approveVectorizeMutationQuiescence !== null &&
+      options.approveVectorizeMutationQuiescence !==
+        vectorizeMutationQuiescenceSha256) {
+    fail("verified recovery Vectorize mutation quiescence approval is invalid");
+  }
   const plan = {
     schema_version: VERIFIED_RECOVERY_PLAN_VERSION,
     created_at: createdAt,
@@ -362,6 +443,7 @@ export function buildVerifiedRecoveryPlan(sourceManifestPath, targetManifestPath
     source_resource_fingerprint: source.resourceFingerprint,
     target_resource_fingerprint: target.resourceFingerprint,
     runtime_contract_fingerprint: source.runtimeFingerprint,
+    vectorize_mutation_quiescence_sha256: vectorizeMutationQuiescenceSha256,
     artifact: {
       format: "financial_brain_recovery_ciphertext_v1",
       relative_name: ".brain-recovery-export.sql.fbrenc",
@@ -437,7 +519,7 @@ function ephemeralRecoveryProviderBinding(loaded, contract) {
         ? null
         : boundedIdentity(
           loaded.manifest.operations.recovery_artifact_key_secret,
-          "recovery artifact-key locator",
+          "provenance-protection key locator",
         ),
     recoveryFieldGate: loaded.manifest.operations?.recovery_field_gate === undefined
       ? null
@@ -481,10 +563,19 @@ export function inspectVerifiedRecoveryManifestBindings(
   const source = recoveryResourceContract(sourceLoaded.manifest, "source");
   const target = recoveryResourceContract(targetLoaded.manifest, "target");
   assertIsolatedRecoveryTarget(source, target);
+  const vectorizeMutationQuiescenceSha256 =
+    v048PlanVectorizeMutationQuiescence(
+      sourceLoaded,
+      targetLoaded,
+      source,
+      target,
+    );
   if (sourceLoaded.fingerprint !== plan.source_manifest_fingerprint ||
       targetLoaded.fingerprint !== plan.target_manifest_fingerprint ||
       source.resourceFingerprint !== plan.source_resource_fingerprint ||
       target.resourceFingerprint !== plan.target_resource_fingerprint ||
+      vectorizeMutationQuiescenceSha256 !==
+        plan.vectorize_mutation_quiescence_sha256 ||
       source.runtimeFingerprint !== plan.runtime_contract_fingerprint ||
       target.runtimeFingerprint !== plan.runtime_contract_fingerprint) {
     fail("verified recovery manifest binding changed after plan review");
@@ -522,6 +613,12 @@ export function validateVerifiedRecoveryPlan(input) {
     "plan_fingerprint", "source_manifest_fingerprint", "target_manifest_fingerprint",
     "source_resource_fingerprint", "target_resource_fingerprint", "runtime_contract_fingerprint",
   ]) hashValue(input[key], `verified recovery plan ${key}`);
+  if (input.vectorize_mutation_quiescence_sha256 !== null) {
+    hashValue(
+      input.vectorize_mutation_quiescence_sha256,
+      "verified recovery plan Vectorize mutation quiescence attestation",
+    );
+  }
   if (!exactKeys(input.artifact, new Set([
     "format", "relative_name", "digest", "owner_only", "refuse_existing",
     "max_single_import_bytes",
@@ -583,7 +680,9 @@ function evidenceKeys(stage, fieldProof = null) {
     export_d1: ["artifact_sha256", "artifact_bytes"],
     verify_export: [
       "artifact_sha256", "artifact_bytes", "integrity", "schema_fingerprint",
-      "aggregate_fingerprint", "content_fingerprint", "document_count", "chunk_count", "fts_count",
+      "aggregate_fingerprint", "content_fingerprint",
+      "source_d1_deletion_state_fingerprint",
+      "document_count", "chunk_count", "fts_count",
     ],
     prove_target_clean: [
       "target_resource_fingerprint", "user_table_count", "vector_count",
@@ -606,7 +705,11 @@ function evidenceKeys(stage, fieldProof = null) {
       ...(fieldProof ? REBUILD_FIELD_PROOF_KEYS : []),
     ],
     verify_health: ["status", "failure_count", "vector_backlog"],
-    verify_eval: ["profile", "status", "critical_failures", "unauthorized_retrievals"],
+    verify_eval: [
+      "profile", "status", "critical_failures", "unauthorized_retrievals",
+      "final_d1_content_fingerprint", "final_d1_deletion_state_fingerprint",
+      "target_eval_llm_append",
+    ],
   };
   return new Set(shapes[stage] || []);
 }
@@ -649,6 +752,26 @@ function validateRecoveryFieldProof(input, completed) {
 
 function validateStageEvidence(stage, input, plan, completed, fieldProof = null) {
   const expected = evidenceKeys(stage, fieldProof);
+  const planRequiresVectorizeMutationQuiescence =
+    ["rebuild_vectorize", "verify_eval"].includes(stage) &&
+    plan.vectorize_mutation_quiescence_sha256 !== null;
+  const hasVectorizeMutationQuiescence =
+    ["rebuild_vectorize", "verify_eval"].includes(stage) &&
+    Object.hasOwn(input || {}, VECTORIZE_QUIESCENCE_KEY);
+  if (planRequiresVectorizeMutationQuiescence !== hasVectorizeMutationQuiescence) {
+    fail(`verified recovery ${stage} evidence is invalid`);
+  }
+  if (hasVectorizeMutationQuiescence) expected.add(VECTORIZE_QUIESCENCE_KEY);
+  const hasExactVectorProof = stage === "rebuild_vectorize" &&
+    REBUILD_VECTORIZE_EXACT_PROOF_KEYS.some((key) => Object.hasOwn(input || {}, key));
+  const planRequiresExactVectorProof = stage === "rebuild_vectorize" &&
+    plan.vectorize_mutation_quiescence_sha256 !== null;
+  if (hasExactVectorProof !== planRequiresExactVectorProof) {
+    fail(`verified recovery ${stage} evidence is invalid`);
+  }
+  if (hasExactVectorProof) {
+    for (const key of REBUILD_VECTORIZE_EXACT_PROOF_KEYS) expected.add(key);
+  }
   if (!expected.size || !exactKeys(input, expected)) fail(`verified recovery ${stage} evidence is invalid`);
   const evidence = structuredClone(input);
   if (stage === "export_d1") {
@@ -663,6 +786,10 @@ function validateStageEvidence(stage, input, plan, completed, fieldProof = null)
     hashValue(evidence.schema_fingerprint, "verified recovery export schema");
     hashValue(evidence.aggregate_fingerprint, "verified recovery export aggregates");
     hashValue(evidence.content_fingerprint, "verified recovery export durable data");
+    hashValue(
+      evidence.source_d1_deletion_state_fingerprint,
+      "verified recovery source D1 deletion state",
+    );
     positiveInteger(evidence.artifact_bytes, "verified recovery export bytes");
     nonNegativeInteger(evidence.document_count, "verified recovery export document count");
     nonNegativeInteger(evidence.chunk_count, "verified recovery export chunk count");
@@ -685,7 +812,7 @@ function validateStageEvidence(stage, input, plan, completed, fieldProof = null)
     }
   } else if (stage === "restore_d1") {
     const exported = completedEvidence(completed, "export_d1");
-    hashValue(evidence.artifact_sha256, "restored recovery artifact");
+    hashValue(evidence.artifact_sha256, "restored encrypted provenance artifact");
     if (evidence.import_completed !== true || evidence.artifact_sha256 !== exported?.artifact_sha256) {
       fail("recovery target did not confirm the reviewed export import");
     }
@@ -727,6 +854,21 @@ function validateStageEvidence(stage, input, plan, completed, fieldProof = null)
           evidence.seed_receipt_sha256 !== fieldProof.seed_receipt_sha256 ||
           evidence.chunk_count !== fieldProof.expected_chunks) {
         fail("verified recovery rebuild proof does not match its field proof binding");
+      }
+    }
+    if (hasVectorizeMutationQuiescence) {
+      hashValue(
+        evidence.vectorize_mutation_quiescence_sha256,
+        "recovery Vectorize mutation quiescence attestation",
+      );
+      if (evidence.vectorize_mutation_quiescence_sha256 !==
+          plan.vectorize_mutation_quiescence_sha256) {
+        fail("recovery Vectorize mutation quiescence attestation does not match plan");
+      }
+    }
+    if (hasExactVectorProof) {
+      for (const key of REBUILD_VECTORIZE_EXACT_PROOF_KEYS) {
+        hashValue(evidence[key], `recovery exact Vectorize proof ${key}`);
       }
     }
     if (evidence.chunk_count !== restored?.chunk_count ||
@@ -774,6 +916,28 @@ function validateStageEvidence(stage, input, plan, completed, fieldProof = null)
   } else if (stage === "verify_eval") {
     nonNegativeInteger(evidence.critical_failures, "recovery critical eval failures");
     nonNegativeInteger(evidence.unauthorized_retrievals, "recovery unauthorized retrievals");
+    hashValue(evidence.final_d1_content_fingerprint, "final recovered D1 durable data");
+    hashValue(
+      evidence.final_d1_deletion_state_fingerprint,
+      "final recovered D1 deletion state",
+    );
+    if (hasVectorizeMutationQuiescence) {
+      hashValue(
+        evidence.vectorize_mutation_quiescence_sha256,
+        "final recovery Vectorize mutation quiescence attestation",
+      );
+      if (evidence.vectorize_mutation_quiescence_sha256 !==
+          plan.vectorize_mutation_quiescence_sha256) {
+        fail("final recovery Vectorize mutation quiescence attestation does not match plan");
+      }
+    }
+    try {
+      evidence.target_eval_llm_append = validateV048TargetEvalLlmAppendReceipt(
+        evidence.target_eval_llm_append,
+      );
+    } catch {
+      fail("post-recovery evaluation LLM append evidence is invalid");
+    }
     if (evidence.profile !== plan.gates.eval_profile || evidence.status !== "pass" ||
         evidence.critical_failures !== 0 || evidence.unauthorized_retrievals !== 0) {
       fail("post-recovery evaluation gate did not pass");
@@ -810,6 +974,14 @@ export function validateVerifiedRecoveryState(input, planInput) {
       hasFieldProof ? input.field_proof : null,
     );
     completed.push(Object.freeze({ id: entry.id, completed_at: completedAt, evidence }));
+  }
+  const completedRebuild = completedEvidence(completed, "rebuild_vectorize");
+  const completedEval = completedEvidence(completed, "verify_eval");
+  const rebuildQuiescence = completedRebuild?.vectorize_mutation_quiescence_sha256;
+  const finalQuiescence = completedEval?.vectorize_mutation_quiescence_sha256;
+  if (completedEval && (Boolean(rebuildQuiescence) !== Boolean(finalQuiescence) ||
+      (rebuildQuiescence && rebuildQuiescence !== finalQuiescence))) {
+    fail("verified recovery Vectorize mutation quiescence evidence does not match");
   }
   const fieldProof = hasFieldProof
     ? validateRecoveryFieldProof(input.field_proof, completed)
@@ -979,6 +1151,11 @@ function markStageComplete(state, evidence, plan, options = {}) {
 export async function runVerifiedRecovery(planInput, stateInput, adapters, options = {}) {
   const plan = validateVerifiedRecoveryPlan(planInput);
   let state = validateVerifiedRecoveryState(stateInput, plan);
+  if (plan.vectorize_mutation_quiescence_sha256 !== null &&
+      options.approveVectorizeMutationQuiescence !==
+        plan.vectorize_mutation_quiescence_sha256) {
+    fail("verified recovery Vectorize mutation quiescence approval is required");
+  }
   if (state.status === "complete") return Object.freeze({ ok: true, state });
   const pendingStages = STAGE_IDS.slice(state.completed.length);
   if (!adapters || pendingStages.some((stage) => typeof adapters[stage] !== "function")) {
@@ -1221,6 +1398,11 @@ export function initializeVerifiedRecovery(
   const absoluteState = resolve(statePath || "");
   if (absolutePlan === absoluteState) fail("verified recovery plan and state must use different files");
   const plan = buildVerifiedRecoveryPlan(sourceManifestPath, targetManifestPath, options);
+  if (plan.vectorize_mutation_quiescence_sha256 !== null &&
+      options.approveVectorizeMutationQuiescence !==
+        plan.vectorize_mutation_quiescence_sha256) {
+    fail("verified recovery Vectorize mutation quiescence approval is required");
+  }
   const state = initialRecoveryState(plan, options);
   let writtenPlan;
   try {
@@ -1248,22 +1430,57 @@ export function verifiedRecoveryStatus(planInput, stateInput) {
   });
 }
 
+/** Derive the privacy-safe target and quiescence hashes before exact-campaign init. */
+export function reviewVerifiedRecoveryVectorizeMutationQuiescence(
+  sourceManifestPath,
+  targetManifestPath,
+) {
+  const plan = buildVerifiedRecoveryPlan(sourceManifestPath, targetManifestPath);
+  if (plan.vectorize_mutation_quiescence_sha256 === null) {
+    fail("verified recovery manifests are not the exact v0.4.8 disposable campaign");
+  }
+  return Object.freeze({
+    schema_version: 1,
+    kind: "v048_vectorize_mutation_quiescence_review_v1",
+    target_resource_fingerprint: plan.target_resource_fingerprint,
+    vectorize_mutation_quiescence_sha256:
+      plan.vectorize_mutation_quiescence_sha256,
+    scope: structuredClone(V048_VECTORIZE_MUTATION_QUIESCENCE_SCOPE),
+    mutation_surfaces_attested:
+      V048_VECTORIZE_MUTATION_QUIESCENCE_SCOPE.mutation_surfaces.length,
+  });
+}
+
 export function parseVerifiedRecoveryCliArguments(argv) {
   if (!Array.isArray(argv)) fail("verified recovery arguments are invalid");
   const [command, ...args] = argv;
-  if (command === "init" && args.length === 4 && args.every((value) =>
-    typeof value === "string" && value && !value.startsWith("--"))) {
+  if (command === "init" && (args.length === 4 || args.length === 6) &&
+      args.slice(0, 4).every((value) =>
+        typeof value === "string" && value && !value.startsWith("--")) &&
+      (args.length === 4 ||
+        (args[4] === "--approve-vectorize-mutation-quiescence" &&
+          typeof args[5] === "string" && SHA256_RE.test(args[5])))) {
     return Object.freeze({
       command,
       sourceManifestPath: args[0],
       targetManifestPath: args[1],
       planPath: args[2],
       statePath: args[3],
+      approveVectorizeMutationQuiescence: args[5] ?? null,
     });
   }
   if (command === "status" && args.length === 2 && args.every((value) =>
     typeof value === "string" && value && !value.startsWith("--"))) {
     return Object.freeze({ command, planPath: args[0], statePath: args[1] });
+  }
+  if (command === "derive-vectorize-mutation-quiescence" &&
+      args.length === 2 && args.every((value) =>
+        typeof value === "string" && value && !value.startsWith("--"))) {
+    return Object.freeze({
+      command,
+      sourceManifestPath: args[0],
+      targetManifestPath: args[1],
+    });
   }
   fail("verified recovery arguments are invalid");
 }
@@ -1271,8 +1488,9 @@ export function parseVerifiedRecoveryCliArguments(argv) {
 async function main(argv = process.argv.slice(2)) {
   let parsed;
   try { parsed = parseVerifiedRecoveryCliArguments(argv); } catch {
-    console.log("usage: node operations/verified-recovery.mjs init <source-manifest> <target-manifest> <private-plan> <private-state>");
+    console.log("usage: node operations/verified-recovery.mjs init <source-manifest> <target-manifest> <private-plan> <private-state> [--approve-vectorize-mutation-quiescence <sha256>]");
     console.log("       node operations/verified-recovery.mjs status <private-plan> <private-state>");
+    console.log("       node operations/verified-recovery.mjs derive-vectorize-mutation-quiescence <source-manifest> <target-manifest>");
     return 1;
   }
   try {
@@ -1282,8 +1500,19 @@ async function main(argv = process.argv.slice(2)) {
         parsed.targetManifestPath,
         parsed.planPath,
         parsed.statePath,
+        {
+          approveVectorizeMutationQuiescence:
+            parsed.approveVectorizeMutationQuiescence,
+        },
       );
       console.log(JSON.stringify(verifiedRecoveryStatus(result.plan, result.state), null, 2));
+      return 0;
+    }
+    if (parsed.command === "derive-vectorize-mutation-quiescence") {
+      console.log(JSON.stringify(reviewVerifiedRecoveryVectorizeMutationQuiescence(
+        parsed.sourceManifestPath,
+        parsed.targetManifestPath,
+      ), null, 2));
       return 0;
     }
     const plan = loadVerifiedRecoveryPlan(parsed.planPath);

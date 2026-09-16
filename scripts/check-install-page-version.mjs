@@ -3,6 +3,10 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  runtimeIdentityArtifactName,
+  verifyRuntimeIdentityArtifact,
+} from './runtime-identity-receipt.mjs';
 export const ENDPOINTS = Object.freeze({
   manifest: 'https://financialbrain.ai/update/manifest.json',
   updateGuide: 'https://financialbrain.ai/update/agent.md',
@@ -12,8 +16,10 @@ export const ENDPOINTS = Object.freeze({
 });
 const UPDATE_URL = 'https://financialbrain.ai/update';
 const RELEASE_BASE = 'https://github.com/guldanjaMAX/financial-brain-installer/releases/download';
+const RUNTIME_IDENTITY_SCHEME = 'brain.runtime-payload.sha256.v1';
 const versionPattern = /^\d+\.\d+\.\d+$/;
 const digestPattern = /^[0-9a-f]{64}$/;
+const sourceDigestPattern = /^[0-9a-f]{40}$/;
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
 export function guideFields(text) {
   requireValue(typeof text === 'string' && text.length < 200_000, 'invalid agent guide');
@@ -76,7 +82,8 @@ export function validatePublicManifest(value) {
   requireValue(Array.isArray(value.changes) && value.changes.every((item) => typeof item === 'string'), 'invalid release notes');
   requireValue(value.proof?.live_client_acceptance === 'required', 'client acceptance boundary is missing');
   if (value.release_state !== 'stable') {
-    requireValue(value.available === false && value.release === null && value.published_at === null && value.installer === null,
+    requireValue(value.available === false && value.release === null && value.published_at === null &&
+      value.installer === null && value.runtime_identity == null,
       'nonstable manifest advertises an executable release');
     requireValue(value.changes.length === 0 && typeof value.held_reason === 'string' && value.held_reason.trim(), 'nonstable hold reason is missing');
     requireValue(value.proof.archive_release_gate === 'not_passed' && value.proof.automated_release_suite === 'pending', 'nonstable manifest overclaims proof');
@@ -89,6 +96,21 @@ export function validatePublicManifest(value) {
   requireValue(value.installer?.url === expectedUrl && digestPattern.test(value.installer?.sha256) &&
     Number.isSafeInteger(value.installer?.bytes) && value.installer.bytes > 0 && value.installer.bytes <= 100 * 1024 * 1024,
   'invalid exact stable package receipt');
+  const expectedRuntimeIdentityUrl =
+    `${RELEASE_BASE}/v${value.release}/${runtimeIdentityArtifactName(value.release)}`;
+  const runtimeIdentity = value.runtime_identity;
+  requireValue(runtimeIdentity && typeof runtimeIdentity === 'object' && !Array.isArray(runtimeIdentity) &&
+    JSON.stringify(Object.keys(runtimeIdentity).sort()) ===
+      JSON.stringify(['bytes', 'identity_scheme', 'package_file_count', 'runtime_payload_sha256',
+        'sha256', 'source_sha', 'url']) &&
+    runtimeIdentity.url === expectedRuntimeIdentityUrl &&
+    digestPattern.test(runtimeIdentity.sha256) &&
+    Number.isSafeInteger(runtimeIdentity.bytes) && runtimeIdentity.bytes > 0 && runtimeIdentity.bytes <= 4096 &&
+    sourceDigestPattern.test(runtimeIdentity.source_sha) &&
+    Number.isSafeInteger(runtimeIdentity.package_file_count) && runtimeIdentity.package_file_count > 0 &&
+    runtimeIdentity.identity_scheme === RUNTIME_IDENTITY_SCHEME &&
+    digestPattern.test(runtimeIdentity.runtime_payload_sha256),
+  'invalid exact stable runtime identity receipt');
   requireValue(value.proof.archive_release_gate === 'passed' && value.proof.automated_release_suite === 'passed', 'stable manifest lacks release proof');
   return value;
 }
@@ -115,11 +137,18 @@ export function verifyPublishedMetadata(manifest, release) {
   requireValue(manifest.release_state === 'stable', 'publication verification needs a stable manifest');
   requireValue(release?.tag_name === `v${manifest.release}` && release.draft === false && release.prerelease === false && release.immutable === true,
     'latest release is not the exact immutable stable release');
-  requireValue(Array.isArray(release.assets) && release.assets.length === 2, 'release must contain exactly two package names');
-  const required = new Set([`brain-installer-${manifest.release}.tgz`, 'brain-installer.tgz']);
+  requireValue(Array.isArray(release.assets) && release.assets.length === 3,
+    'release must contain exactly two package names and one runtime identity receipt');
+  const runtimeIdentityName = runtimeIdentityArtifactName(manifest.release);
+  const required = new Set([
+    `brain-installer-${manifest.release}.tgz`,
+    'brain-installer.tgz',
+    runtimeIdentityName,
+  ]);
   for (const asset of release.assets) {
-    requireValue(required.delete(asset.name) && asset.state === 'uploaded' && asset.size === manifest.installer.bytes &&
-      asset.digest === `sha256:${manifest.installer.sha256}`, 'release asset metadata disagrees with the stable receipt');
+    const receipt = asset.name === runtimeIdentityName ? manifest.runtime_identity : manifest.installer;
+    requireValue(required.delete(asset.name) && asset.state === 'uploaded' && asset.size === receipt.bytes &&
+      asset.digest === `sha256:${receipt.sha256}`, 'release asset metadata disagrees with the stable receipt');
   }
   requireValue(required.size === 0, 'required release asset is missing');
 }
@@ -169,9 +198,27 @@ export async function checkInstallPage({ read = publicBytes, requireStable = fal
   }
   const release = JSON.parse(String(await read(ENDPOINTS.latest, 2_000_000)));
   verifyPublishedMetadata(manifest, release);
-  const bytes = await read(manifest.installer.url, manifest.installer.bytes);
+  const [bytes, runtimeIdentityBytes] = await Promise.all([
+    read(manifest.installer.url, manifest.installer.bytes),
+    read(manifest.runtime_identity.url, manifest.runtime_identity.bytes),
+  ]);
   requireValue(bytes.length === manifest.installer.bytes && createHash('sha256').update(bytes).digest('hex') === manifest.installer.sha256,
     'downloaded stable archive differs from the published receipt');
+  verifyRuntimeIdentityArtifact({
+    bytes: Buffer.from(runtimeIdentityBytes),
+    artifactSha256: manifest.runtime_identity.sha256,
+    artifactBytes: manifest.runtime_identity.bytes,
+    expected: {
+      sourceSha: manifest.runtime_identity.source_sha,
+      packageFilename: `brain-installer-${manifest.release}.tgz`,
+      packageVersion: manifest.release,
+      packageBytes: manifest.installer.bytes,
+      packageFileCount: manifest.runtime_identity.package_file_count,
+      packageSha256: manifest.installer.sha256,
+      identityScheme: manifest.runtime_identity.identity_scheme,
+      runtimePayloadSha256: manifest.runtime_identity.runtime_payload_sha256,
+    },
+  });
   return { ...result, promotionAllowed: true, artifactVerified: true };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

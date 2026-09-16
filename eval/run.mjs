@@ -16,8 +16,10 @@
  * or from flags, and the golden set is per install by construction, since the
  * questions have to name that client's own documents.
  *
- * READ ONLY. Retrieval uses private POST bodies; no write route is called. See
- * brain-client.mjs.
+ * NO OPERATIONAL MUTATION ROUTE. Retrieval uses private POST bodies. An answer
+ * request may append bounded `llm_call_log` audit rows and incur model cost,
+ * but this runner cannot change corpus, connector, configuration, projection,
+ * or provider resource state. See brain-client.mjs.
  */
 
 import { chmod, lstat, mkdir, open, readFile, realpath } from "node:fs/promises";

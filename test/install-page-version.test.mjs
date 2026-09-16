@@ -12,8 +12,24 @@ import {
   validateSupervisedInstallContract,
   verifyPublishedMetadata,
 } from '../scripts/check-install-page-version.mjs';
+import {
+  createRuntimeIdentityReceipt,
+  runtimeIdentityReceiptBytes,
+} from '../scripts/runtime-identity-receipt.mjs';
 const bytes = Buffer.from('synthetic reviewed package fixture\n');
 const sha = createHash('sha256').update(bytes).digest('hex');
+const runtimePayloadSha = 'c'.repeat(64);
+const runtimeBytes = runtimeIdentityReceiptBytes(createRuntimeIdentityReceipt({
+  sourceSha: 'd'.repeat(40),
+  packageFilename: 'brain-installer-9.8.7.tgz',
+  packageVersion: '9.8.7',
+  packageBytes: bytes.length,
+  packageFileCount: 42,
+  packageSha256: sha,
+  identityScheme: 'brain.runtime-payload.sha256.v1',
+  runtimePayloadSha256: runtimePayloadSha,
+}));
+const runtimeSha = createHash('sha256').update(runtimeBytes).digest('hex');
 const commit = createHash('sha1').update('synthetic candidate commit').digest('hex');
 const installGuide = `AGENT_INSTALL_CONTRACT_VERSION: 1
 STATUS: supervised field-test candidate
@@ -33,14 +49,30 @@ const held = (state = 'held') => ({ schema_version: 2, release_state: state, ava
   proof: { archive_release_gate: 'not_passed', automated_release_suite: 'pending', live_client_acceptance: 'required' } });
 const stable = () => ({ ...held('stable'), available: true, release: '9.8.7', published_at: '2026-09-06', held_reason: null,
   installer: { url: 'https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v9.8.7/brain-installer-9.8.7.tgz', sha256: sha, bytes: bytes.length },
+  runtime_identity: {
+    url: 'https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v9.8.7/brain-installer-9.8.7-runtime-identity.json',
+    sha256: runtimeSha,
+    bytes: runtimeBytes.length,
+    source_sha: 'd'.repeat(40),
+    package_file_count: 42,
+    identity_scheme: 'brain.runtime-payload.sha256.v1',
+    runtime_payload_sha256: runtimePayloadSha,
+  },
   proof: { archive_release_gate: 'passed', automated_release_suite: 'passed', live_client_acceptance: 'required' } });
 const guide = (state) => `AGENT_UPDATE_CONTRACT_VERSION: 1\nRELEASE_STATE: ${state}\nPERMITTED_MODE: ${state === 'stable' ? 'guided-update-after-release-and-owner-checks' : 'read-only-diagnosis'}\nPAGE_URL: https://financialbrain.ai/update\nRELEASE_MANIFEST: ${ENDPOINTS.manifest}\n`;
 const release = () => ({ tag_name: 'v9.8.7', draft: false, prerelease: false, immutable: true,
-  assets: ['brain-installer-9.8.7.tgz', 'brain-installer.tgz'].map((name) => ({ name, size: bytes.length, digest: `sha256:${sha}`, state: 'uploaded' })) });
+  assets: ['brain-installer-9.8.7.tgz', 'brain-installer.tgz', 'brain-installer-9.8.7-runtime-identity.json'].map((name) => ({
+    name,
+    size: name.endsWith('.json') ? runtimeBytes.length : bytes.length,
+    digest: `sha256:${name.endsWith('.json') ? runtimeSha : sha}`,
+    state: 'uploaded',
+  })) });
 function reader(manifest, overrides = {}) {
   const values = { [ENDPOINTS.manifest]: Buffer.from(JSON.stringify(manifest)), [ENDPOINTS.updateGuide]: Buffer.from(guide(manifest.release_state)),
     [ENDPOINTS.installGuide]: Buffer.from(installGuide), [ENDPOINTS.latest]: Buffer.from(JSON.stringify(release())),
-    ...(manifest.installer ? { [manifest.installer.url]: bytes } : {}), ...overrides };
+    ...(manifest.installer ? { [manifest.installer.url]: bytes } : {}),
+    ...(manifest.runtime_identity ? { [manifest.runtime_identity.url]: runtimeBytes } : {}),
+    ...overrides };
   const calls = [];
   return { calls, read: async (url) => { calls.push(url); assert.ok(Object.hasOwn(values, url), 'unexpected request'); return values[url]; } };
 }
@@ -51,13 +83,18 @@ for (const state of ['held', 'candidate']) test(`${state} is healthy but never a
   await assert.rejects(checkInstallPage({ ...reader(held(state)), requireStable: true }), /promotion is not allowed/);
 });
 test('nonstable metadata cannot expose a release, installer, completion claim, or missing reason', () => {
-  for (const mutation of [{ available: true }, { release: '9.8.7' }, { installer: stable().installer }, { held_reason: '' }, { changes: ['shipped'] }, { proof: stable().proof }]) {
+  for (const mutation of [{ available: true }, { release: '9.8.7' }, { installer: stable().installer },
+    { runtime_identity: stable().runtime_identity }, { held_reason: '' }, { changes: ['shipped'] },
+    { proof: stable().proof }]) {
     assert.throws(() => validatePublicManifest({ ...held(), ...mutation }));
   }
 });
 test('stable requires exact immutable receipt, independent bytes, and matching guide', async () => {
   assert.deepEqual(await checkInstallPage(reader(stable())), { state: 'stable', publicRelease: '9.8.7', supervisedCandidate: '9.8.6', promotionAllowed: true, artifactVerified: true });
   await assert.rejects(checkInstallPage(reader(stable(), { [stable().installer.url]: Buffer.from('wrong archive') })), /archive differs/);
+  await assert.rejects(checkInstallPage(reader(stable(), {
+    [stable().runtime_identity.url]: Buffer.from('wrong runtime receipt'),
+  })), /RUNTIME_IDENTITY_/);
   await assert.rejects(checkInstallPage(reader(stable(), { [ENDPOINTS.updateGuide]: Buffer.from(guide('held')) })), /disagree/);
 });
 test('stable metadata rejects malformed date, digest, size, URL, schema, and state', () => {
@@ -67,6 +104,46 @@ test('stable metadata rejects malformed date, digest, size, URL, schema, and sta
   for (const mutation of [{ url: 'https://example.invalid/package.tgz' }, { sha256: 'bad' }, { bytes: 0 }, { bytes: -1 }, { bytes: 1.5 }]) {
     assert.throws(() => validatePublicManifest({ ...stable(), installer: { ...stable().installer, ...mutation } }));
   }
+  for (const mutation of [{ url: 'https://example.invalid/runtime.json' }, { sha256: 'bad' },
+    { bytes: 0 }, { bytes: 4097 }, { source_sha: 'bad' }, { package_file_count: 0 },
+    { identity_scheme: 'wrong' }, { runtime_payload_sha256: 'bad' }]) {
+    assert.throws(() => validatePublicManifest({
+      ...stable(), runtime_identity: { ...stable().runtime_identity, ...mutation },
+    }));
+  }
+  assert.throws(() => validatePublicManifest({
+    ...stable(), runtime_identity: { ...stable().runtime_identity, unexpected: true },
+  }));
+});
+test('public runtime receipt cannot disagree with its independently bound package fields', async () => {
+  const mismatchedBytes = runtimeIdentityReceiptBytes(createRuntimeIdentityReceipt({
+    sourceSha: stable().runtime_identity.source_sha,
+    packageFilename: 'brain-installer-9.8.7.tgz',
+    packageVersion: '9.8.7',
+    packageBytes: bytes.length,
+    packageFileCount: stable().runtime_identity.package_file_count + 1,
+    packageSha256: sha,
+    identityScheme: stable().runtime_identity.identity_scheme,
+    runtimePayloadSha256: runtimePayloadSha,
+  }));
+  const mismatchedSha = createHash('sha256').update(mismatchedBytes).digest('hex');
+  const manifest = {
+    ...stable(),
+    runtime_identity: {
+      ...stable().runtime_identity,
+      bytes: mismatchedBytes.length,
+      sha256: mismatchedSha,
+    },
+  };
+  const metadata = release();
+  Object.assign(metadata.assets[2], {
+    size: mismatchedBytes.length,
+    digest: `sha256:${mismatchedSha}`,
+  });
+  await assert.rejects(checkInstallPage(reader(manifest, {
+    [manifest.runtime_identity.url]: mismatchedBytes,
+    [ENDPOINTS.latest]: Buffer.from(JSON.stringify(metadata)),
+  })), /RUNTIME_IDENTITY_EXPECTATION_MISMATCH/);
 });
 test('latest mutable, different-version, incomplete, and mismatched assets all refuse', () => {
   for (const mutation of [{ immutable: false }, { draft: true }, { prerelease: true }, { tag_name: 'v9.8.6' }, { assets: [] }, { assets: [release().assets[0], release().assets[0]] }]) {
@@ -74,6 +151,8 @@ test('latest mutable, different-version, incomplete, and mismatched assets all r
   }
   for (const field of [{ size: 1 }, { digest: 'sha256:wrong' }, { state: 'new' }]) {
     const data = release(); Object.assign(data.assets[0], field); assert.throws(() => verifyPublishedMetadata(stable(), data));
+    const runtimeData = release(); Object.assign(runtimeData.assets[2], field);
+    assert.throws(() => verifyPublishedMetadata(stable(), runtimeData));
   }
 });
 test('duplicate fields, missing owner, swapped candidate URL, or update permission drift refuse', () => {

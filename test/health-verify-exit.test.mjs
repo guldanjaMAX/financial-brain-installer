@@ -131,6 +131,7 @@ if (SCENARIO) {
         });
       }
       if (SCENARIO === "health-backlog-old") {
+        const oldestQueuedAt = Date.now() - 181 * 60 * 1000;
         return json({
           backend: "d1",
           rows: [],
@@ -139,15 +140,17 @@ if (SCENARIO) {
             upserts: 10_240,
             deletes: 0,
             submitted: 0,
-            oldest_queued_at: Date.now() - 181 * 60 * 1000,
+            oldest_queued_at: oldestQueuedAt,
           },
           vector_readiness: {
             ready: false, reason: "vector_work_queued",
             expected_vectors: 10_240, actual_vectors: 0, pending: 10_240, submitted: 0,
+            oldest_queued_at: oldestQueuedAt,
           },
         });
       }
       if (SCENARIO === "health-vector-processing") {
+        const oldestQueuedAt = Date.now() - 1_000;
         return json({
           backend: "d1",
           rows: [],
@@ -156,11 +159,12 @@ if (SCENARIO) {
             upserts: 1,
             deletes: 0,
             submitted: 1,
-            oldest_queued_at: Date.now() - 1_000,
+            oldest_queued_at: oldestQueuedAt,
           },
           vector_readiness: {
             ready: false, reason: "accepted_mutation_processing",
             expected_vectors: 1, actual_vectors: 0, pending: 1, submitted: 1,
+            oldest_queued_at: oldestQueuedAt,
           },
         });
       }
@@ -173,10 +177,13 @@ if (SCENARIO) {
         return json({
           backend: "d1",
           rows: [],
-          vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 },
+          vector_backlog: {
+            pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
+          },
           vector_readiness: {
             ready: false, reason: "vector_count_mismatch",
             expected_vectors: 10, actual_vectors: 0, pending: 0, submitted: 0,
+            oldest_queued_at: null,
           },
         });
       }
@@ -184,10 +191,13 @@ if (SCENARIO) {
         return json({
           backend: "d1",
           rows: [],
-          vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 },
+          vector_backlog: {
+            pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
+          },
           vector_readiness: {
             ready: false, reason: "vector_count_mismatch",
             expected_vectors: 10, actual_vectors: 13, pending: 0, submitted: 0,
+            oldest_queued_at: null,
           },
         });
       }
@@ -197,10 +207,13 @@ if (SCENARIO) {
           version: "0.1.8",
           vector_drain_mode: "active",
           rows: [],
-          vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 },
+          vector_backlog: {
+            pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
+          },
           vector_readiness: {
             ready: true, reason: null,
             expected_vectors: 0, actual_vectors: 0, pending: 0, submitted: 0,
+            oldest_queued_at: null,
           },
         });
       }
@@ -219,10 +232,13 @@ if (SCENARIO) {
       return json({
         backend: "d1",
         rows: [],
-        vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 },
+        vector_backlog: {
+          pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
+        },
         vector_readiness: {
           ready: true, reason: null,
           expected_vectors: 0, actual_vectors: 0, pending: 0, submitted: 0,
+          oldest_queued_at: null,
         },
       });
     }
@@ -476,8 +492,8 @@ if (SCENARIO) {
     mismatch.output);
 
   const caseBypass = runScenario("health-backend-case-bypass", "health", { adminKey: true });
-  check("backend normalization cannot bypass the required D1 backlog proof",
-    caseBypass.code === 1 && /could not prove a valid D1 vector backlog/is.test(caseBypass.output),
+  check("backend normalization cannot turn a malformed D1 identity into readiness",
+    caseBypass.code === 1 && /did not report the exact D1 backend label/is.test(caseBypass.output),
     caseBypass.output);
 
   const unknownBackend = runScenario("health-backend-unknown", "health", { adminKey: true });

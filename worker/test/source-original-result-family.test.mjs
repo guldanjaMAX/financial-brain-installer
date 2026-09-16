@@ -479,6 +479,83 @@ test("a non-family retrieval mutation between family snapshot and probes fails c
   ).n, 0);
 });
 
+test("result_family classifies exact-family vector work as retryable before retrieval", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  await seedBoundFamily(fixture);
+  fixture.raw(
+    "INSERT INTO vector_outbox (chunk_uid,vector_id,op,queued_at) VALUES (?,?, 'upsert',?)",
+    CHUNK_UID, VECTOR_ID, 1,
+  );
+  let retrievalCalls = 0;
+  await assert.rejects(
+    handleSourceOriginalResultFamily(fixture.env, request(), {
+      retrieve: async () => {
+        retrievalCalls += 1;
+        throw new Error("retrieval must not run while the exact family is queued");
+      },
+      readBindingReadiness: sourceOriginalResultBindingReadiness,
+      readVectorReadiness: async () => ({
+        ready: false,
+        expected_vectors: 1,
+        actual_vectors: 1,
+        pending: 1,
+        submitted: 0,
+        outbox_generation: 0,
+        mutation_id: null,
+        mutation_submitted_at: null,
+        projection_status: "pending",
+        bootstrap_epoch: 0,
+      }),
+    }),
+    (error) => error instanceof SourceOriginalResultFamilyError &&
+      error.code === "source_original_result_family_vector_unready",
+  );
+  assert.equal(retrievalCalls, 0);
+  assert.equal(fixture.first(
+    "SELECT COUNT(*) AS n FROM source_original_result_family_receipts",
+  ).n, 0);
+});
+
+test("result_family fails fast when only unrelated vector work remains", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  await seedBoundFamily(fixture);
+  seedNonFamilyResult(fixture);
+  fixture.raw(
+    "INSERT INTO vector_outbox (chunk_uid,vector_id,op,queued_at) VALUES (?,?, 'upsert',?)",
+    "otherdocs:lower#0", "otherdocs:lower#0", 1,
+  );
+  let retrievalCalls = 0;
+  await assert.rejects(
+    handleSourceOriginalResultFamily(fixture.env, request(), {
+      retrieve: async () => {
+        retrievalCalls += 1;
+        throw new Error("retrieval must not run for an unrelated global backlog");
+      },
+      readBindingReadiness: sourceOriginalResultBindingReadiness,
+      readVectorReadiness: async () => ({
+        ready: false,
+        expected_vectors: 2,
+        actual_vectors: 1,
+        pending: 1,
+        submitted: 0,
+        outbox_generation: 0,
+        mutation_id: null,
+        mutation_submitted_at: null,
+        projection_status: "pending",
+        bootstrap_epoch: 0,
+      }),
+    }),
+    (error) => error instanceof SourceOriginalResultFamilyError &&
+      error.code === "first_source_result_family_unrelated_backlog",
+  );
+  assert.equal(retrievalCalls, 0);
+  assert.equal(fixture.first(
+    "SELECT COUNT(*) AS n FROM source_original_result_family_receipts",
+  ).n, 0);
+});
+
 test("result_family fails closed for a degraded production retrieval", async (t) => {
   const fixture = await createProductFixture();
   t.after(() => fixture.close());

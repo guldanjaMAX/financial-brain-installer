@@ -1,8 +1,8 @@
-import { walk, prepare, batches, batchStream, splitOversized, estimatedStatements, loadState, saveState, MAX_FILE_BYTES, MAX_DOC_CHARS } from "../ingest/run.mjs";
+import { walk, prepare, batches, batchStream, splitOversized, estimatedStatements, loadState, saveState, MAX_FILE_BYTES, MAX_DOC_CHARS, resolveExactLocalFile } from "../ingest/run.mjs";
 import { estimateD1IngestStatements } from "../worker/src/lib/store.js";
 import { extract, isBinaryFormat, register, supported } from "../ingest/extract.mjs";
 import { extractPdf, pdfPassIsolated } from "../ingest/formats.mjs";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, readdirSync } from "node:fs";
+import { linkSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, readdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -61,6 +61,117 @@ put("docs/report.pdf", "%PDF-1.4 not really");
 
 /* ---- prepare: every rejection carries a legible reason ---- */
 const one = (rel) => walk(root, {}).files.find((f) => f.rel.split(/[\\/]/).join("/") === rel);
+
+/* ---- exact one-file pilot resolution: no recursive walk ---- */
+{
+  const exactRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-")));
+  const exactText = "One reviewed first-source document with reliable native text for a bounded pilot.";
+  try {
+    writeFileSync(join(exactRoot, "first.txt"), exactText);
+    const exact = resolveExactLocalFile(exactRoot, {
+      relativeLocator: "first.txt",
+      privatePrefixes: ["private"],
+    });
+    check("exact-file pilot resolves the only direct regular file",
+      exact.rel === "first.txt" && exact.size === Buffer.byteLength(exactText) &&
+      exact._localApproval.rootReal === (realpathSync.native || realpathSync)(exactRoot) &&
+      exact._localApproval.identity.nlink === "1", JSON.stringify(exact));
+    const prepared = await prepare(exact, { sourceName: "documents", ocr: null });
+    check("exact-file pilot handle preserves the ordinary native ingest receipt",
+      prepared.envelope?.source_id === "first.txt" &&
+      prepared.envelope?.text_source === "native" && prepared.envelope?.text_reliable === true,
+      JSON.stringify(prepared.skip || prepared.observation));
+
+    writeFileSync(join(exactRoot, "unrelated.txt"), "must never be opened by the exact-file resolver");
+    let widened = false;
+    try { resolveExactLocalFile(exactRoot, { relativeLocator: "first.txt" }); }
+    catch (error) { widened = error?.code === "LOCAL_ROOT_SCOPE_CHANGED"; }
+    check("exact-file pilot refuses a root that widened to a second entry", widened);
+  } finally {
+    rmSync(exactRoot, { recursive: true, force: true });
+  }
+}
+{
+  const fixture = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-linked-root-")));
+  const targetParent = join(fixture, "target");
+  const targetRoot = join(targetParent, "source");
+  const linkedParent = join(fixture, "linked");
+  try {
+    mkdirSync(targetRoot, { recursive: true });
+    writeFileSync(join(targetRoot, "first.txt"), "a linked ancestor must not enter the exact-file pilot");
+    symlinkSync(targetParent, linkedParent, process.platform === "win32" ? "junction" : "dir");
+    let linkedRoot = false;
+    try { resolveExactLocalFile(join(linkedParent, "source"), { relativeLocator: "first.txt" }); }
+    catch (error) { linkedRoot = error?.code === "LOCAL_ROOT_LINK_REFUSED"; }
+    check("exact-file pilot refuses a linked source-root ancestor", linkedRoot);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+}
+{
+  const exactRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-refusal-")));
+  const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-outside-")));
+  try {
+    writeFileSync(join(outsideRoot, "outside.txt"), "outside");
+    symlinkSync(join(outsideRoot, "outside.txt"), join(exactRoot, "first.txt"));
+    let linked = false;
+    try { resolveExactLocalFile(exactRoot, { relativeLocator: "first.txt" }); }
+    catch (error) { linked = ["LOCAL_FILE_NOT_REGULAR", "LOCAL_FILE_LINK_REFUSED"].includes(error?.code); }
+    check("exact-file pilot refuses a linked target before reading it", linked);
+  } finally {
+    rmSync(exactRoot, { recursive: true, force: true });
+    rmSync(outsideRoot, { recursive: true, force: true });
+  }
+}
+{
+  const exactRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-hardlink-")));
+  const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-hardlink-outside-")));
+  try {
+    const outside = join(outsideRoot, "outside.txt");
+    writeFileSync(outside, "one inode must not have an alias outside the dedicated source root");
+    linkSync(outside, join(exactRoot, "first.txt"));
+    let hardLinked = false;
+    try { resolveExactLocalFile(exactRoot, { relativeLocator: "first.txt" }); }
+    catch (error) { hardLinked = error?.code === "LOCAL_FILE_LINK_REFUSED"; }
+    check("exact-file pilot refuses a hard-linked target before reading it", hardLinked);
+  } finally {
+    rmSync(exactRoot, { recursive: true, force: true });
+    rmSync(outsideRoot, { recursive: true, force: true });
+  }
+}
+{
+  const exactRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-hardlink-drift-")));
+  const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-hardlink-drift-outside-")));
+  try {
+    const source = join(exactRoot, "first.txt");
+    writeFileSync(source, "a later hard-link alias must invalidate the approved file identity");
+    const exact = resolveExactLocalFile(exactRoot, { relativeLocator: "first.txt" });
+    linkSync(source, join(outsideRoot, "alias.txt"));
+    const prepared = await prepare(exact, { sourceName: "documents", ocr: null });
+    check("exact-file pilot refuses a hard link added after file approval",
+      /multiple hard links/i.test(String(prepared.skip?.reason || "")),
+      JSON.stringify(prepared.skip || prepared.observation));
+  } finally {
+    rmSync(exactRoot, { recursive: true, force: true });
+    rmSync(outsideRoot, { recursive: true, force: true });
+  }
+}
+{
+  const exactRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-policy-")));
+  try {
+    writeFileSync(join(exactRoot, "private-record.txt"), "private");
+    let privateRefused = false;
+    try {
+      resolveExactLocalFile(exactRoot, {
+        relativeLocator: "private-record.txt",
+        privatePrefixes: ["private"],
+      });
+    } catch (error) { privateRefused = error?.code === "LOCAL_FILE_PRIVATE_PREFIX"; }
+    check("exact-file pilot enforces manifest private prefixes", privateRefused);
+  } finally {
+    rmSync(exactRoot, { recursive: true, force: true });
+  }
+}
 
 function textPdf() {
   const stream = "BT\n/F1 12 Tf\n72 720 Td\n(Brain PDF child process works) Tj\nET\n";

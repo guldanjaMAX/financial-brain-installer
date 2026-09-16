@@ -30,8 +30,13 @@ import {
 import { fileURLToPath } from "node:url";
 import {
   LOCKED_WRANGLER_RUNTIME_DIRECTORY,
+  assertLockedWranglerRuntimeUnchanged,
   prepareLockedWranglerRuntimeFromCache,
 } from "../operations/locked-wrangler-runtime.mjs";
+import {
+  assertPackedBundleArchive,
+  materializeVerifiedBundleCache,
+} from "../operations/package-bundle-verifier.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const IS_WINDOWS = process.platform === "win32";
@@ -123,7 +128,7 @@ const STEP_CATALOG = Object.freeze({
   "package-privacy": commandStep(
     "package-privacy", "Tracked-source and package privacy", process.execPath,
     ["test/package-privacy.test.mjs"],
-    "Full tracked-source, packlist, content, and extracted-package privacy proof.",
+    "Full tracked-source, packlist, content, extracted-package privacy, and exact four-bundle lock-derived closure proof.",
   ),
   "package-privacy-fast": commandStep(
     "package-privacy-fast", "Tracked-source privacy scan", process.execPath,
@@ -222,7 +227,7 @@ export function buildStepPlan(options) {
         internal: true,
         network_scope: "local_only_offline_enforced",
         proof: id === "package-build"
-          ? "Local package bytes, byte count, file count, and SHA-256."
+          ? "Strictly verified four-bundle local package filename, byte count, file count, and SHA-256."
           : "The packed command installs offline into a temporary user prefix and prints usage.",
       });
     }
@@ -259,6 +264,7 @@ export function buildStepPlan(options) {
 const ALLOWED_ENVIRONMENT = Object.freeze([
   "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC",
   "PATHEXT", "LANG", "LANGUAGE", "LC_ALL", "SHELL", "TERM",
+  "TMPDIR", "TMP", "TEMP",
 ]);
 
 export function createSafeEnvironment(source, privateHome) {
@@ -673,10 +679,12 @@ export function renderFieldChecklist(receipt) {
     `- Tarball: ${artifact.filename || "not built"}`,
     `- Tarball bytes: ${artifact.bytes ?? "not built"}`,
     `- Tarball SHA-256: ${artifact.sha256 || "not built"}`,
+    `- Runtime identity scheme: ${artifact.identity_scheme || "not built"}`,
+    `- Runtime payload SHA-256: ${artifact.runtime_payload_sha256 || "not built"}`,
     "",
     "## Before any live action",
     "",
-    "- [ ] The exact commit, tree, tarball byte count, and SHA-256 above match the reviewed candidate.",
+    "- [ ] The exact commit, tree, tarball byte count and SHA-256, runtime identity scheme, and runtime payload SHA-256 above match the reviewed candidate.",
     "- [ ] field-prepare-receipt.json exists and its exact status is source_preparation_passed.",
     "- [ ] Every default credential-free step in that receipt is passed.",
     "- [ ] The owner is present for login, 2FA, consent, billing, and passkey gestures.",
@@ -763,8 +771,8 @@ function receiptIsCompleteDefault(receipt, options) {
     receipt.steps.every((step) => step.status === "passed");
 }
 
-function packageSource(output, env, source) {
-  const result = runNpm([
+export function packageSource(output, env, source, dependencies = {}) {
+  const result = (dependencies.runNpm || runNpm)([
     "pack", "--json", "--ignore-scripts", "--pack-destination", output,
   ], { env, capture: true, timeoutMs: 5 * 60_000 });
   if (!result.ok) throw new Error("npm_pack_failed");
@@ -777,14 +785,23 @@ function packageSource(output, env, source) {
   const archive = join(output, metadata.filename);
   const info = statSync(archive);
   if (!info.isFile() || info.size < 1) throw new Error("npm_pack_archive_missing");
+  const bundleProof = (dependencies.assertPackedBundleArchive ||
+    assertPackedBundleArchive)({
+    root: ROOT,
+    metadata,
+    archivePath: archive,
+    cacheContentRoot: resolveNpmCacheContentRoot(env),
+  });
   if (!IS_WINDOWS) chmodSync(archive, 0o600);
   return {
     path: archive,
     receipt: {
       filename: metadata.filename,
-      bytes: info.size,
-      sha256: createHash("sha256").update(readFileSync(archive)).digest("hex"),
-      file_count: metadata.files.length,
+      bytes: bundleProof.archive_bytes,
+      sha256: bundleProof.archive_sha256,
+      identity_scheme: bundleProof.identity_scheme,
+      runtime_payload_sha256: bundleProof.runtime_payload_sha256,
+      file_count: bundleProof.archive_file_count,
     },
   };
 }
@@ -865,24 +882,63 @@ export async function runFieldPrepare(options, dependencies = {}) {
   const output = makeOutputDirectory(options.output);
   const receiptPath = join(output, "field-prepare-receipt.json");
   const checklistPath = join(output, "HUMAN-FIELD-CHECKLIST.md");
-  const privateHome = mkdtempSync(join(tmpdir(), "brain-field-prepare-home-"));
+  const privateHome = realpathSync(
+    mkdtempSync(join(realpathSync(tmpdir()), "brain-field-prepare-home-")),
+  );
   const environment = createSafeEnvironment(process.env, privateHome);
-  for (const directory of [environment.APPDATA, environment.LOCALAPPDATA, environment.XDG_CONFIG_HOME,
-    environment.XDG_CACHE_HOME, environment.TMPDIR]) mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const cacheRoot = dependencies.npmCacheContentRoot ??
-    resolveNpmCacheContentRoot(process.env);
-  const wranglerRuntime = (dependencies.prepareWranglerRuntime || (() =>
-    prepareLockedWranglerRuntimeFromCache({
-      sourceRoot: ROOT,
-      destination: join(output, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
-      cacheContentRoot: cacheRoot,
-    })))();
-  const receipt = baseReceipt(options, plan, wranglerRuntime);
-  let archive = null;
   let privateHomeRemoved = false;
-  const commandRunner = dependencies.runCommand || run;
   const removePrivateHome = dependencies.removePrivateHome || ((path) =>
     rmSync(path, { recursive: true, force: true }));
+  const cacheRoot = dependencies.npmCacheContentRoot ??
+    resolveNpmCacheContentRoot(process.env);
+  let wranglerRuntime;
+  let preparedWranglerRuntimeRoot;
+  try {
+    for (const directory of [environment.APPDATA, environment.LOCALAPPDATA,
+      environment.XDG_CONFIG_HOME, environment.XDG_CACHE_HOME, environment.TMPDIR]) {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+    }
+    const privateBundleCacheRoot = resolveNpmCacheContentRoot(environment);
+    const bundleCache = (dependencies.materializeBundleCache ||
+      materializeVerifiedBundleCache)({
+      root: ROOT,
+      sourceCacheContentRoot: cacheRoot,
+      destinationCacheContentRoot: privateBundleCacheRoot,
+    });
+    if (bundleCache?.bundle_count !== 4 ||
+        realpathSync(bundleCache.cache_content_root || "") !==
+          realpathSync(privateBundleCacheRoot)) {
+      throw new Error("prepared_bundle_cache_identity_invalid");
+    }
+    wranglerRuntime = (dependencies.prepareWranglerRuntime || (() =>
+      prepareLockedWranglerRuntimeFromCache({
+        sourceRoot: ROOT,
+        destination: join(output, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+        cacheContentRoot: cacheRoot,
+      })))();
+    preparedWranglerRuntimeRoot = realpathSync(
+      join(output, LOCKED_WRANGLER_RUNTIME_DIRECTORY),
+    );
+    if (!wranglerRuntime?.exactRoot || !wranglerRuntime?.ownerOnly ||
+        realpathSync(dirname(wranglerRuntime.lockPin?.path || "")) !==
+          preparedWranglerRuntimeRoot) {
+      throw new Error("prepared_wrangler_runtime_identity_invalid");
+    }
+  } catch (error) {
+    try {
+      removePrivateHome(privateHome);
+      privateHomeRemoved = true;
+    } catch { /* Preserve the original setup refusal. */ }
+    throw error;
+  }
+  // This path is created and verified by the parent before the child receives
+  // its fresh npm cache. It lets the isolated suite reuse that exact runtime
+  // without exposing or mutating the user's ambient cache.
+  environment.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT =
+    preparedWranglerRuntimeRoot;
+  const receipt = baseReceipt(options, plan, wranglerRuntime);
+  let archive = null;
+  const commandRunner = dependencies.runCommand || run;
   const persist = (final = false) => persistReceiptArtifacts(receipt, {
     receiptPath, checklistPath,
   }, { write: dependencies.writePrivateFile || replacePrivateFile, final });
@@ -918,6 +974,7 @@ export async function runFieldPrepare(options, dependencies = {}) {
             finalIdentity.package_json_sha256 !== receipt.source.package_json_sha256 ||
             finalIdentity.package_lock_sha256 !== receipt.source.package_lock_sha256
           )) throw new Error("source_identity_changed_during_run");
+          assertLockedWranglerRuntimeUnchanged(wranglerRuntime);
           if (receipt.source) receipt.source = { ...receipt.source, end_clean: true };
         }
         else if (step.id === "package-build") {

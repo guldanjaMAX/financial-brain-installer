@@ -10,15 +10,13 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 
 // Keep ordinary audit regressions bounded at five minutes. The disposable
 // recovery adapter is intentionally heavier: it exercises the exact 6,001-row
-// replay and cryptographically bound recovery fixture, and a hosted macOS
-// Node 22 run completed normally just under the ordinary ceiling. The exact
-// current candidate also passed this proof earlier in the same hosted
-// macOS/Node 24 job and in its concurrent exact-SHA push run, while the later
-// isolated duplicate reached its exact ten-minute parent ceiling.
-// Give only that exact proof a reviewed fifteen-minute ceiling; a lookalike
-// path does not inherit the exception.
+// replay and encrypted provenance artifact fixture. The hardened adapter also
+// revalidates the fail-closed control-plane contracts throughout the proof; an
+// offline profiled run completed in about thirty minutes. Give only that exact
+// proof a reviewed forty-five-minute ceiling so slower hosted runners retain a
+// bounded margin. A lookalike path does not inherit the exception.
 export const DEFAULT_REGRESSION_TIMEOUT_MS = 300_000;
-export const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS = 900_000;
+export const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS = 45 * 60 * 1000;
 const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION = "test/cloudflare-recovery-adapter.test.mjs";
 
 function regressionTimeoutMs(path) {
@@ -230,7 +228,7 @@ export function assertSourceInventoryV3ReleaseVersion(version) {
 // from running. No shell, no output pipes, no inherited success from a later
 // command. A signal, timeout, or spawn error is a failure too.
 export function regressionEnvironment(env = process.env) {
-  const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI"];
+  const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI", "NPM_CONFIG_CACHE", "npm_config_cache"];
   const clean = Object.fromEntries(keys.filter((key) => typeof env[key] === "string").map((key) => [key, env[key]]));
   // Packed install tests invoke npm through Node, so a Windows timeout cannot
   // leave a shell's npm grandchild holding the disposable prefix open.

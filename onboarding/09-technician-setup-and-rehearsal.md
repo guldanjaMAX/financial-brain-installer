@@ -85,6 +85,41 @@ Never infer `first_brain` because a local file is missing. An existing-Brain
 route with no exact manifest pauses for owner-custody recovery instead of
 searching Cloudflare by name or starting over.
 
+For the held v0.4.8 pilot, an existing Brain must pass the exact package's
+read-only update preview before any update is considered:
+
+```bash
+brain update [manifest] --preview --expect-runtime-sha256 <64hex> --json
+```
+
+The receipt must name `identity_scheme: brain.runtime-payload.sha256.v1`; use
+its `runtime_payload_sha256` as this command's `expected_runtime_sha256`. Do
+not substitute the whole package SHA-256. This is a diagnostic only. It does
+not update the Brain, approve an update, or carry
+approval into a later command. A runtime mismatch, incomplete local manifest,
+invalid bare `brain.domain`, or changed local state stops before credential or
+network access. After those local gates pass, it ignores ambient `ADMIN_KEY`,
+uses the pinned manifest's durable administrator key for exactly one
+authenticated HTTP 200 read from `/api/admin/brain/documents`, and makes no
+Cloudflare control-plane request. It discards document rows and reports only a
+bounded, fingerprinted aggregate of Worker version, active D1 writer state,
+vector counts, pending queue, readiness reason, and verdict. That hostname is a
+pinned manifest assertion, not independent proof of Cloudflare account or
+domain ownership; the supervised field rung must reconcile the target.
+
+Only `projection_ready: true` means the projection is ready. A short projection
+is reported as `recoverable_queued_work`, not readiness, only when queued
+upserts cover its full numeric deficit; a smaller or delete-only queue is
+`projection_work_insufficient` and stops. Exact counts with pending work are
+also non-ready. Zero queued against a short projection, visibility pending with
+no queue, excess vectors, a paused or mixed generation, or malformed fields
+stop. Every result says
+`authorizes_update: false` and performs no Brain write, control-plane request,
+deploy, install, browser launch, manifest or workspace write, skill write, or
+support-journal write. The implementation and fixture tests in this working
+tree remain local-only; immutable package, CI, and supervised field evidence
+are still required before live use.
+
 After installing the released CLI, start with the read-only plan:
 
 ```bash
@@ -245,18 +280,40 @@ owner takes over for Google sign-in, 2FA, credential reveal, and OAuth consent.
 
 Ask what the owner wants the Brain to help with first. Create one dedicated
 folder and place in it one owner-approved, low-sensitivity, text-readable test
-document that can answer one distinctive question. Keep everything else out of
-the folder. Preview it first:
+document that can answer one distinctive question. Register that dedicated
+folder as one manifest source and keep exactly one direct regular file in its
+root. No subdirectory, link, junction, second file, or broader source tree is
+allowed. This architecture gate fails closed: the native Windows
+operating-system probe and the Node process must both report x64 before the
+command reads the manifest, source, credential, or network. Any other or
+uncertain architecture stops the pilot.
+
+Use the manifest source id and the file's canonical source-relative name to
+preview exactly that file. Copy `<64hex>` from the exact sealed package
+receipt's `runtime_payload_sha256`, which must use
+`identity_scheme: brain.runtime-payload.sha256.v1`. Do not substitute the
+whole tarball SHA-256:
 
 ```powershell
-& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" ingest "$HOME\Financial Brain\brain.manifest.json" --path "C:\path\to\the\approved-folder" --dry-run
+& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" ingest-file "$HOME\Financial Brain\brain.manifest.json" --source <id> --file <canonical-relative> --expect-runtime-sha256 <64hex> --json
 ```
 
-The preview sends nothing. Show the proposed source, items, exclusions, and OCR
-state, then obtain exact approval. Repeat the same command without `--dry-run`
-and prove that same document through Received, Saved, Search ready, and Answer
-checked. The Windows lane is manual in this pilot; do not claim that it is
-scheduled or silently substitute a different item for a failed checkpoint.
+The preview sends nothing and changes nothing. It returns one opaque
+64-character approval fingerprint bound to the exact architecture, package,
+manifest, source root, file bytes, and prepared item. Show the bounded scope,
+then obtain approval for that exact fingerprint. Keep the expected runtime
+value unchanged. Apply only with the matching approval value from the
+unchanged preview:
+
+```powershell
+& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" ingest-file "$HOME\Financial Brain\brain.manifest.json" --source <id> --file <canonical-relative> --expect-runtime-sha256 <64hex> --apply --approve <64hex>
+```
+
+This lane allows one exact native-text item only. It excludes OCR, removal,
+reconciliation, a full-source walk, scheduling, and substitution of another
+item. Prove that same document through Received, Saved, Search ready, and
+Answer checked. Documentation of this contract is not implementation, test,
+package, CI, physical Windows, or live-Brain proof.
 
 ### 5. Zoom
 

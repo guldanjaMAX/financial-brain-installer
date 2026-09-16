@@ -44,8 +44,20 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import {
+  PackageBundleVerificationError,
+  assertPackedBundleArchive,
+  assertPackedBundleMetadata,
+  assertPackedBundleRows,
+  inspectNpmArchiveBytes,
+  resolveNpmCacheContentRoot,
+} from "../operations/package-bundle-verifier.mjs";
+import {
+  normalizeWindowsLocalPackMetadata,
+  normalizeWindowsLocalPackRows,
+} from "./windows-local-pack-fixture.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -336,12 +348,32 @@ const packed = SCAN_ONLY ? { status: 0, stdout: "[]" } : spawnSync("npm", ["pack
   timeout: 60_000,
 });
 
+let packMetadata = null;
 let files = [];
 try {
-  files = JSON.parse(packed.stdout)?.[0]?.files?.map((entry) => entry.path) || [];
+  packMetadata = JSON.parse(packed.stdout)?.[0] || null;
+  files = packMetadata?.files?.map((entry) => entry.path) || [];
 } catch {
   // The failure below includes npm's own diagnostic without inventing a second
   // parse error that hides the useful cause.
+}
+let bundleMetadataFailure = null;
+let bundleCacheContentRoot = null;
+if (!SCAN_ONLY && packMetadata) {
+  try {
+    bundleCacheContentRoot = resolveNpmCacheContentRoot(process.env);
+    const localFixture = normalizeWindowsLocalPackMetadata(packMetadata);
+    assertPackedBundleMetadata({
+      root: ROOT,
+      metadata: localFixture.metadata,
+      cacheContentRoot: bundleCacheContentRoot,
+    });
+  }
+  catch (error) {
+    bundleMetadataFailure = error instanceof PackageBundleVerificationError
+      ? error.code
+      : "PACKAGE_BUNDLE_METADATA_INVALID";
+  }
 }
 
 // Structural path denials, plus the identity rules applied to the path itself.
@@ -492,6 +524,15 @@ const expected = [
   "operations/provenance-target-repair.mjs",
   "operations/provenance-target-cli.mjs",
   "operations/provenance-source-assessment.mjs",
+  // Held Windows x64 first-source lane. The pure orchestrator owns no I/O; its
+  // public receipts omit manifest, source, locator, query, and content. The
+  // native gate runs one fixed system PowerShell probe before private reads.
+  "operations/first-source-file.mjs",
+  "operations/windows-native-architecture.mjs",
+  // Local-only exact installed-package preview. It accepts one sealed runtime
+  // digest and emits only bounded version/runtime/plan identities; it has no
+  // credential, network, browser, update, or workspace-write capability.
+  "operations/update-preview.mjs",
   // Fixed fictional field fixture. It has no corpus/path/credential input or
   // live transport and emits only an aggregate plan or D1-count receipt.
   "operations/disposable-recovery-seeder.mjs",
@@ -516,17 +557,62 @@ const expected = [
   // and source A2 and target A4 mutations cannot be combined or exchange
   // approvals. It accepts no credential or token argument and refuses Windows.
   "operations/disposable-recovery-field-deploy-cli.mjs",
+  // Fixed A1/A3 provisioning and the private manifest/receipt cross-reader
+  // used to pass immutable resource identities into the campaign ladder.
+  "operations/disposable-recovery-field-provision.mjs",
+  // Closed A12 acceptance validator. It binds the exact active target and its
+  // private aggregate evidence without adding provider mutation authority.
+  "operations/disposable-recovery-field-acceptance.mjs",
+  // K0 creates only the four fixed disposable values after a local preview;
+  // reset is separately previewed and approved. Values never enter argv,
+  // output, or receipts.
+  "operations/disposable-recovery-field-keychain-prep.mjs",
+  "operations/disposable-recovery-field-keychain-prep-cli.mjs",
+  // A12 evaluates only the exact active disposable target and emits one
+  // owner-private aggregate receipt. It has no corpus or provider mutation.
+  "operations/disposable-recovery-target-eval.mjs",
+  "operations/disposable-recovery-target-eval-cli.mjs",
+  // Fixed A13-A16 deletion child and receipt-bound broker. They accept only
+  // the two campaign roles, journal before DELETE, and require exact custody
+  // and absence evidence before advancing.
+  "operations/cloudflare-disposable-teardown-provider.mjs",
+  "operations/disposable-recovery-field-teardown.mjs",
+  "operations/disposable-recovery-field-teardown-cli.mjs",
+  // A17 cross-binds the completed A12/A14/A16 evidence and can remove only
+  // four fixed campaign Keychain items while retaining the shared token and
+  // required private evidence. It is implemented offline and locally
+  // fixture-tested, but remains held, unfielded, and uncertified. It has no
+  // field or live proof and grants no release authority.
+  "operations/disposable-recovery-field-closeout-journal.mjs",
+  "operations/disposable-recovery-field-closeout-terminal-anchor.mjs",
+  "operations/disposable-recovery-field-closeout.mjs",
+  "operations/disposable-recovery-field-closeout-cli.mjs",
+  "operations/recovery-artifact-residue-policy.mjs",
   // Exact 6,001-document field transport. It accepts no corpus/source selector,
   // reserves an owner-only pending receipt before credential/provider work,
   // and uses only the locked runtime plus manifest-bound disposable source.
   "operations/disposable-recovery-field-seed.mjs",
-  // Owner-only aggregate field receipts. The helper reserves both final and
-  // pending paths before any live action, pins inode/owner/mode, and refuses
-  // ambiguous replacement or durability state.
+  // Owner-only aggregate field receipts. The helper durably reserves one
+  // pending path before any live action, leaves the final path absent until
+  // no-replace publication, and refuses ambiguous replacement or recovery state.
   "operations/private-aggregate-receipt.mjs",
   // Shared byte contract for a normalized install-state prefix plus one direct
   // D1 data export. It owns no credential, provider, or command transport.
   "operations/recovery-content-fingerprint.mjs",
+  // Reviewed v0.4.8 campaign contracts. Seven are dependency-free or pure
+  // hash/shape validators. The teardown D1 proof accepts only an injected,
+  // already approved Wrangler boundary, fixes every permitted read/export
+  // argument, retains no provider payload, and owns no credential resolution.
+  // Together they contain only the public synthetic campaign identifiers,
+  // closed secret names, aggregate proofs, and fail-closed validation logic.
+  "operations/v048-d1-deletion-state-contract.mjs",
+  "operations/v048-disposable-campaign-contract.mjs",
+  "operations/v048-exclusive-resource-custody-contract.mjs",
+  "operations/v048-target-eval-immutability-contract.mjs",
+  "operations/v048-teardown-d1-content-proof.mjs",
+  "operations/v048-vectorize-mutation-quiescence-contract.mjs",
+  "operations/v048-worker-reference-contract.mjs",
+  "operations/v048-worker-version-contract.mjs",
   // Aggregate-only local OCR planner. Reviewed 2026-09-12 for filename, path,
   // content, parser-error, hash, credential, and root-identity disclosure. Its
   // exact schema contains only counts, policy/model/pricing values, ranges,
@@ -553,6 +639,11 @@ const expected = [
   "scripts/reproduce-frozen-vector-fence.mjs",
   "scripts/run-test-chain.mjs",
   "scripts/test-release-workflow-contract.mjs",
+  // Minimal non-secret CI transport for the exact archive-derived update
+  // runtime identity. Its schema contains only source/package digests, counts,
+  // and the fixed identity scheme; it owns no credential or provider access.
+  "scripts/runtime-identity-receipt.mjs",
+  "scripts/verify-package-bundles.mjs",
   "scripts/verify-release-assets.mjs",
   "tools/preflight.ps1",
   "tools/preflight.sh",
@@ -633,6 +724,7 @@ const expected = [
   "privacy/credential-dispositions.json",
   "privacy/history-baseline.json",
   "privacy/public-refs.json",
+  "privacy/reviewed-package-bundles.json",
   "scripts/build-windows-onboarding-kit.mjs",
   "scripts/build-worker-bank-export.mjs",
   "scripts/build-worker-upload-extract.mjs",
@@ -694,6 +786,7 @@ const expected = [
   "operations/aggregate-field-observer.mjs",
   "operations/cloudflare-recovery-adapter.mjs",
   "operations/locked-wrangler-runtime.mjs",
+  "operations/package-bundle-verifier.mjs",
   "operations/verified-recovery.mjs",
   "operations/windows-dpapi.ps1",
   "operations/windows-dpapi-bridge.mjs",
@@ -771,6 +864,14 @@ const expectedBins = {
   brain: "./brain.mjs",
   "brain-v048-disposable-deploy":
     "./operations/disposable-recovery-field-deploy-cli.mjs",
+  "brain-v048-disposable-keychain-prep":
+    "./operations/disposable-recovery-field-keychain-prep-cli.mjs",
+  "brain-v048-disposable-target-eval":
+    "./operations/disposable-recovery-target-eval-cli.mjs",
+  "brain-v048-disposable-teardown":
+    "./operations/disposable-recovery-field-teardown-cli.mjs",
+  "brain-v048-disposable-closeout":
+    "./operations/disposable-recovery-field-closeout-cli.mjs",
 };
 const expectedLockBins = Object.fromEntries(Object.entries(expectedBins).map(
   ([name, path]) => [name, path.replace(/^\.\//u, "")],
@@ -778,6 +879,9 @@ const expectedLockBins = Object.fromEntries(Object.entries(expectedBins).map(
 const binConfigMismatch = !SCAN_ONLY &&
   (JSON.stringify(packageJson.bin) !== JSON.stringify(expectedBins) ||
    JSON.stringify(lock.packages?.[""]?.bin) !== JSON.stringify(expectedLockBins));
+const closedExportsMismatch = !SCAN_ONLY &&
+  (JSON.stringify(packageJson.exports) !== "{}" ||
+   JSON.stringify(lock.packages?.[""]?.exports) !== "{}");
 const dependencyMismatch = SCAN_ONLY ? [] : [...reviewedBundles].filter(([name, version]) =>
   packageJson.dependencies?.[name] !== version ||
   lock.packages?.[`node_modules/${name}`]?.version !== version ||
@@ -895,13 +999,15 @@ for (const path of privateScanPaths) {
 
 // A packlist can name every file and still hide a broken relative import or a
 // skill that cannot be installed from the packed tree. Build and unpack the
-// actual tarball, import the recovery adapter and both target-repair modules,
-// then install the reviewed skill
+// actual tarball, install one copy under node_modules, prove every package-name
+// operations/scripts subpath stays closed, import the reviewed internal modules
+// by absolute path, exercise the five v0.4.8 bin entrypoints, then install the reviewed skill
 // for Claude Code by default and for Codex only when its config tree already
-// exists. Compare every readback with the packed source. These probes invoke
-// no CLI entry point or network.
+// exists. Compare every readback with the packed source. Help and usage probes
+// are local-only and cannot reach Keychain, credentials, or the network.
 let packedAdapterImportFailed = false;
 let packedSkillInstallFailed = false;
+let packedBundleFailure = bundleMetadataFailure;
 const packageProbeDirectory = SCAN_ONLY ? null : mkdtempSync(join(tmpdir(), "brain-package-probe-"));
 if (packageProbeDirectory) try {
   const actualPack = spawnSync(
@@ -914,18 +1020,83 @@ if (packageProbeDirectory) try {
       timeout: 60_000,
     },
   );
+  let actualMetadata = null;
   let filename = null;
-  try { filename = JSON.parse(actualPack.stdout)?.[0]?.filename || null; } catch { /* fixed failure below */ }
+  try {
+    actualMetadata = JSON.parse(actualPack.stdout)?.[0] || null;
+    filename = actualMetadata?.filename || null;
+  } catch { /* fixed failure below */ }
   if (actualPack.status !== 0 || !filename) {
     packedAdapterImportFailed = true;
   } else {
-    const extracted = spawnSync("tar", [
-      "-xzf", join(packageProbeDirectory, filename), "-C", packageProbeDirectory,
-    ], {
-      encoding: "utf-8",
-      shell: process.platform === "win32",
-      timeout: 60_000,
-    });
+    try {
+      const packedArchivePath = join(packageProbeDirectory, filename);
+      const localMetadata = normalizeWindowsLocalPackMetadata(actualMetadata);
+      if (localMetadata.normalized) {
+        const localRows = normalizeWindowsLocalPackRows(
+          inspectNpmArchiveBytes(readFileSync(packedArchivePath)).rows,
+        );
+        if (!localRows.normalized) throw new Error("Windows local pack mode normalization disagreed");
+        let rawArchiveRefusal = null;
+        try {
+          assertPackedBundleArchive({
+            root: ROOT,
+            metadata: actualMetadata,
+            archivePath: packedArchivePath,
+            cacheContentRoot: bundleCacheContentRoot,
+          });
+        } catch (error) {
+          rawArchiveRefusal = error;
+        }
+        if (!(rawArchiveRefusal instanceof PackageBundleVerificationError) ||
+            rawArchiveRefusal.code !== "PACKAGE_BUNDLE_METADATA_INVENTORY_MISMATCH") {
+          throw new Error("Windows local pack archive had an unexpected reviewed-bundle delta");
+        }
+        assertPackedBundleRows({
+          root: ROOT,
+          metadata: localMetadata.metadata,
+          rows: localRows.rows,
+          cacheContentRoot: bundleCacheContentRoot,
+        });
+      } else {
+        assertPackedBundleArchive({
+          root: ROOT,
+          metadata: actualMetadata,
+          archivePath: packedArchivePath,
+          cacheContentRoot: bundleCacheContentRoot,
+        });
+      }
+    } catch (error) {
+      packedBundleFailure = error instanceof PackageBundleVerificationError
+        ? error.code
+        : "PACKAGE_BUNDLE_ARCHIVE_INVALID";
+    }
+    const extracted = packedBundleFailure
+      ? { status: null }
+      : spawnSync("tar", [
+          "-xzf", join(packageProbeDirectory, filename), "-C", packageProbeDirectory,
+        ], {
+          encoding: "utf-8",
+          shell: process.platform === "win32",
+          timeout: 60_000,
+        });
+    const consumerRoot = join(packageProbeDirectory, "consumer");
+    const installedPackagePath = join(
+      consumerRoot,
+      "node_modules",
+      packageJson.name,
+    );
+    let installedPackageReady = false;
+    if (extracted.status === 0) {
+      try {
+        mkdirSync(dirname(installedPackagePath), { recursive: true });
+        cpSync(join(packageProbeDirectory, "package"), installedPackagePath, {
+          recursive: true,
+          errorOnExist: true,
+        });
+        installedPackageReady = true;
+      } catch { /* fixed failure below */ }
+    }
     const adapterPath = join(
       packageProbeDirectory,
       "package",
@@ -962,6 +1133,72 @@ if (packageProbeDirectory) try {
       "operations",
       "disposable-recovery-field-deploy-cli.mjs",
     );
+    const disposableKeychainPrepPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-field-keychain-prep.mjs",
+    );
+    const disposableKeychainPrepCliPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-field-keychain-prep-cli.mjs",
+    );
+    const disposableTargetEvalPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-target-eval.mjs",
+    );
+    const disposableTargetEvalCliPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-target-eval-cli.mjs",
+    );
+    const disposableTeardownProviderPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "cloudflare-disposable-teardown-provider.mjs",
+    );
+    const disposableTeardownPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-field-teardown.mjs",
+    );
+    const disposableTeardownCliPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-field-teardown-cli.mjs",
+    );
+    const disposableCloseoutPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-field-closeout.mjs",
+    );
+    const disposableCloseoutTerminalAnchorPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-field-closeout-terminal-anchor.mjs",
+    );
+    const disposableCloseoutCliPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "disposable-recovery-field-closeout-cli.mjs",
+    );
+    const recoveryArtifactResiduePolicyPath = join(
+      packageProbeDirectory,
+      "package",
+      "operations",
+      "recovery-artifact-residue-policy.mjs",
+    );
     const skillModulePath = join(packageProbeDirectory, "package", "operations", "claude-skill.mjs");
     const skillSourcePath = join(
       packageProbeDirectory,
@@ -976,6 +1213,36 @@ if (packageProbeDirectory) try {
     // module the packed installer uses, so this compares the whole file on
     // every platform instead of asserting the macOS spelling.
     const skillRendererPath = join(packageProbeDirectory, "package", "operations", "cli-guidance.mjs");
+    const closedPackageSpecifiers = [
+      packageJson.name,
+      `${packageJson.name}/operations`,
+      `${packageJson.name}/scripts`,
+      ...files
+        .filter((path) => path.startsWith("operations/") || path.startsWith("scripts/"))
+        .map((path) => `${packageJson.name}/${path}`),
+    ];
+    const packageImportBoundaryProbe = installedPackageReady
+      ? spawnSync(process.execPath, [
+          "--input-type=module",
+          "--eval",
+          [
+            "for(const specifier of JSON.parse(process.env.PACK_CLOSED_SPECIFIERS)){",
+            "let code=null;try{await import(specifier)}catch(error){code=error?.code}",
+            "if(code!=='ERR_PACKAGE_PATH_NOT_EXPORTED'){",
+            "process.stderr.write(`${specifier}:${code||'OPEN'}\\n`);process.exit(1)}}",
+          ].join(""),
+        ], {
+          cwd: consumerRoot,
+          encoding: "utf-8",
+          env: {
+            PATH: process.env.PATH || "",
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
+            PACK_CLOSED_SPECIFIERS: JSON.stringify(closedPackageSpecifiers),
+          },
+          timeout: 60_000,
+        })
+      : { status: null };
     const importProbe = extracted.status === 0
       ? spawnSync(process.execPath, [
           "--input-type=module",
@@ -994,13 +1261,30 @@ if (packageProbeDirectory) try {
               targetCliPath,
               disposableProviderPath,
               disposableCliPath,
+              disposableKeychainPrepPath,
+              disposableKeychainPrepCliPath,
+              disposableTargetEvalPath,
+              disposableTargetEvalCliPath,
+              disposableTeardownProviderPath,
+              disposableTeardownPath,
+              disposableTeardownCliPath,
+              disposableCloseoutPath,
+              disposableCloseoutTerminalAnchorPath,
+              disposableCloseoutCliPath,
+              recoveryArtifactResiduePolicyPath,
             ]),
           },
           timeout: 60_000,
         })
       : { status: null };
-    const dispatcherHelpProbe = extracted.status === 0
-      ? spawnSync(process.execPath, [disposableCliPath, "help"], {
+    const installedBinPath = (name) => join(
+      installedPackagePath,
+      expectedBins[name].replace(/^\.\//u, ""),
+    );
+    const dispatcherHelpProbe = installedPackageReady
+      ? spawnSync(process.execPath, [
+          installedBinPath("brain-v048-disposable-deploy"), "help",
+        ], {
           encoding: "utf-8",
           env: {
             PATH: process.env.PATH || "",
@@ -1010,14 +1294,114 @@ if (packageProbeDirectory) try {
           timeout: 60_000,
         })
       : { status: null, stdout: "" };
-    packedAdapterImportFailed = extracted.status !== 0 || importProbe.status !== 0 ||
+    const teardownHelpProbe = installedPackageReady
+      ? spawnSync(process.execPath, [
+          installedBinPath("brain-v048-disposable-teardown"), "help",
+        ], {
+          encoding: "utf-8",
+          env: {
+            PATH: process.env.PATH || "",
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
+          },
+          timeout: 60_000,
+        })
+      : { status: null, stdout: "" };
+    const keychainPrepHelpProbe = installedPackageReady
+      ? spawnSync(process.execPath, [
+          installedBinPath("brain-v048-disposable-keychain-prep"), "help",
+        ], {
+          encoding: "utf-8",
+          env: {
+            PATH: process.env.PATH || "",
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
+          },
+          timeout: 60_000,
+        })
+      : { status: null, stdout: "" };
+    // Target eval deliberately has no broad help command. Missing arguments
+    // must take its fixed no-I/O usage-refusal path.
+    const targetEvalUsageProbe = installedPackageReady
+      ? spawnSync(process.execPath, [
+          installedBinPath("brain-v048-disposable-target-eval"),
+        ], {
+          encoding: "utf-8",
+          env: {
+            PATH: process.env.PATH || "",
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
+          },
+          timeout: 60_000,
+        })
+      : { status: null, stdout: "", stderr: "" };
+    const targetEvalHelpRefusalProbe = installedPackageReady
+      ? spawnSync(process.execPath, [
+          installedBinPath("brain-v048-disposable-target-eval"), "help",
+        ], {
+          encoding: "utf-8",
+          env: {
+            PATH: process.env.PATH || "",
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
+          },
+          timeout: 60_000,
+        })
+      : { status: null, stdout: "", stderr: "" };
+    const closeoutHelpProbe = installedPackageReady
+      ? spawnSync(process.execPath, [
+          installedBinPath("brain-v048-disposable-closeout"), "help",
+        ], {
+          encoding: "utf-8",
+          env: {
+            PATH: process.env.PATH || "",
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
+          },
+          timeout: 60_000,
+        })
+      : { status: null, stdout: "" };
+    packedAdapterImportFailed = extracted.status !== 0 || !installedPackageReady ||
+      packageImportBoundaryProbe.status !== 0 || importProbe.status !== 0 ||
       dispatcherHelpProbe.status !== 0 ||
       !dispatcherHelpProbe.stdout.includes("source-preflight") ||
       !dispatcherHelpProbe.stdout.includes("--approve-a2") ||
       !dispatcherHelpProbe.stdout.includes("target-preflight") ||
       !dispatcherHelpProbe.stdout.includes("--approve-a4") ||
       !dispatcherHelpProbe.stdout.includes("Windows is unsupported") ||
-      !dispatcherHelpProbe.stdout.includes("not field-proven");
+      !dispatcherHelpProbe.stdout.includes("not field-proven") ||
+      teardownHelpProbe.status !== 0 ||
+      !teardownHelpProbe.stdout.includes("--approve-a14") ||
+      !teardownHelpProbe.stdout.includes("--approve-a16") ||
+      !teardownHelpProbe.stdout.includes("Windows is unsupported") ||
+      !teardownHelpProbe.stdout.includes("unapproved") ||
+      keychainPrepHelpProbe.status !== 0 ||
+      !keychainPrepHelpProbe.stdout.includes("reset-preview") ||
+      !keychainPrepHelpProbe.stdout.includes("--approve-k0-reset") ||
+      !keychainPrepHelpProbe.stdout.includes("no writes or provider requests") ||
+      targetEvalUsageProbe.status !== 1 ||
+      targetEvalUsageProbe.stdout !== "" ||
+      targetEvalUsageProbe.stderr !==
+        "DISPOSABLE_RECOVERY_TARGET_EVAL_ARGUMENTS_INVALID\n" +
+          "usage: brain-v048-disposable-target-eval " +
+          "preview|execute <reviewed exact flags>\n" ||
+      targetEvalHelpRefusalProbe.status !== 1 ||
+      targetEvalHelpRefusalProbe.stdout !== "" ||
+      targetEvalHelpRefusalProbe.stderr !==
+        "DISPOSABLE_RECOVERY_TARGET_EVAL_ARGUMENTS_INVALID\n" +
+          "usage: brain-v048-disposable-target-eval " +
+          "preview|execute <reviewed exact flags>\n" ||
+      closeoutHelpProbe.status !== 0 ||
+      !closeoutHelpProbe.stdout.includes("--approve-a17") ||
+      !closeoutHelpProbe.stdout.includes("--artifact-directory") ||
+      !closeoutHelpProbe.stdout.includes("--field-receipt") ||
+      !closeoutHelpProbe.stdout.includes("--package") ||
+      !closeoutHelpProbe.stdout.includes("exclude transient provider runtime directories") ||
+      !closeoutHelpProbe.stdout.includes("never calls Cloudflare") ||
+      !closeoutHelpProbe.stdout.includes("encrypted provenance artifact") ||
+      !closeoutHelpProbe.stdout.includes("held and uncertified") ||
+      !closeoutHelpProbe.stdout.includes("no field or live proof") ||
+      !closeoutHelpProbe.stdout.includes("grants no release authority");
     const skillInstallProbe = extracted.status === 0
       ? spawnSync(process.execPath, [
           "--input-type=module",
@@ -1065,7 +1449,8 @@ if (packageProbeDirectory) try {
 }
 
 if (packed.status !== 0 || (!SCAN_ONLY && !files.length) || forbidden.length || missing.length || unexpected.length ||
-    bundleConfigMismatch || binConfigMismatch || dependencyMismatch.length ||
+    bundleConfigMismatch || binConfigMismatch || closedExportsMismatch || dependencyMismatch.length ||
+    packedBundleFailure ||
     gitIgnoreFailures.length ||
     canaryFailures.length || trackedEnumerationFailed ||
     privateTextMatches.length || privatePathMatches.length ||
@@ -1088,9 +1473,11 @@ if (packed.status !== 0 || (!SCAN_ONLY && !files.length) || forbidden.length || 
   if (unexpected.length) console.error(`unreviewed package files would ship: ${unexpected.join(", ")}`);
   if (bundleConfigMismatch) console.error("bundleDependencies does not match the reviewed dependency set");
   if (binConfigMismatch) console.error("package bin entries do not match the reviewed command set");
+  if (closedExportsMismatch) console.error("package and lock must expose no npm import subpaths");
   if (dependencyMismatch.length) {
     console.error(`bundled dependency version or package mismatch: ${dependencyMismatch.map(([name]) => name).join(", ")}`);
   }
+  if (packedBundleFailure) console.error(`strict bundled dependency verification failed: ${packedBundleFailure}`);
   if (gitIgnoreFailures.length) {
     console.error(`private admin-key paths are not ignored by Git: ${gitIgnoreFailures.join(", ")}`);
   }
@@ -1102,7 +1489,9 @@ if (packed.status !== 0 || (!SCAN_ONLY && !files.length) || forbidden.length || 
     console.error("replace the identity with a role word or an approved persona. Do not delete the sentence,");
     console.error("and do not remove the rule: a hit here is a finding, not a false alarm to be tuned away.");
   }
-  if (packedAdapterImportFailed) console.error("packed recovery adapter import probe failed");
+  if (packedAdapterImportFailed) {
+    console.error("packed internal import, closed package subpath, or bin entrypoint probe failed");
+  }
   if (packedSkillInstallFailed) console.error("packed technician skill install/readback probe failed");
   process.exit(1);
 }

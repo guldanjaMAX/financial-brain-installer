@@ -2,12 +2,19 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chownSync,
+  chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  renameSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import * as nodeModule from "node:module";
@@ -16,10 +23,14 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
+  assertLockedWranglerRuntimeUnchanged,
+  inspectLockedWranglerRuntime,
   LOCKED_WRANGLER_RESOLUTION_GUARD,
   LOCKED_WRANGLER_RESOLUTION_GUARD_MIN_NODE,
   LOCKED_WRANGLER_RESOLUTION_GUARD_SHA256,
   LOCKED_WRANGLER_RESOLUTION_GUARD_SOURCE,
+  materializeLockedWranglerRuntime,
+  prepareLockedWranglerRuntimeFromCache,
 } from "../operations/locked-wrangler-runtime.mjs";
 import {
   assertDirectPlanEntrypoint,
@@ -32,6 +43,7 @@ import {
   createPlanEnvironment,
   createSafeEnvironment,
   makeOutputDirectory,
+  packageSource,
   parseFieldPrepareArgs,
   readSourceIdentity,
   renderFieldChecklist,
@@ -121,6 +133,10 @@ test("every child environment drops credentials and customer-home access", () =>
       QUICKBOOKS_CLIENT_SECRET: "fixture-qbo-secret",
       GOOGLE_CLIENT_SECRET: "fixture-google-secret",
       NODE_OPTIONS: "--import=/private/customer-hook.mjs",
+      NPM_CONFIG_CACHE: "/private/untrusted-uppercase-cache",
+      npm_config_cache: "/private/untrusted-lowercase-cache",
+      BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT: "/private/untrusted-runtime",
+      BRAIN_FIELD_BUNDLE_CACHE_CONTENT_ROOT: "/private/untrusted-bundle-cache",
     }, temporary);
     assert.equal(safe.PATH, "/fixture/bin");
     assert.equal(safe.HOME, temporary);
@@ -130,6 +146,9 @@ test("every child environment drops credentials and customer-home access", () =>
     assert.equal(safe.QUICKBOOKS_CLIENT_SECRET, undefined);
     assert.equal(safe.GOOGLE_CLIENT_SECRET, undefined);
     assert.equal(safe.NODE_OPTIONS, undefined);
+    assert.equal(safe.npm_config_cache, undefined);
+    assert.equal(safe.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT, undefined);
+    assert.equal(safe.BRAIN_FIELD_BUNDLE_CACHE_CONTENT_ROOT, undefined);
     assert.equal(safe.NPM_CONFIG_CACHE, join(temporary, "npm-cache"));
     assert.equal(safe.NPM_CONFIG_GLOBALCONFIG, join(temporary, "npm-globalrc"));
     assert.equal(safe.NPM_CONFIG_USERCONFIG, join(temporary, "npmrc"));
@@ -156,6 +175,70 @@ test("the integrity cache locator follows npm and Windows cache semantics", () =
     resolve("C:\\Users\\fixture\\AppData\\Local", "npm-cache", "_cacache",
       "content-v2", "sha512"),
   );
+});
+
+test("field package verification is pinned to the scrubbed private npm cache", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "brain-field-package-cache-"));
+  const output = join(fixture, "output");
+  mkdirSync(output);
+  const environment = createSafeEnvironment({
+    PATH: process.env.PATH || "",
+    NPM_CONFIG_CACHE: "/private/untrusted-cache",
+    BRAIN_FIELD_BUNDLE_CACHE_CONTENT_ROOT: "/private/untrusted-bundle-cache",
+  }, join(fixture, "home"));
+  const filename = "brain-installer-9.9.9.tgz";
+  const archive = join(output, filename);
+  const bytes = Buffer.from("x");
+  writeFileSync(archive, bytes);
+  let verified = null;
+  try {
+    const packed = packageSource(output, environment, {
+      package_name: "brain-installer",
+      package_version: "9.9.9",
+    }, {
+      runNpm(args, options) {
+        assert.deepEqual(args, [
+          "pack", "--json", "--ignore-scripts", "--pack-destination", output,
+        ]);
+        assert.equal(options.env, environment);
+        return {
+          ok: true,
+          stdout: JSON.stringify([{ filename, size: bytes.length, files: [{
+            path: "package.json", size: bytes.length, mode: 0o644,
+          }], entryCount: 1 }]),
+        };
+      },
+      assertPackedBundleArchive(options) {
+        verified = options;
+        return {
+          archive_bytes: bytes.length,
+          archive_sha256: createHash("sha256").update(bytes).digest("hex"),
+          identity_scheme: "brain.runtime-payload.sha256.v1",
+          runtime_payload_sha256: "b".repeat(64),
+          archive_file_count: 1,
+          bundle_count: 4,
+          bundle_file_count: 226,
+          bundle_bytes: 11_340_570,
+          inventory_sha256: "a".repeat(64),
+        };
+      },
+    });
+    assert.equal(
+      verified.cacheContentRoot,
+      resolveNpmCacheContentRoot(environment),
+    );
+    assert.notEqual(verified.cacheContentRoot, "/private/untrusted-cache");
+    assert.notEqual(verified.cacheContentRoot, "/private/untrusted-bundle-cache");
+    assert.deepEqual(Object.keys(packed.receipt).sort(), [
+      "bytes", "file_count", "filename", "identity_scheme",
+      "runtime_payload_sha256", "sha256",
+    ]);
+    assert.equal(packed.receipt.identity_scheme, "brain.runtime-payload.sha256.v1");
+    assert.equal(packed.receipt.runtime_payload_sha256, "b".repeat(64));
+  } finally {
+    bytes.fill(0);
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("the locked Wrangler guard rejects ambient module resolution in parent and child Node processes", {
@@ -280,6 +363,256 @@ if (process.argv[2] === "child") {
         /LOCKED_WRANGLER_RESOLUTION_OUTSIDE_RUNTIME/,
       );
     }
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("long-lived Wrangler pins preserve structure while isolating POSIX metadata tolerance", async (t) => {
+  const temporary = mkdtempSync(join(tmpdir(), "brain-wrangler-ctime-"));
+  try {
+    const preparedRoot = process.env.BRAIN_FIELD_PREPARED_WRANGLER_RUNTIME_ROOT;
+    const source = preparedRoot
+      ? inspectLockedWranglerRuntime(preparedRoot, { ownerOnly: true, exactRoot: true })
+      : prepareLockedWranglerRuntimeFromCache({
+          sourceRoot: ROOT,
+          destination: join(temporary, "source-runtime"),
+          cacheContentRoot: resolveNpmCacheContentRoot(process.env),
+        });
+    const materialized = materializeLockedWranglerRuntime(
+      source,
+      join(temporary, "runtime"),
+    );
+    // Normalize the repeatedly mutated fixture file to whole-second times so
+    // filesystems with sub-millisecond stat precision can restore it exactly.
+    const initialStableTime = new Date(Math.floor(Date.now() / 1_000) * 1_000 - 20_000);
+    utimesSync(materialized.entrypointPath, initialStableTime, initialStableTime);
+    let expected = inspectLockedWranglerRuntime(materialized.root, {
+      ownerOnly: materialized.descriptor.ownerOnly,
+      exactRoot: materialized.descriptor.exactRoot,
+      ...materialized.descriptor.host,
+    });
+    const refusesChange = (message, codes = [
+      "LOCKED_WRANGLER_RUNTIME_INVALID",
+      "LOCKED_WRANGLER_RUNTIME_CHANGED",
+    ]) => assert.throws(
+      () => assertLockedWranglerRuntimeUnchanged(expected),
+      (error) => codes.includes(error.code),
+      message,
+    );
+    const assertRestored = () => assert.doesNotThrow(
+      () => assertLockedWranglerRuntimeUnchanged(expected),
+      "each structural probe must restore the exact pinned runtime",
+    );
+
+    await t.test("cross-platform exact-tree, inode, link, byte, and file-mtime pins", () => {
+      const entrypoint = expected.entrypointPath;
+      const leafDirectoryPin = expected.directoryPins.find((candidate) => {
+        const prefix = `${candidate.relative}/`;
+        return !expected.directoryPins.some((other) =>
+          other !== candidate && other.relative.startsWith(prefix)) &&
+          expected.filePins.some((file) => {
+            if (!file.relative.startsWith(prefix)) return false;
+            return !file.relative.slice(prefix.length).includes("/");
+          });
+      });
+      assert(leafDirectoryPin, "the prepared runtime must contain a leaf package directory");
+      const directory = leafDirectoryPin.path;
+
+      const unexpectedFile = join(directory, "unexpected-runtime-entry");
+      writeFileSync(unexpectedFile, "unexpected exact-tree entry\n");
+      try {
+        refusesChange("an added file must change the exact tree");
+      } finally {
+        rmSync(unexpectedFile);
+      }
+      assertRestored();
+
+      const unexpectedDirectory = join(directory, "unexpected-runtime-directory");
+      mkdirSync(unexpectedDirectory);
+      try {
+        refusesChange("an added directory must change the exact tree");
+      } finally {
+        rmSync(unexpectedDirectory, { recursive: true, force: true });
+      }
+      assertRestored();
+
+      const removedFileBackup = join(temporary, "removed-file-backup");
+      renameSync(entrypoint, removedFileBackup);
+      try {
+        refusesChange("a removed file must change the exact tree");
+      } finally {
+        renameSync(removedFileBackup, entrypoint);
+      }
+      assertRestored();
+
+      const removedDirectoryBackup = join(temporary, "removed-directory-backup");
+      renameSync(directory, removedDirectoryBackup);
+      try {
+        refusesChange("a removed directory must change the exact tree");
+      } finally {
+        renameSync(removedDirectoryBackup, directory);
+      }
+      assertRestored();
+
+      const hardLink = join(directory, "unexpected-runtime-hardlink");
+      linkSync(entrypoint, hardLink);
+      try {
+        refusesChange("a hard link must change both the exact tree and file link count");
+      } finally {
+        rmSync(hardLink);
+      }
+      assertRestored();
+
+      const fileBeforeMtime = statSync(entrypoint);
+      utimesSync(entrypoint, fileBeforeMtime.atime, new Date(fileBeforeMtime.mtimeMs + 2_000));
+      try {
+        refusesChange(
+          "directory timestamp tolerance must not weaken a regular-file mtime pin",
+          ["LOCKED_WRANGLER_RUNTIME_CHANGED"],
+        );
+      } finally {
+        utimesSync(entrypoint, fileBeforeMtime.atime, fileBeforeMtime.mtime);
+      }
+      assertRestored();
+
+      const originalBytes = readFileSync(entrypoint);
+      const originalMetadata = statSync(entrypoint);
+      try {
+        writeFileSync(entrypoint, Buffer.concat([
+          originalBytes,
+          Buffer.from("\n// changed runtime bytes\n"),
+        ]));
+        refusesChange("changed runtime bytes must be refused");
+      } finally {
+        writeFileSync(entrypoint, originalBytes);
+        utimesSync(entrypoint, originalMetadata.atime, originalMetadata.mtime);
+        originalBytes.fill(0);
+      }
+      assertRestored();
+
+      const directoryBackup = join(temporary, "directory-replacement-backup");
+      const directoryBefore = statSync(directory);
+      renameSync(directory, directoryBackup);
+      mkdirSync(directory);
+      chmodSync(directory, directoryBefore.mode & 0o777);
+      for (const name of readdirSync(directoryBackup)) {
+        renameSync(join(directoryBackup, name), join(directory, name));
+      }
+      try {
+        assert.notEqual(statSync(directory).ino, directoryBefore.ino);
+        refusesChange("a same-tree directory inode replacement must be refused", [
+          "LOCKED_WRANGLER_RUNTIME_CHANGED",
+        ]);
+      } finally {
+        for (const name of readdirSync(directory)) {
+          renameSync(join(directory, name), join(directoryBackup, name));
+        }
+        rmSync(directory, { recursive: true, force: true });
+        renameSync(directoryBackup, directory);
+      }
+      assertRestored();
+
+      const replacement = join(temporary, "same-byte-file-replacement");
+      const originalBackup = join(temporary, "same-byte-file-original");
+      const replacementBytes = readFileSync(entrypoint);
+      const wholeSecond = new Date(Math.floor(Date.now() / 1_000) * 1_000 - 10_000);
+      writeFileSync(replacement, replacementBytes);
+      chmodSync(replacement, statSync(entrypoint).mode & 0o777);
+      utimesSync(replacement, wholeSecond, wholeSecond);
+      utimesSync(entrypoint, wholeSecond, wholeSecond);
+      expected = inspectLockedWranglerRuntime(materialized.root, {
+        ownerOnly: expected.ownerOnly,
+        exactRoot: expected.exactRoot,
+        ...expected.host,
+      });
+      const originalIdentity = statSync(entrypoint);
+      const replacementIdentity = statSync(replacement);
+      for (const key of ["dev", "nlink", "size", "mode", "uid", "mtimeMs"]) {
+        assert.equal(replacementIdentity[key], originalIdentity[key],
+          `same-byte replacement precondition differs at ${key}`);
+      }
+      renameSync(entrypoint, originalBackup);
+      renameSync(replacement, entrypoint);
+      try {
+        assert.notEqual(statSync(entrypoint).ino, originalIdentity.ino);
+        refusesChange("a same-byte regular-file inode replacement must be refused", [
+          "LOCKED_WRANGLER_RUNTIME_CHANGED",
+        ]);
+      } finally {
+        rmSync(entrypoint);
+        renameSync(originalBackup, entrypoint);
+        replacementBytes.fill(0);
+      }
+      assertRestored();
+    });
+
+    await t.test("POSIX provenance timestamps, symlinks, and mode pins", {
+      skip: process.platform === "win32",
+    }, async () => {
+      const entrypoint = expected.entrypointPath;
+      const before = statSync(entrypoint);
+
+      // Reapplying the effective mode models a provenance xattr update: ctime
+      // changes while the executable's bytes and source mtime do not.
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      chmodSync(entrypoint, before.mode & 0o777);
+      const metadataOnly = statSync(entrypoint);
+      assert.equal(metadataOnly.mtimeMs, before.mtimeMs);
+      assert.notEqual(metadataOnly.ctimeMs, before.ctimeMs);
+      assertRestored();
+
+      const directory = expected.directoryPins.at(-1).path;
+      const directoryBefore = statSync(directory);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+      utimesSync(directory, directoryBefore.atime, new Date(directoryBefore.mtimeMs + 2_000));
+      assert.notEqual(statSync(directory).mtimeMs, directoryBefore.mtimeMs);
+      assertRestored();
+
+      const symlink = join(directory, "unexpected-runtime-symlink");
+      symlinkSync(entrypoint, symlink, "file");
+      try {
+        refusesChange("a symlink must never enter the exact runtime tree");
+      } finally {
+        rmSync(symlink);
+      }
+      assertRestored();
+
+      const fileMode = statSync(entrypoint).mode & 0o777;
+      chmodSync(entrypoint, fileMode ^ 0o100);
+      try {
+        refusesChange("a regular-file mode change must be refused");
+      } finally {
+        chmodSync(entrypoint, fileMode);
+      }
+      assertRestored();
+
+      const directoryMode = statSync(directory).mode & 0o777;
+      chmodSync(directory, directoryMode ^ 0o200);
+      try {
+        refusesChange("a directory mode change must be refused", [
+          "LOCKED_WRANGLER_RUNTIME_CHANGED",
+        ]);
+      } finally {
+        chmodSync(directory, directoryMode);
+      }
+      assertRestored();
+    });
+
+    await t.test("POSIX owner pins reject a real owner transition when privileged", {
+      skip: typeof process.getuid !== "function" || process.getuid() !== 0,
+    }, () => {
+      const entrypoint = expected.entrypointPath;
+      const before = statSync(entrypoint);
+      const replacementUid = before.uid === 1 ? 2 : 1;
+      chownSync(entrypoint, replacementUid, before.gid);
+      try {
+        refusesChange("a regular-file owner change must be refused");
+      } finally {
+        chownSync(entrypoint, before.uid, before.gid);
+      }
+      assertRestored();
+    });
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -456,13 +789,21 @@ test("the generated checklist keeps offline proof separate from human field gate
       head_sha: "a".repeat(40), tree_sha: "b".repeat(40),
       package_name: "brain-installer", package_version: "0.2.1",
     },
-    package: { filename: "brain-installer-0.2.1.tgz", bytes: 123, sha256: "c".repeat(64) },
+    package: {
+      filename: "brain-installer-0.2.1.tgz",
+      bytes: 123,
+      sha256: "c".repeat(64),
+      identity_scheme: "brain.runtime-payload.sha256.v1",
+      runtime_payload_sha256: "d".repeat(64),
+    },
   });
   assert.match(checklist, /Clean Windows owner profile/);
   assert.match(checklist, /Disposable Cloudflare Brain/);
   assert.match(checklist, /schema 46/);
   assert.match(checklist, /Plaid Sandbox through the deployed Brain/);
   assert.match(checklist, /QuickBooks Online Sandbox/);
+  assert.match(checklist, /Runtime identity scheme: brain\.runtime-payload\.sha256\.v1/);
+  assert.match(checklist, new RegExp(`Runtime payload SHA-256: ${"d".repeat(64)}`));
   assert.match(checklist, /does not prove Cloudflare/i);
   assert.doesNotMatch(checklist, /--execute|--live/);
 });
@@ -613,7 +954,10 @@ test("source identity hashes the parsed package bytes and refuses a closing-byte
 
 function gitEnvironment() {
   const environment = {};
-  for (const name of ["PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT"]) {
+  for (const name of [
+    "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC",
+    "PATHEXT", "TMPDIR", "TMP", "TEMP",
+  ]) {
     if (process.env[name]) environment[name] = process.env[name];
   }
   return environment;
@@ -656,6 +1000,14 @@ function makeCleanPlanFixture() {
   writeFileSync(
     join(root, "operations", "locked-wrangler-runtime.mjs"),
     readFileSync(join(ROOT, "operations", "locked-wrangler-runtime.mjs")),
+  );
+  writeFileSync(
+    join(root, "operations", "package-bundle-verifier.mjs"),
+    readFileSync(join(ROOT, "operations", "package-bundle-verifier.mjs")),
+  );
+  writeFileSync(
+    join(root, "operations", "update-preview.mjs"),
+    readFileSync(join(ROOT, "operations", "update-preview.mjs")),
   );
   writeFileSync(join(root, "package.json"), `${JSON.stringify({
     name: "brain-installer",

@@ -11,6 +11,12 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
 import { readPrivateAggregateReceipt } from "./private-aggregate-receipt.mjs";
+import {
+  assertCloudflareDisposableCampaignSemanticAuthority,
+} from "./cloudflare-disposable-deployment-provider.mjs";
+import {
+  assertV048VectorizeMutationQuiescenceApproval,
+} from "./v048-vectorize-mutation-quiescence-contract.mjs";
 
 export const DISPOSABLE_RECOVERY_LEGACY_DEPLOYMENT_PROTOCOL =
   "v048-disposable-recovery-deployment-v1";
@@ -71,6 +77,7 @@ const BINDING_BASE_FIELDS = Object.freeze([
   "candidate_tree_sha",
   "field_receipt_sha256",
   "field_receipt_run_id",
+  "keychain_binding_sha256",
   "package_filename",
   "package_bytes",
   "package_sha256",
@@ -219,6 +226,7 @@ function assertBindingBase(binding, code) {
       !hashes([
         binding.plan_fingerprint,
         binding.field_receipt_sha256,
+        binding.keychain_binding_sha256,
         binding.package_sha256,
         binding.execution_inventory_sha256,
         binding.installed_execution_inventory_sha256,
@@ -280,6 +288,42 @@ export function assertDisposableRecoveryDeploymentBinding(binding) {
     refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_BINDING_INVALID");
   }
   return immutableClone(binding);
+}
+
+/** Validate the exact A4-reviewed continuous no-competing-writer claim. */
+export function assertDisposableRecoveryVectorizeMutationQuiescenceClaim(
+  claim,
+  bindingInput,
+) {
+  const code = "DISPOSABLE_RECOVERY_VECTORIZE_QUIESCENCE_INVALID";
+  const binding = assertDisposableRecoveryDeploymentBinding(bindingInput);
+  const expected = disposableRecoveryVectorizeMutationQuiescenceClaim(
+    binding,
+    claim?.approval_fingerprint,
+  );
+  if (canonical(claim) !== canonical(expected)) refuse(code);
+  return immutableClone(expected);
+}
+
+/** Derive the normalized claim from the exact plan-carried approval value. */
+export function disposableRecoveryVectorizeMutationQuiescenceClaim(
+  bindingInput,
+  approvalFingerprint,
+) {
+  const code = "DISPOSABLE_RECOVERY_VECTORIZE_QUIESCENCE_INVALID";
+  const binding = assertDisposableRecoveryDeploymentBinding(bindingInput);
+  let expected;
+  try {
+    expected = assertV048VectorizeMutationQuiescenceApproval({
+      sourceManifestSha256: binding.source_manifest_fingerprint,
+      targetManifestSha256: binding.target_manifest_fingerprint,
+      targetResourceFingerprint: binding.target_resource_fingerprint,
+      approvalFingerprint,
+    });
+  } catch {
+    refuse(code);
+  }
+  return immutableClone(expected);
 }
 
 /** Derive the source-only A2 approval from the exact preflight receipt. */
@@ -430,6 +474,79 @@ function assertDeploymentEvidence(deployment, code) {
   return immutableClone(deployment);
 }
 
+function assertTargetFinalSemanticAuthority(value, receipt, code) {
+  if (!exactKeys(value, [
+    "campaign_authority", "campaign_custody", "source", "target",
+    "vectorize_mutation_quiescence",
+  ])) {
+    refuse(code);
+  }
+  let authority;
+  try {
+    authority = assertCloudflareDisposableCampaignSemanticAuthority(
+      value.campaign_authority,
+    );
+  } catch {
+    refuse(code);
+  }
+  if (canonical(authority.campaign_custody) !== canonical(value.campaign_custody) ||
+      canonical(value.vectorize_mutation_quiescence) !==
+        canonical(receipt.vectorize_mutation_quiescence) ||
+      !exactKeys(value.source, [
+        "active_deployment_id", "active_script_etag", "active_traffic_percent",
+        "active_version_id", "network_isolation", "resource",
+        "resource_fingerprint", "worker_generation",
+      ]) || !exactKeys(value.target, [
+        "active_version", "network_isolation", "paused_deployment",
+        "paused_version", "resource", "resource_fingerprint",
+        "worker_generation",
+      ]) || value.source.active_traffic_percent !== 100 ||
+      value.source.resource_fingerprint !==
+        receipt.binding.source_resource_fingerprint ||
+      value.target.resource_fingerprint !==
+        receipt.binding.target_resource_fingerprint ||
+      canonical(value.source.network_isolation) !==
+        canonical(authority.network_isolation.source) ||
+      canonical(value.target.network_isolation) !==
+        canonical(authority.network_isolation.target) ||
+      value.source.worker_generation?.worker_generation_sha256 !==
+        authority.campaign_custody.roles.source.worker_protection
+          .worker_generation_sha256 ||
+      value.target.worker_generation?.worker_generation_sha256 !==
+        authority.campaign_custody.roles.target.worker_protection
+          .worker_generation_sha256 ||
+      value.source.active_version_id !== receipt.source.active_version_id ||
+      value.source.active_script_etag !== receipt.source.active_script_etag ||
+      value.source.active_deployment_id !== receipt.source.active_deployment_id ||
+      value.target.paused_version?.version_id !==
+        receipt.target.paused_version.version_id ||
+      value.target.paused_version?.script_etag !==
+        receipt.target.paused_version.script_etag ||
+      value.target.active_version?.version_id !==
+        receipt.target.active_version.version_id ||
+      value.target.active_version?.script_etag !==
+        receipt.target.active_version.script_etag ||
+      value.target.paused_deployment?.deployment_id !==
+        receipt.target.paused_deployment.deployment_id ||
+      value.target.paused_deployment?.version_id !==
+        receipt.target.paused_deployment.version_id ||
+      authority.approved_versions.source.version_id !==
+        receipt.source.active_version_id ||
+      authority.approved_versions.source.script_etag !==
+        receipt.source.active_script_etag ||
+      authority.approved_versions.target_paused.version_id !==
+        receipt.target.paused_version.version_id ||
+      authority.approved_versions.target_paused.script_etag !==
+        receipt.target.paused_version.script_etag ||
+      authority.approved_versions.target_active.version_id !==
+        receipt.target.active_version.version_id ||
+      authority.approved_versions.target_active.script_etag !==
+        receipt.target.active_version.script_etag) {
+    refuse(code);
+  }
+  return immutableClone(value);
+}
+
 /** Validate the immutable read-only gate that precedes source mutation. */
 export function assertDisposableRecoverySourcePreflightReceipt(receipt) {
   const code = "DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_INVALID";
@@ -479,6 +596,7 @@ export function assertDisposableRecoveryTargetPreflightReceipt(receipt) {
     "binding",
     "source_phase_receipt_sha256",
     "seed_receipt_sha256",
+    "vectorize_mutation_quiescence",
     "planned_requests",
     "snapshot",
   ];
@@ -494,6 +612,10 @@ export function assertDisposableRecoveryTargetPreflightReceipt(receipt) {
     refuse(code);
   }
   assertDisposableRecoveryDeploymentBinding(receipt.binding);
+  assertDisposableRecoveryVectorizeMutationQuiescenceClaim(
+    receipt.vectorize_mutation_quiescence,
+    receipt.binding,
+  );
   const plannedFields = [
     "target_paused_upload_sha256",
     "target_active_upload_sha256",
@@ -578,9 +700,11 @@ export function assertDisposableRecoveryTargetPhaseReceipt(receipt) {
     "seed_receipt_sha256",
     "target_preflight_receipt_sha256",
     "a4_approval_fingerprint",
+    "vectorize_mutation_quiescence",
     "journal",
     "source",
     "target",
+    "final_semantic",
     "final_snapshot",
   ];
   if (!exactKeys(receipt, fields) || receipt.schema_version !== 2 ||
@@ -599,6 +723,10 @@ export function assertDisposableRecoveryTargetPhaseReceipt(receipt) {
     refuse(code);
   }
   const binding = assertDisposableRecoveryDeploymentBinding(receipt.binding);
+  assertDisposableRecoveryVectorizeMutationQuiescenceClaim(
+    receipt.vectorize_mutation_quiescence,
+    binding,
+  );
   if (receipt.a4_approval_fingerprint !== disposableRecoveryTargetA4Fingerprint(
     binding,
     ...links,
@@ -649,7 +777,16 @@ export function assertDisposableRecoveryTargetPhaseReceipt(receipt) {
       ]).size !== 3) {
     refuse(code);
   }
-  assertDoubleReadSnapshot(receipt.final_snapshot, code);
+  const finalSnapshot = assertDoubleReadSnapshot(receipt.final_snapshot, code);
+  const finalSemantic = assertTargetFinalSemanticAuthority(
+    receipt.final_semantic,
+    receipt,
+    code,
+  );
+  if (finalSnapshot.stable_semantic_sha256 !==
+      sha256(canonical(finalSemantic))) {
+    refuse(code);
+  }
   return immutableClone(receipt);
 }
 
@@ -729,6 +866,8 @@ export function assertDisposableRecoveryDeploymentReceiptChain(chain) {
       targetPhase.value.source_phase_receipt_sha256 !== sourcePhase.sha256 ||
       targetPhase.value.seed_receipt_sha256 !== chain.seed_receipt_sha256 ||
       targetPhase.value.target_preflight_receipt_sha256 !== targetPreflight.sha256 ||
+      canonical(targetPhase.value.vectorize_mutation_quiescence) !==
+        canonical(targetPreflight.value.vectorize_mutation_quiescence) ||
       targetPhase.value.journal.source_prefix_head_sha256 !==
         sourcePhase.value.journal.head_sha256 ||
       targetPhase.value.source.resource_fingerprint !==

@@ -110,7 +110,10 @@ On Windows, use the sealed ZIP and matching `release.json` from
 instead of sending a repository link, bare SHA, guide, or script. The sealed
 instructions have Claude Code obtain the exact reviewed checkout and use its
 checked-in launcher. The launcher verifies the recorded SHA, clean repository
-root, non-administrator PowerShell, and Node.js 22+, then starts Node directly.
+root, non-administrator PowerShell, Node.js 22+, and the carried non-secret
+`identity_scheme` plus `expected_runtime_sha256`, then starts Node directly.
+That synthetic route preserves the sealed update identity but does not observe
+an installed runtime or run update preview.
 The first run may download one additional small set of public frontend packages
 and can be quiet for several minutes.
 
@@ -126,15 +129,40 @@ synthetic setup, folder, connector, migration, search, owner-action, access, and
 technician scenarios. The final receipt separates automatic proof from the
 remaining live Cloudflare, provider, and physical-device checks.
 
-The package also ships the internal, fixed-campaign dispatcher
-`brain-v048-disposable-deploy`. Run it with `help` to see the separate source
-preview, source preflight, source A2 mutation, target preview, target preflight,
-and target A4 mutation commands. Preview has no network or write capability;
-preflight uses Cloudflare GETs only and writes one owner-private receipt. The
-two mutation commands cannot be combined or exchange approval fingerprints.
-They accept no token option, resolve the exact account token only from macOS
-Keychain, and refuse Windows. The entry point is packaged and fixture-tested,
-but remains **not field-proven** until the exact disposable campaign passes.
+The package contains five internal, fixed-campaign entry points for the held
+v0.4.8 recovery proof. They are not customer install or update commands:
+
+1. `brain-v048-disposable-keychain-prep help` covers K0. Its local preview and
+   exact-approved execute prepare four campaign-only Keychain values before any
+   provider call. An interrupted K0 has a separately previewed and approved
+   reset. It never touches the shared Cloudflare token.
+2. `brain-v048-disposable-deploy help` covers A1 through A4. Source and target
+   provisioning and deployment keep separate approvals and ambiguity journals.
+   Preview has no network or write capability. Preflight uses bounded
+   Cloudflare GETs and writes one owner-private receipt.
+3. `brain-v048-disposable-target-eval preview|execute` is the aggregate A12
+   lane after recovery promotes the exact active target. It changes neither
+   corpus nor provider state, although its private questions may create
+   ordinary aggregate usage records. Its fixed receipt is retained for
+   teardown.
+4. `brain-v048-disposable-teardown help` covers the separate A13/A14 source and
+   A15/A16 target ceremonies. Each role removes only its named disposable
+   Worker, Vectorize index, and D1 database, in that order, after fresh
+   deletion-state proof.
+5. `brain-v048-disposable-closeout help` exposes the held A17 review surface.
+   A17 is implemented offline and locally fixture-tested, but remains held,
+   unfielded, and uncertified. It has no field or live proof and grants no
+   release authority. Any execution still requires separately accepted exact
+   retained-evidence, four campaign-only Keychain deletion, and shared-token
+   preservation gates.
+
+The matching recovery drill stores its D1 export as an encrypted provenance
+artifact. Before it promotes the reviewed active Worker, it requires the exact
+D1 vector-ID set to equal the provider's complete Vectorize ID set, the
+provider's processed mutation watermark to equal the Worker's verified barrier,
+and a durable promotion-intent receipt. These paths remain held and
+**not field-proven** until the exact disposable campaign passes. They do not
+authorize a provider call, release, customer action, or public change.
 
 For an install day, first select one explicit setup intent: `first_brain`,
 `existing_this_computer`, `existing_new_computer`, `resume_interrupted`, or
@@ -401,7 +429,7 @@ but different raw bytes with identical extracted text create a distinct
 revision and cannot inherit the prior binding. Structural `#partNofM` families
 are supported; ambiguous
 multi-record `family_of` exports and legacy rows remain explicitly unbound.
-This is a full-admin-authorized assertion, not cryptographic proof of the
+This is a full-admin-authorized assertion, not independent verification of the
 producer binary or a server-side recomputation over uploaded raw bytes. Both
 the schema-43 D1 guard and the Worker still reject every accepted observation,
 and no OCR, backfill, repair, or deployment is implied.
@@ -595,6 +623,68 @@ First install the exact release named on `financialbrain.ai/update`. Then run
 the update command from any folder. It uses the manifest location saved by
 setup, even after Terminal has been closed and reopened.
 
+The held v0.4.8 pilot evidence plan requires this exact read-only diagnostic
+before any internal-owner update rung:
+
+```bash
+brain update [manifest] --preview --expect-runtime-sha256 <64hex> --json
+```
+
+The SHA-256 value must come from the independently sealed package receipt. A
+valid receipt names `identity_scheme: brain.runtime-payload.sha256.v1` and
+provides its package-derived `runtime_payload_sha256` as the command's
+`expected_runtime_sha256`; those names are not interchangeable with the whole
+tarball SHA-256. The command finishes and rechecks the exact runtime, package,
+manifest, D1 binding, recorded version, and bare `brain.domain` before reading
+a credential or using the network. Only then does it ignore ambient
+`ADMIN_KEY`, read the durable admin key selected by the manifest, and make one
+authenticated HTTP 200 read from the saved Brain's existing
+`/api/admin/brain/documents` route. It makes no Cloudflare control-plane
+request. Document rows are discarded; the bounded receipt retains only the
+same-response Worker version, D1 backend, active drain mode, vector counts,
+queue aggregates, readiness reason, and classification. The hostname identity
+is the pinned manifest's assertion; this diagnostic does not independently
+prove Cloudflare account or domain ownership. The supervised field rung must
+reconcile that target before live use.
+
+For a target whose manifest records exactly v0.4.6, the same CLI has one narrow
+legacy-observation fallback. When that authenticated top-level legacy
+`/api/admin/brain/documents` response lacks both `version` and
+`vector_drain_mode`, the preview validates only the sanitized D1 backlog and
+readiness fields. It returns `status: legacy_observation_complete`,
+`error_code: UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND`,
+`projection_ready: false`, and `authorizes_update: false`, then exits nonzero.
+The Worker generation and drain mode remain unproven, and mixed generations
+are not excluded. This is useful test evidence only and does not satisfy the
+update gate. The fallback does not stitch in public `/health` or any other
+response. It uses one durable credential read and one authenticated network
+request, with zero Brain writes, Cloudflare control requests, deployments, or
+installs. Modern same-response behavior is unchanged.
+
+`ready` means the counts are exact and the queue is empty.
+`recoverable_queued_work` means queued upserts cover the full projection
+shortfall;
+`queued_work_present` means counts are currently exact but pending work still
+makes the projection non-ready. `projection_work_insufficient` means pending
+work exists but its queued upserts cannot repair the full shortfall. That state,
+a short projection with no queued work, provider visibility still pending with
+no queue, an excess projection, a paused or mixed generation, or any malformed
+aggregate stops the preview. The aggregate observation and classification are
+part of the receipt fingerprint.
+A completed preview reports `projection_ready` explicitly and always reports
+`authorizes_update: false`; it performs zero Brain writes, Cloudflare control
+requests, deployments, manifest or workspace writes, installs, browser
+launches, or support-journal writes. It is not an update, approval to update,
+release evidence, or field proof. This candidate contract has only local
+fixture evidence until its immutable package, CI, and supervised field evidence
+are accepted.
+
+For an authorized stable release, that exact receipt is published as
+`brain-installer-<version>-runtime-identity.json` beside both package names.
+The stable update manifest binds its URL, size, SHA-256, source commit, package
+file count, identity scheme, and runtime payload SHA-256. Do not reconstruct
+the receipt from an ambient install or substitute a short-lived CI artifact.
+
 Mac or Linux:
 
 ```bash
@@ -621,8 +711,13 @@ On Windows, use:
 ```
 
 The update verifies the Cloudflare account, requires a D1 restore bookmark,
-deploys and verifies a temporary paused Worker, waits for older Worker requests
-to finish, and applies migrations. A legacy corpus is then rebuilt in durable
+and deploys a temporary paused Worker. Before waiting for older Worker requests
+or applying any migration, one authenticated documents response must bind the
+exact new Worker version,
+`paused-for-upgrade`, D1, equal expected and actual vector totals, an empty
+queue, and query readiness. A mismatch stops on that response without retrying
+it into a different snapshot; the Worker remains paused and migration does not
+start. A legacy corpus is then rebuilt in durable
 1,000-vector batches while writes remain paused. Several disjoint batches may
 be accepted at once, but exact-generation readback is what confirms each vector
 before its batch is acknowledged. An interrupted run resumes from D1 instead of
@@ -654,6 +749,31 @@ brain will not know.
 
 Then drop `--dry-run` to load it for real. Large loads are resumable: if it is
 interrupted, run the same command again and it continues from where it stopped.
+
+The held v0.4.8 Windows x64 pilot does not use that general folder command. Its
+bounded contract requires a dedicated manifest source root containing exactly
+one direct native-text regular file. Subdirectories, links, junctions,
+additional files, and broader source trees stop the pilot. The architecture
+gate fails closed unless both the native Windows operating-system probe and the
+Node process prove x64 before any manifest, source, credential, or network
+access. Use the exact sealed package receipt's `runtime_payload_sha256` under
+`identity_scheme: brain.runtime-payload.sha256.v1` for `<64hex>`, not the whole
+tarball SHA-256. Preview exactly the canonical source-relative file:
+
+```bash
+brain ingest-file <manifest> --source <id> --file <canonical-relative> --expect-runtime-sha256 <64hex> --json
+```
+
+Keep that expected runtime value unchanged. Apply only after approval of that
+unchanged preview fingerprint:
+
+```bash
+brain ingest-file <manifest> --source <id> --file <canonical-relative> --expect-runtime-sha256 <64hex> --apply --approve <64hex>
+```
+
+That one-file lane excludes OCR, removal, reconciliation, scheduling, and a
+full-source walk. Documentation of the required boundary is not implementation,
+test, package, CI, physical Windows, or live-Brain proof.
 
 Drive, Gmail, IMAP, and local-folder refreshes may discover material that was
 deleted, newly excluded, or no longer readable. Each refresh combines every
