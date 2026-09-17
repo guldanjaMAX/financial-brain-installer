@@ -3547,7 +3547,10 @@ THEN 1 ELSE 0 END`;
  *
  * `live_documents` keeps its `MATERIALIZED` hint precisely because it is narrow
  * now: it is what holds the corpus scan and the per-row JSON work to one pass
- * while three later CTEs read it. The hints on the wide CTEs are gone. Every
+ * while three later CTEs read it. The hints on the wide CTEs in this block —
+ * `attributed_documents` and `document_flags`, each read exactly once — are
+ * gone, and they stay gone; that is not a general rule about hints, and
+ * `sourceRecoverySql` keeps its own two for the reason documented there. Every
  * statement still returns the same rows in the same order.
  */
 const INVENTORY_DOCUMENT_CTES_SQL = `
@@ -4193,8 +4196,33 @@ const sourceRecoveryMarkerSql = `
     FROM install_state i
    WHERE i.id=1`;
 
+/**
+ * `candidate_rows` and `source_groups` keep their `MATERIALIZED` hints.
+ *
+ * They are the two CTEs this statement reads more than once: `candidate_rows`
+ * feeds `source_groups`, `global_summary`, the returned page, and the
+ * `MIN(document_rowid)` probe that decides which row carries the group
+ * summary — four readers. Without the hints SQLite re-derives it from
+ * `live_documents` once per reader and rebuilds the automatic covering index
+ * over `chunk_per_document` each time, which `EXPLAIN QUERY PLAN` shows as
+ * four separate `SCAN live_documents` passes.
+ *
+ * Dropping them was a memory-for-time trade that did not pay. Measured on the
+ * 200,000-document fixture below, un-hinted: 95.1 MB, 3,542 / 1,322 / 1,304 ms
+ * cold/warm. Hinted: 91.7 MB, 929 / 924 / 931 ms — cheaper in memory as well,
+ * because four rebuilt covering indexes cost more than one cached result, and
+ * about four times faster cold with a wall-clock that stops varying. Against
+ * D1's documented 30-second maximum query duration, and the CLI's own 30 s
+ * `AbortSignal.timeout`, that stability is the point: the field failure this
+ * statement hit was a clock, not the memory ceiling.
+ *
+ * These two hints are narrow. They do not touch `INVENTORY_DOCUMENT_CTES_SQL`,
+ * so neither half of the original 1.23 GB / 1.59 GB regression — every
+ * document's `meta` crossing three materialisations, every chunk's text
+ * crossing the sorter — can come back through them.
+ */
 export const sourceRecoverySql = `${INVENTORY_DOCUMENT_CTES_SQL},
-  candidate_rows AS (
+  candidate_rows AS MATERIALIZED (
     SELECT f.*,
            COALESCE(s.kind,'unregistered') AS source_kind,
            s.zone AS source_zone,
@@ -4222,7 +4250,7 @@ export const sourceRecoverySql = `${INVENTORY_DOCUMENT_CTES_SQL},
          OR (f.declared_lineage=1 AND f.recognized_lineage=0)
        )
   ),
-  source_groups AS (
+  source_groups AS MATERIALIZED (
     SELECT inventory_source AS source_id,
            source_kind,
            source_zone AS zone,

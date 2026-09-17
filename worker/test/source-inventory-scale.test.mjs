@@ -5,17 +5,20 @@
  * inventory and recovery statements pushed every live document's `meta` JSON
  * through three corpus-sized materialised CTEs and every chunk's full text
  * through the sorter that counted chunks, so D1 aborted them while strictly
- * heavier aggregates over the same rows still completed. Three tests hold that
+ * heavier aggregates over the same rows still completed. Four tests hold that
  * repair. The first proves the rewritten statements return rows byte-identical
  * to the shipped 0.4.8 SQL, which is kept verbatim below so the comparison is
  * against what actually failed rather than against the code under test. The
- * second proves their cost no longer moves when chunk text grows from a token
- * to the product's own chunk size. The third bounds them on the corpus shape
- * that failed — 200,000 documents and 1.8 million chunks — and bounds the slope
- * between that size and a smaller one, so the bound cannot be met by a lucky
- * fixed overhead at one comfortable corpus size.
+ * second reads the recovery statement's query plan and requires it to walk the
+ * corpus once, which is what its `MATERIALIZED` hints buy and what their loss
+ * costs. The third proves the statements' cost no longer moves when chunk text
+ * grows from a token to the product's own chunk size. The fourth bounds them on
+ * the corpus shape that failed — 200,000 documents and 1.8 million chunks — in
+ * memory and, for recovery, in wall-clock, and bounds the memory slope between
+ * that size and a smaller one, so the bound cannot be met by a lucky fixed
+ * overhead at one comfortable corpus size.
  *
- * The first test runs everywhere. The other two measure memory as a
+ * The first two tests run everywhere. The other two measure memory as a
  * resident-set delta, which only reads as cost on a platform whose allocator
  * keeps freed pages mapped; see MEMORY_COST_IS_MEASURABLE for what runs
  * instead where it does not, and why there is nothing portable to measure.
@@ -931,6 +934,55 @@ test("the rewritten source statements return the shipped 0.4.8 rows byte for byt
   db.close();
 });
 
+/**
+ * The recovery statement must read the corpus once, not four times.
+ *
+ * `candidate_rows` has four readers — `source_groups`, `global_summary`, the
+ * returned page, and the `MIN(document_rowid)` probe that decides which row
+ * carries the group summary. Without its `MATERIALIZED` hint SQLite re-derives
+ * it from `live_documents` once per reader and rebuilds the automatic covering
+ * index over `chunk_per_document` each time. That is what the hints were
+ * dropped into, and it is the thing a timing bound cannot reliably catch: on
+ * the machine this was measured on, the un-hinted statement cost 2,918 ms cold
+ * against 2,367 ms hinted, and would have passed the 3-second bound below.
+ * The plan is what actually holds the hints, so the plan is what is asserted.
+ *
+ * `EXPLAIN QUERY PLAN` is deterministic, needs no corpus, and costs nothing, so
+ * this runs on every platform. The fixture is an empty schema-46 database on
+ * purpose: SQLite honours an explicit `MATERIALIZED` hint regardless of table
+ * size, and the plan below was confirmed identical against the 200,000-document
+ * fixture.
+ */
+test("the recovery statement derives its candidates once", () => {
+  const db = migratedDb("plan-fixture");
+  const plan = db.prepare(`EXPLAIN QUERY PLAN ${sourceRecoverySql}`).all(null, 0, 251);
+  const details = plan.map((row) => String(row.detail));
+  db.close();
+
+  // `MATERIALIZE live_documents` is the one pass that is supposed to exist;
+  // every *other* mention is a reader re-walking the corpus.
+  const corpusPasses = details.filter((detail) => /^(SCAN|SEARCH) live_documents\b/.test(detail));
+  assert.equal(
+    corpusPasses.length, 1,
+    `the recovery statement walks live_documents ${corpusPasses.length} times, not once:`
+    + ` ${JSON.stringify(corpusPasses)}. Restore the MATERIALIZED hints on candidate_rows`
+    + " and source_groups.",
+  );
+  // The automatic covering index over chunk_per_document is rebuilt once per
+  // pass, so it is a second, independent witness to the same regression.
+  const coveringIndexBuilds = details.filter((detail) => detail.includes("AUTOMATIC COVERING INDEX"));
+  assert.equal(
+    coveringIndexBuilds.length, 1,
+    `the recovery statement builds ${coveringIndexBuilds.length} automatic covering indexes, not one`,
+  );
+  for (const cte of ["candidate_rows", "source_groups", "live_documents"]) {
+    assert.ok(
+      details.includes(`MATERIALIZE ${cte}`),
+      `${cte} is no longer materialised: ${JSON.stringify(details)}`,
+    );
+  }
+});
+
 // The shape that failed in the field: about 200,000 live documents and 1.7
 // million chunks, roughly nine chunks per document. Both halves of the cost
 // this rewrite removes are corpus-sized, and at a comfortably smaller corpus
@@ -1011,6 +1063,34 @@ const MEMORY_COST_IS_MEASURABLE = TEST_PLATFORM !== "win32";
 // that: it catches a statement that stopped returning on a field-sized corpus,
 // not one that got somewhat more expensive.
 const SCALE_STATEMENT_BUDGET_MS_PER_DOCUMENT = 0.5;
+
+/**
+ * What the recovery statement may cost in wall-clock at the field corpus.
+ *
+ * This one is asserted where the memory bounds are, because the field failure
+ * it guards was a clock and not the memory ceiling: `brain sources --json
+ * --recovery` died at a 28-second client-side abort against the CLI's 30 s
+ * `AbortSignal.timeout`, and D1 documents its own maximum query duration at the
+ * same 30 seconds. Local wall-clock is not D1 wall-clock, but the only anchor
+ * anyone has between them — `sources --json` at 10.5 s live against 0.9–2.9 s
+ * for the same statement offline — puts D1 at roughly 3.6x to 11.8x local, so a
+ * statement that stays near 1 s here projects to 3.4–11 s there and one that
+ * drifts to 3 s here is already racing the clock.
+ *
+ * Measured on the machine these numbers come from (darwin, Node v24.13.1),
+ * 200,000 documents, own process, fixture rebuilt immediately before: recovery
+ * 2,367 ms cold and 947 / 946 / 948 ms warm. The bound is set at 3 s — a little
+ * over the cold reading and about 3x the warm one — because the probe below
+ * runs second on a page cache the inventory probe has already warmed, and
+ * because this is a bound on a slow machine's honest work, not a tight
+ * regression detector.
+ *
+ * It is deliberately NOT the guard on the `MATERIALIZED` hints. The un-hinted
+ * statement measured 2,918 ms cold and 1,337 / 1,339 / 1,384 ms warm on the
+ * same fixture, which this bound would not have caught. The plan assertion in
+ * "the recovery statement derives its candidates once" is what catches that.
+ */
+const FIELD_RECOVERY_MS_BOUND = 3_000;
 
 /**
  * Each statement is measured in its own process.
@@ -1259,6 +1339,22 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
         assert.ok(
           probe.cost < bound,
           `${label} used ${probe.cost} bytes on ${documents} documents, over the ${bound} byte bound`,
+        );
+        if (label === "rewritten-recovery" && documents === FIELD_DOCUMENTS) {
+          // See FIELD_RECOVERY_MS_BOUND: the field failure here was a clock,
+          // and this is the only place it is measured at the size that failed.
+          assert.ok(
+            probe.ms < FIELD_RECOVERY_MS_BOUND,
+            `${label} took ${probe.ms}ms on ${documents} documents, over the`
+            + ` ${FIELD_RECOVERY_MS_BOUND}ms bound. At the 3.6-11.8x D1 multiplier that is`
+            + " at or past the 30 s D1 query-duration limit and the CLI's own 30 s abort.",
+          );
+        }
+        // Printed rather than only asserted, so a run leaves the wall-clock
+        // numbers behind next to the memory ones.
+        console.log(
+          `${TEST_PLATFORM}: ${label} on ${documents} documents`
+          + ` — resident-set delta ${probe.cost} bytes, ${probe.ms}ms`,
         );
         measured.set(label, probe.cost);
       }
