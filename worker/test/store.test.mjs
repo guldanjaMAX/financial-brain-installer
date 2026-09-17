@@ -231,6 +231,7 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
         text_source: binds[21], text_reliable: binds[22], entity_slug: binds[23],
         provenance_receipt_version: binds[25], provenance_receipt_status: binds[26],
         provenance_receipt_reason: binds[27], provenance_receipt_digest: binds[28],
+        document_revision_id: binds[29], source_original_binding_hash: binds[30], deleted_at: null,
       };
       rows.document = rows.document
         ? { ...rows.document, ...incoming }
@@ -254,7 +255,8 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
         rows.document?.content_hash === marker
       ) ? 1 : 0;
     }
-    return { changes };
+    return { changes, results: changes && /UPDATE documents SET content_hash/i.test(sql)
+      ? [{ ...rows.document }] : [] };
   };
 
   const env = {
@@ -269,6 +271,7 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
               first: async () => {
                 if (/SELECT content_hash/i.test(sql)) return rows.document ? { ...rows.document } : null;
                 if (/SELECT client, category/i.test(sql)) return rows.document ? { ...rows.document } : null;
+                if (/SELECT doc_uid,source,content_hash/i.test(sql)) return rows.document ? { ...rows.document } : null;
                 return null;
               },
               all: async () => ({ results: [] }),
@@ -291,7 +294,7 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
         }
         return statements.map((statement) => {
           const result = execute(statement.sql, statement.binds);
-          return { success: true, meta: { changes: result.changes } };
+          return { success: true, results: result.results, meta: { changes: result.changes } };
         });
       },
     },

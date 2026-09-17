@@ -93,7 +93,7 @@ function d1Binding(sqlite, seen, control) {
         const results = statements.map((statement) => {
           seen.sql.push(statement.sql); seen.binds.push(statement.params || []);
           if (shouldFail(control, statement.sql)) throw new Error("fixture database unavailable");
-          const readOnly = /^\s*(SELECT|PRAGMA)\b/i.test(statement.sql) ||
+          const readOnly = /\bRETURNING\b/i.test(statement.sql) || /^\s*(SELECT|PRAGMA)\b/i.test(statement.sql) ||
             (/^\s*WITH\b/i.test(statement.sql) && !/\b(INSERT|UPDATE|DELETE)\b/i.test(statement.sql));
           return execute(sqlite, statement.sql, statement.params || [], readOnly ? "all" : "run");
         });

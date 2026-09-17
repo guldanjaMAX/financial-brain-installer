@@ -353,7 +353,13 @@ readback. The refresh derives freshness only from markers that still belong to
 that transaction, so an all-stale finalizer leaves counts and `last_ingest_at`
 unchanged. The same atomic rule covers ordinary one-document ingest. A final
 content hash by itself is not proof because same-content revisions can carry
-different metadata. Repeated identities in one request deliberately use the
+different metadata. The CAS uses exactly one `UPDATE ... RETURNING` row as its
+statement-local proof, never D1's trigger-inclusive `meta.changes` count. Both
+single and batched paths then recheck the current document's exact source,
+revision, content hash, provenance digest, binding pointer, and live state;
+raw-bound revisions also revalidate their complete immutable receipt. A lost
+or contradictory result stays failed even if writes may already have committed.
+Repeated identities in one request deliberately use the
 original sequential path because revision order is part of their correctness
 contract.
 

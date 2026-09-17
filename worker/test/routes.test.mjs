@@ -2540,6 +2540,7 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         text_source: b[21], text_reliable: b[22], entity_slug: b[23],
         provenance_receipt_version: b[25], provenance_receipt_status: b[26],
         provenance_receipt_reason: b[27], provenance_receipt_digest: b[28],
+        document_revision_id: b[29], source_original_binding_hash: b[30], deleted_at: null,
       });
       written.push(String(b[2]));
       changes = 1;
@@ -2565,7 +2566,8 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         return row?.source === b[0] && row?.content_hash === marker;
       }) ? 1 : 0;
     }
-    return { changes };
+    return { changes, results: changes && /UPDATE documents SET content_hash/.test(sql)
+      ? [{ ...documents.get(b[0]) }] : [] };
   };
   const env = {
     STORAGE: "d1", ADMIN_KEY: "k",
@@ -2579,7 +2581,7 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
             results: (() => {
               calls.remote++;
               calls.submitted_statements++;
-              return /SELECT doc_uid, content_hash FROM documents/.test(sql)
+              return /SELECT doc_uid,source,content_hash/.test(sql)
                 ? b.map((docUid) => documents.get(docUid)).filter(Boolean)
                 : [];
             })(),
@@ -2589,6 +2591,7 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
             calls.submitted_statements++;
             if (/SELECT content_hash, title/.test(sql)) return documents.get(b[0]) || null;
             if (/SELECT client, category/.test(sql)) return documents.get(b[0]) || null;
+            if (/SELECT doc_uid,source,content_hash/.test(sql)) return documents.get(b[0]) || null;
             return null;
           },
           run: async () => {
@@ -2620,7 +2623,7 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         )) throw new Error("simulated chunk batch failure");
         return statements.map((statement) => {
           const result = execute(statement.sql, statement.binds);
-          return { success: true, meta: { changes: result.changes } };
+          return { success: true, results: result.results, meta: { changes: result.changes } };
         });
       },
     },
@@ -3248,7 +3251,7 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
   check("two revisions of one identity preserve sequential created-then-updated receipts",
     body.created === 1 && body.updated === 1 && body.results.map((row) => row.status).join(",") === "created,updated", JSON.stringify(body));
   check("duplicate identities finalize sequentially rather than as one delayed group",
-    calls.finalizer_batches === 2 && calls.stats_scans === 2 && calls.remote === 12, JSON.stringify(calls));
+    calls.finalizer_batches === 2 && calls.stats_scans === 2 && calls.remote === 14, JSON.stringify(calls));
   check("the final duplicate revision is committed rather than left pending",
     /^[a-f0-9]{64}$/.test(documents.get("meeting:same")?.content_hash || ""));
 }

@@ -32,12 +32,15 @@ const metrics = {
   identity_key_reads: 0,
   max_batch_statements: 0,
   max_statement_binds: 0,
+  triggered_finalizations: 0,
 };
 const control = {
   fail_chunk_doc_uid: null,
   fail_finalize_cas_doc_uid: null,
   fail_binding_doc_uid: null,
   before_finalize_batch: null,
+  after_finalize_batch: null,
+  alter_finalize_results: null,
 };
 
 function execute(sql, params, mode) {
@@ -49,7 +52,15 @@ function execute(sql, params, mode) {
   const statement = sqlite.prepare(sql);
   if (mode === "all") return { results: statement.all(...params) };
   if (mode === "first") return statement.get(...params) ?? null;
-  return statement.run(...params);
+  // D1/Miniflare reports the total_changes delta, including trigger writes.
+  // StatementSync.run().changes alone hid the schema-45 generation trigger.
+  const before = sqlite.prepare("SELECT total_changes() AS n").get().n;
+  const results = statement.all(...params);
+  const changes = sqlite.prepare("SELECT total_changes() AS n").get().n - before;
+  if (/UPDATE documents SET content_hash/.test(sql) && changes > 1) {
+    metrics.triggered_finalizations++;
+  }
+  return { changes, results };
 }
 
 function prepared(sql, params = []) {
@@ -62,7 +73,7 @@ function prepared(sql, params = []) {
     run: async () => {
       metrics.remote_calls++;
       const result = execute(sql, params, "run");
-      return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+      return { success: true, results: result.results, meta: { changes: Number(result.changes || 0) } };
     },
   };
 }
@@ -106,9 +117,17 @@ const DB = {
           return { success: true, results: execute(statement.sql, statement.params, "all").results };
         }
         const result = execute(statement.sql, statement.params, "run");
-        return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+        return { success: true, results: result.results, meta: { changes: Number(result.changes || 0) } };
       });
       sqlite.exec("COMMIT");
+      if (statements.some((statement) => /UPDATE documents SET content_hash/.test(statement.sql))) {
+        const hook = control.after_finalize_batch;
+        const alter = control.alter_finalize_results;
+        control.after_finalize_batch = null;
+        control.alter_finalize_results = null;
+        hook?.();
+        alter?.(results, statements);
+      }
       return results;
     } catch (error) {
       sqlite.exec("ROLLBACK");
@@ -159,6 +178,8 @@ const first = await post(fifty);
 assert.equal(first.created, 50);
 assert.equal(first.failed, 0);
 assert.equal(first.results.length, 50);
+assert.equal(metrics.triggered_finalizations, 50,
+  "every CAS exercised the real schema-45 generation trigger and a D1 change count above one");
 assert.equal(metrics.remote_calls, 53);
 assert.equal(metrics.submitted_statements, 352);
 assert.equal(metrics.stats_scans, 1);
@@ -556,7 +577,7 @@ for (const sourceId of ["race-stale-first", "race-winner-first", "race-mixed"]) 
   };
   const callsBeforeBase = metrics.remote_calls;
   await store.ingest(env, base);
-  assert.equal(metrics.remote_calls - callsBeforeBase, 6);
+  assert.equal(metrics.remote_calls - callsBeforeBase, 7);
   sqlite.prepare("UPDATE corpus_stats SET last_ingest_at = ? WHERE source = ?").run(70_000, source);
   const beforeStats = statsFor(source);
 
@@ -898,4 +919,41 @@ for (const sourceId of ["race-stale-first", "race-winner-first", "race-mixed"]) 
   );
 }
 
-console.log("d1-batch-ingest: real SQLite integration and performance structure passed");
+// A valid final hash and trigger-inclusive count never replace direct CAS
+// evidence. Missing/foreign RETURNING rows remain ambiguous even if committed.
+// Likewise a same-hash successor between commit and readback is not our head.
+for (const mode of ["single", "batch"]) {
+  for (const fault of ["missing-return", "foreign-return", "revision-drift", "digest-drift", "binding-drift", "deleted-drift"]) {
+    const id = `proof-${mode}-${fault}`;
+    const docUid = `message:${id}`;
+    const input = envelope(id);
+    if (fault.endsWith("return")) {
+      control.alter_finalize_results = (results, statements) => {
+        const index = statements.findIndex((statement) => /UPDATE documents SET content_hash/.test(statement.sql));
+        assert.ok(results[index].meta.changes > 1, "the real generation trigger ran");
+        if (fault === "missing-return") results[index].results = [];
+        else results[index].results[0].document_revision_id = `rev-v1:${"c".repeat(64)}`;
+      };
+    } else {
+      control.after_finalize_batch = () => {
+        const mutation = {
+          "revision-drift": ["document_revision_id", `rev-v1:${"d".repeat(64)}`],
+          "digest-drift": ["provenance_receipt_digest", "d".repeat(64)],
+          "binding-drift": ["source_original_binding_hash", `sha256:${"d".repeat(64)}`],
+          "deleted-drift": ["deleted_at", 1],
+        }[fault];
+        sqlite.prepare(`UPDATE documents SET ${mutation[0]}=? WHERE doc_uid=?`).run(mutation[1], docUid);
+      };
+    }
+    if (mode === "single") {
+      await assert.rejects(store.ingest(env, input), /superseded before commit|could not be verified/, fault);
+    } else {
+      const staged = await store.ingest(env, input, { deferFinalize: true });
+      assert.equal((await store.finalizeIngestBatch(env, [staged.deferred_revision]))[0].ok, false, fault);
+    }
+    assert.match(sqlite.prepare("SELECT content_hash FROM documents WHERE doc_uid=?").get(docUid).content_hash,
+      /^[a-f0-9]{64}$/, "a failed proof must not imply zero accepted writes");
+  }
+}
+
+console.log("d1-batch-ingest: real SQLite integration, trigger-aware CAS, readback races, and performance structure passed");

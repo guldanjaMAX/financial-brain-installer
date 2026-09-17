@@ -594,6 +594,38 @@ function validDeferredRevision(revision) {
   );
 }
 
+function revisionRowMatches(row, revision) {
+  return row?.doc_uid === revision.doc_uid && row.source === revision.source &&
+    row.content_hash === revision.hash &&
+    row.document_revision_id === revision.document_revision_id &&
+    row.provenance_receipt_digest === revision.provenance_receipt_digest &&
+    row.source_original_binding_hash === (revision.source_original_binding?.binding_hash ?? null) &&
+    row.deleted_at === null;
+}
+
+function revisionCommitStatement(env, revision) {
+  // D1 meta.changes includes writes made by triggers. Schema 45 advances a
+  // generation on this UPDATE, so a successful one-row CAS reports two changes.
+  // RETURNING proves which row THIS statement won, not a later same-hash writer.
+  return env.DB.prepare(
+    `UPDATE documents SET content_hash = ?2
+     WHERE doc_uid = ?1 AND content_hash = ?3 AND source = ?4
+       AND document_revision_id = ?5 AND provenance_receipt_digest = ?6
+       AND source_original_binding_hash IS ?7 AND deleted_at IS NULL
+     RETURNING doc_uid,source,content_hash,document_revision_id,
+               provenance_receipt_digest,source_original_binding_hash,deleted_at`
+  ).bind(
+    revision.doc_uid, revision.hash, revision.pending_marker, revision.source,
+    revision.document_revision_id, revision.provenance_receipt_digest,
+    revision.source_original_binding?.binding_hash ?? null,
+  );
+}
+
+function revisionCommitReturned(result, revision) {
+  return Array.isArray(result?.results) && result.results.length === 1 &&
+    revisionRowMatches(result.results[0], revision);
+}
+
 function sourceOriginalBindingInsertStatement(env, revision) {
   const binding = revision.source_original_binding;
   if (!binding) return null;
@@ -1008,46 +1040,29 @@ const d1Backend = {
     };
     const finalizationStatements = [
       sourceStatsCommitStatement(env, source_type, [revision]),
-      env.DB.prepare(
-        `UPDATE documents SET content_hash = ?2
-         WHERE doc_uid = ?1 AND content_hash = ?3 AND source = ?4
-           AND document_revision_id = ?5 AND provenance_receipt_digest = ?6
-           AND source_original_binding_hash IS ?7
-           AND deleted_at IS NULL`
-      ).bind(
-        docUid,
-        hash,
-        pendingHash,
-        source_type,
-        revisionId,
-        persisted.provenance_receipt_digest,
-        sourceOriginalBinding?.binding_hash ?? null,
-      ),
+      revisionCommitStatement(env, revision),
     ];
     const bindingStatement = sourceOriginalBindingInsertStatement(env, revision);
     if (bindingStatement) finalizationStatements.push(bindingStatement);
     const finalization = await env.DB.batch(finalizationStatements);
     const statsCommitted = Number(finalization?.[0]?.meta?.changes) === 1;
-    const revisionCommitted = Number(finalization?.[1]?.meta?.changes) === 1;
+    const revisionCommitted = revisionCommitReturned(finalization?.[1], revision);
     const bindingCommitted = !bindingStatement || Number(finalization?.[2]?.meta?.changes) === 1;
     if (!statsCommitted || !revisionCommitted || !bindingCommitted) {
       throw new Error("ingest revision was superseded before commit; retry this document");
     }
 
-    if (bindingStatement) {
-      const readback = await env.DB.prepare(
-        `SELECT source,content_hash,provenance_receipt_digest,deleted_at,
-                document_revision_id,source_original_binding_hash,
-                ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
-           FROM documents WHERE doc_uid=?1`
-      ).bind(docUid).first();
-      if (readback?.source !== source_type || readback?.content_hash !== hash ||
-          readback?.provenance_receipt_digest !== sourceOriginalBinding.receipt.provenance_receipt_digest ||
-          readback?.deleted_at != null || readback?.document_revision_id !== revisionId ||
-          readback?.source_original_binding_hash !== sourceOriginalBinding.binding_hash ||
-          !await storedSourceOriginalBindingMatches(readback, sourceOriginalBinding)) {
-        throw new Error("ingest revision binding could not be verified; retry this document");
-      }
+    // RETURNING precedes AFTER triggers and is not a current-head readback.
+    // Recheck every revision, including unbound messages, after the transaction.
+    const readback = await env.DB.prepare(
+      `SELECT doc_uid,source,content_hash,provenance_receipt_digest,deleted_at,
+              document_revision_id,source_original_binding_hash,
+              ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
+         FROM documents WHERE doc_uid=?1`
+    ).bind(docUid).first();
+    if (!revisionRowMatches(readback, revision) || (bindingStatement &&
+        !await storedSourceOriginalBindingMatches(readback, sourceOriginalBinding))) {
+      throw new Error("ingest revision binding could not be verified; retry this document");
     }
 
     return out;
@@ -1109,8 +1124,8 @@ const d1Backend = {
    * and revision-marker updates as one transaction. If it fails, those
    * documents keep their pending hashes and are safe to retry, while another
    * source in the same request can still succeed. The exact CAS statement must
-   * report one changed row; final-hash readback alone is never proof because a
-   * same-content revision can carry different metadata.
+   * return exactly its winning row; final-hash readback alone is never proof
+   * because a same-content revision can carry different metadata.
    */
   async finalizeIngestBatch(env, revisions) {
     const outcomes = revisions.map(() => ({ ok: false, error: "ingest finalization failed; retry this document" }));
@@ -1159,21 +1174,7 @@ const d1Backend = {
           const statements = [sourceStatsCommitStatement(env, source, transactionGroup)];
           const statementIndexes = transactionGroup.map((revision) => {
             const cas = statements.length;
-            statements.push(env.DB.prepare(
-              `UPDATE documents SET content_hash = ?2
-               WHERE doc_uid = ?1 AND content_hash = ?3 AND source = ?4
-                 AND document_revision_id = ?5 AND provenance_receipt_digest = ?6
-                 AND source_original_binding_hash IS ?7
-                 AND deleted_at IS NULL`
-            ).bind(
-              revision.doc_uid,
-              revision.hash,
-              revision.pending_marker,
-              revision.source,
-              revision.document_revision_id,
-              revision.provenance_receipt_digest,
-              revision.source_original_binding?.binding_hash ?? null,
-            ));
+            statements.push(revisionCommitStatement(env, revision));
             const bindingStatement = sourceOriginalBindingInsertStatement(env, revision);
             const binding = bindingStatement ? statements.length : null;
             if (bindingStatement) statements.push(bindingStatement);
@@ -1186,41 +1187,24 @@ const d1Backend = {
 
           const placeholders = transactionGroup.map((_, index) => `?${index + 1}`).join(",");
           const { results } = await env.DB.prepare(
-            `SELECT doc_uid, content_hash FROM documents WHERE doc_uid IN (${placeholders})`
+            `SELECT doc_uid,source,content_hash,provenance_receipt_digest,deleted_at,
+                    document_revision_id,source_original_binding_hash,
+                    ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
+               FROM documents WHERE doc_uid IN (${placeholders})`
           ).bind(...transactionGroup.map((revision) => revision.doc_uid)).all();
-          const committed = new Map((results || []).map((row) => [row.doc_uid, row.content_hash]));
-          const boundRevisions = transactionGroup.filter((revision) => revision.source_original_binding);
-          const boundReadback = new Map();
-          if (boundRevisions.length) {
-            const boundPlaceholders = boundRevisions.map((_, index) => `?${index + 1}`).join(",");
-            const boundResult = await env.DB.prepare(
-              `SELECT doc_uid,source,content_hash,provenance_receipt_digest,deleted_at,
-                      document_revision_id,source_original_binding_hash,
-                      ${sourceOriginalBindingReadbackSql()} AS bound_binding_receipt
-                 FROM documents WHERE doc_uid IN (${boundPlaceholders})`
-            ).bind(...boundRevisions.map((revision) => revision.doc_uid)).all();
-            for (const row of boundResult?.results || []) boundReadback.set(row.doc_uid, row);
-          }
+          const committed = new Map((results || []).map((row) => [row.doc_uid, row]));
           const statsCommitted = Number(batchResults[0]?.meta?.changes) === 1;
           for (let groupIndex = 0; groupIndex < transactionGroup.length; groupIndex++) {
             const revision = transactionGroup[groupIndex];
             const indexes = statementIndexes[groupIndex];
-            const bindingRow = boundReadback.get(revision.doc_uid);
-            const changedThisMarker = Number(batchResults[indexes.cas]?.meta?.changes) === 1;
+            const row = committed.get(revision.doc_uid);
+            const changedThisMarker = revisionCommitReturned(batchResults[indexes.cas], revision);
             const bindingCommitted = indexes.binding === null ||
               Number(batchResults[indexes.binding]?.meta?.changes) === 1;
-            const bindingVerified = !revision.source_original_binding || (
-              bindingRow?.source === revision.source &&
-              bindingRow?.content_hash === revision.hash &&
-              bindingRow?.provenance_receipt_digest ===
-                revision.source_original_binding.receipt.provenance_receipt_digest &&
-              bindingRow?.deleted_at == null &&
-              bindingRow?.document_revision_id === revision.document_revision_id &&
-              bindingRow?.source_original_binding_hash === revision.source_original_binding.binding_hash &&
-              await storedSourceOriginalBindingMatches(bindingRow, revision.source_original_binding)
-            );
+            const bindingVerified = !revision.source_original_binding ||
+              await storedSourceOriginalBindingMatches(row, revision.source_original_binding);
             outcomes[revision.index] = statsCommitted && changedThisMarker && bindingCommitted &&
-              committed.get(revision.doc_uid) === revision.hash && bindingVerified
+              revisionRowMatches(row, revision) && bindingVerified
               ? { ok: true }
               : { ok: false, error: "ingest revision could not be verified; retry this document" };
           }
