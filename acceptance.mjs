@@ -481,8 +481,115 @@ export function freshnessVerdicts({ ok, status, payload, expectedBackend = "d1" 
   return out;
 }
 
+/**
+ * How long acceptance waits out a transient retrieval failure before failing.
+ *
+ * Measured on 2026-09-17 against a 192,082-document / 1,700,842-chunk brain
+ * whose vector projection was verified complete (expected_vectors ==
+ * actual_vectors, backlog 0). Sustained or concurrent request streams saturate
+ * D1, which is single-threaded per database, and the Worker then fast-fails:
+ * 246-606 ms, `degraded: "retrieval"`, `degraded_reason:
+ * "keyword-and-vector-query-failed"`, `status: "search_unavailable"`. Healthy
+ * calls on the same brain cost 2.5-17.3 s. The failures are POSITIONAL, not
+ * probe-bound: three failing runs that morning hit three different probe sets,
+ * and the only constant was position at the tail of a sustained run. Run alone,
+ * the same fifteen saved probes passed 15/15, twice.
+ *
+ * The acceptance suite runs those fifteen probes back-to-back immediately after
+ * activation inside `brain update`, which is the most sustained sequence the
+ * brain ever sees, and it produced a false FAIL twice that day on a brain that
+ * was healthy. That false FAIL stops the update in front of the customer.
+ *
+ * Two properties are load-bearing and neither is negotiable:
+ *
+ *  - SPACED. A deliberate four-way burst went healthy -> partial -> total
+ *    fast-fail in three rounds over ~50 s. Retrying immediately into a
+ *    saturated D1 fails too, and adds to the load that caused the failure.
+ *  - SEQUENTIAL. One call at a time, one probe at a time. Concurrency is the
+ *    thing being worked around; a parallel retry would recreate it.
+ *
+ * The budget is deliberately small and fixed. Retrying is only allowed to
+ * absorb a stall that clears on its own within about half a minute. Anything
+ * longer is a real fault and must still FAIL, because "wait long enough and it
+ * turns green" is how a tolerance becomes a cover-up.
+ */
+export const RETRIEVAL_RETRY_DEFAULTS = Object.freeze({
+  /** Retries after the first attempt, per probe. */
+  attempts: 3,
+  /** Wait between attempts. Spaced, never immediate. */
+  spacingMs: 10_000,
+  /** Ceiling on waiting for ONE probe: 3 x 10 s. */
+  probeBudgetMs: 30_000,
+  /** Ceiling on waiting across the WHOLE tier, however many probes there are. */
+  tierBudgetMs: 180_000,
+});
+
+/**
+ * Waiting budget shared by every probe in one tier.
+ *
+ * Counts time spent WAITING, not wall clock, so the budget is exactly the
+ * arithmetic the policy above describes and a test with an injected sleep
+ * observes it directly instead of racing a timer. Fifteen probes cannot turn
+ * into fifteen separate half-minutes of hope: the tier ceiling binds first.
+ */
+export function retrievalRetryBudget(policy = RETRIEVAL_RETRY_DEFAULTS) {
+  let tierSpent = 0;
+  return {
+    get tierSpentMs() { return tierSpent; },
+    probe() {
+      let probeSpent = 0;
+      return {
+        get spentMs() { return probeSpent; },
+        allows(ms) {
+          return probeSpent + ms <= policy.probeBudgetMs && tierSpent + ms <= policy.tierBudgetMs;
+        },
+        take(ms) { probeSpent += ms; tierSpent += ms; },
+      };
+    },
+  };
+}
+
+/** "; recovered after 2 retries" / "; still degraded after 3 retries". */
+function retryNote(retries, recovered) {
+  if (!retries) return "";
+  const plural = retries === 1 ? "retry" : "retries";
+  return recovered
+    ? `; recovered after ${retries} ${plural}`
+    : `; still degraded after ${retries} ${plural}`;
+}
+
+/**
+ * What the WORKER said about a search it could not complete, or null.
+ *
+ * The text this replaces asserted a cause acceptance never measured. It counted
+ * `degraded === "vector"` and then blamed an empty vector index — provably the
+ * one condition that CANNOT produce that value, because `searchVector` returns
+ * `[]` on an empty Vectorize result without setting `vectorFailed`, so an empty
+ * index degrades nothing. Meanwhile the real reasons (`projection-incomplete`,
+ * `vector-query-failed`, `keyword-and-vector-query-failed`) already ride the
+ * wire as `degraded_reason`, beside `status`, and were simply never read.
+ *
+ * So: report the Worker's own vocabulary, verbatim and bounded. These are fixed
+ * tokens from `retrieval-status.js`, not free text, and slicing keeps a future
+ * one from turning a check detail into a payload.
+ */
+export function workerDegradationDetail(json) {
+  const token = (value, max) => (typeof value === "string" ? value.trim().slice(0, max) : "");
+  const degraded = json?.degraded === null || json?.degraded === undefined || json?.degraded === false
+    ? ""
+    : token(String(json.degraded), 40);
+  const status = token(json?.status, 40);
+  const reason = token(json?.degraded_reason, 80);
+  const head = status || degraded;
+  if (head && reason) return `${head}: ${reason}`;
+  return head || reason || null;
+}
+
 export class Acceptance {
-  constructor({ base, adminKey, manifest, expectVersion = null, fetchImpl = fetch, tolerateStaleSources = false }) {
+  constructor({
+    base, adminKey, manifest, expectVersion = null, fetchImpl = fetch, tolerateStaleSources = false,
+    sleepImpl = null, retrievalRetry = null,
+  }) {
     this.base = String(base).replace(/\/+$/, "");
     this.key = adminKey;
     this.m = manifest || {};
@@ -504,6 +611,37 @@ export class Acceptance {
     // a detail; a whole capability going untested changes what "passed" means,
     // so the summary carries it and the verdict has to say it.
     this.untested = [];
+    // Injectable so the retry tests are arithmetic rather than minutes of real
+    // waiting. Nothing else in this suite sleeps.
+    this.sleep = sleepImpl || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.retrievalRetry = Object.freeze({ ...RETRIEVAL_RETRY_DEFAULTS, ...(retrievalRetry || {}) });
+  }
+
+  /**
+   * Run one retrieval probe, repeating it only while it is still failing and
+   * only while the budget allows. Strictly sequential: one call in flight at a
+   * time, and the next probe does not start until this one is finished.
+   *
+   * `run` returns { failing, value }. The retry changes nothing about what
+   * counts as a pass — the LAST attempt is judged exactly as the only attempt
+   * was before this existed — so a probe that never recovers fails identically
+   * to today, with the same check name and the same status.
+   */
+  async retryTransientProbe(budget, run) {
+    const spend = budget.probe();
+    let outcome = await run();
+    let retries = 0;
+    while (
+      outcome.failing &&
+      retries < this.retrievalRetry.attempts &&
+      spend.allows(this.retrievalRetry.spacingMs)
+    ) {
+      spend.take(this.retrievalRetry.spacingMs);
+      await this.sleep(this.retrievalRetry.spacingMs);
+      outcome = await run();
+      retries += 1;
+    }
+    return { ...outcome, retries, waitedMs: spend.spentMs, recovered: retries > 0 && !outcome.failing };
   }
 
   static isFreshnessCheck(name) {
@@ -701,46 +839,99 @@ export class Acceptance {
       );
     }
 
+    // One waiting budget for the whole tier, spent strictly sequentially.
+    const budget = retrievalRetryBudget(this.retrievalRetry);
     let answered = 0;
-    let vectorDegraded = 0;
+    let degradedProbes = 0;
+    let recoveredProbes = 0;
+    const finalReasons = new Set();
     for (const q of savedQuestions) {
-      const r = await this.post("/api/rag/unified", { q, limit: 5, rerank: 0 });
-      const n = r.json?.results?.length || 0;
+      // Zero results and any non-null `degraded` are the two shapes the
+      // transient D1 saturation takes, and both clear on their own within a
+      // minute on a brain that is actually healthy. Everything else is judged
+      // on the first answer, exactly as before.
+      const attempt = await this.retryTransientProbe(budget, async () => {
+        const r = await this.post("/api/rag/unified", { q, limit: 5, rerank: 0 });
+        const n = r.json?.results?.length || 0;
+        const degraded = r.json?.degraded === undefined || r.json?.degraded === null || r.json?.degraded === false
+          ? null
+          : r.json.degraded;
+        return {
+          failing: n === 0 || degraded !== null,
+          value: { n, degraded, why: workerDegradationDetail(r.json) },
+        };
+      });
+      const { n, degraded, why } = attempt.value;
       if (n > 0) answered++;
-      if (r.json?.degraded === "vector") vectorDegraded++;
+      // Only the LAST attempt counts. A probe that recovered was a stall, not
+      // a degraded brain, and must not be reported as one.
+      if (degraded !== null) {
+        degradedProbes++;
+        if (why) finalReasons.add(why);
+      }
+      if (attempt.recovered) recoveredProbes++;
       this.record(
         t,
         `probe: ${q.slice(0, 48)}`,
         n > 0 ? PASS : FAIL,
-        `${n} result(s)`
+        `${n} result(s)` +
+          (attempt.failing && why ? `; the Worker reported ${why}` : "") +
+          retryNote(attempt.retries, attempt.recovered)
       );
     }
     this.record(
       t,
       "probe coverage",
       answered === savedQuestions.length ? PASS : answered > 0 ? WARN : FAIL,
-      `${answered}/${savedQuestions.length} probes returned sources`
+      `${answered}/${savedQuestions.length} probes returned sources` +
+        (recoveredProbes ? `; ${recoveredProbes} recovered after a retry` : "")
     );
+    // The retry never softens this verdict; it only decides WHEN the verdict is
+    // taken. What changed is that the detail now names the reason the Worker
+    // itself gave instead of asserting a Vectorize cause acceptance never read.
     this.record(
       t,
       "semantic retrieval is active",
-      vectorDegraded === 0 ? PASS : FAIL,
-      vectorDegraded === 0
-        ? "no probe degraded to keyword-only retrieval"
-        : `${vectorDegraded}/${savedQuestions.length} probe(s) were keyword-only because Vectorize returned no candidates`,
+      degradedProbes === 0 ? PASS : FAIL,
+      degradedProbes === 0
+        ? "no probe degraded to keyword-only retrieval" +
+          (recoveredProbes ? `; ${recoveredProbes} probe(s) recovered after a retry` : "")
+        : `${degradedProbes}/${savedQuestions.length} probe(s) were still degraded after the retry budget; ` +
+          (finalReasons.size
+            ? `the Worker reported ${[...finalReasons].join(", ")}`
+            : "the Worker reported no reason"),
     );
 
     // `think` must degrade rather than 500. This is the path most likely to
     // break quietly, because it only fails when the LLM key, the spend cap or
     // the model name is wrong, none of which show up until someone asks a
     // question.
-    const think = await this.post("/api/rag/think", { q: savedQuestions[0], limit: 5 });
+    const thinkAttempt = await this.retryTransientProbe(budget, async () => {
+      const r = await this.post("/api/rag/think", { q: savedQuestions[0], limit: 5 });
+      const degraded = r.json?.degraded === undefined || r.json?.degraded === null || r.json?.degraded === false
+        ? null
+        : r.json.degraded;
+      return { failing: degraded !== null, value: r };
+    });
+    const think = thinkAttempt.value;
     if (think.json?.degraded === "vector") {
+      const why = workerDegradationDetail(think.json);
       this.record(
         t,
         "think uses semantic retrieval",
         FAIL,
-        "the answer path degraded to keyword-only retrieval",
+        "the answer path degraded to keyword-only retrieval" +
+          (why ? `; the Worker reported ${why}` : "") +
+          retryNote(thinkAttempt.retries, false),
+      );
+    } else if (thinkAttempt.recovered) {
+      // Recorded only when it actually had to recover, so a healthy run's
+      // result list is byte-for-byte what it was before this change.
+      this.record(
+        t,
+        "think uses semantic retrieval",
+        PASS,
+        `the answer path used semantic retrieval${retryNote(thinkAttempt.retries, true)}`,
       );
     }
     if (!think.ok) {

@@ -927,10 +927,15 @@ const bootstrapCompletion = () => ({
 }
 
 {
+  // A brain that is keyword-only for good now gets the bounded post-activation
+  // retry before the verdict is taken. Inject the sleep so this test pins the
+  // giving-up, not a minute of real waiting.
+  const degradedWaits = [];
   const degraded = new Acceptance({
     base: "https://fixture.invalid",
     adminKey: "fixture-admin-key",
     manifest: manifestFixture(RUNNING_VERSION),
+    sleepImpl: async (ms) => { degradedWaits.push(ms); },
     fetchImpl: async (_url, init) => {
       const body = JSON.parse(String(init?.body || "{}"));
       return new Response(JSON.stringify({
@@ -947,6 +952,9 @@ const bootstrapCompletion = () => ({
     degraded.results.some((result) => result.name === "semantic retrieval is active" && result.status === "fail") &&
       degraded.results.some((result) => result.name === "think uses semantic retrieval" && result.status === "fail"),
     JSON.stringify(degraded.results));
+  check("it retried the keyword-only probe and the answer path, spaced, then gave up",
+    degradedWaits.length === 6 && degradedWaits.every((ms) => ms === 10_000),
+    JSON.stringify(degradedWaits));
 }
 
 /* ---- it must eventually give up rather than pass ---- */
