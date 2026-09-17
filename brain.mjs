@@ -12127,6 +12127,119 @@ async function cmdIngestCalendarRun(
 }
 
 /**
+ * How many characters of `detail` the worker's sync_runs column keeps. Past
+ * this it stores a prefix and drops the rest, silently.
+ */
+const IMESSAGE_DETAIL_BUDGET = 500;
+
+/**
+ * The clause of an iMessage receipt that no structured field can replace:
+ * docs_refused, complete_sweep and target_range all survive in columns of
+ * their own, but nothing else on the receipt says that the local database is
+ * incapable of proving deletion, other-device retention, or all-time provider
+ * history. It is therefore the clause that must never be the one truncated.
+ */
+const IMESSAGE_LOCAL_HISTORY_CAVEAT =
+  "local chat.db cannot prove deleted, unavailable-device, or all-time provider history";
+
+/**
+ * The iMessage run report: one console line, and one receipt detail built to
+ * the column's budget.
+ *
+ * Both come from one clause list because they are one report. What forces the
+ * list rather than a single interpolated string is the budget: a detail
+ * written as `a; b; c; caveat` loses the caveat FIRST when it overflows,
+ * because truncation eats the end. And overflow is not exotic — a 40k-row Mac
+ * with three conversations still open measures 529 characters, so the caveat
+ * was being cut mid-sentence on exactly the databases large enough for the
+ * missing-history warning to matter.
+ *
+ * So every clause carries a rank, and the detail is assembled until it fits:
+ * the sweep claim and the caveat are rank 0 and never yield, the still-open
+ * clause gives up its release rule before its count, and the rest drop from
+ * the least load-bearing end (each of those is also readable from a
+ * structured field or the console line). The summary is the same clauses at
+ * full length, which is what `info()` and the console have always printed.
+ */
+export function imessageRunReport({
+  rowsSeen = 0,
+  pages = 0,
+  rowsPushed = 0,
+  withoutText = 0,
+  unusable = 0,
+  documentsSent = 0,
+  sessionsOpen = 0,
+  watermark = 0,
+  refusedDocs = 0,
+  rowRefusals = 0,
+  completeSweep = false,
+  walkComplete = false,
+  deliveredThrough = null,
+  budget = IMESSAGE_DETAIL_BUDGET,
+} = {}) {
+  // An open conversation is not a fault and is not closed early to tidy the
+  // report: closing it would move a document boundary by wall-clock time and
+  // re-segment the same rows differently on the next full walk. It is held,
+  // counted, and named together with the rule that releases it, so the owner
+  // can tell "waiting" from "lost". Under a tight budget the count stays and
+  // the release rule — the same sentence on every run — is what goes.
+  const stillOpenShort = sessionsOpen
+    ? `${sessionsOpen} conversation(s) still open`
+    : "0 session(s) still open";
+  const stillOpen = sessionsOpen
+    ? `${stillOpenShort}; the capture ticks deliver each after six quiet hours or at the day boundary`
+    : stillOpenShort;
+  const sweep = completeSweep
+    ? "this Mac's local Messages database is swept complete end to end" +
+      (deliveredThrough ? `, delivered through ${deliveredThrough}` : ", nothing delivered yet")
+    : walkComplete
+      ? "the selected local database was fully enumerated"
+      : "the selected local database was not fully enumerated";
+
+  // Display order, exactly as this report has always read. `summary` marks the
+  // clauses the console line carries; `rank` is what yields first when the
+  // receipt column is tight, and rank 0 never yields.
+  const clauses = [
+    { text: `${rowsSeen} new row(s) read in ${pages} page(s)`, rank: 3, summary: true },
+    { text: `${rowsPushed} sessionized`, rank: 3, summary: true },
+    { text: `${withoutText} without text (tapbacks/attachments), ${unusable} unusable`, rank: 3, summary: true },
+    { text: `${documentsSent} conversation document(s) sent`, rank: 2, summary: true },
+    { text: stillOpen, short: stillOpenShort, rank: 1, summary: true },
+    { text: `watermark ${watermark}`, rank: 4, summary: true },
+    { text: refusedDocs ? `${refusedDocs} credential-refused` : "", rank: 2 },
+    { text: sweep, rank: 0 },
+    { text: rowRefusals ? `${rowRefusals} row(s) remain deliberately non-searchable` : "", rank: 2 },
+    { text: IMESSAGE_LOCAL_HISTORY_CAVEAT, rank: 0 },
+  ].filter((clause) => clause.text);
+
+  const summary = clauses.filter((clause) => clause.summary).map((clause) => clause.text).join("; ");
+  const prefix = "iMessage capture: ";
+  const render = (list) => prefix + list.map((clause) => clause.text).join("; ");
+  const kept = clauses.map((clause) => ({ ...clause }));
+  // Shorten before dropping: a shortened clause still makes its claim.
+  for (const clause of kept) {
+    if (render(kept).length <= budget) break;
+    if (clause.short) clause.text = clause.short;
+  }
+  while (render(kept).length > budget) {
+    let victim = -1;
+    for (let i = 0; i < kept.length; i++) {
+      if (kept[i].rank === 0) continue;
+      // `>=` takes the LAST clause of the weakest rank, so a report shrinks
+      // from its tail rather than losing its opening counts first.
+      if (victim < 0 || kept[i].rank >= kept[victim].rank) victim = i;
+    }
+    if (victim < 0) break;
+    kept.splice(victim, 1);
+  }
+  // The rank-0 clauses are a fixed caveat, a fixed sentence and an ISO
+  // timestamp — about 215 characters, so this command cannot reach here. A
+  // future caller that does still gets the caveat rather than a prefix of it.
+  const detail = render(kept);
+  return { summary, detail: detail.length <= budget ? detail : prefix + IMESSAGE_LOCAL_HISTORY_CAVEAT };
+}
+
+/**
  * `brain ingest <manifest> --from imessage`.
  *
  * One incremental capture pass over the Mac's Messages database: read every
@@ -12274,30 +12387,6 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   if (result.pages) process.stdout.write("\n");
 
   const skipped = result.rows_skipped;
-  // An open conversation is not a fault and is not closed early to tidy the
-  // report: closing it would move a document boundary by wall-clock time and
-  // re-segment the same rows differently on the next full walk. It is held,
-  // counted, and named together with the rule that releases it, so the owner
-  // can tell "waiting" from "lost".
-  const stillOpen = result.sessions_open
-    ? `${result.sessions_open} conversation(s) still open; the capture ticks deliver each after six quiet hours or at the day boundary`
-    : "0 session(s) still open";
-  const summary =
-    `${result.rows_seen} new row(s) read in ${result.pages} page(s); ${result.rows_pushed} sessionized; ` +
-    `${skipped.no_text} without text (tapbacks/attachments), ${skipped.no_timestamp + skipped.no_guid} unusable; ` +
-    `${result.documents_sent} conversation document(s) sent; ${stillOpen}; ` +
-    `watermark ${result.watermark}`;
-
-  if (dry) {
-    info(summary);
-    ok("dry run, nothing was sent and no state was saved");
-    return { ...result, bounded: !!flags.limit, would_send: result.documents_would_send };
-  }
-
-  const bounded = !!flags.limit || result.caught_up !== true;
-  if (flags.limit) warn(`--limit ${flags.limit} bounded this capture pass, so it is NOT a complete source load`);
-  else if (bounded) warn("the capture stopped before it reached the current end of the Messages database, so it is NOT a complete source load");
-
   // A row the walk could not place in history at all: no stable identity, or
   // no timestamp. Those leave a hole this pass cannot describe, so they are
   // counted as lost documents and they withhold the sweep.
@@ -12342,9 +12431,10 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   // the pass read minutes ago is held in local state until it goes quiet, so
   // the newest row in chat.db is routinely not searchable yet; the connector
   // stops this bound strictly before the earliest message still held open, and
-  // it counts only rows that became documents, so a trailing tapback cannot
-  // extend it past the last conversation actually sent. The still-open count
-  // in the summary says what is waiting and what releases it.
+  // it counts only rows that became documents, so a trailing tapback or a
+  // media-marker row cannot extend it past the last conversation actually
+  // sent. The still-open count in the summary says what is waiting and what
+  // releases it.
   //
   // Bounding it here rather than adding a field is deliberate: nothing derives
   // a coverage gap from this range. The receipt route stores it as
@@ -12355,6 +12445,34 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   const measuredRange = localRangeComplete && result.delivered_through
     ? { from: result.first_delivered_at, through: result.delivered_through }
     : null;
+  // One report, two lengths: the console line in full, and the receipt detail
+  // assembled to the 500 characters the worker keeps — so the chat.db caveat
+  // survives instead of being the sentence the column cuts.
+  const { summary, detail } = imessageRunReport({
+    rowsSeen: result.rows_seen,
+    pages: result.pages,
+    rowsPushed: result.rows_pushed,
+    withoutText: skipped.no_text,
+    unusable: unplaceableRows,
+    documentsSent: result.documents_sent,
+    sessionsOpen: result.sessions_open,
+    watermark: result.watermark,
+    refusedDocs: tally.refused,
+    rowRefusals,
+    completeSweep,
+    walkComplete,
+    deliveredThrough: result.delivered_through,
+  });
+
+  if (dry) {
+    info(summary);
+    ok("dry run, nothing was sent and no state was saved");
+    return { ...result, bounded: !!flags.limit, would_send: result.documents_would_send };
+  }
+
+  const bounded = !!flags.limit || result.caught_up !== true;
+  if (flags.limit) warn(`--limit ${flags.limit} bounded this capture pass, so it is NOT a complete source load`);
+  else if (bounded) warn("the capture stopped before it reached the current end of the Messages database, so it is NOT a complete source load");
 
   await postReceipt(base, adminKey, {
     source: sourceName, kind: "imessage", status: "ready",
@@ -12367,20 +12485,7 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
     // confirmed provider history range: deleted messages and messages retained
     // only on another device are not visible to chat.db.
     ...(measuredRange ? { target_range: measuredRange } : {}),
-    // The worker stores 500 characters of this and drops the rest, so nothing
-    // here is said twice: a recorded sweep already states the enumeration, and
-    // a refusal count of zero is already the structured docs_refused field.
-    // The caveat about what chat.db cannot prove must survive to the end.
-    detail: `iMessage capture: ${summary}; ` +
-      (tally.refused ? `${tally.refused} credential-refused; ` : "") +
-      (completeSweep
-        ? "this Mac's local Messages database is swept complete end to end" +
-          (result.delivered_through ? `, delivered through ${result.delivered_through}` : ", nothing delivered yet")
-        : walkComplete
-          ? "the selected local database was fully enumerated"
-          : "the selected local database was not fully enumerated") +
-      (rowRefusals ? `; ${rowRefusals} row(s) remain deliberately non-searchable` : "") +
-      "; local chat.db cannot prove deleted, unavailable-device, or all-time provider history",
+    detail,
     ...(tally.refused ? { refusal_reason: `${tally.refused} conversation document(s) refused by the credential gate` } : {}),
   });
 

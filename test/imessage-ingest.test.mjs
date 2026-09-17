@@ -20,6 +20,7 @@ import {
   cmdConnectImessage,
   cmdDisconnectImessage,
   cmdIngestImessage,
+  imessageRunReport,
 } from "../brain.mjs";
 
 let fail = 0, ran = 0;
@@ -383,6 +384,96 @@ try {
     }
 
     liveDb.close();
+  }
+
+  /* ===== the detail the worker stores is built to its column, not hoped into it ===== */
+  {
+    // Every fixture here is small enough that the old single-string detail
+    // fit by luck. A real Mac is not: 40k rows read in nine pages, five-digit
+    // counts and three conversations still open measures 529 characters
+    // against a 500-character column, and what fell off the end was the last
+    // clause — the caveat about what chat.db cannot prove, which is the only
+    // claim on this receipt that no structured field carries.
+    const big = imessageRunReport({
+      rowsSeen: 40_217, pages: 9, rowsPushed: 38_412, withoutText: 1588, unusable: 0,
+      documentsSent: 2611, sessionsOpen: 3, watermark: 40_217,
+      refusedDocs: 0, rowRefusals: 1588,
+      completeSweep: true, walkComplete: true,
+      deliveredThrough: "2026-09-16T22:41:09.000Z",
+    });
+    check("a 40k-row Mac with three open conversations fits the 500-character detail column",
+      big.detail.length <= 500, `${big.detail.length}: ${big.detail}`);
+    check("the caveat and the sweep claim are what the budget keeps, whole and last",
+      /local chat\.db cannot prove deleted, unavailable-device, or all-time provider history$/.test(big.detail) &&
+      /swept complete end to end, delivered through 2026-09-16T22:41:09\.000Z/.test(big.detail),
+      `${big.detail.length}: ${big.detail}`);
+    check("the still-open conversations are still counted, even when their release rule yields",
+      /3 conversation\(s\) still open/.test(big.detail), big.detail);
+    check("the console summary is unbudgeted and still names every count and the release rule",
+      big.summary === "40217 new row(s) read in 9 page(s); 38412 sessionized; " +
+        "1588 without text (tapbacks/attachments), 0 unusable; 2611 conversation document(s) sent; " +
+        "3 conversation(s) still open; the capture ticks deliver each after six quiet hours or at the day boundary; " +
+        "watermark 40217", big.summary);
+  }
+
+  /* ===== a media-marker row is read, never delivered, and never a bound ===== */
+  {
+    // MessageSessionizer.push drops a row whose whole text is a media marker,
+    // so such a row produces no document and cannot be searched. The capture
+    // loop nonetheless counted it as sessionized and let it advance the
+    // delivered watermark, which put the receipt's target_range.through on a
+    // message the owner can never retrieve — the exact over-claim the
+    // delivered bound exists to prevent.
+    const markerPath = join(sandbox, "chat-marker.db");
+    const markerDb = new DatabaseSync(markerPath);
+    markerDb.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, country TEXT, service TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT, style INTEGER);
+      CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+      CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT UNIQUE, text TEXT, attributedBody BLOB,
+        date INTEGER, is_from_me INTEGER, handle_id INTEGER
+      );
+      INSERT INTO handle (ROWID, id, country, service) VALUES (1, '+15554443333', 'us', 'iMessage');
+      INSERT INTO chat (ROWID, guid, display_name, style) VALUES (1, 'iMessage;-;+15554443333', NULL, 45);
+      INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1,1);
+    `);
+    let markerRowid = 0;
+    const addMarkerRow = ({ guid, text, ts }) => {
+      markerRowid++;
+      markerDb.prepare("INSERT INTO message (ROWID, guid, text, date, is_from_me, handle_id) VALUES (?,?,?,?,?,?)")
+        .run(markerRowid, guid, text, macNs(ts), 0, 1);
+      markerDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, markerRowid);
+    };
+    const lastDelivered = "2026-05-04T12:05:00.000Z";
+    addMarkerRow({ guid: "MK-1", text: "Sending the roof photos over now", ts: "2026-05-04T12:00:00.000Z" });
+    addMarkerRow({ guid: "MK-2", text: "That is the flashing I meant", ts: lastDelivered });
+    // The newest row in the database, and nothing but a marker.
+    addMarkerRow({ guid: "MK-3", text: "[image]", ts: "2026-05-04T12:09:00.000Z" });
+
+    const fakes = makeBrainFakes();
+    const result = await cmdIngestImessage(
+      manifest, manifestPath,
+      { "chat-db": markerPath, source: "imessage-marker", reset: true },
+      fakes.options,
+    );
+    const receipt = fakes.receipts.at(-1);
+    const sent = fakes.batches.flat();
+    check("a media-marker row is read and counted as attachment-only, not as sessionized",
+      result.rows_seen === 3 && result.rows_pushed === 2 &&
+      result.rows_skipped.no_text === 1, JSON.stringify(result));
+    check("no document carries the bare media marker",
+      sent.length === 1 && !/\[image\]/.test(sent[0].content), JSON.stringify(sent));
+    check("the declared range ends at the last DELIVERED message, not the newest row",
+      receipt.target_range?.through === lastDelivered &&
+      receipt.target_range?.from === "2026-05-04T12:00:00.000Z",
+      JSON.stringify({ target_range: receipt.target_range, detail: receipt.detail }));
+    check("the sweep is still claimed: an attachment-only row is not a lost document",
+      receipt.complete_sweep === true && receiptEarnsSweep(receipt) &&
+      new RegExp(`delivered through ${lastDelivered}`).test(receipt.detail), receipt.detail);
+
+    markerDb.close();
   }
 
   /* ===== the same chat.db, swept twice, must produce the same documents ===== */

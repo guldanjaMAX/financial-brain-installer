@@ -56,6 +56,7 @@ import { dirname, join } from "node:path";
 import {
   MESSAGE_SESSION_DEFAULTS,
   MessageSessionizer,
+  messageRowDisposition,
   messageThreadKey,
   sessionEnvelope,
 } from "../ingest/message-session.mjs";
@@ -551,6 +552,19 @@ export async function captureOnce({
           // Tapbacks, attachment-only rows and undecodable bodies land here.
           // They are counted, not silently dropped, so "why is this thread
           // thinner than my phone shows" has an answer.
+          counts.rows_skipped.no_text++;
+          continue;
+        }
+        // The sessionizer, not this loop, decides what becomes a document, and
+        // it drops a row whose whole text is a media marker ("[image]",
+        // "[audio]", "[video]") — an attachment-only row that arrived with a
+        // placeholder body rather than with no body at all. Ask its own
+        // classifier BEFORE pushing: counting such a row as delivered moved
+        // `pushedThrough`, and with it delivered_through and the receipt's
+        // target_range.through, onto a message that was never sent and can
+        // never be searched. It belongs in the same attachment bucket as the
+        // bodyless rows above.
+        if (messageRowDisposition(row) !== "represented") {
           counts.rows_skipped.no_text++;
           continue;
         }
