@@ -359,6 +359,11 @@ single and batched paths then recheck the current document's exact source,
 revision, content hash, provenance digest, binding pointer, and live state;
 raw-bound revisions also revalidate their complete immutable receipt. A lost
 or contradictory result stays failed even if writes may already have committed.
+The batch's `corpus_stats` upsert is proved the same way, from its own returned
+row, but it owns no document and so condemns none: its candidate join carries
+exactly the CAS predicates and runs first in the transaction, so a legitimate
+miss already fails each document's own proof, and what is left when its proof
+fails is freshness bookkeeping that the next ingest recomputes.
 Repeated identities in one request deliberately use the
 original sequential path because revision order is part of their correctness
 contract.

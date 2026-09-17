@@ -255,8 +255,11 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
         rows.document?.content_hash === marker
       ) ? 1 : 0;
     }
-    return { changes, results: changes && /UPDATE documents SET content_hash/i.test(sql)
-      ? [{ ...rows.document }] : [] };
+    if (!changes) return { changes, results: [] };
+    if (/UPDATE documents SET content_hash/i.test(sql)) return { changes, results: [{ ...rows.document }] };
+    // The stats upsert is proved from its RETURNING row too.
+    if (/INSERT INTO corpus_stats/i.test(sql)) return { changes, results: [{ source: binds[0] }] };
+    return { changes, results: [] };
   };
 
   const env = {

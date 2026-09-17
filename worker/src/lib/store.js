@@ -626,6 +626,11 @@ function revisionCommitReturned(result, revision) {
     revisionRowMatches(result.results[0], revision);
 }
 
+function statsCommitReturned(result, source) {
+  return Array.isArray(result?.results) && result.results.length === 1 &&
+    result.results[0]?.source === source;
+}
+
 function sourceOriginalBindingInsertStatement(env, revision) {
   const binding = revision.source_original_binding;
   if (!binding) return null;
@@ -669,6 +674,11 @@ function sourceOriginalBindingInsertStatement(env, revision) {
  * rows that still own the exact pending marker contribute freshness. With no
  * owners, the aggregate's HAVING clause emits no row and corpus_stats is left
  * byte-for-byte unchanged.
+ *
+ * RETURNING, not meta.changes: this statement is proved the same way the
+ * revision CAS is. A future trigger on corpus_stats would inflate D1's
+ * trigger-inclusive change count and repeat the schema-45 false negative here,
+ * at up to 50 documents per slice instead of one.
  */
 function sourceStatsCommitStatement(env, source, revisions) {
   const candidates = JSON.stringify(revisions.map((revision) => [
@@ -716,7 +726,8 @@ function sourceStatsCommitStatement(env, source, revisions) {
      ON CONFLICT(source) DO UPDATE SET
        documents = excluded.documents,
        chunks = excluded.chunks,
-       last_ingest_at = MAX(COALESCE(corpus_stats.last_ingest_at, 0), excluded.last_ingest_at)`
+       last_ingest_at = MAX(COALESCE(corpus_stats.last_ingest_at, 0), excluded.last_ingest_at)
+     RETURNING source`
   ).bind(source, candidates);
 }
 
@@ -1045,7 +1056,7 @@ const d1Backend = {
     const bindingStatement = sourceOriginalBindingInsertStatement(env, revision);
     if (bindingStatement) finalizationStatements.push(bindingStatement);
     const finalization = await env.DB.batch(finalizationStatements);
-    const statsCommitted = Number(finalization?.[0]?.meta?.changes) === 1;
+    const statsCommitted = statsCommitReturned(finalization?.[0], source_type);
     const revisionCommitted = revisionCommitReturned(finalization?.[1], revision);
     const bindingCommitted = !bindingStatement || Number(finalization?.[2]?.meta?.changes) === 1;
     if (!statsCommitted || !revisionCommitted || !bindingCommitted) {
@@ -1193,17 +1204,33 @@ const d1Backend = {
                FROM documents WHERE doc_uid IN (${placeholders})`
           ).bind(...transactionGroup.map((revision) => revision.doc_uid)).all();
           const committed = new Map((results || []).map((row) => [row.doc_uid, row]));
-          const statsCommitted = Number(batchResults[0]?.meta?.changes) === 1;
+          // Statement 0 owns no document, so it condemns none. Its `committing`
+          // JOIN carries exactly the CAS predicates -- doc uid, source, pending
+          // marker, revision id, provenance digest, nullable binding hash and
+          // deleted_at IS NULL -- and it runs first in the same transaction. So
+          // a legitimate miss (no candidate still owns its marker) already
+          // fails that document's own RETURNING proof below, and folding this
+          // statement into every outcome only lets one anomaly on it condemn up
+          // to 50 documents whose own commit is proved. What is left when the
+          // proof fails is freshness bookkeeping, not document truth: stats()
+          // counts documents and chunks from the live tables and reads only
+          // last_ingest_at from this cache, and the next ingest for the source
+          // recomputes both counts and MAX()es the timestamp forward.
           for (let groupIndex = 0; groupIndex < transactionGroup.length; groupIndex++) {
             const revision = transactionGroup[groupIndex];
             const indexes = statementIndexes[groupIndex];
             const row = committed.get(revision.doc_uid);
             const changedThisMarker = revisionCommitReturned(batchResults[indexes.cas], revision);
+            // Still a change count, and safe today only because no trigger
+            // writes on source_original_result_bindings -- 0043's and 0046's
+            // are RAISE guards. It is at least scoped to its own document. If a
+            // writing trigger ever lands on that table, prove it from a
+            // returned row the way the revision CAS above is proved.
             const bindingCommitted = indexes.binding === null ||
               Number(batchResults[indexes.binding]?.meta?.changes) === 1;
             const bindingVerified = !revision.source_original_binding ||
               await storedSourceOriginalBindingMatches(row, revision.source_original_binding);
-            outcomes[revision.index] = statsCommitted && changedThisMarker && bindingCommitted &&
+            outcomes[revision.index] = changedThisMarker && bindingCommitted &&
               revisionRowMatches(row, revision) && bindingVerified
               ? { ok: true }
               : { ok: false, error: "ingest revision could not be verified; retry this document" };

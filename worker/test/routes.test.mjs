@@ -2566,8 +2566,11 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         return row?.source === b[0] && row?.content_hash === marker;
       }) ? 1 : 0;
     }
-    return { changes, results: changes && /UPDATE documents SET content_hash/.test(sql)
-      ? [{ ...documents.get(b[0]) }] : [] };
+    if (!changes) return { changes, results: [] };
+    if (/UPDATE documents SET content_hash/.test(sql)) return { changes, results: [{ ...documents.get(b[0]) }] };
+    // The stats upsert is proved from its RETURNING row too.
+    if (/INSERT INTO corpus_stats/.test(sql)) return { changes, results: [{ source: b[0] }] };
+    return { changes, results: [] };
   };
   const env = {
     STORAGE: "d1", ADMIN_KEY: "k",

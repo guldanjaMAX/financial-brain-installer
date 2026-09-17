@@ -956,4 +956,57 @@ for (const mode of ["single", "batch"]) {
   }
 }
 
-console.log("d1-batch-ingest: real SQLite integration, trigger-aware CAS, readback races, and performance structure passed");
+// Statement 0 -- the corpus_stats upsert -- owns no document. It is proved from
+// its RETURNING row for the same reason the revision CAS is, and an anomaly on
+// it must no longer condemn documents whose own commit is proved. A future
+// trigger on corpus_stats is the schema-45 defect again at 50x the blast radius.
+const statsIndexOf = (statements) =>
+  statements.findIndex((statement) => /INSERT INTO corpus_stats/.test(statement.sql));
+
+for (const anomaly of ["inflated-count", "missing-row", "foreign-row"]) {
+  const ids = ["a", "b", "c"].map((suffix) => `stats-scope-${anomaly}-${suffix}`);
+  const staged = [];
+  for (const id of ids) {
+    staged.push((await store.ingest(env, envelope(id), { deferFinalize: true })).deferred_revision);
+  }
+  let observed = null;
+  control.alter_finalize_results = (results, statements) => {
+    const index = statsIndexOf(statements);
+    observed = { rows: results[index].results.map((row) => row.source), changes: results[index].meta.changes };
+    // Exactly what a new writing trigger on corpus_stats would do, then two
+    // anomalies that defeat the stats proof itself rather than its count.
+    if (anomaly === "inflated-count") results[index].meta.changes = 2;
+    if (anomaly === "missing-row") results[index].results = [];
+    if (anomaly === "foreign-row") results[index].results = [{ source: "drive" }];
+  };
+  const outcomes = await store.finalizeIngestBatch(env, staged);
+  assert.deepEqual(observed, { rows: ["message"], changes: 1 },
+    "the stats upsert returns its own single row, which is what proves it");
+  assert.deepEqual(outcomes, [{ ok: true }, { ok: true }, { ok: true }],
+    `a ${anomaly} on statement 0 condemns none of the three documents that proved their own commit`);
+  for (const id of ids) {
+    assert.match(sqlite.prepare("SELECT content_hash FROM documents WHERE doc_uid=?").get(`message:${id}`).content_hash,
+      /^[a-f0-9]{64}$/);
+  }
+}
+
+// Single ingest keeps the check, because there statement 0 covers exactly its
+// own document. It stays fail-closed on a missing row and trigger-robust on the
+// count -- this is the brain_remember / owner-note path.
+{
+  control.alter_finalize_results = (results, statements) => {
+    results[statsIndexOf(statements)].results = [];
+  };
+  await assert.rejects(store.ingest(env, envelope("stats-scope-single-missing")),
+    /superseded before commit/, "a missing stats row still refuses the single-document commit");
+}
+{
+  control.alter_finalize_results = (results, statements) => {
+    results[statsIndexOf(statements)].meta.changes = 3;
+  };
+  const accepted = await store.ingest(env, envelope("stats-scope-single-inflated"));
+  assert.equal(accepted.action, "created",
+    "a trigger-inflated stats count does not fail a single-document commit that returned its row");
+}
+
+console.log("d1-batch-ingest: real SQLite integration, trigger-aware CAS, statement-0 scope, readback races, and performance structure passed");
