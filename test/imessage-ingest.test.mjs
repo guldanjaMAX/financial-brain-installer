@@ -260,13 +260,13 @@ try {
     rowsDb.close();
   }
 
-  /* ===== a sweep must deliver the conversation it just read, not only walk it ===== */
+  /* ===== what a sweep may claim: read end to end, delivered only this far ===== */
   {
     // Every fixture above is dated months in the past, so the six-hour quiet
-    // rule drains it and the difference between "walked" and "delivered"
-    // cannot show. A real owner's Mac is never like that: the thread they were
+    // rule drains it and the difference between "read" and "delivered" cannot
+    // show. A real owner's Mac is never like that: the thread they were
     // texting on ten minutes ago survives finishStaleSessions, stays in local
-    // state, and is unsearchable. This database reproduces exactly that.
+    // state, and is not searchable yet. This database reproduces exactly that.
     const liveDbPath = join(sandbox, "chat-live.db");
     const liveDb = new DatabaseSync(liveDbPath);
     liveDb.exec(`
@@ -290,9 +290,9 @@ try {
       liveDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, liveRowid);
     };
     const minutesAgo = (n) => new Date(Date.now() - n * 60_000).toISOString();
-    const liveTs = minutesAgo(10);
-    addLiveRow({ guid: "LV-1", text: "Settled thread from last spring", ts: "2026-05-04T12:00:00Z" });
-    addLiveRow({ guid: "LV-2", text: "still talking about the Danforth quote right now", ts: liveTs });
+    const settledTs = "2026-05-04T12:00:00.000Z";
+    addLiveRow({ guid: "LV-1", text: "Settled thread from last spring", ts: settledTs });
+    addLiveRow({ guid: "LV-2", text: "still talking about the Danforth quote right now", ts: minutesAgo(10) });
 
     {
       const fakes = makeBrainFakes();
@@ -303,24 +303,27 @@ try {
       );
       const receipt = fakes.receipts.at(-1);
       const sent = fakes.batches.flat().map((d) => d.source_id);
-      check("an unbounded sweep delivers the conversation it read minutes ago instead of holding it",
-        result.sessions_open === 0 && result.sessions_flushed === 1 &&
-        sent.includes("LV-1") && sent.includes("LV-2"),
-        JSON.stringify({ result, sent }));
-      check("the sweep receipt names the conversations it closed early, and earns the flag",
-        receipt.complete_sweep === true &&
-        /1 open conversation\(s\) closed early to complete the sweep/.test(receipt.detail) &&
-        /0 session\(s\) still open/.test(receipt.detail) &&
-        receiptEarnsSweep(receipt), JSON.stringify(receipt));
-      check("the sweep's declared range ends on a message it actually delivered",
-        receipt.target_range?.through === new Date(liveTs).toISOString() && sent.includes("LV-2"),
-        JSON.stringify({ target_range: receipt.target_range, sent }));
+      check("the live conversation is held, not closed early, so the walk changes no boundary",
+        result.sessions_open === 1 && !("sessions_flushed" in result) &&
+        sent.length === 1 && sent.includes("LV-1"), JSON.stringify({ result, sent }));
+      check("an end-to-end walk with nothing lost still records the sweep its remedy promises",
+        receipt.complete_sweep === true && receiptEarnsSweep(receipt), JSON.stringify(receipt));
+      check("the sweep declares only what it delivered, and stops before the held conversation",
+        receipt.target_range?.from === settledTs && receipt.target_range?.through === settledTs &&
+        new RegExp(`swept complete end to end, delivered through ${settledTs}`).test(receipt.detail),
+        JSON.stringify({ target_range: receipt.target_range, detail: receipt.detail }));
+      check("the receipt says how many conversations are still open and what releases them",
+        /1 conversation\(s\) still open; the capture ticks deliver each after six quiet hours or at the day boundary/
+          .test(receipt.detail), receipt.detail);
+      check("the receipt detail still fits the worker's 500-character column, caveat included",
+        receipt.detail.length <= 500 &&
+        /cannot prove deleted, unavailable-device, or all-time provider history/.test(receipt.detail),
+        `${receipt.detail.length}: ${receipt.detail}`);
     }
 
     {
-      // The normal every-minute tick is unchanged: a resumed pass claims no
-      // sweep, so it has nothing to prove and keeps the six-hour quiet rule
-      // rather than splitting a live conversation once a minute.
+      // The normal every-minute tick: a resumed pass claims no sweep, and it
+      // holds the open conversation exactly as the sweep did.
       addLiveRow({ guid: "LV-3", text: "one more thought before you send it", ts: minutesAgo(2) });
       const fakes = makeBrainFakes();
       const result = await cmdIngestImessage(
@@ -329,13 +332,181 @@ try {
         fakes.options,
       );
       const receipt = fakes.receipts.at(-1);
-      check("an incremental tick still holds an open conversation and claims no sweep",
-        result.sessions_open === 1 && result.sessions_flushed === 0 &&
-        fakes.batches.length === 0 && receipt.complete_sweep === false &&
-        receiptEarnsSweep(receipt) === false, JSON.stringify({ result, receipt }));
+      check("an incremental tick still holds the open conversation and claims no sweep",
+        result.sessions_open === 1 && fakes.batches.length === 0 &&
+        receipt.complete_sweep === false && receiptEarnsSweep(receipt) === false,
+        JSON.stringify({ result, receipt }));
+    }
+
+    {
+      // --flush-sessions is the deliberate early close (disconnect uses it).
+      // It sends the live conversation, and it claims no sweep at all: it read
+      // no chat.db row, so it can prove nothing about the database.
+      const fakes = makeBrainFakes();
+      await cmdIngestImessage(
+        manifest, manifestPath,
+        { source: "imessage-live", "flush-sessions": true },
+        fakes.options,
+      );
+      const receipt = fakes.receipts.at(-1);
+      check("a flush-only pass delivers the open conversation and claims no sweep",
+        fakes.batches.flat().map((d) => d.source_id).includes("LV-2") &&
+        receipt.complete_sweep === false && receipt.walk_complete === false &&
+        !("target_range" in receipt) && receiptEarnsSweep(receipt) === false,
+        JSON.stringify(receipt));
+    }
+
+    {
+      // A preview must not report work it did not do, and must not invent an
+      // early close to make the numbers look finished.
+      const fakes = makeBrainFakes();
+      const chunks = [];
+      const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (chunk, ...rest) => { chunks.push(String(chunk)); return true; };
+      let preview;
+      try {
+        preview = await cmdIngestImessage(
+          manifest, manifestPath,
+          { "chat-db": liveDbPath, source: "imessage-live-preview", "dry-run": true },
+          fakes.options,
+        );
+      } finally {
+        process.stdout.write = write;
+      }
+      const printed = chunks.join("");
+      check("a dry run reports the held conversation and no early close it did not perform",
+        preview.dry_run === true && preview.would_send === 1 &&
+        !/closed early/.test(printed) && !/sessions_flushed/.test(printed) &&
+        /1 conversation\(s\) still open/.test(printed) &&
+        fakes.receipts.length === 0 && fakes.batches.length === 0,
+        JSON.stringify({ preview, printed }));
     }
 
     liveDb.close();
+  }
+
+  /* ===== the same chat.db, swept twice, must produce the same documents ===== */
+  {
+    // The reviewer's scenario, and the reason nothing is closed early: every
+    // other split in message-session.mjs is decided by the data (the incoming
+    // row's day and gap), so a re-walk of the same rows reproduces the same
+    // source_ids. A wall-clock close does not: it would cut this thread at the
+    // moment of the first sweep, then the re-sweep would group all four
+    // messages into the FIRST document and leave the tail document orphaned
+    // forever — nothing in worker/src dedupes or overlaps a
+    // bounded_conversation_session. The six-hour quiet close is stood in for
+    // by --flush-sessions here, which builds the identical envelope.
+    const twicePath = join(sandbox, "chat-twice.db");
+    const twiceDb = new DatabaseSync(twicePath);
+    twiceDb.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, country TEXT, service TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT, style INTEGER);
+      CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+      CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT UNIQUE, text TEXT, attributedBody BLOB,
+        date INTEGER, is_from_me INTEGER, handle_id INTEGER
+      );
+      INSERT INTO handle (ROWID, id, country, service) VALUES (1, '+15554445555', 'us', 'iMessage');
+      INSERT INTO chat (ROWID, guid, display_name, style) VALUES (1, 'iMessage;-;+15554445555', NULL, 45);
+      INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1,1);
+    `);
+    let twiceRowid = 0;
+    const addTwiceRow = ({ guid, text, minutes }) => {
+      twiceRowid++;
+      twiceDb.prepare("INSERT INTO message (ROWID, guid, text, date, is_from_me, handle_id) VALUES (?,?,?,?,?,?)")
+        .run(twiceRowid, guid, text, macNs(new Date(Date.now() - minutes * 60_000).toISOString()), 0, 1);
+      twiceDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, twiceRowid);
+    };
+    const sweepFlags = { "chat-db": twicePath, source: "imessage-twice", reset: true };
+    const tickFlags = { "chat-db": twicePath, source: "imessage-twice" };
+    const flushFlags = { source: "imessage-twice", "flush-sessions": true };
+    const delivered = (fakes) => fakes.batches.flat().map((d) => ({
+      source_id: d.source_id, messages: d.metadata.message_count,
+    }));
+
+    addTwiceRow({ guid: "TW-1", text: "Did the Ferris permit come back?", minutes: 100 });
+    addTwiceRow({ guid: "TW-2", text: "Not yet, chasing it this afternoon", minutes: 90 });
+    const firstPass = makeBrainFakes();
+    await cmdIngestImessage(manifest, manifestPath, sweepFlags, firstPass.options);
+
+    // Two ordinary cron ticks while the same conversation is still going.
+    addTwiceRow({ guid: "TW-3", text: "They want the revised site plan first", minutes: 80 });
+    const tickOne = makeBrainFakes();
+    await cmdIngestImessage(manifest, manifestPath, tickFlags, tickOne.options);
+    addTwiceRow({ guid: "TW-4", text: "Sending it over tonight", minutes: 70 });
+    const tickTwo = makeBrainFakes();
+    await cmdIngestImessage(manifest, manifestPath, tickFlags, tickTwo.options);
+
+    // The quiet spell arrives and the conversation is delivered.
+    const settle = makeBrainFakes();
+    await cmdIngestImessage(manifest, manifestPath, flushFlags, settle.options);
+    const firstRun = [firstPass, tickOne, tickTwo, settle].flatMap(delivered);
+
+    // The owner runs the remedy again: --reset, no --limit, same database.
+    const reSweep = makeBrainFakes();
+    await cmdIngestImessage(manifest, manifestPath, sweepFlags, reSweep.options);
+    const reSettle = makeBrainFakes();
+    await cmdIngestImessage(manifest, manifestPath, flushFlags, reSettle.options);
+    const secondRun = [reSweep, reSettle].flatMap(delivered);
+
+    check("a re-sweep of the same chat.db produces the same conversation documents",
+      JSON.stringify(firstRun) === JSON.stringify(secondRun) &&
+      firstRun.length === 1 && firstRun[0].source_id === "TW-1" && firstRun[0].messages === 4,
+      JSON.stringify({ firstRun, secondRun }));
+    check("no document from the first sweep is orphaned by the second",
+      firstRun.every((doc) => secondRun.some((later) => later.source_id === doc.source_id)),
+      JSON.stringify({ firstRun, secondRun }));
+
+    twiceDb.close();
+  }
+
+  /* ===== a trailing tapback is not a delivered message ===== */
+  {
+    // first_row_at/last_row_at are recorded before the no-text skip, so the
+    // newest ROW in a chat.db is routinely a tapback that never became a
+    // document. The declared range must end at the newest message actually
+    // delivered, not at that row.
+    const tapbackPath = join(sandbox, "chat-tapback.db");
+    const tapbackDb = new DatabaseSync(tapbackPath);
+    tapbackDb.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, country TEXT, service TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT, style INTEGER);
+      CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+      CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT UNIQUE, text TEXT, attributedBody BLOB,
+        date INTEGER, is_from_me INTEGER, handle_id INTEGER
+      );
+      INSERT INTO handle (ROWID, id, country, service) VALUES (1, '+15556667777', 'us', 'iMessage');
+      INSERT INTO chat (ROWID, guid, display_name, style) VALUES (1, 'iMessage;-;+15556667777', NULL, 45);
+      INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1,1);
+    `);
+    let tapbackRowid = 0;
+    const addTapbackRow = ({ guid, text, ts }) => {
+      tapbackRowid++;
+      tapbackDb.prepare("INSERT INTO message (ROWID, guid, text, date, is_from_me, handle_id) VALUES (?,?,?,?,?,?)")
+        .run(tapbackRowid, guid, text, macNs(ts), 0, 1);
+      tapbackDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, tapbackRowid);
+    };
+    addTapbackRow({ guid: "TP-1", text: "Roof crew confirmed for the 14th", ts: "2026-04-10T10:00:00Z" });
+    addTapbackRow({ guid: "TP-2", text: "Perfect, I will tell the owner", ts: "2026-04-10T10:05:00Z" });
+    addTapbackRow({ guid: "TP-3", text: null, ts: "2026-04-10T10:10:00Z" });
+
+    const fakes = makeBrainFakes();
+    await cmdIngestImessage(
+      manifest, manifestPath,
+      { "chat-db": tapbackPath, source: "imessage-tapback", reset: true },
+      fakes.options,
+    );
+    const receipt = fakes.receipts.at(-1);
+    check("the declared range ends on the newest delivered message, not on a trailing tapback",
+      receipt.complete_sweep === true &&
+      receipt.target_range?.through === "2026-04-10T10:05:00.000Z" &&
+      /1 without text \(tapbacks\/attachments\)/.test(receipt.detail) &&
+      receiptEarnsSweep(receipt), JSON.stringify(receipt));
+
+    tapbackDb.close();
   }
 
   /* ================= refusals count; failures stop the watermark ======== */

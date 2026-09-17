@@ -56,6 +56,7 @@ import { dirname, join } from "node:path";
 import {
   MESSAGE_SESSION_DEFAULTS,
   MessageSessionizer,
+  messageThreadKey,
   sessionEnvelope,
 } from "../ingest/message-session.mjs";
 
@@ -435,7 +436,6 @@ export async function captureOnce({
   now = () => Date.now(),
   openDb = openChatDbReadOnly,
   flushOnly = false,
-  flushOnCompleteWalk = false,
   dryRun = false,
   reset = false,
   onPage = () => {},
@@ -458,12 +458,19 @@ export async function captureOnce({
     documents_sent: 0,
     documents_would_send: 0,
     sessions_open: 0,
-    sessions_flushed: 0,
     started_watermark: state.last_rowid,
     watermark: state.last_rowid,
     caught_up: false,
     first_row_at: null,
     last_row_at: null,
+    // What this pass READ is never what it DELIVERED. A conversation stays in
+    // local state until it goes quiet for maxGapMs or the day turns, so on a
+    // Mac in daily use the newest rows above are routinely still unsent. These
+    // two bound the messages a caller may claim are searchable now: everything
+    // strictly older than the earliest message of any still-open session was
+    // sent, because rows arrive chronologically and no held row precedes it.
+    first_delivered_at: null,
+    delivered_through: null,
     dry_run: dryRun,
   };
 
@@ -476,6 +483,26 @@ export async function captureOnce({
     await sendEnvelopes(envelopes);
     counts.documents_sent += envelopes.length;
   };
+  // Delivery bookkeeping for the two counts above. `pushedThrough` is the
+  // newest message this pass handed to the sessionizer; `sessionOpenedAfter`
+  // remembers, per open session, what had been delivered before it began.
+  let pushedThrough = null;
+  const sessionOpenedAfter = new Map();
+  const settleDeliveredRange = () => {
+    let earliestOpen = null;
+    let deliveredThrough = pushedThrough;
+    for (const [key, session] of sessionizer.active) {
+      if (earliestOpen && !(Date.parse(session.first_ts) < Date.parse(earliestOpen))) continue;
+      earliestOpen = session.first_ts;
+      const before = sessionOpenedAfter.get(key) ?? null;
+      // Strictly before, so a message sharing an instant with a held one can
+      // never be inside the claim.
+      deliveredThrough = before && Date.parse(before) < Date.parse(session.first_ts) ? before : null;
+    }
+    counts.delivered_through = deliveredThrough;
+    if (!deliveredThrough) counts.first_delivered_at = null;
+  };
+
   const persist = () => {
     if (dryRun) return;
     saveCaptureState(statePath, {
@@ -528,7 +555,20 @@ export async function captureOnce({
           continue;
         }
         counts.rows_pushed++;
+        // The newest message delivered before this session opened, recorded as
+        // it opens because only then is "before" still known. A session
+        // restored from a previous pass's snapshot gets no entry, and reports
+        // no delivered bound rather than a guessed one.
+        const key = messageThreadKey(row);
+        const deliveredBefore = pushedThrough;
         closed.push(...sessionizer.push(row));
+        if (sessionizer.active.get(key)?.first_id === row.id) {
+          sessionOpenedAfter.set(key, deliveredBefore);
+        }
+        if (!counts.first_delivered_at || Date.parse(row.ts) < Date.parse(counts.first_delivered_at)) {
+          counts.first_delivered_at = row.ts;
+        }
+        if (!pushedThrough || Date.parse(row.ts) > Date.parse(pushedThrough)) pushedThrough = row.ts;
       }
 
       // Documents first, then the watermark+snapshot pair, atomically. A kill
@@ -549,23 +589,8 @@ export async function captureOnce({
 
     const stale = finishStaleSessions(sessionizer, { nowMs: now(), maxGapMs });
     await dispatch(stale);
-    // A walk that started at row zero and reached the end of chat.db is the
-    // only pass that can say it read this database end to end — and that is
-    // only worth saying if the pass also DELIVERED what it read. Every thread
-    // active within the last maxGapMs survives finishStaleSessions, so on a
-    // Mac in daily use the newest conversations would otherwise stay in local
-    // state, unsearchable, while the pass reported a proven history that
-    // covers them. Close them here instead. The cost is one conversation
-    // document split at the sweep rather than at the next quiet spell; the
-    // alternative is a completeness claim over messages the brain does not
-    // have. Bounded and resumed passes make no such claim and keep the plain
-    // six-hour rule.
-    if (flushOnCompleteWalk && counts.caught_up && counts.started_watermark === 0) {
-      const open = sessionizer.finish();
-      counts.sessions_flushed = open.length;
-      await dispatch(open);
-    }
     counts.sessions_open = sessionizer.active.size;
+    settleDeliveredRange();
     persist();
     return counts;
   } finally {

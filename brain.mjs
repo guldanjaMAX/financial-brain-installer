@@ -12246,12 +12246,6 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
       groupingTimezone: m.client?.timezone || "UTC",
       maxRows: flags.limit ? parseInt(flags.limit, 10) : Infinity,
       flushOnly,
-      // Only an unbounded pass can end up claiming a completed sweep, and that
-      // claim is worth nothing unless the pass also delivered every
-      // conversation it read — including the ones still inside the six-hour
-      // quiet window. A bounded or resumed pass claims nothing and keeps the
-      // plain quiet rule.
-      flushOnCompleteWalk: !flushOnly && !flags.limit,
       dryRun: dry,
       reset: !!flags.reset,
       onPage: ({ page, rows, watermark }) => {
@@ -12280,14 +12274,18 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   if (result.pages) process.stdout.write("\n");
 
   const skipped = result.rows_skipped;
+  // An open conversation is not a fault and is not closed early to tidy the
+  // report: closing it would move a document boundary by wall-clock time and
+  // re-segment the same rows differently on the next full walk. It is held,
+  // counted, and named together with the rule that releases it, so the owner
+  // can tell "waiting" from "lost".
+  const stillOpen = result.sessions_open
+    ? `${result.sessions_open} conversation(s) still open; the capture ticks deliver each after six quiet hours or at the day boundary`
+    : "0 session(s) still open";
   const summary =
     `${result.rows_seen} new row(s) read in ${result.pages} page(s); ${result.rows_pushed} sessionized; ` +
     `${skipped.no_text} without text (tapbacks/attachments), ${skipped.no_timestamp + skipped.no_guid} unusable; ` +
-    `${result.documents_sent} conversation document(s) sent; ` +
-    (result.sessions_flushed
-      ? `${result.sessions_flushed} open conversation(s) closed early to complete the sweep; `
-      : "") +
-    `${result.sessions_open} session(s) still open; ` +
+    `${result.documents_sent} conversation document(s) sent; ${stillOpen}; ` +
     `watermark ${result.watermark}`;
 
   if (dry) {
@@ -12319,24 +12317,43 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   const localRangeComplete = walkComplete && result.started_watermark === 0;
   // What a completed sweep claims for this source, and nothing more: every row
   // this Mac's Messages database holds, from its first to its last, was walked
-  // in one unbounded pass and became a delivered document or a named skip.
-  // That is the whole declared scope of `imessage` — it is why the owner
-  // remedy is `--reset` with no `--limit`, and why iPhone-backup history stays
-  // a separate source. Reporting it false whatever happened made that remedy
+  // in one unbounded pass and became a document, a named skip, or a still-open
+  // conversation this receipt excludes from its declared range. That is the
+  // whole declared scope of `imessage` — it is why the owner remedy is
+  // `--reset` with no `--limit`, and why iPhone-backup history stays a
+  // separate source. Reporting it false whatever happened made that remedy
   // unreachable and left every category of `brain check` permanently
   // provisional.
   //
-  // `sessions_open === 0` is the delivery half of that claim, and it is not
-  // redundant with the walk: a conversation the pass read minutes ago is held
-  // in local state until it goes quiet, and a sweep that counted it as covered
-  // while the brain could not return it would be exactly the missing record
-  // presented as a complete-corpus finding. flushOnCompleteWalk above closes
-  // those for this pass, so the conjunct is reachable rather than decorative,
-  // and it still withholds the sweep if anything is left open.
-  const completeSweep = localRangeComplete && result.sessions_open === 0 &&
-    unplaceableRows === 0 && tally.refused === 0 && tally.failed === 0;
-  const measuredRange = localRangeComplete && (result.first_row_at || result.last_row_at)
-    ? { from: result.first_row_at, through: result.last_row_at }
+  // `sessions_open === 0` is deliberately NOT a conjunct. On a Mac in daily
+  // use a thread is almost always live, so it would put the sweep out of reach
+  // again; and the only way to force it — closing open conversations at the
+  // end of the walk — would make segmentation depend on the clock. Every other
+  // split is decided by the incoming row's own day and gap, which is why a
+  // re-walk of the same chat.db reproduces the same source_ids; a wall-clock
+  // close would re-group those rows on the next sweep and strand the tail
+  // document it wrote before, with no overlap or dedupe anywhere for a
+  // bounded_conversation_session. The honest answer is to claim the walk and
+  // bound the range by what was delivered, which is what measuredRange does.
+  const completeSweep = localRangeComplete && unplaceableRows === 0 &&
+    tally.refused === 0 && tally.failed === 0;
+  // The range the receipt DECLARES, which is what the sweep is read against,
+  // so it ends where delivery ends and not where the walk did. A conversation
+  // the pass read minutes ago is held in local state until it goes quiet, so
+  // the newest row in chat.db is routinely not searchable yet; the connector
+  // stops this bound strictly before the earliest message still held open, and
+  // it counts only rows that became documents, so a trailing tapback cannot
+  // extend it past the last conversation actually sent. The still-open count
+  // in the summary says what is waiting and what releases it.
+  //
+  // Bounding it here rather than adding a field is deliberate: nothing derives
+  // a coverage gap from this range. The receipt route stores it as
+  // sync_runs.target_from/target_through, source-coverage echoes it beside the
+  // separately gated confirmed_range, and `brain sources` reports it under the
+  // run. Migration 0038 calls these connector-declared bounds, and a connector
+  // declaring what it delivered is the honest reading of that column.
+  const measuredRange = localRangeComplete && result.delivered_through
+    ? { from: result.first_delivered_at, through: result.delivered_through }
     : null;
 
   await postReceipt(base, adminKey, {
@@ -12346,18 +12363,23 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
     docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
     docs_refused: tally.refused + unplaceableRows, docs_failed: tally.failed,
     walk_complete: walkComplete, complete_sweep: completeSweep,
-    // This is an observed local-database span, not a confirmed provider
-    // history range: deleted messages and messages retained only on another
-    // device are not visible to chat.db.
+    // This is the span this pass delivered out of the local database, not a
+    // confirmed provider history range: deleted messages and messages retained
+    // only on another device are not visible to chat.db.
     ...(measuredRange ? { target_range: measuredRange } : {}),
-    detail: `iMessage capture: ${summary}; ${tally.refused} credential-refused; ` +
-      (walkComplete
-        ? "the selected local database was fully enumerated"
-        : "the selected local database was not fully enumerated") +
-      (rowRefusals ? `; ${rowRefusals} row(s) remain deliberately non-searchable` : "") +
+    // The worker stores 500 characters of this and drops the rest, so nothing
+    // here is said twice: a recorded sweep already states the enumeration, and
+    // a refusal count of zero is already the structured docs_refused field.
+    // The caveat about what chat.db cannot prove must survive to the end.
+    detail: `iMessage capture: ${summary}; ` +
+      (tally.refused ? `${tally.refused} credential-refused; ` : "") +
       (completeSweep
-        ? "; this Mac's local Messages database is swept complete end to end"
-        : "") +
+        ? "this Mac's local Messages database is swept complete end to end" +
+          (result.delivered_through ? `, delivered through ${result.delivered_through}` : ", nothing delivered yet")
+        : walkComplete
+          ? "the selected local database was fully enumerated"
+          : "the selected local database was not fully enumerated") +
+      (rowRefusals ? `; ${rowRefusals} row(s) remain deliberately non-searchable` : "") +
       "; local chat.db cannot prove deleted, unavailable-device, or all-time provider history",
     ...(tally.refused ? { refusal_reason: `${tally.refused} conversation document(s) refused by the credential gate` } : {}),
   });

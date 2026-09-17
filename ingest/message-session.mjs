@@ -47,6 +47,10 @@ const rowId = (row) => String(row.id || row.message_id || row.cursor_id || "").t
 const rowBody = (row) => clean(row.body ?? row.content);
 const rowTime = (row) => iso(row.ts);
 const threadKey = (row) => `${String(row.platform || "message").toLowerCase()}:${String(row.thread_id || "unknown")}`;
+// Exported so a connector can ask which open session a row it just pushed
+// belongs to, without re-deriving this key format and silently drifting from
+// it. Read-only: it changes nothing about how rows are grouped.
+export { threadKey as messageThreadKey };
 const isMediaMarkerOnly = (body) => /^\[(?:audio|image|video)\]\s*$/i.test(body);
 
 const speakerOf = (row, ownerLabel) => {
