@@ -3523,14 +3523,32 @@ const LINEAGE_SHAPE_SQL = `CASE WHEN
   )
 THEN 1 ELSE 0 END`;
 
-const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `
+/**
+ * The per-document CTEs both source statements open with.
+ *
+ * `brain sources` failed on a large brain with an opaque 503 while strictly
+ * heavier aggregates over the same rows still returned. The cause was memory,
+ * not time: D1 holds a materialised CTE in RAM, and these CTEs carried every
+ * live document's `meta` JSON through three corpus-sized materialisations to
+ * produce one row per source. So every `meta`-derived flag is now decided in
+ * `live_documents`, and each downstream CTE names the narrow columns it
+ * forwards. Measured on a schema-46-shaped SQLite at 50,000 documents with a
+ * kilobyte of metadata each, the statements below cost about 25 MB where the
+ * shipped ones cost 269 MB and 356 MB, and the cost no longer tracks metadata
+ * size at all.
+ *
+ * `live_documents` keeps its `MATERIALIZED` hint precisely because it is narrow
+ * now: it is what holds the corpus scan and the per-row JSON work to one pass
+ * while three later CTEs read it. The hints on the wide CTEs are gone. Every
+ * statement still returns the same rows in the same order.
+ */
+const INVENTORY_DOCUMENT_CTES_SQL = `
   WITH live_documents AS MATERIALIZED (
     SELECT d.rowid AS document_rowid,
            d.doc_uid,
            d.source AS physical_source,
            d.source_id,
            d.ingested_at,
-           d.meta,
            d.text_source,
            d.text_reliable,
            d.provenance_receipt_version,
@@ -3538,12 +3556,41 @@ const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `
            d.provenance_receipt_reason,
            d.provenance_receipt_digest,
            ${PROVENANCE_MARKER_SQL} AS provenance_marker_valid,
-           ${FAMILY_UID_SQL} AS family_doc_uid
+           ${FAMILY_UID_SQL} AS family_doc_uid,
+           -- Each lineage flag keeps its receipt gate in front of the JSON
+           -- work, exactly where it sat before. That is not only cheaper on a
+           -- corpus whose pre-0.4.8 rows are unassessed by design; the lineage
+           -- shape test reads json_each, which raises on unparsable metadata
+           -- and on a root_ids value that is not an array, so evaluating it
+           -- ahead of the gate would widen the set of rows that can abort the
+           -- whole statement.
+           CASE WHEN (${PROVENANCE_MARKER_SQL})=1 AND json_valid(d.meta)
+                     AND json_type(d.meta,'$.evidence_lineage')='object' THEN 1 ELSE 0 END AS declared_lineage,
+           CASE WHEN (${PROVENANCE_MARKER_SQL})=1 THEN ${LINEAGE_SHAPE_SQL} ELSE 0 END AS recognized_lineage,
+           CASE WHEN (${PROVENANCE_MARKER_SQL})=1 AND json_valid(d.meta) AND (
+             (json_type(d.meta,'$.family_of')='text' AND length(trim(json_extract(d.meta,'$.family_of'))) > 0)
+             OR (json_type(d.meta,'$.part_of')='text' AND length(trim(json_extract(d.meta,'$.part_of'))) > 0)
+           ) THEN 1 ELSE 0 END AS family_lineage
       FROM documents d
      WHERE d.deleted_at IS NULL
   ),
-  attributed_documents AS MATERIALIZED (
-    SELECT live_documents.*,
+  attributed_documents AS (
+    SELECT live_documents.document_rowid,
+           live_documents.doc_uid,
+           live_documents.physical_source,
+           live_documents.source_id,
+           live_documents.ingested_at,
+           live_documents.text_source,
+           live_documents.text_reliable,
+           live_documents.provenance_receipt_version,
+           live_documents.provenance_receipt_status,
+           live_documents.provenance_receipt_reason,
+           live_documents.provenance_receipt_digest,
+           live_documents.provenance_marker_valid,
+           live_documents.family_doc_uid,
+           live_documents.declared_lineage,
+           live_documents.recognized_lineage,
+           live_documents.family_lineage,
            CASE
              WHEN instr(family_doc_uid, ':') BETWEEN 2 AND 65
               AND substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1) GLOB '[a-z0-9]*'
@@ -3561,8 +3608,21 @@ const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `
       LEFT JOIN chunks c ON c.doc_uid=a.doc_uid
      GROUP BY a.doc_uid
   ),
-  document_flags AS MATERIALIZED (
-    SELECT a.*,
+  document_flags AS (
+    SELECT a.document_rowid,
+           a.doc_uid,
+           a.physical_source,
+           a.source_id,
+           a.ingested_at,
+           a.text_source,
+           a.text_reliable,
+           a.provenance_receipt_version,
+           a.provenance_receipt_status,
+           a.provenance_receipt_reason,
+           a.provenance_receipt_digest,
+           a.provenance_marker_valid,
+           a.family_doc_uid,
+           a.inventory_source,
            COALESCE(c.chunk_count,0) AS chunk_count,
            COALESCE(c.nonblank_chunk_count,0) AS nonblank_chunk_count,
            CASE WHEN a.provenance_marker_valid=1 AND trim(COALESCE(a.source_id,'')) != '' THEN 1 ELSE 0 END AS has_source_identity,
@@ -3571,20 +3631,20 @@ const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `
            CASE WHEN a.provenance_marker_valid=1
                      AND lower(COALESCE(a.text_source,'')) IN ('native','ocr','ocr_partial')
                      AND a.text_reliable IN (0,1) THEN 1 ELSE 0 END AS has_text_reliability,
-           CASE WHEN a.provenance_marker_valid=1 AND json_valid(a.meta)
-                     AND json_type(a.meta,'$.evidence_lineage')='object' THEN 1 ELSE 0 END AS declared_lineage,
-           CASE WHEN a.provenance_marker_valid=1 THEN ${LINEAGE_SHAPE_SQL} ELSE 0 END AS recognized_lineage,
-           CASE WHEN a.provenance_marker_valid=1 AND json_valid(a.meta) AND (
-             (json_type(a.meta,'$.family_of')='text' AND length(trim(json_extract(a.meta,'$.family_of'))) > 0)
-             OR (json_type(a.meta,'$.part_of')='text' AND length(trim(json_extract(a.meta,'$.part_of'))) > 0)
-           ) THEN 1 ELSE 0 END AS family_lineage,
+           a.declared_lineage,
+           a.recognized_lineage,
+           a.family_lineage,
            CASE WHEN a.provenance_marker_valid=1 AND (
              a.provenance_receipt_status='complete'
              OR a.provenance_receipt_reason='text_provenance_unavailable'
            ) THEN 1 ELSE 0 END AS has_lineage
       FROM attributed_documents a
       LEFT JOIN chunk_per_document c ON c.doc_uid=a.doc_uid
-  ),
+  )`;
+
+// Exported so the scale regression can run this exact statement against a
+// synthetic corpus and diff its rows with the 0.4.8 SQL it replaced.
+export const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `${INVENTORY_DOCUMENT_CTES_SQL},
   source_names AS (
     SELECT name FROM sources
     UNION
@@ -4118,69 +4178,8 @@ const sourceRecoveryMarkerSql = `
     FROM install_state i
    WHERE i.id=1`;
 
-const sourceRecoverySql = `
-  WITH live_documents AS MATERIALIZED (
-    SELECT d.rowid AS document_rowid,
-           d.doc_uid,
-           d.source AS physical_source,
-           d.source_id,
-           d.ingested_at,
-           d.meta,
-           d.text_source,
-           d.text_reliable,
-           d.provenance_receipt_version,
-           d.provenance_receipt_status,
-           d.provenance_receipt_reason,
-           d.provenance_receipt_digest,
-           ${PROVENANCE_MARKER_SQL} AS provenance_marker_valid,
-           ${FAMILY_UID_SQL} AS family_doc_uid
-      FROM documents d
-     WHERE d.deleted_at IS NULL
-  ),
-  attributed_documents AS MATERIALIZED (
-    SELECT live_documents.*,
-           CASE
-             WHEN instr(family_doc_uid, ':') BETWEEN 2 AND 65
-              AND substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1) GLOB '[a-z0-9]*'
-              AND substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1) NOT GLOB '*[^a-z0-9_-]*'
-               THEN substr(family_doc_uid, 1, instr(family_doc_uid, ':') - 1)
-             ELSE physical_source
-           END AS inventory_source
-      FROM live_documents
-  ),
-  chunk_per_document AS (
-    SELECT a.doc_uid,
-           COUNT(c.chunk_uid) AS chunk_count,
-           COALESCE(SUM(CASE WHEN trim(c.text) != '' THEN 1 ELSE 0 END),0) AS nonblank_chunk_count
-      FROM attributed_documents a
-      LEFT JOIN chunks c ON c.doc_uid=a.doc_uid
-     GROUP BY a.doc_uid
-  ),
-  document_flags AS MATERIALIZED (
-    SELECT a.*,
-           COALESCE(c.chunk_count,0) AS chunk_count,
-           COALESCE(c.nonblank_chunk_count,0) AS nonblank_chunk_count,
-           CASE WHEN a.provenance_marker_valid=1 AND trim(COALESCE(a.source_id,'')) != '' THEN 1 ELSE 0 END AS has_source_identity,
-           CASE WHEN a.provenance_marker_valid=1
-                     AND lower(COALESCE(a.text_source,'')) IN ('native','ocr','ocr_partial') THEN 1 ELSE 0 END AS has_extraction_method,
-           CASE WHEN a.provenance_marker_valid=1
-                     AND lower(COALESCE(a.text_source,'')) IN ('native','ocr','ocr_partial')
-                     AND a.text_reliable IN (0,1) THEN 1 ELSE 0 END AS has_text_reliability,
-           CASE WHEN a.provenance_marker_valid=1 AND json_valid(a.meta)
-                     AND json_type(a.meta,'$.evidence_lineage')='object' THEN 1 ELSE 0 END AS declared_lineage,
-           CASE WHEN a.provenance_marker_valid=1 THEN ${LINEAGE_SHAPE_SQL} ELSE 0 END AS recognized_lineage,
-           CASE WHEN a.provenance_marker_valid=1 AND json_valid(a.meta) AND (
-             (json_type(a.meta,'$.family_of')='text' AND length(trim(json_extract(a.meta,'$.family_of'))) > 0)
-             OR (json_type(a.meta,'$.part_of')='text' AND length(trim(json_extract(a.meta,'$.part_of'))) > 0)
-           ) THEN 1 ELSE 0 END AS family_lineage,
-           CASE WHEN a.provenance_marker_valid=1 AND (
-             a.provenance_receipt_status='complete'
-             OR a.provenance_receipt_reason='text_provenance_unavailable'
-           ) THEN 1 ELSE 0 END AS has_lineage
-      FROM attributed_documents a
-      LEFT JOIN chunk_per_document c ON c.doc_uid=a.doc_uid
-  ),
-  candidate_rows AS MATERIALIZED (
+export const sourceRecoverySql = `${INVENTORY_DOCUMENT_CTES_SQL},
+  candidate_rows AS (
     SELECT f.*,
            COALESCE(s.kind,'unregistered') AS source_kind,
            s.zone AS source_zone,
@@ -4208,7 +4207,7 @@ const sourceRecoverySql = `
          OR (f.declared_lineage=1 AND f.recognized_lineage=0)
        )
   ),
-  source_groups AS MATERIALIZED (
+  source_groups AS (
     SELECT inventory_source AS source_id,
            source_kind,
            source_zone AS zone,
@@ -4239,7 +4238,47 @@ const sourceRecoverySql = `
            COALESCE(SUM(reason_lineage_contract_unrecognized),0) AS total_lineage_contract_unrecognized
       FROM candidate_rows
   )
-  SELECT candidate_rows.*,
+  SELECT candidate_rows.document_rowid,
+         candidate_rows.doc_uid,
+         candidate_rows.physical_source,
+         candidate_rows.source_id,
+         candidate_rows.ingested_at,
+         -- Read for the returned page only. The JS boundary re-derives each
+         -- record's receipt from its stored metadata, so the metadata has to
+         -- reach it, but a scalar subquery keyed on the rowid fetches at most
+         -- one page of them instead of carrying every candidate's metadata
+         -- through the corpus-sized CTEs above.
+         (SELECT meta FROM documents WHERE rowid=candidate_rows.document_rowid) AS meta,
+         candidate_rows.text_source,
+         candidate_rows.text_reliable,
+         candidate_rows.provenance_receipt_version,
+         candidate_rows.provenance_receipt_status,
+         candidate_rows.provenance_receipt_reason,
+         candidate_rows.provenance_receipt_digest,
+         candidate_rows.provenance_marker_valid,
+         candidate_rows.family_doc_uid,
+         candidate_rows.inventory_source,
+         candidate_rows.chunk_count,
+         candidate_rows.nonblank_chunk_count,
+         candidate_rows.has_source_identity,
+         candidate_rows.has_extraction_method,
+         candidate_rows.has_text_reliability,
+         candidate_rows.declared_lineage,
+         candidate_rows.recognized_lineage,
+         candidate_rows.family_lineage,
+         candidate_rows.has_lineage,
+         candidate_rows.source_kind,
+         candidate_rows.source_zone,
+         candidate_rows.registered,
+         candidate_rows.reason_no_stored_chunks,
+         candidate_rows.reason_blank_only_chunks,
+         candidate_rows.reason_ocr_partial_review,
+         candidate_rows.reason_provenance_receipt_unassessed,
+         candidate_rows.reason_extraction_method_missing,
+         candidate_rows.reason_text_reliability_missing,
+         candidate_rows.reason_source_record_id_missing,
+         candidate_rows.reason_derivation_lineage_missing,
+         candidate_rows.reason_lineage_contract_unrecognized,
          global_summary.*,
          CASE WHEN candidate_rows.document_rowid=(
            SELECT MIN(next_candidate.document_rowid)

@@ -727,3 +727,131 @@ test("source inventory refuses mixed snapshots and owner selection", async () =>
   assert.deepEqual(other.sources.map((row) => row.source_id), ["zeta"]);
   assert.doesNotMatch(JSON.stringify(other), /alpha|beta|orphan|gamma/);
 });
+
+/**
+ * Replace the store boundary with one that refuses the source statements.
+ *
+ * Only the two whole-corpus statements fail; the marker read and every other
+ * prepare still works, so the route reaches the same catch it reaches in the
+ * field instead of failing earlier for an unrelated reason.
+ */
+function refusingEnv(db, error) {
+  const { env } = d1Env(db);
+  const prepare = env.DB.prepare.bind(env.DB);
+  env.DB = {
+    prepare(sql) {
+      if (/WITH live_documents/.test(sql)) throw error;
+      return prepare(sql);
+    },
+    async batch() { throw new Error("source inventory must never execute a write batch"); },
+  };
+  return env;
+}
+
+/** Collect the route's own warnings instead of letting them reach the runner. */
+async function withCapturedWarnings(run) {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try { return { value: await run(), warnings }; } finally { console.warn = original; }
+}
+
+test("a refused inventory names its cause without carrying the statement or the corpus", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const failure = new RangeError(
+    "D1_ERROR: query exceeded the memory limit while reading 'SELECT d.meta FROM documents'"
+    + " for \"SYNTHETIC_PRIVATE_DOCUMENT secret-account@example.invalid\"\nstack frame omitted",
+  );
+  failure.code = "d1_resource_exhausted";
+
+  const { value: [inventory, recovery], warnings } = await withCapturedWarnings(async () => {
+    const env = refusingEnv(db, failure);
+    return [
+      await call(env, post({ limit: 1 }, { "X-Admin-Key": "test-admin-key" })),
+      await call(env, post({ mode: "recovery", limit: 1 }, { "X-Admin-Key": "test-admin-key" })),
+    ];
+  });
+
+  assert.equal(inventory.status, 503);
+  const inventoryBody = await inventory.json();
+  assert.equal(inventoryBody.code, "source_inventory_unavailable");
+  assert.equal(inventoryBody.detail.error_class, "RangeError");
+  assert.equal(inventoryBody.detail.failure_code, "d1_resource_exhausted");
+  assert.equal(inventoryBody.detail.redacted, true);
+  assert.match(inventoryBody.detail.reason, /query exceeded the memory limit/);
+  assert.ok(inventoryBody.detail.reason.length <= 160);
+
+  assert.equal(recovery.status, 503);
+  const recoveryBody = await recovery.json();
+  assert.equal(recoveryBody.code, "source_inventory_unavailable");
+  assert.equal(recoveryBody.detail.error_class, "RangeError");
+
+  const serialized = JSON.stringify({ inventoryBody, recoveryBody });
+  for (const forbidden of [
+    "SELECT", "documents", "d.meta", "SYNTHETIC_PRIVATE_DOCUMENT", "secret-account", "stack frame",
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, `the detail must not carry ${forbidden}`);
+  }
+  assert.equal(warnings.length, 2, "each refusal is recorded once for the owner's logs");
+  for (const warning of warnings) {
+    assert.match(warning, /^\[source-inventory\] .* refused: RangeError \(d1_resource_exhausted\): /);
+    assert.doesNotMatch(warning, /SELECT|SYNTHETIC_PRIVATE_DOCUMENT|secret-account/);
+  }
+});
+
+test("the too-large and changed refusals keep their codes while gaining a detail", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+
+  const oversized = new Error("source inventory exceeds the safe row limit");
+  oversized.code = "source_inventory_too_large";
+  const { value: tooLarge } = await withCapturedWarnings(
+    () => call(refusingEnv(db, oversized), post({}, { "X-Admin-Key": "test-admin-key" })),
+  );
+  assert.equal(tooLarge.status, 503);
+  const tooLargeBody = await tooLarge.json();
+  assert.equal(tooLargeBody.code, "source_inventory_too_large");
+  assert.equal(tooLargeBody.detail.failure_code, "source_inventory_too_large");
+
+  const changed = new Error("source recovery inventory changed during the read");
+  changed.code = "source_recovery_changed";
+  const { value: changedResponse } = await withCapturedWarnings(
+    () => call(refusingEnv(db, changed), post({
+      mode: "recovery",
+      limit: 1,
+    }, { "X-Admin-Key": "test-admin-key" })),
+  );
+  assert.equal(changedResponse.status, 409);
+  const changedBody = await changedResponse.json();
+  assert.equal(changedBody.code, "source_inventory_changed");
+  assert.equal(changedBody.detail.failure_code, "source_recovery_changed");
+
+  const { value: anonymous } = await withCapturedWarnings(
+    () => call(refusingEnv(db, oversized), post()),
+  );
+  assert.equal(anonymous.status, 401, "a refused statement never reaches an unauthorized caller");
+  assert.equal("detail" in await anonymous.json(), false);
+});
+
+test("an unnamed store failure still returns a usable, bounded detail", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const failure = new Error(`${"private-".repeat(60)}detail`);
+  failure.name = "not a valid class";
+  failure.code = "NOT_A_VALID_CODE";
+  const { value: response } = await withCapturedWarnings(
+    () => call(refusingEnv(db, failure), post({}, { "X-Admin-Key": "test-admin-key" })),
+  );
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.equal(body.detail.error_class, "Error", "an unusable class falls back to the generic one");
+  assert.equal(body.detail.failure_code, null, "an unusable code is dropped rather than echoed");
+  assert.equal(body.detail.reason.length, 160, "the reason is truncated, not omitted");
+
+  const empty = new Error("");
+  const { value: emptyResponse } = await withCapturedWarnings(
+    () => call(refusingEnv(db, empty), post({}, { "X-Admin-Key": "test-admin-key" })),
+  );
+  assert.equal((await emptyResponse.json()).detail.reason, null);
+});

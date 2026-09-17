@@ -217,6 +217,48 @@ function recoveryPlanSummary(sources) {
   };
 }
 
+/**
+ * Describe why the inventory refused, without letting the cause become a leak.
+ *
+ * The first 0.4.8 field failure returned one opaque code for a D1 resource
+ * abort, an invalid source identity, and a failed recovery summary alike, so
+ * diagnosing it needed a whole read-only investigation. This keeps the public
+ * code stable and adds a bounded description: the error class, the store's own
+ * failure code when it set one, and a message reduced to an allowlisted
+ * alphabet with every quoted segment removed, so no SQL text, row value,
+ * document metadata, path, or identifier can ride out on it.
+ */
+function inventoryFailureDetail(error) {
+  const errorClass = /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(String(error?.name || ""))
+    ? String(error.name)
+    : "Error";
+  const failureCode = /^[a-z][a-z0-9_]{0,63}$/.test(String(error?.code || ""))
+    ? String(error.code)
+    : null;
+  const reason = String(error?.message || "")
+    .split("\n")[0]
+    .replace(/'[^']*'|"[^"]*"|`[^`]*`/g, " ")
+    .replace(/[^A-Za-z0-9 ,.:()/_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+  return {
+    error_class: errorClass,
+    failure_code: failureCode,
+    reason: reason || null,
+    redacted: true,
+  };
+}
+
+/** Record the refusal where the owner can retrieve it, never its payload. */
+function logInventoryFailure(stage, detail) {
+  console.warn(
+    `[source-inventory] ${stage} refused: ${detail.error_class}`
+    + `${detail.failure_code ? ` (${detail.failure_code})` : ""}`
+    + `${detail.reason ? `: ${detail.reason}` : ""}`,
+  );
+}
+
 /** Handle the one source-inventory route, including its narrow auth boundary. */
 export async function handleSourceInventoryApi(env, request) {
   let authorized = validateAdminKey(request, env);
@@ -258,11 +300,14 @@ export async function handleSourceInventoryApi(env, request) {
       });
     } catch (error) {
       const changed = error?.code === "source_recovery_changed";
+      const detail = inventoryFailureDetail(error);
+      logInventoryFailure(changed ? "recovery snapshot" : "recovery", detail);
       return respond({
         error: changed
           ? "source recovery inventory changed; restart from the first page"
           : "source recovery inventory is unavailable",
         code: changed ? "source_inventory_changed" : "source_inventory_unavailable",
+        detail,
       }, changed ? 409 : 503);
     }
     const snapshot = await digestHex(JSON.stringify({
@@ -327,11 +372,14 @@ export async function handleSourceInventoryApi(env, request) {
     const code = error?.code === "source_inventory_too_large"
       ? "source_inventory_too_large"
       : "source_inventory_unavailable";
+    const detail = inventoryFailureDetail(error);
+    logInventoryFailure("inventory", detail);
     return respond({
       error: code === "source_inventory_too_large"
         ? "source inventory is too large for one safe snapshot"
         : "source inventory is unavailable",
       code,
+      detail,
     }, 503);
   }
 
@@ -350,10 +398,13 @@ export async function handleSourceInventoryApi(env, request) {
   let recoverySummary;
   try {
     recoverySummary = recoveryPlanSummary(inventory.rows);
-  } catch {
+  } catch (error) {
+    const detail = inventoryFailureDetail(error);
+    logInventoryFailure("inventory recovery summary", detail);
     return respond({
       error: "source inventory recovery summary is unavailable",
       code: "source_inventory_unavailable",
+      detail,
     }, 503);
   }
 

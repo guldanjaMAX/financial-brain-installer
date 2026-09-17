@@ -10,6 +10,19 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **`brain sources` works on a large corpus again.** The source inventory and
+  its recovery preview used to read every document's stored metadata three
+  times over before counting anything, so on a brain with a few hundred
+  thousand documents the database gave up and the command returned only
+  "source inventory is unavailable". Both reads now decide everything they
+  need from the metadata once and carry only the small results forward: on a
+  50,000-document test corpus they use about a tenth of the memory, and the
+  cost no longer grows with how large each document's metadata is. The numbers
+  they report are unchanged. If a source read still refuses, the answer now
+  names the kind of failure instead of only saying it is unavailable, and the
+  same line is written to the Brain's own log; it carries no query text, no
+  document content, and no identifiers.
+
 - **An update cannot migrate a Brain whose starting projection is already
   uncertain.** After the exact new Worker is serving in paused mode, update now
   requires one private response to prove D1, equal vector totals, an empty
