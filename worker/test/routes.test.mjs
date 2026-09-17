@@ -1984,6 +1984,47 @@ const zeroChunkExpectedReturn = {
       !seen.binds.some((values) => values[0] === "run_invalid_count"), String(invalid.status));
 }
 
+/* ---- the iMessage capture receipt reaches sources.last_complete_sweep_at ---- */
+{
+  const { env, seen } = mkEnv([]);
+  // Exactly the shape brain.mjs cmdIngestImessage posts after an unbounded
+  // --reset walk of a Mac's chat.db: tapback rows are named in the detail and
+  // are NOT counted as refused documents, so this receipt reaches the gate.
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "imessage", kind: "imessage", status: "ready",
+      run_id: "run_imessage_sweep", lane: "manual", walk_complete: true,
+      complete_sweep: true, docs_refused: 0, docs_failed: 0,
+      target_range: { from: "2019-02-03T00:00:00.000Z", through: "2026-09-16T00:00:00.000Z" },
+      detail: "iMessage capture: 4 without text (tapbacks/attachments), 0 unusable; " +
+        "this Mac's local Messages database is swept complete end to end",
+    }),
+  }), env, {});
+  const sourceBind = seen.binds.find((values) => values[0] === "imessage" && values.length === 5);
+  const runBind = seen.binds.find((values) => values[0] === "run_imessage_sweep" && values.length === 22);
+  check("an unbounded iMessage walk advances durable history proof for the imessage source",
+    response.status === 200 && sourceBind?.[4] === 1 &&
+      runBind?.[5] === 1 && runBind?.[10] === 0 && runBind?.[11] === 0 && runBind?.[12] === 1,
+    JSON.stringify({ sourceBind, runBind }));
+
+  // The same connector on an incremental tick: the walk closes, but it
+  // resumed from a watermark, so it claims nothing about history.
+  const incremental = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "imessage-tick", kind: "imessage", status: "ready",
+      run_id: "run_imessage_tick", lane: "manual", walk_complete: true,
+      complete_sweep: false, docs_refused: 0, docs_failed: 0,
+    }),
+  }), env, {});
+  const tickBind = seen.binds.find((values) => values[0] === "imessage-tick" && values.length === 5);
+  check("an incremental iMessage tick still records no completed history sweep",
+    incremental.status === 200 && tickBind?.[4] === 0, JSON.stringify(tickBind));
+}
+
 /* ---- provenance ranges accept only the connector's explicit wire formats ---- */
 {
   const { env, seen } = mkEnv([]);

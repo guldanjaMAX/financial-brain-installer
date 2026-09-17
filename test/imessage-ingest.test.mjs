@@ -25,6 +25,15 @@ import {
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 260))); if (!c) fail++; };
 
+/* The worker's own gate on `sources.last_complete_sweep_at`, restated here
+   from worker/src/index.js handleSourceReceipt. A receipt that sets
+   complete_sweep but cannot pass this is a flag that never lands, which is
+   the shape of the defect this file now pins. */
+const receiptEarnsSweep = (receipt) => receipt?.status === "ready" &&
+  receipt?.complete_sweep === true && receipt?.walk_complete === true &&
+  Object.hasOwn(receipt, "docs_refused") && Object.hasOwn(receipt, "docs_failed") &&
+  receipt.docs_refused === 0 && receipt.docs_failed === 0 && !receipt.refusal_reason;
+
 const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-imessage-ingest-")));
 const manifestPath = join(sandbox, "brain.manifest.json");
 const manifest = {
@@ -124,7 +133,7 @@ try {
       fakes.receipts[1].docs_added === 2 && /2 conversation document\(s\) sent/.test(fakes.receipts[1].detail),
       JSON.stringify(fakes.receipts[1]));
     check("a full local database walk is measured without claiming all-time iMessage history",
-      fakes.receipts[1].walk_complete === true && fakes.receipts[1].complete_sweep === false &&
+      fakes.receipts[1].walk_complete === true && fakes.receipts[1].complete_sweep === true &&
       fakes.receipts[1].files_seen === 3 && fakes.receipts[1].docs_refused === 0 &&
       fakes.receipts[1].docs_failed === 0 &&
       !("confirmed_range" in fakes.receipts[1]) &&
@@ -132,6 +141,12 @@ try {
       fakes.receipts[1].target_range?.through === "2026-03-02T18:00:00.000Z" &&
       /cannot prove deleted, unavailable-device, or all-time provider history/.test(fakes.receipts[1].detail),
       JSON.stringify(fakes.receipts[1]));
+    check("an unbounded walk from an empty watermark records the sweep the owner remedy promises",
+      fakes.receipts[1].complete_sweep === true &&
+      /this Mac's local Messages database is swept complete end to end/.test(fakes.receipts[1].detail),
+      JSON.stringify(fakes.receipts[1]));
+    check("that receipt passes the worker's own complete-sweep gate, so the flag can land",
+      receiptEarnsSweep(fakes.receipts[1]), JSON.stringify(fakes.receipts[1]));
     check("capture state landed beside the manifest under the source's name",
       existsSync(join(sandbox, ".brain-ingest-imessage.json")));
   }
@@ -144,6 +159,8 @@ try {
       fakes.receipts[1].walk_complete === true && fakes.receipts[1].complete_sweep === false &&
       !("confirmed_range" in fakes.receipts[1]) && !("target_range" in fakes.receipts[1]),
       JSON.stringify(fakes.receipts[1]));
+    check("an incremental pass resumed from a watermark claims no sweep at all",
+      receiptEarnsSweep(fakes.receipts[1]) === false, JSON.stringify(fakes.receipts[1]));
   }
   {
     const fakes = makeBrainFakes();
@@ -157,6 +174,90 @@ try {
       fakes.receipts.length === 0 && fakes.batches.length === 0 &&
       !existsSync(join(sandbox, ".brain-ingest-imessage-preview.json")),
       JSON.stringify(preview));
+  }
+
+  /* ===== what "swept complete" means for a database that is only this Mac ===== */
+  {
+    // A second synthetic database, so the main one's watermark is untouched.
+    // It carries the three row shapes a real chat.db always mixes together:
+    // ordinary messages, tapback/attachment-only rows with no text, and rows
+    // the walk cannot place in history at all.
+    const rowsDbPath = join(sandbox, "chat-rows.db");
+    const rowsDb = new DatabaseSync(rowsDbPath);
+    rowsDb.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, country TEXT, service TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT, style INTEGER);
+      CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+      CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT UNIQUE, text TEXT, attributedBody BLOB,
+        date INTEGER, is_from_me INTEGER, handle_id INTEGER
+      );
+      INSERT INTO handle (ROWID, id, country, service) VALUES (1, '+15550001111', 'us', 'iMessage');
+      INSERT INTO chat (ROWID, guid, display_name, style) VALUES (1, 'iMessage;-;+15550001111', NULL, 45);
+      INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1,1);
+    `);
+    let rowsRowid = 0;
+    const addRow = ({ guid, text, ts }) => {
+      rowsRowid++;
+      rowsDb.prepare("INSERT INTO message (ROWID, guid, text, date, is_from_me, handle_id) VALUES (?,?,?,?,?,?)")
+        .run(rowsRowid, guid, text, ts === null ? null : macNs(ts), 0, 1);
+      rowsDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, rowsRowid);
+      return rowsRowid;
+    };
+    addRow({ guid: "RW-1", text: "The Kessler estimate is ready whenever you are", ts: "2026-04-01T15:00:00Z" });
+    // A tapback: a real row, read and classified, carrying no message text.
+    addRow({ guid: "RW-2", text: null, ts: "2026-04-01T15:01:00Z" });
+    addRow({ guid: "RW-3", text: "Thanks, opening it now", ts: "2026-04-01T15:02:00Z" });
+
+    {
+      const fakes = makeBrainFakes();
+      await cmdIngestImessage(
+        manifest, manifestPath,
+        { "chat-db": rowsDbPath, source: "imessage-rows" },
+        fakes.options,
+      );
+      const receipt = fakes.receipts.at(-1);
+      check("tapbacks and attachment-only rows are named but do not withhold the sweep",
+        receipt.complete_sweep === true && receipt.docs_refused === 0 &&
+        /1 without text \(tapbacks\/attachments\)/.test(receipt.detail) &&
+        /1 row\(s\) remain deliberately non-searchable/.test(receipt.detail) &&
+        receiptEarnsSweep(receipt), JSON.stringify(receipt));
+    }
+
+    {
+      // A row with no timestamp cannot be placed in history. That is a hole
+      // the walk cannot describe, so it is a lost document and the sweep stops.
+      addRow({ guid: "RW-4", text: "undated and therefore unplaceable", ts: null });
+      const fakes = makeBrainFakes();
+      await cmdIngestImessage(
+        manifest, manifestPath,
+        { "chat-db": rowsDbPath, source: "imessage-rows", reset: true },
+        fakes.options,
+      );
+      const receipt = fakes.receipts.at(-1);
+      check("a row the walk cannot place in history is a loss, and withholds the sweep",
+        receipt.complete_sweep === false && receipt.docs_refused === 1 &&
+        /1 unusable/.test(receipt.detail) && receiptEarnsSweep(receipt) === false,
+        JSON.stringify(receipt));
+    }
+
+    {
+      // --limit is the other half of the owner remedy. A capped pass has not
+      // seen the whole database and must not claim it has.
+      const fakes = makeBrainFakes();
+      await cmdIngestImessage(
+        manifest, manifestPath,
+        { "chat-db": rowsDbPath, source: "imessage-rows", reset: true, limit: "2" },
+        fakes.options,
+      );
+      const receipt = fakes.receipts.at(-1);
+      check("--limit bounds the pass, so neither the walk nor the sweep is claimed",
+        receipt.walk_complete === false && receipt.complete_sweep === false &&
+        receiptEarnsSweep(receipt) === false, JSON.stringify(receipt));
+    }
+
+    rowsDb.close();
   }
 
   /* ================= refusals count; failures stop the watermark ======== */

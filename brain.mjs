@@ -12290,13 +12290,33 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   if (flags.limit) warn(`--limit ${flags.limit} bounded this capture pass, so it is NOT a complete source load`);
   else if (bounded) warn("the capture stopped before it reached the current end of the Messages database, so it is NOT a complete source load");
 
-  const rowRefusals = skipped.no_text + skipped.no_timestamp + skipped.no_guid;
+  // A row the walk could not place in history at all: no stable identity, or
+  // no timestamp. Those leave a hole this pass cannot describe, so they are
+  // counted as lost documents and they withhold the sweep.
+  const unplaceableRows = skipped.no_timestamp + skipped.no_guid;
+  // Rows with no text — tapbacks, reactions, attachment-only messages — are a
+  // different thing, and deliberately NOT counted as refused documents. They
+  // were read and classified, they carry no message text to index, and every
+  // real chat.db has them; counting them as losses would make a proven sweep
+  // unreachable on any Mac while saying nothing true about missing history.
+  // The run report still names them, and the attachment caveat below stands.
+  const rowRefusals = skipped.no_text + unplaceableRows;
   const walkComplete = !flushOnly && !flags.limit && result.caught_up === true;
   // Reaching the end of the selected Mac's chat.db proves that local walk,
   // not all-time iMessage history. Messages can have been deleted, retained
   // only on another device, or represented only by unavailable attachments;
   // Apple exposes no authoritative history/deletion inventory here.
   const localRangeComplete = walkComplete && result.started_watermark === 0;
+  // What a completed sweep claims for this source, and nothing more: every row
+  // this Mac's Messages database holds, from its first to its last, was walked
+  // in one unbounded pass and became a document or a named skip. That is the
+  // whole declared scope of `imessage` — it is why the owner remedy is
+  // `--reset` with no `--limit`, and why iPhone-backup history stays a
+  // separate source. Reporting it false whatever happened made that remedy
+  // unreachable and left every category of `brain check` permanently
+  // provisional.
+  const completeSweep = localRangeComplete && unplaceableRows === 0 &&
+    tally.refused === 0 && tally.failed === 0;
   const measuredRange = localRangeComplete && (result.first_row_at || result.last_row_at)
     ? { from: result.first_row_at, through: result.last_row_at }
     : null;
@@ -12306,8 +12326,8 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
     run_id: runId, lane: "manual", started_at: startedAt, completed_at: new Date().toISOString(),
     files_seen: result.rows_seen,
     docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
-    docs_refused: tally.refused + rowRefusals, docs_failed: tally.failed,
-    walk_complete: walkComplete, complete_sweep: false,
+    docs_refused: tally.refused + unplaceableRows, docs_failed: tally.failed,
+    walk_complete: walkComplete, complete_sweep: completeSweep,
     // This is an observed local-database span, not a confirmed provider
     // history range: deleted messages and messages retained only on another
     // device are not visible to chat.db.
@@ -12317,6 +12337,9 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
         ? "the selected local database was fully enumerated"
         : "the selected local database was not fully enumerated") +
       (rowRefusals ? `; ${rowRefusals} row(s) remain deliberately non-searchable` : "") +
+      (completeSweep
+        ? "; this Mac's local Messages database is swept complete end to end"
+        : "") +
       "; local chat.db cannot prove deleted, unavailable-device, or all-time provider history",
     ...(tally.refused ? { refusal_reason: `${tally.refused} conversation document(s) refused by the credential gate` } : {}),
   });

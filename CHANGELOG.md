@@ -10,6 +10,22 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **A full iMessage run can now prove its own history, so the record review
+  can finish.** A capture started with `--reset` and no `--limit` walks this
+  Mac's whole message database end to end and records that as a completed
+  history sweep. Before this, that run recorded nothing, which is why the
+  remedy your Brain printed — "run iMessage with --reset and no --limit" —
+  could never clear the warning it was answering, and why `brain check` could
+  report every category as provisional on a Brain with an iMessage source.
+  What the claim covers is this Mac's database and nothing wider: deleted
+  messages, messages that only ever lived on the phone, and attachment-only
+  content still need the iPhone backup load. Tapbacks and attachment-only rows
+  no longer count against the sweep — every real message database has them —
+  but they are still counted and named in the run report, and a row the walk
+  cannot place in time at all still withholds the sweep. To check: run
+  `brain ingest <manifest> --from imessage --reset`, then `brain sources` and
+  confirm iMessage no longer says its history is unproven.
+
 - **`brain sources` works on a large corpus again.** The source inventory and
   its recovery preview used to read every document's stored metadata three
   times over before counting anything, and pulled the full text of every chunk
