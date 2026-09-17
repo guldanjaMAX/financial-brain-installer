@@ -4330,6 +4330,45 @@ function mkForgetEnv({
     diagnostic === null, String(diagnostic));
 }
 
+/* ---- a withheld answer's evidence receipt also resolves inside the returned results ----
+   The live failure: limit 5, the verifier rejected the draft but still named
+   document 6 as its evidence, so the Worker withheld the answer (answer null,
+   no citations) while evidence_gate.evidence pointed past five results and
+   acceptance rejected the evidence gate as incompatible. */
+{
+  const rows = Array.from({ length: 7 }, (_, i) => ({
+    ...ROW,
+    chunk_uid: `withheld-doc-${i + 1}#0`, doc_uid: `withheld-doc-${i + 1}`, source_id: `withheld-doc-${i + 1}`,
+    uri: `meeting://withheld-doc-${i + 1}`, title: `Withheld fixture ${i + 1}`,
+    text: `Retainer fixture passage number ${i + 1}.`,
+  }));
+  const { env } = mkEnv(rows, {
+    vectorIds: rows.map((row) => row.chunk_uid),
+    extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: false, complete: true, evidence: [6], reason: "the draft overstates document 6" }, usage: {} })
+        : ({ response: "The retainer was cancelled [6].", usage: {} }) } },
+  });
+  const body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  const count = Array.isArray(body.results) ? body.results.length : 0;
+  const evidence = Array.isArray(body.evidence_gate?.evidence) ? body.evidence_gate.evidence : [];
+  check("fixture: the verifier rejected the draft, withheld the answer, and named document 6",
+    body.answer === null && body.evidence_gate?.supported === false &&
+      body.evidence_gate?.complete === true && evidence.includes(6),
+    JSON.stringify({ answer: body.answer, evidence_gate: body.evidence_gate, citations: body.citations }));
+  check("every withheld-answer evidence receipt number resolves to a returned result",
+    evidence.length > 0 && evidence.every((n) => Number.isInteger(n) && n >= 1 && n <= count),
+    JSON.stringify({ evidence, results: count }));
+  check("the withheld answer still returns the sixth document its receipt names",
+    Boolean(body.results?.[5]) && typeof body.results[5] === "object" && typeof body.results[5].chunk_uid === "string",
+    JSON.stringify({ results: count }));
+  const { answerResponseContractDiagnostic } = await import("../../acceptance.mjs");
+  const diagnostic = answerResponseContractDiagnostic(body);
+  check("acceptance's think response contract accepts a small-limit withheld answer",
+    diagnostic === null, String(diagnostic));
+}
+
 console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);
 process.exit(fail ? 1 : 0);
 
