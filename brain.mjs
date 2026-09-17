@@ -56,6 +56,7 @@ import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-f
 import { ingestEnvelopeValidationError } from "./worker/src/lib/ingest-envelope.js";
 import { normalizeSourceOriginalReceipt } from "./worker/src/lib/source-original-binding.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
+import { ensureBankFeedWorkerSecrets } from "./operations/bank-feed-owner-secrets.mjs";
 import {
   financialPictureRequestFromFlags,
   parseFinancialPictureArgv,
@@ -2437,8 +2438,8 @@ export function optionalWorkerSecretNames(m) {
   // An enabled bank feed allows already-present provider credentials and its
   // independent wrapping key to remain on the Worker. This is a preservation
   // allowlist only: generic `brain secrets` and setup must never source or
-  // replace these values from the process environment while credential setup
-  // remains held.
+  // replace these values from the process environment. The only writer is the
+  // owner-present hidden prompt in `brain connect bank`.
   const bankFeed = m.corpora?.bank_feed?.enabled === true;
   return Object.freeze([
     ...(storage === "supabase" ? ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] : []),
@@ -2473,8 +2474,9 @@ async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
     die(
       `the enabled bank feed is missing required Worker secrets: ${absent.join(", ")}. ` +
         "Bank credential setup remains held and is not available through `brain secrets`, " +
-        "`brain setup`, or the generic technician workflow. Complete it only through a " +
-        "separately reviewed owner-custody process. No local or Worker secret was changed.",
+        "`brain setup`, or the generic technician workflow. Complete it only through the " +
+        "separately reviewed owner-custody process: the owner runs `brain connect bank <manifest>` " +
+        "and enters the Plaid keys at its hidden prompt. No local or Worker secret was changed.",
     );
   }
   const unwanted = WORKER_PROVIDER_SECRET_NAMES.filter((name) =>
@@ -15739,7 +15741,17 @@ export async function cmdConnect(target, options = {}) {
   const flags = parseFlags(argv.slice(3));
   const which = (target || "").toLowerCase();
   const manifestPath = argv[4];
-  if (which === "bank") return cmdConnectBank(manifestPath, flags);
+  if (which === "bank") {
+    // The owner-custody secret check reads, and may write, the Worker, so it
+    // runs under the manifest's saved Cloudflare custody exactly as Zoom does.
+    const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
+    const connectBank = options.connectBank ?? cmdConnectBank;
+    return runManifestControl(
+      manifestPath,
+      () => connectBank(manifestPath, flags, options.bankOptions || {}),
+      options.controlOptions || {},
+    );
+  }
   if (which === "imessage") return cmdConnectImessage(manifestPath, flags);
   if (which === "whatsapp") return cmdConnectWhatsapp(manifestPath, flags);
   if (which === "zoom") {
@@ -16379,16 +16391,22 @@ export async function cmdDisconnectImap(manifestPath, flags = {}, options = {}) 
  * required to be ASCII, and refusing one at the keystroke would look, to the
  * person typing, exactly like the provider rejecting them.
  */
-export function readHiddenSecret(promptText, { input = process.stdin, output = process.stderr, maxBytes = 512 } = {}) {
+export function readHiddenSecret(promptText, {
+  input = process.stdin,
+  output = process.stderr,
+  maxBytes = 512,
+  noun = "password",
+  insecure =
+    "this terminal cannot prompt securely, and a mailbox password is never accepted as a flag " +
+    "or an environment variable. Rerun from an interactive terminal.",
+} = {}) {
   return readHiddenInput({
     prompt: promptText,
     input,
     output,
     maxBytes,
-    noun: "password",
-    insecure:
-      "this terminal cannot prompt securely, and a mailbox password is never accepted as a flag " +
-      "or an environment variable. Rerun from an interactive terminal.",
+    noun,
+    insecure,
     accepts: (byte) => byte >= 0x20 && byte !== 0x7f,
     finalize: (bytes) => bytes.toString("utf-8"),
   });
@@ -17298,6 +17316,9 @@ function closePrompts() {
     _lines = null;
   }
 }
+/** Test seams: open the shared ask() readline, and report whether one is still attached. */
+export function openPromptsForTesting() { prompts(); }
+export function promptsOpenForTesting() { return _rl !== null; }
 
 /** Ask a question. Returns the trimmed answer, or the default when blank or absent. */
 async function ask(question, fallback = "") {
@@ -25278,6 +25299,23 @@ async function cmdReconcile(target) {
  * so one vendor-owned OAuth client serving many customers would require Google
  * verification plus a paid annual CASA security assessment.
  */
+/**
+ * Read one Plaid application key, hidden.
+ *
+ * An earlier ask() (a Cloudflare sign-in refresh, token recovery, or "remember
+ * this token") leaves a readline attached to stdin. Raw mode does not detach
+ * it, so it would still echo every keystroke to stdout. Close it first.
+ */
+export function readBankFeedKeyHidden(promptText, { read = readHiddenSecret } = {}) {
+  closePrompts();
+  return read(promptText, {
+    noun: "Plaid key",
+    insecure:
+      "this terminal cannot prompt securely, and Plaid keys are never accepted as a flag or an " +
+      "environment variable. Rerun `brain connect bank` from an interactive terminal.",
+  });
+}
+
 export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   if (!manifestPath || String(manifestPath).startsWith("--")) {
     die("usage: brain connect bank <manifest> [--print]");
@@ -25292,7 +25330,8 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   if (feed.enabled !== true) {
     die(
       "corpora.bank_feed.enabled is not true in this manifest. General Plaid bank invitations remain held. " +
-      "Enable the native feed only inside a named, version-scoped disposable-candidate field plan."
+      "The Brain owner may turn it on for their own owner-present connection: set corpora.bank_feed.enabled " +
+      "to true with provider plaid and environment sandbox or production, deploy, then rerun this command."
     );
   }
   if (manifestBankFeedProvider(feed) !== "plaid") {
@@ -25320,6 +25359,55 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
     );
   }
   const url = bankFeedRedirectUri(domainUrl.host);
+
+  // Plaid Link cannot start on a Worker without its application credentials,
+  // so custody is settled before the owner is sent to the browser. The listing
+  // is read-only; the owner is prompted only when a name is actually missing.
+  const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+  let acct = null;
+  const account = async () => (acct ??= await (options.resolveAccount ?? resolveAccount)(m));
+  const listSecretNames = options.listWorkerSecretNames ?? (async () => {
+    let inventory;
+    try {
+      inventory = await cf(`/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`);
+    } catch (error) {
+      if (/does not exist/i.test(error.message) || /\(404\)/.test(error.message)) {
+        die(`the worker "${scriptName}" has not been deployed yet. Run brain deploy first, then rerun brain connect bank.`);
+      }
+      die("the Worker's existing secret names could not be inspected. No bank secret was written.");
+    }
+    if (!Array.isArray(inventory) || inventory.some((binding) =>
+      !binding || typeof binding !== "object" || typeof binding.name !== "string")) {
+      die("Cloudflare returned an invalid Worker secret inventory. No bank secret was written.");
+    }
+    return inventory.map((binding) => binding.name);
+  });
+  const putSecret = options.putWorkerSecret ?? (async (name, text) =>
+    cf(`/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`, {
+      method: "PUT",
+      body: { name, text, type: "secret_text" },
+    }));
+  const readSecret = options.readSecret ?? readBankFeedKeyHidden;
+  let custody;
+  try {
+    custody = await ensureBankFeedWorkerSecrets({
+      env: options.env ?? process.env,
+      listSecretNames,
+      putSecret,
+      readSecret,
+      generateWrappingKey: options.generateWrappingKey,
+      report: info,
+    });
+  } catch (error) {
+    if (error instanceof Fatal) throw error;
+    die(String(error?.message || error));
+  }
+  if (custody.written.length) {
+    ok(`wrote and verified ${custody.written.join(", ")} on ${scriptName}`);
+  } else {
+    ok(`${custody.names.join(", ")} already present on ${scriptName}; nothing was prompted or written`);
+  }
+
   const shouldOpen = flags.print !== true && options.open !== false;
   const opener = options.openImpl ?? openBrowser;
   let opened = false;
@@ -25333,7 +25421,10 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   console.log(`\n  ${url}\n`);
   info("The owner signs in with their Brain passkey, completes Plaid Link, and assigns each masked account to the business that owns it.");
   info("Opening this page does not enter a Plaid credential, contact a bank, or prove the connector until the owner continues in the browser.");
-  return { provider: "plaid", url, opened, live_provider_proof: false };
+  return {
+    provider: "plaid", url, opened, live_provider_proof: false,
+    secrets_written: custody.written,
+  };
 }
 
 /**
@@ -25726,7 +25817,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect zoom     <manifest>      Zoom cloud-recording transcripts (needs a paid Zoom seat)
     brain connect imap     <manifest>      any IMAP mailbox (Yahoo, Fastmail, iCloud, a host): app
                                            password entered hidden, proven by a real read first
-    brain connect bank     <manifest>      held field-plan entrypoint for owner-only Plaid Link and masked account assignment
+    brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, then
+                                           owner-only Plaid Link and masked account assignment
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end

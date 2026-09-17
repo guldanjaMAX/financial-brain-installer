@@ -59,9 +59,19 @@ try {
   }
   check("bank connect keeps an ordinary disabled manifest inside the held field gate",
     /general Plaid bank invitations remain held/i.test(heldBankError) &&
-      /named, version-scoped disposable-candidate field plan/i.test(heldBankError), heldBankError);
+      /owner-present connection/i.test(heldBankError) &&
+      !/disposable-candidate field plan/i.test(heldBankError), heldBankError);
   let bankPageUrl = null;
+  // The owner-custody secret path has its own offline Cloudflare proof in
+  // bank-feed-secrets.test.mjs. Here the Worker already holds all three names.
+  const bankSecretsPresent = {
+    env: {},
+    listWorkerSecretNames: async () => ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET", "BANK_FEED_WRAPPING_KEY_V2"],
+    putWorkerSecret: async () => { throw new Error("must not write"); },
+    readSecret: async () => { throw new Error("must not prompt"); },
+  };
   const bankConnection = await cmdConnectBank(bankManifestPath, {}, {
+    ...bankSecretsPresent,
     openImpl: (url) => { bankPageUrl = url; return true; },
   });
   check("bank connect opens the deployed owner page without handling a Plaid credential",
@@ -69,6 +79,7 @@ try {
     bankConnection.url === "https://fixture.invalid/app/connect/bank" && bankPageUrl === bankConnection.url);
   let skippedOpen = false;
   const printedOnly = await cmdConnectBank(bankManifestPath, { print: true }, {
+    ...bankSecretsPresent,
     openImpl: () => { skippedOpen = true; return true; },
   });
   check("bank connect can print the exact owner link without opening a browser",

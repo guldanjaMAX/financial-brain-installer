@@ -18,23 +18,33 @@ them outright.
 
 ## What the product must establish
 
-Until every step below has version-scoped evidence, ordinary onboarding must
-leave `corpora.bank_feed.enabled` false and must not run `brain connect bank`.
-The native command is an acceptance entrypoint, not permission to invite a
-customer. Use it first on the named disposable candidate under the approved
-field plan, then on the separately approved production pilot.
+The seven steps below gate public invitations. Until every step has
+version-scoped evidence, ordinary onboarding must
+leave `corpora.bank_feed.enabled` false and must not run `brain connect bank` for a
+customer. The one exception is the Brain owner connecting their own accounts
+while present: they may set `enabled` to `true` with `provider: "plaid"` and
+`environment` of `sandbox` or `production`, deploy, and run
+`brain connect bank` themselves. That owner-present pilot is evidence toward
+these steps, not permission to invite anyone else.
 
-Application-credential setup is also held. Generic `brain setup`, `brain
-secrets`, and technician workflows do not accept or write
-`BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, or
-`BANK_FEED_WRAPPING_KEY_V2`. Routine setup preserves an approved,
-already-configured candidate's complete existing set, but all three names must
-be present before a routine core-key rotation can begin. If any is missing,
-stop without changing a local or Worker secret and use only a separately
-reviewed owner-custody setup.
-Recording return and webhook URIs in a manifest is non-secret evidence of work
-already completed in the matching Plaid environment. It does not perform that
-held setup or justify automatically renewing a Plaid deferral for a new release.
+Application credentials are entered by the owner through `brain connect bank`.
+Before it opens the browser, the command lists the Worker's secret names
+read-only. If `BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, or
+`BANK_FEED_WRAPPING_KEY_V2` is missing, it asks the owner for the Plaid client
+ID and secret at a hidden prompt, generates a missing wrapping key locally,
+writes the missing values to the Worker as secrets, lists the names again to
+verify them, and prints names only. An existing wrapping key is never replaced,
+because retained encrypted connection references depend on it. No command
+accepts these values from environment variables, arguments, or chat. Generic
+`brain setup`, `brain secrets`, and technician workflows still do not accept or
+write them. Routine setup preserves a complete existing set, and all three
+names must be present before a routine core-key rotation can begin. If any is
+missing, it stops without changing a local or Worker secret and points the
+owner to `brain connect bank`.
+Recording return and webhook URIs in a manifest is non-secret evidence of
+registration already completed in the matching Plaid dashboard. It does not
+perform that registration or justify automatically renewing a Plaid deferral
+for a new release.
 
 1. Deploy the exact packaged version and named Plaid environment to an approved
    disposable Brain. Read back its version, schema, required secret names and

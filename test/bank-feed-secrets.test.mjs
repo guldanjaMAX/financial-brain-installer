@@ -28,7 +28,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  WORKER_PROVIDER_SECRET_NAMES, optionalWorkerSecretNames, cmdSecrets,
+  WORKER_PROVIDER_SECRET_NAMES, optionalWorkerSecretNames, cmdSecrets, cmdConnectBank,
+  readBankFeedKeyHidden, openPromptsForTesting, promptsOpenForTesting,
 } from "../brain.mjs";
 import {
   checkBankFeedRedirect,
@@ -79,8 +80,11 @@ const apiResponse = (result) => new Response(JSON.stringify({ success: true, res
 });
 
 /** An offline Cloudflare, recording every secret write and delete in order. */
-function cloudflareHarness(events, initialSecrets = []) {
+function cloudflareHarness(events, initialSecrets = [], { dropWrites = false } = {}) {
   const secrets = new Set(initialSecrets);
+  // Written values are kept apart from `events`, which failure details print.
+  const values = new Map();
+  let lists = 0;
   const fetchImpl = async (input, options = {}) => {
     const url = new URL(String(input));
     const method = options.method || "GET";
@@ -88,6 +92,7 @@ function cloudflareHarness(events, initialSecrets = []) {
       return apiResponse([{ id: "fixture-account", name: "Fixture account" }]);
     }
     if (url.pathname.endsWith("/workers/scripts/fixture-brain/secrets") && method === "GET") {
+      lists++;
       return apiResponse([...secrets].map((name) => ({ name, type: "secret_text" })));
     }
     const one = url.pathname.match(/\/workers\/scripts\/fixture-brain\/secrets\/([^/]+)$/);
@@ -98,14 +103,18 @@ function cloudflareHarness(events, initialSecrets = []) {
       return apiResponse({});
     }
     if (url.pathname.endsWith("/workers/scripts/fixture-brain/secrets") && method === "PUT") {
-      const name = JSON.parse(String(options.body || "{}")).name;
-      events.push(`set:${name}`);
-      secrets.add(name);
+      const body = JSON.parse(String(options.body || "{}"));
+      events.push(`set:${body.name}`);
+      if (body.type !== "secret_text") events.push(`wrong-type:${body.name}`);
+      values.set(body.name, body.text);
+      if (!dropWrites) secrets.add(body.name);
       return apiResponse({});
     }
     throw new Error(`offline fixture has no response for ${method} ${url.pathname}`);
   };
   fetchImpl.secretNames = () => new Set(secrets);
+  fetchImpl.secretValue = (name) => values.get(name);
+  fetchImpl.listCount = () => lists;
   return fetchImpl;
 }
 
@@ -335,6 +344,141 @@ try {
       fetchImpl.secretNames().has(WRAPPING_NAME) &&
       /missing required Worker secrets/i.test(message) && reenabledEvents.length === 0,
       JSON.stringify({ message, disabledEvents, reenabledEvents }));
+  }
+
+
+  /* ============ owner custody: `brain connect bank` hidden prompt ============ */
+  const PLAID_CLIENT_ID = "plaid-client-id-placeholder";
+  const PLAID_SECRET = "plaid-secret-placeholder";
+  const bankManifest = () => ({
+    ...manifest(),
+    corpora: { bank_feed: {
+      enabled: true, provider: "plaid", environment: "sandbox",
+      registered_redirect_uris: ["https://fixture-brain.example.workers.dev/app/connect/bank"],
+      registered_webhook_uris: ["https://fixture-brain.example.workers.dev/api/webhooks/plaid"],
+    } },
+  });
+  const ownerPrompt = (prompts, answers = [PLAID_CLIENT_ID, PLAID_SECRET]) => async (text) => {
+    prompts.push(text);
+    return answers[prompts.length - 1];
+  };
+  async function connectBank(name, { initial, env = {}, answers, harness = {} }) {
+    const events = [];
+    const prompts = [];
+    const opened = [];
+    const fetchImpl = cloudflareHarness(events, initial, harness);
+    let result = null;
+    let message = "";
+    let output = "";
+    try {
+      ({ value: result, output } = await isolatedRuntime({
+        fetchImpl,
+        env: { CLOUDFLARE_API_TOKEN: "fixture-token", ...env },
+      }, () => cmdConnectBank(writeManifest(name, bankManifest()), {}, {
+        readSecret: ownerPrompt(prompts, answers),
+        openImpl: (url) => { opened.push(url); return true; },
+      })));
+    } catch (error) {
+      message = String(error?.message || error);
+    }
+    return { events, prompts, opened, fetchImpl, result, message, output };
+  }
+
+  {
+    const run = await connectBank("connect-absent", { initial: ["ADMIN_KEY"] });
+    const wrapping = run.fetchImpl.secretValue(WRAPPING_NAME);
+    check("CONNECT BANK, ABSENT: the owner is prompted once for each Plaid value",
+      run.prompts.length === 2 && /client_id/.test(run.prompts[0]) && /secret/.test(run.prompts[1]) &&
+      run.prompts.every((text) => /hidden/.test(text)),
+      JSON.stringify({ prompts: run.prompts, message: run.message.slice(0, 200) }));
+    check("CONNECT BANK, ABSENT: all three are written as secret_text before the browser opens",
+      JSON.stringify(run.events) === JSON.stringify(FEED_NAMES.map((name) => `set:${name}`)) &&
+      run.fetchImpl.secretValue("BANK_FEED_CLIENT_ID") === PLAID_CLIENT_ID &&
+      run.fetchImpl.secretValue("BANK_FEED_SECRET") === PLAID_SECRET &&
+      /^v2\.[A-Za-z0-9_-]{43}$/.test(wrapping || "") &&
+      run.opened.length === 1 && run.result?.opened === true,
+      JSON.stringify({ events: run.events, opened: run.opened, message: run.message.slice(0, 200) }));
+    check("CONNECT BANK, ABSENT: the Worker is re-listed after the writes and holds every name",
+      run.fetchImpl.listCount() === 2 && FEED_NAMES.every((name) => run.fetchImpl.secretNames().has(name)) &&
+      JSON.stringify(run.result?.secrets_written) === JSON.stringify(FEED_NAMES),
+      JSON.stringify({ lists: run.fetchImpl.listCount(), written: run.result?.secrets_written }));
+    check("CONNECT BANK, ABSENT: output names the secrets and never prints a value",
+      FEED_NAMES.every((name) => run.output.includes(name)) &&
+      [PLAID_CLIENT_ID, PLAID_SECRET, wrapping].every((value) => value && !run.output.includes(value)),
+      "output withheld: it would be the leak being tested");
+  }
+
+  {
+    // An earlier ask() readline left attached to stdin echoes what the owner
+    // types at the hidden prompt, so the default reader must close it first.
+    openPromptsForTesting();
+    const openBefore = promptsOpenForTesting();
+    const seen = [];
+    await readBankFeedKeyHidden("  Plaid secret (hidden): ", {
+      read: async (text, options) => { seen.push({ text, open: promptsOpenForTesting(), noun: options.noun }); return ""; },
+    });
+    check("CONNECT BANK, PROMPT: an open ask() readline is closed before the hidden Plaid prompt reads",
+      openBefore === true && seen.length === 1 && seen[0].open === false && seen[0].noun === "Plaid key",
+      JSON.stringify({ openBefore, seen }));
+  }
+
+  {
+    const run = await connectBank("connect-present", { initial: ["ADMIN_KEY", ...FEED_NAMES] });
+    check("CONNECT BANK, PRESENT: nothing is prompted or written and the page still opens",
+      run.prompts.length === 0 && run.events.length === 0 && run.fetchImpl.listCount() === 1 &&
+      run.opened.length === 1 && run.result?.secrets_written?.length === 0,
+      JSON.stringify({ prompts: run.prompts, events: run.events, message: run.message.slice(0, 200) }));
+  }
+
+  {
+    const outcomes = [];
+    for (const [name, value] of [
+      ["BANK_FEED_CLIENT_ID", PLAID_CLIENT_ID],
+      ["BANK_FEED_SECRET", PLAID_SECRET],
+      [WRAPPING_NAME, FIXTURE_WRAPPING_KEY],
+      ["BANK_FEED_SECRET", ""],
+    ]) {
+      const run = await connectBank(`connect-env-${outcomes.length}`, {
+        initial: ["ADMIN_KEY"], env: { [name]: value },
+      });
+      outcomes.push({ name, value, ...run });
+    }
+    check("CONNECT BANK, ENV-SUPPLIED: refused before any Cloudflare read, prompt, write, or browser",
+      outcomes.every(({ name, message, prompts, events, opened, fetchImpl }) =>
+        message.includes(name) && /not accepted from environment variables/i.test(message) &&
+        prompts.length === 0 && events.length === 0 && opened.length === 0 && fetchImpl.listCount() === 0),
+      JSON.stringify(outcomes.map(({ name, message, events }) => ({ name, events, message: message.slice(0, 160) }))));
+    check("CONNECT BANK, ENV-SUPPLIED: the refusal repeats no value",
+      outcomes.every(({ value, message }) => !value || !message.includes(value)), "");
+  }
+
+  {
+    // Disabling sync deletes the provider pair and keeps the wrapping key. The
+    // re-enable must restore the pair without regenerating recovery custody.
+    const run = await connectBank("connect-reenable", { initial: ["ADMIN_KEY", WRAPPING_NAME] });
+    check("CONNECT BANK, RE-ENABLE: an existing wrapping key is never replaced",
+      run.prompts.length === 2 &&
+      JSON.stringify(run.events) === JSON.stringify(SERVICE_NAMES.map((name) => `set:${name}`)) &&
+      run.fetchImpl.secretValue(WRAPPING_NAME) === undefined && run.opened.length === 1,
+      JSON.stringify({ events: run.events, message: run.message.slice(0, 200) }));
+  }
+
+  {
+    const run = await connectBank("connect-unverified", {
+      initial: ["ADMIN_KEY"], harness: { dropWrites: true },
+    });
+    check("CONNECT BANK, UNVERIFIED: a write the re-list does not show stops before Plaid Link",
+      /did not list/i.test(run.message) && run.opened.length === 0 &&
+      ![PLAID_CLIENT_ID, PLAID_SECRET].some((value) => run.message.includes(value)),
+      JSON.stringify({ events: run.events, message: run.message.slice(0, 200) }));
+  }
+
+  {
+    const run = await connectBank("connect-blank", { initial: ["ADMIN_KEY"], answers: ["", PLAID_SECRET] });
+    check("CONNECT BANK, BLANK ENTRY: nothing is written when the owner enters no value",
+      /no value was entered for BANK_FEED_CLIENT_ID/.test(run.message) &&
+      run.events.length === 0 && run.opened.length === 0,
+      JSON.stringify({ events: run.events, message: run.message.slice(0, 200) }));
   }
 
   /* ============ deploy before secrets ============ */

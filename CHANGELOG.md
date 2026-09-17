@@ -10,6 +10,21 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **You can now connect your own bank accounts yourself with `brain connect
+  bank`.** Turn on `corpora.bank_feed` with provider `plaid` and environment
+  `sandbox` or `production`, record the return and webhook addresses you saved
+  in your Plaid dashboard, and deploy. The command checks which bank secret
+  names your Worker already has. Only if one is missing does it ask you for
+  your Plaid client ID and secret, at a prompt that does not show what you
+  type. It creates the separate wrapping key if that is missing, saves them to
+  your Worker, and confirms the names are there before opening the bank page.
+  It never prints a value, never replaces an existing wrapping key, and refuses
+  to run if a bank key is sitting in an environment variable. Invitations for
+  other people's bank accounts remain held. Verify: rerun the command and
+  confirm it reports all three names already present without asking again.
+  This path has local fixture coverage only; it has not yet been run against a
+  real Plaid account.
+
 - **Notes you dictate to the Brain no longer hold the record review back.**
   Everything saved through "remember this" lives in a source the Brain writes
   directly, one note at a time — there is no remote archive to go and walk, so

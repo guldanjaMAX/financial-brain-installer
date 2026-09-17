@@ -706,6 +706,10 @@ const expected = [
   "migrations/d1/0045_source_original_accepted_resolutions.sql",
   "migrations/d1/0046_source_original_observation_authority_chain.sql",
   "operations/bank-access-wrapping-key.mjs",
+  // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
+  // injected list, write, and hidden-prompt callbacks; refuses ambient values
+  // and reports secret names, never values.
+  "operations/bank-feed-owner-secrets.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
   // callbacks and timestamps, with no filesystem, credential, network, or
