@@ -953,7 +953,7 @@ const bootstrapCompletion = () => ({
       degraded.results.some((result) => result.name === "think uses semantic retrieval" && result.status === "fail"),
     JSON.stringify(degraded.results));
   check("it retried the keyword-only probe and the answer path, spaced, then gave up",
-    degradedWaits.length === 6 && degradedWaits.every((ms) => ms === 10_000),
+    degradedWaits.length === 8 && degradedWaits.every((ms) => ms === 15_000),
     JSON.stringify(degradedWaits));
 }
 

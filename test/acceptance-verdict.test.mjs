@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import {
   Acceptance, acceptanceVerdict, answerUnavailableDiagnostic,
   RETRIEVAL_RETRY_DEFAULTS, retrievalRetryBudget, workerDegradationDetail,
+  DEGRADED_CLASSIFICATION, RETRIEVAL_FAILURE_DEGRADED, EXPECTED_DEGRADED,
+  isRetrievalFailureDegradation,
 } from "../acceptance.mjs";
 import { computeVerdict } from "../report-html.mjs";
 import { optionalProbeQuestionsNotice } from "../brain.mjs";
@@ -653,7 +655,7 @@ const keywordOnly = ok({
     coverage?.status === "pass" && /1 recovered after a retry/.test(coverage?.detail || ""),
     JSON.stringify(coverage));
   check("it waited between attempts rather than retrying immediately",
-    waits.length === 2 && waits.every((ms) => ms === 10_000), JSON.stringify(waits));
+    waits.length === 2 && waits.every((ms) => ms === 15_000), JSON.stringify(waits));
   check("only the failing probe was retried",
     calls.filter((c) => c === "/api/rag/unified").length === 3, JSON.stringify(calls));
 }
@@ -670,7 +672,7 @@ const keywordOnly = ok({
     /search_unavailable: keyword-and-vector-query-failed/.test(probe?.detail || ""),
     JSON.stringify(probe));
   check("the failing probe's detail says it stayed degraded across the retries",
-    /still degraded after 3 retries/.test(probe?.detail || ""), JSON.stringify(probe));
+    /still degraded after 4 retries/.test(probe?.detail || ""), JSON.stringify(probe));
   check("semantic retrieval is active FAILS on a probe that ended degraded",
     semantic?.status === "fail", JSON.stringify(semantic));
   check("the semantic FAIL reports the Worker's reason, not an invented cause",
@@ -678,7 +680,7 @@ const keywordOnly = ok({
       /search_unavailable: keyword-and-vector-query-failed/.test(semantic?.detail || ""),
     JSON.stringify(semantic));
   check("it gave up after exactly the allowed retries",
-    waits.length === 3 && calls.filter((c) => c === "/api/rag/unified").length === 4,
+    waits.length === 4 && calls.filter((c) => c === "/api/rag/unified").length === 5,
     JSON.stringify({ waits, calls }));
 }
 
@@ -719,7 +721,7 @@ const keywordOnly = ok({
     recovered?.status === "pass" && /recovered after 1 retry/.test(recovered?.detail || ""),
     JSON.stringify(recovering.suite.results));
   check("the recovered think probe waited before retrying",
-    recovering.waits.length === 1 && recovering.waits[0] === 10_000, JSON.stringify(recovering.waits));
+    recovering.waits.length === 1 && recovering.waits[0] === 15_000, JSON.stringify(recovering.waits));
 
   const stuck = retrySuite({ unified: () => healthyProbe, think: () => thinkDegraded });
   await stuck.suite.tierRetrieval(["What did we agree?"]);
@@ -728,10 +730,10 @@ const keywordOnly = ok({
     stuckResult?.status === "fail", JSON.stringify(stuckResult));
   check("the think FAIL carries the Worker's degraded_reason and the retry count",
     /vector: vector-query-failed/.test(stuckResult?.detail || "") &&
-      /still degraded after 3 retries/.test(stuckResult?.detail || ""),
+      /still degraded after 4 retries/.test(stuckResult?.detail || ""),
     JSON.stringify(stuckResult));
   check("the think probe gave up after exactly the allowed retries",
-    stuck.waits.length === 3 && stuck.calls.filter((c) => c === "/api/rag/think").length === 4,
+    stuck.waits.length === 4 && stuck.calls.filter((c) => c === "/api/rag/think").length === 5,
     JSON.stringify({ waits: stuck.waits, calls: stuck.calls }));
 }
 
@@ -768,23 +770,47 @@ const keywordOnly = ok({
 
 /* ---- (e) the budgets hold, and the calls never overlap ---- */
 {
-  check("the shipped policy is 3 retries, 10 s apart, 30 s per probe, 3 min per tier",
-    RETRIEVAL_RETRY_DEFAULTS.attempts === 3 &&
-      RETRIEVAL_RETRY_DEFAULTS.spacingMs === 10_000 &&
-      RETRIEVAL_RETRY_DEFAULTS.probeBudgetMs === 30_000 &&
-      RETRIEVAL_RETRY_DEFAULTS.tierBudgetMs === 180_000,
+  // 4 x 15 s is not a round number chosen for looks. A301BB4-DECISION §4
+  // condition 1 measured exactly one recovery interval -- "60 s is empirically
+  // sufficient (r2 tail -> r3 fully clean)" -- and a per-probe ceiling below
+  // that gives up before the only evidence the retry was built on.
+  check("the shipped policy is 4 retries, 15 s apart, 60 s per probe, 4 min per tier",
+    RETRIEVAL_RETRY_DEFAULTS.attempts === 4 &&
+      RETRIEVAL_RETRY_DEFAULTS.spacingMs === 15_000 &&
+      RETRIEVAL_RETRY_DEFAULTS.probeBudgetMs === 60_000 &&
+      RETRIEVAL_RETRY_DEFAULTS.tierBudgetMs === 240_000,
     JSON.stringify(RETRIEVAL_RETRY_DEFAULTS));
+  check("the per-probe ceiling spans the one measured recovery interval",
+    RETRIEVAL_RETRY_DEFAULTS.attempts * RETRIEVAL_RETRY_DEFAULTS.spacingMs >= 60_000 &&
+      RETRIEVAL_RETRY_DEFAULTS.probeBudgetMs >= 60_000,
+    JSON.stringify(RETRIEVAL_RETRY_DEFAULTS));
+  check("a retry is still spaced well clear of the tight-loop failure mode",
+    RETRIEVAL_RETRY_DEFAULTS.spacingMs >= 10_000, JSON.stringify(RETRIEVAL_RETRY_DEFAULTS));
+  // The worst case is two bounded things, not one. Sleeping is capped by the
+  // tier budget; extra REQUESTS are capped at tierBudget/spacing, and each one
+  // can cost as much as the measured healthy-latency max of 17.3 s.
+  {
+    const extraRequests = RETRIEVAL_RETRY_DEFAULTS.tierBudgetMs / RETRIEVAL_RETRY_DEFAULTS.spacingMs;
+    check("at most 16 extra requests can be made across the tier",
+      extraRequests === 16, `${extraRequests}`);
+    const worstMs = RETRIEVAL_RETRY_DEFAULTS.tierBudgetMs + extraRequests * 17_300;
+    check("the true worst case is ~8.6 minutes, not the 3 minutes of sleeping alone",
+      Math.round(worstMs / 1000) === 517, `${worstMs}`);
+    const realisticMs = RETRIEVAL_RETRY_DEFAULTS.tierBudgetMs + extraRequests * 606;
+    check("the realistic D1-fast-fail case is a little over 4 minutes",
+      Math.round(realisticMs / 1000) === 250, `${realisticMs}`);
+  }
 
   // Fifteen probes, every one of them down for good. Per-probe that would be
-  // 15 x 30 s = 450 s; the tier ceiling has to bind first.
+  // 15 x 60 s = 900 s; the tier ceiling has to bind first.
   const fifteen = Array.from({ length: 15 }, (_, i) => `probe ${i}`);
   // Held as one object, not destructured: maxInFlight is a live getter.
   const run = retrySuite({ unified: () => d1FastFail });
   const { suite, waits } = run;
   await suite.tierRetrieval(fifteen);
   const waited = waits.reduce((a, b) => a + b, 0);
-  check("the tier's added wait is capped at three minutes",
-    waited === RETRIEVAL_RETRY_DEFAULTS.tierBudgetMs, `${waited}`);
+  check("the tier's added wait is capped at four minutes",
+    waited === RETRIEVAL_RETRY_DEFAULTS.tierBudgetMs && waited === 240_000, `${waited}`);
   check("the tier cap binds before the per-probe cap could be spent fifteen times",
     waited < 15 * RETRIEVAL_RETRY_DEFAULTS.probeBudgetMs, `${waited}`);
   check("probes after the tier budget is spent are still run, just not retried",
@@ -799,9 +825,9 @@ const keywordOnly = ok({
   // Per-probe ceiling, in isolation from the tier ceiling.
   const probeSpend = retrievalRetryBudget(RETRIEVAL_RETRY_DEFAULTS).probe();
   let allowed = 0;
-  while (probeSpend.allows(10_000)) { probeSpend.take(10_000); allowed += 1; }
-  check("one probe can spend at most 30 s of waiting",
-    allowed === 3 && probeSpend.spentMs === 30_000, `${allowed}/${probeSpend.spentMs}`);
+  while (probeSpend.allows(15_000)) { probeSpend.take(15_000); allowed += 1; }
+  check("one probe can spend at most 60 s of waiting",
+    allowed === 4 && probeSpend.spentMs === 60_000, `${allowed}/${probeSpend.spentMs}`);
 }
 
 /* ---- (f) the misattributed Vectorize cause is gone from the tree ---- */
@@ -827,6 +853,223 @@ const keywordOnly = ok({
   check("an over-long provider string cannot become the check detail",
     (workerDegradationDetail({ degraded: "x".repeat(200), degraded_reason: "y".repeat(200) }) || "").length <= 122,
     String(workerDegradationDetail({ degraded: "x".repeat(200), degraded_reason: "y".repeat(200) })?.length));
+}
+
+
+/* ============================================================================
+   Which degradations are failures, and which are ordinary states.
+
+   The retry's first version treated EVERY non-null `degraded` as a failure to
+   be retried and then failed on. The Worker emits six distinct tokens and most
+   of them are not faults: `scoped-vector` means an exact-document scope was
+   applied on purpose, `fts` means the keyword side is down while the semantic
+   side ran. Retrying those buys a minute of install time and fails a brain for
+   behaving correctly.
+
+   These tests pin the classification against the Worker source itself, so a
+   seventh token cannot silently join either side of the table.
+   ========================================================================= */
+
+/** Every `degraded` string literal the Worker can put on the wire. */
+function workerDegradedTokens() {
+  const files = ["../worker/src/lib/store-d1.js", "../worker/src/lib/store.js"];
+  const tokens = new Set();
+  for (const rel of files) {
+    const src = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+    for (const m of src.matchAll(/(?<!_)\bdegraded\s*[:=]\s*"([^"]+)"/g)) tokens.add(m[1]);
+  }
+  return tokens;
+}
+
+{
+  const emitted = workerDegradedTokens();
+  const classified = new Set(Object.keys(DEGRADED_CLASSIFICATION));
+
+  check("the Worker source still emits the six tokens this table was built from",
+    [...emitted].sort().join(",") ===
+      "document-access-unavailable,fts,no-embedding,retrieval,scoped-vector,vector",
+    [...emitted].sort().join(","));
+  const unclassified = [...emitted].filter((token) => !classified.has(token));
+  check("every degraded token the Worker emits is classified",
+    unclassified.length === 0, `unclassified: ${unclassified.join(", ")}`);
+  const ghosts = [...classified].filter((token) => !emitted.has(token));
+  check("the table invents no token the Worker cannot emit",
+    ghosts.length === 0, `not emitted: ${ghosts.join(", ")}`);
+
+  // The floor: exactly what a301bb4 counted, plus the one token added since to
+  // name the worse case. Widening beyond this is the false-FAIL source; not
+  // reaching it would let a real degradation pass.
+  check("the failure set is exactly vector (what a301bb4 counted) and retrieval",
+    Object.keys(RETRIEVAL_FAILURE_DEGRADED).sort().join(",") === "retrieval,vector",
+    Object.keys(RETRIEVAL_FAILURE_DEGRADED).join(","));
+  check("the expected states are the four the Worker reports as ordinary",
+    Object.keys(EXPECTED_DEGRADED).sort().join(",") ===
+      "document-access-unavailable,fts,no-embedding,scoped-vector",
+    Object.keys(EXPECTED_DEGRADED).join(","));
+  for (const token of ["vector", "retrieval"]) {
+    check(`${token} is counted as a retrieval failure`,
+      isRetrievalFailureDegradation(token) === true, token);
+  }
+  for (const token of ["fts", "scoped-vector", "no-embedding", "document-access-unavailable"]) {
+    check(`${token} is an expected state and fails nothing`,
+      isRetrievalFailureDegradation(token) === false, token);
+  }
+  // An unrecognised token answers "not a failure". A Worker change is caught by
+  // the pin above, in development, rather than by a FAIL during an install.
+  check("an unknown token is not turned into a FAIL in front of a customer",
+    isRetrievalFailureDegradation("some-future-token") === false);
+  check("no degradation at all is not a failure",
+    isRetrievalFailureDegradation(null) === false &&
+      isRetrievalFailureDegradation(undefined) === false &&
+      isRetrievalFailureDegradation(false) === false);
+}
+
+/* ---- an expected degradation is recorded, never retried, never failed ---- */
+{
+  const scoped = ok({
+    results: [{ title: "a" }, { title: "b" }],
+    degraded: "scoped-vector",
+    degraded_reason: "zone-scope-keyword-only",
+    status: "coverage_incomplete",
+  });
+  const { suite, waits, calls } = retrySuite({ unified: () => scoped });
+  await suite.tierRetrieval(["What did we agree?"]);
+  const probe = suite.results.find((r) => r.name.startsWith("probe: "));
+  const semantic = suite.results.find((r) => r.name === "semantic retrieval is active");
+  check("a deliberately scoped request is not retried",
+    waits.length === 0 && calls.filter((c) => c === "/api/rag/unified").length === 1,
+    JSON.stringify({ waits, calls }));
+  check("a deliberately scoped request is a probe PASS",
+    probe?.status === "pass", JSON.stringify(probe));
+  check("the expected state is still recorded in the probe detail, and named as expected",
+    probe?.detail === "2 result(s); the Worker reported the expected state " +
+      "coverage_incomplete: zone-scope-keyword-only, not a retrieval failure",
+    JSON.stringify(probe));
+  check("an expected state does not fail semantic retrieval",
+    semantic?.status === "pass", JSON.stringify(semantic));
+  check("but it is reported there rather than dropped",
+    /expected states reported, none of them a retrieval failure: coverage_incomplete: zone-scope-keyword-only/
+      .test(semantic?.detail || ""), JSON.stringify(semantic));
+}
+
+/* ---- keyword-side outage: reported, not a semantic-retrieval FAIL ---- */
+{
+  const ftsDown = ok({
+    results: [{ title: "a" }],
+    degraded: "fts",
+    degraded_reason: "keyword-query-failed",
+    status: "coverage_incomplete",
+  });
+  const { suite, waits } = retrySuite({ unified: () => ftsDown });
+  await suite.tierRetrieval(["What did we agree?"]);
+  check("a keyword-side outage is not retried as if the vector path had failed",
+    waits.length === 0, JSON.stringify(waits));
+  check("a keyword-side outage does not fail 'semantic retrieval is active'",
+    suite.results.find((r) => r.name === "semantic retrieval is active")?.status === "pass",
+    JSON.stringify(suite.results));
+}
+
+/* ---- a total retrieval failure on the answer path is not "keyword-only" ---- */
+{
+  const thinkNothing = ok({
+    mode: "think", answer: null, citations: [], results: [], gaps: [],
+    degraded: "retrieval",
+    degraded_reason: "keyword-and-vector-query-failed",
+    status: "search_unavailable",
+  });
+  const { suite } = retrySuite({ unified: () => healthyProbe, think: () => thinkNothing });
+  await suite.tierRetrieval(["What did we agree?"]);
+  const result = suite.results.find((r) => r.name === "think uses semantic retrieval");
+  check("a total retrieval failure on the answer path still FAILS",
+    result?.status === "fail", JSON.stringify(result));
+  check("and it is not described as a keyword-only fallback that never happened",
+    /completed no retrieval at all/.test(result?.detail || "") &&
+      !/keyword-only/.test(result?.detail || ""),
+    JSON.stringify(result));
+}
+
+/* ---- the think path classifies the same way ---- */
+{
+  const thinkScoped = ok({
+    mode: "think",
+    answer: "The agreement ends in June [1].",
+    citations: [{ n: 1, title: "Agreement", source: "drive" }],
+    results: [{ title: "Agreement", source: "drive", chunk_uid: "drive:agreement#0" }],
+    gaps: [],
+    degraded: "scoped-vector",
+    degraded_reason: "document-scope-keyword-only",
+    evidence_gate: { supported: true, complete: true, evidence: [1] },
+  });
+  const { suite, waits } = retrySuite({ unified: () => healthyProbe, think: () => thinkScoped });
+  await suite.tierRetrieval(["What did we agree?"]);
+  check("the answer path is not retried on a deliberate scope",
+    waits.length === 0, JSON.stringify(waits));
+  check("a deliberate scope does not fail 'think uses semantic retrieval'",
+    !suite.results.some((r) => r.name === "think uses semantic retrieval" && r.status === "fail"),
+    JSON.stringify(suite.results));
+}
+
+/* ============================================================================
+   Zero results with NO degradation reported.
+
+   Two separate bugs live on this path. First, it is a retry trigger in its own
+   right -- the measured D1 fast-fail returned zero rows, and a stall can return
+   zero rows before the Worker has anything to call degraded. Delete `n === 0 ||`
+   from the trigger and both tests below fail. Second, the detail must not
+   borrow the vocabulary of a degradation the Worker never reported: a healthy
+   `coverage_incomplete` with no `degraded` field is a real and ordinary shape.
+   ========================================================================= */
+
+/** Structurally healthy, no degradation, simply empty. */
+const emptyNoDegradation = ok({
+  results: [],
+  status: "coverage_incomplete",
+  gaps: [{ type: "coverage_incomplete" }],
+});
+
+{
+  const { suite, waits, calls } = retrySuite({
+    unified: (attempt) => (attempt < 1 ? emptyNoDegradation : healthyProbe),
+  });
+  await suite.tierRetrieval(["What did we agree?"]);
+  const probe = suite.results.find((r) => r.name.startsWith("probe: "));
+  check("a zero-result probe is retried even when nothing was reported degraded",
+    calls.filter((c) => c === "/api/rag/unified").length === 2 && waits.length === 1,
+    JSON.stringify({ waits, calls }));
+  check("a zero-result probe that fills in on retry is a PASS",
+    probe?.status === "pass" && /recovered after 1 retry/.test(probe?.detail || ""),
+    JSON.stringify(probe));
+  check("a recovered empty probe claims no degradation at all",
+    !/degrad/.test(probe?.detail || ""), JSON.stringify(probe));
+}
+
+{
+  const { suite, waits } = retrySuite({ unified: () => emptyNoDegradation });
+  await suite.tierRetrieval(["What did we agree?"]);
+  const probe = suite.results.find((r) => r.name.startsWith("probe: "));
+  const semantic = suite.results.find((r) => r.name === "semantic retrieval is active");
+  check("a probe that stays empty is retried the full allowance, then FAILS",
+    probe?.status === "fail" && waits.length === 4, JSON.stringify({ probe, waits }));
+  check("its detail reports the Worker's status and says there was no degradation",
+    probe?.detail ===
+      "0 result(s); the Worker reported status coverage_incomplete with no degradation; " +
+      "still empty after 4 retries",
+    JSON.stringify(probe));
+  check("an empty-but-undegraded probe does not fail 'semantic retrieval is active'",
+    semantic?.status === "pass", JSON.stringify(semantic));
+  check("probe coverage still records the miss",
+    suite.results.find((r) => r.name === "probe coverage")?.status === "fail",
+    JSON.stringify(suite.results));
+}
+
+/* ---- zero results, no degradation, and no status either ---- */
+{
+  const { suite } = retrySuite({ unified: () => ok({ results: [] }) });
+  await suite.tierRetrieval(["What did we agree?"]);
+  const probe = suite.results.find((r) => r.name.startsWith("probe: "));
+  check("with no status to report, it still refuses to invent a degradation",
+    probe?.detail === "0 result(s); the Worker reported no degradation; still empty after 4 retries",
+    JSON.stringify(probe));
 }
 
 console.log(`\nacceptance verdict: ${ran - fail}/${ran} passed`);

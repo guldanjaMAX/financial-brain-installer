@@ -508,20 +508,44 @@ export function freshnessVerdicts({ ok, status, payload, expectedBackend = "d1" 
  *  - SEQUENTIAL. One call at a time, one probe at a time. Concurrency is the
  *    thing being worked around; a parallel retry would recreate it.
  *
- * The budget is deliberately small and fixed. Retrying is only allowed to
- * absorb a stall that clears on its own within about half a minute. Anything
- * longer is a real fault and must still FAIL, because "wait long enough and it
- * turns green" is how a tolerance becomes a cover-up.
+ * The budget is fixed, and it is sized to the ONE recovery interval anyone has
+ * actually measured. A301BB4-DECISION-2026-09-17 §4 condition 1: burst round 3
+ * fast-failed 4/4 at 249-383 ms, and "60 s is empirically sufficient (r2 tail ->
+ * r3 fully clean)". A 30 s per-probe ceiling is therefore below the only
+ * interval the retry was built to cover, and would give up exactly one attempt
+ * short of the evidence. Four attempts 15 s apart spans that 60 s and keeps the
+ * spacing well clear of the tight-loop failure mode.
+ *
+ * Anything longer than that is a real fault and must still FAIL, because "wait
+ * long enough and it turns green" is how a tolerance becomes a cover-up.
+ *
+ * THE WORST CASE, stated honestly, because the first version of this comment
+ * understated it by counting only the sleeping. Two things are bounded here and
+ * only one of them is sleep:
+ *
+ *  - SLEEPING is capped by `tierBudgetMs` at 240 s across the whole tier.
+ *  - EXTRA REQUESTS are capped at tierBudgetMs / spacingMs = 16, because every
+ *    retry costs one full spacing interval out of the same tier budget. Each of
+ *    those requests is itself a live call that can take as long as a healthy
+ *    call took on the measured brain: 2.5-17.3 s (§1(b)).
+ *
+ * So the true ceiling is 240 s of sleeping + 16 x 17.3 s = ~277 s of requests,
+ * about 8.6 minutes added to an install. The realistic figure is far smaller,
+ * and it is the one this is designed around: a retry only fires because D1 is
+ * fast-failing, and a fast-fail costs 246-606 ms, so 240 s of sleeping + 16 x
+ * 0.6 s = ~10 s of requests, a little over 4 minutes. The 8.6 minute number is
+ * the case where every retried call is slow AND still wrong, which is a brain
+ * that is going to FAIL anyway.
  */
 export const RETRIEVAL_RETRY_DEFAULTS = Object.freeze({
   /** Retries after the first attempt, per probe. */
-  attempts: 3,
+  attempts: 4,
   /** Wait between attempts. Spaced, never immediate. */
-  spacingMs: 10_000,
-  /** Ceiling on waiting for ONE probe: 3 x 10 s. */
-  probeBudgetMs: 30_000,
+  spacingMs: 15_000,
+  /** Ceiling on waiting for ONE probe: 4 x 15 s, spanning the measured 60 s. */
+  probeBudgetMs: 60_000,
   /** Ceiling on waiting across the WHOLE tier, however many probes there are. */
-  tierBudgetMs: 180_000,
+  tierBudgetMs: 240_000,
 });
 
 /**
@@ -549,13 +573,85 @@ export function retrievalRetryBudget(policy = RETRIEVAL_RETRY_DEFAULTS) {
   };
 }
 
-/** "; recovered after 2 retries" / "; still degraded after 3 retries". */
-function retryNote(retries, recovered) {
+/**
+ * "; recovered after 2 retries" / "; still degraded after 4 retries" /
+ * "; still empty after 4 retries".
+ *
+ * `outcome` is explicit rather than a boolean pair because the three endings
+ * are three different findings. A probe that came back empty from a Worker
+ * that reported NO degradation did not stay degraded -- it stayed empty, and
+ * saying "still degraded" there invents a Worker report that never happened.
+ */
+function retryNote(retries, outcome) {
   if (!retries) return "";
   const plural = retries === 1 ? "retry" : "retries";
-  return recovered
-    ? `; recovered after ${retries} ${plural}`
-    : `; still degraded after ${retries} ${plural}`;
+  const ending = outcome === "recovered"
+    ? "recovered"
+    : outcome === "empty" ? "still empty" : "still degraded";
+  return `; ${ending} after ${retries} ${plural}`;
+}
+
+/**
+ * Every `degraded` token the Worker can put on the wire, classified.
+ *
+ * This table exists because "any non-null `degraded`" is not the same question
+ * as "did semantic retrieval fail", and conflating them is a false-FAIL source.
+ * The Worker emits six distinct tokens from two sites -- `store-d1.js` (the D1
+ * backend, five tokens) and `store.js` (the legacy Supabase backend, two) --
+ * and most of them describe a state that is expected, deliberate, or simply not
+ * about the vector path at all. Failing acceptance on `scoped-vector`, which
+ * means "an exact-document scope was applied so the unscoped index was
+ * deliberately not queried", would fail a brain for behaving correctly.
+ *
+ * So only the tokens that mean a retrieval path FAILED are counted, and that
+ * set is exactly what commit a301bb4 counted (`vector`) plus the one token
+ * added since to name the worse case explicitly (`retrieval`).
+ *
+ * `vector` is kept a failure even though two of its three reasons
+ * (`projection-incomplete`, `entity-vector-authority-unindexed`) are ordinary
+ * states of a young or entity-filtered brain: that is the behaviour a301bb4
+ * shipped and this change is not the place to narrow it. The reason rides the
+ * detail text either way, so the reader can tell which one they have.
+ *
+ * `test/acceptance-verdict.test.mjs` pins these keys against the Worker source,
+ * so a seventh token cannot silently become either a failure or a benign state.
+ */
+export const RETRIEVAL_FAILURE_DEGRADED = Object.freeze({
+  vector: "the vector modality did not serve this request",
+  retrieval: "both keyword and vector retrieval failed",
+});
+
+/** Degraded tokens that are expected states, not retrieval failures. */
+export const EXPECTED_DEGRADED = Object.freeze({
+  fts: "keyword search was unavailable; the semantic modality still ran",
+  "scoped-vector": "a document or zone scope was applied, so the unscoped semantic index was deliberately not queried",
+  "no-embedding": "the embedding model did not answer, so this request was keyword-only",
+  "document-access-unavailable": "the legacy Supabase backend cannot serve a scoped request",
+});
+
+/** The whole vocabulary, token -> "failure" | "expected". Pinned by test. */
+export const DEGRADED_CLASSIFICATION = Object.freeze({
+  ...Object.fromEntries(Object.keys(RETRIEVAL_FAILURE_DEGRADED).map((k) => [k, "failure"])),
+  ...Object.fromEntries(Object.keys(EXPECTED_DEGRADED).map((k) => [k, "expected"])),
+});
+
+/** The wire value as a bounded token, or null when nothing was reported. */
+export function degradedToken(value) {
+  if (value === null || value === undefined || value === false) return null;
+  const token = String(value).trim().slice(0, 40);
+  return token || null;
+}
+
+/**
+ * Did semantic retrieval actually fail?
+ *
+ * An unknown token answers NO. A token this file has never seen is a Worker
+ * change, and the honest response to a Worker change is a failing pin test in
+ * development, not a FAIL invented in front of a customer during an install.
+ */
+export function isRetrievalFailureDegradation(value) {
+  const token = degradedToken(value);
+  return token !== null && DEGRADED_CLASSIFICATION[token] === "failure";
 }
 
 /**
@@ -583,6 +679,21 @@ export function workerDegradationDetail(json) {
   const head = status || degraded;
   if (head && reason) return `${head}: ${reason}`;
   return head || reason || null;
+}
+
+/**
+ * The Worker's `status` alone, bounded the same way.
+ *
+ * Needed on the one path where there is no degradation to describe: a response
+ * that returned zero rows and reported no `degraded` field at all. That shape
+ * is healthy in structure -- `coverage_incomplete` with no degradation is the
+ * ordinary state of a brain whose declared source history is partial -- and the
+ * detail has to say what the Worker actually said rather than borrowing the
+ * vocabulary of a degradation that was never reported.
+ */
+export function workerStatusToken(json) {
+  const status = typeof json?.status === "string" ? json.status.trim().slice(0, 40) : "";
+  return status || null;
 }
 
 export class Acceptance {
@@ -845,38 +956,63 @@ export class Acceptance {
     let degradedProbes = 0;
     let recoveredProbes = 0;
     const finalReasons = new Set();
+    const expectedStates = new Set();
     for (const q of savedQuestions) {
-      // Zero results and any non-null `degraded` are the two shapes the
-      // transient D1 saturation takes, and both clear on their own within a
-      // minute on a brain that is actually healthy. Everything else is judged
-      // on the first answer, exactly as before.
+      // Zero results and a degradation that means a retrieval path FAILED are
+      // the two shapes the transient D1 saturation takes, and both clear on
+      // their own within a minute on a brain that is actually healthy.
+      //
+      // An expected degradation is neither. `scoped-vector` will still be
+      // `scoped-vector` after four retries and a minute of waiting, because it
+      // is a description of the request, not a fault -- retrying it buys an
+      // extra minute of install time and then fails the brain anyway. It is
+      // recorded in the detail and nothing else. Everything else is judged on
+      // the first answer, exactly as before.
       const attempt = await this.retryTransientProbe(budget, async () => {
         const r = await this.post("/api/rag/unified", { q, limit: 5, rerank: 0 });
         const n = r.json?.results?.length || 0;
-        const degraded = r.json?.degraded === undefined || r.json?.degraded === null || r.json?.degraded === false
-          ? null
-          : r.json.degraded;
+        const degraded = degradedToken(r.json?.degraded);
         return {
-          failing: n === 0 || degraded !== null,
-          value: { n, degraded, why: workerDegradationDetail(r.json) },
+          failing: n === 0 || isRetrievalFailureDegradation(degraded),
+          value: {
+            n,
+            degraded,
+            failure: isRetrievalFailureDegradation(degraded),
+            why: workerDegradationDetail(r.json),
+            status: workerStatusToken(r.json),
+          },
         };
       });
-      const { n, degraded, why } = attempt.value;
+      const { n, degraded, failure, why, status } = attempt.value;
       if (n > 0) answered++;
       // Only the LAST attempt counts. A probe that recovered was a stall, not
       // a degraded brain, and must not be reported as one.
-      if (degraded !== null) {
+      if (failure) {
         degradedProbes++;
         if (why) finalReasons.add(why);
+      } else if (degraded !== null && why) {
+        expectedStates.add(why);
       }
       if (attempt.recovered) recoveredProbes++;
+      // Three different findings, three different sentences. The last one is
+      // the zero-result response that reported NO degradation: it must say so,
+      // because claiming a degradation the Worker never reported sends the
+      // reader to look for an outage that does not exist.
+      let observed = "";
+      if (failure && why) observed = `; the Worker reported ${why}`;
+      else if (degraded !== null) observed = `; the Worker reported the expected state ${why || degraded}, not a retrieval failure`;
+      else if (n === 0) {
+        observed = status
+          ? `; the Worker reported status ${status} with no degradation`
+          : "; the Worker reported no degradation";
+      }
       this.record(
         t,
         `probe: ${q.slice(0, 48)}`,
         n > 0 ? PASS : FAIL,
         `${n} result(s)` +
-          (attempt.failing && why ? `; the Worker reported ${why}` : "") +
-          retryNote(attempt.retries, attempt.recovered)
+          observed +
+          retryNote(attempt.retries, attempt.recovered ? "recovered" : failure ? "degraded" : "empty")
       );
     }
     this.record(
@@ -888,18 +1024,23 @@ export class Acceptance {
     );
     // The retry never softens this verdict; it only decides WHEN the verdict is
     // taken. What changed is that the detail now names the reason the Worker
-    // itself gave instead of asserting a Vectorize cause acceptance never read.
+    // itself gave instead of asserting a Vectorize cause acceptance never read,
+    // and that the tally counts only degradations that mean a retrieval path
+    // failed. Expected states are reported here and fail nothing.
+    const expectedNote = expectedStates.size
+      ? `; expected states reported, none of them a retrieval failure: ${[...expectedStates].join(", ")}`
+      : "";
     this.record(
       t,
       "semantic retrieval is active",
       degradedProbes === 0 ? PASS : FAIL,
-      degradedProbes === 0
+      (degradedProbes === 0
         ? "no probe degraded to keyword-only retrieval" +
           (recoveredProbes ? `; ${recoveredProbes} probe(s) recovered after a retry` : "")
         : `${degradedProbes}/${savedQuestions.length} probe(s) were still degraded after the retry budget; ` +
           (finalReasons.size
             ? `the Worker reported ${[...finalReasons].join(", ")}`
-            : "the Worker reported no reason"),
+            : "the Worker reported no reason")) + expectedNote,
     );
 
     // `think` must degrade rather than 500. This is the path most likely to
@@ -908,21 +1049,25 @@ export class Acceptance {
     // question.
     const thinkAttempt = await this.retryTransientProbe(budget, async () => {
       const r = await this.post("/api/rag/think", { q: savedQuestions[0], limit: 5 });
-      const degraded = r.json?.degraded === undefined || r.json?.degraded === null || r.json?.degraded === false
-        ? null
-        : r.json.degraded;
-      return { failing: degraded !== null, value: r };
+      // Same classification as the probes above: retry a failed retrieval path,
+      // never an expected state that a retry cannot change.
+      return { failing: isRetrievalFailureDegradation(r.json?.degraded), value: r };
     });
     const think = thinkAttempt.value;
-    if (think.json?.degraded === "vector") {
+    if (isRetrievalFailureDegradation(think.json?.degraded)) {
       const why = workerDegradationDetail(think.json);
+      // `retrieval` means NEITHER modality ran. Calling that "keyword-only"
+      // would describe a fallback that did not happen.
+      const headline = degradedToken(think.json?.degraded) === "retrieval"
+        ? "the answer path completed no retrieval at all"
+        : "the answer path degraded to keyword-only retrieval";
       this.record(
         t,
         "think uses semantic retrieval",
         FAIL,
-        "the answer path degraded to keyword-only retrieval" +
+        headline +
           (why ? `; the Worker reported ${why}` : "") +
-          retryNote(thinkAttempt.retries, false),
+          retryNote(thinkAttempt.retries, "degraded"),
       );
     } else if (thinkAttempt.recovered) {
       // Recorded only when it actually had to recover, so a healthy run's
@@ -931,7 +1076,7 @@ export class Acceptance {
         t,
         "think uses semantic retrieval",
         PASS,
-        `the answer path used semantic retrieval${retryNote(thinkAttempt.retries, true)}`,
+        `the answer path used semantic retrieval${retryNote(thinkAttempt.retries, "recovered")}`,
       );
     }
     if (!think.ok) {
