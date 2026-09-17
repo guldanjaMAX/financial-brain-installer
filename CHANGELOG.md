@@ -34,7 +34,14 @@ asset publication.
   content still need the iPhone backup load. Tapbacks and attachment-only rows
   no longer count against the sweep — every real message database has them —
   but they are still counted and named in the run report, and a row the walk
-  cannot place in time at all still withholds the sweep. To check: run
+  cannot place in time at all still withholds the sweep. So that the claim
+  covers the messages you sent this morning as well as the ones from years
+  ago, that full run now also closes and sends any conversation still in
+  progress instead of waiting for it to go quiet for six hours; the run report
+  says how many it closed, and the only visible effect is that one live thread
+  is split into two conversation documents at that moment. Ordinary capture
+  ticks are unchanged — they claim nothing, so they keep the six-hour rule. To
+  check: run
   `brain ingest <manifest> --from imessage --reset`, then `brain sources` and
   confirm iMessage no longer says its history is unproven.
 

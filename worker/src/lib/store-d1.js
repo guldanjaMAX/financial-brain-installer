@@ -2954,7 +2954,7 @@ function sourceOwnerRemedy(source, concern = "refresh") {
     gmail: "Reconnect Google if access has expired, then run a full Gmail sync with no --limit.",
     calendar: "Reconnect Google if access has expired, then run Calendar with --reset and no --limit for the configured historical scope.",
     imap: "Check the mailbox connection, then run a full IMAP sync with --reset and no --limit.",
-    imessage: "On the owner Mac, confirm Full Disk Access, then run iMessage with --reset and no --limit. That records a complete sweep of the selected local Messages database end to end, and nothing beyond it; load a reviewed iPhone backup or export when older, deleted, or attachment-only history matters.",
+    imessage: "On the owner Mac, confirm Full Disk Access, then run iMessage with --reset and no --limit. That records a complete sweep of the selected local Messages database end to end, and nothing beyond it: it closes and sends any conversation still in progress so the sweep covers it, and it says so in the run report. Load a reviewed iPhone backup or export when older, deleted, or attachment-only history matters.",
     whatsapp: "Keep the phone linked for new messages and load an owner-provided export for any history from before the link date.",
     microsoft: "Reconnect Microsoft 365 if access has expired, then run a full Microsoft sync with no --limit.",
     dropbox: "Reconnect Dropbox if access has expired, then run a full Dropbox sync with no --limit.",

@@ -260,6 +260,84 @@ try {
     rowsDb.close();
   }
 
+  /* ===== a sweep must deliver the conversation it just read, not only walk it ===== */
+  {
+    // Every fixture above is dated months in the past, so the six-hour quiet
+    // rule drains it and the difference between "walked" and "delivered"
+    // cannot show. A real owner's Mac is never like that: the thread they were
+    // texting on ten minutes ago survives finishStaleSessions, stays in local
+    // state, and is unsearchable. This database reproduces exactly that.
+    const liveDbPath = join(sandbox, "chat-live.db");
+    const liveDb = new DatabaseSync(liveDbPath);
+    liveDb.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, country TEXT, service TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT, style INTEGER);
+      CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+      CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT UNIQUE, text TEXT, attributedBody BLOB,
+        date INTEGER, is_from_me INTEGER, handle_id INTEGER
+      );
+      INSERT INTO handle (ROWID, id, country, service) VALUES (1, '+15552223333', 'us', 'iMessage');
+      INSERT INTO chat (ROWID, guid, display_name, style) VALUES (1, 'iMessage;-;+15552223333', NULL, 45);
+      INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1,1);
+    `);
+    let liveRowid = 0;
+    const addLiveRow = ({ guid, text, ts }) => {
+      liveRowid++;
+      liveDb.prepare("INSERT INTO message (ROWID, guid, text, date, is_from_me, handle_id) VALUES (?,?,?,?,?,?)")
+        .run(liveRowid, guid, text, macNs(ts), 0, 1);
+      liveDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, liveRowid);
+    };
+    const minutesAgo = (n) => new Date(Date.now() - n * 60_000).toISOString();
+    const liveTs = minutesAgo(10);
+    addLiveRow({ guid: "LV-1", text: "Settled thread from last spring", ts: "2026-05-04T12:00:00Z" });
+    addLiveRow({ guid: "LV-2", text: "still talking about the Danforth quote right now", ts: liveTs });
+
+    {
+      const fakes = makeBrainFakes();
+      const result = await cmdIngestImessage(
+        manifest, manifestPath,
+        { "chat-db": liveDbPath, source: "imessage-live", reset: true },
+        fakes.options,
+      );
+      const receipt = fakes.receipts.at(-1);
+      const sent = fakes.batches.flat().map((d) => d.source_id);
+      check("an unbounded sweep delivers the conversation it read minutes ago instead of holding it",
+        result.sessions_open === 0 && result.sessions_flushed === 1 &&
+        sent.includes("LV-1") && sent.includes("LV-2"),
+        JSON.stringify({ result, sent }));
+      check("the sweep receipt names the conversations it closed early, and earns the flag",
+        receipt.complete_sweep === true &&
+        /1 open conversation\(s\) closed early to complete the sweep/.test(receipt.detail) &&
+        /0 session\(s\) still open/.test(receipt.detail) &&
+        receiptEarnsSweep(receipt), JSON.stringify(receipt));
+      check("the sweep's declared range ends on a message it actually delivered",
+        receipt.target_range?.through === new Date(liveTs).toISOString() && sent.includes("LV-2"),
+        JSON.stringify({ target_range: receipt.target_range, sent }));
+    }
+
+    {
+      // The normal every-minute tick is unchanged: a resumed pass claims no
+      // sweep, so it has nothing to prove and keeps the six-hour quiet rule
+      // rather than splitting a live conversation once a minute.
+      addLiveRow({ guid: "LV-3", text: "one more thought before you send it", ts: minutesAgo(2) });
+      const fakes = makeBrainFakes();
+      const result = await cmdIngestImessage(
+        manifest, manifestPath,
+        { "chat-db": liveDbPath, source: "imessage-live" },
+        fakes.options,
+      );
+      const receipt = fakes.receipts.at(-1);
+      check("an incremental tick still holds an open conversation and claims no sweep",
+        result.sessions_open === 1 && result.sessions_flushed === 0 &&
+        fakes.batches.length === 0 && receipt.complete_sweep === false &&
+        receiptEarnsSweep(receipt) === false, JSON.stringify({ result, receipt }));
+    }
+
+    liveDb.close();
+  }
+
   /* ================= refusals count; failures stop the watermark ======== */
   {
     addMessage({ guid: "IG-C1", text: "Here is that key: sk-fixture-notreal", ts: "2026-03-04T10:00:00Z" });

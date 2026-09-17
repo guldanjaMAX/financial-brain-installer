@@ -12246,6 +12246,12 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
       groupingTimezone: m.client?.timezone || "UTC",
       maxRows: flags.limit ? parseInt(flags.limit, 10) : Infinity,
       flushOnly,
+      // Only an unbounded pass can end up claiming a completed sweep, and that
+      // claim is worth nothing unless the pass also delivered every
+      // conversation it read — including the ones still inside the six-hour
+      // quiet window. A bounded or resumed pass claims nothing and keeps the
+      // plain quiet rule.
+      flushOnCompleteWalk: !flushOnly && !flags.limit,
       dryRun: dry,
       reset: !!flags.reset,
       onPage: ({ page, rows, watermark }) => {
@@ -12277,7 +12283,11 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   const summary =
     `${result.rows_seen} new row(s) read in ${result.pages} page(s); ${result.rows_pushed} sessionized; ` +
     `${skipped.no_text} without text (tapbacks/attachments), ${skipped.no_timestamp + skipped.no_guid} unusable; ` +
-    `${result.documents_sent} conversation document(s) sent; ${result.sessions_open} session(s) still open; ` +
+    `${result.documents_sent} conversation document(s) sent; ` +
+    (result.sessions_flushed
+      ? `${result.sessions_flushed} open conversation(s) closed early to complete the sweep; `
+      : "") +
+    `${result.sessions_open} session(s) still open; ` +
     `watermark ${result.watermark}`;
 
   if (dry) {
@@ -12309,14 +12319,22 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
   const localRangeComplete = walkComplete && result.started_watermark === 0;
   // What a completed sweep claims for this source, and nothing more: every row
   // this Mac's Messages database holds, from its first to its last, was walked
-  // in one unbounded pass and became a document or a named skip. That is the
-  // whole declared scope of `imessage` — it is why the owner remedy is
-  // `--reset` with no `--limit`, and why iPhone-backup history stays a
-  // separate source. Reporting it false whatever happened made that remedy
+  // in one unbounded pass and became a delivered document or a named skip.
+  // That is the whole declared scope of `imessage` — it is why the owner
+  // remedy is `--reset` with no `--limit`, and why iPhone-backup history stays
+  // a separate source. Reporting it false whatever happened made that remedy
   // unreachable and left every category of `brain check` permanently
   // provisional.
-  const completeSweep = localRangeComplete && unplaceableRows === 0 &&
-    tally.refused === 0 && tally.failed === 0;
+  //
+  // `sessions_open === 0` is the delivery half of that claim, and it is not
+  // redundant with the walk: a conversation the pass read minutes ago is held
+  // in local state until it goes quiet, and a sweep that counted it as covered
+  // while the brain could not return it would be exactly the missing record
+  // presented as a complete-corpus finding. flushOnCompleteWalk above closes
+  // those for this pass, so the conjunct is reachable rather than decorative,
+  // and it still withholds the sweep if anything is left open.
+  const completeSweep = localRangeComplete && result.sessions_open === 0 &&
+    unplaceableRows === 0 && tally.refused === 0 && tally.failed === 0;
   const measuredRange = localRangeComplete && (result.first_row_at || result.last_row_at)
     ? { from: result.first_row_at, through: result.last_row_at }
     : null;

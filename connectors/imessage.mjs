@@ -435,6 +435,7 @@ export async function captureOnce({
   now = () => Date.now(),
   openDb = openChatDbReadOnly,
   flushOnly = false,
+  flushOnCompleteWalk = false,
   dryRun = false,
   reset = false,
   onPage = () => {},
@@ -457,6 +458,7 @@ export async function captureOnce({
     documents_sent: 0,
     documents_would_send: 0,
     sessions_open: 0,
+    sessions_flushed: 0,
     started_watermark: state.last_rowid,
     watermark: state.last_rowid,
     caught_up: false,
@@ -547,6 +549,22 @@ export async function captureOnce({
 
     const stale = finishStaleSessions(sessionizer, { nowMs: now(), maxGapMs });
     await dispatch(stale);
+    // A walk that started at row zero and reached the end of chat.db is the
+    // only pass that can say it read this database end to end — and that is
+    // only worth saying if the pass also DELIVERED what it read. Every thread
+    // active within the last maxGapMs survives finishStaleSessions, so on a
+    // Mac in daily use the newest conversations would otherwise stay in local
+    // state, unsearchable, while the pass reported a proven history that
+    // covers them. Close them here instead. The cost is one conversation
+    // document split at the sweep rather than at the next quiet spell; the
+    // alternative is a completeness claim over messages the brain does not
+    // have. Bounded and resumed passes make no such claim and keep the plain
+    // six-hour rule.
+    if (flushOnCompleteWalk && counts.caught_up && counts.started_watermark === 0) {
+      const open = sessionizer.finish();
+      counts.sessions_flushed = open.length;
+      await dispatch(open);
+    }
     counts.sessions_open = sessionizer.active.size;
     persist();
     return counts;
