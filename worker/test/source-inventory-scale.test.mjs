@@ -15,6 +15,11 @@
  * between that size and a smaller one, so the bound cannot be met by a lucky
  * fixed overhead at one comfortable corpus size.
  *
+ * The first test runs everywhere. The other two measure memory as a
+ * resident-set delta, which only reads as cost on a platform whose allocator
+ * keeps freed pages mapped; see MEMORY_COST_IS_MEASURABLE for what runs
+ * instead where it does not, and why there is nothing portable to measure.
+ *
  * Every fixture here is synthetic.
  */
 import assert from "node:assert/strict";
@@ -963,6 +968,49 @@ const MEMORY_PER_DOCUMENT_BOUND_BYTES = 768;
 // 30 s at 50,000 documents, 120 s at 200,000. A machine slower than that is
 // not one whose memory numbers are worth asserting on.
 const SCALE_BUILD_BUDGET_MS_PER_DOCUMENT = 0.6;
+const CHUNK_TEXT_DOCUMENTS = 10_000;
+
+/**
+ * Where the resident-set proxy means anything, and what runs where it does not.
+ *
+ * The probe reads `process.memoryUsage().rss` on either side of one `.all()`.
+ * That reports what the statement peaked at only where the allocator keeps
+ * freed pages mapped in the process, which is what glibc and macOS libmalloc
+ * do: the sorter's arena is still resident when the statement returns. Windows
+ * hands large blocks straight back to the OS on free, so the working set is
+ * already back where it started by the time the second reading is taken. CI
+ * run 35249051915 measured the shipped inventory at 4.60 MB against 4.10 MB
+ * across the hundredfold chunk-text step that moves it 3.5x here — not less
+ * growth, none — and the control assertion below correctly refused to treat
+ * that as proof of anything.
+ *
+ * There is no portable substitute to switch to. node:sqlite exposes no memory
+ * API at all (no `sqlite3_memory_used`, no `sqlite3_status`), and the SQLite it
+ * bundles reports `DEFAULT_MEMSTATUS=0` and `SYSTEM_MALLOC` in
+ * `PRAGMA compile_options`, so those counters are not collected and its
+ * allocations never reach V8's `external` or `arrayBuffers` either. A peak
+ * working-set reading (`process.resourceUsage().maxRSS`) should survive the
+ * free-back, and the probe now reports one, but nothing here can confirm that
+ * on Windows, and a memory bound nobody has watched hold is not a bound.
+ *
+ * So the cost comparisons run where the proxy is real. On win32 the same
+ * statements still run against the same fixtures and must still return the
+ * same aggregates within a bounded time, and every unasserted number is
+ * printed rather than dropped. What the rewrite is actually for — that the
+ * statements return the shipped 0.4.8 rows byte for byte — is asserted on
+ * every platform by the first test, which touches none of this.
+ *
+ * `BRAIN_TEST_PLATFORM` exists only so the win32 branch can be exercised from
+ * a development machine; nothing in the product reads it.
+ */
+const TEST_PLATFORM = process.env.BRAIN_TEST_PLATFORM || process.platform;
+const MEMORY_COST_IS_MEASURABLE = TEST_PLATFORM !== "win32";
+// A liveness bound, not a cost bound. The rewritten statements take 2.3 s on
+// 200,000 documents and 0.1 s on the 10,000-document chunk-text fixture on the
+// machine the memory numbers above were measured on, so this allows about 40x
+// that: it catches a statement that stopped returning on a field-sized corpus,
+// not one that got somewhat more expensive.
+const SCALE_STATEMENT_BUDGET_MS_PER_DOCUMENT = 0.5;
 
 /**
  * Each statement is measured in its own process.
@@ -984,8 +1032,15 @@ db.exec("PRAGMA temp_store=MEMORY");
 db.exec("PRAGMA cache_size=-2000");
 const statement = db.prepare(readFileSync(sqlPath, "utf8"));
 const before = process.memoryUsage().rss;
+const peakBefore = process.resourceUsage().maxRSS;
+const startedAt = Date.now();
 const rows = statement.all(...JSON.parse(bindJson));
+const ms = Date.now() - startedAt;
 const cost = process.memoryUsage().rss - before;
+// The high-water reading is reported but never asserted on. It is the evidence
+// a win32 run leaves behind for whoever wants to re-enable the cost assertions
+// there: see MEMORY_COST_IS_MEASURABLE. maxRSS is kilobytes.
+const peakCost = (process.resourceUsage().maxRSS - peakBefore) * 1024;
 // Report what the answer actually counted, so a statement that stayed under
 // the bound by returning empty rows cannot pass for one that aggregated the
 // whole corpus.
@@ -994,6 +1049,8 @@ const inventory = rows.length > 0 && "physical_documents" in rows[0];
 process.stdout.write(JSON.stringify({
   rows: rows.length,
   cost,
+  peakCost,
+  ms,
   documents: inventory ? total("physical_documents") : Number(rows[0]?.recovery_total ?? 0),
   chunks: inventory ? total("chunks") : null,
 }));
@@ -1090,7 +1147,7 @@ test("the rewritten source statements no longer pay for chunk text", () => {
       ["product", PRODUCT_CHUNK_TEXT_BYTES],
     ]) {
       const dbPath = join(root, `corpus-${label}.db`);
-      buildScaleCorpus(dbPath, { documents: 10_000, chunkTextBytes });
+      buildScaleCorpus(dbPath, { documents: CHUNK_TEXT_DOCUMENTS, chunkTextBytes });
       corpora[label] = dbPath;
     }
 
@@ -1103,7 +1160,29 @@ test("the rewritten source statements no longer pay for chunk text", () => {
     for (const [label, sql, binds, rewritten] of statements) {
       const thin = measure(`${label}-thin`, corpora.thin, sql, binds);
       const product = measure(`${label}-product`, corpora.product, sql, binds);
-      assert.equal(product.documents, 10_000, `${label} did not aggregate the whole corpus`);
+      assert.equal(product.documents, CHUNK_TEXT_DOCUMENTS, `${label} did not aggregate the whole corpus`);
+      assert.equal(thin.documents, CHUNK_TEXT_DOCUMENTS, `${label} did not aggregate the whole corpus`);
+      if (!MEMORY_COST_IS_MEASURABLE) {
+        // The statements still run against both corpora and are still held to
+        // their answers above; only the comparison between the two costs is
+        // dropped, because this platform's reading cannot carry it.
+        if (rewritten) {
+          const budget = CHUNK_TEXT_DOCUMENTS * SCALE_STATEMENT_BUDGET_MS_PER_DOCUMENT;
+          assert.ok(
+            product.ms < budget,
+            `${label} took ${product.ms}ms on ${CHUNK_TEXT_DOCUMENTS} documents at`
+            + ` ${PRODUCT_CHUNK_TEXT_BYTES}-byte chunk text, over the ${budget}ms bound`,
+          );
+        }
+        console.log(
+          `${TEST_PLATFORM}: ${label} chunk-text cost is measured but not asserted`
+          + ` (resident-set delta ${thin.cost} -> ${product.cost} bytes,`
+          + ` peak delta ${thin.peakCost} -> ${product.peakCost} bytes,`
+          + ` ${thin.ms}ms -> ${product.ms}ms across the`
+          + ` ${THIN_CHUNK_TEXT_BYTES} -> ${PRODUCT_CHUNK_TEXT_BYTES} byte step)`,
+        );
+        continue;
+      }
       if (rewritten) {
         // Measured 6.14 MB against 6.21 MB, and 7.98 MB against 8.03 MB: the
         // chunk aggregate now decides the blank test per chunk and forwards
@@ -1161,6 +1240,22 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
             `${label} did not count every chunk`,
           );
         }
+        if (!MEMORY_COST_IS_MEASURABLE) {
+          // Same statement, same field-sized fixture, same answers checked
+          // above; what is dropped is the memory bound this platform cannot
+          // measure, replaced by the bound it can.
+          const budget = documents * SCALE_STATEMENT_BUDGET_MS_PER_DOCUMENT;
+          assert.ok(
+            probe.ms < budget,
+            `${label} took ${probe.ms}ms on ${documents} documents, over the ${budget}ms bound`,
+          );
+          console.log(
+            `${TEST_PLATFORM}: ${label} memory is measured but not asserted on ${documents}`
+            + ` documents (resident-set delta ${probe.cost} bytes, peak delta ${probe.peakCost}`
+            + ` bytes, ${probe.ms}ms, against the ${bound} byte bound)`,
+          );
+          continue;
+        }
         assert.ok(
           probe.cost < bound,
           `${label} used ${probe.cost} bytes on ${documents} documents, over the ${bound} byte bound`,
@@ -1179,6 +1274,15 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
           ["shipped-recovery", ORIGINAL_SOURCE_RECOVERY_SQL, [null, 0, 101]],
         ]) {
           const probe = measure(`${label}-${documents}`, dbPath, sql, binds);
+          if (!MEMORY_COST_IS_MEASURABLE) {
+            console.log(
+              `${TEST_PLATFORM}: ${label} is measured but not asserted on ${documents}`
+              + ` documents (resident-set delta ${probe.cost} bytes, peak delta`
+              + ` ${probe.peakCost} bytes, ${probe.ms}ms, against the ${bound} byte bound`
+              + " it is expected to exceed)",
+            );
+            continue;
+          }
           assert.ok(
             probe.cost > bound,
             `${label} used ${probe.cost} bytes and was expected to exceed the bound;`
@@ -1191,6 +1295,14 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
       rmSync(dbPath, { force: true });
     }
 
+    if (!MEMORY_COST_IS_MEASURABLE) {
+      console.log(
+        `${TEST_PLATFORM}: the per-document memory slope between ${SMALL_DOCUMENTS} and`
+        + ` ${FIELD_DOCUMENTS} documents is not asserted, for the same reason as the`
+        + " endpoints above; the statements ran and answered on both corpora",
+      );
+      return;
+    }
     for (const label of ["rewritten-inventory", "rewritten-recovery"]) {
       const growth = costs.get(FIELD_DOCUMENTS).get(label) - costs.get(SMALL_DOCUMENTS).get(label);
       const perDocument = growth / (FIELD_DOCUMENTS - SMALL_DOCUMENTS);
