@@ -147,7 +147,7 @@ test("fresh owner notes are registered, attributable, reversible recollections a
     source: local.source.name,
     kind: local.source.kind,
     status: local.source.status,
-    history: local.source.complete_history_through,
+    history_is_a_timestamp: typeof local.source.complete_history_through === "string",
     zone: local.source.zone,
     provenance: local.provenance.label,
   }, {
@@ -157,10 +157,15 @@ test("fresh owner notes are registered, attributable, reversible recollections a
     source: OWNER_NOTES_SOURCE,
     kind: OWNER_NOTES_KIND,
     status: "ready",
-    history: null,
+    // A direct-write source has no corpus beyond the writes it accepted, so an
+    // exact readback IS its completed history sweep. Reporting null here left
+    // the source permanently unproven and turned every brain check category
+    // provisional on any Brain whose owner had used brain_remember.
+    history_is_a_timestamp: true,
     zone: null,
     provenance: "Owner assistant on this computer",
   });
+  assert.equal(local.source.complete_history_through, local.source.last_ingest_at ?? local.source.complete_history_through);
 
   const storedLocal = fixture.first(
     "SELECT source,source_id,title,content_hash,text_source,text_reliable,meta FROM documents WHERE doc_uid=?",
@@ -201,14 +206,19 @@ test("fresh owner notes are registered, attributable, reversible recollections a
     "SELECT name,kind,status,document_count,last_complete_sweep_at,zone FROM sources WHERE name=?",
     OWNER_NOTES_SOURCE,
   );
-  assert.deepEqual({ ...source }, {
+  assert.deepEqual({ ...source, last_complete_sweep_at: typeof source.last_complete_sweep_at }, {
     name: OWNER_NOTES_SOURCE,
     kind: OWNER_NOTES_KIND,
     status: "ready",
     document_count: 2,
-    last_complete_sweep_at: null,
+    last_complete_sweep_at: "string",
     zone: null,
   });
+  // The second note's own write is what stamps it, so the sweep stays current
+  // rather than aging out from the first note onward.
+  assert.equal(source.last_complete_sweep_at, fixture.first(
+    "SELECT last_ingest_at FROM sources WHERE name=?", OWNER_NOTES_SOURCE,
+  ).last_ingest_at);
 
   const search = await mcp(fixture, token, "search", { query: "amber compass" });
   const searchPayload = JSON.parse(search.content[0].text);
@@ -256,9 +266,9 @@ test("fresh owner notes are registered, attributable, reversible recollections a
     status: ownerNotes.source_status,
     zone: ownerNotes.zone,
     automatable: ownerNotes.automatable,
-    complete: ownerNotes.last_complete_sweep_at,
-  }, { state: "manual", status: "ready", zone: null, automatable: false, complete: null });
-  assert.equal(ownerNotes.coverage.history.state, "unknown");
+    complete: typeof ownerNotes.last_complete_sweep_at,
+  }, { state: "manual", status: "ready", zone: null, automatable: false, complete: "string" });
+  assert.equal(ownerNotes.coverage.history.state, "complete");
 
   const inventoryResponse = await fixture.post(
     "/api/admin/brain/source-families", { source: OWNER_NOTES_SOURCE }, ownerHeaders(fixture),

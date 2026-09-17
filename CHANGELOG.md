@@ -10,6 +10,18 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Notes you dictate to the Brain no longer hold the record review back.**
+  Everything saved through "remember this" lives in a source the Brain writes
+  directly, one note at a time — there is no remote archive to go and walk, so
+  there was never a command that could prove its history complete, and it sat
+  permanently unproven. That single unproven source was enough to make
+  `brain check` call every category provisional, on any Brain whose owner had
+  ever saved a note. Each accepted note now records the source as complete
+  through the moment it was written and read back, which is exactly what is
+  true of it. A note whose write does not confirm still puts the source in
+  error, plainly, as before. To check: save a note, then run `brain check` and
+  confirm the categories it reviews are no longer held up by your notes.
+
 - **A full iMessage run can now prove its own history, so the record review
   can finish.** A capture started with `--reset` and no `--limit` walks this
   Mac's whole message database end to end and records that as a completed

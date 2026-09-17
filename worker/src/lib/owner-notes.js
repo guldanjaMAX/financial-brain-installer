@@ -440,9 +440,21 @@ export async function completeOwnerNoteWrite(env, envelope, receipt, {
   const counts = await sourceFamilyCounts(env, { source: OWNER_NOTES_SOURCE });
   const at = new Date(now).toISOString();
   await env.DB.batch([
+    // last_complete_sweep_at is a sweep receipt by construction, and this is
+    // the only place it can honestly come from for this source. Every other
+    // connector proves history by walking a remote corpus it does not own;
+    // owner-notes has no remote corpus. A note exists here because it was
+    // written here, one at a time, and the write above just proved this one
+    // is readable back exactly. At this instant the source therefore holds
+    // every owner note that was ever accepted, which is precisely what a
+    // completed history sweep claims. Leaving the column null instead made
+    // coverageGapReport raise history_unproven on every Brain whose owner had
+    // ever used brain_remember, which turns every brain check category
+    // provisional, and no command could clear it because no command sweeps a
+    // source that is only ever written directly.
     env.DB.prepare(
       `UPDATE sources
-          SET status='ready', last_ingest_at=?1,
+          SET status='ready', last_ingest_at=?1, last_complete_sweep_at=?1,
               document_count=?2, stale_reason=NULL
         WHERE name=?3 AND kind=?4`
     ).bind(at, counts.logical_documents, OWNER_NOTES_SOURCE, OWNER_NOTES_KIND),
@@ -463,7 +475,7 @@ export async function completeOwnerNoteWrite(env, envelope, receipt, {
   ).bind(OWNER_NOTES_SOURCE).first();
   const exactSource = source?.name === OWNER_NOTES_SOURCE &&
     source?.kind === OWNER_NOTES_KIND && source?.status === "ready" &&
-    source?.last_ingest_at === at &&
+    source?.last_ingest_at === at && source?.last_complete_sweep_at === at &&
     Number(source?.document_count) === counts.logical_documents;
   if (!exactSource) {
     throw new OwnerNoteLifecycleError(
@@ -481,7 +493,8 @@ export async function completeOwnerNoteWrite(env, envelope, receipt, {
       status: source.status,
       documents: Number(source.document_count),
       last_ingest_at: source.last_ingest_at,
-      // A direct write proves this record, not a complete historical sweep.
+      // Direct-write sources have no history beyond their accepted writes, so
+      // this is complete through the moment this note was read back.
       complete_history_through: source.last_complete_sweep_at || null,
       zone: typeof source.zone === "string" && source.zone.trim() ? source.zone.trim() : null,
     },
