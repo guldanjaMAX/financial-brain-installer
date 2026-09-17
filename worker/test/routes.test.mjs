@@ -4288,6 +4288,48 @@ function mkForgetEnv({
     JSON.stringify(body).slice(0, 260));
 }
 
+/* ---- every evidence and citation number resolves inside the returned results ----
+   The answer model sees up to twelve numbered documents. A caller asking for
+   fewer (acceptance uses limit 5) must still receive every document a
+   citation or evidence receipt can name, or the receipt points past the end
+   of the results array and a strict consumer rejects the whole response. */
+{
+  const rows = Array.from({ length: 7 }, (_, i) => ({
+    ...ROW,
+    chunk_uid: `contract-doc-${i + 1}#0`, doc_uid: `contract-doc-${i + 1}`, source_id: `contract-doc-${i + 1}`,
+    uri: `meeting://contract-doc-${i + 1}`, title: `Contract fixture ${i + 1}`,
+    text: `Retainer fixture passage number ${i + 1}.`,
+  }));
+  const { env } = mkEnv(rows, {
+    vectorIds: rows.map((row) => row.chunk_uid),
+    extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: true, complete: true, evidence: [6], reason: "direct support" }, usage: {} })
+        : ({ response: "The retainer was deferred [6].", usage: {} }) } },
+  });
+  const body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  const count = Array.isArray(body.results) ? body.results.length : 0;
+  const evidence = Array.isArray(body.evidence_gate?.evidence) ? body.evidence_gate.evidence : [];
+  const citations = Array.isArray(body.citations) ? body.citations : [];
+  check("fixture: the model cited document 6 while the caller asked for 5 results",
+    typeof body.answer === "string" && /\[6\]/.test(body.answer) && evidence.includes(6) &&
+      citations.some((citation) => citation.n === 6),
+    JSON.stringify({ answer: body.answer, evidence_gate: body.evidence_gate, citations: citations.map((c) => c.n) }));
+  check("every evidence receipt number resolves to a returned result",
+    evidence.every((n) => Number.isInteger(n) && n >= 1 && n <= count),
+    JSON.stringify({ evidence, results: count }));
+  check("every citation number resolves to the returned result it names",
+    citations.every((citation) => citation.n >= 1 && citation.n <= count &&
+      body.results[citation.n - 1]?.title === citation.title &&
+      body.results[citation.n - 1]?.source === citation.source),
+    JSON.stringify({ citations: citations.map((c) => c.n), results: count }));
+  const { answerResponseContractDiagnostic } = await import("../../acceptance.mjs");
+  const diagnostic = answerResponseContractDiagnostic(body);
+  check("acceptance's think response contract accepts a small-limit cited answer",
+    diagnostic === null, String(diagnostic));
+}
+
 console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);
 process.exit(fail ? 1 : 0);
 

@@ -1365,7 +1365,10 @@ async function handleThink(
     confidence,
     evidence_authority: approvedDocs.length ? strongestEvidenceAuthority(approvedDocs) || undefined : undefined,
     citations: approvedDocs.map(citationForDocument),
-    results: results.slice(0, limit),
+    // Every document numbered for the answer model stays in the response, so
+    // each citation and evidence receipt number resolves to a returned result
+    // even when the caller asked for fewer than the model was shown.
+    results: results.slice(0, Math.max(limit, docs.length)),
   });
 }
 
