@@ -19,9 +19,10 @@
  * overhead at one comfortable corpus size.
  *
  * The first two tests run everywhere. The other two measure memory as a
- * resident-set delta, which only reads as cost on a platform whose allocator
- * keeps freed pages mapped; see MEMORY_COST_IS_MEASURABLE for what runs
- * instead where it does not, and why there is nothing portable to measure.
+ * resident-set delta, which reads as cost only where the allocator leaves the
+ * freed pages mapped — of the three platforms CI runs, darwin alone; see
+ * MEMORY_COST_IS_MEASURABLE for what runs instead where it does not, and why
+ * there is nothing portable to measure.
  *
  * Every fixture here is synthetic.
  */
@@ -1026,15 +1027,25 @@ const CHUNK_TEXT_DOCUMENTS = 10_000;
  * Where the resident-set proxy means anything, and what runs where it does not.
  *
  * The probe reads `process.memoryUsage().rss` on either side of one `.all()`.
- * That reports what the statement peaked at only where the allocator keeps
- * freed pages mapped in the process, which is what glibc and macOS libmalloc
- * do: the sorter's arena is still resident when the statement returns. Windows
- * hands large blocks straight back to the OS on free, so the working set is
- * already back where it started by the time the second reading is taken. CI
- * run 35249051915 measured the shipped inventory at 4.60 MB against 4.10 MB
- * across the hundredfold chunk-text step that moves it 3.5x here — not less
- * growth, none — and the control assertion below correctly refused to treat
- * that as proof of anything.
+ * That reports what the statement peaked at only where the allocator leaves
+ * the sorter's arena mapped in the process until the second reading is taken,
+ * which is what macOS libmalloc does. Windows hands large blocks straight back
+ * to the OS on free. So does glibc: anything past its mmap threshold is served
+ * with `mmap` and released with `munmap`, and that threshold tops out far
+ * below what a corpus-sized sorter asks for. On both, the working set is
+ * already back where it started by the time the second reading is taken.
+ *
+ * Two CI runs have now measured it, each across the hundredfold chunk-text
+ * step that moves the shipped statement 3.5x on darwin:
+ *
+ *   35249051915  windows  shipped-inventory   4.10 MB ->  4.60 MB   1.12x
+ *   35273588253  ubuntu   shipped-recovery   59.00 MB -> 59.04 MB   1.00x  node 24
+ *   35273588253  ubuntu   shipped-recovery   58.88 MB -> 58.78 MB   1.00x  node 22
+ *
+ * Not less growth on either platform: none, and on node 22 the corpus with a
+ * hundred times the chunk text read fractionally lower than the thin one. The
+ * control assertion below correctly refused to treat that as proof of
+ * anything, on both.
  *
  * There is no portable substitute to switch to. node:sqlite exposes no memory
  * API at all (no `sqlite3_memory_used`, no `sqlite3_status`), and the SQLite it
@@ -1042,21 +1053,34 @@ const CHUNK_TEXT_DOCUMENTS = 10_000;
  * `PRAGMA compile_options`, so those counters are not collected and its
  * allocations never reach V8's `external` or `arrayBuffers` either. A peak
  * working-set reading (`process.resourceUsage().maxRSS`) should survive the
- * free-back, and the probe now reports one, but nothing here can confirm that
- * on Windows, and a memory bound nobody has watched hold is not a bound.
+ * free-back, and the probe now reports one, but no run has yet confirmed that
+ * anywhere the free-back happens, and a memory bound nobody has watched hold
+ * is not a bound.
  *
- * So the cost comparisons run where the proxy is real. On win32 the same
- * statements still run against the same fixtures and must still return the
- * same aggregates within a bounded time, and every unasserted number is
- * printed rather than dropped. What the rewrite is actually for — that the
- * statements return the shipped 0.4.8 rows byte for byte — is asserted on
- * every platform by the first test, which touches none of this.
+ * So the cost assertions run only where the proxy has been watched to carry a
+ * cost, which is darwin and nowhere else yet. An allowlist rather than a list
+ * of known-bad platforms, on purpose: glibc sat on the good list above until
+ * run 35273588253 actually measured it, and a reading nobody has checked is
+ * not evidence that it works. That is also why the whole set goes together
+ * rather than the control alone. Every other memory assertion here has the
+ * form `cost < bound`, and a reading that understates can only make those
+ * pass, so on a platform that frees back they would go on quietly passing
+ * while measuring nothing — which is worse than not running them.
  *
- * `BRAIN_TEST_PLATFORM` exists only so the win32 branch can be exercised from
+ * Off darwin the same statements still run against the same fixtures and must
+ * still return the same aggregates — every source row, every document, every
+ * chunk — within a bounded wall-clock time, and every unasserted number is
+ * printed with its reason rather than dropped. What the rewrite is actually
+ * for — that the statements return the shipped 0.4.8 rows byte for byte — is
+ * asserted on every platform by the first test, and the single corpus pass the
+ * repair turns on is asserted on every platform by the second. Neither test
+ * touches any of this.
+ *
+ * `BRAIN_TEST_PLATFORM` exists only so the other branch can be exercised from
  * a development machine; nothing in the product reads it.
  */
 const TEST_PLATFORM = process.env.BRAIN_TEST_PLATFORM || process.platform;
-const MEMORY_COST_IS_MEASURABLE = TEST_PLATFORM !== "win32";
+const MEMORY_COST_IS_MEASURABLE = TEST_PLATFORM === "darwin";
 // A liveness bound, not a cost bound. The rewritten statements take 2.3 s on
 // 200,000 documents and 0.1 s on the 10,000-document chunk-text fixture on the
 // machine the memory numbers above were measured on, so this allows about 40x
@@ -1118,8 +1142,9 @@ const rows = statement.all(...JSON.parse(bindJson));
 const ms = Date.now() - startedAt;
 const cost = process.memoryUsage().rss - before;
 // The high-water reading is reported but never asserted on. It is the evidence
-// a win32 run leaves behind for whoever wants to re-enable the cost assertions
-// there: see MEMORY_COST_IS_MEASURABLE. maxRSS is kilobytes.
+// a run on a platform that frees back leaves behind for whoever wants to
+// re-enable the cost assertions there: see MEMORY_COST_IS_MEASURABLE. maxRSS
+// is kilobytes.
 const peakCost = (process.resourceUsage().maxRSS - peakBefore) * 1024;
 // Report what the answer actually counted, so a statement that stayed under
 // the bound by returning empty rows cannot pass for one that aggregated the
