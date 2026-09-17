@@ -72,6 +72,20 @@ function makeEnv({
     return { mutationId };
   };
   const d1Queries = { submitted: 0, maxBinds: 0 };
+  // D1 hands a write back its RETURNING rows, and derives meta.changes from a
+  // total_changes() delta that counts trigger writes too. node:sqlite's run()
+  // reports neither, so a stub built on it cannot carry the ingest finalizer's
+  // RETURNING proof. Execute RETURNING writes with all() and report the same
+  // trigger-inclusive delta D1 does; a row that does not match still comes back
+  // empty, so nothing here can manufacture a commit the database refused.
+  const write = (sql, params) => {
+    if (!/\bRETURNING\b/i.test(sql)) {
+      return { results: [], meta: { changes: Number(db.prepare(sql).run(...params).changes || 0) } };
+    }
+    const before = db.prepare("SELECT total_changes() AS n").get().n;
+    const results = db.prepare(sql).all(...params);
+    return { results, meta: { changes: db.prepare("SELECT total_changes() AS n").get().n - before } };
+  };
   const prepare = (sql) => {
     const shape = (params = []) => ({
       bind: (...next) => shape(next),
@@ -96,8 +110,7 @@ function makeEnv({
       run: async () => {
         d1Queries.submitted++;
         d1Queries.maxBinds = Math.max(d1Queries.maxBinds, params.length);
-        const result = db.prepare(sql).run(...params);
-        return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+        return { success: true, ...write(sql, params) };
       },
       _sql: sql,
       _params: params,
@@ -131,12 +144,12 @@ function makeEnv({
                 /UPDATE chunks AS c SET vector_id/.test(statement._sql)) {
               return { success: true, results: [], meta: { changes: 0 } };
             }
-            const result = db.prepare(statement._sql).run(...statement._params);
+            const result = write(statement._sql, statement._params);
             const changes = Number.isSafeInteger(acceleratedVectorIdReportedChanges) &&
                 /UPDATE chunks AS c SET vector_id/.test(statement._sql)
               ? acceleratedVectorIdReportedChanges
-              : Number(result.changes || 0);
-            return { success: true, results: [], meta: { changes } };
+              : result.meta.changes;
+            return { success: true, results: result.results, meta: { changes } };
           });
           db.exec("COMMIT");
           return results;
