@@ -3528,14 +3528,22 @@ THEN 1 ELSE 0 END`;
  *
  * `brain sources` failed on a large brain with an opaque 503 while strictly
  * heavier aggregates over the same rows still returned. The cause was memory,
- * not time: D1 holds a materialised CTE in RAM, and these CTEs carried every
- * live document's `meta` JSON through three corpus-sized materialisations to
- * produce one row per source. So every `meta`-derived flag is now decided in
- * `live_documents`, and each downstream CTE names the narrow columns it
- * forwards. Measured on a schema-46-shaped SQLite at 50,000 documents with a
- * kilobyte of metadata each, the statements below cost about 25 MB where the
- * shipped ones cost 269 MB and 356 MB, and the cost no longer tracks metadata
- * size at all.
+ * not time: D1 holds a materialised CTE in RAM, and these CTEs pushed two
+ * corpus-sized payloads through them to produce one row per source. Every live
+ * document's `meta` JSON crossed three materialisations, and every chunk's
+ * full text crossed the sorter that counted chunks per document. Both are
+ * gone: each `meta`-derived flag is decided in `live_documents`, each
+ * downstream CTE names the narrow columns it forwards, and
+ * `chunk_per_document` groups over the chunk index rather than over documents
+ * joined to chunks.
+ *
+ * Measured on a schema-46-shaped SQLite at the shape that failed — 200,000
+ * documents, nine chunks each, a kilobyte of metadata each — the statements
+ * below cost 73 MB and 97 MB where the shipped ones cost 1.23 GB and 1.59 GB.
+ * The cost now tracks neither metadata size nor chunk-text size; what is left
+ * is about 0.4 KB per document, so it is still linear in corpus size and the
+ * regression test bounds it at the corpus that failed rather than at a
+ * comfortable one.
  *
  * `live_documents` keeps its `MATERIALIZED` hint precisely because it is narrow
  * now: it is what holds the corpus scan and the per-row JSON work to one pass
@@ -3600,13 +3608,20 @@ const INVENTORY_DOCUMENT_CTES_SQL = `
            END AS inventory_source
       FROM live_documents
   ),
+  -- Grouped on chunks itself rather than on the documents joined to it. The
+  -- join-then-group shape could not use idx_chunks_doc for its grouping, so it
+  -- sorted, and the sorter carried every chunk's full text: at the product's
+  -- 1500-byte CHUNK_SIZE that was the largest cost in the statement, several
+  -- times what the metadata ever was. Grouping over the index reads each chunk
+  -- once, decides the blank test before the row is forwarded, and keeps only
+  -- two integers per document. Documents with no chunks are still counted: the
+  -- join below is a LEFT JOIN and both columns are coalesced.
   chunk_per_document AS (
-    SELECT a.doc_uid,
-           COUNT(c.chunk_uid) AS chunk_count,
-           COALESCE(SUM(CASE WHEN trim(c.text) != '' THEN 1 ELSE 0 END),0) AS nonblank_chunk_count
-      FROM attributed_documents a
-      LEFT JOIN chunks c ON c.doc_uid=a.doc_uid
-     GROUP BY a.doc_uid
+    SELECT doc_uid,
+           COUNT(chunk_uid) AS chunk_count,
+           COALESCE(SUM(CASE WHEN trim(text) != '' THEN 1 ELSE 0 END),0) AS nonblank_chunk_count
+      FROM chunks
+     GROUP BY doc_uid
   ),
   document_flags AS (
     SELECT a.document_rowid,

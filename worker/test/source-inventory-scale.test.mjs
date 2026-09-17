@@ -2,14 +2,18 @@
  * The source statements must stay cheap enough for a whole corpus to fit.
  *
  * `brain sources` failed in the field with an opaque 503 on a large brain: the
- * inventory and recovery statements each carried every live document's `meta`
- * JSON through three corpus-sized materialised CTEs, so D1 aborted them while
- * strictly heavier aggregates over the same rows still completed. These tests
- * hold both halves of that repair. The first proves the rewritten statements
- * return rows byte-identical to the shipped 0.4.8 SQL, which is kept verbatim
- * below so the comparison is against what actually failed rather than against
- * the code under test. The second proves the rewritten statements stay inside a
- * bounded memory proxy on a corpus large enough that the original exceeds it.
+ * inventory and recovery statements pushed every live document's `meta` JSON
+ * through three corpus-sized materialised CTEs and every chunk's full text
+ * through the sorter that counted chunks, so D1 aborted them while strictly
+ * heavier aggregates over the same rows still completed. Three tests hold that
+ * repair. The first proves the rewritten statements return rows byte-identical
+ * to the shipped 0.4.8 SQL, which is kept verbatim below so the comparison is
+ * against what actually failed rather than against the code under test. The
+ * second proves their cost no longer moves when chunk text grows from a token
+ * to the product's own chunk size. The third bounds them on the corpus shape
+ * that failed — 200,000 documents and 1.8 million chunks — and bounds the slope
+ * between that size and a smaller one, so the bound cannot be met by a lucky
+ * fixed overhead at one comfortable corpus size.
  *
  * Every fixture here is synthetic.
  */
@@ -922,16 +926,43 @@ test("the rewritten source statements return the shipped 0.4.8 rows byte for byt
   db.close();
 });
 
-// Big enough that the shipped statement's whole-corpus copies of `meta` are
-// unmistakable, small enough to build and run well inside the default timeout.
-const SCALE_DOCUMENTS = 50_000;
+// The shape that failed in the field: about 200,000 live documents and 1.7
+// million chunks, roughly nine chunks per document. Both halves of the cost
+// this rewrite removes are corpus-sized, and at a comfortably smaller corpus
+// the shipped statements fit as well, so a bound measured there would hold
+// whether or not `brain sources` recovers on a real brain.
+const FIELD_DOCUMENTS = 200_000;
+const SMALL_DOCUMENTS = 50_000;
+const SCALE_CHUNKS_PER_DOCUMENT = 9;
 const SCALE_META_BYTES = 1000;
-const SCALE_CHUNKS_PER_DOCUMENT = 2;
-// Measured here: the rewritten statements cost about 25 MB and the shipped ones
-// about 270 MB and 355 MB. This is a resident-set proxy, not exact SQLite
-// accounting, so the bound sits far from both rather than near either.
-const SCALE_MEMORY_BOUND_BYTES = 96 * 1024 * 1024;
-const SCALE_BUILD_BUDGET_MS = 30_000;
+// `CHUNK_SIZE` in worker/src/lib/store.js: what one real chunk's text costs.
+// The shipped statement pushed every one of them through a sorter.
+const PRODUCT_CHUNK_TEXT_BYTES = 1500;
+const THIN_CHUNK_TEXT_BYTES = 15;
+
+/*
+ * Measured here on a schema-46-shaped SQLite, nine chunks and a kilobyte of
+ * metadata per document, resident-set proxy, one child process per statement:
+ *
+ *   documents   rewritten            shipped 0.4.8
+ *      50,000    20 MB /  27 MB      309 MB /  399 MB
+ *     200,000    73 MB /  97 MB     1.23 GB / 1.59 GB
+ *
+ * Both bounds sit below what the same statements cost with only the metadata
+ * half of the repair applied — 55/59 MB at 50,000 and 218/233 MB at 200,000 —
+ * so losing either half fails this test instead of passing on the other's
+ * margin. They are a resident-set proxy, not exact SQLite accounting.
+ */
+const SMALL_MEMORY_BOUND_BYTES = 48 * 1024 * 1024;
+const FIELD_MEMORY_BOUND_BYTES = 192 * 1024 * 1024;
+// What remains is linear in documents: 0.35 KB and 0.47 KB per document across
+// those two sizes. The slope is asserted as well as the endpoint, so a change
+// that moves cost out of a fixed overhead and into the per-document term
+// cannot hide inside a single bound.
+const MEMORY_PER_DOCUMENT_BOUND_BYTES = 768;
+// 30 s at 50,000 documents, 120 s at 200,000. A machine slower than that is
+// not one whose memory numbers are worth asserting on.
+const SCALE_BUILD_BUDGET_MS_PER_DOCUMENT = 0.6;
 
 /**
  * Each statement is measured in its own process.
@@ -954,10 +985,38 @@ db.exec("PRAGMA cache_size=-2000");
 const statement = db.prepare(readFileSync(sqlPath, "utf8"));
 const before = process.memoryUsage().rss;
 const rows = statement.all(...JSON.parse(bindJson));
-process.stdout.write(JSON.stringify({ rows: rows.length, cost: process.memoryUsage().rss - before }));
+const cost = process.memoryUsage().rss - before;
+// Report what the answer actually counted, so a statement that stayed under
+// the bound by returning empty rows cannot pass for one that aggregated the
+// whole corpus.
+const total = (column) => rows.reduce((sum, row) => sum + Number(row[column] ?? 0), 0);
+const inventory = rows.length > 0 && "physical_documents" in rows[0];
+process.stdout.write(JSON.stringify({
+  rows: rows.length,
+  cost,
+  documents: inventory ? total("physical_documents") : Number(rows[0]?.recovery_total ?? 0),
+  chunks: inventory ? total("chunks") : null,
+}));
 `;
 
-function buildScaleCorpus(dbPath) {
+/** One probe runner per temporary root; each statement gets its own child. */
+function scaleProbe(root) {
+  const probePath = join(root, "probe.mjs");
+  writeFileSync(probePath, SCALE_PROBE);
+  return (label, dbPath, sql, binds) => {
+    const sqlPath = join(root, `${label}.sql`);
+    writeFileSync(sqlPath, sql);
+    const probe = spawnSync(
+      process.execPath,
+      ["--no-warnings", probePath, dbPath, sqlPath, JSON.stringify(binds)],
+      { encoding: "utf8" },
+    );
+    assert.equal(probe.status, 0, `${label} probe failed: ${probe.stderr}`);
+    return JSON.parse(probe.stdout);
+  };
+}
+
+function buildScaleCorpus(dbPath, { documents, chunkTextBytes }) {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode=OFF");
   db.exec("PRAGMA synchronous=OFF");
@@ -988,8 +1047,9 @@ function buildScaleCorpus(dbPath) {
      VALUES (?,?,?,?,?,?,?,?,?)`,
   );
   const padding = "x".repeat(SCALE_META_BYTES);
+  const chunkText = "synthetic chunk text ".repeat(Math.ceil(chunkTextBytes / 21)).slice(0, chunkTextBytes);
   db.exec("BEGIN");
-  for (let index = 0; index < SCALE_DOCUMENTS; index++) {
+  for (let index = 0; index < documents; index++) {
     const source = SOURCE_NAMES[index % SOURCE_NAMES.length];
     const docUid = `${source}:doc-${index}`;
     // Migration 0039 leaves pre-0.4.8 rows unassessed by design, so an upgraded
@@ -1005,62 +1065,140 @@ function buildScaleCorpus(dbPath) {
     );
     for (let chunk = 0; chunk < SCALE_CHUNKS_PER_DOCUMENT; chunk++) {
       insertChunk.run(
-        `${docUid}#${chunk}`, docUid, chunk, `synthetic ${index}-${chunk}`,
+        `${docUid}#${chunk}`, docUid, chunk, chunkText,
         source, `Synthetic ${index}`, 1, null, null,
       );
+    }
+    // One transaction per 20,000 documents: the whole corpus in one keeps the
+    // rollback journal in memory and competes with the measurement it feeds.
+    if (index % 20_000 === 19_999) {
+      db.exec("COMMIT");
+      db.exec("BEGIN");
     }
   }
   db.exec("COMMIT");
   db.close();
 }
 
-test(`the rewritten source statements stay bounded on ${SCALE_DOCUMENTS} documents`, (t) => {
-  const root = mkdtempSync(join(tmpdir(), "brain-source-inventory-scale-"));
+test("the rewritten source statements no longer pay for chunk text", () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-source-inventory-chunk-text-"));
   try {
-    const dbPath = join(root, "corpus.db");
-    const started = Date.now();
-    buildScaleCorpus(dbPath);
-    const buildMs = Date.now() - started;
-    if (buildMs > SCALE_BUILD_BUDGET_MS) {
-      t.skip(`building ${SCALE_DOCUMENTS} synthetic documents took ${buildMs}ms on this machine`);
-      return;
+    const measure = scaleProbe(root);
+    const corpora = {};
+    for (const [label, chunkTextBytes] of [
+      ["thin", THIN_CHUNK_TEXT_BYTES],
+      ["product", PRODUCT_CHUNK_TEXT_BYTES],
+    ]) {
+      const dbPath = join(root, `corpus-${label}.db`);
+      buildScaleCorpus(dbPath, { documents: 10_000, chunkTextBytes });
+      corpora[label] = dbPath;
     }
 
-    const probePath = join(root, "probe.mjs");
-    writeFileSync(probePath, SCALE_PROBE);
-    const measure = (label, sql, binds) => {
-      const sqlPath = join(root, `${label}.sql`);
-      writeFileSync(sqlPath, sql);
-      const probe = spawnSync(
-        process.execPath,
-        ["--no-warnings", probePath, dbPath, sqlPath, JSON.stringify(binds)],
-        { encoding: "utf8" },
-      );
-      assert.equal(probe.status, 0, `${label} probe failed: ${probe.stderr}`);
-      return JSON.parse(probe.stdout);
-    };
-
-    const cases = [
-      ["rewritten-inventory", sourceInventorySql(), [10001], SOURCE_NAMES.length, true],
-      ["rewritten-recovery", sourceRecoverySql, [null, 0, 101], 101, true],
-      ["shipped-inventory", originalInventorySql(), [10001], SOURCE_NAMES.length, false],
-      ["shipped-recovery", ORIGINAL_SOURCE_RECOVERY_SQL, [null, 0, 101], 101, false],
+    const statements = [
+      ["rewritten-inventory", sourceInventorySql(), [10001], true],
+      ["rewritten-recovery", sourceRecoverySql, [null, 0, 101], true],
+      ["shipped-inventory", originalInventorySql(), [10001], false],
+      ["shipped-recovery", ORIGINAL_SOURCE_RECOVERY_SQL, [null, 0, 101], false],
     ];
-    for (const [label, sql, binds, expectedRows, bounded] of cases) {
-      const measured = measure(label, sql, binds);
-      assert.equal(measured.rows, expectedRows, `${label} answered a different question`);
-      if (bounded) {
+    for (const [label, sql, binds, rewritten] of statements) {
+      const thin = measure(`${label}-thin`, corpora.thin, sql, binds);
+      const product = measure(`${label}-product`, corpora.product, sql, binds);
+      assert.equal(product.documents, 10_000, `${label} did not aggregate the whole corpus`);
+      if (rewritten) {
+        // Measured 6.14 MB against 6.21 MB, and 7.98 MB against 8.03 MB: the
+        // chunk aggregate now decides the blank test per chunk and forwards
+        // two integers, so a hundredfold more chunk text costs nothing.
         assert.ok(
-          measured.cost < SCALE_MEMORY_BOUND_BYTES,
-          `${label} used ${measured.cost} bytes, over the ${SCALE_MEMORY_BOUND_BYTES} byte bound`,
+          product.cost <= thin.cost * 1.25,
+          `${label} cost ${product.cost} bytes at ${PRODUCT_CHUNK_TEXT_BYTES}-byte chunk text`
+          + ` against ${thin.cost} at ${THIN_CHUNK_TEXT_BYTES}: chunk text is reaching memory again`,
         );
       } else {
+        // The other direction, so the fixture is known to be able to see the
+        // effect at all: the shipped statements grew 3.5x and 2.9x here.
         assert.ok(
-          measured.cost > SCALE_MEMORY_BOUND_BYTES,
-          `${label} used ${measured.cost} bytes and was expected to exceed the bound;`
-          + " if the shipped statement now fits, this regression test no longer proves anything",
+          product.cost >= thin.cost * 2,
+          `${label} cost ${product.cost} bytes against ${thin.cost}; if chunk text no longer`
+          + " moves the shipped statement, this comparison no longer proves anything",
         );
       }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documents`, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "brain-source-inventory-scale-"));
+  try {
+    const measure = scaleProbe(root);
+    const costs = new Map();
+    for (const documents of [SMALL_DOCUMENTS, FIELD_DOCUMENTS]) {
+      const dbPath = join(root, `corpus-${documents}.db`);
+      const started = Date.now();
+      // Chunk text is thin here on purpose: the test above proves the rewritten
+      // statements no longer pay for it, and a field-sized corpus at the
+      // product's chunk size would be several gigabytes of fixture.
+      buildScaleCorpus(dbPath, { documents, chunkTextBytes: THIN_CHUNK_TEXT_BYTES });
+      const buildMs = Date.now() - started;
+      if (buildMs > documents * SCALE_BUILD_BUDGET_MS_PER_DOCUMENT) {
+        t.skip(`building ${documents} synthetic documents took ${buildMs}ms on this machine`);
+        return;
+      }
+
+      const bound = documents === FIELD_DOCUMENTS ? FIELD_MEMORY_BOUND_BYTES : SMALL_MEMORY_BOUND_BYTES;
+      const measured = new Map();
+      for (const [label, sql, binds, expectedRows] of [
+        ["rewritten-inventory", sourceInventorySql(), [10001], SOURCE_NAMES.length],
+        ["rewritten-recovery", sourceRecoverySql, [null, 0, 101], 101],
+      ]) {
+        const probe = measure(`${label}-${documents}`, dbPath, sql, binds);
+        assert.equal(probe.rows, expectedRows, `${label} answered a different question`);
+        assert.equal(probe.documents, documents, `${label} did not aggregate all ${documents} documents`);
+        if (probe.chunks !== null) {
+          assert.equal(
+            probe.chunks, documents * SCALE_CHUNKS_PER_DOCUMENT,
+            `${label} did not count every chunk`,
+          );
+        }
+        assert.ok(
+          probe.cost < bound,
+          `${label} used ${probe.cost} bytes on ${documents} documents, over the ${bound} byte bound`,
+        );
+        measured.set(label, probe.cost);
+      }
+      costs.set(documents, measured);
+
+      if (documents === SMALL_DOCUMENTS) {
+        // The shipped statements are measured only at the smaller size. At the
+        // field size they want well over a gigabyte — which is the failure
+        // itself — and one reproduction is enough to show this fixture still
+        // exercises what broke.
+        for (const [label, sql, binds] of [
+          ["shipped-inventory", originalInventorySql(), [10001]],
+          ["shipped-recovery", ORIGINAL_SOURCE_RECOVERY_SQL, [null, 0, 101]],
+        ]) {
+          const probe = measure(`${label}-${documents}`, dbPath, sql, binds);
+          assert.ok(
+            probe.cost > bound,
+            `${label} used ${probe.cost} bytes and was expected to exceed the bound;`
+            + " if the shipped statement now fits, this regression test no longer proves anything",
+          );
+        }
+      }
+      // Each corpus is removed before the next is built: the pair would
+      // otherwise hold more than a gigabyte of fixture on disk at once.
+      rmSync(dbPath, { force: true });
+    }
+
+    for (const label of ["rewritten-inventory", "rewritten-recovery"]) {
+      const growth = costs.get(FIELD_DOCUMENTS).get(label) - costs.get(SMALL_DOCUMENTS).get(label);
+      const perDocument = growth / (FIELD_DOCUMENTS - SMALL_DOCUMENTS);
+      assert.ok(
+        perDocument < MEMORY_PER_DOCUMENT_BOUND_BYTES,
+        `${label} grew ${perDocument.toFixed(1)} bytes per document between ${SMALL_DOCUMENTS}`
+        + ` and ${FIELD_DOCUMENTS}, over the ${MEMORY_PER_DOCUMENT_BOUND_BYTES} byte slope bound`,
+      );
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
