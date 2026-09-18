@@ -10,15 +10,16 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
-- **Drive now has a real confirmation path for files the owner deleted
-  permanently.** A 404, or a 403 whose provider response says `notFound`, adds
-  the stored family to the exact `source_deleted` removal plan and never
-  deletes it automatically. Review the aggregate plan, then approve only that
-  fingerprint with `brain ingest <manifest> --from drive --approve-removals
-  <fingerprint>`. A different 403 remains an access problem: the item stays in
-  `drive_removal_review`, is excluded from deletion, and clears only after a
-  later walk can see it again. Approved deletions are read back before their
-  review entries clear. No file identity is printed in either path.
+- **Drive no longer mistakes a hidden file for a deleted file.** A 404 proves
+  only that Drive stopped returning that item to this credential, so the Brain
+  keeps its last accessible copy and records a seven-day review window. The
+  item enters a deletion plan only when Drive's change feed also reports its id
+  removed, or a second walk at least seven days later gets the same result. The
+  approval stop shows the locally saved name and folder for each corroborated
+  candidate. Nothing from that candidate list is deleted without the exact
+  `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
+  approval. A 403 access denial remains outside the plan. Approved deletions
+  are read back before their review entries clear.
 
 - **Older Brains can now produce a safe update-preview observation.** A Brain
   recorded as 0.4.0 through 0.4.6 does not report either its Worker version or

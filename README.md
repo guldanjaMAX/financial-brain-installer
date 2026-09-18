@@ -784,12 +784,16 @@ crossing the applicable limit stops before deleting anything or advancing the
 source cursor. It prints aggregate counts and an opaque approval fingerprint,
 never filenames or document IDs. Review the cause, then add the exact
 `--approve-removals <fingerprint>` value only when the plan is expected.
-Drive treats access loss differently: an access-denied 403 remains in the
+Drive treats access loss differently. An access-denied 403 remains in the
 review record and is excluded from deletion. A 404, or a 403 whose provider
-response says `notFound`, enters the `source_deleted` plan but is never removed
-automatically. Approve that exact plan only with `brain ingest <manifest>
---from drive --approve-removals <fingerprint>`. Visible trash and a visible move
-outside the reviewed roots remain direct source proof.
+response says `notFound`, proves only that Drive stopped returning the item to
+this credential. It stays in review unless the same id also has a change-feed
+removal event or Drive still does not return it on a second walk at least seven
+days later. Only then does it enter the `source_deleted` plan. The stopped
+approval message shows each candidate's locally saved name and folder, and no
+such candidate is deleted without the exact `brain ingest <manifest> --from
+drive --approve-removals <fingerprint>` approval. Visible trash and a visible
+move outside the reviewed roots remain direct source proof.
 
 Gmail reads additions, deletions, and label changes from its typed history. A
 complete pass also compares the filtered mailbox snapshot with the live D1

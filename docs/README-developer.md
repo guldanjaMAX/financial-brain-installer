@@ -663,14 +663,22 @@ a currently accepted message wins over a stale pending marker. A complete IMAP
 pass also compares its stable message identities with D1 and reads every planned
 removal back before committing folder watermarks.
 
-Drive never treats access loss as deletion evidence. Any account-wide changed
-item is rebuilt through the reviewed-root traversal before content is read. A
-403 access denial or inconsistent in-scope omission stays in the review record
-and outside the deletion plan. A 404, or a 403 carrying `notFound` or `File not
-found`, enters the `source_deleted` plan, but even one such target requires the
+Any account-wide changed item is rebuilt through the reviewed-root traversal
+before content is read.
+
+Drive never treats access loss as deletion evidence. A 403 access denial or
+inconsistent in-scope omission stays in the review record and outside the
+deletion plan. A 404, including a 403 response carrying `notFound` or `File not
+found`, proves only that Drive stopped returning the item to this credential.
+The first such observation records a dated seven-day grace window and remains
+outside the plan. It becomes a `source_deleted` candidate only when the same id
+also has a change-feed removal event, or a second not-returned observation is
+made at least seven days later. Even one corroborated candidate stops for the
 exact `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
-approval. Visible trash and a visible move outside the reviewed roots remain
-ordinary source-deletion evidence.
+approval and shows the locally saved name and folder. Those labels remain local
+terminal context; they are not added to Worker requests or source receipts.
+Visible trash and a visible move outside the reviewed roots remain direct
+source-deletion evidence.
 
 A Gmail full pass is an authoritative snapshot. It compares every message
 allowed by the default query with the live D1 family inventory, so messages

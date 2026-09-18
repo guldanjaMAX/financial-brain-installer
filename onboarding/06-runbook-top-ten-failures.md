@@ -667,14 +667,26 @@ A bad import being one command instead of a support call is the reason you can a
 
 ### Cleanup says `review required`
 
-This is an intentional safety stop, not an installer crash. The proposed cleanup
-crossed 100 documents or 10% of what that source had loaded. Nothing in the plan
-was removed, and the source cursor was not advanced.
+This is an intentional safety stop, not an installer crash. It has three
+possible causes, and the owner action depends on which one the message names:
 
-Review the aggregate reason counts in the message. If the change is expected,
-rerun with the exact `--approve-removals <fingerprint>` value it printed. If the
-change is surprising, do not approve it. Check the connection and source policy,
-then rerun so a fresh source comparison produces a new plan.
+1. **The cleanup plan crossed 100 documents or 10% of what the source had
+   loaded.** Nothing in the plan was removed, and the source cursor was not
+   advanced. Review the aggregate reason counts. If the change is expected,
+   rerun with the exact `--approve-removals <fingerprint>` value it printed. If
+   it is surprising, do not approve it. Check the connection and source policy,
+   then rerun so a fresh comparison produces a new plan.
+2. **Drive stopped returning an item, but deletion is not corroborated yet.**
+   The Brain keeps its last accessible copy. Restore sharing if access changed,
+   or wait until the recorded seven-day grace date and run Drive ingestion
+   again. Only a matching change-feed removal or a second not-returned result at
+   least seven days later can create a deletion candidate. That later approval
+   stop shows the locally saved name and folder. Review those labels, then use
+   the exact fingerprint only if deletion is expected.
+3. **Drive returned an access-denied 403 during the end-of-run absence check.**
+   The indexed copy remains in place and outside every deletion plan. Restore
+   this credential's access to the file, then rerun Drive ingestion. There is no
+   deletion approval to give for this stop.
 
 **On a watched local folder this most often means the folder was not there.** A
 cloud folder that had not finished syncing, an external drive that was not
