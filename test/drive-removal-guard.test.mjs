@@ -640,6 +640,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     pendingRemoval = false,
     priorReview = false,
     priorNotReturnedDays = null,
+    priorNotReturnedNamed = true,
     priorChangeFeedDays = null,
     args = [],
   } = {}) => {
@@ -764,6 +765,10 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
               last_observed_at: firstObservedAt.toISOString(),
               grace_eligible_at: new Date(firstObservedAt.getTime() + (7 * 24 * 60 * 60 * 1000)).toISOString(),
               observation_count: 1,
+              ...(priorNotReturnedNamed ? {
+                name: "Owner tax return.txt",
+                folder_path: "Reviewed Root/Tax",
+              } : {}),
             }],
             source_deletion_candidates: [],
           },
@@ -826,7 +831,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         full ? `fixture-prewalk-${mode}` : `fixture-next-${mode}`,
         "a completed Drive walk did not save its cursor",
       );
-      assert.equal(state.drive_removal_review.schema_version, 3);
+      assert.equal(state.drive_removal_review.schema_version, 4);
       assert.equal(state.drive_removal_review.issue_code, "SAFETY_REVIEW_REQUIRED");
       assert.deepEqual(state.drive_removal_review.uids, ["drive:missing-sensitive"]);
       assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
@@ -877,7 +882,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.removedFamilies, 0);
     const state = unresolvedPending.state();
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 3,
+      schema_version: 4,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: 1,
@@ -991,7 +996,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const state = unresolvedBatch.state();
     assert.equal(state.sync_token, "fixture-next-incremental-unresolved-batch");
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 3,
+      schema_version: 4,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: 3,
@@ -1045,7 +1050,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(goneReviewOnly.evidence().forgetRequests, 0,
       "a change-feed removal event reached the destructive endpoint");
     const review = goneReviewOnly.state().drive_removal_review;
-    assert.equal(review.schema_version, 3);
+    assert.equal(review.schema_version, 4);
     assert.deepEqual(review.counts, {
       unresolved_absences: 1,
       unresolved_access: 0,
@@ -1111,10 +1116,27 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     recentRepeat.cleanup();
   }
 
+  const unnamedLegacy = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    priorNotReturnedNamed: false,
+    args: ["--approve-removals", "0".repeat(64)],
+  });
+  try {
+    assert.equal(unnamedLegacy.code, 1, unnamedLegacy.output);
+    assert.match(unnamedLegacy.output, /does not contain the saved name and folder/i);
+    assert.equal(/--approve-removals [0-9a-f]{64}/.test(unnamedLegacy.output), false,
+      "an unnamed legacy review record advertised an approval fingerprint");
+    assert.equal(unnamedLegacy.evidence().forgetRequests, 0);
+  } finally {
+    unnamedLegacy.cleanup();
+  }
+
   let elapsedApproval = null;
   const elapsedRepeat = runScopeScenario("full-unresolved", {
     full: true,
     priorNotReturnedDays: 8,
+    args: ["--reset"],
   });
   try {
     assert.equal(elapsedRepeat.code, 1, elapsedRepeat.output);
@@ -1146,7 +1168,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   const elapsedApproved = runScopeScenario("full-unresolved", {
     full: true,
     priorNotReturnedDays: 8,
-    args: ["--approve-removals", elapsedApproval],
+    args: ["--reset", "--approve-removals", elapsedApproval],
   });
   try {
     assert.equal(elapsedApproved.code, 0, elapsedApproved.output);

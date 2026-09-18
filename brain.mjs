@@ -14248,11 +14248,24 @@ const cmdIngestRemoteRun = async (
     : null;
   const driveReviewObservedAt = new Date().toISOString();
   const driveAbsenceGraceMs = 7 * 24 * 60 * 60 * 1000;
+  const localDriveReviewDetails = (uid) => {
+    let version = null;
+    try { version = JSON.parse(String(state.done?.[uid] || "")); } catch { /* unavailable */ }
+    const name = Array.isArray(version) && typeof version[2] === "string" && version[2].trim()
+      ? version[2].trim()
+      : null;
+    const folderPath = Array.isArray(version) && typeof version[4] === "string" && version[4].trim()
+      ? version[4].trim()
+      : null;
+    return { name, folderPath };
+  };
   const driveGraceRecord = (uid, {
     firstObservedAt = driveReviewObservedAt,
     lastObservedAt = driveReviewObservedAt,
     observationCount = 1,
     changeFeedRemovedAt = null,
+    name = null,
+    folderPath = null,
   } = {}) => {
     const firstMs = Date.parse(firstObservedAt);
     const lastMs = Date.parse(lastObservedAt);
@@ -14267,6 +14280,8 @@ const cmdIngestRemoteRun = async (
       last_observed_at: new Date(safeLastMs).toISOString(),
       grace_eligible_at: new Date(safeFirstMs + driveAbsenceGraceMs).toISOString(),
       observation_count: valid ? observationCount : 1,
+      ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
+      ...(typeof folderPath === "string" && folderPath.trim() ? { folder_path: folderPath.trim() } : {}),
       ...(Number.isFinite(changeFeedRemovedMs)
         ? { change_feed_removed_at: new Date(changeFeedRemovedMs).toISOString() }
         : {}),
@@ -14295,6 +14310,8 @@ const cmdIngestRemoteRun = async (
       lastObservedAt: raw.last_observed_at,
       observationCount: raw.observation_count,
       changeFeedRemovedAt: raw.change_feed_removed_at,
+      name: raw.name,
+      folderPath: raw.folder_path,
     });
     unresolvedNotReturnedDriveReview.set(record.uid, record);
   }
@@ -14313,6 +14330,8 @@ const cmdIngestRemoteRun = async (
       observationCount: raw.observation_count,
       changeFeedRemovedAt: raw.change_feed_removed_at ||
         (raw.corroboration === "change_feed_removed" ? raw.last_observed_at : null),
+      name: raw.name,
+      folderPath: raw.folder_path,
     });
     if (raw.corroboration === "change_feed_removed") {
       unresolvedNotReturnedDriveReview.set(record.uid, record);
@@ -14369,7 +14388,7 @@ const cmdIngestRemoteRun = async (
       return;
     }
     driveRemovalReview = {
-      schema_version: 3,
+      schema_version: 4,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: unresolvedAccessUids.length + unresolvedNotReturned.length,
@@ -14691,7 +14710,7 @@ const cmdIngestRemoteRun = async (
             confirmedDriveAbsenceUids.push(uid);
             continue;
           }
-          const firstObservation = prior || driveGraceRecord(uid);
+          const firstObservation = prior || driveGraceRecord(uid, localDriveReviewDetails(uid));
           unresolvedNotReturnedDriveReview.set(uid, {
             ...firstObservation,
             last_observed_at: driveReviewObservedAt,
@@ -14705,7 +14724,7 @@ const cmdIngestRemoteRun = async (
         if (classification.kind === "gone") {
           // Older injected connector doubles may still return R6's temporary
           // name. Keep those tests and adapters fail-closed as uncorroborated.
-          unresolvedNotReturnedDriveReview.set(uid, driveGraceRecord(uid));
+          unresolvedNotReturnedDriveReview.set(uid, driveGraceRecord(uid, localDriveReviewDetails(uid)));
           continue;
         }
         if (classification.kind === "unresolved_access" || classification.kind === "unresolved") {
@@ -14867,11 +14886,21 @@ const cmdIngestRemoteRun = async (
       const eligibleCorroboratedPlanTargets = excludeProtectedDriveUids(corroboratedPlanTargets)
         .filter((uid) => storedUids.has(uid) && !seenUids.has(uid));
       if (eligibleCorroboratedPlanTargets.length && removalApproval !== driveRemovalPlan.fingerprint) {
+        const unnamed = eligibleCorroboratedPlanTargets.filter((uid) => {
+          const record = pendingSourceDeletionDriveReview.get(uid);
+          return !record?.name || !record?.folder_path;
+        });
+        if (unnamed.length) {
+          throw new DriveRemovalReviewRequired(
+            `Drive cannot present ${unnamed.length} removal candidate(s) for approval because the local review record ` +
+              "does not contain the saved name and folder. Nothing was removed and no approval fingerprint was issued. " +
+              "Restore the prior ingest state or let Drive return the file so the local labels can be recorded."
+          );
+        }
         const localDetails = eligibleCorroboratedPlanTargets.map((uid) => {
-          let version = null;
-          try { version = JSON.parse(String(state.done?.[uid] || "")); } catch { /* unavailable below */ }
-          const name = safeIngestDisplay(Array.isArray(version) ? version[2] : null, "name unavailable");
-          const folder = safeIngestDisplay(Array.isArray(version) ? version[4] : null, "folder unavailable");
+          const record = pendingSourceDeletionDriveReview.get(uid);
+          const name = safeIngestDisplay(record.name);
+          const folder = safeIngestDisplay(record.folder_path);
           return `      - ${name} (folder: ${folder})`;
         }).join("\n");
         throw new DriveRemovalReviewRequired(
