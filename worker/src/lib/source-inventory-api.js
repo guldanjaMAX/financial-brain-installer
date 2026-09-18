@@ -95,7 +95,8 @@ async function inventoryBody(request) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { error: "source inventory request must be a JSON object", status: 400 };
   }
-  if (Object.keys(body).some((field) => !["cursor", "limit", "mode", "source"].includes(field))) {
+  if (Object.keys(body).some((field) =>
+    !["cursor", "limit", "mode", "source", "source_group_cursor"].includes(field))) {
     return { error: "source inventory request has unknown fields", status: 400 };
   }
   const mode = body.mode === undefined ? "inventory" : body.mode;
@@ -118,11 +119,24 @@ async function inventoryBody(request) {
   if (mode === "inventory" && body.source !== undefined) {
     return { error: "source is available only in recovery mode", status: 400 };
   }
+  if (body.source_group_cursor !== undefined &&
+      (mode !== "recovery" || typeof body.source_group_cursor !== "string" ||
+       !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.source_group_cursor))) {
+    return { error: "source_group_cursor is available only in recovery mode and must be a normalized source id", status: 400 };
+  }
   const source = body.source ?? cursor?.source ?? null;
   if (cursor && cursor.source !== source) {
     return { error: "source does not match this recovery cursor", status: 400 };
   }
-  return { body: { limit, cursor, mode, source } };
+  return {
+    body: {
+      limit,
+      cursor,
+      mode,
+      source,
+      sourceGroupCursor: body.source_group_cursor ?? null,
+    },
+  };
 }
 
 function sourceInventoryLimitations() {
@@ -199,6 +213,9 @@ function recoveryPlanSummary(sources) {
     candidate_source_groups: sourceGroups.length,
     source_groups_returned: boundedSourceGroups.length,
     source_groups_truncated: boundedSourceGroups.length < sourceGroups.length,
+    source_groups_cursor: boundedSourceGroups.length < sourceGroups.length
+      ? boundedSourceGroups[boundedSourceGroups.length - 1]?.source_id || null
+      : null,
     source_group_details: "complete_in_sources_pages",
     candidate_pages_at_max_size: Math.ceil(candidates / SOURCE_INVENTORY_MAX_PAGE_SIZE),
     maximum_page_size: SOURCE_INVENTORY_MAX_PAGE_SIZE,
@@ -288,7 +305,7 @@ export async function handleSourceInventoryApi(env, request) {
   const parsed = await inventoryBody(request);
   if (!parsed.body) return respond({ error: parsed.error }, parsed.status);
 
-  const { limit, cursor, mode, source } = parsed.body;
+  const { limit, cursor, mode, source, sourceGroupCursor } = parsed.body;
   const asOf = cursor?.as_of || new Date().toISOString();
   if (mode === "recovery") {
     let recovery;
@@ -296,6 +313,7 @@ export async function handleSourceInventoryApi(env, request) {
       recovery = await sourceRecoveryCandidates(env, {
         source,
         afterRowId: cursor?.after || 0,
+        afterSourceId: sourceGroupCursor,
         limit,
       });
     } catch (error) {

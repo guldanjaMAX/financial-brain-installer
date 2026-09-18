@@ -937,9 +937,18 @@ test("the rewritten source statements return the shipped 0.4.8 rows byte for byt
   for (const source of [null, "drive", "gmail", "orphan_source9", "curated"]) {
     const before = rowsOf(db, ORIGINAL_SOURCE_RECOVERY_SQL, [source, 0, 251]);
     const expected = before.length ? JSON.parse(before[0].recovery_source_groups) : [];
-    const after = rowsOf(db, sourceRecoverySummarySql, [source, 251]);
+    const after = rowsOf(db, sourceRecoverySummarySql, [source, null, 251]);
+    const groupFields = [
+      "source_id", "source_kind", "zone", "candidate_documents",
+      "no_stored_chunks", "blank_only_chunks", "ocr_partial_review",
+      "provenance_receipt_unassessed", "extraction_method_missing",
+      "text_reliability_missing", "source_record_id_missing",
+      "derivation_lineage_missing", "lineage_contract_unrecognized",
+    ];
+    const projectedAfter = after.map((row) =>
+      Object.fromEntries(groupFields.map((field) => [field, row[field]])));
     assert.equal(
-      JSON.stringify(after), JSON.stringify(expected),
+      JSON.stringify(projectedAfter), JSON.stringify(expected),
       `recovery source summary changed for ${source}`,
     );
   }
@@ -1280,7 +1289,7 @@ test("the rewritten source statements no longer pay for chunk text", () => {
 
     const statements = [
       ["rewritten-inventory", sourceInventorySql(), [10001], true, CHUNK_TEXT_DOCUMENTS],
-      ["rewritten-recovery-summary", sourceRecoverySummarySql, [null, 251], true, CHUNK_TEXT_DOCUMENTS],
+      ["rewritten-recovery-summary", sourceRecoverySummarySql, [null, null, 251], true, CHUNK_TEXT_DOCUMENTS],
       ["rewritten-recovery-page", sourceRecoverySql, [null, 0, 101], true, 101],
       ["shipped-inventory", originalInventorySql(), [10001], false, CHUNK_TEXT_DOCUMENTS],
       ["shipped-recovery", ORIGINAL_SOURCE_RECOVERY_SQL, [null, 0, 101], false, CHUNK_TEXT_DOCUMENTS],
@@ -1357,7 +1366,7 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
       const measured = new Map();
       for (const [label, sql, binds, expectedRows, expectedDocuments] of [
         ["rewritten-inventory", sourceInventorySql(), [10001], SOURCE_NAMES.length, documents],
-        ["rewritten-recovery-summary", sourceRecoverySummarySql, [null, 251], SOURCE_NAMES.length, documents],
+        ["rewritten-recovery-summary", sourceRecoverySummarySql, [null, null, 251], SOURCE_NAMES.length, documents],
         ["rewritten-recovery-page", sourceRecoverySql, [null, 0, 101], 101, 101],
       ]) {
         const probe = measure(`${label}-${documents}`, dbPath, sql, binds);

@@ -4309,6 +4309,7 @@ const SOURCE_RECOVERY_CANDIDATES_SQL = `${INVENTORY_DOCUMENT_CTES_SQL},
 // global totals, source grouping, and JSON aggregation into one all-or-nothing
 // request on a large Brain.
 export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
+  ,source_groups AS MATERIALIZED (
     SELECT inventory_source AS source_id,
            source_kind,
            source_zone AS zone,
@@ -4324,8 +4325,26 @@ export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
            SUM(reason_lineage_contract_unrecognized) AS lineage_contract_unrecognized
       FROM candidate_rows
      GROUP BY inventory_source,source_kind,source_zone
+  ),
+  global_summary AS (
+    SELECT COUNT(*) AS recovery_source_group_total,
+           COALESCE(SUM(candidate_documents),0) AS recovery_total,
+           COALESCE(SUM(no_stored_chunks),0) AS total_no_stored_chunks,
+           COALESCE(SUM(blank_only_chunks),0) AS total_blank_only_chunks,
+           COALESCE(SUM(ocr_partial_review),0) AS total_ocr_partial_review,
+           COALESCE(SUM(provenance_receipt_unassessed),0) AS total_provenance_receipt_unassessed,
+           COALESCE(SUM(extraction_method_missing),0) AS total_extraction_method_missing,
+           COALESCE(SUM(text_reliability_missing),0) AS total_text_reliability_missing,
+           COALESCE(SUM(source_record_id_missing),0) AS total_source_record_id_missing,
+           COALESCE(SUM(derivation_lineage_missing),0) AS total_derivation_lineage_missing,
+           COALESCE(SUM(lineage_contract_unrecognized),0) AS total_lineage_contract_unrecognized
+      FROM source_groups
+  )
+    SELECT source_groups.*,global_summary.*
+      FROM source_groups CROSS JOIN global_summary
+     WHERE (?2 IS NULL OR source_id>?2)
      ORDER BY source_id
-     LIMIT ?2`;
+     LIMIT ?3`;
 
 export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
   SELECT candidate_rows.document_rowid,
@@ -4374,12 +4393,17 @@ export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
    ORDER BY document_rowid ASC
    LIMIT ?3`;
 
-export function sourceRecoveryPlan({ source = null, afterRowId = 0, limit = 100 } = {}) {
+export function sourceRecoveryPlan({
+  source = null,
+  afterRowId = 0,
+  afterSourceId = null,
+  limit = 100,
+} = {}) {
   return Object.freeze([
     Object.freeze({
       kind: "source_summary",
       sql: sourceRecoverySummarySql,
-      binds: Object.freeze([source, SOURCE_RECOVERY_MAX_PAGE_SIZE + 1]),
+      binds: Object.freeze([source, afterSourceId, SOURCE_RECOVERY_MAX_PAGE_SIZE + 1]),
     }),
     Object.freeze({
       kind: "candidate_page",
@@ -4442,6 +4466,7 @@ async function opaqueInventoryRecordId(key, docUid) {
 export async function sourceRecoveryCandidates(env, {
   source = null,
   afterRowId = 0,
+  afterSourceId = null,
   limit = 100,
 } = {}) {
   const normalizedSource = source === null ? null : String(source);
@@ -4451,6 +4476,11 @@ export async function sourceRecoveryCandidates(env, {
   if (!Number.isSafeInteger(afterRowId) || afterRowId < 0) {
     throw new TypeError("source recovery cursor is invalid");
   }
+  if (afterSourceId !== null &&
+      (typeof afterSourceId !== "string" ||
+       !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(afterSourceId))) {
+    throw new TypeError("source recovery source-group cursor is invalid");
+  }
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > SOURCE_RECOVERY_MAX_PAGE_SIZE) {
     throw new TypeError("source recovery page size is invalid");
   }
@@ -4459,6 +4489,7 @@ export async function sourceRecoveryCandidates(env, {
   const [summaryStep, pageStep] = sourceRecoveryPlan({
     source: normalizedSource,
     afterRowId,
+    afterSourceId,
     limit,
   });
   const summaryResult = await env.DB.prepare(summaryStep.sql)
@@ -4476,9 +4507,14 @@ export async function sourceRecoveryCandidates(env, {
 
   const rawRows = Array.isArray(result?.results) ? result.results : [];
   const rawGroups = Array.isArray(summaryResult?.results) ? summaryResult.results : [];
-  if (rawGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE) {
+  if (rawGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE + 1) {
     throw new Error("source recovery source summary exceeds its declared bound");
   }
+  const groupRows = rawGroups.slice(0, SOURCE_RECOVERY_MAX_PAGE_SIZE);
+  const sourceGroupsTruncated = rawGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE;
+  const sourceGroupsCursor = sourceGroupsTruncated && groupRows.length
+    ? String(groupRows[groupRows.length - 1]?.source_id || "")
+    : null;
   const pageRows = rawRows.slice(0, limit);
   const reasonFields = Object.freeze([
     "no_stored_chunks", "blank_only_chunks", "ocr_partial_review",
@@ -4486,13 +4522,24 @@ export async function sourceRecoveryCandidates(env, {
     "text_reliability_missing", "source_record_id_missing",
     "derivation_lineage_missing", "lineage_contract_unrecognized",
   ]);
-  const total = rawGroups.reduce((sum, group) =>
-    sum + inventoryCount(group.candidate_documents), 0);
+  const summaryRow = rawGroups[0] || null;
+  const total = summaryRow ? inventoryCount(summaryRow.recovery_total) : 0;
   const reasonCounts = Object.fromEntries(reasonFields.map((reason) => [
     reason,
-    rawGroups.reduce((sum, group) => sum + inventoryCount(group[reason]), 0),
+    summaryRow ? inventoryCount(summaryRow[`total_${reason}`]) : 0,
   ]));
-  const sourceGroups = rawGroups.map((group) => {
+  const globalBlockingSignals = [
+    ...(reasonCounts.no_stored_chunks || reasonCounts.blank_only_chunks
+      ? ["records_without_readable_text"]
+      : []),
+    ...(reasonCounts.ocr_partial_review ? ["partial_ocr_receipts"] : []),
+    ...(reasonCounts.provenance_receipt_unassessed || reasonCounts.extraction_method_missing ||
+        reasonCounts.text_reliability_missing || reasonCounts.source_record_id_missing ||
+        reasonCounts.derivation_lineage_missing || reasonCounts.lineage_contract_unrecognized
+      ? ["incomplete_provenance_receipts"]
+      : []),
+  ];
+  const sourceGroups = groupRows.map((group) => {
     const sourceId = String(group?.source_id || "");
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(sourceId)) {
       throw new Error("source recovery source summary contains an invalid source identity");
@@ -4521,7 +4568,9 @@ export async function sourceRecoveryCandidates(env, {
         : "stored OCR or provenance receipts require review",
     };
   });
-  const sourceGroupTotal = sourceGroups.length;
+  const sourceGroupTotal = summaryRow
+    ? inventoryCount(summaryRow.recovery_source_group_total)
+    : 0;
   const privacyKey = pageRows.length ? await sourceRecoveryPrivacyKey(env) : null;
   const candidates = await Promise.all(pageRows.map(async (row) => {
     const sourceId = String(row.inventory_source || "");
@@ -4651,22 +4700,19 @@ export async function sourceRecoveryCandidates(env, {
       candidate_documents: total,
       candidate_source_groups: sourceGroupTotal,
       source_groups_returned: sourceGroups.length,
-      source_groups_truncated: sourceGroups.length < sourceGroupTotal,
-      source_group_details: sourceGroups.length < sourceGroupTotal
-        ? "rerun_with_source_filter_or_read_source_inventory_pages"
+      source_groups_truncated: sourceGroupsTruncated,
+      source_groups_cursor: sourceGroupsCursor,
+      source_group_details: sourceGroupsTruncated
+        ? "continue_from_source_groups_cursor"
         : "complete",
       candidate_pages_at_max_size: Math.ceil(total / SOURCE_RECOVERY_MAX_PAGE_SIZE),
       maximum_page_size: SOURCE_RECOVERY_MAX_PAGE_SIZE,
-      priority: sourceGroups.some((group) => group.priority === "high")
+      priority: globalBlockingSignals.includes("records_without_readable_text")
         ? "high"
         : total
           ? "review"
           : "none",
-      blocking_signals: [
-        "records_without_readable_text",
-        "partial_ocr_receipts",
-        "incomplete_provenance_receipts",
-      ].filter((signal) => sourceGroups.some((group) => group.blocking_signals.includes(signal))),
+      blocking_signals: globalBlockingSignals,
       reason_counts: reasonCounts,
       source_groups: sourceGroups,
     },

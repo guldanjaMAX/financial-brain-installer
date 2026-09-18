@@ -12,7 +12,7 @@ import {
   normalizeIngestEnvelopeProvenance,
   provenanceAssessmentMarker,
 } from "../src/lib/provenance-receipt.js";
-import { sourceInventory } from "../src/lib/store-d1.js";
+import { sourceInventory, sourceRecoveryCandidates } from "../src/lib/store-d1.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "..", "..", "migrations", "d1");
@@ -232,6 +232,72 @@ function d1Env(db, label = "fixture") {
   };
   return { env, seen };
 }
+
+test("source recovery pages summaries beyond 250 source groups", async () => {
+  const db = migratedDb("many-source-groups");
+  const insert = db.prepare(
+    `INSERT INTO documents
+       (doc_uid,source,source_id,title,ingested_at,content_hash)
+     VALUES (?,?,?,?,?,?)`,
+  );
+  for (let index = 0; index < 260; index++) {
+    const source = `source_${String(index).padStart(3, "0")}`;
+    insert.run(
+      `${source}:record`, source, "record", `Synthetic ${index}`,
+      Date.parse("2026-09-01T00:00:00.000Z"), `hash-${index}`,
+    );
+  }
+  const { env, seen } = d1Env(db, "many-source-groups");
+  const first = await sourceRecoveryCandidates(env, { limit: 1 });
+  assert.equal(first.total, 260);
+  assert.equal(first.summary.candidate_source_groups, 260);
+  assert.equal(first.summary.source_groups_returned, 250);
+  assert.equal(first.summary.source_groups_truncated, true);
+  assert.equal(first.summary.source_groups_cursor, "source_249");
+  assert.deepEqual(
+    first.summary.source_groups.map((group) => group.source_id),
+    Array.from({ length: 250 }, (_, index) => `source_${String(index).padStart(3, "0")}`),
+  );
+
+  const second = await sourceRecoveryCandidates(env, {
+    afterSourceId: first.summary.source_groups_cursor,
+    limit: 1,
+  });
+  assert.equal(second.total, 260);
+  assert.equal(second.summary.candidate_source_groups, 260);
+  assert.equal(second.summary.source_groups_returned, 10);
+  assert.equal(second.summary.source_groups_truncated, false);
+  assert.equal(second.summary.source_groups_cursor, null);
+  assert.deepEqual(
+    second.summary.source_groups.map((group) => group.source_id),
+    Array.from({ length: 10 }, (_, index) => `source_${index + 250}`),
+  );
+
+  const firstResponse = await call(env, post(
+    { mode: "recovery", limit: 1 },
+    { "X-Admin-Key": "test-admin-key" },
+  ));
+  assert.equal(firstResponse.status, 200, await firstResponse.clone().text());
+  const firstReceipt = await firstResponse.json();
+  assert.equal(firstReceipt.recovery_plan_summary.source_groups_truncated, true);
+  assert.equal(firstReceipt.recovery_plan_summary.source_groups_cursor, "source_249");
+  const secondResponse = await call(env, post(
+    {
+      mode: "recovery",
+      limit: 1,
+      source_group_cursor: firstReceipt.recovery_plan_summary.source_groups_cursor,
+    },
+    { "X-Admin-Key": "test-admin-key" },
+  ));
+  assert.equal(secondResponse.status, 200, await secondResponse.clone().text());
+  const secondReceipt = await secondResponse.json();
+  assert.equal(secondReceipt.recovery_plan_summary.source_groups_returned, 10);
+  assert.equal(secondReceipt.recovery_plan_summary.source_groups_truncated, false);
+  assert.equal(secondReceipt.recovery_plan_summary.source_groups_cursor, null);
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+  db.close();
+});
 
 const post = (body = {}, headers = {}) => new Request(`${ORIGIN}/api/admin/brain/sources`, {
   method: "POST",
