@@ -667,7 +667,7 @@ A bad import being one command instead of a support call is the reason you can a
 
 ### Cleanup says `review required`
 
-This is an intentional safety stop, not an installer crash. It has three
+This is an intentional safety stop, not an installer crash. It has four
 possible causes, and the owner action depends on which one the message names:
 
 1. **The cleanup plan crossed 100 documents or 10% of what the source had
@@ -697,7 +697,12 @@ possible causes, and the owner action depends on which one the message names:
    advances. Review the displayed labels, then use the exact fingerprint within
    24 hours only if the owner expects deletion. Nothing is deleted until that
    exact approval, and the review record clears only after deletion readback.
-3. **Drive returned an access-denied 403 during the end-of-run absence check.**
+3. **Drive found the item under a reviewed folder after the completed walk
+   omitted it.** The message says `present on Drive; retained`. The indexed copy
+   remains protected and no deletion approval is available. This is not an
+   access-denied result. Run Drive ingestion again so a later completed walk can
+   reconcile the inconsistency.
+4. **Drive returned an access-denied 403 during the end-of-run absence check.**
    The indexed copy remains in place and outside every deletion plan. Restore
    this credential's access to the file, then rerun Drive ingestion. There is no
    deletion approval to give for this stop.

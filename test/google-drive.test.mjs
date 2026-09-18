@@ -558,8 +558,8 @@ const workbookBytes = (sheets) => {
     hiddenGone.kind === "unresolved_not_returned" && hiddenGone.retryable);
   check("a 403 access denial remains review-only",
     accessDenied.kind === "unresolved_access" && accessDenied.retryable);
-  check("an item still parented inside scope but missing from the walk blocks tombstones",
-    inconsistent.kind === "unresolved_access" && inconsistent.retryable);
+  check("an item still parented inside scope is labelled present rather than access-denied",
+    inconsistent.kind === "present_in_scope" && inconsistent.retryable && inconsistent.visible_in_scope === true);
 }
 {
   const t = await startPageToken(tok, { fetchImpl: async () => json({ startPageToken: "T1" }), sleep: async () => {} });

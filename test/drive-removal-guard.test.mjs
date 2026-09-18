@@ -929,7 +929,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         full ? `fixture-prewalk-${mode}` : `fixture-next-${mode}`,
         "a completed Drive walk did not save its cursor",
       );
-      assert.equal(state.drive_removal_review.schema_version, 6);
+      assert.equal(state.drive_removal_review.schema_version, 7);
       assert.equal(state.drive_removal_review.issue_code, "SAFETY_REVIEW_REQUIRED");
       assert.deepEqual(state.drive_removal_review.uids, ["drive:missing-sensitive"]);
       assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
@@ -937,12 +937,14 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         assert.deepEqual(state.drive_removal_review.counts, {
           unresolved_absences: 1,
           unresolved_access: 0,
+          present_in_scope: 0,
           unresolved_transient: 0,
           unresolved_not_returned: 1,
           label_unavailable: 0,
           pending_source_deletions: 0,
         });
         assert.deepEqual(state.drive_removal_review.unresolved_access_uids, []);
+        assert.deepEqual(state.drive_removal_review.present_in_scope_uids, []);
         const [record] = state.drive_removal_review.unresolved_not_returned;
         assert.equal(record.uid, "drive:missing-sensitive");
         assert.equal(record.observation_count, 1);
@@ -955,12 +957,14 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         assert.deepEqual(state.drive_removal_review.counts, {
           unresolved_absences: 1,
           unresolved_access: 1,
+          present_in_scope: 0,
           unresolved_transient: 0,
           unresolved_not_returned: 0,
           label_unavailable: 0,
           pending_source_deletions: 0,
         });
         assert.deepEqual(state.drive_removal_review.unresolved_access_uids, ["drive:missing-sensitive"]);
+        assert.deepEqual(state.drive_removal_review.present_in_scope_uids, []);
         assert.deepEqual(state.drive_removal_review.unresolved_not_returned, []);
       }
       if (full) {
@@ -984,11 +988,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.removedFamilies, 0);
     const state = unresolvedPending.state();
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 6,
+      schema_version: 7,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: 1,
         unresolved_access: 1,
+        present_in_scope: 0,
         unresolved_transient: 0,
         unresolved_not_returned: 0,
         label_unavailable: 0,
@@ -996,6 +1001,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       },
       uids: ["drive:missing-sensitive"],
       unresolved_access_uids: ["drive:missing-sensitive"],
+      present_in_scope_uids: [],
       unresolved_transient: [],
       unresolved_not_returned: [],
       label_unavailable: [],
@@ -1094,6 +1100,28 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     restoredStaleMarker.cleanup();
   }
 
+  const presentInScope = runScopeScenario("incremental-stale-marker-live", {
+    priorMaturedDays: 10,
+  });
+  try {
+    assert.equal(presentInScope.code, 0, presentInScope.output);
+    assert.match(presentInScope.output, /present on Drive under a reviewed folder; retained/i);
+    assert.doesNotMatch(presentInScope.output, /denied access/i);
+    const evidence = presentInScope.evidence();
+    assert.equal(evidence.absenceMetadataReads, 1);
+    assert.equal(evidence.forgetRequests, 0,
+      "a file Drive reported present and in scope reached the destructive endpoint");
+    const review = presentInScope.state().drive_removal_review;
+    assert.equal(review.schema_version, 7);
+    assert.equal(review.counts.present_in_scope, 1);
+    assert.equal(review.counts.unresolved_access, 0);
+    assert.deepEqual(review.present_in_scope_uids, ["drive:missing-sensitive"]);
+    assert.deepEqual(review.unresolved_access_uids, []);
+    assert.deepEqual(review.source_deletion_candidates, []);
+  } finally {
+    presentInScope.cleanup();
+  }
+
   for (const priorReview of [false, true]) {
     const pendingNotReturned = runScopeScenario("full-unresolved-subthreshold", {
       full: true,
@@ -1146,11 +1174,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const state = unresolvedBatch.state();
     assert.equal(state.sync_token, "fixture-next-incremental-unresolved-batch");
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 6,
+      schema_version: 7,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: 3,
         unresolved_access: 3,
+        present_in_scope: 0,
         unresolved_transient: 0,
         unresolved_not_returned: 0,
         label_unavailable: 0,
@@ -1166,6 +1195,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         "drive:missing-batch-01",
         "drive:missing-batch-02",
       ],
+      present_in_scope_uids: [],
       unresolved_transient: [],
       unresolved_not_returned: [],
       label_unavailable: [],
@@ -1224,16 +1254,18 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(goneReviewOnly.evidence().forgetRequests, 0,
       "a change-feed removal event reached the destructive endpoint");
     const review = goneReviewOnly.state().drive_removal_review;
-    assert.equal(review.schema_version, 6);
+    assert.equal(review.schema_version, 7);
     assert.deepEqual(review.counts, {
       unresolved_absences: 1,
       unresolved_access: 0,
+      present_in_scope: 0,
       unresolved_transient: 0,
       unresolved_not_returned: 1,
       label_unavailable: 0,
       pending_source_deletions: 0,
     });
     assert.deepEqual(review.unresolved_access_uids, []);
+    assert.deepEqual(review.present_in_scope_uids, []);
     assert.equal(review.unresolved_not_returned.length, 1);
     assert.equal(review.unresolved_not_returned[0].uid, "drive:missing-sensitive");
     assert.ok(Number.isFinite(Date.parse(review.unresolved_not_returned[0].change_feed_removed_at)),

@@ -601,7 +601,7 @@ export async function classifyScopedAbsence(getAccessToken, fileId, {
   const parents = Array.isArray(file?.parents) ? file.parents.map(String) : [];
   if (parents.some((parent) => scopedFolderIds.has(parent))) {
     return {
-      kind: "unresolved_access",
+      kind: "present_in_scope",
       reason: "Drive still places the file under a reviewed folder but omitted it from the completed traversal",
       retryable: true,
       visible_in_scope: true,

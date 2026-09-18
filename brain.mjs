@@ -14425,6 +14425,11 @@ const cmdIngestRemoteRun = async (
       ? storedDriveRemovalReview.unresolved_access_uids
       : legacyDriveReviewUids).map(String),
   );
+  let presentInScopeDriveReviewUids = new Set(
+    (Array.isArray(storedDriveRemovalReview?.present_in_scope_uids)
+      ? storedDriveRemovalReview.present_in_scope_uids
+      : []).map(String),
+  );
   let unresolvedTransientDriveReview = new Map();
   for (const raw of Array.isArray(storedDriveRemovalReview?.unresolved_transient)
     ? storedDriveRemovalReview.unresolved_transient
@@ -14513,6 +14518,7 @@ const cmdIngestRemoteRun = async (
   const protectedDriveUids = () => {
     const protectedUids = new Set([
       ...unresolvedDriveReviewUids,
+      ...presentInScopeDriveReviewUids,
       ...unresolvedTransientDriveReview.keys(),
       ...unresolvedNotReturnedDriveReview.keys(),
       ...labelUnavailableDriveReview.keys(),
@@ -14530,6 +14536,7 @@ const cmdIngestRemoteRun = async (
   };
   const dropDriveRemovalReviewUid = (uid) => {
     unresolvedDriveReviewUids.delete(uid);
+    presentInScopeDriveReviewUids.delete(uid);
     unresolvedTransientDriveReview.delete(uid);
     unresolvedNotReturnedDriveReview.delete(uid);
     pendingSourceDeletionDriveReview.delete(uid);
@@ -14538,6 +14545,7 @@ const cmdIngestRemoteRun = async (
 
   const updateDriveRemovalReview = () => {
     const unresolvedAccessUids = [...unresolvedDriveReviewUids].sort();
+    const presentInScopeUids = [...presentInScopeDriveReviewUids].sort();
     const unresolvedTransient = [...unresolvedTransientDriveReview.values()]
       .sort((a, b) => a.uid.localeCompare(b.uid));
     const unresolvedNotReturned = [...unresolvedNotReturnedDriveReview.values()]
@@ -14548,6 +14556,7 @@ const cmdIngestRemoteRun = async (
       .sort((a, b) => a.uid.localeCompare(b.uid));
     const uids = [...new Set([
       ...unresolvedAccessUids,
+      ...presentInScopeUids,
       ...unresolvedTransient.map((entry) => entry.uid),
       ...unresolvedNotReturned.map((entry) => entry.uid),
       ...labelUnavailable.map((entry) => entry.uid),
@@ -14559,12 +14568,13 @@ const cmdIngestRemoteRun = async (
       return;
     }
     driveRemovalReview = {
-      schema_version: 6,
+      schema_version: 7,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
-        unresolved_absences: unresolvedAccessUids.length + unresolvedTransient.length +
+        unresolved_absences: unresolvedAccessUids.length + presentInScopeUids.length + unresolvedTransient.length +
           unresolvedNotReturned.length + labelUnavailable.length,
         unresolved_access: unresolvedAccessUids.length,
+        present_in_scope: presentInScopeUids.length,
         unresolved_transient: unresolvedTransient.length,
         unresolved_not_returned: unresolvedNotReturned.length,
         label_unavailable: labelUnavailable.length,
@@ -14572,6 +14582,7 @@ const cmdIngestRemoteRun = async (
       },
       uids,
       unresolved_access_uids: unresolvedAccessUids,
+      present_in_scope_uids: presentInScopeUids,
       unresolved_transient: unresolvedTransient,
       unresolved_not_returned: unresolvedNotReturned,
       label_unavailable: labelUnavailable,
@@ -14825,6 +14836,7 @@ const cmdIngestRemoteRun = async (
       }
       for (const uid of [
         ...unresolvedDriveReviewUids,
+        ...presentInScopeDriveReviewUids,
         ...unresolvedTransientDriveReview.keys(),
         ...unresolvedNotReturnedDriveReview.keys(),
         ...labelUnavailableDriveReview.keys(),
@@ -14853,12 +14865,14 @@ const cmdIngestRemoteRun = async (
       const priorSourceDeletionReview = pendingSourceDeletionDriveReview;
       const priorReviewedUids = new Set([
         ...unresolvedDriveReviewUids,
+        ...presentInScopeDriveReviewUids,
         ...unresolvedTransientDriveReview.keys(),
         ...priorNotReturnedReview.keys(),
         ...priorLabelUnavailableReview.keys(),
         ...priorSourceDeletionReview.keys(),
       ]);
       unresolvedDriveReviewUids = new Set();
+      presentInScopeDriveReviewUids = new Set();
       unresolvedTransientDriveReview = new Map();
       unresolvedNotReturnedDriveReview = new Map();
       labelUnavailableDriveReview = new Map();
@@ -14885,6 +14899,10 @@ const cmdIngestRemoteRun = async (
         if (classification.visible_in_scope === true && pendingDriveAtStart.includes(uid) &&
             !priorReviewedUids.has(uid) && incremental) {
           delete state.removed?.[uid];
+          continue;
+        }
+        if (classification.kind === "present_in_scope") {
+          presentInScopeDriveReviewUids.add(uid);
           continue;
         }
         if (classification.kind === "source_deleted" || classification.kind === "left_scope") {
@@ -16044,6 +16062,7 @@ const cmdIngestRemoteRun = async (
     const count = protectedDriveUids().size;
     const notReturned = Number(driveRemovalReview.counts.unresolved_not_returned || 0);
     const accessDenied = Number(driveRemovalReview.counts.unresolved_access || 0);
+    const presentInScope = Number(driveRemovalReview.counts.present_in_scope || 0);
     const transient = Number(driveRemovalReview.counts.unresolved_transient || 0);
     const labelUnavailable = Number(driveRemovalReview.counts.label_unavailable || 0);
     const pendingUnderGrace = [...pendingSourceDeletionDriveReview.values()]
@@ -16055,6 +16074,9 @@ const cmdIngestRemoteRun = async (
       ] : []),
       ...(accessDenied ? [
         `${accessDenied} item(s): Drive denied access to the file metadata. Restore access, then run Drive ingestion again.`,
+      ] : []),
+      ...(presentInScope ? [
+        `${presentInScope} item(s): present on Drive under a reviewed folder; retained because the completed walk omitted it.`,
       ] : []),
       ...(transient ? [
         `${transient} item(s): Drive metadata lookup was temporarily unavailable. ` +

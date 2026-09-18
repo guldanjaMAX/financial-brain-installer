@@ -666,8 +666,11 @@ removal back before committing folder watermarks.
 Any account-wide changed item is rebuilt through the reviewed-root traversal
 before content is read.
 
-Drive never treats access loss as deletion evidence. A 403 access denial or
-inconsistent in-scope omission stays in the review record and outside the
+Drive never treats access loss as deletion evidence. A 403 access denial stays
+in the review record and outside the deletion plan. If the metadata lookup says
+the file is present under a reviewed folder despite its omission from the
+completed walk, the distinct `present_in_scope` review state reports `present
+on Drive; retained`; it is not described as access-denied and cannot enter the
 deletion plan. A 404, including a 403 response carrying `notFound` or `File not
 found`, proves only that Drive stopped returning the item to this credential.
 A bare 404 is never deletion evidence. Every stale retry marker is reclassified
