@@ -663,6 +663,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorReview = false,
     priorNotReturnedDays = null,
     priorNotReturnedNamed = true,
+    priorObservation = false,
+    priorClockSkewHours = 0,
     priorChangeFeedDays = null,
     priorMaturedDays = null,
     args = [],
@@ -740,7 +742,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         const firstObservedAt = new Date(Date.now() - (priorMaturedDays * 24 * 60 * 60 * 1000));
         return {
           drive_removal_review: {
-            schema_version: 4,
+            schema_version: 5,
             issue_code: "SAFETY_REVIEW_REQUIRED",
             counts: {
               unresolved_absences: 0,
@@ -762,6 +764,18 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
               corroboration: "repeated_not_returned",
               approval_observation_id: fixedReviewObservationId,
               approval_observed_at: fixedReviewObservedAt,
+              observations: [
+                {
+                  run_id: "sync_fixture_first_observation",
+                  observed_at: firstObservedAt.toISOString(),
+                  server_observed_at: firstObservedAt.toISOString(),
+                },
+                {
+                  run_id: fixedReviewObservationId,
+                  observed_at: fixedReviewObservedAt,
+                  server_observed_at: fixedReviewObservedAt,
+                },
+              ],
             }],
           },
         };
@@ -786,6 +800,13 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
               last_observed_at: firstObservedAt.toISOString(),
               grace_eligible_at: new Date(firstObservedAt.getTime() + (7 * 24 * 60 * 60 * 1000)).toISOString(),
               observation_count: 1,
+              ...(priorObservation ? {
+                observations: [{
+                  run_id: "sync_fixture_prior_observation",
+                  observed_at: new Date(firstObservedAt.getTime() + priorClockSkewHours * 60 * 60 * 1000).toISOString(),
+                  server_observed_at: firstObservedAt.toISOString(),
+                }],
+              } : {}),
               corroboration: "change_feed_removed",
             }],
           },
@@ -817,6 +838,13 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
               last_observed_at: firstObservedAt.toISOString(),
               grace_eligible_at: new Date(firstObservedAt.getTime() + (7 * 24 * 60 * 60 * 1000)).toISOString(),
               observation_count: 1,
+              ...(priorObservation ? {
+                observations: [{
+                  run_id: "sync_fixture_prior_observation",
+                  observed_at: new Date(firstObservedAt.getTime() + priorClockSkewHours * 60 * 60 * 1000).toISOString(),
+                  server_observed_at: firstObservedAt.toISOString(),
+                }],
+              } : {}),
               ...(priorNotReturnedNamed ? {
                 name: "Owner tax return.txt",
                 folder_path: "Reviewed Root/Tax",
@@ -883,7 +911,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         full ? `fixture-prewalk-${mode}` : `fixture-next-${mode}`,
         "a completed Drive walk did not save its cursor",
       );
-      assert.equal(state.drive_removal_review.schema_version, 4);
+      assert.equal(state.drive_removal_review.schema_version, 5);
       assert.equal(state.drive_removal_review.issue_code, "SAFETY_REVIEW_REQUIRED");
       assert.deepEqual(state.drive_removal_review.uids, ["drive:missing-sensitive"]);
       assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
@@ -934,7 +962,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.removedFamilies, 0);
     const state = unresolvedPending.state();
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 4,
+      schema_version: 5,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: 1,
@@ -1048,7 +1076,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const state = unresolvedBatch.state();
     assert.equal(state.sync_token, "fixture-next-incremental-unresolved-batch");
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 4,
+      schema_version: 5,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: 3,
@@ -1102,7 +1130,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(goneReviewOnly.evidence().forgetRequests, 0,
       "a change-feed removal event reached the destructive endpoint");
     const review = goneReviewOnly.state().drive_removal_review;
-    assert.equal(review.schema_version, 4);
+    assert.equal(review.schema_version, 5);
     assert.deepEqual(review.counts, {
       unresolved_absences: 1,
       unresolved_access: 0,
@@ -1143,7 +1171,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(review.counts.unresolved_not_returned, 1);
     assert.equal(review.counts.pending_source_deletions, 0,
       "a stored change-feed candidate remained eligible for deletion");
-    assert.equal(review.unresolved_not_returned[0].observation_count, 2);
+    assert.equal(review.unresolved_not_returned[0].observation_count, 1);
     assert.ok(Number.isFinite(Date.parse(review.unresolved_not_returned[0].change_feed_removed_at)));
   } finally {
     legacyChangeFeedCandidate.cleanup();
@@ -1152,6 +1180,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   const recentRepeat = runScopeScenario("full-unresolved", {
     full: true,
     priorNotReturnedDays: 2,
+    priorObservation: true,
   });
   try {
     assert.equal(recentRepeat.code, 1, recentRepeat.output);
@@ -1172,6 +1201,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     full: true,
     priorNotReturnedDays: 8,
     priorNotReturnedNamed: false,
+    priorObservation: true,
     args: ["--approve-removals", "0".repeat(64)],
   });
   try {
@@ -1235,9 +1265,42 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   }
 
   let elapsedApproval = null;
+  const backdatedLegacySingle = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+  });
+  try {
+    assert.equal(backdatedLegacySingle.code, 1, backdatedLegacySingle.output);
+    assert.equal(backdatedLegacySingle.evidence().forgetRequests, 0);
+    const review = backdatedLegacySingle.state().drive_removal_review;
+    assert.equal(review.counts.unresolved_not_returned, 1);
+    assert.equal(review.counts.pending_source_deletions, 0,
+      "one current observation inherited maturity from a legacy local timestamp");
+    assert.equal(review.unresolved_not_returned[0].observations.length, 1);
+  } finally {
+    backdatedLegacySingle.cleanup();
+  }
+
+  const clockSkewedRepeat = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    priorObservation: true,
+    priorClockSkewHours: 48,
+  });
+  try {
+    assert.equal(clockSkewedRepeat.code, 1, clockSkewedRepeat.output);
+    const review = clockSkewedRepeat.state().drive_removal_review;
+    assert.equal(review.counts.pending_source_deletions, 0,
+      "a Drive absence matured despite a local/server clock disagreement over 24 hours");
+    assert.equal(review.unresolved_not_returned[0].observations.length, 2);
+  } finally {
+    clockSkewedRepeat.cleanup();
+  }
+
   const elapsedRepeat = runScopeScenario("full-unresolved", {
     full: true,
     priorNotReturnedDays: 8,
+    priorObservation: true,
     args: ["--reset"],
   });
   try {

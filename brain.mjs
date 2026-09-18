@@ -11500,10 +11500,11 @@ export function assertNoPendingRemovals(result, label = "source deletion") {
 }
 
 /** Read every live logical document uid for one source from the data plane. */
-export async function listStoredSourceFamilies({ base, adminKey, source }) {
+export async function listStoredSourceFamilies({ base, adminKey, source, includeServerObservedAt = false }) {
   const normalizedSource = assertSourceName(source);
   const families = new Set();
   const seenCursors = new Set();
+  let serverObservedAt = null;
   let cursor = "";
   for (;;) {
     if (seenCursors.has(cursor)) throw new Error("source-family inventory repeated a cursor");
@@ -11522,6 +11523,14 @@ export async function listStoredSourceFamilies({ base, adminKey, source }) {
       }),
     }, { what: "the source-family inventory" });
     const raw = await res.text();
+    if (includeServerObservedAt) {
+      const serverMs = Date.parse(String(res.headers?.get?.("date") || ""));
+      if (!Number.isFinite(serverMs)) {
+        throw new Error("source-family inventory did not provide a valid server Date header");
+      }
+      const observedAt = new Date(serverMs).toISOString();
+      if (serverObservedAt === null) serverObservedAt = observedAt;
+    }
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
     if (!res.ok || !body || body.source !== normalizedSource || !Array.isArray(body.families)) {
@@ -11543,7 +11552,9 @@ export async function listStoredSourceFamilies({ base, adminKey, source }) {
       families.add(uid);
       previous = uid;
     }
-    if (body.next_cursor === null) return families;
+    if (body.next_cursor === null) {
+      return includeServerObservedAt ? { families, serverObservedAt } : families;
+    }
     if (typeof body.next_cursor !== "string" || !body.next_cursor.startsWith(`${normalizedSource}:`)) {
       throw new Error("source-family inventory returned an invalid next cursor");
     }
@@ -14248,6 +14259,7 @@ const cmdIngestRemoteRun = async (
     : null;
   const driveReviewObservedAt = new Date().toISOString();
   const driveAbsenceGraceMs = 7 * 24 * 60 * 60 * 1000;
+  let driveInventoryServerObservedAt = null;
   const localDriveReviewDetails = (uid) => {
     let version = null;
     try { version = JSON.parse(String(state.done?.[uid] || "")); } catch { /* unavailable */ }
@@ -14259,6 +14271,25 @@ const cmdIngestRemoteRun = async (
       : null;
     return { name, folderPath };
   };
+  const normalizeDriveObservations = (observations) => {
+    const byRun = new Map();
+    for (const observation of Array.isArray(observations) ? observations : []) {
+      const runIdValue = typeof observation?.run_id === "string" ? observation.run_id.trim() : "";
+      const localMs = Date.parse(String(observation?.observed_at || ""));
+      const serverMs = Date.parse(String(observation?.server_observed_at || ""));
+      if (!runIdValue || !Number.isFinite(localMs) || !Number.isFinite(serverMs)) continue;
+      if (byRun.has(runIdValue)) continue;
+      byRun.set(runIdValue, {
+        run_id: runIdValue,
+        observed_at: new Date(localMs).toISOString(),
+        server_observed_at: new Date(serverMs).toISOString(),
+      });
+    }
+    return [...byRun.values()].sort((a, b) =>
+      Date.parse(a.server_observed_at) - Date.parse(b.server_observed_at) ||
+      a.run_id.localeCompare(b.run_id)
+    );
+  };
   const driveGraceRecord = (uid, {
     firstObservedAt = driveReviewObservedAt,
     lastObservedAt = driveReviewObservedAt,
@@ -14268,20 +14299,27 @@ const cmdIngestRemoteRun = async (
     folderPath = null,
     approvalObservationId = null,
     approvalObservedAt = null,
+    observations = [],
   } = {}) => {
+    const normalizedObservations = normalizeDriveObservations(observations);
     const firstMs = Date.parse(firstObservedAt);
     const lastMs = Date.parse(lastObservedAt);
     const valid = Number.isFinite(firstMs) && Number.isFinite(lastMs) &&
       lastMs >= firstMs && Number.isSafeInteger(observationCount) && observationCount >= 1;
-    const safeFirstMs = valid ? firstMs : Date.parse(driveReviewObservedAt);
-    const safeLastMs = valid ? lastMs : safeFirstMs;
+    const safeFirstMs = normalizedObservations.length
+      ? Date.parse(normalizedObservations[0].observed_at)
+      : valid ? firstMs : Date.parse(driveReviewObservedAt);
+    const safeLastMs = normalizedObservations.length
+      ? Date.parse(normalizedObservations.at(-1).observed_at)
+      : valid ? lastMs : safeFirstMs;
     const changeFeedRemovedMs = Date.parse(changeFeedRemovedAt || "");
     return {
       uid: String(uid),
       first_observed_at: new Date(safeFirstMs).toISOString(),
       last_observed_at: new Date(safeLastMs).toISOString(),
       grace_eligible_at: new Date(safeFirstMs + driveAbsenceGraceMs).toISOString(),
-      observation_count: valid ? observationCount : 1,
+      observation_count: normalizedObservations.length || (valid ? observationCount : 1),
+      observations: normalizedObservations,
       ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
       ...(typeof folderPath === "string" && folderPath.trim() ? { folder_path: folderPath.trim() } : {}),
       ...(typeof approvalObservationId === "string" && approvalObservationId.trim()
@@ -14294,6 +14332,29 @@ const cmdIngestRemoteRun = async (
         ? { change_feed_removed_at: new Date(changeFeedRemovedMs).toISOString() }
         : {}),
     };
+  };
+  const currentDriveObservation = () => {
+    if (!driveInventoryServerObservedAt) {
+      throw new Error("Drive absence review requires the source inventory's server clock");
+    }
+    return {
+      run_id: runId,
+      observed_at: driveReviewObservedAt,
+      server_observed_at: driveInventoryServerObservedAt,
+    };
+  };
+  const appendDriveObservation = (record) => normalizeDriveObservations([
+    ...(record?.observations || []),
+    currentDriveObservation(),
+  ]);
+  const driveAbsenceProofMatured = (record) => {
+    const observations = normalizeDriveObservations(record?.observations);
+    if (observations.length < 2) return false;
+    if (observations.some((observation) => Math.abs(
+      Date.parse(observation.observed_at) - Date.parse(observation.server_observed_at)
+    ) > 24 * 60 * 60 * 1000)) return false;
+    return Date.parse(observations.at(-1).server_observed_at) -
+      Date.parse(observations[0].server_observed_at) >= driveAbsenceGraceMs;
   };
   const legacyDriveReviewUids = storedDriveRemovalReview?.schema_version === 1 &&
     Array.isArray(storedDriveRemovalReview?.uids)
@@ -14322,6 +14383,7 @@ const cmdIngestRemoteRun = async (
       folderPath: raw.folder_path,
       approvalObservationId: raw.approval_observation_id,
       approvalObservedAt: raw.approval_observed_at,
+      observations: raw.observations,
     });
     unresolvedNotReturnedDriveReview.set(record.uid, record);
   }
@@ -14344,6 +14406,7 @@ const cmdIngestRemoteRun = async (
       folderPath: raw.folder_path,
       approvalObservationId: raw.approval_observation_id,
       approvalObservedAt: raw.approval_observed_at,
+      observations: raw.observations,
     });
     if (raw.corroboration === "change_feed_removed") {
       unresolvedNotReturnedDriveReview.set(record.uid, record);
@@ -14364,10 +14427,8 @@ const cmdIngestRemoteRun = async (
       ...unresolvedNotReturnedDriveReview.keys(),
       ...unclassifiedPendingDriveUids,
     ]);
-    const observedMs = Date.parse(driveReviewObservedAt);
     for (const record of pendingSourceDeletionDriveReview.values()) {
-      const graceEligibleMs = Date.parse(record?.grace_eligible_at || "");
-      if (!Number.isFinite(graceEligibleMs) || observedMs < graceEligibleMs) {
+      if (!driveAbsenceProofMatured(record)) {
         protectedUids.add(record.uid);
       }
     }
@@ -14400,7 +14461,7 @@ const cmdIngestRemoteRun = async (
       return;
     }
     driveRemovalReview = {
-      schema_version: 4,
+      schema_version: 5,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: unresolvedAccessUids.length + unresolvedNotReturned.length,
@@ -14606,9 +14667,16 @@ const cmdIngestRemoteRun = async (
       Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0 ||
       Number(driveRemovalReview?.counts?.pending_source_deletions || 0) > 0
     );
-    const driveStoredBeforeProcessing = needsDrivePreInventory
-      ? await listStoredSourceFamilies({ base, adminKey, source: sourceName })
+    const driveInventoryBeforeProcessing = needsDrivePreInventory
+      ? await listStoredSourceFamilies({
+          base,
+          adminKey,
+          source: sourceName,
+          includeServerObservedAt: true,
+        })
       : null;
+    const driveStoredBeforeProcessing = driveInventoryBeforeProcessing?.families || null;
+    driveInventoryServerObservedAt = driveInventoryBeforeProcessing?.serverObservedAt || null;
     const driveRemovalSafetyCount = driveStoredBeforeProcessing
       ? recordRemovalSafetyBaseline({
           stateKey: "drive_removal_safety_baseline",
@@ -14701,48 +14769,44 @@ const cmdIngestRemoteRun = async (
           if (pendingDriveAtStart.includes(uid) && !priorReviewedUids.has(uid)) {
             newlyReviewedPendingDriveUids.add(uid);
           }
-          const observedMs = Date.parse(driveReviewObservedAt);
-          const graceEligibleMs = Date.parse(prior?.grace_eligible_at || "");
-          let candidate = null;
-          if (priorCandidate) {
-            candidate = {
-              ...priorCandidate,
-              last_observed_at: driveReviewObservedAt,
-              observation_count: Number(priorCandidate.observation_count || 1) + 1,
-              approval_observation_id: priorCandidate.approval_observation_id || runId,
-              approval_observed_at: priorCandidate.approval_observed_at || driveReviewObservedAt,
-            };
-          } else if (prior && Number.isFinite(graceEligibleMs) && observedMs >= graceEligibleMs) {
-            candidate = {
-              ...prior,
-              last_observed_at: driveReviewObservedAt,
-              observation_count: Number(prior.observation_count || 1) + 1,
+          const priorRecord = priorCandidate || prior || driveGraceRecord(
+            uid,
+            localDriveReviewDetails(uid),
+          );
+          const observedRecord = driveGraceRecord(uid, {
+            firstObservedAt: priorRecord.first_observed_at,
+            lastObservedAt: driveReviewObservedAt,
+            observationCount: priorRecord.observation_count,
+            changeFeedRemovedAt: priorRecord.change_feed_removed_at ||
+              (changeFeedRemovalUids.has(uid) ? driveReviewObservedAt : null),
+            name: priorRecord.name,
+            folderPath: priorRecord.folder_path,
+            approvalObservationId: priorRecord.approval_observation_id,
+            approvalObservedAt: priorRecord.approval_observed_at,
+            observations: appendDriveObservation(priorRecord),
+          });
+          if (driveAbsenceProofMatured(observedRecord)) {
+            const candidate = {
+              ...observedRecord,
               corroboration: "repeated_not_returned",
-              approval_observation_id: runId,
-              approval_observed_at: driveReviewObservedAt,
+              approval_observation_id: observedRecord.approval_observation_id || runId,
+              approval_observed_at: observedRecord.approval_observed_at || driveReviewObservedAt,
             };
-          }
-          if (candidate) {
             pendingSourceDeletionDriveReview.set(uid, candidate);
             corroboratedNotReturnedUids.push(uid);
             confirmedDriveAbsenceUids.push(uid);
             continue;
           }
-          const firstObservation = prior || driveGraceRecord(uid, localDriveReviewDetails(uid));
-          unresolvedNotReturnedDriveReview.set(uid, {
-            ...firstObservation,
-            last_observed_at: driveReviewObservedAt,
-            observation_count: Number(firstObservation.observation_count || 1) + (prior ? 1 : 0),
-            ...(changeFeedRemovalUids.has(uid)
-              ? { change_feed_removed_at: firstObservation.change_feed_removed_at || driveReviewObservedAt }
-              : {}),
-          });
+          unresolvedNotReturnedDriveReview.set(uid, observedRecord);
           continue;
         }
         if (classification.kind === "gone") {
           // Older injected connector doubles may still return R6's temporary
           // name. Keep those tests and adapters fail-closed as uncorroborated.
-          unresolvedNotReturnedDriveReview.set(uid, driveGraceRecord(uid, localDriveReviewDetails(uid)));
+          unresolvedNotReturnedDriveReview.set(uid, driveGraceRecord(uid, {
+            ...localDriveReviewDetails(uid),
+            observations: [currentDriveObservation()],
+          }));
           continue;
         }
         if (classification.kind === "unresolved_access" || classification.kind === "unresolved") {

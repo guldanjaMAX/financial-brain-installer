@@ -47,7 +47,7 @@ function saveEvidence(evidence) {
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", date: new Date().toUTCString() },
   });
 }
 
