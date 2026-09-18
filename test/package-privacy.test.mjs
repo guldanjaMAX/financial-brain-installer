@@ -846,6 +846,9 @@ const expected = [
   "worker/src/lib/query-intent.js",
   "worker/src/lib/retrieval-status.js",
   "worker/src/lib/secret-scan.js",
+  // Reviewed pure string validator: dependency-free, with no I/O, secrets,
+  // owner data, or network access.
+  "worker/src/lib/stored-family-identity.js",
   "worker/src/lib/store-d1.js",
   "worker/src/lib/store.js",
   "worker/src/lib/system-status.js",
