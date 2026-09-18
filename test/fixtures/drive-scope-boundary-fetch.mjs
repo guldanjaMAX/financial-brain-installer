@@ -11,6 +11,7 @@ const MODES = new Set([
   "changed-outside",
   "full-unresolved",
   "incremental-unresolved",
+  "incremental-unresolved-batch",
   "incremental-trash",
   "incremental-left-scope",
 ]);
@@ -24,6 +25,13 @@ syncBuiltinESMExports();
 const ROOT_ID = "root-fixture";
 const MISSING_ID = "missing-sensitive";
 const MISSING_UID = `drive:${MISSING_ID}`;
+const BATCH_MISSING_IDS = Array.from({ length: 10 }, (_, index) =>
+  `missing-batch-${String(index).padStart(2, "0")}`
+);
+const BATCH_MISSING_UIDS = BATCH_MISSING_IDS.map((id) => `drive:${id}`);
+const BATCH_RETAINED_UIDS = Array.from({ length: 100 }, (_, index) =>
+  `drive:batch-retained-${String(index).padStart(3, "0")}`
+);
 const RETAINED_UIDS = Array.from({ length: 10 }, (_, index) =>
   `drive:retained-${String(index).padStart(2, "0")}`
 );
@@ -38,6 +46,7 @@ const blankEvidence = () => ({
   forgetRequests: 0,
   removedFamilies: 0,
   receipts: { indexing: 0, error: 0, ready: 0 },
+  lastErrorReceipt: null,
 });
 
 function readEvidence() {
@@ -75,6 +84,12 @@ function requestBody(options) {
 
 function storedFamilies(evidence) {
   if (mode === "changed-outside") return [];
+  if (mode === "incremental-unresolved-batch") {
+    const removed = evidence.removedFamilies ? new Set(BATCH_MISSING_UIDS.slice(3)) : new Set();
+    return [...BATCH_MISSING_UIDS, ...BATCH_RETAINED_UIDS]
+      .filter((uid) => !removed.has(uid))
+      .sort();
+  }
   if (["full-unresolved", "incremental-unresolved"].includes(mode)) return [MISSING_UID];
   return evidence.removedFamilies ? RETAINED_UIDS : [MISSING_UID, ...RETAINED_UIDS].sort();
 }
@@ -116,7 +131,8 @@ globalThis.fetch = async (input, options = {}) => {
     }
     if (mode.startsWith("incremental-")) {
       return json({
-        changes: [{ fileId: MISSING_ID, removed: true }],
+        changes: (mode === "incremental-unresolved-batch" ? BATCH_MISSING_IDS : [MISSING_ID])
+          .map((fileId) => ({ fileId, removed: true })),
         newStartPageToken: `fixture-next-${mode}`,
       });
     }
@@ -172,6 +188,25 @@ globalThis.fetch = async (input, options = {}) => {
     throw new Error("an unrelated changed item reached absence classification");
   }
 
+  if (url.hostname === "www.googleapis.com" && url.pathname.startsWith("/drive/v3/files/missing-batch-")) {
+    const fileId = url.pathname.slice("/drive/v3/files/".length);
+    const index = BATCH_MISSING_IDS.indexOf(fileId);
+    if (mode !== "incremental-unresolved-batch" || index < 0) {
+      throw new Error("an unrelated batch item reached absence classification");
+    }
+    const evidence = readEvidence();
+    evidence.absenceMetadataReads++;
+    saveEvidence(evidence);
+    if (index < 3) return json({ error: { message: "not found" } }, 404);
+    return json({
+      id: fileId,
+      name: "Removed batch fixture.txt",
+      mimeType: "text/plain",
+      trashed: true,
+      parents: [ROOT_ID],
+    });
+  }
+
   if (url.hostname === "www.googleapis.com" && url.pathname === "/drive/v3/files/outside-file") {
     const evidence = readEvidence();
     evidence.outsideContentReads++;
@@ -193,21 +228,24 @@ globalThis.fetch = async (input, options = {}) => {
     const families = Array.isArray(request.families) ? request.families : [];
     const evidence = readEvidence();
     evidence.forgetRequests++;
-    if (!["incremental-trash", "incremental-left-scope"].includes(mode) ||
-        request.confirm !== true || families.length !== 1 ||
-        families[0]?.base_doc_uid !== MISSING_UID ||
-        !Array.isArray(families[0]?.keep_doc_uids) || families[0].keep_doc_uids.length !== 0) {
+    const expectedUids = mode === "incremental-unresolved-batch"
+      ? BATCH_MISSING_UIDS.slice(3)
+      : [MISSING_UID];
+    if (!["incremental-trash", "incremental-left-scope", "incremental-unresolved-batch"].includes(mode) ||
+        request.confirm !== true || families.length !== expectedUids.length ||
+        families.some((family, index) => family?.base_doc_uid !== expectedUids[index] ||
+          !Array.isArray(family?.keep_doc_uids) || family.keep_doc_uids.length !== 0)) {
       saveEvidence(evidence);
       throw new Error("fixture received an unsafe absence removal");
     }
-    evidence.removedFamilies = 1;
+    evidence.removedFamilies = families.length;
     saveEvidence(evidence);
     return json({
       dry_run: false,
-      documents: 1,
-      chunks: 1,
-      vectors: 1,
-      targets: [MISSING_UID],
+      documents: families.length,
+      chunks: families.length,
+      vectors: families.length,
+      targets: expectedUids,
     });
   }
 
@@ -222,6 +260,13 @@ globalThis.fetch = async (input, options = {}) => {
     const receipt = requestBody(options);
     const evidence = readEvidence();
     if (Object.hasOwn(evidence.receipts, receipt.status)) evidence.receipts[receipt.status]++;
+    if (receipt.status === "error") {
+      evidence.lastErrorReceipt = {
+        issue_code: receipt.issue_code || null,
+        walk_complete: receipt.walk_complete === true,
+        docs_failed: receipt.docs_failed,
+      };
+    }
     saveEvidence(evidence);
     return json({ source: receipt.source, status: receipt.status, run_id: receipt.run_id });
   }

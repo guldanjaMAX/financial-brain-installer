@@ -732,12 +732,55 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       assert.equal(evidence.forgetRequests, 0, "ambiguous absence reached the destructive endpoint");
       assert.equal(evidence.receipts.error, 1, "ambiguous absence did not close its receipt as an error");
       const state = unresolved.state();
-      assert.equal(state.sync_token, unresolved.priorCursor, "ambiguous absence advanced the Drive cursor");
-      assert.equal(state.drive_last_full_sweep_at, unresolved.priorFullSweep,
-        "ambiguous absence completed a full-sweep checkpoint");
+      assert.equal(
+        state.sync_token,
+        full ? `fixture-prewalk-${mode}` : `fixture-next-${mode}`,
+        "a completed Drive walk did not save its cursor",
+      );
+      assert.deepEqual(state.drive_removal_review, {
+        schema_version: 1,
+        issue_code: "SAFETY_REVIEW_REQUIRED",
+        counts: { unresolved_absences: 1 },
+        uids: ["drive:missing-sensitive"],
+      });
+      if (full) {
+        assert.notEqual(state.drive_last_full_sweep_at, unresolved.priorFullSweep,
+          "a completed full walk did not save its sweep checkpoint");
+      }
     } finally {
       unresolved.cleanup();
     }
+  }
+
+  const unresolvedBatch = runScopeScenario("incremental-unresolved-batch");
+  try {
+    assert.equal(unresolvedBatch.code, 1, unresolvedBatch.output);
+    assert.match(unresolvedBatch.output, /Drive review required: 3 stored item\(s\)/i);
+    const evidence = unresolvedBatch.evidence();
+    assert.equal(evidence.absenceMetadataReads, 10, "the classifier stopped before all absence candidates were reviewed");
+    assert.equal(evidence.forgetRequests, 1, "confirmed deletions did not reach the guarded removal plan");
+    assert.equal(evidence.removedFamilies, 7, "an unresolved absence was deleted or a confirmed deletion was retained");
+    assert.equal(evidence.receipts.error, 1);
+    assert.equal(evidence.receipts.ready, 0);
+    assert.deepEqual(evidence.lastErrorReceipt, {
+      issue_code: "SAFETY_REVIEW_REQUIRED",
+      walk_complete: true,
+      docs_failed: 0,
+    });
+    const state = unresolvedBatch.state();
+    assert.equal(state.sync_token, "fixture-next-incremental-unresolved-batch");
+    assert.deepEqual(state.drive_removal_review, {
+      schema_version: 1,
+      issue_code: "SAFETY_REVIEW_REQUIRED",
+      counts: { unresolved_absences: 3 },
+      uids: [
+        "drive:missing-batch-00",
+        "drive:missing-batch-01",
+        "drive:missing-batch-02",
+      ],
+    });
+  } finally {
+    unresolvedBatch.cleanup();
   }
 
   for (const mode of ["incremental-trash", "incremental-left-scope"]) {

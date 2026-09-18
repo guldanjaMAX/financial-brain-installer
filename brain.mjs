@@ -14149,7 +14149,7 @@ const cmdIngestRemoteRun = async (
           ? { removed: { ...savedState.removed } }
           : {}),
         ...Object.fromEntries(
-          ["drive_removal_safety_baseline", "gmail_removal_safety_baseline", "imap_removal_safety_baseline"]
+          ["drive_removal_safety_baseline", "drive_removal_review", "gmail_removal_safety_baseline", "imap_removal_safety_baseline"]
             .filter((key) => savedState[key] != null)
             .map((key) => [key, savedState[key]])
         ),
@@ -14242,6 +14242,13 @@ const cmdIngestRemoteRun = async (
   let gmailPendingRemovalGaps = 0;
   let gmailOperationalFailure = null;
   let imapSnapshotGaps = 0;
+  let driveRemovalReview = which === "drive" &&
+    state.drive_removal_review?.issue_code === "SAFETY_REVIEW_REQUIRED" &&
+    Number.isSafeInteger(state.drive_removal_review?.counts?.unresolved_absences) &&
+    state.drive_removal_review.counts.unresolved_absences > 0 &&
+    Array.isArray(state.drive_removal_review?.uids)
+    ? state.drive_removal_review
+    : null;
   // A scanner migration is complete only when every previously accepted item
   // was either rechecked or deliberately removed. A transient unreadable item
   // may keep its old Brain copy, but it must also keep the migration pending.
@@ -14471,28 +14478,41 @@ const cmdIngestRemoteRun = async (
         ...sourcePolicy.rootFolderIds,
         ...Object.keys(state.drive_folders || {}),
       ]);
+      // Incremental runs can resolve one member of a review without proving
+      // anything about the rest. A complete rooted walk replaces the record;
+      // an incremental window updates only the candidates it actually saw.
+      const unresolvedDriveAbsenceUids = new Set(incremental
+        ? (driveRemovalReview?.uids || []).filter((uid) => driveStoredBeforeProcessing.has(uid))
+        : []);
       for (const uid of [...absenceCandidates].sort()) {
         const fileId = uid.startsWith(uidPrefix) ? uid.slice(uidPrefix.length) : "";
         if (!fileId) {
-          throw new drive.DriveError(
-            "a stored Drive family had no source file id, so cleanup was withheld and the source cursor was not advanced",
-            0,
-            "unresolvedScopedAbsence",
-            { retryable: true },
-          );
+          unresolvedDriveAbsenceUids.add(uid);
+          continue;
         }
         const classification = await drive.classifyScopedAbsence(getToken, fileId, { scopedFolderIds });
         if (classification.kind === "source_deleted" || classification.kind === "left_scope") {
           confirmedDriveAbsenceUids.push(uid);
+          unresolvedDriveAbsenceUids.delete(uid);
           continue;
         }
-        throw new drive.DriveError(
-          "at least one stored Drive item was absent from the reviewed-root walk, but Drive could not distinguish deletion from permission loss; cleanup was withheld and the source cursor was not advanced",
-          0,
-          "unresolvedScopedAbsence",
-          { retryable: true },
-        );
+        unresolvedDriveAbsenceUids.add(uid);
       }
+
+      const reviewUids = [...unresolvedDriveAbsenceUids].sort();
+      if (reviewUids.length) {
+        driveRemovalReview = {
+          schema_version: 1,
+          issue_code: "SAFETY_REVIEW_REQUIRED",
+          counts: { unresolved_absences: reviewUids.length },
+          uids: reviewUids,
+        };
+        state.drive_removal_review = driveRemovalReview;
+      } else {
+        driveRemovalReview = null;
+        delete state.drive_removal_review;
+      }
+      saveState(statePath, state);
     }
 
     const prepareDrive = async (f) => {
@@ -14596,7 +14616,8 @@ const cmdIngestRemoteRun = async (
       // should not page through a large corpus merely to prove zero. Full
       // sweeps always inventory because absence itself is a deletion signal.
       const needsStoredInventory = !incremental || excludedUids.length ||
-        confirmedDriveAbsenceUids.length || intentionalRemovalUids.length || pendingDriveUids.length;
+        confirmedDriveAbsenceUids.length || intentionalRemovalUids.length || pendingDriveUids.length ||
+        Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0;
       const storedUids = needsStoredInventory
         ? (driveStoredBeforeProcessing || await listStoredSourceFamilies({ base, adminKey, source: sourceName }))
         : new Set();
@@ -15466,7 +15487,9 @@ const cmdIngestRemoteRun = async (
   // label evidence, an incomplete scanner sweep, or a missing history marker
   // withholds its cursor above.
   const totalRefused = tally.refused + localRefused;
-  const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0;
+  const driveReviewRequired = which === "drive" &&
+    Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0;
+  const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0 || driveReviewRequired;
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
   await recordSourceReceipt({
@@ -15489,7 +15512,9 @@ const cmdIngestRemoteRun = async (
     // an issue code invites a reader to believe the happier of the two.
     ...(hasRemoteGap
       ? {
-          issue_code: totalRefused > 0 ? "INPUT_REFUSED" : "INGEST_FAILED",
+          issue_code: driveReviewRequired
+            ? "SAFETY_REVIEW_REQUIRED"
+            : totalRefused > 0 ? "INPUT_REFUSED" : "INGEST_FAILED",
           ...(which === "gmail" && gmailOperationalFailure
             ? { failure_evidence: gmailFailureEvidence(gmailOperationalFailure, statePath, gmailCheckpointBefore) }
             : {}),
@@ -15510,6 +15535,15 @@ const cmdIngestRemoteRun = async (
   await reportSkips(skips);
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
+  if (driveReviewRequired) {
+    const count = driveRemovalReview.counts.unresolved_absences;
+    throw new DriveRemovalReviewRequired(
+      `Drive review required: ${count} stored item(s) were absent from the reviewed-root walk, ` +
+        "but Drive could not distinguish deletion from permission loss.\n" +
+        "      Nothing unresolved was removed. The completed source cursor was saved.\n" +
+        "      Restore access or confirm source deletion, then run Drive ingestion again."
+    );
+  }
   await reportBacklog(manifestPath);
   if (which === "gmail" && hasRemoteGap) {
     const disposition = tally.created + tally.updated + unchanged + tally.unchanged > 0
