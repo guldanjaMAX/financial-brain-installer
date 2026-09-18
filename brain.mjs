@@ -23553,13 +23553,21 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     const legacyV046Shape = local.recordedVersion === "0.4.6" &&
       !Object.hasOwn(inventory, "version") &&
       !Object.hasOwn(inventory, "vector_drain_mode");
+    const legacyPre044Shape = preview.isLegacyPre044Version(local.recordedVersion) &&
+      !Object.hasOwn(inventory, "version") &&
+      Object.hasOwn(inventory, "vector_drain_mode");
     const deployedObservation = legacyV046Shape
       ? preview.classifyLegacyV046ProjectionObservation(inventory, {
         expectedVersion: local.recordedVersion,
         expectedBackend: "d1",
       })
+      : legacyPre044Shape
+        ? preview.classifyLegacyPre044ProjectionObservation(inventory, {
+          expectedVersion: local.recordedVersion,
+          expectedBackend: "d1",
+        })
       : null;
-    const deployedProjection = legacyV046Shape
+    const deployedProjection = legacyV046Shape || legacyPre044Shape
       ? null
       : preview.classifyUpdatePreviewProjectionReceipt(inventory, {
         expectedVersion: local.recordedVersion,
@@ -23583,6 +23591,21 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
         deployedObservation,
       });
       const receipt = preview.createLegacyV046UpdatePreviewReceipt(
+        observation,
+        observedEffects,
+      );
+      throw new JsonFatal(receipt);
+    }
+    if (legacyPre044Shape) {
+      const observation = preview.createLegacyPre044UpdatePreviewObservation({
+        manifestSha256: manifestPin.fingerprint,
+        manifestSource: installed.source,
+        recordedVersion: local.recordedVersion,
+        candidateVersion,
+        runtimeProof: finalRuntime,
+        deployedObservation,
+      });
+      const receipt = preview.createLegacyPre044UpdatePreviewReceipt(
         observation,
         observedEffects,
       );

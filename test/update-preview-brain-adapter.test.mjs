@@ -81,6 +81,12 @@ function legacyV046Inventory(overrides = {}) {
   return inventory;
 }
 
+function legacyPre044Inventory(overrides = {}) {
+  const inventory = readinessInventory({ version: "0.4.1", ...overrides });
+  delete inventory.version;
+  return inventory;
+}
+
 function streamedResponse(body, {
   status = 200,
   contentLength,
@@ -502,6 +508,81 @@ test("recorded v0.4.6 emits one closed legacy observation only after final reval
   assert.equal(credentialReads, 1);
   assert.equal(networkRequests, 1);
   assert.equal(successWrites, 0, "the non-green legacy receipt cannot use the success writer");
+});
+
+test("recorded v0.4.0 and v0.4.1 emit a drain-bound pre-0.4.4 observation", async () => {
+  for (const recordedVersion of ["0.4.0", "0.4.1"]) {
+    const manifest = structuredClone(MANIFEST);
+    manifest.brain.version = recordedVersion;
+    const inventory = legacyPre044Inventory({
+      rows: [{ source_type: "private-source-must-not-escape" }],
+    });
+    await assert.rejects(
+      cmdUpdatePreview([
+        "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+      ], previewOptions({ manifest, inventory })),
+      (error) => {
+        assert.equal(error.constructor.name, "JsonFatal");
+        const receipt = error.payload;
+        assert.equal(receipt.status, "legacy_pre044_observation");
+        assert.equal(receipt.error_code, "UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND");
+        assert.equal(receipt.read_only, true);
+        assert.equal(receipt.authorizes_update, false);
+        assert.equal(receipt.legacy_observation.manifest.recorded_version, recordedVersion);
+        assert.equal(
+          receipt.legacy_observation.deployed_projection_observation.vector_drain_mode,
+          "active",
+        );
+        assert.equal(
+          receipt.legacy_observation.drain_mode_binding,
+          "present_in_authenticated_response",
+        );
+        assert.match(receipt.observation_fingerprint, /^[a-f0-9]{64}$/u);
+        assert.equal(Object.hasOwn(receipt, "plan"), false);
+        for (const [name, value] of Object.entries(receipt.effects)) {
+          assert.equal(
+            value,
+            name === "credential_reads" || name === "network_requests" ? 1 : 0,
+            `${name} must report the exact read-only boundary`,
+          );
+        }
+        assert.doesNotMatch(JSON.stringify(receipt), /private-source-must-not-escape/u);
+        return true;
+      },
+    );
+  }
+});
+
+test("recorded v0.4.8 keeps the modern same-response preview path", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.brain.version = "0.4.8";
+  const receipt = await cmdUpdatePreview([
+    "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+  ], previewOptions({ manifest, inventory: readinessInventory({ version: "0.4.8" }) }));
+  assert.equal(receipt.status, "pre_update_check_complete");
+  assert.equal(receipt.plan.manifest.recorded_version, "0.4.8");
+  assert.equal(receipt.plan.deployed_projection.worker_version, "0.4.8");
+  assert.equal(Object.hasOwn(receipt, "legacy_observation"), false);
+});
+
+test("a recorded v0.4.3 receipt with an explicit mismatching version refuses", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.brain.version = "0.4.3";
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      manifest,
+      inventory: readinessInventory({ version: "0.4.2" }),
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH");
+      assert.equal(error.payload?.effects.credential_reads, 1);
+      assert.equal(error.payload?.effects.network_requests, 1);
+      assert.equal(Object.hasOwn(error.payload, "legacy_observation"), false);
+      return true;
+    },
+  );
 });
 
 test("an unversioned response cannot enter the v0.4.6 legacy lane for another manifest", async () => {
