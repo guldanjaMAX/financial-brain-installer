@@ -17,6 +17,7 @@ import {
   DRIVE_REMOVAL_MAX_COUNT,
   DRIVE_REMOVAL_MAX_RATIO,
   drivePolicyFingerprint,
+  isRetryableDriveError,
   remoteFamilySettlement,
   VALUE_FLAGS,
 } from "../brain.mjs";
@@ -31,6 +32,25 @@ const DRIVE_SCOPE_FETCH = pathToFileURL(join(HERE, "fixtures", "drive-scope-boun
 const DRIVE_ACTIVE_SKIP_FETCH = pathToFileURL(join(HERE, "fixtures", "drive-active-skip-fetch.mjs")).href;
 
 const CATEGORIES = ["source_policy", "source_deleted", "intentional_skip"];
+
+const injectedDriveDouble = {
+  classifyScopedAbsence: async () => {
+    const error = new Error("temporary injected connector failure");
+    error.name = "DriveError";
+    error.retryable = true;
+    throw error;
+  },
+};
+let injectedDriveError = null;
+try {
+  await injectedDriveDouble.classifyScopedAbsence();
+} catch (error) {
+  injectedDriveError = error;
+}
+assert.equal(isRetryableDriveError(injectedDriveError), true,
+  "an injected Drive double without a DriveError constructor was not recognized");
+assert.equal(isRetryableDriveError({ name: "DriveError", retryable: false }), false);
+assert.equal(isRetryableDriveError({ name: "OtherError", retryable: true }), false);
 
 function ids(prefix, count) {
   return Array.from({ length: count }, (_, index) => `${prefix}-${String(index).padStart(4, "0")}`);

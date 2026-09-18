@@ -11499,6 +11499,11 @@ export function assertNoPendingRemovals(result, label = "source deletion") {
   return result;
 }
 
+/** Connector doubles and lazy-loaded modules share this stable error shape. */
+export function isRetryableDriveError(error) {
+  return error?.name === "DriveError" && error?.retryable === true;
+}
+
 /** Read every live logical document uid for one source from the data plane. */
 export async function listStoredSourceFamilies({
   base,
@@ -14943,7 +14948,7 @@ const cmdIngestRemoteRun = async (
         try {
           classification = await drive.classifyScopedAbsence(getToken, fileId, { scopedFolderIds });
         } catch (error) {
-          if (!(error instanceof drive.DriveError) || error.retryable !== true) throw error;
+          if (!isRetryableDriveError(error)) throw error;
           unresolvedTransientDriveReview.set(uid, {
             uid,
             observed_at: driveReviewObservedAt,
