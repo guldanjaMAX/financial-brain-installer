@@ -21,6 +21,7 @@ import {
   VALUE_FLAGS,
 } from "../brain.mjs";
 import { driveVersion } from "../connectors/google-drive.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { previewSupportJournal } from "../support-journal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -634,7 +635,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   }, true);
   const stripAnsi = (value) => String(value || "").replace(/\x1b\[[0-9;]*m/g, "");
 
-  const runScopeScenario = (mode, { full = false, pendingRemoval = false } = {}) => {
+  const runScopeScenario = (mode, {
+    full = false,
+    pendingRemoval = false,
+    priorReview = false,
+    args = [],
+  } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
     const manifestPath = join(directory, "fixture.manifest.json");
     const statePath = join(directory, ".brain-ingest-drive.json");
@@ -674,7 +680,15 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     }), { mode: 0o600 });
     writeFileSync(statePath, JSON.stringify({
       version: 1,
-      done: {},
+      done: mode === "incremental-restored" ? {
+        "drive:missing-sensitive": JSON.stringify([
+          "2026-09-02T00:00:00Z",
+          "restored-version",
+          "Restored fixture.txt",
+          "text/plain",
+          "Reviewed Root",
+        ]),
+      } : {},
       skipped: {},
       sync_token: priorCursor,
       drive_policy_fingerprint: policyFingerprint,
@@ -684,11 +698,20 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         "root-fixture": { name: "Reviewed Root", parents: [] },
       },
       removed: pendingRemoval ? { "drive:missing-sensitive": "2026-09-01T00:00:00.000Z" } : {},
+      ...(priorReview ? {
+        drive_removal_review: {
+          schema_version: 1,
+          issue_code: "SAFETY_REVIEW_REQUIRED",
+          counts: { unresolved_absences: 1 },
+          uids: ["drive:missing-sensitive"],
+        },
+      } : {}),
     }), { mode: 0o600 });
 
     const result = spawnSync(process.execPath, [
       "--import", DRIVE_SCOPE_FETCH,
       CLI, "ingest", manifestPath, "--from", "drive",
+      ...args,
     ], { encoding: "utf8", env: environment, timeout: 30_000 });
     assert.equal(result.error, undefined, String(result.error || ""));
     assert.equal(result.signal, null, `Drive scope CLI was terminated by ${result.signal}`);
@@ -724,7 +747,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const unresolved = runScopeScenario(mode, { full });
     try {
       assert.equal(unresolved.code, 1, unresolved.output);
-      assert.match(unresolved.output, /could not distinguish deletion from permission loss/i);
+      assert.match(unresolved.output, /denied access to the file metadata/i);
       assert.equal(unresolved.output.includes("missing-sensitive"), false, "ambiguous Drive id leaked to CLI output");
       const evidence = unresolved.evidence();
       assert.equal(evidence.absenceMetadataReads, 1, `${mode} did not classify the missing stored file`);
@@ -739,10 +762,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         "a completed Drive walk did not save its cursor",
       );
       assert.deepEqual(state.drive_removal_review, {
-        schema_version: 1,
+        schema_version: 2,
         issue_code: "SAFETY_REVIEW_REQUIRED",
-        counts: { unresolved_absences: 1 },
+        counts: { unresolved_absences: 1, pending_source_deletions: 0 },
         uids: ["drive:missing-sensitive"],
+        unresolved_access_uids: ["drive:missing-sensitive"],
+        pending_source_deletion_uids: [],
       });
       if (full) {
         assert.notEqual(state.drive_last_full_sweep_at, unresolved.priorFullSweep,
@@ -765,10 +790,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.removedFamilies, 0);
     const state = unresolvedPending.state();
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 1,
+      schema_version: 2,
       issue_code: "SAFETY_REVIEW_REQUIRED",
-      counts: { unresolved_absences: 1 },
+      counts: { unresolved_absences: 1, pending_source_deletions: 0 },
       uids: ["drive:missing-sensitive"],
+      unresolved_access_uids: ["drive:missing-sensitive"],
+      pending_source_deletion_uids: [],
     });
     assert.equal(
       state.removed?.["drive:missing-sensitive"],
@@ -797,17 +824,87 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const state = unresolvedBatch.state();
     assert.equal(state.sync_token, "fixture-next-incremental-unresolved-batch");
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 1,
+      schema_version: 2,
       issue_code: "SAFETY_REVIEW_REQUIRED",
-      counts: { unresolved_absences: 3 },
+      counts: { unresolved_absences: 3, pending_source_deletions: 0 },
       uids: [
         "drive:missing-batch-00",
         "drive:missing-batch-01",
         "drive:missing-batch-02",
       ],
+      unresolved_access_uids: [
+        "drive:missing-batch-00",
+        "drive:missing-batch-01",
+        "drive:missing-batch-02",
+      ],
+      pending_source_deletion_uids: [],
     });
   } finally {
     unresolvedBatch.cleanup();
+  }
+
+  const goneStoredFamilies = [
+    "drive:missing-sensitive",
+    ...Array.from({ length: 10 }, (_, index) =>
+      `drive:retained-${String(index).padStart(2, "0")}`
+    ),
+  ].sort();
+  const gonePlan = buildDriveRemovalPlan({
+    storedFamilies: goneStoredFamilies,
+    activeFamilies: [],
+    policyCandidates: [],
+    vanishedCandidates: ["drive:missing-sensitive"],
+    intentionalCandidates: [],
+  }, {
+    safetyBaselineCount: goneStoredFamilies.length,
+    fingerprintContext: "drive-strict",
+  });
+  assert.equal(gonePlan.tooLarge, false, "the gone fixture must prove owner approval below routine limits");
+
+  const goneNeedsApproval = runScopeScenario("incremental-gone", { priorReview: true });
+  try {
+    assert.equal(goneNeedsApproval.code, 1, goneNeedsApproval.output);
+    assert.match(
+      goneNeedsApproval.output,
+      new RegExp(renderCliCommands(
+        `brain ingest <manifest> --from drive --approve-removals ${gonePlan.fingerprint}`,
+      )),
+    );
+    assert.equal(goneNeedsApproval.evidence().forgetRequests, 0,
+      "a provider-confirmed gone item was removed without exact owner approval");
+    assert.deepEqual(goneNeedsApproval.state().drive_removal_review, {
+      schema_version: 2,
+      issue_code: "SAFETY_REVIEW_REQUIRED",
+      counts: { unresolved_absences: 0, pending_source_deletions: 1 },
+      uids: ["drive:missing-sensitive"],
+      unresolved_access_uids: [],
+      pending_source_deletion_uids: ["drive:missing-sensitive"],
+    });
+  } finally {
+    goneNeedsApproval.cleanup();
+  }
+
+  const goneApproved = runScopeScenario("incremental-gone", {
+    priorReview: true,
+    args: ["--approve-removals", gonePlan.fingerprint],
+  });
+  try {
+    assert.equal(goneApproved.code, 0, goneApproved.output);
+    assert.equal(goneApproved.evidence().forgetRequests, 1);
+    assert.equal(goneApproved.state().drive_removal_review, undefined,
+      "an approved and read-back removal left a stale Drive review record");
+  } finally {
+    goneApproved.cleanup();
+  }
+
+  const restoredReview = runScopeScenario("incremental-restored", { priorReview: true });
+  try {
+    assert.equal(restoredReview.code, 0, restoredReview.output);
+    assert.equal(restoredReview.evidence().forgetRequests, 0);
+    assert.equal(restoredReview.state().drive_removal_review, undefined,
+      "a later complete walk that found the file left a stale Drive review record");
+  } finally {
+    restoredReview.cleanup();
   }
 
   for (const mode of ["incremental-trash", "incremental-left-scope"]) {

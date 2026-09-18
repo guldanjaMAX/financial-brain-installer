@@ -12,6 +12,8 @@ const MODES = new Set([
   "full-unresolved",
   "incremental-unresolved",
   "incremental-unresolved-batch",
+  "incremental-gone",
+  "incremental-restored",
   "incremental-trash",
   "incremental-left-scope",
 ]);
@@ -90,7 +92,7 @@ function storedFamilies(evidence) {
       .filter((uid) => !removed.has(uid))
       .sort();
   }
-  if (["full-unresolved", "incremental-unresolved"].includes(mode)) return [MISSING_UID];
+  if (["full-unresolved", "incremental-unresolved", "incremental-restored"].includes(mode)) return [MISSING_UID];
   return evidence.removedFamilies ? RETAINED_UIDS : [MISSING_UID, ...RETAINED_UIDS].sort();
 }
 
@@ -105,6 +107,20 @@ function changedOutsideFile() {
     md5Checksum: "outside-version",
     trashed: false,
     parents: ["outside-folder"],
+  };
+}
+
+function restoredFile() {
+  return {
+    id: MISSING_ID,
+    name: "Restored fixture.txt",
+    mimeType: "text/plain",
+    size: "240",
+    createdTime: "2026-01-01T00:00:00Z",
+    modifiedTime: "2026-09-02T00:00:00Z",
+    md5Checksum: "restored-version",
+    trashed: false,
+    parents: [ROOT_ID],
   };
 }
 
@@ -127,6 +143,12 @@ globalThis.fetch = async (input, options = {}) => {
       return json({
         changes: [{ fileId: "outside-file", file: changedOutsideFile() }],
         newStartPageToken: "fixture-next-changed-outside",
+      });
+    }
+    if (mode === "incremental-restored") {
+      return json({
+        changes: [{ fileId: MISSING_ID, file: restoredFile() }],
+        newStartPageToken: "fixture-next-incremental-restored",
       });
     }
     if (mode.startsWith("incremental-")) {
@@ -157,7 +179,11 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.rootedWalks++;
     saveEvidence(evidence);
-    return json({ files: [], nextPageToken: null, incompleteSearch: false });
+    return json({
+      files: mode === "incremental-restored" ? [restoredFile()] : [],
+      nextPageToken: null,
+      incompleteSearch: false,
+    });
   }
 
   if (url.hostname === "www.googleapis.com" && url.pathname === `/drive/v3/files/${MISSING_ID}`) {
@@ -165,7 +191,15 @@ globalThis.fetch = async (input, options = {}) => {
     evidence.absenceMetadataReads++;
     saveEvidence(evidence);
     if (mode === "full-unresolved" || mode === "incremental-unresolved") {
-      return json({ error: { message: "not found" } }, 404);
+      return json({
+        error: {
+          message: "insufficient permissions",
+          errors: [{ reason: "insufficientFilePermissions" }],
+        },
+      }, 403);
+    }
+    if (mode === "incremental-gone") {
+      return json({ error: { message: "File not found" } }, 404);
     }
     if (mode === "incremental-trash") {
       return json({
@@ -197,7 +231,14 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.absenceMetadataReads++;
     saveEvidence(evidence);
-    if (index < 3) return json({ error: { message: "not found" } }, 404);
+    if (index < 3) {
+      return json({
+        error: {
+          message: "insufficient permissions",
+          errors: [{ reason: "insufficientFilePermissions" }],
+        },
+      }, 403);
+    }
     return json({
       id: fileId,
       name: "Removed batch fixture.txt",
@@ -231,7 +272,7 @@ globalThis.fetch = async (input, options = {}) => {
     const expectedUids = mode === "incremental-unresolved-batch"
       ? BATCH_MISSING_UIDS.slice(3)
       : [MISSING_UID];
-    if (!["incremental-trash", "incremental-left-scope", "incremental-unresolved-batch"].includes(mode) ||
+    if (!["incremental-gone", "incremental-trash", "incremental-left-scope", "incremental-unresolved-batch"].includes(mode) ||
         request.confirm !== true || families.length !== expectedUids.length ||
         families.some((family, index) => family?.base_doc_uid !== expectedUids[index] ||
           !Array.isArray(family?.keep_doc_uids) || family.keep_doc_uids.length !== 0)) {

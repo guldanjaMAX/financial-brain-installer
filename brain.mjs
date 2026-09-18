@@ -14242,13 +14242,48 @@ const cmdIngestRemoteRun = async (
   let gmailPendingRemovalGaps = 0;
   let gmailOperationalFailure = null;
   let imapSnapshotGaps = 0;
-  let driveRemovalReview = which === "drive" &&
-    state.drive_removal_review?.issue_code === "SAFETY_REVIEW_REQUIRED" &&
-    Number.isSafeInteger(state.drive_removal_review?.counts?.unresolved_absences) &&
-    state.drive_removal_review.counts.unresolved_absences > 0 &&
-    Array.isArray(state.drive_removal_review?.uids)
+  const storedDriveRemovalReview = which === "drive" &&
+    state.drive_removal_review?.issue_code === "SAFETY_REVIEW_REQUIRED"
     ? state.drive_removal_review
     : null;
+  const legacyDriveReviewUids = storedDriveRemovalReview?.schema_version === 1 &&
+    Array.isArray(storedDriveRemovalReview?.uids)
+    ? storedDriveRemovalReview.uids
+    : [];
+  let unresolvedDriveReviewUids = new Set(
+    (Array.isArray(storedDriveRemovalReview?.unresolved_access_uids)
+      ? storedDriveRemovalReview.unresolved_access_uids
+      : legacyDriveReviewUids).map(String),
+  );
+  let pendingGoneDriveReviewUids = new Set(
+    (Array.isArray(storedDriveRemovalReview?.pending_source_deletion_uids)
+      ? storedDriveRemovalReview.pending_source_deletion_uids
+      : []).map(String),
+  );
+  let driveRemovalReview = storedDriveRemovalReview;
+
+  const updateDriveRemovalReview = () => {
+    const unresolvedAccessUids = [...unresolvedDriveReviewUids].sort();
+    const pendingSourceDeletionUids = [...pendingGoneDriveReviewUids].sort();
+    const uids = [...new Set([...unresolvedAccessUids, ...pendingSourceDeletionUids])].sort();
+    if (!uids.length) {
+      driveRemovalReview = null;
+      delete state.drive_removal_review;
+      return;
+    }
+    driveRemovalReview = {
+      schema_version: 2,
+      issue_code: "SAFETY_REVIEW_REQUIRED",
+      counts: {
+        unresolved_absences: unresolvedAccessUids.length,
+        pending_source_deletions: pendingSourceDeletionUids.length,
+      },
+      uids,
+      unresolved_access_uids: unresolvedAccessUids,
+      pending_source_deletion_uids: pendingSourceDeletionUids,
+    };
+    state.drive_removal_review = driveRemovalReview;
+  };
   // A scanner migration is complete only when every previously accepted item
   // was either rechecked or deliberately removed. A transient unreadable item
   // may keep its old Brain copy, but it must also keep the migration pending.
@@ -14457,6 +14492,7 @@ const cmdIngestRemoteRun = async (
 
     const seenDriveUids = new Set(files.map((file) => `${sourceName}:${file.id}`));
     const confirmedDriveAbsenceUids = [];
+    const goneDriveAbsenceUids = [];
     if (!dry && driveStoredBeforeProcessing) {
       const uidPrefix = `${sourceName}:`;
       const absenceCandidates = new Set(
@@ -14469,49 +14505,46 @@ const cmdIngestRemoteRun = async (
           if (!seenDriveUids.has(uid)) absenceCandidates.add(uid);
         }
       }
+      for (const uid of [...unresolvedDriveReviewUids, ...pendingGoneDriveReviewUids]) {
+        if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) {
+          absenceCandidates.add(uid);
+        }
+      }
 
       // The current rooted traversal is the authority for which folder ids are
-      // in scope. A visible file outside this set is a confirmed move; a file
-      // that Drive hides with 403/404 is deliberately ambiguous because hard
-      // deletion and permission loss are indistinguishable to this credential.
+      // in scope. A visible file outside this set is a confirmed move. Drive's
+      // 404/notFound response is a separately approved source deletion, while
+      // an access-denied 403 stays review-only and can never enter this plan.
       const scopedFolderIds = new Set([
         ...sourcePolicy.rootFolderIds,
         ...Object.keys(state.drive_folders || {}),
       ]);
-      // Incremental runs can resolve one member of a review without proving
-      // anything about the rest. A complete rooted walk replaces the record;
-      // an incremental window updates only the candidates it actually saw.
-      const unresolvedDriveAbsenceUids = new Set(incremental
-        ? (driveRemovalReview?.uids || []).filter((uid) => driveStoredBeforeProcessing.has(uid))
-        : []);
+      // Recheck every retained review member. A later walk that sees the file
+      // again clears it, a provider-confirmed absence moves it into the exact
+      // removal plan, and access loss remains excluded from deletion.
+      unresolvedDriveReviewUids = new Set();
+      pendingGoneDriveReviewUids = new Set();
       for (const uid of [...absenceCandidates].sort()) {
         const fileId = uid.startsWith(uidPrefix) ? uid.slice(uidPrefix.length) : "";
         if (!fileId) {
-          unresolvedDriveAbsenceUids.add(uid);
+          unresolvedDriveReviewUids.add(uid);
           continue;
         }
         const classification = await drive.classifyScopedAbsence(getToken, fileId, { scopedFolderIds });
         if (classification.kind === "source_deleted" || classification.kind === "left_scope") {
           confirmedDriveAbsenceUids.push(uid);
-          unresolvedDriveAbsenceUids.delete(uid);
           continue;
         }
-        unresolvedDriveAbsenceUids.add(uid);
+        if (classification.kind === "gone") {
+          confirmedDriveAbsenceUids.push(uid);
+          goneDriveAbsenceUids.push(uid);
+          pendingGoneDriveReviewUids.add(uid);
+          continue;
+        }
+        unresolvedDriveReviewUids.add(uid);
       }
 
-      const reviewUids = [...unresolvedDriveAbsenceUids].sort();
-      if (reviewUids.length) {
-        driveRemovalReview = {
-          schema_version: 1,
-          issue_code: "SAFETY_REVIEW_REQUIRED",
-          counts: { unresolved_absences: reviewUids.length },
-          uids: reviewUids,
-        };
-        state.drive_removal_review = driveRemovalReview;
-      } else {
-        driveRemovalReview = null;
-        delete state.drive_removal_review;
-      }
+      updateDriveRemovalReview();
       saveState(statePath, state);
     }
 
@@ -14617,11 +14650,12 @@ const cmdIngestRemoteRun = async (
       // sweeps always inventory because absence itself is a deletion signal.
       const needsStoredInventory = !incremental || excludedUids.length ||
         confirmedDriveAbsenceUids.length || intentionalRemovalUids.length || pendingDriveUids.length ||
-        Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0;
+        Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0 ||
+        Number(driveRemovalReview?.counts?.pending_source_deletions || 0) > 0;
       const storedUids = needsStoredInventory
         ? (driveStoredBeforeProcessing || await listStoredSourceFamilies({ base, adminKey, source: sourceName }))
         : new Set();
-      const unresolvedDriveUids = new Set(driveRemovalReview?.uids || []);
+      const unresolvedDriveUids = new Set(driveRemovalReview?.unresolved_access_uids || []);
       const withoutUnresolvedDriveUids = (uids) =>
         uids.filter((uid) => !unresolvedDriveUids.has(uid));
 
@@ -14652,6 +14686,18 @@ const cmdIngestRemoteRun = async (
         fingerprintContext: "drive-strict",
       });
       saveState(statePath, state);
+      const gonePlanTargets = [...new Set([
+        ...goneDriveAbsenceUids,
+        ...pendingGoneDriveReviewUids,
+      ])].filter((uid) => storedUids.has(uid) && !seenUids.has(uid));
+      if (gonePlanTargets.length && removalApproval !== driveRemovalPlan.fingerprint) {
+        throw new DriveRemovalReviewRequired(
+          `Drive reports ${gonePlanTargets.length} stored item(s) no longer exist.\n` +
+            "      Nothing from this removal plan was removed. The source cursor was not advanced.\n" +
+            "      Confirm this exact source-deletion plan by re-running:\n" +
+            `      brain ingest <manifest> --from drive --approve-removals ${driveRemovalPlan.fingerprint}`
+        );
+      }
       assertDriveRemovalPlanSafe(driveRemovalPlan, removalApproval);
 
       const currentlyPlanned = new Set(Object.values(driveRemovalPlan.targets).flat());
@@ -14694,8 +14740,10 @@ const cmdIngestRemoteRun = async (
           } else {
             if (state.done) delete state.done[uid];
             if (state.removed) delete state.removed[uid];
+            pendingGoneDriveReviewUids.delete(uid);
           }
         }
+        updateDriveRemovalReview();
         saveState(statePath, state);
         if (stillStored.length) {
           throw new Error(
@@ -15548,9 +15596,11 @@ const cmdIngestRemoteRun = async (
     const count = driveRemovalReview.counts.unresolved_absences;
     throw new DriveRemovalReviewRequired(
       `Drive review required: ${count} stored item(s) were absent from the reviewed-root walk, ` +
-        "but Drive could not distinguish deletion from permission loss.\n" +
+        "and Drive denied access to the file metadata.\n" +
         "      Nothing unresolved was removed. The completed source cursor was saved.\n" +
-        "      Restore access or confirm source deletion, then run Drive ingestion again."
+        "      Restore access, then run Drive ingestion again. Source deletion can only be confirmed " +
+        "when Drive reports the item gone and the exact brain ingest <manifest> --from drive " +
+        "--approve-removals <fingerprint> plan is approved."
     );
   }
   await reportBacklog(manifestPath);

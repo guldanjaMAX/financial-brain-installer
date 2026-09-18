@@ -558,10 +558,12 @@ export function driveAssistantPreviewSummary({
 /**
  * Explain why a formerly indexed item is absent from a complete rooted walk.
  *
- * A 404 can mean hard deletion or permission loss. Drive does not distinguish
- * those cases for this credential, so it is deliberately unresolved and must
- * never become a tombstone. Visible trash and a visible move outside the
- * approved folder set are authoritative removal evidence.
+ * Drive uses 404, and sometimes a 403 carrying notFound, when a file no longer
+ * exists. That is source-deletion evidence, but it still needs the owner's
+ * exact removal-plan approval before it can become a tombstone. A different
+ * 403 is access loss and must stay outside every deletion plan. Visible trash
+ * and a visible move outside the approved folder set are also authoritative
+ * removal evidence.
  */
 export async function classifyScopedAbsence(getAccessToken, fileId, {
   scopedFolderIds = new Set(),
@@ -571,10 +573,23 @@ export async function classifyScopedAbsence(getAccessToken, fileId, {
   try {
     file = await getFileMetadata(getAccessToken, fileId, opts);
   } catch (error) {
-    if (error instanceof DriveError && (error.status === 403 || error.status === 404)) {
+    if (error instanceof DriveError && (
+      error.status === 404 ||
+      (error.status === 403 && (
+        /not[ _-]?found/i.test(String(error.providerReason || error.reason || "")) ||
+        /\bfile\s+not\s+found\b/i.test(String(error.message || ""))
+      ))
+    )) {
       return {
-        kind: "unresolved",
-        reason: "permission loss and hard deletion are indistinguishable",
+        kind: "gone",
+        reason: "Drive reports that the file no longer exists",
+        retryable: false,
+      };
+    }
+    if (error instanceof DriveError && error.status === 403) {
+      return {
+        kind: "unresolved_access",
+        reason: "Drive denied access to the file metadata",
         retryable: true,
       };
     }
@@ -586,7 +601,7 @@ export async function classifyScopedAbsence(getAccessToken, fileId, {
   const parents = Array.isArray(file?.parents) ? file.parents.map(String) : [];
   if (parents.some((parent) => scopedFolderIds.has(parent))) {
     return {
-      kind: "unresolved",
+      kind: "unresolved_access",
       reason: "Drive still places the file under a reviewed folder but omitted it from the completed traversal",
       retryable: true,
     };
@@ -609,7 +624,7 @@ export async function startPageToken(getAccessToken, opts = {}) {
  * Returns { changed, removed, nextToken }. `removed` covers deletion, trashing,
  * and a file that merely left this credential's view. The caller must classify
  * a stored removed id with classifyScopedAbsence() before treating it as source
- * deletion, because 403/404 cannot distinguish hard deletion from access loss.
+ * deletion: 404/notFound is gone, while an access-denied 403 remains review-only.
  */
 export async function listChanges(getAccessToken, pageToken, opts = {}) {
   const changed = [];

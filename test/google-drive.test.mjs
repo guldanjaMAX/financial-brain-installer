@@ -541,13 +541,22 @@ const workbookBytes = (sheets) => {
   });
   const moved = await classify({ id: "old", name: "old.txt", parents: ["outside"] });
   const trashed = await classify({ id: "old", name: "old.txt", parents: ["root"], trashed: true });
-  const ambiguous = await classify({ error: { message: "not found" } }, 404);
+  const gone = await classify({ error: { message: "File not found" } }, 404);
+  const hiddenGone = await classify({
+    error: { message: "File not found", errors: [{ reason: "notFound" }] },
+  }, 403);
+  const accessDenied = await classify({
+    error: { message: "insufficient permissions", errors: [{ reason: "insufficientFilePermissions" }] },
+  }, 403);
   const inconsistent = await classify({ id: "old", name: "old.txt", parents: ["nested"] });
   check("a visible move out of scope is authoritative removal evidence", moved.kind === "left_scope");
   check("visible trash is authoritative deletion evidence", trashed.kind === "source_deleted");
-  check("permission loss is not guessed to be hard deletion", ambiguous.kind === "unresolved" && ambiguous.retryable);
+  check("a 404 is classified as a gone source item", gone.kind === "gone" && !gone.retryable);
+  check("a 403 notFound body is classified as a gone source item", hiddenGone.kind === "gone" && !hiddenGone.retryable);
+  check("a 403 access denial remains review-only",
+    accessDenied.kind === "unresolved_access" && accessDenied.retryable);
   check("an item still parented inside scope but missing from the walk blocks tombstones",
-    inconsistent.kind === "unresolved" && inconsistent.retryable);
+    inconsistent.kind === "unresolved_access" && inconsistent.retryable);
 }
 {
   const t = await startPageToken(tok, { fetchImpl: async () => json({ startPageToken: "T1" }), sleep: async () => {} });
