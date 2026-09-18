@@ -5,6 +5,7 @@ import {
   filterSql,
   listSourceFamilies,
   projectedSourceFamilyName,
+  SOURCE_FAMILY_CURSOR_MAX_BYTES,
   SOURCE_FAMILY_UID_FILTER_MAX,
   unsupportedFilters,
 } from "../src/lib/store-d1.js";
@@ -2435,11 +2436,29 @@ const labelProjectionParityRows = [
         ORDER BY family_doc_uid ASC
         LIMIT ?3`
     ).all(source, cursor, limit + 1);
-    const families = results.slice(0, limit).map((row) => String(row.family_doc_uid));
+    const hasMore = results.length > limit;
+    let pageRows = results.slice(0, limit);
+    let nextCursor = null;
+    if (hasMore) {
+      let resumableIndex = pageRows.length - 1;
+      while (resumableIndex >= 0 &&
+          new TextEncoder().encode(String(pageRows[resumableIndex].family_doc_uid)).length >
+            SOURCE_FAMILY_CURSOR_MAX_BYTES) {
+        resumableIndex--;
+      }
+      if (resumableIndex < 0) {
+        const error = new Error("source-family inventory cannot emit a resumable page boundary");
+        error.code = "unpageable_family_identity";
+        throw error;
+      }
+      pageRows = pageRows.slice(0, resumableIndex + 1);
+      nextCursor = String(pageRows[pageRows.length - 1].family_doc_uid);
+    }
+    const families = pageRows.map((row) => String(row.family_doc_uid));
     return {
       source,
       families,
-      next_cursor: results.length > limit ? families.at(-1) : null,
+      next_cursor: nextCursor,
     };
   };
 
@@ -2702,6 +2721,232 @@ const labelProjectionParityRows = [
     }
   ), readOnlyEnv, {});
   check("the read-only retrieval credential cannot enumerate source families", readOnly.status === 401, String(readOnly.status));
+}
+
+{
+  const routePage = async (source) => {
+    const database = new DatabaseSync(":memory:");
+    database.exec(`
+      CREATE TABLE documents (
+        doc_uid TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        title TEXT,
+        meta TEXT,
+        deleted_at INTEGER
+      );
+    `);
+    const longUid = `${source}:${"m".repeat(17_000)}`;
+    const insert = database.prepare(
+      "INSERT INTO documents (doc_uid, source, title, meta, deleted_at) VALUES (?, ?, ?, ?, NULL)"
+    );
+    insert.run(`${source}:a`, source, "A", "{}");
+    insert.run(longUid, source, "Long", "{}");
+    insert.run(`${source}:z`, source, "Z", "{}");
+    const env = {
+      STORAGE: "d1",
+      ADMIN_KEY: "k",
+      DB: {
+        prepare(sql) {
+          const statement = database.prepare(sql);
+          let bindings = [];
+          return {
+            bind(...values) { bindings = values; return this; },
+            async all() { return { results: statement.all(...bindings) }; },
+          };
+        },
+      },
+    };
+    const firstResponse = await worker.fetch(new Request(
+      "https://b.example/api/admin/brain/source-families",
+      {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+        body: JSON.stringify({ source, limit: 2 }),
+      },
+    ), env, {});
+    const first = await firstResponse.json();
+    const secondResponse = await worker.fetch(new Request(
+      "https://b.example/api/admin/brain/source-families",
+      {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+        body: JSON.stringify({ source, limit: 2, cursor: first.next_cursor }),
+      },
+    ), env, {});
+    const second = await secondResponse.json();
+    database.close();
+    return { longUid, firstResponse, first, secondResponse, second };
+  };
+
+  for (const source of ["upload", "drive"]) {
+    const result = await routePage(source);
+    const walked = [result.first, result.second].flatMap((page) => page.families || []);
+    check(`${source} route never emits a continuation cursor its next request rejects`,
+      result.firstResponse.status === 200 &&
+        new TextEncoder().encode(result.first.next_cursor || "").length <= 16 * 1024 &&
+        result.secondResponse.status === 200 &&
+        result.second.next_cursor === null &&
+        walked.join(",") === [`${source}:a`, result.longUid, `${source}:z`].join(",") &&
+        new Set(walked).size === walked.length,
+      JSON.stringify({
+        first_status: result.firstResponse.status,
+        next_cursor_bytes: new TextEncoder().encode(result.first.next_cursor || "").length,
+        second_status: result.secondResponse.status,
+        second_code: result.second.code || null,
+      }));
+  }
+
+  const uidWithBytes = (source, first, bytes) => {
+    const prefix = `${source}:`;
+    return `${prefix}${first}${"x".repeat(bytes - prefix.length - 1)}`;
+  };
+  const boundaryCases = [
+    {
+      name: "an exact 16384-byte tail",
+      limit: 2,
+      uids: ["upload:a", uidWithBytes("upload", "m", SOURCE_FAMILY_CURSOR_MAX_BYTES), "upload:z"],
+      status: 200,
+      expectedLength: 2,
+      expectedCursorBytes: SOURCE_FAMILY_CURSOR_MAX_BYTES,
+    },
+    {
+      name: "a 16385-byte tail",
+      limit: 2,
+      uids: ["upload:a", uidWithBytes("upload", "m", SOURCE_FAMILY_CURSOR_MAX_BYTES + 1), "upload:z"],
+      status: 200,
+      expectedLength: 1,
+      expectedCursor: "upload:a",
+    },
+    {
+      name: "a 100000-byte tail",
+      limit: 2,
+      uids: ["upload:a", uidWithBytes("upload", "m", 100_000), "upload:z"],
+      status: 200,
+      expectedLength: 1,
+      expectedCursor: "upload:a",
+    },
+    {
+      name: "an over-long middle row",
+      limit: 3,
+      uids: ["upload:a", uidWithBytes("upload", "m", 17_000), "upload:z", "upload:zz"],
+      status: 200,
+      expectedLength: 3,
+      expectedCursor: "upload:z",
+    },
+    {
+      name: "an over-long first row followed by an in-bound row",
+      limit: 2,
+      uids: [uidWithBytes("upload", "b", 17_000), "upload:z", "upload:zz"],
+      status: 200,
+      expectedLength: 2,
+      expectedCursor: "upload:z",
+    },
+    {
+      name: "one over-long row in a one-row resumable page",
+      limit: 1,
+      uids: [uidWithBytes("upload", "m", 17_000), "upload:z"],
+      status: 409,
+      code: "unpageable_family_identity",
+    },
+    {
+      name: "only over-long rows in a resumable page",
+      limit: 2,
+      uids: [uidWithBytes("upload", "m", 17_000), uidWithBytes("upload", "n", 17_000), "upload:z"],
+      status: 409,
+      code: "unpageable_family_identity",
+    },
+    {
+      name: "an over-long final row",
+      limit: 2,
+      uids: ["upload:a", uidWithBytes("upload", "z", 17_000)],
+      status: 200,
+      expectedLength: 2,
+      expectedCursor: null,
+    },
+  ];
+
+  for (const scenario of boundaryCases) {
+    const rows = scenario.uids.map((uid, index) => ({
+      doc_uid: uid,
+      source: "upload",
+      title: `Boundary ${index}`,
+      meta: JSON.stringify({ folder: "Reviewed Root" }),
+      deleted_at: null,
+    }));
+    const database = new DatabaseSync(":memory:");
+    database.exec(`
+      CREATE TABLE documents (
+        doc_uid TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        title TEXT,
+        meta TEXT,
+        deleted_at INTEGER
+      );
+    `);
+    const insert = database.prepare(
+      "INSERT INTO documents (doc_uid, source, title, meta, deleted_at) VALUES (?, ?, ?, ?, ?)"
+    );
+    for (const row of rows) insert.run(row.doc_uid, row.source, row.title, row.meta, row.deleted_at);
+    const env = {
+      STORAGE: "d1",
+      ADMIN_KEY: "k",
+      DB: {
+        prepare(sql) {
+          const statement = database.prepare(sql);
+          let bindings = [];
+          return {
+            bind(...values) { bindings = values; return this; },
+            async all() { return { results: statement.all(...bindings) }; },
+          };
+        },
+      },
+    };
+    const { env: fakeEnv } = mkSourceFamilyEnv(rows);
+    const captureStore = async (candidateEnv) => {
+      try {
+        return { value: await listSourceFamilies(candidateEnv, {
+          source: "upload",
+          limit: scenario.limit,
+          includeLabels: true,
+        }), code: null };
+      } catch (error) {
+        return { value: null, code: error?.code || null };
+      }
+    };
+    const [real, fake] = await Promise.all([captureStore(env), captureStore(fakeEnv)]);
+    const routeResponse = await worker.fetch(new Request(
+      "https://b.example/api/admin/brain/source-families",
+      {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "upload", limit: scenario.limit, include_labels: true }),
+      },
+    ), env, {});
+    const route = await routeResponse.json();
+    const expectedShape = scenario.status === 409
+      ? real.code === scenario.code && fake.code === scenario.code && route.code === scenario.code
+      : real.code === null && fake.code === null &&
+        JSON.stringify(real.value) === JSON.stringify(fake.value) &&
+        JSON.stringify(route) === JSON.stringify(real.value) &&
+        route.families?.length === scenario.expectedLength &&
+        (scenario.expectedCursorBytes !== undefined || route.next_cursor === scenario.expectedCursor) &&
+        (scenario.expectedCursorBytes === undefined ||
+          new TextEncoder().encode(route.next_cursor).length === scenario.expectedCursorBytes) &&
+        route.family_details?.length === route.families?.length;
+    check(`real SQLite, fake and route agree for ${scenario.name}`,
+      routeResponse.status === scenario.status && expectedShape,
+      JSON.stringify({
+        status: routeResponse.status,
+        route_code: route.code || null,
+        real_code: real.code,
+        fake_code: fake.code,
+        families: route.families?.length,
+        cursor_bytes: typeof route.next_cursor === "string"
+          ? new TextEncoder().encode(route.next_cursor).length
+          : null,
+      }));
+    database.close();
+  }
 }
 
 {

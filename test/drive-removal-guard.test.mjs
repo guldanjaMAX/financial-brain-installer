@@ -949,6 +949,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     inventoryLabelMode = "stored",
     inventoryDate = true,
     inventoryUidFilterMode = "available",
+    inventoryRouteMode = "available",
     storedUid = "drive:",
     args = [],
   } = {}) => {
@@ -973,6 +974,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? inventoryLabelMode : "none",
       BRAIN_DRIVE_SCOPE_DATE: inventoryDate ? "server" : "none",
       BRAIN_DRIVE_SCOPE_UID_FILTER: inventoryUidFilterMode,
+      BRAIN_DRIVE_SCOPE_ROUTE_MODE: inventoryRouteMode,
       BRAIN_DRIVE_SCOPE_STORED_UID: storedUid,
       BRAIN_DRIVE_SCOPE_STORED_UID_JSON: JSON.stringify(storedUid),
       ADMIN_KEY: "fixture-admin",
@@ -1348,6 +1350,23 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       } finally {
         rejected.cleanup();
       }
+    }
+  }
+
+  for (const [mode, full] of [["full-unresolved", true], ["incremental-unresolved", false]]) {
+    const unpageable = runScopeScenario(mode, { full, inventoryRouteMode: "unpageable-409" });
+    try {
+      assert.equal(unpageable.code, 1, unpageable.output);
+      assert.match(unpageable.output, /not accepted \(409\)/i);
+      const evidence = unpageable.evidence();
+      assert.equal(evidence.inventoryReads, 1,
+        `${mode} treated typed 409 as a first-page capability signal`);
+      assert.deepEqual(evidence.inventoryCursors, [""]);
+      assert.equal(evidence.forgetRequests, 0);
+      assert.equal(unpageable.stateBytes(), unpageable.initialStateBytes,
+        `${mode} changed source state after typed 409`);
+    } finally {
+      unpageable.cleanup();
     }
   }
 

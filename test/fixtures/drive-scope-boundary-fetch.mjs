@@ -9,6 +9,7 @@ const evidencePath = String(process.env.BRAIN_DRIVE_SCOPE_EVIDENCE || "");
 const mode = String(process.env.BRAIN_DRIVE_SCOPE_MODE || "");
 const inventoryLabelMode = String(process.env.BRAIN_DRIVE_SCOPE_LABELS || "available");
 const inventoryUidFilterMode = String(process.env.BRAIN_DRIVE_SCOPE_UID_FILTER || "available");
+const inventoryRouteMode = String(process.env.BRAIN_DRIVE_SCOPE_ROUTE_MODE || "available");
 const inventoryLabelsAvailable = inventoryLabelMode !== "none";
 const inventoryDateAvailable = process.env.BRAIN_DRIVE_SCOPE_DATE !== "none";
 const testedStoredUid = process.env.BRAIN_DRIVE_SCOPE_STORED_UID_JSON
@@ -454,6 +455,12 @@ globalThis.fetch = async (input, options = {}) => {
     }
     if (request.include_labels === true && !Array.isArray(request.uids)) evidence.inventoryFullLabelReads++;
     saveEvidence(evidence);
+    if (inventoryRouteMode === "unpageable-409") {
+      return json({
+        error: "source-family inventory cannot emit a resumable page boundary",
+        code: "unpageable_family_identity",
+      }, 409, inventoryDateAvailable);
+    }
     if (mode === "full-control-cursor-v048" && /[\u0000-\u001f\u007f]/.test(String(request.cursor || ""))) {
       return json({ error: "cursor is not valid for this inventory" }, 400);
     }

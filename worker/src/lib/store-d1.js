@@ -173,6 +173,15 @@ export async function metadataTokenFor(value) {
 const VECTOR_TOPK_MAX = 100;
 export const D1_QUERY_BIND_LIMIT = 100;
 export const SOURCE_FAMILY_UID_FILTER_MAX = D1_QUERY_BIND_LIMIT - 3;
+export const SOURCE_FAMILY_CURSOR_MAX_BYTES = 16 * 1024;
+
+export class UnpageableSourceFamilyIdentityError extends Error {
+  constructor() {
+    super("source-family inventory cannot emit a resumable page boundary");
+    this.name = "UnpageableSourceFamilyIdentityError";
+    this.code = "unpageable_family_identity";
+  }
+}
 // Keep one transaction reviewable and bounded independently of the documented
 // 1,000-query invocation limit. This is our conservative internal slice, not a
 // claimed D1 per-batch platform ceiling. Each chunk needs two statements.
@@ -6755,7 +6764,20 @@ export async function listSourceFamilies(env, {
     ).bind(cursor, limit + 1);
   const { results } = await statement.all();
 
-  const pageRows = (results || []).slice(0, limit);
+  const hasMore = (results || []).length > limit;
+  let pageRows = (results || []).slice(0, limit);
+  let nextCursor = null;
+  if (hasMore) {
+    let resumableIndex = pageRows.length - 1;
+    while (resumableIndex >= 0 &&
+        new TextEncoder().encode(String(pageRows[resumableIndex].family_doc_uid)).length >
+          SOURCE_FAMILY_CURSOR_MAX_BYTES) {
+      resumableIndex--;
+    }
+    if (resumableIndex < 0) throw new UnpageableSourceFamilyIdentityError();
+    pageRows = pageRows.slice(0, resumableIndex + 1);
+    nextCursor = String(pageRows[pageRows.length - 1].family_doc_uid);
+  }
   const page = pageRows.map((row) => String(row.family_doc_uid));
   return {
     source,
@@ -6771,7 +6793,7 @@ export async function listSourceFamilies(env, {
           : null,
       })),
     } : {}),
-    next_cursor: (results || []).length > limit ? page[page.length - 1] : null,
+    next_cursor: nextCursor,
   };
 }
 

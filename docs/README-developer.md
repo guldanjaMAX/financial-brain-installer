@@ -677,11 +677,14 @@ code point outside printable ASCII and caps display length while the stored
 value remains exact. The removal plan never trims an identity.
 
 The source-family continuation cursor is a separate opaque token, bounded to
-16 KiB, source-prefixed, byte-for-byte equal to the page tail, and never
-repeated. Client ordering follows SQLite's UTF-8 byte order. The Worker accepts
-every bounded raw tail it can emit, including control characters, because the
-value reaches only a D1 bind parameter. A malformed tail remains quarantined as
-a row and cannot become a provider lookup or deletion target. Shipped 0.4.8
+16 KiB, source-prefixed, byte-for-byte equal to the returned page tail, and
+never repeated. Client ordering follows SQLite's UTF-8 byte order. When more
+rows remain, the Worker ends the page at the last row whose raw identity can be
+accepted as the next cursor; any later rows return on the following page. If no
+row in the requested page can form a resumable boundary, the route returns a
+typed 409 instead of falsely ending or widening the walk. An over-long final
+row still returns normally with no continuation cursor. A malformed row remains
+quarantined and cannot become a provider lookup or deletion target. Shipped 0.4.8
 rejects a control-character cursor; the CLI treats that specific page-two 400
 as an anticipated update requirement and preserves the prior source cursor.
 

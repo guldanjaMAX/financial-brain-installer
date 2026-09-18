@@ -31,10 +31,13 @@ asset publication.
 
 - **A malformed family at an inventory page boundary no longer stops the
   sweep.** Continuation cursors are bounded paging tokens, not deletion
-  identities. The Brain can resume from every raw tail it emits, while the CLI
-  quarantines malformed rows and still classifies legitimate families on the
-  next page. An older 0.4.8 Brain that rejects its own control-character cursor
-  now receives clear update guidance and keeps the prior Drive cursor.
+  identities. When more rows remain, the Brain ends the page at the last row it
+  can accept as the next cursor, then returns any later rows on the following
+  page. An over-long stored identity remains visible without becoming an
+  unusable continuation token. If a page has no safe boundary, the walk stops
+  with a typed conflict instead of dropping rows. An older 0.4.8 Brain that
+  rejects its own control-character cursor now receives clear update guidance
+  and keeps the prior Drive cursor.
 
 - **Drive ingest stays compatible while an older Brain is awaiting its
   update.** If the stored-family inventory does not support review labels yet,

@@ -54,7 +54,7 @@ import {
 import {
   storeFor, backendOf, D1, expectedD1ContentHash, ProvenanceTransitionError,
 } from "./lib/store.js";
-import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
+import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
@@ -2401,14 +2401,24 @@ async function handleSourceFamilies(env, request) {
   }
   const cursorBytes = new TextEncoder().encode(cursor).length;
   if (cursor && (
-    cursorBytes > 16 * 1024 ||
+    cursorBytes > SOURCE_FAMILY_CURSOR_MAX_BYTES ||
     (source !== null && !cursor.startsWith(`${source}:`)) ||
     (source === null && !/^[a-z0-9][a-z0-9_-]{0,63}:/.test(cursor))
   )) {
     return respond({ error: "cursor is not valid for this inventory" }, 400);
   }
 
-  return respond(await listSourceFamilies(env, { source, cursor, limit, includeLabels, uids }));
+  try {
+    return respond(await listSourceFamilies(env, { source, cursor, limit, includeLabels, uids }));
+  } catch (error) {
+    if (error?.code === "unpageable_family_identity") {
+      return respond({
+        error: "source-family inventory cannot emit a resumable page boundary",
+        code: error.code,
+      }, 409);
+    }
+    throw error;
+  }
 }
 
 async function handleDocuments(env) {
