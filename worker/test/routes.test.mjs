@@ -1,5 +1,6 @@
 import worker from "../src/index.js";
-import { filterSql, unsupportedFilters } from "../src/lib/store-d1.js";
+import { DatabaseSync } from "node:sqlite";
+import { filterSql, listSourceFamilies, unsupportedFilters } from "../src/lib/store-d1.js";
 import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
@@ -2325,6 +2326,97 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     ...extra,
   };
   return { env, seen };
+}
+
+{
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE documents (
+      doc_uid TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      title TEXT,
+      meta TEXT,
+      deleted_at INTEGER
+    );
+  `);
+  const insert = database.prepare(
+    "INSERT INTO documents (doc_uid, source, title, meta, deleted_at) VALUES (?, ?, ?, ?, ?)"
+  );
+  for (const row of [
+    ["drive:a", "drive", "A", "{}", null],
+    ["drive:b#part1of2", "drive", "B 1", '{"part_of":"b"}', null],
+    ["drive:b#part2of2", "drive", "B 2", '{"part_of":"b"}', null],
+    ["drive:deleted", "drive", "Deleted", "{}", 1],
+    ["gmail:a", "gmail", "Gmail A", "{}", null],
+    ["gmail:b#part1of2", "gmail", "Gmail B 1", '{"part_of":"gmail:b"}', null],
+    ["gmail:b#part2of2", "gmail", "Gmail B 2", '{"part_of":"gmail:b"}', null],
+  ]) insert.run(...row);
+
+  const env = {
+    DB: {
+      prepare(sql) {
+        const statement = database.prepare(sql);
+        let bindings = [];
+        return {
+          bind(...values) {
+            bindings = values;
+            return this;
+          },
+          async all() {
+            return { results: statement.all(...bindings) };
+          },
+        };
+      },
+    },
+  };
+  const preRewritePage = (source, cursor = "", limit = 1) => {
+    const results = database.prepare(
+      `SELECT family_doc_uid
+         FROM (
+           SELECT DISTINCT CASE
+             WHEN json_valid(meta)
+              AND json_type(meta,'$.family_of') = 'text'
+              AND length(json_extract(meta,'$.family_of')) > 0
+               THEN json_extract(meta,'$.family_of')
+             WHEN json_valid(meta)
+              AND json_type(meta,'$.part_of') = 'text'
+              AND length(json_extract(meta,'$.part_of')) > 0
+               THEN CASE
+                 WHEN substr(json_extract(meta,'$.part_of'), 1, length(source) + 1) = source || ':'
+                   THEN json_extract(meta,'$.part_of')
+                 ELSE source || ':' || json_extract(meta,'$.part_of')
+               END
+             ELSE doc_uid
+           END AS family_doc_uid
+             FROM documents
+            WHERE deleted_at IS NULL
+         )
+        WHERE substr(family_doc_uid, 1, length(?1) + 1) = ?1 || ':'
+          AND family_doc_uid > ?2
+        ORDER BY family_doc_uid ASC
+        LIMIT ?3`
+    ).all(source, cursor, limit + 1);
+    const families = results.slice(0, limit).map((row) => String(row.family_doc_uid));
+    return {
+      source,
+      families,
+      next_cursor: results.length > limit ? families.at(-1) : null,
+    };
+  };
+
+  for (const source of ["drive", "gmail"]) {
+    const first = await listSourceFamilies(env, { source, limit: 1 });
+    const expectedFirst = preRewritePage(source);
+    check(`${source} grouped source-family SQL matches the executed pre-rewrite first page`,
+      JSON.stringify(first) === JSON.stringify(expectedFirst),
+      `${JSON.stringify(first)} ${JSON.stringify(expectedFirst)}`);
+    const second = await listSourceFamilies(env, { source, cursor: first.next_cursor, limit: 1 });
+    const expectedSecond = preRewritePage(source, expectedFirst.next_cursor, 1);
+    check(`${source} grouped source-family SQL matches the executed pre-rewrite cursor page`,
+      JSON.stringify(second) === JSON.stringify(expectedSecond),
+      `${JSON.stringify(second)} ${JSON.stringify(expectedSecond)}`);
+  }
+  database.close();
 }
 
 {
