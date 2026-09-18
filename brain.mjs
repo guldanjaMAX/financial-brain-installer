@@ -14324,11 +14324,14 @@ const cmdIngestRemoteRun = async (
     });
   }
   let driveRemovalReview = storedDriveRemovalReview;
+  let unclassifiedPendingDriveUids = new Set();
+  const newlyReviewedPendingDriveUids = new Set();
 
   const protectedDriveUids = () => {
     const protectedUids = new Set([
       ...unresolvedDriveReviewUids,
       ...unresolvedNotReturnedDriveReview.keys(),
+      ...unclassifiedPendingDriveUids,
     ]);
     const observedMs = Date.parse(driveReviewObservedAt);
     for (const record of pendingSourceDeletionDriveReview.values()) {
@@ -14598,6 +14601,11 @@ const cmdIngestRemoteRun = async (
           driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)
         )
       );
+      for (const uid of pendingDriveAtStart) {
+        if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) {
+          absenceCandidates.add(uid);
+        }
+      }
       if (!incremental) {
         for (const uid of driveStoredBeforeProcessing) {
           if (!seenDriveUids.has(uid)) absenceCandidates.add(uid);
@@ -14628,6 +14636,12 @@ const cmdIngestRemoteRun = async (
       // so stale deletion intent can never survive a later access denial.
       const priorNotReturnedReview = unresolvedNotReturnedDriveReview;
       const priorSourceDeletionReview = pendingSourceDeletionDriveReview;
+      const priorReviewedUids = new Set([
+        ...unresolvedDriveReviewUids,
+        ...priorNotReturnedReview.keys(),
+        ...priorSourceDeletionReview.keys(),
+      ]);
+      const classifiedDriveUids = new Set();
       unresolvedDriveReviewUids = new Set();
       unresolvedNotReturnedDriveReview = new Map();
       pendingSourceDeletionDriveReview = new Map();
@@ -14638,6 +14652,12 @@ const cmdIngestRemoteRun = async (
           continue;
         }
         const classification = await drive.classifyScopedAbsence(getToken, fileId, { scopedFolderIds });
+        classifiedDriveUids.add(uid);
+        if (classification.visible_in_scope === true && pendingDriveAtStart.includes(uid) &&
+            !priorReviewedUids.has(uid) && incremental) {
+          delete state.removed?.[uid];
+          continue;
+        }
         if (classification.kind === "source_deleted" || classification.kind === "left_scope") {
           confirmedDriveAbsenceUids.push(uid);
           continue;
@@ -14645,6 +14665,9 @@ const cmdIngestRemoteRun = async (
         if (classification.kind === "unresolved_not_returned") {
           const prior = priorNotReturnedReview.get(uid);
           const priorCandidate = priorSourceDeletionReview.get(uid);
+          if (pendingDriveAtStart.includes(uid) && !priorReviewedUids.has(uid)) {
+            newlyReviewedPendingDriveUids.add(uid);
+          }
           const observedMs = Date.parse(driveReviewObservedAt);
           const graceEligibleMs = Date.parse(prior?.grace_eligible_at || "");
           let candidate = null;
@@ -14691,6 +14714,10 @@ const cmdIngestRemoteRun = async (
         }
         unresolvedDriveReviewUids.add(uid);
       }
+
+      unclassifiedPendingDriveUids = new Set(pendingDriveAtStart.filter((uid) =>
+        driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid) && !classifiedDriveUids.has(uid)
+      ));
 
       updateDriveRemovalReview();
       saveState(statePath, state);
@@ -14803,9 +14830,9 @@ const cmdIngestRemoteRun = async (
         confirmedDriveAbsenceUids.length || intentionalRemovalUids.length || pendingDriveUids.length ||
         Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0 ||
         Number(driveRemovalReview?.counts?.pending_source_deletions || 0) > 0;
-      const storedUids = needsStoredInventory
-        ? (driveStoredBeforeProcessing || await listStoredSourceFamilies({ base, adminKey, source: sourceName }))
-        : new Set();
+      const storedUids = driveStoredBeforeProcessing || (needsStoredInventory
+        ? await listStoredSourceFamilies({ base, adminKey, source: sourceName })
+        : new Set());
       // A valid prior forget may have reached the Worker even if its response
       // was lost. Inventory is authoritative; clear only local retry markers
       // for families that are already absent so they cannot block re-ingest.
@@ -15709,6 +15736,8 @@ const cmdIngestRemoteRun = async (
   // withholds its cursor above.
   const totalRefused = tally.refused + localRefused;
   const driveReviewRequired = which === "drive" && protectedDriveUids().size > 0;
+  const driveReviewBlocksCommand = driveReviewRequired &&
+    [...protectedDriveUids()].some((uid) => !newlyReviewedPendingDriveUids.has(uid));
   const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0 || driveReviewRequired;
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
@@ -15774,14 +15803,15 @@ const cmdIngestRemoteRun = async (
           "Leave the Brain's accessible copy in place and run Drive ingestion again after the recorded grace date.",
       ] : []),
     ].join("\n      ");
-    throw new DriveRemovalReviewRequired(
+    const message =
       `Drive review required: ${count} stored item(s) were absent from the reviewed-root walk.\n` +
         `      ${reasons}\n` +
         "      Nothing unresolved was removed. The completed source cursor was saved.\n" +
         "      Only a second not-returned observation at least seven days later can move an item " +
         "into the exact brain ingest <manifest> --from drive " +
-        "--approve-removals <fingerprint> plan."
-    );
+        "--approve-removals <fingerprint> plan.";
+    if (driveReviewBlocksCommand) throw new DriveRemovalReviewRequired(message);
+    warn(message);
   }
   await reportBacklog(manifestPath);
   if (which === "gmail" && hasRemoteGap) {

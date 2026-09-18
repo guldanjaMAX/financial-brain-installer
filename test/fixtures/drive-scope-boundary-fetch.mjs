@@ -17,6 +17,8 @@ const MODES = new Set([
   "incremental-restored",
   "incremental-trash",
   "incremental-left-scope",
+  "incremental-stale-marker-404",
+  "incremental-stale-marker-live",
 ]);
 if (!userRoot) throw new Error("BRAIN_DRIVE_SCOPE_USER_ROOT is required");
 if (!evidencePath) throw new Error("BRAIN_DRIVE_SCOPE_EVIDENCE is required");
@@ -93,7 +95,9 @@ function storedFamilies(evidence) {
       .filter((uid) => !removed.has(uid))
       .sort();
   }
-  if (mode === "full-unresolved-subthreshold") return [MISSING_UID, ...RETAINED_UIDS].sort();
+  if (["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)) {
+    return [MISSING_UID, ...RETAINED_UIDS].sort();
+  }
   if (["full-unresolved", "incremental-unresolved", "incremental-restored"].includes(mode)) {
     return evidence.removedFamilies ? [] : [MISSING_UID];
   }
@@ -170,6 +174,9 @@ globalThis.fetch = async (input, options = {}) => {
         newStartPageToken: "fixture-next-incremental-restored",
       });
     }
+    if (["incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)) {
+      return json({ changes: [], newStartPageToken: `fixture-next-${mode}` });
+    }
     if (mode.startsWith("incremental-")) {
       return json({
         changes: (mode === "incremental-unresolved-batch" ? BATCH_MISSING_IDS : [MISSING_ID])
@@ -201,7 +208,7 @@ globalThis.fetch = async (input, options = {}) => {
     return json({
       files: mode === "incremental-restored"
         ? [restoredFile()]
-        : mode === "full-unresolved-subthreshold"
+        : ["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)
           ? RETAINED_UIDS.map((_, index) => retainedFile(index))
           : [],
       nextPageToken: null,
@@ -213,8 +220,17 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.absenceMetadataReads++;
     saveEvidence(evidence);
-    if (["full-unresolved", "full-unresolved-subthreshold"].includes(mode)) {
+    if (["full-unresolved", "full-unresolved-subthreshold", "incremental-stale-marker-404"].includes(mode)) {
       return json({ error: { message: "File not found" } }, 404);
+    }
+    if (mode === "incremental-stale-marker-live") {
+      return json({
+        id: MISSING_ID,
+        name: "Owner tax return.txt",
+        mimeType: "text/plain",
+        trashed: false,
+        parents: [ROOT_ID],
+      });
     }
     if (mode === "incremental-unresolved") {
       return json({
@@ -246,6 +262,19 @@ globalThis.fetch = async (input, options = {}) => {
       });
     }
     throw new Error("an unrelated changed item reached absence classification");
+  }
+
+  const retainedMatch = /^\/drive\/v3\/files\/retained-(\d{2})$/.exec(url.pathname);
+  if (url.hostname === "www.googleapis.com" && retainedMatch &&
+      mode === "incremental-stale-marker-404") {
+    const index = Number(retainedMatch[1]);
+    if (url.searchParams.get("alt") === "media") {
+      return new Response(`Retained fixture ${retainedMatch[1]} ${"reviewed source text ".repeat(20)}`, {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+    }
+    return json(retainedFile(index));
   }
 
   if (url.hostname === "www.googleapis.com" && url.pathname.startsWith("/drive/v3/files/missing-batch-")) {
@@ -294,6 +323,16 @@ globalThis.fetch = async (input, options = {}) => {
     const request = requestBody(options);
     const families = Array.isArray(request.families) ? request.families : [];
     const evidence = readEvidence();
+    if (mode === "incremental-stale-marker-404" && families.length &&
+        families.every((family) => Array.isArray(family?.keep_doc_uids) && family.keep_doc_uids.length > 0)) {
+      return json({
+        dry_run: false,
+        documents: families.length,
+        chunks: 0,
+        vectors: 0,
+        targets: families.map((family) => family.base_doc_uid),
+      });
+    }
     evidence.forgetRequests++;
     const expectedUids = mode === "incremental-unresolved-batch"
       ? BATCH_MISSING_UIDS.slice(3)
@@ -320,6 +359,15 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.ingestBatchWrites++;
     saveEvidence(evidence);
+    if (mode === "incremental-stale-marker-404") {
+      const request = requestBody(options);
+      return json({
+        results: (request.docs || []).map((document) => ({
+          source_id: document.source_id,
+          status: "created",
+        })),
+      });
+    }
     throw new Error("scope-boundary fixture must not send an ingest batch");
   }
 

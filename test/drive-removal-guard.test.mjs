@@ -690,7 +690,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           "text/plain",
           mode === "incremental-restored" ? "Reviewed Root" : "Reviewed Root/Tax",
         ]),
-        ...(mode === "full-unresolved-subthreshold"
+        ...(["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)
           ? Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
               const suffix = String(index).padStart(2, "0");
               return [`drive:retained-${suffix}`, JSON.stringify([
@@ -899,6 +899,46 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     unresolvedPending.cleanup();
   }
 
+  for (const reset of [false, true]) {
+    const staleMarker = runScopeScenario("incremental-stale-marker-404", {
+      pendingRemoval: true,
+      args: reset ? ["--reset"] : [],
+    });
+    try {
+      assert.equal(staleMarker.code, 0, staleMarker.output);
+      const evidence = staleMarker.evidence();
+      assert.ok(evidence.absenceMetadataReads >= 1,
+        "a stale retry marker was not checked against live Drive metadata");
+      assert.equal(evidence.forgetRequests, 0,
+        "a stale retry marker reached deletion without owner-reviewed absence proof");
+      const state = staleMarker.state();
+      assert.equal(state.removed?.["drive:missing-sensitive"], "2026-09-01T00:00:00.000Z");
+      assert.equal(state.drive_removal_review?.unresolved_not_returned?.[0]?.uid, "drive:missing-sensitive");
+      assert.equal(state.sync_token, reset
+        ? "fixture-prewalk-incremental-stale-marker-404"
+        : "fixture-next-incremental-stale-marker-404");
+    } finally {
+      staleMarker.cleanup();
+    }
+  }
+
+  const restoredStaleMarker = runScopeScenario("incremental-stale-marker-live", {
+    pendingRemoval: true,
+  });
+  try {
+    assert.equal(restoredStaleMarker.code, 0, restoredStaleMarker.output);
+    const evidence = restoredStaleMarker.evidence();
+    assert.equal(evidence.absenceMetadataReads, 1);
+    assert.equal(evidence.forgetRequests, 0);
+    const state = restoredStaleMarker.state();
+    assert.equal(state.removed?.["drive:missing-sensitive"], undefined,
+      "a live in-scope file left its stale retry marker behind");
+    assert.equal(state.drive_removal_review, undefined);
+    assert.equal(state.sync_token, "fixture-next-incremental-stale-marker-live");
+  } finally {
+    restoredStaleMarker.cleanup();
+  }
+
   for (const priorReview of [false, true]) {
     const pendingNotReturned = runScopeScenario("full-unresolved-subthreshold", {
       full: true,
@@ -906,7 +946,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       priorReview,
     });
     try {
-      assert.equal(pendingNotReturned.code, 1, pendingNotReturned.output);
+      assert.equal(pendingNotReturned.code, priorReview ? 1 : 0, pendingNotReturned.output);
       const evidence = pendingNotReturned.evidence();
       assert.equal(evidence.absenceMetadataReads, 1);
       assert.equal(evidence.forgetRequests, 0,

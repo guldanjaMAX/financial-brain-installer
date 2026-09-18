@@ -604,6 +604,7 @@ export async function classifyScopedAbsence(getAccessToken, fileId, {
       kind: "unresolved_access",
       reason: "Drive still places the file under a reviewed folder but omitted it from the completed traversal",
       retryable: true,
+      visible_in_scope: true,
     };
   }
   return { kind: "left_scope", reason: "the visible file moved outside every reviewed root", retryable: false };
