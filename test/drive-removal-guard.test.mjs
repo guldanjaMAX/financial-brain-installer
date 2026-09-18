@@ -837,6 +837,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   const fixedReviewObservationId = "sync_fixture_review_observation";
   const fixedReviewObservedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const expiredReviewObservedAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  const singularDiagnoseGuidance = renderCliCommands(
+    "Run brain diagnose to see the quarantined identity."
+  );
+  const pluralDiagnoseGuidance = renderCliCommands(
+    "Run brain diagnose to see the quarantined identities."
+  );
 
   const runScopeScenario = (mode, {
     full = false,
@@ -1323,6 +1329,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       assert.equal(boundary.code, 0, boundary.output);
       assert.doesNotMatch(boundary.output, /unexpected error|INGEST_FAILED/i);
       assert.match(boundary.output, /3 stored items have malformed identities and are held/i);
+      assert.ok(boundary.output.includes(pluralDiagnoseGuidance),
+        `${mode} omitted the platform-rendered plural diagnose remediation`);
       const evidence = boundary.evidence();
       assert.deepEqual(evidence.inventoryCursors.slice(0, 2), ["", "drive:b "],
         `${mode} did not read each inventory page exactly once`);
@@ -1418,6 +1426,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   try {
     assert.equal(malformedStoredIdentity.code, 0, malformedStoredIdentity.output);
     assert.match(malformedStoredIdentity.output, /1 stored item has a malformed identity and is held/i);
+    assert.ok(malformedStoredIdentity.output.includes(singularDiagnoseGuidance),
+      "the real Drive command omitted the platform-rendered singular diagnose remediation");
     assert.doesNotMatch(malformedStoredIdentity.output, /malformed_identity/i);
     assert.doesNotMatch(malformedStoredIdentity.output, /unexpected error|INGEST_FAILED/i);
     assert.equal(malformedStoredIdentity.evidence().forgetRequests, 0,
