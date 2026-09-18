@@ -1,6 +1,11 @@
 import worker from "../src/index.js";
 import { DatabaseSync } from "node:sqlite";
-import { filterSql, listSourceFamilies, unsupportedFilters } from "../src/lib/store-d1.js";
+import {
+  filterSql,
+  listSourceFamilies,
+  projectedSourceFamilyName,
+  unsupportedFilters,
+} from "../src/lib/store-d1.js";
 import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
@@ -2292,9 +2297,7 @@ function mkSourceFamilyEnv(documents, extra = {}) {
                         : row.doc_uid;
                       return {
                         family_doc_uid,
-                        family_name: typeof row.title === "string"
-                          ? row.title.replace(/ \(part \d+ of \d+\)$/, "")
-                          : null,
+                        family_name: projectedSourceFamilyName(row),
                         folder_path: typeof metadata?.folder === "string" ? metadata.folder : null,
                       };
                     } catch {
@@ -2350,6 +2353,16 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     ["gmail:a", "gmail", "Gmail A", "{}", null],
     ["gmail:b#part1of2", "gmail", "Gmail B 1", '{"part_of":"gmail:b"}', null],
     ["gmail:b#part2of2", "gmail", "Gmail B 2", '{"part_of":"gmail:b"}', null],
+    ...Array.from({ length: 12 }, (_, index) => [
+      `drive:f#part${index + 1}of12`,
+      "drive",
+      `Owner annual report.pdf (part ${index + 1} of 12)`,
+      JSON.stringify({ part_of: "f", part: index + 1, part_count: 12, folder: "Reviewed Root/Annual" }),
+      null,
+    ]),
+    ["drive:w", "drive", "Weird (part 3 of 9)", "{}", null],
+    ["drive:x", "drive", "No suffix", '{"part":3,"part_count":9}', null],
+    ["drive:y", "drive", "String metadata (part 3 of 9)", '{"part":"3","part_count":9}', null],
   ]) insert.run(...row);
 
   const env = {
@@ -2416,6 +2429,15 @@ function mkSourceFamilyEnv(documents, extra = {}) {
       JSON.stringify(second) === JSON.stringify(expectedSecond),
       `${JSON.stringify(second)} ${JSON.stringify(expectedSecond)}`);
   }
+  const labelled = await listSourceFamilies(env, { source: "drive", limit: 100, includeLabels: true });
+  const details = new Map(labelled.family_details.map((detail) => [detail.uid, detail]));
+  check("the labelled source-family projection executes against real SQLite",
+    details.get("drive:f")?.name === "Owner annual report.pdf" &&
+      details.get("drive:f")?.folder_path === "Reviewed Root/Annual" &&
+      details.get("drive:w")?.name === "Weird (part 3 of 9)" &&
+      details.get("drive:x")?.name === "No suffix" &&
+      details.get("drive:y")?.name === "String metadata (part 3 of 9)",
+    JSON.stringify(labelled));
   database.close();
 }
 

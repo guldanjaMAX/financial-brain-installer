@@ -6615,6 +6615,24 @@ export async function sourceFamilyCounts(env, { source } = {}) {
   };
 }
 
+export const SPLIT_PART_TITLE_SUFFIX_PATTERN = /^(.*) \(part (-?\d+) of (-?\d+)\)$/;
+
+/** Mirror the labelled SQL projection for D1-shaped test doubles. */
+export function projectedSourceFamilyName({ title = null, meta = null } = {}) {
+  if (typeof title !== "string" || !title.trim()) return null;
+  const trimmed = title.trim();
+  let metadata = meta;
+  if (typeof metadata === "string") {
+    try { metadata = JSON.parse(metadata); } catch { metadata = null; }
+  }
+  const match = SPLIT_PART_TITLE_SUFFIX_PATTERN.exec(trimmed);
+  if (match && Number.isInteger(metadata?.part) && Number.isInteger(metadata?.part_count) &&
+      Number(match[2]) === metadata.part && Number(match[3]) === metadata.part_count) {
+    return match[1] || null;
+  }
+  return trimmed;
+}
+
 /**
  * Return one uid per live logical source family in stable lexical pages.
  * Large connector documents use `meta.part_of`; multi-document exports use a
