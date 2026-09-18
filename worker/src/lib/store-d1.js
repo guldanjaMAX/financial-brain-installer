@@ -1355,16 +1355,15 @@ async function scheduleVectorFailures(env, rows, {
 }
 
 // One two-phase slice either submits or confirms. Submission receipts and
-// legacy hashed-id remaps are set-based through json_each, so batch size no
-// longer multiplies D1 statements. Confirmation can still use one CAS per row;
-// the three-batch in-flight window bounds that path before another submission.
-// Reserving this conservative slice before provider work keeps the lease
-// release inside the invocation budget.
-export function drainBatchQueryUpperBound(_batchSize = DRAIN_BATCH_SIZE_MAX) {
-  // +1 renews and re-proves the owner immediately before the one possible
-  // provider mutation in this slice. The remaining headroom covers the bounded
-  // reads, set-based writes/readback, retry receipt, and legacy bootstrap page.
-  return 16;
+// legacy hashed-id remaps are set-based through json_each. Confirmation still
+// uses one CAS for an accepted row or two retry-state statements for a refused
+// row, so the reservation must retain that real per-row worst case. Reserving
+// before provider work keeps the lease release inside the invocation budget.
+export function drainBatchQueryUpperBound(batchSize = DRAIN_BATCH_SIZE_MAX) {
+  const boundedBatchSize = Number.isInteger(batchSize)
+    ? Math.min(DRAIN_BATCH_SIZE_MAX, Math.max(1, batchSize))
+    : DRAIN_BATCH_SIZE_MAX;
+  return 12 + (2 * boundedBatchSize);
 }
 
 const drainLeaseChanges = (result) => Number(
@@ -1498,6 +1497,38 @@ function acceptedMutationId(receipt) {
   return id;
 }
 
+export const recordSubmittedMutationChunkRemapSql =
+  `UPDATE chunks AS c SET vector_id=json_extract(m.value,'$.v')
+     FROM json_each(?1) AS m
+     JOIN chunks AS target
+       ON target.chunk_uid=json_extract(m.value,'$.u')
+     JOIN vector_outbox AS o
+       ON o.chunk_uid=json_extract(m.value,'$.u')
+      AND o.generation=json_extract(m.value,'$.g')
+      AND o.op='upsert'
+    WHERE c.id=target.id
+      AND (target.vector_id IS NULL OR target.vector_id<>json_extract(m.value,'$.v'))`;
+
+export const recordSubmittedMutationOutboxReceiptSql =
+  `UPDATE vector_outbox AS o
+      SET submitted_mutation_id=?2,submitted_at=?3,last_error=NULL
+    WHERE o.rowid IN (
+      SELECT target.rowid
+        FROM json_each(?1) AS m
+        CROSS JOIN vector_outbox AS target
+          ON target.chunk_uid=json_extract(m.value,'$.u')
+       WHERE target.generation=json_extract(m.value,'$.g')
+         AND target.op=json_extract(m.value,'$.o')
+         AND target.submitted_mutation_id IS NULL
+         AND (target.op='upsert' OR
+              COALESCE(target.vector_id,target.chunk_uid)=json_extract(m.value,'$.v'))
+         AND (target.op='delete' OR EXISTS (
+           SELECT 1 FROM chunks c
+            WHERE c.chunk_uid=target.chunk_uid
+              AND c.vector_id=json_extract(m.value,'$.v')
+         ))
+    )`;
+
 /** Store the provider receipt before any affected outbox row can be confirmed. */
 async function recordSubmittedMutation(env, rows, op, receipt, submittedAt = Date.now()) {
   const mutationId = acceptedMutationId(receipt);
@@ -1522,6 +1553,7 @@ async function recordSubmittedMutation(env, rows, op, receipt, submittedAt = Dat
     u: row.chunk_uid,
     v: row.vector_id || row.chunk_uid,
     g: row.generation,
+    o: op,
   }));
   if (new Set(mapping.map((row) => row.u)).size !== mapping.length) {
     throw new Error("the vector mutation row identities are not unique");
@@ -1535,37 +1567,10 @@ async function recordSubmittedMutation(env, rows, op, receipt, submittedAt = Dat
   if (op === "upsert") {
     // Persist the actual provider id before the accepted row receipt. The
     // inequality guard avoids firing chunks_au for an already-correct id.
-    statements.push(env.DB.prepare(
-      `UPDATE chunks AS c SET vector_id=(
-         SELECT json_extract(value,'$.v') FROM json_each(?1)
-          WHERE json_extract(value,'$.u')=c.chunk_uid
-       ) WHERE EXISTS (
-         SELECT 1 FROM json_each(?1) m JOIN vector_outbox o
-           ON o.chunk_uid=json_extract(m.value,'$.u')
-          AND o.generation=json_extract(m.value,'$.g')
-          AND o.op='upsert'
-          WHERE o.chunk_uid=c.chunk_uid
-            AND (c.vector_id IS NULL OR c.vector_id<>json_extract(m.value,'$.v'))
-       )`
-    ).bind(mappingJson));
+    statements.push(env.DB.prepare(recordSubmittedMutationChunkRemapSql).bind(mappingJson));
   }
-  statements.push(env.DB.prepare(
-    `UPDATE vector_outbox AS o
-        SET submitted_mutation_id=?2,submitted_at=?3,last_error=NULL
-      WHERE o.op=?4 AND o.submitted_mutation_id IS NULL
-        AND EXISTS (
-          SELECT 1 FROM json_each(?1) m
-           WHERE json_extract(m.value,'$.u')=o.chunk_uid
-             AND json_extract(m.value,'$.g')=o.generation
-             AND (o.op='upsert' OR
-                  COALESCE(o.vector_id,o.chunk_uid)=json_extract(m.value,'$.v'))
-             AND (o.op='delete' OR EXISTS (
-               SELECT 1 FROM chunks c
-                WHERE c.chunk_uid=o.chunk_uid
-                  AND c.vector_id=json_extract(m.value,'$.v')
-             ))
-        )`
-  ).bind(mappingJson, mutationId, submittedAt, op));
+  statements.push(env.DB.prepare(recordSubmittedMutationOutboxReceiptSql)
+    .bind(mappingJson, mutationId, submittedAt));
   const changes = await env.DB.batch(statements);
   if (!Array.isArray(changes) || changes.length !== statements.length) {
     throw new Error("the vector mutation row receipts were ambiguous");
@@ -1588,7 +1593,7 @@ async function recordSubmittedMutation(env, rows, op, receipt, submittedAt = Dat
         ))`
   ).bind(mappingJson, mutationId, submittedAt, op).first();
   const submitted = Number(rowReceipt?.n);
-  if (!Number.isSafeInteger(submitted) || submitted < 0 || submitted > rows.length) {
+  if (!Number.isSafeInteger(submitted) || submitted !== rows.length) {
     throw new Error("the vector mutation row receipts were ambiguous");
   }
   return { mutationId, submitted };
@@ -2128,6 +2133,10 @@ async function drainOutboxWithLease(env, options, lease) {
     DRAIN_PROJECTION_VERIFY_QUERIES + DRAIN_INITIAL_DEPTH_QUERIES +
     DRAIN_RETRY_STATE_QUERIES;
   const batchQueryUpperBound = drainBatchQueryUpperBound(batchSize);
+  const rawQueryBudget = Number(options.d1QueryBudget ?? DRAIN_D1_QUERY_BUDGET);
+  const queryBudget = Number.isInteger(rawQueryBudget)
+    ? Math.min(DRAIN_D1_QUERY_BUDGET, Math.max(0, rawQueryBudget))
+    : DRAIN_D1_QUERY_BUDGET;
   const inFlightMutations = new Map();
   for (let batch = 0; batch < maxBatches; batch++) {
     if (now() - startedAt >= maxInvocationMs) break;
@@ -2135,7 +2144,7 @@ async function drainOutboxWithLease(env, options, lease) {
     // that batch fits alongside the already-reserved lease release. This
     // prevents a Vectorize write from landing only to hit D1's invocation
     // query limit before its durable acknowledgement can be recorded.
-    if (reservedQueries + batchQueryUpperBound > DRAIN_D1_QUERY_BUDGET) break;
+    if (reservedQueries + batchQueryUpperBound > queryBudget) break;
     reservedQueries += batchQueryUpperBound;
     const part = await drainOutboxBatch(env, {
       ...options,

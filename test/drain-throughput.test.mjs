@@ -73,7 +73,7 @@ const rows = (n) => Array.from({ length: n }, (_, i) => ({
     JSON.stringify(up[0]?.metadata));
   check("an unchanged provider id does not rewrite the chunk or retrigger FTS",
     statementSql.some((sql) =>
-      /UPDATE chunks AS c SET vector_id=[\s\S]*c\.vector_id IS NULL OR c\.vector_id<>/.test(sql)),
+      /UPDATE chunks AS c SET vector_id=[\s\S]*target\.vector_id IS NULL OR target\.vector_id<>/.test(sql)),
     statementSql.join("\n"));
 }
 
