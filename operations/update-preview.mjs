@@ -136,15 +136,9 @@ const LEGACY_OBSERVATION_PROOF_BOUNDARY = Object.freeze({
   deployment: "not_started",
   acceptance: "not_run",
 });
-const LEGACY_PRE044_OBSERVATION_PROOF_BOUNDARY = Object.freeze({
-  ...LEGACY_OBSERVATION_PROOF_BOUNDARY,
-  deployed_drain_mode: "observed",
-});
 const FINGERPRINT_DOMAIN = Buffer.from("brain.update.preview.plan.v1\0", "utf8");
 const LEGACY_OBSERVATION_FINGERPRINT_DOMAIN =
   Buffer.from("brain.update.preview.legacy-observation.v1\0", "utf8");
-const LEGACY_PRE044_OBSERVATION_FINGERPRINT_DOMAIN =
-  Buffer.from("brain.update.preview.legacy-pre044-observation.v1\0", "utf8");
 const RUNTIME_DOMAIN = Buffer.from("brain.update.runtime-payload.v1\0", "utf8");
 
 const DEFAULT_IO = Object.freeze({
@@ -1158,10 +1152,10 @@ export function updatePreviewVersionRelation(recordedVersion, candidateVersion) 
   return comparison < 0 ? "upgrade" : "same";
 }
 
-/** Identify manifests recorded before /documents began reporting Worker version. */
-export function isLegacyPre044Version(version) {
+/** Identify the shipped /documents contract before version and drain mode appeared. */
+export function isLegacyPre047Version(version) {
   parseVersion(version);
-  return compareVersion(version, "0.4.4") < 0;
+  return compareVersion(version, "0.4.7") < 0;
 }
 
 const READINESS_REASONS = new Set([
@@ -1411,15 +1405,14 @@ export function classifyUpdatePreviewProjectionReceipt(inventory, options = {}) 
 }
 
 /**
- * Validate only the authenticated aggregate envelope associated with a
- * manifest-recorded v0.4.6 target. The response does not bind Worker
- * generation or drain mode, so this function returns an observation and can
- * never produce projection readiness.
+ * Validate only the authenticated aggregate envelope shipped through v0.4.6.
+ * The response does not bind Worker generation or drain mode, so this function
+ * returns an observation and can never produce projection readiness.
  */
 export function classifyLegacyV046ProjectionObservation(inventory, options = {}) {
   const expectedVersion = options?.expectedVersion;
   const expectedBackend = options?.expectedBackend ?? "d1";
-  if (expectedVersion !== "0.4.6" || expectedBackend !== "d1" ||
+  if (!isLegacyPre047Version(expectedVersion) || expectedBackend !== "d1" ||
       !exactKeys(inventory, ["backend", "rows", "vector_backlog", "vector_readiness"]) ||
       !Array.isArray(inventory.rows)) {
     refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
@@ -1428,35 +1421,6 @@ export function classifyLegacyV046ProjectionObservation(inventory, options = {})
   const verdict = projectionAggregateVerdict(aggregate);
   return immutable({
     backend: aggregate.backend,
-    expected_vectors: aggregate.expected_vectors,
-    actual_vectors: aggregate.actual_vectors,
-    queue: aggregate.queue,
-    worker_reported_query_ready: aggregate.query_ready,
-    worker_reported_readiness_reason: aggregate.readiness_reason,
-    worker_reported_verdict: verdict,
-  });
-}
-
-/**
- * Validate the pre-v0.4.4 aggregate envelope. These Workers report their
- * writer mode but not their version, so the result remains an observation and
- * can never become an update plan.
- */
-export function classifyLegacyPre044ProjectionObservation(inventory, options = {}) {
-  const expectedVersion = options?.expectedVersion;
-  const expectedBackend = options?.expectedBackend ?? "d1";
-  if (!isLegacyPre044Version(expectedVersion) || expectedBackend !== "d1" ||
-      !exactKeys(inventory, [
-        "backend", "rows", "vector_backlog", "vector_readiness", "vector_drain_mode",
-      ]) || !Array.isArray(inventory.rows) ||
-      !["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode)) {
-    refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
-  }
-  const aggregate = validateProjectionAggregateFields(inventory, expectedBackend);
-  const verdict = projectionAggregateVerdict(aggregate);
-  return immutable({
-    backend: aggregate.backend,
-    vector_drain_mode: inventory.vector_drain_mode,
     expected_vectors: aggregate.expected_vectors,
     actual_vectors: aggregate.actual_vectors,
     queue: aggregate.queue,
@@ -1521,139 +1485,8 @@ function checkedLegacyProjectionObservation(value) {
   return rebuilt;
 }
 
-function checkedLegacyPre044ProjectionObservation(value, expectedVersion) {
-  if (!exactKeys(value, [
-    "backend", "vector_drain_mode", "expected_vectors", "actual_vectors", "queue",
-    "worker_reported_query_ready", "worker_reported_readiness_reason",
-    "worker_reported_verdict",
-  ]) || !exactKeys(value.queue, [
-    "pending", "upserts", "deletes", "submitted", "oldest_queued_at",
-  ])) {
-    refuse("UPDATE_PREVIEW_PLAN_INVALID");
-  }
-  let rebuilt;
-  try {
-    rebuilt = classifyLegacyPre044ProjectionObservation({
-      backend: value.backend,
-      vector_drain_mode: value.vector_drain_mode,
-      rows: [],
-      vector_backlog: {
-        pending: value.queue.pending,
-        upserts: value.queue.upserts,
-        deletes: value.queue.deletes,
-        submitted: value.queue.submitted,
-        oldest_queued_at: value.queue.oldest_queued_at,
-      },
-      vector_readiness: {
-        ready: value.worker_reported_query_ready,
-        reason: value.worker_reported_readiness_reason,
-        expected_vectors: value.expected_vectors,
-        actual_vectors: value.actual_vectors,
-        pending: value.queue.pending,
-        submitted: value.queue.submitted,
-        oldest_queued_at: value.queue.oldest_queued_at,
-      },
-    }, { expectedVersion, expectedBackend: "d1" });
-  } catch {
-    refuse("UPDATE_PREVIEW_PLAN_INVALID");
-  }
-  if (canonical(rebuilt) !== canonical(value)) refuse("UPDATE_PREVIEW_PLAN_INVALID");
-  return rebuilt;
-}
-
-/** Bind a pre-v0.4.4 aggregate observation to the exact local candidate. */
-export function createLegacyPre044UpdatePreviewObservation(options = {}) {
-  const required = [
-    "manifestSha256", "manifestSource", "recordedVersion", "candidateVersion",
-    "runtimeProof", "deployedObservation",
-  ];
-  if (!options || typeof options !== "object" || Array.isArray(options) ||
-      !exactKeys(options, required)) {
-    refuse("UPDATE_PREVIEW_PLAN_INVALID");
-  }
-  const {
-    manifestSha256, manifestSource, recordedVersion, candidateVersion,
-    runtimeProof, deployedObservation,
-  } = options;
-  safeSha256(manifestSha256, "UPDATE_PREVIEW_PLAN_INVALID");
-  if (!MANIFEST_SOURCES.has(manifestSource) || !isLegacyPre044Version(recordedVersion)) {
-    refuse("UPDATE_PREVIEW_PLAN_INVALID");
-  }
-  const relation = updatePreviewVersionRelation(recordedVersion, candidateVersion);
-  const runtime = checkedRuntimeProof(runtimeProof);
-  const projection = checkedLegacyPre044ProjectionObservation(
-    deployedObservation,
-    recordedVersion,
-  );
-  return immutable({
-    schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
-    operation: "brain.update.legacy-pre044-observation",
-    manifest: {
-      source: manifestSource,
-      sha256: manifestSha256,
-      recorded_version: recordedVersion,
-    },
-    candidate: {
-      version: candidateVersion,
-      identity_scheme: runtime.identity_scheme,
-      expected_runtime_sha256: runtime.expected_runtime_sha256,
-      observed_runtime_sha256: runtime.runtime_payload_sha256,
-      file_count: runtime.file_count,
-      total_bytes: runtime.total_bytes,
-    },
-    response_contract: "brain.documents.pre-v0.4.4.legacy",
-    deployed_projection_observation: projection,
-    generation_binding: "absent_from_authenticated_response",
-    drain_mode_binding: "present_in_authenticated_response",
-    mixed_generation_excluded: false,
-    version_relation: relation,
-    live_verification_required: true,
-    update_gate_satisfied: false,
-  });
-}
-
-function checkedLegacyPre044UpdatePreviewObservation(value) {
-  if (!exactKeys(value, [
-    "schema_version", "operation", "manifest", "candidate", "response_contract",
-    "deployed_projection_observation", "generation_binding", "drain_mode_binding",
-    "mixed_generation_excluded", "version_relation", "live_verification_required",
-    "update_gate_satisfied",
-  ]) || value.schema_version !== UPDATE_PREVIEW_SCHEMA_VERSION ||
-      value.operation !== "brain.update.legacy-pre044-observation" ||
-      value.response_contract !== "brain.documents.pre-v0.4.4.legacy" ||
-      value.generation_binding !== "absent_from_authenticated_response" ||
-      value.drain_mode_binding !== "present_in_authenticated_response" ||
-      value.mixed_generation_excluded !== false ||
-      value.live_verification_required !== true || value.update_gate_satisfied !== false ||
-      !exactKeys(value.manifest, ["source", "sha256", "recorded_version"]) ||
-      !exactKeys(value.candidate, [
-        "version", "identity_scheme", "expected_runtime_sha256", "observed_runtime_sha256",
-        "file_count", "total_bytes",
-      ])) {
-    refuse("UPDATE_PREVIEW_PLAN_INVALID");
-  }
-  const rebuilt = createLegacyPre044UpdatePreviewObservation({
-    manifestSha256: value.manifest.sha256,
-    manifestSource: value.manifest.source,
-    recordedVersion: value.manifest.recorded_version,
-    candidateVersion: value.candidate.version,
-    runtimeProof: {
-      schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
-      identity_scheme: value.candidate.identity_scheme,
-      runtime_payload_sha256: value.candidate.observed_runtime_sha256,
-      file_count: value.candidate.file_count,
-      total_bytes: value.candidate.total_bytes,
-      expected_runtime_sha256: value.candidate.expected_runtime_sha256,
-      verified_passes: 2,
-    },
-    deployedObservation: value.deployed_projection_observation,
-  });
-  if (canonical(rebuilt) !== canonical(value)) refuse("UPDATE_PREVIEW_PLAN_INVALID");
-  return rebuilt;
-}
-
 /**
- * Bind a manifest-recorded-v0.4.6 aggregate observation to the exact local
+ * Bind a manifest-recorded pre-v0.4.7 aggregate observation to the exact local
  * candidate.
  * This is deliberately not an update plan because the live response omits the
  * fields needed to exclude a mixed Worker generation.
@@ -1678,7 +1511,7 @@ export function createLegacyV046UpdatePreviewObservation(options = {}) {
     deployedObservation,
   } = options;
   safeSha256(manifestSha256, "UPDATE_PREVIEW_PLAN_INVALID");
-  if (!MANIFEST_SOURCES.has(manifestSource) || recordedVersion !== "0.4.6") {
+  if (!MANIFEST_SOURCES.has(manifestSource) || !isLegacyPre047Version(recordedVersion)) {
     refuse("UPDATE_PREVIEW_PLAN_INVALID");
   }
   const relation = updatePreviewVersionRelation(recordedVersion, candidateVersion);
@@ -1849,28 +1682,6 @@ export function legacyV046UpdatePreviewObservationFingerprint(observation) {
     .digest("hex");
 }
 
-/** Fingerprint the legacy facts an approval sentence can bind without a version claim. */
-export function legacyPre044UpdatePreviewObservationFingerprint(observation) {
-  const checked = checkedLegacyPre044UpdatePreviewObservation(observation);
-  const projection = checked.deployed_projection_observation;
-  const fingerprintedFacts = {
-    recorded_version: checked.manifest.recorded_version,
-    vector_drain_mode: projection.vector_drain_mode,
-    expected_vectors: projection.expected_vectors,
-    actual_vectors: projection.actual_vectors,
-    queue: {
-      pending: projection.queue.pending,
-      upserts: projection.queue.upserts,
-      deletes: projection.queue.deletes,
-      submitted: projection.queue.submitted,
-    },
-  };
-  return createHash("sha256")
-    .update(LEGACY_PRE044_OBSERVATION_FINGERPRINT_DOMAIN)
-    .update(canonical(fingerprintedFacts))
-    .digest("hex");
-}
-
 function receiptEffects(observed = {}, { requireLiveRead = false } = {}) {
   const credentialReads = observed?.credential_reads;
   const networkRequests = observed?.network_requests;
@@ -1883,7 +1694,7 @@ function receiptEffects(observed = {}, { requireLiveRead = false } = {}) {
 }
 
 /**
- * Return a closed, non-green receipt for the manifest-recorded-v0.4.6 legacy
+ * Return a closed, non-green receipt for the pre-v0.4.7 legacy
  * contract.
  * A complete aggregate observation is useful evidence, but it cannot satisfy
  * the update gate without same-response generation and drain-mode fields.
@@ -1901,24 +1712,6 @@ export function createLegacyV046UpdatePreviewReceipt(observation, observedEffect
     legacy_observation: checked,
     observation_fingerprint: legacyV046UpdatePreviewObservationFingerprint(checked),
     proof_boundary: { ...LEGACY_OBSERVATION_PROOF_BOUNDARY },
-    effects: receiptEffects(observedEffects, { requireLiveRead: true }),
-  });
-}
-
-/** Return the read-only observation available from a pre-v0.4.4 Worker. */
-export function createLegacyPre044UpdatePreviewReceipt(observation, observedEffects) {
-  const checked = checkedLegacyPre044UpdatePreviewObservation(observation);
-  return immutable({
-    schema_version: UPDATE_PREVIEW_SCHEMA_VERSION,
-    operation: UPDATE_PREVIEW_OPERATION,
-    status: "legacy_pre044_observation",
-    read_only: true,
-    authorizes_update: false,
-    projection_ready: false,
-    error_code: "UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND",
-    legacy_observation: checked,
-    observation_fingerprint: legacyPre044UpdatePreviewObservationFingerprint(checked),
-    proof_boundary: { ...LEGACY_PRE044_OBSERVATION_PROOF_BOUNDARY },
     effects: receiptEffects(observedEffects, { requireLiveRead: true }),
   });
 }

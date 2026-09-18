@@ -81,11 +81,28 @@ function legacyV046Inventory(overrides = {}) {
   return inventory;
 }
 
-function legacyPre044Inventory(overrides = {}) {
-  const inventory = readinessInventory({ version: "0.4.1", ...overrides });
-  delete inventory.version;
-  return inventory;
-}
+// Exact JSON contract emitted by v0.4.0 handleDocuments: no version and no
+// vector_drain_mode, only the backend, rows, backlog, and readiness fields.
+const V040_DOCUMENTS_BODY = Object.freeze({
+  backend: "d1",
+  rows: [],
+  vector_backlog: Object.freeze({
+    pending: 0,
+    upserts: 0,
+    deletes: 0,
+    submitted: 0,
+    oldest_queued_at: null,
+  }),
+  vector_readiness: Object.freeze({
+    ready: true,
+    reason: null,
+    expected_vectors: 10,
+    actual_vectors: 10,
+    pending: 0,
+    submitted: 0,
+    oldest_queued_at: null,
+  }),
+});
 
 function streamedResponse(body, {
   status = 200,
@@ -510,13 +527,12 @@ test("recorded v0.4.6 emits one closed legacy observation only after final reval
   assert.equal(successWrites, 0, "the non-green legacy receipt cannot use the success writer");
 });
 
-test("recorded v0.4.0 and v0.4.1 emit a drain-bound pre-0.4.4 observation", async () => {
+test("recorded v0.4.0 and v0.4.1 accept the real v0.4.0 documents body as observation only", async () => {
   for (const recordedVersion of ["0.4.0", "0.4.1"]) {
     const manifest = structuredClone(MANIFEST);
     manifest.brain.version = recordedVersion;
-    const inventory = legacyPre044Inventory({
-      rows: [{ source_type: "private-source-must-not-escape" }],
-    });
+    const inventory = structuredClone(V040_DOCUMENTS_BODY);
+    inventory.rows = [{ source_type: "private-source-must-not-escape" }];
     await assert.rejects(
       cmdUpdatePreview([
         "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
@@ -524,19 +540,16 @@ test("recorded v0.4.0 and v0.4.1 emit a drain-bound pre-0.4.4 observation", asyn
       (error) => {
         assert.equal(error.constructor.name, "JsonFatal");
         const receipt = error.payload;
-        assert.equal(receipt.status, "legacy_pre044_observation");
+        assert.equal(receipt.status, "legacy_observation_complete");
         assert.equal(receipt.error_code, "UPDATE_PREVIEW_LEGACY_GENERATION_UNBOUND");
         assert.equal(receipt.read_only, true);
         assert.equal(receipt.authorizes_update, false);
         assert.equal(receipt.legacy_observation.manifest.recorded_version, recordedVersion);
         assert.equal(
-          receipt.legacy_observation.deployed_projection_observation.vector_drain_mode,
-          "active",
-        );
-        assert.equal(
           receipt.legacy_observation.drain_mode_binding,
-          "present_in_authenticated_response",
+          "absent_from_authenticated_response",
         );
+        assert.equal(receipt.proof_boundary.deployed_drain_mode, "unproven");
         assert.match(receipt.observation_fingerprint, /^[a-f0-9]{64}$/u);
         assert.equal(Object.hasOwn(receipt, "plan"), false);
         for (const [name, value] of Object.entries(receipt.effects)) {
@@ -551,6 +564,25 @@ test("recorded v0.4.0 and v0.4.1 emit a drain-bound pre-0.4.4 observation", asyn
       },
     );
   }
+});
+
+test("a pre-v0.4.7 paused-shaped body refuses instead of becoming an observation", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.brain.version = "0.4.0";
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      manifest,
+      inventory: { ...structuredClone(V040_DOCUMENTS_BODY), vector_drain_mode: "paused-for-upgrade" },
+    })),
+    (error) => {
+      assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
+      assert.equal(Object.hasOwn(error.payload, "legacy_observation"), false);
+      assert.equal(Object.hasOwn(error.payload, "observation_fingerprint"), false);
+      return true;
+    },
+  );
 });
 
 test("recorded v0.4.8 keeps the modern same-response preview path", async () => {
@@ -585,11 +617,13 @@ test("a recorded v0.4.3 receipt with an explicit mismatching version refuses", a
   );
 });
 
-test("an unversioned response cannot enter the v0.4.6 legacy lane for another manifest", async () => {
+test("an unversioned response cannot enter the pre-v0.4.7 lane for a v0.4.7 manifest", async () => {
+  const manifest = structuredClone(MANIFEST);
+  manifest.brain.version = "0.4.7";
   await assert.rejects(
     cmdUpdatePreview([
       "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
-    ], previewOptions({ inventory: legacyV046Inventory() })),
+    ], previewOptions({ manifest, inventory: legacyV046Inventory() })),
     (error) => {
       assert.equal(error.payload?.error_code, "UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
       assert.equal(error.payload?.effects.credential_reads, 1);
@@ -601,18 +635,18 @@ test("an unversioned response cannot enter the v0.4.6 legacy lane for another ma
   );
 });
 
-test("partial or extended v0.4.6 envelopes fail as ordinary invalid receipts", async () => {
+test("partial or extended pre-v0.4.7 envelopes fail as ordinary invalid receipts", async () => {
   const manifest = structuredClone(MANIFEST);
   manifest.brain.version = "0.4.6";
-  const missingVersion = readinessInventory({ version: "0.4.6" });
-  delete missingVersion.version;
-  const missingDrainMode = readinessInventory({ version: "0.4.6" });
-  delete missingDrainMode.vector_drain_mode;
+  const versionlessButDrainBound = readinessInventory({ version: "0.4.6" });
+  delete versionlessButDrainBound.version;
+  const versionedButDrainless = readinessInventory({ version: "0.4.6" });
+  delete versionedButDrainless.vector_drain_mode;
   const extraLegacyField = {
     ...legacyV046Inventory(),
     private_provider_detail: "must-not-pass",
   };
-  for (const inventory of [missingVersion, missingDrainMode, extraLegacyField]) {
+  for (const inventory of [versionlessButDrainBound, versionedButDrainless, extraLegacyField]) {
     await assert.rejects(
       cmdUpdatePreview([
         "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",

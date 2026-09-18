@@ -287,6 +287,7 @@ function legacyV046Inventory(overrides = {}) {
 }
 
 function syntheticLegacyV046Observation(overrides = {}) {
+  const recordedVersion = overrides.recordedVersion ?? "0.4.6";
   const deployedObservation = overrides.deployedObservation ??
     classifyLegacyV046ProjectionObservation(legacyV046Inventory(overrides.projection), {
       expectedVersion: "0.4.6",
@@ -295,7 +296,7 @@ function syntheticLegacyV046Observation(overrides = {}) {
   return createLegacyV046UpdatePreviewObservation({
     manifestSha256: overrides.manifestSha256 ?? HASH_B,
     manifestSource: overrides.manifestSource ?? "explicit",
-    recordedVersion: overrides.recordedVersion ?? "0.4.6",
+    recordedVersion,
     candidateVersion: overrides.candidateVersion ?? "0.4.8",
     runtimeProof: overrides.runtimeProof ?? syntheticRuntimeProof(),
     deployedObservation,
@@ -1047,7 +1048,7 @@ test("authenticated projection validation returns only one frozen aggregate cut"
   assert.doesNotMatch(JSON.stringify(aggregate), /private-payroll|Private Customer File/u);
 });
 
-test("legacy v0.4.6 projection observation accepts only the exact aggregate envelope", () => {
+test("pre-v0.4.7 projection observation accepts only the shipped aggregate envelope", () => {
   const inventory = legacyV046Inventory({
     rows: [{ source_type: "private-payroll", title: "Private Customer File" }],
   });
@@ -1101,7 +1102,14 @@ test("legacy v0.4.6 projection observation accepts only the exact aggregate enve
       expectedBackend: "d1",
     }),
     expectCode("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID"),
-    "only an installed v0.4.6 manifest may enter the unbound legacy observation lane",
+    "only an installed version below v0.4.7 may enter the unbound legacy observation lane",
+  );
+  assert.deepEqual(
+    classifyLegacyV046ProjectionObservation(inventory, {
+      expectedVersion: "0.4.0",
+      expectedBackend: "d1",
+    }),
+    observation,
   );
 });
 
