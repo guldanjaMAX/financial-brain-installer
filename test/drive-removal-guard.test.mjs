@@ -925,11 +925,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   const goneNeedsApproval = runScopeScenario("incremental-gone", { priorReview: true });
   try {
     assert.equal(goneNeedsApproval.code, 1, goneNeedsApproval.output);
-    assert.match(
-      goneNeedsApproval.output,
-      new RegExp(renderCliCommands(
+    assert.ok(
+      goneNeedsApproval.output.includes(renderCliCommands(
         `brain ingest <manifest> --from drive --approve-removals ${gonePlan.fingerprint}`,
       )),
+      "the approval stop did not show the exact platform-rendered retry command",
     );
     assert.match(goneNeedsApproval.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/,
       "the approval stop did not show the locally known name and folder");
