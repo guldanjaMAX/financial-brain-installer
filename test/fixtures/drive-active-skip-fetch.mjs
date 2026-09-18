@@ -112,6 +112,7 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/source-families") {
+    const request = parseBody(options);
     const evidence = readEvidence();
     evidence.inventoryReads++;
     saveEvidence(evidence);
@@ -120,7 +121,14 @@ globalThis.fetch = async (input, options = {}) => {
       : evidence.removedFamilies
         ? [MIGRATED]
         : [MIGRATED, STALE, SENSITIVE, MISSING].sort();
-    return json({ source: parseBody(options).source, families, next_cursor: null });
+    return json({
+      source: request.source,
+      families,
+      ...(request.include_labels === true ? {
+        family_details: families.map((uid) => ({ uid, name: null, folder_path: null })),
+      } : {}),
+      next_cursor: null,
+    });
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/forget") {

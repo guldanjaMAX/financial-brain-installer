@@ -688,10 +688,13 @@ possible causes, and the owner action depends on which one the message names:
    not-returned result in two distinct runs with Worker-backed timestamps at
    least seven days apart can create a deletion candidate. The local and server
    clocks must agree within 24 hours. That later approval stop shows the locally
-   saved name and folder. If either label is missing, no approval is offered.
-   Review those labels, then use the exact fingerprint within 24 hours only if the
-   owner expects deletion. Nothing is deleted until that exact approval, and
-   the review record clears only after deletion readback.
+   saved name and folder, using the Brain's stored document inventory if local
+   ingest state no longer has them. If either label is still missing, the item
+   is listed as `label_unavailable`, remains protected and retained, and cannot
+   enter an approval fingerprint or deletion plan. The completed cursor still
+   advances. Review the displayed labels, then use the exact fingerprint within
+   24 hours only if the owner expects deletion. Nothing is deleted until that
+   exact approval, and the review record clears only after deletion readback.
 3. **Drive returned an access-denied 403 during the end-of-run absence check.**
    The indexed copy remains in place and outside every deletion plan. Restore
    this credential's access to the file, then rerun Drive ingestion. There is no

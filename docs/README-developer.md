@@ -684,11 +684,16 @@ candidate only after the same outcome is observed by two distinct run IDs with
 Worker inventory response dates at least seven days apart. Each local and
 server timestamp must agree within 24 hours. Even one such candidate stops for the exact `brain ingest
 <manifest> --from drive --approve-removals <fingerprint>` owner approval and
-shows its locally saved name and folder from the durable local review record.
-Missing labels refuse the approval surface. The fingerprint binds the exact
+shows its name and folder from durable local state, with the authenticated D1
+family inventory as the fallback. Every run backfills missing labels from those
+two sources. A family still missing either label is recorded as
+`label_unavailable`, retained, protected from every deletion reason, and left
+out of the approval target set while the completed cursor advances. The
+fingerprint binds the exact
 UID set, displayed labels, observation ID, and observation time, and expires
-after 24 hours. Those labels remain local terminal context; they are not added
-to Worker requests or source receipts. The UID
+after 24 hours. Those labels are private terminal context; the fallback travels
+only in the authenticated no-store inventory response and is not added to
+source receipts or destructive Worker requests. The UID
 stays under review until an approved deletion has exact inventory readback;
 only then is it removed from every review map. Visible trash and a visible move
 outside the reviewed roots remain direct source-deletion evidence.

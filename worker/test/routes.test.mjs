@@ -2273,30 +2273,46 @@ function mkSourceFamilyEnv(documents, extra = {}) {
             return {
               all: async () => {
                 const sourceScoped = binds.length === 3;
+                const includeLabels = /AS family_name/.test(sql);
                 const [source, cursor, limit] = sourceScoped
                   ? binds
                   : [null, binds[0], binds[1]];
-                const familyUids = documents
+                const familyRows = documents
                   .filter((row) => row.deleted_at == null)
                   .map((row) => {
                     try {
                       const metadata = JSON.parse(row.meta || "{}");
                       const familyOf = metadata?.family_of;
                       const partOf = metadata?.part_of;
-                      if (typeof familyOf === "string" && familyOf) return familyOf;
-                      return typeof partOf === "string" && partOf
+                      const family_doc_uid = typeof familyOf === "string" && familyOf
+                        ? familyOf
+                        : typeof partOf === "string" && partOf
                         ? (partOf.startsWith(`${row.source}:`) ? partOf : `${row.source}:${partOf}`)
                         : row.doc_uid;
+                      return {
+                        family_doc_uid,
+                        family_name: typeof row.title === "string" ? row.title : null,
+                        folder_path: typeof metadata?.folder === "string" ? metadata.folder : null,
+                      };
                     } catch {
-                      return row.doc_uid;
+                      return { family_doc_uid: row.doc_uid, family_name: row.title || null, folder_path: null };
                     }
                   })
-                  .filter((uid) => source === null || uid.startsWith(`${source}:`));
-                const page = [...new Set(familyUids)]
-                  .sort()
-                  .filter((uid) => uid > cursor)
+                  .filter((row) => source === null || row.family_doc_uid.startsWith(`${source}:`));
+                const grouped = new Map();
+                for (const row of familyRows) {
+                  const prior = grouped.get(row.family_doc_uid) || {};
+                  grouped.set(row.family_doc_uid, {
+                    family_doc_uid: row.family_doc_uid,
+                    family_name: [prior.family_name, row.family_name].filter(Boolean).sort().at(-1) || null,
+                    folder_path: [prior.folder_path, row.folder_path].filter(Boolean).sort().at(-1) || null,
+                  });
+                }
+                const page = [...grouped.values()]
+                  .sort((a, b) => a.family_doc_uid.localeCompare(b.family_doc_uid))
+                  .filter((row) => row.family_doc_uid > cursor)
                   .slice(0, limit)
-                  .map((family_doc_uid) => ({ family_doc_uid }));
+                  .map((row) => includeLabels ? row : { family_doc_uid: row.family_doc_uid });
                 return { results: page };
               },
             };
@@ -2311,7 +2327,13 @@ function mkSourceFamilyEnv(documents, extra = {}) {
 
 {
   const docs = [
-    { doc_uid: "drive:a", source: "drive", meta: "{}", deleted_at: null },
+    {
+      doc_uid: "drive:a",
+      source: "drive",
+      title: "Owner tax return.txt",
+      meta: '{"folder":"Reviewed Root/Tax"}',
+      deleted_at: null,
+    },
     { doc_uid: "drive:b#part1of2", source: "drive", meta: '{"part_of":"b"}', deleted_at: null },
     { doc_uid: "drive:b#part2of2", source: "drive", meta: '{"part_of":"b"}', deleted_at: null },
     { doc_uid: "drive:c", source: "drive", meta: "{}", deleted_at: 1750000000000 },
@@ -2346,9 +2368,26 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   check("the final reconciliation page has no continuation cursor",
     second.next_cursor === null, JSON.stringify(second));
 
+  const labelledResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 2, include_labels: true }),
+    },
+  ), env, {});
+  const labelled = await labelledResponse.json();
+  check("the private Drive inventory can return the Brain's stored family labels",
+    labelledResponse.status === 200 &&
+      JSON.stringify(labelled.family_details?.[0]) === JSON.stringify({
+        uid: "drive:a",
+        name: "Owner tax return.txt",
+        folder_path: "Reviewed Root/Tax",
+      }), JSON.stringify(labelled));
+
   const sql = seen.sql.find((value) => /SELECT family_doc_uid/.test(value)) || "";
   check("D1 collapses structural and declared families before the page limit",
-    /SELECT DISTINCT/.test(sql) && /part_of/.test(sql) && /family_of/.test(sql) && /deleted_at IS NULL/.test(sql), sql);
+    /GROUP BY family_doc_uid/.test(sql) && /part_of/.test(sql) && /family_of/.test(sql) && /deleted_at IS NULL/.test(sql), sql);
   check("D1 filters by the derived family namespace rather than the physical row source",
     /substr\(family_doc_uid, 1, length\(\?1\) \+ 1\) = \?1 \|\| ':'/.test(sql) &&
       !/WHERE source = \?1/.test(sql), sql);
@@ -2409,6 +2448,7 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     post({ source: "drive", limit: 1001 }),
     post({ source: "drive", limit: 2.5 }),
     post({ source: "drive", cursor: "gmail:a" }),
+    post({ source: "drive", include_labels: "yes" }),
     post({ source: "drive", unexpected: true }),
   ]);
   check("source-family reconciliation validates source, limit, cursor and unknown fields",

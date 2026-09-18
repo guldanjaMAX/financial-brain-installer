@@ -6621,19 +6621,36 @@ export async function sourceFamilyCounts(env, { source } = {}) {
  * fully qualified `meta.family_of`. The latter can deliberately cross the
  * stored row's source namespace, for example `message:*` rows belonging to an
  * `upload:*` file. Source filtering therefore applies to the derived family
- * uid rather than to the physical row. DISTINCT happens before the cursor and
+ * uid rather than to the physical row. Grouping happens before the cursor and
  * LIMIT so either representation occupies exactly one reconciliation slot.
  */
-export async function listSourceFamilies(env, { source = null, cursor = "", limit = 500 } = {}) {
+export async function listSourceFamilies(env, {
+  source = null,
+  cursor = "",
+  limit = 500,
+  includeLabels = false,
+} = {}) {
   // With no source filter this query derives the complete source set from live
   // document rows themselves. `corpus_stats` is useful operational metadata,
   // but it is denormalized and therefore cannot be the discovery boundary for
   // a completeness proof. A missing stats row must not hide an indexed family.
+  const labelProjection = includeLabels
+    ? `,
+       MAX(CASE WHEN length(trim(title)) > 0 THEN trim(title) ELSE NULL END) AS family_name,
+       MAX(CASE
+         WHEN json_valid(meta)
+          AND json_type(meta,'$.folder') = 'text'
+          AND length(trim(json_extract(meta,'$.folder'))) > 0
+           THEN trim(json_extract(meta,'$.folder'))
+         ELSE NULL
+       END) AS folder_path`
+    : "";
+  const grouping = " GROUP BY family_doc_uid";
   const statement = source
     ? env.DB.prepare(
-      `SELECT family_doc_uid
+      `SELECT family_doc_uid${labelProjection}
          FROM (
-           SELECT DISTINCT CASE
+           SELECT CASE
              WHEN json_valid(meta)
               AND json_type(meta,'$.family_of') = 'text'
               AND length(json_extract(meta,'$.family_of')) > 0
@@ -6647,19 +6664,22 @@ export async function listSourceFamilies(env, { source = null, cursor = "", limi
                  ELSE source || ':' || json_extract(meta,'$.part_of')
                END
              ELSE doc_uid
-           END AS family_doc_uid
+           END AS family_doc_uid,
+           title,
+           meta
              FROM documents
             WHERE deleted_at IS NULL
          )
         WHERE substr(family_doc_uid, 1, length(?1) + 1) = ?1 || ':'
           AND family_doc_uid > ?2
+        ${grouping}
         ORDER BY family_doc_uid ASC
         LIMIT ?3`
     ).bind(source, cursor, limit + 1)
     : env.DB.prepare(
-      `SELECT family_doc_uid
+      `SELECT family_doc_uid${labelProjection}
          FROM (
-           SELECT DISTINCT CASE
+           SELECT CASE
              WHEN json_valid(meta)
               AND json_type(meta,'$.family_of') = 'text'
               AND length(json_extract(meta,'$.family_of')) > 0
@@ -6673,20 +6693,35 @@ export async function listSourceFamilies(env, { source = null, cursor = "", limi
                  ELSE source || ':' || json_extract(meta,'$.part_of')
                END
              ELSE doc_uid
-           END AS family_doc_uid
+           END AS family_doc_uid,
+           title,
+           meta
              FROM documents
             WHERE deleted_at IS NULL
          )
         WHERE family_doc_uid > ?1
+        ${grouping}
         ORDER BY family_doc_uid ASC
         LIMIT ?2`
     ).bind(cursor, limit + 1);
   const { results } = await statement.all();
 
-  const page = (results || []).slice(0, limit).map((row) => String(row.family_doc_uid));
+  const pageRows = (results || []).slice(0, limit);
+  const page = pageRows.map((row) => String(row.family_doc_uid));
   return {
     source,
     families: page,
+    ...(includeLabels ? {
+      family_details: pageRows.map((row) => ({
+        uid: String(row.family_doc_uid),
+        name: typeof row.family_name === "string" && row.family_name.trim()
+          ? row.family_name.trim()
+          : null,
+        folder_path: typeof row.folder_path === "string" && row.folder_path.trim()
+          ? row.folder_path.trim()
+          : null,
+      })),
+    } : {}),
     next_cursor: (results || []).length > limit ? page[page.length - 1] : null,
   };
 }

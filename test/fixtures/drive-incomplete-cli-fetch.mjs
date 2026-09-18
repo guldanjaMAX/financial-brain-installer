@@ -194,7 +194,14 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.inventory_reads++;
     saveEvidence(evidence);
-    return json({ source: "drive", families: evidence.stored_families, next_cursor: null });
+    return json({
+      source: "drive",
+      families: evidence.stored_families,
+      ...(request.include_labels === true ? {
+        family_details: evidence.stored_families.map((uid) => ({ uid, name: null, folder_path: null })),
+      } : {}),
+      next_cursor: null,
+    });
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/forget") {

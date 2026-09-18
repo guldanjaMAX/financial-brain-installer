@@ -669,6 +669,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorChangeFeedDays = null,
     priorMaturedDays = null,
     priorApprovalExpired = false,
+    localDoneLabels = true,
+    inventoryLabels = true,
     args = [],
   } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
@@ -689,6 +691,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       BRAIN_DRIVE_SCOPE_USER_ROOT: userRoot,
       BRAIN_DRIVE_SCOPE_EVIDENCE: evidencePath,
       BRAIN_DRIVE_SCOPE_MODE: mode,
+      BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? "stored" : "none",
       ADMIN_KEY: "fixture-admin",
     });
 
@@ -711,13 +714,15 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     writeFileSync(statePath, JSON.stringify({
       version: 1,
       done: {
-        "drive:missing-sensitive": JSON.stringify([
-          "2026-09-02T00:00:00Z",
-          "restored-version",
-          mode === "incremental-restored" ? "Restored fixture.txt" : "Owner tax return.txt",
-          "text/plain",
-          mode === "incremental-restored" ? "Reviewed Root" : "Reviewed Root/Tax",
-        ]),
+        ...(localDoneLabels ? {
+          "drive:missing-sensitive": JSON.stringify([
+            "2026-09-02T00:00:00Z",
+            "restored-version",
+            mode === "incremental-restored" ? "Restored fixture.txt" : "Owner tax return.txt",
+            "text/plain",
+            mode === "incremental-restored" ? "Reviewed Root" : "Reviewed Root/Tax",
+          ]),
+        } : {}),
         ...(["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)
           ? Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
               const suffix = String(index).padStart(2, "0");
@@ -858,20 +863,29 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       })() : {}),
     }), { mode: 0o600 });
 
-    const result = spawnSync(process.execPath, [
-      "--import", DRIVE_SCOPE_FETCH,
-      CLI, "ingest", manifestPath, "--from", "drive",
-      ...args,
-    ], { encoding: "utf8", env: environment, timeout: 30_000 });
-    assert.equal(result.error, undefined, String(result.error || ""));
-    assert.equal(result.signal, null, `Drive scope CLI was terminated by ${result.signal}`);
+    const execute = (runArgs = []) => {
+      const result = spawnSync(process.execPath, [
+        "--import", DRIVE_SCOPE_FETCH,
+        CLI, "ingest", manifestPath, "--from", "drive",
+        ...runArgs,
+      ], { encoding: "utf8", env: environment, timeout: 30_000 });
+      assert.equal(result.error, undefined, String(result.error || ""));
+      assert.equal(result.signal, null, `Drive scope CLI was terminated by ${result.signal}`);
+      return {
+        code: result.status,
+        output: stripAnsi(`${result.stdout || ""}${result.stderr || ""}`),
+      };
+    };
+    const result = execute(args);
     return {
-      code: result.status,
-      output: stripAnsi(`${result.stdout || ""}${result.stderr || ""}`),
+      code: result.code,
+      output: result.output,
       priorCursor,
       priorFullSweep,
       state: () => JSON.parse(readFileSync(statePath, "utf8")),
+      writeState: (nextState) => writeFileSync(statePath, JSON.stringify(nextState), { mode: 0o600 }),
       evidence: () => JSON.parse(readFileSync(evidencePath, "utf8")),
+      rerun: (runArgs = []) => execute(runArgs),
       cleanup: () => rmSync(directory, { recursive: true, force: true }),
     };
   };
@@ -913,7 +927,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         full ? `fixture-prewalk-${mode}` : `fixture-next-${mode}`,
         "a completed Drive walk did not save its cursor",
       );
-      assert.equal(state.drive_removal_review.schema_version, 5);
+      assert.equal(state.drive_removal_review.schema_version, 6);
       assert.equal(state.drive_removal_review.issue_code, "SAFETY_REVIEW_REQUIRED");
       assert.deepEqual(state.drive_removal_review.uids, ["drive:missing-sensitive"]);
       assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
@@ -923,6 +937,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           unresolved_access: 0,
           unresolved_transient: 0,
           unresolved_not_returned: 1,
+          label_unavailable: 0,
           pending_source_deletions: 0,
         });
         assert.deepEqual(state.drive_removal_review.unresolved_access_uids, []);
@@ -940,6 +955,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           unresolved_access: 1,
           unresolved_transient: 0,
           unresolved_not_returned: 0,
+          label_unavailable: 0,
           pending_source_deletions: 0,
         });
         assert.deepEqual(state.drive_removal_review.unresolved_access_uids, ["drive:missing-sensitive"]);
@@ -966,19 +982,21 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.removedFamilies, 0);
     const state = unresolvedPending.state();
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 5,
+      schema_version: 6,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: 1,
         unresolved_access: 1,
         unresolved_transient: 0,
         unresolved_not_returned: 0,
+        label_unavailable: 0,
         pending_source_deletions: 0,
       },
       uids: ["drive:missing-sensitive"],
       unresolved_access_uids: ["drive:missing-sensitive"],
       unresolved_transient: [],
       unresolved_not_returned: [],
+      label_unavailable: [],
       source_deletion_candidates: [],
     });
     assert.equal(
@@ -1011,6 +1029,38 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     } finally {
       staleMarker.cleanup();
     }
+  }
+
+  const resetLifecycle = runScopeScenario("incremental-stale-marker-404", {
+    pendingRemoval: true,
+    args: ["--reset"],
+  });
+  try {
+    assert.equal(resetLifecycle.code, 0, resetLifecycle.output);
+    const firstState = resetLifecycle.state();
+    const firstRecord = firstState.drive_removal_review?.unresolved_not_returned?.[0];
+    assert.equal(firstRecord?.name, "Owner tax return.txt");
+    assert.equal(firstRecord?.folder_path, "Reviewed Root/Tax");
+    const agedAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    firstRecord.first_observed_at = agedAt;
+    firstRecord.last_observed_at = agedAt;
+    firstRecord.grace_eligible_at = new Date(Date.parse(agedAt) + 7 * 24 * 60 * 60 * 1000).toISOString();
+    firstRecord.observations[0].observed_at = agedAt;
+    firstRecord.observations[0].server_observed_at = agedAt;
+    resetLifecycle.writeState(firstState);
+
+    const secondRun = resetLifecycle.rerun();
+    assert.equal(secondRun.code, 1, secondRun.output);
+    assert.match(secondRun.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/);
+    assert.match(secondRun.output, /--approve-removals [0-9a-f]{64}/);
+    const thirdRun = resetLifecycle.rerun();
+    assert.equal(thirdRun.code, 1, thirdRun.output);
+    assert.match(thirdRun.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/);
+    assert.match(thirdRun.output, /--approve-removals [0-9a-f]{64}/,
+      "the reset-created review did not remain approvable on its third run");
+    assert.equal(resetLifecycle.evidence().forgetRequests, 0);
+  } finally {
+    resetLifecycle.cleanup();
   }
 
   const restoredStaleMarker = runScopeScenario("incremental-stale-marker-live", {
@@ -1082,13 +1132,14 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const state = unresolvedBatch.state();
     assert.equal(state.sync_token, "fixture-next-incremental-unresolved-batch");
     assert.deepEqual(state.drive_removal_review, {
-      schema_version: 5,
+      schema_version: 6,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: 3,
         unresolved_access: 3,
         unresolved_transient: 0,
         unresolved_not_returned: 0,
+        label_unavailable: 0,
         pending_source_deletions: 0,
       },
       uids: [
@@ -1103,6 +1154,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       ],
       unresolved_transient: [],
       unresolved_not_returned: [],
+      label_unavailable: [],
       source_deletion_candidates: [],
     });
   } finally {
@@ -1158,12 +1210,13 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(goneReviewOnly.evidence().forgetRequests, 0,
       "a change-feed removal event reached the destructive endpoint");
     const review = goneReviewOnly.state().drive_removal_review;
-    assert.equal(review.schema_version, 5);
+    assert.equal(review.schema_version, 6);
     assert.deepEqual(review.counts, {
       unresolved_absences: 1,
       unresolved_access: 0,
       unresolved_transient: 0,
       unresolved_not_returned: 1,
+      label_unavailable: 0,
       pending_source_deletions: 0,
     });
     assert.deepEqual(review.unresolved_access_uids, []);
@@ -1244,14 +1297,25 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorNotReturnedDays: 8,
     priorNotReturnedNamed: false,
     priorObservation: true,
+    localDoneLabels: false,
+    inventoryLabels: false,
     args: ["--approve-removals", "0".repeat(64)],
   });
   try {
-    assert.equal(unnamedLegacy.code, 1, unnamedLegacy.output);
-    assert.match(unnamedLegacy.output, /does not contain the saved name and folder/i);
+    assert.equal(unnamedLegacy.code, 0, unnamedLegacy.output);
+    assert.match(unnamedLegacy.output, /no saved name and folder/i);
+    assert.match(unnamedLegacy.output, /protected and retained/i);
     assert.equal(/--approve-removals [0-9a-f]{64}/.test(unnamedLegacy.output), false,
       "an unnamed legacy review record advertised an approval fingerprint");
     assert.equal(unnamedLegacy.evidence().forgetRequests, 0);
+    const state = unnamedLegacy.state();
+    assert.equal(state.sync_token, "fixture-prewalk-full-unresolved",
+      "an unlabelled protected family withheld the completed Drive cursor");
+    assert.equal(state.drive_removal_review.counts.label_unavailable, 1);
+    assert.deepEqual(state.drive_removal_review.label_unavailable.map((record) => record.uid), [
+      "drive:missing-sensitive",
+    ]);
+    assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
   } finally {
     unnamedLegacy.cleanup();
   }

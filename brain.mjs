@@ -11500,9 +11500,16 @@ export function assertNoPendingRemovals(result, label = "source deletion") {
 }
 
 /** Read every live logical document uid for one source from the data plane. */
-export async function listStoredSourceFamilies({ base, adminKey, source, includeServerObservedAt = false }) {
+export async function listStoredSourceFamilies({
+  base,
+  adminKey,
+  source,
+  includeServerObservedAt = false,
+  includeLabels = false,
+}) {
   const normalizedSource = assertSourceName(source);
   const families = new Set();
+  const labels = new Map();
   const seenCursors = new Set();
   let serverObservedAt = null;
   let cursor = "";
@@ -11519,6 +11526,7 @@ export async function listStoredSourceFamilies({ base, adminKey, source, include
       body: JSON.stringify({
         source: normalizedSource,
         limit: 1000,
+        ...(includeLabels ? { include_labels: true } : {}),
         ...(cursor ? { cursor } : {}),
       }),
     }, { what: "the source-family inventory" });
@@ -11541,8 +11549,13 @@ export async function listStoredSourceFamilies({ base, adminKey, source, include
     if (body.families.length > 1000) {
       throw new Error("source-family inventory exceeded its requested page size");
     }
+    if (includeLabels && (
+      !Array.isArray(body.family_details) || body.family_details.length !== body.families.length
+    )) {
+      throw new Error("source-family inventory returned invalid family labels");
+    }
     let previous = cursor;
-    for (const uid of body.families) {
+    for (const [index, uid] of body.families.entries()) {
       if (typeof uid !== "string" || !uid.startsWith(`${normalizedSource}:`)) {
         throw new Error("source-family inventory returned an invalid document uid");
       }
@@ -11550,10 +11563,26 @@ export async function listStoredSourceFamilies({ base, adminKey, source, include
         throw new Error("source-family inventory was not strictly ordered");
       }
       families.add(uid);
+      if (includeLabels) {
+        const detail = body.family_details[index];
+        if (!detail || detail.uid !== uid ||
+            (detail.name !== null && typeof detail.name !== "string") ||
+            (detail.folder_path !== null && typeof detail.folder_path !== "string")) {
+          throw new Error("source-family inventory returned invalid family labels");
+        }
+        labels.set(uid, {
+          name: typeof detail.name === "string" && detail.name.trim() ? detail.name.trim() : null,
+          folderPath: typeof detail.folder_path === "string" && detail.folder_path.trim()
+            ? detail.folder_path.trim()
+            : null,
+        });
+      }
       previous = uid;
     }
     if (body.next_cursor === null) {
-      return includeServerObservedAt ? { families, serverObservedAt } : families;
+      return includeServerObservedAt || includeLabels
+        ? { families, serverObservedAt, labels }
+        : families;
     }
     if (typeof body.next_cursor !== "string" || !body.next_cursor.startsWith(`${normalizedSource}:`)) {
       throw new Error("source-family inventory returned an invalid next cursor");
@@ -14260,7 +14289,8 @@ const cmdIngestRemoteRun = async (
   const driveReviewObservedAt = new Date().toISOString();
   const driveAbsenceGraceMs = 7 * 24 * 60 * 60 * 1000;
   let driveInventoryServerObservedAt = null;
-  const localDriveReviewDetails = (uid) => {
+  let driveInventoryLabels = new Map();
+  const stateDriveReviewDetails = (uid) => {
     let version = null;
     try { version = JSON.parse(String(state.done?.[uid] || "")); } catch { /* unavailable */ }
     const name = Array.isArray(version) && typeof version[2] === "string" && version[2].trim()
@@ -14270,6 +14300,14 @@ const cmdIngestRemoteRun = async (
       ? version[4].trim()
       : null;
     return { name, folderPath };
+  };
+  const localDriveReviewDetails = (uid) => {
+    const stateDetails = stateDriveReviewDetails(uid);
+    const inventoryDetails = driveInventoryLabels.get(uid) || {};
+    return {
+      name: stateDetails.name || inventoryDetails.name || null,
+      folderPath: stateDetails.folderPath || inventoryDetails.folderPath || null,
+    };
   };
   const normalizeDriveObservations = (observations) => {
     const byRun = new Map();
@@ -14430,6 +14468,27 @@ const cmdIngestRemoteRun = async (
       corroboration: "repeated_not_returned",
     });
   }
+  let labelUnavailableDriveReview = new Map();
+  for (const raw of Array.isArray(storedDriveRemovalReview?.label_unavailable)
+    ? storedDriveRemovalReview.label_unavailable
+    : []) {
+    if (!raw || typeof raw !== "object" || !String(raw.uid || "")) continue;
+    const record = driveGraceRecord(raw.uid, {
+      firstObservedAt: raw.first_observed_at,
+      lastObservedAt: raw.last_observed_at,
+      observationCount: raw.observation_count,
+      changeFeedRemovedAt: raw.change_feed_removed_at,
+      name: raw.name,
+      folderPath: raw.folder_path,
+      approvalObservationId: raw.approval_observation_id,
+      approvalObservedAt: raw.approval_observed_at,
+      observations: raw.observations,
+    });
+    labelUnavailableDriveReview.set(record.uid, {
+      ...record,
+      protection: "label_unavailable",
+    });
+  }
   let driveRemovalReview = storedDriveRemovalReview;
   let unclassifiedPendingDriveUids = new Set();
   const newlyReviewedPendingDriveUids = new Set();
@@ -14440,6 +14499,7 @@ const cmdIngestRemoteRun = async (
       ...unresolvedDriveReviewUids,
       ...unresolvedTransientDriveReview.keys(),
       ...unresolvedNotReturnedDriveReview.keys(),
+      ...labelUnavailableDriveReview.keys(),
       ...unclassifiedPendingDriveUids,
     ]);
     for (const record of pendingSourceDeletionDriveReview.values()) {
@@ -14458,6 +14518,7 @@ const cmdIngestRemoteRun = async (
     unresolvedTransientDriveReview.delete(uid);
     unresolvedNotReturnedDriveReview.delete(uid);
     pendingSourceDeletionDriveReview.delete(uid);
+    labelUnavailableDriveReview.delete(uid);
   };
 
   const updateDriveRemovalReview = () => {
@@ -14468,10 +14529,13 @@ const cmdIngestRemoteRun = async (
       .sort((a, b) => a.uid.localeCompare(b.uid));
     const sourceDeletionCandidates = [...pendingSourceDeletionDriveReview.values()]
       .sort((a, b) => a.uid.localeCompare(b.uid));
+    const labelUnavailable = [...labelUnavailableDriveReview.values()]
+      .sort((a, b) => a.uid.localeCompare(b.uid));
     const uids = [...new Set([
       ...unresolvedAccessUids,
       ...unresolvedTransient.map((entry) => entry.uid),
       ...unresolvedNotReturned.map((entry) => entry.uid),
+      ...labelUnavailable.map((entry) => entry.uid),
       ...sourceDeletionCandidates.map((entry) => entry.uid),
     ])].sort();
     if (!uids.length) {
@@ -14480,19 +14544,22 @@ const cmdIngestRemoteRun = async (
       return;
     }
     driveRemovalReview = {
-      schema_version: 5,
+      schema_version: 6,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
-        unresolved_absences: unresolvedAccessUids.length + unresolvedTransient.length + unresolvedNotReturned.length,
+        unresolved_absences: unresolvedAccessUids.length + unresolvedTransient.length +
+          unresolvedNotReturned.length + labelUnavailable.length,
         unresolved_access: unresolvedAccessUids.length,
         unresolved_transient: unresolvedTransient.length,
         unresolved_not_returned: unresolvedNotReturned.length,
+        label_unavailable: labelUnavailable.length,
         pending_source_deletions: sourceDeletionCandidates.length,
       },
       uids,
       unresolved_access_uids: unresolvedAccessUids,
       unresolved_transient: unresolvedTransient,
       unresolved_not_returned: unresolvedNotReturned,
+      label_unavailable: labelUnavailable,
       source_deletion_candidates: sourceDeletionCandidates,
     };
     state.drive_removal_review = driveRemovalReview;
@@ -14694,10 +14761,12 @@ const cmdIngestRemoteRun = async (
           adminKey,
           source: sourceName,
           includeServerObservedAt: true,
+          includeLabels: true,
         })
       : null;
     const driveStoredBeforeProcessing = driveInventoryBeforeProcessing?.families || null;
     driveInventoryServerObservedAt = driveInventoryBeforeProcessing?.serverObservedAt || null;
+    driveInventoryLabels = driveInventoryBeforeProcessing?.labels || new Map();
     const driveRemovalSafetyCount = driveStoredBeforeProcessing
       ? recordRemovalSafetyBaseline({
           stateKey: "drive_removal_safety_baseline",
@@ -14737,6 +14806,7 @@ const cmdIngestRemoteRun = async (
         ...unresolvedDriveReviewUids,
         ...unresolvedTransientDriveReview.keys(),
         ...unresolvedNotReturnedDriveReview.keys(),
+        ...labelUnavailableDriveReview.keys(),
         ...pendingSourceDeletionDriveReview.keys(),
       ]) {
         if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) {
@@ -14758,17 +14828,20 @@ const cmdIngestRemoteRun = async (
       // again clears it. A changed outcome replaces the old classification,
       // so stale deletion intent can never survive a later access denial.
       const priorNotReturnedReview = unresolvedNotReturnedDriveReview;
+      const priorLabelUnavailableReview = labelUnavailableDriveReview;
       const priorSourceDeletionReview = pendingSourceDeletionDriveReview;
       const priorReviewedUids = new Set([
         ...unresolvedDriveReviewUids,
         ...unresolvedTransientDriveReview.keys(),
         ...priorNotReturnedReview.keys(),
+        ...priorLabelUnavailableReview.keys(),
         ...priorSourceDeletionReview.keys(),
       ]);
       const classifiedDriveUids = new Set();
       unresolvedDriveReviewUids = new Set();
       unresolvedTransientDriveReview = new Map();
       unresolvedNotReturnedDriveReview = new Map();
+      labelUnavailableDriveReview = new Map();
       pendingSourceDeletionDriveReview = new Map();
       for (const uid of [...absenceCandidates].sort()) {
         const fileId = uid.startsWith(uidPrefix) ? uid.slice(uidPrefix.length) : "";
@@ -14801,22 +14874,24 @@ const cmdIngestRemoteRun = async (
         }
         if (classification.kind === "unresolved_not_returned") {
           const prior = priorNotReturnedReview.get(uid);
+          const priorLabelUnavailable = priorLabelUnavailableReview.get(uid);
           const priorCandidate = priorSourceDeletionReview.get(uid);
           if (pendingDriveAtStart.includes(uid) && !priorReviewedUids.has(uid)) {
             newlyReviewedPendingDriveUids.add(uid);
           }
-          const priorRecord = priorCandidate || prior || driveGraceRecord(
+          const priorRecord = priorCandidate || priorLabelUnavailable || prior || driveGraceRecord(
             uid,
             localDriveReviewDetails(uid),
           );
+          const labelFallback = localDriveReviewDetails(uid);
           const observedRecord = driveGraceRecord(uid, {
             firstObservedAt: priorRecord.first_observed_at,
             lastObservedAt: driveReviewObservedAt,
             observationCount: priorRecord.observation_count,
             changeFeedRemovedAt: priorRecord.change_feed_removed_at ||
               (changeFeedRemovalUids.has(uid) ? driveReviewObservedAt : null),
-            name: priorRecord.name,
-            folderPath: priorRecord.folder_path,
+            name: priorRecord.name || labelFallback.name,
+            folderPath: priorRecord.folder_path || labelFallback.folderPath,
             approvalObservationId: priorRecord.approval_observation_id,
             approvalObservedAt: priorRecord.approval_observed_at,
             observations: appendDriveObservation(priorRecord),
@@ -14832,6 +14907,13 @@ const cmdIngestRemoteRun = async (
               approval_observation_id: approvalExpired ? runId : observedRecord.approval_observation_id,
               approval_observed_at: approvalExpired ? driveReviewObservedAt : observedRecord.approval_observed_at,
             };
+            if (!candidate.name || !candidate.folder_path) {
+              labelUnavailableDriveReview.set(uid, {
+                ...candidate,
+                protection: "label_unavailable",
+              });
+              continue;
+            }
             pendingSourceDeletionDriveReview.set(uid, candidate);
             corroboratedNotReturnedUids.push(uid);
             confirmedDriveAbsenceUids.push(uid);
@@ -15901,7 +15983,8 @@ const cmdIngestRemoteRun = async (
   const totalRefused = tally.refused + localRefused;
   const driveReviewRequired = which === "drive" && protectedDriveUids().size > 0;
   const driveReviewBlocksCommand = driveReviewRequired &&
-    [...protectedDriveUids()].some((uid) => !newlyReviewedPendingDriveUids.has(uid));
+    [...protectedDriveUids()].some((uid) =>
+      !newlyReviewedPendingDriveUids.has(uid) && !labelUnavailableDriveReview.has(uid));
   const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0 || driveReviewRequired;
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
@@ -15953,6 +16036,7 @@ const cmdIngestRemoteRun = async (
     const notReturned = Number(driveRemovalReview.counts.unresolved_not_returned || 0);
     const accessDenied = Number(driveRemovalReview.counts.unresolved_access || 0);
     const transient = Number(driveRemovalReview.counts.unresolved_transient || 0);
+    const labelUnavailable = Number(driveRemovalReview.counts.label_unavailable || 0);
     const pendingUnderGrace = [...pendingSourceDeletionDriveReview.values()]
       .filter((record) => protectedDriveUids().has(record.uid)).length;
     const reasons = [
@@ -15966,6 +16050,10 @@ const cmdIngestRemoteRun = async (
       ...(transient ? [
         `${transient} item(s): Drive metadata lookup was temporarily unavailable. ` +
           "The completed change window was saved and the item will be checked again on the next run.",
+      ] : []),
+      ...(labelUnavailable ? [
+        `${labelUnavailable} item(s): the Brain has no saved name and folder for this stored family. ` +
+          "It remains protected and retained, cannot enter an approval plan, and will be checked again on the next run.",
       ] : []),
       ...(pendingUnderGrace ? [
         `${pendingUnderGrace} item(s): Drive still has an open seven-day review window. ` +

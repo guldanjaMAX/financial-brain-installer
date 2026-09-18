@@ -10,6 +10,16 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Drive cleanup can no longer get stuck when an older review record has no
+  saved label.** The Brain now repairs a missing name and folder from its own
+  stored document inventory, including after `--reset`. If neither local state
+  nor the stored document has both labels, that family stays protected and
+  retained, is listed as `label_unavailable`, and cannot enter an approval
+  fingerprint or deletion plan. The completed Drive cursor still advances so
+  every other file can continue syncing. To check: a matured labelled item
+  shows its name, folder, and approval fingerprint; an unlabelled item reports
+  protection, prints no fingerprint for that item, and leaves it stored.
+
 - **A stale retry marker can no longer delete a document without a fresh look
   at Drive and your approval.** Every saved retry marker is checked again; a
   live file clears it, a temporary lookup failure stays protected for the next
@@ -22,8 +32,9 @@ asset publication.
   open, even when a stale retry marker exists. The item can enter a deletion
   plan only after the same not-returned result in two distinct runs whose
   Worker-backed timestamps are at least seven days apart and agree with this
-  computer's clock. That plan shows the locally saved name and folder; if
-  either label is unavailable, no approval is offered. Its approval binds
+  computer's clock. That plan shows the name and folder saved locally or in the
+  Brain's stored document inventory. If either label is still unavailable, the
+  family remains protected and cannot enter the plan. Its approval binds
   those displayed labels and the exact observation, expires after 24 hours,
   and nothing from it is deleted without the exact
   `brain ingest <manifest> --from drive --approve-removals <fingerprint>`

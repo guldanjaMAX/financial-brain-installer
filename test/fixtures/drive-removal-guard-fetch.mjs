@@ -152,9 +152,13 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.inventoryReads++;
     saveEvidence(evidence);
+    const families = storedFamilyIndexes(evidence).map(familyUid);
     return json({
       source: request.source,
-      families: storedFamilyIndexes(evidence).map(familyUid),
+      families,
+      ...(request.include_labels === true ? {
+        family_details: families.map((uid) => ({ uid, name: null, folder_path: null })),
+      } : {}),
       next_cursor: null,
     });
   }

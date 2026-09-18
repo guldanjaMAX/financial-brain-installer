@@ -796,10 +796,13 @@ stays protected for the next run. No UID is deleted while its absence is
 unresolved or its grace window is open. It can enter the `source_deleted` plan
 only after the same not-returned outcome is recorded by two distinct runs with
 Worker-backed timestamps at least seven days apart and clocks that agree within
-24 hours. That stopped approval message shows each candidate's locally saved
-name and folder. If either label is missing, the command refuses to offer an
-approval. The fingerprint binds those labels and the exact observation, and it
-expires after 24 hours. The item is deleted only after the owner supplies the exact
+24 hours. That stopped approval message shows each candidate's name and folder,
+using local ingest state first and the Brain's stored document metadata as the
+fallback. A family still missing either label is reported as
+`label_unavailable`, remains protected and retained, and is excluded from every
+approval fingerprint and deletion plan without stopping the completed Drive
+cursor. The fingerprint binds the eligible labels and exact observation, and
+it expires after 24 hours. The item is deleted only after the owner supplies the exact
 `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
 approval, and its review entry clears only after deletion readback. Visible
 trash and a visible move outside the reviewed roots remain direct source proof.

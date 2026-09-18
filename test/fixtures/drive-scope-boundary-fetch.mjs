@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from "node:module";
 const userRoot = String(process.env.BRAIN_DRIVE_SCOPE_USER_ROOT || "");
 const evidencePath = String(process.env.BRAIN_DRIVE_SCOPE_EVIDENCE || "");
 const mode = String(process.env.BRAIN_DRIVE_SCOPE_MODE || "");
+const inventoryLabelsAvailable = process.env.BRAIN_DRIVE_SCOPE_LABELS !== "none";
 const MODES = new Set([
   "changed-outside",
   "full-unresolved",
@@ -107,6 +108,20 @@ function storedFamilies(evidence) {
     return evidence.removedFamilies ? [] : [MISSING_UID];
   }
   return evidence.removedFamilies ? RETAINED_UIDS : [MISSING_UID, ...RETAINED_UIDS].sort();
+}
+
+function storedFamilyDetails(families) {
+  return families.map((uid) => {
+    if (!inventoryLabelsAvailable) return { uid, name: null, folder_path: null };
+    if (uid === MISSING_UID) {
+      return { uid, name: "Owner tax return.txt", folder_path: "Reviewed Root/Tax" };
+    }
+    const retained = /^drive:retained-(\d{2})$/.exec(uid);
+    if (retained) {
+      return { uid, name: `Retained ${retained[1]}.txt`, folder_path: "Reviewed Root" };
+    }
+    return { uid, name: "Stored Drive item.txt", folder_path: "Reviewed Root" };
+  });
 }
 
 function changedOutsideFile() {
@@ -326,7 +341,13 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.inventoryReads++;
     saveEvidence(evidence);
-    return json({ source: "drive", families: storedFamilies(evidence), next_cursor: null });
+    const families = storedFamilies(evidence);
+    return json({
+      source: "drive",
+      families,
+      ...(request.include_labels === true ? { family_details: storedFamilyDetails(families) } : {}),
+      next_cursor: null,
+    });
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/forget") {

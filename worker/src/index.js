@@ -2356,7 +2356,8 @@ async function handleSourceFamilies(env, request) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return respond({ error: "source-family request must be a JSON object" }, 400);
   }
-  const extras = Object.keys(body).filter((field) => !["source", "cursor", "limit"].includes(field));
+  const extras = Object.keys(body).filter((field) =>
+    !["source", "cursor", "limit", "include_labels"].includes(field));
   if (extras.length > 0) {
     return respond({ error: "source-family request has unknown fields" }, 400);
   }
@@ -2373,6 +2374,11 @@ async function handleSourceFamilies(env, request) {
     return respond({ error: `limit must be an integer from 1 to ${SOURCE_FAMILY_MAX_LIMIT}` }, 400);
   }
 
+  const includeLabels = body.include_labels === undefined ? false : body.include_labels;
+  if (typeof includeLabels !== "boolean") {
+    return respond({ error: "include_labels must be a boolean" }, 400);
+  }
+
   const cursor = body.cursor === undefined || body.cursor === null ? "" : body.cursor;
   if (typeof cursor !== "string") {
     return respond({ error: "cursor must be a string" }, 400);
@@ -2387,7 +2393,7 @@ async function handleSourceFamilies(env, request) {
     return respond({ error: "cursor is not valid for this inventory" }, 400);
   }
 
-  return respond(await listSourceFamilies(env, { source, cursor, limit }));
+  return respond(await listSourceFamilies(env, { source, cursor, limit, includeLabels }));
 }
 
 async function handleDocuments(env) {
