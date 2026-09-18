@@ -1682,6 +1682,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(clockSkewedRepeat.code, 0, clockSkewedRepeat.output);
     assert.match(clockSkewedRepeat.output, /observation at .* disagreed with server time/i);
     assert.match(clockSkewedRepeat.output, /a new consistent observation is needed/i);
+    assert.match(clockSkewedRepeat.output, /seven days must still elapse after a consistent observation/i);
     assert.doesNotMatch(clockSkewedRepeat.output, /run Drive ingestion again after the recorded seven-day grace date/i);
     const review = clockSkewedRepeat.state().drive_removal_review;
     assert.equal(review.counts.pending_source_deletions, 0,

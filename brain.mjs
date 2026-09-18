@@ -16151,7 +16151,8 @@ const cmdIngestRemoteRun = async (
       ] : []),
       ...skewBlockedRecords.map((status) =>
         `1 item: the Drive absence observation at ${status.skewed.observed_at} disagreed with server time by more than 24 hours. ` +
-          "That observation receives no proof credit; a new consistent observation is needed before removal review can mature."
+          "That observation receives no proof credit; a new consistent observation is needed, and seven days must still " +
+          "elapse after a consistent observation before removal review can mature."
       ),
       ...(accessDenied ? [
         `${accessDenied} item(s): Drive denied access to the file metadata. Restore access, then run Drive ingestion again.`,
