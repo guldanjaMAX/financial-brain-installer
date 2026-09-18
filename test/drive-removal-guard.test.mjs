@@ -1603,6 +1603,8 @@ assert.notEqual(remoteStart, -1, "cmdIngestRemote must exist");
 const remote = source.slice(remoteStart, remoteEnd === -1 ? source.length : remoteEnd);
 assert.equal(remote.includes("Drive removal plan retained a protected review item"), false,
   "the Drive lane must not advertise an unreachable post-construction invariant");
+assert.equal(remote.includes("unclassifiedPendingDriveUids"), false,
+  "the Drive lane must not retain an unreachable shadow classification guard");
 const consumeStart = remote.indexOf("const consumeGroup = async (group) => {");
 const consumeEnd = remote.indexOf("\n  try {\n  if (!dry)", consumeStart);
 assert.ok(consumeStart !== -1 && consumeEnd > consumeStart, "remote group consumer must be inspectable");

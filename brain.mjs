@@ -14508,7 +14508,6 @@ const cmdIngestRemoteRun = async (
     });
   }
   let driveRemovalReview = storedDriveRemovalReview;
-  let unclassifiedPendingDriveUids = new Set();
   const newlyReviewedPendingDriveUids = new Set();
   let expiredDriveReviewApproval = false;
 
@@ -14518,7 +14517,6 @@ const cmdIngestRemoteRun = async (
       ...unresolvedTransientDriveReview.keys(),
       ...unresolvedNotReturnedDriveReview.keys(),
       ...labelUnavailableDriveReview.keys(),
-      ...unclassifiedPendingDriveUids,
     ]);
     for (const record of pendingSourceDeletionDriveReview.values()) {
       if (!driveAbsenceProofMatured(record)) {
@@ -14861,24 +14859,23 @@ const cmdIngestRemoteRun = async (
         ...priorLabelUnavailableReview.keys(),
         ...priorSourceDeletionReview.keys(),
       ]);
-      const classifiedDriveUids = new Set();
       unresolvedDriveReviewUids = new Set();
       unresolvedTransientDriveReview = new Map();
       unresolvedNotReturnedDriveReview = new Map();
       labelUnavailableDriveReview = new Map();
       pendingSourceDeletionDriveReview = new Map();
       for (const uid of [...absenceCandidates].sort()) {
-        const fileId = uid.startsWith(uidPrefix) ? uid.slice(uidPrefix.length) : "";
-        if (!fileId) {
-          unresolvedDriveReviewUids.add(uid);
-          continue;
-        }
+        // Every candidate is first intersected with the authenticated stored
+        // family inventory, whose parser requires this exact source prefix.
+        // Stored ingest identities cannot have an empty source id, so this
+        // slice is always a real file id and every candidate reaches the typed
+        // classifier below. A second "unclassified" set would be unreachable.
+        const fileId = uid.slice(uidPrefix.length);
         let classification;
         try {
           classification = await drive.classifyScopedAbsence(getToken, fileId, { scopedFolderIds });
         } catch (error) {
           if (!(error instanceof drive.DriveError) || error.retryable !== true) throw error;
-          classifiedDriveUids.add(uid);
           unresolvedTransientDriveReview.set(uid, {
             uid,
             observed_at: driveReviewObservedAt,
@@ -14886,7 +14883,6 @@ const cmdIngestRemoteRun = async (
           });
           continue;
         }
-        classifiedDriveUids.add(uid);
         if (classification.visible_in_scope === true && pendingDriveAtStart.includes(uid) &&
             !priorReviewedUids.has(uid) && incremental) {
           delete state.removed?.[uid];
@@ -14962,10 +14958,6 @@ const cmdIngestRemoteRun = async (
         }
         unresolvedDriveReviewUids.add(uid);
       }
-
-      unclassifiedPendingDriveUids = new Set(pendingDriveAtStart.filter((uid) =>
-        driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid) && !classifiedDriveUids.has(uid)
-      ));
 
       updateDriveRemovalReview();
       saveState(statePath, state);
