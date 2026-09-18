@@ -6620,18 +6620,21 @@ export const SPLIT_PART_TITLE_SUFFIX_PATTERN = /^(.*) \(part (-?\d+) of (-?\d+)\
 
 /** Mirror the labelled SQL projection for D1-shaped test doubles. */
 export function projectedSourceFamilyName({ title = null, meta = null } = {}) {
-  if (typeof title !== "string" || !title.trim()) return null;
-  const trimmed = title.trim();
+  if (typeof title !== "string") return null;
+  // SQLite trim() removes U+0020 only. Keep that exact comparison boundary;
+  // the route's final projection applies JavaScript trim after SQL returns.
+  const sqliteTrimmed = title.replace(/^ +| +$/g, "");
+  if (!sqliteTrimmed) return null;
   let metadata = meta;
   if (typeof metadata === "string") {
     try { metadata = JSON.parse(metadata); } catch { metadata = null; }
   }
-  const match = SPLIT_PART_TITLE_SUFFIX_PATTERN.exec(trimmed);
-  if (match && Number.isInteger(metadata?.part) && Number.isInteger(metadata?.part_count) &&
-      Number(match[2]) === metadata.part && Number(match[3]) === metadata.part_count) {
-    return match[1] || null;
+  let projected = sqliteTrimmed;
+  if (Number.isInteger(metadata?.part) && Number.isInteger(metadata?.part_count)) {
+    const suffix = ` (part ${metadata.part} of ${metadata.part_count})`;
+    if (sqliteTrimmed.endsWith(suffix)) projected = sqliteTrimmed.slice(0, -suffix.length);
   }
-  return trimmed;
+  return projected.trim() || null;
 }
 
 /**

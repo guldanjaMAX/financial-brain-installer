@@ -2336,6 +2336,19 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   return { env, seen };
 }
 
+const labelProjectionParityRows = [
+  { doc_uid: "drive:parity-plain", source: "drive", title: "Plain.pdf", meta: "{}", deleted_at: null },
+  { doc_uid: "drive:parity-canonical", source: "drive", title: "Canonical.pdf (part 1 of 12)", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-leading-zero", source: "drive", title: "Leading.pdf (part 01 of 012)", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-zero", source: "drive", title: "Zero.pdf (part 0 of 12)", meta: '{"part":0,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-negative", source: "drive", title: "Negative.pdf (part -1 of -12)", meta: '{"part":-1,"part_count":-12}', deleted_at: null },
+  { doc_uid: "drive:parity-string", source: "drive", title: "String.pdf (part 1 of 12)", meta: '{"part":"1","part_count":"12"}', deleted_at: null },
+  { doc_uid: "drive:parity-lookalike", source: "drive", title: "Lookalike.pdf (part 1 of 12) copy", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-tab", source: "drive", title: "Tab.pdf (part 1 of 12)\t", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-nbsp", source: "drive", title: "Nbsp.pdf (part 1 of 12)\u00a0", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-blank", source: "drive", title: "   ", meta: "{}", deleted_at: null },
+];
+
 {
   const database = new DatabaseSync(":memory:");
   database.exec(`
@@ -2369,6 +2382,9 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     ["drive:w", "drive", "Weird (part 3 of 9)", "{}", null],
     ["drive:x", "drive", "No suffix", '{"part":3,"part_count":9}', null],
     ["drive:y", "drive", "String metadata (part 3 of 9)", '{"part":"3","part_count":9}', null],
+    ...labelProjectionParityRows.map((row) => [
+      row.doc_uid, row.source, row.title, row.meta, row.deleted_at,
+    ]),
   ]) insert.run(...row);
 
   let maxSqliteBindings = 0;
@@ -2484,6 +2500,38 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     /1 to 97 identities/i.test(String(sqliteOverBound?.message || "")) &&
       maxSqliteBindings === D1_QUERY_BIND_LIMIT,
     `${String(sqliteOverBound?.message || sqliteOverBound)} ${maxSqliteBindings}`);
+  const parityUids = labelProjectionParityRows.map((row) => row.doc_uid);
+  const sqliteParity = await listSourceFamilies(env, {
+    source: "drive",
+    limit: 100,
+    includeLabels: true,
+    uids: parityUids,
+  });
+  const { env: fakeParityEnv } = mkSourceFamilyEnv(labelProjectionParityRows);
+  const fakeParity = await listSourceFamilies(fakeParityEnv, {
+    source: "drive",
+    limit: 100,
+    includeLabels: true,
+    uids: parityUids,
+  });
+  const sqliteParityNames = new Map(sqliteParity.family_details.map((row) => [row.uid, row.name]));
+  const fakeParityNames = new Map(fakeParity.family_details.map((row) => [row.uid, row.name]));
+  const expectedParityNames = new Map([
+    ["drive:parity-plain", "Plain.pdf"],
+    ["drive:parity-canonical", "Canonical.pdf"],
+    ["drive:parity-leading-zero", "Leading.pdf (part 01 of 012)"],
+    ["drive:parity-zero", "Zero.pdf"],
+    ["drive:parity-negative", "Negative.pdf"],
+    ["drive:parity-string", "String.pdf (part 1 of 12)"],
+    ["drive:parity-lookalike", "Lookalike.pdf (part 1 of 12) copy"],
+    ["drive:parity-tab", "Tab.pdf (part 1 of 12)"],
+    ["drive:parity-nbsp", "Nbsp.pdf (part 1 of 12)"],
+    ["drive:parity-blank", null],
+  ]);
+  check("the fake and real SQLite label projection have exact title parity",
+    parityUids.every((uid) => sqliteParityNames.get(uid) === expectedParityNames.get(uid) &&
+      fakeParityNames.get(uid) === expectedParityNames.get(uid)),
+    JSON.stringify({ sqlite: [...sqliteParityNames], fake: [...fakeParityNames] }));
   const controlFirstResponse = await worker.fetch(new Request(
     "https://b.example/api/admin/brain/source-families",
     {
