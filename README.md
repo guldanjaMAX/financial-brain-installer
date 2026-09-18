@@ -806,8 +806,12 @@ shows each candidate's name and folder,
 using local ingest state first and the Brain's stored document metadata as the
 fallback. That private metadata request carries only the exact candidate and
 existing-review family IDs, in bounded groups. It falls back to one full label
-inventory only when a structurally identified older Worker does not support
-the UID filter. A family still missing either label is reported as
+inventory when an older Worker answers the first filtered request with HTTP
+400. Against the shipped 0.4.8 Worker, which returns the unstructured body
+`{"error":"source-family request has unknown fields"}` for either new field,
+the client deterministically retries first without the UID filter and then
+without labels. It never treats a later-page 400 or any other status as a
+capability signal. A family still missing either label is reported as
 `label_unavailable`, remains protected and retained, and is excluded from every
 approval fingerprint and deletion plan without stopping the completed Drive
 cursor. The fingerprint binds the eligible labels and exact observation, and

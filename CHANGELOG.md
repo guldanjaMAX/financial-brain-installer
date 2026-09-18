@@ -28,9 +28,11 @@ asset publication.
   update.** If the stored-family inventory does not support review labels yet,
   the walk continues, saves its completed cursor, and keeps any unlabelled
   review item protected from deletion. It warns once to update the Brain so a
-  later review can show the item name and folder. To check: run Drive ingest
-  against the structured `unknown_field` response for `include_labels` and
-  confirm it exits successfully, advances the cursor, and reports
+  later review can show the item name and folder. The shipped 0.4.8 Brain
+  returns `{"error":"source-family request has unknown fields"}` for these
+  newer request fields, so the CLI retries the first page without the UID
+  filter and then without labels. To check: that exact response should still
+  let Drive ingest exit successfully, advance the cursor, and report
   `label_unavailable` without removing the item. A rejected response's clock is
   never used for the seven-day absence proof.
 

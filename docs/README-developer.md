@@ -673,10 +673,13 @@ byte-for-byte in `drive_removal_review.malformed_identities`, excluded before
 provider lookup, and shown only through the read-only diagnostic path. The
 removal plan never trims an identity.
 
-Label negotiation is fail-closed and structural. A 400 retry without
-`include_labels` is allowed only for `{ code: "unknown_field", field:
-"include_labels" }`; human error text is never parsed. Server time is latched
-only from an accepted 2xx inventory response, never from the rejected probe.
+Label negotiation is fail-closed and request-shaped. A structured
+`unknown_field` response remains the fast path. For the shipped 0.4.8 Worker,
+which returns the same unstructured HTTP 400 for either additive field, a 400
+on the first page drops `uids` once and restarts, then drops `include_labels`
+once and restarts if needed. A later-page 400, 413, 429, or 5xx never widens or
+restarts the read, and human error text is never parsed. Server time is latched
+only from an accepted 2xx inventory response, never from a rejected probe.
 
 Drive never treats access loss as deletion evidence. A 403 access denial stays
 in the review record and outside the deletion plan. If the metadata lookup says

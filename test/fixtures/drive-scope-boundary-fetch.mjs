@@ -378,6 +378,9 @@ globalThis.fetch = async (input, options = {}) => {
     }
     if (request.include_labels === true && !Array.isArray(request.uids)) evidence.inventoryFullLabelReads++;
     saveEvidence(evidence);
+    if (request.include_labels === true && inventoryLabelMode === "reject-v048") {
+      return json({ error: "source-family request has unknown fields" }, 400, true);
+    }
     if (request.include_labels === true && inventoryLabelMode === "reject") {
       return json({
         error: "wording is deliberately unrelated to compatibility detection",
@@ -391,6 +394,9 @@ globalThis.fetch = async (input, options = {}) => {
         code: "unknown_field",
         field: "uids",
       }, 400, inventoryDateAvailable);
+    }
+    if (Array.isArray(request.uids) && inventoryUidFilterMode === "reject-unstructured") {
+      return json({ error: "source-family request has unknown fields" }, 400, inventoryDateAvailable);
     }
     const stored = storedFamilies(evidence);
     const families = Array.isArray(request.uids)

@@ -19,6 +19,7 @@ import {
   drivePolicyFingerprint,
   isRetryableDriveError,
   isCanonicalStoredFamilyUid,
+  listStoredSourceFamilies,
   renderMalformedDriveIdentities,
   remoteFamilySettlement,
   VALUE_FLAGS,
@@ -87,6 +88,64 @@ for (const uid of ["drive:", "drive:   ", "drive:\t", "drive: abc"]) {
 assert.equal(isCanonicalStoredFamilyUid("drive:a", "drive"), true);
 assert.equal(isCanonicalStoredFamilyUid("message:232ba44cf58b17b4539b4c018d25655e"), true);
 assert.equal(isCanonicalStoredFamilyUid("upload:WhatsApp Chat with Alex Rivera.txt"), true);
+
+{
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const status of [413, 500]) {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        return new Response(JSON.stringify({ error: "fixture refusal" }), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      };
+      await assert.rejects(
+        listStoredSourceFamilies({
+          base: "https://fixture.invalid",
+          adminKey: "fixture-admin",
+          source: "drive",
+          includeLabels: true,
+          uids: ["drive:a"],
+        }),
+        new RegExp(`not accepted \\(${status}\\)`, "i"),
+      );
+      assert.equal(calls, 1, `HTTP ${status} was treated as a capability signal`);
+    }
+
+    let pageCalls = 0;
+    globalThis.fetch = async (_input, options = {}) => {
+      pageCalls++;
+      const body = JSON.parse(String(options.body || "{}"));
+      if (!body.cursor) {
+        return new Response(JSON.stringify({
+          source: "drive",
+          families: ["drive:a"],
+          family_details: [{ uid: "drive:a", name: "A", folder_path: null }],
+          next_cursor: "drive:a",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: "source-family request has unknown fields" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    await assert.rejects(
+      listStoredSourceFamilies({
+        base: "https://fixture.invalid",
+        adminKey: "fixture-admin",
+        source: "drive",
+        includeLabels: true,
+        uids: ["drive:a"],
+      }),
+      /not accepted \(400\)/i,
+    );
+    assert.equal(pageCalls, 2, "a page-two 400 restarted or widened the inventory walk");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
 
 /* Candidate sets are intersected with live stored families and categorized once. */
 const overlapPlan = buildDriveRemovalPlan({
@@ -1092,6 +1151,58 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(legacyInventoryWithoutUidFilter.state().sync_token, "fixture-prewalk-full-unresolved");
   } finally {
     legacyInventoryWithoutUidFilter.cleanup();
+  }
+
+  const shippedV048Inventory = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    priorObservation: true,
+    priorNotReturnedNamed: false,
+    localDoneLabels: false,
+    inventoryLabelMode: "reject-v048",
+  });
+  try {
+    assert.equal(shippedV048Inventory.code, 0, shippedV048Inventory.output);
+    assert.doesNotMatch(shippedV048Inventory.output, /unexpected error|INGEST_FAILED/i);
+    const evidence = shippedV048Inventory.evidence();
+    assert.equal(evidence.inventoryReads, 4,
+      "the v0.4.8 request-shape ladder did not make pre-inventory, labels+uids, labels, then bare reads");
+    assert.equal(evidence.inventoryUidFilteredReads, 1);
+    assert.equal(evidence.inventoryLabelReads, 2);
+    assert.equal(evidence.inventoryFullLabelReads, 1);
+    assert.ok(evidence.absenceMetadataReads >= 1,
+      "the v0.4.8 fallback test never reached Drive absence classification");
+    assert.equal(evidence.forgetRequests, 0);
+    assert.match(shippedV048Inventory.output, /did not return Drive labels[\s\S]*Update the Brain/i);
+    const state = shippedV048Inventory.state();
+    assert.equal(state.sync_token, "fixture-prewalk-full-unresolved");
+    assert.equal(state.drive_removal_review.counts.label_unavailable, 1);
+  } finally {
+    shippedV048Inventory.cleanup();
+  }
+
+  const preUidFilterWorker = runScopeScenario("full-unresolved", {
+    full: true,
+    localDoneLabels: false,
+    inventoryUidFilterMode: "reject-unstructured",
+  });
+  try {
+    assert.equal(preUidFilterWorker.code, 0, preUidFilterWorker.output);
+    assert.doesNotMatch(preUidFilterWorker.output, /unexpected error|INGEST_FAILED/i);
+    const evidence = preUidFilterWorker.evidence();
+    assert.equal(evidence.inventoryReads, 3);
+    assert.equal(evidence.inventoryUidFilteredReads, 1);
+    assert.equal(evidence.inventoryFullLabelReads, 1,
+      "the pre-uid-filter Worker did not receive exactly one full labelled read");
+    assert.ok(evidence.absenceMetadataReads >= 1,
+      "the pre-uid-filter fallback test never reached Drive absence classification");
+    assert.equal(evidence.forgetRequests, 0);
+    const state = preUidFilterWorker.state();
+    assert.equal(state.sync_token, "fixture-prewalk-full-unresolved");
+    assert.equal(state.drive_removal_review.counts.unresolved_not_returned, 1);
+    assert.equal(state.drive_removal_review.unresolved_not_returned[0].name, "Owner tax return.txt");
+  } finally {
+    preUidFilterWorker.cleanup();
   }
 
   const malformedStoredIdentity = runScopeScenario("full-malformed", { full: true });

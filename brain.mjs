@@ -11531,6 +11531,13 @@ export async function listStoredSourceFamilies({
   let requestUids = uids === null ? null : [...new Set(uids)].sort();
   let uidFilterAvailable = true;
   let cursor = "";
+  const restartWalk = () => {
+    families.clear();
+    labels.clear();
+    malformedIdentities.clear();
+    seenCursors.clear();
+    cursor = "";
+  };
   for (;;) {
     if (seenCursors.has(cursor)) throw new Error("source-family inventory repeated a cursor");
     seenCursors.add(cursor);
@@ -11559,11 +11566,7 @@ export async function listStoredSourceFamilies({
       // instead of withholding an otherwise complete source cursor.
       requestLabels = false;
       labelsAvailable = false;
-      families.clear();
-      labels.clear();
-      malformedIdentities.clear();
-      seenCursors.clear();
-      cursor = "";
+      restartWalk();
       continue;
     }
     if (requestUids && res.status === 400 &&
@@ -11573,11 +11576,23 @@ export async function listStoredSourceFamilies({
       // for the complete stored source.
       requestUids = null;
       uidFilterAvailable = false;
-      families.clear();
-      labels.clear();
-      malformedIdentities.clear();
-      seenCursors.clear();
-      cursor = "";
+      restartWalk();
+      continue;
+    }
+    if (res.status === 400 && cursor === "" && requestUids) {
+      // Shipped v0.4.8 and the intermediate label-capable Workers return the
+      // same unstructured 400 for every unknown request field. The request we
+      // generated is the capability signal: remove only the newest shape once
+      // and restart before accepting any page. Never widen after page one.
+      requestUids = null;
+      uidFilterAvailable = false;
+      restartWalk();
+      continue;
+    }
+    if (res.status === 400 && cursor === "" && requestLabels) {
+      requestLabels = false;
+      labelsAvailable = false;
+      restartWalk();
       continue;
     }
     if (!res.ok || !body || body.source !== normalizedSource || !Array.isArray(body.families)) {
