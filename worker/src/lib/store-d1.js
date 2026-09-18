@@ -1529,6 +1529,7 @@ async function recordSubmittedMutation(env, rows, op, receipt, submittedAt = Dat
         const remapChanges = await env.DB.batch(remaps.map((row) => env.DB.prepare(
           `UPDATE chunks SET vector_id = ?2
             WHERE chunk_uid = ?1
+              AND (vector_id IS NULL OR vector_id <> ?2)
               AND EXISTS (
                 SELECT 1 FROM vector_outbox
                  WHERE chunk_uid = ?1 AND op = 'upsert' AND generation = ?3
