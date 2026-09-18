@@ -14437,16 +14437,25 @@ const cmdIngestRemoteRun = async (
       observationCount: priorCount + (alreadyRecorded ? 0 : 1),
     };
   };
-  const driveAbsenceProofMatured = (record) => {
+  const driveAbsenceProofStatus = (record) => {
     const observations = normalizeDriveObservations(record?.observations)
       .filter((observation) => Number.isFinite(Date.parse(observation.server_observed_at || "")));
-    if (observations.length < 2) return false;
-    if (observations.some((observation) => Math.abs(
+    const consistent = observations.filter((observation) => Math.abs(
       Date.parse(observation.observed_at) - Date.parse(observation.server_observed_at)
-    ) > 24 * 60 * 60 * 1000)) return false;
-    return Date.parse(observations.at(-1).server_observed_at) -
-      Date.parse(observations[0].server_observed_at) >= driveAbsenceGraceMs;
+    ) <= 24 * 60 * 60 * 1000);
+    for (let first = 0; first < consistent.length; first++) {
+      const firstServerMs = Date.parse(consistent[first].server_observed_at);
+      const qualifyingLater = consistent.slice(first + 1).find((observation) =>
+        Date.parse(observation.server_observed_at) - firstServerMs >= driveAbsenceGraceMs
+      );
+      if (qualifyingLater) {
+        return { matured: true, first: consistent[first], later: qualifyingLater, skewed: null };
+      }
+    }
+    const skewed = observations.find((observation) => !consistent.includes(observation)) || null;
+    return { matured: false, first: consistent[0] || null, later: null, skewed };
   };
+  const driveAbsenceProofMatured = (record) => driveAbsenceProofStatus(record).matured;
   const legacyDriveReviewUids = storedDriveRemovalReview?.schema_version === 1 &&
     Array.isArray(storedDriveRemovalReview?.uids)
     ? storedDriveRemovalReview.uids
@@ -16113,13 +16122,21 @@ const cmdIngestRemoteRun = async (
     const transient = Number(driveRemovalReview.counts.unresolved_transient || 0);
     const labelUnavailable = Number(driveRemovalReview.counts.label_unavailable || 0);
     const malformedIdentity = Number(driveRemovalReview.counts.malformed_identity || 0);
+    const skewBlockedRecords = [...unresolvedNotReturnedDriveReview.values()]
+      .map((record) => driveAbsenceProofStatus(record))
+      .filter((status) => !status.matured && status.skewed);
+    const ordinaryNotReturned = Math.max(0, notReturned - skewBlockedRecords.length);
     const pendingUnderGrace = [...pendingSourceDeletionDriveReview.values()]
       .filter((record) => protectedDriveUids().has(record.uid)).length;
     const reasons = [
-      ...(notReturned ? [
-        `${notReturned} item(s): Drive no longer returns this item to this credential. ` +
+      ...(ordinaryNotReturned ? [
+        `${ordinaryNotReturned} item(s): Drive no longer returns this item to this credential. ` +
           "Leave the Brain's accessible copy in place and run Drive ingestion again after the recorded seven-day grace date.",
       ] : []),
+      ...skewBlockedRecords.map((status) =>
+        `1 item: the Drive absence observation at ${status.skewed.observed_at} disagreed with server time by more than 24 hours. ` +
+          "That observation receives no proof credit; a new consistent observation is needed before removal review can mature."
+      ),
       ...(accessDenied ? [
         `${accessDenied} item(s): Drive denied access to the file metadata. Restore access, then run Drive ingestion again.`,
       ] : []),

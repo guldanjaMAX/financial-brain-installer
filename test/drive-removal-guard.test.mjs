@@ -666,6 +666,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorNotReturnedNamed = true,
     priorObservation = false,
     priorClockSkewHours = 0,
+    priorConsistentObservationDays = null,
     priorChangeFeedDays = null,
     priorMaturedDays = null,
     priorApprovalExpired = false,
@@ -853,7 +854,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
                   run_id: "sync_fixture_prior_observation",
                   observed_at: new Date(firstObservedAt.getTime() + priorClockSkewHours * 60 * 60 * 1000).toISOString(),
                   server_observed_at: firstObservedAt.toISOString(),
-                }],
+                }, ...(Number.isFinite(priorConsistentObservationDays) ? [{
+                  run_id: "sync_fixture_later_consistent_observation",
+                  observed_at: new Date(Date.now() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
+                  server_observed_at: new Date(Date.now() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
+                }] : [])],
               } : {}),
               ...(priorNotReturnedNamed ? {
                 name: "Owner tax return.txt",
@@ -1555,12 +1560,35 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   });
   try {
     assert.equal(clockSkewedRepeat.code, 0, clockSkewedRepeat.output);
+    assert.match(clockSkewedRepeat.output, /observation at .* disagreed with server time/i);
+    assert.match(clockSkewedRepeat.output, /a new consistent observation is needed/i);
+    assert.doesNotMatch(clockSkewedRepeat.output, /run Drive ingestion again after the recorded seven-day grace date/i);
     const review = clockSkewedRepeat.state().drive_removal_review;
     assert.equal(review.counts.pending_source_deletions, 0,
       "a Drive absence matured despite a local/server clock disagreement over 24 hours");
     assert.equal(review.unresolved_not_returned[0].observations.length, 2);
   } finally {
     clockSkewedRepeat.cleanup();
+  }
+
+  const laterConsistentPair = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 20,
+    priorObservation: true,
+    priorClockSkewHours: 48,
+    priorConsistentObservationDays: 9,
+  });
+  try {
+    assert.equal(laterConsistentPair.code, 1, laterConsistentPair.output);
+    assert.match(laterConsistentPair.output, /two walks at least seven days apart/i);
+    assert.doesNotMatch(laterConsistentPair.output, /a new consistent observation is needed/i);
+    const review = laterConsistentPair.state().drive_removal_review;
+    assert.equal(review.counts.pending_source_deletions, 1,
+      "an older skewed observation poisoned a later consistent seven-day pair");
+    assert.equal(review.source_deletion_candidates[0].corroboration, "repeated_not_returned");
+    assert.equal(laterConsistentPair.evidence().forgetRequests, 0);
+  } finally {
+    laterConsistentPair.cleanup();
   }
 
   const missingServerDate = runScopeScenario("full-unresolved", {
