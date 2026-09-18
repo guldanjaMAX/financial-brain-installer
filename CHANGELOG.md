@@ -10,15 +10,25 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Drive now stops visibly when access loss could look like deletion.** If a
+  reviewed-root walk finds stored items missing but Drive cannot distinguish a
+  deletion from lost permission, `brain ingest drive` exits non-zero with
+  `Drive review required: N stored item(s)...` and records issue code
+  `SAFETY_REVIEW_REQUIRED`. Nothing unresolved is removed, and the completed
+  source cursor remains saved. Restore access or confirm the source deletion,
+  then run Drive ingestion again.
+
 - **Older Brains can now produce a safe update-preview observation.** A Brain
-  recorded as 0.4.0 through 0.4.3 does not report its Worker version from the
-  private documents receipt. Preview now recognizes that historical contract
-  when the receipt still reports its writer mode, and returns a read-only
-  fingerprint over that mode, the vector counts, and the recorded version.
-  The observation does not authorize an update. An explicit version that
-  disagrees with the manifest still stops. To check: preview an older Brain
-  and confirm the receipt says `legacy_pre044_observation`, `read_only: true`,
-  and `authorizes_update: false`.
+  recorded as 0.4.0 through 0.4.6 does not report either its Worker version or
+  vector drain mode in the private documents receipt. Preview now recognizes
+  that exact historical response shape and returns a read-only, canonical
+  observation fingerprint. The missing generation and drain-mode evidence
+  remains explicitly unproven, so the observation cannot authorize an update.
+  An explicit version that disagrees with the manifest still stops. To check:
+  preview an older Brain and confirm the receipt says
+  `legacy_observation_complete`, `read_only: true`,
+  `authorizes_update: false`, and reports its deployed drain mode as
+  `unproven`.
 
 - **An update now waits through brief Worker-generation skew at its safety
   pause.** Right after the paused Worker appears, Cloudflare can briefly serve
@@ -46,8 +56,9 @@ asset publication.
   the same opening and closing snapshot checks. This keeps a large recovery
   preview away from D1's 30-second per-statement limit without changing its
   counts or exposing document identities. To check: run
-  `brain sources <manifest> --recovery` and confirm the first page includes the
-  same source summaries and a continuation cursor when more candidates remain.
+  `brain sources <manifest> --json --recovery` and confirm the first page
+  includes the same source summaries and a source-summary cursor when more than
+  250 source groups remain.
 
 - **A successful ingest is now proved by the row D1 actually returns.** D1's
   change counter can include full-text trigger work and can therefore make a
