@@ -11554,6 +11554,16 @@ export function batchSourceFamilyLabelUids({
   return batches;
 }
 
+function compareUtf8Bytes(left, right) {
+  const a = new TextEncoder().encode(left);
+  const b = new TextEncoder().encode(right);
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index++) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return a.length - b.length;
+}
+
 /** Read every live logical document uid for one source from the data plane. */
 export async function listStoredSourceFamilies({
   base,
@@ -11646,6 +11656,12 @@ export async function listStoredSourceFamilies({
       restartWalk();
       continue;
     }
+    if (res.status === 400 && cursor && /[\u0000-\u001f\u007f]/.test(cursor)) {
+      die(
+        "This older Brain rejected the bounded continuation cursor it returned. " +
+          "Update the Brain, then rerun Drive ingestion. Nothing was removed, and the prior source cursor was kept."
+      );
+    }
     if (!res.ok || !body || body.source !== normalizedSource || !Array.isArray(body.families)) {
       throw new Error(
         `source-family inventory was not accepted (${res.status}): ${body?.error || raw.slice(0, 160) || "invalid response"}`
@@ -11673,7 +11689,7 @@ export async function listStoredSourceFamilies({
       if (typeof uid !== "string" || !uid.startsWith(`${normalizedSource}:`)) {
         throw new Error("source-family inventory returned an invalid document uid");
       }
-      if (uid <= previous) {
+      if (compareUtf8Bytes(uid, previous) <= 0) {
         throw new Error("source-family inventory was not strictly ordered");
       }
       if (!isCanonicalStoredFamilyUid(uid, normalizedSource)) {
@@ -11712,7 +11728,10 @@ export async function listStoredSourceFamilies({
           }
         : families;
     }
-    if (!isCanonicalStoredFamilyUid(body.next_cursor, normalizedSource)) {
+    if (typeof body.next_cursor !== "string" ||
+        new TextEncoder().encode(body.next_cursor).length > 16 * 1024 ||
+        !body.next_cursor.startsWith(`${normalizedSource}:`) ||
+        seenCursors.has(body.next_cursor)) {
       throw new Error("source-family inventory returned an invalid next cursor");
     }
     if (!body.families.length || body.next_cursor !== body.families[body.families.length - 1]) {

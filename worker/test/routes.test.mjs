@@ -2350,6 +2350,7 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     "INSERT INTO documents (doc_uid, source, title, meta, deleted_at) VALUES (?, ?, ?, ?, ?)"
   );
   for (const row of [
+    ["drive:\t", "drive", "Control cursor", "{}", null],
     ["drive:a", "drive", "A", "{}", null],
     ["drive:b#part1of2", "drive", "B 1", '{"part_of":"b"}', null],
     ["drive:b#part2of2", "drive", "B 2", '{"part_of":"b"}', null],
@@ -2371,6 +2372,8 @@ function mkSourceFamilyEnv(documents, extra = {}) {
 
   let maxSqliteBindings = 0;
   const env = {
+    STORAGE: "d1",
+    ADMIN_KEY: "k",
     DB: {
       prepare(sql) {
         const statement = database.prepare(sql);
@@ -2480,6 +2483,29 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     /1 to 97 identities/i.test(String(sqliteOverBound?.message || "")) &&
       maxSqliteBindings === D1_QUERY_BIND_LIMIT,
     `${String(sqliteOverBound?.message || sqliteOverBound)} ${maxSqliteBindings}`);
+  const controlFirstResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 1 }),
+    },
+  ), env, {});
+  const controlFirst = await controlFirstResponse.json();
+  const controlSecondResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 1, cursor: controlFirst.next_cursor }),
+    },
+  ), env, {});
+  const controlSecond = await controlSecondResponse.json();
+  check("the Worker resumes page two from a bounded raw control-character tail",
+    controlFirstResponse.status === 200 && controlFirst.next_cursor === "drive:\t" &&
+      controlSecondResponse.status === 200 && controlSecond.families.join(",") === "drive:a",
+    `${controlFirstResponse.status} ${JSON.stringify(controlFirst)} ` +
+      `${controlSecondResponse.status} ${JSON.stringify(controlSecond)}`);
   database.close();
 }
 

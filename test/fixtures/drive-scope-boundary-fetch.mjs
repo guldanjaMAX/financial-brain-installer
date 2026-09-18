@@ -16,10 +16,13 @@ const MODES = new Set([
   "changed-outside",
   "full-malformed",
   "full-label-bounds",
+  "full-page-boundary",
+  "full-control-cursor-v048",
   "full-identity",
   "full-unresolved",
   "full-unresolved-subthreshold",
   "incremental-unresolved",
+  "incremental-page-boundary",
   "incremental-identity",
   "incremental-unresolved-batch",
   "incremental-gone",
@@ -55,6 +58,7 @@ const LABEL_BOUND_IDS = Array.from({ length: 2500 }, (_, index) =>
   `label-bound-${String(index).padStart(4, "0")}-${"a".repeat(30)}`
 );
 const LABEL_BOUND_UIDS = LABEL_BOUND_IDS.map((id) => `drive:${id}`);
+const PAGE_BOUNDARY_UIDS = ["drive:a\t", "drive:b ", "drive:c\u0001", "drive:d"];
 
 const blankEvidence = () => ({
   changesReads: 0,
@@ -66,6 +70,7 @@ const blankEvidence = () => ({
   inventoryUidFilteredReads: 0,
   inventoryFullLabelReads: 0,
   inventoryUidBatchSizes: [],
+  inventoryCursors: [],
   ingestBatchWrites: 0,
   forgetRequests: 0,
   removedFamilies: 0,
@@ -113,6 +118,8 @@ function storedFamilies(evidence) {
   if (mode === "changed-outside") return [];
   if (mode === "full-malformed") return ["drive:", ...RETAINED_UIDS].sort();
   if (mode === "full-label-bounds") return LABEL_BOUND_UIDS;
+  if (["full-page-boundary", "incremental-page-boundary"].includes(mode)) return PAGE_BOUNDARY_UIDS;
+  if (mode === "full-control-cursor-v048") return ["drive:a\t", "drive:b"];
   if (["full-identity", "incremental-identity"].includes(mode)) return [testedStoredUid];
   if (mode === "incremental-unresolved-batch") {
     const removed = evidence.removedFamilies ? new Set(BATCH_MISSING_UIDS.slice(3)) : new Set();
@@ -220,6 +227,12 @@ globalThis.fetch = async (input, options = {}) => {
       return json({
         changes: [{ fileId: testedStoredUid.slice("drive:".length), removed: true }],
         newStartPageToken: "fixture-next-incremental-identity",
+      });
+    }
+    if (mode === "incremental-page-boundary") {
+      return json({
+        changes: [{ fileId: "d", removed: true }],
+        newStartPageToken: "fixture-next-incremental-page-boundary",
       });
     }
     if (["incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)) {
@@ -339,6 +352,14 @@ globalThis.fetch = async (input, options = {}) => {
     }, 403);
   }
 
+  if (url.hostname === "www.googleapis.com" && url.pathname === "/drive/v3/files/d" &&
+      ["full-page-boundary", "incremental-page-boundary"].includes(mode)) {
+    const evidence = readEvidence();
+    evidence.absenceMetadataReads++;
+    saveEvidence(evidence);
+    return json({ error: { message: "File not found" } }, 404);
+  }
+
   const retainedMatch = /^\/drive\/v3\/files\/retained-(\d{2})$/.exec(url.pathname);
   if (url.hostname === "www.googleapis.com" && retainedMatch &&
       mode === "incremental-stale-marker-404") {
@@ -396,6 +417,7 @@ globalThis.fetch = async (input, options = {}) => {
     if (request.source !== "drive") throw new Error("fixture received the wrong source inventory request");
     const evidence = readEvidence();
     evidence.inventoryReads++;
+    evidence.inventoryCursors.push(String(request.cursor || ""));
     if (request.include_labels === true) evidence.inventoryLabelReads++;
     if (Array.isArray(request.uids)) {
       evidence.inventoryUidFilteredReads++;
@@ -403,6 +425,9 @@ globalThis.fetch = async (input, options = {}) => {
     }
     if (request.include_labels === true && !Array.isArray(request.uids)) evidence.inventoryFullLabelReads++;
     saveEvidence(evidence);
+    if (mode === "full-control-cursor-v048" && /[\u0000-\u001f\u007f]/.test(String(request.cursor || ""))) {
+      return json({ error: "cursor is not valid for this inventory" }, 400);
+    }
     if (request.include_labels === true && inventoryLabelMode === "reject-v048") {
       return json({ error: "source-family request has unknown fields" }, 400, true);
     }
@@ -428,7 +453,13 @@ globalThis.fetch = async (input, options = {}) => {
       ? stored.filter((uid) => request.uids.includes(uid))
       : stored;
     const remaining = selected.filter((uid) => uid > String(request.cursor || ""));
-    const limit = Number(request.limit || 1000);
+    const requestedLimit = Number(request.limit || 1000);
+    const limit = !Array.isArray(request.uids) &&
+      ["full-page-boundary", "incremental-page-boundary"].includes(mode)
+      ? 2
+      : !Array.isArray(request.uids) && mode === "full-control-cursor-v048"
+        ? 1
+        : requestedLimit;
     const families = remaining.slice(0, limit);
     return json({
       source: "drive",

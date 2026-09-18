@@ -830,6 +830,12 @@ control character is quarantined before any provider lookup. The exact stored
 identity is retained in the private review record for `brain diagnose`, while
 ingest shows only an owner-readable held-item count. Removal plans accept only
 byte-for-byte canonical identities and never trim or rewrite a target.
+Inventory continuation cursors are separate bounded paging tokens. A malformed
+family at a page boundary is still quarantined while the next page continues;
+the cursor never becomes a provider lookup or deletion target. An older 0.4.8
+Brain can reject a control-character cursor that it emitted itself. That case
+stops safely, keeps the prior source cursor, and asks the owner to update the
+Brain before rerunning Drive ingest.
 
 Gmail reads additions, deletions, and label changes from its typed history. A
 complete pass also compares the filtered mailbox snapshot with the live D1

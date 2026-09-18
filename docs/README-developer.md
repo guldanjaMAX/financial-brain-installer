@@ -673,6 +673,15 @@ byte-for-byte in `drive_removal_review.malformed_identities`, excluded before
 provider lookup, and shown only through the read-only diagnostic path. The
 removal plan never trims an identity.
 
+The source-family continuation cursor is a separate opaque token, bounded to
+16 KiB, source-prefixed, byte-for-byte equal to the page tail, and never
+repeated. Client ordering follows SQLite's UTF-8 byte order. The Worker accepts
+every bounded raw tail it can emit, including control characters, because the
+value reaches only a D1 bind parameter. A malformed tail remains quarantined as
+a row and cannot become a provider lookup or deletion target. Shipped 0.4.8
+rejects a control-character cursor; the CLI treats that specific page-two 400
+as an anticipated update requirement and preserves the prior source cursor.
+
 Label negotiation is fail-closed and request-shaped. A structured
 `unknown_field` response remains the fast path. For the shipped 0.4.8 Worker,
 which returns the same unstructured HTTP 400 for either additive field, a 400

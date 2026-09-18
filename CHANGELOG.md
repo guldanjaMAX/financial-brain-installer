@@ -27,6 +27,13 @@ asset publication.
   malformed family is held without a forget request while a valid short ID
   continues through the ordinary Drive review path.
 
+- **A malformed family at an inventory page boundary no longer stops the
+  sweep.** Continuation cursors are bounded paging tokens, not deletion
+  identities. The Brain can resume from every raw tail it emits, while the CLI
+  quarantines malformed rows and still classifies legitimate families on the
+  next page. An older 0.4.8 Brain that rejects its own control-character cursor
+  now receives clear update guidance and keeps the prior Drive cursor.
+
 - **Drive ingest stays compatible while an older Brain is awaiting its
   update.** If the stored-family inventory does not support review labels yet,
   the walk continues, saves its completed cursor, and keeps any unlabelled

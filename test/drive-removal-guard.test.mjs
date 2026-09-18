@@ -1256,6 +1256,66 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     boundedLabels.cleanup();
   }
 
+  for (const [mode, full, expectedCursor] of [
+    ["full-page-boundary", true, "fixture-prewalk-full-page-boundary"],
+    ["incremental-page-boundary", false, "fixture-next-incremental-page-boundary"],
+  ]) {
+    const boundary = runScopeScenario(mode, { full });
+    try {
+      assert.equal(boundary.code, 0, boundary.output);
+      assert.doesNotMatch(boundary.output, /unexpected error|INGEST_FAILED/i);
+      assert.match(boundary.output, /3 stored items have malformed identities and are held/i);
+      const evidence = boundary.evidence();
+      assert.deepEqual(evidence.inventoryCursors.slice(0, 2), ["", "drive:b "],
+        `${mode} did not read each inventory page exactly once`);
+      assert.equal(evidence.absenceMetadataReads, 1,
+        `${mode} did not classify the legitimate family after the malformed page boundary`);
+      assert.equal(evidence.forgetRequests, 0);
+      const state = boundary.state();
+      assert.equal(state.sync_token, expectedCursor);
+      assert.deepEqual(state.drive_removal_review.malformed_identities,
+        ["drive:a\t", "drive:b ", "drive:c\u0001"]);
+      assert.equal(state.drive_removal_review.counts.malformed_identity, 3);
+      assert.equal(state.drive_removal_review.counts.unresolved_not_returned, 1);
+    } finally {
+      boundary.cleanup();
+    }
+  }
+
+  const v048ControlCursor = runScopeScenario("full-control-cursor-v048", { full: true });
+  try {
+    assert.equal(v048ControlCursor.code, 1, v048ControlCursor.output);
+    assert.match(v048ControlCursor.output, /update the Brain/i);
+    assert.doesNotMatch(v048ControlCursor.output, /unexpected error/i);
+    const evidence = v048ControlCursor.evidence();
+    assert.deepEqual(evidence.inventoryCursors, ["", "drive:a\t"]);
+    assert.equal(evidence.forgetRequests, 0);
+    assert.equal(v048ControlCursor.state().sync_token, "fixture-prior-full-control-cursor-v048");
+  } finally {
+    v048ControlCursor.cleanup();
+  }
+
+  {
+    const originalFetch = globalThis.fetch;
+    const sqliteOrdered = ["drive:a\uff5e", "drive:a\ud83d\ude00"];
+    try {
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        source: "drive",
+        families: sqliteOrdered,
+        next_cursor: null,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+      const inventory = await listStoredSourceFamilies({
+        base: "https://fixture.invalid",
+        adminKey: "fixture-admin",
+        source: "drive",
+      });
+      assert.deepEqual([...inventory], sqliteOrdered,
+        "the client did not preserve SQLite UTF-8 byte ordering");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
   const malformedStoredIdentity = runScopeScenario("full-malformed", { full: true });
   try {
     assert.equal(malformedStoredIdentity.code, 0, malformedStoredIdentity.output);

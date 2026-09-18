@@ -2402,7 +2402,6 @@ async function handleSourceFamilies(env, request) {
   const cursorBytes = new TextEncoder().encode(cursor).length;
   if (cursor && (
     cursorBytes > 16 * 1024 ||
-    /[\u0000-\u001f\u007f]/.test(cursor) ||
     (source !== null && !cursor.startsWith(`${source}:`)) ||
     (source === null && !/^[a-z0-9][a-z0-9_-]{0,63}:/.test(cursor))
   )) {
