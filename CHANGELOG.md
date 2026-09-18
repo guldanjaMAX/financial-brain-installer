@@ -27,6 +27,15 @@ asset publication.
   proof. To check: the run should finish its walk without `INGEST_FAILED`, keep
   the candidate protected, and print no matured approval from that observation.
 
+- **Drive review exit codes now follow the action you need to take.** A
+  completed walk whose cursor was saved exits successfully when an item stays
+  protected because of a 403, 404, temporary lookup failure, open grace window,
+  clock mismatch, or missing label. Those conditions remain visible in the
+  review receipt and warning. The command exits non-zero only when the walk
+  failed or a matured, labelled, current-run candidate needs your approval now.
+  To check: repeat the same protected 403 or 404 run and confirm both runs save
+  progress and return the same successful exit code without deleting anything.
+
 - **A stale retry marker can no longer delete a document without a fresh look
   at Drive and your approval.** Every saved retry marker is checked again; a
   live file clears it, a temporary lookup failure stays protected for the next

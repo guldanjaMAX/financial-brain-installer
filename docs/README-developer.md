@@ -705,6 +705,14 @@ stays under review until an approved deletion has exact inventory readback;
 only then is it removed from every review map. Visible trash and a visible move
 outside the reviewed roots remain direct source-deletion evidence.
 
+Drive exit status follows the completed state transition, not the age of the
+review record. A completed walk whose cursor advanced returns zero when any
+candidate remains protected or unresolved, including 403 and 404 outcomes.
+Those runs still close an error-shaped `SAFETY_REVIEW_REQUIRED` source receipt
+for diagnosis. A non-zero Drive review exit is reserved for a matured, labelled,
+current-run-corroborated candidate that requires owner approval before the
+cursor may advance; ordinary walk failures remain non-zero as well.
+
 A Gmail full pass is an authoritative snapshot. It compares every message
 allowed by the default query with the live D1 family inventory, so messages
 missed after history expiry, deletion, or relabeling are reconciled without

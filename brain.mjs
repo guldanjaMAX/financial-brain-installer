@@ -14508,7 +14508,6 @@ const cmdIngestRemoteRun = async (
     });
   }
   let driveRemovalReview = storedDriveRemovalReview;
-  const newlyReviewedPendingDriveUids = new Set();
   let expiredDriveReviewApproval = false;
 
   const protectedDriveUids = () => {
@@ -14896,9 +14895,6 @@ const cmdIngestRemoteRun = async (
           const prior = priorNotReturnedReview.get(uid);
           const priorLabelUnavailable = priorLabelUnavailableReview.get(uid);
           const priorCandidate = priorSourceDeletionReview.get(uid);
-          if (pendingDriveAtStart.includes(uid) && !priorReviewedUids.has(uid)) {
-            newlyReviewedPendingDriveUids.add(uid);
-          }
           const priorRecord = priorCandidate || priorLabelUnavailable || prior || driveGraceRecord(
             uid,
             localDriveReviewDetails(uid),
@@ -15998,9 +15994,6 @@ const cmdIngestRemoteRun = async (
   // withholds its cursor above.
   const totalRefused = tally.refused + localRefused;
   const driveReviewRequired = which === "drive" && protectedDriveUids().size > 0;
-  const driveReviewBlocksCommand = driveReviewRequired &&
-    [...protectedDriveUids()].some((uid) =>
-      !newlyReviewedPendingDriveUids.has(uid) && !labelUnavailableDriveReview.has(uid));
   const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0 || driveReviewRequired;
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
@@ -16083,7 +16076,6 @@ const cmdIngestRemoteRun = async (
         "      Only a second not-returned observation at least seven days later can move an item " +
         "into the exact brain ingest <manifest> --from drive " +
         "--approve-removals <fingerprint> plan.";
-    if (driveReviewBlocksCommand) throw new DriveRemovalReviewRequired(message);
     warn(message);
   }
   await reportBacklog(manifestPath);

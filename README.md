@@ -809,6 +809,10 @@ it expires after 24 hours. The item is deleted only after the owner supplies the
 `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
 approval, and its review entry clears only after deletion readback. Visible
 trash and a visible move outside the reviewed roots remain direct source proof.
+When the walk completed and its cursor advanced, these protected review states
+warn and exit successfully. A Drive run exits non-zero only when the walk
+failed or a matured, labelled candidate observed again in that run requires an
+owner approval immediately.
 
 Gmail reads additions, deletions, and label changes from its typed history. A
 complete pass also compares the filtered mailbox snapshot with the live D1

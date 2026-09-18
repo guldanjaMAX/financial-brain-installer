@@ -912,7 +912,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   for (const [mode, full] of [["full-unresolved", true], ["incremental-unresolved", false]]) {
     const unresolved = runScopeScenario(mode, { full });
     try {
-      assert.equal(unresolved.code, 1, unresolved.output);
+      assert.equal(unresolved.code, 0, unresolved.output);
       assert.match(unresolved.output, full
         ? /Drive no longer returns this item to this credential/i
         : /denied access to the file metadata/i);
@@ -976,7 +976,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     pendingRemoval: true,
   });
   try {
-    assert.equal(unresolvedPending.code, 1, unresolvedPending.output);
+    assert.equal(unresolvedPending.code, 0, unresolvedPending.output);
     const evidence = unresolvedPending.evidence();
     assert.equal(evidence.absenceMetadataReads, 1);
     assert.equal(evidence.forgetRequests, 0,
@@ -1006,6 +1006,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       "2026-09-01T00:00:00.000Z",
       "the unresolved pending marker must remain visible for review rather than being applied",
     );
+    const repeated403 = unresolvedPending.rerun();
+    assert.equal(repeated403.code, 0, repeated403.output);
+    assert.match(repeated403.output, /denied access to the file metadata/i);
+    assert.equal(unresolvedPending.evidence().forgetRequests, 0,
+      "a consecutive protected 403 run reached forget");
   } finally {
     unresolvedPending.cleanup();
   }
@@ -1028,6 +1033,13 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       assert.equal(state.sync_token, reset
         ? "fixture-prewalk-incremental-stale-marker-404"
         : "fixture-next-incremental-stale-marker-404");
+      if (!reset) {
+        const repeated404 = staleMarker.rerun();
+        assert.equal(repeated404.code, 0, repeated404.output);
+        assert.match(repeated404.output, /Drive no longer returns this item to this credential/i);
+        assert.equal(staleMarker.evidence().forgetRequests, 0,
+          "a consecutive protected 404 run reached forget");
+      }
     } finally {
       staleMarker.cleanup();
     }
@@ -1089,7 +1101,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       priorReview,
     });
     try {
-      assert.equal(pendingNotReturned.code, priorReview ? 1 : 0, pendingNotReturned.output);
+      assert.equal(pendingNotReturned.code, 0, pendingNotReturned.output);
       const evidence = pendingNotReturned.evidence();
       assert.equal(evidence.absenceMetadataReads, 1);
       assert.equal(evidence.forgetRequests, 0,
@@ -1118,7 +1130,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   const unresolvedBatch = runScopeScenario("incremental-unresolved-batch");
   try {
-    assert.equal(unresolvedBatch.code, 1, unresolvedBatch.output);
+    assert.equal(unresolvedBatch.code, 0, unresolvedBatch.output);
     assert.match(unresolvedBatch.output, /Drive review required: 3 stored item\(s\)/i);
     const evidence = unresolvedBatch.evidence();
     assert.equal(evidence.absenceMetadataReads, 10, "the classifier stopped before all absence candidates were reviewed");
@@ -1165,7 +1177,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   const transientBatch = runScopeScenario("incremental-transient-batch");
   try {
-    assert.equal(transientBatch.code, 1, transientBatch.output);
+    assert.equal(transientBatch.code, 0, transientBatch.output);
     assert.match(transientBatch.output, /metadata lookup was temporarily unavailable/i);
     const evidence = transientBatch.evidence();
     assert.equal(evidence.absenceMetadataReads, 14,
@@ -1203,7 +1215,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   const goneReviewOnly = runScopeScenario("incremental-gone", { priorReview: true });
   try {
-    assert.equal(goneReviewOnly.code, 1, goneReviewOnly.output);
+    assert.equal(goneReviewOnly.code, 0, goneReviewOnly.output);
     assert.match(goneReviewOnly.output, /recorded seven-day grace date/i);
     assert.equal(goneReviewOnly.output.includes(gonePlan.fingerprint), false,
       "an open grace window advertised an exact deletion approval");
@@ -1249,7 +1261,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     args: ["--approve-removals", gonePlan.fingerprint],
   });
   try {
-    assert.equal(goneApprovalCannotShorten.code, 1, goneApprovalCannotShorten.output);
+    assert.equal(goneApprovalCannotShorten.code, 0, goneApprovalCannotShorten.output);
     assert.equal(goneApprovalCannotShorten.evidence().forgetRequests, 0,
       "exact plan approval bypassed an open grace window");
     assert.equal(goneApprovalCannotShorten.state().drive_removal_review?.unresolved_not_returned.length, 1,
@@ -1262,7 +1274,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorChangeFeedDays: 2,
   });
   try {
-    assert.equal(legacyChangeFeedCandidate.code, 1, legacyChangeFeedCandidate.output);
+    assert.equal(legacyChangeFeedCandidate.code, 0, legacyChangeFeedCandidate.output);
     assert.equal(legacyChangeFeedCandidate.evidence().forgetRequests, 0);
     const review = legacyChangeFeedCandidate.state().drive_removal_review;
     assert.equal(review.counts.unresolved_not_returned, 1);
@@ -1280,7 +1292,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorObservation: true,
   });
   try {
-    assert.equal(recentRepeat.code, 1, recentRepeat.output);
+    assert.equal(recentRepeat.code, 0, recentRepeat.output);
     assert.match(recentRepeat.output, /Drive no longer returns this item to this credential/i);
     assert.equal(recentRepeat.evidence().forgetRequests, 0,
       "a second 404 inside the grace window reached the deletion plan");
@@ -1451,7 +1463,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorNotReturnedDays: 8,
   });
   try {
-    assert.equal(backdatedLegacySingle.code, 1, backdatedLegacySingle.output);
+    assert.equal(backdatedLegacySingle.code, 0, backdatedLegacySingle.output);
     assert.equal(backdatedLegacySingle.evidence().forgetRequests, 0);
     const review = backdatedLegacySingle.state().drive_removal_review;
     assert.equal(review.counts.unresolved_not_returned, 1);
@@ -1469,7 +1481,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorClockSkewHours: 48,
   });
   try {
-    assert.equal(clockSkewedRepeat.code, 1, clockSkewedRepeat.output);
+    assert.equal(clockSkewedRepeat.code, 0, clockSkewedRepeat.output);
     const review = clockSkewedRepeat.state().drive_removal_review;
     assert.equal(review.counts.pending_source_deletions, 0,
       "a Drive absence matured despite a local/server clock disagreement over 24 hours");
@@ -1485,7 +1497,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     inventoryDate: false,
   });
   try {
-    assert.equal(missingServerDate.code, 1, missingServerDate.output);
+    assert.equal(missingServerDate.code, 0, missingServerDate.output);
     assert.match(missingServerDate.output, /did not provide a valid server time/i);
     assert.match(missingServerDate.output, /cannot advance the seven-day removal proof/i);
     assert.doesNotMatch(missingServerDate.output, /unexpected error|INGEST_FAILED/i);

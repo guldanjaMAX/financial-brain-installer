@@ -702,6 +702,13 @@ possible causes, and the owner action depends on which one the message names:
    this credential's access to the file, then rerun Drive ingestion. There is no
    deletion approval to give for this stop.
 
+When Drive completed the walk and saved its cursor, protected 403, 404,
+temporary, grace-window, clock, and missing-label states warn but exit
+successfully. A non-zero review exit means a matured, labelled candidate needs
+the printed approval now, or the walk itself failed. The private review receipt
+still records protected conditions for `brain diagnose` even when the process
+exit is zero.
+
 **On a watched local folder this most often means the folder was not there.** A
 cloud folder that had not finished syncing, an external drive that was not
 mounted, a path that moved: all three look exactly like every file being
