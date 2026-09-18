@@ -15,6 +15,7 @@ const testedStoredUid = String(process.env.BRAIN_DRIVE_SCOPE_STORED_UID || "driv
 const MODES = new Set([
   "changed-outside",
   "full-malformed",
+  "full-label-bounds",
   "full-identity",
   "full-unresolved",
   "full-unresolved-subthreshold",
@@ -50,6 +51,10 @@ const BATCH_RETAINED_UIDS = Array.from({ length: 100 }, (_, index) =>
 const RETAINED_UIDS = Array.from({ length: 10 }, (_, index) =>
   `drive:retained-${String(index).padStart(2, "0")}`
 );
+const LABEL_BOUND_IDS = Array.from({ length: 2500 }, (_, index) =>
+  `label-bound-${String(index).padStart(4, "0")}-${"a".repeat(30)}`
+);
+const LABEL_BOUND_UIDS = LABEL_BOUND_IDS.map((id) => `drive:${id}`);
 
 const blankEvidence = () => ({
   changesReads: 0,
@@ -107,6 +112,7 @@ function requestBody(options) {
 function storedFamilies(evidence) {
   if (mode === "changed-outside") return [];
   if (mode === "full-malformed") return ["drive:", ...RETAINED_UIDS].sort();
+  if (mode === "full-label-bounds") return LABEL_BOUND_UIDS;
   if (["full-identity", "incremental-identity"].includes(mode)) return [testedStoredUid];
   if (mode === "incremental-unresolved-batch") {
     const removed = evidence.removedFamilies ? new Set(BATCH_MISSING_UIDS.slice(3)) : new Set();
@@ -317,6 +323,22 @@ globalThis.fetch = async (input, options = {}) => {
     return json({ error: { message: "File not found" } }, 404);
   }
 
+  if (url.hostname === "www.googleapis.com" && url.pathname.startsWith("/drive/v3/files/label-bound-")) {
+    const fileId = decodeURIComponent(url.pathname.slice("/drive/v3/files/".length));
+    if (mode !== "full-label-bounds" || !LABEL_BOUND_IDS.includes(fileId)) {
+      throw new Error("an unrelated label-bound item reached absence classification");
+    }
+    const evidence = readEvidence();
+    evidence.absenceMetadataReads++;
+    saveEvidence(evidence);
+    return json({
+      error: {
+        message: "insufficient permissions",
+        errors: [{ reason: "insufficientFilePermissions" }],
+      },
+    }, 403);
+  }
+
   const retainedMatch = /^\/drive\/v3\/files\/retained-(\d{2})$/.exec(url.pathname);
   if (url.hostname === "www.googleapis.com" && retainedMatch &&
       mode === "incremental-stale-marker-404") {
@@ -367,6 +389,9 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/source-families") {
+    if (new TextEncoder().encode(String(options.body || "")).length > 32 * 1024) {
+      return json({ error: "source-family request is too large" }, 413);
+    }
     const request = requestBody(options);
     if (request.source !== "drive") throw new Error("fixture received the wrong source inventory request");
     const evidence = readEvidence();
@@ -399,16 +424,19 @@ globalThis.fetch = async (input, options = {}) => {
       return json({ error: "source-family request has unknown fields" }, 400, inventoryDateAvailable);
     }
     const stored = storedFamilies(evidence);
-    const families = Array.isArray(request.uids)
+    const selected = Array.isArray(request.uids)
       ? stored.filter((uid) => request.uids.includes(uid))
       : stored;
+    const remaining = selected.filter((uid) => uid > String(request.cursor || ""));
+    const limit = Number(request.limit || 1000);
+    const families = remaining.slice(0, limit);
     return json({
       source: "drive",
       families,
       ...(request.include_labels === true && inventoryLabelMode !== "absent"
         ? { family_details: storedFamilyDetails(families) }
         : {}),
-      next_cursor: null,
+      next_cursor: remaining.length > limit ? families.at(-1) : null,
     }, 200, inventoryDateAvailable);
   }
 

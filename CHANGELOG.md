@@ -12,10 +12,13 @@ asset publication.
 
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
-  then returns names and folders only for those bounded IDs. A Brain from
+  then returns names and folders only for those IDs in requests capped at 97
+  families and kept below 32 KiB. Every candidate is requested exactly once,
+  even when a sweep has thousands. A Brain from
   before this filter receives one compatibility fallback to the former full
   label read. To check: an ordinary candidate-free sweep makes no label request,
-  while a one-item review requests exactly that family.
+  while 2,500 candidates produce 26 bounded requests with none omitted or
+  repeated.
 
 - **A malformed stored Drive identity can no longer become a deletion
   target.** Empty, whitespace-only, control-character, and whitespace-containing

@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   assertDriveRemovalPlanSafe,
+  batchSourceFamilyLabelUids,
   buildDriveRemovalPlan,
   credentialScannerFingerprint,
   DRIVE_REMOVAL_MAX_COUNT,
@@ -88,6 +89,34 @@ for (const uid of ["drive:", "drive:   ", "drive:\t", "drive: abc"]) {
 assert.equal(isCanonicalStoredFamilyUid("drive:a", "drive"), true);
 assert.equal(isCanonicalStoredFamilyUid("message:232ba44cf58b17b4539b4c018d25655e"), true);
 assert.equal(isCanonicalStoredFamilyUid("upload:WhatsApp Chat with Alex Rivera.txt"), true);
+
+{
+  const candidates = Array.from({ length: 2500 }, (_, index) =>
+    `drive:batch-${String(index).padStart(4, "0")}`
+  );
+  const batches = batchSourceFamilyLabelUids({ source: "drive", uids: candidates });
+  assert.equal(batches.length, 26);
+  assert.ok(batches.every((batch) => batch.length <= 97));
+  assert.deepEqual(batches.flat(), candidates,
+    "source-family label batching duplicated, reordered or dropped a candidate");
+  assert.equal(new Set(batches.flat()).size, candidates.length);
+
+  const longCandidates = Array.from({ length: 7 }, (_, index) =>
+    `drive:${index}-${"a".repeat(10_000)}`
+  );
+  const byteBatches = batchSourceFamilyLabelUids({ source: "drive", uids: longCandidates });
+  assert.ok(byteBatches.length > 1, "the serialized-byte ceiling did not split synthetic long ids");
+  for (const batch of byteBatches) {
+    const bytes = new TextEncoder().encode(JSON.stringify({
+      source: "drive",
+      limit: 1000,
+      include_labels: true,
+      uids: batch,
+    })).length;
+    assert.ok(bytes < 32 * 1024, `label request was ${bytes} bytes`);
+  }
+  assert.deepEqual(byteBatches.flat(), longCandidates);
+}
 
 {
   const originalFetch = globalThis.fetch;
@@ -1203,6 +1232,28 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(state.drive_removal_review.unresolved_not_returned[0].name, "Owner tax return.txt");
   } finally {
     preUidFilterWorker.cleanup();
+  }
+
+  const boundedLabels = runScopeScenario("full-label-bounds", { full: true });
+  try {
+    assert.equal(boundedLabels.code, 0, boundedLabels.output);
+    assert.doesNotMatch(boundedLabels.output, /unexpected error|INGEST_FAILED/i);
+    const evidence = boundedLabels.evidence();
+    assert.equal(evidence.inventoryUidFilteredReads, 26,
+      "2,500 candidates were not partitioned into 26 bounded label requests");
+    assert.deepEqual(evidence.inventoryUidBatchSizes, [
+      ...Array.from({ length: 25 }, () => 97),
+      75,
+    ]);
+    assert.equal(evidence.absenceMetadataReads, 2500,
+      "not every labelled candidate reached Drive classification exactly once");
+    assert.equal(evidence.forgetRequests, 0);
+    const state = boundedLabels.state();
+    assert.equal(state.sync_token, "fixture-prewalk-full-label-bounds");
+    assert.equal(state.drive_removal_review.counts.unresolved_access, 2500);
+    assert.equal(new Set(state.drive_removal_review.unresolved_access_uids).size, 2500);
+  } finally {
+    boundedLabels.cleanup();
   }
 
   const malformedStoredIdentity = runScopeScenario("full-malformed", { full: true });

@@ -172,6 +172,7 @@ export async function metadataTokenFor(value) {
 // decides whether candidate depth is sufficient.
 const VECTOR_TOPK_MAX = 100;
 export const D1_QUERY_BIND_LIMIT = 100;
+export const SOURCE_FAMILY_UID_FILTER_MAX = D1_QUERY_BIND_LIMIT - 3;
 // Keep one transaction reviewable and bounded independently of the documented
 // 1,000-query invocation limit. This is our conservative internal slice, not a
 // claimed D1 per-batch platform ceiling. Each chunk needs two statements.
@@ -6649,6 +6650,12 @@ export async function listSourceFamilies(env, {
   includeLabels = false,
   uids = null,
 } = {}) {
+  if (uids !== null && (!Array.isArray(uids) || uids.length < 1 ||
+      uids.length > SOURCE_FAMILY_UID_FILTER_MAX)) {
+    throw new TypeError(
+      `source-family uid filter needs 1 to ${SOURCE_FAMILY_UID_FILTER_MAX} identities`
+    );
+  }
   // With no source filter this query derives the complete source set from live
   // document rows themselves. `corpus_stats` is useful operational metadata,
   // but it is denormalized and therefore cannot be the discovery boundary for

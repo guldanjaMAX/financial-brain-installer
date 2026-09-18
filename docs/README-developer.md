@@ -719,7 +719,9 @@ UID set, displayed labels, observation ID, and observation time, and expires
 after 24 hours. Those labels are private terminal context; the fallback travels
 only in the authenticated no-store inventory response and is not added to
 source receipts or destructive Worker requests. The CLI requests labels only
-for bounded candidate/review UID groups. A structured `unknown_field` response
+for candidate/review UID groups bounded by both the 32 KiB request limit and
+`D1_QUERY_BIND_LIMIT - 3`, currently 97 UIDs. The route enforces the same 97-UID
+limit before preparing SQL. A structured `unknown_field` response
 for `uids` permits one compatibility restart without the filter; no other
 failure widens the label read. The UID
 stays under review until an approved deletion has exact inventory readback;

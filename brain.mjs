@@ -55,6 +55,10 @@ import {
 import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
 import { ingestEnvelopeValidationError } from "./worker/src/lib/ingest-envelope.js";
 import { normalizeSourceOriginalReceipt } from "./worker/src/lib/source-original-binding.js";
+import {
+  D1_QUERY_BIND_LIMIT,
+  SOURCE_FAMILY_UID_FILTER_MAX,
+} from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import { ensureBankFeedWorkerSecrets } from "./operations/bank-feed-owner-secrets.mjs";
 import {
@@ -11506,6 +11510,50 @@ export function isRetryableDriveError(error) {
   return error?.name === "DriveError" && error?.retryable === true;
 }
 
+const SOURCE_FAMILY_REQUEST_MAX_BYTES = 32 * 1024;
+
+/** Partition private label lookups under both the D1 bind and HTTP byte limits. */
+export function batchSourceFamilyLabelUids({
+  source,
+  uids,
+  maxRequestBytes = SOURCE_FAMILY_REQUEST_MAX_BYTES,
+} = {}) {
+  if (typeof source !== "string" || !source || !Array.isArray(uids) ||
+      !Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1) {
+    throw new TypeError("source-family label batching needs a source, uid array and byte limit");
+  }
+  const maxUids = D1_QUERY_BIND_LIMIT - 3;
+  if (maxUids !== SOURCE_FAMILY_UID_FILTER_MAX) {
+    throw new Error("source-family uid limit drifted from the D1 binding contract");
+  }
+  const batches = [];
+  let batch = [];
+  const requestBytes = (candidate) => new TextEncoder().encode(JSON.stringify({
+    source,
+    limit: 1000,
+    include_labels: true,
+    uids: candidate,
+  })).length;
+  for (const uid of uids) {
+    if (typeof uid !== "string" || !uid) throw new TypeError("source-family label uid must be a string");
+    const candidate = [...batch, uid];
+    if (candidate.length > maxUids || requestBytes(candidate) >= maxRequestBytes) {
+      if (!batch.length) {
+        throw new TypeError("one source-family label uid exceeds the request byte limit");
+      }
+      batches.push(batch);
+      batch = [uid];
+      if (requestBytes(batch) >= maxRequestBytes) {
+        throw new TypeError("one source-family label uid exceeds the request byte limit");
+      }
+    } else {
+      batch = candidate;
+    }
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
 /** Read every live logical document uid for one source from the data plane. */
 export async function listStoredSourceFamilies({
   base,
@@ -11516,9 +11564,12 @@ export async function listStoredSourceFamilies({
   uids = null,
 }) {
   const normalizedSource = assertSourceName(source);
-  if (uids !== null && (!Array.isArray(uids) || uids.length < 1 || uids.length > 1000 ||
+  if (uids !== null && (!Array.isArray(uids) || uids.length < 1 ||
+      uids.length > SOURCE_FAMILY_UID_FILTER_MAX ||
       uids.some((uid) => !isCanonicalStoredFamilyUid(uid, normalizedSource)))) {
-    throw new TypeError("source-family label filter needs 1 to 1000 canonical uids");
+    throw new TypeError(
+      `source-family label filter needs 1 to ${SOURCE_FAMILY_UID_FILTER_MAX} canonical uids`
+    );
   }
   const families = new Set();
   const labels = new Map();
@@ -14921,17 +14972,18 @@ const cmdIngestRemoteRun = async (
     }
     let driveLabelsAvailable = true;
     const labelCandidateUids = [...driveAbsenceCandidates].sort();
-    for (let offset = 0; offset < labelCandidateUids.length; offset += 1000) {
+    const labelBatches = batchSourceFamilyLabelUids({ source: sourceName, uids: labelCandidateUids });
+    for (const batch of labelBatches) {
       const labelInventory = await listStoredSourceFamilies({
         base,
         adminKey,
         source: sourceName,
         includeLabels: true,
-        uids: labelCandidateUids.slice(offset, offset + 1000),
+        uids: batch,
       });
       for (const [uid, details] of labelInventory.labels) driveInventoryLabels.set(uid, details);
       if (labelInventory.labelsAvailable === false) driveLabelsAvailable = false;
-      if (labelInventory.uidFilterAvailable === false) break;
+      if (labelInventory.uidFilterAvailable === false || labelInventory.labelsAvailable === false) break;
     }
     if (labelCandidateUids.length && driveLabelsAvailable === false) {
       warn(

@@ -1,9 +1,11 @@
 import worker from "../src/index.js";
 import { DatabaseSync } from "node:sqlite";
 import {
+  D1_QUERY_BIND_LIMIT,
   filterSql,
   listSourceFamilies,
   projectedSourceFamilyName,
+  SOURCE_FAMILY_UID_FILTER_MAX,
   unsupportedFilters,
 } from "../src/lib/store-d1.js";
 import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
@@ -2367,6 +2369,7 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     ["drive:y", "drive", "String metadata (part 3 of 9)", '{"part":"3","part_count":9}', null],
   ]) insert.run(...row);
 
+  let maxSqliteBindings = 0;
   const env = {
     DB: {
       prepare(sql) {
@@ -2375,6 +2378,7 @@ function mkSourceFamilyEnv(documents, extra = {}) {
         return {
           bind(...values) {
             bindings = values;
+            maxSqliteBindings = Math.max(maxSqliteBindings, values.length);
             return this;
           },
           async all() {
@@ -2450,6 +2454,32 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     filteredLabels.families.join(",") === "drive:f" &&
       filteredLabels.family_details?.[0]?.name === "Owner annual report.pdf",
     JSON.stringify(filteredLabels));
+  const sqliteBoundedUids = ["drive:f", ...Array.from({ length: 96 }, (_, index) =>
+    `drive:not-present-${String(index).padStart(2, "0")}`
+  )];
+  const sqliteBounded = await listSourceFamilies(env, {
+    source: "drive",
+    limit: 1000,
+    includeLabels: true,
+    uids: sqliteBoundedUids,
+  });
+  check("the real SQLite label query accepts 97 uid filters with 100 bindings",
+    maxSqliteBindings === D1_QUERY_BIND_LIMIT && sqliteBounded.families.join(",") === "drive:f",
+    `${maxSqliteBindings} ${JSON.stringify(sqliteBounded)}`);
+  let sqliteOverBound = null;
+  try {
+    await listSourceFamilies(env, {
+      source: "drive",
+      includeLabels: true,
+      uids: [...sqliteBoundedUids, "drive:not-present-97"],
+    });
+  } catch (error) {
+    sqliteOverBound = error;
+  }
+  check("the store refuses 98 uid filters before preparing an over-bound statement",
+    /1 to 97 identities/i.test(String(sqliteOverBound?.message || "")) &&
+      maxSqliteBindings === D1_QUERY_BIND_LIMIT,
+    `${String(sqliteOverBound?.message || sqliteOverBound)} ${maxSqliteBindings}`);
   database.close();
 }
 
@@ -2626,6 +2656,49 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   check("source-family unknown-field errors identify the rejected field structurally",
     unknownFieldBody.code === "unknown_field" && unknownFieldBody.field === "unexpected",
     JSON.stringify(unknownFieldBody));
+
+  const boundedUids = Array.from({ length: SOURCE_FAMILY_UID_FILTER_MAX }, (_, index) =>
+    `drive:bounded-${String(index).padStart(2, "0")}`
+  );
+  const bounded = await post({
+    source: "drive",
+    limit: 1000,
+    include_labels: true,
+    uids: boundedUids,
+  });
+  check("the source-family route accepts 97 uid filters at exactly 100 D1 bindings",
+    bounded.status === 200 && seen.binds.at(-1)?.length === D1_QUERY_BIND_LIMIT,
+    `${bounded.status} ${JSON.stringify(seen.binds.at(-1))}`);
+  const bindsBeforeRefusal = seen.binds.length;
+  const overBound = await post({
+    source: "drive",
+    limit: 1000,
+    include_labels: true,
+    uids: [...boundedUids, "drive:bounded-97"],
+  });
+  check("the source-family route refuses 98 uid filters before D1 prepare",
+    overBound.status === 400 && seen.binds.length === bindsBeforeRefusal,
+    `${overBound.status} ${seen.binds.length - bindsBeforeRefusal}`);
+
+  const oversizedBody = JSON.stringify({
+    source: "drive",
+    limit: 1000,
+    include_labels: true,
+    uids: Array.from({ length: 1000 }, (_, index) =>
+      `drive:${String(index).padStart(4, "0")}-${"a".repeat(40)}`
+    ),
+  });
+  const oversized = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: oversizedBody,
+    },
+  ), env, {});
+  check("the real source-family route enforces its 32 KiB request boundary",
+    new TextEncoder().encode(oversizedBody).length > 32 * 1024 && oversized.status === 413,
+    `${new TextEncoder().encode(oversizedBody).length} ${oversized.status}`);
 
   const legacyGet = await worker.fetch(new Request(
     "https://b.example/api/admin/brain/source-families",

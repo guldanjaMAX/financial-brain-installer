@@ -54,7 +54,7 @@ import {
 import {
   storeFor, backendOf, D1, expectedD1ContentHash, ProvenanceTransitionError,
 } from "./lib/store.js";
-import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
+import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
@@ -2385,12 +2385,14 @@ async function handleSourceFamilies(env, request) {
 
   const uids = body.uids === undefined ? null : body.uids;
   if (uids !== null && (
-    source === null || !Array.isArray(uids) || uids.length < 1 || uids.length > 1000 ||
+    source === null || !Array.isArray(uids) || uids.length < 1 || uids.length > SOURCE_FAMILY_UID_FILTER_MAX ||
     new Set(uids).size !== uids.length ||
     uids.some((uid) => typeof uid !== "string" || !uid.startsWith(`${source}:`) ||
       uid.length <= source.length + 1 || /[\s\u0000-\u001f\u007f-\u009f]/u.test(uid.slice(source.length + 1)))
   )) {
-    return respond({ error: "uids must be 1 to 1000 unique canonical identities for source" }, 400);
+    return respond({
+      error: `uids must be 1 to ${SOURCE_FAMILY_UID_FILTER_MAX} unique canonical identities for source`,
+    }, 400);
   }
 
   const cursor = body.cursor === undefined || body.cursor === null ? "" : body.cursor;

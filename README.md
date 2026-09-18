@@ -805,7 +805,8 @@ timestamp and cannot advance the seven-day proof. That stopped approval message
 shows each candidate's name and folder,
 using local ingest state first and the Brain's stored document metadata as the
 fallback. That private metadata request carries only the exact candidate and
-existing-review family IDs, in bounded groups. It falls back to one full label
+existing-review family IDs, in groups of at most 97 whose serialized request is
+also kept below 32 KiB. It falls back to one full label
 inventory when an older Worker answers the first filtered request with HTTP
 400. Against the shipped 0.4.8 Worker, which returns the unstructured body
 `{"error":"source-family request has unknown fields"}` for either new field,
