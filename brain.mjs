@@ -15069,49 +15069,48 @@ const cmdIngestRemoteRun = async (
         }
       }
 
+      const corroboratedPlanTargets = [...new Set([
+        ...corroboratedNotReturnedUids,
+      ])];
+      const eligibleCorroboratedPlanTargets = excludeProtectedDriveUids(corroboratedPlanTargets)
+        .filter((uid) => {
+          const record = pendingSourceDeletionDriveReview.get(uid);
+          return storedUids.has(uid) && !seenUids.has(uid) &&
+            Boolean(record?.name && record?.folder_path);
+        });
+      const corroboratedTargetSet = new Set(corroboratedPlanTargets);
+      const directlyConfirmedDriveAbsenceUids = confirmedDriveAbsenceUids.filter(
+        (uid) => !corroboratedTargetSet.has(uid),
+      );
       const driveRemovalPlan = buildDriveRemovalPlan({
         storedFamilies: storedUids,
         activeFamilies: seenUids,
-        // The review set wins over every deletion reason, including a pending
-        // marker left by an earlier walk. Permission loss must never inherit a
-        // stale decision to delete the same family.
+        // A retry marker is never a target by itself. Ambiguous absences must
+        // be corroborated, labelled and eligible in this exact run; visible
+        // trash and moves outside scope remain direct current-run evidence.
         policyCandidates: excludeProtectedDriveUids(excludedUids),
         vanishedCandidates: [
-          ...excludeProtectedDriveUids(confirmedDriveAbsenceUids),
-          ...excludeProtectedDriveUids(pendingDriveUids),
+          ...excludeProtectedDriveUids(directlyConfirmedDriveAbsenceUids),
+          ...eligibleCorroboratedPlanTargets,
         ],
         intentionalCandidates: excludeProtectedDriveUids(intentionalRemovalUids),
       }, {
         safetyBaselineCount: driveRemovalSafetyCount ?? storedUids.size,
         fingerprintContext: "drive-strict",
-        fingerprintBinding: [...pendingSourceDeletionDriveReview.values()]
+        fingerprintBinding: eligibleCorroboratedPlanTargets
+          .map((uid) => pendingSourceDeletionDriveReview.get(uid))
+          .filter(Boolean)
           .sort((a, b) => a.uid.localeCompare(b.uid))
           .map((record) => ({
             uid: record.uid,
-            name: record.name || null,
-            folder_path: record.folder_path || null,
+            name: record.name,
+            folder_path: record.folder_path,
             observation_id: record.approval_observation_id || null,
             observed_at: record.approval_observed_at || record.last_observed_at || null,
           })),
       });
       saveState(statePath, state);
-      const corroboratedPlanTargets = [...new Set([
-        ...corroboratedNotReturnedUids,
-      ])];
-      const eligibleCorroboratedPlanTargets = excludeProtectedDriveUids(corroboratedPlanTargets)
-        .filter((uid) => storedUids.has(uid) && !seenUids.has(uid));
       if (eligibleCorroboratedPlanTargets.length && removalApproval !== driveRemovalPlan.fingerprint) {
-        const unnamed = eligibleCorroboratedPlanTargets.filter((uid) => {
-          const record = pendingSourceDeletionDriveReview.get(uid);
-          return !record?.name || !record?.folder_path;
-        });
-        if (unnamed.length) {
-          throw new DriveRemovalReviewRequired(
-            `Drive cannot present ${unnamed.length} removal candidate(s) for approval because the local review record ` +
-              "does not contain the saved name and folder. Nothing was removed and no approval fingerprint was issued. " +
-              "Restore the prior ingest state or let Drive return the file so the local labels can be recorded."
-          );
-        }
         const localDetails = eligibleCorroboratedPlanTargets.map((uid) => {
           const record = pendingSourceDeletionDriveReview.get(uid);
           const name = safeIngestDisplay(record.name);

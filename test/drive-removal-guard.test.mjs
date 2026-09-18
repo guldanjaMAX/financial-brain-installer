@@ -1320,6 +1320,46 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     unnamedLegacy.cleanup();
   }
 
+  const offlineMintedUnnamed = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    priorNotReturnedNamed: false,
+    priorObservation: true,
+    localDoneLabels: false,
+    inventoryLabels: false,
+  });
+  try {
+    assert.equal(offlineMintedUnnamed.code, 0, offlineMintedUnnamed.output);
+    const refusedState = offlineMintedUnnamed.state();
+    const [record] = refusedState.drive_removal_review.label_unavailable;
+    const offlineFingerprint = buildDriveRemovalPlan({
+      storedFamilies: ["drive:missing-sensitive"],
+      activeFamilies: [],
+      policyCandidates: [],
+      vanishedCandidates: ["drive:missing-sensitive"],
+      intentionalCandidates: [],
+    }, {
+      safetyBaselineCount: 1,
+      fingerprintContext: "drive-strict",
+      fingerprintBinding: [{
+        uid: record.uid,
+        name: record.name || null,
+        folder_path: record.folder_path || null,
+        observation_id: record.approval_observation_id || null,
+        observed_at: record.approval_observed_at || record.last_observed_at || null,
+      }],
+    }).fingerprint;
+    const attemptedBypass = offlineMintedUnnamed.rerun([
+      "--reset", "--approve-removals", offlineFingerprint,
+    ]);
+    assert.equal(attemptedBypass.code, 0, attemptedBypass.output);
+    assert.match(attemptedBypass.output, /protected and retained/i);
+    assert.equal(offlineMintedUnnamed.evidence().forgetRequests, 0,
+      "an offline-minted fingerprint let an ineligible UID reach forget");
+  } finally {
+    offlineMintedUnnamed.cleanup();
+  }
+
   const reviewStoredFamilies = [
     "drive:missing-sensitive",
     ...Array.from({ length: 10 }, (_, index) => `drive:retained-${String(index).padStart(2, "0")}`),
