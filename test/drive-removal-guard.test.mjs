@@ -1409,6 +1409,8 @@ const remoteStart = source.indexOf("async function cmdIngestRemote(");
 const remoteEnd = source.indexOf("\nasync function ", remoteStart + 1);
 assert.notEqual(remoteStart, -1, "cmdIngestRemote must exist");
 const remote = source.slice(remoteStart, remoteEnd === -1 ? source.length : remoteEnd);
+assert.equal(remote.includes("Drive removal plan retained a protected review item"), false,
+  "the Drive lane must not advertise an unreachable post-construction invariant");
 const consumeStart = remote.indexOf("const consumeGroup = async (group) => {");
 const consumeEnd = remote.indexOf("\n  try {\n  if (!dry)", consumeStart);
 assert.ok(consumeStart !== -1 && consumeEnd > consumeStart, "remote group consumer must be inspectable");

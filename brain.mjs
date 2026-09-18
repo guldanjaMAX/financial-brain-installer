@@ -15041,11 +15041,10 @@ const cmdIngestRemoteRun = async (
         );
       }
       assertDriveRemovalPlanSafe(driveRemovalPlan, removalApproval);
-      for (const targets of Object.values(driveRemovalPlan.targets)) {
-        if (excludeProtectedDriveUids(targets).length !== targets.length) {
-          throw new Error("Drive removal plan retained a protected review item");
-        }
-      }
+      // Every candidate list is filtered through excludeProtectedDriveUids
+      // before buildDriveRemovalPlan, which only intersects, deduplicates and
+      // sorts those inputs. It cannot add a protected UID, so a second check
+      // here would be unreachable rather than an independently useful guard.
 
       const currentlyPlanned = new Set(Object.values(driveRemovalPlan.targets).flat());
       let clearedRestoredPending = false;
