@@ -42,13 +42,14 @@ asset publication.
   safety message. To check: the paused verification must report that public
   health and private inventory agree before migration begins.
 
-- **The ordinary vector drain can now keep three batches in flight.** A cron
+- **The ordinary vector drain can now keep two full batches in flight.** A cron
   run no longer submits one 100-row batch and then immediately waits for that
-  same batch. It can submit up to three leased batches before confirmation,
+  same batch. It can submit up to two fully reserved leased batches before confirmation,
   reports the full waiting count, avoids rewriting a chunk when its vector ID
   is already correct, and records each batch with set-based D1 statements
-  instead of two writes per row. The same lease, generation fence, query
-  budget, and exact visibility confirmation still apply. To check: run
+  instead of two writes per row. A refused confirmation can require three D1
+  statements per row, and the reservation now counts all three. The same lease,
+  generation fence, query budget, and exact visibility confirmation still apply. To check: run
   `brain drain <manifest>` and confirm `submitted` can exceed 100 while
   `waiting` remains visible until Vectorize confirms it.
 

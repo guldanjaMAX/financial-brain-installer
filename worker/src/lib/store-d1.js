@@ -1356,14 +1356,15 @@ async function scheduleVectorFailures(env, rows, {
 
 // One two-phase slice either submits or confirms. Submission receipts and
 // legacy hashed-id remaps are set-based through json_each. Confirmation still
-// uses one CAS for an accepted row or two retry-state statements for a refused
-// row, so the reservation must retain that real per-row worst case. Reserving
+// uses one CAS for an accepted row or three statements for a refused row: one
+// receipt-clear CAS plus the retry-state upsert and outbox bookkeeping update.
+// The reservation must retain that real per-row worst case. Reserving
 // before provider work keeps the lease release inside the invocation budget.
 export function drainBatchQueryUpperBound(batchSize = DRAIN_BATCH_SIZE_MAX) {
   const boundedBatchSize = Number.isInteger(batchSize)
     ? Math.min(DRAIN_BATCH_SIZE_MAX, Math.max(1, batchSize))
     : DRAIN_BATCH_SIZE_MAX;
-  return 12 + (2 * boundedBatchSize);
+  return 12 + (3 * boundedBatchSize);
 }
 
 const drainLeaseChanges = (result) => Number(

@@ -616,6 +616,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   const drained = await drainOutbox(env, {
     embed: async () => [0.7],
     maxBatches: 10,
+    batchSize: 1,
   });
   const after = await vectorReadiness(env);
   const state = db.prepare(
@@ -1023,11 +1024,11 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
        FROM vector_outbox WHERE submitted_mutation_id IS NOT NULL`,
   ).get();
   const queries = d1Queries.submitted - before;
-  check("one lazy-confirmation invocation submits three provider batches before waiting",
-    result.submitted === 300 && result.waiting === 300 && result.drained === 0 &&
-      submittedState.n === 300 && submittedState.mutations === 3,
+  check("one lazy-confirmation invocation submits two fully reserved provider batches before waiting",
+    result.submitted === 200 && result.waiting === 200 && result.drained === 0 &&
+      submittedState.n === 200 && submittedState.mutations === 2,
     JSON.stringify({ result, submittedState }));
-  check("the three-batch in-flight window remains inside the D1 query budget",
+  check("the reserved in-flight window remains inside the D1 query budget",
     queries < DRAIN_D1_QUERY_BUDGET,
     JSON.stringify({ queries, budget: DRAIN_D1_QUERY_BUDGET }));
 }
@@ -1063,16 +1064,50 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
      FROM install_state WHERE id = 1`
   ).get();
   check("the batch reservation includes the per-row confirmation worst case",
-    drainBatchQueryUpperBound(100) === 212);
-  check("the default query budget stops before an unreserved fifth batch",
-    drained.drained === 100 && drained.submitted === 300 &&
-      drained.waiting === 200 && drained.remaining === 500 &&
-      submitted <= 8 + (4 * drainBatchQueryUpperBound(100)) &&
+    drainBatchQueryUpperBound(100) === 312);
+  check("the default query budget stops before an unreserved third batch",
+    drained.drained === 0 && drained.submitted === 200 &&
+      drained.waiting === 200 && drained.remaining === 600 &&
+      submitted <= 8 + (2 * drainBatchQueryUpperBound(100)) &&
       submitted < DRAIN_D1_QUERY_BUDGET,
     JSON.stringify({ drained, submitted, budget: DRAIN_D1_QUERY_BUDGET }));
   check("the bounded invocation never strands the exclusive drain lease",
     leaseState.owner === null && leaseState.expires === null,
     JSON.stringify(leaseState));
+}
+
+{
+  const { env, db, d1Queries } = makeEnv();
+  const count = 100;
+  for (let i = 0; i < count; i++) {
+    const docUid = `drive:refused-budget-${String(i).padStart(3, "0")}`;
+    const chunkUid = `${docUid}#0`;
+    insertDocument(db, docUid);
+    insertChunk(db, chunkUid, docUid, 0);
+    db.prepare(
+      `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+       VALUES (?, ?, 'upsert', ?)`,
+    ).run(chunkUid, chunkUid, i);
+  }
+  markAllOutboxSubmitted(env, db);
+  const before = d1Queries.submitted;
+  const queryBudget = 8 + drainBatchQueryUpperBound(count);
+  const result = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    batchSize: count,
+    d1QueryBudget: queryBudget,
+  });
+  const queries = d1Queries.submitted - before;
+  const retryState = db.prepare(
+    `SELECT count(*) AS n
+       FROM vector_outbox_retry_state
+      WHERE attempts=1 AND failure_code='visibility_mismatch'`,
+  ).get();
+  check("a fully refused confirmation slice stays within its reserved D1 budget",
+    result.failed === count && result.remaining === count && retryState.n === count &&
+      queries <= queryBudget && queries <= 8 + drainBatchQueryUpperBound(count),
+    JSON.stringify({ result, retryState, queries, queryBudget }));
 }
 
 {
@@ -1088,13 +1123,13 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     embed: async () => [0.1],
     maxBatches: 10,
     batchSize: 100,
-    d1QueryBudget: 220,
+    d1QueryBudget: 8 + drainBatchQueryUpperBound(100),
   });
   const submitted = db.prepare(
     `SELECT count(*) AS n FROM vector_outbox
       WHERE submitted_mutation_id IS NOT NULL`,
   ).get().n;
-  check("a small D1 query budget fires the reservation guard after one batch",
+  check("an exact one-batch D1 query budget fires the reservation guard after one batch",
     result.submitted === 100 && result.waiting === 100 &&
       result.remaining === 300 && submitted === 100,
     JSON.stringify({ result, submitted }));
