@@ -14433,6 +14433,7 @@ const cmdIngestRemoteRun = async (
   let driveRemovalReview = storedDriveRemovalReview;
   let unclassifiedPendingDriveUids = new Set();
   const newlyReviewedPendingDriveUids = new Set();
+  let expiredDriveReviewApproval = false;
 
   const protectedDriveUids = () => {
     const protectedUids = new Set([
@@ -14821,11 +14822,15 @@ const cmdIngestRemoteRun = async (
             observations: appendDriveObservation(priorRecord),
           });
           if (driveAbsenceProofMatured(observedRecord)) {
+            const priorApprovalMs = Date.parse(observedRecord.approval_observed_at || "");
+            const approvalExpired = !Number.isFinite(priorApprovalMs) ||
+              Date.parse(driveReviewObservedAt) - priorApprovalMs > 24 * 60 * 60 * 1000;
+            if (priorCandidate && approvalExpired) expiredDriveReviewApproval = true;
             const candidate = {
               ...observedRecord,
               corroboration: "repeated_not_returned",
-              approval_observation_id: observedRecord.approval_observation_id || runId,
-              approval_observed_at: observedRecord.approval_observed_at || driveReviewObservedAt,
+              approval_observation_id: approvalExpired ? runId : observedRecord.approval_observation_id,
+              approval_observed_at: approvalExpired ? driveReviewObservedAt : observedRecord.approval_observed_at,
             };
             pendingSourceDeletionDriveReview.set(uid, candidate);
             corroboratedNotReturnedUids.push(uid);
@@ -15035,6 +15040,9 @@ const cmdIngestRemoteRun = async (
           `Drive did not return ${eligibleCorroboratedPlanTargets.length} stored item(s) ` +
             "on two walks at least seven days apart.\n" +
             `${localDetails}\n` +
+            (expiredDriveReviewApproval
+              ? "      The earlier approval fingerprint expired after 24 hours; review this fresh observation before approving.\n"
+              : "") +
             "      Nothing from this removal plan was removed. The source cursor was not advanced.\n" +
             "      Confirm this exact source-deletion plan by re-running:\n" +
             `      brain ingest <manifest> --from drive --approve-removals ${driveRemovalPlan.fingerprint}`

@@ -656,6 +656,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   const stripAnsi = (value) => String(value || "").replace(/\x1b\[[0-9;]*m/g, "");
   const fixedReviewObservationId = "sync_fixture_review_observation";
   const fixedReviewObservedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const expiredReviewObservedAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
 
   const runScopeScenario = (mode, {
     full = false,
@@ -667,6 +668,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorClockSkewHours = 0,
     priorChangeFeedDays = null,
     priorMaturedDays = null,
+    priorApprovalExpired = false,
     args = [],
   } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
@@ -763,7 +765,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
               folder_path: "Reviewed Root/Tax",
               corroboration: "repeated_not_returned",
               approval_observation_id: fixedReviewObservationId,
-              approval_observed_at: fixedReviewObservedAt,
+              approval_observed_at: priorApprovalExpired ? expiredReviewObservedAt : fixedReviewObservedAt,
               observations: [
                 {
                   run_id: "sync_fixture_first_observation",
@@ -772,8 +774,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
                 },
                 {
                   run_id: fixedReviewObservationId,
-                  observed_at: fixedReviewObservedAt,
-                  server_observed_at: fixedReviewObservedAt,
+                  observed_at: priorApprovalExpired ? expiredReviewObservedAt : fixedReviewObservedAt,
+                  server_observed_at: priorApprovalExpired ? expiredReviewObservedAt : fixedReviewObservedAt,
                 },
               ],
             }],
@@ -1302,6 +1304,39 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(approvedEmptyWindowReview.state().drive_removal_review, undefined);
   } finally {
     approvedEmptyWindowReview.cleanup();
+  }
+
+  const expiredReviewPlan = buildDriveRemovalPlan({
+    storedFamilies: reviewStoredFamilies,
+    activeFamilies: [],
+    policyCandidates: [],
+    vanishedCandidates: ["drive:missing-sensitive"],
+    intentionalCandidates: [],
+  }, {
+    safetyBaselineCount: reviewStoredFamilies.length,
+    fingerprintContext: "drive-strict",
+    fingerprintBinding: [{
+      uid: "drive:missing-sensitive",
+      name: "Owner tax return.txt",
+      folder_path: "Reviewed Root/Tax",
+      observation_id: fixedReviewObservationId,
+      observed_at: expiredReviewObservedAt,
+    }],
+  });
+  const expiredApproval = runScopeScenario("incremental-review-empty", {
+    priorMaturedDays: 10,
+    priorApprovalExpired: true,
+    args: ["--approve-removals", expiredReviewPlan.fingerprint],
+  });
+  try {
+    assert.equal(expiredApproval.code, 1, expiredApproval.output);
+    assert.match(expiredApproval.output, /approval fingerprint expired after 24 hours/i);
+    const freshFingerprint = /--approve-removals ([0-9a-f]{64})/.exec(expiredApproval.output)?.[1];
+    assert.ok(freshFingerprint && freshFingerprint !== expiredReviewPlan.fingerprint,
+      "an expired approval was not replaced by a fresh observation-bound fingerprint");
+    assert.equal(expiredApproval.evidence().forgetRequests, 0);
+  } finally {
+    expiredApproval.cleanup();
   }
 
   let elapsedApproval = null;
