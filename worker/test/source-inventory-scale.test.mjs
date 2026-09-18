@@ -40,7 +40,12 @@ import {
   normalizeIngestEnvelopeProvenance,
   provenanceAssessmentMarker,
 } from "../src/lib/provenance-receipt.js";
-import { sourceInventorySql, sourceRecoverySql } from "../src/lib/store-d1.js";
+import {
+  sourceInventorySql,
+  sourceRecoveryPlan,
+  sourceRecoverySql,
+  sourceRecoverySummarySql,
+} from "../src/lib/store-d1.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "..", "..", "migrations", "d1");
@@ -919,14 +924,24 @@ test("the rewritten source statements return the shipped 0.4.8 rows byte for byt
   for (const binds of recoveryBinds) {
     const before = rowsOf(db, ORIGINAL_SOURCE_RECOVERY_SQL, binds);
     const after = rowsOf(db, sourceRecoverySql, binds);
+    const keys = after.length ? Object.keys(after[0]) : [];
+    const projectedBefore = before.map((row) => Object.fromEntries(keys.map((key) => [key, row[key]])));
     assert.equal(
-      JSON.stringify(after), JSON.stringify(before),
+      JSON.stringify(after), JSON.stringify(projectedBefore),
       `recovery rows changed for ${JSON.stringify(binds)}`,
     );
-    if (before.length) {
-      assert.deepEqual(Object.keys(after[0]), Object.keys(before[0]), "column order changed");
+    if (after.length) {
       assert.ok("meta" in after[0], "the recovery page still carries the metadata its JS boundary reads");
     }
+  }
+  for (const source of [null, "drive", "gmail", "orphan_source9", "curated"]) {
+    const before = rowsOf(db, ORIGINAL_SOURCE_RECOVERY_SQL, [source, 0, 251]);
+    const expected = before.length ? JSON.parse(before[0].recovery_source_groups) : [];
+    const after = rowsOf(db, sourceRecoverySummarySql, [source, 251]);
+    assert.equal(
+      JSON.stringify(after), JSON.stringify(expected),
+      `recovery source summary changed for ${source}`,
+    );
   }
   assert.ok(
     rowsOf(db, ORIGINAL_SOURCE_RECOVERY_SQL, [null, 0, 251]).length > 10,
@@ -954,33 +969,35 @@ test("the rewritten source statements return the shipped 0.4.8 rows byte for byt
  * size, and the plan below was confirmed identical against the 200,000-document
  * fixture.
  */
-test("the recovery statement derives its candidates once", () => {
+test("the recovery plan uses separate one-pass summary and page statements", () => {
   const db = migratedDb("plan-fixture");
-  const plan = db.prepare(`EXPLAIN QUERY PLAN ${sourceRecoverySql}`).all(null, 0, 251);
-  const details = plan.map((row) => String(row.detail));
+  const recoveryPlan = sourceRecoveryPlan({ source: null, afterRowId: 0, limit: 250 });
+  assert.equal(recoveryPlan.length, 2);
+  const plans = recoveryPlan.map((step) => ({
+    kind: step.kind,
+    details: db.prepare(`EXPLAIN QUERY PLAN ${step.sql}`).all(...step.binds)
+      .map((row) => String(row.detail)),
+  }));
   db.close();
 
-  // `MATERIALIZE live_documents` is the one pass that is supposed to exist;
-  // every *other* mention is a reader re-walking the corpus.
-  const corpusPasses = details.filter((detail) => /^(SCAN|SEARCH) live_documents\b/.test(detail));
-  assert.equal(
-    corpusPasses.length, 1,
-    `the recovery statement walks live_documents ${corpusPasses.length} times, not once:`
-    + ` ${JSON.stringify(corpusPasses)}. Restore the MATERIALIZED hints on candidate_rows`
-    + " and source_groups.",
-  );
-  // The automatic covering index over chunk_per_document is rebuilt once per
-  // pass, so it is a second, independent witness to the same regression.
-  const coveringIndexBuilds = details.filter((detail) => detail.includes("AUTOMATIC COVERING INDEX"));
-  assert.equal(
-    coveringIndexBuilds.length, 1,
-    `the recovery statement builds ${coveringIndexBuilds.length} automatic covering indexes, not one`,
-  );
-  for (const cte of ["candidate_rows", "source_groups", "live_documents"]) {
+  for (const { kind, details } of plans) {
+    const corpusPasses = details.filter((detail) => /^(SCAN|SEARCH) live_documents\b/.test(detail));
     assert.ok(
-      details.includes(`MATERIALIZE ${cte}`),
-      `${cte} is no longer materialised: ${JSON.stringify(details)}`,
+      corpusPasses.length <= 1,
+      `${kind} walks live_documents ${corpusPasses.length} times: ${JSON.stringify(corpusPasses)}`,
     );
+    const coveringIndexBuilds = details.filter((detail) =>
+      detail.includes("AUTOMATIC COVERING INDEX"));
+    assert.ok(
+      coveringIndexBuilds.length <= 1,
+      `${kind} builds ${coveringIndexBuilds.length} automatic covering indexes`,
+    );
+    for (const cte of ["candidate_rows", "live_documents"]) {
+      assert.ok(
+        details.includes(`MATERIALIZE ${cte}`),
+        `${kind} no longer materialises ${cte}: ${JSON.stringify(details)}`,
+      );
+    }
   }
 });
 
@@ -1151,12 +1168,17 @@ const peakCost = (process.resourceUsage().maxRSS - peakBefore) * 1024;
 // whole corpus.
 const total = (column) => rows.reduce((sum, row) => sum + Number(row[column] ?? 0), 0);
 const inventory = rows.length > 0 && "physical_documents" in rows[0];
+const recoverySummary = rows.length > 0 && "candidate_documents" in rows[0];
 process.stdout.write(JSON.stringify({
   rows: rows.length,
   cost,
   peakCost,
   ms,
-  documents: inventory ? total("physical_documents") : Number(rows[0]?.recovery_total ?? 0),
+  documents: inventory
+    ? total("physical_documents")
+    : recoverySummary
+      ? total("candidate_documents")
+      : rows[0]?.recovery_total !== undefined ? Number(rows[0].recovery_total) : rows.length,
   chunks: inventory ? total("chunks") : null,
 }));
 `;
@@ -1257,16 +1279,17 @@ test("the rewritten source statements no longer pay for chunk text", () => {
     }
 
     const statements = [
-      ["rewritten-inventory", sourceInventorySql(), [10001], true],
-      ["rewritten-recovery", sourceRecoverySql, [null, 0, 101], true],
-      ["shipped-inventory", originalInventorySql(), [10001], false],
-      ["shipped-recovery", ORIGINAL_SOURCE_RECOVERY_SQL, [null, 0, 101], false],
+      ["rewritten-inventory", sourceInventorySql(), [10001], true, CHUNK_TEXT_DOCUMENTS],
+      ["rewritten-recovery-summary", sourceRecoverySummarySql, [null, 251], true, CHUNK_TEXT_DOCUMENTS],
+      ["rewritten-recovery-page", sourceRecoverySql, [null, 0, 101], true, 101],
+      ["shipped-inventory", originalInventorySql(), [10001], false, CHUNK_TEXT_DOCUMENTS],
+      ["shipped-recovery", ORIGINAL_SOURCE_RECOVERY_SQL, [null, 0, 101], false, CHUNK_TEXT_DOCUMENTS],
     ];
-    for (const [label, sql, binds, rewritten] of statements) {
+    for (const [label, sql, binds, rewritten, expectedDocuments] of statements) {
       const thin = measure(`${label}-thin`, corpora.thin, sql, binds);
       const product = measure(`${label}-product`, corpora.product, sql, binds);
-      assert.equal(product.documents, CHUNK_TEXT_DOCUMENTS, `${label} did not aggregate the whole corpus`);
-      assert.equal(thin.documents, CHUNK_TEXT_DOCUMENTS, `${label} did not aggregate the whole corpus`);
+      assert.equal(product.documents, expectedDocuments, `${label} answered a different question`);
+      assert.equal(thin.documents, expectedDocuments, `${label} answered a different question`);
       if (!MEMORY_COST_IS_MEASURABLE) {
         // The statements still run against both corpora and are still held to
         // their answers above; only the comparison between the two costs is
@@ -1332,13 +1355,14 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
 
       const bound = documents === FIELD_DOCUMENTS ? FIELD_MEMORY_BOUND_BYTES : SMALL_MEMORY_BOUND_BYTES;
       const measured = new Map();
-      for (const [label, sql, binds, expectedRows] of [
-        ["rewritten-inventory", sourceInventorySql(), [10001], SOURCE_NAMES.length],
-        ["rewritten-recovery", sourceRecoverySql, [null, 0, 101], 101],
+      for (const [label, sql, binds, expectedRows, expectedDocuments] of [
+        ["rewritten-inventory", sourceInventorySql(), [10001], SOURCE_NAMES.length, documents],
+        ["rewritten-recovery-summary", sourceRecoverySummarySql, [null, 251], SOURCE_NAMES.length, documents],
+        ["rewritten-recovery-page", sourceRecoverySql, [null, 0, 101], 101, 101],
       ]) {
         const probe = measure(`${label}-${documents}`, dbPath, sql, binds);
         assert.equal(probe.rows, expectedRows, `${label} answered a different question`);
-        assert.equal(probe.documents, documents, `${label} did not aggregate all ${documents} documents`);
+        assert.equal(probe.documents, expectedDocuments, `${label} answered a different document scope`);
         if (probe.chunks !== null) {
           assert.equal(
             probe.chunks, documents * SCALE_CHUNKS_PER_DOCUMENT,
@@ -1365,7 +1389,7 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
           probe.cost < bound,
           `${label} used ${probe.cost} bytes on ${documents} documents, over the ${bound} byte bound`,
         );
-        if (label === "rewritten-recovery" && documents === FIELD_DOCUMENTS) {
+        if (label.startsWith("rewritten-recovery-") && documents === FIELD_DOCUMENTS) {
           // See FIELD_RECOVERY_MS_BOUND: the field failure here was a clock,
           // and this is the only place it is measured at the size that failed.
           assert.ok(
@@ -1424,7 +1448,9 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
       );
       return;
     }
-    for (const label of ["rewritten-inventory", "rewritten-recovery"]) {
+    for (const label of [
+      "rewritten-inventory", "rewritten-recovery-summary", "rewritten-recovery-page",
+    ]) {
       const growth = costs.get(FIELD_DOCUMENTS).get(label) - costs.get(SMALL_DOCUMENTS).get(label);
       const perDocument = growth / (FIELD_DOCUMENTS - SMALL_DOCUMENTS);
       assert.ok(

@@ -4255,31 +4255,16 @@ const sourceRecoveryMarkerSql = `
    WHERE i.id=1`;
 
 /**
- * `candidate_rows` and `source_groups` keep their `MATERIALIZED` hints.
+ * Shared one-pass candidate derivation for the recovery plan.
  *
- * They are the two CTEs this statement reads more than once: `candidate_rows`
- * feeds `source_groups`, `global_summary`, the returned page, and the
- * `MIN(document_rowid)` probe that decides which row carries the group
- * summary — four readers. Without the hints SQLite re-derives it from
- * `live_documents` once per reader and rebuilds the automatic covering index
- * over `chunk_per_document` each time, which `EXPLAIN QUERY PLAN` shows as
- * four separate `SCAN live_documents` passes.
- *
- * Dropping them was a memory-for-time trade that did not pay. Measured on the
- * 200,000-document fixture below, un-hinted: 95.1 MB, 3,542 / 1,322 / 1,304 ms
- * cold/warm. Hinted: 91.7 MB, 929 / 924 / 931 ms — cheaper in memory as well,
- * because four rebuilt covering indexes cost more than one cached result, and
- * about four times faster cold with a wall-clock that stops varying. Against
- * D1's documented 30-second maximum query duration, and the CLI's own 30 s
- * `AbortSignal.timeout`, that stability is the point: the field failure this
- * statement hit was a clock, not the memory ceiling.
- *
- * These two hints are narrow. They do not touch `INVENTORY_DOCUMENT_CTES_SQL`,
- * so neither half of the original 1.23 GB / 1.59 GB regression — every
- * document's `meta` crossing three materialisations, every chunk's text
- * crossing the sorter — can come back through them.
+ * The previous statement reused one materialised candidate set for page rows,
+ * global totals, grouping, JSON aggregation, and a cursor probe. That was
+ * locally efficient but exceeded D1's 30-second statement clock at 193,270
+ * candidates. Page selection and the at-most-250 source summaries now run as
+ * separate statements. Each statement scans the corpus once and remains
+ * bracketed by the same opening and closing snapshot markers.
  */
-export const sourceRecoverySql = `${INVENTORY_DOCUMENT_CTES_SQL},
+const SOURCE_RECOVERY_CANDIDATES_SQL = `${INVENTORY_DOCUMENT_CTES_SQL},
   candidate_rows AS MATERIALIZED (
     SELECT f.*,
            COALESCE(s.kind,'unregistered') AS source_kind,
@@ -4307,8 +4292,14 @@ export const sourceRecoverySql = `${INVENTORY_DOCUMENT_CTES_SQL},
          OR f.has_lineage=0
          OR (f.declared_lineage=1 AND f.recognized_lineage=0)
        )
-  ),
-  source_groups AS MATERIALIZED (
+  )`;
+
+// Recovery is deliberately a plan, not one corpus-sized statement. The page
+// and per-source reason summary each derive candidates in one bounded query.
+// This prevents D1's 30-second statement clock from combining page selection,
+// global totals, source grouping, and JSON aggregation into one all-or-nothing
+// request on a large Brain.
+export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
     SELECT inventory_source AS source_id,
            source_kind,
            source_zone AS zone,
@@ -4324,21 +4315,10 @@ export const sourceRecoverySql = `${INVENTORY_DOCUMENT_CTES_SQL},
            SUM(reason_lineage_contract_unrecognized) AS lineage_contract_unrecognized
       FROM candidate_rows
      GROUP BY inventory_source,source_kind,source_zone
-  ),
-  global_summary AS (
-    SELECT COUNT(*) AS recovery_total,
-           (SELECT COUNT(*) FROM source_groups) AS recovery_source_group_total,
-           COALESCE(SUM(reason_no_stored_chunks),0) AS total_no_stored_chunks,
-           COALESCE(SUM(reason_blank_only_chunks),0) AS total_blank_only_chunks,
-           COALESCE(SUM(reason_ocr_partial_review),0) AS total_ocr_partial_review,
-           COALESCE(SUM(reason_provenance_receipt_unassessed),0) AS total_provenance_receipt_unassessed,
-           COALESCE(SUM(reason_extraction_method_missing),0) AS total_extraction_method_missing,
-           COALESCE(SUM(reason_text_reliability_missing),0) AS total_text_reliability_missing,
-           COALESCE(SUM(reason_source_record_id_missing),0) AS total_source_record_id_missing,
-           COALESCE(SUM(reason_derivation_lineage_missing),0) AS total_derivation_lineage_missing,
-           COALESCE(SUM(reason_lineage_contract_unrecognized),0) AS total_lineage_contract_unrecognized
-      FROM candidate_rows
-  )
+     ORDER BY source_id
+     LIMIT ?2`;
+
+export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
   SELECT candidate_rows.document_rowid,
          candidate_rows.doc_uid,
          candidate_rows.physical_source,
@@ -4379,33 +4359,26 @@ export const sourceRecoverySql = `${INVENTORY_DOCUMENT_CTES_SQL},
          candidate_rows.reason_text_reliability_missing,
          candidate_rows.reason_source_record_id_missing,
          candidate_rows.reason_derivation_lineage_missing,
-         candidate_rows.reason_lineage_contract_unrecognized,
-         global_summary.*,
-         CASE WHEN candidate_rows.document_rowid=(
-           SELECT MIN(next_candidate.document_rowid)
-             FROM candidate_rows next_candidate
-            WHERE next_candidate.document_rowid>?2
-         ) THEN (SELECT json_group_array(json_object(
-            'source_id',ordered.source_id,
-            'source_kind',ordered.source_kind,
-            'zone',ordered.zone,
-            'candidate_documents',ordered.candidate_documents,
-            'no_stored_chunks',ordered.no_stored_chunks,
-            'blank_only_chunks',ordered.blank_only_chunks,
-            'ocr_partial_review',ordered.ocr_partial_review,
-            'provenance_receipt_unassessed',ordered.provenance_receipt_unassessed,
-            'extraction_method_missing',ordered.extraction_method_missing,
-            'text_reliability_missing',ordered.text_reliability_missing,
-            'source_record_id_missing',ordered.source_record_id_missing,
-            'derivation_lineage_missing',ordered.derivation_lineage_missing,
-            'lineage_contract_unrecognized',ordered.lineage_contract_unrecognized
-          )) FROM (SELECT * FROM source_groups ORDER BY source_id LIMIT 250) ordered)
-         ELSE NULL END AS recovery_source_groups
+         candidate_rows.reason_lineage_contract_unrecognized
     FROM candidate_rows
-    CROSS JOIN global_summary
    WHERE document_rowid>?2
    ORDER BY document_rowid ASC
    LIMIT ?3`;
+
+export function sourceRecoveryPlan({ source = null, afterRowId = 0, limit = 100 } = {}) {
+  return Object.freeze([
+    Object.freeze({
+      kind: "source_summary",
+      sql: sourceRecoverySummarySql,
+      binds: Object.freeze([source, SOURCE_RECOVERY_MAX_PAGE_SIZE + 1]),
+    }),
+    Object.freeze({
+      kind: "candidate_page",
+      sql: sourceRecoverySql,
+      binds: Object.freeze([source, afterRowId, limit + 1]),
+    }),
+  ]);
+}
 
 function normalizedRecoveryMarker(row) {
   if (!row || typeof row !== "object") throw new Error("source recovery marker is unavailable");
@@ -4474,8 +4447,16 @@ export async function sourceRecoveryCandidates(env, {
   }
 
   const openingMarker = await sourceRecoveryMarker(env);
-  const result = await env.DB.prepare(sourceRecoverySql)
-    .bind(normalizedSource, afterRowId, limit + 1)
+  const [summaryStep, pageStep] = sourceRecoveryPlan({
+    source: normalizedSource,
+    afterRowId,
+    limit,
+  });
+  const summaryResult = await env.DB.prepare(summaryStep.sql)
+    .bind(...summaryStep.binds)
+    .all();
+  const result = await env.DB.prepare(pageStep.sql)
+    .bind(...pageStep.binds)
     .all();
   const closingMarker = await sourceRecoveryMarker(env);
   if (JSON.stringify(openingMarker) !== JSON.stringify(closingMarker)) {
@@ -4485,36 +4466,29 @@ export async function sourceRecoveryCandidates(env, {
   }
 
   const rawRows = Array.isArray(result?.results) ? result.results : [];
-  const pageRows = rawRows.slice(0, limit);
-  const total = rawRows.length ? inventoryCount(rawRows[0].recovery_total) : 0;
-  const reasonFieldMap = Object.freeze({
-    no_stored_chunks: "total_no_stored_chunks",
-    blank_only_chunks: "total_blank_only_chunks",
-    ocr_partial_review: "total_ocr_partial_review",
-    provenance_receipt_unassessed: "total_provenance_receipt_unassessed",
-    extraction_method_missing: "total_extraction_method_missing",
-    text_reliability_missing: "total_text_reliability_missing",
-    source_record_id_missing: "total_source_record_id_missing",
-    derivation_lineage_missing: "total_derivation_lineage_missing",
-    lineage_contract_unrecognized: "total_lineage_contract_unrecognized",
-  });
-  const reasonCounts = Object.fromEntries(Object.entries(reasonFieldMap).map(([reason, field]) => [
-    reason,
-    rawRows.length ? inventoryCount(rawRows[0][field]) : 0,
-  ]));
-  let rawGroups = [];
-  if (rawRows.length) {
-    try { rawGroups = JSON.parse(String(rawRows[0].recovery_source_groups || "[]")); } catch {
-      throw new Error("source recovery source summary is invalid");
-    }
+  const rawGroups = Array.isArray(summaryResult?.results) ? summaryResult.results : [];
+  if (rawGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE) {
+    throw new Error("source recovery source summary exceeds its declared bound");
   }
-  if (!Array.isArray(rawGroups)) throw new Error("source recovery source summary is invalid");
+  const pageRows = rawRows.slice(0, limit);
+  const reasonFields = Object.freeze([
+    "no_stored_chunks", "blank_only_chunks", "ocr_partial_review",
+    "provenance_receipt_unassessed", "extraction_method_missing",
+    "text_reliability_missing", "source_record_id_missing",
+    "derivation_lineage_missing", "lineage_contract_unrecognized",
+  ]);
+  const total = rawGroups.reduce((sum, group) =>
+    sum + inventoryCount(group.candidate_documents), 0);
+  const reasonCounts = Object.fromEntries(reasonFields.map((reason) => [
+    reason,
+    rawGroups.reduce((sum, group) => sum + inventoryCount(group[reason]), 0),
+  ]));
   const sourceGroups = rawGroups.map((group) => {
     const sourceId = String(group?.source_id || "");
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(sourceId)) {
       throw new Error("source recovery source summary contains an invalid source identity");
     }
-    const reasons = Object.fromEntries(Object.keys(reasonFieldMap).map((reason) => [
+    const reasons = Object.fromEntries(reasonFields.map((reason) => [
       reason,
       inventoryCount(group[reason]),
     ]));
@@ -4538,12 +4512,7 @@ export async function sourceRecoveryCandidates(env, {
         : "stored OCR or provenance receipts require review",
     };
   });
-  const sourceGroupTotal = rawRows.length
-    ? inventoryCount(rawRows[0].recovery_source_group_total)
-    : 0;
-  if (sourceGroups.length > sourceGroupTotal || sourceGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE) {
-    throw new Error("source recovery source summary exceeds its declared bound");
-  }
+  const sourceGroupTotal = sourceGroups.length;
   const privacyKey = pageRows.length ? await sourceRecoveryPrivacyKey(env) : null;
   const candidates = await Promise.all(pageRows.map(async (row) => {
     const sourceId = String(row.inventory_source || "");
