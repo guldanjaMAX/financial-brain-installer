@@ -20,6 +20,7 @@ const MODES = new Set([
   "incremental-stale-marker-404",
   "incremental-stale-marker-live",
   "incremental-review-empty",
+  "incremental-transient-batch",
 ]);
 if (!userRoot) throw new Error("BRAIN_DRIVE_SCOPE_USER_ROOT is required");
 if (!evidencePath) throw new Error("BRAIN_DRIVE_SCOPE_EVIDENCE is required");
@@ -96,6 +97,7 @@ function storedFamilies(evidence) {
       .filter((uid) => !removed.has(uid))
       .sort();
   }
+  if (mode === "incremental-transient-batch") return BATCH_MISSING_UIDS;
   if (["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)) {
     return (mode === "incremental-review-empty" && evidence.removedFamilies
       ? RETAINED_UIDS
@@ -182,7 +184,9 @@ globalThis.fetch = async (input, options = {}) => {
     }
     if (mode.startsWith("incremental-")) {
       return json({
-        changes: (mode === "incremental-unresolved-batch" ? BATCH_MISSING_IDS : [MISSING_ID])
+        changes: (["incremental-unresolved-batch", "incremental-transient-batch"].includes(mode)
+          ? BATCH_MISSING_IDS
+          : [MISSING_ID])
           .map((fileId) => ({ fileId, removed: true })),
         newStartPageToken: `fixture-next-${mode}`,
       });
@@ -283,13 +287,16 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.hostname === "www.googleapis.com" && url.pathname.startsWith("/drive/v3/files/missing-batch-")) {
     const fileId = url.pathname.slice("/drive/v3/files/".length);
     const index = BATCH_MISSING_IDS.indexOf(fileId);
-    if (mode !== "incremental-unresolved-batch" || index < 0) {
+    if (!["incremental-unresolved-batch", "incremental-transient-batch"].includes(mode) || index < 0) {
       throw new Error("an unrelated batch item reached absence classification");
     }
     const evidence = readEvidence();
     evidence.absenceMetadataReads++;
     saveEvidence(evidence);
-    if (index < 3) {
+    if (mode === "incremental-transient-batch" && index === 0) {
+      return json({ error: { message: "temporary provider failure" } }, 503);
+    }
+    if (mode === "incremental-transient-batch" || index < 3) {
       return json({
         error: {
           message: "insufficient permissions",

@@ -919,6 +919,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         assert.deepEqual(state.drive_removal_review.counts, {
           unresolved_absences: 1,
           unresolved_access: 0,
+          unresolved_transient: 0,
           unresolved_not_returned: 1,
           pending_source_deletions: 0,
         });
@@ -935,6 +936,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         assert.deepEqual(state.drive_removal_review.counts, {
           unresolved_absences: 1,
           unresolved_access: 1,
+          unresolved_transient: 0,
           unresolved_not_returned: 0,
           pending_source_deletions: 0,
         });
@@ -967,11 +969,13 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       counts: {
         unresolved_absences: 1,
         unresolved_access: 1,
+        unresolved_transient: 0,
         unresolved_not_returned: 0,
         pending_source_deletions: 0,
       },
       uids: ["drive:missing-sensitive"],
       unresolved_access_uids: ["drive:missing-sensitive"],
+      unresolved_transient: [],
       unresolved_not_returned: [],
       source_deletion_candidates: [],
     });
@@ -1081,6 +1085,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       counts: {
         unresolved_absences: 3,
         unresolved_access: 3,
+        unresolved_transient: 0,
         unresolved_not_returned: 0,
         pending_source_deletions: 0,
       },
@@ -1094,11 +1099,32 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         "drive:missing-batch-01",
         "drive:missing-batch-02",
       ],
+      unresolved_transient: [],
       unresolved_not_returned: [],
       source_deletion_candidates: [],
     });
   } finally {
     unresolvedBatch.cleanup();
+  }
+
+  const transientBatch = runScopeScenario("incremental-transient-batch");
+  try {
+    assert.equal(transientBatch.code, 1, transientBatch.output);
+    assert.match(transientBatch.output, /metadata lookup was temporarily unavailable/i);
+    const evidence = transientBatch.evidence();
+    assert.equal(evidence.absenceMetadataReads, 14,
+      "the transient candidate did not exhaust its five attempts while the other probes continued");
+    assert.equal(evidence.forgetRequests, 0);
+    assert.equal(evidence.receipts.error, 1);
+    const state = transientBatch.state();
+    assert.equal(state.sync_token, "fixture-next-incremental-transient-batch",
+      "a per-file transient lookup withheld the completed Drive change cursor");
+    assert.equal(state.drive_removal_review.counts.unresolved_transient, 1);
+    assert.equal(state.drive_removal_review.counts.unresolved_access, 9);
+    assert.equal(state.drive_removal_review.unresolved_transient.length, 1);
+    assert.equal(state.drive_removal_review.unresolved_transient[0].uid, "drive:missing-batch-00");
+  } finally {
+    transientBatch.cleanup();
   }
 
   const goneStoredFamilies = [
@@ -1134,6 +1160,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.deepEqual(review.counts, {
       unresolved_absences: 1,
       unresolved_access: 0,
+      unresolved_transient: 0,
       unresolved_not_returned: 1,
       pending_source_deletions: 0,
     });

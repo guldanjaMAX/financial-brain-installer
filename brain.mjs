@@ -14369,6 +14369,19 @@ const cmdIngestRemoteRun = async (
       ? storedDriveRemovalReview.unresolved_access_uids
       : legacyDriveReviewUids).map(String),
   );
+  let unresolvedTransientDriveReview = new Map();
+  for (const raw of Array.isArray(storedDriveRemovalReview?.unresolved_transient)
+    ? storedDriveRemovalReview.unresolved_transient
+    : []) {
+    if (!raw || typeof raw !== "object" || !String(raw.uid || "")) continue;
+    unresolvedTransientDriveReview.set(String(raw.uid), {
+      uid: String(raw.uid),
+      observed_at: Number.isFinite(Date.parse(raw.observed_at || ""))
+        ? new Date(Date.parse(raw.observed_at)).toISOString()
+        : driveReviewObservedAt,
+      run_id: typeof raw.run_id === "string" && raw.run_id.trim() ? raw.run_id.trim() : runId,
+    });
+  }
   let unresolvedNotReturnedDriveReview = new Map();
   for (const raw of Array.isArray(storedDriveRemovalReview?.unresolved_not_returned)
     ? storedDriveRemovalReview.unresolved_not_returned
@@ -14424,6 +14437,7 @@ const cmdIngestRemoteRun = async (
   const protectedDriveUids = () => {
     const protectedUids = new Set([
       ...unresolvedDriveReviewUids,
+      ...unresolvedTransientDriveReview.keys(),
       ...unresolvedNotReturnedDriveReview.keys(),
       ...unclassifiedPendingDriveUids,
     ]);
@@ -14440,18 +14454,22 @@ const cmdIngestRemoteRun = async (
   };
   const dropDriveRemovalReviewUid = (uid) => {
     unresolvedDriveReviewUids.delete(uid);
+    unresolvedTransientDriveReview.delete(uid);
     unresolvedNotReturnedDriveReview.delete(uid);
     pendingSourceDeletionDriveReview.delete(uid);
   };
 
   const updateDriveRemovalReview = () => {
     const unresolvedAccessUids = [...unresolvedDriveReviewUids].sort();
+    const unresolvedTransient = [...unresolvedTransientDriveReview.values()]
+      .sort((a, b) => a.uid.localeCompare(b.uid));
     const unresolvedNotReturned = [...unresolvedNotReturnedDriveReview.values()]
       .sort((a, b) => a.uid.localeCompare(b.uid));
     const sourceDeletionCandidates = [...pendingSourceDeletionDriveReview.values()]
       .sort((a, b) => a.uid.localeCompare(b.uid));
     const uids = [...new Set([
       ...unresolvedAccessUids,
+      ...unresolvedTransient.map((entry) => entry.uid),
       ...unresolvedNotReturned.map((entry) => entry.uid),
       ...sourceDeletionCandidates.map((entry) => entry.uid),
     ])].sort();
@@ -14464,13 +14482,15 @@ const cmdIngestRemoteRun = async (
       schema_version: 5,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
-        unresolved_absences: unresolvedAccessUids.length + unresolvedNotReturned.length,
+        unresolved_absences: unresolvedAccessUids.length + unresolvedTransient.length + unresolvedNotReturned.length,
         unresolved_access: unresolvedAccessUids.length,
+        unresolved_transient: unresolvedTransient.length,
         unresolved_not_returned: unresolvedNotReturned.length,
         pending_source_deletions: sourceDeletionCandidates.length,
       },
       uids,
       unresolved_access_uids: unresolvedAccessUids,
+      unresolved_transient: unresolvedTransient,
       unresolved_not_returned: unresolvedNotReturned,
       source_deletion_candidates: sourceDeletionCandidates,
     };
@@ -14714,6 +14734,7 @@ const cmdIngestRemoteRun = async (
       }
       for (const uid of [
         ...unresolvedDriveReviewUids,
+        ...unresolvedTransientDriveReview.keys(),
         ...unresolvedNotReturnedDriveReview.keys(),
         ...pendingSourceDeletionDriveReview.keys(),
       ]) {
@@ -14739,11 +14760,13 @@ const cmdIngestRemoteRun = async (
       const priorSourceDeletionReview = pendingSourceDeletionDriveReview;
       const priorReviewedUids = new Set([
         ...unresolvedDriveReviewUids,
+        ...unresolvedTransientDriveReview.keys(),
         ...priorNotReturnedReview.keys(),
         ...priorSourceDeletionReview.keys(),
       ]);
       const classifiedDriveUids = new Set();
       unresolvedDriveReviewUids = new Set();
+      unresolvedTransientDriveReview = new Map();
       unresolvedNotReturnedDriveReview = new Map();
       pendingSourceDeletionDriveReview = new Map();
       for (const uid of [...absenceCandidates].sort()) {
@@ -14752,7 +14775,19 @@ const cmdIngestRemoteRun = async (
           unresolvedDriveReviewUids.add(uid);
           continue;
         }
-        const classification = await drive.classifyScopedAbsence(getToken, fileId, { scopedFolderIds });
+        let classification;
+        try {
+          classification = await drive.classifyScopedAbsence(getToken, fileId, { scopedFolderIds });
+        } catch (error) {
+          if (!(error instanceof drive.DriveError) || error.retryable !== true) throw error;
+          classifiedDriveUids.add(uid);
+          unresolvedTransientDriveReview.set(uid, {
+            uid,
+            observed_at: driveReviewObservedAt,
+            run_id: runId,
+          });
+          continue;
+        }
         classifiedDriveUids.add(uid);
         if (classification.visible_in_scope === true && pendingDriveAtStart.includes(uid) &&
             !priorReviewedUids.has(uid) && incremental) {
@@ -15910,6 +15945,7 @@ const cmdIngestRemoteRun = async (
     const count = protectedDriveUids().size;
     const notReturned = Number(driveRemovalReview.counts.unresolved_not_returned || 0);
     const accessDenied = Number(driveRemovalReview.counts.unresolved_access || 0);
+    const transient = Number(driveRemovalReview.counts.unresolved_transient || 0);
     const pendingUnderGrace = [...pendingSourceDeletionDriveReview.values()]
       .filter((record) => protectedDriveUids().has(record.uid)).length;
     const reasons = [
@@ -15919,6 +15955,10 @@ const cmdIngestRemoteRun = async (
       ] : []),
       ...(accessDenied ? [
         `${accessDenied} item(s): Drive denied access to the file metadata. Restore access, then run Drive ingestion again.`,
+      ] : []),
+      ...(transient ? [
+        `${transient} item(s): Drive metadata lookup was temporarily unavailable. ` +
+          "The completed change window was saved and the item will be checked again on the next run.",
       ] : []),
       ...(pendingUnderGrace ? [
         `${pendingUnderGrace} item(s): Drive still has an open seven-day review window. ` +
