@@ -685,6 +685,10 @@ Worker inventory response dates at least seven days apart. Each local and
 server timestamp must agree within 24 hours. A missing or invalid inventory
 `Date` header records `server_observed_at: null`, warns once, and contributes no
 maturation evidence; it does not fail the walk or withhold its completed cursor.
+Each review record preserves its first observation and the 10 most recent
+distinct-run observations, including the last, plus a cumulative
+`observation_count`. Seven-day proof continues to use the retained first and
+last valid server-anchored endpoints without unbounded local-state growth.
 Even one such candidate stops for the exact `brain ingest
 <manifest> --from drive --approve-removals <fingerprint>` owner approval and
 shows its name and folder from durable local state, with the authenticated D1

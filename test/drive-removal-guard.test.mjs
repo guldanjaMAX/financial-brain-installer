@@ -1535,6 +1535,33 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     elapsedRepeat.cleanup();
   }
 
+  const boundedObservations = runScopeScenario("incremental-stale-marker-404", {
+    pendingRemoval: true,
+    priorNotReturnedDays: 8,
+    priorObservation: true,
+  });
+  try {
+    assert.equal(boundedObservations.code, 1, boundedObservations.output);
+    for (let run = 2; run <= 30; run++) {
+      const repeated = boundedObservations.rerun();
+      assert.equal(repeated.code, 1, `Drive observation run ${run} failed:\n${repeated.output}`);
+    }
+    const [record] = boundedObservations.state().drive_removal_review.source_deletion_candidates;
+    assert.equal(record.observation_count, 31,
+      "the bounded review lost the cumulative prior-plus-30-run observation count");
+    assert.ok(record.observations.length <= 11,
+      `the bounded review retained ${record.observations.length} observation rows`);
+    assert.equal(record.observations[0].run_id, "sync_fixture_prior_observation",
+      "the bounded review discarded its first proof endpoint");
+    assert.equal(new Set(record.observations.map((observation) => observation.run_id)).size,
+      record.observations.length, "the bounded review retained duplicate run observations");
+    assert.equal(record.corroboration, "repeated_not_returned",
+      "the bounded observation shape no longer matured after seven days");
+    assert.equal(boundedObservations.evidence().forgetRequests, 0);
+  } finally {
+    boundedObservations.cleanup();
+  }
+
   const restoredReview = runScopeScenario("incremental-restored", { priorReview: true });
   try {
     assert.equal(restoredReview.code, 0, restoredReview.output);

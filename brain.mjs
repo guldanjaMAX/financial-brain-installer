@@ -14324,8 +14324,17 @@ const cmdIngestRemoteRun = async (
     return [...byRun.values()].sort((a, b) =>
       (Date.parse(a.server_observed_at || "") || Date.parse(a.observed_at)) -
         (Date.parse(b.server_observed_at || "") || Date.parse(b.observed_at)) ||
+      Date.parse(a.observed_at) - Date.parse(b.observed_at) ||
       a.run_id.localeCompare(b.run_id)
     );
+  };
+  const boundDriveObservations = (observations) => {
+    const normalized = normalizeDriveObservations(observations);
+    if (normalized.length <= 11) return normalized;
+    // The newest ten include the last observation. Keeping the first beside
+    // them preserves the longest trustworthy proof span without allowing one
+    // unresolved family to grow the adjacent state file on every run forever.
+    return [normalized[0], ...normalized.slice(-10)];
   };
   const driveGraceRecord = (uid, {
     firstObservedAt = driveReviewObservedAt,
@@ -14338,7 +14347,7 @@ const cmdIngestRemoteRun = async (
     approvalObservedAt = null,
     observations = [],
   } = {}) => {
-    const normalizedObservations = normalizeDriveObservations(observations);
+    const normalizedObservations = boundDriveObservations(observations);
     const firstMs = Date.parse(firstObservedAt);
     const lastMs = Date.parse(lastObservedAt);
     const valid = Number.isFinite(firstMs) && Number.isFinite(lastMs) &&
@@ -14355,7 +14364,10 @@ const cmdIngestRemoteRun = async (
       first_observed_at: new Date(safeFirstMs).toISOString(),
       last_observed_at: new Date(safeLastMs).toISOString(),
       grace_eligible_at: new Date(safeFirstMs + driveAbsenceGraceMs).toISOString(),
-      observation_count: normalizedObservations.length || (valid ? observationCount : 1),
+      observation_count: Math.max(
+        normalizedObservations.length,
+        valid ? observationCount : 1,
+      ),
       observations: normalizedObservations,
       ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
       ...(typeof folderPath === "string" && folderPath.trim() ? { folder_path: folderPath.trim() } : {}),
@@ -14377,10 +14389,19 @@ const cmdIngestRemoteRun = async (
       server_observed_at: driveInventoryServerObservedAt || null,
     };
   };
-  const appendDriveObservation = (record) => normalizeDriveObservations([
-    ...(record?.observations || []),
-    currentDriveObservation(),
-  ]);
+  const appendDriveObservation = (record) => {
+    const current = currentDriveObservation();
+    const prior = normalizeDriveObservations(record?.observations);
+    const alreadyRecorded = prior.some((observation) => observation.run_id === current.run_id);
+    const priorCount = prior.length && Number.isSafeInteger(record?.observation_count) &&
+        record.observation_count >= prior.length
+      ? record.observation_count
+      : prior.length;
+    return {
+      observations: boundDriveObservations([...prior, current]),
+      observationCount: priorCount + (alreadyRecorded ? 0 : 1),
+    };
+  };
   const driveAbsenceProofMatured = (record) => {
     const observations = normalizeDriveObservations(record?.observations)
       .filter((observation) => Number.isFinite(Date.parse(observation.server_observed_at || "")));
@@ -14887,17 +14908,18 @@ const cmdIngestRemoteRun = async (
             localDriveReviewDetails(uid),
           );
           const labelFallback = localDriveReviewDetails(uid);
+          const appendedObservation = appendDriveObservation(priorRecord);
           const observedRecord = driveGraceRecord(uid, {
             firstObservedAt: priorRecord.first_observed_at,
             lastObservedAt: driveReviewObservedAt,
-            observationCount: priorRecord.observation_count,
+            observationCount: appendedObservation.observationCount,
             changeFeedRemovedAt: priorRecord.change_feed_removed_at ||
               (changeFeedRemovalUids.has(uid) ? driveReviewObservedAt : null),
             name: priorRecord.name || labelFallback.name,
             folderPath: priorRecord.folder_path || labelFallback.folderPath,
             approvalObservationId: priorRecord.approval_observation_id,
             approvalObservedAt: priorRecord.approval_observed_at,
-            observations: appendDriveObservation(priorRecord),
+            observations: appendedObservation.observations,
           });
           if (driveAbsenceProofMatured(observedRecord)) {
             const priorApprovalMs = Date.parse(observedRecord.approval_observed_at || "");
