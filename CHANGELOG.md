@@ -10,13 +10,15 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
-- **Drive now stops visibly when access loss could look like deletion.** If a
-  reviewed-root walk finds stored items missing but Drive cannot distinguish a
-  deletion from lost permission, `brain ingest drive` exits non-zero with
-  `Drive review required: N stored item(s)...` and records issue code
-  `SAFETY_REVIEW_REQUIRED`. Nothing unresolved is removed, and the completed
-  source cursor remains saved. Restore access or confirm the source deletion,
-  then run Drive ingestion again.
+- **Drive now has a real confirmation path for files the owner deleted
+  permanently.** A 404, or a 403 whose provider response says `notFound`, adds
+  the stored family to the exact `source_deleted` removal plan and never
+  deletes it automatically. Review the aggregate plan, then approve only that
+  fingerprint with `brain ingest <manifest> --from drive --approve-removals
+  <fingerprint>`. A different 403 remains an access problem: the item stays in
+  `drive_removal_review`, is excluded from deletion, and clears only after a
+  later walk can see it again. Approved deletions are read back before their
+  review entries clear. No file identity is printed in either path.
 
 - **Older Brains can now produce a safe update-preview observation.** A Brain
   recorded as 0.4.0 through 0.4.6 does not report either its Worker version or

@@ -130,7 +130,7 @@ explicit proof boundary: the command does not independently prove Cloudflare
 account or domain ownership, so the supervised field rung must reconcile the
 target before live use.
 
-Targets whose manifest records exactly v0.4.6 have one narrow
+Targets whose manifest records a version below 0.4.7 have one narrow
 legacy-observation fallback in the same CLI. If the authenticated top-level
 legacy `/api/admin/brain/documents` response
 omits both `version` and `vector_drain_mode`, the adapter validates only the
@@ -665,9 +665,12 @@ removal back before committing folder watermarks.
 
 Drive never treats access loss as deletion evidence. Any account-wide changed
 item is rebuilt through the reviewed-root traversal before content is read. A
-stored file omitted from that traversal is removed only when Drive still shows
-visible trash or a visible move outside the reviewed roots. A 403, 404, or
-inconsistent in-scope omission stops cleanup and cursor advancement for review.
+403 access denial or inconsistent in-scope omission stays in the review record
+and outside the deletion plan. A 404, or a 403 carrying `notFound` or `File not
+found`, enters the `source_deleted` plan, but even one such target requires the
+exact `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
+approval. Visible trash and a visible move outside the reviewed roots remain
+ordinary source-deletion evidence.
 
 A Gmail full pass is an authoritative snapshot. It compares every message
 allowed by the default query with the live D1 family inventory, so messages

@@ -647,7 +647,7 @@ is the pinned manifest's assertion; this diagnostic does not independently
 prove Cloudflare account or domain ownership. The supervised field rung must
 reconcile that target before live use.
 
-For a target whose manifest records exactly v0.4.6, the same CLI has one narrow
+For a target whose manifest records a version below 0.4.7, the same CLI has one narrow
 legacy-observation fallback. When that authenticated top-level legacy
 `/api/admin/brain/documents` response lacks both `version` and
 `vector_drain_mode`, the preview validates only the sanitized D1 backlog and
@@ -784,10 +784,12 @@ crossing the applicable limit stops before deleting anything or advancing the
 source cursor. It prints aggregate counts and an opaque approval fingerprint,
 never filenames or document IDs. Review the cause, then add the exact
 `--approve-removals <fingerprint>` value only when the plan is expected.
-Drive treats an inaccessible file differently: a 403 or 404 cannot prove
-whether the file was deleted or access was revoked, so cleanup and cursor
-advancement stop until visible trash or a visible move outside the reviewed
-roots provides source proof.
+Drive treats access loss differently: an access-denied 403 remains in the
+review record and is excluded from deletion. A 404, or a 403 whose provider
+response says `notFound`, enters the `source_deleted` plan but is never removed
+automatically. Approve that exact plan only with `brain ingest <manifest>
+--from drive --approve-removals <fingerprint>`. Visible trash and a visible move
+outside the reviewed roots remain direct source proof.
 
 Gmail reads additions, deletions, and label changes from its typed history. A
 complete pass also compares the filtered mailbox snapshot with the live D1
