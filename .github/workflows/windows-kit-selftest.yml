@@ -1,0 +1,50 @@
+name: Windows kit selftest
+
+on:
+  push:
+    branches:
+      - claude/windows-kit-rehearsal
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell-5-1:
+    name: Windows PowerShell 5.1
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run selftest
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File kits/windows/brain-windows-update.ps1 selftest 2>&1 | Tee-Object -FilePath windows-powershell-5.1.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload selftest output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-powershell-5.1-selftest
+          path: windows-powershell-5.1.txt
+
+  windows-powershell-7:
+    name: PowerShell 7
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run selftest
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File kits/windows/brain-windows-update.ps1 selftest 2>&1 | Tee-Object -FilePath windows-powershell-7.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload selftest output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-powershell-7-selftest
+          path: windows-powershell-7.txt
