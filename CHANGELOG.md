@@ -22,8 +22,10 @@ asset publication.
   the walk continues, saves its completed cursor, and keeps any unlabelled
   review item protected from deletion. It warns once to update the Brain so a
   later review can show the item name and folder. To check: run Drive ingest
-  against the older response shape and confirm it exits successfully, advances
-  the cursor, and reports `label_unavailable` without removing the item.
+  against the structured `unknown_field` response for `include_labels` and
+  confirm it exits successfully, advances the cursor, and reports
+  `label_unavailable` without removing the item. A rejected response's clock is
+  never used for the seven-day absence proof.
 
 - **Drive cleanup can no longer get stuck when an older review record has no
   saved label.** The Brain now repairs a missing name and folder from its own

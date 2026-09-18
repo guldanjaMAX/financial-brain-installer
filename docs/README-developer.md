@@ -673,6 +673,11 @@ byte-for-byte in `drive_removal_review.malformed_identities`, excluded before
 provider lookup, and shown only through the read-only diagnostic path. The
 removal plan never trims an identity.
 
+Label negotiation is fail-closed and structural. A 400 retry without
+`include_labels` is allowed only for `{ code: "unknown_field", field:
+"include_labels" }`; human error text is never parsed. Server time is latched
+only from an accepted 2xx inventory response, never from the rejected probe.
+
 Drive never treats access loss as deletion evidence. A 403 access denial stays
 in the review record and outside the deletion plan. If the metadata lookup says
 the file is present under a reviewed folder despite its omission from the

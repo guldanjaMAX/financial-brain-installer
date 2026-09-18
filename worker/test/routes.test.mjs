@@ -2570,6 +2570,10 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   ]);
   check("source-family reconciliation validates source, limit, cursor and unknown fields",
     responses.every((response) => response.status === 400), responses.map((response) => response.status).join(","));
+  const unknownFieldBody = await responses.at(-1).json();
+  check("source-family unknown-field errors identify the rejected field structurally",
+    unknownFieldBody.code === "unknown_field" && unknownFieldBody.field === "unexpected",
+    JSON.stringify(unknownFieldBody));
 
   const legacyGet = await worker.fetch(new Request(
     "https://b.example/api/admin/brain/source-families",

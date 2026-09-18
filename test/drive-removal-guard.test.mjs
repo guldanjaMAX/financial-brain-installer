@@ -1040,6 +1040,30 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     legacyInventoryWithoutLabels.cleanup();
   }
 
+  const structuredLabelRejection = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    priorObservation: true,
+    priorNotReturnedNamed: false,
+    localDoneLabels: false,
+    inventoryLabelMode: "reject",
+    inventoryDate: false,
+  });
+  try {
+    assert.equal(structuredLabelRejection.code, 0, structuredLabelRejection.output);
+    assert.doesNotMatch(structuredLabelRejection.output, /unexpected error|INGEST_FAILED/i);
+    assert.equal(structuredLabelRejection.evidence().inventoryReads, 2,
+      "the structured include_labels rejection did not restart without labels");
+    assert.equal(structuredLabelRejection.evidence().forgetRequests, 0);
+    const state = structuredLabelRejection.state();
+    assert.equal(state.sync_token, "fixture-prewalk-full-unresolved");
+    assert.equal(state.drive_removal_review.counts.unresolved_not_returned, 1);
+    assert.equal(state.drive_removal_review.unresolved_not_returned[0].observations.at(-1).server_observed_at, null,
+      "the rejected 400 response supplied the seven-day server anchor");
+  } finally {
+    structuredLabelRejection.cleanup();
+  }
+
   const malformedStoredIdentity = runScopeScenario("full-malformed", { full: true });
   try {
     assert.equal(malformedStoredIdentity.code, 0, malformedStoredIdentity.output);

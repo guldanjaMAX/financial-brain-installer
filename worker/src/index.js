@@ -2359,7 +2359,11 @@ async function handleSourceFamilies(env, request) {
   const extras = Object.keys(body).filter((field) =>
     !["source", "cursor", "limit", "include_labels"].includes(field));
   if (extras.length > 0) {
-    return respond({ error: "source-family request has unknown fields" }, 400);
+    return respond({
+      error: "source-family request has unknown fields",
+      code: "unknown_field",
+      field: extras[0],
+    }, 400);
   }
 
   const source = body.source === undefined || body.source === null ? null : body.source;

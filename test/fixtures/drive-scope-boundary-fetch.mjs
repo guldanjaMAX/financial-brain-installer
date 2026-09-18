@@ -367,6 +367,13 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.inventoryReads++;
     saveEvidence(evidence);
+    if (request.include_labels === true && inventoryLabelMode === "reject") {
+      return json({
+        error: "wording is deliberately unrelated to compatibility detection",
+        code: "unknown_field",
+        field: "include_labels",
+      }, 400, true);
+    }
     const families = storedFamilies(evidence);
     return json({
       source: "drive",

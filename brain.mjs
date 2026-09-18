@@ -11542,15 +11542,10 @@ export async function listStoredSourceFamilies({
       }),
     }, { what: "the source-family inventory" });
     const raw = await res.text();
-    if (includeServerObservedAt && !serverDateChecked) {
-      serverDateChecked = true;
-      const serverMs = Date.parse(String(res.headers?.get?.("date") || ""));
-      if (Number.isFinite(serverMs)) serverObservedAt = new Date(serverMs).toISOString();
-    }
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
-    const responseError = typeof body?.error === "string" ? body.error : "";
-    if (requestLabels && res.status === 400 && /unknown field|include_labels/i.test(responseError)) {
+    if (requestLabels && res.status === 400 &&
+        body?.code === "unknown_field" && body?.field === "include_labels") {
       // A newer CLI can run before its matching Worker is deployed. Older
       // Workers reject this additive field, so restart the read without labels
       // instead of withholding an otherwise complete source cursor.
@@ -11567,6 +11562,11 @@ export async function listStoredSourceFamilies({
       throw new Error(
         `source-family inventory was not accepted (${res.status}): ${body?.error || raw.slice(0, 160) || "invalid response"}`
       );
+    }
+    if (includeServerObservedAt && !serverDateChecked) {
+      serverDateChecked = true;
+      const serverMs = Date.parse(String(res.headers?.get?.("date") || ""));
+      if (Number.isFinite(serverMs)) serverObservedAt = new Date(serverMs).toISOString();
     }
     if (body.families.length > 1000) {
       throw new Error("source-family inventory exceeded its requested page size");
