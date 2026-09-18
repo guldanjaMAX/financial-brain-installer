@@ -1522,6 +1522,28 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     approvedEmptyWindowReview.cleanup();
   }
 
+  const fullSweepApprovedReview = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    priorObservation: true,
+  });
+  try {
+    assert.equal(fullSweepApprovedReview.code, 1, fullSweepApprovedReview.output);
+    const approval = /--approve-removals ([0-9a-f]{64})/.exec(fullSweepApprovedReview.output)?.[1];
+    assert.ok(approval, "the full-sweep review did not print its approval fingerprint");
+    const approved = fullSweepApprovedReview.rerun(["--approve-removals", approval]);
+    assert.equal(approved.code, 0, approved.output);
+    const evidence = fullSweepApprovedReview.evidence();
+    assert.equal(evidence.forgetRequests, 1,
+      "an approved full-sweep repeated absence did not reach one bounded forget");
+    assert.equal(evidence.inventoryReads, 3,
+      "the approved full-sweep deletion did not perform its post-forget inventory readback");
+    assert.equal(evidence.removedFamilies, 1);
+    assert.equal(fullSweepApprovedReview.state().drive_removal_review, undefined);
+  } finally {
+    fullSweepApprovedReview.cleanup();
+  }
+
   const expiredReviewPlan = buildDriveRemovalPlan({
     storedFamilies: reviewStoredFamilies,
     activeFamilies: [],
