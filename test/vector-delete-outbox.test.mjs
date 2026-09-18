@@ -578,6 +578,63 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     JSON.stringify({ message: repeatedError?.message, upserts: upserted.length, repeated }));
 }
 
+/* Delete acceptance has the same two-phase durability boundary as upsert.
+   A provider-accepted delete with a short D1 receipt must stay queued as an
+   immediately retryable receipt failure, not be mislabeled as provider loss. */
+{
+  const { env, db, deleted } = makeEnv();
+  db.prepare(
+    `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+     VALUES ('delete:short-receipt', 'vector:short-receipt', 'delete', 104)`,
+  ).run();
+  db.exec(`CREATE TRIGGER skip_one_delete_submission_receipt
+    BEFORE UPDATE OF submitted_mutation_id ON vector_outbox
+    WHEN NEW.chunk_uid='delete:short-receipt' AND NEW.submitted_mutation_id IS NOT NULL
+    BEGIN SELECT RAISE(IGNORE); END`);
+  let error = null;
+  try {
+    await drainOutbox(env, { embed: async () => [0.16] });
+  } catch (caught) {
+    error = caught;
+  }
+  const retained = db.prepare(
+    `SELECT o.submitted_mutation_id, o.attempts, s.failure_code,
+            s.next_attempt_at, s.last_attempt_at, s.quarantined_at
+       FROM vector_outbox o
+       LEFT JOIN vector_outbox_retry_state s
+         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+      WHERE o.chunk_uid='delete:short-receipt'`,
+  ).get();
+  const deletesAfterFirst = deleted.length;
+  let repeatedError = null;
+  try {
+    await drainOutbox(env, { embed: async () => [0.17] });
+  } catch (caught) {
+    repeatedError = caught;
+  }
+  const repeated = db.prepare(
+    `SELECT o.submitted_mutation_id, o.attempts, s.attempts AS retry_attempts,
+            s.failure_code, s.next_attempt_at, s.last_attempt_at, s.quarantined_at
+       FROM vector_outbox o
+       LEFT JOIN vector_outbox_retry_state s
+         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+      WHERE o.chunk_uid='delete:short-receipt'`,
+  ).get();
+  check("an accepted delete with a short receipt is classified as receipt-write incomplete",
+    error?.code === "receipt_write_incomplete" && error?.vectorReceiptWriteIncomplete === true &&
+      error?.vectorDeleteFailed === false && /row receipts were ambiguous/u.test(error?.message || "") &&
+      deletesAfterFirst === 1 && retained?.submitted_mutation_id === null && retained?.attempts === 1 &&
+      retained?.failure_code === "receipt_write_incomplete" &&
+      retained?.next_attempt_at === retained?.last_attempt_at && retained?.quarantined_at === null,
+    JSON.stringify({ message: error?.message, code: error?.code, retained, deletes: deleted.length }));
+  check("repeated delete receipt shortfalls stay immediately retryable",
+    repeatedError?.code === "receipt_write_incomplete" && deleted.length === 2 &&
+      repeated?.submitted_mutation_id === null && repeated?.attempts === 1 &&
+      repeated?.retry_attempts === 1 && repeated?.failure_code === "receipt_write_incomplete" &&
+      repeated?.next_attempt_at === repeated?.last_attempt_at && repeated?.quarantined_at === null,
+    JSON.stringify({ message: repeatedError?.message, repeated }));
+}
+
 /* A processed receipt with an old same-id generation is not success. This is
    the deterministic reproduction of the false-green class: vectorCount can
    look right while semantic search still holds stale bytes. */

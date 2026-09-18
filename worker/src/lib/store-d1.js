@@ -1823,19 +1823,25 @@ async function confirmSubmittedVectors(env, rows, lease) {
 
 async function submitQueuedDeletes(env, rows, lease) {
   if (!rows.length) return { mutationId: null, submitted: 0 };
+  let providerAccepted = false;
   try {
     await renewDrainLease(env, lease.ownerToken, { now: lease.now() });
     const receipt = await env.VECTORIZE.deleteByIds(rows.map((row) => row.vector_id || row.chunk_uid));
-    return recordSubmittedMutation(env, rows, "delete", receipt);
+    providerAccepted = true;
+    return await recordSubmittedMutation(env, rows, "delete", receipt);
   } catch (error) {
     const detail = String(error?.message || error).slice(0, 300);
     await scheduleVectorFailures(env, rows, {
-      failureCode: "delete_provider_failure",
+      failureCode: providerAccepted ? "receipt_write_incomplete" : "delete_provider_failure",
       error: detail,
       now: lease.now(),
     }).catch(() => {});
-    const wrapped = new Error(`the vector index could not durably accept this delete batch: ${detail}`);
-    wrapped.vectorDeleteFailed = true;
+    const wrapped = new Error(providerAccepted
+      ? `the vector index accepted this delete batch but its D1 receipt was incomplete: ${detail}`
+      : `the vector index could not durably accept this delete batch: ${detail}`);
+    wrapped.code = providerAccepted ? "receipt_write_incomplete" : "delete_provider_failure";
+    wrapped.vectorDeleteFailed = !providerAccepted;
+    wrapped.vectorReceiptWriteIncomplete = providerAccepted;
     throw wrapped;
   }
 }
