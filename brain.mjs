@@ -14252,6 +14252,7 @@ const cmdIngestRemoteRun = async (
     firstObservedAt = driveReviewObservedAt,
     lastObservedAt = driveReviewObservedAt,
     observationCount = 1,
+    changeFeedRemovedAt = null,
   } = {}) => {
     const firstMs = Date.parse(firstObservedAt);
     const lastMs = Date.parse(lastObservedAt);
@@ -14259,12 +14260,16 @@ const cmdIngestRemoteRun = async (
       lastMs >= firstMs && Number.isSafeInteger(observationCount) && observationCount >= 1;
     const safeFirstMs = valid ? firstMs : Date.parse(driveReviewObservedAt);
     const safeLastMs = valid ? lastMs : safeFirstMs;
+    const changeFeedRemovedMs = Date.parse(changeFeedRemovedAt || "");
     return {
       uid: String(uid),
       first_observed_at: new Date(safeFirstMs).toISOString(),
       last_observed_at: new Date(safeLastMs).toISOString(),
       grace_eligible_at: new Date(safeFirstMs + driveAbsenceGraceMs).toISOString(),
       observation_count: valid ? observationCount : 1,
+      ...(Number.isFinite(changeFeedRemovedMs)
+        ? { change_feed_removed_at: new Date(changeFeedRemovedMs).toISOString() }
+        : {}),
     };
   };
   const legacyDriveReviewUids = storedDriveRemovalReview?.schema_version === 1 &&
@@ -14289,6 +14294,7 @@ const cmdIngestRemoteRun = async (
       firstObservedAt: raw.first_observed_at,
       lastObservedAt: raw.last_observed_at,
       observationCount: raw.observation_count,
+      changeFeedRemovedAt: raw.change_feed_removed_at,
     });
     unresolvedNotReturnedDriveReview.set(record.uid, record);
   }
@@ -14305,10 +14311,16 @@ const cmdIngestRemoteRun = async (
       firstObservedAt: raw.first_observed_at,
       lastObservedAt: raw.last_observed_at,
       observationCount: raw.observation_count,
+      changeFeedRemovedAt: raw.change_feed_removed_at ||
+        (raw.corroboration === "change_feed_removed" ? raw.last_observed_at : null),
     });
+    if (raw.corroboration === "change_feed_removed") {
+      unresolvedNotReturnedDriveReview.set(record.uid, record);
+      continue;
+    }
     pendingSourceDeletionDriveReview.set(record.uid, {
       ...record,
-      corroboration: raw.corroboration,
+      corroboration: "repeated_not_returned",
     });
   }
   let driveRemovalReview = storedDriveRemovalReview;
@@ -14604,8 +14616,9 @@ const cmdIngestRemoteRun = async (
       // The current rooted traversal is the authority for which folder ids are
       // in scope. A visible file outside this set is a confirmed move. A 404
       // proves only that Drive no longer returns the item to this credential.
-      // It enters the deletion plan only with the same id in this change-feed
-      // window or after a second observation beyond the recorded grace date.
+      // A change-feed removal has the same access-loss ambiguity and can only
+      // annotate this record. The item enters the deletion plan after a second
+      // not-returned observation beyond the recorded grace date.
       const scopedFolderIds = new Set([
         ...sourcePolicy.rootFolderIds,
         ...Object.keys(state.drive_folders || {}),
@@ -14635,15 +14648,7 @@ const cmdIngestRemoteRun = async (
           const observedMs = Date.parse(driveReviewObservedAt);
           const graceEligibleMs = Date.parse(prior?.grace_eligible_at || "");
           let candidate = null;
-          if (changeFeedRemovalUids.has(uid)) {
-            const record = prior || priorCandidate || driveGraceRecord(uid);
-            candidate = {
-              ...record,
-              last_observed_at: driveReviewObservedAt,
-              observation_count: Number(record.observation_count || 1) + (prior || priorCandidate ? 1 : 0),
-              corroboration: "change_feed_removed",
-            };
-          } else if (priorCandidate) {
+          if (priorCandidate) {
             candidate = {
               ...priorCandidate,
               last_observed_at: driveReviewObservedAt,
@@ -14668,6 +14673,9 @@ const cmdIngestRemoteRun = async (
             ...firstObservation,
             last_observed_at: driveReviewObservedAt,
             observation_count: Number(firstObservation.observation_count || 1) + (prior ? 1 : 0),
+            ...(changeFeedRemovalUids.has(uid)
+              ? { change_feed_removed_at: firstObservation.change_feed_removed_at || driveReviewObservedAt }
+              : {}),
           });
           continue;
         }
@@ -14840,8 +14848,8 @@ const cmdIngestRemoteRun = async (
           return `      - ${name} (folder: ${folder})`;
         }).join("\n");
         throw new DriveRemovalReviewRequired(
-          `Drive stopped returning ${eligibleCorroboratedPlanTargets.length} stored item(s) to this credential, ` +
-            "and the deletion is now corroborated.\n" +
+          `Drive did not return ${eligibleCorroboratedPlanTargets.length} stored item(s) ` +
+            "on two walks at least seven days apart.\n" +
             `${localDetails}\n` +
             "      Nothing from this removal plan was removed. The source cursor was not advanced.\n" +
             "      Confirm this exact source-deletion plan by re-running:\n" +
@@ -15770,8 +15778,8 @@ const cmdIngestRemoteRun = async (
       `Drive review required: ${count} stored item(s) were absent from the reviewed-root walk.\n` +
         `      ${reasons}\n` +
         "      Nothing unresolved was removed. The completed source cursor was saved.\n" +
-        "      Only a change-feed removal or a second not-returned observation at least seven days later " +
-        "can move an item into the exact brain ingest <manifest> --from drive " +
+        "      Only a second not-returned observation at least seven days later can move an item " +
+        "into the exact brain ingest <manifest> --from drive " +
         "--approve-removals <fingerprint> plan."
     );
   }

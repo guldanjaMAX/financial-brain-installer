@@ -624,8 +624,8 @@ export async function startPageToken(getAccessToken, opts = {}) {
  * Returns { changed, removed, nextToken }. `removed` covers deletion, trashing,
  * and a file that merely left this credential's view. The caller must classify
  * a stored removed id with classifyScopedAbsence() before treating it as source
- * deletion. A removed change-feed event can corroborate a separate 404, but a
- * 404 by itself remains review-only because Drive also uses it for access loss.
+ * deletion. A removed change-feed event can annotate a not-returned review
+ * record, but it cannot corroborate deletion or shorten the seven-day window.
  */
 export async function listChanges(getAccessToken, pageToken, opts = {}) {
   const changed = [];

@@ -640,6 +640,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     pendingRemoval = false,
     priorReview = false,
     priorNotReturnedDays = null,
+    priorChangeFeedDays = null,
     args = [],
   } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
@@ -711,7 +712,32 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         "root-fixture": { name: "Reviewed Root", parents: [] },
       },
       removed: pendingRemoval ? { "drive:missing-sensitive": "2026-09-01T00:00:00.000Z" } : {},
-      ...(priorReview ? {
+      ...(Number.isFinite(priorChangeFeedDays) ? (() => {
+        const firstObservedAt = new Date(Date.now() - (priorChangeFeedDays * 24 * 60 * 60 * 1000));
+        return {
+          drive_removal_review: {
+            schema_version: 3,
+            issue_code: "SAFETY_REVIEW_REQUIRED",
+            counts: {
+              unresolved_absences: 0,
+              unresolved_access: 0,
+              unresolved_not_returned: 0,
+              pending_source_deletions: 1,
+            },
+            uids: ["drive:missing-sensitive"],
+            unresolved_access_uids: [],
+            unresolved_not_returned: [],
+            source_deletion_candidates: [{
+              uid: "drive:missing-sensitive",
+              first_observed_at: firstObservedAt.toISOString(),
+              last_observed_at: firstObservedAt.toISOString(),
+              grace_eligible_at: new Date(firstObservedAt.getTime() + (7 * 24 * 60 * 60 * 1000)).toISOString(),
+              observation_count: 1,
+              corroboration: "change_feed_removed",
+            }],
+          },
+        };
+      })() : priorReview ? {
         drive_removal_review: {
           schema_version: 1,
           issue_code: "SAFETY_REVIEW_REQUIRED",
@@ -968,45 +994,62 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   });
   assert.equal(gonePlan.tooLarge, false, "the gone fixture must prove owner approval below routine limits");
 
-  const goneNeedsApproval = runScopeScenario("incremental-gone", { priorReview: true });
+  const goneReviewOnly = runScopeScenario("incremental-gone", { priorReview: true });
   try {
-    assert.equal(goneNeedsApproval.code, 1, goneNeedsApproval.output);
-    assert.match(goneNeedsApproval.output, /open seven-day review window/i);
-    assert.equal(goneNeedsApproval.output.includes(gonePlan.fingerprint), false,
+    assert.equal(goneReviewOnly.code, 1, goneReviewOnly.output);
+    assert.match(goneReviewOnly.output, /recorded seven-day grace date/i);
+    assert.equal(goneReviewOnly.output.includes(gonePlan.fingerprint), false,
       "an open grace window advertised an exact deletion approval");
-    assert.equal(goneNeedsApproval.output.includes("missing-sensitive"), false,
+    assert.equal(goneReviewOnly.output.includes("missing-sensitive"), false,
       "the approval stop disclosed the raw Drive identity");
-    assert.equal(goneNeedsApproval.evidence().forgetRequests, 0,
-      "a provider-confirmed gone item was removed without exact owner approval");
-    const review = goneNeedsApproval.state().drive_removal_review;
+    assert.equal(goneReviewOnly.evidence().forgetRequests, 0,
+      "a change-feed removal event reached the destructive endpoint");
+    const review = goneReviewOnly.state().drive_removal_review;
     assert.equal(review.schema_version, 3);
     assert.deepEqual(review.counts, {
-      unresolved_absences: 0,
+      unresolved_absences: 1,
       unresolved_access: 0,
-      unresolved_not_returned: 0,
-      pending_source_deletions: 1,
+      unresolved_not_returned: 1,
+      pending_source_deletions: 0,
     });
     assert.deepEqual(review.unresolved_access_uids, []);
-    assert.deepEqual(review.unresolved_not_returned, []);
-    assert.equal(review.source_deletion_candidates.length, 1);
-    assert.equal(review.source_deletion_candidates[0].uid, "drive:missing-sensitive");
-    assert.equal(review.source_deletion_candidates[0].corroboration, "change_feed_removed");
+    assert.equal(review.unresolved_not_returned.length, 1);
+    assert.equal(review.unresolved_not_returned[0].uid, "drive:missing-sensitive");
+    assert.ok(Number.isFinite(Date.parse(review.unresolved_not_returned[0].change_feed_removed_at)),
+      "the change-feed removal was not retained as a dated annotation");
+    assert.deepEqual(review.source_deletion_candidates, []);
   } finally {
-    goneNeedsApproval.cleanup();
+    goneReviewOnly.cleanup();
   }
 
-  const goneApproved = runScopeScenario("incremental-gone", {
+  const goneApprovalCannotShorten = runScopeScenario("incremental-gone", {
     priorReview: true,
     args: ["--approve-removals", gonePlan.fingerprint],
   });
   try {
-    assert.equal(goneApproved.code, 1, goneApproved.output);
-    assert.equal(goneApproved.evidence().forgetRequests, 0,
+    assert.equal(goneApprovalCannotShorten.code, 1, goneApprovalCannotShorten.output);
+    assert.equal(goneApprovalCannotShorten.evidence().forgetRequests, 0,
       "exact plan approval bypassed an open grace window");
-    assert.equal(goneApproved.state().drive_removal_review?.source_deletion_candidates.length, 1,
+    assert.equal(goneApprovalCannotShorten.state().drive_removal_review?.unresolved_not_returned.length, 1,
       "the protected review record disappeared without a confirmed removal");
   } finally {
-    goneApproved.cleanup();
+    goneApprovalCannotShorten.cleanup();
+  }
+
+  const legacyChangeFeedCandidate = runScopeScenario("incremental-gone", {
+    priorChangeFeedDays: 2,
+  });
+  try {
+    assert.equal(legacyChangeFeedCandidate.code, 1, legacyChangeFeedCandidate.output);
+    assert.equal(legacyChangeFeedCandidate.evidence().forgetRequests, 0);
+    const review = legacyChangeFeedCandidate.state().drive_removal_review;
+    assert.equal(review.counts.unresolved_not_returned, 1);
+    assert.equal(review.counts.pending_source_deletions, 0,
+      "a stored change-feed candidate remained eligible for deletion");
+    assert.equal(review.unresolved_not_returned[0].observation_count, 2);
+    assert.ok(Number.isFinite(Date.parse(review.unresolved_not_returned[0].change_feed_removed_at)));
+  } finally {
+    legacyChangeFeedCandidate.cleanup();
   }
 
   const recentRepeat = runScopeScenario("full-unresolved", {
@@ -1028,15 +1071,16 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     recentRepeat.cleanup();
   }
 
+  let elapsedApproval = null;
   const elapsedRepeat = runScopeScenario("full-unresolved", {
     full: true,
     priorNotReturnedDays: 8,
   });
   try {
     assert.equal(elapsedRepeat.code, 1, elapsedRepeat.output);
-    assert.match(elapsedRepeat.output, /deletion is now corroborated/i);
+    assert.match(elapsedRepeat.output, /two walks at least seven days apart/i);
     assert.match(elapsedRepeat.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/);
-    const elapsedApproval = /--approve-removals ([0-9a-f]{64})/.exec(elapsedRepeat.output)?.[1];
+    elapsedApproval = /--approve-removals ([0-9a-f]{64})/.exec(elapsedRepeat.output)?.[1];
     assert.ok(elapsedApproval, "the elapsed approval stop did not print an approval fingerprint");
     assert.ok(
       elapsedRepeat.output.includes(renderCliCommands(
@@ -1057,6 +1101,20 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     );
   } finally {
     elapsedRepeat.cleanup();
+  }
+
+  const elapsedApproved = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    args: ["--approve-removals", elapsedApproval],
+  });
+  try {
+    assert.equal(elapsedApproved.code, 0, elapsedApproved.output);
+    assert.equal(elapsedApproved.evidence().forgetRequests, 1);
+    assert.equal(elapsedApproved.state().drive_removal_review, undefined,
+      "an approved repeated absence left a stale Drive review record");
+  } finally {
+    elapsedApproved.cleanup();
   }
 
   const restoredReview = runScopeScenario("incremental-restored", { priorReview: true });

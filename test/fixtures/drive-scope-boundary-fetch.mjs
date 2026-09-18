@@ -94,7 +94,9 @@ function storedFamilies(evidence) {
       .sort();
   }
   if (mode === "full-unresolved-subthreshold") return [MISSING_UID, ...RETAINED_UIDS].sort();
-  if (["full-unresolved", "incremental-unresolved", "incremental-restored"].includes(mode)) return [MISSING_UID];
+  if (["full-unresolved", "incremental-unresolved", "incremental-restored"].includes(mode)) {
+    return evidence.removedFamilies ? [] : [MISSING_UID];
+  }
   return evidence.removedFamilies ? RETAINED_UIDS : [MISSING_UID, ...RETAINED_UIDS].sort();
 }
 
@@ -296,7 +298,7 @@ globalThis.fetch = async (input, options = {}) => {
     const expectedUids = mode === "incremental-unresolved-batch"
       ? BATCH_MISSING_UIDS.slice(3)
       : [MISSING_UID];
-    if (!["incremental-gone", "incremental-trash", "incremental-left-scope", "incremental-unresolved-batch"].includes(mode) ||
+    if (!["full-unresolved", "incremental-gone", "incremental-trash", "incremental-left-scope", "incremental-unresolved-batch"].includes(mode) ||
         request.confirm !== true || families.length !== expectedUids.length ||
         families.some((family, index) => family?.base_doc_uid !== expectedUids[index] ||
           !Array.isArray(family?.keep_doc_uids) || family.keep_doc_uids.length !== 0)) {
