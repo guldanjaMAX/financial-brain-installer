@@ -19,12 +19,14 @@ const MODES = new Set([
   "full-malformed",
   "full-label-bounds",
   "full-page-boundary",
+  "full-structured-page-rejection",
   "full-control-cursor-v048",
   "full-identity",
   "full-unresolved",
   "full-unresolved-subthreshold",
   "incremental-unresolved",
   "incremental-page-boundary",
+  "incremental-structured-page-rejection",
   "incremental-identity",
   "incremental-unresolved-batch",
   "incremental-gone",
@@ -61,6 +63,9 @@ const LABEL_BOUND_IDS = Array.from({ length: 2500 }, (_, index) =>
 );
 const LABEL_BOUND_UIDS = LABEL_BOUND_IDS.map((id) => `drive:${id}`);
 const PAGE_BOUNDARY_UIDS = ["drive:a\t", "drive:b ", "drive:c\u0001", "drive:d"];
+const STRUCTURED_PAGE_UIDS = Array.from({ length: 4 }, (_, index) =>
+  `drive:structured-page-${index}`
+);
 
 const blankEvidence = () => ({
   changesReads: 0,
@@ -73,6 +78,7 @@ const blankEvidence = () => ({
   inventoryFullLabelReads: 0,
   inventoryUidBatchSizes: [],
   inventoryCursors: [],
+  inventoryAcceptedFamilies: 0,
   ingestBatchWrites: 0,
   forgetRequests: 0,
   removedFamilies: 0,
@@ -121,6 +127,9 @@ function storedFamilies(evidence) {
   if (mode === "full-malformed") return ["drive:", ...RETAINED_UIDS].sort();
   if (mode === "full-label-bounds") return LABEL_BOUND_UIDS;
   if (["full-page-boundary", "incremental-page-boundary"].includes(mode)) return PAGE_BOUNDARY_UIDS;
+  if (["full-structured-page-rejection", "incremental-structured-page-rejection"].includes(mode)) {
+    return STRUCTURED_PAGE_UIDS;
+  }
   if (mode === "full-control-cursor-v048") return ["drive:a\t", "drive:b"];
   if (["full-identity", "incremental-identity"].includes(mode)) return [testedStoredUid];
   if (mode === "incremental-unresolved-batch") {
@@ -237,6 +246,15 @@ globalThis.fetch = async (input, options = {}) => {
         newStartPageToken: "fixture-next-incremental-page-boundary",
       });
     }
+    if (mode === "incremental-structured-page-rejection") {
+      return json({
+        changes: STRUCTURED_PAGE_UIDS.map((uid) => ({
+          fileId: uid.slice("drive:".length),
+          removed: true,
+        })),
+        newStartPageToken: `fixture-next-${mode}`,
+      });
+    }
     if (["incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)) {
       return json({ changes: [], newStartPageToken: `fixture-next-${mode}` });
     }
@@ -327,6 +345,15 @@ globalThis.fetch = async (input, options = {}) => {
       });
     }
     throw new Error("an unrelated changed item reached absence classification");
+  }
+
+  const structuredPageId = decodeURIComponent(url.pathname.slice("/drive/v3/files/".length));
+  if (url.hostname === "www.googleapis.com" && STRUCTURED_PAGE_UIDS.includes(`drive:${structuredPageId}`) &&
+      ["full-structured-page-rejection", "incremental-structured-page-rejection"].includes(mode)) {
+    const evidence = readEvidence();
+    evidence.absenceMetadataReads++;
+    saveEvidence(evidence);
+    return json({ error: { message: "File not found" } }, 404);
   }
 
   if (url.hostname === "www.googleapis.com" &&
@@ -440,12 +467,28 @@ globalThis.fetch = async (input, options = {}) => {
         field: "include_labels",
       }, 400, true);
     }
+    if (request.include_labels === true && inventoryLabelMode === "reject-after-first-page" &&
+        String(request.cursor || "") !== "") {
+      return json({
+        error: "wording is deliberately unrelated to compatibility detection",
+        code: "unknown_field",
+        field: "include_labels",
+      }, 400, true);
+    }
     if (Array.isArray(request.uids) && inventoryUidFilterMode === "reject") {
       return json({
         error: "wording is deliberately unrelated to compatibility detection",
         code: "unknown_field",
         field: "uids",
       }, 400, inventoryDateAvailable);
+    }
+    if (Array.isArray(request.uids) && inventoryUidFilterMode === "reject-after-first-page" &&
+        String(request.cursor || "") !== "") {
+      return json({
+        error: "wording is deliberately unrelated to compatibility detection",
+        code: "unknown_field",
+        field: "uids",
+      }, 400, true);
     }
     if (Array.isArray(request.uids) && inventoryUidFilterMode === "reject-unstructured") {
       return json({ error: "source-family request has unknown fields" }, 400, inventoryDateAvailable);
@@ -456,13 +499,18 @@ globalThis.fetch = async (input, options = {}) => {
       : stored;
     const remaining = selected.filter((uid) => uid > String(request.cursor || ""));
     const requestedLimit = Number(request.limit || 1000);
-    const limit = !Array.isArray(request.uids) &&
-      ["full-page-boundary", "incremental-page-boundary"].includes(mode)
+    const limit = ["full-page-boundary", "incremental-page-boundary"].includes(mode) &&
+      !Array.isArray(request.uids)
       ? 2
+      : ["full-structured-page-rejection", "incremental-structured-page-rejection"].includes(mode) &&
+          (request.include_labels === true || Array.isArray(request.uids))
+        ? 2
       : !Array.isArray(request.uids) && mode === "full-control-cursor-v048"
         ? 1
         : requestedLimit;
     const families = remaining.slice(0, limit);
+    evidence.inventoryAcceptedFamilies += families.length;
+    saveEvidence(evidence);
     return json({
       source: "drive",
       families,

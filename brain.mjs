@@ -11622,7 +11622,7 @@ export async function listStoredSourceFamilies({
     const raw = await res.text();
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
-    if (requestLabels && res.status === 400 &&
+    if (cursor === "" && requestLabels && res.status === 400 &&
         body?.code === "unknown_field" && body?.field === "include_labels") {
       // A newer CLI can run before its matching Worker is deployed. Older
       // Workers reject this additive field, so restart the read without labels
@@ -11632,7 +11632,7 @@ export async function listStoredSourceFamilies({
       restartWalk();
       continue;
     }
-    if (requestUids && res.status === 400 &&
+    if (cursor === "" && requestUids && res.status === 400 &&
         body?.code === "unknown_field" && body?.field === "uids") {
       // A Worker from before targeted labels must still be usable. Restart
       // once without the filter; this is the only path allowed to pull labels

@@ -228,6 +228,94 @@ for (const uid of legitimateFamilyShapes) {
       /not accepted \(400\)/i,
     );
     assert.equal(pageCalls, 2, "a page-two 400 restarted or widened the inventory walk");
+
+    let unexpectedFieldCalls = 0;
+    globalThis.fetch = async (_input, options = {}) => {
+      unexpectedFieldCalls++;
+      const body = JSON.parse(String(options.body || "{}"));
+      if (body.include_labels || body.uids) {
+        return new Response(JSON.stringify({
+          error: "wording is deliberately unrelated to compatibility detection",
+          code: "unknown_field",
+          field: "limit",
+        }), { status: 400, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        source: "drive",
+        families: [],
+        next_cursor: null,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const requestShapedFallback = await listStoredSourceFamilies({
+      base: "https://fixture.invalid",
+      adminKey: "fixture-admin",
+      source: "drive",
+      includeLabels: true,
+      uids: ["drive:a"],
+    });
+    assert.equal(unexpectedFieldCalls, 3,
+      "an unrelated structured field changed or looped the request-shaped fallback ladder");
+    assert.equal(requestShapedFallback.families.size, 0);
+
+    let controlCursorCalls = 0;
+    globalThis.fetch = async (_input, options = {}) => {
+      controlCursorCalls++;
+      const body = JSON.parse(String(options.body || "{}"));
+      if (!body.cursor) {
+        return new Response(JSON.stringify({
+          source: "drive",
+          families: ["drive:a\t"],
+          family_details: [{ uid: "drive:a\t", name: null, folder_path: null }],
+          next_cursor: "drive:a\t",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        error: "wording is deliberately unrelated to compatibility detection",
+        code: "unknown_field",
+        field: "include_labels",
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    };
+    await assert.rejects(
+      listStoredSourceFamilies({
+        base: "https://fixture.invalid",
+        adminKey: "fixture-admin",
+        source: "drive",
+        includeLabels: true,
+      }),
+      /update the Brain/i,
+    );
+    assert.equal(controlCursorCalls, 2,
+      "a structured page-two error hid the older Brain's control-cursor incompatibility");
+
+    for (const status of [413, 429, 500]) {
+      let laterStatusCalls = 0;
+      globalThis.fetch = async (_input, options = {}) => {
+        laterStatusCalls++;
+        const body = JSON.parse(String(options.body || "{}"));
+        if (!body.cursor) {
+          return new Response(JSON.stringify({
+            source: "drive",
+            families: ["drive:a"],
+            family_details: [{ uid: "drive:a", name: "A", folder_path: null }],
+            next_cursor: "drive:a",
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify({ error: "fixture later-page refusal" }), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      };
+      await assert.rejects(
+        listStoredSourceFamilies({
+          base: "https://fixture.invalid",
+          adminKey: "fixture-admin",
+          source: "drive",
+          includeLabels: true,
+        }),
+        new RegExp(`not accepted \\(${status}\\)`, "i"),
+      );
+      assert.equal(laterStatusCalls, 2, `HTTP ${status} on page two restarted the inventory walk`);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1062,6 +1150,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       })() : {}),
     }), { mode: 0o600 });
 
+    const initialStateBytes = readFileSync(statePath, "utf8");
     const execute = (runArgs = []) => {
       const result = spawnSync(process.execPath, [
         "--import", DRIVE_SCOPE_FETCH,
@@ -1081,6 +1170,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       output: result.output,
       priorCursor,
       priorFullSweep,
+      initialStateBytes,
+      stateBytes: () => readFileSync(statePath, "utf8"),
       state: () => JSON.parse(readFileSync(statePath, "utf8")),
       writeState: (nextState) => writeFileSync(statePath, JSON.stringify(nextState), { mode: 0o600 }),
       evidence: () => JSON.parse(readFileSync(evidencePath, "utf8")),
@@ -1225,6 +1316,39 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       "the rejected 400 response supplied the seven-day server anchor");
   } finally {
     structuredLabelRejection.cleanup();
+  }
+
+  for (const [field, options] of [
+    ["include_labels", { inventoryLabelMode: "reject-after-first-page" }],
+    ["uids", { inventoryUidFilterMode: "reject-after-first-page" }],
+  ]) {
+    for (const [mode, full] of [
+      ["full-structured-page-rejection", true],
+      ["incremental-structured-page-rejection", false],
+    ]) {
+      const rejected = runScopeScenario(mode, {
+        full,
+        inventoryDate: false,
+        ...options,
+      });
+      try {
+        assert.equal(rejected.code, 1,
+          `${field} ${mode} did not fail closed:\n${rejected.output}`);
+        const evidence = rejected.evidence();
+        assert.equal(evidence.inventoryReads, 3,
+          `${field} ${mode} did not stop after the pre-inventory and two-page capability walk`);
+        assert.deepEqual(evidence.inventoryCursors.slice(-2), ["", "drive:structured-page-1"],
+          `${field} ${mode} restarted after accepting page one`);
+        assert.ok(evidence.inventoryAcceptedFamilies >= 6,
+          `${field} ${mode} did not prove the pre-inventory and page-one families were read`);
+        assert.equal(evidence.forgetRequests, 0,
+          `${field} ${mode} reached the destructive endpoint`);
+        assert.equal(rejected.stateBytes(), rejected.initialStateBytes,
+          `${field} ${mode} changed source state after the rejected page`);
+      } finally {
+        rejected.cleanup();
+      }
+    }
   }
 
   const legacyInventoryWithoutUidFilter = runScopeScenario("full-unresolved", {
