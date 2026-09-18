@@ -634,7 +634,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   }, true);
   const stripAnsi = (value) => String(value || "").replace(/\x1b\[[0-9;]*m/g, "");
 
-  const runScopeScenario = (mode, { full = false } = {}) => {
+  const runScopeScenario = (mode, { full = false, pendingRemoval = false } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
     const manifestPath = join(directory, "fixture.manifest.json");
     const statePath = join(directory, ".brain-ingest-drive.json");
@@ -683,6 +683,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       drive_folders: {
         "root-fixture": { name: "Reviewed Root", parents: [] },
       },
+      removed: pendingRemoval ? { "drive:missing-sensitive": "2026-09-01T00:00:00.000Z" } : {},
     }), { mode: 0o600 });
 
     const result = spawnSync(process.execPath, [
@@ -750,6 +751,32 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     } finally {
       unresolved.cleanup();
     }
+  }
+
+  const unresolvedPending = runScopeScenario("incremental-unresolved", {
+    pendingRemoval: true,
+  });
+  try {
+    assert.equal(unresolvedPending.code, 1, unresolvedPending.output);
+    const evidence = unresolvedPending.evidence();
+    assert.equal(evidence.absenceMetadataReads, 1);
+    assert.equal(evidence.forgetRequests, 0,
+      "an unresolved item inherited a deletion from an earlier pending marker");
+    assert.equal(evidence.removedFamilies, 0);
+    const state = unresolvedPending.state();
+    assert.deepEqual(state.drive_removal_review, {
+      schema_version: 1,
+      issue_code: "SAFETY_REVIEW_REQUIRED",
+      counts: { unresolved_absences: 1 },
+      uids: ["drive:missing-sensitive"],
+    });
+    assert.equal(
+      state.removed?.["drive:missing-sensitive"],
+      "2026-09-01T00:00:00.000Z",
+      "the unresolved pending marker must remain visible for review rather than being applied",
+    );
+  } finally {
+    unresolvedPending.cleanup();
   }
 
   const unresolvedBatch = runScopeScenario("incremental-unresolved-batch");

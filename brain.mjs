@@ -14621,6 +14621,9 @@ const cmdIngestRemoteRun = async (
       const storedUids = needsStoredInventory
         ? (driveStoredBeforeProcessing || await listStoredSourceFamilies({ base, adminKey, source: sourceName }))
         : new Set();
+      const unresolvedDriveUids = new Set(driveRemovalReview?.uids || []);
+      const withoutUnresolvedDriveUids = (uids) =>
+        uids.filter((uid) => !unresolvedDriveUids.has(uid));
 
       // A valid prior forget may have reached the Worker even if its response
       // was lost. Inventory is authoritative; clear only local retry markers
@@ -14635,9 +14638,15 @@ const cmdIngestRemoteRun = async (
       const driveRemovalPlan = buildDriveRemovalPlan({
         storedFamilies: storedUids,
         activeFamilies: seenUids,
-        policyCandidates: excludedUids,
-        vanishedCandidates: [...confirmedDriveAbsenceUids, ...pendingDriveUids],
-        intentionalCandidates: intentionalRemovalUids,
+        // The review set wins over every deletion reason, including a pending
+        // marker left by an earlier walk. Permission loss must never inherit a
+        // stale decision to delete the same family.
+        policyCandidates: withoutUnresolvedDriveUids(excludedUids),
+        vanishedCandidates: withoutUnresolvedDriveUids([
+          ...confirmedDriveAbsenceUids,
+          ...pendingDriveUids,
+        ]),
+        intentionalCandidates: withoutUnresolvedDriveUids(intentionalRemovalUids),
       }, {
         safetyBaselineCount: driveRemovalSafetyCount ?? storedUids.size,
         fingerprintContext: "drive-strict",
