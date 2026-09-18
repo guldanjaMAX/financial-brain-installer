@@ -1354,20 +1354,17 @@ async function scheduleVectorFailures(env, rows, {
   return { scheduled: rows.length - quarantined, quarantined };
 }
 
-// One two-phase slice either submits or confirms. The largest path is an upsert
-// submission: queue/fence/delete/upsert reads plus the durable fence, final
-// depth, one submission receipt per row, and one legacy hashed-id remap per row.
-// Confirmation needs only one CAS statement per row. Reserving this bound before
-// provider work keeps the lease release inside the invocation budget.
-export function drainBatchQueryUpperBound(batchSize = DRAIN_BATCH_SIZE_MAX) {
-  const bounded = Number.isInteger(batchSize)
-    ? Math.min(DRAIN_BATCH_SIZE_MAX, Math.max(1, batchSize))
-    : DRAIN_BATCH_SIZE_MAX;
+// One two-phase slice either submits or confirms. Submission receipts and
+// legacy hashed-id remaps are set-based through json_each, so batch size no
+// longer multiplies D1 statements. Confirmation can still use one CAS per row;
+// the three-batch in-flight window bounds that path before another submission.
+// Reserving this conservative slice before provider work keeps the lease
+// release inside the invocation budget.
+export function drainBatchQueryUpperBound(_batchSize = DRAIN_BATCH_SIZE_MAX) {
   // +1 renews and re-proves the owner immediately before the one possible
-  // provider mutation in this slice. Five more cover the bounded legacy
-  // bootstrap status/page/transaction/depth path when a confirmation empties
-  // the current page.
-  return 12 + (2 * bounded);
+  // provider mutation in this slice. The remaining headroom covers the bounded
+  // reads, set-based writes/readback, retry receipt, and legacy bootstrap page.
+  return 16;
 }
 
 const drainLeaseChanges = (result) => Number(
@@ -1517,57 +1514,84 @@ async function recordSubmittedMutation(env, rows, op, receipt, submittedAt = Dat
     throw new Error("the vector mutation receipt could not be recorded durably");
   }
 
-  if (rows.length) {
-    if (op === "upsert") {
-      // Do this for every accepted upsert, including a legacy short id whose
-      // chunks.vector_id is NULL. The receipt below is conditional on this
-      // exact durable hydration mapping.
-      const remaps = rows;
-      if (remaps.length) {
-        // Persist the actual hashed provider id before the accepted row receipt.
-        // If this batch fails, the global fence remains durable and the outbox
-        // generation stays unsubmitted/retryable; it can never false-green.
-        const remapChanges = await env.DB.batch(remaps.map((row) => env.DB.prepare(
-          `UPDATE chunks SET vector_id = ?2
-            WHERE chunk_uid = ?1
-              AND (vector_id IS NULL OR vector_id <> ?2)
-              AND EXISTS (
-                SELECT 1 FROM vector_outbox
-                 WHERE chunk_uid = ?1 AND op = 'upsert' AND generation = ?3
-              )`
-        ).bind(row.chunk_uid, row.vector_id, row.generation)));
-        if (!Array.isArray(remapChanges) || remapChanges.length !== remaps.length) {
-          throw new Error("the accepted vector id remap could not be recorded");
-        }
-      }
-    }
-    const statements = rows.map((row) => op === "delete"
-      ? env.DB.prepare(
-        `UPDATE vector_outbox
-              SET submitted_mutation_id = ?4, submitted_at = ?5, last_error = NULL
-            WHERE chunk_uid = ?1 AND op = 'delete'
-              AND COALESCE(vector_id, chunk_uid) = ?2 AND generation = ?3`
-      ).bind(row.chunk_uid, row.vector_id || row.chunk_uid, row.generation, mutationId, submittedAt)
-      : env.DB.prepare(
-          `UPDATE vector_outbox
-              SET submitted_mutation_id = ?3, submitted_at = ?4, last_error = NULL
-            WHERE chunk_uid = ?1 AND op = 'upsert' AND generation = ?2
-              AND EXISTS (
-                SELECT 1 FROM chunks
-                 WHERE chunk_uid = ?1 AND vector_id = ?5
-              )`
-        ).bind(row.chunk_uid, row.generation, mutationId, submittedAt, row.vector_id));
-    const changes = await env.DB.batch(statements);
-    if (!Array.isArray(changes) || changes.length !== rows.length) {
-      throw new Error("the vector mutation row receipts were ambiguous");
-    }
-    return {
-      mutationId,
-      submitted: changes.reduce((total, result) =>
-        total + Number(drainLeaseChanges(result) === 1), 0),
-    };
+  if (!rows.length) return { mutationId, submitted: 0 };
+  if (!["upsert", "delete"].includes(op)) {
+    throw new Error("the vector mutation operation is invalid");
   }
-  return { mutationId, submitted: 0 };
+  const mapping = rows.map((row) => ({
+    u: row.chunk_uid,
+    v: row.vector_id || row.chunk_uid,
+    g: row.generation,
+  }));
+  if (new Set(mapping.map((row) => row.u)).size !== mapping.length) {
+    throw new Error("the vector mutation row identities are not unique");
+  }
+  const mappingJson = JSON.stringify(mapping);
+  if (new TextEncoder().encode(mappingJson).length > 1_800_000) {
+    throw new Error("the vector mutation identity receipt is too large");
+  }
+
+  const statements = [];
+  if (op === "upsert") {
+    // Persist the actual provider id before the accepted row receipt. The
+    // inequality guard avoids firing chunks_au for an already-correct id.
+    statements.push(env.DB.prepare(
+      `UPDATE chunks AS c SET vector_id=(
+         SELECT json_extract(value,'$.v') FROM json_each(?1)
+          WHERE json_extract(value,'$.u')=c.chunk_uid
+       ) WHERE EXISTS (
+         SELECT 1 FROM json_each(?1) m JOIN vector_outbox o
+           ON o.chunk_uid=json_extract(m.value,'$.u')
+          AND o.generation=json_extract(m.value,'$.g')
+          AND o.op='upsert'
+          WHERE o.chunk_uid=c.chunk_uid
+            AND (c.vector_id IS NULL OR c.vector_id<>json_extract(m.value,'$.v'))
+       )`
+    ).bind(mappingJson));
+  }
+  statements.push(env.DB.prepare(
+    `UPDATE vector_outbox AS o
+        SET submitted_mutation_id=?2,submitted_at=?3,last_error=NULL
+      WHERE o.op=?4 AND o.submitted_mutation_id IS NULL
+        AND EXISTS (
+          SELECT 1 FROM json_each(?1) m
+           WHERE json_extract(m.value,'$.u')=o.chunk_uid
+             AND json_extract(m.value,'$.g')=o.generation
+             AND (o.op='upsert' OR
+                  COALESCE(o.vector_id,o.chunk_uid)=json_extract(m.value,'$.v'))
+             AND (o.op='delete' OR EXISTS (
+               SELECT 1 FROM chunks c
+                WHERE c.chunk_uid=o.chunk_uid
+                  AND c.vector_id=json_extract(m.value,'$.v')
+             ))
+        )`
+  ).bind(mappingJson, mutationId, submittedAt, op));
+  const changes = await env.DB.batch(statements);
+  if (!Array.isArray(changes) || changes.length !== statements.length) {
+    throw new Error("the vector mutation row receipts were ambiguous");
+  }
+
+  // chunks_au makes D1's meta.changes unsuitable as proof of the mapping.
+  // Read back the complete set, including each generation and provider id.
+  const rowReceipt = await env.DB.prepare(
+    `SELECT count(*) AS n
+       FROM json_each(?1) m JOIN vector_outbox o
+         ON o.chunk_uid=json_extract(m.value,'$.u')
+        AND o.generation=json_extract(m.value,'$.g')
+      WHERE o.op=?4 AND o.submitted_mutation_id=?2 AND o.submitted_at=?3
+        AND (o.op='upsert' OR
+             COALESCE(o.vector_id,o.chunk_uid)=json_extract(m.value,'$.v'))
+        AND (o.op='delete' OR EXISTS (
+          SELECT 1 FROM chunks c
+           WHERE c.chunk_uid=o.chunk_uid
+             AND c.vector_id=json_extract(m.value,'$.v')
+        ))`
+  ).bind(mappingJson, mutationId, submittedAt, op).first();
+  const submitted = Number(rowReceipt?.n);
+  if (!Number.isSafeInteger(submitted) || submitted < 0 || submitted > rows.length) {
+    throw new Error("the vector mutation row receipts were ambiguous");
+  }
+  return { mutationId, submitted };
 }
 
 async function projectionFenceState(env) {

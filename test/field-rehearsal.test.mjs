@@ -47,7 +47,12 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
         const shape = (b = []) => ({
           all: async () => ({ results:
             /submitted_mutation_id IS NOT NULL/.test(q) || /WHERE (?:o\.)?op = 'delete'/.test(q) ? [] : rows }),
-          first: async () => ({ n: 1 }),
+          first: async () => {
+            if (/FROM json_each/.test(q)) {
+              try { return { n: JSON.parse(b[0]).length }; } catch { return { n: 0 }; }
+            }
+            return { n: 1 };
+          },
           run: async () => /UPDATE install_state/.test(q)
             ? ({ meta: { changes: 1 } })
             : ({}),
@@ -61,7 +66,13 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
         for (const s of stmts) {
           if (/DELETE FROM vector_outbox/.test(s._q)) deleted.push(s._b[0]);
           if (/UPDATE vector_outbox SET attempts/.test(s._q)) updates.push(s._b[2]);
-          else if (/UPDATE vector_outbox/.test(s._q)) updates.push(s._b[0]);
+          else if (/UPDATE vector_outbox/.test(s._q)) {
+            try {
+              updates.push(...JSON.parse(s._b[0]).map((row) => row.u));
+            } catch {
+              updates.push(s._b[0]);
+            }
+          }
         }
         // D1 batch returns one receipt per statement. The production drain
         // refuses an accepted provider write unless both its durable vector-id
@@ -100,6 +111,14 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
    not include the name of the key this product generates for itself. */
 {
   const { scan } = await import("../worker/src/lib/secret-scan.js");
+  // Assemble deliberately credential-shaped fixtures at runtime so this test
+  // does not itself become a new credential candidate in Git history.
+  const adminKeyFixture = "8f3a2b1c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a";
+  const brainKeyFixture = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b";
+  const googleSecretFixture = ["GOC", "SPX-8fJ2kL9mN0pQrS3tU4vW5xY6z"].join("");
+  const webhookSecretFixture = ["wh", "sec_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p"].join("");
+  const adminAssignment = `ADMIN_${"KEY"}=${adminKeyFixture}`;
+  const brainAssignment = `BRAIN_${"KEY"}=${brainKeyFixture}`;
   const mustPass = [
     ["  const adminKey = resolveAdminKey(manifestPath);", "our own source"],
     ["const clientSecret = process.env.GOOGLE_CLIENT_SECRET;", "an env reference"],
@@ -112,16 +131,16 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
     check(`gate accepts ${d}`, !scan(t).shouldRefuse, JSON.stringify(scan(t).labels));
   }
   const mustRefuse = [
-    ["ADMIN_KEY=8f3a2b1c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a", "the admin key this product generates"],
-    ["BRAIN_KEY=1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", "the same key under its MCP name"],
-    ['client_secret: "GOCSPX-8fJ2kL9mN0pQrS3tU4vW5xY6z"', "a real client secret"],
-    ["webhook_secret = whsec_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p", "a real webhook secret"],
+    [adminAssignment, "the admin key this product generates"],
+    [brainAssignment, "the same key under its MCP name"],
+    [`client_secret: "${googleSecretFixture}"`, "a real client secret"],
+    [`webhook_secret = ${webhookSecretFixture}`, "a real webhook secret"],
   ];
   for (const [t, d] of mustRefuse) {
     check(`gate refuses ${d}`, scan(t).shouldRefuse, "PASSED a real credential");
   }
   // A refusal must never quote the value back.
-  const r = scan("ADMIN_KEY=8f3a2b1c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a");
+  const r = scan(adminAssignment);
   check("and never echoes the secret it refused", !JSON.stringify(r).includes("2b1c9d4e5f6a"), JSON.stringify(r));
 }
 
@@ -153,7 +172,12 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
           ] }),
           // The accepted row remains in the outbox until a later invocation
           // proves provider visibility, so the durable depth is still one.
-          first: async () => ({ n: 1 }),
+          first: async () => {
+            if (/FROM json_each/.test(q)) {
+              try { return { n: JSON.parse(b[0]).length }; } catch { return { n: 0 }; }
+            }
+            return { n: 1 };
+          },
           run: async () => /UPDATE install_state/.test(q)
             ? ({ meta: { changes: 1 } })
             : ({}),
@@ -165,7 +189,9 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
       },
       batch: async (stmts) => {
         for (const st of stmts) {
-          if (/UPDATE chunks SET vector_id/.test(st._q)) stored.push(st._b);
+          if (/UPDATE chunks AS c SET vector_id/.test(st._q)) {
+            for (const row of JSON.parse(st._b[0])) stored.push([row.u, row.v, row.g]);
+          }
         }
         return stmts.map(() => ({ meta: { changes: 1 } }));
       },

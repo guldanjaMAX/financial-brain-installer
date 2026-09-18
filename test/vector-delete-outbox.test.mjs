@@ -467,7 +467,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   let failRemap = true;
   env.DB.batch = async (statements) => {
     if (failRemap && statements.some((statement) =>
-      /UPDATE chunks SET vector_id/.test(statement._sql || ""))) {
+      /UPDATE chunks(?: AS c)? SET vector_id/.test(statement._sql || ""))) {
       failRemap = false;
       throw new Error("synthetic durable remap failure");
     }
@@ -1003,17 +1003,14 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     `SELECT vector_drain_lease_owner owner, vector_drain_lease_expires_at expires
      FROM install_state WHERE id = 1`
   ).get();
-  check("the documented worst-case batch statement bound includes hashed-id remaps",
-    drainBatchQueryUpperBound(100) === 212);
-  check("a ten-batch request stops before the internal D1 query budget",
-    drained.drained === 100 && drained.submitted === 300 &&
-      drained.waiting === 200 && drained.remaining === 500 &&
-      // 421 before the drain proved the retry-state schema and swept its
-      // orphans; those are the two statements DRAIN_RETRY_STATE_QUERIES
-      // reserves, so the pin moves with them rather than being loosened.
-      submitted === 426 && submitted < DRAIN_D1_QUERY_BUDGET,
+  check("the set-based batch bound no longer grows with 100 row receipts",
+    drainBatchQueryUpperBound(100) === 16);
+  check("a ten-batch request stays inside the internal D1 query budget",
+    drained.drained === 400 && drained.submitted === 600 &&
+      drained.waiting === 200 && drained.remaining === 200 &&
+      submitted === 471 && submitted < DRAIN_D1_QUERY_BUDGET,
     JSON.stringify({ drained, submitted, budget: DRAIN_D1_QUERY_BUDGET }));
-  check("query-budget exhaustion never strands the exclusive drain lease",
+  check("the bounded invocation never strands the exclusive drain lease",
     leaseState.owner === null && leaseState.expires === null,
     JSON.stringify(leaseState));
 }
