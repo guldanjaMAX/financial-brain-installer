@@ -22,12 +22,35 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File kits/windows/brain-windows-update.ps1 selftest 2>&1 | Tee-Object -FilePath windows-powershell-5.1.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise synthetic SHA256SUMS gate
+        shell: powershell
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'synthetic-four-file-kit-5.1'
+          New-Item -ItemType Directory -Path $kit -Force | Out-Null
+          Copy-Item kits/windows/brain-windows-update.ps1 (Join-Path $kit 'brain-windows-update.ps1')
+          Copy-Item kits/windows/README-WINDOWS-KIT.md (Join-Path $kit 'README-WINDOWS-KIT.md')
+          [System.IO.File]::WriteAllBytes((Join-Path $kit 'brain-installer-0.4.8.tgz'), [byte[]](0x1f,0x8b,0x08,0x00))
+          [System.IO.File]::WriteAllText((Join-Path $kit 'field-prepare-receipt.json'), '{"synthetic":true}', (New-Object System.Text.UTF8Encoding($false)))
+          $names = @('brain-installer-0.4.8.tgz','field-prepare-receipt.json','brain-windows-update.ps1','README-WINDOWS-KIT.md')
+          $lines = @($names | ForEach-Object { ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $kit $_)).Hash.ToLowerInvariant() + '  ' + $_) })
+          [System.IO.File]::WriteAllLines((Join-Path $kit 'SHA256SUMS'), $lines, (New-Object System.Text.ASCIIEncoding))
+          powershell -NoProfile -ExecutionPolicy Bypass -File kits/windows/brain-windows-update.ps1 selftest -Kit $kit 2>&1 | Tee-Object -FilePath windows-powershell-5.1-sha-gate.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $stream = [System.IO.File]::Open((Join-Path $kit 'brain-installer-0.4.8.tgz'), [System.IO.FileMode]::Append)
+          try { $stream.WriteByte(0x21) } finally { $stream.Dispose() }
+          $refusal = (& powershell -NoProfile -ExecutionPolicy Bypass -File kits/windows/brain-windows-update.ps1 __verify-checksums -Kit $kit 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          $refusal | Tee-Object -FilePath windows-powershell-5.1-sha-refusal.txt
+          if ($code -ne 65) { throw "tampered checksum gate exited $code, expected 65" }
+          if ($refusal -notmatch 'brain-installer-0\.4\.8\.tgz: SHA-256 MISMATCH') { throw 'tampered checksum gate did not name the package mismatch' }
+          if ($refusal -notmatch 'do not match SHA256SUMS') { throw 'tampered checksum gate did not print the refusal message' }
+          exit 0
       - name: Upload selftest output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-powershell-5.1-selftest
-          path: windows-powershell-5.1.txt
+          path: windows-powershell-5.1*.txt
 
   windows-powershell-7:
     name: PowerShell 7
@@ -42,9 +65,33 @@ jobs:
         run: |
           pwsh -NoProfile -File kits/windows/brain-windows-update.ps1 selftest 2>&1 | Tee-Object -FilePath windows-powershell-7.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise synthetic SHA256SUMS gate
+        shell: pwsh
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'synthetic-four-file-kit-7'
+          New-Item -ItemType Directory -Path $kit -Force | Out-Null
+          Copy-Item kits/windows/brain-windows-update.ps1 (Join-Path $kit 'brain-windows-update.ps1')
+          Copy-Item kits/windows/README-WINDOWS-KIT.md (Join-Path $kit 'README-WINDOWS-KIT.md')
+          [System.IO.File]::WriteAllBytes((Join-Path $kit 'brain-installer-0.4.8.tgz'), [byte[]](0x1f,0x8b,0x08,0x00))
+          [System.IO.File]::WriteAllText((Join-Path $kit 'field-prepare-receipt.json'), '{"synthetic":true}', (New-Object System.Text.UTF8Encoding($false)))
+          $names = @('brain-installer-0.4.8.tgz','field-prepare-receipt.json','brain-windows-update.ps1','README-WINDOWS-KIT.md')
+          $lines = @($names | ForEach-Object { ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $kit $_)).Hash.ToLowerInvariant() + '  ' + $_) })
+          [System.IO.File]::WriteAllLines((Join-Path $kit 'SHA256SUMS'), $lines, (New-Object System.Text.ASCIIEncoding))
+          pwsh -NoProfile -File kits/windows/brain-windows-update.ps1 selftest -Kit $kit 2>&1 | Tee-Object -FilePath windows-powershell-7-sha-gate.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $stream = [System.IO.File]::Open((Join-Path $kit 'brain-installer-0.4.8.tgz'), [System.IO.FileMode]::Append)
+          try { $stream.WriteByte(0x21) } finally { $stream.Dispose() }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $refusal = (& pwsh -NoProfile -File kits/windows/brain-windows-update.ps1 __verify-checksums -Kit $kit 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          $refusal | Tee-Object -FilePath windows-powershell-7-sha-refusal.txt
+          if ($code -ne 65) { throw "tampered checksum gate exited $code, expected 65" }
+          if ($refusal -notmatch 'brain-installer-0\.4\.8\.tgz: SHA-256 MISMATCH') { throw 'tampered checksum gate did not name the package mismatch' }
+          if ($refusal -notmatch 'do not match SHA256SUMS') { throw 'tampered checksum gate did not print the refusal message' }
+          exit 0
       - name: Upload selftest output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-powershell-7-selftest
-          path: windows-powershell-7.txt
+          path: windows-powershell-7*.txt

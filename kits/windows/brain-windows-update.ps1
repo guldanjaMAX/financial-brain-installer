@@ -1,5 +1,5 @@
 <#
-  brain-windows-update.ps1 — Windows Brain, 0.4.0/0.4.1 -> 0.4.8, CANDIDATE build e44a38b.
+  brain-windows-update.ps1 -- Windows Brain, 0.4.0/0.4.1 -> 0.4.8, CANDIDATE build e44a38b.
   Reusable for a pre-0.4.4 Brain the week of 2026-09-21 (WEEKEND-PLAN B4).
 
   THE HONESTY LINE, FIRST, BECAUSE EVERYTHING ELSE DEPENDS ON IT
@@ -7,14 +7,14 @@
     No mode has contacted or changed a Brain on Windows. The field logic is written from the
     shipped 0.4.8 CLI read on 2026-09-17 and from the Mac kit it mirrors.
     Sunday 2026-09-20 is a READ-ONLY REHEARSAL: discover, install, preview. `apply` exists, and it
-    is gated so hard that on this Brain it cannot run at all today — see PREVIEW, below.
+    is gated so hard that on this Brain it cannot run at all today -- see PREVIEW, below.
 
   WHAT WE EXPECT TO HAPPEN ON SUNDAY, AND WHY IT IS A PASS, NOT A FAILURE
     Verified in git: the Worker only began reporting its own `version` on /documents in 0.4.4.
     The supported starting versions are 0.4.0 and 0.4.1, whose deployed Workers do not report it.
     The 0.4.8 preview's MODERN path requires inventory.version to equal the manifest's recorded
     version (operations/update-preview.mjs:1271-1276), and the legacy-observation fallback is
-    gated on recordedVersion === "0.4.6" (brain.mjs:23555-23557, update-preview.mjs:1410) — which
+    gated on recordedVersion === "0.4.6" (brain.mjs:23555-23557, update-preview.mjs:1410) -- which
     is another update path, not this one. So the preview is EXPECTED TO REFUSE here, with
     UPDATE_PREVIEW_READINESS_RECEIPT_INVALID or UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH.
     Capturing that refusal cleanly IS Sunday's deliverable (WEEKEND-PLAN E8). `preview` exits 3
@@ -29,7 +29,8 @@
     preview         health, then ONE read-only `brain update --preview`. Classifies the result:
                       modern plan            -> prints the approval sentence, exit 0
                       expected pre-0.4.4     -> prints EXPECTED REFUSAL, exit 3
-                      anything else          -> STOP, exit 4
+                      unclassifiable receipt -> STOP, exit 4
+                      no JSON receipt        -> check sign-in, nothing changed, exit 5
     apply -Run -Approval "<sentence>"
                     only reachable after a MODERN plan. Re-previews, requires plan-fingerprint
                     equality and a byte-exact sentence, then ONE bare `brain update <manifest>`,
@@ -50,19 +51,20 @@
     2   selftest had failures
     3   preview: the EXPECTED pre-0.4.4 refusal. Stop, send the receipts folder to the technician.
     4   preview: a receipt that is neither a modern plan nor the expected refusal. STOP.
+    5   preview: no JSON receipt was produced. Check Cloudflare sign-in; nothing changed.
     64  usage error (bad mode or missing switch)
     65  any other hard stop: kit, guards, prefix, approval, freshness, observation
 
   WINDOWS RULES BAKED IN (from the Sep 4 / Sep 8 field writeups and the shipped CLI)
     * PowerShell 5.1 AND 7. No ternary, no ??, no &&/||, no -AsHashtable, no bare $IsWindows.
-      Script file only — nothing here is meant to be pasted line by line at a prompt.
+      Script file only -- nothing here is meant to be pasted line by line at a prompt.
     * npm.cmd / npx.cmd, never bare npm / npx: a restricted execution policy blocks the .ps1 shims.
     * Explicit --prefix always; never a bare `npm i -g` (an MSIX shell redirects %APPDATA%).
     * A prefix path with a space is refused: cmd.exe re-parses arguments (doctor.mjs:111-113).
       Every path this script passes is fully quoted anyway.
     * Get-FileHash -Algorithm SHA256 for every hash.
     * No token is ever printed, prompted for, or written. The CLI refuses Cloudflare token entry
-      on Windows outright (brain.mjs:790-812) — browser sign-in is the only path. If any prompt
+      on Windows outright (brain.mjs:790-812) -- browser sign-in is the only path. If any prompt
       is ever needed for a NON-Cloudflare secret, it is Read-Host -AsSecureString; no mode here
       prompts for anything.
     * curl.exe, never curl. This script does not use either.
@@ -103,7 +105,7 @@ $ExpectHeadSha     = 'e44a38b5c9d562ff98f81b7d5a8cd1f581c938d1'
 $ExpectBuild       = 'e44a38b'
 $ExpectVersion     = '0.4.8'
 # This kit is for a PRE-0.4.4 Brain at 0.4.0 or 0.4.1. A 0.4.6 Brain takes the
-# legacy-observation path this script does not implement — that is the Mac kit's path.
+# legacy-observation path this script does not implement -- that is the Mac kit's path.
 $ExpectFromVersions = @('0.4.0', '0.4.1')
 $ExpectPkgSha      = 'c6363a24ca4f7b369753f964ed8624920113074d634ace61975f430d13ecabf3'
 $ExpectRuntimeSha  = 'ad5ed8102fec8fb002c66ccef043348c65f8158ed506cb57512edff05327bc37'
@@ -125,6 +127,7 @@ $script:ExitStop            = 65
 $script:ExitUsage           = 64
 $script:ExitExpectedRefusal = 3
 $script:ExitUnclassified    = 4
+$script:ExitNoReceipt       = 5
 
 # ---------------------------------------------------------------- paths
 
@@ -134,6 +137,19 @@ if ([string]::IsNullOrEmpty($Kit)) {
     $script:KitDir = $Kit
 }
 $script:ScriptFileName = Split-Path -Leaf $PSCommandPath
+# The same bytes run under a generic public filename and a recipient-specific private filename.
+# Bind each launcher name to one exact guide name without carrying a person's name in public code.
+if ([string]::Equals($script:ScriptFileName, 'brain-windows-update.ps1',
+                     [System.StringComparison]::Ordinal)) {
+    $script:GuideFileName = 'README-WINDOWS-KIT.md'
+} else {
+    $guideStem = [System.IO.Path]::GetFileNameWithoutExtension($script:ScriptFileName)
+    if ($guideStem.EndsWith('-update', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $guideStem = $guideStem.Substring(0, $guideStem.Length - '-update'.Length)
+    }
+    if ([string]::IsNullOrEmpty($guideStem)) { Stop-Kit 'the launcher filename cannot identify its exact guide' }
+    $script:GuideFileName = 'README-FOR-' + $guideStem.ToUpperInvariant() + '.md'
+}
 $script:PkgPath  = Join-Path $script:KitDir 'brain-installer-0.4.8.tgz'
 $script:RcptPath = Join-Path $script:KitDir 'field-prepare-receipt.json'
 $script:SumsPath = Join-Path $script:KitDir 'SHA256SUMS'
@@ -560,7 +576,9 @@ function Resolve-NpmCmd {
 
 # ---------------------------------------------------------------- kit integrity
 
-function Test-Kit {
+function Test-KitChecksums {
+    # The checksum gate is independent of the signed preparation-receipt gate below. Keeping it
+    # separate lets CI exercise the exact four-file contract with tiny synthetic bytes.
     # Nothing here trusts a typed constant for the package or runtime hash. The values come out
     # of SHA256SUMS and field-prepare-receipt.json at run time; the constants above are only
     # cross-checked against them, so a mismatch names which of the two is wrong.
@@ -570,12 +588,10 @@ function Test-Kit {
 
     $report = @()
     $bad    = @()
-    # The public and private copies use different descriptive filenames. Bind the script entry to
-    # the file that is actually running and require exactly one Markdown guide, while preserving
-    # the exact four-entry checksum contract.
+    # The public and private copies use different descriptive filenames. Bind both the launcher
+    # and guide to their exact runtime names while preserving the four-entry checksum contract.
     $expectedSumNames = @('brain-installer-0.4.8.tgz', 'field-prepare-receipt.json',
-                          $script:ScriptFileName)
-    $guideSumNames = @()
+                          $script:ScriptFileName, $script:GuideFileName)
     $listedSumNames = @()
     foreach ($line in (Get-Content -LiteralPath $script:SumsPath)) {
         $t = $line.Trim()
@@ -587,10 +603,10 @@ function Test-Kit {
         $want = $Matches[1].ToLowerInvariant()
         $name = $Matches[2].Trim()
         $listedSumNames += $name
-        $isGuideName = [string]::Equals([System.IO.Path]::GetExtension($name), '.md',
-                                        [System.StringComparison]::OrdinalIgnoreCase)
-        if ($isGuideName) { $guideSumNames += $name }
-        if ((-not ($expectedSumNames -contains $name)) -and (-not $isGuideName)) {
+        $isExpectedName = @($expectedSumNames | Where-Object {
+            [string]::Equals($_, $name, [System.StringComparison]::Ordinal)
+        }).Count -eq 1
+        if (-not $isExpectedName) {
             $bad += ($name + ': UNEXPECTED entry in SHA256SUMS')
             continue
         }
@@ -608,10 +624,7 @@ function Test-Kit {
         $present = @($listedSumNames | Where-Object { [string]::Equals($_, $name, [System.StringComparison]::Ordinal) }).Count
         if ($present -eq 0) { $bad += ($name + ': MISSING from SHA256SUMS') }
     }
-    if ($guideSumNames.Count -ne 1) {
-        $bad += ('SHA256SUMS must contain exactly one Markdown guide entry; found ' + $guideSumNames.Count)
-    }
-    $expectedSumCount = $expectedSumNames.Count + 1
+    $expectedSumCount = $expectedSumNames.Count
     if ($listedSumNames.Count -ne $expectedSumCount) {
         $bad += ('SHA256SUMS must contain exactly ' + $expectedSumCount +
                  ' entries; found ' + $listedSumNames.Count)
@@ -622,28 +635,34 @@ function Test-Kit {
         Stop-Kit 'the kit files do not match SHA256SUMS. Do not install. Re-send the kit.'
     }
 
+    Say ('SHA256SUMS gate verified: exactly ' + $expectedSumCount + ' expected files')
+}
+
+function Test-Kit {
+    Test-KitChecksums
+
     $r = Read-JsonReceipt -Path $script:RcptPath
-    if ($null -eq $r) { Stop-Kit 'the preparation receipt is not readable JSON — do not install' }
+    if ($null -eq $r) { Stop-Kit 'the preparation receipt is not readable JSON -- do not install' }
 
     $status = Get-Prop -Object $r -Name 'status'
     if ($status -ne 'source_preparation_passed') {
-        Stop-Kit ('the preparation receipt status is "' + [string] $status + '", not source_preparation_passed — do not install')
+        Stop-Kit ('the preparation receipt status is "' + [string] $status + '", not source_preparation_passed -- do not install')
     }
     $steps = Get-Prop -Object $r -Name 'steps'
-    if ($null -eq $steps -or @($steps).Count -eq 0) { Stop-Kit 'the preparation receipt carries no steps — do not install' }
+    if ($null -eq $steps -or @($steps).Count -eq 0) { Stop-Kit 'the preparation receipt carries no steps -- do not install' }
     foreach ($s in @($steps)) {
         $st = Get-Prop -Object $s -Name 'status'
         if ($st -ne 'passed') {
             Stop-Kit ('preparation step "' + [string] (Get-Prop -Object $s -Name 'id') +
-                      '" is ' + [string] $st + ', not passed — this is not a full pass, do not install')
+                      '" is ' + [string] $st + ', not passed -- this is not a full pass, do not install')
         }
     }
     $head = Get-PropPath -Object $r -Path 'source.head_sha'
     if ($head -ne $ExpectHeadSha) {
-        Stop-Kit ('the receipt is for source head ' + [string] $head + ', not ' + $ExpectHeadSha + ' — do not install')
+        Stop-Kit ('the receipt is for source head ' + [string] $head + ', not ' + $ExpectHeadSha + ' -- do not install')
     }
     $clean = Get-PropPath -Object $r -Path 'source.working_tree_clean'
-    if ($clean -ne $true) { Stop-Kit 'the receipt does not record a clean working tree — do not install' }
+    if ($clean -ne $true) { Stop-Kit 'the receipt does not record a clean working tree -- do not install' }
 
     $script:PkgSha     = [string] (Get-PropPath -Object $r -Path 'package.sha256')
     $script:RuntimeSha = [string] (Get-PropPath -Object $r -Path 'package.runtime_payload_sha256')
@@ -735,9 +754,9 @@ function Resolve-ManifestPath {
     if (@($c.manifests).Count -gt 1) {
         Say '  more than one manifest is present under the profile:'
         foreach ($m in $c.manifests) { Say ('    ' + $m) }
-        Stop-Kit 'more than one manifest was found — pass -Manifest "<the right one>" explicitly'
+        Stop-Kit 'more than one manifest was found -- pass -Manifest "<the right one>" explicitly'
     }
-    Stop-Kit 'no remembered-manifest pointer and no manifest under the profile — pass -Manifest "<his manifest .json>"'
+    Stop-Kit 'no remembered-manifest pointer and no manifest under the profile -- pass -Manifest "<his manifest .json>"'
 }
 
 function Get-ManifestValue {
@@ -750,7 +769,7 @@ function Get-ManifestValue {
 }
 
 function Show-ManifestFacts {
-    # Settings only. No record, message, key or token is read or printed — presence, never value.
+    # Settings only. No record, message, key or token is read or printed -- presence, never value.
     $m = Read-JsonReceipt -Path $script:ManifestPath
     if ($null -eq $m) { Stop-Kit ('the manifest at ' + $script:ManifestPath + ' is not readable JSON') }
     $present = {
@@ -837,7 +856,7 @@ function Test-Prefix {
         if (Test-Path -LiteralPath $w) { $wrapper = $w; break }
     }
     if ([string]::IsNullOrEmpty($wrapper)) {
-        Say '  note: no brain.cmd shim was written beside the prefix. That is not a stop — every'
+        Say '  note: no brain.cmd shim was written beside the prefix. That is not a stop -- every'
         Say '        command in this kit calls node with the full path to brain.mjs anyway.'
     } else {
         $so = Join-Path $script:OutDir 'prefix-wrapper-usage.txt'
@@ -870,7 +889,7 @@ function Test-Prefix {
 
     $sigs = @(
         @{ n = '1/5'; f = $worker;     s = $FixLine;                      once = $true;
-           why = 'the c795716 evidence-contract fix line — on its own it is what used to be the ONLY check that told the fixed build from the broken 29a1075 build' },
+           why = 'the c795716 evidence-contract fix line -- on its own it is what used to be the ONLY check that told the fixed build from the broken 29a1075 build' },
         @{ n = '2/5'; f = $storeD1;    s = 'INVENTORY_DOCUMENT_CTES_SQL'; once = $false;
            why = 'the source-inventory fix (brain sources)' },
         @{ n = '3/5'; f = $ownerNotes; s = 'sweep receipt by construction'; once = $false;
@@ -887,18 +906,18 @@ function Test-Prefix {
             if ($hits.Count -ne 1) {
                 Stop-Kit ('candidate-build check failed (' + $sig.n + '): "' + $sig.s + '" (' + $sig.why +
                           ') is not present exactly once in ' + $sig.f + ' (found ' + $hits.Count +
-                          '). This is one of FIVE required signatures — do not proceed.')
+                          '). This is one of FIVE required signatures -- do not proceed.')
             }
         } elseif ($hits.Count -lt 1) {
             Stop-Kit ('candidate-build check failed (' + $sig.n + '): "' + $sig.s + '" (' + $sig.why +
                       ') is not present in ' + $sig.f +
-                      '. This is one of FIVE required candidate-build signatures — do not proceed.')
+                      '. This is one of FIVE required candidate-build signatures -- do not proceed.')
         }
         Say ('  signature ' + $sig.n + ' present')
     }
-    # Signature 4/5 — the Plaid owner-custody module. Presence only, no content check.
+    # Signature 4/5 -- the Plaid owner-custody module. Presence only, no content check.
     if (-not (Test-Path -LiteralPath $bankFeed)) {
-        Stop-Kit ('candidate-build check failed (4/5): operations\bank-feed-owner-secrets.mjs (the bank-feed owner-custody module) is not present in the installed prefix. This is one of FIVE required candidate-build signatures — do not proceed.')
+        Stop-Kit ('candidate-build check failed (4/5): operations\bank-feed-owner-secrets.mjs (the bank-feed owner-custody module) is not present in the installed prefix. This is one of FIVE required candidate-build signatures -- do not proceed.')
     }
     Say '  signature 4/5 present'
 
@@ -936,7 +955,7 @@ function Get-IdentityField {
 
 function Test-IdentityUnchanged {
     if (-not (Test-Path -LiteralPath $script:IdentityPath)) {
-        Stop-Kit ('no recorded identity at ' + $script:IdentityPath + ' — run install first (it records the Node and CLI hashes)')
+        Stop-Kit ('no recorded identity at ' + $script:IdentityPath + ' -- run install first (it records the Node and CLI hashes)')
     }
     $wantNode    = Get-IdentityField -Name 'node_path'
     $wantNodeSha = Get-IdentityField -Name 'node_sha256'
@@ -1030,7 +1049,7 @@ function Test-Guards {
         Stop-Kit ('a Brain scheduled task is running right now (' + ($tasks -join ', ') + '). Wait for it to finish.')
     }
     if ([string]::IsNullOrEmpty($script:CliPath) -or -not (Test-Path -LiteralPath $script:CliPath)) {
-        Stop-Kit ('no installed CLI under ' + $script:PrefixDir + ' — run: install')
+        Stop-Kit ('no installed CLI under ' + $script:PrefixDir + ' -- run: install')
     }
 }
 
@@ -1064,12 +1083,12 @@ function Exit-WriterLock {
 
 # ---------------------------------------------------------------- the approval sentences
 
-# Both sentences — the ordinary update one and the RESUME one — are rendered from the SAME three
+# Both sentences -- the ordinary update one and the RESUME one -- are rendered from the SAME three
 # blocks, so a clause can never be carried by one path and silently dropped by the other. The
 # held-candidate disclosure is byte-identical to the corresponding Mac kit's
 # SENTENCE_DISCLOSURE): it is the whole reason an owner is being asked to consent to a build
 # that is not released, and it is not optional on either path.
-$SentenceDisclosure = ' — a version that is not publicly released, whose own packaged technician guidance says a held candidate should not be used on a customer Brain, which the technician is installing as a supervised private pilot and will update until it is released — '
+$SentenceDisclosure = ' -- a version that is not publicly released, whose own packaged technician guidance says a held candidate should not be used on a customer Brain, which the technician is installing as a supervised private pilot and will update until it is released -- '
 $SentenceTrail      = '; one attempt; no automatic retry; I understand that this also rewrites, on my PC, my manifest''s version field, the remembered-manifest pointer, my already-managed Claude Code and Codex Brain connections, a managed CLAUDE.md and the technician skill, and that in my Cloudflare account it enables the workers.dev route and may remove managed provider secrets the new version does not use.'
 $SentenceCarve      = ' I understand my manifest has no Cloudflare sign-in profile yet, so signing in will add that one field and change its fingerprint, and that the technician must read me a fresh sentence if that happens before we start.'
 
@@ -1117,7 +1136,7 @@ function New-ResumeSentence {
     #      `brain update` does from here; and
     #   2. the observation clause becomes "paused-state observation <fp> taken <ISO minute>",
     #      because the paused refusal carries no plan at all, and because that fingerprint is a
-    #      pure function of STABLE values — without the minute, a sentence captured once would
+    #      pure function of STABLE values -- without the minute, a sentence captured once would
     #      authorize a resume for ever.
     # The selftest diffs the two rendered sentences and FAILS on any third difference.
     param(
@@ -1159,7 +1178,7 @@ function Write-ApprovalReceipt {
     $lines = @(
         ('recorded_at   ' + (Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz')),
         'ceremony      The technician read the plain-language approval paragraph aloud and the owner consented in plain language. The technical sentence below was recorded verbatim and offered to the owner, not read at the owner.',
-        ('build         ' + $ExpectBuild + ' — a held candidate, not a public release'),
+        ('build         ' + $ExpectBuild + ' -- a held candidate, not a public release'),
         '',
         $Sentence
     )
@@ -1174,7 +1193,7 @@ function Get-EffectsVerdict {
     param($Effects)
     $fails = @()
     $names = @(Get-PropNames -Object $Effects)
-    if ($names.Count -eq 0) { return @('effects is empty or absent — a receipt with no effects record proves nothing') }
+    if ($names.Count -eq 0) { return @('effects is empty or absent -- a receipt with no effects record proves nothing') }
     $cr = Get-Prop -Object $Effects -Name 'credential_reads'
     $nr = Get-Prop -Object $Effects -Name 'network_requests'
     if ($cr -ne 1) { $fails += ('effects.credential_reads=' + [string] $cr + ' expected 1') }
@@ -1184,7 +1203,7 @@ function Get-EffectsVerdict {
         $v = Get-Prop -Object $Effects -Name $n
         if ($v -ne 0) {
             $fails += ('effects.' + $n + '=' + [string] $v +
-                       ' expected 0 — no counter other than credential_reads and network_requests may be non-zero, known or not')
+                       ' expected 0 -- no counter other than credential_reads and network_requests may be non-zero, known or not')
         }
     }
     return $fails
@@ -1202,6 +1221,7 @@ function Get-PreviewClassification {
     $res = @{ kind = 'unclassified'; fails = @(); fingerprint = ''; vectors = ''; error_code = '' }
     $r = Read-JsonReceipt -Path $PreviewJsonPath
     if ($null -eq $r) {
+        $res.kind = 'no_receipt'
         $res.fails = @('the preview printed no parsable JSON at all (' + $PreviewJsonPath + ')')
         return $res
     }
@@ -1250,8 +1270,8 @@ function Get-PreviewClassification {
         if ($ExitCode -eq 0) { $fails += 'the preview exited 0 while reporting status failed' }
         if ((Get-Prop -Object $r -Name 'read_only') -ne $true) { $fails += 'read_only is not true' }
         if ((Get-Prop -Object $r -Name 'authorizes_update') -ne $false) { $fails += 'authorizes_update is not false' }
-        if (Test-HasProp -Object $r -Name 'plan') { $fails += 'the receipt carries a plan — a refusal must not' }
-        if (Test-HasProp -Object $r -Name 'plan_fingerprint') { $fails += 'the receipt carries a plan_fingerprint — a refusal must not' }
+        if (Test-HasProp -Object $r -Name 'plan') { $fails += 'the receipt carries a plan -- a refusal must not' }
+        if (Test-HasProp -Object $r -Name 'plan_fingerprint') { $fails += 'the receipt carries a plan_fingerprint -- a refusal must not' }
         $fails = @($fails) + @(Get-EffectsVerdict -Effects $effects)
         if ($ExpectedRefusalCodes -contains $code -and $fails.Count -eq 0) {
             $res.kind = 'expected_refusal'
@@ -1262,7 +1282,7 @@ function Get-PreviewClassification {
         }
         if ($code -eq 'UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED') {
             $res.kind = 'paused'
-            $res.fails = @('this Brain is PAUSED mid-update (UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED). preview/apply is not the mode for that state — use resume-preview.')
+            $res.fails = @('this Brain is PAUSED mid-update (UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED). preview/apply is not the mode for that state -- use resume-preview.')
             return $res
         }
         $res.kind = 'unclassified'
@@ -1272,7 +1292,7 @@ function Get-PreviewClassification {
 
     if ($status -eq 'legacy_observation_complete') {
         $res.kind = 'unclassified'
-        $res.fails = @('this Brain took the 0.4.6 LEGACY observation path (status legacy_observation_complete). That is the Mac kit''s contract, not this one — this kit is for a recorded ' + ($ExpectFromVersions -join ' or ') + ' Brain. Stop and reassess.')
+        $res.fails = @('this Brain took the 0.4.6 LEGACY observation path (status legacy_observation_complete). That is the Mac kit''s contract, not this one -- this kit is for a recorded ' + ($ExpectFromVersions -join ' or ') + ' Brain. Stop and reassess.')
         return $res
     }
 
@@ -1317,7 +1337,7 @@ function Get-HealthSummary {
 }
 
 function Test-PausedObservation {
-    # Fail-closed on ANYTHING that is not the exact paused-state signature — including a Brain
+    # Fail-closed on ANYTHING that is not the exact paused-state signature -- including a Brain
     # that is healthy again, a Brain still wholly on its recorded version, and a real modern
     # plan. The binding artifact is an OBSERVATION FINGERPRINT over
     # sha256(canonical-JSON { error_code, effects, health }), because this state has no plan and
@@ -1342,33 +1362,33 @@ function Test-PausedObservation {
 
     # ---- (1) health must be the paused failure, and nothing else -----------------------------
     if ($HealthExit -eq 0) {
-        $fails += 'health exited 0 — this Brain is NOT paused mid-update any more. Do not resume; re-read the state first.'
+        $fails += 'health exited 0 -- this Brain is NOT paused mid-update any more. Do not resume; re-read the state first.'
     }
     if ($hs.error_code -ne 'HEALTH_CHECK_FAILED') {
         $fails += ('health error_code=' + [string] $hs.error_code + ' expected HEALTH_CHECK_FAILED')
     }
     if (-not $hs.paused_for_update) {
-        $fails += ('health did not print the pause sentence ("' + $PauseSentence + '") — it failed for some OTHER reason (an unbound documents receipt, a wrong backend, an unreachable domain). That is not this mode.')
+        $fails += ('health did not print the pause sentence ("' + $PauseSentence + '") -- it failed for some OTHER reason (an unbound documents receipt, a wrong backend, an unreachable domain). That is not this mode.')
     }
     if ($hs.accepting_documents -eq $true) {
-        $fails += 'health reports accepting_documents=true — a paused Brain does not accept documents'
+        $fails += 'health reports accepting_documents=true -- a paused Brain does not accept documents'
     }
     # The pause sentence is the discriminator. On a paused Brain `brain health` dies at that
     # sentence before printing the drain mode, so drain_mode / accepting_documents are only
     # opportunistic fail-closed extras when a future or unusual output happens to include them.
     # Silence is accepted; any explicit value that contradicts paused is a STOP.
     if ($null -ne $hs.drain_mode -and $hs.drain_mode -notmatch '^paused') {
-        $fails += ('health reports vector drain mode "' + [string] $hs.drain_mode + '", which is not a paused drain mode — the writer is live, so this is a generation mismatch with a RUNNING writer, not an update that stopped mid-flight. Do not resume; re-read the state first.')
+        $fails += ('health reports vector drain mode "' + [string] $hs.drain_mode + '", which is not a paused drain mode -- the writer is live, so this is a generation mismatch with a RUNNING writer, not an update that stopped mid-flight. Do not resume; re-read the state first.')
     }
     if ($hs.paused_for_upgrade -and $hs.accepting_documents -eq $true) {
-        $fails += 'health names paused-for-upgrade and accepting_documents=true at once — those cannot both be true'
+        $fails += 'health names paused-for-upgrade and accepting_documents=true at once -- those cannot both be true'
     }
     if ($null -ne $hs.version -and $hs.version -ne $RecordedVersion -and $hs.version -ne $ExpectVersion) {
         $fails += ('health names version ' + [string] $hs.version + ', which is neither ' + $RecordedVersion + ' nor ' + $ExpectVersion)
     }
 
     # ---- (2) the preview must be the read-only refusal, with no plan --------------------------
-    if ($PreviewExit -eq 0) { $fails += 'the preview exited 0 — that is a real plan, not the paused refusal' }
+    if ($PreviewExit -eq 0) { $fails += 'the preview exited 0 -- that is a real plan, not the paused refusal' }
     $r = Read-JsonReceipt -Path $PreviewJsonPath
     $effects = $null
     $code = $null
@@ -1382,9 +1402,9 @@ function Test-PausedObservation {
         if ($PausedRefusalCodes -notcontains $code) {
             $fails += ('error_code=' + $code + ' is not one of ' + ($PausedRefusalCodes -join ' / '))
         }
-        if (Test-HasProp -Object $r -Name 'plan') { $fails += 'the receipt carries a plan — this is a real update plan, not the paused refusal. Use preview/apply, not resume.' }
-        if (Test-HasProp -Object $r -Name 'plan_fingerprint') { $fails += 'the receipt carries a plan_fingerprint — this is a real update plan, not the paused refusal' }
-        if (Test-HasProp -Object $r -Name 'legacy_observation') { $fails += 'the receipt carries a legacy_observation — this Brain took the 0.4.6 legacy path, so it is NOT paused mid-update' }
+        if (Test-HasProp -Object $r -Name 'plan') { $fails += 'the receipt carries a plan -- this is a real update plan, not the paused refusal. Use preview/apply, not resume.' }
+        if (Test-HasProp -Object $r -Name 'plan_fingerprint') { $fails += 'the receipt carries a plan_fingerprint -- this is a real update plan, not the paused refusal' }
+        if (Test-HasProp -Object $r -Name 'legacy_observation') { $fails += 'the receipt carries a legacy_observation -- this Brain took the 0.4.6 legacy path, so it is NOT paused mid-update' }
         $effects = Get-Prop -Object $r -Name 'effects'
         $fails = @($fails) + @(Get-EffectsVerdict -Effects $effects)
     }
@@ -1494,7 +1514,7 @@ function Get-IsoAgeSeconds {
 function Read-ResumeRecord {
     param([string] $Path)
     if (-not (Test-Path -LiteralPath $Path)) {
-        Stop-Kit ('no resume-preview observation on record at ' + $Path + ' — run: resume-preview')
+        Stop-Kit ('no resume-preview observation on record at ' + $Path + ' -- run: resume-preview')
     }
     $fp = ''; $at = ''
     foreach ($line in (Get-Content -LiteralPath $Path)) {
@@ -1502,14 +1522,14 @@ function Read-ResumeRecord {
         if ($line -match '^observed_at\s+(\S+)') { $at = $Matches[1] }
     }
     if ([string]::IsNullOrEmpty($fp)) {
-        Stop-Kit ('the recorded paused-state observation at ' + $Path + ' carries no fingerprint — run resume-preview again and use its sentence')
+        Stop-Kit ('the recorded paused-state observation at ' + $Path + ' carries no fingerprint -- run resume-preview again and use its sentence')
     }
     if ([string]::IsNullOrEmpty($at)) {
-        Stop-Kit ('the recorded paused-state observation at ' + $Path + ' carries no observed_at time, so its age cannot be bounded — run resume-preview again and use its sentence')
+        Stop-Kit ('the recorded paused-state observation at ' + $Path + ' carries no observed_at time, so its age cannot be bounded -- run resume-preview again and use its sentence')
     }
     $age = Get-IsoAgeSeconds -Iso $at
     if ($null -eq $age) {
-        Stop-Kit ('could not read the observed_at time in ' + $Path + ' ("' + $at + '") — run resume-preview again and use its sentence')
+        Stop-Kit ('could not read the observed_at time in ' + $Path + ' ("' + $at + '") -- run resume-preview again and use its sentence')
     }
     $script:ResumeRecordedFp  = $fp
     $script:ResumeRecordedAt  = $at
@@ -1519,7 +1539,7 @@ function Read-ResumeRecord {
 function Test-ResumeRecordFresh {
     # WHY a time bound at all: the observation fingerprint is sha256 over the refusal code, the
     # effects counters and the health summary. Every one of those is STABLE while the Brain stays
-    # paused, so the fingerprint observed a week from now is the same fingerprint — a sentence
+    # paused, so the fingerprint observed a week from now is the same fingerprint -- a sentence
     # captured once would otherwise authorize a resume indefinitely, long after the conversation
     # in which he said yes. The freshness bound is what makes his yes a yes to THIS moment.
     if ($script:ResumeRecordedAge -lt 0) {
@@ -1531,10 +1551,10 @@ function Test-ResumeRecordFresh {
         Say ('  taken at        : ' + $script:ResumeRecordedAt)
         Say ('  age now         : ' + $script:ResumeRecordedAge + 's')
         Say ('  freshness bound : ' + $ResumeObsMaxAgeSeconds + 's')
-        Say 'The fingerprint alone does not go stale — a paused Brain keeps producing the same one —'
+        Say 'The fingerprint alone does not go stale -- a paused Brain keeps producing the same one --'
         Say 'so the sentence is bound to the MINUTE the state was observed as well. Run resume-preview'
         Say 'again, read him the fresh sentence, and ask again. Do not paste the old one.'
-        Stop-Kit ('the paused-state observation is older than ' + $ResumeObsMaxAgeSeconds + 's — run resume-preview again')
+        Stop-Kit ('the paused-state observation is older than ' + $ResumeObsMaxAgeSeconds + 's -- run resume-preview again')
     }
 }
 
@@ -1570,7 +1590,7 @@ function Initialize-BrainContext {
     if ($ExpectFromVersions -notcontains $script:FromVersion) {
         Stop-Kit ('this manifest records version "' + $script:FromVersion + '". This kit is for a ' +
                   ($ExpectFromVersions -join ' or ') + ' Brain only. A 0.4.6 Brain takes the legacy-observation ' +
-                  'path this script does not implement — that is the Mac kit. Stop and reassess.')
+                  'path this script does not implement -- that is the Mac kit. Stop and reassess.')
     }
     Test-Prefix -PrefixPath $script:PrefixDir
     Test-Guards
@@ -1587,7 +1607,7 @@ function Initialize-BrainContext {
     Say ('recorded version: ' + $script:FromVersion)
     Say ('Cloudflare sign-in profile in manifest: ' + $script:AuthState)
     if ($script:AuthState -eq 'absent') {
-        Say '  (the first sign-in writes that one field, which changes the manifest SHA — see the sentence)'
+        Say '  (the first sign-in writes that one field, which changes the manifest SHA -- see the sentence)'
     }
 }
 
@@ -1595,11 +1615,12 @@ function Initialize-BrainContext {
 
 function Invoke-ModeDiscover {
     Say '=============================================================='
-    Say ' DISCOVER — read-only, and NO NETWORK AT ALL. Nothing about'
+    Say ' DISCOVER -- read-only, and NO NETWORK AT ALL. Nothing about'
     Say ' this Brain, this Cloudflare account or these records is'
     Say ' changed, installed, sent or contacted.'
     Say '=============================================================='
     Resolve-NodeExe
+    Test-Kit
     $info = Get-NodeInfo
 
     Say ''
@@ -1626,7 +1647,7 @@ function Invoke-ModeDiscover {
     Say ('  PSVersion        : ' + $PSVersionTable.PSVersion.ToString())
     Say ('  PSEdition        : ' + $PSVersionTable.PSEdition)
     if (Test-IsWindowsHost) {
-        try { Say ('  ExecutionPolicy  : ' + (Get-ExecutionPolicy).ToString() + '   (do not change it — this kit uses the .cmd shims)') } catch { }
+        try { Say ('  ExecutionPolicy  : ' + (Get-ExecutionPolicy).ToString() + '   (do not change it -- this kit uses the .cmd shims)') } catch { }
         if (-not [string]::IsNullOrEmpty($env:APPDATA)) { Say ('  APPDATA          : ' + $env:APPDATA) }
         if ($env:APPDATA -match 'WindowsApps|Packages\\') {
             Say '  ** APPDATA looks redirected (an MSIX / packaged shell). A bare `npm i -g` would install'
@@ -1647,7 +1668,7 @@ function Invoke-ModeDiscover {
         $se = Join-Path $script:OutDir 'npm-version.stderr'
         $rc = Invoke-Captured -FilePath $script:NpmCmdExe -Arguments @('--version') -StdoutPath $so -StderrPath $se
         if ($rc -eq 0) { Say ('  npm version      : ' + (Get-Content -LiteralPath $so -Raw).Trim()) }
-        else { Say ('  npm version      : could not be read (exit ' + $rc + ') — see ' + $se) }
+        else { Say ('  npm version      : could not be read (exit ' + $rc + ') -- see ' + $se) }
     } else {
         Say '  npm command      : NOT FOUND. Find it with "where npm.cmd" and pass -NpmCmd <that path>.'
     }
@@ -1657,7 +1678,7 @@ function Invoke-ModeDiscover {
     Say ('  prefix           : ' + $script:PrefixDir)
     $root = Get-PrefixRoot -PrefixPath $script:PrefixDir
     if ([string]::IsNullOrEmpty($root)) {
-        if (Test-Path -LiteralPath $script:PrefixDir) { Say '  state            : the folder exists but holds no brain-installer — install would refuse it' }
+        if (Test-Path -LiteralPath $script:PrefixDir) { Say '  state            : the folder exists but holds no brain-installer -- install would refuse it' }
         else { Say '  state            : not present yet (this is the normal state before install)' }
     } else {
         Say ('  state            : brain-installer is already installed at ' + $root)
@@ -1674,10 +1695,10 @@ function Invoke-ModeDiscover {
     }
 
     Say ''
-    Say 'Any CLI already on PATH (not used by this kit — every command here uses the full path)'
+    Say 'Any CLI already on PATH (not used by this kit -- every command here uses the full path)'
     $b = Get-Command -Name 'brain' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $b) { Say '  brain on PATH    : none' }
-    else { Say ('  brain on PATH    : ' + $b.Source + '   (a stale shim can point at another install — ignore it)') }
+    else { Say ('  brain on PATH    : ' + $b.Source + '   (a stale shim can point at another install -- ignore it)') }
 
     Say ''
     Say 'The manifest'
@@ -1704,7 +1725,7 @@ function Invoke-ModeDiscover {
     $adminKey = Get-ManifestValue -Path 'operations.admin_key_secret'
     if (-not [string]::IsNullOrEmpty($adminKey) -and $adminKey -like 'keychain://*') {
         Say '  ** the admin-key locator is a macOS keychain:// URI. On Windows the CLI treats any'
-        Say '     keychain locator as an unsupported admin key store (brain.mjs:23286-23296) — a'
+        Say '     keychain locator as an unsupported admin key store (brain.mjs:23286-23296) -- a'
         Say '     Windows Brain must use the adjacent DPAPI-protected key file. Flag this to the technician. **'
     }
 
@@ -1725,13 +1746,14 @@ function Show-ExpectedTable {
     Say '             kit verification. No network at all. Nothing is changed.'
     Say ('  install    "installed ... into <prefix>", then "prefix verified: CLI ' + $ExpectVersion + ', all five')
     Say '             candidate-build signatures present".'
-    Say '  preview    ONE of three outcomes, and it says which:'
-    Say '               EXPECTED here, on a pre-0.4.4 Brain — a read-only refusal, exit 3.'
+    Say '  preview    ONE of four outcomes, and it says which:'
+    Say '               EXPECTED here, on a pre-0.4.4 Brain -- a read-only refusal, exit 3.'
     Say '                 The 0.4.0 and 0.4.1 Workers do not report their own version on /documents'
     Say '                 (that landed in 0.4.4), and the 0.4.8 modern preview requires it. Capturing'
     Say '                 that refusal cleanly is what Sunday is FOR. Stop there and send the receipts.'
-    Say '               a modern plan — exit 0, and only then is there a sentence to read.'
-    Say '               anything else — exit 4. STOP and call the technician.'
+    Say '               a modern plan -- exit 0, and only then is there a sentence to read.'
+    Say '               an unclassifiable receipt -- exit 4. STOP and call the technician.'
+    Say '               no JSON receipt -- exit 5. Check the Cloudflare sign-in; nothing changed.'
     Say ('  apply      one update, uninterrupted, ending "upgrade verified, now at ' + $ExpectVersion + '", then the readback.')
     Say '             The bare update command does NOT enforce the runtime SHA-256. That hash names'
     Say '             the kit being run; only the read-only preview can bind it before the update.'
@@ -1748,11 +1770,11 @@ function Show-ExpectedTable {
 
 function Invoke-ModeInstall {
     Say '=============================================================='
-    Say ' INSTALL — the kit package only. No Brain, no Cloudflare.'
+    Say ' INSTALL -- the kit package only. No Brain, no Cloudflare.'
     Say '=============================================================='
     Resolve-NodeExe
     if (Test-NodeVersionManaged -Path $script:NodeExe) {
-        Stop-Kit ('the Node at ' + $script:NodeExe + ' sits under a version manager — see discover. Resolve to a stable Node first.')
+        Stop-Kit ('the Node at ' + $script:NodeExe + ' sits under a version manager -- see discover. Resolve to a stable Node first.')
     }
     $info = Get-NodeInfo
     if ($info.major -lt $MinNodeMajor) { Stop-Kit ('Node major version ' + $info.major + ' is below ' + $MinNodeMajor) }
@@ -1770,7 +1792,7 @@ function Invoke-ModeInstall {
     Test-Kit
 
     if ($script:PrefixDir -match '\s') {
-        Stop-Kit ('the prefix path "' + $script:PrefixDir + '" contains a space. cmd.exe re-parses arguments and can split it silently (doctor.mjs:111-113). Unzip the kit somewhere without a space — C:\FinancialBrain-kit is the recommended place — or pass -Prefix "C:\FinancialBrain\prefix".')
+        Stop-Kit ('the prefix path "' + $script:PrefixDir + '" contains a space. cmd.exe re-parses arguments and can split it silently (doctor.mjs:111-113). Unzip the kit somewhere without a space -- C:\FinancialBrain-kit is the recommended place -- or pass -Prefix "C:\FinancialBrain\prefix".')
     }
     foreach ($bad in @('\Downloads\', '\OneDrive', '\Dropbox', '\Google Drive', '\Temp\', '\Windows\Temp')) {
         if ($script:PrefixDir -like ('*' + $bad + '*')) {
@@ -1778,7 +1800,7 @@ function Invoke-ModeInstall {
         }
     }
     if (-not [string]::IsNullOrEmpty((Get-PrefixRoot -PrefixPath $script:PrefixDir))) {
-        Stop-Kit ('a brain-installer prefix already exists at ' + $script:PrefixDir + ' — not overwriting. Choose another with -Prefix, or check what is there first.')
+        Stop-Kit ('a brain-installer prefix already exists at ' + $script:PrefixDir + ' -- not overwriting. Choose another with -Prefix, or check what is there first.')
     }
 
     New-KitDirectory -Path $script:PrefixDir
@@ -1798,7 +1820,7 @@ function Invoke-ModeInstall {
     Test-Prefix -PrefixPath $script:PrefixDir
     Save-Identity
     Say ''
-    Say ('Installed. Never move or delete ' + $script:PrefixDir + ' after an update — the local')
+    Say ('Installed. Never move or delete ' + $script:PrefixDir + ' after an update -- the local')
     Say 'registrations point at absolute paths inside it.'
     Say 'Next: preview'
 }
@@ -1826,11 +1848,11 @@ function Invoke-HealthProbe {
         Say 'preview and apply are not the modes for that state. Do not retry, Ctrl-C, unpause,'
         Say 'clear the drain mode, reindex, ingest, repair or restore.'
         Say 'Run instead:   resume-preview'
-        Stop-Kit 'this Brain is paused mid-update — use resume-preview, not preview'
+        Stop-Kit 'this Brain is paused mid-update -- use resume-preview, not preview'
     }
     if ($rc -ne 0) {
-        Say '  ** health did not exit 0. That is not automatically a stop — the preview below is the'
-        Say '     authoritative read — but note it, and send this file back with the receipts:'
+        Say '  ** health did not exit 0. That is not automatically a stop -- the preview below is the'
+        Say '     authoritative read -- but note it, and send this file back with the receipts:'
         Say ('     ' + (Join-Path $script:OutDir ($Label + '.txt')))
     }
     return $rc
@@ -1838,7 +1860,7 @@ function Invoke-HealthProbe {
 
 function Invoke-ModePreview {
     Say '=============================================================='
-    Say ' PREVIEW — read-only. Health, then ONE look at this Brain.'
+    Say ' PREVIEW -- read-only. Health, then ONE look at this Brain.'
     Say ' Nothing is written. On a 0.4.0 / 0.4.1 Brain a REFUSAL is the'
     Say ' expected outcome and it is the finding Sunday exists to get.'
     Say '=============================================================='
@@ -1860,13 +1882,19 @@ function Invoke-ModePreview {
     Say ('  classification: ' + $cls.kind)
     if (-not [string]::IsNullOrEmpty($cls.error_code)) { Say ('  error_code    : ' + $cls.error_code) }
 
+    if ($cls.kind -eq 'no_receipt') {
+        Say ''
+        Say 'no receipt was produced (likely a Cloudflare sign-in or credential problem) -- run discover and check the sign-in; nothing was changed'
+        exit $script:ExitNoReceipt
+    }
+
     if ($cls.kind -eq 'expected_refusal') {
         Say ''
         Say '--------------------------------------------------------------'
         Say 'EXPECTED REFUSAL on a pre-0.4.4 Brain: stop here, send the receipts folder to the technician'
         Say '--------------------------------------------------------------'
         Say ('This Brain records ' + $script:FromVersion + '. Its deployed Worker does not report its own version on')
-        Say '/documents — that field only arrived in 0.4.4 — and the 0.4.8 modern preview requires it,'
+        Say '/documents -- that field only arrived in 0.4.4 -- and the 0.4.8 modern preview requires it,'
         Say 'with a legacy fallback only for a recorded 0.4.6. So the preview refused, read-only:'
         Say ('  error_code        : ' + $cls.error_code)
         Say '  read_only         : true'
@@ -1884,7 +1912,7 @@ function Invoke-ModePreview {
     if ($cls.kind -ne 'modern') {
         Say ''
         Say '--------------------------------------------------------------'
-        Say 'STOP — this is neither a modern plan nor the expected pre-0.4.4 refusal.'
+        Say 'STOP -- this is neither a modern plan nor the expected pre-0.4.4 refusal.'
         Say '--------------------------------------------------------------'
         foreach ($f in $cls.fails) { Say ('  ' + $f) }
         Say ''
@@ -1910,7 +1938,7 @@ function Invoke-ModePreview {
     Write-Utf8NoBom -Path $sp -Text $sentence
     Say ''
     Say '--------------------------------------------------------------'
-    Say 'RECORD ONLY — do not read the hashes aloud.'
+    Say 'RECORD ONLY -- do not read the hashes aloud.'
     Say 'Say the plain-language paragraph, get his yes, then paste this sentence back with'
     Say '-Approval. His "yes" is the consent; this sentence is the record of what he agreed to.'
     Say '--------------------------------------------------------------'
@@ -1932,7 +1960,7 @@ function Invoke-OneUpdate {
     # different command from the one that was approved; only the receipt stem differs.
     param([string] $Stem)
     Say ''
-    Say ('== ' + $Stem + ' — do not Ctrl-C, do not close this window, do not let the PC sleep')
+    Say ('== ' + $Stem + ' -- do not Ctrl-C, do not close this window, do not let the PC sleep')
     Say '   Progress lines with the first number climbing are the thing working.'
     $start = Get-Date
     $outFile = Join-Path $script:OutDir ($Stem + '.stdout')
@@ -1992,7 +2020,7 @@ function Invoke-PostUpdateReadback {
         foreach ($f in $cls.fails) { Say ('   ' + $f) }
     }
 
-    # status, health, check — then a quiet gap — then sources, alone.
+    # status, health, check -- then a quiet gap -- then sources, alone.
     foreach ($c in @('status', 'health')) {
         $rc = Invoke-BrainRead -Stem ($ReadbackStem + '-' + $c) -BrainArgs @($c, $script:ManifestPath)
         Say ($ReadbackStem + '-' + $c + ' exit=' + $rc)
@@ -2000,11 +2028,11 @@ function Invoke-PostUpdateReadback {
     $checkArgs = @('check', $script:ManifestPath)
     if (-not [string]::IsNullOrEmpty($Subject)) { $checkArgs = @('check', $script:ManifestPath, '--subject', $Subject) }
     $rc = Invoke-BrainRead -Stem ($ReadbackStem + '-check') -BrainArgs $checkArgs
-    Say ($ReadbackStem + '-check exit=' + $rc + '   (exit 0 is NOT the pass signal here — count the completed categories)')
+    Say ($ReadbackStem + '-check exit=' + $rc + '   (exit 0 is NOT the pass signal here -- count the completed categories)')
     $rc = Invoke-BrainRead -Stem ($ReadbackStem + '-mcp-config') -BrainArgs @('mcp-config', $script:ManifestPath)
     Say ($ReadbackStem + '-mcp-config exit=' + $rc + '   (read-only; --apply is never run by this kit)')
 
-    Say ('   waiting ' + $SourcesQuietSeconds + 's before sources — it 503s when it follows check too closely')
+    Say ('   waiting ' + $SourcesQuietSeconds + 's before sources -- it 503s when it follows check too closely')
     Start-Sleep -Seconds $SourcesQuietSeconds
     $rc = Invoke-BrainRead -Stem ($ReadbackStem + '-sources') -BrainArgs @('sources', $script:ManifestPath, '--json')
     Say ($ReadbackStem + '-sources exit=' + $rc + '   (0 = the source-inventory fix is proven live on this Brain)')
@@ -2052,7 +2080,7 @@ function Invoke-ModeApply {
     $lock = Enter-WriterLock
     try {
         Say '=============================================================='
-        Say ' APPLY — ONE update. Never Ctrl-C. Never retry.'
+        Say ' APPLY -- ONE update. Never Ctrl-C. Never retry.'
         Say '=============================================================='
         Initialize-BrainContext
 
@@ -2071,13 +2099,13 @@ function Invoke-ModeApply {
             Say ''
             Say ('The preview refuses on this Brain (' + $cls.error_code + '). There is no plan, so there is')
             Say 'nothing an approval can authorize. apply cannot run. This is the expected pre-0.4.4'
-            Say 'outcome — stop here and send the receipts folder to the technician.'
+            Say 'outcome -- stop here and send the receipts folder to the technician.'
             Exit-WriterLock -Lock $lock
             exit $script:ExitExpectedRefusal
         }
         if ($cls.kind -ne 'modern') {
             Say ''
-            Say 'STOP — apply requires a MODERN plan and this is not one:'
+            Say 'STOP -- apply requires a MODERN plan and this is not one:'
             foreach ($f in $cls.fails) { Say ('  ' + $f) }
             Exit-WriterLock -Lock $lock
             exit $script:ExitUnclassified
@@ -2086,7 +2114,7 @@ function Invoke-ModeApply {
         # The plan fingerprint the owner was read must still be the plan fingerprint now.
         $recordedFpFile = Join-Path $script:OutDir 'plan-fingerprint.txt'
         if (-not (Test-Path -LiteralPath $recordedFpFile)) {
-            Stop-Kit ('no preview plan fingerprint on record at ' + $recordedFpFile + ' — run preview first and use its sentence')
+            Stop-Kit ('no preview plan fingerprint on record at ' + $recordedFpFile + ' -- run preview first and use its sentence')
         }
         $recordedFp = ''
         foreach ($line in (Get-Content -LiteralPath $recordedFpFile)) {
@@ -2097,7 +2125,7 @@ function Invoke-ModeApply {
             Say 'The plan is not the plan he was shown.'
             Say ('  recorded at preview : ' + $recordedFp)
             Say ('  observed just now   : ' + $cls.fingerprint)
-            Stop-Kit 'the plan changed since preview (the plan fingerprint differs) — run preview again and use its sentence'
+            Stop-Kit 'the plan changed since preview (the plan fingerprint differs) -- run preview again and use its sentence'
         }
 
         $fresh = New-UpdateSentence -BrainName $script:BrainName -BrainDomain $script:BrainDomain `
@@ -2122,7 +2150,7 @@ function Show-ResumeExpectedTable {
     Say 'What resume-preview should print if all is well'
     Say '  health   a NON-ZERO exit, HEALTH_CHECK_FAILED, and the sentence'
     Say ('           "' + $PauseSentence + '".')
-    Say '           A health that exits 0 means this Brain is no longer paused — that is a STOP here.'
+    Say '           A health that exits 0 means this Brain is no longer paused -- that is a STOP here.'
     Say '  preview  a NON-ZERO exit and a read-only REFUSAL: status failed, read_only true,'
     Say '           authorizes_update false, NO plan and NO plan fingerprint, exactly 1 credential'
     Say '           read, 1 network request, and zero of every other counter. The code should be'
@@ -2147,11 +2175,11 @@ function Show-ResumeExpectedTable {
 
 function Invoke-ModeResumePreview {
     Say '=============================================================='
-    Say ' RESUME-PREVIEW — read-only. Two looks at this Brain, spaced.'
+    Say ' RESUME-PREVIEW -- read-only. Two looks at this Brain, spaced.'
     Say ' Nothing is written. This mode is for ONE state and no other:'
     Say ' an update that STOPPED with the Brain left PAUSED mid-update,'
     Say ' with the new Worker already deployed. If the Brain is healthy,'
-    Say ' this mode refuses — use preview and apply instead.'
+    Say ' this mode refuses -- use preview and apply instead.'
     Say '=============================================================='
     Initialize-BrainContext
     Show-ResumeExpectedTable
@@ -2173,10 +2201,10 @@ function Invoke-ModeResumePreview {
 
     Say ''
     Say '--------------------------------------------------------------'
-    Say 'RECORD ONLY — do not read the hashes aloud.'
+    Say 'RECORD ONLY -- do not read the hashes aloud.'
     Say 'Say plainly that his Brain is paused right now, that his records are readable but he'
     Say 'cannot add to them until this finishes, and that this is one more attempt at the SAME'
-    Say 'update he already agreed to — not a new one, and not a repair. Get his yes, then paste'
+    Say 'update he already agreed to -- not a new one, and not a repair. Get his yes, then paste'
     Say 'this sentence back with -Approval.'
     Say '--------------------------------------------------------------'
     Write-Output $sentence
@@ -2188,7 +2216,7 @@ function Invoke-ModeResumePreview {
     Say ''
     Say ('This sentence goes stale. It was taken at ' + $script:ResumeObsAt + ' and resume refuses it more than')
     Say ([string] $ResumeObsMaxAgeSeconds + 's (20 minutes) after that. If the conversation runs long, run resume-preview')
-    Say 'again and read him the fresh sentence — that is the intended outcome, not a fault.'
+    Say 'again and read him the fresh sentence -- that is the intended outcome, not a fault.'
 }
 
 function Invoke-ModeResume {
@@ -2206,7 +2234,7 @@ function Invoke-ModeResume {
     $lock = Enter-WriterLock
     try {
         Say '=============================================================='
-        Say ' RESUME — ONE update, from the top. Never Ctrl-C. Never retry.'
+        Say ' RESUME -- ONE update, from the top. Never Ctrl-C. Never retry.'
         Say '=============================================================='
         Initialize-BrainContext
 
@@ -2222,7 +2250,7 @@ function Invoke-ModeResume {
         Invoke-PausedObservation -Label '11-resume-recheck' -RecordedVersion $script:FromVersion
         Test-ResumeObservationGate -RecordPath $script:ResumeFpPath -ObservedNow $script:ResumeObsFp
 
-        # The sentence names the minute the RECORDED observation was taken — the one he was read —
+        # The sentence names the minute the RECORDED observation was taken -- the one he was read --
         # not this instant, so the rebuilt sentence can match his byte for byte. What keeps that
         # honest is the freshness bound above, not a fresh timestamp here.
         $fresh = New-ResumeSentence -BrainName $script:BrainName -BrainDomain $script:BrainDomain `
@@ -2273,7 +2301,7 @@ function New-FixtureFile {
 }
 
 function Invoke-ModeSelftest {
-    Write-Output 'SELFTEST — offline. No network, no Brain, no install, no real profile touched.'
+    Write-Output 'SELFTEST -- offline. No network, no Brain, no install, no real profile touched.'
     Write-Output ('  host: PowerShell ' + $PSVersionTable.PSVersion.ToString() + ' (' + $PSVersionTable.PSEdition + ')')
 
     $T = Join-Path ([System.IO.Path]::GetTempPath()) ('brain-windows-kit-selftest-' + [System.Guid]::NewGuid().ToString('N'))
@@ -2300,6 +2328,14 @@ function Invoke-ModeSelftest {
         $script:NodeSha = Get-Sha256OfFile -Path $script:NodeExe
 
         # ---- T0 the three parser/process regressions fixed by this review ----------------------
+        $scriptBytes = [System.IO.File]::ReadAllBytes($PSCommandPath)
+        $scriptIsAscii = $true
+        foreach ($byte in $scriptBytes) {
+            if ($byte -gt 0x7F) { $scriptIsAscii = $false; break }
+        }
+        Test-Says 'T0a the launcher bytes are ASCII-only (no BOM and no version-dependent decoding)' `
+                  $scriptIsAscii
+
         $noArgExe = (Get-Command -Name 'whoami' -CommandType Application -ErrorAction Stop |
                      Select-Object -First 1).Source
         $noArgOut = Join-Path $T 'no-arguments.stdout'
@@ -2425,7 +2461,7 @@ process.exit(1);
             '{"status":"failed","read_only":true,"authorizes_update":false,"projection_ready":false,' +
             '"error_code":"UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED",' + $effectsOk + '}')
         $cls = Get-PreviewClassification -PreviewJsonPath $paused -ExitCode 1
-        Test-Says 'T6  the PAUSED refusal is NOT treated as the expected pre-0.4.4 one — it routes to resume' `
+        Test-Says 'T6  the PAUSED refusal is NOT treated as the expected pre-0.4.4 one -- it routes to resume' `
                   ($cls.kind -eq 'paused')
 
         $legacy = New-FixtureFile -Path (Join-Path $T 'fx-legacy.json') -Text (
@@ -2456,7 +2492,8 @@ process.exit(1);
                   ($planExit.kind -ne 'modern')
         $garbage = New-FixtureFile -Path (Join-Path $T 'fx-garbage.txt') -Text 'this is not json'
         $cls = Get-PreviewClassification -PreviewJsonPath $garbage -ExitCode 1
-        Test-Says 'T9b output with no JSON at all is unclassified, never silently passed' ($cls.kind -eq 'unclassified')
+        Test-Says 'T9b output with no JSON at all is classified separately from a receipt' `
+                  ($cls.kind -eq 'no_receipt')
         $modernQueue = New-FixtureFile -Path (Join-Path $T 'fx-modern-queue.json') -Text (
             (Get-Content -LiteralPath $modern -Raw).Replace('"pending":0', '"pending":7'))
         $cls = Get-PreviewClassification -PreviewJsonPath $modernQueue -ExitCode 0
@@ -2494,7 +2531,7 @@ process.exit(1);
         $o3 = Test-PausedObservation -PreviewJsonPath $paused -PreviewExit 1 `
                                      -HealthTextPath $healthPaused -HealthExit 0 `
                                      -ObservationOutPath (Join-Path $T 'obs-3.json') -RecordedVersion '0.4.0'
-        Test-Says 'T12 health EXIT 0 is refused — a Brain that is no longer paused must not be resumed' (-not $o3.ok)
+        Test-Says 'T12 health EXIT 0 is refused -- a Brain that is no longer paused must not be resumed' (-not $o3.ok)
 
         $healthSkew = Join-Path $T 'fx-health-skew.txt'
         [System.IO.File]::WriteAllBytes($healthSkew, [Convert]::FromBase64String(
@@ -2531,6 +2568,12 @@ process.exit(1);
                -ManifestSha 'MSHA' -PlanFingerprint 'FPX' -PackageSha 'PKGX' -RuntimeSha 'RTX' `
                -NodeSha 'NODEX' -CliSha 'CLIX' -AuthState 'present'
         Test-Equal 'T20 the update sentence is byte-identical on two runs' $s1 $s1b
+        $sentenceBytes = [System.Text.Encoding]::UTF8.GetBytes($s1)
+        $sentenceIsAscii = $true
+        foreach ($byte in $sentenceBytes) {
+            if ($byte -gt 0x7F) { $sentenceIsAscii = $false; break }
+        }
+        Test-Says 'T20a the rendered approval sentence contains no byte above 0x7F' $sentenceIsAscii
         foreach ($want in @('one update of fake-brain (fake.example.invalid)', 'from 0.4.0 to 0.4.8 build e44a38b',
                             'manifest SHA-256 MSHA', 'plan fingerprint FPX', 'package SHA-256 PKGX',
                             'runtime SHA-256 RTX', 'Node SHA-256 NODEX', 'CLI SHA-256 CLIX',
@@ -2584,7 +2627,7 @@ process.exit(1);
         Test-Says 'T27b a 25-minute-old observation is REFUSED although its fingerprint still matches exactly (replay bound)' `
                   (($r.code -ne 0) -and ($r.text -match 'stale|older than'))
         $r = Invoke-Child -ChildArgs @('__resume-fp-gate', '-Out', (Join-Path $T 'childout'), '-Pos1', $recNoAt, '-Pos2', 'AAAA')
-        Test-Says 'T27c a record with no observed_at is refused — its age cannot be bounded' ($r.code -ne 0)
+        Test-Says 'T27c a record with no observed_at is refused -- its age cannot be bounded' ($r.code -ne 0)
         $r = Invoke-Child -ChildArgs @('__resume-fp-gate', '-Out', (Join-Path $T 'childout'), '-Pos1', $recFuture, '-Pos2', 'AAAA')
         Test-Says 'T27d an observation dated in the future is refused rather than treated as fresh' ($r.code -ne 0)
         $r = Invoke-Child -ChildArgs @('__resume-fp-gate', '-Out', (Join-Path $T 'childout'), '-Pos1', $recFresh, '-Pos2', 'BBBB')
@@ -2638,22 +2681,26 @@ process.exit(1);
         Test-Says 'T32b the recorded version is printed' ($facts -match 'recorded version\s+:\s+0\.4\.0')
         Test-Says 'T32c probe_questions is counted, not listed' ($facts -match 'probe_questions count\s+:\s+3')
 
-        # ---- T34 the kit itself, if the sealed files are beside this script ---------------------
+        # ---- T34 the checksum gate, if a four-file kit is available -----------------------------
         if ((Test-Path -LiteralPath $script:PkgPath) -and (Test-Path -LiteralPath $script:SumsPath)) {
-            $r = Invoke-Child -ChildArgs @('__verify-kit', '-Out', (Join-Path $T 'childout'), '-Kit', $script:KitDir)
-            Test-Says 'T34 the real kit beside this script verifies against SHA256SUMS and the receipt' `
-                      (($r.code -eq 0) -and ($r.text -match 'kit verified'))
+            $r = Invoke-Child -ChildArgs @('__verify-checksums', '-Out', (Join-Path $T 'childout'), '-Kit', $script:KitDir)
+            Test-Says 'T34 the four-file kit verifies against its exact SHA256SUMS entries' `
+                      (($r.code -eq 0) -and ($r.text -match 'SHA256SUMS gate verified'))
             # A tampered copy of the kit must be refused by the checksum gate.
             $tamperKit = Join-Path $T 'tamperkit'
             New-KitDirectory -Path $tamperKit
             Copy-Item -LiteralPath $script:SumsPath  -Destination (Join-Path $tamperKit 'SHA256SUMS')
             Copy-Item -LiteralPath $script:RcptPath  -Destination (Join-Path $tamperKit 'field-prepare-receipt.json')
             Copy-Item -LiteralPath $PSCommandPath    -Destination (Join-Path $tamperKit $script:ScriptFileName)
+            Copy-Item -LiteralPath (Join-Path $script:KitDir $script:GuideFileName) `
+                      -Destination (Join-Path $tamperKit $script:GuideFileName)
             Copy-Item -LiteralPath $script:PkgPath   -Destination (Join-Path $tamperKit 'brain-installer-0.4.8.tgz')
             Add-Content -LiteralPath (Join-Path $tamperKit 'brain-installer-0.4.8.tgz') -Value 'tamper'
-            $r = Invoke-Child -ChildArgs @('__verify-kit', '-Out', (Join-Path $T 'childout'), '-Kit', $tamperKit)
-            Test-Says 'T34b a tampered package is refused by the checksum gate' `
-                      (($r.code -ne 0) -and ($r.text -match 'do not match SHA256SUMS'))
+            $r = Invoke-Child -ChildArgs @('__verify-checksums', '-Out', (Join-Path $T 'childout'), '-Kit', $tamperKit)
+            Test-Says 'T34b the tampered package is refused with exit 65 and its exact mismatch message' `
+                      (($r.code -eq 65) -and
+                       ($r.text -match 'brain-installer-0\.4\.8\.tgz: SHA-256 MISMATCH') -and
+                       ($r.text -match 'do not match SHA256SUMS'))
         } else {
             Write-Output '  note T34 skipped: the sealed package / SHA256SUMS are not beside this script'
         }
@@ -2672,7 +2719,7 @@ process.exit(1);
     Write-Output ''
     Write-Output ('SELFTEST: ' + $script:SelfPass + ' passed, ' + $script:SelfFail + ' failed')
     if ($script:SelfFail -ne 0) { exit 2 }
-    Write-Output 'All checks passed. This proves this script''s own logic only — it proves nothing about any Brain.'
+    Write-Output 'All checks passed. This proves this script''s own logic only -- it proves nothing about any Brain.'
 }
 
 # ---------------------------------------------------------------- dispatch
@@ -2687,6 +2734,7 @@ switch ($Mode) {
     'selftest'        { Invoke-ModeSelftest }
 
     # internal, used only by selftest; never run in the field
+    '__verify-checksums' { Test-KitChecksums }
     '__verify-kit'    { Resolve-NodeExe; Test-Kit }
     '__verify-prefix' { Resolve-NodeExe; Test-Prefix -PrefixPath $script:PrefixDir }
     '__approval-gate' { Test-ApprovalSentence -Given $Pos1 -Fresh $Pos2 -FreshPathStem 'gate-fresh'; Write-Output 'APPROVAL_MATCHED' }

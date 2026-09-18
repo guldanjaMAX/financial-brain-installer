@@ -68,13 +68,19 @@ Everything the script writes stays inside that folder:
    volta) is a stop: the update bakes the absolute path into your local registrations.
 3. **PowerShell from the Start menu.** Not an app's built-in terminal, not Claude Desktop, not
    "Run as administrator". 5.1 and 7 both work.
-4. **Do not change the execution policy.** The script only ever calls `npm.cmd`, never `npm`.
+4. **Do not change the stored execution policy.** Every launcher line below uses
+   `-ExecutionPolicy Bypass` for that one new PowerShell process only. It does not change the
+   machine or user policy, and it is the exact form exercised by the Windows PowerShell 5.1 CI job.
+   The script itself only ever calls `npm.cmd`, never `npm`.
 5. **Never paste a token.** You will not be asked for one. The CLI refuses to take a Cloudflare
    token on Windows at all — browser sign-in is the only path. (A PowerShell 5.1 prompt echoed a
    live token on 2026-09-08; that is why.)
-6. **Cloudflare sign-in, pinned:** `npx.cmd wrangler@4.73.0 login` — that exact version, as the
-   CLI prints it. You have two Cloudflare accounts: **match the account by its id, not by its
-   display name.** Your Brain's id is in your manifest; `discover` prints where the manifest is.
+6. **Cloudflare sign-in, pinned:** `wrangler@4.73.0` is the version the CLI prints for the login
+   command. The CLI invokes `wrangler@4.131.1` for its OAuth ceremony and doctor. You have two
+   Cloudflare accounts: **match the account by its id, not by its display name.** Your Brain's id
+   is in your manifest; `discover` prints where the manifest is. If the 4.73.0 login session is not
+   accepted by the 4.131.1 ceremony or doctor, stop and report that exact version boundary, the
+   step, exit code and safe receipt output. Do not paste a token or try another Wrangler version.
 7. **`curl.exe`, never `curl`** — in PowerShell the bare name is something else entirely.
 8. **Plugged in, sleep off, one window, left open.** Never pipe anything here through `findstr`
    or `more`.
@@ -88,12 +94,16 @@ Open PowerShell from the Start menu, then:
 
 ```powershell
 cd C:\FinancialBrain-kit
+Get-ChildItem | Unblock-File
 ```
+
+`Unblock-File` removes the downloaded files' Mark-of-the-Web once inside this kit folder. It does
+not change the execution policy.
 
 **Step 0 — run the offline selftest. It contacts no Brain and makes no network request.**
 
 ```powershell
-.\brain-windows-update.ps1 selftest
+powershell -NoProfile -ExecutionPolicy Bypass -File .\brain-windows-update.ps1 selftest
 ```
 
 It must end with `0 failed`. Exit code **2** means this kit failed its own checks. Stop and tell
@@ -102,12 +112,26 @@ the technician; do not continue to `discover`, `install`, or `preview`.
 **Step 1 — discover. Read-only, and it makes no network request at all.**
 
 ```powershell
-.\brain-windows-update.ps1 discover
+powershell -NoProfile -ExecutionPolicy Bypass -File .\brain-windows-update.ps1 discover
 ```
 
 It prints your Node, npm and PowerShell versions, where your manifest is, what version it records,
 whether the prefix exists yet, and the kit's checksums. Nothing is installed and your Brain is
 never contacted. Screenshot the end of it.
+
+If `discover` finds no manifest or more than one, run it again with the exact path it showed or the
+path supplied by the technician:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\brain-windows-update.ps1 discover -Manifest "C:\path\to\your.manifest.json"
+```
+
+To compare the account picker without printing the full account id, replace the path below with
+that exact manifest path. This one line prints only the last four characters:
+
+```powershell
+$id = [string]((Get-Content -Raw "C:\path\to\your.manifest.json" | ConvertFrom-Json).infrastructure.cloudflare.account_id); "Cloudflare account id ends in " + $id.Substring([Math]::Max(0, $id.Length - 4))
+```
 
 **Step 2 — Cloudflare sign-in (only if the technician says so on the call).**
 
@@ -120,7 +144,7 @@ One Allow click in the browser. Match the **account id**, not the name.
 **Step 3 — install. Offline as far as your Brain is concerned.**
 
 ```powershell
-.\brain-windows-update.ps1 install
+powershell -NoProfile -ExecutionPolicy Bypass -File .\brain-windows-update.ps1 install
 ```
 
 It installs into `C:\FinancialBrain-kit\prefix` with an explicit `--prefix`, then checks **five
@@ -131,7 +155,7 @@ number alone cannot tell this build from one missing a fix.
 **Step 4 — preview. Read-only. One health check, then one look at your Brain.**
 
 ```powershell
-.\brain-windows-update.ps1 preview
+powershell -NoProfile -ExecutionPolicy Bypass -File .\brain-windows-update.ps1 preview
 ```
 
 This is where we expect to stop. See §5.
@@ -139,7 +163,7 @@ This is where we expect to stop. See §5.
 **Step 5 — only if the preview produced a real plan, which we do not expect:**
 
 ```powershell
-.\brain-windows-update.ps1 apply -Run -Approval "<the exact sentence the preview printed>"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\brain-windows-update.ps1 apply -Run -Approval "<the exact sentence the preview printed>"
 ```
 
 The technician reads you a plain-language paragraph first and you say yes to that. The long sentence is the
@@ -158,6 +182,7 @@ Run `echo $LASTEXITCODE` right after a command to see it.
 | **0** | the step did what it is for | carry on |
 | **3** | **the expected refusal on a pre-0.4.4 Brain** | **this is Sunday's result.** Stop. Zip `receipts\` and send it. Nothing was changed. |
 | **4** | the preview returned something that is neither a plan nor the refusal we expect | STOP. Do nothing else. Send `receipts\` and tell the technician. |
+| **5** | the preview produced no JSON receipt, likely because Cloudflare sign-in or credentials were not accepted | Nothing changed. Run `discover`, check the sign-in and report the 4.73.0/4.131.1 boundary. Do not run `apply`. |
 | **64** | you left off a switch, or used a mode name that does not exist | re-read the line and run it again |
 | **65** | a hard stop: the kit, a guard, the prefix, the approval sentence or a freshness check | read the STOP line — it says exactly which. Do not work around it. |
 | **2** | `selftest` had failures | tell the technician; do not run anything else from this kit |
@@ -173,10 +198,10 @@ Then, and only then:
 
 1. Do **not** Ctrl-C, retry, clear `VECTOR_DRAIN_MODE`, restore the D1 bookmark, or run `reindex`,
    `drain`, `ingest`, `forget` or `setup`.
-2. `.\brain-windows-update.ps1 resume-preview` — **both commands inside it are supposed to exit non-zero.**
+2. `powershell -NoProfile -ExecutionPolicy Bypass -File .\brain-windows-update.ps1 resume-preview` — **both commands inside it are supposed to exit non-zero.**
    That is the correct answer for a paused Brain, not a failure.
 3. The technician reads you the RESUME sentence, you say yes, then
-   `.\brain-windows-update.ps1 resume -Run -Approval "<that sentence>"`.
+   `powershell -NoProfile -ExecutionPolicy Bypass -File .\brain-windows-update.ps1 resume -Run -Approval "<that sentence>"`.
 4. That sentence **expires after 20 minutes.** If the conversation runs long, run `resume-preview`
    again and use the fresh one. That is intended, not a fault.
 
