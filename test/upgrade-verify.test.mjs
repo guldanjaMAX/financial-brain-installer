@@ -413,7 +413,7 @@ const bootstrapCompletion = () => ({
       brain: { domain: "fixture.invalid", worker_name: "fixture" },
       infrastructure: { cloudflare: { storage: "d1" } },
     }));
-    const runGate = async (inventory) => {
+    const runGate = async (inventoryOrFactory) => {
       let documentCalls = 0;
       let authenticated = false;
       const waits = [];
@@ -434,6 +434,9 @@ const bootstrapCompletion = () => ({
             if (path !== "/api/admin/brain/documents") throw new Error(`unexpected request ${path}`);
             documentCalls++;
             authenticated = init.headers?.["X-Admin-Key"] === "fixture-admin-label";
+            const inventory = typeof inventoryOrFactory === "function"
+              ? inventoryOrFactory(documentCalls)
+              : inventoryOrFactory;
             return new Response(JSON.stringify(inventory), { status: 200 });
           },
         });
@@ -446,9 +449,28 @@ const bootstrapCompletion = () => ({
       exact.error === null && exact.authenticated && exact.documentCalls === 1 && exact.waits.length === 0,
       JSON.stringify({ ...exact, error: exact.error?.message }));
 
+    const transientSkew = await runGate((attempt) => attempt <= 3
+      ? readyProjectionInventory({ drainMode: "active" })
+      : readyProjectionInventory());
+    check("the paused pre-migration gate retries three skewed generations and accepts the fourth",
+      transientSkew.error === null && transientSkew.authenticated &&
+        transientSkew.documentCalls === 4 && transientSkew.waits.join(",") === "4000,4000,4000",
+      JSON.stringify({ ...transientSkew, error: transientSkew.error?.message }));
+
+    const persistentSkew = await runGate(readyProjectionInventory({ version: "0.0.0-fixture-old" }));
+    check("the paused pre-migration gate exhausts the receipt ladder on persistent generation skew",
+      persistentSkew.error !== null && persistentSkew.authenticated &&
+        persistentSkew.documentCalls === 15 && persistentSkew.waits.length === 14 &&
+        /the authenticated documents receipt did not match the public Worker's version and writer mode/.test(
+          persistentSkew.error?.message || "",
+        ),
+      JSON.stringify({
+        documentCalls: persistentSkew.documentCalls,
+        waits: persistentSkew.waits,
+        error: persistentSkew.error?.message,
+      }));
+
     const mismatches = [
-      ["worker version", readyProjectionInventory({ version: "0.0.0-fixture-old" })],
-      ["writer mode", readyProjectionInventory({ drainMode: "active" })],
       ["D1 backend", readyProjectionInventory({ backend: "supabase" })],
       ["vector totals", readyProjectionInventory({ expectedVectors: 9, actualVectors: 8 })],
       ["non-empty queue", readyProjectionInventory({
@@ -1487,10 +1509,13 @@ const bootstrapCompletion = () => ({
 
   for (const failureStage of pausedAggregateFailures.keys()) {
     const pausedProjectionFailure = await runFailure(failureStage);
-    check(`${failureStage} stops after one authenticated response and before every later update stage`,
+    const generationSkew = ["paused-generation", "paused-mode"].includes(failureStage);
+    const expectedDocumentCalls = generationSkew ? 15 : 1;
+    const expectedWaits = generationSkew ? 14 : 0;
+    check(`${failureStage} stops after its bounded authenticated check and before every later update stage`,
       pausedProjectionFailure.events.join(",") === "deploy-paused,health-paused-reach" &&
-        pausedProjectionFailure.pausedDocumentCalls === 1 &&
-        pausedProjectionFailure.pausedHealthWaits === 0 &&
+        pausedProjectionFailure.pausedDocumentCalls === expectedDocumentCalls &&
+        pausedProjectionFailure.pausedHealthWaits === expectedWaits &&
         pausedProjectionFailure.pausedRequestAuthenticated === true &&
         pausedProjectionFailure.versionWrites === 0 && pausedProjectionFailure.manifestWrites === 0 &&
         pausedProjectionFailure.manifestVersion === "0.1.9" &&

@@ -3068,13 +3068,11 @@ export async function cmdHealth(manifestPath, {
       // Explicit update/setup checks are deploy waiters: the public endpoint
       // can reach the new Worker one request before this authenticated route.
       // Ordinary health remains a one-snapshot fail-closed check.
-      // The paused pre-migration gate is one fail-closed observation. Once the
-      // authenticated route answers, a generation, writer-mode, backend, or
-      // projection mismatch must stop this update instead of being retried into
-      // a different snapshot that could hide the state which blocked migration.
-      const receiptAttempts = requireProjectionReady
-        ? 1
-        : (expectVersion || expectDrainMode) ? attempts : 1;
+      // Explicit generation checks tolerate only the bounded rolling-edge skew
+      // between /health and this authenticated route. Once version and writer
+      // mode agree, every backend, shape, and projection-readiness gate below
+      // remains a one-observation fail-closed decision.
+      const receiptAttempts = (expectVersion || expectDrainMode) ? attempts : 1;
       const missingVersion = typeof inventory.version !== "string" || !inventory.version.trim();
       const missingMode = !["active", "paused-for-upgrade"].includes(inventory.vector_drain_mode);
       if ((missingVersion || missingMode) && i < receiptAttempts) {
