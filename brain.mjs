@@ -14906,10 +14906,13 @@ const cmdIngestRemoteRun = async (
           uids: excludeProtectedDriveUids(excludedUids),
           base, adminKey, state, dryRun: true, label: "source policy",
         });
-        await applyDriveRemovals({
-          uids: excludeProtectedDriveUids(sourceDeletedUids),
-          base, adminKey, state, dryRun: true, label: "Drive deletion",
-        });
+        const changeFeedRemovedCount = excludeProtectedDriveUids(sourceDeletedUids).length;
+        if (changeFeedRemovedCount) {
+          warn(
+            `${changeFeedRemovedCount} file(s) were reported by the change feed as removed; ` +
+              "they will be verified and are never deleted on that signal"
+          );
+        }
         await applyDriveRemovals({
           uids: excludeProtectedDriveUids(intentionalRemovalUids),
           base, adminKey, state, dryRun: true, label: "intentional source skip",

@@ -1147,6 +1147,19 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     goneReviewOnly.cleanup();
   }
 
+  const goneDryRun = runScopeScenario("incremental-gone", {
+    args: ["--dry-run"],
+  });
+  try {
+    assert.equal(goneDryRun.code, 0, goneDryRun.output);
+    assert.match(goneDryRun.output,
+      /1 file\(s\) were reported by the change feed as removed; they will be verified and are never deleted on that signal/i);
+    assert.doesNotMatch(goneDryRun.output, /WOULD be removed from the brain/i);
+    assert.equal(goneDryRun.evidence().forgetRequests, 0);
+  } finally {
+    goneDryRun.cleanup();
+  }
+
   const goneApprovalCannotShorten = runScopeScenario("incremental-gone", {
     priorReview: true,
     args: ["--approve-removals", gonePlan.fingerprint],
