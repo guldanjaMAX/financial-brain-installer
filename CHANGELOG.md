@@ -20,6 +20,13 @@ asset publication.
   shows its name, folder, and approval fingerprint; an unlabelled item reports
   protection, prints no fingerprint for that item, and leaves it stored.
 
+- **A missing server clock header no longer stops Drive ingest.** If the
+  Brain's private inventory response has no valid server time, the completed
+  Drive walk and cursor are still saved. That run records an unanchored absence
+  observation, warns once, and gives it no credit toward the seven-day removal
+  proof. To check: the run should finish its walk without `INGEST_FAILED`, keep
+  the candidate protected, and print no matured approval from that observation.
+
 - **A stale retry marker can no longer delete a document without a fresh look
   at Drive and your approval.** Every saved retry marker is checked again; a
   live file clears it, a temporary lookup failure stays protected for the next

@@ -8,6 +8,7 @@ const userRoot = String(process.env.BRAIN_DRIVE_SCOPE_USER_ROOT || "");
 const evidencePath = String(process.env.BRAIN_DRIVE_SCOPE_EVIDENCE || "");
 const mode = String(process.env.BRAIN_DRIVE_SCOPE_MODE || "");
 const inventoryLabelsAvailable = process.env.BRAIN_DRIVE_SCOPE_LABELS !== "none";
+const inventoryDateAvailable = process.env.BRAIN_DRIVE_SCOPE_DATE !== "none";
 const MODES = new Set([
   "changed-outside",
   "full-unresolved",
@@ -75,10 +76,13 @@ function saveEvidence(evidence) {
   writeFileSync(evidencePath, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
 }
 
-function json(body, status = 200) {
+function json(body, status = 200, includeDate = true) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json", date: new Date().toUTCString() },
+    headers: {
+      "content-type": "application/json",
+      ...(includeDate ? { date: new Date().toUTCString() } : {}),
+    },
   });
 }
 
@@ -347,7 +351,7 @@ globalThis.fetch = async (input, options = {}) => {
       families,
       ...(request.include_labels === true ? { family_details: storedFamilyDetails(families) } : {}),
       next_cursor: null,
-    });
+    }, 200, inventoryDateAvailable);
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/forget") {

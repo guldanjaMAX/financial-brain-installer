@@ -671,6 +671,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorApprovalExpired = false,
     localDoneLabels = true,
     inventoryLabels = true,
+    inventoryDate = true,
     args = [],
   } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
@@ -692,6 +693,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       BRAIN_DRIVE_SCOPE_EVIDENCE: evidencePath,
       BRAIN_DRIVE_SCOPE_MODE: mode,
       BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? "stored" : "none",
+      BRAIN_DRIVE_SCOPE_DATE: inventoryDate ? "server" : "none",
       ADMIN_KEY: "fixture-admin",
     });
 
@@ -1474,6 +1476,30 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(review.unresolved_not_returned[0].observations.length, 2);
   } finally {
     clockSkewedRepeat.cleanup();
+  }
+
+  const missingServerDate = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    priorObservation: true,
+    inventoryDate: false,
+  });
+  try {
+    assert.equal(missingServerDate.code, 1, missingServerDate.output);
+    assert.match(missingServerDate.output, /did not provide a valid server time/i);
+    assert.match(missingServerDate.output, /cannot advance the seven-day removal proof/i);
+    assert.doesNotMatch(missingServerDate.output, /unexpected error|INGEST_FAILED/i);
+    assert.equal(missingServerDate.evidence().forgetRequests, 0);
+    const state = missingServerDate.state();
+    assert.equal(state.sync_token, "fixture-prewalk-full-unresolved",
+      "a missing inventory Date header withheld the completed Drive cursor");
+    assert.equal(state.drive_removal_review.counts.pending_source_deletions, 0);
+    assert.equal(state.drive_removal_review.counts.unresolved_not_returned, 1);
+    assert.ok(state.drive_removal_review.unresolved_not_returned[0].observations.some(
+      (observation) => observation.server_observed_at === null,
+    ), "the unanchored observation was not retained with a null server timestamp");
+  } finally {
+    missingServerDate.cleanup();
   }
 
   const elapsedRepeat = runScopeScenario("full-unresolved", {

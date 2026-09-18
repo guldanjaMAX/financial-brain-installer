@@ -687,7 +687,9 @@ possible causes, and the owner action depends on which one the message names:
    Drive ingestion again. Only the same
    not-returned result in two distinct runs with Worker-backed timestamps at
    least seven days apart can create a deletion candidate. The local and server
-   clocks must agree within 24 hours. That later approval stop shows the locally
+   clocks must agree within 24 hours. If a private inventory response has no
+   valid server time, that run warns and keeps syncing, but its absence
+   observation cannot advance this proof. That later approval stop shows the locally
    saved name and folder, using the Brain's stored document inventory if local
    ingest state no longer has them. If either label is still missing, the item
    is listed as `label_unavailable`, remains protected and retained, and cannot

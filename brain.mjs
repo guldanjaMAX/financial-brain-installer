@@ -11512,6 +11512,7 @@ export async function listStoredSourceFamilies({
   const labels = new Map();
   const seenCursors = new Set();
   let serverObservedAt = null;
+  let serverDateChecked = false;
   let cursor = "";
   for (;;) {
     if (seenCursors.has(cursor)) throw new Error("source-family inventory repeated a cursor");
@@ -11531,13 +11532,10 @@ export async function listStoredSourceFamilies({
       }),
     }, { what: "the source-family inventory" });
     const raw = await res.text();
-    if (includeServerObservedAt) {
+    if (includeServerObservedAt && !serverDateChecked) {
+      serverDateChecked = true;
       const serverMs = Date.parse(String(res.headers?.get?.("date") || ""));
-      if (!Number.isFinite(serverMs)) {
-        throw new Error("source-family inventory did not provide a valid server Date header");
-      }
-      const observedAt = new Date(serverMs).toISOString();
-      if (serverObservedAt === null) serverObservedAt = observedAt;
+      if (Number.isFinite(serverMs)) serverObservedAt = new Date(serverMs).toISOString();
     }
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
@@ -14315,16 +14313,17 @@ const cmdIngestRemoteRun = async (
       const runIdValue = typeof observation?.run_id === "string" ? observation.run_id.trim() : "";
       const localMs = Date.parse(String(observation?.observed_at || ""));
       const serverMs = Date.parse(String(observation?.server_observed_at || ""));
-      if (!runIdValue || !Number.isFinite(localMs) || !Number.isFinite(serverMs)) continue;
+      if (!runIdValue || !Number.isFinite(localMs)) continue;
       if (byRun.has(runIdValue)) continue;
       byRun.set(runIdValue, {
         run_id: runIdValue,
         observed_at: new Date(localMs).toISOString(),
-        server_observed_at: new Date(serverMs).toISOString(),
+        server_observed_at: Number.isFinite(serverMs) ? new Date(serverMs).toISOString() : null,
       });
     }
     return [...byRun.values()].sort((a, b) =>
-      Date.parse(a.server_observed_at) - Date.parse(b.server_observed_at) ||
+      (Date.parse(a.server_observed_at || "") || Date.parse(a.observed_at)) -
+        (Date.parse(b.server_observed_at || "") || Date.parse(b.observed_at)) ||
       a.run_id.localeCompare(b.run_id)
     );
   };
@@ -14372,13 +14371,10 @@ const cmdIngestRemoteRun = async (
     };
   };
   const currentDriveObservation = () => {
-    if (!driveInventoryServerObservedAt) {
-      throw new Error("Drive absence review requires the source inventory's server clock");
-    }
     return {
       run_id: runId,
       observed_at: driveReviewObservedAt,
-      server_observed_at: driveInventoryServerObservedAt,
+      server_observed_at: driveInventoryServerObservedAt || null,
     };
   };
   const appendDriveObservation = (record) => normalizeDriveObservations([
@@ -14386,7 +14382,8 @@ const cmdIngestRemoteRun = async (
     currentDriveObservation(),
   ]);
   const driveAbsenceProofMatured = (record) => {
-    const observations = normalizeDriveObservations(record?.observations);
+    const observations = normalizeDriveObservations(record?.observations)
+      .filter((observation) => Number.isFinite(Date.parse(observation.server_observed_at || "")));
     if (observations.length < 2) return false;
     if (observations.some((observation) => Math.abs(
       Date.parse(observation.observed_at) - Date.parse(observation.server_observed_at)
@@ -14767,6 +14764,12 @@ const cmdIngestRemoteRun = async (
     const driveStoredBeforeProcessing = driveInventoryBeforeProcessing?.families || null;
     driveInventoryServerObservedAt = driveInventoryBeforeProcessing?.serverObservedAt || null;
     driveInventoryLabels = driveInventoryBeforeProcessing?.labels || new Map();
+    if (driveInventoryBeforeProcessing && !driveInventoryServerObservedAt) {
+      warn(
+        "Drive's stored-family inventory did not provide a valid server time. " +
+          "This walk will continue, but its absence observations cannot advance the seven-day removal proof."
+      );
+    }
     const driveRemovalSafetyCount = driveStoredBeforeProcessing
       ? recordRemovalSafetyBaseline({
           stateKey: "drive_removal_safety_baseline",

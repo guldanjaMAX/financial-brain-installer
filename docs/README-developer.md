@@ -682,7 +682,10 @@ cannot shorten the window. No UID is deleted while its absence is unresolved
 or its grace window is open. A not-returned item becomes a `source_deleted`
 candidate only after the same outcome is observed by two distinct run IDs with
 Worker inventory response dates at least seven days apart. Each local and
-server timestamp must agree within 24 hours. Even one such candidate stops for the exact `brain ingest
+server timestamp must agree within 24 hours. A missing or invalid inventory
+`Date` header records `server_observed_at: null`, warns once, and contributes no
+maturation evidence; it does not fail the walk or withhold its completed cursor.
+Even one such candidate stops for the exact `brain ingest
 <manifest> --from drive --approve-removals <fingerprint>` owner approval and
 shows its name and folder from durable local state, with the authenticated D1
 family inventory as the fallback. Every run backfills missing labels from those
