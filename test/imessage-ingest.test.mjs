@@ -104,6 +104,15 @@ function makeBrainFakes({ script = null } = {}) {
   };
 }
 
+function withImessageClock(fakes, nowIso) {
+  const nowMs = Date.parse(nowIso);
+  fakes.options.imessage = {
+    ...imessage,
+    captureOnce: (options) => imessage.captureOnce({ ...options, now: () => nowMs }),
+  };
+  return fakes;
+}
+
 try {
   /* ================= one capture pass through the real command ========== */
   {
@@ -503,10 +512,11 @@ try {
       INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1,1);
     `);
     let twiceRowid = 0;
+    const fixedAfternoon = Date.parse("2026-06-15T22:00:00.000Z"); // 15:00 America/Phoenix
     const addTwiceRow = ({ guid, text, minutes }) => {
       twiceRowid++;
       twiceDb.prepare("INSERT INTO message (ROWID, guid, text, date, is_from_me, handle_id) VALUES (?,?,?,?,?,?)")
-        .run(twiceRowid, guid, text, macNs(new Date(Date.now() - minutes * 60_000).toISOString()), 0, 1);
+        .run(twiceRowid, guid, text, macNs(new Date(fixedAfternoon - minutes * 60_000).toISOString()), 0, 1);
       twiceDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, twiceRowid);
     };
     const sweepFlags = { "chat-db": twicePath, source: "imessage-twice", reset: true };
@@ -518,26 +528,26 @@ try {
 
     addTwiceRow({ guid: "TW-1", text: "Did the Ferris permit come back?", minutes: 100 });
     addTwiceRow({ guid: "TW-2", text: "Not yet, chasing it this afternoon", minutes: 90 });
-    const firstPass = makeBrainFakes();
+    const firstPass = withImessageClock(makeBrainFakes(), "2026-06-15T23:00:00.000Z");
     await cmdIngestImessage(manifest, manifestPath, sweepFlags, firstPass.options);
 
     // Two ordinary cron ticks while the same conversation is still going.
     addTwiceRow({ guid: "TW-3", text: "They want the revised site plan first", minutes: 80 });
-    const tickOne = makeBrainFakes();
+    const tickOne = withImessageClock(makeBrainFakes(), "2026-06-15T23:00:00.000Z");
     await cmdIngestImessage(manifest, manifestPath, tickFlags, tickOne.options);
     addTwiceRow({ guid: "TW-4", text: "Sending it over tonight", minutes: 70 });
-    const tickTwo = makeBrainFakes();
+    const tickTwo = withImessageClock(makeBrainFakes(), "2026-06-15T23:00:00.000Z");
     await cmdIngestImessage(manifest, manifestPath, tickFlags, tickTwo.options);
 
     // The quiet spell arrives and the conversation is delivered.
-    const settle = makeBrainFakes();
+    const settle = withImessageClock(makeBrainFakes(), "2026-06-16T05:30:00.000Z");
     await cmdIngestImessage(manifest, manifestPath, flushFlags, settle.options);
     const firstRun = [firstPass, tickOne, tickTwo, settle].flatMap(delivered);
 
     // The owner runs the remedy again: --reset, no --limit, same database.
-    const reSweep = makeBrainFakes();
+    const reSweep = withImessageClock(makeBrainFakes(), "2026-06-16T05:30:00.000Z");
     await cmdIngestImessage(manifest, manifestPath, sweepFlags, reSweep.options);
-    const reSettle = makeBrainFakes();
+    const reSettle = withImessageClock(makeBrainFakes(), "2026-06-16T05:30:00.000Z");
     await cmdIngestImessage(manifest, manifestPath, flushFlags, reSettle.options);
     const secondRun = [reSweep, reSettle].flatMap(delivered);
 
@@ -550,6 +560,61 @@ try {
       JSON.stringify({ firstRun, secondRun }));
 
     twiceDb.close();
+  }
+
+  /* ===== a local-midnight split is stable across a re-sweep ===== */
+  {
+    const midnightPath = join(sandbox, "chat-midnight.db");
+    const midnightDb = new DatabaseSync(midnightPath);
+    midnightDb.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, country TEXT, service TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT, style INTEGER);
+      CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+      CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+      CREATE TABLE message (
+        ROWID INTEGER PRIMARY KEY, guid TEXT UNIQUE, text TEXT, attributedBody BLOB,
+        date INTEGER, is_from_me INTEGER, handle_id INTEGER
+      );
+      INSERT INTO handle (ROWID, id, country, service) VALUES (1, '+15554446666', 'us', 'iMessage');
+      INSERT INTO chat (ROWID, guid, display_name, style) VALUES (1, 'iMessage;-;+15554446666', NULL, 45);
+      INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1,1);
+    `);
+    const midnightRows = [
+      ["MD-1", "Still awake?", "2026-06-16T06:50:00.000Z"], // 23:50 Phoenix
+      ["MD-2", "Yes, finishing the permit notes", "2026-06-16T06:55:00.000Z"],
+      ["MD-3", "It just turned midnight", "2026-06-16T07:05:00.000Z"], // 00:05 Phoenix
+      ["MD-4", "I will send them in the morning", "2026-06-16T07:10:00.000Z"],
+    ];
+    for (const [index, [guid, text, timestamp]] of midnightRows.entries()) {
+      const row = index + 1;
+      midnightDb.prepare("INSERT INTO message (ROWID, guid, text, date, is_from_me, handle_id) VALUES (?,?,?,?,?,?)")
+        .run(row, guid, text, macNs(timestamp), 0, 1);
+      midnightDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, row);
+    }
+
+    const flags = { "chat-db": midnightPath, source: "imessage-midnight", reset: true };
+    const flush = { source: "imessage-midnight", "flush-sessions": true };
+    const sweepDocuments = async () => {
+      const pass = withImessageClock(makeBrainFakes(), "2026-06-16T08:00:00.000Z");
+      await cmdIngestImessage(manifest, manifestPath, flags, pass.options);
+      const settle = withImessageClock(makeBrainFakes(), "2026-06-16T08:00:00.000Z");
+      await cmdIngestImessage(manifest, manifestPath, flush, settle.options);
+      return [pass, settle].flatMap((fakes) => fakes.batches.flat()).map((document) => ({
+        source_id: document.source_id,
+        messages: document.metadata.message_count,
+      }));
+    };
+
+    const first = await sweepDocuments();
+    const second = await sweepDocuments();
+    check("a thread crossing local midnight is split into two stable documents",
+      JSON.stringify(first) === JSON.stringify(second) &&
+      JSON.stringify(first) === JSON.stringify([
+        { source_id: "MD-1", messages: 2 },
+        { source_id: "MD-3", messages: 2 },
+      ]), JSON.stringify({ first, second }));
+
+    midnightDb.close();
   }
 
   /* ===== a trailing tapback is not a delivered message ===== */
