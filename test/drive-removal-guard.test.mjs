@@ -27,7 +27,7 @@ import {
   VALUE_FLAGS,
 } from "../brain.mjs";
 import { driveVersion } from "../connectors/google-drive.mjs";
-import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { brainCliPrefix, renderCliCommands } from "../operations/cli-guidance.mjs";
 import { previewSupportJournal } from "../support-journal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -35,6 +35,14 @@ const CLI = join(HERE, "..", "brain.mjs");
 const DRIVE_GUARD_FETCH = pathToFileURL(join(HERE, "fixtures", "drive-removal-guard-fetch.mjs")).href;
 const DRIVE_SCOPE_FETCH = pathToFileURL(join(HERE, "fixtures", "drive-scope-boundary-fetch.mjs")).href;
 const DRIVE_ACTIVE_SKIP_FETCH = pathToFileURL(join(HERE, "fixtures", "drive-active-skip-fetch.mjs")).href;
+const guidanceSource = readFileSync(join(HERE, "..", "operations", "cli-guidance.mjs"), "utf8");
+const commandAlternation = guidanceSource.match(
+  /const COMMAND = \/\\bbrain\(\?=\\s\+\(\?:([^)]+)\)\\b\)\//
+)?.[1];
+assert.ok(commandAlternation, "the CLI renderer command vocabulary could not be read");
+const diagnoseCommand = commandAlternation.split("|").find((command) => command === "diagnose");
+assert.ok(diagnoseCommand, "the CLI renderer no longer covers diagnose guidance");
+const bareDiagnoseCommand = new RegExp(String.raw`\bbrain\s+(?:${diagnoseCommand})\b`);
 
 const CATEGORIES = ["source_policy", "source_deleted", "intentional_skip"];
 
@@ -947,6 +955,23 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   const pluralDiagnoseGuidance = renderCliCommands(
     "Run brain diagnose to see the quarantined identities."
   );
+  const win32Rendering = {
+    platform: "win32",
+    nodePath: process.execPath,
+    scriptPath: CLI,
+    env: { PATH: "" },
+    existsSync: () => false,
+  };
+  const win32Prefix = brainCliPrefix(win32Rendering);
+  assert.notEqual(win32Prefix, "brain", "the win32 Drive guidance seam did not take effect");
+  const win32SingularDiagnoseGuidance = renderCliCommands(
+    "Run brain diagnose to see the quarantined identity.",
+    win32Rendering,
+  );
+  const win32PluralDiagnoseGuidance = renderCliCommands(
+    "Run brain diagnose to see the quarantined identities.",
+    win32Rendering,
+  );
 
   const runScopeScenario = (mode, {
     full = false,
@@ -967,6 +992,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     inventoryUidFilterMode = "available",
     inventoryRouteMode = "available",
     storedUid = "drive:",
+    win32 = false,
     args = [],
   } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
@@ -993,6 +1019,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       BRAIN_DRIVE_SCOPE_ROUTE_MODE: inventoryRouteMode,
       BRAIN_DRIVE_SCOPE_STORED_UID: storedUid,
       BRAIN_DRIVE_SCOPE_STORED_UID_JSON: JSON.stringify(storedUid),
+      ...(win32 ? { BRAIN_DRIVE_SCOPE_WIN32_GUIDANCE: "1" } : {}),
       ADMIN_KEY: "fixture-admin",
     });
 
@@ -1169,8 +1196,16 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     }), { mode: 0o600 });
 
     const initialStateBytes = readFileSync(statePath, "utf8");
+    const win32Preload = join(directory, "win32-platform.mjs");
+    if (win32) {
+      writeFileSync(win32Preload,
+        'globalThis.__enableWin32Guidance = () => Object.defineProperty(process, "platform", ' +
+          '{ value: "win32", configurable: true });\n',
+        { mode: 0o600 });
+    }
     const execute = (runArgs = []) => {
       const result = spawnSync(process.execPath, [
+        ...(win32 ? ["--import", pathToFileURL(win32Preload).href] : []),
         "--import", DRIVE_SCOPE_FETCH,
         CLI, "ingest", manifestPath, "--from", "drive",
         ...runArgs,
@@ -1620,6 +1655,22 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
   } finally {
     malformedStoredIdentity.cleanup();
+  }
+
+  for (const [mode, full, expectedGuidance] of [
+    ["full-malformed", true, win32SingularDiagnoseGuidance],
+    ["full-page-boundary", true, win32PluralDiagnoseGuidance],
+  ]) {
+    const rendered = runScopeScenario(mode, { full, win32: true });
+    try {
+      assert.equal(rendered.code, 0, rendered.output);
+      assert.ok(rendered.output.includes(expectedGuidance),
+        `${mode} omitted the win32-rendered diagnose remediation`);
+      assert.doesNotMatch(rendered.output, bareDiagnoseCommand,
+        `${mode} emitted bare diagnose guidance under the win32 preload`);
+    } finally {
+      rendered.cleanup();
+    }
   }
 
   for (const storedUid of ["drive:", "drive:   ", "drive:\t", "drive: abc"]) {

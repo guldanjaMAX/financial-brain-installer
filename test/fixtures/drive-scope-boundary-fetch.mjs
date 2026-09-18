@@ -440,6 +440,9 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/source-families") {
+    if (process.env.BRAIN_DRIVE_SCOPE_WIN32_GUIDANCE === "1") {
+      globalThis.__enableWin32Guidance?.();
+    }
     if (new TextEncoder().encode(String(options.body || "")).length > 32 * 1024) {
       return json({ error: "source-family request is too large" }, 413);
     }
