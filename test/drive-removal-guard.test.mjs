@@ -671,6 +671,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorApprovalExpired = false,
     localDoneLabels = true,
     inventoryLabels = true,
+    inventoryLabelMode = "stored",
     inventoryDate = true,
     args = [],
   } = {}) => {
@@ -692,7 +693,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       BRAIN_DRIVE_SCOPE_USER_ROOT: userRoot,
       BRAIN_DRIVE_SCOPE_EVIDENCE: evidencePath,
       BRAIN_DRIVE_SCOPE_MODE: mode,
-      BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? "stored" : "none",
+      BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? inventoryLabelMode : "none",
       BRAIN_DRIVE_SCOPE_DATE: inventoryDate ? "server" : "none",
       ADMIN_KEY: "fixture-admin",
     });
@@ -974,6 +975,27 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     } finally {
       unresolved.cleanup();
     }
+  }
+
+  const legacyInventoryWithoutLabels = runScopeScenario("full-unresolved", {
+    full: true,
+    priorNotReturnedDays: 8,
+    priorObservation: true,
+    priorNotReturnedNamed: false,
+    localDoneLabels: false,
+    inventoryLabelMode: "absent",
+  });
+  try {
+    assert.equal(legacyInventoryWithoutLabels.code, 0, legacyInventoryWithoutLabels.output);
+    assert.match(legacyInventoryWithoutLabels.output, /update the Brain to label review items/i);
+    assert.doesNotMatch(legacyInventoryWithoutLabels.output, /unexpected error|INGEST_FAILED/i);
+    assert.equal(legacyInventoryWithoutLabels.evidence().forgetRequests, 0);
+    assert.equal(legacyInventoryWithoutLabels.state().sync_token,
+      "fixture-prewalk-full-unresolved",
+      "a legacy label-less inventory withheld the completed Drive cursor");
+    assert.equal(legacyInventoryWithoutLabels.state().drive_removal_review.counts.label_unavailable, 1);
+  } finally {
+    legacyInventoryWithoutLabels.cleanup();
   }
 
   const unresolvedPending = runScopeScenario("incremental-unresolved", {

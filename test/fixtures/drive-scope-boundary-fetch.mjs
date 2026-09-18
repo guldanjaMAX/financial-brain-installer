@@ -7,7 +7,8 @@ import { syncBuiltinESMExports } from "node:module";
 const userRoot = String(process.env.BRAIN_DRIVE_SCOPE_USER_ROOT || "");
 const evidencePath = String(process.env.BRAIN_DRIVE_SCOPE_EVIDENCE || "");
 const mode = String(process.env.BRAIN_DRIVE_SCOPE_MODE || "");
-const inventoryLabelsAvailable = process.env.BRAIN_DRIVE_SCOPE_LABELS !== "none";
+const inventoryLabelMode = String(process.env.BRAIN_DRIVE_SCOPE_LABELS || "available");
+const inventoryLabelsAvailable = inventoryLabelMode !== "none";
 const inventoryDateAvailable = process.env.BRAIN_DRIVE_SCOPE_DATE !== "none";
 const MODES = new Set([
   "changed-outside",
@@ -349,7 +350,9 @@ globalThis.fetch = async (input, options = {}) => {
     return json({
       source: "drive",
       families,
-      ...(request.include_labels === true ? { family_details: storedFamilyDetails(families) } : {}),
+      ...(request.include_labels === true && inventoryLabelMode !== "absent"
+        ? { family_details: storedFamilyDetails(families) }
+        : {}),
       next_cursor: null,
     }, 200, inventoryDateAvailable);
   }

@@ -11513,6 +11513,8 @@ export async function listStoredSourceFamilies({
   const seenCursors = new Set();
   let serverObservedAt = null;
   let serverDateChecked = false;
+  let labelsAvailable = includeLabels;
+  let requestLabels = includeLabels;
   let cursor = "";
   for (;;) {
     if (seenCursors.has(cursor)) throw new Error("source-family inventory repeated a cursor");
@@ -11527,7 +11529,7 @@ export async function listStoredSourceFamilies({
       body: JSON.stringify({
         source: normalizedSource,
         limit: 1000,
-        ...(includeLabels ? { include_labels: true } : {}),
+        ...(requestLabels ? { include_labels: true } : {}),
         ...(cursor ? { cursor } : {}),
       }),
     }, { what: "the source-family inventory" });
@@ -11539,6 +11541,19 @@ export async function listStoredSourceFamilies({
     }
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
+    const responseError = typeof body?.error === "string" ? body.error : "";
+    if (requestLabels && res.status === 400 && /unknown field|include_labels/i.test(responseError)) {
+      // A newer CLI can run before its matching Worker is deployed. Older
+      // Workers reject this additive field, so restart the read without labels
+      // instead of withholding an otherwise complete source cursor.
+      requestLabels = false;
+      labelsAvailable = false;
+      families.clear();
+      labels.clear();
+      seenCursors.clear();
+      cursor = "";
+      continue;
+    }
     if (!res.ok || !body || body.source !== normalizedSource || !Array.isArray(body.families)) {
       throw new Error(
         `source-family inventory was not accepted (${res.status}): ${body?.error || raw.slice(0, 160) || "invalid response"}`
@@ -11547,7 +11562,11 @@ export async function listStoredSourceFamilies({
     if (body.families.length > 1000) {
       throw new Error("source-family inventory exceeded its requested page size");
     }
-    if (includeLabels && (
+    if (requestLabels && body.family_details === undefined) {
+      requestLabels = false;
+      labelsAvailable = false;
+      labels.clear();
+    } else if (requestLabels && (
       !Array.isArray(body.family_details) || body.family_details.length !== body.families.length
     )) {
       throw new Error("source-family inventory returned invalid family labels");
@@ -11561,7 +11580,7 @@ export async function listStoredSourceFamilies({
         throw new Error("source-family inventory was not strictly ordered");
       }
       families.add(uid);
-      if (includeLabels) {
+      if (requestLabels) {
         const detail = body.family_details[index];
         if (!detail || detail.uid !== uid ||
             (detail.name !== null && typeof detail.name !== "string") ||
@@ -11579,7 +11598,7 @@ export async function listStoredSourceFamilies({
     }
     if (body.next_cursor === null) {
       return includeServerObservedAt || includeLabels
-        ? { families, serverObservedAt, labels }
+        ? { families, serverObservedAt, labels, ...(includeLabels ? { labelsAvailable } : {}) }
         : families;
     }
     if (typeof body.next_cursor !== "string" || !body.next_cursor.startsWith(`${normalizedSource}:`)) {
@@ -14793,6 +14812,12 @@ const cmdIngestRemoteRun = async (
     const driveStoredBeforeProcessing = driveInventoryBeforeProcessing?.families || null;
     driveInventoryServerObservedAt = driveInventoryBeforeProcessing?.serverObservedAt || null;
     driveInventoryLabels = driveInventoryBeforeProcessing?.labels || new Map();
+    if (driveInventoryBeforeProcessing?.labelsAvailable === false) {
+      warn(
+        "The stored-family inventory did not return Drive labels. " +
+          "Update the Brain to label review items; this walk will continue and protect any item without a saved label."
+      );
+    }
     if (driveInventoryBeforeProcessing && !driveInventoryServerObservedAt) {
       warn(
         "Drive's stored-family inventory did not provide a valid server time. " +
