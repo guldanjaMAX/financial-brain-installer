@@ -1642,7 +1642,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   try {
     assert.equal(missingServerDate.code, 0, missingServerDate.output);
     assert.match(missingServerDate.output, /did not provide a valid server time/i);
-    assert.match(missingServerDate.output, /cannot advance the seven-day removal proof/i);
+    assert.match(missingServerDate.output, /unanchored absence observations receive no credit/i);
+    assert.match(missingServerDate.output, /two earlier qualifying server-anchored observations can still complete an approval/i);
     assert.doesNotMatch(missingServerDate.output, /unexpected error|INGEST_FAILED/i);
     assert.equal(missingServerDate.evidence().forgetRequests, 0);
     const state = missingServerDate.state();

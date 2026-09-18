@@ -14856,7 +14856,8 @@ const cmdIngestRemoteRun = async (
     if (driveInventoryBeforeProcessing && !driveInventoryServerObservedAt) {
       warn(
         "Drive's stored-family inventory did not provide a valid server time. " +
-          "This walk will continue, but its absence observations cannot advance the seven-day removal proof."
+          "This walk will continue. Its unanchored absence observations receive no credit toward the seven-day proof, " +
+          "but two earlier qualifying server-anchored observations can still complete an approval."
       );
     }
     const driveRemovalSafetyCount = driveStoredBeforeProcessing
