@@ -6636,7 +6636,23 @@ export async function listSourceFamilies(env, {
   // a completeness proof. A missing stats row must not hide an indexed family.
   const labelProjection = includeLabels
     ? `,
-       MAX(CASE WHEN length(trim(title)) > 0 THEN trim(title) ELSE NULL END) AS family_name,
+       MAX(CASE
+         WHEN length(trim(title)) = 0 THEN NULL
+         WHEN json_valid(meta)
+          AND json_type(meta,'$.part') = 'integer'
+          AND json_type(meta,'$.part_count') = 'integer'
+          AND substr(
+            trim(title),
+            -length(' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')')
+          ) = ' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')'
+           THEN substr(
+             trim(title),
+             1,
+             length(trim(title)) -
+               length(' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')')
+           )
+         ELSE trim(title)
+       END) AS family_name,
        MAX(CASE
          WHEN json_valid(meta)
           AND json_type(meta,'$.folder') = 'text'

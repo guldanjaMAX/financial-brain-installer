@@ -2291,7 +2291,9 @@ function mkSourceFamilyEnv(documents, extra = {}) {
                         : row.doc_uid;
                       return {
                         family_doc_uid,
-                        family_name: typeof row.title === "string" ? row.title : null,
+                        family_name: typeof row.title === "string"
+                          ? row.title.replace(/ \(part \d+ of \d+\)$/, "")
+                          : null,
                         folder_path: typeof metadata?.folder === "string" ? metadata.folder : null,
                       };
                     } catch {
@@ -2384,6 +2386,29 @@ function mkSourceFamilyEnv(documents, extra = {}) {
         name: "Owner tax return.txt",
         folder_path: "Reviewed Root/Tax",
       }), JSON.stringify(labelled));
+
+  const splitFamily = Array.from({ length: 12 }, (_, index) => ({
+    doc_uid: `drive:f#part${index + 1}of12`,
+    source: "drive",
+    title: `Owner annual report.pdf (part ${index + 1} of 12)`,
+    meta: JSON.stringify({ part_of: "f", part: index + 1, part_count: 12 }),
+    deleted_at: null,
+  }));
+  const { env: splitEnv } = mkSourceFamilyEnv(splitFamily);
+  const splitLabelResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 2, include_labels: true }),
+    },
+  ), splitEnv, {});
+  const splitLabel = await splitLabelResponse.json();
+  check("a split family review label uses the base title instead of a part title",
+    splitLabelResponse.status === 200 &&
+      splitLabel.family_details?.[0]?.uid === "drive:f" &&
+      splitLabel.family_details?.[0]?.name === "Owner annual report.pdf",
+    JSON.stringify(splitLabel));
 
   const sql = seen.sql.find((value) => /SELECT family_doc_uid/.test(value)) || "";
   check("D1 collapses structural and declared families before the page limit",
