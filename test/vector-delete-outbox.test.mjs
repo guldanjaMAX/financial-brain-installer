@@ -945,6 +945,35 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
 /* maxBatches is only a latency preference. The internal statement budget is
    the hard stop, including legacy long-id remaps and the lease release. */
 {
+  const { env, db, d1Queries } = makeEnv({ autoProcessVectorMutations: false });
+  for (let i = 0; i < 400; i++) {
+    const uid = `lazy-delete:${String(i).padStart(4, "0")}`;
+    db.prepare(
+      `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+       VALUES (?, ?, 'delete', ?)`,
+    ).run(uid, uid, i);
+  }
+  const before = d1Queries.submitted;
+  const result = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    batchSize: 100,
+  });
+  const submittedState = db.prepare(
+    `SELECT count(*) AS n, count(DISTINCT submitted_mutation_id) AS mutations
+       FROM vector_outbox WHERE submitted_mutation_id IS NOT NULL`,
+  ).get();
+  const queries = d1Queries.submitted - before;
+  check("one lazy-confirmation invocation submits three provider batches before waiting",
+    result.submitted === 300 && result.waiting === 300 && result.drained === 0 &&
+      submittedState.n === 300 && submittedState.mutations === 3,
+    JSON.stringify({ result, submittedState }));
+  check("the three-batch in-flight window remains inside the D1 query budget",
+    queries < DRAIN_D1_QUERY_BUDGET,
+    JSON.stringify({ queries, budget: DRAIN_D1_QUERY_BUDGET }));
+}
+
+{
   const { env, db, d1Queries } = makeEnv();
   const count = 300;
   for (let i = 0; i < count; i++) {
@@ -977,11 +1006,12 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   check("the documented worst-case batch statement bound includes hashed-id remaps",
     drainBatchQueryUpperBound(100) === 212);
   check("a ten-batch request stops before the internal D1 query budget",
-    drained.drained === 200 && drained.remaining === 400 &&
+    drained.drained === 100 && drained.submitted === 300 &&
+      drained.waiting === 200 && drained.remaining === 500 &&
       // 421 before the drain proved the retry-state schema and swept its
       // orphans; those are the two statements DRAIN_RETRY_STATE_QUERIES
       // reserves, so the pin moves with them rather than being loosened.
-      submitted === 423 && submitted < DRAIN_D1_QUERY_BUDGET,
+      submitted === 426 && submitted < DRAIN_D1_QUERY_BUDGET,
     JSON.stringify({ drained, submitted, budget: DRAIN_D1_QUERY_BUDGET }));
   check("query-budget exhaustion never strands the exclusive drain lease",
     leaseState.owner === null && leaseState.expires === null,

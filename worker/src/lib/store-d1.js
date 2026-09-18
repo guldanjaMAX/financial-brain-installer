@@ -1271,6 +1271,7 @@ const DRAIN_PROJECTION_VERIFY_QUERIES = 3;
 const DRAIN_INITIAL_DEPTH_QUERIES = 1;
 const DRAIN_RETRY_STATE_QUERIES = 2;
 const DRAIN_BATCH_SIZE_MAX = 100;
+export const DRAIN_IN_FLIGHT_BATCH_WINDOW = 3;
 export const VECTOR_RETRY_MAX_ATTEMPTS = 5;
 const VECTOR_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
 
@@ -1780,11 +1781,11 @@ async function confirmSubmittedVectors(env, rows, lease) {
 }
 
 async function submitQueuedDeletes(env, rows, lease) {
-  if (!rows.length) return 0;
+  if (!rows.length) return { mutationId: null, submitted: 0 };
   try {
     await renewDrainLease(env, lease.ownerToken, { now: lease.now() });
     const receipt = await env.VECTORIZE.deleteByIds(rows.map((row) => row.vector_id || row.chunk_uid));
-    return (await recordSubmittedMutation(env, rows, "delete", receipt)).submitted;
+    return recordSubmittedMutation(env, rows, "delete", receipt);
   } catch (error) {
     const detail = String(error?.message || error).slice(0, 300);
     await scheduleVectorFailures(env, rows, {
@@ -1825,8 +1826,24 @@ async function drainOutboxBatch(env, {
   batchSize = 100,
   embedGroup = 50,
   lease,
+  inFlightMutationIds = new Set(),
   skipUpserts = false,
 } = {}) {
+  const confirmAcceptedRows = async (rows) => {
+    const confirmed = await confirmSubmittedVectors(env, rows, lease);
+    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+    return {
+      drained: confirmed.confirmed,
+      deleted: confirmed.confirmedDeletes,
+      upserted: confirmed.confirmedUpserts,
+      submitted: 0,
+      waiting: confirmed.waiting,
+      failed: confirmed.retrying,
+      remaining: Number(rest?.n || 0),
+      errors: confirmed.retrying ? ["accepted vector state was not visible and was re-queued"] : [],
+      observed_mutation_ids: [...new Set(rows.map((row) => row.submitted_mutation_id))],
+    };
+  };
   // First finish the second phase of accepted asynchronous mutations. A newer
   // enqueue clears its submitted receipt through the generation trigger, so a
   // stale confirmation can never acknowledge the newer operation.
@@ -1840,26 +1857,19 @@ async function drainOutboxBatch(env, {
       WHERE o.submitted_mutation_id IS NOT NULL
       ORDER BY o.queued_at LIMIT ?1`
   ).bind(batchSize).all();
-  if (submittedRows?.length) {
-    const confirmed = await confirmSubmittedVectors(env, submittedRows, lease);
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
-    return {
-      drained: confirmed.confirmed,
-      deleted: confirmed.confirmedDeletes,
-      upserted: confirmed.confirmedUpserts,
-      submitted: 0,
-      waiting: confirmed.waiting,
-      failed: confirmed.retrying,
-      remaining: Number(rest?.n || 0),
-      errors: confirmed.retrying ? ["accepted vector state was not visible and was re-queued"] : [],
-    };
+  const submittedByThisInvocation = submittedRows?.length && submittedRows.every((row) =>
+    inFlightMutationIds.has(row.submitted_mutation_id));
+  if (submittedRows?.length &&
+      (!submittedByThisInvocation || inFlightMutationIds.size >= DRAIN_IN_FLIGHT_BATCH_WINDOW)) {
+    return confirmAcceptedRows(submittedRows);
   }
 
   // An accepted mutation can lose its per-row marker if a newer ingest replaces
   // every affected generation. The global fence must still process before any
   // newer provider write is accepted, or the older result could land last.
   const fence = await projectionFenceState(env);
-  if (!await projectionFenceProcessed(env, fence, lease)) {
+  const fenceWasSubmittedHere = fence.mutationId && inFlightMutationIds.has(fence.mutationId);
+  if (!fenceWasSubmittedHere && !await projectionFenceProcessed(env, fence, lease)) {
     const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     const remaining = Number(rest?.n || 0);
     return {
@@ -1886,17 +1896,20 @@ async function drainOutboxBatch(env, {
     const selected = headRetryNeedsIsolation(deletePending[0])
       ? deletePending.slice(0, 1)
       : deletePending;
-    const submitted = await submitQueuedDeletes(env, selected, lease);
+    const submission = await submitQueuedDeletes(env, selected, lease);
+    const submitted = submission.submitted;
     const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted, waiting: submitted,
       failed: 0, remaining: Number(rest?.n || 0), errors: [],
+      submission_mutation_id: submission.mutationId,
     };
   }
 
   // A residue-only re-projection owns every queued upsert row; the paused drain
   // only clears what that walk cannot page (deletes, and rows already submitted).
   if (skipUpserts) {
+    if (submittedRows?.length) return confirmAcceptedRows(submittedRows);
     const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0,
@@ -1921,6 +1934,7 @@ async function drainOutboxBatch(env, {
     .all();
 
   if (!pending?.length) {
+    if (submittedRows?.length) return confirmAcceptedRows(submittedRows);
     const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0,
@@ -1999,6 +2013,7 @@ async function drainOutboxBatch(env, {
   }
 
   let submitted = 0;
+  let submissionMutationId = null;
   if (vectors.length) {
     try {
       await renewDrainLease(env, lease.ownerToken, { now: lease.now() });
@@ -2008,7 +2023,9 @@ async function drainOutboxBatch(env, {
         generation: chunkGeneration.get(idToChunk.get(vector.id)),
         vector_id: vector.id,
       }));
-      submitted = (await recordSubmittedMutation(env, submittedRows, "upsert", receipt)).submitted;
+      const submission = await recordSubmittedMutation(env, submittedRows, "upsert", receipt);
+      submitted = submission.submitted;
+      submissionMutationId = submission.mutationId;
     } catch (e) {
       // Acceptance and its D1 receipt are one phase. If either fails, leave the
       // row queued so a later idempotent upsert creates a newer ordering fence.
@@ -2053,6 +2070,7 @@ async function drainOutboxBatch(env, {
     failed: poisoned.length,
     remaining: Number(rest?.n || 0),
     errors: poisoned.slice(0, 3).map((p) => p.error),
+    submission_mutation_id: submissionMutationId,
   };
 }
 
@@ -2086,6 +2104,7 @@ async function drainOutboxWithLease(env, options, lease) {
     DRAIN_PROJECTION_VERIFY_QUERIES + DRAIN_INITIAL_DEPTH_QUERIES +
     DRAIN_RETRY_STATE_QUERIES;
   const batchQueryUpperBound = drainBatchQueryUpperBound(batchSize);
+  const inFlightMutations = new Map();
   for (let batch = 0; batch < maxBatches; batch++) {
     if (now() - startedAt >= maxInvocationMs) break;
     // Never begin provider work unless every possible D1 receipt/remap for
@@ -2097,13 +2116,27 @@ async function drainOutboxWithLease(env, options, lease) {
     const part = await drainOutboxBatch(env, {
       ...options,
       batchSize,
+      inFlightMutationIds: new Set(inFlightMutations.keys()),
       lease: { ownerToken: lease.ownerToken, now },
     });
     result.drained += Number(part.drained || 0);
     result.deleted += Number(part.deleted || 0);
     result.upserted += Number(part.upserted || 0);
     result.submitted += Number(part.submitted || 0);
-    result.waiting = Number(part.waiting || 0);
+    if (part.submission_mutation_id && part.submitted > 0) {
+      inFlightMutations.set(part.submission_mutation_id, Number(part.submitted));
+    }
+    if (part.observed_mutation_ids?.length) {
+      if (part.waiting > 0 && part.observed_mutation_ids.length === 1 &&
+          inFlightMutations.has(part.observed_mutation_ids[0])) {
+        inFlightMutations.set(part.observed_mutation_ids[0], Number(part.waiting));
+      } else if (part.waiting === 0) {
+        for (const mutationId of part.observed_mutation_ids) inFlightMutations.delete(mutationId);
+      }
+    }
+    const trackedWaiting = [...inFlightMutations.values()]
+      .reduce((total, count) => total + count, 0);
+    result.waiting = trackedWaiting || Number(part.waiting || 0);
     result.failed += Number(part.failed || 0);
     result.remaining = Number(part.remaining || 0);
     result.errors.push(...(part.errors || []).slice(0, Math.max(0, 3 - result.errors.length)));
