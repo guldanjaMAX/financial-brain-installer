@@ -817,6 +817,12 @@ warn and exit successfully. A Drive run exits non-zero only when the walk
 failed or a matured, labelled candidate observed again in that run requires an
 owner approval immediately.
 
+A stored Drive family whose source ID is empty or contains whitespace or a
+control character is quarantined before any provider lookup. The exact stored
+identity is retained in the private review record for `brain diagnose`, while
+ingest shows only an owner-readable held-item count. Removal plans accept only
+byte-for-byte canonical identities and never trim or rewrite a target.
+
 Gmail reads additions, deletions, and label changes from its typed history. A
 complete pass also compares the filtered mailbox snapshot with the live D1
 inventory, so a stale stored message cannot survive simply because history

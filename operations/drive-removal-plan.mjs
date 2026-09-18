@@ -22,12 +22,38 @@ const CATEGORY_INPUTS = Object.freeze([
   ["intentional_skip", "intentionalCandidates"],
 ]);
 
-function normalizedSet(values, label) {
+/**
+ * A stored family identity must survive every boundary byte-for-byte. Drive
+ * provider ids cannot contain whitespace: accepting it there would let the
+ * inventory classify one identity while the removal request names another.
+ * Other connectors retain their existing opaque ids, including local upload
+ * family names whose exact path-derived identity can legitimately contain a
+ * space.
+ */
+export function isCanonicalStoredFamilyUid(value, source = null) {
+  if (typeof value !== "string") return false;
+  const separator = value.indexOf(":");
+  if (separator < 1) return false;
+  const uidSource = value.slice(0, separator);
+  const sourceId = value.slice(separator + 1);
+  if (source !== null && uidSource !== source) return false;
+  const sourceIdPattern = uidSource === "drive"
+    ? /^[^\s\u0000-\u001f\u007f-\u009f]+$/u
+    : /^[^\u0000-\u001f\u007f-\u009f]+$/u;
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(uidSource) &&
+    sourceIdPattern.test(sourceId);
+}
+
+function canonicalIdentitySet(values, label) {
   if (values == null) return new Set();
   if (typeof values === "string" || typeof values[Symbol.iterator] !== "function") {
     throw new TypeError(`${label} must be an iterable of document identifiers`);
   }
-  return new Set([...values].map((value) => String(value || "").trim()).filter(Boolean));
+  const identities = [...values];
+  if (identities.some((value) => !isCanonicalStoredFamilyUid(value))) {
+    throw new TypeError(`${label} contains a malformed document identity`);
+  }
+  return new Set(identities);
 }
 
 /**
@@ -39,13 +65,13 @@ function normalizedSet(values, label) {
  * twice. Only the opaque digest is shown to the owner.
  */
 export function buildDriveRemovalPlan(input = {}, options = {}) {
-  const storedFamilies = normalizedSet(input.storedFamilies, "storedFamilies");
-  const activeFamilies = normalizedSet(input.activeFamilies, "activeFamilies");
+  const storedFamilies = canonicalIdentitySet(input.storedFamilies, "storedFamilies");
+  const activeFamilies = canonicalIdentitySet(input.activeFamilies, "activeFamilies");
   const assigned = new Set();
   const targets = {};
 
   for (const [category, inputKey] of CATEGORY_INPUTS) {
-    const candidates = normalizedSet(input[inputKey], inputKey);
+    const candidates = canonicalIdentitySet(input[inputKey], inputKey);
     targets[category] = [...candidates]
       .filter((uid) =>
         storedFamilies.has(uid) &&

@@ -11,10 +11,11 @@ are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
 - **A malformed stored Drive identity can no longer become a deletion
-  target.** An empty source ID is now reported as `malformed_identity`, kept
-  outside provider lookups and removal plans, and left visible to
-  `brain diagnose`. To check: a stored bare `drive:` family reports the issue,
-  performs no forget request, and leaves the completed walk otherwise intact.
+  target.** Empty, whitespace-only, control-character, and whitespace-containing
+  source IDs are quarantined byte-for-byte, kept outside provider lookups and
+  removal plans, and listed by `brain diagnose` for repair. To check: each
+  malformed family is held without a forget request while a valid short ID
+  continues through the ordinary Drive review path.
 
 - **Drive ingest stays compatible while an older Brain is awaiting its
   update.** If the stored-family inventory does not support review labels yet,

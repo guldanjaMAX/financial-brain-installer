@@ -18,6 +18,8 @@ import {
   DRIVE_REMOVAL_MAX_RATIO,
   drivePolicyFingerprint,
   isRetryableDriveError,
+  isCanonicalStoredFamilyUid,
+  renderMalformedDriveIdentities,
   remoteFamilySettlement,
   VALUE_FLAGS,
 } from "../brain.mjs";
@@ -72,6 +74,19 @@ function reportsCount(message, label, count) {
 
 assert.equal(DRIVE_REMOVAL_MAX_COUNT, 100);
 assert.equal(DRIVE_REMOVAL_MAX_RATIO, 0.10);
+
+for (const uid of ["drive:", "drive:   ", "drive:\t", "drive: abc"]) {
+  assert.equal(isCanonicalStoredFamilyUid(uid, "drive"), false, JSON.stringify(uid));
+  assert.throws(() => buildDriveRemovalPlan({
+    storedFamilies: [uid],
+    policyCandidates: [],
+    vanishedCandidates: [uid],
+    intentionalCandidates: [],
+  }), /malformed document identity/i, `${JSON.stringify(uid)} produced an approval fingerprint`);
+}
+assert.equal(isCanonicalStoredFamilyUid("drive:a", "drive"), true);
+assert.equal(isCanonicalStoredFamilyUid("message:232ba44cf58b17b4539b4c018d25655e"), true);
+assert.equal(isCanonicalStoredFamilyUid("upload:WhatsApp Chat with Alex Rivera.txt"), true);
 
 /* Candidate sets are intersected with live stored families and categorized once. */
 const overlapPlan = buildDriveRemovalPlan({
@@ -694,6 +709,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     inventoryLabels = true,
     inventoryLabelMode = "stored",
     inventoryDate = true,
+    storedUid = "drive:",
     args = [],
   } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
@@ -716,6 +732,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       BRAIN_DRIVE_SCOPE_MODE: mode,
       BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? inventoryLabelMode : "none",
       BRAIN_DRIVE_SCOPE_DATE: inventoryDate ? "server" : "none",
+      BRAIN_DRIVE_SCOPE_STORED_UID: storedUid,
       ADMIN_KEY: "fixture-admin",
     });
 
@@ -1026,8 +1043,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   const malformedStoredIdentity = runScopeScenario("full-malformed", { full: true });
   try {
     assert.equal(malformedStoredIdentity.code, 0, malformedStoredIdentity.output);
-    assert.match(malformedStoredIdentity.output, /malformed_identity/i);
-    assert.match(malformedStoredIdentity.output, /recorded for brain diagnose/i);
+    assert.match(malformedStoredIdentity.output, /1 stored item has a malformed identity and is held/i);
+    assert.doesNotMatch(malformedStoredIdentity.output, /malformed_identity/i);
     assert.doesNotMatch(malformedStoredIdentity.output, /unexpected error|INGEST_FAILED/i);
     assert.equal(malformedStoredIdentity.evidence().forgetRequests, 0,
       "a malformed stored family identity reached the destructive endpoint");
@@ -1036,10 +1053,47 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const state = malformedStoredIdentity.state();
     assert.equal(state.sync_token, "fixture-prewalk-full-malformed");
     assert.equal(state.drive_removal_review.counts.malformed_identity, 1);
+    assert.deepEqual(state.drive_removal_review.malformed_identities, ["drive:"]);
     assert.deepEqual(state.drive_removal_review.uids, []);
     assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
   } finally {
     malformedStoredIdentity.cleanup();
+  }
+
+  for (const storedUid of ["drive:", "drive:   ", "drive:\t", "drive: abc"]) {
+    for (const [mode, full] of [["full-identity", true], ["incremental-identity", false]]) {
+      const malformed = runScopeScenario(mode, { full, storedUid });
+      try {
+        assert.equal(malformed.code, 0, malformed.output);
+        assert.match(malformed.output, /1 stored item has a malformed identity and is held/i);
+        assert.equal(malformed.evidence().absenceMetadataReads, 0,
+          `${JSON.stringify(storedUid)} reached Drive classification during ${mode}`);
+        assert.equal(malformed.evidence().forgetRequests, 0,
+          `${JSON.stringify(storedUid)} reached deletion during ${mode}`);
+        assert.deepEqual(malformed.state().drive_removal_review.malformed_identities, [storedUid]);
+      } finally {
+        malformed.cleanup();
+      }
+    }
+  }
+
+  for (const [mode, full] of [["full-identity", true], ["incremental-identity", false]]) {
+    const validShortIdentity = runScopeScenario(mode, { full, storedUid: "drive:a" });
+    try {
+      assert.equal(validShortIdentity.code, 0, validShortIdentity.output);
+      assert.equal(validShortIdentity.evidence().absenceMetadataReads, 1,
+        `a legitimate short source id did not reach Drive classification during ${mode}`);
+      assert.equal(validShortIdentity.evidence().forgetRequests, 0);
+      assert.equal(validShortIdentity.state().drive_removal_review.counts.unresolved_not_returned, 1);
+    } finally {
+      validShortIdentity.cleanup();
+    }
+  }
+
+  {
+    const lines = [];
+    renderMalformedDriveIdentities(["drive:\t"], { write: (line) => lines.push(line) });
+    assert.match(lines.join("\n"), /drive:\\t/, "brain diagnose did not surface the escaped quarantined identity");
   }
 
   const unresolvedPending = runScopeScenario("incremental-unresolved", {

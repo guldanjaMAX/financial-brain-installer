@@ -666,6 +666,13 @@ removal back before committing folder watermarks.
 Any account-wide changed item is rebuilt through the reviewed-root traversal
 before content is read.
 
+The stored-family inventory and removal-plan builder share one canonical
+identity validator. A family source ID must be non-empty and contain no
+whitespace or control characters. Invalid identities are preserved
+byte-for-byte in `drive_removal_review.malformed_identities`, excluded before
+provider lookup, and shown only through the read-only diagnostic path. The
+removal plan never trims an identity.
+
 Drive never treats access loss as deletion evidence. A 403 access denial stays
 in the review record and outside the deletion plan. If the metadata lookup says
 the file is present under a reviewed folder despite its omission from the

@@ -10,12 +10,15 @@ const mode = String(process.env.BRAIN_DRIVE_SCOPE_MODE || "");
 const inventoryLabelMode = String(process.env.BRAIN_DRIVE_SCOPE_LABELS || "available");
 const inventoryLabelsAvailable = inventoryLabelMode !== "none";
 const inventoryDateAvailable = process.env.BRAIN_DRIVE_SCOPE_DATE !== "none";
+const testedStoredUid = String(process.env.BRAIN_DRIVE_SCOPE_STORED_UID || "drive:");
 const MODES = new Set([
   "changed-outside",
   "full-malformed",
+  "full-identity",
   "full-unresolved",
   "full-unresolved-subthreshold",
   "incremental-unresolved",
+  "incremental-identity",
   "incremental-unresolved-batch",
   "incremental-gone",
   "incremental-restored",
@@ -99,6 +102,7 @@ function requestBody(options) {
 function storedFamilies(evidence) {
   if (mode === "changed-outside") return [];
   if (mode === "full-malformed") return ["drive:", ...RETAINED_UIDS].sort();
+  if (["full-identity", "incremental-identity"].includes(mode)) return [testedStoredUid];
   if (mode === "incremental-unresolved-batch") {
     const removed = evidence.removedFamilies ? new Set(BATCH_MISSING_UIDS.slice(3)) : new Set();
     return [...BATCH_MISSING_UIDS, ...BATCH_RETAINED_UIDS]
@@ -201,6 +205,12 @@ globalThis.fetch = async (input, options = {}) => {
         newStartPageToken: "fixture-next-incremental-restored",
       });
     }
+    if (mode === "incremental-identity") {
+      return json({
+        changes: [{ fileId: testedStoredUid.slice("drive:".length), removed: true }],
+        newStartPageToken: "fixture-next-incremental-identity",
+      });
+    }
     if (["incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)) {
       return json({ changes: [], newStartPageToken: `fixture-next-${mode}` });
     }
@@ -291,6 +301,15 @@ globalThis.fetch = async (input, options = {}) => {
       });
     }
     throw new Error("an unrelated changed item reached absence classification");
+  }
+
+  if (url.hostname === "www.googleapis.com" &&
+      decodeURIComponent(url.pathname.slice("/drive/v3/files/".length)) === testedStoredUid.slice("drive:".length) &&
+      ["full-identity", "incremental-identity"].includes(mode)) {
+    const evidence = readEvidence();
+    evidence.absenceMetadataReads++;
+    saveEvidence(evidence);
+    return json({ error: { message: "File not found" } }, 404);
   }
 
   const retainedMatch = /^\/drive\/v3\/files\/retained-(\d{2})$/.exec(url.pathname);

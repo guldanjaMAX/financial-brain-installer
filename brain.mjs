@@ -297,6 +297,7 @@ import {
   DriveRemovalReviewRequired,
   assertDriveRemovalPlanSafe,
   buildDriveRemovalPlan,
+  isCanonicalStoredFamilyUid,
 } from "./operations/drive-removal-plan.mjs";
 import {
   discoverInstalledManifest,
@@ -319,6 +320,7 @@ export {
   DriveRemovalReviewRequired,
   assertDriveRemovalPlanSafe,
   buildDriveRemovalPlan,
+  isCanonicalStoredFamilyUid,
 };
 
 // fileURLToPath, never `new URL(...).pathname`. The latter is percent-encoded,
@@ -11586,7 +11588,7 @@ export async function listStoredSourceFamilies({
       if (uid <= previous) {
         throw new Error("source-family inventory was not strictly ordered");
       }
-      if (uid.length <= normalizedSource.length + 1) {
+      if (!isCanonicalStoredFamilyUid(uid, normalizedSource)) {
         // Keep corrupt stored identities visible to diagnostics, but never let
         // one become a provider lookup or deletion target.
         malformedIdentities.add(uid);
@@ -11621,8 +11623,7 @@ export async function listStoredSourceFamilies({
           }
         : families;
     }
-    if (typeof body.next_cursor !== "string" || !body.next_cursor.startsWith(`${normalizedSource}:`) ||
-        body.next_cursor.length <= normalizedSource.length + 1) {
+    if (!isCanonicalStoredFamilyUid(body.next_cursor, normalizedSource)) {
       throw new Error("source-family inventory returned an invalid next cursor");
     }
     if (!body.families.length || body.next_cursor !== body.families[body.families.length - 1]) {
@@ -14562,9 +14563,15 @@ const cmdIngestRemoteRun = async (
     });
   }
   let driveRemovalReview = storedDriveRemovalReview;
-  let malformedDriveIdentityCount = Number.isSafeInteger(storedDriveRemovalReview?.counts?.malformed_identity)
-    ? Math.max(0, storedDriveRemovalReview.counts.malformed_identity)
-    : 0;
+  let malformedDriveIdentities = new Set(
+    (Array.isArray(storedDriveRemovalReview?.malformed_identities)
+      ? storedDriveRemovalReview.malformed_identities
+      : []).filter((uid) => typeof uid === "string" && uid.startsWith(`${sourceName}:`)),
+  );
+  let malformedDriveIdentityCount = malformedDriveIdentities.size ||
+    (Number.isSafeInteger(storedDriveRemovalReview?.counts?.malformed_identity)
+      ? Math.max(0, storedDriveRemovalReview.counts.malformed_identity)
+      : 0);
   let expiredDriveReviewApproval = false;
 
   const protectedDriveUids = () => {
@@ -14639,6 +14646,9 @@ const cmdIngestRemoteRun = async (
       unresolved_transient: unresolvedTransient,
       unresolved_not_returned: unresolvedNotReturned,
       label_unavailable: labelUnavailable,
+      ...(malformedDriveIdentities.size
+        ? { malformed_identities: [...malformedDriveIdentities].sort() }
+        : {}),
       source_deletion_candidates: sourceDeletionCandidates,
     };
     state.drive_removal_review = driveRemovalReview;
@@ -14845,6 +14855,7 @@ const cmdIngestRemoteRun = async (
       : null;
     const driveStoredBeforeProcessing = driveInventoryBeforeProcessing?.families || null;
     malformedDriveIdentityCount = driveInventoryBeforeProcessing?.malformedIdentities?.size || 0;
+    malformedDriveIdentities = new Set(driveInventoryBeforeProcessing?.malformedIdentities || []);
     driveInventoryServerObservedAt = driveInventoryBeforeProcessing?.serverObservedAt || null;
     driveInventoryLabels = driveInventoryBeforeProcessing?.labels || new Map();
     if (driveInventoryBeforeProcessing?.labelsAvailable === false) {
@@ -14940,10 +14951,9 @@ const cmdIngestRemoteRun = async (
       pendingSourceDeletionDriveReview = new Map();
       for (const uid of [...absenceCandidates].sort()) {
         // Every candidate is first intersected with the authenticated stored
-        // family inventory, whose parser requires this exact source prefix.
-        // Stored ingest identities cannot have an empty source id, so this
-        // slice is always a real file id and every candidate reaches the typed
-        // classifier below. A second "unclassified" set would be unreachable.
+        // family inventory, whose shared canonical validator requires a
+        // non-empty, whitespace-free source id. The exact uid therefore reaches
+        // both the typed classifier and any later removal plan without rewriting.
         const fileId = uid.slice(uidPrefix.length);
         let classification;
         try {
@@ -16158,8 +16168,11 @@ const cmdIngestRemoteRun = async (
           "It remains protected and retained, cannot enter an approval plan, and will be checked again on the next run.",
       ] : []),
       ...(malformedIdentity ? [
-        `${malformedIdentity} item(s): malformed_identity in the Brain's stored Drive inventory. ` +
-          "The invalid identity remains protected, was excluded from every deletion target, and is recorded for brain diagnose.",
+        malformedIdentity === 1
+          ? "1 stored item has a malformed identity and is held; nothing will be deleted from it until it is looked at. " +
+            "Run brain diagnose to see the quarantined identity."
+          : `${malformedIdentity} stored items have malformed identities and are held; ` +
+            "nothing will be deleted from them until they are looked at. Run brain diagnose to see the quarantined identities.",
       ] : []),
       ...(pendingUnderGrace ? [
         `${pendingUnderGrace} item(s): Drive still has an open seven-day review window. ` +
@@ -21366,7 +21379,31 @@ async function cmdDiagnose(manifestPath) {
   if (!receipt.ok) die(`diagnose returned HTTP success without a trustworthy receipt: ${receipt.reason}.`);
 
   renderDiagnosis(r);
+  renderMalformedDriveIdentities(readMalformedDriveIdentities(manifestPath));
   return r;
+}
+
+export function readMalformedDriveIdentities(manifestPath) {
+  const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: "drive" });
+  try {
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    const identities = state?.drive_removal_review?.malformed_identities;
+    return Array.isArray(identities)
+      ? identities.filter((uid) => typeof uid === "string" && !isCanonicalStoredFamilyUid(uid, "drive"))
+      : [];
+  } catch (error) {
+    if (error?.code === "ENOENT" || error instanceof SyntaxError) return [];
+    throw error;
+  }
+}
+
+export function renderMalformedDriveIdentities(identities, { write = warn } = {}) {
+  if (!Array.isArray(identities) || identities.length === 0) return identities;
+  write(
+    `${identities.length} stored Drive item(s) have malformed identities and remain quarantined from deletion.\n` +
+      identities.map((uid) => `        - ${JSON.stringify(uid)}`).join("\n"),
+  );
+  return identities;
 }
 
 function nonNegativeReceiptCount(body, field, label) {
