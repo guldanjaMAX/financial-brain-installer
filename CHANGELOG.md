@@ -10,6 +10,61 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Older Brains can now produce a safe update-preview observation.** A Brain
+  recorded as 0.4.0 through 0.4.3 does not report its Worker version from the
+  private documents receipt. Preview now recognizes that historical contract
+  when the receipt still reports its writer mode, and returns a read-only
+  fingerprint over that mode, the vector counts, and the recorded version.
+  The observation does not authorize an update. An explicit version that
+  disagrees with the manifest still stops. To check: preview an older Brain
+  and confirm the receipt says `legacy_pre044_observation`, `read_only: true`,
+  and `authorizes_update: false`.
+
+- **An update now waits through brief Worker-generation skew at its safety
+  pause.** Right after the paused Worker appears, Cloudflare can briefly serve
+  the private inventory from the preceding active generation. Update now gives
+  that version-and-writer-mode disagreement the same bounded, spaced retry
+  window as its other deployment checks. Backend, receipt shape, queue, count,
+  and query-readiness failures still stop on the first observation, and a
+  disagreement that lasts through the window still stops with the original
+  safety message. To check: the paused verification must report that public
+  health and private inventory agree before migration begins.
+
+- **The ordinary vector drain can now keep three batches in flight.** A cron
+  run no longer submits one 100-row batch and then immediately waits for that
+  same batch. It can submit up to three leased batches before confirmation,
+  reports the full waiting count, avoids rewriting a chunk when its vector ID
+  is already correct, and records each batch with set-based D1 statements
+  instead of two writes per row. The same lease, generation fence, query
+  budget, and exact visibility confirmation still apply. To check: run
+  `brain drain <manifest>` and confirm `submitted` can exceed 100 while
+  `waiting` remains visible until Vectorize confirms it.
+
+- **The recovery view in `brain sources` no longer asks D1 to finish every
+  recovery calculation in one statement.** The candidate page and the
+  at-most-250 source reason summaries are now separate bounded reads inside
+  the same opening and closing snapshot checks. This keeps a large recovery
+  preview away from D1's 30-second per-statement limit without changing its
+  counts or exposing document identities. To check: run
+  `brain sources <manifest> --recovery` and confirm the first page includes the
+  same source summaries and a continuation cursor when more candidates remain.
+
+- **A successful ingest is now proved by the row D1 actually returns.** D1's
+  change counter can include full-text trigger work and can therefore make a
+  correctly finalized document look unconfirmed. Finalization now uses the
+  guarded `RETURNING` row as its commit proof, so a stored document is not
+  reported failed because of that trigger accounting. A missing returned row
+  still leaves the item retryable. To check: ingest one record, then confirm
+  its result is committed and an immediate unchanged retry does not rewrite it.
+
+- **Acceptance retries only the results that mean search was unavailable.** A
+  degraded retrieval or a search-unavailable answer receives bounded, spaced
+  retries so transient Vectorize visibility does not fail an otherwise sound
+  update. A complete but wrong answer, malformed receipt, or other real
+  acceptance failure still stops immediately instead of being retried into a
+  different result. To check: a transient degraded result should show spaced
+  retry attempts, while a non-degraded failure should return after one.
+
 - **You can now connect your own bank accounts yourself with `brain connect
   bank`.** Turn on `corpora.bank_feed` with provider `plaid` and environment
   `sandbox` or `production`, record the return and webhook addresses you saved
