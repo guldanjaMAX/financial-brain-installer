@@ -676,13 +676,19 @@ possible causes, and the owner action depends on which one the message names:
    rerun with the exact `--approve-removals <fingerprint>` value it printed. If
    it is surprising, do not approve it. Check the connection and source policy,
    then rerun so a fresh comparison produces a new plan.
-2. **Drive stopped returning an item, but deletion is not corroborated yet.**
-   The Brain keeps its last accessible copy. Restore sharing if access changed,
-   or wait until the recorded seven-day grace date and run Drive ingestion
-   again. Only a matching change-feed removal or a second not-returned result at
-   least seven days later can create a deletion candidate. That later approval
-   stop shows the locally saved name and folder. Review those labels, then use
-   the exact fingerprint only if deletion is expected.
+2. **Drive stopped returning an item.** A bare 404 is never deletion evidence,
+   and Drive's change-feed `removed` flag is not corroboration because access
+   loss can produce it too. The flag may add a dated note, but it cannot shorten
+   the review window. The Brain keeps its last accessible copy. No UID is
+   deleted while its absence is unresolved or its grace window is open; during
+   that time it is excluded from every removal reason and plan. Restore sharing
+   if access changed, or wait until the recorded seven-day grace date and run
+   Drive ingestion again. Only the same
+   not-returned result on two walks at least seven days apart can create a
+   deletion candidate. That later approval stop shows the locally saved name
+   and folder. Review those labels, then use the exact fingerprint only if the
+   owner expects deletion. Nothing is deleted until that exact approval, and
+   the review record clears only after deletion readback.
 3. **Drive returned an access-denied 403 during the end-of-run absence check.**
    The indexed copy remains in place and outside every deletion plan. Restore
    this credential's access to the file, then rerun Drive ingestion. There is no

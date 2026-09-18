@@ -11,15 +11,18 @@ are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
 - **Drive no longer mistakes a hidden file for a deleted file.** A 404 proves
-  only that Drive stopped returning that item to this credential, so the Brain
-  keeps its last accessible copy and records a seven-day review window. The
-  item enters a deletion plan only when Drive's change feed also reports its id
-  removed, or a second walk at least seven days later gets the same result. The
-  approval stop shows the locally saved name and folder for each corroborated
-  candidate. Nothing from that candidate list is deleted without the exact
+  only that Drive stopped returning that item to this credential and is never
+  deletion evidence. Drive's change-feed `removed` flag is not corroboration
+  because access loss can produce the same flag; it adds only a dated note to
+  the review record. The Brain keeps its last accessible copy. No UID is
+  deleted while its absence is unresolved or its seven-day grace window is
+  open, even when a stale retry marker exists. The item can enter a deletion
+  plan only after the same not-returned result on two walks at least seven days
+  apart. That plan shows the locally saved name and folder, and nothing from it
+  is deleted without the exact
   `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
-  approval. A 403 access denial remains outside the plan. Approved deletions
-  are read back before their review entries clear.
+  approval. A 403 access denial also remains outside the plan. An approved
+  deletion is read back before its review entry clears.
 
 - **Older Brains can now produce a safe update-preview observation.** A Brain
   recorded as 0.4.0 through 0.4.6 does not report either its Worker version or

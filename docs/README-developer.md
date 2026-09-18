@@ -670,15 +670,21 @@ Drive never treats access loss as deletion evidence. A 403 access denial or
 inconsistent in-scope omission stays in the review record and outside the
 deletion plan. A 404, including a 403 response carrying `notFound` or `File not
 found`, proves only that Drive stopped returning the item to this credential.
-The first such observation records a dated seven-day grace window and remains
-outside the plan. It becomes a `source_deleted` candidate only when the same id
-also has a change-feed removal event, or a second not-returned observation is
-made at least seven days later. Even one corroborated candidate stops for the
-exact `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
-approval and shows the locally saved name and folder. Those labels remain local
-terminal context; they are not added to Worker requests or source receipts.
-Visible trash and a visible move outside the reviewed roots remain direct
-source-deletion evidence.
+A bare 404 is never deletion evidence. The first such observation records a
+dated seven-day grace window and remains outside every removal reason and plan,
+including policy, source deletion, intentional skip, and a stale retry marker.
+Drive's change-feed `removed` flag is not corroboration because loss of access
+can set it too; it may add only a dated annotation to the review record and
+cannot shorten the window. No UID is deleted while its absence is unresolved
+or its grace window is open. A not-returned item becomes a `source_deleted`
+candidate only after the same outcome is observed on two walks at least seven
+days apart. Even one such candidate stops for the exact `brain ingest
+<manifest> --from drive --approve-removals <fingerprint>` owner approval and
+shows its locally saved name and folder. Those labels remain local terminal
+context; they are not added to Worker requests or source receipts. The UID
+stays under review until an approved deletion has exact inventory readback;
+only then is it removed from every review map. Visible trash and a visible move
+outside the reviewed roots remain direct source-deletion evidence.
 
 A Gmail full pass is an authoritative snapshot. It compares every message
 allowed by the default query with the live D1 family inventory, so messages

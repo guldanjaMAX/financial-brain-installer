@@ -787,13 +787,18 @@ never filenames or document IDs. Review the cause, then add the exact
 Drive treats access loss differently. An access-denied 403 remains in the
 review record and is excluded from deletion. A 404, or a 403 whose provider
 response says `notFound`, proves only that Drive stopped returning the item to
-this credential. It stays in review unless the same id also has a change-feed
-removal event or Drive still does not return it on a second walk at least seven
-days later. Only then does it enter the `source_deleted` plan. The stopped
-approval message shows each candidate's locally saved name and folder, and no
-such candidate is deleted without the exact `brain ingest <manifest> --from
-drive --approve-removals <fingerprint>` approval. Visible trash and a visible
-move outside the reviewed roots remain direct source proof.
+this credential and is never deletion evidence. Drive's change-feed `removed`
+flag is not corroboration because access loss can produce the same flag. It may
+add a dated annotation to the review record, but it cannot shorten the grace
+window. No UID is deleted while its absence is unresolved or its grace window
+is open. During that time it is excluded from every removal reason and plan,
+including a stale retry marker. It can enter the `source_deleted` plan only
+after the same not-returned outcome is observed on two walks at least seven
+days apart. That stopped approval message shows each candidate's locally saved
+name and folder. The item is deleted only after the owner supplies the exact
+`brain ingest <manifest> --from drive --approve-removals <fingerprint>`
+approval, and its review entry clears only after deletion readback. Visible
+trash and a visible move outside the reviewed roots remain direct source proof.
 
 Gmail reads additions, deletions, and label changes from its typed history. A
 complete pass also compares the filtered mailbox snapshot with the live D1
