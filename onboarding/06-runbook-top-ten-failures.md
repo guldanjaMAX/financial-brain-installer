@@ -698,7 +698,7 @@ possible causes, and the owner action depends on which one the message names:
    24 hours only if the owner expects deletion. Nothing is deleted until that
    exact approval, and the review record clears only after deletion readback.
 3. **Drive found the item under a reviewed folder after the completed walk
-   omitted it.** The message says `present on Drive; retained`. The indexed copy
+   omitted it.** The message says `present on Drive under a reviewed folder; retained because the completed walk omitted it.` The indexed copy
    remains protected and no deletion approval is available. This is not an
    access-denied result. Run Drive ingestion again so a later completed walk can
    reconcile the inconsistency.

@@ -793,8 +793,8 @@ add a dated annotation to the review record, but it cannot shorten the grace
 window. A stale retry marker is checked against Drive again before it can enter
 any removal plan; a live file clears the marker. If Drive reports a file present
 under a reviewed folder but the completed walk omitted it, the Brain reports
-`present on Drive; retained`, never `denied access`, and keeps it protected for
-the next run. A temporary lookup failure is protected too. No UID is deleted
+`present on Drive under a reviewed folder; retained because the completed walk omitted it.`,
+never `denied access`, and keeps it protected for the next run. A temporary lookup failure is protected too. No UID is deleted
 while its absence is unresolved or its grace window is open. It can enter the
 `source_deleted` plan
 only after the same not-returned outcome is recorded by two distinct runs with
