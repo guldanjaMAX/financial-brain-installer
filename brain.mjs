@@ -11730,8 +11730,21 @@ export async function listStoredSourceFamilies({
           }
         : families;
     }
+    const nextCursorBytes = typeof body.next_cursor === "string"
+      ? new TextEncoder().encode(body.next_cursor).length
+      : null;
+    if (typeof body.next_cursor === "string" &&
+        body.next_cursor.startsWith(`${normalizedSource}:`) &&
+        nextCursorBytes > 16 * 1024 &&
+        body.families.length > 0 &&
+        body.next_cursor === body.families[body.families.length - 1]) {
+      die(
+        "This older Brain returned a continuation token it cannot itself accept. " +
+          "Update the Brain, then rerun ingestion. Nothing was removed, and the prior source cursor was kept."
+      );
+    }
     if (typeof body.next_cursor !== "string" ||
-        new TextEncoder().encode(body.next_cursor).length > 16 * 1024 ||
+        nextCursorBytes > 16 * 1024 ||
         !body.next_cursor.startsWith(`${normalizedSource}:`) ||
         seenCursors.has(body.next_cursor)) {
       throw new Error("source-family inventory returned an invalid next cursor");

@@ -461,6 +461,16 @@ globalThis.fetch = async (input, options = {}) => {
         code: "unpageable_family_identity",
       }, 409, inventoryDateAvailable);
     }
+    if (inventoryRouteMode === "overlong-tail-v048") {
+      const uid = `drive:${"x".repeat(17_000)}`;
+      evidence.inventoryAcceptedFamilies++;
+      saveEvidence(evidence);
+      return json({
+        source: "drive",
+        families: [uid],
+        next_cursor: uid,
+      }, 200, inventoryDateAvailable);
+    }
     if (mode === "full-control-cursor-v048" && /[\u0000-\u001f\u007f]/.test(String(request.cursor || ""))) {
       return json({ error: "cursor is not valid for this inventory" }, 400);
     }

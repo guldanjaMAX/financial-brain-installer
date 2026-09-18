@@ -316,6 +316,22 @@ for (const uid of legitimateFamilyShapes) {
       );
       assert.equal(laterStatusCalls, 2, `HTTP ${status} on page two restarted the inventory walk`);
     }
+
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      source: "drive",
+      families: ["drive:a"],
+      next_cursor: "gmail:a",
+    }), { status: 200, headers: { "content-type": "application/json" } });
+    await assert.rejects(
+      listStoredSourceFamilies({
+        base: "https://fixture.invalid",
+        adminKey: "fixture-admin",
+        source: "drive",
+      }),
+      (error) => /invalid next cursor/i.test(String(error?.message || error)) &&
+        !/update the Brain/i.test(String(error?.message || error)),
+      "the over-long-tail guidance swallowed an unrelated invalid cursor shape",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1367,6 +1383,25 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         `${mode} changed source state after typed 409`);
     } finally {
       unpageable.cleanup();
+    }
+  }
+
+  for (const [mode, full] of [["full-unresolved", true], ["incremental-unresolved", false]]) {
+    const overlong = runScopeScenario(mode, { full, inventoryRouteMode: "overlong-tail-v048" });
+    try {
+      assert.equal(overlong.code, 1, overlong.output);
+      assert.match(overlong.output, /update the Brain/i);
+      assert.doesNotMatch(overlong.output, /unexpected error/i);
+      const evidence = overlong.evidence();
+      assert.equal(evidence.inventoryReads, 1,
+        `${mode} attempted to send the over-long continuation token back to the Brain`);
+      assert.equal(evidence.inventoryAcceptedFamilies, 1,
+        `${mode} did not reach the over-long page-tail decision`);
+      assert.equal(evidence.forgetRequests, 0);
+      assert.equal(overlong.stateBytes(), overlong.initialStateBytes,
+        `${mode} changed source state after the over-long continuation token`);
+    } finally {
+      overlong.cleanup();
     }
   }
 
