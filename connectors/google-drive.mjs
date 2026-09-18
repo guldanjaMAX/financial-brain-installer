@@ -558,12 +558,12 @@ export function driveAssistantPreviewSummary({
 /**
  * Explain why a formerly indexed item is absent from a complete rooted walk.
  *
- * Drive uses 404, and sometimes a 403 carrying notFound, when a file no longer
- * exists. That is source-deletion evidence, but it still needs the owner's
- * exact removal-plan approval before it can become a tombstone. A different
- * 403 is access loss and must stay outside every deletion plan. Visible trash
- * and a visible move outside the approved folder set are also authoritative
- * removal evidence.
+ * Drive can hide an item's existence with 404 when this credential has no
+ * access. A 404, and the equivalent 403 notFound response, therefore proves
+ * only that Drive no longer returns the item to this credential. The caller
+ * must keep that outcome out of every deletion plan until independent local
+ * history corroborates it. Visible trash and a visible move outside the
+ * approved folder set remain authoritative removal evidence.
  */
 export async function classifyScopedAbsence(getAccessToken, fileId, {
   scopedFolderIds = new Set(),
@@ -581,9 +581,9 @@ export async function classifyScopedAbsence(getAccessToken, fileId, {
       ))
     )) {
       return {
-        kind: "gone",
-        reason: "Drive reports that the file no longer exists",
-        retryable: false,
+        kind: "unresolved_not_returned",
+        reason: "Drive no longer returns this item to this credential",
+        retryable: true,
       };
     }
     if (error instanceof DriveError && error.status === 403) {
@@ -624,7 +624,8 @@ export async function startPageToken(getAccessToken, opts = {}) {
  * Returns { changed, removed, nextToken }. `removed` covers deletion, trashing,
  * and a file that merely left this credential's view. The caller must classify
  * a stored removed id with classifyScopedAbsence() before treating it as source
- * deletion: 404/notFound is gone, while an access-denied 403 remains review-only.
+ * deletion. A removed change-feed event can corroborate a separate 404, but a
+ * 404 by itself remains review-only because Drive also uses it for access loss.
  */
 export async function listChanges(getAccessToken, pageToken, opts = {}) {
   const changed = [];

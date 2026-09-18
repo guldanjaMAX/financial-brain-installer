@@ -551,8 +551,11 @@ const workbookBytes = (sheets) => {
   const inconsistent = await classify({ id: "old", name: "old.txt", parents: ["nested"] });
   check("a visible move out of scope is authoritative removal evidence", moved.kind === "left_scope");
   check("visible trash is authoritative deletion evidence", trashed.kind === "source_deleted");
-  check("a 404 is classified as a gone source item", gone.kind === "gone" && !gone.retryable);
-  check("a 403 notFound body is classified as a gone source item", hiddenGone.kind === "gone" && !hiddenGone.retryable);
+  check("permission loss is not guessed to be hard deletion",
+    gone.kind === "unresolved_not_returned" && gone.retryable &&
+      gone.reason === "Drive no longer returns this item to this credential");
+  check("a 403 notFound body is also not guessed to be hard deletion",
+    hiddenGone.kind === "unresolved_not_returned" && hiddenGone.retryable);
   check("a 403 access denial remains review-only",
     accessDenied.kind === "unresolved_access" && accessDenied.retryable);
   check("an item still parented inside scope but missing from the walk blocks tombstones",

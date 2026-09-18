@@ -190,7 +190,10 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.absenceMetadataReads++;
     saveEvidence(evidence);
-    if (mode === "full-unresolved" || mode === "incremental-unresolved") {
+    if (mode === "full-unresolved") {
+      return json({ error: { message: "File not found" } }, 404);
+    }
+    if (mode === "incremental-unresolved") {
       return json({
         error: {
           message: "insufficient permissions",

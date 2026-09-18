@@ -14246,41 +14246,102 @@ const cmdIngestRemoteRun = async (
     state.drive_removal_review?.issue_code === "SAFETY_REVIEW_REQUIRED"
     ? state.drive_removal_review
     : null;
+  const driveReviewObservedAt = new Date().toISOString();
+  const driveAbsenceGraceMs = 7 * 24 * 60 * 60 * 1000;
+  const driveGraceRecord = (uid, {
+    firstObservedAt = driveReviewObservedAt,
+    lastObservedAt = driveReviewObservedAt,
+    observationCount = 1,
+  } = {}) => {
+    const firstMs = Date.parse(firstObservedAt);
+    const lastMs = Date.parse(lastObservedAt);
+    const valid = Number.isFinite(firstMs) && Number.isFinite(lastMs) &&
+      lastMs >= firstMs && Number.isSafeInteger(observationCount) && observationCount >= 1;
+    const safeFirstMs = valid ? firstMs : Date.parse(driveReviewObservedAt);
+    const safeLastMs = valid ? lastMs : safeFirstMs;
+    return {
+      uid: String(uid),
+      first_observed_at: new Date(safeFirstMs).toISOString(),
+      last_observed_at: new Date(safeLastMs).toISOString(),
+      grace_eligible_at: new Date(safeFirstMs + driveAbsenceGraceMs).toISOString(),
+      observation_count: valid ? observationCount : 1,
+    };
+  };
   const legacyDriveReviewUids = storedDriveRemovalReview?.schema_version === 1 &&
     Array.isArray(storedDriveRemovalReview?.uids)
     ? storedDriveRemovalReview.uids
+    : [];
+  const legacyPendingNotReturnedUids = storedDriveRemovalReview?.schema_version === 2 &&
+    Array.isArray(storedDriveRemovalReview?.pending_source_deletion_uids)
+    ? storedDriveRemovalReview.pending_source_deletion_uids
     : [];
   let unresolvedDriveReviewUids = new Set(
     (Array.isArray(storedDriveRemovalReview?.unresolved_access_uids)
       ? storedDriveRemovalReview.unresolved_access_uids
       : legacyDriveReviewUids).map(String),
   );
-  let pendingGoneDriveReviewUids = new Set(
-    (Array.isArray(storedDriveRemovalReview?.pending_source_deletion_uids)
-      ? storedDriveRemovalReview.pending_source_deletion_uids
-      : []).map(String),
-  );
+  let unresolvedNotReturnedDriveReview = new Map();
+  for (const raw of Array.isArray(storedDriveRemovalReview?.unresolved_not_returned)
+    ? storedDriveRemovalReview.unresolved_not_returned
+    : []) {
+    if (!raw || typeof raw !== "object" || !String(raw.uid || "")) continue;
+    const record = driveGraceRecord(raw.uid, {
+      firstObservedAt: raw.first_observed_at,
+      lastObservedAt: raw.last_observed_at,
+      observationCount: raw.observation_count,
+    });
+    unresolvedNotReturnedDriveReview.set(record.uid, record);
+  }
+  for (const uid of legacyPendingNotReturnedUids.map(String)) {
+    unresolvedNotReturnedDriveReview.set(uid, driveGraceRecord(uid));
+  }
+  let pendingSourceDeletionDriveReview = new Map();
+  for (const raw of Array.isArray(storedDriveRemovalReview?.source_deletion_candidates)
+    ? storedDriveRemovalReview.source_deletion_candidates
+    : []) {
+    if (!raw || typeof raw !== "object" || !String(raw.uid || "")) continue;
+    if (!["change_feed_removed", "repeated_not_returned"].includes(raw.corroboration)) continue;
+    const record = driveGraceRecord(raw.uid, {
+      firstObservedAt: raw.first_observed_at,
+      lastObservedAt: raw.last_observed_at,
+      observationCount: raw.observation_count,
+    });
+    pendingSourceDeletionDriveReview.set(record.uid, {
+      ...record,
+      corroboration: raw.corroboration,
+    });
+  }
   let driveRemovalReview = storedDriveRemovalReview;
 
   const updateDriveRemovalReview = () => {
     const unresolvedAccessUids = [...unresolvedDriveReviewUids].sort();
-    const pendingSourceDeletionUids = [...pendingGoneDriveReviewUids].sort();
-    const uids = [...new Set([...unresolvedAccessUids, ...pendingSourceDeletionUids])].sort();
+    const unresolvedNotReturned = [...unresolvedNotReturnedDriveReview.values()]
+      .sort((a, b) => a.uid.localeCompare(b.uid));
+    const sourceDeletionCandidates = [...pendingSourceDeletionDriveReview.values()]
+      .sort((a, b) => a.uid.localeCompare(b.uid));
+    const uids = [...new Set([
+      ...unresolvedAccessUids,
+      ...unresolvedNotReturned.map((entry) => entry.uid),
+      ...sourceDeletionCandidates.map((entry) => entry.uid),
+    ])].sort();
     if (!uids.length) {
       driveRemovalReview = null;
       delete state.drive_removal_review;
       return;
     }
     driveRemovalReview = {
-      schema_version: 2,
+      schema_version: 3,
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
-        unresolved_absences: unresolvedAccessUids.length,
-        pending_source_deletions: pendingSourceDeletionUids.length,
+        unresolved_absences: unresolvedAccessUids.length + unresolvedNotReturned.length,
+        unresolved_access: unresolvedAccessUids.length,
+        unresolved_not_returned: unresolvedNotReturned.length,
+        pending_source_deletions: sourceDeletionCandidates.length,
       },
       uids,
       unresolved_access_uids: unresolvedAccessUids,
-      pending_source_deletion_uids: pendingSourceDeletionUids,
+      unresolved_not_returned: unresolvedNotReturned,
+      source_deletion_candidates: sourceDeletionCandidates,
     };
     state.drive_removal_review = driveRemovalReview;
   };
@@ -14492,9 +14553,10 @@ const cmdIngestRemoteRun = async (
 
     const seenDriveUids = new Set(files.map((file) => `${sourceName}:${file.id}`));
     const confirmedDriveAbsenceUids = [];
-    const goneDriveAbsenceUids = [];
+    const corroboratedNotReturnedUids = [];
     if (!dry && driveStoredBeforeProcessing) {
       const uidPrefix = `${sourceName}:`;
+      const changeFeedRemovalUids = new Set(sourceDeletedUids);
       const absenceCandidates = new Set(
         sourceDeletedUids.filter((uid) =>
           driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)
@@ -14505,25 +14567,33 @@ const cmdIngestRemoteRun = async (
           if (!seenDriveUids.has(uid)) absenceCandidates.add(uid);
         }
       }
-      for (const uid of [...unresolvedDriveReviewUids, ...pendingGoneDriveReviewUids]) {
+      for (const uid of [
+        ...unresolvedDriveReviewUids,
+        ...unresolvedNotReturnedDriveReview.keys(),
+        ...pendingSourceDeletionDriveReview.keys(),
+      ]) {
         if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) {
           absenceCandidates.add(uid);
         }
       }
 
       // The current rooted traversal is the authority for which folder ids are
-      // in scope. A visible file outside this set is a confirmed move. Drive's
-      // 404/notFound response is a separately approved source deletion, while
-      // an access-denied 403 stays review-only and can never enter this plan.
+      // in scope. A visible file outside this set is a confirmed move. A 404
+      // proves only that Drive no longer returns the item to this credential.
+      // It enters the deletion plan only with the same id in this change-feed
+      // window or after a second observation beyond the recorded grace date.
       const scopedFolderIds = new Set([
         ...sourcePolicy.rootFolderIds,
         ...Object.keys(state.drive_folders || {}),
       ]);
       // Recheck every retained review member. A later walk that sees the file
-      // again clears it, a provider-confirmed absence moves it into the exact
-      // removal plan, and access loss remains excluded from deletion.
+      // again clears it. A changed outcome replaces the old classification,
+      // so stale deletion intent can never survive a later access denial.
+      const priorNotReturnedReview = unresolvedNotReturnedDriveReview;
+      const priorSourceDeletionReview = pendingSourceDeletionDriveReview;
       unresolvedDriveReviewUids = new Set();
-      pendingGoneDriveReviewUids = new Set();
+      unresolvedNotReturnedDriveReview = new Map();
+      pendingSourceDeletionDriveReview = new Map();
       for (const uid of [...absenceCandidates].sort()) {
         const fileId = uid.startsWith(uidPrefix) ? uid.slice(uidPrefix.length) : "";
         if (!fileId) {
@@ -14535,10 +14605,56 @@ const cmdIngestRemoteRun = async (
           confirmedDriveAbsenceUids.push(uid);
           continue;
         }
+        if (classification.kind === "unresolved_not_returned") {
+          const prior = priorNotReturnedReview.get(uid);
+          const priorCandidate = priorSourceDeletionReview.get(uid);
+          const observedMs = Date.parse(driveReviewObservedAt);
+          const graceEligibleMs = Date.parse(prior?.grace_eligible_at || "");
+          let candidate = null;
+          if (changeFeedRemovalUids.has(uid)) {
+            const record = prior || priorCandidate || driveGraceRecord(uid);
+            candidate = {
+              ...record,
+              last_observed_at: driveReviewObservedAt,
+              observation_count: Number(record.observation_count || 1) + (prior || priorCandidate ? 1 : 0),
+              corroboration: "change_feed_removed",
+            };
+          } else if (priorCandidate) {
+            candidate = {
+              ...priorCandidate,
+              last_observed_at: driveReviewObservedAt,
+              observation_count: Number(priorCandidate.observation_count || 1) + 1,
+            };
+          } else if (prior && Number.isFinite(graceEligibleMs) && observedMs >= graceEligibleMs) {
+            candidate = {
+              ...prior,
+              last_observed_at: driveReviewObservedAt,
+              observation_count: Number(prior.observation_count || 1) + 1,
+              corroboration: "repeated_not_returned",
+            };
+          }
+          if (candidate) {
+            pendingSourceDeletionDriveReview.set(uid, candidate);
+            corroboratedNotReturnedUids.push(uid);
+            confirmedDriveAbsenceUids.push(uid);
+            continue;
+          }
+          const firstObservation = prior || driveGraceRecord(uid);
+          unresolvedNotReturnedDriveReview.set(uid, {
+            ...firstObservation,
+            last_observed_at: driveReviewObservedAt,
+            observation_count: Number(firstObservation.observation_count || 1) + (prior ? 1 : 0),
+          });
+          continue;
+        }
         if (classification.kind === "gone") {
-          confirmedDriveAbsenceUids.push(uid);
-          goneDriveAbsenceUids.push(uid);
-          pendingGoneDriveReviewUids.add(uid);
+          // Older injected connector doubles may still return R6's temporary
+          // name. Keep those tests and adapters fail-closed as uncorroborated.
+          unresolvedNotReturnedDriveReview.set(uid, driveGraceRecord(uid));
+          continue;
+        }
+        if (classification.kind === "unresolved_access" || classification.kind === "unresolved") {
+          unresolvedDriveReviewUids.add(uid);
           continue;
         }
         unresolvedDriveReviewUids.add(uid);
@@ -14686,13 +14802,22 @@ const cmdIngestRemoteRun = async (
         fingerprintContext: "drive-strict",
       });
       saveState(statePath, state);
-      const gonePlanTargets = [...new Set([
-        ...goneDriveAbsenceUids,
-        ...pendingGoneDriveReviewUids,
+      const corroboratedPlanTargets = [...new Set([
+        ...corroboratedNotReturnedUids,
+        ...pendingSourceDeletionDriveReview.keys(),
       ])].filter((uid) => storedUids.has(uid) && !seenUids.has(uid));
-      if (gonePlanTargets.length && removalApproval !== driveRemovalPlan.fingerprint) {
+      if (corroboratedPlanTargets.length && removalApproval !== driveRemovalPlan.fingerprint) {
+        const localDetails = corroboratedPlanTargets.map((uid) => {
+          let version = null;
+          try { version = JSON.parse(String(state.done?.[uid] || "")); } catch { /* unavailable below */ }
+          const name = safeIngestDisplay(Array.isArray(version) ? version[2] : null, "name unavailable");
+          const folder = safeIngestDisplay(Array.isArray(version) ? version[4] : null, "folder unavailable");
+          return `      - ${name} (folder: ${folder})`;
+        }).join("\n");
         throw new DriveRemovalReviewRequired(
-          `Drive reports ${gonePlanTargets.length} stored item(s) no longer exist.\n` +
+          `Drive stopped returning ${corroboratedPlanTargets.length} stored item(s) to this credential, ` +
+            "and the deletion is now corroborated.\n" +
+            `${localDetails}\n` +
             "      Nothing from this removal plan was removed. The source cursor was not advanced.\n" +
             "      Confirm this exact source-deletion plan by re-running:\n" +
             `      brain ingest <manifest> --from drive --approve-removals ${driveRemovalPlan.fingerprint}`
@@ -14740,7 +14865,7 @@ const cmdIngestRemoteRun = async (
           } else {
             if (state.done) delete state.done[uid];
             if (state.removed) delete state.removed[uid];
-            pendingGoneDriveReviewUids.delete(uid);
+            pendingSourceDeletionDriveReview.delete(uid);
           }
         }
         updateDriveRemovalReview();
@@ -15594,13 +15719,24 @@ const cmdIngestRemoteRun = async (
   assertNoIngestFailures(tally);
   if (driveReviewRequired) {
     const count = driveRemovalReview.counts.unresolved_absences;
+    const notReturned = Number(driveRemovalReview.counts.unresolved_not_returned || 0);
+    const accessDenied = Number(driveRemovalReview.counts.unresolved_access || 0);
+    const reasons = [
+      ...(notReturned ? [
+        `${notReturned} item(s): Drive no longer returns this item to this credential. ` +
+          "Leave the Brain's accessible copy in place and run Drive ingestion again after the recorded seven-day grace date.",
+      ] : []),
+      ...(accessDenied ? [
+        `${accessDenied} item(s): Drive denied access to the file metadata. Restore access, then run Drive ingestion again.`,
+      ] : []),
+    ].join("\n      ");
     throw new DriveRemovalReviewRequired(
-      `Drive review required: ${count} stored item(s) were absent from the reviewed-root walk, ` +
-        "and Drive denied access to the file metadata.\n" +
+      `Drive review required: ${count} stored item(s) were absent from the reviewed-root walk.\n` +
+        `      ${reasons}\n` +
         "      Nothing unresolved was removed. The completed source cursor was saved.\n" +
-        "      Restore access, then run Drive ingestion again. Source deletion can only be confirmed " +
-        "when Drive reports the item gone and the exact brain ingest <manifest> --from drive " +
-        "--approve-removals <fingerprint> plan is approved."
+        "      Only a change-feed removal or a second not-returned observation at least seven days later " +
+        "can move an item into the exact brain ingest <manifest> --from drive " +
+        "--approve-removals <fingerprint> plan."
     );
   }
   await reportBacklog(manifestPath);
