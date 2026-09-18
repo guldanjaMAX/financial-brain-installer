@@ -10,16 +10,22 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
-- **Drive no longer mistakes a hidden file for a deleted file.** A 404 proves
+- **A stale retry marker can no longer delete a document without a fresh look
+  at Drive and your approval.** Every saved retry marker is checked again; a
+  live file clears it, a temporary lookup failure stays protected for the next
+  run, and a 404 starts the normal review instead of deleting anything. A 404 proves
   only that Drive stopped returning that item to this credential and is never
   deletion evidence. Drive's change-feed `removed` flag is not corroboration
   because access loss can produce the same flag; it adds only a dated note to
   the review record. The Brain keeps its last accessible copy. No UID is
   deleted while its absence is unresolved or its seven-day grace window is
   open, even when a stale retry marker exists. The item can enter a deletion
-  plan only after the same not-returned result on two walks at least seven days
-  apart. That plan shows the locally saved name and folder, and nothing from it
-  is deleted without the exact
+  plan only after the same not-returned result in two distinct runs whose
+  Worker-backed timestamps are at least seven days apart and agree with this
+  computer's clock. That plan shows the locally saved name and folder; if
+  either label is unavailable, no approval is offered. Its approval binds
+  those displayed labels and the exact observation, expires after 24 hours,
+  and nothing from it is deleted without the exact
   `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
   approval. A 403 access denial also remains outside the plan. An approved
   deletion is read back before its review entry clears.

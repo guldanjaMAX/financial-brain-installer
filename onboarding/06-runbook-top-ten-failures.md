@@ -680,13 +680,16 @@ possible causes, and the owner action depends on which one the message names:
    and Drive's change-feed `removed` flag is not corroboration because access
    loss can produce it too. The flag may add a dated note, but it cannot shorten
    the review window. The Brain keeps its last accessible copy. No UID is
-   deleted while its absence is unresolved or its grace window is open; during
-   that time it is excluded from every removal reason and plan. Restore sharing
+   deleted while its absence is unresolved or its grace window is open. A stale
+   retry marker is checked against Drive again, and a temporary lookup failure
+   stays protected while the completed cursor is saved. Restore sharing
    if access changed, or wait until the recorded seven-day grace date and run
    Drive ingestion again. Only the same
-   not-returned result on two walks at least seven days apart can create a
-   deletion candidate. That later approval stop shows the locally saved name
-   and folder. Review those labels, then use the exact fingerprint only if the
+   not-returned result in two distinct runs with Worker-backed timestamps at
+   least seven days apart can create a deletion candidate. The local and server
+   clocks must agree within 24 hours. That later approval stop shows the locally
+   saved name and folder. If either label is missing, no approval is offered.
+   Review those labels, then use the exact fingerprint within 24 hours only if the
    owner expects deletion. Nothing is deleted until that exact approval, and
    the review record clears only after deletion readback.
 3. **Drive returned an access-denied 403 during the end-of-run absence check.**

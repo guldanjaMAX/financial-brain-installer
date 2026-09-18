@@ -790,12 +790,16 @@ response says `notFound`, proves only that Drive stopped returning the item to
 this credential and is never deletion evidence. Drive's change-feed `removed`
 flag is not corroboration because access loss can produce the same flag. It may
 add a dated annotation to the review record, but it cannot shorten the grace
-window. No UID is deleted while its absence is unresolved or its grace window
-is open. During that time it is excluded from every removal reason and plan,
-including a stale retry marker. It can enter the `source_deleted` plan only
-after the same not-returned outcome is observed on two walks at least seven
-days apart. That stopped approval message shows each candidate's locally saved
-name and folder. The item is deleted only after the owner supplies the exact
+window. A stale retry marker is checked against Drive again before it can enter
+any removal plan; a live file clears the marker, and a temporary lookup failure
+stays protected for the next run. No UID is deleted while its absence is
+unresolved or its grace window is open. It can enter the `source_deleted` plan
+only after the same not-returned outcome is recorded by two distinct runs with
+Worker-backed timestamps at least seven days apart and clocks that agree within
+24 hours. That stopped approval message shows each candidate's locally saved
+name and folder. If either label is missing, the command refuses to offer an
+approval. The fingerprint binds those labels and the exact observation, and it
+expires after 24 hours. The item is deleted only after the owner supplies the exact
 `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
 approval, and its review entry clears only after deletion readback. Visible
 trash and a visible move outside the reviewed roots remain direct source proof.
