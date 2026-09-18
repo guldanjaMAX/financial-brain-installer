@@ -9,6 +9,7 @@ import {
   unsupportedFilters,
 } from "../src/lib/store-d1.js";
 import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
+import { DRIVE_STORED_FAMILY_UID_MAX_BYTES } from "../src/lib/stored-family-identity.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
 let fail = 0, ran = 0;
@@ -2682,6 +2683,35 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   check("source-family unknown-field errors identify the rejected field structurally",
     unknownFieldBody.code === "unknown_field" && unknownFieldBody.field === "unexpected",
     JSON.stringify(unknownFieldBody));
+
+  const invalidDriveUids = [
+    "drive:abc\u200bdef",
+    "drive:abc\u200ddef",
+    "drive:abc\u202edef",
+    "drive:abc\u2066def",
+    "drive:abc\u3164def",
+    "drive:abc\ufe0fdef",
+    "drive:abc\ud800def",
+    `drive:${"a".repeat(251)}`,
+  ];
+  const invalidIdentityResponses = await Promise.all(invalidDriveUids.map((uid) => post({
+    source: "drive",
+    include_labels: true,
+    uids: [uid],
+  })));
+  check("the route applies the printable-ASCII Drive identity parity table",
+    invalidIdentityResponses.every((response) => response.status === 400),
+    invalidIdentityResponses.map((response) => response.status).join(","));
+  const maxDriveUid = `drive:${"a".repeat(DRIVE_STORED_FAMILY_UID_MAX_BYTES - "drive:".length)}`;
+  const maxIdentityResponse = await post({
+    source: "drive",
+    include_labels: true,
+    uids: [maxDriveUid],
+  });
+  check("the route accepts a printable 256-byte Drive uid",
+    new TextEncoder().encode(maxDriveUid).length === DRIVE_STORED_FAMILY_UID_MAX_BYTES &&
+      maxIdentityResponse.status === 200,
+    `${new TextEncoder().encode(maxDriveUid).length} ${maxIdentityResponse.status}`);
 
   const boundedUids = Array.from({ length: SOURCE_FAMILY_UID_FILTER_MAX }, (_, index) =>
     `drive:bounded-${String(index).padStart(2, "0")}`

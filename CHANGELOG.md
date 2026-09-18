@@ -21,11 +21,13 @@ asset publication.
   repeated.
 
 - **A malformed stored Drive identity can no longer become a deletion
-  target.** Empty, whitespace-only, control-character, and whitespace-containing
-  source IDs are quarantined byte-for-byte, kept outside provider lookups and
-  removal plans, and listed by `brain diagnose` for repair. To check: each
-  malformed family is held without a forget request while a valid short ID
-  continues through the ordinary Drive review path.
+  target.** A Drive source ID must use printable ASCII U+0021 through U+007E,
+  and the whole `drive:<id>` identity is capped at 256 UTF-8 bytes. Zero-width,
+  bidi, variation-selector, non-ASCII lookalike, surrogate, whitespace, control,
+  and overlength values are quarantined byte-for-byte and kept outside provider
+  lookups and removal plans. `brain diagnose` escapes invisible code points and
+  caps display length. To check: each malformed family is held without a forget
+  request while a valid 256-byte identity continues through ordinary review.
 
 - **A malformed family at an inventory page boundary no longer stops the
   sweep.** Continuation cursors are bounded paging tokens, not deletion

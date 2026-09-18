@@ -1,4 +1,13 @@
 import { createHash } from "node:crypto";
+import {
+  DRIVE_STORED_FAMILY_UID_MAX_BYTES,
+  isCanonicalStoredFamilyUid,
+} from "../worker/src/lib/stored-family-identity.js";
+
+export {
+  DRIVE_STORED_FAMILY_UID_MAX_BYTES,
+  isCanonicalStoredFamilyUid,
+};
 
 // A routine sync may clean up a few ordinary source changes without making an
 // unattended scheduler unusable. Crossing either boundary is no longer
@@ -21,28 +30,6 @@ const CATEGORY_INPUTS = Object.freeze([
   ["source_deleted", "vanishedCandidates"],
   ["intentional_skip", "intentionalCandidates"],
 ]);
-
-/**
- * A stored family identity must survive every boundary byte-for-byte. Drive
- * provider ids cannot contain whitespace: accepting it there would let the
- * inventory classify one identity while the removal request names another.
- * Other connectors retain their existing opaque ids, including local upload
- * family names whose exact path-derived identity can legitimately contain a
- * space.
- */
-export function isCanonicalStoredFamilyUid(value, source = null) {
-  if (typeof value !== "string") return false;
-  const separator = value.indexOf(":");
-  if (separator < 1) return false;
-  const uidSource = value.slice(0, separator);
-  const sourceId = value.slice(separator + 1);
-  if (source !== null && uidSource !== source) return false;
-  const sourceIdPattern = uidSource === "drive"
-    ? /^[^\s\u0000-\u001f\u007f-\u009f]+$/u
-    : /^[^\u0000-\u001f\u007f-\u009f]+$/u;
-  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(uidSource) &&
-    sourceIdPattern.test(sourceId);
-}
 
 function canonicalIdentitySet(values, label) {
   if (values == null) return new Set();

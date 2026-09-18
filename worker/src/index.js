@@ -72,6 +72,7 @@ import {
   attachEvidenceLineage, evidenceLineageFor, evidenceLineageRootIds,
 } from "./lib/evidence-lineage.js";
 import { ingestEnvelopeValidationError } from "./lib/ingest-envelope.js";
+import { isCanonicalStoredFamilyUid } from "./lib/stored-family-identity.js";
 import {
   normalizeIngestEnvelopeProvenance, restampFirstPartySourceProvenance,
 } from "./lib/provenance-receipt.js";
@@ -2387,8 +2388,7 @@ async function handleSourceFamilies(env, request) {
   if (uids !== null && (
     source === null || !Array.isArray(uids) || uids.length < 1 || uids.length > SOURCE_FAMILY_UID_FILTER_MAX ||
     new Set(uids).size !== uids.length ||
-    uids.some((uid) => typeof uid !== "string" || !uid.startsWith(`${source}:`) ||
-      uid.length <= source.length + 1 || /[\s\u0000-\u001f\u007f-\u009f]/u.test(uid.slice(source.length + 1)))
+    uids.some((uid) => !isCanonicalStoredFamilyUid(uid, source))
   )) {
     return respond({
       error: `uids must be 1 to ${SOURCE_FAMILY_UID_FILTER_MAX} unique canonical identities for source`,

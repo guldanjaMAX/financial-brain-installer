@@ -667,11 +667,14 @@ Any account-wide changed item is rebuilt through the reviewed-root traversal
 before content is read.
 
 The stored-family inventory and removal-plan builder share one canonical
-identity validator. A family source ID must be non-empty and contain no
-whitespace or control characters. Invalid identities are preserved
-byte-for-byte in `drive_removal_review.malformed_identities`, excluded before
-provider lookup, and shown only through the read-only diagnostic path. The
-removal plan never trims an identity.
+identity validator. A Drive source ID must contain only printable ASCII U+0021
+through U+007E, and the complete `drive:<id>` UID is limited to 256 UTF-8 bytes.
+Other source namespaces retain their existing non-control opaque identities,
+including spaces. Invalid Drive identities are preserved byte-for-byte in
+`drive_removal_review.malformed_identities`, excluded before provider lookup,
+and shown only through the read-only diagnostic path. Diagnose escapes every
+code point outside printable ASCII and caps display length while the stored
+value remains exact. The removal plan never trims an identity.
 
 The source-family continuation cursor is a separate opaque token, bounded to
 16 KiB, source-prefixed, byte-for-byte equal to the page tail, and never
@@ -730,7 +733,9 @@ only in the authenticated no-store inventory response and is not added to
 source receipts or destructive Worker requests. The CLI requests labels only
 for candidate/review UID groups bounded by both the 32 KiB request limit and
 `D1_QUERY_BIND_LIMIT - 3`, currently 97 UIDs. The route enforces the same 97-UID
-limit before preparing SQL. A structured `unknown_field` response
+limit before preparing SQL. At the 256-byte Drive UID limit, 97 UIDs cannot
+reach 32 KiB, but the independent byte guard remains for defense in depth. A
+structured `unknown_field` response
 for `uids` permits one compatibility restart without the filter; no other
 failure widens the label read. The UID
 stays under review until an approved deletion has exact inventory readback;

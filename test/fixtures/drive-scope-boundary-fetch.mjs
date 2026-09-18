@@ -11,7 +11,9 @@ const inventoryLabelMode = String(process.env.BRAIN_DRIVE_SCOPE_LABELS || "avail
 const inventoryUidFilterMode = String(process.env.BRAIN_DRIVE_SCOPE_UID_FILTER || "available");
 const inventoryLabelsAvailable = inventoryLabelMode !== "none";
 const inventoryDateAvailable = process.env.BRAIN_DRIVE_SCOPE_DATE !== "none";
-const testedStoredUid = String(process.env.BRAIN_DRIVE_SCOPE_STORED_UID || "drive:");
+const testedStoredUid = process.env.BRAIN_DRIVE_SCOPE_STORED_UID_JSON
+  ? JSON.parse(process.env.BRAIN_DRIVE_SCOPE_STORED_UID_JSON)
+  : String(process.env.BRAIN_DRIVE_SCOPE_STORED_UID || "drive:");
 const MODES = new Set([
   "changed-outside",
   "full-malformed",

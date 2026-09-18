@@ -296,6 +296,7 @@ import {
   readAdminKeyFromKeychain,
 } from "./operations/admin-key-persistence.mjs";
 import {
+  DRIVE_STORED_FAMILY_UID_MAX_BYTES,
   DRIVE_REMOVAL_MAX_COUNT,
   DRIVE_REMOVAL_MAX_RATIO,
   DriveRemovalReviewRequired,
@@ -319,6 +320,7 @@ import {
   loadCorpusContract,
 } from "./eval/corpus-contract.mjs";
 export {
+  DRIVE_STORED_FAMILY_UID_MAX_BYTES,
   DRIVE_REMOVAL_MAX_COUNT,
   DRIVE_REMOVAL_MAX_RATIO,
   DriveRemovalReviewRequired,
@@ -21519,9 +21521,27 @@ export function readMalformedDriveIdentities(manifestPath) {
 
 export function renderMalformedDriveIdentities(identities, { write = warn } = {}) {
   if (!Array.isArray(identities) || identities.length === 0) return identities;
+  const visible = (value) => {
+    const codePoints = [...String(value)];
+    const limit = 120;
+    const escaped = codePoints.slice(0, limit).map((character) => {
+      const point = character.codePointAt(0);
+      if (character === "\t") return "\\t";
+      if (character === "\n") return "\\n";
+      if (character === "\r") return "\\r";
+      if (point >= 0x21 && point <= 0x7e) {
+        return character === "\\" || character === '"' ? `\\${character}` : character;
+      }
+      return point <= 0xffff
+        ? `\\u${point.toString(16).padStart(4, "0")}`
+        : `\\u{${point.toString(16)}}`;
+    }).join("");
+    const suffix = codePoints.length > limit ? `... (${codePoints.length} code points total)` : "";
+    return `"${escaped}${suffix}"`;
+  };
   write(
     `${identities.length} stored Drive item(s) have malformed identities and remain quarantined from deletion.\n` +
-      identities.map((uid) => `        - ${JSON.stringify(uid)}`).join("\n"),
+      identities.map((uid) => `        - ${visible(uid)}`).join("\n"),
   );
   return identities;
 }
