@@ -524,7 +524,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
 /* A provider acceptance is not durable unless every requested row appears in
    the exact receipt readback. One skipped target must fail the whole batch. */
 {
-  const { env, db } = makeEnv();
+  const { env, db, upserted } = makeEnv();
   insertDocument(db, "drive:short-receipt");
   insertChunk(db, "drive:short-receipt#0", "drive:short-receipt", 0);
   db.prepare(
@@ -542,13 +542,40 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     error = caught;
   }
   const retained = db.prepare(
-    `SELECT submitted_mutation_id, attempts FROM vector_outbox
-      WHERE chunk_uid='drive:short-receipt#0'`,
+    `SELECT o.submitted_mutation_id, o.attempts, s.failure_code,
+            s.next_attempt_at, s.last_attempt_at, s.quarantined_at
+       FROM vector_outbox o
+       LEFT JOIN vector_outbox_retry_state s
+         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+      WHERE o.chunk_uid='drive:short-receipt#0'`,
+  ).get();
+  let repeatedError = null;
+  try {
+    await drainOutbox(env, { embed: async () => [0.15] });
+  } catch (caught) {
+    repeatedError = caught;
+  }
+  const repeated = db.prepare(
+    `SELECT o.submitted_mutation_id, o.attempts, s.attempts AS retry_attempts,
+            s.failure_code, s.next_attempt_at, s.last_attempt_at, s.quarantined_at
+       FROM vector_outbox o
+       LEFT JOIN vector_outbox_retry_state s
+         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+      WHERE o.chunk_uid='drive:short-receipt#0'`,
   ).get();
   check("any short mutation receipt readback fails closed",
-    /row receipts were ambiguous/u.test(error?.message || "") &&
-      retained?.submitted_mutation_id === null && retained?.attempts === 1,
-    JSON.stringify({ message: error?.message, retained }));
+    error?.code === "receipt_write_incomplete" && error?.vectorReceiptWriteIncomplete === true &&
+      /row receipts were ambiguous/u.test(error?.message || "") &&
+      retained?.submitted_mutation_id === null && retained?.attempts === 1 &&
+      retained?.failure_code === "receipt_write_incomplete" &&
+      retained?.next_attempt_at === retained?.last_attempt_at && retained?.quarantined_at === null,
+    JSON.stringify({ message: error?.message, code: error?.code, retained }));
+  check("repeated receipt shortfalls stay immediately retryable without climbing the provider ladder",
+    repeatedError?.code === "receipt_write_incomplete" && upserted.length === 2 &&
+      repeated?.submitted_mutation_id === null && repeated?.attempts === 1 &&
+      repeated?.retry_attempts === 1 && repeated?.failure_code === "receipt_write_incomplete" &&
+      repeated?.next_attempt_at === repeated?.last_attempt_at && repeated?.quarantined_at === null,
+    JSON.stringify({ message: repeatedError?.message, upserts: upserted.length, repeated }));
 }
 
 /* A processed receipt with an old same-id generation is not success. This is

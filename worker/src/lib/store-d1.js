@@ -1320,16 +1320,27 @@ async function scheduleVectorFailures(env, rows, {
   const statements = [];
   let quarantined = 0;
   for (const row of rows) {
-    const attempt = Math.max(0, Number(row.attempts || 0)) + 1;
+    const receiptWriteIncomplete = failureCode === "receipt_write_incomplete";
+    // A provider-accepted mutation whose D1 receipt is incomplete is a
+    // bookkeeping failure, not another provider rejection. Keep it immediately
+    // retryable and do not climb the provider backoff/quarantine ladder for
+    // every member of the accepted slice. The retry table predates this class
+    // and requires attempts >= 1, so the first marker uses one without growing
+    // on repeated receipt failures.
+    const attempt = receiptWriteIncomplete
+      ? Math.max(1, Number(row.attempts || 0))
+      : Math.max(0, Number(row.attempts || 0)) + 1;
     // A visibility mismatch is a systemic confirmation artifact, never a
     // property of the row: quarantining on it strands healthy rows behind an
     // operator ceremony after any stall lasting a few cycles. The backoff
     // ladder still applies (capped at its last rung), so these rows retry
     // forever instead of dying.
-    const quarantineAt = failureCode !== "visibility_mismatch" &&
+    const quarantineAt = failureCode !== "visibility_mismatch" && !receiptWriteIncomplete &&
       attempt >= VECTOR_RETRY_MAX_ATTEMPTS ? now : null;
     if (quarantineAt !== null) quarantined++;
-    const nextAttemptAt = quarantineAt === null ? now + vectorRetryDelay(attempt) : now;
+    const nextAttemptAt = receiptWriteIncomplete
+      ? now
+      : quarantineAt === null ? now + vectorRetryDelay(attempt) : now;
     statements.push(env.DB.prepare(
       `INSERT INTO vector_outbox_retry_state
          (chunk_uid,generation,attempts,next_attempt_at,last_attempt_at,quarantined_at,failure_code,last_error)
@@ -1845,7 +1856,11 @@ async function submitQueuedDeletes(env, rows, lease) {
 // embed loop below. Every other class (provider batch rejections, and legacy
 // rows carrying no recorded class) keeps the exclusive head slice, which is
 // how one poison row proves itself alone.
-const VECTOR_BATCH_SAFE_RETRY_CODES = new Set(["visibility_mismatch", "embedding_failure"]);
+const VECTOR_BATCH_SAFE_RETRY_CODES = new Set([
+  "visibility_mismatch",
+  "embedding_failure",
+  "receipt_write_incomplete",
+]);
 const headRetryNeedsIsolation = (row) =>
   Number(row?.attempts || 0) > 0 &&
   !VECTOR_BATCH_SAFE_RETRY_CODES.has(String(row?.failure_code || ""));
@@ -2045,9 +2060,11 @@ async function drainOutboxBatch(env, {
   let submitted = 0;
   let submissionMutationId = null;
   if (vectors.length) {
+    let providerAccepted = false;
     try {
       await renewDrainLease(env, lease.ownerToken, { now: lease.now() });
       const receipt = await env.VECTORIZE.upsert(vectors);
+      providerAccepted = true;
       const submittedRows = vectors.map((vector) => ({
         chunk_uid: idToChunk.get(vector.id),
         generation: chunkGeneration.get(idToChunk.get(vector.id)),
@@ -2065,12 +2082,16 @@ async function drainOutboxBatch(env, {
         generation: chunkGeneration.get(idToChunk.get(vector.id)),
         attempts: selectedPending.find((row) => row.chunk_uid === idToChunk.get(vector.id))?.attempts || 0,
       })), {
-        failureCode: "upsert_provider_failure",
+        failureCode: providerAccepted ? "receipt_write_incomplete" : "upsert_provider_failure",
         error: err,
         now: lease.now(),
       }).catch(() => {});
-      const e2 = new Error(`the vector index could not durably accept this batch: ${err}`);
-      e2.vectorUpsertFailed = true;
+      const e2 = new Error(providerAccepted
+        ? `the vector index accepted this batch but its D1 receipt was incomplete: ${err}`
+        : `the vector index could not durably accept this batch: ${err}`);
+      e2.code = providerAccepted ? "receipt_write_incomplete" : "upsert_provider_failure";
+      e2.vectorUpsertFailed = !providerAccepted;
+      e2.vectorReceiptWriteIncomplete = providerAccepted;
       throw e2;
     }
   }
