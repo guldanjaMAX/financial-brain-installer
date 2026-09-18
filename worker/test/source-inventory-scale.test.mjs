@@ -945,7 +945,7 @@ test("the rewritten source statements return the shipped 0.4.8 rows byte for byt
       "text_reliability_missing", "source_record_id_missing",
       "derivation_lineage_missing", "lineage_contract_unrecognized",
     ];
-    const projectedAfter = after.map((row) =>
+    const projectedAfter = after.filter((row) => Number(row.summary_only) === 0).map((row) =>
       Object.fromEntries(groupFields.map((field) => [field, row[field]])));
     assert.equal(
       JSON.stringify(projectedAfter), JSON.stringify(expected),
@@ -1366,7 +1366,7 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
       const measured = new Map();
       for (const [label, sql, binds, expectedRows, expectedDocuments] of [
         ["rewritten-inventory", sourceInventorySql(), [10001], SOURCE_NAMES.length, documents],
-        ["rewritten-recovery-summary", sourceRecoverySummarySql, [null, null, 251], SOURCE_NAMES.length, documents],
+        ["rewritten-recovery-summary", sourceRecoverySummarySql, [null, null, 251], SOURCE_NAMES.length + 1, documents],
         ["rewritten-recovery-page", sourceRecoverySql, [null, 0, 101], 101, 101],
       ]) {
         const probe = measure(`${label}-${documents}`, dbPath, sql, binds);

@@ -4339,12 +4339,21 @@ export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
            COALESCE(SUM(derivation_lineage_missing),0) AS total_derivation_lineage_missing,
            COALESCE(SUM(lineage_contract_unrecognized),0) AS total_lineage_contract_unrecognized
       FROM source_groups
-  )
-    SELECT source_groups.*,global_summary.*
-      FROM source_groups CROSS JOIN global_summary
+  ),
+  paged_source_groups AS (
+    SELECT *
+      FROM source_groups
      WHERE (?2 IS NULL OR source_id>?2)
      ORDER BY source_id
-     LIMIT ?3`;
+     LIMIT (?3 - 1)
+  )
+    SELECT paged_source_groups.*,global_summary.*,0 AS summary_only
+      FROM paged_source_groups CROSS JOIN global_summary
+    UNION ALL
+    SELECT NULL,NULL,NULL,0,0,0,0,0,0,0,0,0,0,
+           global_summary.*,1 AS summary_only
+      FROM global_summary
+     ORDER BY summary_only DESC,source_id`;
 
 export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
   SELECT candidate_rows.document_rowid,
@@ -4403,7 +4412,9 @@ export function sourceRecoveryPlan({
     Object.freeze({
       kind: "source_summary",
       sql: sourceRecoverySummarySql,
-      binds: Object.freeze([source, afterSourceId, SOURCE_RECOVERY_MAX_PAGE_SIZE + 1]),
+      // One independent global-summary row plus up to page-size + 1 source
+      // groups. The extra group is the truncation probe.
+      binds: Object.freeze([source, afterSourceId, SOURCE_RECOVERY_MAX_PAGE_SIZE + 2]),
     }),
     Object.freeze({
       kind: "candidate_page",
@@ -4507,11 +4518,17 @@ export async function sourceRecoveryCandidates(env, {
 
   const rawRows = Array.isArray(result?.results) ? result.results : [];
   const rawGroups = Array.isArray(summaryResult?.results) ? summaryResult.results : [];
-  if (rawGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE + 1) {
+  if (rawGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE + 2) {
     throw new Error("source recovery source summary exceeds its declared bound");
   }
-  const groupRows = rawGroups.slice(0, SOURCE_RECOVERY_MAX_PAGE_SIZE);
-  const sourceGroupsTruncated = rawGroups.length > SOURCE_RECOVERY_MAX_PAGE_SIZE;
+  const summaryRows = rawGroups.filter((row) => Number(row?.summary_only) === 1);
+  const returnedGroupRows = rawGroups.filter((row) => Number(row?.summary_only) === 0);
+  if (summaryRows.length !== 1 || summaryRows.length + returnedGroupRows.length !== rawGroups.length) {
+    throw new Error("source recovery global summary is unavailable");
+  }
+  const summaryRow = summaryRows[0];
+  const groupRows = returnedGroupRows.slice(0, SOURCE_RECOVERY_MAX_PAGE_SIZE);
+  const sourceGroupsTruncated = returnedGroupRows.length > SOURCE_RECOVERY_MAX_PAGE_SIZE;
   const sourceGroupsCursor = sourceGroupsTruncated && groupRows.length
     ? String(groupRows[groupRows.length - 1]?.source_id || "")
     : null;
@@ -4522,11 +4539,10 @@ export async function sourceRecoveryCandidates(env, {
     "text_reliability_missing", "source_record_id_missing",
     "derivation_lineage_missing", "lineage_contract_unrecognized",
   ]);
-  const summaryRow = rawGroups[0] || null;
-  const total = summaryRow ? inventoryCount(summaryRow.recovery_total) : 0;
+  const total = inventoryCount(summaryRow.recovery_total);
   const reasonCounts = Object.fromEntries(reasonFields.map((reason) => [
     reason,
-    summaryRow ? inventoryCount(summaryRow[`total_${reason}`]) : 0,
+    inventoryCount(summaryRow[`total_${reason}`]),
   ]));
   const globalBlockingSignals = [
     ...(reasonCounts.no_stored_chunks || reasonCounts.blank_only_chunks
@@ -4568,9 +4584,7 @@ export async function sourceRecoveryCandidates(env, {
         : "stored OCR or provenance receipts require review",
     };
   });
-  const sourceGroupTotal = summaryRow
-    ? inventoryCount(summaryRow.recovery_source_group_total)
-    : 0;
+  const sourceGroupTotal = inventoryCount(summaryRow.recovery_source_group_total);
   const privacyKey = pageRows.length ? await sourceRecoveryPrivacyKey(env) : null;
   const candidates = await Promise.all(pageRows.map(async (row) => {
     const sourceId = String(row.inventory_source || "");

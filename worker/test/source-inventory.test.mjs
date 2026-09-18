@@ -273,6 +273,20 @@ test("source recovery pages summaries beyond 250 source groups", async () => {
     Array.from({ length: 10 }, (_, index) => `source_${index + 250}`),
   );
 
+  const pastEnd = await sourceRecoveryCandidates(env, {
+    afterRowId: 9_999_999,
+    afterSourceId: "zzzzzz",
+    limit: 1,
+  });
+  assert.equal(pastEnd.rows.length, 0);
+  assert.equal(pastEnd.summary.source_groups_returned, 0);
+  assert.equal(pastEnd.total, first.total,
+    "an empty page must not collapse the snapshot-wide candidate total");
+  assert.equal(pastEnd.summary.candidate_source_groups, first.summary.candidate_source_groups,
+    "an empty source-group page must not collapse the snapshot-wide group total");
+  assert.deepEqual(pastEnd.summary.reason_counts, first.summary.reason_counts,
+    "an empty page must preserve the snapshot-wide reason totals");
+
   const firstResponse = await call(env, post(
     { mode: "recovery", limit: 1 },
     { "X-Admin-Key": "test-admin-key" },
