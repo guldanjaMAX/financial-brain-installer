@@ -726,7 +726,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
             mode === "incremental-restored" ? "Reviewed Root" : "Reviewed Root/Tax",
           ]),
         } : {}),
-        ...(["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)
+        ...(["full-malformed", "full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)
           ? Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
               const suffix = String(index).padStart(2, "0");
               return [`drive:retained-${suffix}`, JSON.stringify([
@@ -996,6 +996,25 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(legacyInventoryWithoutLabels.state().drive_removal_review.counts.label_unavailable, 1);
   } finally {
     legacyInventoryWithoutLabels.cleanup();
+  }
+
+  const malformedStoredIdentity = runScopeScenario("full-malformed", { full: true });
+  try {
+    assert.equal(malformedStoredIdentity.code, 0, malformedStoredIdentity.output);
+    assert.match(malformedStoredIdentity.output, /malformed_identity/i);
+    assert.match(malformedStoredIdentity.output, /recorded for brain diagnose/i);
+    assert.doesNotMatch(malformedStoredIdentity.output, /unexpected error|INGEST_FAILED/i);
+    assert.equal(malformedStoredIdentity.evidence().forgetRequests, 0,
+      "a malformed stored family identity reached the destructive endpoint");
+    assert.equal(malformedStoredIdentity.evidence().absenceMetadataReads, 0,
+      "a malformed stored family identity reached the Drive metadata classifier");
+    const state = malformedStoredIdentity.state();
+    assert.equal(state.sync_token, "fixture-prewalk-full-malformed");
+    assert.equal(state.drive_removal_review.counts.malformed_identity, 1);
+    assert.deepEqual(state.drive_removal_review.uids, []);
+    assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
+  } finally {
+    malformedStoredIdentity.cleanup();
   }
 
   const unresolvedPending = runScopeScenario("incremental-unresolved", {

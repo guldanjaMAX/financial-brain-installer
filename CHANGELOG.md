@@ -10,6 +10,12 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **A malformed stored Drive identity can no longer become a deletion
+  target.** An empty source ID is now reported as `malformed_identity`, kept
+  outside provider lookups and removal plans, and left visible to
+  `brain diagnose`. To check: a stored bare `drive:` family reports the issue,
+  performs no forget request, and leaves the completed walk otherwise intact.
+
 - **Drive ingest stays compatible while an older Brain is awaiting its
   update.** If the stored-family inventory does not support review labels yet,
   the walk continues, saves its completed cursor, and keeps any unlabelled

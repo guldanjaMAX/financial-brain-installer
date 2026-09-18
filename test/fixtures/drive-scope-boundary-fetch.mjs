@@ -12,6 +12,7 @@ const inventoryLabelsAvailable = inventoryLabelMode !== "none";
 const inventoryDateAvailable = process.env.BRAIN_DRIVE_SCOPE_DATE !== "none";
 const MODES = new Set([
   "changed-outside",
+  "full-malformed",
   "full-unresolved",
   "full-unresolved-subthreshold",
   "incremental-unresolved",
@@ -97,6 +98,7 @@ function requestBody(options) {
 
 function storedFamilies(evidence) {
   if (mode === "changed-outside") return [];
+  if (mode === "full-malformed") return ["drive:", ...RETAINED_UIDS].sort();
   if (mode === "incremental-unresolved-batch") {
     const removed = evidence.removedFamilies ? new Set(BATCH_MISSING_UIDS.slice(3)) : new Set();
     return [...BATCH_MISSING_UIDS, ...BATCH_RETAINED_UIDS]
@@ -235,7 +237,7 @@ globalThis.fetch = async (input, options = {}) => {
     return json({
       files: mode === "incremental-restored"
         ? [restoredFile()]
-        : ["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)
+        : ["full-malformed", "full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)
           ? RETAINED_UIDS.map((_, index) => retainedFile(index))
           : [],
       nextPageToken: null,

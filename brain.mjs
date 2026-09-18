@@ -11510,6 +11510,7 @@ export async function listStoredSourceFamilies({
   const normalizedSource = assertSourceName(source);
   const families = new Set();
   const labels = new Map();
+  const malformedIdentities = new Set();
   const seenCursors = new Set();
   let serverObservedAt = null;
   let serverDateChecked = false;
@@ -11550,6 +11551,7 @@ export async function listStoredSourceFamilies({
       labelsAvailable = false;
       families.clear();
       labels.clear();
+      malformedIdentities.clear();
       seenCursors.clear();
       cursor = "";
       continue;
@@ -11579,6 +11581,13 @@ export async function listStoredSourceFamilies({
       if (uid <= previous) {
         throw new Error("source-family inventory was not strictly ordered");
       }
+      if (uid.length <= normalizedSource.length + 1) {
+        // Keep corrupt stored identities visible to diagnostics, but never let
+        // one become a provider lookup or deletion target.
+        malformedIdentities.add(uid);
+        previous = uid;
+        continue;
+      }
       families.add(uid);
       if (requestLabels) {
         const detail = body.family_details[index];
@@ -11598,10 +11607,17 @@ export async function listStoredSourceFamilies({
     }
     if (body.next_cursor === null) {
       return includeServerObservedAt || includeLabels
-        ? { families, serverObservedAt, labels, ...(includeLabels ? { labelsAvailable } : {}) }
+        ? {
+            families,
+            serverObservedAt,
+            labels,
+            malformedIdentities,
+            ...(includeLabels ? { labelsAvailable } : {}),
+          }
         : families;
     }
-    if (typeof body.next_cursor !== "string" || !body.next_cursor.startsWith(`${normalizedSource}:`)) {
+    if (typeof body.next_cursor !== "string" || !body.next_cursor.startsWith(`${normalizedSource}:`) ||
+        body.next_cursor.length <= normalizedSource.length + 1) {
       throw new Error("source-family inventory returned an invalid next cursor");
     }
     if (!body.families.length || body.next_cursor !== body.families[body.families.length - 1]) {
@@ -14532,6 +14548,9 @@ const cmdIngestRemoteRun = async (
     });
   }
   let driveRemovalReview = storedDriveRemovalReview;
+  let malformedDriveIdentityCount = Number.isSafeInteger(storedDriveRemovalReview?.counts?.malformed_identity)
+    ? Math.max(0, storedDriveRemovalReview.counts.malformed_identity)
+    : 0;
   let expiredDriveReviewApproval = false;
 
   const protectedDriveUids = () => {
@@ -14581,7 +14600,7 @@ const cmdIngestRemoteRun = async (
       ...labelUnavailable.map((entry) => entry.uid),
       ...sourceDeletionCandidates.map((entry) => entry.uid),
     ])].sort();
-    if (!uids.length) {
+    if (!uids.length && malformedDriveIdentityCount === 0) {
       driveRemovalReview = null;
       delete state.drive_removal_review;
       return;
@@ -14591,12 +14610,13 @@ const cmdIngestRemoteRun = async (
       issue_code: "SAFETY_REVIEW_REQUIRED",
       counts: {
         unresolved_absences: unresolvedAccessUids.length + presentInScopeUids.length + unresolvedTransient.length +
-          unresolvedNotReturned.length + labelUnavailable.length,
+          unresolvedNotReturned.length + labelUnavailable.length + malformedDriveIdentityCount,
         unresolved_access: unresolvedAccessUids.length,
         present_in_scope: presentInScopeUids.length,
         unresolved_transient: unresolvedTransient.length,
         unresolved_not_returned: unresolvedNotReturned.length,
         label_unavailable: labelUnavailable.length,
+        ...(malformedDriveIdentityCount > 0 ? { malformed_identity: malformedDriveIdentityCount } : {}),
         pending_source_deletions: sourceDeletionCandidates.length,
       },
       uids,
@@ -14810,6 +14830,7 @@ const cmdIngestRemoteRun = async (
         })
       : null;
     const driveStoredBeforeProcessing = driveInventoryBeforeProcessing?.families || null;
+    malformedDriveIdentityCount = driveInventoryBeforeProcessing?.malformedIdentities?.size || 0;
     driveInventoryServerObservedAt = driveInventoryBeforeProcessing?.serverObservedAt || null;
     driveInventoryLabels = driveInventoryBeforeProcessing?.labels || new Map();
     if (driveInventoryBeforeProcessing?.labelsAvailable === false) {
@@ -16036,7 +16057,8 @@ const cmdIngestRemoteRun = async (
   // label evidence, an incomplete scanner sweep, or a missing history marker
   // withholds its cursor above.
   const totalRefused = tally.refused + localRefused;
-  const driveReviewRequired = which === "drive" && protectedDriveUids().size > 0;
+  const driveReviewRequired = which === "drive" &&
+    (protectedDriveUids().size > 0 || malformedDriveIdentityCount > 0);
   const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0 || driveReviewRequired;
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
@@ -16084,12 +16106,13 @@ const cmdIngestRemoteRun = async (
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
   if (driveReviewRequired) {
-    const count = protectedDriveUids().size;
+    const count = protectedDriveUids().size + malformedDriveIdentityCount;
     const notReturned = Number(driveRemovalReview.counts.unresolved_not_returned || 0);
     const accessDenied = Number(driveRemovalReview.counts.unresolved_access || 0);
     const presentInScope = Number(driveRemovalReview.counts.present_in_scope || 0);
     const transient = Number(driveRemovalReview.counts.unresolved_transient || 0);
     const labelUnavailable = Number(driveRemovalReview.counts.label_unavailable || 0);
+    const malformedIdentity = Number(driveRemovalReview.counts.malformed_identity || 0);
     const pendingUnderGrace = [...pendingSourceDeletionDriveReview.values()]
       .filter((record) => protectedDriveUids().has(record.uid)).length;
     const reasons = [
@@ -16110,6 +16133,10 @@ const cmdIngestRemoteRun = async (
       ...(labelUnavailable ? [
         `${labelUnavailable} item(s): the Brain has no saved name and folder for this stored family. ` +
           "It remains protected and retained, cannot enter an approval plan, and will be checked again on the next run.",
+      ] : []),
+      ...(malformedIdentity ? [
+        `${malformedIdentity} item(s): malformed_identity in the Brain's stored Drive inventory. ` +
+          "The invalid identity remains protected, was excluded from every deletion target, and is recorded for brain diagnose.",
       ] : []),
       ...(pendingUnderGrace ? [
         `${pendingUnderGrace} item(s): Drive still has an open seven-day review window. ` +
