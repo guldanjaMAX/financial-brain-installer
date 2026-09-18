@@ -994,8 +994,14 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(elapsedRepeat.code, 1, elapsedRepeat.output);
     assert.match(elapsedRepeat.output, /deletion is now corroborated/i);
     assert.match(elapsedRepeat.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/);
-    assert.match(elapsedRepeat.output,
-      /brain ingest <manifest> --from drive --approve-removals [0-9a-f]{64}/);
+    const elapsedApproval = /--approve-removals ([0-9a-f]{64})/.exec(elapsedRepeat.output)?.[1];
+    assert.ok(elapsedApproval, "the elapsed approval stop did not print an approval fingerprint");
+    assert.ok(
+      elapsedRepeat.output.includes(renderCliCommands(
+        `brain ingest <manifest> --from drive --approve-removals ${elapsedApproval}`,
+      )),
+      "the elapsed approval stop did not show the exact platform-rendered retry command",
+    );
     assert.equal(elapsedRepeat.evidence().forgetRequests, 0,
       "an elapsed grace window bypassed exact approval");
     const review = elapsedRepeat.state().drive_removal_review;
