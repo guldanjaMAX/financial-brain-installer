@@ -2278,11 +2278,12 @@ function mkSourceFamilyEnv(documents, extra = {}) {
             seen.binds.push(binds);
             return {
               all: async () => {
-                const sourceScoped = binds.length === 3;
+                const sourceScoped = /length\(\?1\)/.test(sql);
                 const includeLabels = /AS family_name/.test(sql);
                 const [source, cursor, limit] = sourceScoped
                   ? binds
                   : [null, binds[0], binds[1]];
+                const requestedUids = sourceScoped ? new Set(binds.slice(3)) : null;
                 const familyRows = documents
                   .filter((row) => row.deleted_at == null)
                   .map((row) => {
@@ -2304,7 +2305,8 @@ function mkSourceFamilyEnv(documents, extra = {}) {
                       return { family_doc_uid: row.doc_uid, family_name: row.title || null, folder_path: null };
                     }
                   })
-                  .filter((row) => source === null || row.family_doc_uid.startsWith(`${source}:`));
+                  .filter((row) => (source === null || row.family_doc_uid.startsWith(`${source}:`)) &&
+                    (!requestedUids?.size || requestedUids.has(row.family_doc_uid)));
                 const grouped = new Map();
                 for (const row of familyRows) {
                   const prior = grouped.get(row.family_doc_uid) || {};
@@ -2438,6 +2440,16 @@ function mkSourceFamilyEnv(documents, extra = {}) {
       details.get("drive:x")?.name === "No suffix" &&
       details.get("drive:y")?.name === "String metadata (part 3 of 9)",
     JSON.stringify(labelled));
+  const filteredLabels = await listSourceFamilies(env, {
+    source: "drive",
+    limit: 100,
+    includeLabels: true,
+    uids: ["drive:f"],
+  });
+  check("the real SQLite projection honors the bounded family uid filter",
+    filteredLabels.families.join(",") === "drive:f" &&
+      filteredLabels.family_details?.[0]?.name === "Owner annual report.pdf",
+    JSON.stringify(filteredLabels));
   database.close();
 }
 
@@ -2500,6 +2512,22 @@ function mkSourceFamilyEnv(documents, extra = {}) {
         name: "Owner tax return.txt",
         folder_path: "Reviewed Root/Tax",
       }), JSON.stringify(labelled));
+
+  const filteredLabelResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 100, include_labels: true, uids: ["drive:a"] }),
+    },
+  ), env, {});
+  const filteredLabel = await filteredLabelResponse.json();
+  check("the private Drive inventory returns labels only for requested family uids",
+    filteredLabelResponse.status === 200 &&
+      filteredLabel.families.join(",") === "drive:a" &&
+      filteredLabel.family_details?.length === 1 &&
+      filteredLabel.family_details[0].uid === "drive:a",
+    JSON.stringify(filteredLabel));
 
   const splitFamily = Array.from({ length: 12 }, (_, index) => ({
     doc_uid: `drive:f#part${index + 1}of12`,
@@ -2588,6 +2616,8 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     post({ source: "drive", limit: 2.5 }),
     post({ source: "drive", cursor: "gmail:a" }),
     post({ source: "drive", include_labels: "yes" }),
+    post({ source: "drive", uids: [] }),
+    post({ source: "drive", uids: ["gmail:a"] }),
     post({ source: "drive", unexpected: true }),
   ]);
   check("source-family reconciliation validates source, limit, cursor and unknown fields",

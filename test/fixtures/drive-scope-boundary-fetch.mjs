@@ -8,6 +8,7 @@ const userRoot = String(process.env.BRAIN_DRIVE_SCOPE_USER_ROOT || "");
 const evidencePath = String(process.env.BRAIN_DRIVE_SCOPE_EVIDENCE || "");
 const mode = String(process.env.BRAIN_DRIVE_SCOPE_MODE || "");
 const inventoryLabelMode = String(process.env.BRAIN_DRIVE_SCOPE_LABELS || "available");
+const inventoryUidFilterMode = String(process.env.BRAIN_DRIVE_SCOPE_UID_FILTER || "available");
 const inventoryLabelsAvailable = inventoryLabelMode !== "none";
 const inventoryDateAvailable = process.env.BRAIN_DRIVE_SCOPE_DATE !== "none";
 const testedStoredUid = String(process.env.BRAIN_DRIVE_SCOPE_STORED_UID || "drive:");
@@ -56,6 +57,10 @@ const blankEvidence = () => ({
   absenceMetadataReads: 0,
   outsideContentReads: 0,
   inventoryReads: 0,
+  inventoryLabelReads: 0,
+  inventoryUidFilteredReads: 0,
+  inventoryFullLabelReads: 0,
+  inventoryUidBatchSizes: [],
   ingestBatchWrites: 0,
   forgetRequests: 0,
   removedFamilies: 0,
@@ -366,6 +371,12 @@ globalThis.fetch = async (input, options = {}) => {
     if (request.source !== "drive") throw new Error("fixture received the wrong source inventory request");
     const evidence = readEvidence();
     evidence.inventoryReads++;
+    if (request.include_labels === true) evidence.inventoryLabelReads++;
+    if (Array.isArray(request.uids)) {
+      evidence.inventoryUidFilteredReads++;
+      evidence.inventoryUidBatchSizes.push(request.uids.length);
+    }
+    if (request.include_labels === true && !Array.isArray(request.uids)) evidence.inventoryFullLabelReads++;
     saveEvidence(evidence);
     if (request.include_labels === true && inventoryLabelMode === "reject") {
       return json({
@@ -374,7 +385,17 @@ globalThis.fetch = async (input, options = {}) => {
         field: "include_labels",
       }, 400, true);
     }
-    const families = storedFamilies(evidence);
+    if (Array.isArray(request.uids) && inventoryUidFilterMode === "reject") {
+      return json({
+        error: "wording is deliberately unrelated to compatibility detection",
+        code: "unknown_field",
+        field: "uids",
+      }, 400, inventoryDateAvailable);
+    }
+    const stored = storedFamilies(evidence);
+    const families = Array.isArray(request.uids)
+      ? stored.filter((uid) => request.uids.includes(uid))
+      : stored;
     return json({
       source: "drive",
       families,

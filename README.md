@@ -804,7 +804,10 @@ and cursor still complete, but that run's absence observation has a null server
 timestamp and cannot advance the seven-day proof. That stopped approval message
 shows each candidate's name and folder,
 using local ingest state first and the Brain's stored document metadata as the
-fallback. A family still missing either label is reported as
+fallback. That private metadata request carries only the exact candidate and
+existing-review family IDs, in bounded groups. It falls back to one full label
+inventory only when a structurally identified older Worker does not support
+the UID filter. A family still missing either label is reported as
 `label_unavailable`, remains protected and retained, and is excluded from every
 approval fingerprint and deletion plan without stopping the completed Drive
 cursor. The fingerprint binds the eligible labels and exact observation, and

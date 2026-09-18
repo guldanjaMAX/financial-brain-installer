@@ -6647,6 +6647,7 @@ export async function listSourceFamilies(env, {
   cursor = "",
   limit = 500,
   includeLabels = false,
+  uids = null,
 } = {}) {
   // With no source filter this query derives the complete source set from live
   // document rows themselves. `corpus_stats` is useful operational metadata,
@@ -6680,6 +6681,9 @@ export async function listSourceFamilies(env, {
        END) AS folder_path`
     : "";
   const grouping = " GROUP BY family_doc_uid";
+  const uidFilter = Array.isArray(uids) && uids.length
+    ? ` AND family_doc_uid IN (${uids.map((_, index) => `?${index + 4}`).join(", ")})`
+    : "";
   const statement = source
     ? env.DB.prepare(
       `SELECT family_doc_uid${labelProjection}
@@ -6706,10 +6710,11 @@ export async function listSourceFamilies(env, {
          )
         WHERE substr(family_doc_uid, 1, length(?1) + 1) = ?1 || ':'
           AND family_doc_uid > ?2
+          ${uidFilter}
         ${grouping}
         ORDER BY family_doc_uid ASC
         LIMIT ?3`
-    ).bind(source, cursor, limit + 1)
+    ).bind(source, cursor, limit + 1, ...(uids || []))
     : env.DB.prepare(
       `SELECT family_doc_uid${labelProjection}
          FROM (

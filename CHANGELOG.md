@@ -10,6 +10,13 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Drive review no longer downloads every stored file label on each sweep.**
+  The Brain first identifies the exact absent or already-reviewed families,
+  then returns names and folders only for those bounded IDs. A Brain from
+  before this filter receives one compatibility fallback to the former full
+  label read. To check: an ordinary candidate-free sweep makes no label request,
+  while a one-item review requests exactly that family.
+
 - **A malformed stored Drive identity can no longer become a deletion
   target.** Empty, whitespace-only, control-character, and whitespace-containing
   source IDs are quarantined byte-for-byte, kept outside provider lookups and

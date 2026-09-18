@@ -709,6 +709,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     inventoryLabels = true,
     inventoryLabelMode = "stored",
     inventoryDate = true,
+    inventoryUidFilterMode = "available",
     storedUid = "drive:",
     args = [],
   } = {}) => {
@@ -732,6 +733,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       BRAIN_DRIVE_SCOPE_MODE: mode,
       BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? inventoryLabelMode : "none",
       BRAIN_DRIVE_SCOPE_DATE: inventoryDate ? "server" : "none",
+      BRAIN_DRIVE_SCOPE_UID_FILTER: inventoryUidFilterMode,
       BRAIN_DRIVE_SCOPE_STORED_UID: storedUid,
       ADMIN_KEY: "fixture-admin",
     });
@@ -945,6 +947,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.outsideContentReads, 0, "an out-of-root changed file reached the content boundary");
     assert.equal(evidence.ingestBatchWrites, 0, "an out-of-root changed file reached ingest");
     assert.equal(evidence.forgetRequests, 0);
+    assert.equal(evidence.inventoryLabelReads, 0,
+      "a candidate-free sweep requested stored names or folders");
     const state = changedOutside.state();
     assert.equal(state.sync_token, "fixture-next-changed-outside");
     assert.notEqual(state.drive_last_full_sweep_at, changedOutside.priorFullSweep);
@@ -965,6 +969,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       assert.equal(evidence.rootedWalks, full ? 1 : 0);
       assert.equal(evidence.ingestBatchWrites, 0, "ambiguous absence allowed content writes");
       assert.equal(evidence.forgetRequests, 0, "ambiguous absence reached the destructive endpoint");
+      assert.equal(evidence.inventoryUidFilteredReads, 1,
+        `${mode} did not request labels only for its review candidate`);
+      assert.deepEqual(evidence.inventoryUidBatchSizes, [1]);
+      assert.equal(evidence.inventoryFullLabelReads, 0,
+        `${mode} downloaded full-corpus labels from a filter-capable Worker`);
       assert.equal(evidence.receipts.error, 1, "ambiguous absence did not close its receipt as an error");
       const state = unresolved.state();
       assert.equal(
@@ -1052,8 +1061,10 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   try {
     assert.equal(structuredLabelRejection.code, 0, structuredLabelRejection.output);
     assert.doesNotMatch(structuredLabelRejection.output, /unexpected error|INGEST_FAILED/i);
-    assert.equal(structuredLabelRejection.evidence().inventoryReads, 2,
+    assert.equal(structuredLabelRejection.evidence().inventoryReads, 3,
       "the structured include_labels rejection did not restart without labels");
+    assert.equal(structuredLabelRejection.evidence().inventoryUidFilteredReads, 2);
+    assert.equal(structuredLabelRejection.evidence().inventoryFullLabelReads, 0);
     assert.equal(structuredLabelRejection.evidence().forgetRequests, 0);
     const state = structuredLabelRejection.state();
     assert.equal(state.sync_token, "fixture-prewalk-full-unresolved");
@@ -1062,6 +1073,25 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       "the rejected 400 response supplied the seven-day server anchor");
   } finally {
     structuredLabelRejection.cleanup();
+  }
+
+  const legacyInventoryWithoutUidFilter = runScopeScenario("full-unresolved", {
+    full: true,
+    inventoryUidFilterMode: "reject",
+  });
+  try {
+    assert.equal(legacyInventoryWithoutUidFilter.code, 0, legacyInventoryWithoutUidFilter.output);
+    assert.doesNotMatch(legacyInventoryWithoutUidFilter.output, /unexpected error|INGEST_FAILED/i);
+    const evidence = legacyInventoryWithoutUidFilter.evidence();
+    assert.equal(evidence.inventoryReads, 3);
+    assert.equal(evidence.inventoryUidFilteredReads, 1,
+      "the CLI did not try the bounded uid filter before compatibility fallback");
+    assert.equal(evidence.inventoryFullLabelReads, 1,
+      "a Worker without uid filtering did not receive the one allowed full-label fallback");
+    assert.equal(evidence.forgetRequests, 0);
+    assert.equal(legacyInventoryWithoutUidFilter.state().sync_token, "fixture-prewalk-full-unresolved");
+  } finally {
+    legacyInventoryWithoutUidFilter.cleanup();
   }
 
   const malformedStoredIdentity = runScopeScenario("full-malformed", { full: true });
@@ -1614,8 +1644,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const evidence = fullSweepApprovedReview.evidence();
     assert.equal(evidence.forgetRequests, 1,
       "an approved full-sweep repeated absence did not reach one bounded forget");
-    assert.equal(evidence.inventoryReads, 3,
-      "the approved full-sweep deletion did not perform its post-forget inventory readback");
+    assert.equal(evidence.inventoryReads, 5,
+      "the two full inventories, two targeted label reads, and post-forget readback did not all run");
     assert.equal(evidence.removedFamilies, 1);
     assert.equal(fullSweepApprovedReview.state().drive_removal_review, undefined);
   } finally {
@@ -1816,7 +1846,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       assert.equal(evidence.rootedWalks, 0, `${mode} unexpectedly required a full walk`);
       assert.equal(evidence.forgetRequests, 1, `${mode} did not reach the guarded removal plan`);
       assert.equal(evidence.removedFamilies, 1);
-      assert.equal(evidence.inventoryReads, 2, "confirmed removal lacked exact inventory readback");
+      assert.equal(evidence.inventoryReads, 3,
+        "confirmed removal lacked its base inventory, targeted label read, or exact readback");
       assert.equal(evidence.ingestBatchWrites, 0);
       const state = confirmed.state();
       assert.equal(state.sync_token, `fixture-next-${mode}`);

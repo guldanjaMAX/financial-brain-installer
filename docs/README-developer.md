@@ -715,7 +715,10 @@ fingerprint binds the exact
 UID set, displayed labels, observation ID, and observation time, and expires
 after 24 hours. Those labels are private terminal context; the fallback travels
 only in the authenticated no-store inventory response and is not added to
-source receipts or destructive Worker requests. The UID
+source receipts or destructive Worker requests. The CLI requests labels only
+for bounded candidate/review UID groups. A structured `unknown_field` response
+for `uids` permits one compatibility restart without the filter; no other
+failure widens the label read. The UID
 stays under review until an approved deletion has exact inventory readback;
 only then is it removed from every review map. Visible trash and a visible move
 outside the reviewed roots remain direct source-deletion evidence.

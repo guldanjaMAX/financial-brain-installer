@@ -11513,8 +11513,13 @@ export async function listStoredSourceFamilies({
   source,
   includeServerObservedAt = false,
   includeLabels = false,
+  uids = null,
 }) {
   const normalizedSource = assertSourceName(source);
+  if (uids !== null && (!Array.isArray(uids) || uids.length < 1 || uids.length > 1000 ||
+      uids.some((uid) => !isCanonicalStoredFamilyUid(uid, normalizedSource)))) {
+    throw new TypeError("source-family label filter needs 1 to 1000 canonical uids");
+  }
   const families = new Set();
   const labels = new Map();
   const malformedIdentities = new Set();
@@ -11523,6 +11528,8 @@ export async function listStoredSourceFamilies({
   let serverDateChecked = false;
   let labelsAvailable = includeLabels;
   let requestLabels = includeLabels;
+  let requestUids = uids === null ? null : [...new Set(uids)].sort();
+  let uidFilterAvailable = true;
   let cursor = "";
   for (;;) {
     if (seenCursors.has(cursor)) throw new Error("source-family inventory repeated a cursor");
@@ -11538,6 +11545,7 @@ export async function listStoredSourceFamilies({
         source: normalizedSource,
         limit: 1000,
         ...(requestLabels ? { include_labels: true } : {}),
+        ...(requestUids ? { uids: requestUids } : {}),
         ...(cursor ? { cursor } : {}),
       }),
     }, { what: "the source-family inventory" });
@@ -11551,6 +11559,20 @@ export async function listStoredSourceFamilies({
       // instead of withholding an otherwise complete source cursor.
       requestLabels = false;
       labelsAvailable = false;
+      families.clear();
+      labels.clear();
+      malformedIdentities.clear();
+      seenCursors.clear();
+      cursor = "";
+      continue;
+    }
+    if (requestUids && res.status === 400 &&
+        body?.code === "unknown_field" && body?.field === "uids") {
+      // A Worker from before targeted labels must still be usable. Restart
+      // once without the filter; this is the only path allowed to pull labels
+      // for the complete stored source.
+      requestUids = null;
+      uidFilterAvailable = false;
       families.clear();
       labels.clear();
       malformedIdentities.clear();
@@ -11620,6 +11642,7 @@ export async function listStoredSourceFamilies({
             labels,
             malformedIdentities,
             ...(includeLabels ? { labelsAvailable } : {}),
+            ...(uids !== null ? { uidFilterAvailable } : {}),
           }
         : families;
     }
@@ -14839,6 +14862,7 @@ const cmdIngestRemoteRun = async (
     const pendingDriveAtStart = Object.keys(state.removed || {}).filter(
       (uid) => uid.startsWith(`${sourceName}:`)
     );
+    const seenDriveUids = new Set(files.map((file) => `${sourceName}:${file.id}`));
     const needsDrivePreInventory = !dry && (
       !incremental || files.length > 0 || sourceDeletedUids.length > 0 || pendingDriveAtStart.length > 0 ||
       Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0 ||
@@ -14850,15 +14874,51 @@ const cmdIngestRemoteRun = async (
           adminKey,
           source: sourceName,
           includeServerObservedAt: true,
-          includeLabels: true,
         })
       : null;
     const driveStoredBeforeProcessing = driveInventoryBeforeProcessing?.families || null;
     malformedDriveIdentityCount = driveInventoryBeforeProcessing?.malformedIdentities?.size || 0;
     malformedDriveIdentities = new Set(driveInventoryBeforeProcessing?.malformedIdentities || []);
     driveInventoryServerObservedAt = driveInventoryBeforeProcessing?.serverObservedAt || null;
-    driveInventoryLabels = driveInventoryBeforeProcessing?.labels || new Map();
-    if (driveInventoryBeforeProcessing?.labelsAvailable === false) {
+    const driveAbsenceCandidates = new Set();
+    if (driveStoredBeforeProcessing) {
+      for (const uid of sourceDeletedUids) {
+        if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) driveAbsenceCandidates.add(uid);
+      }
+      for (const uid of pendingDriveAtStart) {
+        if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) driveAbsenceCandidates.add(uid);
+      }
+      if (!incremental) {
+        for (const uid of driveStoredBeforeProcessing) {
+          if (!seenDriveUids.has(uid)) driveAbsenceCandidates.add(uid);
+        }
+      }
+      for (const uid of [
+        ...unresolvedDriveReviewUids,
+        ...presentInScopeDriveReviewUids,
+        ...unresolvedTransientDriveReview.keys(),
+        ...unresolvedNotReturnedDriveReview.keys(),
+        ...labelUnavailableDriveReview.keys(),
+        ...pendingSourceDeletionDriveReview.keys(),
+      ]) {
+        if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) driveAbsenceCandidates.add(uid);
+      }
+    }
+    let driveLabelsAvailable = true;
+    const labelCandidateUids = [...driveAbsenceCandidates].sort();
+    for (let offset = 0; offset < labelCandidateUids.length; offset += 1000) {
+      const labelInventory = await listStoredSourceFamilies({
+        base,
+        adminKey,
+        source: sourceName,
+        includeLabels: true,
+        uids: labelCandidateUids.slice(offset, offset + 1000),
+      });
+      for (const [uid, details] of labelInventory.labels) driveInventoryLabels.set(uid, details);
+      if (labelInventory.labelsAvailable === false) driveLabelsAvailable = false;
+      if (labelInventory.uidFilterAvailable === false) break;
+    }
+    if (labelCandidateUids.length && driveLabelsAvailable === false) {
       warn(
         "The stored-family inventory did not return Drive labels. " +
           "Update the Brain to label review items; this walk will continue and protect any item without a saved label."
@@ -14885,39 +14945,12 @@ const cmdIngestRemoteRun = async (
     const pathOf = (file) => drive.folderPathFor(file, state.drive_folders);
     const excludedUids = [];
 
-    const seenDriveUids = new Set(files.map((file) => `${sourceName}:${file.id}`));
     const confirmedDriveAbsenceUids = [];
     const corroboratedNotReturnedUids = [];
     if (!dry && driveStoredBeforeProcessing) {
       const uidPrefix = `${sourceName}:`;
       const changeFeedRemovalUids = new Set(sourceDeletedUids);
-      const absenceCandidates = new Set(
-        sourceDeletedUids.filter((uid) =>
-          driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)
-        )
-      );
-      for (const uid of pendingDriveAtStart) {
-        if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) {
-          absenceCandidates.add(uid);
-        }
-      }
-      if (!incremental) {
-        for (const uid of driveStoredBeforeProcessing) {
-          if (!seenDriveUids.has(uid)) absenceCandidates.add(uid);
-        }
-      }
-      for (const uid of [
-        ...unresolvedDriveReviewUids,
-        ...presentInScopeDriveReviewUids,
-        ...unresolvedTransientDriveReview.keys(),
-        ...unresolvedNotReturnedDriveReview.keys(),
-        ...labelUnavailableDriveReview.keys(),
-        ...pendingSourceDeletionDriveReview.keys(),
-      ]) {
-        if (driveStoredBeforeProcessing.has(uid) && !seenDriveUids.has(uid)) {
-          absenceCandidates.add(uid);
-        }
-      }
+      const absenceCandidates = driveAbsenceCandidates;
 
       // The current rooted traversal is the authority for which folder ids are
       // in scope. A visible file outside this set is a confirmed move. A 404

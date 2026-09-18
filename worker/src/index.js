@@ -2357,7 +2357,7 @@ async function handleSourceFamilies(env, request) {
     return respond({ error: "source-family request must be a JSON object" }, 400);
   }
   const extras = Object.keys(body).filter((field) =>
-    !["source", "cursor", "limit", "include_labels"].includes(field));
+    !["source", "cursor", "limit", "include_labels", "uids"].includes(field));
   if (extras.length > 0) {
     return respond({
       error: "source-family request has unknown fields",
@@ -2383,6 +2383,16 @@ async function handleSourceFamilies(env, request) {
     return respond({ error: "include_labels must be a boolean" }, 400);
   }
 
+  const uids = body.uids === undefined ? null : body.uids;
+  if (uids !== null && (
+    source === null || !Array.isArray(uids) || uids.length < 1 || uids.length > 1000 ||
+    new Set(uids).size !== uids.length ||
+    uids.some((uid) => typeof uid !== "string" || !uid.startsWith(`${source}:`) ||
+      uid.length <= source.length + 1 || /[\s\u0000-\u001f\u007f-\u009f]/u.test(uid.slice(source.length + 1)))
+  )) {
+    return respond({ error: "uids must be 1 to 1000 unique canonical identities for source" }, 400);
+  }
+
   const cursor = body.cursor === undefined || body.cursor === null ? "" : body.cursor;
   if (typeof cursor !== "string") {
     return respond({ error: "cursor must be a string" }, 400);
@@ -2397,7 +2407,7 @@ async function handleSourceFamilies(env, request) {
     return respond({ error: "cursor is not valid for this inventory" }, 400);
   }
 
-  return respond(await listSourceFamilies(env, { source, cursor, limit, includeLabels }));
+  return respond(await listSourceFamilies(env, { source, cursor, limit, includeLabels, uids }));
 }
 
 async function handleDocuments(env) {
