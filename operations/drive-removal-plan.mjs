@@ -73,6 +73,7 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
   const maxRatio = options.maxRatio ?? DRIVE_REMOVAL_MAX_RATIO;
   const ratioFloorCount = options.ratioFloorCount ?? 0;
   const fingerprintContext = String(options.fingerprintContext || "default");
+  const fingerprintBinding = options.fingerprintBinding ?? null;
   if (!Number.isInteger(maxCount) || maxCount < 0) throw new TypeError("maxCount must be a non-negative integer");
   if (!Number.isFinite(maxRatio) || maxRatio < 0 || maxRatio > 1) {
     throw new TypeError("maxRatio must be between zero and one");
@@ -85,11 +86,12 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
   // target or changing the plan invalidates an earlier approval even when the
   // aggregate total happens to stay the same.
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    version: 2,
+    version: fingerprintBinding === null ? 2 : 3,
     context: fingerprintContext,
     limits: { maxCount, maxRatio, ratioFloorCount },
     stored,
     targets: CATEGORY_INPUTS.map(([category]) => [category, targets[category]]),
+    ...(fingerprintBinding === null ? {} : { binding: fingerprintBinding }),
   })).digest("hex");
 
   return {

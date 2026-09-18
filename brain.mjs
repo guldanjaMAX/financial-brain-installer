@@ -14266,6 +14266,8 @@ const cmdIngestRemoteRun = async (
     changeFeedRemovedAt = null,
     name = null,
     folderPath = null,
+    approvalObservationId = null,
+    approvalObservedAt = null,
   } = {}) => {
     const firstMs = Date.parse(firstObservedAt);
     const lastMs = Date.parse(lastObservedAt);
@@ -14282,6 +14284,12 @@ const cmdIngestRemoteRun = async (
       observation_count: valid ? observationCount : 1,
       ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
       ...(typeof folderPath === "string" && folderPath.trim() ? { folder_path: folderPath.trim() } : {}),
+      ...(typeof approvalObservationId === "string" && approvalObservationId.trim()
+        ? { approval_observation_id: approvalObservationId.trim() }
+        : {}),
+      ...(Number.isFinite(Date.parse(approvalObservedAt || ""))
+        ? { approval_observed_at: new Date(Date.parse(approvalObservedAt)).toISOString() }
+        : {}),
       ...(Number.isFinite(changeFeedRemovedMs)
         ? { change_feed_removed_at: new Date(changeFeedRemovedMs).toISOString() }
         : {}),
@@ -14312,6 +14320,8 @@ const cmdIngestRemoteRun = async (
       changeFeedRemovedAt: raw.change_feed_removed_at,
       name: raw.name,
       folderPath: raw.folder_path,
+      approvalObservationId: raw.approval_observation_id,
+      approvalObservedAt: raw.approval_observed_at,
     });
     unresolvedNotReturnedDriveReview.set(record.uid, record);
   }
@@ -14332,6 +14342,8 @@ const cmdIngestRemoteRun = async (
         (raw.corroboration === "change_feed_removed" ? raw.last_observed_at : null),
       name: raw.name,
       folderPath: raw.folder_path,
+      approvalObservationId: raw.approval_observation_id,
+      approvalObservedAt: raw.approval_observed_at,
     });
     if (raw.corroboration === "change_feed_removed") {
       unresolvedNotReturnedDriveReview.set(record.uid, record);
@@ -14590,7 +14602,9 @@ const cmdIngestRemoteRun = async (
       (uid) => uid.startsWith(`${sourceName}:`)
     );
     const needsDrivePreInventory = !dry && (
-      !incremental || files.length > 0 || sourceDeletedUids.length > 0 || pendingDriveAtStart.length > 0
+      !incremental || files.length > 0 || sourceDeletedUids.length > 0 || pendingDriveAtStart.length > 0 ||
+      Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0 ||
+      Number(driveRemovalReview?.counts?.pending_source_deletions || 0) > 0
     );
     const driveStoredBeforeProcessing = needsDrivePreInventory
       ? await listStoredSourceFamilies({ base, adminKey, source: sourceName })
@@ -14695,6 +14709,8 @@ const cmdIngestRemoteRun = async (
               ...priorCandidate,
               last_observed_at: driveReviewObservedAt,
               observation_count: Number(priorCandidate.observation_count || 1) + 1,
+              approval_observation_id: priorCandidate.approval_observation_id || runId,
+              approval_observed_at: priorCandidate.approval_observed_at || driveReviewObservedAt,
             };
           } else if (prior && Number.isFinite(graceEligibleMs) && observedMs >= graceEligibleMs) {
             candidate = {
@@ -14702,6 +14718,8 @@ const cmdIngestRemoteRun = async (
               last_observed_at: driveReviewObservedAt,
               observation_count: Number(prior.observation_count || 1) + 1,
               corroboration: "repeated_not_returned",
+              approval_observation_id: runId,
+              approval_observed_at: driveReviewObservedAt,
             };
           }
           if (candidate) {
@@ -14877,11 +14895,19 @@ const cmdIngestRemoteRun = async (
       }, {
         safetyBaselineCount: driveRemovalSafetyCount ?? storedUids.size,
         fingerprintContext: "drive-strict",
+        fingerprintBinding: [...pendingSourceDeletionDriveReview.values()]
+          .sort((a, b) => a.uid.localeCompare(b.uid))
+          .map((record) => ({
+            uid: record.uid,
+            name: record.name || null,
+            folder_path: record.folder_path || null,
+            observation_id: record.approval_observation_id || null,
+            observed_at: record.approval_observed_at || record.last_observed_at || null,
+          })),
       });
       saveState(statePath, state);
       const corroboratedPlanTargets = [...new Set([
         ...corroboratedNotReturnedUids,
-        ...pendingSourceDeletionDriveReview.keys(),
       ])];
       const eligibleCorroboratedPlanTargets = excludeProtectedDriveUids(corroboratedPlanTargets)
         .filter((uid) => storedUids.has(uid) && !seenUids.has(uid));

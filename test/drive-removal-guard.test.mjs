@@ -177,6 +177,26 @@ const categoryChanged = buildDriveRemovalPlan({
 });
 assert.notEqual(buildDriveRemovalPlan(fingerprintFixture).fingerprint, targetChanged.fingerprint);
 assert.notEqual(buildDriveRemovalPlan(fingerprintFixture).fingerprint, categoryChanged.fingerprint);
+const displayedReviewPlan = buildDriveRemovalPlan(fingerprintFixture, {
+  fingerprintBinding: [{
+    uid: "drive:a",
+    name: "Owner tax return.txt",
+    folder_path: "Reviewed Root/Tax",
+    observation_id: "sync_review_a",
+    observed_at: "2026-09-18T08:00:00.000Z",
+  }],
+});
+const renamedReviewPlan = buildDriveRemovalPlan(fingerprintFixture, {
+  fingerprintBinding: [{
+    uid: "drive:a",
+    name: "Renamed tax return.txt",
+    folder_path: "Reviewed Root/Tax",
+    observation_id: "sync_review_a",
+    observed_at: "2026-09-18T08:00:00.000Z",
+  }],
+});
+assert.notEqual(displayedReviewPlan.fingerprint, renamedReviewPlan.fingerprint,
+  "the approval fingerprint must bind the displayed local name");
 
 /* The limits are strict exceedance checks, with count and ratio enforced independently. */
 const emptyPlan = buildDriveRemovalPlan({
@@ -634,6 +654,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     privatePrefixes: [],
   }, true);
   const stripAnsi = (value) => String(value || "").replace(/\x1b\[[0-9;]*m/g, "");
+  const fixedReviewObservationId = "sync_fixture_review_observation";
+  const fixedReviewObservedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
   const runScopeScenario = (mode, {
     full = false,
@@ -642,6 +664,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     priorNotReturnedDays = null,
     priorNotReturnedNamed = true,
     priorChangeFeedDays = null,
+    priorMaturedDays = null,
     args = [],
   } = {}) => {
     const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
@@ -691,7 +714,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           "text/plain",
           mode === "incremental-restored" ? "Reviewed Root" : "Reviewed Root/Tax",
         ]),
-        ...(["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)
+        ...(["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)
           ? Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
               const suffix = String(index).padStart(2, "0");
               return [`drive:retained-${suffix}`, JSON.stringify([
@@ -713,7 +736,36 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         "root-fixture": { name: "Reviewed Root", parents: [] },
       },
       removed: pendingRemoval ? { "drive:missing-sensitive": "2026-09-01T00:00:00.000Z" } : {},
-      ...(Number.isFinite(priorChangeFeedDays) ? (() => {
+      ...(Number.isFinite(priorMaturedDays) ? (() => {
+        const firstObservedAt = new Date(Date.now() - (priorMaturedDays * 24 * 60 * 60 * 1000));
+        return {
+          drive_removal_review: {
+            schema_version: 4,
+            issue_code: "SAFETY_REVIEW_REQUIRED",
+            counts: {
+              unresolved_absences: 0,
+              unresolved_access: 0,
+              unresolved_not_returned: 0,
+              pending_source_deletions: 1,
+            },
+            uids: ["drive:missing-sensitive"],
+            unresolved_access_uids: [],
+            unresolved_not_returned: [],
+            source_deletion_candidates: [{
+              uid: "drive:missing-sensitive",
+              first_observed_at: firstObservedAt.toISOString(),
+              last_observed_at: firstObservedAt.toISOString(),
+              grace_eligible_at: new Date(firstObservedAt.getTime() + (7 * 24 * 60 * 60 * 1000)).toISOString(),
+              observation_count: 2,
+              name: "Owner tax return.txt",
+              folder_path: "Reviewed Root/Tax",
+              corroboration: "repeated_not_returned",
+              approval_observation_id: fixedReviewObservationId,
+              approval_observed_at: fixedReviewObservedAt,
+            }],
+          },
+        };
+      })() : Number.isFinite(priorChangeFeedDays) ? (() => {
         const firstObservedAt = new Date(Date.now() - (priorChangeFeedDays * 24 * 60 * 60 * 1000));
         return {
           drive_removal_review: {
@@ -1132,6 +1184,56 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     unnamedLegacy.cleanup();
   }
 
+  const reviewStoredFamilies = [
+    "drive:missing-sensitive",
+    ...Array.from({ length: 10 }, (_, index) => `drive:retained-${String(index).padStart(2, "0")}`),
+  ].sort();
+  const currentReviewPlan = buildDriveRemovalPlan({
+    storedFamilies: reviewStoredFamilies,
+    activeFamilies: [],
+    policyCandidates: [],
+    vanishedCandidates: ["drive:missing-sensitive"],
+    intentionalCandidates: [],
+  }, {
+    safetyBaselineCount: reviewStoredFamilies.length,
+    fingerprintContext: "drive-strict",
+    fingerprintBinding: [{
+      uid: "drive:missing-sensitive",
+      name: "Owner tax return.txt",
+      folder_path: "Reviewed Root/Tax",
+      observation_id: fixedReviewObservationId,
+      observed_at: fixedReviewObservedAt,
+    }],
+  });
+
+  const emptyWindowReview = runScopeScenario("incremental-review-empty", {
+    priorMaturedDays: 10,
+  });
+  try {
+    assert.equal(emptyWindowReview.code, 1, emptyWindowReview.output);
+    assert.equal(emptyWindowReview.evidence().changesReads, 1);
+    assert.equal(emptyWindowReview.evidence().absenceMetadataReads, 1,
+      "a matured review candidate was offered without a live lookup in this run");
+    assert.match(emptyWindowReview.output, new RegExp(currentReviewPlan.fingerprint));
+    assert.equal(emptyWindowReview.evidence().forgetRequests, 0);
+  } finally {
+    emptyWindowReview.cleanup();
+  }
+
+  const approvedEmptyWindowReview = runScopeScenario("incremental-review-empty", {
+    priorMaturedDays: 10,
+    args: ["--approve-removals", currentReviewPlan.fingerprint],
+  });
+  try {
+    assert.equal(approvedEmptyWindowReview.code, 0, approvedEmptyWindowReview.output);
+    assert.equal(approvedEmptyWindowReview.evidence().absenceMetadataReads, 1);
+    assert.equal(approvedEmptyWindowReview.evidence().forgetRequests, 1,
+      "approval after a live repeated-not-returned observation was a no-op");
+    assert.equal(approvedEmptyWindowReview.state().drive_removal_review, undefined);
+  } finally {
+    approvedEmptyWindowReview.cleanup();
+  }
+
   let elapsedApproval = null;
   const elapsedRepeat = runScopeScenario("full-unresolved", {
     full: true,
@@ -1163,20 +1265,6 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     );
   } finally {
     elapsedRepeat.cleanup();
-  }
-
-  const elapsedApproved = runScopeScenario("full-unresolved", {
-    full: true,
-    priorNotReturnedDays: 8,
-    args: ["--reset", "--approve-removals", elapsedApproval],
-  });
-  try {
-    assert.equal(elapsedApproved.code, 0, elapsedApproved.output);
-    assert.equal(elapsedApproved.evidence().forgetRequests, 1);
-    assert.equal(elapsedApproved.state().drive_removal_review, undefined,
-      "an approved repeated absence left a stale Drive review record");
-  } finally {
-    elapsedApproved.cleanup();
   }
 
   const restoredReview = runScopeScenario("incremental-restored", { priorReview: true });

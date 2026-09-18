@@ -19,6 +19,7 @@ const MODES = new Set([
   "incremental-left-scope",
   "incremental-stale-marker-404",
   "incremental-stale-marker-live",
+  "incremental-review-empty",
 ]);
 if (!userRoot) throw new Error("BRAIN_DRIVE_SCOPE_USER_ROOT is required");
 if (!evidencePath) throw new Error("BRAIN_DRIVE_SCOPE_EVIDENCE is required");
@@ -95,8 +96,10 @@ function storedFamilies(evidence) {
       .filter((uid) => !removed.has(uid))
       .sort();
   }
-  if (["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)) {
-    return [MISSING_UID, ...RETAINED_UIDS].sort();
+  if (["full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)) {
+    return (mode === "incremental-review-empty" && evidence.removedFamilies
+      ? RETAINED_UIDS
+      : [MISSING_UID, ...RETAINED_UIDS]).sort();
   }
   if (["full-unresolved", "incremental-unresolved", "incremental-restored"].includes(mode)) {
     return evidence.removedFamilies ? [] : [MISSING_UID];
@@ -174,7 +177,7 @@ globalThis.fetch = async (input, options = {}) => {
         newStartPageToken: "fixture-next-incremental-restored",
       });
     }
-    if (["incremental-stale-marker-404", "incremental-stale-marker-live"].includes(mode)) {
+    if (["incremental-stale-marker-404", "incremental-stale-marker-live", "incremental-review-empty"].includes(mode)) {
       return json({ changes: [], newStartPageToken: `fixture-next-${mode}` });
     }
     if (mode.startsWith("incremental-")) {
@@ -220,7 +223,7 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.absenceMetadataReads++;
     saveEvidence(evidence);
-    if (["full-unresolved", "full-unresolved-subthreshold", "incremental-stale-marker-404"].includes(mode)) {
+    if (["full-unresolved", "full-unresolved-subthreshold", "incremental-stale-marker-404", "incremental-review-empty"].includes(mode)) {
       return json({ error: { message: "File not found" } }, 404);
     }
     if (mode === "incremental-stale-marker-live") {
@@ -337,7 +340,7 @@ globalThis.fetch = async (input, options = {}) => {
     const expectedUids = mode === "incremental-unresolved-batch"
       ? BATCH_MISSING_UIDS.slice(3)
       : [MISSING_UID];
-    if (!["full-unresolved", "incremental-gone", "incremental-trash", "incremental-left-scope", "incremental-unresolved-batch"].includes(mode) ||
+    if (!["full-unresolved", "incremental-gone", "incremental-trash", "incremental-left-scope", "incremental-unresolved-batch", "incremental-review-empty"].includes(mode) ||
         request.confirm !== true || families.length !== expectedUids.length ||
         families.some((family, index) => family?.base_doc_uid !== expectedUids[index] ||
           !Array.isArray(family?.keep_doc_uids) || family.keep_doc_uids.length !== 0)) {
