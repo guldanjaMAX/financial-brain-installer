@@ -689,6 +689,18 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           "text/plain",
           mode === "incremental-restored" ? "Reviewed Root" : "Reviewed Root/Tax",
         ]),
+        ...(mode === "full-unresolved-subthreshold"
+          ? Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
+              const suffix = String(index).padStart(2, "0");
+              return [`drive:retained-${suffix}`, JSON.stringify([
+                "2026-09-02T00:00:00Z",
+                `retained-version-${suffix}`,
+                `Retained ${suffix}.txt`,
+                "text/plain",
+                "Reviewed Root",
+              ])];
+            }))
+          : {}),
       },
       skipped: {},
       sync_token: priorCursor,
@@ -861,6 +873,40 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     unresolvedPending.cleanup();
   }
 
+  for (const priorReview of [false, true]) {
+    const pendingNotReturned = runScopeScenario("full-unresolved-subthreshold", {
+      full: true,
+      pendingRemoval: true,
+      priorReview,
+    });
+    try {
+      assert.equal(pendingNotReturned.code, 1, pendingNotReturned.output);
+      const evidence = pendingNotReturned.evidence();
+      assert.equal(evidence.absenceMetadataReads, 1);
+      assert.equal(evidence.forgetRequests, 0,
+        "a bare 404 inherited a stale pending deletion below the routine size threshold");
+      assert.equal(evidence.removedFamilies, 0);
+      const state = pendingNotReturned.state();
+      assert.equal(state.done?.["drive:missing-sensitive"] != null, true,
+        "the protected Brain copy was removed from local accepted state");
+      assert.equal(
+        state.removed?.["drive:missing-sensitive"],
+        "2026-09-01T00:00:00.000Z",
+        "the pending retry marker disappeared while the item remained under review",
+      );
+      assert.ok(state.drive_removal_review, pendingNotReturned.output);
+      assert.deepEqual(state.drive_removal_review.uids, ["drive:missing-sensitive"]);
+      assert.deepEqual(state.drive_removal_review.unresolved_access_uids, []);
+      assert.equal(state.drive_removal_review.unresolved_not_returned.length, 1);
+      assert.equal(state.drive_removal_review.unresolved_not_returned[0].uid, "drive:missing-sensitive");
+      assert.deepEqual(state.drive_removal_review.source_deletion_candidates, []);
+      assert.equal(state.drive_removal_review.counts.unresolved_not_returned, 1);
+      assert.equal(state.drive_removal_review.counts.pending_source_deletions, 0);
+    } finally {
+      pendingNotReturned.cleanup();
+    }
+  }
+
   const unresolvedBatch = runScopeScenario("incremental-unresolved-batch");
   try {
     assert.equal(unresolvedBatch.code, 1, unresolvedBatch.output);
@@ -925,14 +971,9 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   const goneNeedsApproval = runScopeScenario("incremental-gone", { priorReview: true });
   try {
     assert.equal(goneNeedsApproval.code, 1, goneNeedsApproval.output);
-    assert.ok(
-      goneNeedsApproval.output.includes(renderCliCommands(
-        `brain ingest <manifest> --from drive --approve-removals ${gonePlan.fingerprint}`,
-      )),
-      "the approval stop did not show the exact platform-rendered retry command",
-    );
-    assert.match(goneNeedsApproval.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/,
-      "the approval stop did not show the locally known name and folder");
+    assert.match(goneNeedsApproval.output, /open seven-day review window/i);
+    assert.equal(goneNeedsApproval.output.includes(gonePlan.fingerprint), false,
+      "an open grace window advertised an exact deletion approval");
     assert.equal(goneNeedsApproval.output.includes("missing-sensitive"), false,
       "the approval stop disclosed the raw Drive identity");
     assert.equal(goneNeedsApproval.evidence().forgetRequests, 0,
@@ -959,10 +1000,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     args: ["--approve-removals", gonePlan.fingerprint],
   });
   try {
-    assert.equal(goneApproved.code, 0, goneApproved.output);
-    assert.equal(goneApproved.evidence().forgetRequests, 1);
-    assert.equal(goneApproved.state().drive_removal_review, undefined,
-      "an approved and read-back removal left a stale Drive review record");
+    assert.equal(goneApproved.code, 1, goneApproved.output);
+    assert.equal(goneApproved.evidence().forgetRequests, 0,
+      "exact plan approval bypassed an open grace window");
+    assert.equal(goneApproved.state().drive_removal_review?.source_deletion_candidates.length, 1,
+      "the protected review record disappeared without a confirmed removal");
   } finally {
     goneApproved.cleanup();
   }

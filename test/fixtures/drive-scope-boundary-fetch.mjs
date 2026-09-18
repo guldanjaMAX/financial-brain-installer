@@ -10,6 +10,7 @@ const mode = String(process.env.BRAIN_DRIVE_SCOPE_MODE || "");
 const MODES = new Set([
   "changed-outside",
   "full-unresolved",
+  "full-unresolved-subthreshold",
   "incremental-unresolved",
   "incremental-unresolved-batch",
   "incremental-gone",
@@ -92,6 +93,7 @@ function storedFamilies(evidence) {
       .filter((uid) => !removed.has(uid))
       .sort();
   }
+  if (mode === "full-unresolved-subthreshold") return [MISSING_UID, ...RETAINED_UIDS].sort();
   if (["full-unresolved", "incremental-unresolved", "incremental-restored"].includes(mode)) return [MISSING_UID];
   return evidence.removedFamilies ? RETAINED_UIDS : [MISSING_UID, ...RETAINED_UIDS].sort();
 }
@@ -119,6 +121,21 @@ function restoredFile() {
     createdTime: "2026-01-01T00:00:00Z",
     modifiedTime: "2026-09-02T00:00:00Z",
     md5Checksum: "restored-version",
+    trashed: false,
+    parents: [ROOT_ID],
+  };
+}
+
+function retainedFile(index) {
+  const suffix = String(index).padStart(2, "0");
+  return {
+    id: `retained-${suffix}`,
+    name: `Retained ${suffix}.txt`,
+    mimeType: "text/plain",
+    size: "240",
+    createdTime: "2026-01-01T00:00:00Z",
+    modifiedTime: "2026-09-02T00:00:00Z",
+    md5Checksum: `retained-version-${suffix}`,
     trashed: false,
     parents: [ROOT_ID],
   };
@@ -180,7 +197,11 @@ globalThis.fetch = async (input, options = {}) => {
     evidence.rootedWalks++;
     saveEvidence(evidence);
     return json({
-      files: mode === "incremental-restored" ? [restoredFile()] : [],
+      files: mode === "incremental-restored"
+        ? [restoredFile()]
+        : mode === "full-unresolved-subthreshold"
+          ? RETAINED_UIDS.map((_, index) => retainedFile(index))
+          : [],
       nextPageToken: null,
       incompleteSearch: false,
     });
@@ -190,7 +211,7 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.absenceMetadataReads++;
     saveEvidence(evidence);
-    if (mode === "full-unresolved") {
+    if (["full-unresolved", "full-unresolved-subthreshold"].includes(mode)) {
       return json({ error: { message: "File not found" } }, 404);
     }
     if (mode === "incremental-unresolved") {
