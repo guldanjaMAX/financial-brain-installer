@@ -96,6 +96,10 @@ const COPY = Object.freeze({
       "This comes from your documents, not from a financial map you confirmed — your map isn't set up yet.",
     one_step:
       "Open Financial Map in your private owner app and answer its short questions, one at a time — which businesses you own or have owned, and whether each one is still open — then save the map it builds. From then on your Financial Map shows every entity with its status.",
+    // Appended to the not-established one step only, and only when a list
+    // really follows. A stale map's one step has no questions in it.
+    candidates_follow:
+      " The questions start from what your Brain has already seen, listed below as possible mentions.",
   }),
   stale: Object.freeze({
     unsupported:
@@ -106,9 +110,6 @@ const COPY = Object.freeze({
       "Open Financial Map in your private owner app, review what changed, and save the updated map. Then your Financial Map shows every entity with its current status.",
   }),
 });
-const CANDIDATES_FOLLOW =
-  " The questions start from what your Brain has already seen, listed below as possible mentions.";
-
 const ownerKey = (fixture) => ({ "X-Admin-Key": fixture.env.ADMIN_KEY });
 
 /**
@@ -331,7 +332,7 @@ test("a not-established map turns a bare refusal into the reason, the candidates
   assert.equal(guidance.map_status, "not_established");
   assert.match(guidance.message, /financial map isn't set up yet/i);
   assert.equal(guidance.message, COPY.not_established.unsupported);
-  assert.equal(guidance.one_step, COPY.not_established.one_step + CANDIDATES_FOLLOW,
+  assert.equal(guidance.one_step, COPY.not_established.one_step + COPY.not_established.candidates_follow,
     "candidates are listed below, so the sentence that points at them is appended");
   assert.equal(/guided owner interview|complete preview/i.test(JSON.stringify(guidance)), false,
     "the map read's operator-facing next_step must never reach owner copy");
@@ -502,7 +503,9 @@ test("an activated map answers through its own surface, and a stale one falls ba
   const guided = await think(fixture, FLAGSHIP);
   assert.equal(guided.body.map_guidance?.map_status, "stale");
   assert.equal(guided.body.map_guidance.message, COPY.stale.unsupported);
-  assert.equal(guided.body.map_guidance.one_step, COPY.stale.one_step + CANDIDATES_FOLLOW);
+  assert.equal(guided.body.map_guidance.one_step, COPY.stale.one_step,
+    "the 'questions start from' sentence belongs to the not-established step, which has questions in it");
+  assert.equal(guided.body.map_guidance.one_step.includes("questions start from"), false);
   assert.equal(guided.body.map_guidance.what_the_brain_sees.unconfirmed, true);
   assert.ok(
     guided.body.map_guidance.what_the_brain_sees.entities.some((row) => row.label === "Synthetic Annex"),

@@ -144,6 +144,13 @@ const MESSAGES = Object.freeze({
       "This comes from your documents, not from a financial map you confirmed — your map isn't set up yet.",
     one_step:
       "Open Financial Map in your private owner app and answer its short questions, one at a time — which businesses you own or have owned, and whether each one is still open — then save the map it builds. From then on your Financial Map shows every entity with its status.",
+    // Appended ONLY when at least one candidate is listed below it, so the
+    // sentence never points at a list that is not there. Set under the
+    // not-established wording deliberately: it says the QUESTIONS start from
+    // what the Brain has seen, and only the not-established one_step has
+    // questions in it. A stale map's one step is "review what changed".
+    candidates_follow:
+      " The questions start from what your Brain has already seen, listed below as possible mentions.",
   }),
   // A stale map was activated once and its inventory has changed since. Reading
   // the old snapshot as current fact is the exact error the map's own
@@ -157,11 +164,6 @@ const MESSAGES = Object.freeze({
       "Open Financial Map in your private owner app, review what changed, and save the updated map. Then your Financial Map shows every entity with its current status.",
   }),
 });
-
-/* Appended to `one_step` ONLY when at least one candidate is listed below it,
-   so the sentence never points at a list that is not there. */
-const CANDIDATES_FOLLOW =
-  " The questions start from what your Brain has already seen, listed below as possible mentions.";
 
 /* The words that keep a candidate a candidate wherever this is rendered. */
 export const CANDIDATE_NOTICE =
@@ -223,7 +225,9 @@ export function financialMapGuidance(state, { answerSupported = false } = {}) {
   return {
     map_status: status,
     message: copy.unsupported,
-    one_step: anyListed ? `${copy.one_step}${CANDIDATES_FOLLOW}` : copy.one_step,
+    one_step: anyListed && copy.candidates_follow
+      ? `${copy.one_step}${copy.candidates_follow}`
+      : copy.one_step,
     what_the_brain_sees: {
       candidate_notice: CANDIDATE_NOTICE,
       entities,
