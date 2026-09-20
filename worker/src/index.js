@@ -803,15 +803,17 @@ async function taxDocumentCoverageForRead(env, {
  * today's refusal, not a partial list they cannot interpret and did not earn.
  * Guard 2 therefore refuses rather than filters.
  *
- * ONE COUPLING TO REMEMBER. The remote MCP connector calls handleThink at
- * `:2898` with NO access or scope arguments, so every OAuth grant profile
+ * ONE COUPLING TO REMEMBER. The remote MCP connector builds handleMcp's
+ * `think` dependency (search this file for `think: async (body)`) by calling
+ * handleThink with NO access or scope arguments, so every OAuth grant profile
  * reaching `ask` is already treated as the whole owner on this route — which
  * is what makes guard 2 pass there regardless of profile. That is pre-existing
  * whole-corpus behaviour for `ask`, and entity labels are strictly less than
  * the cited document snippets `ask` already returns. But if a narrowed remote
- * profile is ever introduced, `:2898` and this guard have to be revisited
- * TOGETHER: tightening one without the other either silently breaks the
- * feature or silently widens it.
+ * profile is ever introduced, that dependency and this guard have to be
+ * revisited TOGETHER: tightening one without the other either silently breaks
+ * the feature or silently widens it. Named rather than cited by line, because
+ * a line number in a comment rots on the next edit above it.
  */
 function financialMapStateFor(env, question, {
   access, grantScope, scopePrincipalKind, entityScope,
