@@ -42,6 +42,9 @@ const OWNER_HELD_SUBJECT = new RegExp(
     `\\b(?:my|our)\\s+(?:[a-z][a-z'-]*\\s+){0,2}?${SUBJECT}\\b`,
     `\\b${SUBJECT}\\b[^?\\n]{0,40}?\\b(?:do|did|does)\\s+(?:i|we)\\s+(?:still\\s+)?(?:have|own|hold)\\b`,
     `\\b${SUBJECT}\\b[^?\\n]{0,20}?\\b(?:i|we)\\s+(?:still\\s+)?(?:own|hold)\\b`,
+    // The perfect-tense form owners reach for when asking about the past:
+    // "which businesses have I dissolved", "what companies had we closed".
+    `\\b${SUBJECT}\\b[^?\\n]{0,30}?\\b(?:have|had)\\s+(?:i|we)\\b`,
   ].join("|"),
   "i",
 );
@@ -60,7 +63,7 @@ const INVENTORY_ASK =
    these has been the difference between a status question and an ordinary
    one in the wording owners actually use. */
 const ORDINARY_QUESTION =
-  /\bhow\s+much\b|\bwhen\s+(?:did|do|does|will|should|was|were|can|is|are|am)\b|\bhow\s+do\s+i\b|\bhow\s+should\b|\bshould\s+i\b|\bcan\s+i\b|\bwhat\s+did\s+(?:i|we)\s+pay\b|\bpaid\b|\bpayments?\b|\binvoices?\b|\breceipts?\b|\bbalances?\b|\btransactions?\b|\bdeposits?\b|\bwithdrawals?\b|\bstatements?\b|\brouting\s+number\b|\bpassword\b/i;
+  /\bhow\s+much\b|\bwhen\s+(?:did|do|does|will|should|was|were|can|is|are|am)\b|\bhow\s+do\s+i\b|\bhow\s+should\b|\bshould\s+i\b|\bcan\s+i\b|\bwhat\s+did\s+(?:i|we)\s+pay\b|\bpaid\b|\bpayments?\b|\binvoices?\b|\breceipts?\b|\bbalances?\b|\btransactions?\b|\bdeposits?\b|\bwithdrawals?\b|\bstatements?\b|\brouting\s+number\b|\bpassword\b|\bwhat\s+(?:do|should)\s+(?:i|we)\s+do\b|\bwhat\s+happens\s+(?:now|next)\b/i;
 
 /* The subject noun modifying a different noun: "my business address" is not a
    question about the business. */
@@ -68,6 +71,28 @@ const SUBJECT_MODIFIES_ANOTHER_NOUN = new RegExp(
   `\\b${SUBJECT}\\s+(?:address(?:es)?|names?|numbers?|cards?|emails?|phones?|websites?|logos?|hours|plans?|models?|managers?|partners?|bankers?|types?|ids?|slugs?)\\b`,
   "i",
 );
+
+/* "Account" is the one genuinely overloaded noun in SUBJECT. The map's
+   accounts are an entity's FINANCIAL accounts — the ledger's account kinds are
+   checking, savings, card, loan, line of credit, investment, retirement,
+   merchant, point of sale and escrow. Every other sense of the word belongs to
+   a different question: the accounting senses (accounts payable, accounts
+   receivable, a chart of accounts, expense and revenue accounts), the
+   relationship senses (a vendor or customer account), and the login senses (a
+   user, email or software account). Asked any of those, an owner wants their
+   books or their logins, and financial-map copy above the answer would be the
+   product's worst face. A qualifier on either side settles it. */
+const ACCOUNT_IN_ANOTHER_SENSE =
+  /\baccounts?\s+(?:payable|receivable|payables?|receivables?)\b|\bchart\s+of\s+accounts\b|\b(?:expense|revenue|income|asset|liability|equity|ledger|gl|general\s+ledger|contra|suspense|clearing|login|log-?in|sign-?in|user|admin|email|e-?mail|software|app|saas|cloud|portal|subscription|streaming|service|utility|utilities|vendor|supplier|customer|client|social(?:\s+media)?|online|advertising|ad)\s+accounts?\b/i;
+
+/* A status question has to ASK. "my company closed last year" and "my LLC is
+   dissolved" are the owner TELLING the brain a status they already know, and
+   answering them with "your financial map isn't set up, so your Brain can't
+   say which entities are open or closed" is both useless and faintly insulting.
+   A question mark, a wh-word, an imperative, or a leading auxiliary is what
+   separates the two; every genuine phrasing of the flagship question has one. */
+const ASKS_SOMETHING =
+  /\?|\b(?:which|what|whose|who|how\s+many|list|name|show|tell|give)\b|^\s*(?:is|are|was|were|do|does|did|am|can|has|have|any)\b/i;
 
 /* A question longer than this is not a crisp status question, and an unbounded
    input is not worth the backtracking. Staying silent here costs nothing. */
@@ -83,7 +108,9 @@ const MAX_QUESTION_CHARS = 500;
 export function hasFinancialMapStatusIntent(query) {
   const q = String(query || "").trim();
   if (!q || q.length > MAX_QUESTION_CHARS) return false;
+  if (!ASKS_SOMETHING.test(q)) return false;
   if (ORDINARY_QUESTION.test(q)) return false;
+  if (ACCOUNT_IN_ANOTHER_SENSE.test(q)) return false;
   if (SUBJECT_MODIFIES_ANOTHER_NOUN.test(q)) return false;
   if (!OWNER_HELD_SUBJECT.test(q)) return false;
   return STATUS_TERM.test(q) || INVENTORY_ASK.test(q);
@@ -93,17 +120,48 @@ export function hasFinancialMapStatusIntent(query) {
     itself and is deliberately not handled here. */
 const GUIDED_STATES = new Set(["not_established", "stale"]);
 
-const MESSAGE = Object.freeze({
-  not_established:
-    "Your financial map isn't set up yet, so your Brain can't say which entities are open or closed.",
+/**
+ * The owner-facing copy, set by leadership. Literals per map state.
+ *
+ * `one_step` is deliberately NOT the map read's `next_step`. That field
+ * ("Offer a guided owner interview, one short question at a time, then create
+ * a complete preview") is an instruction to a technician about what to do for
+ * the owner; it reads as nonsense to the owner themselves. It stays on the
+ * `brain_financial_map` read for the technician surface and must never reach
+ * `map_guidance`.
+ *
+ * Two messages per state. A refusal can say the map is not set up as the
+ * reason there is no answer. Beside an answer the documents DID support,
+ * the same sentence would contradict what the owner is reading, so the
+ * supported variant understates instead: the answer stands, and the map is
+ * named as the thing that would make it authoritative.
+ */
+const MESSAGES = Object.freeze({
+  not_established: Object.freeze({
+    unsupported:
+      "Your financial map isn't set up yet, so your Brain can't say which entities are open or closed.",
+    supported:
+      "This comes from your documents, not from a financial map you confirmed — your map isn't set up yet.",
+    one_step:
+      "Open Financial Map in your private owner app and answer its short questions, one at a time — which businesses you own or have owned, and whether each one is still open — then save the map it builds. From then on your Financial Map shows every entity with its status.",
+  }),
   // A stale map was activated once and its inventory has changed since. Reading
   // the old snapshot as current fact is the exact error the map's own
   // currentness check exists to prevent, so a stale map gets guidance too.
-  stale:
-    "Your financial map was set up, but your entity or account inventory changed afterwards, so your Brain can't read it as a current answer about which entities are open or closed.",
+  stale: Object.freeze({
+    unsupported:
+      "Your financial map is out of date: an entity or account was added or changed after you set it up, so your Brain won't answer this from the old map.",
+    supported:
+      "This comes from your documents, not from a financial map you confirmed — your map is out of date.",
+    one_step:
+      "Open Financial Map in your private owner app, review what changed, and save the updated map. Then your Financial Map shows every entity with its current status.",
+  }),
 });
 
-const WHERE = "Financial Map in your private owner app is where that happens.";
+/* Appended to `one_step` ONLY when at least one candidate is listed below it,
+   so the sentence never points at a list that is not there. */
+const CANDIDATES_FOLLOW =
+  " The questions start from what your Brain has already seen, listed below as possible mentions.";
 
 /* The words that keep a candidate a candidate wherever this is rendered. */
 export const CANDIDATE_NOTICE =
@@ -126,7 +184,13 @@ function candidateList(rows) {
   if (!Array.isArray(rows)) return [];
   return rows.slice(0, MAX_LISTED).map((row) => ({
     label: String(row?.label ?? "").slice(0, 160),
-    candidate_state: String(row?.candidate_state ?? "possible_mention"),
+    // The literal, never the row's own value. This is THIS module's invariant,
+    // not a field to relay: a row arriving with candidate_state "confirmed"
+    // would render as "(confirmed)" directly underneath a notice saying nothing
+    // here is confirmed. The map's inventory hardcodes "possible_mention" today
+    // (owner-financial-map.js publicInventory), and if that ever changes, this
+    // surface must not inherit the change silently.
+    candidate_state: "possible_mention",
   }));
 }
 
@@ -139,24 +203,33 @@ function omittedCount(rows) {
  *
  * Returns null for a `current` map and for anything unrecognisable, so the
  * caller's response is unchanged whenever this cannot speak with certainty.
+ *
+ * `answerSupported` is the evidence gate's verdict. When the documents DID
+ * support an answer, the guidance carries no candidate list at all: the answer
+ * beside it already cites real documents, and a list of unconfirmed names in
+ * the same block invites reading the two together as one finding.
  */
-export function financialMapGuidance(state) {
+export function financialMapGuidance(state, { answerSupported = false } = {}) {
   const status = String(state?.map_status || "");
   if (!GUIDED_STATES.has(status)) return null;
+  const copy = MESSAGES[status];
+  if (answerSupported) {
+    return { map_status: status, message: copy.supported, one_step: copy.one_step };
+  }
   const inventory = state?.current_inventory || {};
-  const entities = inventory.entities;
-  const accounts = inventory.accounts;
-  const nextStep = String(state?.next_step || "").trim();
+  const entities = candidateList(inventory.entities);
+  const accounts = candidateList(inventory.accounts);
+  const anyListed = entities.length > 0 || accounts.length > 0;
   return {
     map_status: status,
-    message: MESSAGE[status],
-    one_step: nextStep ? `${nextStep} ${WHERE}` : WHERE,
+    message: copy.unsupported,
+    one_step: anyListed ? `${copy.one_step}${CANDIDATES_FOLLOW}` : copy.one_step,
     what_the_brain_sees: {
       candidate_notice: CANDIDATE_NOTICE,
-      entities: candidateList(entities),
-      accounts: candidateList(accounts),
-      entities_not_listed: omittedCount(entities),
-      accounts_not_listed: omittedCount(accounts),
+      entities,
+      accounts,
+      entities_not_listed: omittedCount(inventory.entities),
+      accounts_not_listed: omittedCount(inventory.accounts),
       unconfirmed: true,
     },
   };
@@ -170,9 +243,12 @@ export function financialMapGuidance(state) {
  */
 export function financialMapGuidanceLines(guidance) {
   if (!guidance || typeof guidance !== "object") return [];
-  const seen = guidance.what_the_brain_sees || {};
   const lines = [String(guidance.message || "")];
   if (guidance.one_step) lines.push(`One step: ${guidance.one_step}`);
+  // Absent beside a supported answer, on purpose. Nothing to say about
+  // candidates there, and no empty-list sentence either.
+  const seen = guidance.what_the_brain_sees;
+  if (!seen || typeof seen !== "object") return lines;
 
   const render = (rows, noun) => {
     const list = Array.isArray(rows) ? rows : [];

@@ -194,20 +194,31 @@ async function runAsk(deps, args) {
   if (thought.answer === null && thought.answer_error) {
     return toolError(`the brain could not answer: ${thought.answer_error}`);
   }
-  // An incomplete search reaching a client's phone as "the documents do not
-  // answer the question" is the worst error this product can make: a confident
-  // absence claim about their own records. It is likeliest on install day,
-  // while the index is still projecting and they are asking their first
-  // questions from the Claude app.
-  if (unavailableSearch(thought)) {
-    return text([answerText(thought), "", confidenceText(thought)].join("\n"));
-  }
   // A question about which of the owner's entities or accounts are open, on a
   // brain whose financial map is not set up, ends in a refusal that is honest
   // and useless. The guidance goes ABOVE the refusal: the refusal stays exactly
   // what it was, and this says why the brain cannot answer it yet, what it has
   // seen without confirming, and the one step that fixes it.
   const guidance = financialMapGuidanceLines(thought.map_guidance);
+  const withGuidance = (rest) => text([...(guidance.length ? [...guidance, ""] : []), ...rest].join("\n"));
+
+  // An incomplete search reaching a client's phone as "the documents do not
+  // answer the question" is the worst error this product can make: a confident
+  // absence claim about their own records. It is likeliest on install day,
+  // while the index is still projecting and they are asking their first
+  // questions from the Claude app.
+  //
+  // The guidance rides above that notice rather than instead of it, and both
+  // sentences stay true. It is derived from the owner's MAP state, not from
+  // the search, so a half-built index does not make it provisional; and it
+  // never claims the records lack anything — it says the map is not set up,
+  // which is why the brain cannot answer, and names the one step. The notice
+  // below it is unchanged, so the absence claim remains impossible. Install
+  // day is precisely when an owner asks this question and when this path is
+  // the one they hit.
+  if (unavailableSearch(thought)) {
+    return withGuidance([answerText(thought), "", confidenceText(thought)]);
+  }
   const lines = guidance.length ? [...guidance, ""] : [];
   lines.push(answerText(thought));
   const trust = confidenceLine(thought.confidence, {
