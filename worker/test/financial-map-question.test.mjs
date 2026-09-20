@@ -134,14 +134,37 @@ function seedFormationDocument(fixture) {
   );
 }
 
+/** The exact ledger content, so "the answer path wrote nothing" is a claim
+    about rows rather than about intent. */
+function ledgerRows(fixture) {
+  return JSON.stringify({
+    entities: fixture.rows("SELECT * FROM fin_entities ORDER BY id").map((row) => ({ ...row })),
+    accounts: fixture.rows("SELECT * FROM fin_accounts ORDER BY id").map((row) => ({ ...row })),
+  });
+}
+
 async function think(fixture, q) {
   const from = fixture.seen.sql.length;
+  const ledgerBefore = ledgerRows(fixture);
   const response = await fixture.post("/api/rag/think", { q }, ownerKey(fixture));
-  const sqlSeen = fixture.seen.sql.slice(from);
+  const sqlSeen = fixture.seen.sql.slice(from).map(String);
   assert.equal(response.status, 200, `think returned ${response.status}`);
+  assert.ok(sqlSeen.length > 0, "no statement was recorded, so the checks below would pass vacuously");
+  // Answering a question must never create or change a ledger row. Checked on
+  // EVERY call in this file, both as content and as statements, because an
+  // entity the brain proposed and then quietly recorded would be exactly the
+  // unconfirmed-candidate-becomes-fact failure this whole change exists to
+  // avoid.
+  assert.equal(ledgerRows(fixture), ledgerBefore, `the ledger changed while answering: ${q}`);
+  assert.equal(
+    sqlSeen.some((sql) => /\b(?:INSERT|UPDATE|DELETE)\b/i.test(sql) && /\bfin_(?:entities|accounts)\b/i.test(sql)),
+    false,
+    `a ledger write statement was issued while answering: ${q}`,
+  );
   return {
     body: await response.json(),
-    mapWasRead: sqlSeen.some((sql) => MAP_READ_MARKER.test(String(sql))),
+    sqlSeen,
+    mapWasRead: sqlSeen.some((sql) => MAP_READ_MARKER.test(sql)),
   };
 }
 
