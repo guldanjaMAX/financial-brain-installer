@@ -27,6 +27,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 
 import { createProductFixture, json } from "./product-contract-fixture.mjs";
 import { makeCredential, signAssertion } from "./webauthn-fixtures.mjs";
@@ -447,6 +450,38 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   assert.ok(!/do not answer the question/i.test(unchanged));
 });
 
+test("the local MCP carries the guidance to the client instead of relaying a bare refusal", async () => {
+  const guidance = financialMapGuidance({
+    map_status: "not_established",
+    next_step: "Offer a guided owner interview, one short question at a time, then create a complete preview.",
+    current_inventory: {
+      entities: [{ label: ENTITY_LABEL, candidate_state: "possible_mention" }],
+      accounts: [],
+    },
+  });
+  const out = await localMcpThink({
+    mode: "think",
+    answer: null,
+    status: "coverage_incomplete",
+    notice: "The search found candidate records, but source history is incomplete. Treat this result as provisional.",
+    gaps: [], citations: [], results: [],
+    evidence_gate: { supported: false, complete: false, evidence: [], reason: "answer model found no direct support" },
+    map_guidance: guidance,
+  });
+  assert.equal(out.map_guidance?.map_status, "not_established");
+  assert.equal(out.map_guidance.what_the_brain_sees.unconfirmed, true);
+  assert.deepEqual(out.map_guidance.what_the_brain_sees.entities,
+    [{ label: ENTITY_LABEL, candidate_state: "possible_mention" }]);
+  assert.equal(out.search_status, "coverage_incomplete", "the provisional-coverage signal still rides out");
+
+  const without = await localMcpThink({
+    mode: "think", answer: "The documents do not answer the question.",
+    gaps: [], citations: [], results: [],
+  });
+  assert.equal(Object.hasOwn(without, "map_guidance"), false,
+    "a response with no guidance gains no key");
+});
+
 /* ------------------------------------------------------------------ unit */
 
 test("the guidance renders as sentences that keep every candidate a candidate", () => {
@@ -484,6 +519,48 @@ test("the guidance renders as sentences that keep every candidate a candidate", 
 });
 
 /* ---------------------------------------------------------------- helpers */
+
+const LOCAL_MCP = fileURLToPath(new URL("../../components/brain-mcp.mjs", import.meta.url));
+
+/** Drive the shipped local MCP server against one canned /think body. */
+async function localMcpThink(body) {
+  const server = createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  try {
+    const child = spawn(process.execPath, [LOCAL_MCP], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        BRAIN_URL: `http://127.0.0.1:${port}`,
+        BRAIN_NAME: "fixture-brain",
+        BRAIN_KEY: `fixture-${"k".repeat(40)}`,
+        BRAIN_CONFIG: "",
+        BRAIN_MANIFEST: "",
+      },
+    });
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stdin.end(`${JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "brain_think", arguments: { q: FLAGSHIP } },
+    })}\n`);
+    const code = await new Promise((resolve) => child.on("close", resolve));
+    assert.equal(code, 0, `local mcp exited ${code}`);
+    const reply = stdout.split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((m) => m.id === 1);
+    assert.ok(reply, `no reply on stdout: ${stdout}`);
+    return JSON.parse(reply.result.content[0].text);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
 
 /** The smallest complete map submission the contract accepts for this
     inventory, so an activated map can exist without inventing a second
