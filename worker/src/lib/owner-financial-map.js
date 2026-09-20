@@ -1325,6 +1325,25 @@ function readStateBody(state) {
   };
 }
 
+/**
+ * The read body, for a surface that already authenticated the whole owner.
+ *
+ * Exactly the state `${OWNER_FINANCIAL_MAP_READ_PATH}` returns, built by the
+ * same two functions, so map_status and the candidate inventory can never mean
+ * one thing on the map's own route and another beside an answer. It reads and
+ * nothing else: no snapshot is created, no ledger row is written, no preview is
+ * touched.
+ *
+ * Returns null on a backend that has no D1 map to read. Every other failure
+ * throws, because a caller that cannot tell "no map" from "could not look"
+ * would turn the second into the first.
+ */
+export async function readOwnerFinancialMapState(env) {
+  if (backendOf(env) !== D1 || !env?.DB) return null;
+  const signer = await signingContext(env);
+  return readStateBody(await captureCurrentState(env, signer));
+}
+
 async function readOrPreviewPrincipal(request, env) {
   if (validateAdminKey(request, env)) return { kind: "admin" };
   const principal = await ownerSessionPrincipal(request, env);

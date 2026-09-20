@@ -765,6 +765,11 @@ const expected = [
   "worker/src/lib/source-original-observation.js",
   // Sealed owner map with opaque row references and passkey-only activation.
   "worker/src/lib/owner-financial-map.js",
+  // Deterministic offline intent detector plus the reviewed guidance wording
+  // for an entity/account status question. No corpus content, no credential,
+  // no ledger value: it carries candidate labels and the possible-mention
+  // state only, and every string in it is fixed product copy.
+  "worker/src/lib/financial-map-question.js",
   "worker/src/lib/support-access.js",
   "worker/src/lib/tax-qbo-reconciliation.js",
   "worker/src/lib/update-status.js",

@@ -27,6 +27,10 @@ import { confidenceLine } from "./confidence.js";
 // a consumer that has to defend itself, and this is the remote one.
 import { answerText, confidenceText, unavailableSearch } from "./answer-render.js";
 import { COVERAGE_INCOMPLETE } from "./retrieval-status.js";
+// A refusal about the owner's own entities is only honest with the reason
+// beside it. financial-map-question.js owns the wording so no renderer can
+// drop the "possible mention" flag that makes a candidate a candidate.
+import { financialMapGuidanceLines } from "./financial-map-question.js";
 // The same contract the local MCP server enforces. Two surfaces writing to one
 // brain under two standards is how a record quietly becomes untrustworthy.
 import {
@@ -198,7 +202,14 @@ async function runAsk(deps, args) {
   if (unavailableSearch(thought)) {
     return text([answerText(thought), "", confidenceText(thought)].join("\n"));
   }
-  const lines = [answerText(thought)];
+  // A question about which of the owner's entities or accounts are open, on a
+  // brain whose financial map is not set up, ends in a refusal that is honest
+  // and useless. The guidance goes ABOVE the refusal: the refusal stays exactly
+  // what it was, and this says why the brain cannot answer it yet, what it has
+  // seen without confirming, and the one step that fixes it.
+  const guidance = financialMapGuidanceLines(thought.map_guidance);
+  const lines = guidance.length ? [...guidance, ""] : [];
+  lines.push(answerText(thought));
   const trust = confidenceLine(thought.confidence, {
     refused: /^The documents do not answer/i.test(thought.answer || ""),
   });

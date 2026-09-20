@@ -112,7 +112,11 @@ import {
 } from "./lib/source-original-observation.js";
 import {
   handleOwnerFinancialMap, OWNER_FINANCIAL_MAP_PATH_PREFIX, OWNER_FINANCIAL_MAP_APP_PATH_PREFIX,
+  readOwnerFinancialMapState,
 } from "./lib/owner-financial-map.js";
+import {
+  financialMapGuidance, hasFinancialMapStatusIntent,
+} from "./lib/financial-map-question.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -773,6 +777,39 @@ async function taxDocumentCoverageForRead(env, {
   }
 }
 
+/**
+ * "Which of my entities are still open?" — read the owner's financial map
+ * state beside retrieval, so a refusal can say why the question cannot be
+ * answered yet and what the single step is that fixes it.
+ *
+ * Three guards, in order. When any one of them does not pass, the response is
+ * byte for byte what it is today, because the field is simply absent:
+ *
+ *   1. The question has to be about the owner's own entities or accounts and
+ *      their status. The detector is deterministic, offline, and written to
+ *      stay silent when unsure.
+ *   2. The caller has to be the whole owner. A zone-scoped grant, a read-only
+ *      proxy key, a document grant, or a question narrowed to one entity sees
+ *      a narrowed corpus on purpose, and the complete candidate inventory
+ *      would widen that scope through the back door.
+ *   3. The read has to succeed. A map that could not be read is not a map that
+ *      is not set up, and only one of those licenses this guidance.
+ */
+function financialMapGuidanceFor(env, question, {
+  access, grantScope, scopePrincipalKind, entityScope,
+}) {
+  if (!hasFinancialMapStatusIntent(question)) return Promise.resolve(null);
+  if (access || grantScope?.all !== true || scopePrincipalKind !== "owner") return Promise.resolve(null);
+  if (entityScope?.applied === true) return Promise.resolve(null);
+  // Started here and awaited at the response, so it runs alongside retrieval
+  // rather than after it. The catch is attached at creation: a map read that
+  // rejects must never surface as an unhandled rejection or as a failed
+  // question, and the caller can await this promise more than once.
+  return readOwnerFinancialMapState(env)
+    .then((state) => financialMapGuidance(state))
+    .catch(() => null);
+}
+
 async function handleThink(
   env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner",
 ) {
@@ -805,6 +842,10 @@ async function handleThink(
     });
   }
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit")) || 8, 1), 20);
+
+  const mapGuidance = financialMapGuidanceFor(env, q, {
+    access, grantScope, scopePrincipalKind, entityScope,
+  });
 
   const {
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
@@ -887,6 +928,11 @@ async function handleThink(
         ? undefined
         : refusalConfidence({ gaps, degraded, resultCount: 0 }),
       evidence_authority: evidenceAuthority || undefined,
+      // Present only for an owner asking which of their own entities or
+      // accounts are open, on a map that is not established or has gone stale.
+      // JSON.stringify drops the key otherwise, so every other response is
+      // byte for byte what it was.
+      map_guidance: (await mapGuidance) || undefined,
     });
   }
 
@@ -1366,6 +1412,11 @@ async function handleThink(
     confidence,
     evidence_authority: approvedDocs.length ? strongestEvidenceAuthority(approvedDocs) || undefined : undefined,
     citations: approvedDocs.map(citationForDocument),
+    // Present only for an owner asking which of their own entities or accounts
+    // are open, on a map that is not established or has gone stale. It never
+    // changes `answer`, `evidence_gate` or `confidence`: the refusal above is
+    // exactly as honest as it was, and this says why it cannot be answered yet.
+    map_guidance: (await mapGuidance) || undefined,
     // Every document numbered for the answer model stays in the response, so
     // each citation and evidence receipt number resolves to a returned result
     // even when the caller asked for fewer than the model was shown.
