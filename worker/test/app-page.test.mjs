@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 
 import worker from "../src/index.js";
 import { appPageHtml, brandOgSvg } from "../src/lib/app-page.js";
+import { APP_JS } from "../src/lib/app-assets.js";
 
 const ORIGIN = "https://brain.example.com";
 const env = { BRAIN_NAME: "acme-brain", BRAIN_OWNER: "Dana Okonkwo" };
@@ -90,6 +91,21 @@ test("the app bundle is served with the right types and is cacheable", async () 
   const html = appPageHtml(env, ORIGIN);
   assert.match(html, /\/app\/assets\/app\.js\?v=[0-9a-f]{12}/);
   assert.match(html, /\/app\/assets\/app\.css\?v=[0-9a-f]{12}/);
+});
+
+test("the shipped enrollment screen explains the passkey window before the owner click", () => {
+  for (const phrase of [
+    "Here is what happens next",
+    "Create my owner passkey",
+    "secure passkey window",
+    "This verifies that you are the owner",
+    "cannot see or store your passkey, Face ID, fingerprint, or device PIN",
+    "choose Cancel",
+  ]) {
+    assert.ok(APP_JS.includes(phrase), `shipped app bundle is missing: ${phrase}`);
+  }
+  assert.ok(!APP_JS.includes("Set up with Face ID"));
+  assert.ok(!APP_JS.includes("Works on every device you own"));
 });
 
 test("the shell is never cached, so an upgrade actually reaches the client", async () => {

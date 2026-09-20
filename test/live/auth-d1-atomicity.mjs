@@ -22,7 +22,7 @@ const ROOT = join(HERE, "..", "..");
 const fixture = join(HERE, "fixtures", "auth-atomicity-worker.mjs");
 const migrations = join(ROOT, "migrations", "d1");
 const wranglerCli = join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
-const expectedWranglerVersion = "4.127.1";
+const expectedWranglerVersion = "4.131.1";
 const packageJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 const packageLock = JSON.parse(readFileSync(join(ROOT, "package-lock.json"), "utf8"));
 assert.equal(packageJson.devDependencies?.wrangler, expectedWranglerVersion,

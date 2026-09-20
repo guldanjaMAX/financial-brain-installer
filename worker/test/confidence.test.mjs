@@ -6,7 +6,13 @@ import {
 } from "../src/lib/confidence.js";
 import { looksLikeRefusal } from "../../eval/scorer.mjs";
 
-const dated = (ref, reliable = true) => ({ ref, title: ref, ts: "2026-07-31T00:00:00Z", date_reliable: reliable });
+const dated = (ref, reliable = true, family = ref) => ({
+  ref,
+  title: ref,
+  ts: "2026-07-31T00:00:00Z",
+  date_reliable: reliable,
+  lineage: { status: "known", family_tokens: [`family-${family}`] },
+});
 
 test("the rubric is deterministic and bounded", () => {
   const input = { approvedDocs: [dated("a"), dated("b")], gaps: [], degraded: null };
@@ -34,6 +40,23 @@ test("independent agreement and reliable dates raise confidence; blind spots low
   const healthy = computeAnswerConfidence({ approvedDocs: [dated("a"), dated("b")] });
   assert.ok(degraded.percent < healthy.percent, "a degraded index must show in the number");
   assert.ok(degraded.basis.some((entry) => /vector/i.test(entry)), "the basis names the degradation");
+});
+
+test("repetition within one derivation family never earns agreement credit", () => {
+  const source = dated("ledger", true, "ledger-root");
+  const generated = dated("generated-pack", true, "ledger-root");
+  const repeated = computeAnswerConfidence({ approvedDocs: [source, generated] });
+  const single = computeAnswerConfidence({ approvedDocs: [source] });
+  assert.equal(repeated.percent, single.percent);
+  assert.ok(repeated.basis.some((entry) => /1 derivation family/.test(entry)) ||
+    repeated.basis.some((entry) => /corroboration is not established/.test(entry)));
+
+  const unknown = computeAnswerConfidence({ approvedDocs: [
+    { ...dated("old-ledger"), lineage: { status: "unknown" } },
+    { ...dated("old-pack"), lineage: { status: "unknown" } },
+  ] });
+  assert.ok(unknown.basis.some((entry) => /unknown lineage/.test(entry)));
+  assert.equal(unknown.percent, single.percent);
 });
 
 test("a refusal during healthy retrieval outranks one during a blind spot", () => {

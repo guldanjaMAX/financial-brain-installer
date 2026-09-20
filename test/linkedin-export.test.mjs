@@ -34,6 +34,9 @@ check("recognized LinkedIn CSVs become separate stable documents",
 check("unknown tracking CSVs are not silently indexed", parsed.envelopes.every((item) => !item.content.includes("Ad_Targeting")));
 check("export provenance records access mode and row counts", parsed.envelopes.every((item) =>
   item.metadata.platform === "linkedin" && item.metadata.access_mode === "account_owner_export" && item.metadata.row_count === 1));
+check("LinkedIn's decoded CSV text carries an explicit native provenance receipt", parsed.envelopes.every((item) =>
+  item.text_source === "native" && item.text_reliable === true &&
+  item.metadata.provenance_receipt?.status === "complete"));
 
 const folder = mkdtempSync(join(tmpdir(), "brain-linkedin-export-"));
 try {
@@ -77,7 +80,8 @@ try {
   }, { sourceName: "upload" });
   check("a LinkedIn CSV beyond its row limit is explicitly incomplete",
     capped.incomplete === true && /1 LinkedIn row\(s\).*not represented/.test(capped.note || "") &&
-      capped.envelopes[0]?.metadata?.omitted_row_count === 1,
+      capped.envelopes[0]?.metadata?.omitted_row_count === 1 &&
+      capped.envelopes[0]?.text_source === "native" && capped.envelopes[0]?.text_reliable === false,
     JSON.stringify({ incomplete: capped.incomplete, note: capped.note, metadata: capped.envelopes[0]?.metadata }));
 } finally {
   rmSync(cappedFolder, { recursive: true, force: true });

@@ -1,7 +1,8 @@
 import {
-  api, listFiles, listRootedFiles, listChanges, startPageToken, triage, toEnvelope, DriveError, EXPORTS,
+  api, listFiles, listRootedFiles, listRootedFilesPreview, listChanges, startPageToken, triage, toEnvelope, DriveError, EXPORTS,
   updateFolderIndex, folderPathFor, exclusionReason, driveVersion, classifyScopedAbsence, FOLDER_MIME, EXPORT_LIMIT,
 } from "../connectors/google-drive.mjs";
+import { toEnvelope as gmailToEnvelope } from "../connectors/gmail.mjs";
 import { buildAuthUrl, pkce, exchangeCode, createTokenProvider, redirectUri } from "../connectors/google-auth.mjs";
 import * as XLSX from "@e965/xlsx";
 
@@ -137,6 +138,27 @@ const workbookBytes = (sheets) => {
   // silence. It must fail on the first.
   check("403 for a permission problem fails FAST", n === 1 && e instanceof DriveError, `${n} attempts`);
   check("and reports the reason", e.reason === "insufficientFilePermissions", e.reason);
+  check("and distinguishes the parsed provider reason from local connector reasons",
+    e.providerReason === "insufficientFilePermissions" && e.providerStatus === 403,
+    `${e.providerReason}/${e.providerStatus}`);
+}
+{
+  let e = null;
+  await gmailToEnvelope(tok, "synthetic-message", {}, {
+    attempts: 1,
+    fetchImpl: async () => json({
+      error: {
+        errors: [{ reason: "failedPrecondition" }],
+        status: "FAILED_PRECONDITION",
+        message: "SYNTHETIC_PROVIDER_MESSAGE /private/id token-like-value",
+      },
+    }, 400),
+    sleep: async () => {},
+  }).catch((caught) => { e = caught; });
+  check("a Gmail provider failure carries a closed operation class plus typed HTTP evidence",
+    e instanceof DriveError && e.operationClass === "gmail_message_read" &&
+      e.providerStatus === 400 && e.providerReason === "failedPrecondition",
+    `${e?.operationClass}/${e?.providerStatus}/${e?.providerReason}`);
 }
 {
   let n = 0;
@@ -184,6 +206,9 @@ const workbookBytes = (sheets) => {
     sleep: async () => {},
   }).catch((x) => (e = x));
   check("an exhausted network failure stays fatal", n === 2 && e instanceof DriveError && e.retryable === true && e.reason === "networkError", `${n} ${e?.reason}`);
+  check("a local network classification is never misrepresented as a provider response",
+    e.providerReason === null && e.providerStatus === null,
+    `${e?.providerReason}/${e?.providerStatus}`);
 }
 {
   const tokenCalls = [];
@@ -445,6 +470,44 @@ const workbookBytes = (sheets) => {
       files.find((file) => file.id === "inside-nested").scope_root_ids.join(",") === "root-a");
 }
 {
+  const calls = [];
+  const fetchImpl = async (input) => {
+    const url = new URL(input);
+    calls.push(url);
+    const id = decodeURIComponent(url.pathname.split("/").pop());
+    if (url.pathname !== "/drive/v3/files") {
+      return json({ id, name: `private-${id}`, mimeType: FOLDER_MIME });
+    }
+    const q = url.searchParams.get("q") || "";
+    if (q.includes("'root-a' in parents")) {
+      return json({
+        files: [
+          { id: "file-a", name: "private-a.txt", mimeType: "text/plain", parents: ["root-a"] },
+          { id: "file-b", name: "private-b.txt", mimeType: "text/plain", parents: ["root-a"] },
+        ],
+        nextPageToken: "private-next-page",
+      });
+    }
+    return json({ files: [{ id: "must-not-walk", name: "private-c.txt" }] });
+  };
+  const files = [];
+  for await (const file of listRootedFilesPreview(tok, {
+    rootFolderIds: ["root-b", "root-a"],
+    limit: 2,
+    opts: { fetchImpl, sleep: async () => {} },
+  })) files.push(file);
+  const metadataCalls = calls.filter((url) => url.pathname !== "/drive/v3/files");
+  const listingCalls = calls.filter((url) => url.pathname === "/drive/v3/files");
+  check("bounded preview validates every configured root before it samples content",
+    metadataCalls.length === 2 && metadataCalls.some((url) => url.pathname.endsWith("/root-a")) &&
+      metadataCalls.some((url) => url.pathname.endsWith("/root-b")),
+    calls.map((url) => url.pathname).join(","));
+  check("bounded preview stops provider traversal at its exact limit",
+    files.length === 2 && listingCalls.length === 1 &&
+      listingCalls[0].searchParams.get("pageToken") === null,
+    `${files.length} yielded / ${listingCalls.length} listing call(s)`);
+}
+{
   let error = null;
   const fetchImpl = async (input) => {
     const url = new URL(input);
@@ -478,13 +541,25 @@ const workbookBytes = (sheets) => {
   });
   const moved = await classify({ id: "old", name: "old.txt", parents: ["outside"] });
   const trashed = await classify({ id: "old", name: "old.txt", parents: ["root"], trashed: true });
-  const ambiguous = await classify({ error: { message: "not found" } }, 404);
+  const gone = await classify({ error: { message: "File not found" } }, 404);
+  const hiddenGone = await classify({
+    error: { message: "File not found", errors: [{ reason: "notFound" }] },
+  }, 403);
+  const accessDenied = await classify({
+    error: { message: "insufficient permissions", errors: [{ reason: "insufficientFilePermissions" }] },
+  }, 403);
   const inconsistent = await classify({ id: "old", name: "old.txt", parents: ["nested"] });
   check("a visible move out of scope is authoritative removal evidence", moved.kind === "left_scope");
   check("visible trash is authoritative deletion evidence", trashed.kind === "source_deleted");
-  check("permission loss is not guessed to be hard deletion", ambiguous.kind === "unresolved" && ambiguous.retryable);
-  check("an item still parented inside scope but missing from the walk blocks tombstones",
-    inconsistent.kind === "unresolved" && inconsistent.retryable);
+  check("permission loss is not guessed to be hard deletion",
+    gone.kind === "unresolved_not_returned" && gone.retryable &&
+      gone.reason === "Drive no longer returns this item to this credential");
+  check("a 403 notFound body is also not guessed to be hard deletion",
+    hiddenGone.kind === "unresolved_not_returned" && hiddenGone.retryable);
+  check("a 403 access denial remains review-only",
+    accessDenied.kind === "unresolved_access" && accessDenied.retryable);
+  check("an item still parented inside scope is labelled present rather than access-denied",
+    inconsistent.kind === "present_in_scope" && inconsistent.retryable && inconsistent.visible_in_scope === true);
 }
 {
   const t = await startPageToken(tok, { fetchImpl: async () => json({ startPageToken: "T1" }), sleep: async () => {} });
@@ -1044,7 +1119,8 @@ const gm = await import("../connectors/gmail.mjs");
     sleep: async () => {},
   }).catch((x) => (e = x));
   check("a Gmail profile without a history marker is incomplete rather than a valid cursor",
-    /no valid history marker/i.test(e?.message || ""), e?.message);
+    /no valid history marker/i.test(e?.message || "") && e?.operationClass === "gmail_profile_read",
+    `${e?.operationClass}: ${e?.message}`);
 }
 {
   let e = null;
@@ -1053,7 +1129,8 @@ const gm = await import("../connectors/gmail.mjs");
     sleep: async () => {},
   }).catch((x) => (e = x));
   check("a Gmail history response without its terminal marker cannot settle the window",
-    /no valid terminal history marker/i.test(e?.message || ""), e?.message);
+    /no valid terminal history marker/i.test(e?.message || "") && e?.operationClass === "gmail_history_list",
+    `${e?.operationClass}: ${e?.message}`);
 }
 {
   let e = null;

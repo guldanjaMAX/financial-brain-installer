@@ -11,13 +11,18 @@ import { drainOutbox } from "../worker/src/lib/store-d1.js";
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 200))); if (!c) fail++; };
 
-const mkEnv = (rows, upserted, deleted = [], updates = []) => ({
+const mkEnv = (rows, upserted, deleted = [], updates = [], statementSql = []) => ({
   DB: {
     prepare(q) {
       const shape = (b = []) => ({
         all: async () => ({ results:
           /submitted_mutation_id IS NOT NULL/.test(q) || /WHERE (?:o\.)?op = 'delete'/.test(q) ? [] : rows }),
-        first: async () => ({ n: 1 }),
+        first: async () => {
+          if (/FROM json_each/.test(q)) {
+            try { return { n: JSON.parse(b[0]).length }; } catch { return { n: 0 }; }
+          }
+          return { n: 1 };
+        },
         run: async () => /UPDATE install_state/.test(q)
           ? ({ meta: { changes: 1 } })
           : ({}),
@@ -27,9 +32,16 @@ const mkEnv = (rows, upserted, deleted = [], updates = []) => ({
     },
     batch: async (stmts) => {
       for (const s of stmts) {
+        statementSql.push(s._q);
         if (/DELETE FROM vector_outbox/.test(s._q)) deleted.push(s._b[0]);
         if (/UPDATE vector_outbox SET attempts/.test(s._q)) updates.push(s._b[2]);
-        else if (/UPDATE vector_outbox/.test(s._q)) updates.push(s._b[0]);
+        else if (/UPDATE vector_outbox/.test(s._q)) {
+          try {
+            updates.push(...JSON.parse(s._b[0]).map((row) => row.u));
+          } catch {
+            updates.push(s._b[0]);
+          }
+        }
       }
       return stmts.map(() => ({ meta: { changes: 1 } }));
     },
@@ -45,8 +57,8 @@ const rows = (n) => Array.from({ length: n }, (_, i) => ({
 
 /* ---- the round trips actually collapse ---- */
 {
-  const up = []; let batchCalls = 0, singleCalls = 0;
-  const r = await drainOutbox(mkEnv(rows(100), up), {
+  const up = [], statementSql = []; let batchCalls = 0, singleCalls = 0;
+  const r = await drainOutbox(mkEnv(rows(100), up, [], [], statementSql), {
     embed: async () => { singleCalls++; return [0.1]; },
     embedBatch: async (texts) => { batchCalls++; return texts.map((_, i) => [i]); },
     embedGroup: 50,
@@ -59,6 +71,10 @@ const rows = (n) => Array.from({ length: n }, (_, i) => ({
       v.metadata.category === "note" && v.metadata.top_folder === "Clients" &&
       v.metadata.platform === "drive" && v.metadata.document_date === 1750000000000),
     JSON.stringify(up[0]?.metadata));
+  check("an unchanged provider id does not rewrite the chunk or retrigger FTS",
+    statementSql.some((sql) =>
+      /UPDATE chunks AS c SET vector_id=[\s\S]*target\.vector_id IS NULL OR target\.vector_id<>/.test(sql)),
+    statementSql.join("\n"));
 }
 
 /* ---- alignment: the vector a chunk gets must be ITS OWN ---- */

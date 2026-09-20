@@ -17,7 +17,7 @@
 // resolution, the admin key, and the brain's own /api/admin/brain/ingest
 // endpoint) is faked; every calendar-side function is the genuine one.
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -76,10 +76,12 @@ const EVENT_CANCELLED = { kind: "calendar#event", id: "evt_old_002", status: "ca
 
 const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-calendar-ingest-")));
 const manifestPath = join(sandbox, "brain.manifest.json");
+writeFileSync(manifestPath, "{}\n", { mode: 0o600 });
 
 const fakeReceipts = [];
 const fakeRemovals = [];
 const commonOptions = () => ({
+  sourceIngestLockOptions: { home: sandbox },
   resolveAccount: async () => ({ id: "fixture-account" }),
   resolveBaseUrl: async () => "https://fixture.invalid",
   resolveAdminKey: () => "fixture-admin-key",
@@ -154,6 +156,16 @@ try {
     check("the final receipt reports the real created/removed counts",
       fakeReceipts[1].receipt.docs_added === 1 && /1 removed/.test(fakeReceipts[1].receipt.detail),
       JSON.stringify(fakeReceipts[1].receipt));
+    check("a full Calendar walk with a terminal sync token proves configured history",
+      fakeReceipts[1].receipt.walk_complete === true &&
+      fakeReceipts[1].receipt.complete_sweep === true &&
+      fakeReceipts[1].receipt.files_seen === 2 &&
+      fakeReceipts[1].receipt.docs_refused === 0 &&
+      fakeReceipts[1].receipt.docs_failed === 0 &&
+      fakeReceipts[1].receipt.confirmed_range?.from === null &&
+      fakeReceipts[1].receipt.confirmed_range?.through === null &&
+      /authoritative sync token/.test(fakeReceipts[1].receipt.detail),
+      JSON.stringify(fakeReceipts[1].receipt));
     check("cmdIngestCalendar returns a real result object, not undefined",
       result && result.result && result.sent && typeof result.removed === "number");
 
@@ -189,6 +201,11 @@ try {
     const statePath = join(sandbox, ".brain-ingest-calendar.json");
     const saved = JSON.parse(readFileSync(statePath, "utf8"));
     check("the new token replaces the old one", saved?.primary?.sync_token === "TOK_2", JSON.stringify(saved));
+    check("an incremental Calendar walk is successful without restating a full history sweep",
+      fakeReceipts.at(-1)?.receipt.walk_complete === true &&
+      fakeReceipts.at(-1)?.receipt.complete_sweep === false &&
+      !("confirmed_range" in fakeReceipts.at(-1).receipt),
+      JSON.stringify(fakeReceipts.at(-1)?.receipt));
   }
 
   fakeReceipts.length = 0;
@@ -196,6 +213,7 @@ try {
   /* ---- a custom source controls rows, removals, state, and receipts ---- */
   {
     const customManifest = join(sandbox, "custom-source.manifest.json");
+    writeFileSync(customManifest, "{}\n", { mode: 0o600 });
     const impl = fakeGoogle({
       calendar: [{ status: 200, body: { nextSyncToken: "TOK_CUSTOM", items: [EVENT_KICKOFF, EVENT_CANCELLED] } }],
     });
@@ -237,6 +255,7 @@ try {
     const retryDir = join(sandbox, "send-retry");
     mkdirSync(retryDir);
     const retryManifest = join(retryDir, "brain.manifest.json");
+    writeFileSync(retryManifest, "{}\n", { mode: 0o600 });
     const failedImpl = fakeGoogle({
       calendar: [{ status: 200, body: { nextSyncToken: "TOK_MUST_NOT_SAVE", items: [EVENT_KICKOFF] } }],
     });
@@ -259,6 +278,12 @@ try {
       !existsSync(join(retryDir, ".brain-ingest-calendar.json")));
     check("an event send failure closes the source receipt as error",
       fakeReceipts.at(-1)?.receipt.status === "error" && /send.*failed/.test(fakeReceipts.at(-1)?.receipt.error || ""),
+      JSON.stringify(fakeReceipts.at(-1)?.receipt));
+    check("an event send failure does not erase the completed Google walk",
+      fakeReceipts.at(-1)?.receipt.walk_complete === true &&
+      fakeReceipts.at(-1)?.receipt.complete_sweep === false &&
+      fakeReceipts.at(-1)?.receipt.docs_failed === 1 &&
+      !("confirmed_range" in fakeReceipts.at(-1).receipt),
       JSON.stringify(fakeReceipts.at(-1)?.receipt));
 
     const retryImpl = fakeGoogle({
@@ -292,6 +317,7 @@ try {
     const refusedDir = join(sandbox, "refused");
     mkdirSync(refusedDir);
     const refusedManifest = join(refusedDir, "brain.manifest.json");
+    writeFileSync(refusedManifest, "{}\n", { mode: 0o600 });
     const impl = fakeGoogle({
       calendar: [{ status: 200, body: { nextSyncToken: "TOK_REFUSED", items: [EVENT_KICKOFF] } }],
     });
@@ -315,6 +341,12 @@ try {
     check("a refused Calendar event marks the source receipt incomplete",
       fakeReceipts.at(-1)?.receipt.status === "error" && /refused/.test(fakeReceipts.at(-1)?.receipt.error || ""),
       JSON.stringify(fakeReceipts.at(-1)?.receipt));
+    check("a refused Calendar event remains a completed walk with a measured refusal",
+      fakeReceipts.at(-1)?.receipt.walk_complete === true &&
+      fakeReceipts.at(-1)?.receipt.complete_sweep === false &&
+      fakeReceipts.at(-1)?.receipt.docs_refused === 1 &&
+      !("confirmed_range" in fakeReceipts.at(-1).receipt),
+      JSON.stringify(fakeReceipts.at(-1)?.receipt));
   }
 
   fakeReceipts.length = 0;
@@ -323,6 +355,7 @@ try {
     const cleanupDir = join(sandbox, "cleanup-retry");
     mkdirSync(cleanupDir);
     const cleanupManifest = join(cleanupDir, "brain.manifest.json");
+    writeFileSync(cleanupManifest, "{}\n", { mode: 0o600 });
     const impl = fakeGoogle({
       calendar: [{ status: 200, body: { nextSyncToken: "TOK_PENDING_DELETE", items: [EVENT_CANCELLED] } }],
     });
@@ -343,6 +376,79 @@ try {
       !existsSync(join(cleanupDir, ".brain-ingest-calendar.json")));
     check("a pending Calendar cancellation marks the source receipt incomplete",
       fakeReceipts.at(-1)?.receipt.status === "error" && /remain pending/.test(fakeReceipts.at(-1)?.receipt.error || ""),
+      JSON.stringify(fakeReceipts.at(-1)?.receipt));
+    check("a pending Calendar cancellation does not conflate delivery with traversal",
+      fakeReceipts.at(-1)?.receipt.walk_complete === true &&
+      fakeReceipts.at(-1)?.receipt.complete_sweep === false &&
+      !("confirmed_range" in fakeReceipts.at(-1).receipt),
+      JSON.stringify(fakeReceipts.at(-1)?.receipt));
+  }
+
+  fakeReceipts.length = 0;
+
+  /* ---- a malformed event is a measured gap inside an otherwise full walk ---- */
+  {
+    const gapDir = join(sandbox, "event-gap");
+    mkdirSync(gapDir);
+    const gapManifest = join(gapDir, "brain.manifest.json");
+    writeFileSync(gapManifest, "{}\n", { mode: 0o600 });
+    const impl = fakeGoogle({
+      calendar: [{ status: 200, body: {
+        nextSyncToken: "TOK_WITH_GAP",
+        items: [{ id: "evt_missing_start", status: "confirmed", summary: "Undated fixture event" }],
+      } }],
+    });
+    await cmdIngestCalendar(
+      { infrastructure: { cloudflare: {} } }, gapManifest, {},
+      {
+        ...commonOptions(),
+        getAccessToken: provider(impl).get,
+        fetchImpl: impl,
+        googleCalendar: {
+          syncAll,
+          ingestEnvelopes: async () => ({
+            created: 0, updated: 0, unchanged: 0, refused: [], errors: [], total: 0,
+          }),
+        },
+      },
+    );
+    check("a malformed event leaves the Google walk complete but blocks searchable history proof",
+      fakeReceipts.at(-1)?.receipt.status === "ready" &&
+      fakeReceipts.at(-1)?.receipt.walk_complete === true &&
+      fakeReceipts.at(-1)?.receipt.complete_sweep === false &&
+      fakeReceipts.at(-1)?.receipt.docs_refused === 1 &&
+      !("confirmed_range" in fakeReceipts.at(-1).receipt),
+      JSON.stringify(fakeReceipts.at(-1)?.receipt));
+  }
+
+  fakeReceipts.length = 0;
+
+  /* ---- terminal page without a sync token is a walk, not snapshot proof ---- */
+  {
+    const noTokenDir = join(sandbox, "no-token");
+    mkdirSync(noTokenDir);
+    const noTokenManifest = join(noTokenDir, "brain.manifest.json");
+    writeFileSync(noTokenManifest, "{}\n", { mode: 0o600 });
+    const impl = fakeGoogle({ calendar: [{ status: 200, body: { items: [] } }] });
+    await cmdIngestCalendar(
+      { infrastructure: { cloudflare: {} } }, noTokenManifest, {},
+      {
+        ...commonOptions(),
+        getAccessToken: provider(impl).get,
+        fetchImpl: impl,
+        googleCalendar: {
+          syncAll,
+          ingestEnvelopes: async () => ({
+            created: 0, updated: 0, unchanged: 0, refused: [], errors: [], total: 0,
+          }),
+        },
+      },
+    );
+    check("Calendar keeps walk completion separate from authoritative snapshot proof",
+      fakeReceipts.at(-1)?.receipt.status === "ready" &&
+      fakeReceipts.at(-1)?.receipt.walk_complete === true &&
+      fakeReceipts.at(-1)?.receipt.complete_sweep === false &&
+      !("confirmed_range" in fakeReceipts.at(-1).receipt),
       JSON.stringify(fakeReceipts.at(-1)?.receipt));
   }
 

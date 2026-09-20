@@ -165,6 +165,11 @@ try {
       JSON.stringify(sent.map((d) => d.source_id)));
     check("every document carries source_type whatsapp, so forget --source whatsapp scopes to it",
       sent.every((d) => d.source_type === "whatsapp"), JSON.stringify(sent.map((d) => d.source_type)));
+    check("every decodable WhatsApp session carries its final native source family",
+      sent.every((d) => d.text_source === "native" && d.text_reliable === true &&
+        d.metadata.provenance_receipt.status === "complete" &&
+        JSON.stringify(d.metadata.provenance_receipt.root_ids) === JSON.stringify([`whatsapp:${d.source_id}`])),
+      JSON.stringify(sent.map((d) => d.metadata.provenance_receipt)));
     check("the owner's manifest display name speaks for outbound messages",
       sent.find((d) => d.source_id === "wi-1").content.includes("Morgan Diaz:"));
     check("the media-only row never became a document",
@@ -175,6 +180,15 @@ try {
       fakes.receipts[1].status === "ready" &&
       fakes.receipts.every((r) => r.kind === "whatsapp" && r.source === "whatsapp"),
       JSON.stringify(fakes.receipts.map((r) => r.status)));
+    check("a complete local outbox walk never claims all-time WhatsApp history",
+      fakes.receipts[1].walk_complete === true && fakes.receipts[1].complete_sweep === false &&
+      fakes.receipts[1].files_seen === 4 && fakes.receipts[1].docs_added === 2 &&
+      fakes.receipts[1].docs_refused === 1 && fakes.receipts[1].docs_failed === 0 &&
+      !("confirmed_range" in fakes.receipts[1]) &&
+      fakes.receipts[1].target_range?.from === "2026-03-02T17:00:00.000Z" &&
+      fakes.receipts[1].target_range?.through === "2026-03-03T09:01:00.000Z" &&
+      /never claims all-time WhatsApp coverage/.test(fakes.receipts[1].detail),
+      JSON.stringify(fakes.receipts[1]));
     check("drain state landed beside the manifest under the source's name",
       existsSync(join(sandbox, ".brain-ingest-whatsapp.json")));
   }
@@ -183,6 +197,10 @@ try {
     const again = await cmdIngestWhatsapp(manifestWithDataDir, manifestPathWithDataDir, {}, fakes.options);
     check("a second drain through the CLI is incremental: nothing re-read, nothing re-sent",
       again.rows_seen === 0 && fakes.batches.length === 0, JSON.stringify(again));
+    check("an incremental outbox catch-up does not invent a historical range",
+      fakes.receipts[1].walk_complete === true && fakes.receipts[1].complete_sweep === false &&
+      !("confirmed_range" in fakes.receipts[1]) && !("target_range" in fakes.receipts[1]),
+      JSON.stringify(fakes.receipts[1]));
   }
 
   {
@@ -221,6 +239,10 @@ try {
     check("a refused WhatsApp conversation is explicit and never completion-shaped",
       result.refused === 1 && result.documents_accepted === 0 &&
       result.outcome?.kind === "partial" && result.outcome?.complete === false &&
+      refusing.receipts.at(-1)?.walk_complete === true &&
+      refusing.receipts.at(-1)?.complete_sweep === false &&
+      !("confirmed_range" in refusing.receipts.at(-1)) &&
+      "target_range" in refusing.receipts.at(-1) &&
       /credential gate/.test(refusing.receipts.at(-1)?.refusal_reason || ""),
       JSON.stringify({ result, receipt: refusing.receipts.at(-1) }));
   }

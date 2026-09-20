@@ -176,11 +176,18 @@ function drive(env, { maxDurationMs = 3_600_000, contract = 2, onPoll = null } =
   seedStaleBrain(db, visible, { epoch: 4, stranded: 1200, drainedSince: 10, quarantined: 50 });
   const run = await drive(env);
   const after = snapshot(db);
-  check("quarantine: 1,150 embedded, then refused by name with the count and both remedies, before the movement budget",
-    run.error !== null && /50 quarantined row\(s\)/.test(String(run.error?.message)) && /vector-retry/.test(String(run.error?.message)) &&
-      /brain forget/.test(String(run.error?.message)) && !/reindex/.test(String(run.error?.message)) &&
+  const quarantineMessage = String(run.error?.message || "");
+  check("quarantine: 1,150 embedded, then refused with the allowed retry and reviewed-repair path before the movement budget",
+    run.error !== null && /50 quarantined row\(s\)/.test(quarantineMessage) && /vector-retry/.test(quarantineMessage) &&
+      /reviewed repair/.test(quarantineMessage) && !/brain forget/.test(quarantineMessage) &&
+      !/reindex/.test(quarantineMessage) &&
       run.embeds() === 1150 && Number(after.outbox) === 50 && after.status === "pending",
     JSON.stringify({ error: String(run.error?.message).slice(0, 200), embeds: run.embeds(), after }));
+  check("quarantine guidance makes the read-only preview precede owner-reviewed confirmation",
+    quarantineMessage.indexOf('{"confirm":false}') >= 0 &&
+      quarantineMessage.indexOf('{"confirm":true}') > quarantineMessage.indexOf('{"confirm":false}') &&
+      /read-only receipt[\s\S]*owner reviews that count/.test(quarantineMessage),
+    quarantineMessage);
   // The remedy the refusal names, then the same update again.
   db.prepare("DELETE FROM vector_outbox_retry_state WHERE quarantined_at IS NOT NULL").run();
   db.prepare("UPDATE vector_outbox SET attempts=0, last_error=NULL").run();
@@ -274,8 +281,9 @@ function drive(env, { maxDurationMs = 3_600_000, contract = 2, onPoll = null } =
       !/\n\s*brain reindex <manifest> --yes/.test(text),
     text.slice(-600));
   if (stalled && /Vectorize holds/.test(text)) {
-    check("and when it does stall it names a bounded, per-source remedy instead",
-      /--source <name>/.test(text) && /brain diagnose/.test(text),
+    check("and when it stalls, it keeps the pause and names only read-only diagnosis plus reviewed repair",
+      /Keep the Worker paused/.test(text) && /brain diagnose <manifest>/.test(text) &&
+        /reviewed repair/.test(text) && !/brain reindex <manifest> --source/.test(text),
       text.slice(-600));
   }
 }

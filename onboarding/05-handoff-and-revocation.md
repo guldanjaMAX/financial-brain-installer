@@ -1,6 +1,9 @@
 # Handoff and revocation
 
-Template. Fill every bracket before sending. Delivered at the end of the kickoff session, immediately after the revocation is performed live.
+Template. Fill every bracket before sending. Mark anything that was not used as
+not applicable. Deliver this at the end of the kickoff session only after every
+applicable access cleanup has been performed and verified live. Never claim a
+revocation or rotation that did not occur.
 
 ---
 
@@ -17,28 +20,49 @@ At **[TIME] on [DATE]**, with you watching:
 
 | What | Action | Result |
 |---|---|---|
-| My Cloudflare API token for your account | Deleted | I can no longer see, deploy to, or delete anything in your Cloudflare account |
-| The stored copy of that token on my computer | Removed with `brain token <manifest> --forget`, with you watching | My machine's keychain holds nothing for your account — a revoked token must also stop existing locally, not linger as clutter |
-| My access to your [Google Drive folders / source] | Removed by you | I can no longer read any of your source material |
-| Your admin key | Rotated by you, to a value I have never seen | I cannot query your brain, even at its public address |
+| A fallback Cloudflare API token for your account, only if one was used | [Not used / Revoked by you] | [No token existed / The exact token used for this work no longer authorizes account changes] |
+| The protected local copy of that token, only if one was used | [Not used / Removed with `brain token <manifest> --forget`, with you watching] | [Nothing was stored / The encrypted recovery copy no longer remains on this computer] |
+| Temporary access to your [Google Drive folders / source], only if granted | [Not granted / Removed by you] | [No temporary access existed / I can no longer read that source material] |
+| Your admin key | [Not rotated because it was generated directly into your protected store and never left your custody / Rotated by you through the reviewed owner-controlled secure replacement path after exposure] | [No unnecessary credential change / I no longer know a key that can query your Brain] |
 
-The Cloudflare and admin credentials used during the build are rotated or
-revoked at handoff. Written answers use the Cloudflare AI binding, so there is
-no separate model-provider key to transfer or revoke.
+Only credentials and source access that were actually used are revoked or
+removed at handoff. Normal fresh setup uses the owner's Cloudflare browser
+sign-in and generates the admin key directly into the owner's protected store.
+If that key never left owner-only custody and the installer never saw, copied,
+or retained it, do not rotate it solely for handoff.
 
-Once those steps are done I hold **no credential of any kind** to your infrastructure, your material, or your brain.
+If the admin key was exposed to an installer, technician, shared terminal,
+chat, command line, shell history, persistent environment, log, or other party,
+rotation is required. Proceed only through a reviewed owner-controlled secure
+replacement path that keeps the new value out of all of those places. If no
+such path is available, stop and record the handoff as incomplete rather than
+asking the owner to improvise secret entry.
+
+Before any admin-key rotation, explain that it also replaces the session-signing
+key. Every owner-app session on every device will be signed out. Passkeys,
+enrolled-device records, and Brain data remain in place; the owner signs in
+again with an existing passkey after the rotation. Written answers use the
+Cloudflare AI binding, so there is no separate model-provider key to transfer
+or revoke.
+
+Once the applicable steps are done, and the admin key was either never exposed
+or was safely replaced after exposure, I hold **no credential of any kind** to
+your infrastructure, your material, or your Brain.
 
 This is not a policy I am promising to follow. It is a fact about what keys exist. There is no support account, no vendor backdoor, and no copy of your data on any machine I control, because there never was one. Your material was read in your account, indexed into your account, and answered from your account.
 
 ### Verify it yourself, today
 
-Do not take my word for any of the above. All three are checkable in about five minutes:
+Do not take my word for any of the above. Verify only the checks that actually
+apply:
 
-1. **Cloudflare.** Log in, go to **My Profile, then API Tokens**. The token named `[TOKEN NAME]` should not be listed. If it is, delete it now and tell me.
-2. **Google.** Open the sharing settings on the folders you granted, or the service account list at [LOCATION]. My access should not appear.
-3. **Your admin key.** You rotated it during our session. I was not shown the new value and it exists only in your own store.
-After all three, run `node brain.mjs test <manifest>` yourself. If the brain
-still answers, the remaining credentials and Cloudflare AI binding are working.
+1. **Cloudflare, only if a fallback token was used.** Log in, go to **My Profile, then API Tokens**. The exact token used for this work should not be listed. If it remains, the cleanup is incomplete.
+2. **Source sharing, only if temporary access was granted.** Open the sharing settings on the source you granted. My access should not appear.
+3. **Your admin key.** If it never left your protected store, confirm that no installer or technician received it and leave it unchanged. If exposure required a reviewed rotation, confirm that the rotation succeeded without showing the new value, then sign back in with an existing passkey.
+After every applicable check, run `node brain.mjs test <manifest>` yourself. Then complete
+one adaptive evidence-derived check and confirm the expected citation and
+provenance. No prepared question list is required. If both checks pass, the
+remaining credentials, answer path, and Cloudflare AI binding are working.
 
 If any of those three does not check out, that is a real problem and I want to hear about it the same day.
 
@@ -52,15 +76,20 @@ Everything. Here it is written down, because "you own it" is worthless if nobody
 |---|---|---|
 | Cloudflare account | [ACCOUNT EMAIL], account ID `[ACCOUNT_ID]` | Everything below sits inside it |
 | Your brain (the worker) | `[WORKER_NAME]`, at `[BRAIN URL]` | The service that answers questions |
-| Database | Cloudflare D1, `[D1_NAME]`, ID `[D1_ID]` | Version tracking and spend accounting |
-| File storage | Cloudflare R2 bucket `[R2_BUCKET]` | Stored files |
+| Database | Cloudflare D1, `[D1_NAME]`, ID `[D1_ID]` | Extracted text, metadata, keyword search, version tracking, and spend accounting |
+| Optional original-file copy, omit this row when absent | Cloudflare R2 bucket `[R2_BUCKET]` | Original-file storage only when this install separately configured and proved it |
 | Search index | Cloudflare Vectorize index `[VECTORIZE_INDEX]`, in YOUR account | The meaning of your material, as vectors |
-| Text and keywords | Cloudflare D1 database `[D1_NAME]`, in YOUR account | Your material itself, and the keyword index over it |
+| Text and keywords | Cloudflare D1 database `[D1_NAME]`, in YOUR account | Extracted text, source metadata, and the keyword index over it |
 | Answer model | Cloudflare Workers AI in [ACCOUNT EMAIL] | Writes the answers in the same account, capped at $[CAP] per day |
 | Source access | [GOOGLE SERVICE ACCOUNT / OAUTH CLIENT] | Read-only access to your own folders |
 | Admin key | [WHERE YOU STORED IT] | The password to your brain. Treat it like one |
 | Your manifest | `[PATH / REPO]` | The one file that describes your install. Contains no secrets |
 | The installer and its tools | `[PATH / REPO]` | Everything needed to verify, update, or rebuild |
+
+Original files remain in their source provider unless this install separately
+configured and proved an R2 original-file copy. D1 holds extracted text and
+metadata, not a backup of the original binary. Remove the R2 row above whenever
+the manifest has no R2 bucket.
 
 **The manifest is the important one.** It is the single file that differs between one install and another. Anyone competent, holding that file and your own credentials, can rebuild or move this. That is deliberate: it means you are not dependent on me existing.
 
@@ -70,37 +99,63 @@ Everything. Here it is written down, because "you own it" is worthless if nobody
 
 Routine checks use the admin key from the manifest's durable local storage, so
 you do not need to copy it into your shell. For account-changing work, run the
-supported `brain setup` or `brain update` path in an interactive terminal and
-enter the scoped Cloudflare token at its hidden prompt. Low-level automation
-must inject that token through an approved secret manager. Never paste a token
-into a shell command or leave it in shell history.
+supported `brain setup` or `brain update` path in an interactive terminal. It
+reuses this Brain's named Cloudflare browser sign-in. If Cloudflare asks for a
+refresh, the owner completes sign-in, 2FA, account choice, and consent in the
+official browser. A scoped token is used only when the released CLI offers a
+recovery path and the owner explicitly chooses it. Never paste one into a shell
+command or leave it in shell history.
 
 Then, from the installer folder:
 
 | You want to | Run |
 |---|---|
-| Prove the whole thing works, all five layers | `node brain.mjs test <manifest>` |
+| Run the five automated acceptance layers | `node brain.mjs test <manifest>` |
 | Quick "is it up" check | `node brain.mjs health <manifest>` |
-| See what it holds, per source, and when each last updated | `node brain.mjs sources <manifest>` |
+| Read the complete source-inventory contract v3 receipt | `node brain.mjs sources <manifest> --json` |
 | Remove one source and everything it brought in | `node brain.mjs forget <manifest> --source <name>` |
 | See what version you are on, and the update history | `node brain.mjs status <manifest>` |
 | Reconnect your AI tools, or add a new machine | `node brain.mjs mcp-config <manifest>` |
-| Change a key or password | `node brain.mjs secrets <manifest>` |
+| Reapply the current durable admin key, or rotate it only through a reviewed secure replacement path | `node brain.mjs secrets <manifest>` |
 
-`brain secrets` is the exact admin-key rotation command. It normally reads the
-existing value from the manifest's durable local storage. A deliberate new
-replacement must be supplied through the installer/operator's approved
-no-history credential launcher; never paste it into a shell command. The
-command reports success only after the durable local value reads back exactly
-and the Worker accepts it. If the remote update fails, rerun the same command
-without supplying the key again; the verified durable copy is the retry source.
+`brain secrets` normally reads and reapplies the existing value from the
+manifest's durable local storage. Running it without a new value is not an
+admin-key rotation. A deliberate replacement rotates the key only when it is
+supplied through a reviewed owner-controlled no-history credential path; never
+paste it into a shell command, chat, log, or persistent environment. If that
+secure replacement path is unavailable, stop without attempting a rotation.
+Before supplying a replacement, tell the owner that every owner-app session on
+every device will be signed out while passkeys, enrolled-device records, and
+Brain data remain. The command reports success only after the durable local
+value reads back exactly and the Worker accepts it. If the remote update fails,
+rerun the same command without supplying the key again; the verified durable
+copy is the retry source.
+
+`brain sources <manifest> --json` returns source-inventory contract v3 rather
+than a fixed human column list. For each registered source it reports a safe
+source identity and connector kind, zone, physical and logical document counts,
+readable and unreadable counts, first and last ingest evidence,
+complete-history-through and freshness evidence, extraction and OCR state,
+lineage, and exact missing provenance fields. A missing field is not zero, and
+an older contract version must not be interpreted as v3.
 
 Existing installer-owned Claude Code and Codex registrations are refreshed with
 the non-secret manifest locator during rotation. Claude Desktop is not changed
 automatically: replace its manual entry with the locator-only output from
 `brain mcp-config <manifest>`, then restart Claude Desktop.
 
-`test` is the one that matters. It runs five layers in order: is it reachable and locked down, is there anything in it and is it current, does a real question return real sources, does the credential protection actually refuse, and is the version and configuration right. It is read-only apart from one deliberate probe that must be refused.
+`test` runs five layers in order: is it reachable and locked down, is there
+anything in it and is it current, do any optional saved owner questions return
+real sources, does the credential protection actually refuse, and is the
+version and configuration right. It is read-only apart from one deliberate
+probe that must be refused. Zero owner-authored questions are required for
+setup, adaptive acceptance, or handoff.
+
+Before handoff, use the actual source receipts and prove one approved
+low-sensitivity item through four separate states: accepted, stored with source
+and extraction provenance, projected with its exact generation confirmed, and
+query-visible with the expected citation and provenance. Stop at the first
+unproven state. A green automated test does not replace that evidence gate.
 
 **It is the same suite I ran in front of you with my access removed.** Nothing about it needs me.
 
@@ -108,7 +163,7 @@ automatically: replace its manual entry with the locator-only output from
 
 1. Run `node brain.mjs test <manifest>`.
 2. Read the failures and warnings at the bottom. The freshness line is the one to watch: a brain that quietly stops taking in new material still answers confidently, using old information.
-3. Run `node brain.mjs sources <manifest>` and check the last ingest date on each line.
+3. Run `node brain.mjs sources <manifest> --json` and review the v3 receipt for each source's freshness, history coverage, readability, OCR state, and missing provenance. Do not look for the old fixed `status`, `documents`, or `last ingest` columns.
 4. Check your Cloudflare bill against the numbers in section 2.
 
 ### When something breaks
@@ -117,14 +172,15 @@ Use the runbook you were given: `06-runbook-top-ten-failures.md`. It covers the 
 
 ### If you want me back in
 
-Issue a fresh scoped Cloudflare API token. At the start of the supported work,
-you enter it yourself at the hidden `brain setup` or `brain update` prompt. For
-low-level automation, your approved secret manager must launch the process and
-inject the token without exposing it in a command, log, or shell history. Do
-not send the credential to me or put it in a shared channel. **Delete it when
-the work is done.** That is the cost of the custody model and I would rather it
-be slightly inconvenient than have a standing key to your business sitting in
-my password manager for years.
+Keep control of the existing named Cloudflare browser sign-in. At the start of
+supported work, you complete any required sign-in, 2FA, account choice, and
+consent in the official browser yourself. Do not send a credential to me or put
+one in a shared channel.
+
+If the released CLI explicitly requires its recovery-only scoped token path,
+create the exact short-lived token named by that plan and enter it yourself at
+the hidden prompt. **Delete it when the work is done.** Routine work should not
+create a token merely because a technician is present.
 
 ---
 
@@ -142,13 +198,20 @@ Without `--yes` it removes nothing and prints exactly what would go. That is the
 
 The rest of this section is for removing **all** of it.
 
-**Read this first: every step below is irreversible.** Deleting the database and the search index destroys your index permanently. It does not touch your original documents in Google Drive, which are untouched throughout and always have been.
+**Read this first: every step below is irreversible.** Deleting the database and
+the search index destroys your extracted text, metadata, keyword index, and
+meaning index permanently. Original files normally remain in their source
+provider. If a separately configured R2 original-file copy exists, deleting
+that copy does not delete the provider's original.
 
 In this order:
 
 1. **Delete the search index.** In your own Cloudflare account: `npx wrangler@4.73.0 vectorize delete [VECTORIZE_INDEX]` removes the vectors, and Workers and Pages, D1, then delete `[D1_NAME]` removes the text and the keyword index. Both live in your account, so this is yours to do and needs nothing from me.
 2. **Delete the database.** Cloudflare dashboard, Workers and Pages, D1, `[D1_NAME]`, Delete. This removes version history and spend records, including its time travel history.
-3. **Delete the file storage.** Cloudflare dashboard, R2, bucket `[R2_BUCKET]`, Delete.
+3. **If configured, delete the R2 original-file copy.** First confirm the
+   manifest actually declares bucket `[R2_BUCKET]`, then use Cloudflare
+   dashboard, R2, bucket `[R2_BUCKET]`, Delete. Omit this step entirely when the
+   install has no R2 bucket.
 4. **Delete the brain.** Cloudflare dashboard, Workers and Pages, `[WORKER_NAME]`, Settings, Delete.
 5. **Revoke source access.** Remove [SERVICE ACCOUNT / OAUTH CLIENT] from the folders it could read, and delete it in the Google Cloud console.
 
@@ -164,7 +227,7 @@ Complete list. Nothing omitted.
 
 | What | Contains | How long |
 |---|---|---|
-| Your intake answers and my notes | Your ten questions, your sources, your exclusions. No credentials | Until you ask me to delete them |
+| Your intake answers and my notes | Your goals, approved sources, exclusions, and any optional questions you chose to save. No credentials | Until you ask me to delete them |
 | A copy of your manifest | Resource names and IDs. **No secrets.** Every credential in it is a reference to a store, never a value | Until you ask me to delete it |
 | Our email and message history | Whatever we wrote to each other | Normal business records |
 

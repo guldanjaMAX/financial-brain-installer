@@ -11,6 +11,7 @@ const MODES = [
   "mixed",
   "unclassified",
   "credential-refusal",
+  "worker-refusal",
   "sweep-query-evidence",
   "policy-change-sweep",
   "sweep-marker-missing",
@@ -28,6 +29,8 @@ const MODES = [
   "pending-readback-failure",
   "readback-stale",
   "resume-progress",
+  "resume-precondition-failure",
+  "incremental-precondition-failure",
 ];
 if (!evidencePath || !userRoot || !MODES.includes(mode)) {
   throw new Error("the Gmail policy fixture is not configured");
@@ -103,10 +106,12 @@ globalThis.fetch = async (input, options = {}) => {
       mixed: ["promotion", "inbox"],
       unclassified: [...lateEligibleIds, "unclassified"],
       "credential-refusal": ["credential-refused", "credential-clean"],
+      "worker-refusal": ["worker-refused"],
       "scanner-v5": ["migration-safe", "migration-sensitive"],
       "pending-restored": ["pending-restored"],
       "pending-retained": ["pending-retained"],
       "pending-absent-unreadable": ["pending-absent-unreadable"],
+      "incremental-precondition-failure": ["checkpoint-provider-failure"],
     };
     const ids = idsByMode[mode];
     if (!ids) throw new Error("the full-sweep fixture must use Gmail messages.list");
@@ -122,6 +127,14 @@ globalThis.fetch = async (input, options = {}) => {
     });
   }
   if (url.hostname === "gmail.googleapis.com" && url.pathname === "/gmail/v1/users/me/messages") {
+    if (mode === "resume-precondition-failure") {
+      return json({
+        messages: [
+          ...Array.from({ length: 51 }, (_, i) => ({ id: `checkpoint-new-${i + 1}` })),
+          { id: "checkpoint-provider-failure" },
+        ],
+      });
+    }
     if (mode === "resume-progress") {
       return json({
         messages: [
@@ -158,6 +171,24 @@ globalThis.fetch = async (input, options = {}) => {
   }
   if (url.hostname === "gmail.googleapis.com" && url.pathname.startsWith("/gmail/v1/users/me/messages/")) {
     const id = url.pathname.split("/").at(-1);
+    if (id.startsWith("checkpoint-new-")) {
+      return json({
+        id, historyId: `checkpoint-v1-${id}`, internalDate: "1788030000000", labelIds: ["INBOX"],
+        raw: rawMail("Checkpointed mail", `This invented ordinary message ${id} proves that an accepted batch remains resumable after a later failure.`),
+      });
+    }
+    if (id === "checkpoint-provider-failure") {
+      if (mode === "incremental-precondition-failure" && url.searchParams.get("format") === "minimal") {
+        return json({ id, labelIds: ["INBOX"] });
+      }
+      return json({
+        error: {
+          errors: [{ reason: "failedPrecondition" }],
+          status: "FAILED_PRECONDITION",
+          message: "SYNTHETIC_PRIVATE_PROVIDER_SENTINEL /mail/id?access_token=fixture-secret",
+        },
+      }, 400);
+    }
     if (id.startsWith("eligible-")) {
       return json({
         id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
@@ -206,6 +237,12 @@ globalThis.fetch = async (input, options = {}) => {
       return json({
         id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
         raw: rawMail("Clean inbox mail", "This invented clean inbox message confirms the reviewed project owner, agreed scope, timing, price, and next milestone."),
+      });
+    }
+    if (id === "worker-refused") {
+      return json({
+        id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
+        raw: rawMail("Worker-side refusal", "This invented ordinary inbox message passes the local scanner so the fixture Worker can refuse it at the receipt boundary."),
       });
     }
     if (id === "sweep-inbox") {
@@ -272,7 +309,11 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.ingested_ids.push(...request.docs.map((doc) => doc.source_id));
     saveEvidence(evidence);
-    return json({ results: request.docs.map((doc) => ({ source_id: doc.source_id, status: "created" })) });
+    return json({
+      results: request.docs.map((doc) => mode === "worker-refusal"
+        ? { source_id: doc.source_id, status: "refused", labels: ["synthetic_test_label"] }
+        : { source_id: doc.source_id, status: "created" }),
+    });
   }
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/forget") {
     const request = bodyOf(options);
@@ -338,7 +379,9 @@ globalThis.fetch = async (input, options = {}) => {
     }
     const stored = new Set([
       ...(storedByMode[mode] || []),
-      ...evidence.ingested_ids.map((id) => `gmail:${id}`),
+      ...evidence.ingested_ids
+        .filter(() => mode !== "worker-refusal")
+        .map((id) => `gmail:${id}`),
     ]);
     if (mode === "pending-readback-failure") {
       // The first success-shaped forget is deliberately ineffective. The retry

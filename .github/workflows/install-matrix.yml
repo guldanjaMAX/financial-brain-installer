@@ -1,20 +1,15 @@
-# Tier 1 of docs/INSTALL-TEST-SOP.md, which described this workflow for two
-# weeks while the file did not exist.
-#
-# Everything else in CI tests the repo against itself. This is the only job that
-# reads the PUBLISHED install contract at financialbrain.ai and does what a
-# client's agent is told to do with it. That distinction is not academic: every
-# defect that reached a client in the week of 2026-09-08 reached them through
-# the published surface, and repo-only checks were green the whole time.
-#
-# The rule this exists to enforce, from the SOP: nothing weird gets discovered
-# on the day of an install.
+# Package-only portion of Tier 1 in docs/INSTALL-TEST-SOP.md. This workflow reads
+# the PUBLISHED supervised-install contract and its sealed field kit, rejects a
+# malformed or mutable outer receipt, validates the platform guide's actual npm
+# command, installs into a throwaway prefix (including real PowerShell/npm.cmd on
+# Windows), and runs package-local version and doctor checks. It does not
+# provision Cloudflare, exercise the deployed browser, or complete a physical
+# owner ceremony.
 name: install-matrix
 
 on:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
+  workflow_call:
   schedule:
     - cron: "41 14 * * *"   # 07:41 Phoenix, after install-page-drift
 
@@ -40,6 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -55,21 +51,23 @@ jobs:
           command -v brain >/dev/null && { echo "::error::a brain CLI is already on PATH"; exit 1; }
           echo "no brain, no CLI: this is a first install"
 
-      - name: follow the published contract end to end
+      - name: verify and install from the published package contract
         shell: bash
         run: node scripts/install-from-public-contract.mjs "${RUNNER_TEMP}/install-run" --guide ${{ matrix.guide }}
 
-      # The SOP asks for the transcript and the timing, not just a green tick.
-      - name: keep the transcript
+      # The Actions log is the command transcript. Keep the downloaded public
+      # guides and receipts beside it so a later review can identify the exact
+      # contract the job followed.
+      - name: keep the downloaded public contract documents
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: install-contract-${{ matrix.os }}
-          path: ${{ runner.temp }}/install-run/*.md
+          path: ${{ runner.temp }}/install-run/**/*.md
           if-no-files-found: ignore
           retention-days: 14
 
-# NOT YET HERE: the provisioning half.
+# OPEN GATE: the provisioning half.
 #
 # The valuable second job creates one Worker, one D1 database and one Vectorize
 # index on the disposable test account, ingests the package's own public
@@ -77,7 +75,7 @@ jobs:
 # the refusal contract, and tears everything down. It is deliberately absent
 # rather than present-and-skipped, because a job that green-ticks without
 # provisioning anything is precisely the failure this file exists to end: the
-# SOP described three tiers and ran one for two weeks.
+# SOP must keep this boundary visible.
 #
 # It needs three repository secrets that do not exist yet:
 #   BRAIN_TEST_CF_TOKEN        the scoped test-account token (4 install permissions)
@@ -86,3 +84,5 @@ jobs:
 #                              and the test account hosts a live preview brain
 #
 # Add those, then the job lands with them, tested, in one change.
+# The deployed-browser matrix and physical passkey ceremony remain separate
+# open gates as documented in the SOP; this package job cannot prove either.

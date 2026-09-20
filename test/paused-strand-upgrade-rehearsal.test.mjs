@@ -1,26 +1,25 @@
-// the paused client's stranded brain, rehearsed on the REAL published schema prefix.
+// A synthetic stranded-upgrade fixture, rehearsed on the REAL published schema prefix.
 //
-// His email, 2026-09-04: "0.3.5 upgrade is stuck. Brain is paused and can't
-// accept documents. Install: pausedclientbrain / worker pausedclientbrain-brain. Path:
-// 0.2.3 -> 0.3.5." the independent audit's diagnosis the next day named the mechanism: the
-// bootstrap-v2 branch of acceleratedVectorBootstrap did not clear outbox
+// It models a 0.2.3 -> 0.3.5 upgrade that is paused and cannot accept
+// documents. The audited defect mechanism was that the bootstrap-v2 branch of
+// acceleratedVectorBootstrap did not clear outbox
 // residue while paused, so ONE chunk queued by ordinary ingest in the seconds
 // before the pause could never be projected.
 //
 // test/vector-bootstrap-paused-strand.test.mjs already pins that fix, but it
 // builds its fixture by applying ALL 35 migrations and then writing
-// schema_version=22 into install_state. the paused client's brain is the other way round:
+// schema_version=22 into install_state. The production-shaped fixture is the other way round:
 // every shipped release through v0.3.6 carries only migrations 0001-0022, so
 // the tables 0023-0035 create do not exist on it at all. This file rehearses
 // the composition nobody had executed: the real 22-migration prefix, seeded
-// into his exact stranded shape, taken across the 22 -> 35 jump the way
+// into the stranded regression shape, taken across the 22 -> 35 jump the way
 // cmdMigrate does it, and only then handed to today's bootstrap.
 //
 // It is deliberately not vacuous. Block 1 proves the jump is load-bearing:
 // the recovery path reads vector_outbox_retry_state, which migration 0028
 // creates, so a brain that skipped 0023-0035 cannot recover at all.
 //
-// Block 4 measures what a RE-RUN costs. That is the half of the paused client's experience
+// Block 4 measures what a RE-RUN costs. That is the half of the stranded-upgrade path
 // no test covered: upgrade-verify.test.mjs drives waitForVectorDrainCutover
 // with hand-written {leaseFree, inFlight} objects, never with the SQL
 // cmdUpdate actually issues against a real stranded database.
@@ -121,7 +120,7 @@ function makeShippedClientBrain({ deferProvider = false } = {}) {
   db.prepare(
     `INSERT INTO install_state
        (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
-     VALUES (1, 'pausedclientbrain', '0.2.3', ?, 0, '2026-08-01T00:00:00Z', 'stable')`
+     VALUES (1, 'example-paused-brain', '0.2.3', ?, 0, '2026-08-01T00:00:00Z', 'stable')`
   ).run(SHIPPED_PREFIX);
 
   const visible = new Map();
@@ -129,7 +128,7 @@ function makeShippedClientBrain({ deferProvider = false } = {}) {
   let sequence = 0;
   let processedUpToMutation = null;
   const accept = (apply) => {
-    const mutationId = `paused-client-mutation-${++sequence}`;
+    const mutationId = `fixture-mutation-${++sequence}`;
     if (deferProvider) held.push({ mutationId, apply });
     else { apply(); processedUpToMutation = mutationId; }
     return { mutationId };
@@ -169,14 +168,14 @@ const addChunk = (db, uid) => {
 };
 
 /**
- * the paused client's shape: a finished bootstrap epoch, then one more chunk ingested, then
+ * The synthetic stranded shape: a finished bootstrap epoch, then one more chunk ingested, then
  * the upgrade pause landing while that chunk's outbox row is still queued.
  * base_count is the stale value from the finished epoch; chunks has grown past
  * it; the current epoch owns no batches.
  */
 function seedStrandedPausedClient(db, visible, { epoch = 7, projected = 12 } = {}) {
   for (let i = 0; i < projected; i++) {
-    const uid = `drive:paused-client-${String(i).padStart(3, "0")}#0`;
+    const uid = `drive:example-paused-${String(i).padStart(3, "0")}#0`;
     addChunk(db, uid);
     visible.set(uid, { id: uid, values: [0.1], metadata: {} });
   }
@@ -190,7 +189,7 @@ function seedStrandedPausedClient(db, visible, { epoch = 7, projected = 12 } = {
             vector_projection_bootstrap_base_count=(SELECT count(*) FROM chunks)
       WHERE id=1`
   ).run(epoch);
-  const stranded = "drive:paused-client-late#0";
+  const stranded = "drive:example-paused-late#0";
   addChunk(db, stranded);
   db.prepare(
     "INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at) VALUES (?1, ?1, 'upsert', 2000)"
@@ -210,17 +209,21 @@ function migrateToHead(db) {
     `INSERT INTO install_state
        (id, client_slug, product_version, schema_version, gate_version, installed_at, ring,
         vector_projection_status, vector_projection_bootstrap_epoch,
-        vector_projection_bootstrap_cursor, vector_projection_bootstrap_high_water)
+        vector_projection_bootstrap_cursor, vector_projection_bootstrap_high_water,
+        source_original_retrieval_generation)
      VALUES (1,?,?,?,?,?,?,
        CASE WHEN EXISTS (SELECT 1 FROM chunks) THEN 'bootstrap_required' ELSE 'verified' END,
        CASE WHEN EXISTS (SELECT 1 FROM chunks) THEN 1 ELSE 0 END,
        NULL,
-       (SELECT MAX(chunk_uid) FROM chunks))
+       (SELECT MAX(chunk_uid) FROM chunks),
+       COALESCE((SELECT source_original_retrieval_generation + 1
+                   FROM install_state WHERE id=1), 0))
      ON CONFLICT(id) DO UPDATE SET
        client_slug = excluded.client_slug,
        schema_version = excluded.schema_version,
-       gate_version = excluded.gate_version`
-  ).run("pausedclientbrain", "0.4.0", Math.max(...migrations.map((m) => m.version)), 0,
+       gate_version = excluded.gate_version,
+       source_original_retrieval_generation = excluded.source_original_retrieval_generation`
+  ).run("example-paused-brain", "0.4.0", Math.max(...migrations.map((m) => m.version)), 0,
     new Date().toISOString(), "stable");
 }
 
@@ -392,13 +395,13 @@ let strandedFenceBeforeMigration = null;
 }
 
 // --- 5. Control: a healthy shipped brain crosses the same jump untouched ----
-// Lindsay Smith's install log, 2026-09-01: brain-installer v0.2.0, macOS
-// arm64, "brain health passing all checks". Same 22-migration prefix, no
-// strand. Her update must not acquire one.
+// A synthetic healthy v0.2.0 macOS arm64 fixture reports "brain health
+// passing all checks". It has the same 22-migration prefix and no strand, so
+// its update must not acquire one.
 {
   const { db, env, visible } = makeShippedClientBrain();
   for (let i = 0; i < 6; i++) {
-    const uid = `drive:lvc-${i}#0`;
+    const uid = `drive:example-owner-${i}#0`;
     addChunk(db, uid);
     visible.set(uid, { id: uid, values: [0.1], metadata: {} });
   }
@@ -431,7 +434,7 @@ let strandedFenceBeforeMigration = null;
 
 // --- 6. End to end: the real CLI runner against the real Worker -------------
 // Everything above exercises the Worker function. This drives brain.mjs's own
-// runAcceleratedBootstrap against it, which is what the paused client actually experienced:
+// runAcceleratedBootstrap against it, covering the complete stranded-upgrade path:
 // the poll loop, the "N/M legacy vector(s) confirmed" line, and the stall rule.
 const driveCli = async (env, db) => {
   let clock = 0;
@@ -458,7 +461,7 @@ const driveCli = async (env, db) => {
   seedStrandedPausedClient(db, visible);
   migrateToHead(db);
   const run = await driveCli(env, db);
-  check("the CLI takes the paused client's stranded brain to a completed bootstrap in one round",
+  check("the CLI takes the synthetic stranded brain to a completed bootstrap in one round",
     run.died === null && run.completion?.complete === true && run.completion.rounds === 1 &&
       run.completion.remaining === 0 && run.after.status === "verified",
     JSON.stringify({ died: run.died?.message ?? null, completion: run.completion, after: run.after }));
@@ -473,7 +476,7 @@ const driveCli = async (env, db) => {
 // markProjectionVerifiedIfExact's other precondition reachable: that cut also
 // requires `(SELECT count(*) FROM chunks) = VECTORIZE.describe().vectorCount`.
 // One vector the provider still holds with no D1 chunk behind it therefore
-// deadlocks the paused bootstrap in the paused client's exact reported shape, with an EMPTY
+// deadlocks the paused bootstrap in the same synthetic regression shape, with an EMPTY
 // outbox, so there is nothing left for an operator to act on. RECOVERY.md
 // already states that provider-only excess vectors cannot be enumerated from
 // D1, so this is a known class, not a hypothetical one.
@@ -518,12 +521,13 @@ const driveCli = async (env, db) => {
       /excess vectors/i.test(stallMessage)),
     stallMessage);
   check("the stall no longer prescribes a re-run that cannot change the vector count",
-    !stalled || (/cannot change this/i.test(stallMessage) &&
+    !stalled || (/already stopped the paused bootstrap/i.test(stallMessage) &&
+      /report this update failure for reviewed repair before retrying/i.test(stallMessage) &&
       !/Re-run `brain update/.test(stallMessage)),
     stallMessage);
   check("the stall still reports the movement budget and that the brain stays paused",
     !stalled || (/has not moved for \d+ minutes/.test(stallMessage) &&
-      /remains paused/i.test(stallMessage)),
+      /Keep the Worker paused/i.test(stallMessage)),
     stallMessage);
   if (stalled) {
     console.log("      ^ open defect: receipt had expected_vectors=" +

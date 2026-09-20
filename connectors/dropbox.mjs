@@ -90,6 +90,8 @@ export async function syncDropbox({
           size: Number(entry.size || 0),
           ...extracted.provenance,
         },
+        textSource: extracted.provenance.text_source,
+        textReliable: extracted.provenance.text_reliable,
       }));
     }
     if (!data.cursor) {

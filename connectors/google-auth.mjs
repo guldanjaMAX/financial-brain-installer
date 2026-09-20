@@ -1243,6 +1243,38 @@ export function loadTokens(value) {
   return verified;
 }
 
+/**
+ * Open the complete Google credential record without changing its storage.
+ *
+ * Dry-run source readers need the actual refresh token, so the sanitized
+ * readiness inspector is not enough. They must still leave a legacy Windows
+ * plaintext file or macOS file-to-Keychain migration untouched. Keep this
+ * separate from loadTokens so a preview cannot opt into migration by accident.
+ */
+export function loadTokensReadOnly(value) {
+  const options = storageOptions(value);
+  const path = filePath(options);
+  if (storageBackend(options) === "file") {
+    const platform = options.platform || process.platform;
+    return readFileStoreState(path, {
+      ...options,
+      strict: platform === "win32",
+    })?.store ?? {};
+  }
+
+  let stored;
+  try {
+    stored = readKeychainStore(options);
+  } catch (error) {
+    // A valid legacy file remains the read-only recovery source when Keychain
+    // cannot be opened. The preview may use it, but never moves or deletes it.
+    if (!existsSync(path)) throw error;
+  }
+  if (stored) return stored;
+  if (!existsSync(path)) return {};
+  return readFileStore(path, { ...options, strict: true }) ?? {};
+}
+
 /** Human-readable storage location for CLI success and support messages. */
 /**
  * Actually open the credential store, rather than confirming a file is there.
@@ -1293,6 +1325,98 @@ export function verifyTokenStorageReadable(value) {
     // The message is ours, not the credential's. Every throw on this path is
     // already written to name the failure without quoting a value.
     return { checked: true, readable: false, reason: error.message };
+  }
+}
+
+/**
+ * Read-only Google connection readiness for a state-bound repair preview.
+ *
+ * Unlike loadTokens(), this never migrates a legacy file. It returns only
+ * booleans and normalized scope names, never any OAuth value. That lets a
+ * preview prove that this computer can open the credential it will need
+ * without turning the preview itself into a credential-store write.
+ */
+export function inspectGoogleTokenStorage(value) {
+  const options = storageOptions(value);
+  const status = tokenStorageStatus(options);
+  if (!status.exists) {
+    return {
+      checked: false,
+      readable: false,
+      connected: false,
+      backend: status.backend,
+      scopes: [],
+      reason: status.error || "no credential is stored",
+    };
+  }
+
+  try {
+    let store;
+    if (storageBackend(options) === "file") {
+      store = readFileStoreState(filePath(options), {
+        ...options,
+        strict: (options.platform || process.platform) === "win32",
+      })?.store;
+    } else {
+      store = readKeychainStore(options);
+      // An older macOS file is a readable recovery source but must remain
+      // untouched during preview. The ordinary connection use may migrate it.
+      if (!store && existsSync(filePath(options))) {
+        store = readFileStoreState(filePath(options), { ...options, strict: true })?.store;
+      }
+    }
+    if (!store || typeof store !== "object" || Array.isArray(store)) {
+      return {
+        checked: true,
+        readable: false,
+        connected: false,
+        backend: status.backend,
+        scopes: [],
+        reason: "the stored credential record could not be decoded",
+      };
+    }
+    const google = store.google;
+    const scopes = Array.isArray(google?.scopes)
+      ? [...new Set(google.scopes.map((scope) => String(scope || "").trim()).filter(Boolean))].sort()
+      : [];
+    // Installed-app OAuth clients may legitimately have no client secret.
+    // The existing refresh path accepts that shape; readiness must not reject
+    // a connection the real connector can use. A PRESENT secret still has to
+    // be a string, so corrupt stores fail closed.
+    const clientSecretValid = google?.client_secret === undefined || google?.client_secret === null ||
+      typeof google?.client_secret === "string";
+    const connected = [google?.client_id, google?.refresh_token]
+      .every((entry) => typeof entry === "string" && entry.length > 0) && clientSecretValid;
+    const canonicalCredential = (item) => {
+      if (Array.isArray(item)) return item.map(canonicalCredential);
+      if (!item || typeof item !== "object") return item;
+      return Object.fromEntries(Object.keys(item).sort().map((key) => [key, canonicalCredential(item[key])]));
+    };
+    // The digest is used only as an equality fence. The decoded credential and
+    // its account/client values never leave this function. Reconnecting a
+    // different Google account, even with identical scopes, must make a prior
+    // source-rewalk approval stale.
+    const recordFingerprint = google && typeof google === "object" && !Array.isArray(google)
+      ? createHash("sha256").update(JSON.stringify(canonicalCredential(google))).digest("hex")
+      : null;
+    return {
+      checked: true,
+      readable: true,
+      connected,
+      backend: status.backend,
+      scopes,
+      record_fingerprint: recordFingerprint,
+      ...(connected ? {} : { reason: "the stored Google connection is incomplete" }),
+    };
+  } catch (error) {
+    return {
+      checked: true,
+      readable: false,
+      connected: false,
+      backend: status.backend,
+      scopes: [],
+      reason: error.message,
+    };
   }
 }
 

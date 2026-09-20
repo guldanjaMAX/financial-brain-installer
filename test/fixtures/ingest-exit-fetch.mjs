@@ -112,7 +112,12 @@ globalThis.fetch = async (input, options = {}) => {
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/source-families") {
     const request = JSON.parse(String(options.body || "{}"));
-    return json({ source: request.source, families: [], next_cursor: null });
+    return json({
+      source: request.source,
+      families: [],
+      ...(request.include_labels === true ? { family_details: [] } : {}),
+      next_cursor: null,
+    });
   }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/source-receipt") {

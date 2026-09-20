@@ -89,7 +89,7 @@ export function OwnerPeriodClose({ scope, statements }: {
     }
   }
 
-  if (!scope) return <Note>Select one business above before reading or recording a period close.</Note>;
+  if (!scope) return <Note>Select one part of your finances above before reading or recording a period close.</Note>;
 
   return (
     <div className="border-t border-line">

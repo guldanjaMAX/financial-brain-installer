@@ -97,6 +97,7 @@ export async function syncSlack({
   const documents = [];
   const deletions = [];
   const warnings = [];
+  let walkComplete = true;
 
   for (const channel of channels) {
     const messages = new Map();
@@ -121,6 +122,7 @@ export async function syncSlack({
     for (const parent of [...messages.values()].filter((message) => Number(message.reply_count || 0) > 0)) {
       if (expandedThreads >= maxThreadsPerChannel) {
         warnings.push(`Slack conversation ${channel.id} exceeded the bounded thread expansion limit.`);
+        walkComplete = false;
         break;
       }
       expandedThreads++;
@@ -147,6 +149,6 @@ export async function syncSlack({
   );
   return providerSyncResult({
     provider: "slack", documents, deletions, warnings,
-    deletionAuthority: "unavailable", proposedCursor: null,
+    deletionAuthority: "unavailable", proposedCursor: null, walkComplete,
   });
 }

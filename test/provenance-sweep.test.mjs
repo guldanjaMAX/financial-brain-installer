@@ -19,7 +19,9 @@ import {
   partition,
   rowMatchesSubject,
   renderConfirmations,
+  renderCoverageSummary,
   renderReport,
+  renderSetWaitingMessage,
   renderZoneReadiness,
   unavailableZoneReadiness,
   validateConfirmationReceipt,
@@ -31,8 +33,16 @@ const SUBJECT = "Example Owner";
 
 // Authority tiers are heuristics and always carry the rule that produced them.
 assert.equal(tierOf({ source: "plaid" }).tier, "T1");
-assert.equal(tierOf({ source: "drive", title: "Synthetic registrar record.pdf" }).tier, "T1");
-assert.equal(tierOf({ source: "drive", title: "Synthetic invoice.pdf" }).tier, "T2");
+assert.equal(tierOf({ source: "drive", title: "Synthetic registrar record.pdf" }).tier, "T3");
+assert.equal(tierOf({ source: "drive", title: "Synthetic invoice.pdf" }).tier, "T3");
+assert.equal(tierOf({
+  doc_uid: "drive:registrar", source: "drive", title: "Synthetic registrar record.pdf",
+  authority_meta: { evidence_lineage: { version: 1, kind: "source_record", root_ids: [] } },
+}).tier, "T1");
+assert.equal(tierOf({
+  doc_uid: "curated:invoice-summary", source: "curated", title: "Synthetic invoice.pdf",
+  authority_meta: { evidence_lineage: { version: 1, kind: "derived_record", root_ids: ["drive:registrar"] } },
+}).tier, "T2");
 assert.equal(tierOf({ source: "gmail", title: "Synthetic correspondence" }).tier, "T3");
 assert.equal(tierOf({ source: "zoom", title: "Synthetic weekly sync" }).tier, "T4");
 assert.equal(tierOf({ source: "plaid", source_kind: "upload", title: "Synthetic memo" }).tier, "T3");
@@ -56,9 +66,10 @@ assert.match(changingAgreement.line, /tracks how long something has been written
 assert.equal(agreementVerdict(softPile, { changes: false }).confident, true);
 assert.equal(
   agreementVerdict([...softPile, {
-    source: "drive", title: "Synthetic signed agreement.pdf",
+    doc_uid: "drive:signed-agreement", source: "drive", title: "Synthetic signed agreement.pdf",
     ts: "2026-01-15T00:00:00.000Z", date_reliable: true,
     text_source: "native", text_reliable: true,
+    authority_meta: { evidence_lineage: { version: 1, kind: "source_record", root_ids: [] } },
   }], { changes: true }).confident,
   true,
 );
@@ -83,7 +94,14 @@ const address = assessProbe({
     { value: "100 Example Avenue", doc: { source: "drive", title: "Synthetic note one", date: "2024-01-01", date_reliable: false } },
     { value: "100 Example Avenue", doc: { source: "imessage", title: "Synthetic note two", date: "2024-02-01", date_reliable: true } },
     { value: "100 example avenue", doc: { source: "gmail", title: "Synthetic note three", date: "2024-03-01", date_reliable: true } },
-    { value: "200 Sample Road", doc: { source: "drive", title: "Synthetic lease agreement.pdf", date: "2026-01-15", date_reliable: true } },
+    { value: "200 Sample Road", doc: {
+      doc_uid: "drive:lease-agreement",
+      source: "drive",
+      title: "Synthetic lease agreement.pdf",
+      date: "2026-01-15",
+      date_reliable: true,
+      authority_meta: { evidence_lineage: { version: 1, kind: "source_record", root_ids: [] } },
+    } },
   ],
 });
 assert.equal(address.conflict, true);
@@ -191,10 +209,92 @@ const incompleteCoverage = await gather(async () => ({
   gaps: [{ type: "history_unproven", source: "client-mail" }],
   results: rowsFor("mailing address").results,
 }), { subject: SUBJECT, probes: [{ name: "Mailing address", changes: true, extract: () => ["x"], query: "mailing address" }] });
-assert.equal(incompleteCoverage[0].candidates.length, 0);
-assert.match(incompleteCoverage[0].error, /source history is incomplete/);
-assert.match(renderReport(incompleteCoverage, { subject: SUBJECT }).text, /NOT checked/);
-ok("coverage-incomplete raw search cannot make a check category look complete");
+assert.equal(incompleteCoverage[0].candidates.length, 2);
+assert.equal(incompleteCoverage[0].error, null);
+assert.match(incompleteCoverage[0].coverage_warning, /source history is incomplete/);
+const incompleteCoverageReport = renderReport(incompleteCoverage, { subject: SUBJECT });
+assert.match(incompleteCoverageReport.text, /Provisional evidence from records already available/);
+assert.match(incompleteCoverageReport.text, /Returned evidence is shown above, but this category is not complete/);
+assert.equal(incompleteCoverageReport.coverage.complete, false);
+ok("coverage-incomplete raw search retains positive evidence without making the category complete");
+
+const mixedCoverageProbes = Array.from({ length: 14 }, (_, index) => ({
+  name: `Mixed category ${index + 1}`,
+  changes: true,
+  query: `mixed-${index + 1}`,
+  extract: index === 0 ? () => ["Synthetic current value"] : () => [],
+}));
+const mixedCoverage = await gather(async ({ q }) => ({
+  status: "coverage_incomplete",
+  notice: "one declared source has not proven its complete history",
+  results: /mixed-(1|2)$/.test(q) ? [{
+    snippet: `${SUBJECT} has a usable synthetic record`,
+    title: `${SUBJECT} synthetic record`,
+    source: "drive",
+  }] : [],
+}), { subject: SUBJECT, probes: mixedCoverageProbes });
+const mixedCoverageReport = renderReport(mixedCoverage, { subject: SUBJECT });
+assert.deepEqual(mixedCoverageReport.coverage, {
+  total: 14, completed: 0, provisional: 2, absence_unproven: 12, unchecked: 14, complete: false,
+});
+assert.match(mixedCoverageReport.text, /2 categories have usable returned records/);
+assert.doesNotMatch(mixedCoverageReport.text, /14 categories have usable returned records/);
+assert.match(mixedCoverageReport.text, /Mixed category 2: 1 matching record\(s\) returned; provisional coverage/);
+assert.match(mixedCoverageReport.text, /Mixed category 14:.*Zero returned records cannot prove/);
+ok("a corpus-wide gap reports two useful probes and twelve unproven absences exactly");
+
+const waitingCoverage = await gather(async () => ({
+  status: "coverage_incomplete",
+  notice: "source history is not yet proven complete while records may still be loading",
+  gaps: [{ type: "history_unproven", source: "fixture-mail" }],
+  results: [],
+}), {
+  subject: SUBJECT,
+  probes: [
+    { name: "Mailing address", changes: true, extract: () => [], query: "mailing address" },
+    { name: "Who currently pays them", changes: true, freeform: true, query: "current client" },
+  ],
+});
+const waitingReport = renderReport(waitingCoverage, { subject: SUBJECT });
+assert.deepEqual(waitingReport.coverage, {
+  total: 2, completed: 0, provisional: 0, absence_unproven: 2, unchecked: 2, complete: false,
+});
+assert.match(waitingReport.text, /Record review still waiting: none of the 2 categories could be checked completely/);
+assert.match(waitingReport.text, /cannot yet say whether your records agree or disagree/);
+assert.match(waitingReport.text, /not a finding that your records are empty/);
+assert.doesNotMatch(waitingReport.text, /No disagreement appeared/);
+assert.match(waitingReport.text, /No automatically comparable category completed/);
+assert.match(waitingReport.text, /Owner confirmation is still waiting/);
+assert.match(waitingReport.text, /Do not use `--set` until every category completes/);
+assert.doesNotMatch(waitingReport.text, /Run the same command with --set to record your answers/);
+assert.equal(
+  renderCoverageSummary({ total: 2, completed: 1, unchecked: 1 }),
+  "Record review partial: 1 of 2 categories was checked; 1 could not be checked.\n" +
+    "Any agreement or disagreement below applies only to the 1 completed category. Follow the reasons under Could not check, then run this check again.",
+);
+assert.equal(
+  renderCoverageSummary({ total: 1, completed: 1, unchecked: 0 }),
+  "Record review complete: the category was checked.",
+);
+assert.equal(
+  renderCoverageSummary({ total: 1, completed: 0, unchecked: 1 }),
+  "Record review still waiting: the category could not be checked completely.\n" +
+    "This run cannot yet say whether your records agree or disagree. This is not a finding that your records are empty.\n" +
+    "Follow the reasons under Could not check, then run this check again.",
+);
+assert.match(
+  renderSetWaitingMessage({ total: 14, unchecked: 1 }),
+  /1 of 14 categories is unchecked/,
+);
+assert.match(
+  renderSetWaitingMessage({ total: 1, unchecked: 1 }),
+  /1 of 1 category is unchecked/,
+);
+assert.match(
+  renderSetWaitingMessage({ total: 14, unchecked: 2 }),
+  /2 of 14 categories are unchecked/,
+);
+ok("an unavailable check is a waiting state, never a clean zero-category result");
 
 const zoneReadiness = assessZoneReadiness({
   zones: [
@@ -261,6 +361,7 @@ assert.match(runReport.text, /Worth your own eyes/);
 assert.match(runReport.text, /OCR text may be incomplete/);
 assert.match(runReport.text, /## Access zones/);
 assert.match(runReport.text, /Nothing has been written/);
+assert.match(runReport.text, /Run the same command with --set to record your answers/);
 ok("one read-only report shows subject-scoped provenance and access-zone readiness");
 
 const failedGather = await gather(async ({ q }) => {
@@ -369,9 +470,83 @@ assert.equal(readOnly.wrote, false);
 assert.equal(wrote, false);
 assert.equal(readOnly.zones_checked, true);
 assert.equal(readOnly.zones_ready, true);
+assert.equal(readOnly.categories_total, 14);
+assert.equal(readOnly.categories_completed, 14);
+assert.equal(readOnly.categories_unchecked, 0);
+assert.equal(readOnly.category_checks_complete, true);
 assert.match(querySeen, /Records about Example Owner/);
 assert.ok(readOnly.conflicts >= 1);
 ok("brain check is subject-scoped and read-only by default");
+
+const waitingCommand = await cmdCheck(manifestPath, {
+  adminKey: "synthetic", baseUrl: "https://fixture.invalid", flags: {},
+  search: async () => ({
+    status: "search_unavailable", degraded: "vector",
+    notice: "the vector index is still building; this category was not checked",
+    results: [],
+  }),
+  readZones,
+});
+assert.equal(waitingCommand.categories_total, 14);
+assert.equal(waitingCommand.categories_completed, 0);
+assert.equal(waitingCommand.categories_with_provisional_evidence, 0);
+assert.equal(waitingCommand.categories_with_unproven_absence, 0);
+assert.equal(waitingCommand.categories_unchecked, 14);
+assert.equal(waitingCommand.category_checks_complete, false);
+ok("brain check returns exact complete and unchecked category counts for local agents");
+
+const mixedCommand = await cmdCheck(manifestPath, {
+  adminKey: "synthetic", baseUrl: "https://fixture.invalid", flags: {},
+  search: async ({ q }) => ({
+    status: "coverage_incomplete",
+    notice: "one declared source has not proven its complete history",
+    results: /mailing address|current client/i.test(q) ? rowsFor(q).results : [],
+  }),
+  readZones,
+});
+assert.equal(mixedCommand.categories_total, 14);
+assert.equal(mixedCommand.categories_completed, 0);
+assert.equal(mixedCommand.categories_with_provisional_evidence, 2);
+assert.equal(mixedCommand.categories_with_unproven_absence, 12);
+assert.equal(mixedCommand.categories_unchecked, 14);
+assert.equal(mixedCommand.category_checks_complete, false);
+ok("brain check exposes the synthetic two-positive and twelve-unproven coverage split to the calling agent");
+
+let zeroCoverageAsked = false;
+let zeroCoverageWrote = false;
+await assert.rejects(cmdCheck(manifestPath, {
+  adminKey: "synthetic", baseUrl: "https://fixture.invalid", flags: { set: true },
+  search: async () => ({
+    status: "search_unavailable", degraded: "vector",
+    notice: "the vector index is still building; this category was not checked",
+    results: [],
+  }),
+  readZones,
+  ask: async () => { zeroCoverageAsked = true; return "1"; },
+  write: async () => { zeroCoverageWrote = true; },
+}), /owner confirmation is still waiting because 14 of 14 categories are unchecked.*Nothing was written/);
+assert.equal(zeroCoverageAsked, false);
+assert.equal(zeroCoverageWrote, false);
+ok("--set exits nonzero without prompting or writing when no category completed");
+
+let partialCoverageAsked = false;
+let partialCoverageWrote = false;
+await assert.rejects(cmdCheck(manifestPath, {
+  adminKey: "synthetic", baseUrl: "https://fixture.invalid", flags: { set: true },
+  search: async ({ q }) => /mailing address/i.test(q)
+    ? rowsFor(q)
+    : {
+      status: "coverage_incomplete",
+      notice: "source history is not yet proven complete; this category was not checked",
+      results: [],
+    },
+  readZones,
+  ask: async () => { partialCoverageAsked = true; return "1"; },
+  write: async () => { partialCoverageWrote = true; },
+}), /owner confirmation is still waiting because 13 of 14 categories are unchecked.*Nothing was written/);
+assert.equal(partialCoverageAsked, false);
+assert.equal(partialCoverageWrote, false);
+ok("--set exits nonzero without prompting or writing when a conflict appears in partial coverage");
 
 let writtenEnvelope = null;
 const setResult = await cmdCheck(manifestPath, {

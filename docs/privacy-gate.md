@@ -19,9 +19,37 @@ node test/package-privacy.test.mjs --scan-only   # identity scan, about 2 second
 ```
 
 The full gate also verifies the npm packlist against its reviewed allowlist and
-builds a real tarball to import a module out of it. `npm test` runs the full
-gate. `--scan-only` is the identity half on its own, which is the half a commit
-can get wrong.
+builds a real tarball to import a module out of it. It also re-derives all four
+bundled dependency inventories from the exact SHA-512 archives named by
+`package-lock.json`. Missing, extra, renamed, mode-changed, or content-changed
+bundle files fail, as does empty or incorrect `npm pack` bundled metadata.
+The final compressed archive must also match npm's canonical SHA-512 integrity
+and SHA-1 shasum receipt before any tar member is parsed. The deliberately
+narrow parser accepts only aligned USTAR regular-file archives with portable
+paths, raw modes no wider than `0777`, bounded metadata and contents, and two
+complete terminal zero blocks. Field preparation copies only the four verified
+lock archives into a newly created private cache whose existing ancestor and
+call-created directory identities are pinned during creation and cleanup.
+`npm test` runs the full gate. `--scan-only` remains the identity half on its
+own and does not pack or read the npm cache.
+
+## Updating the reviewed bundle manifest
+
+`privacy/reviewed-package-bundles.json` is a compact review checkpoint, not an
+independent source of truth. Every verification re-derives it from the lock's
+four SHA-512 cache objects and requires an exact match. Generate a proposed
+replacement outside the checkout, review the complete diff, then deliberately
+replace the tracked file:
+
+```sh
+node scripts/verify-package-bundles.mjs --generate \
+  --cache-content-root "$(npm config get cache)/_cacache/content-v2/sha512" \
+  --output /tmp/reviewed-package-bundles.json
+```
+
+Generation is offline and refuses to overwrite an existing output unless
+`--replace` is explicitly supplied. A dependency or lock change is therefore
+never accepted merely because a test updated generated data.
 
 ## Installing it as a pre-commit hook
 

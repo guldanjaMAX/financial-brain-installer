@@ -1,4 +1,13 @@
 import { createHash } from "node:crypto";
+import {
+  DRIVE_STORED_FAMILY_UID_MAX_BYTES,
+  isCanonicalStoredFamilyUid,
+} from "../worker/src/lib/stored-family-identity.js";
+
+export {
+  DRIVE_STORED_FAMILY_UID_MAX_BYTES,
+  isCanonicalStoredFamilyUid,
+};
 
 // A routine sync may clean up a few ordinary source changes without making an
 // unattended scheduler unusable. Crossing either boundary is no longer
@@ -22,12 +31,16 @@ const CATEGORY_INPUTS = Object.freeze([
   ["intentional_skip", "intentionalCandidates"],
 ]);
 
-function normalizedSet(values, label) {
+function canonicalIdentitySet(values, label) {
   if (values == null) return new Set();
   if (typeof values === "string" || typeof values[Symbol.iterator] !== "function") {
     throw new TypeError(`${label} must be an iterable of document identifiers`);
   }
-  return new Set([...values].map((value) => String(value || "").trim()).filter(Boolean));
+  const identities = [...values];
+  if (identities.some((value) => !isCanonicalStoredFamilyUid(value))) {
+    throw new TypeError(`${label} contains a malformed document identity`);
+  }
+  return new Set(identities);
 }
 
 /**
@@ -39,13 +52,13 @@ function normalizedSet(values, label) {
  * twice. Only the opaque digest is shown to the owner.
  */
 export function buildDriveRemovalPlan(input = {}, options = {}) {
-  const storedFamilies = normalizedSet(input.storedFamilies, "storedFamilies");
-  const activeFamilies = normalizedSet(input.activeFamilies, "activeFamilies");
+  const storedFamilies = canonicalIdentitySet(input.storedFamilies, "storedFamilies");
+  const activeFamilies = canonicalIdentitySet(input.activeFamilies, "activeFamilies");
   const assigned = new Set();
   const targets = {};
 
   for (const [category, inputKey] of CATEGORY_INPUTS) {
-    const candidates = normalizedSet(input[inputKey], inputKey);
+    const candidates = canonicalIdentitySet(input[inputKey], inputKey);
     targets[category] = [...candidates]
       .filter((uid) =>
         storedFamilies.has(uid) &&
@@ -73,6 +86,7 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
   const maxRatio = options.maxRatio ?? DRIVE_REMOVAL_MAX_RATIO;
   const ratioFloorCount = options.ratioFloorCount ?? 0;
   const fingerprintContext = String(options.fingerprintContext || "default");
+  const fingerprintBinding = options.fingerprintBinding ?? null;
   if (!Number.isInteger(maxCount) || maxCount < 0) throw new TypeError("maxCount must be a non-negative integer");
   if (!Number.isFinite(maxRatio) || maxRatio < 0 || maxRatio > 1) {
     throw new TypeError("maxRatio must be between zero and one");
@@ -85,11 +99,12 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
   // target or changing the plan invalidates an earlier approval even when the
   // aggregate total happens to stay the same.
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    version: 2,
+    version: fingerprintBinding === null ? 2 : 3,
     context: fingerprintContext,
     limits: { maxCount, maxRatio, ratioFloorCount },
     stored,
     targets: CATEGORY_INPUTS.map(([category]) => [category, targets[category]]),
+    ...(fingerprintBinding === null ? {} : { binding: fingerprintBinding }),
   })).digest("hex");
 
   return {

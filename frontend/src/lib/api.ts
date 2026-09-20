@@ -2,16 +2,85 @@
 // SameSite=Strict session cookie: the cookie proves who, this header proves
 // the request came from this app rather than from a page that merely sits in
 // the same browser.
+const OWNER_SAFE_REQUEST_FAILURE = "Your Brain could not confirm what happened. Refresh this page to check the current state before trying again.";
+
+function normalizedErrorBody(body: unknown, status: number): Record<string, unknown> {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return {};
+  const normalized = { ...body } as Record<string, unknown>;
+  // These fields are display copy in the owner app. Keep useful structured
+  // guidance verbatim, but never let a legacy bare HTTP code bypass the shared
+  // presentation path when a component reads the body directly.
+  for (const field of ["error", "detail", "reason", "recovery"] as const) {
+    if (typeof normalized[field] !== "string") continue;
+    const fallback = field === "reason" && status === 415
+      ? "This file type is not supported for owner upload."
+      : OWNER_SAFE_REQUEST_FAILURE;
+    normalized[field] = ownerSafeMessage(normalized[field], fallback);
+  }
+  return normalized;
+}
+
+function ownerSafeMessage(value: unknown, fallback = OWNER_SAFE_REQUEST_FAILURE): string {
+  const safeFallback = typeof fallback === "string" && fallback.trim() &&
+    !/^HTTP\s+\d{3}\b/i.test(fallback.trim())
+    ? fallback
+    : OWNER_SAFE_REQUEST_FAILURE;
+  if (typeof value !== "string" || !value.trim() || /^HTTP\s+\d{3}\b/i.test(value.trim())) {
+    return safeFallback;
+  }
+  return value;
+}
+
+const OWNER_ACTION_CODE_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  idempotency_conflict: "This save was already used for a different choice. Nothing changed. Refresh this page, review the current information, and try again.",
+  request_id_conflict: "This save was already used for a different choice. Nothing changed. Refresh this page, review the current information, and try again.",
+  entity_parent_cycle: "That ownership choice would create a loop. Nothing changed. Review which financial entity owns which, then choose again.",
+  entity_already_exists: "That financial entity already exists. Nothing changed. Refresh the financial list and choose the existing entry.",
+  exception_already_resolved: "That item was already resolved. Nothing changed. Refresh the current records before making another decision.",
+  incomplete_evidence: "This period still has missing or unresolved evidence. Nothing changed. Review the open items before accepting it.",
+  period_already_accepted: "This period was already accepted. Nothing changed. Refresh the current period record before taking another action.",
+  period_not_accepted: "This period is not currently accepted, so it could not be reopened. Nothing changed. Refresh the current period record.",
+  owner_upload_ocr_disabled: "This scanned file needs text recognition, but OCR is not enabled. Nothing was added. Upload a searchable copy or ask your installer to enable OCR.",
+  owner_upload_pdf_needs_ocr: "This PDF appears to be scanned, but text recognition is not available. Nothing was added. Upload a searchable copy or ask your installer for help.",
+  unsafe_upload_archive: "This archive did not pass the Brain's file-safety checks. Nothing was added. Choose the original supported files or ask your installer for help.",
+  unreadable_upload: "The Brain could not read this file. Nothing was added. Choose a supported readable copy and try again.",
+  bank_export_unreadable: "The Brain could not read this bank export. Nothing was imported. Download a fresh supported export and try again.",
+  bank_export_refused: "This bank export did not match the reviewed import format. Nothing was imported. Review the export type and column choices before trying again.",
+});
+
+function ownerActionMessage(body: Record<string, unknown>, fallback: string): string {
+  // Conflict and validation payloads can carry private names, locators, or raw
+  // diagnostics. Only stable, reviewed codes may select owner-visible copy.
+  // The server-provided detail is never rendered through this shared boundary.
+  const code = typeof body.code === "string" ? body.code : "";
+  return Object.hasOwn(OWNER_ACTION_CODE_MESSAGES, code)
+    ? OWNER_ACTION_CODE_MESSAGES[code]
+    : fallback;
+}
+
 export class ApiError extends Error {
   status: number;
   body: Record<string, unknown>;
 
-  constructor(status: number, body: Record<string, unknown>, fallback: string) {
-    super(typeof body.error === "string" ? body.error : fallback);
+  constructor(status: number, body: unknown, fallback = OWNER_SAFE_REQUEST_FAILURE) {
+    const normalizedBody = normalizedErrorBody(body, status);
+    const structuredMessage = typeof normalizedBody.error === "string" && normalizedBody.error.trim()
+      ? normalizedBody.error
+      : null;
+    super(ownerSafeMessage(structuredMessage, fallback));
     this.name = "ApiError";
     this.status = status;
-    this.body = body;
+    this.body = normalizedBody;
   }
+}
+
+async function decodeApiResponse<T>(response: Response): Promise<T> {
+  // Keep successful JSON responses exactly as the route returned them. For an
+  // error, ApiError accepts only an object-shaped body so HTML, plain text,
+  // arrays, null, and other malformed payloads never become owner-facing copy.
+  const data = await response.json().catch(() => ({})) as unknown;
+  if (!response.ok) throw new ApiError(response.status, data);
+  return data as T;
 }
 
 export async function api<T = unknown>(path: string, body?: unknown): Promise<T> {
@@ -20,9 +89,7 @@ export async function api<T = unknown>(path: string, body?: unknown): Promise<T>
     headers: { "Content-Type": "application/json", "X-Brain-App": "1" },
     body: JSON.stringify(body ?? {}),
   });
-  const data = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (!response.ok) throw new ApiError(response.status, data, `HTTP ${response.status}`);
-  return data as T;
+  return decodeApiResponse<T>(response);
 }
 
 export function requestId(prefix = "owner"): string {
@@ -34,17 +101,38 @@ export function requestId(prefix = "owner"): string {
 
 export function ownerError(error: unknown): { status: number | null; message: string } {
   if (error instanceof ApiError) {
-    if (error.status === 409) return { status: 409, message: "The records changed before this decision was saved. Read the current state and decide again." };
+    if (error.status === 409) return {
+      status: 409,
+      message: ownerActionMessage(
+        error.body,
+        "That save could not be applied to the current records. Nothing changed. Refresh this page, review the current information, and try again.",
+      ),
+    };
     if ([400, 404, 413].includes(error.status) && typeof error.body.detail === "string") {
-      return { status: error.status, message: error.body.detail };
+      return { status: error.status, message: ownerSafeMessage(error.body.detail) };
     }
-    if (error.status === 415) return { status: 415, message: typeof error.body.reason === "string" ? error.body.reason : "This file type is not supported for owner upload." };
-    if (error.status === 422) return { status: 422, message: "The brain refused this content, so nothing was added." };
+    if (error.status === 415) return {
+      status: 415,
+      message: ownerSafeMessage(error.body.reason, "This file type is not supported for owner upload."),
+    };
+    if (error.status === 422) return {
+      status: 422,
+      message: ownerActionMessage(
+        error.body,
+        "The Brain could not use that information. Nothing was added or changed. Review the fields and try again.",
+      ),
+    };
     if (error.status === 403) return { status: 403, message: "This session is not allowed to do that." };
     if (error.status === 503) return { status: 503, message: "This part of the brain is unavailable right now. Nothing was treated as empty or saved." };
-    return { status: error.status, message: error.message };
+    return {
+      status: error.status,
+      message: ownerSafeMessage(error.message),
+    };
   }
-  return { status: null, message: error instanceof Error ? error.message : String(error) };
+  return {
+    status: null,
+    message: ownerSafeMessage(error instanceof Error ? error.message : String(error)),
+  };
 }
 
 export type EvidenceAuthority = {
@@ -617,7 +705,5 @@ export type FinDocumentsResponse = {
  *  X-Brain-App header still marks the request as coming from this app. */
 export async function apiGet<T = unknown>(path: string): Promise<T> {
   const response = await fetch(path, { headers: { "X-Brain-App": "1" } });
-  const data = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (!response.ok) throw new ApiError(response.status, data, `HTTP ${response.status}`);
-  return data as T;
+  return decodeApiResponse<T>(response);
 }

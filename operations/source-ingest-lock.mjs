@@ -118,17 +118,37 @@ function ensurePrivateRuntime(home, platform) {
   return realpathSync(locksDir);
 }
 
+function canonicalManifestFilePath(manifestPath) {
+  const manifest = realpathSync(resolve(manifestPath));
+  const state = lstatSync(manifest);
+  // A hard-linked manifest has more than one equally valid parent directory,
+  // so there is no portable way to choose its one adjacent resume-state file.
+  // Refuse that ambiguous identity instead of letting each alias take a
+  // different state lease. Keep the error path-free because manifests may
+  // live below owner-private directories.
+  if (state.nlink !== 1) {
+    throw lockError(
+      "the local brain manifest must not have multiple filesystem links",
+      "source_ingest_lock_unsafe",
+    );
+  }
+  return manifest;
+}
+
 /**
  * The adjacent resume-state path is the local mutation identity. Canonicalizing
- * its parent means a manifest reached through a symlink cannot start a second
+ * the manifest itself means a file or parent symlink cannot start a second
  * writer. Only its digest reaches the private runtime path.
  */
 export function canonicalSourceIngestStatePath({ manifestPath, sourceName }) {
   if (!manifestPath || !sourceName) {
     throw new TypeError("a manifest path and source name are required for an ingest lock");
   }
-  const manifest = resolve(manifestPath);
-  return join(realpathSync(dirname(manifest)), `.brain-ingest-${sourceName}.json`);
+  // Resolve the manifest itself, not only its parent. A manifest-file symlink
+  // can live in a real second directory, and canonicalizing only that directory
+  // gives the alias a second resume file and therefore a second writer lease.
+  const manifest = canonicalManifestFilePath(manifestPath);
+  return join(dirname(manifest), `.brain-ingest-${sourceName}.json`);
 }
 
 export function sourceIngestLockPath({
@@ -149,9 +169,15 @@ export function sourceIngestLockPath({
   // manifest directories. Serialize the whole provider record; a source-only
   // lock cannot protect read/modify/write of that shared record. This coarse
   // namespace also stays exclusive when its storage backend changes.
+  // Actual source writers pass both manifestPath and their already-derived
+  // statePath. Revalidate the manifest here so a caller cannot bypass the
+  // hard-link refusal merely by supplying the state path explicitly.
+  const manifest = sharedRecord === null && manifestPath
+    ? canonicalManifestFilePath(manifestPath)
+    : null;
   const canonicalIdentity = sharedRecord !== null
     ? `shared-record-v1:${sharedRecord}`
-    : statePath ? resolve(statePath) : canonicalSourceIngestStatePath({ manifestPath, sourceName });
+    : statePath ? resolve(statePath) : join(dirname(manifest), `.brain-ingest-${sourceName}.json`);
   const identity = createHash("sha256").update(canonicalIdentity).digest("hex").slice(0, 32);
   return join(ensurePrivateRuntime(home, platform), `source-ingest-${identity}.lock`);
 }

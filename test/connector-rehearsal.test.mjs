@@ -159,6 +159,7 @@ try {
     const impl = fakeGoogleCalendar({ calendar: [{ status: 200, body: { nextSyncToken: "TOK_REHEARSAL_1", items: [RENEWAL_EVENT] } }] });
     const provider = createTokenProvider({ clientId: "cid", clientSecret: "csec", refreshToken: "rt", fetchImpl: impl });
     const outcome = await cmdIngestCalendar(m, manifestPath, {}, {
+      sourceIngestLockOptions: { home: sandbox },
       resolveAccount: async () => ({ id: "fixture-account" }),
       resolveBaseUrl: async () => "https://fixture.invalid",
       resolveAdminKey: () => "fixture-admin-key",

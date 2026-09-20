@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,7 @@ writeFileSync(bankManifestPath, JSON.stringify({
     enabled: true,
     environment: "sandbox",
     registered_redirect_uris: ["https://fixture.invalid/app/connect/bank"],
+    registered_webhook_uris: ["https://fixture.invalid/api/webhooks/plaid"],
   } },
 }));
 
@@ -50,8 +51,27 @@ const realWarn = console.warn;
 console.log = () => {};
 console.warn = () => {};
 try {
+  let heldBankError = "";
+  try {
+    await cmdConnectBank(manifestPath, {}, { openImpl: () => true });
+  } catch (error) {
+    heldBankError = String(error?.message || error);
+  }
+  check("bank connect keeps an ordinary disabled manifest inside the held field gate",
+    /general Plaid bank invitations remain held/i.test(heldBankError) &&
+      /owner-present connection/i.test(heldBankError) &&
+      !/disposable-candidate field plan/i.test(heldBankError), heldBankError);
   let bankPageUrl = null;
+  // The owner-custody secret path has its own offline Cloudflare proof in
+  // bank-feed-secrets.test.mjs. Here the Worker already holds all three names.
+  const bankSecretsPresent = {
+    env: {},
+    listWorkerSecretNames: async () => ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET", "BANK_FEED_WRAPPING_KEY_V2"],
+    putWorkerSecret: async () => { throw new Error("must not write"); },
+    readSecret: async () => { throw new Error("must not prompt"); },
+  };
   const bankConnection = await cmdConnectBank(bankManifestPath, {}, {
+    ...bankSecretsPresent,
     openImpl: (url) => { bankPageUrl = url; return true; },
   });
   check("bank connect opens the deployed owner page without handling a Plaid credential",
@@ -59,6 +79,7 @@ try {
     bankConnection.url === "https://fixture.invalid/app/connect/bank" && bankPageUrl === bankConnection.url);
   let skippedOpen = false;
   const printedOnly = await cmdConnectBank(bankManifestPath, { print: true }, {
+    ...bankSecretsPresent,
     openImpl: () => { skippedOpen = true; return true; },
   });
   check("bank connect can print the exact owner link without opening a browser",
@@ -324,6 +345,15 @@ try {
       /corpora\.slack\.enabled is not true/.test(routedOutput) &&
       !/--from must be drive, gmail, or imap/.test(routedOutput),
     routedOutput);
+
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const plaidReleaseGate = readFileSync(join(repositoryRoot, "docs", "PLAID-RELEASE-GATE.md"), "utf8");
+  const sourceMatrix = readFileSync(join(repositoryRoot, "onboarding", "07-ingest-source-matrix.md"), "utf8");
+  const publicTemplate = readFileSync(join(repositoryRoot, "templates", "brain.manifest.json"), "utf8");
+  check("the shipped gate, source matrix, and manifest template all keep ordinary bank invitations closed",
+    /ordinary onboarding must[\s\S]*leave `corpora\.bank_feed\.enabled` false/i.test(plaidReleaseGate) &&
+      /general bank invitations are closed/i.test(sourceMatrix) &&
+      /general[\s\S]*customer bank invitations remain held/i.test(publicTemplate));
 } finally {
   console.log = realLog;
   console.warn = realWarn;

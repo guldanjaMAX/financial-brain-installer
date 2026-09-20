@@ -220,11 +220,17 @@ const uploadBody = {
     db.prepare("SELECT count(*) n FROM owner_action_requests WHERE request_id=?").get(rejectedRequestId).n === 0 &&
     db.prepare("SELECT count(*) n FROM owner_activity_events WHERE request_id=?").get(rejectedRequestId).n === 0);
 
-  const document = db.prepare("SELECT entity_slug,client FROM documents WHERE doc_uid=?").get(
+  const document = db.prepare("SELECT entity_slug,client,text_source,text_reliable,meta FROM documents WHERE doc_uid=?").get(
     "upload:owner:acme:budget_note",
   );
   check("owner upload binds authoritative document and vector candidate scope",
     document.entity_slug === "acme" && document.client === "acme", JSON.stringify(document));
+  const uploadMetadata = JSON.parse(document.meta);
+  check("text owner upload records native extraction and its durable source root",
+    document.text_source === "native" && document.text_reliable === 1 &&
+    uploadMetadata.provenance_receipt?.status === "complete" &&
+    JSON.stringify(uploadMetadata.provenance_receipt?.root_ids) ===
+      JSON.stringify(["upload:owner:acme:budget_note"]), JSON.stringify(document));
 }
 
 /* -------- binary extraction commits once and a lost response does not rerun OCR */
@@ -273,7 +279,10 @@ const uploadBody = {
   check("binary storage carries extraction and original-byte provenance",
     stored.text_source === "ocr" && stored.text_reliable === 0 &&
     /^[a-f0-9]{64}$/.test(storedMeta.original_binary_sha256) &&
-    /^[a-f0-9]{64}$/.test(storedMeta.owner_upload_payload_hash));
+    /^[a-f0-9]{64}$/.test(storedMeta.owner_upload_payload_hash) &&
+    storedMeta.provenance_receipt?.status === "complete" &&
+    JSON.stringify(storedMeta.provenance_receipt?.root_ids) ===
+      JSON.stringify(["upload:owner:acme:scan_receipt"]));
 }
 
 /* ------------------------------------------- exact entity-scoped retrieval */

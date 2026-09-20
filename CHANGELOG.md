@@ -4,6 +4,529 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.8
+
+Candidate only. This version has not been released. Its versioned README URLs
+are deliberately unavailable until a separate release approval and immutable
+asset publication.
+
+- **Drive review no longer downloads every stored file label on each sweep.**
+  The Brain first identifies the exact absent or already-reviewed families,
+  then returns names and folders only for those IDs in requests capped at 97
+  families and kept below 32 KiB. Every candidate is requested exactly once,
+  even when a sweep has thousands. A Brain from
+  before this filter receives one compatibility fallback to the former full
+  label read. To check: an ordinary candidate-free sweep makes no label request,
+  while 2,500 candidates produce 26 bounded requests with none omitted or
+  repeated.
+
+- **A malformed stored Drive identity can no longer become a deletion
+  target.** A Drive source ID must use printable ASCII U+0021 through U+007E,
+  and the whole `drive:<id>` identity is capped at 256 UTF-8 bytes. Zero-width,
+  bidi, variation-selector, non-ASCII lookalike, surrogate, whitespace, control,
+  and overlength values are quarantined byte-for-byte and kept outside provider
+  lookups and removal plans. `brain diagnose` escapes invisible code points and
+  caps display length. To check: each malformed family is held without a forget
+  request while a valid 256-byte identity continues through ordinary review.
+
+- **A malformed family at an inventory page boundary no longer stops the
+  sweep.** Continuation cursors are bounded paging tokens, not deletion
+  identities. When more rows remain, the Brain ends the page at the last row it
+  can accept as the next cursor, then returns any later rows on the following
+  page. An over-long stored identity remains visible without becoming an
+  unusable continuation token. If a page has no safe boundary, the walk stops
+  with a typed conflict instead of dropping rows. An older 0.4.8 Brain that
+  rejects its own control-character cursor now receives clear update guidance
+  and keeps the prior Drive cursor.
+
+- **Drive ingest stays compatible while an older Brain is awaiting its
+  update.** If the stored-family inventory does not support review labels yet,
+  the walk continues, saves its completed cursor, and keeps any unlabelled
+  review item protected from deletion. It warns once to update the Brain so a
+  later review can show the item name and folder. The shipped 0.4.8 Brain
+  returns `{"error":"source-family request has unknown fields"}` for these
+  newer request fields, so the CLI retries the first page without the UID
+  filter and then without labels. To check: that exact response should still
+  let Drive ingest exit successfully, advance the cursor, and report
+  `label_unavailable` without removing the item. A rejected response's clock is
+  never used for the seven-day absence proof.
+
+- **Drive cleanup can no longer get stuck when an older review record has no
+  saved label.** The Brain now repairs a missing name and folder from its own
+  stored document inventory, including after `--reset`. If neither local state
+  nor the stored document has both labels, that family stays protected and
+  retained, is listed as `label_unavailable`, and cannot enter an approval
+  fingerprint or deletion plan. The completed Drive cursor still advances so
+  every other file can continue syncing. To check: a matured labelled item
+  shows its name, folder, and approval fingerprint; an unlabelled item reports
+  protection, prints no fingerprint for that item, and leaves it stored.
+
+- **A missing server clock header no longer stops Drive ingest.** If the
+  Brain's private inventory response has no valid server time, the completed
+  Drive walk and cursor are still saved. That run records an unanchored absence
+  observation, warns once, and gives it no credit toward the seven-day removal
+  proof. To check: the run should finish its walk without `INGEST_FAILED`, keep
+  the candidate protected, and print no matured approval from that observation.
+
+- **Drive review exit codes now follow the action you need to take.** A
+  completed walk whose cursor was saved exits successfully when an item stays
+  protected because of a 403, 404, temporary lookup failure, open grace window,
+  clock mismatch, or missing label. Those conditions remain visible in the
+  review receipt and warning. The command exits non-zero only when the walk
+  failed or a matured, labelled, current-run candidate needs your approval now.
+  To check: repeat the same protected 403 or 404 run and confirm both runs save
+  progress and return the same successful exit code without deleting anything.
+
+- **A stale retry marker can no longer delete a document without a fresh look
+  at Drive and your approval.** Every saved retry marker is checked again; a
+  live file clears it, a temporary lookup failure stays protected for the next
+  run, and a 404 starts the normal review instead of deleting anything. A 404 proves
+  only that Drive stopped returning that item to this credential and is never
+  deletion evidence. Drive's change-feed `removed` flag is not corroboration
+  because access loss can produce the same flag; it adds only a dated note to
+  the review record. The Brain keeps its last accessible copy. No UID is
+  deleted while its absence is unresolved or its seven-day grace window is
+  open, even when a stale retry marker exists. The item can enter a deletion
+  plan only after the same not-returned result in two distinct runs whose
+  Worker-backed timestamps are at least seven days apart and agree with this
+  computer's clock. That plan shows the name and folder saved locally or in the
+  Brain's stored document inventory. If either label is still unavailable, the
+  family remains protected and cannot enter the plan. Its approval binds
+  those displayed labels and the exact observation, expires after 24 hours,
+  and nothing from it is deleted without the exact
+  `brain ingest <manifest> --from drive --approve-removals <fingerprint>`
+  approval. A 403 access denial also remains outside the plan. An approved
+  deletion is read back before its review entry clears.
+
+- **Older Brains can now produce a safe update-preview observation.** A Brain
+  recorded as 0.4.0 through 0.4.6 does not report either its Worker version or
+  vector drain mode in the private documents receipt. Preview now recognizes
+  that exact historical response shape and returns a read-only, canonical
+  observation fingerprint. The missing generation and drain-mode evidence
+  remains explicitly unproven, so the observation cannot authorize an update.
+  An explicit version that disagrees with the manifest still stops. To check:
+  preview an older Brain and confirm the receipt says
+  `legacy_observation_complete`, `read_only: true`,
+  `authorizes_update: false`, and reports its deployed drain mode as
+  `unproven`.
+
+- **An update now waits through brief Worker-generation skew at its safety
+  pause.** Right after the paused Worker appears, Cloudflare can briefly serve
+  the private inventory from the preceding active generation. Update now gives
+  that version-and-writer-mode disagreement the same bounded, spaced retry
+  window as its other deployment checks. Backend, receipt shape, queue, count,
+  and query-readiness failures still stop on the first observation, and a
+  disagreement that lasts through the window still stops with the original
+  safety message. To check: the paused verification must report that public
+  health and private inventory agree before migration begins.
+
+- **The ordinary vector drain can now keep two full batches in flight.** A cron
+  run no longer submits one 100-row batch and then immediately waits for that
+  same batch. It can submit up to two fully reserved leased batches before confirmation,
+  reports the full waiting count, avoids rewriting a chunk when its vector ID
+  is already correct, and records each batch with set-based D1 statements
+  instead of two writes per row. A refused confirmation can require three D1
+  statements per row, and the reservation now counts all three. The same lease,
+  generation fence, query budget, and exact visibility confirmation still apply. To check: run
+  `brain drain <manifest>` and confirm `submitted` can exceed 100 while
+  `waiting` remains visible until Vectorize confirms it.
+
+- **The recovery view in `brain sources` no longer asks D1 to finish every
+  recovery calculation in one statement.** The candidate page and the
+  at-most-250 source reason summaries are now separate bounded reads inside
+  the same opening and closing snapshot checks. This keeps a large recovery
+  preview away from D1's 30-second per-statement limit without changing its
+  counts or exposing document identities. To check: run
+  `brain sources <manifest> --json --recovery` and confirm the first page
+  includes the same source summaries and a source-summary cursor when more than
+  250 source groups remain.
+
+- **A successful ingest is now proved by the row D1 actually returns.** D1's
+  change counter can include full-text trigger work and can therefore make a
+  correctly finalized document look unconfirmed. Finalization now uses the
+  guarded `RETURNING` row as its commit proof, so a stored document is not
+  reported failed because of that trigger accounting. A missing returned row
+  still leaves the item retryable. To check: ingest one record, then confirm
+  its result is committed and an immediate unchanged retry does not rewrite it.
+
+- **Acceptance retries only the results that mean search was unavailable.** A
+  degraded retrieval or a search-unavailable answer receives bounded, spaced
+  retries so transient Vectorize visibility does not fail an otherwise sound
+  update. A complete but wrong answer, malformed receipt, or other real
+  acceptance failure still stops immediately instead of being retried into a
+  different result. To check: a transient degraded result should show spaced
+  retry attempts, while a non-degraded failure should return after one.
+
+- **You can now connect your own bank accounts yourself with `brain connect
+  bank`.** Turn on `corpora.bank_feed` with provider `plaid` and environment
+  `sandbox` or `production`, record the return and webhook addresses you saved
+  in your Plaid dashboard, and deploy. The command checks which bank secret
+  names your Worker already has. Only if one is missing does it ask you for
+  your Plaid client ID and secret, at a prompt that does not show what you
+  type. It creates the separate wrapping key if that is missing, saves them to
+  your Worker, and confirms the names are there before opening the bank page.
+  It never prints a value, never replaces an existing wrapping key, and refuses
+  to run if a bank key is sitting in an environment variable. Invitations for
+  other people's bank accounts remain held. Verify: rerun the command and
+  confirm it reports all three names already present without asking again.
+  This path has local fixture coverage only; it has not yet been run against a
+  real Plaid account.
+
+- **Notes you dictate to the Brain no longer hold the record review back.**
+  Everything saved through "remember this" lives in a source the Brain writes
+  directly, one note at a time — there is no remote archive to go and walk, so
+  there was never a command that could prove its history complete, and it sat
+  permanently unproven. That single unproven source was enough to make
+  `brain check` call every category provisional, on any Brain whose owner had
+  ever saved a note. Each accepted note now records the source as complete
+  through the moment it was written and read back, which is exactly what is
+  true of it. A note whose write does not confirm still puts the source in
+  error, plainly, as before. To check: save a note, then run `brain check` and
+  confirm the categories it reviews are no longer held up by your notes.
+
+- **A full iMessage run can now prove its own history, so the record review
+  can finish.** A capture started with `--reset` and no `--limit` walks this
+  Mac's whole message database end to end and records that as a completed
+  history sweep. Before this, that run recorded nothing, which is why the
+  remedy your Brain printed — "run iMessage with --reset and no --limit" —
+  could never clear the warning it was answering, and why `brain check` could
+  report every category as provisional on a Brain with an iMessage source.
+  What the claim covers is this Mac's database and nothing wider: deleted
+  messages, messages that only ever lived on the phone, and attachment-only
+  content still need the iPhone backup load. Tapbacks and attachment-only rows
+  no longer count against the sweep — every real message database has them —
+  but they are still counted and named in the run report, and a row the walk
+  cannot place in time at all still withholds the sweep. A conversation you are
+  still in the middle of is not closed early to make the claim look finished:
+  cutting it would put the same messages into different documents every time
+  you re-ran the sweep. It stays open, the run report says how many
+  conversations are open and that ordinary capture delivers each once it has
+  been quiet for six hours or the day turns, and the receipt's date range ends
+  at the newest message actually delivered rather than at the newest row read.
+  To check: run
+  `brain ingest <manifest> --from imessage --reset`, then `brain sources` and
+  confirm iMessage no longer says its history is unproven.
+
+- **`brain sources` works on a large corpus again.** The source inventory and
+  its recovery preview used to read every document's stored metadata three
+  times over before counting anything, and pulled the full text of every chunk
+  through the step that counts chunks, so on a brain with a few hundred
+  thousand documents the database gave up and the command returned only
+  "source inventory is unavailable". Both reads now decide everything they
+  need from the metadata once, count chunks straight off the chunk index, and
+  carry only the small results forward: on a test corpus the size of a large
+  brain — 200,000 documents and 1.8 million chunks — they use about a
+  sixteenth of the memory, and the cost no longer grows with how large each
+  document's metadata is or how much text each chunk holds. The numbers they
+  report are unchanged. If a source read still refuses, the answer now
+  names the kind of failure instead of only saying it is unavailable, and the
+  same line is written to the Brain's own log; it carries no query text, no
+  document content, and no identifiers.
+
+- **An update cannot migrate a Brain whose starting projection is already
+  uncertain.** After the exact new Worker is serving in paused mode, update now
+  requires one private response to prove D1, equal vector totals, an empty
+  queue, and query readiness before it waits for old requests or changes the
+  database. Any mismatch stops on that response, leaves writes paused, and
+  starts no migration. This protection has local fixture coverage only; it has
+  not authorized or performed an owner update.
+
+- **The held update preview now checks whether vector work actually exists.**
+  After it verifies the exact candidate package and saved manifest locally, it
+  makes one private read from the Brain and reports only aggregate vector and
+  queue state. A short projection is recoverable only when queued upserts cover
+  the full numeric deficit, and remains non-ready. Missing or insufficient
+  queued upserts stop instead of sending the owner into an update that cannot
+  help it. The preview changes nothing and never authorizes an update. This
+  behavior has local fixture coverage only; it has not passed immutable package
+  or supervised Brain field proof.
+
+- **Every disposable provider-changing phase now remains bound to K0.** A1
+  through A4 require the exact campaign account and K0 receipt, then revalidate
+  all four campaign Keychain values at each provider boundary.
+
+- **The held recovery proof now has one closed operator sequence through A16.**
+  The package contains separate entry points for local campaign-key setup,
+  source and target deployment, active-target evaluation, exact teardown, and
+  the A17 review surface. Every provider-changing step has its own preview,
+  approval fingerprint, durable ambiguity record, and exact readback. Source
+  teardown must close before target teardown. A17 is implemented offline and
+  locally fixture-tested, but remains held, unfielded, and uncertified. It has
+  no field or live proof and grants no release authority. Its implemented
+  contract removes only four disposable values, preserves the shared token,
+  and retains the encrypted provenance artifact and other reviewed private
+  evidence. None of these tools has run against Cloudflare or authorizes a
+  release, customer Brain, or provider action.
+
+- **The disposable recovery rehearsal now proves the restored Brain, not only
+  matching totals.** Its D1 export is an encrypted provenance artifact. Before
+  the reviewed active Worker can be promoted, the rehearsal requires every D1
+  vector identity to match the complete provider Vectorize identity set, the
+  provider's processed mutation watermark to match the Worker's verified
+  barrier, and a durable promotion-intent receipt. The target deployment
+  receipt also fixes the exact Worker versions and code generation, proves that
+  traffic surfaces are closed, proves that no other traffic-bearing Worker
+  binds the campaign D1 or Vectorize resources, and carries one continuous
+  no-competing-writer approval. Release evaluation must leave all non-audit
+  durable state unchanged; only its bounded model-usage audit append and
+  matching audit sequence may advance. Source and
+  final-target deletion fingerprints then gate a separate, receipt-bound
+  disposable cleanup in Worker, Vectorize, D1 order. These protections have
+  deterministic offline and fixture coverage only. No Cloudflare field run,
+  release, customer recovery, or deletion has been performed or authorized.
+
+- **You can now see the scanned-PDF work before choosing OCR.** `brain
+  ocr-preflight <manifest> --path <folder> --json` reads local PDF structure
+  without running OCR or making an application HTTP request, opening an
+  application key store, or writing a Brain record, cursor, checkpoint, local
+  state file, manifest, or source file. Reading a cloud-synced local file can
+  ask its operating-system file provider to hydrate it, so provider network,
+  credential, and filesystem effects remain explicitly unknown. Its private
+  aggregate receipt separates
+  affected documents and authoritative pages from unknown or uninspectable
+  cases, applies the configured per-document page limit, and binds the exact OCR
+  model and pricing-basis version. Only the reviewed default model receives a
+  cost/time range; a nondefault or mismatched pricing contract stays unpriced.
+  The full configured-cap comparison uses the unrounded high planning value and
+  stays separate from the unknown remaining shared daily budget and unknown
+  actual affordability. A missing cap stays
+  missing. A state-bound fingerprint can support a later approval, but this
+  command does not authorize or perform OCR. This remains a held candidate and
+  has not run on a customer folder.
+
+- **Two computers can no longer create competing provenance histories for the
+  same original.** Each new observation now names the exact prior observation
+  seen by its reviewed plan, and the Brain compares that head atomically. The
+  first writer wins; another computer with an older preview stops before
+  reingest, family cleanup, or vector drain. A later owner exclusion, gap, or
+  failure also removes an older accepted resolution from current status and
+  prevents stale reactivation. Exact lost-response replay stays safe, and
+  verified recovery preserves the same ordering without restoring local
+  activation.
+
+- **One owner-selected local original can now be repaired through an exact,
+  proof-gated lane.** Add `--target <source-relative-file>` to
+  `brain provenance-repair <manifest> --source <name>` to preview one eligible
+  file from the manifest's registered local upload source. The command never
+  guesses a target, enables OCR, advances a source cursor or receipt, performs
+  a source-wide removal, or claims whole-source completeness. Apply needs the
+  preview's exact approval hash, reacquires the source lease, and repeats the
+  complete private history and state checks before it changes anything. It
+  reingests that one native-readable record, reconciles only its exact family,
+  drains the shared vector outbox, records and verifies the schema-44 family,
+  then records and verifies the schema-45 accepted resolution. The preview
+  explains that exact-family stale siblings may be removed, the shared drain
+  may process unrelated queued work, embeddings may be created, and the four
+  proof operations run eight private retrieval probes that can create ordinary
+  aggregate usage records. If the exact accepted observation already exists,
+  a fresh preview offers a re-verification-only approval: it repeats the four
+  proof operations but skips discovery, reingest, family cleanup, and the
+  shared vector drain. That makes a lost response, stale activation, or
+  verified recovery retry safe without duplicating accepted history. This
+  remains a held candidate and has not run on a customer Brain.
+
+- **Eligible local file imports keep a verifiable link to their exact
+  original.** The ordinary single-record local-file path records a private
+  fingerprint and byte length together with its current document revision. If
+  that record arrives with conflicting original evidence, the Brain stops
+  instead of silently replacing its history. Other ingest producers and
+  ambiguous multi-record exports remain unbound, so this does not yet prevent
+  every new provenance gap or repair every older one. The no-target repair
+  preview stays read-only. The separate one-target lane above must prove the
+  complete chain from the original through the search result and its citation.
+
+- **Ordinary setup will not surprise you with a bank-credential request.** Bank
+  application credentials remain outside normal setup and technician steps. An
+  already approved pilot with a complete existing bank setup keeps it unchanged.
+  If any piece is missing, setup stops before changing other credentials and
+  explains that a separate reviewed setup is needed. The health check cannot
+  call the signed webhook ready unless the exact Brain webhook address was
+  already recorded. General bank invitations remain held.
+
+- **One exact original can now enter a guarded accepted-resolution evidence
+  chain.** The full-admin-only source-original observation route adds
+  `mode: "accepted_resolution"` for exactly one sealed target. Record and
+  read-only verify both rerun the exact result-family, Vectorize, and production
+  owner retrieval proof. Initial admission requires the exact family receipt
+  to have been stored first by ordinary non-authorizing `result_family`
+  record. Accepted-resolution record then atomically binds the prior unresolved
+  observation, original bytes, that family receipt, fresh verification, and
+  accepted observation. Portable history survives recovery, but current
+  verification does not: the recovered Brain must rerun the proof and create a
+  fresh local activation. Every successful accepted-resolution response states
+  `whole_source_complete: false`. The ordinary
+  `result_family` mode remains non-authorizing, the legacy no-target
+  `provenance-repair --apply` remains disabled, and the route itself does not
+  run OCR, reingest, deletion, deployment, or customer execution.
+
+- **The no-target provenance recovery preview stays read-only.** `brain
+  provenance-repair <manifest> --source <name>`
+  shows a state-bound inventory for one manifest-declared local folder, Drive,
+  Gmail, or Calendar source. Its schema-1 `--apply` path is unavailable and
+  stops before reading the manifest, credentials, network, scheduler, or
+  source. Nothing is changed and zero candidates are reported fixed. The
+  preview never advertises an apply command; every candidate stays unresolved
+  through that CLI. The separate schema-45 route above can admit only one exact
+  sealed target after fresh family and retrieval proof.
+
+- **A private result-family proof can now seal exact stored chunks and test
+  retrieval without authorizing repair.** For one explicitly named local
+  original, schema 44 binds every current document revision and title-prefixed
+  chunk, requires a fully drained and count-matched vector index, repeats the
+  production owner retrieval path, and proves the top citation belongs to that
+  family. Private locators, queries, document IDs, titles, and text do not enter
+  the durable proof. Portable family evidence survives recovery, while the
+  deployment-local retrieval check must be repeated after Vectorize is rebuilt.
+  Historical seals restore only inside an empty-target marker that the encrypted
+  provenance artifact closes and checks before the recovery can advance.
+  Ordinary `result_family` remains non-authorizing. The separate schema-45 gate
+  can consume the proof for one exact sealed target, but this still does not
+  authorize OCR, reingest, deletion, or a whole-source completeness claim.
+
+- **Optimize can now read exact source and provenance receipts without a
+  Cloudflare sign-in.** `brain sources <manifest> --json` uses the Brain's saved
+  owner credential and private Worker route to return a stable D1 source
+  inventory with masked scope/cursor state, physical and logical counts,
+  freshness, extraction, OCR, lineage, exact missing fields, and a validated
+  metadata-only Gmail failure receipt when available. Human output summarizes
+  that receipt without exposing a provider message, ID, path, cursor value,
+  content, or secret. A separate `--json --recovery` mode pages opaque record
+  identities and closed reason codes for planning. Both modes are strictly
+  read-only, reveal no raw source locator, and stop if the snapshot changes.
+  They do not run OCR or repair. The required failure field advances the shared
+  inventory/recovery response and cursor contract to v3; v2 is refused, while
+  schema 39 remains readable with the new evidence explicitly unknown. Because
+  0.4.6 is already live and the earlier held 0.4.7 candidate consumed its
+  evidence identity without being tagged or released, the enforcing release
+  audit refuses both older identities and requires 0.4.8 or newer.
+- **Optimize can now inventory the stored financial picture without changing
+  it.** The new `brain financial-picture <manifest> --json` command reads one
+  bounded D1 snapshot of exact entity, period, masked-account, books, tax,
+  filing, custody, provenance, extraction, supersession, and conflict evidence.
+  A document-derived name stays a possible mention until the owner explicitly
+  confirms it. Stored `owner_stated` data also remains an unconfirmed assertion
+  because the current schema has no durable owner-actor receipt; Optimize asks
+  for current owner confirmation instead of treating that tuple as authority.
+  Page-bounded gap counts name missing provenance, OCR or
+  readability state, freshness policy, payroll, filing-unit, tax-form,
+  K-1-role, and payment-confirmation evidence instead of guessing from search
+  results. A prior receipt's exact as-of time can now gate whether newly
+  recorded rows introduced provenance debt, while empty, page-truncated, or
+  nested-lineage-truncated scope refuses to pass. Recovery is planning only.
+  The receipt hash also binds its as-of and keyed database-version metadata; raw
+  corpus document IDs, source and feed keys, and provider locators stay private
+  behind per-Brain HMAC-SHA-256 references and resolution states. The keyed
+  references remain equal across pages until the Brain secret rotates and are
+  not dictionaryable without that secret; missing signing material fails
+  closed. Only closed-list connector kinds may be readable. A shared closed
+  version-2 schema rejects unknown or raw-looking nested fields at both the
+  Worker JSON boundary and CLI output boundary. Every material entity field has
+  its own confirmation state, stored owner assertions remain provenance debt,
+  and any requested Unavailable section forces baseline scope to be
+  insufficient. Orphaned statement or
+  coverage rows and missing extraction-reliability metadata remain explicit
+  blocking gaps instead of disappearing from a scoped audit.
+  Optimize uses those gaps as an evidence-first interview map, and an owner's
+  answer never auto-confirms a mapping or authorizes a mutation. The CLI also
+  requires a saved valid HTTPS Brain domain and never opens a Wrangler/account
+  session for this data-plane read.
+  The receipt is an inventory, never a
+  completeness, books-correctness, or tax-correctness verdict.
+
+- **Account and passkey steps now explain themselves before anything opens.**
+  Claude Code can handle official-page navigation and non-secret form fields,
+  then pauses for sign-in, 2FA, secrets, consent, billing, and the secure device
+  window. The first owner screen now says why the passkey protects the owner
+  area, what the next click opens, what to do or cancel, and what Financial
+  Brain and the assistant cannot see. It no longer promises that one passkey
+  works on every device.
+
+- **Setup checks the boring prerequisites before it can create anything.** It
+  now stops early if Node is older than 22, the real install drive has less than
+  2 GiB free, or the terminal is running as root or Administrator. On Windows it
+  checks the `LOCALAPPDATA` drive. The Cloudflare step also waits for the owner
+  to confirm the exact account says Workers Paid, because its narrow sign-in
+  cannot read billing status and should never pretend otherwise.
+
+- **Your own Claude Code or Codex can now add and correct information in your
+  Brain.** Setup previously connected the local tool without selecting its
+  profile, so it silently defaulted to read-only. Local installs now use Owner
+  assistant access and verify that the remember tool is really present. An
+  ordinary update also upgrades an existing installer-managed connection, but
+  never adds a missing one or changes a disabled or custom-profile connection.
+  It can read, remember, correct, and check the connection. It cannot delete
+  records or change who has access. New notes live in a registered Owner notes
+  source, show whether they came from the local owner assistant or an approved
+  remote connector, and remain recollections rather than current-source proof.
+
+- **Optimize can offer one precise local repair after its read-only report.**
+  A new computer can be missing the technician guide, the Claude Code
+  connection, the Codex connection, or any combination. The new preview lists
+  only the pieces you select and the exact files or settings they would change.
+  One approval can apply that bundle. Customized and disabled entries stay
+  untouched, every write destination is snapshotted before the first write, and a
+  failure anywhere restores the full bundle to its previewed state. It cannot
+  replace the Brain CLI or change anything in your Brain, Cloudflare account,
+  sources, access, zones, passkeys, or devices.
+
+- **A new computer can now be audited before it resumes a source.**
+  `brain machine-continuity <manifest> --json` checks the exact local manifest,
+  saved owner credential readability, local connector credentials and folders,
+  supported scheduler state and drift, resume checkpoints, current local CLI,
+  technician skill, and exact Claude Code and Codex MCP discovery. It reuses
+  only the authenticated read-only D1 source inventory and never opens a
+  browser, refreshes a provider, reads Cloudflare's control plane, checks a
+  passkey, installs, or writes. The receipt exposes only closed statuses and a
+  safe next step, not customer values, paths, resource IDs, credentials, or
+  cursors. Because a CLI cannot authenticate its own release, D1 masks cursors,
+  and legacy checkpoints have no manifest binding, release integrity, exact
+  cross-computer resume, and deployed-resource matches remain explicitly
+  unproven instead of being guessed from self-declared versions or counts.
+
+- **Closing a laptop no longer makes an index rebuild look stalled.** The
+  fifteen-minute no-movement check now counts only time the updater could keep
+  observing. Waking the computer continues from the durable rebuild instead of
+  treating the sleep interval as proof of a stuck index. The separate six-hour
+  wall-clock safety limit still applies, and a stopped update still keeps the
+  Brain's writes paused until the same update command is run again.
+
+- **When a paused rebuild still finds an index mismatch, the advice is now
+  runnable.** It used to point at reindex even though a paused Brain refuses
+  every reindex request. It now keeps the safety pause in place, directs the
+  update to resume its durable work, and asks for reviewed repair when the same
+  mismatch stops that update again. Once the Brain is active, the ordinary
+  reindex recovery remains available.
+
+- **A zone repair now rides through the exact Cloudflare edge error seen in a
+  live run.** If Cloudflare answers one assignment pass with an HTML 500, the
+  command says that the pass may already be saved, retries that same safe
+  checkpoint after 1, 2, and 4 seconds, and shows each attempt. It stops after
+  three retries and keeps every other failure immediate, so a different error
+  is never hidden or replayed by guesswork.
+
+- **A test that receives no written answer now names the stage that stopped.**
+  It distinguishes retrieval, incomplete source coverage, answer generation,
+  and evidence verification, then keeps only a reviewed safe explanation. It
+  no longer leaves the person running the test with "unknown."
+
+- **A check that could not finish no longer sounds clean.** If source history
+  is not yet proven or the search index is still building, `brain check` now
+  leads with how many record-review categories actually completed. When none
+  did, it says the check is still waiting and makes no agreement finding. Zero
+  completed categories can no longer be mistaken for zero conflicts or an
+  empty corpus. `brain check --set` also waits until every category completes,
+  exits nonzero without prompting or writing, and cannot turn a partial review
+  into a green confirmation result.
+
+- **The deep diagnostic can finish on a large brain without pretending a
+  timeout was a clean result.** Its chunk checks now move through one bounded
+  page at a time and reuse that pass for missing, blank, oversized, source, and
+  zone checks. Source and zone repairs plus vector-projection changes are part
+  of the same opening and closing receipt. If the brain changes during the
+  check, a page cannot be read, or the safety budget is reached, it says the
+  report is incomplete and does not publish partial counts as proof that
+  everything is fine.
+
 ## 0.4.6
 
 Candidate only. This version has not been released.
@@ -228,8 +751,9 @@ for availability.
 - Uploads accept PDFs and images, not only text, and read scanned pages when
   you turn that on. A document read that way is marked, so an answer resting
   on it says so.
-- The recovery drill's export is encrypted rather than plain SQL, and it now
-  counts the state of every bank reference it restored.
+- The recovery drill stores its export as an encrypted provenance artifact
+  rather than plain SQL, and it now counts the state of every bank reference it
+  restored.
 - Credential screening now recognizes the install's 64-character admin keys
   when they begin with a letter. The v5 safety marker makes local folders,
   Drive, Gmail, and IMAP run a complete recheck of previously accepted

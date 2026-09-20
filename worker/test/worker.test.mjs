@@ -29,7 +29,9 @@ const fresh = new Date().toISOString();
 const old = new Date(Date.now() - 90 * 864e5).toISOString();
 
 let g = computeGaps([
-  { ts: fresh, source: "drive", date_reliable: true }, { ts: fresh, source: "message", date_reliable: true }, { ts: fresh, source: "curated", date_reliable: true },
+  { ts: fresh, source: "drive", date_reliable: true, lineage: { status: "known" } },
+  { ts: fresh, source: "message", date_reliable: true, lineage: { status: "known" } },
+  { ts: fresh, source: "curated", date_reliable: true, lineage: { status: "known" } },
 ]);
 check("fresh multi-corpus = no gaps", g.length === 0, JSON.stringify(g.map(x => x.type)));
 

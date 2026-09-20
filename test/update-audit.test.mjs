@@ -5,10 +5,25 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions, regressionEnvironment,
   verifiedNpmCliPath, assertUndeferrableRegistered, assertEvidenceDocuments, UNDEFERRABLE_INCIDENTS,
-  DEFERRAL_CAUSES } from "../scripts/audit-updates.mjs";
+  DEFERRAL_CAUSES, assertSourceInventoryV3ReleaseVersion,
+  SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, DEFAULT_REGRESSION_TIMEOUT_MS,
+  CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS } from "../scripts/audit-updates.mjs";
 
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+assert.equal(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, "0.4.8");
+assert.equal(assertSourceInventoryV3ReleaseVersion(packageVersion), packageVersion,
+  "the held candidate must use a non-colliding source-inventory identity");
+assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.6"), /already-live package 0\.4\.6/);
+assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.5"), /package version must be 0\.4\.8 or newer/);
+assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.7"),
+  /retired held candidate identity 0\.4\.7; that candidate was never public or live.*0\.4\.8 or newer/,
+  "changed bytes must not reuse the prior held candidate's evidence identity");
+assert.equal(assertSourceInventoryV3ReleaseVersion("0.4.8"), "0.4.8");
+assert.equal(assertSourceInventoryV3ReleaseVersion("0.5.0"), "0.5.0");
+const auditSource = readFileSync(new URL("../scripts/audit-updates.mjs", import.meta.url), "utf8");
+assert.match(auditSource, /if \(mode === "--release"\) assertSourceInventoryV3ReleaseVersion\(version\)/,
+  "the package-version reuse guard must run in the enforcing release mode");
 validateIncidents(cases);
 assert.ok(cases.some((c) => c.id === "UPDATE-002"), "the frozen-fence incident must not disappear from the registry");
 for (let n = 17; n <= 22; n++) {
@@ -169,18 +184,51 @@ for (const item of cases.filter((i) => i.deferral)) {
 assert.ok(releaseBlockers(cases, packageVersion).length > 0,
   "0.4.0 still has real blockers; scoping the gate must not be mistaken for clearing it");
 const calls = [];
-const results = runRegressions([{ tests: ["test/first.mjs", "test/second.mjs", "test/first.mjs"] }], (path) => {
-  calls.push(path);
+const results = runRegressions([{ tests: ["test/first.mjs", "test/second.mjs", "test/first.mjs"] }], (path, timeout) => {
+  calls.push({ path, timeout });
   return { status: path.includes("first") ? 1 : 0 };
 });
 assert.equal(calls.length, 2, "failure must not skip the next independent test; shared tests run once");
+assert.deepEqual(calls.map((call) => call.path), ["test/first.mjs", "test/second.mjs"]);
+assert.deepEqual(calls.map((call) => call.timeout), [DEFAULT_REGRESSION_TIMEOUT_MS, DEFAULT_REGRESSION_TIMEOUT_MS],
+  "ordinary regressions retain the five-minute bound");
 assert.deepEqual(results.map((r) => r.passed), [false, true]);
+const timeoutSelections = [];
+runRegressions([{ tests: [
+  "test/cloudflare-recovery-adapter.test.mjs",
+  "test/cloudflare-recovery-adapter-extra.test.mjs",
+] }], (path, timeout) => {
+  timeoutSelections.push({ path, timeout });
+  return { status: 0 };
+});
+assert.deepEqual(timeoutSelections, [
+  {
+    path: "test/cloudflare-recovery-adapter.test.mjs",
+    timeout: CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS,
+  },
+  {
+    path: "test/cloudflare-recovery-adapter-extra.test.mjs",
+    timeout: DEFAULT_REGRESSION_TIMEOUT_MS,
+  },
+], "only the exact heavy adapter proof gets the reviewed forty-five-minute bound");
+assert.equal(DEFAULT_REGRESSION_TIMEOUT_MS, 300_000);
+assert.equal(CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS, 45 * 60 * 1000);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: null, signal: "SIGTERM" }))[0].passed, false);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"], testPlatform: "win32" }], () => { throw new Error("must not run on this host"); }, "darwin")[0].skipped, true);
 assert.equal(runRegressions([{ tests: ["test/fixture.mjs"] }], () => ({ status: 0, error: new Error("synthetic timeout") }))[0].passed, false);
 assert.deepEqual(regressionEnvironment({ PATH: "/synthetic-bin", CLOUDFLARE_API_TOKEN: "fixture", UNRELATED_PRIVATE_VALUE: "fixture" }), { PATH: "/synthetic-bin" });
 const windowsRuntime = { USERNAME: "fixture", USERDOMAIN: "LOCAL", HOMEDRIVE: "C:", HOMEPATH: "\\Users\\fixture", ComSpec: "C:\\Windows\\System32\\cmd.exe" };
 assert.deepEqual(regressionEnvironment({ ...windowsRuntime, NPM_TOKEN: "fixture" }), windowsRuntime);
+const npmCacheRuntime = {
+  ...windowsRuntime,
+  NPM_CONFIG_CACHE: "C:\\npm\\cache",
+  npm_config_cache: "C:\\npm\\cache",
+};
+assert.deepEqual(
+  regressionEnvironment({ ...npmCacheRuntime, NPM_TOKEN: "fixture", NODE_AUTH_TOKEN: "fixture" }),
+  npmCacheRuntime,
+  "the reviewed npm cache path survives while registry credentials remain scrubbed",
+);
 const npmFixture = mkdtempSync(join(tmpdir(), "brain-audit-npm-"));
 try {
   mkdirSync(join(npmFixture, "bin"));

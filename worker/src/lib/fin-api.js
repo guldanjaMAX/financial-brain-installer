@@ -54,6 +54,14 @@ import {
   TaxQuickBooksReconciliationError,
   runTaxQuickBooksReconciliation,
 } from "./tax-qbo-reconciliation.js";
+import {
+  FINANCIAL_PICTURE_PATH,
+  FinancialPictureInputError,
+  assertFinancialPicturePublicReceipt,
+  financialPictureInventory,
+  unavailableFinancialPicture,
+  validateFinancialPictureRequest,
+} from "./financial-picture.js";
 
 export const FIN_PATH_PREFIX = "/api/fin/";
 
@@ -185,11 +193,77 @@ export async function handleFinApi(env, request, url, path) {
         : jsonResponse({ error: "unauthorized", code: "session_required" }, 401));
     }
 
-    const body = await readJson(request);
+    let body;
+    if (path === FINANCIAL_PICTURE_PATH) {
+      try {
+        body = await request.json();
+      } catch {
+        return privateNoStore(jsonResponse({
+          error: "the inventory request must be readable JSON",
+          code: "invalid_json",
+          read_only: true,
+          mutation_count: 0,
+        }, 400));
+      }
+    } else {
+      body = await readJson(request);
+    }
+    if (path === FINANCIAL_PICTURE_PATH) {
+      try {
+        // Validate before even the read-only schema probe. A missing ledger
+        // must not turn a malformed request into a successful Unavailable
+        // receipt with different filters.
+        validateFinancialPictureRequest(body);
+      } catch (error) {
+        if (error instanceof FinancialPictureInputError) {
+          return privateNoStore(jsonResponse({
+            error: error.message,
+            code: error.code,
+            read_only: true,
+            mutation_count: 0,
+          }, error.status));
+        }
+        throw error;
+      }
+    }
     // "" and null both mean no filter, so a cleared form field behaves like an
     // absent one rather than scoping to an entity named "".
     const entitySlug = body.entity_slug ? String(body.entity_slug) : null;
     const install = await ledgerInstalled(env);
+
+    if (path === FINANCIAL_PICTURE_PATH) {
+      if (install.unavailable) {
+        const receipt = await unavailableFinancialPicture(body, "financial_ledger_status_unavailable");
+        return privateNoStore(jsonResponse(
+          assertFinancialPicturePublicReceipt(receipt),
+          503,
+        ));
+      }
+      if (!install.installed) {
+        const receipt = await unavailableFinancialPicture(body, "financial_ledger_schema_not_installed");
+        return privateNoStore(jsonResponse(
+          assertFinancialPicturePublicReceipt(receipt),
+          200,
+        ));
+      }
+      try {
+        const result = await financialPictureInventory(env, body);
+        return privateNoStore(jsonResponse(
+          assertFinancialPicturePublicReceipt(result.body),
+          result.status,
+        ));
+      } catch (error) {
+        if (error instanceof FinancialPictureInputError) {
+          return privateNoStore(jsonResponse({
+            error: error.message,
+            code: error.code,
+            read_only: true,
+            mutation_count: 0,
+          }, error.status));
+        }
+        throw error;
+      }
+    }
 
     if (install.unavailable) {
       return privateNoStore(jsonResponse({

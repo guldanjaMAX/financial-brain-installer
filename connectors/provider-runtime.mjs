@@ -11,6 +11,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { batches, splitOversized } from "../ingest/envelope-batching.mjs";
 import { ingestionOutcome } from "../ingest/outcome.mjs";
 import { sourceReceiptIssueCode } from "../worker/src/lib/source-receipt.js";
+import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 const SAFE_SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESULT_STATUSES = new Set(["created", "updated", "unchanged", "refused", "failed"]);
@@ -39,7 +40,16 @@ export function normalizeProviderResult(source, result) {
   if (!result?.outcome || !Array.isArray(result.documents) || !Array.isArray(result.deletions)) {
     throw new TypeError("provider adapter returned no common sync result");
   }
-  const documents = result.documents.map((document) => ({ ...document, source_type: sourceName }));
+  const documents = result.documents.map((document) => {
+    return restampFirstPartySourceProvenance(document, {
+      sourceType: sourceName,
+      // The common adapter is not entitled to infer how an arbitrary provider
+      // obtained its text. Concrete first-party adapters stamp what they know;
+      // an omission remains explicit unknown/unavailable at the boundary.
+      textSource: document.text_source,
+      textReliable: document.text_reliable,
+    });
+  });
   const deletions = result.deletions.map((deletion) => ({ ...deletion, source_type: sourceName }));
   const documentIds = documents.map((document) => String(document?.source_id || ""));
   const deletionIds = deletions.map((deletion) => String(deletion?.source_id || ""));
@@ -171,10 +181,10 @@ function resultDetail(result, tally, removal, cursorAdvanced) {
 }
 
 /**
- * Run one provider window. Permanent provider limitations preserve accepted
- * documents, but close the source as error and never advance its cursor.
- * Delivery failures also close the source as error and throw so a scheduler
- * cannot record success.
+ * Run one provider window. A completed walk may close ready and advance its
+ * cursor while still declining all-time history coverage when the provider
+ * lacks authoritative deletion or snapshot semantics. Delivery failures close
+ * the source as error and throw so a scheduler cannot record success.
  */
 export async function runProviderConnector({
   provider,
@@ -208,6 +218,7 @@ export async function runProviderConnector({
   }
   const startedAt = now().toISOString();
   let opened = false;
+  let terminalEvidence = null;
   assertOwned?.();
   await postReceipt(base, adminKey, {
     source: sourceName, kind, status: "indexing", run_id: runId,
@@ -307,6 +318,8 @@ export async function runProviderConnector({
     }
     const deliveryComplete = tally.failed === 0 && tally.refused === 0 && removal.pending === 0 && deletionReadbackVerified;
     const sourceComplete = normalized.outcome.kind === "completed";
+    const sourceWalkComplete = normalized.walk_complete === true ||
+      (normalized.walk_complete === undefined && sourceComplete);
     // The common runner, not an individual adapter, owns cursor and health
     // truth. An inconsistent adapter must not turn an explicit partial result
     // into a skipped provider window or a healthy source receipt.
@@ -322,20 +335,33 @@ export async function runProviderConnector({
       });
     }
     const detail = resultDetail(normalized, tally, removal, cursorAdvanced);
+    terminalEvidence = {
+      files_seen: normalized.documents.length + normalized.deletions.length,
+      docs_added: tally.created,
+      docs_updated: tally.updated,
+      docs_unchanged: tally.unchanged,
+      docs_refused: tally.refused,
+      docs_failed: tally.failed,
+      walk_complete: sourceWalkComplete,
+      complete_sweep: false,
+      outcome_kind: normalized.outcome.kind,
+      deletion_authority: normalized.deletion_authority,
+    };
     if (!deliveryComplete) {
       throw new ProviderDeliveryError(detail, { code: "provider_delivery_incomplete", tally });
     }
     assertOwned?.();
     await postReceipt(base, adminKey, {
-      source: sourceName, kind, status: sourceComplete ? "ready" : "error", run_id: runId, lane,
+      source: sourceName, kind, status: sourceWalkComplete ? "ready" : "error", run_id: runId, lane,
       started_at: startedAt, completed_at: completedAt,
       files_seen: normalized.documents.length + normalized.deletions.length,
       docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
-      walk_complete: sourceComplete,
-      complete_sweep: sourceComplete && normalized.authoritative_snapshot === true,
+      docs_refused: tally.refused, docs_failed: tally.failed,
+      walk_complete: sourceWalkComplete,
+      complete_sweep: sourceWalkComplete && sourceComplete && normalized.authoritative_snapshot === true,
       outcome_kind: normalized.outcome.kind,
       deletion_authority: normalized.deletion_authority,
-      ...(sourceComplete ? { detail } : { issue_code: "INGEST_FAILED" }),
+      ...(sourceWalkComplete ? { detail } : { issue_code: "INGEST_FAILED" }),
     });
     assertOwned?.();
     return {
@@ -355,6 +381,7 @@ export async function runProviderConnector({
           source: sourceName, kind, status: "error", run_id: runId, lane,
           started_at: startedAt, completed_at: now().toISOString(),
           issue_code: sourceReceiptIssueCode(error),
+          ...(terminalEvidence || {}),
         });
         assertOwned?.();
       } catch (receiptError) {

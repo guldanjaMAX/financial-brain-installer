@@ -12,6 +12,8 @@
  */
 
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
+import { evidenceLineageFor, independentEvidenceSummary } from "./evidence-lineage.js";
+import { taxEvidenceScope } from "./tax-evidence-scope.js";
 
 /** Highest authority first. T0 is absence, not a weak document. */
 export const TIERS = Object.freeze({
@@ -48,7 +50,9 @@ const TRANSACTIONAL_SOURCES = new Set([
 const CORRESPONDENCE_SOURCES = new Set([
   "email", "fb_messenger", "gmail", "imessage", "imap", "messages", "sms", "whatsapp",
 ]);
-const RECOLLECTION_SOURCES = new Set(["fireflies", "granola", "meeting-notes", "otter", "zoom"]);
+const RECOLLECTION_SOURCES = new Set([
+  "fireflies", "granola", "meeting-notes", "otter", "owner-notes", "zoom",
+]);
 
 const RELATIONSHIP_STATUS_CLAIM = /\b(client|customer|member|patient|employee|tenant|vendor|partner)s?\b/i;
 const PRESENT_RELATIONSHIP_CLAIM =
@@ -59,9 +63,9 @@ const STATUS_LANGUAGE = /\b(active|inactive|current(?:ly)?|still|remains?|contin
 
 const trueValue = (value) => value === true || value === 1 || value === "1";
 const reliableText = (row) => {
-  const source = String(row?.text_source || "native").toLowerCase();
+  const source = String(row?.text_source || "unknown").toLowerCase();
   const reliable = row?.text_reliable === undefined || row?.text_reliable === null
-    ? source === "native"
+    ? false
     : trueValue(row.text_reliable);
   return source === "native" && reliable;
 };
@@ -241,13 +245,21 @@ function authoritySource(row) {
 
 /** Classify one document's base record kind. Always returns a plain reason. */
 export function tierOf(row = {}) {
+  const owner = ownerConfirmedRecord(row);
+  const lineage = evidenceLineageFor(row, { trustedSourceRecord: owner.valid }).lineage;
+  // Agent-written material is useful context, but it is an account of the
+  // underlying evidence. This one-way demotion also survives file reingest via
+  // the marker in the native text.
+  if (lineage.kind === "agent_derived") {
+    return { tier: "T4", ...TIERS.T4, reason: lineage.reason };
+  }
   const carried = existingTier(row);
   if (carried) return carried;
 
   const source = authoritySource(row);
   const titleAndUri = `${row.title || ""} ${row.uri || ""}`;
   const folder = String(row.top_folder || "");
-  if (ownerConfirmedRecord(row).valid) {
+  if (owner.valid) {
     return { tier: "T1", ...TIERS.T1, reason: "an operative value you confirmed yourself" };
   }
   if (RELATIONSHIP_SOURCES.has(source)) {
@@ -257,12 +269,15 @@ export function tierOf(row = {}) {
     return { tier: "T1", ...TIERS.T1, reason: `a machine feed (${source}), not somebody's account of it` };
   }
   const primaryMatch = PRIMARY_TITLE.exec(titleAndUri) || PRIMARY_FOLDER.exec(folder);
-  if (primaryMatch) {
-    return { tier: "T1", ...TIERS.T1, reason: `named like an authoritative record (${primaryMatch[0]})` };
+  if (primaryMatch && lineage.kind === "source_record" && lineage.status === "known") {
+    return { tier: "T1", ...TIERS.T1, reason: `a recorded direct source artifact (${primaryMatch[0]})` };
   }
   const derivedMatch = DERIVED_TITLE.exec(titleAndUri);
-  if (derivedMatch) {
-    return { tier: "T2", ...TIERS.T2, reason: `prepared from a primary record (${derivedMatch[0]})` };
+  if (lineage.kind === "derived_record" && lineage.status === "known") {
+    return { tier: "T2", ...TIERS.T2, reason: lineage.reason };
+  }
+  if (derivedMatch && lineage.kind === "source_record" && lineage.status === "known") {
+    return { tier: "T2", ...TIERS.T2, reason: `a recorded source artifact prepared from primary records (${derivedMatch[0]})` };
   }
   if (RECOLLECTION_SOURCES.has(source)) {
     return { tier: "T4", ...TIERS.T4, reason: `a ${source} record of what was said` };
@@ -273,6 +288,13 @@ export function tierOf(row = {}) {
   const recollectionMatch = RECOLLECTION_TITLE.exec(titleAndUri);
   if (recollectionMatch) {
     return { tier: "T4", ...TIERS.T4, reason: `named like a record of a conversation (${recollectionMatch[0]})` };
+  }
+  if (primaryMatch || derivedMatch) {
+    const match = primaryMatch?.[0] || derivedMatch?.[0];
+    return {
+      tier: "T3", ...TIERS.T3,
+      reason: `its name suggests a ${primaryMatch ? "primary" : "derived"} record (${match}), but its derivation provenance was not recorded`,
+    };
   }
   return { tier: "T3", ...TIERS.T3, reason: "a document, with nothing to show it is authoritative" };
 }
@@ -301,9 +323,11 @@ export function authorityFor(row = {}, {
   const operativeSection = owner.valid ? operativeSectionForQuery(row, query) : null;
   const relationshipBlocked = claimKind === CLAIM_KINDS.RELATIONSHIP_STATUS && transactionalEvidence(row) && !owner.valid;
   const ownerSectionMismatch = owner.valid && !operativeSection;
+  const taxScope = taxEvidenceScope(row, query);
+  const taxScopeBlocked = taxScope?.matched === false;
   const textIsReliable = reliableText(row);
   const dateIsReliable = !current || reliableDate(row);
-  const eligible = !relationshipBlocked && !ownerSectionMismatch;
+  const eligible = !relationshipBlocked && !ownerSectionMismatch && !taxScopeBlocked;
   const authoritative = eligible && base.rank <= TIERS.T2.rank && textIsReliable && dateIsReliable;
 
   let reason = base.reason;
@@ -311,6 +335,8 @@ export function authorityFor(row = {}, {
     reason = `${String(row.source || "this financial record")} can establish its account or transaction state, not a relationship`;
   } else if (ownerSectionMismatch) {
     reason = "an owner-confirmed record, but no operative section matches this claim";
+  } else if (taxScopeBlocked) {
+    reason = "this record does not match the requested tax entity, tax year, and exact form";
   } else if (!textIsReliable) {
     reason = `${base.reason}; its text was not obtained from a reliable native text layer`;
   } else if (!dateIsReliable) {
@@ -330,6 +356,7 @@ export function authorityFor(row = {}, {
     current: Boolean(current),
     owner_confirmed: owner.valid,
     operative: Boolean(operativeSection),
+    ...(taxScope ? { tax_scope: taxScope } : {}),
     ...(operativeSection ? { operative_section: operativeSection } : {}),
   };
 }
@@ -348,18 +375,30 @@ export function agreementVerdict(docs = [], { changes = true, current = changes,
   if (!docs.length) return { confident: false, caution: true, line: "nothing in your records mentions this." };
   const best = bestTier(docs, { ...options, current });
   const n = docs.length;
+  const independence = independentEvidenceSummary(docs);
+  const familyPhrase = independence.groups >= 2
+    ? `${independence.groups} independent source families`
+    : independence.groups === 1
+      ? "one recorded source family"
+      : "no recorded derivation families";
   if (best.authoritative === true && best.rank <= TIERS.T2.rank) {
-    return { confident: true, caution: false, line: `${n} record(s), the strongest being ${best.name}: ${best.reason}.` };
+    return { confident: true, caution: false, line: `${n} record(s) across ${familyPhrase}, the strongest being ${best.name}: ${best.reason}.` };
   }
   if (!changes) {
-    return { confident: true, caution: false, line: `${n} record(s) agree, and this is not the kind of fact that changes.` };
+    return {
+      confident: true,
+      caution: independence.groups < 2,
+      line: independence.groups >= 2
+        ? `${familyPhrase} agree, and this is not the kind of fact that changes.`
+        : `${n} record(s) say the same thing, and this is not the kind of fact that changes, but independent corroboration is not established.`,
+    };
   }
   return {
     confident: false,
     caution: true,
     line: n === 1
       ? `one ${best.name} record, and nothing authoritative. This fact can change, so treat it as a lead rather than an answer.`
-      : `${n} records agree, but none is authoritative: the strongest is ${best.name}. For a fact that changes, agreement among records like these tracks how long something has been written down, not whether it is still true.`,
+      : `${n} records say the same thing across ${familyPhrase}, but none is authoritative: the strongest is ${best.name}. For a fact that changes, repetition among records like these tracks how long something has been written down, not whether it is still true.`,
   };
 }
 

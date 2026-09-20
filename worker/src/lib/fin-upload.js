@@ -214,7 +214,7 @@ export function validateBankEnvelope(envelope) {
 /**
  * POST /api/admin/fin/import-bank-export
  *
- * Body: `{ envelope, entity_slug?, entity_label? }`. Answers with the receipt
+ * Body: `{ envelope, entity_slug, entity_label? }`. Answers with the receipt
  * `importBankExport` produced, unchanged, so what the operator is told is what
  * the ledger was actually asked to do.
  */
@@ -227,9 +227,14 @@ export async function handleBankExportImport(env, request) {
     return jsonResponse({ imported: false, refused: true, reason: "the import body was not readable JSON" }, 400);
   }
 
-  const entitySlug = body?.entity_slug === undefined || body?.entity_slug === null
-    ? "primary"
-    : String(body.entity_slug);
+  if (body?.entity_slug === undefined || body?.entity_slug === null || body.entity_slug === "") {
+    return jsonResponse({
+      imported: false,
+      refused: true,
+      reason: "entity_slug is required; no primary entity was assumed",
+    }, 400);
+  }
+  const entitySlug = String(body.entity_slug);
   if (!SLUG.test(entitySlug)) {
     return jsonResponse({
       imported: false, refused: true,

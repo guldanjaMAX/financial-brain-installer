@@ -20,7 +20,16 @@ const ACCOUNT = "0123456789abcdef0123456789abcdef";
 const dir = mkdtempSync(join(tmpdir(), "brain-init-"));
 
 const run = (args, input = "") =>
-  spawnSync(process.execPath, [CLI, "init", ...args], { input, encoding: "utf8" });
+  spawnSync(process.execPath, [CLI, "init", ...args], {
+    input,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      // This test exercises local manifest creation. It must not discover or
+      // refresh whichever Wrangler OAuth session the developer has on disk.
+      BRAIN_NO_WRANGLER_LOGIN: "1",
+    },
+  });
 
 // Fully interactive: no flags at all, every answer typed.
 const interactive = run([join(dir, "a.json")], `Rowan Vale\nrowanvale\n${ACCOUNT}\n`);

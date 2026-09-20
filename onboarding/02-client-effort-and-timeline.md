@@ -14,7 +14,7 @@ One page. Every single thing you have to do, how long it takes you, and what hap
 | **Day 2** | Create the Cloudflare account and grant access to your sources | 30 min | Everything after it. This is the gate |
 | **Days 3 to 4** | Nothing | 0 | I build and deploy |
 | **Days 5 to 6** | Nothing. I may send one or two short questions | 5 min | I load your material, most valuable first |
-| **Day 7** | Nothing | 0 | I read the actual answers to your ten questions and fix what is wrong before you see any of it |
+| **Day 7** | Nothing | 0 | I review live source evidence and prepare adaptive acceptance checks. Zero owner-authored questions are required |
 | **Day 8** | Kickoff | 60 min | |
 | **Day 15** | Check-in 1 | 15 min | |
 | **Day 22** | Check-in 2 | 15 min | |
@@ -82,7 +82,7 @@ So the quiet days are not a mystery:
 
 - **Days 3 to 4.** Create your database and storage, deploy the brain into your account, set the keys, prove it responds.
 - **Days 5 to 6.** Load your material, most useful first. Not oldest first. The folder you named as "if it only understood this, it would already be worth it" goes in ahead of everything else and gets proven before the rest streams in behind it.
-- **Day 7.** The gate. I sit down and read the real answers to your ten questions, not a pass or fail summary, and fix what is wrong. You never see a first draft. This is the step that decides whether kickoff feels like your business or like a technology demo, and it is why I need the full day.
+- **Day 7.** The gate. I read the live source receipts and the answers to evidence-derived checks, not only a pass or fail summary. I stop at the first unproven source stage and record what needs attention before kickoff. You are not required to prepare questions. This is the step that decides whether kickoff feels like your business or like a technology demo, and it is why I need the full day.
 
 ---
 
@@ -116,7 +116,7 @@ What does not work is assuming they will be quick.
 
 Print this, or forward it to whoever is doing the setup.
 
-- [ ] Intake sheet returned, including all ten questions in section 6
+- [ ] Intake goals, source boundaries, and exclusions reviewed; optional real questions may be blank
 - [ ] Cloudflare account created, and I have been told which email it is under
 - [ ] Cloudflare account upgraded to Workers Paid (verify in the Cloudflare dashboard; `node brain.mjs doctor` separately proves Vectorize access)
 - [ ] Read-only access granted to the folders named at intake

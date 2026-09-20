@@ -1,11 +1,14 @@
 /**
- * Dependency-free envelope splitting and request batching.
+ * Lightweight envelope splitting and request batching.
  *
  * Migration tools use the same wire limits as ordinary ingest, but they do not
  * extract files. Keeping this module free of the format registry prevents a
  * migration-only process from loading PDF, spreadsheet, archive, or email
- * packages it will never call.
+ * packages it will never call. Its only shared dependency is the normalized
+ * provenance contract used by the Worker boundary.
  */
+
+import { normalizeIngestEnvelopeProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 /** Maximum content characters allowed in one document envelope. */
 export const MAX_DOC_CHARS = 400_000;
@@ -19,25 +22,28 @@ export const MAX_DOC_CHARS = 400_000;
  * proportionally smaller character ceiling.
  */
 export function splitOversized(envelope, maxChars = MAX_DOC_CHARS) {
-  const text = envelope.content || "";
+  // Establish the family before a part suffix changes storage identity. Every
+  // split, retry and later chunk can then carry the original durable root.
+  const rootedEnvelope = normalizeIngestEnvelopeProvenance(envelope);
+  const text = rootedEnvelope.content || "";
   const bytes = Buffer.byteLength(text, "utf8");
   const ratio = text.length ? bytes / text.length : 1;
   const effective = ratio > 1.05 ? Math.max(20_000, Math.floor(maxChars / ratio)) : maxChars;
-  if (bytes <= effective * ratio && text.length <= effective) return [envelope];
+  if (bytes <= effective * ratio && text.length <= effective) return [rootedEnvelope];
 
   const parts = [];
   for (let i = 0; i < text.length; i += effective) parts.push(text.slice(i, i + effective));
 
   return parts.map((content, i) => ({
-    ...envelope,
-    source_id: `${envelope.source_id}#part${i + 1}of${parts.length}`,
-    title: `${envelope.title || envelope.source_id} (part ${i + 1} of ${parts.length})`,
+    ...rootedEnvelope,
+    source_id: `${rootedEnvelope.source_id}#part${i + 1}of${parts.length}`,
+    title: `${rootedEnvelope.title || rootedEnvelope.source_id} (part ${i + 1} of ${parts.length})`,
     content,
     metadata: {
-      ...(envelope.metadata || {}),
+      ...(rootedEnvelope.metadata || {}),
       part: i + 1,
       part_count: parts.length,
-      part_of: envelope.source_id,
+      part_of: rootedEnvelope.source_id,
     },
   }));
 }
@@ -50,9 +56,12 @@ export function envelopeBytes(envelope) {
 /**
  * Mirror of the worker's conservative D1 statement estimate for one envelope
  * (worker/src/lib/store.js: 9 fixed statements plus 2 per sliding-window
- * chunk at the default 1500/300 geometry). Deliberately duplicated rather
- * than imported: this module stays dependency-free by design, and a test
- * imports the worker's real estimator to prove the two never drift.
+ * chunk at the default 1500/300 geometry). A bound receipt uses 12 fixed
+ * statements plus one shared identity-key read. This per-envelope helper
+ * charges that shared read every time, which is safely conservative when a
+ * local batch contains more than one bound file. Deliberately duplicated
+ * rather than imported: this module stays dependency-free by design, and a
+ * test imports the worker's real estimator to prove the single-file case.
  */
 export function estimatedStatements(envelope) {
   const body = String(envelope?.content || "");
@@ -61,7 +70,7 @@ export function estimatedStatements(envelope) {
     : body.length <= 1500
       ? 1
       : 1 + Math.ceil((body.length - 1500) / 1200);
-  return 9 + chunks * 2;
+  return (envelope?.source_original_receipt != null ? 13 : 9) + chunks * 2;
 }
 
 /**

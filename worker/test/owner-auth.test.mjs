@@ -181,6 +181,7 @@ test("invite -> enroll -> sign in -> settings, end to end", async () => {
   const optionResponse = await worker.fetch(post("/auth/register/options", { code }), testEnv);
   assert.match(optionResponse.headers.get("Cache-Control") || "", /no-store/);
   const options = await optionResponse.json();
+  assert.equal(options.user_name, "Fixture Owner", "an owner invitation keeps owner enrollment context");
   const credential = await makeCredential({ rpId: RP });
   const verify = await worker.fetch(post("/auth/register/verify", {
     code,

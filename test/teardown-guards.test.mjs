@@ -1,80 +1,112 @@
 /**
- * The teardown script deletes a Worker, a D1 database and a Vectorize index.
- * Its two guards both failed open until 2026-09-03.
+ * Compatibility checks for the retired teardown script.
  *
- * The name check was /^brain-test|test/i, which alternates across the whole
- * pattern: "starts with brain-test, OR contains test anywhere". That made
- * `my-production-testbed` deletable, and `latest-greatest` too, because
- * "latest" contains t-e-s-t. The second lock read a comma-separated list from
- * the environment and, unset, was an empty array that protected nothing and
- * said nothing. Both were found by reading the script before adopting it.
+ * Destructive A13-A16 behavior is covered by
+ * disposable-recovery-field-teardown.test.mjs. This file proves the former
+ * name-only and --v048-campaign entry points cannot become a second operator
+ * path beside that broker.
  */
+
 import assert from "node:assert/strict";
-import { looksDisposable, protectedListMissing, teardownDecision } from "../scripts/teardown-test-brain.mjs";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-// Disposable, by an anchored prefix only.
-for (const name of ["brain-test-run-1", "brain-test-partner-ui", "test-scratch", "TEST-UPPER", "brain-test"]) {
-  assert.equal(looksDisposable(name), true, `${name} should be deletable`);
-}
+import {
+  LEGACY_GENERIC_TEARDOWN_QUARANTINED,
+  V048_DISPOSABLE_TEARDOWN_NAMES,
+  looksDisposable,
+  parseV048DisposableTeardownCliArguments,
+  parseV048TeardownLifecycleQuiescenceCliArguments,
+  protectedListMissing,
+  runV048DisposableCampaignTeardown,
+  teardownDecision,
+} from "../scripts/teardown-test-brain.mjs";
 
-// The regression: "test" in the middle of a word is not a test resource.
-for (const name of [
-  "my-production-testbed",
-  "latest-greatest",             // "latest" contains test
-  "brain-latest",                // and so does the name of a safety copy
-  "owner-latest-backup",         // the backup made before a risky operation
-  "protest-archive",
-  "fastest-brain",
-  "greatest-hits",
-  "contest-results",
-  "financial-brain-partner-preview-brain",
-  "owner-brain-shadow",
-  "client-brain",
-  "brain-attestation",
-]) {
-  assert.equal(looksDisposable(name), false, `${name} must NOT be deletable by name`);
-}
+const SCRIPT_PATH = fileURLToPath(
+  new URL("../scripts/teardown-test-brain.mjs", import.meta.url),
+);
+const RETIRED_CODE = "V048_TEARDOWN_LEGACY_PATH_RETIRED";
+const BROKER_HELP = "brain-v048-disposable-teardown help";
 
-// Nothing, and nothing-shaped, is disposable.
-for (const bad of ["", null, undefined, "   ", 0]) {
-  assert.equal(looksDisposable(bad), false, `${String(bad)} must not be deletable`);
-}
+test("legacy names remain anchored but can no longer authorize a mutation", () => {
+  assert.equal(LEGACY_GENERIC_TEARDOWN_QUARANTINED, true);
+  assert.equal(looksDisposable("brain-test-run-1"), true);
+  assert.equal(looksDisposable("my-production-testbed"), false);
+  assert.equal(looksDisposable(V048_DISPOSABLE_TEARDOWN_NAMES.source), false);
+  assert.equal(looksDisposable(V048_DISPOSABLE_TEARDOWN_NAMES.target), false);
+  assert.equal(protectedListMissing(""), true);
+  assert.equal(protectedListMissing("owner-live-brain"), false);
+  assert.deepEqual(teardownDecision("brain-test-run-1", {
+    protectedRaw: "owner-live-brain,client-production",
+  }), {
+    allowed: false,
+    reason: "legacy_path_retired",
+  });
+});
 
-// The second lock must exist before anything is deleted.
-assert.equal(protectedListMissing(""), true, "an unset list is missing");
-assert.equal(protectedListMissing(undefined), true, "an absent list is missing");
-assert.equal(protectedListMissing("  , ,, "), true, "a list of separators is still empty");
-assert.equal(protectedListMissing("client-brain"), false, "one name is a list");
-assert.equal(protectedListMissing("client-brain,owner-brain-shadow"), false, "several names are a list");
+test("imported legacy parser and runner stop before inspecting caller input", async () => {
+  const unreadable = new Proxy({}, {
+    get() {
+      assert.fail("retired input was inspected");
+    },
+    ownKeys() {
+      assert.fail("retired input was inspected");
+    },
+  });
+  assert.throws(
+    () => parseV048DisposableTeardownCliArguments(unreadable),
+    (error) => error?.code === RETIRED_CODE && error?.message.includes(BROKER_HELP),
+  );
+  assert.throws(
+    () => parseV048TeardownLifecycleQuiescenceCliArguments(unreadable),
+    (error) => error?.code === RETIRED_CODE && error?.message.includes(BROKER_HELP),
+  );
+  await assert.rejects(
+    runV048DisposableCampaignTeardown(unreadable, unreadable),
+    (error) => error?.code === RETIRED_CODE && error?.message.includes(BROKER_HELP),
+  );
+});
 
-// A decision must carry its evidence. "would delete" looked the same whether
-// one guard passed or three did, which is how a thin guard passes for a strong
-// one; the same shape as a database error that said only "could not verify".
-{
-  const prefixes = [/^client-brain/i, /^owner-brain-shadow/i];
-  const opts = { protectedPrefixes: prefixes, protectedRaw: "client-brain,owner-brain-shadow" };
-
-  const allowed = teardownDecision("brain-test-run-1", opts);
-  assert.equal(allowed.allowed, true);
-  assert.match(allowed.reason, /disposable prefix/, "an allow says which rule let it through");
-  assert.match(allowed.reason, /protected list of 2/, "an allow says how many names it was checked against");
-
-  const onList = teardownDecision("client-brain", opts);
-  assert.equal(onList.allowed, false);
-  assert.match(onList.reason, /protected list \(\^client-brain\)/, "a refusal names the pattern that stopped it");
-
-  const wrongShape = teardownDecision("latest-greatest", opts);
-  assert.equal(wrongShape.allowed, false);
-  assert.match(wrongShape.reason, /does not start with/, "a refusal names the rule, not just the verdict");
-
-  const noLock = teardownDecision("brain-test-run-1", { protectedPrefixes: [], protectedRaw: "" });
-  assert.equal(noLock.allowed, false);
-  assert.match(noLock.reason, /BRAIN_TEARDOWN_PROTECTED/, "the missing lock is named so it can be set");
-
-  assert.equal(teardownDecision("", opts).allowed, false, "no name is not a decision to delete");
-  for (const d of [allowed, onList, wrongShape, noLock]) {
-    assert.ok(d.reason && d.reason.length > 10, "every decision carries a readable reason");
+test("every historical direct CLI form fails closed with only the fixed broker direction", async (t) => {
+  const forms = [
+    ["--name", "private-brain-test", "--commit"],
+    ["--v048-campaign", "--role", "source", "--commit"],
+    ["--v048-campaign", "--role", "target", "--commit"],
+    ["derive-lifecycle-quiescence", "--source-manifest-sha256", "private-hash"],
+  ];
+  for (const argv of forms) {
+    await t.test(argv[0] === "derive-lifecycle-quiescence" ? argv[0] : argv.join(" "), () => {
+      const result = spawnSync(process.execPath, [SCRIPT_PATH, ...argv], {
+        cwd: "/",
+        env: Object.freeze({}),
+        encoding: "utf8",
+        shell: false,
+        timeout: 5_000,
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.signal, null);
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, new RegExp(RETIRED_CODE, "u"));
+      assert.match(result.stderr, new RegExp(BROKER_HELP, "u"));
+      assert.equal(result.stderr.includes("private-brain-test"), false);
+      assert.equal(result.stderr.includes("private-hash"), false);
+    });
   }
-}
+});
 
-console.log("teardown guards: only an anchored test prefix is deletable, the live-name lock must be set, and every decision says which rule decided it");
+test("retired script contains no provider, token, or delete implementation", () => {
+  const source = readFileSync(SCRIPT_PATH, "utf8");
+  for (const forbidden of [
+    "createCloudflareDisposableDeploymentTransport",
+    "loadStoredCloudflareToken",
+    "deleteWorker",
+    "deleteVectorizeIndex",
+    "deleteD1Database",
+    'method: "DELETE"',
+  ]) {
+    assert.equal(source.includes(forbidden), false, forbidden);
+  }
+});

@@ -34,6 +34,7 @@
  */
 
 import { fetchBrainWithAdminKey } from "./components/brain-http.mjs";
+import { safeAnswerErrorText } from "./worker/src/lib/answer-render.js";
 
 const PASS = "pass";
 const FAIL = "fail";
@@ -43,6 +44,257 @@ const SKIP = "skip";
 const CREDENTIAL_GATE_ERROR = "refused: content carries live credential(s)";
 const CREDENTIAL_GATE_DETAIL =
   "Rotate them, strip them from the source, then re-ingest. Nothing was written.";
+
+const CANONICAL_REFUSAL = "The documents do not answer the question.";
+const answerIsRefusal = (answer) => String(answer || "").trim() === CANONICAL_REFUSAL;
+const responseObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const nonemptyResponseText = (value) => typeof value === "string" && value.trim().length > 0;
+const ANSWER_UNAVAILABLE_STATUSES = new Set(["search_unavailable", "coverage_incomplete"]);
+
+function normalizedEvidenceNumbers(value, resultCount) {
+  if (!Array.isArray(value)) return false;
+  const seen = new Set();
+  for (const number of value) {
+    if (!Number.isInteger(number) || number < 1 || number > resultCount || seen.has(number)) {
+      return false;
+    }
+    seen.add(number);
+  }
+  return true;
+}
+
+/**
+ * Refuse a 200-shaped answer whose fields contradict each other.
+ *
+ * Type checks alone are insufficient here: plausible answer text paired with
+ * no candidates, no citations, or an unavailable/error state is not evidence
+ * that the reviewed answer path ran. All returned details stay fixed public
+ * copy so a malformed older Worker cannot leak provider or private text.
+ */
+export function answerResponseContractDiagnostic(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "the Worker returned no structured answer response";
+  }
+
+  const owns = (field) => Object.prototype.hasOwnProperty.call(payload, field);
+  if (payload.mode !== "think" || !owns("answer") ||
+      !(payload.answer === null || typeof payload.answer === "string") ||
+      !Array.isArray(payload.results) || !Array.isArray(payload.gaps) ||
+      !Array.isArray(payload.citations)) {
+    return "the Worker returned an incomplete or incompatible answer response";
+  }
+
+  const hasTopLevelError = owns("error") && payload.error !== undefined && payload.error !== null;
+  const hasStatus = owns("status") && payload.status !== undefined && payload.status !== null;
+  if (hasTopLevelError || (hasStatus && !ANSWER_UNAVAILABLE_STATUSES.has(payload.status))) {
+    return "the Worker returned an incompatible answer error or status";
+  }
+  if (owns("evidence_gate") && payload.evidence_gate !== undefined &&
+      payload.evidence_gate !== null && !responseObject(payload.evidence_gate)) {
+    return "the Worker returned an incomplete or incompatible evidence gate";
+  }
+  const evidenceGate = responseObject(payload.evidence_gate) ? payload.evidence_gate : null;
+  if (payload.results.some((result) =>
+    !responseObject(result) || !nonemptyResponseText(result.chunk_uid) ||
+    !(result.title === null || result.title === undefined || typeof result.title === "string") ||
+    !(result.source === null || result.source === undefined || typeof result.source === "string"))) {
+    return "the Worker returned an incomplete or incompatible candidate result";
+  }
+  if (evidenceGate && Object.prototype.hasOwnProperty.call(evidenceGate, "partial") &&
+      typeof evidenceGate.partial !== "boolean") {
+    return "the Worker returned an incomplete or incompatible evidence gate";
+  }
+  if (evidenceGate && Object.prototype.hasOwnProperty.call(evidenceGate, "error") &&
+      !nonemptyResponseText(evidenceGate.error)) {
+    return "the Worker returned an incomplete or incompatible evidence gate";
+  }
+  const evidenceGateHasError = Boolean(evidenceGate) &&
+    Object.prototype.hasOwnProperty.call(evidenceGate, "error");
+
+  if (payload.answer === null) {
+    if (payload.citations.length > 0) {
+      return "the Worker returned citations without an answer";
+    }
+    if (evidenceGate?.supported === true) {
+      return "the Worker withheld answer text despite a supported evidence gate";
+    }
+    if (evidenceGate) {
+      const ownsEvidence = Object.prototype.hasOwnProperty.call(evidenceGate, "evidence");
+      const normalizedEvidence = ownsEvidence &&
+        normalizedEvidenceNumbers(evidenceGate.evidence, payload.results.length);
+      const invalidErrorGate = evidenceGateHasError &&
+        (evidenceGate.supported !== false || evidenceGate.complete !== false ||
+         evidenceGate.partial === true || (ownsEvidence &&
+           (!normalizedEvidence || evidenceGate.evidence.length !== 0)));
+      const invalidOrdinaryGate = !evidenceGateHasError && !normalizedEvidence;
+      if (typeof evidenceGate.supported !== "boolean" ||
+          typeof evidenceGate.complete !== "boolean" ||
+          evidenceGate.partial === true || invalidErrorGate || invalidOrdinaryGate) {
+        return "the Worker returned an incomplete or incompatible evidence gate";
+      }
+    }
+    if (owns("answer_error") && payload.answer_error !== undefined &&
+        payload.answer_error !== null && !nonemptyResponseText(payload.answer_error)) {
+      return "the Worker returned an incomplete or incompatible answer error";
+    }
+    return null;
+  }
+
+  const answer = payload.answer.trim();
+  if (!answer) return "the Worker returned empty answer text instead of null";
+
+  if (ANSWER_UNAVAILABLE_STATUSES.has(payload.status) ||
+      owns("answer_error") ||
+      evidenceGateHasError) {
+    return "the Worker returned answer text alongside an unavailable or error state";
+  }
+
+  if (answerIsRefusal(answer)) {
+    if (payload.citations.length > 0 || !evidenceGate ||
+        evidenceGate.supported !== false || typeof evidenceGate.complete !== "boolean" ||
+        evidenceGate.partial === true ||
+        !normalizedEvidenceNumbers(evidenceGate.evidence, payload.results.length)) {
+      return "the Worker's refusal contradicted its citation or evidence receipt";
+    }
+    return null;
+  }
+  if (payload.results.length === 0) {
+    return "the Worker returned a factual answer without candidate evidence";
+  }
+
+  const markers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
+  const cited = new Map();
+  for (const citation of payload.citations) {
+    if (!responseObject(citation) || !Number.isInteger(citation.n) ||
+        citation.n < 1 || citation.n > payload.results.length ||
+        !nonemptyResponseText(citation.title) || !nonemptyResponseText(citation.source) ||
+        cited.has(citation.n)) {
+      return "the Worker's factual answer and citation evidence did not agree";
+    }
+    const result = payload.results[citation.n - 1];
+    const resultTitle = String(result.title || "untitled").slice(0, 140);
+    const resultSource = String(result.source || "?");
+    if (citation.title !== resultTitle || citation.source !== resultSource) {
+      return "the Worker's citation did not identify its numbered candidate result";
+    }
+    cited.set(citation.n, citation);
+  }
+  if (!markers.size || !cited.size || markers.size !== cited.size ||
+      [...markers].some((n) => !cited.has(n))) {
+    return "the Worker's factual answer and citation evidence did not agree";
+  }
+  if (!evidenceGate || evidenceGate.supported !== true ||
+      !Array.isArray(evidenceGate.evidence) ||
+      !(evidenceGate.complete === true ||
+        (evidenceGate.complete === false && evidenceGate.partial === true)) ||
+      (evidenceGate.complete === true && evidenceGate.partial === true)) {
+    return "the Worker returned a factual answer its evidence gate did not support";
+  }
+  const approved = new Set();
+  for (const number of evidenceGate.evidence) {
+    if (!Number.isInteger(number) || approved.has(number)) {
+      return "the Worker's factual answer carried an invalid evidence receipt";
+    }
+    approved.add(number);
+  }
+  if (approved.size !== cited.size || [...approved].some((n) => !cited.has(n))) {
+    return "the Worker's factual answer and evidence receipt did not agree";
+  }
+  return null;
+}
+
+/**
+ * Name the exact stage that left `/api/rag/think` without an answer.
+ *
+ * A null answer is not one condition. It can mean retrieval was unavailable,
+ * declared source coverage is still incomplete, the evidence verifier refused
+ * an unsupported draft, or the answer model itself returned nothing. Those
+ * states require different next actions, and collapsing them into "unknown"
+ * made a live acceptance warning impossible to investigate.
+ *
+ * Only bounded, already-public response fields enter the detail. Provider
+ * errors are sanitized by the Worker before this function sees them.
+ */
+export function answerUnavailableDiagnostic(payload) {
+  const contractDiagnostic = answerResponseContractDiagnostic(payload);
+  if (contractDiagnostic) {
+    return {
+      stage: "response_contract",
+      detail: contractDiagnostic,
+    };
+  }
+
+  const results = payload.results;
+  const gaps = payload.gaps;
+  const evidenceGate = payload.evidence_gate && typeof payload.evidence_gate === "object" &&
+    !Array.isArray(payload.evidence_gate)
+    ? payload.evidence_gate
+    : null;
+
+  if (payload.status === "search_unavailable" ||
+      (results.length === 0 && payload.degraded)) {
+    return {
+      stage: "retrieval",
+      detail: "search was incomplete, so no absence claim was accepted",
+    };
+  }
+
+  const coverageGap = gaps.find((gap) =>
+    gap && typeof gap === "object" && ["coverage_stale", "coverage_unavailable"].includes(gap.type)
+  );
+  if (payload.status === "coverage_incomplete" || coverageGap) {
+    return {
+      stage: "source_coverage",
+      detail: "one or more declared sources are not yet proven complete",
+    };
+  }
+
+  if (evidenceGate?.error) {
+    return {
+      stage: "answer_verification",
+      // Modern Workers emit a fixed public token here, but an acceptance
+      // runner can be newer than the Worker it probes. Never carry an older
+      // raw verifier/provider error into the local report.
+      detail: "the evidence verifier was unavailable; no answer was accepted",
+    };
+  }
+
+  if (payload.answer_error) {
+    return {
+      stage: "answer_model",
+      detail: safeAnswerErrorText(payload.answer_error),
+    };
+  }
+  if (evidenceGate && (evidenceGate.supported === false || evidenceGate.complete === false)) {
+    return {
+      stage: "answer_verification",
+      // The verifier reason is model-generated from the private question,
+      // draft, and citations. It is diagnostic evidence, not public copy.
+      detail: evidenceGate.supported === false
+        ? "the generated draft was not accepted because its cited evidence did not support it"
+        : "the generated draft was not accepted because it did not cover the complete question",
+    };
+  }
+
+  if (results.length === 0) {
+    return {
+      stage: "retrieval",
+      detail: "search completed but returned no candidate evidence for the probe",
+    };
+  }
+
+  if (payload.model) {
+    return {
+      stage: "answer_model",
+      detail: `the configured answer model returned no answer text from ${results.length} candidate result(s)`,
+    };
+  }
+
+  return {
+    stage: "answer_model_dispatch",
+    detail: `${results.length} candidate result(s) were present, but the Worker reported neither a model nor an answer error`,
+  };
+}
 
 /**
  * Accept only the credential scanner's production refusal contract.
@@ -229,8 +481,226 @@ export function freshnessVerdicts({ ok, status, payload, expectedBackend = "d1" 
   return out;
 }
 
+/**
+ * How long acceptance waits out a transient retrieval failure before failing.
+ *
+ * Measured on 2026-09-17 against a 192,082-document / 1,700,842-chunk brain
+ * whose vector projection was verified complete (expected_vectors ==
+ * actual_vectors, backlog 0). Sustained or concurrent request streams saturate
+ * D1, which is single-threaded per database, and the Worker then fast-fails:
+ * 246-606 ms, `degraded: "retrieval"`, `degraded_reason:
+ * "keyword-and-vector-query-failed"`, `status: "search_unavailable"`. Healthy
+ * calls on the same brain cost 2.5-17.3 s. The failures are POSITIONAL, not
+ * probe-bound: three failing runs that morning hit three different probe sets,
+ * and the only constant was position at the tail of a sustained run. Run alone,
+ * the same fifteen saved probes passed 15/15, twice.
+ *
+ * The acceptance suite runs those fifteen probes back-to-back immediately after
+ * activation inside `brain update`, which is the most sustained sequence the
+ * brain ever sees, and it produced a false FAIL twice that day on a brain that
+ * was healthy. That false FAIL stops the update in front of the customer.
+ *
+ * Two properties are load-bearing and neither is negotiable:
+ *
+ *  - SPACED. A deliberate four-way burst went healthy -> partial -> total
+ *    fast-fail in three rounds over ~50 s. Retrying immediately into a
+ *    saturated D1 fails too, and adds to the load that caused the failure.
+ *  - SEQUENTIAL. One call at a time, one probe at a time. Concurrency is the
+ *    thing being worked around; a parallel retry would recreate it.
+ *
+ * The budget is fixed, and it is sized to the ONE recovery interval anyone has
+ * actually measured. A301BB4-DECISION-2026-09-17 §4 condition 1: burst round 3
+ * fast-failed 4/4 at 249-383 ms, and "60 s is empirically sufficient (r2 tail ->
+ * r3 fully clean)". A 30 s per-probe ceiling is therefore below the only
+ * interval the retry was built to cover, and would give up exactly one attempt
+ * short of the evidence. Four attempts 15 s apart spans that 60 s and keeps the
+ * spacing well clear of the tight-loop failure mode.
+ *
+ * Anything longer than that is a real fault and must still FAIL, because "wait
+ * long enough and it turns green" is how a tolerance becomes a cover-up.
+ *
+ * THE WORST CASE, stated honestly, because the first version of this comment
+ * understated it by counting only the sleeping. Two things are bounded here and
+ * only one of them is sleep:
+ *
+ *  - SLEEPING is capped by `tierBudgetMs` at 240 s across the whole tier.
+ *  - EXTRA REQUESTS are capped at tierBudgetMs / spacingMs = 16, because every
+ *    retry costs one full spacing interval out of the same tier budget. Each of
+ *    those requests is itself a live call that can take as long as a healthy
+ *    call took on the measured brain: 2.5-17.3 s (§1(b)).
+ *
+ * So the true ceiling is 240 s of sleeping + 16 x 17.3 s = ~277 s of requests,
+ * about 8.6 minutes added to an install. The realistic figure is far smaller,
+ * and it is the one this is designed around: a retry only fires because D1 is
+ * fast-failing, and a fast-fail costs 246-606 ms, so 240 s of sleeping + 16 x
+ * 0.6 s = ~10 s of requests, a little over 4 minutes. The 8.6 minute number is
+ * the case where every retried call is slow AND still wrong, which is a brain
+ * that is going to FAIL anyway.
+ */
+export const RETRIEVAL_RETRY_DEFAULTS = Object.freeze({
+  /** Retries after the first attempt, per probe. */
+  attempts: 4,
+  /** Wait between attempts. Spaced, never immediate. */
+  spacingMs: 15_000,
+  /** Ceiling on waiting for ONE probe: 4 x 15 s, spanning the measured 60 s. */
+  probeBudgetMs: 60_000,
+  /** Ceiling on waiting across the WHOLE tier, however many probes there are. */
+  tierBudgetMs: 240_000,
+});
+
+/**
+ * Waiting budget shared by every probe in one tier.
+ *
+ * Counts time spent WAITING, not wall clock, so the budget is exactly the
+ * arithmetic the policy above describes and a test with an injected sleep
+ * observes it directly instead of racing a timer. Fifteen probes cannot turn
+ * into fifteen separate half-minutes of hope: the tier ceiling binds first.
+ */
+export function retrievalRetryBudget(policy = RETRIEVAL_RETRY_DEFAULTS) {
+  let tierSpent = 0;
+  return {
+    get tierSpentMs() { return tierSpent; },
+    probe() {
+      let probeSpent = 0;
+      return {
+        get spentMs() { return probeSpent; },
+        allows(ms) {
+          return probeSpent + ms <= policy.probeBudgetMs && tierSpent + ms <= policy.tierBudgetMs;
+        },
+        take(ms) { probeSpent += ms; tierSpent += ms; },
+      };
+    },
+  };
+}
+
+/**
+ * "; recovered after 2 retries" / "; still degraded after 4 retries" /
+ * "; still empty after 4 retries".
+ *
+ * `outcome` is explicit rather than a boolean pair because the three endings
+ * are three different findings. A probe that came back empty from a Worker
+ * that reported NO degradation did not stay degraded -- it stayed empty, and
+ * saying "still degraded" there invents a Worker report that never happened.
+ */
+function retryNote(retries, outcome) {
+  if (!retries) return "";
+  const plural = retries === 1 ? "retry" : "retries";
+  const ending = outcome === "recovered"
+    ? "recovered"
+    : outcome === "empty" ? "still empty" : "still degraded";
+  return `; ${ending} after ${retries} ${plural}`;
+}
+
+/**
+ * Every `degraded` token the Worker can put on the wire, classified.
+ *
+ * This table exists because "any non-null `degraded`" is not the same question
+ * as "did semantic retrieval fail", and conflating them is a false-FAIL source.
+ * The Worker emits six distinct tokens from two sites -- `store-d1.js` (the D1
+ * backend, five tokens) and `store.js` (the legacy Supabase backend, two) --
+ * and most of them describe a state that is expected, deliberate, or simply not
+ * about the vector path at all. Failing acceptance on `scoped-vector`, which
+ * means "an exact-document scope was applied so the unscoped index was
+ * deliberately not queried", would fail a brain for behaving correctly.
+ *
+ * So only the tokens that mean a retrieval path FAILED are counted, and that
+ * set is exactly what commit a301bb4 counted (`vector`) plus the one token
+ * added since to name the worse case explicitly (`retrieval`).
+ *
+ * `vector` is kept a failure even though two of its three reasons
+ * (`projection-incomplete`, `entity-vector-authority-unindexed`) are ordinary
+ * states of a young or entity-filtered brain: that is the behaviour a301bb4
+ * shipped and this change is not the place to narrow it. The reason rides the
+ * detail text either way, so the reader can tell which one they have.
+ *
+ * `test/acceptance-verdict.test.mjs` pins these keys against the Worker source,
+ * so a seventh token cannot silently become either a failure or a benign state.
+ */
+export const RETRIEVAL_FAILURE_DEGRADED = Object.freeze({
+  vector: "the vector modality did not serve this request",
+  retrieval: "both keyword and vector retrieval failed",
+});
+
+/** Degraded tokens that are expected states, not retrieval failures. */
+export const EXPECTED_DEGRADED = Object.freeze({
+  fts: "keyword search was unavailable; the semantic modality still ran",
+  "scoped-vector": "a document or zone scope was applied, so the unscoped semantic index was deliberately not queried",
+  "no-embedding": "the embedding model did not answer, so this request was keyword-only",
+  "document-access-unavailable": "the legacy Supabase backend cannot serve a scoped request",
+});
+
+/** The whole vocabulary, token -> "failure" | "expected". Pinned by test. */
+export const DEGRADED_CLASSIFICATION = Object.freeze({
+  ...Object.fromEntries(Object.keys(RETRIEVAL_FAILURE_DEGRADED).map((k) => [k, "failure"])),
+  ...Object.fromEntries(Object.keys(EXPECTED_DEGRADED).map((k) => [k, "expected"])),
+});
+
+/** The wire value as a bounded token, or null when nothing was reported. */
+export function degradedToken(value) {
+  if (value === null || value === undefined || value === false) return null;
+  const token = String(value).trim().slice(0, 40);
+  return token || null;
+}
+
+/**
+ * Did semantic retrieval actually fail?
+ *
+ * An unknown token answers NO. A token this file has never seen is a Worker
+ * change, and the honest response to a Worker change is a failing pin test in
+ * development, not a FAIL invented in front of a customer during an install.
+ */
+export function isRetrievalFailureDegradation(value) {
+  const token = degradedToken(value);
+  return token !== null && DEGRADED_CLASSIFICATION[token] === "failure";
+}
+
+/**
+ * What the WORKER said about a search it could not complete, or null.
+ *
+ * The text this replaces asserted a cause acceptance never measured. It counted
+ * `degraded === "vector"` and then blamed an empty vector index — provably the
+ * one condition that CANNOT produce that value, because `searchVector` returns
+ * `[]` on an empty Vectorize result without setting `vectorFailed`, so an empty
+ * index degrades nothing. Meanwhile the real reasons (`projection-incomplete`,
+ * `vector-query-failed`, `keyword-and-vector-query-failed`) already ride the
+ * wire as `degraded_reason`, beside `status`, and were simply never read.
+ *
+ * So: report the Worker's own vocabulary, verbatim and bounded. These are fixed
+ * tokens from `retrieval-status.js`, not free text, and slicing keeps a future
+ * one from turning a check detail into a payload.
+ */
+export function workerDegradationDetail(json) {
+  const token = (value, max) => (typeof value === "string" ? value.trim().slice(0, max) : "");
+  const degraded = json?.degraded === null || json?.degraded === undefined || json?.degraded === false
+    ? ""
+    : token(String(json.degraded), 40);
+  const status = token(json?.status, 40);
+  const reason = token(json?.degraded_reason, 80);
+  const head = status || degraded;
+  if (head && reason) return `${head}: ${reason}`;
+  return head || reason || null;
+}
+
+/**
+ * The Worker's `status` alone, bounded the same way.
+ *
+ * Needed on the one path where there is no degradation to describe: a response
+ * that returned zero rows and reported no `degraded` field at all. That shape
+ * is healthy in structure -- `coverage_incomplete` with no degradation is the
+ * ordinary state of a brain whose declared source history is partial -- and the
+ * detail has to say what the Worker actually said rather than borrowing the
+ * vocabulary of a degradation that was never reported.
+ */
+export function workerStatusToken(json) {
+  const status = typeof json?.status === "string" ? json.status.trim().slice(0, 40) : "";
+  return status || null;
+}
+
 export class Acceptance {
-  constructor({ base, adminKey, manifest, expectVersion = null, fetchImpl = fetch, tolerateStaleSources = false }) {
+  constructor({
+    base, adminKey, manifest, expectVersion = null, fetchImpl = fetch, tolerateStaleSources = false,
+    sleepImpl = null, retrievalRetry = null,
+  }) {
     this.base = String(base).replace(/\/+$/, "");
     this.key = adminKey;
     this.m = manifest || {};
@@ -244,11 +714,45 @@ export class Acceptance {
     // failures, because there the question is "is this brain proven".
     this.tolerateStaleSources = tolerateStaleSources === true;
     this.results = [];
+    // The first failed tier and an intentional early stop are different facts.
+    // Tier 2+ failures stay recorded while the independent later tiers run.
     this.tierFailed = null;
+    this.stoppedAtTier = null;
     // Capabilities the run could not exercise at all. A skip inside a tier is
     // a detail; a whole capability going untested changes what "passed" means,
     // so the summary carries it and the verdict has to say it.
     this.untested = [];
+    // Injectable so the retry tests are arithmetic rather than minutes of real
+    // waiting. Nothing else in this suite sleeps.
+    this.sleep = sleepImpl || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.retrievalRetry = Object.freeze({ ...RETRIEVAL_RETRY_DEFAULTS, ...(retrievalRetry || {}) });
+  }
+
+  /**
+   * Run one retrieval probe, repeating it only while it is still failing and
+   * only while the budget allows. Strictly sequential: one call in flight at a
+   * time, and the next probe does not start until this one is finished.
+   *
+   * `run` returns { failing, value }. The retry changes nothing about what
+   * counts as a pass — the LAST attempt is judged exactly as the only attempt
+   * was before this existed — so a probe that never recovers fails identically
+   * to today, with the same check name and the same status.
+   */
+  async retryTransientProbe(budget, run) {
+    const spend = budget.probe();
+    let outcome = await run();
+    let retries = 0;
+    while (
+      outcome.failing &&
+      retries < this.retrievalRetry.attempts &&
+      spend.allows(this.retrievalRetry.spacingMs)
+    ) {
+      spend.take(this.retrievalRetry.spacingMs);
+      await this.sleep(this.retrievalRetry.spacingMs);
+      outcome = await run();
+      retries += 1;
+    }
+    return { ...outcome, retries, waitedMs: spend.spentMs, recovered: retries > 0 && !outcome.failing };
   }
 
   static isFreshnessCheck(name) {
@@ -424,103 +928,203 @@ export class Acceptance {
     }
   }
 
-  /* --------------------------------------------------- tier 3: retrieval */
+  /* ---------------------------------- tier 3: optional owner-question checks */
 
   async tierRetrieval(probes) {
     const t = 3;
-    // Retrieval is proven with the CLIENT's own probe questions, not generic
-    // ones. A brain that returns results for "test" but nothing for "what did
-    // we agree with our biggest customer" has passed a meaningless check.
-    if (!probes || !probes.length) {
-      this.untested.push("retrieval");
+    // Saved owner questions are an optional regression aid. Setup and handoff
+    // do not depend on the owner preparing a question list: the technician
+    // proves one real item separately through accepted, stored with provenance,
+    // projected, and query-visible with citation. When questions are present,
+    // keep exercising the full retrieval and answer contracts below.
+    const savedQuestions = Array.isArray(probes)
+      ? probes.filter((question) => String(question || "").trim())
+      : [];
+    if (!savedQuestions.length) {
+      this.untested.push("optional_owner_questions");
       return this.record(
         t,
-        "retrieval probes",
+        "optional owner-question checks",
         SKIP,
-        "no probe questions in the manifest (testing.probe_questions)"
+        "none saved; zero are required for setup, adaptive acceptance, or handoff"
       );
     }
 
+    // One waiting budget for the whole tier, spent strictly sequentially.
+    const budget = retrievalRetryBudget(this.retrievalRetry);
     let answered = 0;
-    let vectorDegraded = 0;
-    for (const q of probes) {
-      const r = await this.post("/api/rag/unified", { q, limit: 5, rerank: 0 });
-      const n = r.json?.results?.length || 0;
+    let degradedProbes = 0;
+    let recoveredProbes = 0;
+    const finalReasons = new Set();
+    const expectedStates = new Set();
+    for (const q of savedQuestions) {
+      // Zero results and a degradation that means a retrieval path FAILED are
+      // the two shapes the transient D1 saturation takes, and both clear on
+      // their own within a minute on a brain that is actually healthy.
+      //
+      // An expected degradation is neither. `scoped-vector` will still be
+      // `scoped-vector` after four retries and a minute of waiting, because it
+      // is a description of the request, not a fault -- retrying it buys an
+      // extra minute of install time and then fails the brain anyway. It is
+      // recorded in the detail and nothing else. Everything else is judged on
+      // the first answer, exactly as before.
+      const attempt = await this.retryTransientProbe(budget, async () => {
+        const r = await this.post("/api/rag/unified", { q, limit: 5, rerank: 0 });
+        const n = r.json?.results?.length || 0;
+        const degraded = degradedToken(r.json?.degraded);
+        return {
+          failing: n === 0 || isRetrievalFailureDegradation(degraded),
+          value: {
+            n,
+            degraded,
+            failure: isRetrievalFailureDegradation(degraded),
+            why: workerDegradationDetail(r.json),
+            status: workerStatusToken(r.json),
+          },
+        };
+      });
+      const { n, degraded, failure, why, status } = attempt.value;
       if (n > 0) answered++;
-      if (r.json?.degraded === "vector") vectorDegraded++;
+      // Only the LAST attempt counts. A probe that recovered was a stall, not
+      // a degraded brain, and must not be reported as one.
+      if (failure) {
+        degradedProbes++;
+        if (why) finalReasons.add(why);
+      } else if (degraded !== null && why) {
+        expectedStates.add(why);
+      }
+      if (attempt.recovered) recoveredProbes++;
+      // Three different findings, three different sentences. The last one is
+      // the zero-result response that reported NO degradation: it must say so,
+      // because claiming a degradation the Worker never reported sends the
+      // reader to look for an outage that does not exist.
+      let observed = "";
+      if (failure && why) observed = `; the Worker reported ${why}`;
+      else if (degraded !== null) observed = `; the Worker reported the expected state ${why || degraded}, not a retrieval failure`;
+      else if (n === 0) {
+        observed = status
+          ? `; the Worker reported status ${status} with no degradation`
+          : "; the Worker reported no degradation";
+      }
       this.record(
         t,
         `probe: ${q.slice(0, 48)}`,
         n > 0 ? PASS : FAIL,
-        `${n} result(s)`
+        `${n} result(s)` +
+          observed +
+          retryNote(attempt.retries, attempt.recovered ? "recovered" : failure ? "degraded" : "empty")
       );
     }
     this.record(
       t,
       "probe coverage",
-      answered === probes.length ? PASS : answered > 0 ? WARN : FAIL,
-      `${answered}/${probes.length} probes returned sources`
+      answered === savedQuestions.length ? PASS : answered > 0 ? WARN : FAIL,
+      `${answered}/${savedQuestions.length} probes returned sources` +
+        (recoveredProbes ? `; ${recoveredProbes} recovered after a retry` : "")
     );
+    // The retry never softens this verdict; it only decides WHEN the verdict is
+    // taken. What changed is that the detail now names the reason the Worker
+    // itself gave instead of asserting a Vectorize cause acceptance never read,
+    // and that the tally counts only degradations that mean a retrieval path
+    // failed. Expected states are reported here and fail nothing.
+    const expectedNote = expectedStates.size
+      ? `; expected states reported, none of them a retrieval failure: ${[...expectedStates].join(", ")}`
+      : "";
     this.record(
       t,
       "semantic retrieval is active",
-      vectorDegraded === 0 ? PASS : FAIL,
-      vectorDegraded === 0
-        ? "no probe degraded to keyword-only retrieval"
-        : `${vectorDegraded}/${probes.length} probe(s) were keyword-only because Vectorize returned no candidates`,
+      degradedProbes === 0 ? PASS : FAIL,
+      (degradedProbes === 0
+        ? "no probe degraded to keyword-only retrieval" +
+          (recoveredProbes ? `; ${recoveredProbes} probe(s) recovered after a retry` : "")
+        : `${degradedProbes}/${savedQuestions.length} probe(s) were still degraded after the retry budget; ` +
+          (finalReasons.size
+            ? `the Worker reported ${[...finalReasons].join(", ")}`
+            : "the Worker reported no reason")) + expectedNote,
     );
 
     // `think` must degrade rather than 500. This is the path most likely to
     // break quietly, because it only fails when the LLM key, the spend cap or
     // the model name is wrong, none of which show up until someone asks a
     // question.
-    const think = await this.post("/api/rag/think", { q: probes[0], limit: 5 });
-    if (think.json?.degraded === "vector") {
+    const thinkAttempt = await this.retryTransientProbe(budget, async () => {
+      const r = await this.post("/api/rag/think", { q: savedQuestions[0], limit: 5 });
+      // Same classification as the probes above: retry a failed retrieval path,
+      // never an expected state that a retry cannot change.
+      return { failing: isRetrievalFailureDegradation(r.json?.degraded), value: r };
+    });
+    const think = thinkAttempt.value;
+    if (isRetrievalFailureDegradation(think.json?.degraded)) {
+      const why = workerDegradationDetail(think.json);
+      // `retrieval` means NEITHER modality ran. Calling that "keyword-only"
+      // would describe a fallback that did not happen.
+      const headline = degradedToken(think.json?.degraded) === "retrieval"
+        ? "the answer path completed no retrieval at all"
+        : "the answer path degraded to keyword-only retrieval";
       this.record(
         t,
         "think uses semantic retrieval",
         FAIL,
-        "the answer path degraded to keyword-only retrieval",
+        headline +
+          (why ? `; the Worker reported ${why}` : "") +
+          retryNote(thinkAttempt.retries, "degraded"),
+      );
+    } else if (thinkAttempt.recovered) {
+      // Recorded only when it actually had to recover, so a healthy run's
+      // result list is byte-for-byte what it was before this change.
+      this.record(
+        t,
+        "think uses semantic retrieval",
+        PASS,
+        `the answer path used semantic retrieval${retryNote(thinkAttempt.retries, "recovered")}`,
       );
     }
     if (!think.ok) {
       this.record(t, "think endpoint", FAIL, `HTTP ${think.status}`);
-    } else if (think.json?.answer) {
-      const answer = think.json.answer;
-      this.record(t, "think returns an answer", PASS, `${answer.length} chars`);
-      // A refusal ("the documents do not answer this") correctly carries no
-      // citations, because it makes no factual claim to cite. Requiring
-      // markers unconditionally fails the brain for behaving honestly, which
-      // is the opposite of what this check is for.
-      const isRefusal =
-        /\b(do(es)? not (contain|answer|address)|no (information|record|mention)|nothing (recorded|found))\b/i.test(
-          answer
-        );
-      const cited = /\[\d+\]/.test(answer);
-      if (isRefusal && !cited) {
-        this.record(t, "answer citation discipline", PASS, "honest refusal, nothing to cite");
+    } else {
+      // Validate the complete public response envelope before trusting answer
+      // text. A malformed 200 containing plausible prose is not proof that the
+      // Worker ran the reviewed answer path, and must never turn acceptance
+      // green merely because `answer` is truthy.
+      const diagnostic = answerUnavailableDiagnostic(think.json);
+      if (diagnostic.stage === "response_contract") {
+        this.record(t, "think response contract", FAIL, diagnostic.detail);
+      } else if (think.json?.answer) {
+        const answer = think.json.answer;
+        this.record(t, "think returns an answer", PASS, `${answer.length} chars`);
+        // A refusal ("the documents do not answer this") correctly carries no
+        // citations, because it makes no factual claim to cite. Requiring
+        // markers unconditionally fails the brain for behaving honestly, which
+        // is the opposite of what this check is for.
+        const isRefusal = answerIsRefusal(answer);
+        const cited = /\[\d+\]/.test(answer);
+        if (isRefusal && !cited) {
+          this.record(t, "answer citation discipline", PASS, "honest refusal, nothing to cite");
+        } else {
+          this.record(
+            t,
+            "answer carries inline citations",
+            cited ? PASS : FAIL,
+            cited ? "found [n] markers" : "the answer makes claims but cites nothing"
+          );
+        }
       } else {
+        // A complete null-answer response proves the endpoint degraded rather
+        // than crashed. Its reviewed fields identify the stage without
+        // exposing model- or provider-generated private text.
         this.record(
           t,
-          "answer carries inline citations",
-          cited ? PASS : FAIL,
-          cited ? "found [n] markers" : "the answer makes claims but cites nothing"
+          "think degrades cleanly",
+          PASS,
+          `no answer; stage ${diagnostic.stage}: ${diagnostic.detail}`
+        );
+        this.record(
+          t,
+          `answer unavailable at ${diagnostic.stage}`,
+          WARN,
+          diagnostic.detail
         );
       }
-    } else {
-      // Degradation is a pass for the endpoint and a warning for the install.
-      this.record(
-        t,
-        "think degrades cleanly",
-        PASS,
-        `no answer, reason: ${think.json?.answer_error || "unknown"}`
-      );
-      this.record(
-        t,
-        "answer generation configured",
-        WARN,
-        think.json?.answer_error || "no answer produced"
-      );
     }
     this.record(
       t,
@@ -648,7 +1252,10 @@ export class Acceptance {
     await this.tierReach();
     // Everything downstream reads the brain, so a broken tier 1 makes the rest
     // noise rather than signal.
-    if (this.tierFailed === 1) return this.summary();
+    if (this.tierFailed === 1) {
+      this.stoppedAtTier = 1;
+      return this.summary();
+    }
     await this.tierData();
     await this.tierRetrieval(probes);
     await this.tierSafety();
@@ -663,7 +1270,8 @@ export class Acceptance {
       results: this.results,
       counts,
       passed: counts.fail === 0,
-      stoppedAtTier: this.tierFailed,
+      firstFailedTier: this.tierFailed,
+      stoppedAtTier: this.stoppedAtTier,
       untested: [...this.untested],
     };
   }
@@ -672,29 +1280,36 @@ export class Acceptance {
 /**
  * The one-line verdict a person reads last, with any honesty qualifiers.
  *
- * A suite that skipped its whole retrieval tier has not proven the thing the
- * client actually bought, and an unqualified "passed" is how a false green
- * reaches a kickoff call: reach, data, safety and operations were checked,
- * and nobody asked the brain a single question. The headline itself changes,
- * not just a detail line above it, because the headline is the sentence that
- * gets read aloud and pasted into a thread.
+ * Saved owner questions are optional. Their absence is reported without
+ * turning onboarding into homework. The separate same-item evidence gate is
+ * what proves retrieval before handoff. A legacy summary that says the whole
+ * retrieval capability went untested remains qualified so old results cannot
+ * be mistaken for evidence.
  *
  * Exit semantics are the caller's and stay unchanged: a failed suite still
  * fails, a passed-but-unqualified suite still exits clean.
  */
 export function acceptanceVerdict(summary) {
-  if (!summary?.passed) return { headline: "acceptance suite FAILED", warnings: [] };
+  if (!summary?.passed) return { headline: "acceptance suite FAILED", warnings: [], notes: [] };
   const untested = Array.isArray(summary.untested) ? summary.untested : [];
   if (untested.includes("retrieval")) {
     return {
-      headline: "acceptance suite passed — but retrieval was NOT tested",
+      headline: "automated checks passed; query-visible retrieval still needs evidence",
       warnings: [
-        "retrieval was NOT tested: testing.probe_questions is empty in the manifest.",
-        "Reach, data, safety and operations were checked; nobody asked this brain a",
-        "single question. Fill testing.probe_questions from the intake — the client's",
-        "own words, not tidied English — then re-run: brain test <manifest>",
+        "This older result did not include query-visible retrieval proof.",
+        "Do not ask the owner to prepare a question list. Prove one approved",
+        "low-sensitivity item as accepted, stored with provenance, projected,",
+        "and query-visible with a citation before handoff.",
       ],
+      notes: [],
     };
   }
-  return { headline: "acceptance suite passed", warnings: [] };
+  const notes = untested.includes("optional_owner_questions")
+    ? [
+        "No owner-authored regression questions were run. Zero are required for setup, adaptive acceptance, or handoff.",
+        "Owner handoff still requires the separate same-item evidence gate: accepted, stored with provenance, projected, and query-visible with a citation.",
+        "Add saved owner questions later only if they would be useful for repeatable regression checks.",
+      ]
+    : [];
+  return { headline: "automated acceptance checks passed", warnings: [], notes };
 }

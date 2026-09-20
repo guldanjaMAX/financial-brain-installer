@@ -1,0 +1,937 @@
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+import { splitStatements } from "../../brain.mjs";
+import worker from "../src/index.js";
+import { mintSessionCookie } from "../src/lib/sessions.js";
+import {
+  normalizeIngestEnvelopeProvenance,
+  provenanceAssessmentMarker,
+} from "../src/lib/provenance-receipt.js";
+import { sourceInventory, sourceRecoveryCandidates } from "../src/lib/store-d1.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS = join(HERE, "..", "..", "migrations", "d1");
+const ORIGIN = "https://brain.invalid";
+const OWNER_CREDENTIAL = "fixture-owner-source-inventory";
+const SCOPED_CREDENTIAL = "fixture-scoped-source-inventory";
+const SAFE_GMAIL_FAILURE = Object.freeze({
+  version: 1,
+  operation_class: "gmail_message_read",
+  http_status: 400,
+  provider_reason: "failed_precondition",
+  checkpoint_readback: "verified",
+  checkpoint_done: 55,
+  checkpoint_skipped: 3,
+  cursor_preservation: "absent_preserved",
+});
+
+function migratedDb(label = "fixture", { throughMigration = Infinity } = {}) {
+  const db = new DatabaseSync(":memory:");
+  for (const file of readdirSync(MIGRATIONS)
+    .filter((name) => name.endsWith(".sql") && Number(name.slice(0, 4)) <= throughMigration)
+    .sort()) {
+    const sql = readFileSync(join(MIGRATIONS, file), "utf8");
+    for (const statement of splitStatements(sql)) db.exec(statement);
+  }
+  db.prepare(
+    `INSERT INTO install_state (id,client_slug,product_version,installed_at)
+     VALUES (1,?,'0.0.0-test','2026-01-01T00:00:00.000Z')`,
+  ).run(label);
+  for (const [credential, grant] of [[OWNER_CREDENTIAL, null], [SCOPED_CREDENTIAL, "g_scoped"]]) {
+    db.prepare(
+      `INSERT INTO owner_passkeys
+         (credential_id,public_key_jwk,alg,sign_count,nickname,created_at,grant_id)
+       VALUES (?,'{}',-7,0,'Fixture device',?,?)`,
+    ).run(credential, Date.parse("2026-09-01T00:00:00.000Z"), grant);
+  }
+  db.prepare(
+    `INSERT INTO grants
+       (grant_id,display_name,capabilities,created_at,created_by,scope_include,scope_exclude)
+     VALUES ('g_scoped','Scoped fixture','["administer"]',?,'owner','{"all":true}','[]')`,
+  ).run(Date.parse("2026-09-01T00:00:00.000Z"));
+  return db;
+}
+
+async function addInventoryFixture(db, prefix = "", { includeFailureEvidence = true } = {}) {
+  const source = (name) => `${prefix}${name}`;
+  db.prepare(
+    `INSERT INTO sources
+       (name,kind,status,created_at,last_ingest_at,document_count,
+        sync_cursor,cursor_updated_at,scope,
+        expected_refresh_seconds,last_complete_sweep_at,stale_reason,zone)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    source("alpha"), "drive", "ready", "2026-08-01T00:00:00.000Z",
+    "2026-09-09T00:00:00.000Z", 2,
+    "private-cursor-123", "2026-09-09T00:01:00.000Z",
+    JSON.stringify({ root_folder_ids: ["private-root-one", "private-root-two"], private_label: "secret scope label" }),
+    86400, "2026-09-09T00:00:00.000Z", null, "books",
+  );
+  db.prepare(
+    `INSERT INTO sources
+       (name,kind,status,created_at,last_ingest_at,document_count,
+        expected_refresh_seconds,last_complete_sweep_at,stale_reason,zone)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    source("beta"), "gmail", "error", "2026-08-02T00:00:00.000Z",
+    "2026-09-01T00:00:00.000Z", 2, 86400, null, "AUTH_EXPIRED", null,
+  );
+
+  const insertDocument = db.prepare(
+    `INSERT INTO documents
+       (doc_uid,source,source_id,title,uri,document_date,date_source,date_reliable,
+        client,category,ingested_at,content_hash,meta,text_source,text_reliable,
+        provenance_receipt_version,provenance_receipt_status,
+        provenance_receipt_reason,provenance_receipt_digest)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  const provenance = async (sourceType, sourceId, textSource, textReliable, metadata = {}) => {
+    const envelope = normalizeIngestEnvelopeProvenance({
+      source_type: sourceType,
+      source_id: sourceId,
+      content: "fixture",
+      text_source: textSource,
+      text_reliable: textReliable,
+      metadata,
+    });
+    return {
+      meta: JSON.stringify(envelope.metadata),
+      marker: await provenanceAssessmentMarker(envelope),
+    };
+  };
+  const alphaOneRoot = `${source("alpha")}:one`;
+  const alphaOne = await provenance(source("alpha"), "one", "native", true, {
+    evidence_lineage: { version: 1, kind: "source_record", root_ids: [alphaOneRoot] },
+  });
+  const alphaTwoRoot = `${source("alpha")}:two`;
+  const alphaTwo = await provenance(source("alpha"), "two", "ocr_partial", false, {
+    family_of: alphaTwoRoot,
+    evidence_lineage: { version: 1, kind: "source_record", root_ids: [alphaTwoRoot] },
+  });
+  const betaOne = await provenance(source("beta"), "one", "ocr", false);
+  insertDocument.run(
+    `${source("alpha")}:one`, source("alpha"), "one", "Invented alpha one", null,
+    Date.parse("2026-08-01T00:00:00.000Z"), "fixture", 1, null, null,
+    Date.parse("2026-09-09T00:00:00.000Z"), "hash-alpha-one",
+    alphaOne.meta,
+    "native", 1,
+    alphaOne.marker.provenance_receipt_version,
+    alphaOne.marker.provenance_receipt_status,
+    alphaOne.marker.provenance_receipt_reason,
+    alphaOne.marker.provenance_receipt_digest,
+  );
+  insertDocument.run(
+    `${source("alpha")}:two`, source("alpha"), "two", "Invented alpha two", null,
+    Date.parse("2026-08-02T00:00:00.000Z"), "fixture", 1, null, null,
+    Date.parse("2026-09-09T00:00:00.000Z"), "hash-alpha-two",
+    alphaTwo.meta, "ocr_partial", 0,
+    alphaTwo.marker.provenance_receipt_version,
+    alphaTwo.marker.provenance_receipt_status,
+    alphaTwo.marker.provenance_receipt_reason,
+    alphaTwo.marker.provenance_receipt_digest,
+  );
+  insertDocument.run(
+    `${source("beta")}:one`, source("beta"), "one", "Invented beta", null,
+    Date.parse("2026-08-03T00:00:00.000Z"), "fixture", 1, null, null,
+    Date.parse("2026-09-01T00:00:00.000Z"), "hash-beta-one", betaOne.meta, "ocr", 0,
+    betaOne.marker.provenance_receipt_version,
+    betaOne.marker.provenance_receipt_status,
+    betaOne.marker.provenance_receipt_reason,
+    betaOne.marker.provenance_receipt_digest,
+  );
+  insertDocument.run(
+    `${source("orphan")}:one`, source("orphan"), "one", "Invented orphan", null,
+    Date.parse("2026-08-04T00:00:00.000Z"), "fixture", 1, null, null,
+    Date.parse("2026-09-01T00:00:00.000Z"), "hash-orphan-one",
+    JSON.stringify({
+      family_of: `${source("orphan")}:one`,
+      evidence_lineage: { version: 99, kind: "source_record", root_ids: [] },
+    }), "native", 1, null, null, null, null,
+  );
+
+  const insertChunk = db.prepare(
+    `INSERT INTO chunks (chunk_uid,doc_uid,chunk_ix,text,source,title,document_date,client,category)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  insertChunk.run(`${source("alpha")}:one#0`, `${source("alpha")}:one`, 0, "fixture alpha", source("alpha"), "Alpha", 1, null, null);
+  insertChunk.run(`${source("beta")}:one#0`, `${source("beta")}:one`, 0, "fixture beta", source("beta"), "Beta", 1, null, null);
+  insertChunk.run(`${source("orphan")}:one#0`, `${source("orphan")}:one`, 0, "fixture orphan", source("orphan"), "Orphan", 1, null, null);
+
+  db.prepare(
+    `INSERT INTO sync_runs
+       (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+        docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+        confirmed_from,confirmed_through,target_from,target_through,
+        proposed_deletes,delete_action,refusal_reason,error)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    `${source("alpha")}-run`, source("alpha"), "sweep",
+    Date.parse("2026-09-09T00:00:00.000Z"), Date.parse("2026-09-09T00:01:00.000Z"),
+    1, 2, 1, 0, 1, 0, 0, 1,
+    "2020-01-01T00:00:00.000Z", "2026-09-09T00:00:00.000Z",
+    "2020-01-01T00:00:00.000Z", "2026-09-09T00:00:00.000Z",
+    0, "applied", null, null,
+  );
+  const betaRunValues = [
+    `${source("beta")}-run`, source("beta"), "incremental",
+    Date.parse("2026-09-01T00:00:00.000Z"), Date.parse("2026-09-01T00:01:00.000Z"),
+    0, 1, 0, 0, 0, 0, 1, 1, 0, null, null,
+    "private provider failure for secret-account@example.invalid",
+  ];
+  if (includeFailureEvidence) {
+    db.prepare(
+      `INSERT INTO sync_runs
+         (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+          docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+          proposed_deletes,delete_action,refusal_reason,error,failure_evidence)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(...betaRunValues, JSON.stringify(SAFE_GMAIL_FAILURE));
+  } else {
+    db.prepare(
+      `INSERT INTO sync_runs
+         (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+          docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+          proposed_deletes,delete_action,refusal_reason,error)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(...betaRunValues);
+  }
+}
+
+function d1Env(db, label = "fixture") {
+  const seen = { prepared: [], runs: 0, batches: 0 };
+  const env = {
+    STORAGE: "d1",
+    ADMIN_KEY: "test-admin-key",
+    RAG_PROXY_KEY: "test-proxy-key",
+    SESSION_SIGNING_KEY: "test-session-signing-key-0123456789",
+    BRAIN_NAME: label,
+    DB: {
+      prepare(sql) {
+        seen.prepared.push(sql);
+        const shape = (parameters = []) => ({
+          bind: (...next) => shape(next),
+          all: async () => ({ results: db.prepare(sql).all(...parameters) }),
+          first: async () => db.prepare(sql).get(...parameters) ?? null,
+          run: async () => {
+            seen.runs++;
+            throw new Error("source inventory must never execute a write statement");
+          },
+        });
+        return shape();
+      },
+      async batch() {
+        seen.batches++;
+        throw new Error("source inventory must never execute a write batch");
+      },
+    },
+  };
+  return { env, seen };
+}
+
+test("source recovery pages summaries beyond 250 source groups", async () => {
+  const db = migratedDb("many-source-groups");
+  const insert = db.prepare(
+    `INSERT INTO documents
+       (doc_uid,source,source_id,title,ingested_at,content_hash)
+     VALUES (?,?,?,?,?,?)`,
+  );
+  for (let index = 0; index < 260; index++) {
+    const source = `source_${String(index).padStart(3, "0")}`;
+    insert.run(
+      `${source}:record`, source, "record", `Synthetic ${index}`,
+      Date.parse("2026-09-01T00:00:00.000Z"), `hash-${index}`,
+    );
+  }
+  const { env, seen } = d1Env(db, "many-source-groups");
+  const first = await sourceRecoveryCandidates(env, { limit: 1 });
+  assert.equal(first.total, 260);
+  assert.equal(first.summary.candidate_source_groups, 260);
+  assert.equal(first.summary.source_groups_returned, 250);
+  assert.equal(first.summary.source_groups_truncated, true);
+  assert.equal(first.summary.source_groups_cursor, "source_249");
+  assert.deepEqual(
+    first.summary.source_groups.map((group) => group.source_id),
+    Array.from({ length: 250 }, (_, index) => `source_${String(index).padStart(3, "0")}`),
+  );
+
+  const second = await sourceRecoveryCandidates(env, {
+    afterSourceId: first.summary.source_groups_cursor,
+    limit: 1,
+  });
+  assert.equal(second.total, 260);
+  assert.equal(second.summary.candidate_source_groups, 260);
+  assert.equal(second.summary.source_groups_returned, 10);
+  assert.equal(second.summary.source_groups_truncated, false);
+  assert.equal(second.summary.source_groups_cursor, null);
+  assert.deepEqual(
+    second.summary.source_groups.map((group) => group.source_id),
+    Array.from({ length: 10 }, (_, index) => `source_${index + 250}`),
+  );
+
+  const pastEnd = await sourceRecoveryCandidates(env, {
+    afterRowId: 9_999_999,
+    afterSourceId: "zzzzzz",
+    limit: 1,
+  });
+  assert.equal(pastEnd.rows.length, 0);
+  assert.equal(pastEnd.summary.source_groups_returned, 0);
+  assert.equal(pastEnd.total, first.total,
+    "an empty page must not collapse the snapshot-wide candidate total");
+  assert.equal(pastEnd.summary.candidate_source_groups, first.summary.candidate_source_groups,
+    "an empty source-group page must not collapse the snapshot-wide group total");
+  assert.deepEqual(pastEnd.summary.reason_counts, first.summary.reason_counts,
+    "an empty page must preserve the snapshot-wide reason totals");
+
+  const firstResponse = await call(env, post(
+    { mode: "recovery", limit: 1 },
+    { "X-Admin-Key": "test-admin-key" },
+  ));
+  assert.equal(firstResponse.status, 200, await firstResponse.clone().text());
+  const firstReceipt = await firstResponse.json();
+  assert.equal(firstReceipt.recovery_plan_summary.source_groups_truncated, true);
+  assert.equal(firstReceipt.recovery_plan_summary.source_groups_cursor, "source_249");
+  const secondResponse = await call(env, post(
+    {
+      mode: "recovery",
+      limit: 1,
+      source_group_cursor: firstReceipt.recovery_plan_summary.source_groups_cursor,
+    },
+    { "X-Admin-Key": "test-admin-key" },
+  ));
+  assert.equal(secondResponse.status, 200, await secondResponse.clone().text());
+  const secondReceipt = await secondResponse.json();
+  assert.equal(secondReceipt.recovery_plan_summary.source_groups_returned, 10);
+  assert.equal(secondReceipt.recovery_plan_summary.source_groups_truncated, false);
+  assert.equal(secondReceipt.recovery_plan_summary.source_groups_cursor, null);
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+  db.close();
+});
+
+const post = (body = {}, headers = {}) => new Request(`${ORIGIN}/api/admin/brain/sources`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", ...headers },
+  body: typeof body === "string" ? body : JSON.stringify(body),
+});
+
+const call = (env, request) => worker.fetch(request, env, { waitUntil() {}, passThroughOnException() {} });
+
+function cursorWithVersion(value, version) {
+  const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  return Buffer.from(JSON.stringify({ ...decoded, v: version }), "utf8").toString("base64url");
+}
+
+async function ownerHeaders(env, credential = OWNER_CREDENTIAL, grantId = null) {
+  const cookie = await mintSessionCookie(env, 1, { credentialId: credential, grantId });
+  return { Cookie: cookie.split(";")[0], "X-Brain-App": "1" };
+}
+
+test("source inventory auth is owner-only and private", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const { env } = d1Env(db);
+
+  const anonymous = await call(env, post());
+  assert.equal(anonymous.status, 401);
+  assert.match(anonymous.headers.get("cache-control") || "", /private.*no-store/);
+
+  const proxy = await call(env, post({}, { "X-Admin-Key": "test-proxy-key" }));
+  assert.equal(proxy.status, 401, "the retrieval proxy key is not owner authority");
+
+  const admin = await call(env, post({}, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(admin.status, 200, await admin.clone().text());
+
+  const owner = await call(env, post({}, await ownerHeaders(env)));
+  assert.equal(owner.status, 200, await owner.clone().text());
+
+  const ownerNoCsrf = await call(env, post({}, {
+    Cookie: (await ownerHeaders(env)).Cookie,
+  }));
+  assert.equal(ownerNoCsrf.status, 401, "an owner cookie still needs the companion app header");
+
+  const scoped = await call(env, post({}, await ownerHeaders(env, SCOPED_CREDENTIAL, "g_scoped")));
+  assert.equal(scoped.status, 403, "even an administer-capable scoped passkey is not the owner");
+  assert.equal((await scoped.json()).code, "owner_required");
+
+  const queryCredential = await call(env, post({}, {}));
+  assert.equal(queryCredential.status, 401, "a key cannot move into a URL or body");
+
+  const wrongMethod = await call(env, new Request(`${ORIGIN}/api/admin/brain/sources`, {
+    headers: { "X-Admin-Key": "test-admin-key" },
+  }));
+  assert.equal(wrongMethod.status, 405);
+  assert.match(wrongMethod.headers.get("cache-control") || "", /private.*no-store/);
+});
+
+test("source inventory pages are complete, stable, supported, and read-only", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const { env, seen } = d1Env(db);
+  const changesBefore = db.prepare("SELECT total_changes() AS n").get().n;
+  const passkeysBefore = db.prepare("SELECT COUNT(*) AS n FROM owner_passkeys").get().n;
+  const eventsBefore = db.prepare("SELECT COUNT(*) AS n FROM source_events").get().n;
+
+  const firstResponse = await call(env, post({ limit: 1 }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(firstResponse.status, 200, await firstResponse.clone().text());
+  const first = await firstResponse.json();
+  assert.equal(first.contract_version, 3);
+  assert.equal(first.total, 3);
+  assert.equal(first.returned, 1);
+  assert.equal(first.truncated, true);
+  assert.equal(first.complete, false);
+  assert.ok(first.cursor);
+  assert.equal(first.snapshot.total, 3);
+  assert.equal(first.snapshot.as_of, first.as_of);
+  assert.equal(first.sources[0].source_id, "alpha");
+  assert.equal(first.recovery_plan_summary.status, "review_needed");
+  assert.equal(first.recovery_plan_summary.candidate_documents, 3);
+  assert.equal(first.recovery_plan_summary.candidate_source_groups, 3);
+  assert.equal(first.recovery_plan_summary.source_groups_returned, 3);
+  assert.equal(first.recovery_plan_summary.source_groups_truncated, false);
+  assert.equal(first.recovery_plan_summary.priority, "high");
+  assert.deepEqual(
+    first.recovery_plan_summary.source_groups.map((group) => group.source_id),
+    ["alpha", "beta", "orphan"],
+  );
+  assert.equal(first.recovery_plan_summary.reason_counts.no_stored_chunks, 1);
+  assert.equal(first.recovery_plan_summary.reason_counts.provenance_receipt_unassessed, 1);
+  assert.equal(first.recovery_plan_summary.reason_counts.derivation_lineage_missing, 2);
+  assert.equal(first.recovery_plan_summary.reason_counts.lineage_contract_unrecognized, 0);
+  assert.equal(first.sources[0].zone, "books");
+  assert.deepEqual(first.sources[0].connector, {
+    kind: "drive",
+    provider: "google",
+    provider_identity_status: "supported",
+  });
+  assert.deepEqual(first.sources[0].configuration.scope, {
+    status: "supported",
+    masked: true,
+    format: "json_object",
+    recorded_fields: ["root_folder_ids"],
+    configured_root_count: 2,
+  });
+  assert.deepEqual(first.sources[0].configuration.cursor, {
+    status: "present",
+    masked: true,
+    updated_at: "2026-09-09T00:01:00.000Z",
+  });
+  assert.deepEqual(first.sources[0].storage, {
+    physical_documents: 2,
+    logical_documents: 2,
+    chunks: 1,
+    readable_documents: 1,
+    unreadable_documents: 1,
+    basis: "document rows are attributed by a validated family_of or part_of receipt when present, otherwise by doc_uid; readable means at least one nonblank stored chunk",
+  });
+  assert.equal(first.sources[0].readability.status, "partial");
+  assert.equal(first.sources[0].readability.empty_documents, 1);
+  assert.equal(first.sources[0].readability.scan_only_documents, null);
+  assert.equal(first.sources[0].readability.scan_only_status, "unavailable");
+  assert.equal(first.sources[0].readability.likely_ocr_candidates, 0);
+  assert.equal(first.sources[0].readability.ocr_retry_candidates, 1);
+  assert.equal(first.sources[0].readability.ocr_partial_documents, 1);
+  assert.equal(first.sources[0].provenance.status, "complete");
+  assert.deepEqual(first.sources[0].provenance.missing_subfields, []);
+  assert.equal(first.sources[0].provenance.lineage.recognized_contract_documents, 2);
+  assert.equal(first.sources[0].provenance.lineage.family_marker_documents, 1);
+  assert.equal(first.sources[0].recovery_plan.candidate_documents, 1);
+  assert.equal(first.sources[0].receipt.reported_logical_documents, 2);
+  assert.equal(first.sources[0].receipt.logical_matches_reported, true);
+  assert.equal(first.sources[0].receipt.first_ingest_observed_at, "2026-09-09T00:00:00.000Z");
+  assert.deepEqual(first.sources[0].receipt.first_ingest_evidence, ["stored_document", "sync_run"]);
+  assert.equal(first.sources[0].receipt.last_successful_run_at, "2026-09-09T00:01:00.000Z");
+  assert.equal(first.sources[0].receipt.complete_history_through, "2026-09-09T00:00:00.000Z");
+  assert.equal(first.sources[0].receipt.latest_run.outcome, "completed");
+  assert.equal(first.sources[0].receipt.latest_run.metrics_version, 1);
+  assert.equal(first.sources[0].receipt.latest_run.docs_refused, 0);
+  assert.equal(first.sources[0].receipt.latest_run.docs_failed, 0);
+  assert.equal(first.sources[0].last_failure, null);
+  assert.equal(first.sources[0].freshness.coverage.history.state, "complete");
+  assert.deepEqual(first.sources[0].freshness.coverage.confirmed_range, {
+    from: "2020-01-01T00:00:00.000Z",
+    through: "2026-09-09T00:00:00.000Z",
+  });
+  assert.deepEqual(first.sources[0].freshness.coverage.counts, {
+    seen: 2,
+    accepted: 2,
+    refused: 0,
+    failed: 0,
+  });
+
+  const secondResponse = await call(env, post({ limit: 1, cursor: first.cursor }, { "X-Admin-Key": "test-admin-key" }));
+  const second = await secondResponse.json();
+  assert.equal(secondResponse.status, 200, JSON.stringify(second));
+  assert.equal(second.sources[0].source_id, "beta");
+  assert.equal(second.sources[0].receipt.logical_matches_reported, false);
+  assert.equal(second.sources[0].provenance.status, "partial");
+  assert.deepEqual(second.sources[0].provenance.missing_subfields, ["derivation_lineage"]);
+  assert.equal(second.sources[0].freshness.state, "broken");
+  assert.deepEqual(second.sources[0].last_failure, SAFE_GMAIL_FAILURE);
+  assert.doesNotMatch(
+    JSON.stringify({ first, second }),
+    /secret-account|private provider failure|private-cursor|private-root|secret scope label/i,
+  );
+  assert.equal(second.snapshot.id, first.snapshot.id);
+  assert.equal(second.as_of, first.as_of);
+
+  const thirdResponse = await call(env, post({ limit: 1, cursor: second.cursor }, { "X-Admin-Key": "test-admin-key" }));
+  const third = await thirdResponse.json();
+  assert.equal(thirdResponse.status, 200, JSON.stringify(third));
+  assert.equal(third.sources[0].source_id, "orphan");
+  assert.equal(third.sources[0].registered, false);
+  assert.equal(third.sources[0].receipt, null);
+  assert.equal(third.sources[0].connector.provider, null);
+  assert.equal(third.sources[0].configuration.status, "unavailable");
+  assert.equal(third.sources[0].freshness.state, "unregistered");
+  assert.equal(third.sources[0].last_failure, null);
+  assert.equal(third.truncated, false);
+  assert.equal(third.cursor, null);
+  assert.equal(third.complete, true);
+
+  for (const page of [first, second, third]) {
+    assert.equal(page.limitations.entity_year_coverage, "not_available");
+    for (const row of page.sources) {
+      for (const forbidden of ["entity", "entity_slug", "year", "tax_year", "admin_key", "token", "secret", "credential"]) {
+        assert.equal(forbidden in row, false, `source rows must not invent or expose ${forbidden}`);
+      }
+    }
+  }
+
+  assert.equal(db.prepare("SELECT total_changes() AS n").get().n, changesBefore);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM owner_passkeys").get().n, passkeysBefore);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM source_events").get().n, eventsBefore);
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+  assert.ok(seen.prepared.every((sql) => !/^\s*(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b/i.test(sql)));
+});
+
+test("latest run truth keeps bounded ingest success separate from whole-source completeness", async () => {
+  const db = migratedDb("run-truth");
+  const privateSentinel = "SYNTHETIC_PRIVATE_OLD_RUN /private/source/path secret-account@example.invalid";
+  const lastComplete = "2026-09-07T00:01:00.000Z";
+  const latestFinished = "2026-09-09T00:01:00.000Z";
+  const cases = [
+    {
+      source: "bounded_clean", kind: "upload", lane: "manual", walkComplete: 0, refused: 0, failed: 0,
+      outcome: "partial", lastSuccessful: latestFinished, completeThrough: lastComplete,
+      history: "needs_attention",
+    },
+    {
+      source: "refused_gap", kind: "gmail", lane: "sweep", walkComplete: 1, refused: 1, failed: 0,
+      outcome: "partial", lastSuccessful: lastComplete, completeThrough: lastComplete,
+      history: "needs_attention",
+    },
+    {
+      source: "failed_gap", kind: "drive", lane: "sweep", walkComplete: 1, refused: 0, failed: 1,
+      outcome: "partial", lastSuccessful: lastComplete, completeThrough: lastComplete,
+      history: "needs_attention",
+    },
+    {
+      source: "incremental_clean", kind: "drive", lane: "incremental", walkComplete: 1, refused: 0, failed: 0,
+      outcome: "completed", lastSuccessful: latestFinished, completeThrough: lastComplete,
+      history: "complete",
+    },
+    {
+      source: "full_clean", kind: "drive", lane: "sweep", walkComplete: 1, refused: 0, failed: 0,
+      outcome: "completed", lastSuccessful: latestFinished, completeThrough: latestFinished,
+      history: "complete", confirmedFrom: "2020-01-01T00:00:00.000Z", confirmedThrough: latestFinished,
+    },
+  ];
+  const insertSource = db.prepare(
+    `INSERT INTO sources
+       (name,kind,status,created_at,last_ingest_at,document_count,last_complete_sweep_at)
+     VALUES (?,?,'ready','2026-09-01T00:00:00.000Z',?,0,?)`,
+  );
+  const insertRun = db.prepare(
+    `INSERT INTO sync_runs
+       (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
+        docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+        confirmed_from,confirmed_through,error)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+
+  for (const shape of cases) {
+    insertSource.run(shape.source, shape.kind, latestFinished, shape.completeThrough);
+    insertRun.run(
+      `${shape.source}-private-old-failure`, shape.source, "sweep",
+      Date.parse("2026-09-06T00:00:00.000Z"), Date.parse("2026-09-06T00:01:00.000Z"),
+      0, 0, 0, 0, 0, 0, 0, 1, null, null, privateSentinel,
+    );
+    insertRun.run(
+      `${shape.source}-clean`, shape.source, "sweep",
+      Date.parse("2026-09-07T00:00:00.000Z"), Date.parse(lastComplete),
+      1, 2, 1, 0, 1, 0, 0, 1,
+      "2020-01-01T00:00:00.000Z", lastComplete, null,
+    );
+    insertRun.run(
+      `${shape.source}-latest`, shape.source, shape.lane,
+      Date.parse("2026-09-09T00:00:00.000Z"), Date.parse(latestFinished),
+      shape.walkComplete, 3, 1, 0, 1, shape.refused, shape.failed, 1,
+      shape.confirmedFrom || null, shape.confirmedThrough || null, null,
+    );
+  }
+
+  const { env, seen } = d1Env(db, "run-truth");
+  const changesBefore = db.prepare("SELECT total_changes() AS n").get().n;
+  const response = await call(env, post({ limit: 10 }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(response.status, 200, await response.clone().text());
+  const inventory = await response.json();
+  assert.deepEqual(
+    inventory.sources.map((source) => source.source_id),
+    ["bounded_clean", "failed_gap", "full_clean", "incremental_clean", "refused_gap"],
+  );
+
+  for (const shape of cases) {
+    const source = inventory.sources.find((candidate) => candidate.source_id === shape.source);
+    assert.equal(source.receipt.latest_run.outcome, shape.outcome, shape.source);
+    assert.equal(source.receipt.last_successful_run_at, shape.lastSuccessful, shape.source);
+    assert.equal(source.receipt.complete_history_through, shape.completeThrough, shape.source);
+    assert.equal(source.freshness.coverage.history.state, shape.history, shape.source);
+    assert.deepEqual(source.freshness.coverage.confirmed_range, {
+      from: shape.confirmedFrom || null,
+      through: shape.confirmedThrough || null,
+    }, shape.source);
+    assert.equal(source.receipt.latest_run.docs_refused, shape.refused, shape.source);
+    assert.equal(source.receipt.latest_run.docs_failed, shape.failed, shape.source);
+  }
+  assert.equal(
+    inventory.sources.find((source) => source.source_id === "bounded_clean")
+      .freshness.coverage.counts.seen,
+    null,
+    "a bounded successful ingest must not expose its counters as a measured whole-source walk",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(inventory),
+    /SYNTHETIC_PRIVATE_OLD_RUN|private\/source\/path|secret-account/i,
+  );
+  assert.equal(db.prepare("SELECT total_changes() AS n").get().n, changesBefore);
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+});
+
+test("source inventory suppresses stored Gmail failure evidence that fails the closed privacy contract", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const privateSentinel = "SYNTHETIC_PRIVATE_PROVIDER_MESSAGE /private/message-id cursor-value secret";
+  db.prepare("UPDATE sync_runs SET failure_evidence=? WHERE source='beta'").run(JSON.stringify({
+    ...SAFE_GMAIL_FAILURE,
+    provider_message: privateSentinel,
+  }));
+  const { env } = d1Env(db);
+  const response = await call(env, post({ limit: 10 }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(response.status, 200, await response.clone().text());
+  const inventory = await response.json();
+  const beta = inventory.sources.find((source) => source.source_id === "beta");
+  assert.equal(beta.last_failure, null);
+  assert.doesNotMatch(JSON.stringify(inventory), /SYNTHETIC_PRIVATE_PROVIDER_MESSAGE|message-id|cursor-value|secret/i);
+});
+
+test("source inventory reads schema 39 with unknown failure evidence and rethrows non-schema failures", async () => {
+  const db = migratedDb("schema39", { throughMigration: 39 });
+  await addInventoryFixture(db, "", { includeFailureEvidence: false });
+  const { env, seen } = d1Env(db, "schema39");
+  const response = await call(env, post({ limit: 10 }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(response.status, 200, await response.clone().text());
+  const inventory = await response.json();
+  assert.equal(inventory.contract_version, 3);
+  const beta = inventory.sources.find((source) => source.source_id === "beta");
+  assert.equal(beta.last_failure, null);
+  assert.equal(beta.receipt.latest_run.metrics_version, 1);
+  assert.equal(beta.receipt.latest_run.docs_failed, 1);
+  assert.ok(seen.prepared.some((sql) => /NULL AS failure_evidence/.test(sql)));
+  assert.doesNotMatch(JSON.stringify(inventory), /private provider failure|secret-account/i);
+
+  let attempts = 0;
+  await assert.rejects(
+    sourceInventory({
+      DB: {
+        prepare() {
+          attempts++;
+          throw new Error("D1 transport timeout");
+        },
+      },
+    }),
+    /D1 transport timeout/,
+  );
+  assert.equal(attempts, 1, "non-schema failures must not enter the compatibility retry");
+});
+
+test("source recovery preview is exhaustive through stable opaque pages and performs no repair", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const { env, seen } = d1Env(db);
+  const changesBefore = db.prepare("SELECT total_changes() AS n").get().n;
+
+  const pages = [];
+  let cursor = null;
+  do {
+    const response = await call(env, post({
+      mode: "recovery",
+      limit: 1,
+      ...(cursor ? { cursor } : {}),
+    }, { "X-Admin-Key": "test-admin-key" }));
+    assert.equal(response.status, 200, await response.clone().text());
+    const page = await response.json();
+    pages.push(page);
+    cursor = page.cursor;
+  } while (cursor);
+
+  assert.equal(pages.length, 3);
+  assert.ok(pages.every((page) => page.total === 3));
+  assert.ok(pages.every((page) => page.returned === 1));
+  assert.ok(pages.slice(0, -1).every((page) => page.truncated && !page.complete));
+  assert.equal(pages.at(-1).truncated, false);
+  assert.equal(pages.at(-1).complete, true);
+  assert.equal(pages.at(-1).cursor, null);
+  assert.ok(pages.every((page) => page.snapshot.id === pages[0].snapshot.id));
+  assert.ok(pages.every((page) => page.as_of === pages[0].as_of));
+  assert.ok(pages.every((page) => page.recovery_plan_summary.candidate_documents === 3));
+  assert.ok(pages.every((page) => page.recovery_plan_summary.candidate_pages_at_requested_size === 3));
+  assert.ok(pages.every((page) => page.recovery_plan_summary.source_groups.length === 3));
+  assert.ok(pages.every((page) => page.recovery_plan_summary.source_groups_truncated === false));
+  assert.deepEqual(
+    pages[0].recovery_plan_summary.source_groups.map((group) => group.source_id),
+    ["alpha", "beta", "orphan"],
+  );
+
+  const candidates = pages.flatMap((page) => page.candidates);
+  assert.deepEqual(candidates.map((candidate) => candidate.source_id), ["alpha", "beta", "orphan"]);
+  assert.ok(candidates.every((candidate) => /^hmac-sha256:[a-f0-9]{64}$/.test(candidate.record_id)));
+  assert.ok(candidates.every((candidate) => candidate.locator.value === candidate.record_id));
+  assert.ok(candidates.every((candidate) => candidate.locator.reversible === false));
+  assert.equal(candidates[0].text.content_state, "empty");
+  assert.equal(candidates[0].text.extraction_method, "ocr_partial");
+  assert.equal(candidates[0].ocr.retry_candidate, true);
+  assert.equal(candidates[0].ocr.partial_review, true);
+  assert.deepEqual(candidates[0].provenance.missing_subfields, []);
+  assert.deepEqual(candidates[1].provenance.missing_subfields, ["derivation_lineage"]);
+  assert.deepEqual(candidates[2].provenance.missing_subfields, [
+    "validated_provenance_receipt",
+    "source_record_id",
+    "extraction_method",
+    "text_reliability",
+    "derivation_lineage",
+  ]);
+  assert.deepEqual(candidates[2].reasons, [
+    "provenance_receipt_unassessed",
+    "extraction_method_missing",
+    "text_reliability_missing",
+    "source_record_id_missing",
+    "derivation_lineage_missing",
+  ]);
+  assert.equal(candidates[1].plan.mode, "preview_only");
+
+  const filteredResponse = await call(env, post({
+    mode: "recovery",
+    source: "alpha",
+    limit: 10,
+  }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(filteredResponse.status, 200, await filteredResponse.clone().text());
+  const filtered = await filteredResponse.json();
+  assert.equal(filtered.source_filter, "alpha");
+  assert.equal(filtered.total, 1);
+  assert.deepEqual(filtered.candidates.map((candidate) => candidate.source_id), ["alpha"]);
+
+  const serialized = JSON.stringify({ pages, filtered });
+  assert.doesNotMatch(
+    serialized,
+    /Invented alpha|Invented beta|Invented orphan|alpha:two|private-cursor|private-root|secret-account|private provider failure/i,
+  );
+  for (const forbidden of ["title", "uri", "doc_uid", "raw_source_id", "provider_record_id"]) {
+    assert.equal(serialized.includes(`\"${forbidden}\"`), false, `${forbidden} must not cross the recovery boundary`);
+  }
+
+  assert.equal(db.prepare("SELECT total_changes() AS n").get().n, changesBefore);
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+});
+
+test("source inventory refuses mixed snapshots and owner selection", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const { env } = d1Env(db);
+  const first = await (await call(env, post({ limit: 1 }, { "X-Admin-Key": "test-admin-key" }))).json();
+
+  const oldContractResponse = await call(env, post({
+    limit: 1,
+    cursor: cursorWithVersion(first.cursor, 2),
+  }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(oldContractResponse.status, 400);
+  assert.match(await oldContractResponse.text(), /cursor is not valid/);
+
+  db.prepare(
+    `INSERT INTO sources (name,kind,status,created_at,document_count)
+     VALUES ('gamma','upload','pending','2026-09-10T00:00:00.000Z',0)`,
+  ).run();
+  const changedResponse = await call(env, post({ limit: 1, cursor: first.cursor }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(changedResponse.status, 409);
+  assert.equal((await changedResponse.json()).code, "source_inventory_changed");
+
+  const recoveryFirst = await (await call(env, post({
+    mode: "recovery",
+    limit: 1,
+  }, { "X-Admin-Key": "test-admin-key" }))).json();
+  db.prepare(
+    `UPDATE documents
+        SET text_source=CASE doc_uid
+          WHEN 'alpha:two' THEN 'ocr'
+          WHEN 'beta:one' THEN 'ocr_partial'
+          ELSE text_source
+        END
+      WHERE doc_uid IN ('alpha:two','beta:one')`,
+  ).run();
+  const changedRecovery = await call(env, post({
+    mode: "recovery",
+    limit: 1,
+    cursor: recoveryFirst.cursor,
+  }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(changedRecovery.status, 409);
+  assert.equal((await changedRecovery.json()).code, "source_inventory_changed");
+
+  const ownerSelector = await call(env, post({ owner_id: "somebody-else" }, { "X-Admin-Key": "test-admin-key" }));
+  assert.equal(ownerSelector.status, 400, "the caller cannot select another owner or database");
+  assert.doesNotMatch(await ownerSelector.text(), /alpha|beta|orphan|gamma/);
+
+  const otherDb = migratedDb("other-owner");
+  otherDb.prepare(
+    `INSERT INTO sources (name,kind,status,created_at,document_count)
+     VALUES ('zeta','upload','pending','2026-09-10T00:00:00.000Z',0)`,
+  ).run();
+  const { env: otherEnv } = d1Env(otherDb, "other-owner");
+  const other = await (await call(otherEnv, post({}, { "X-Admin-Key": "test-admin-key" }))).json();
+  assert.deepEqual(other.sources.map((row) => row.source_id), ["zeta"]);
+  assert.doesNotMatch(JSON.stringify(other), /alpha|beta|orphan|gamma/);
+});
+
+/**
+ * Replace the store boundary with one that refuses the source statements.
+ *
+ * Only the two whole-corpus statements fail; the marker read and every other
+ * prepare still works, so the route reaches the same catch it reaches in the
+ * field instead of failing earlier for an unrelated reason.
+ */
+function refusingEnv(db, error) {
+  const { env } = d1Env(db);
+  const prepare = env.DB.prepare.bind(env.DB);
+  env.DB = {
+    prepare(sql) {
+      if (/WITH live_documents/.test(sql)) throw error;
+      return prepare(sql);
+    },
+    async batch() { throw new Error("source inventory must never execute a write batch"); },
+  };
+  return env;
+}
+
+/** Collect the route's own warnings instead of letting them reach the runner. */
+async function withCapturedWarnings(run) {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try { return { value: await run(), warnings }; } finally { console.warn = original; }
+}
+
+test("a refused inventory names its cause without carrying the statement or the corpus", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const failure = new RangeError(
+    "D1_ERROR: query exceeded the memory limit while reading 'SELECT d.meta FROM documents'"
+    + " for \"SYNTHETIC_PRIVATE_DOCUMENT secret-account@example.invalid\"\nstack frame omitted",
+  );
+  failure.code = "d1_resource_exhausted";
+
+  const { value: [inventory, recovery], warnings } = await withCapturedWarnings(async () => {
+    const env = refusingEnv(db, failure);
+    return [
+      await call(env, post({ limit: 1 }, { "X-Admin-Key": "test-admin-key" })),
+      await call(env, post({ mode: "recovery", limit: 1 }, { "X-Admin-Key": "test-admin-key" })),
+    ];
+  });
+
+  assert.equal(inventory.status, 503);
+  const inventoryBody = await inventory.json();
+  assert.equal(inventoryBody.code, "source_inventory_unavailable");
+  assert.equal(inventoryBody.detail.error_class, "RangeError");
+  assert.equal(inventoryBody.detail.failure_code, "d1_resource_exhausted");
+  assert.equal(inventoryBody.detail.redacted, true);
+  assert.match(inventoryBody.detail.reason, /query exceeded the memory limit/);
+  assert.ok(inventoryBody.detail.reason.length <= 160);
+
+  assert.equal(recovery.status, 503);
+  const recoveryBody = await recovery.json();
+  assert.equal(recoveryBody.code, "source_inventory_unavailable");
+  assert.equal(recoveryBody.detail.error_class, "RangeError");
+
+  const serialized = JSON.stringify({ inventoryBody, recoveryBody });
+  for (const forbidden of [
+    "SELECT", "documents", "d.meta", "SYNTHETIC_PRIVATE_DOCUMENT", "secret-account", "stack frame",
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, `the detail must not carry ${forbidden}`);
+  }
+  assert.equal(warnings.length, 2, "each refusal is recorded once for the owner's logs");
+  for (const warning of warnings) {
+    assert.match(warning, /^\[source-inventory\] .* refused: RangeError \(d1_resource_exhausted\): /);
+    assert.doesNotMatch(warning, /SELECT|SYNTHETIC_PRIVATE_DOCUMENT|secret-account/);
+  }
+});
+
+test("the too-large and changed refusals keep their codes while gaining a detail", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+
+  const oversized = new Error("source inventory exceeds the safe row limit");
+  oversized.code = "source_inventory_too_large";
+  const { value: tooLarge } = await withCapturedWarnings(
+    () => call(refusingEnv(db, oversized), post({}, { "X-Admin-Key": "test-admin-key" })),
+  );
+  assert.equal(tooLarge.status, 503);
+  const tooLargeBody = await tooLarge.json();
+  assert.equal(tooLargeBody.code, "source_inventory_too_large");
+  assert.equal(tooLargeBody.detail.failure_code, "source_inventory_too_large");
+
+  const changed = new Error("source recovery inventory changed during the read");
+  changed.code = "source_recovery_changed";
+  const { value: changedResponse } = await withCapturedWarnings(
+    () => call(refusingEnv(db, changed), post({
+      mode: "recovery",
+      limit: 1,
+    }, { "X-Admin-Key": "test-admin-key" })),
+  );
+  assert.equal(changedResponse.status, 409);
+  const changedBody = await changedResponse.json();
+  assert.equal(changedBody.code, "source_inventory_changed");
+  assert.equal(changedBody.detail.failure_code, "source_recovery_changed");
+
+  const { value: anonymous } = await withCapturedWarnings(
+    () => call(refusingEnv(db, oversized), post()),
+  );
+  assert.equal(anonymous.status, 401, "a refused statement never reaches an unauthorized caller");
+  assert.equal("detail" in await anonymous.json(), false);
+});
+
+test("an unnamed store failure still returns a usable, bounded detail", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const failure = new Error(`${"private-".repeat(60)}detail`);
+  failure.name = "not a valid class";
+  failure.code = "NOT_A_VALID_CODE";
+  const { value: response } = await withCapturedWarnings(
+    () => call(refusingEnv(db, failure), post({}, { "X-Admin-Key": "test-admin-key" })),
+  );
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.equal(body.detail.error_class, "Error", "an unusable class falls back to the generic one");
+  assert.equal(body.detail.failure_code, null, "an unusable code is dropped rather than echoed");
+  assert.equal(body.detail.reason.length, 160, "the reason is truncated, not omitted");
+
+  const empty = new Error("");
+  const { value: emptyResponse } = await withCapturedWarnings(
+    () => call(refusingEnv(db, empty), post({}, { "X-Admin-Key": "test-admin-key" })),
+  );
+  assert.equal((await emptyResponse.json()).detail.reason, null);
+});

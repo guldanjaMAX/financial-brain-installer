@@ -93,7 +93,7 @@ function d1Binding(sqlite, seen, control) {
         const results = statements.map((statement) => {
           seen.sql.push(statement.sql); seen.binds.push(statement.params || []);
           if (shouldFail(control, statement.sql)) throw new Error("fixture database unavailable");
-          const readOnly = /^\s*(SELECT|PRAGMA)\b/i.test(statement.sql) ||
+          const readOnly = /\bRETURNING\b/i.test(statement.sql) || /^\s*(SELECT|PRAGMA)\b/i.test(statement.sql) ||
             (/^\s*WITH\b/i.test(statement.sql) && !/\b(INSERT|UPDATE|DELETE)\b/i.test(statement.sql));
           return execute(sqlite, statement.sql, statement.params || [], readOnly ? "all" : "run");
         });
@@ -123,6 +123,12 @@ export async function createProductFixture(options = {}) {
        (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
      VALUES (1, 'fixture', '0.0.0-test', ?, 0, '2026-08-29T00:00:00Z', 'test')`,
   ).run(schemaVersion);
+  if (schemaVersion >= 41) {
+    sqlite.prepare(
+      `INSERT OR IGNORE INTO owner_financial_map_key_state (tenant_id, signing_salt)
+       VALUES ('primary', lower(hex(randomblob(32))))`,
+    ).run();
+  }
 
   const seen = { sql: [], binds: [], vectorQueries: [], vectorDeletes: [] };
   const control = {

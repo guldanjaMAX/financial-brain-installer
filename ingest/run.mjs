@@ -30,12 +30,18 @@ import { extract, canExtract, extensionOf, isBinaryFormat } from "./extract.mjs"
 import {
   MAX_DOC_CHARS, batches, envelopeBytes, estimatedStatements, splitOversized,
 } from "./envelope-batching.mjs";
-// Side-effect import: registers pdf/docx/xlsx/pptx/eml and pulls in their
-// dependencies. Importing it here rather than in extract.mjs keeps the core
-// registry honestly dependency-free.
-import "./formats.mjs";
+// This import registers pdf/docx/xlsx/pptx/eml and pulls in their dependencies.
+// Importing it here rather than in extract.mjs keeps the core registry honestly
+// dependency-free. The named PDF import is also the structured, content-free
+// observation path used by the read-only local-source assessor below.
+import { extractPdf, parseEmailMessage } from "./formats.mjs";
 import { textQuality, isLikelyBinary, utf16Encoding } from "./quality.mjs";
 import { documentDate } from "./doc-date.mjs";
+import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
+import {
+  normalizeSourceOriginalReceipt,
+  SOURCE_ORIGINAL_BINDING_CONTRACT_VERSION,
+} from "../worker/src/lib/source-original-binding.js";
 import { detectWhatsAppExport, parseWhatsAppExport, deriveThreadTitle } from "./whatsapp-export.mjs";
 import {
   detectSmsBackupXml, parseSmsBackupXml,
@@ -48,10 +54,6 @@ import {
 import { parseLinkedInArchive } from "./linkedin-export.mjs";
 import { MessageSessionizer } from "./message-session.mjs";
 import { MboxStreamSplitter, mboxMessageKey } from "./mbox.mjs";
-// The one mail reader. Imported by name rather than reached through the
-// registry because an archive's messages need their own subjects and dates,
-// and a second parser beside the first is how the two start disagreeing.
-import { parseEmailMessage } from "./formats.mjs";
 
 // Preserve the original ingest/run.mjs API while letting migration-only code
 // import the dependency-free boundary directly.
@@ -88,6 +90,49 @@ export const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 /** One malformed or attachment-heavy email cannot own the whole process. */
 export const MAX_MBOX_MESSAGE_BYTES = MAX_FILE_BYTES;
 
+/** Retrospective assessment is intentionally a tiny, read-only sample. */
+export const MAX_LOCAL_ASSESSMENT_ORIGINALS = 10;
+
+// Kept non-enumerable on walk skips so ordinary ingest reporting never gains a
+// raw path, while the read-only assessor can still re-open an empty file using
+// the same descriptor identity fence as every non-empty original.
+const LOCAL_ASSESSMENT_HANDLE = Symbol("localAssessmentHandle");
+
+/** The complete public state vocabulary for one directly observed original. */
+export const ORIGINAL_EXTRACTION_STATES = Object.freeze([
+  "native_readable",
+  "ocr_reliable",
+  "ocr_partial",
+  "scan_only_ocr_needed",
+  "empty",
+  "password_protected",
+  "unsupported",
+  "extraction_failed",
+  "unavailable",
+]);
+
+const ORIGINAL_EXTRACTION_STATE_SET = new Set(ORIGINAL_EXTRACTION_STATES);
+
+/** Closed reason vocabulary shared with source_original_observations. */
+export const ORIGINAL_REASON_CODE_BY_STATE = Object.freeze({
+  native_readable: "provenance_unassessed",
+  ocr_reliable: "provenance_unassessed",
+  ocr_partial: "ocr_partial_review",
+  scan_only_ocr_needed: "scan_only_ocr_needed",
+  empty: "empty_original",
+  password_protected: "password_protected",
+  unsupported: "unsupported_format",
+  extraction_failed: "extraction_failed",
+  unavailable: "original_unavailable",
+});
+
+const ORIGINAL_ALLOWED_REASON_CODES_BY_STATE = Object.freeze({
+  ...Object.fromEntries(Object.entries(ORIGINAL_REASON_CODE_BY_STATE)
+    .map(([state, reason]) => [state, new Set([reason])])),
+  unsupported: new Set(["unsupported_format", "source_policy_excluded"]),
+  unavailable: new Set(["original_unavailable", "source_policy_excluded"]),
+});
+
 /** Buffered multi-document containers that still get the hard archive ceiling. */
 const BUFFERED_ARCHIVE_EXTENSIONS = new Set([".zip"]);
 
@@ -112,6 +157,11 @@ const localFileFail = (code, message) => {
 
 const nativeRealpath = realpathSync.native || realpathSync;
 
+// On Windows the JavaScript resolver preserves a legitimate 8.3 spelling but
+// still resolves linked ancestors. Native realpath remains the canonical
+// identity resolver after this direct-path check.
+const directRealpath = process.platform === "win32" ? realpathSync : nativeRealpath;
+
 const comparablePath = (value) => {
   const normalized = resolve(String(value));
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -126,7 +176,17 @@ function regularFileSnapshot(st) {
   return {
     dev: String(st.dev),
     ino: String(st.ino),
+    nlink: String(st.nlink),
     size: String(st.size),
+    mtimeNs: String(st.mtimeNs ?? BigInt(Math.trunc(Number(st.mtimeMs) * 1e6))),
+    ctimeNs: String(st.ctimeNs ?? BigInt(Math.trunc(Number(st.ctimeMs) * 1e6))),
+  };
+}
+
+function directorySnapshot(st) {
+  return {
+    dev: String(st.dev),
+    ino: String(st.ino),
     mtimeNs: String(st.mtimeNs ?? BigInt(Math.trunc(Number(st.mtimeMs) * 1e6))),
     ctimeNs: String(st.ctimeNs ?? BigInt(Math.trunc(Number(st.ctimeMs) * 1e6))),
   };
@@ -136,6 +196,11 @@ const sameFileIdentity = (left, right) => left.dev === right.dev && left.ino ===
 
 const sameFileVersion = (left, right) =>
   sameFileIdentity(left, right) && left.size === right.size &&
+  left.nlink === right.nlink && left.mtimeNs === right.mtimeNs &&
+  left.ctimeNs === right.ctimeNs;
+
+const sameDirectoryVersion = (left, right) =>
+  left.dev === right.dev && left.ino === right.ino &&
   left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 
 function inspectRegularPath(path) {
@@ -149,6 +214,9 @@ function inspectRegularPath(path) {
     localFileFail("LOCAL_FILE_LINK_REFUSED", "symbolic links and junctions are not ingested");
   }
   if (!st.isFile()) localFileFail("LOCAL_FILE_NOT_REGULAR", "the path is not a regular file");
+  if (st.nlink !== 1n) {
+    localFileFail("LOCAL_FILE_LINK_REFUSED", "files with multiple hard links are not ingested");
+  }
   return regularFileSnapshot(st);
 }
 
@@ -267,6 +335,9 @@ function readApprovedLocalFile(file, { maxBytes }) {
     try {
       const st = fstatSync(fd, { bigint: true });
       if (!st.isFile()) localFileFail("LOCAL_FILE_NOT_REGULAR", "the opened path is not a regular file");
+      if (st.nlink !== 1n) {
+        localFileFail("LOCAL_FILE_LINK_REFUSED", "files with multiple hard links are not ingested");
+      }
       before = regularFileSnapshot(st);
     } catch (error) {
       if (error instanceof LocalFileSafetyError) throw error;
@@ -285,6 +356,9 @@ function readApprovedLocalFile(file, { maxBytes }) {
       after = regularFileSnapshot(fstatSync(fd, { bigint: true }));
     } catch (error) {
       localFileFail("LOCAL_FILE_METADATA_UNAVAILABLE", `opened-file metadata could not be rechecked: ${error.code || "unavailable"}`);
+    }
+    if (after.nlink !== "1") {
+      localFileFail("LOCAL_FILE_LINK_REFUSED", "the file gained another hard link while it was being read");
     }
     if (!sameFileVersion(before, after) || BigInt(after.size) !== BigInt(bytes.length)) {
       localFileFail("LOCAL_FILE_CHANGED_DURING_READ", "the file changed while it was being read; retry the ingest");
@@ -337,6 +411,9 @@ function* streamApprovedLocalFile(file) {
     try {
       const st = fstatSync(fd, { bigint: true });
       if (!st.isFile()) localFileFail("LOCAL_FILE_NOT_REGULAR", "the opened path is not a regular file");
+      if (st.nlink !== 1n) {
+        localFileFail("LOCAL_FILE_LINK_REFUSED", "files with multiple hard links are not ingested");
+      }
       before = regularFileSnapshot(st);
     } catch (error) {
       if (error instanceof LocalFileSafetyError) throw error;
@@ -372,6 +449,9 @@ function* streamApprovedLocalFile(file) {
     } catch (error) {
       localFileFail("LOCAL_FILE_METADATA_UNAVAILABLE", `opened-file metadata could not be rechecked: ${error.code || "unavailable"}`);
     }
+    if (after.nlink !== "1") {
+      localFileFail("LOCAL_FILE_LINK_REFUSED", "the file gained another hard link while it was being read");
+    }
     if (!sameFileVersion(before, after) || BigInt(after.size) !== BigInt(total)) {
       localFileFail("LOCAL_FILE_CHANGED_DURING_READ", "the file changed while it was being read; retry the ingest");
     }
@@ -395,6 +475,10 @@ const localFileSafetyReason = (error) => error instanceof LocalFileSafetyError
   ? error.message
   : `could not safely inspect the local file: ${error?.code || "unavailable"}`;
 
+const localFileSafetyCode = (error) => error instanceof LocalFileSafetyError
+  ? String(error.code || "LOCAL_FILE_UNAVAILABLE").toLowerCase()
+  : "local_file_unavailable";
+
 export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, archiveBytes = MAX_ARCHIVE_BYTES } = {}) {
   const files = [];
   const skipped = [];
@@ -407,7 +491,12 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
   } catch (error) {
     return {
       files,
-      skipped: [{ path: root, reason: localFileSafetyReason(error) }],
+      skipped: [{
+        path: root,
+        reason: localFileSafetyReason(error),
+        reason_code: localFileSafetyCode(error),
+        scope: "root",
+      }],
       complete: false,
     };
   }
@@ -422,7 +511,12 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
     } catch (e) {
       // A directory that cannot be listed is reported, never swallowed: a
       // permission error that silently truncates the walk looks like success.
-      skipped.push({ path: dir, reason: `directory could not be read: ${e.code || e.message}` });
+      skipped.push({
+        path: dir,
+        reason: `directory could not be read: ${e.code || e.message}`,
+        reason_code: "directory_read_failed",
+        scope: "directory",
+      });
       complete = false;
       return;
     }
@@ -449,13 +543,24 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
           path: rel,
           reason: "symbolic links and junctions are not ingested",
           subtree: true,
+          coverage_gap: false,
+          adjudication: "preserve_external_subtree",
+          reason_code: "local_file_link_refused",
+          scope: "subtree",
         });
         continue;
       }
       if (e.isDirectory()) {
         if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
         if (isPrivate(rel)) {
-          skipped.push({ path: rel, reason: "matched a private path prefix from the manifest" });
+          skipped.push({
+            path: rel,
+            reason: "matched a private path prefix from the manifest",
+            coverage_gap: false,
+            adjudication: "source_policy",
+            reason_code: "source_policy_excluded",
+            scope: "subtree",
+          });
           continue;
         }
         visit(full);
@@ -470,14 +575,27 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
       if (e.name.startsWith("._")) continue;
       if (JUNK_FILES.has(e.name.toLowerCase())) continue;
       if (isPrivate(rel)) {
-        skipped.push({ path: rel, reason: "matched a private path prefix from the manifest" });
+        skipped.push({
+          path: rel,
+          reason: "matched a private path prefix from the manifest",
+          coverage_gap: false,
+          adjudication: "source_policy",
+          reason_code: "source_policy_excluded",
+          scope: "file",
+        });
         continue;
       }
       let approval;
       try {
         approval = approveWalkedFile(full, rootApproval);
       } catch (error) {
-        skipped.push({ path: rel, reason: localFileSafetyReason(error) });
+        skipped.push({
+          path: rel,
+          reason: localFileSafetyReason(error),
+          reason_code: localFileSafetyCode(error),
+          scope: "file",
+          original_state: "unavailable",
+        });
         // Any identity or containment failure means the walk did not establish
         // a complete deletion boundary, so no ingest or removal may run.
         complete = false;
@@ -485,14 +603,49 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
       }
       const size = Number(approval.identity.size);
       if (!Number.isSafeInteger(size) || size < 0) {
-        skipped.push({ path: rel, reason: "file size could not be represented safely" });
+        skipped.push({
+          path: rel,
+          reason: "file size could not be represented safely",
+          reason_code: "local_file_size_unrepresentable",
+          scope: "file",
+          original_state: "unavailable",
+        });
         complete = false;
         continue;
       }
-      if (size === 0) { skipped.push({ path: rel, reason: "file is empty" }); continue; }
+      if (size === 0) {
+        const emptySkip = {
+          path: rel,
+          reason: "file is empty",
+          coverage_gap: false,
+          adjudication: "empty_content",
+          reason_code: "empty_file",
+          scope: "file",
+          original_state: "empty",
+        };
+        Object.defineProperty(emptySkip, LOCAL_ASSESSMENT_HANDLE, {
+          enumerable: false,
+          value: {
+            full,
+            rel,
+            name: e.name,
+            size,
+            sizeLimit: fileSizeLimitFor(e.name, maxBytes, archiveBytes),
+            _localApproval: approval,
+          },
+        });
+        skipped.push(emptySkip);
+        continue;
+      }
       const sizeLimit = fileSizeLimitFor(e.name, maxBytes, archiveBytes);
       if (size > sizeLimit) {
-        skipped.push({ path: rel, reason: `file is ${(size / 1048576).toFixed(1)}MB, over the ${(sizeLimit / 1048576).toFixed(0)}MB limit` });
+        skipped.push({
+          path: rel,
+          reason: `file is ${(size / 1048576).toFixed(1)}MB, over the ${(sizeLimit / 1048576).toFixed(0)}MB limit`,
+          reason_code: "local_file_too_large",
+          scope: "file",
+          original_state: "unavailable",
+        });
         continue;
       }
       files.push({
@@ -510,11 +663,578 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 
+/** Private raw-byte evidence attached only to one-original document families. */
+export const SOURCE_ORIGINAL_RECEIPT_VERSION = SOURCE_ORIGINAL_BINDING_CONTRACT_VERSION;
+
+function sourceOriginalReceipt(file, contentSha256, byteCount) {
+  // `source_id` carries the locator for an unsplit local document and
+  // splitOversized records the same value as `metadata.part_of` for every
+  // structural part. Do not duplicate that private path inside the receipt.
+  canonicalLocalAssessmentLocator(String(file?.rel || "").split(sep).join("/"));
+  return normalizeSourceOriginalReceipt({
+    version: SOURCE_ORIGINAL_RECEIPT_VERSION,
+    locator_kind: "source_relative_path",
+    original_content_sha256: contentSha256,
+    original_byte_count: byteCount,
+  });
+}
+
 /** Same decode the core plain-text extractor uses: real encoding, BOM stripped. */
 function decodeText(buf) {
   const enc = utf16Encoding(buf) || "utf-8";
   const text = new TextDecoder(enc, { fatal: false }).decode(buf);
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+const safeObservationFormat = (value) => {
+  const normalized = String(value || "").toLowerCase().replace(/^\./, "");
+  return /^[a-z0-9][a-z0-9+_-]{0,31}$/.test(normalized) ? normalized : "unknown";
+};
+
+const safeObservationReason = (value, fallback = null) => {
+  const normalized = String(value || "").toLowerCase();
+  return /^[a-z0-9][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
+};
+
+function contentFreeOriginalObservation(state, {
+  format = "unknown",
+  reasonCode = null,
+  textReliable = null,
+  extractionComplete = null,
+  pageCount = null,
+  pageCountAuthoritative = false,
+  multiRecord = false,
+  contentSha256 = null,
+  byteCount = null,
+} = {}) {
+  const requestedState = ORIGINAL_EXTRACTION_STATE_SET.has(state) ? state : "extraction_failed";
+  // A producer must positively assert OCR reliability. This central guard also
+  // protects callers that supply an older structured observation directly.
+  const safeState = requestedState === "ocr_reliable" && textReliable !== true
+    ? "ocr_partial"
+    : requestedState;
+  const normalizedFormat = safeObservationFormat(format);
+  const expectedReason = ORIGINAL_REASON_CODE_BY_STATE[safeState];
+  // Format extractors may carry a narrower internal detail code, but only the
+  // storage contract's closed reason vocabulary may leave this boundary.
+  const suppliedReason = safeObservationReason(reasonCode);
+  const safeReason = ORIGINAL_ALLOWED_REASON_CODES_BY_STATE[safeState].has(suppliedReason)
+    ? suppliedReason
+    : expectedReason;
+  const observedPdfPages = normalizedFormat === "pdf" &&
+    Number.isInteger(pageCount) && pageCount >= 1 && pageCount <= 10_000 &&
+    pageCountAuthoritative === true;
+  const hasContentReceipt = safeState !== "unavailable" &&
+    /^[a-f0-9]{64}$/.test(String(contentSha256 || "")) &&
+    Number.isSafeInteger(byteCount) && byteCount >= 0;
+  return Object.freeze({
+    state: safeState,
+    format: normalizedFormat,
+    reason_code: safeReason,
+    ...(typeof textReliable === "boolean" ? { text_reliable: textReliable } : {}),
+    ...(typeof extractionComplete === "boolean"
+      ? { extraction_complete: safeState === "ocr_partial" ? false : extractionComplete }
+      : {}),
+    page_count_state: normalizedFormat === "pdf"
+      ? observedPdfPages ? "authoritative" : "unavailable"
+      : "not_applicable",
+    ...(observedPdfPages
+      ? { page_count: pageCount, page_count_authoritative: true }
+      : {}),
+    ...(hasContentReceipt
+      ? { original_content_sha256: contentSha256, original_byte_count: byteCount }
+      : {}),
+    ...(multiRecord === true ? { multi_record: true } : {}),
+  });
+}
+
+function withOriginalContent(observation, buf) {
+  if (!Buffer.isBuffer(buf) && !(buf instanceof Uint8Array)) return observation;
+  return contentFreeOriginalObservation(observation.state, {
+    format: observation.format,
+    reasonCode: observation.reason_code,
+    textReliable: observation.text_reliable,
+    extractionComplete: observation.extraction_complete,
+    pageCount: observation.page_count,
+    pageCountAuthoritative: observation.page_count_authoritative,
+    multiRecord: observation.multi_record,
+    contentSha256: sha(buf),
+    byteCount: buf.byteLength,
+  });
+}
+
+/**
+ * Reduce an extractor result to the finite, content-free original-state
+ * vocabulary. No error prose, filename, path, extracted text, or content hash
+ * crosses this boundary.
+ */
+export function originalObservationFromExtraction(result, { format = "unknown" } = {}) {
+  const structured = result?.observation;
+  if (structured && ORIGINAL_EXTRACTION_STATE_SET.has(structured.state)) {
+    return contentFreeOriginalObservation(structured.state, {
+      format: structured.format || format,
+      reasonCode: structured.reason_code,
+      textReliable: structured.text_reliable,
+      extractionComplete: structured.extraction_complete,
+      pageCount: structured.page_count,
+      pageCountAuthoritative: structured.page_count_authoritative,
+      multiRecord: structured.multi_record,
+      contentSha256: structured.original_content_sha256,
+      byteCount: structured.original_byte_count,
+    });
+  }
+
+  if (result?.unsupported === true) {
+    return contentFreeOriginalObservation("unsupported", {
+      format,
+      reasonCode: "unsupported_format",
+      extractionComplete: false,
+    });
+  }
+  if (result?.provenance?.text_source === "ocr_partial") {
+    return contentFreeOriginalObservation("ocr_partial", {
+      format,
+      reasonCode: "ocr_partial_review",
+      textReliable: result.provenance.text_reliable === true,
+      extractionComplete: false,
+    });
+  }
+  if (result?.provenance?.text_source === "ocr") {
+    const reliable = result.provenance.text_reliable === true;
+    return contentFreeOriginalObservation(reliable ? "ocr_reliable" : "ocr_partial", {
+      format,
+      reasonCode: reliable ? "provenance_unassessed" : "ocr_partial_review",
+      textReliable: reliable,
+      extractionComplete: reliable,
+    });
+  }
+  if (result?.error || result?.text == null) {
+    return contentFreeOriginalObservation("extraction_failed", {
+      format,
+      reasonCode: "extraction_failed",
+      extractionComplete: false,
+    });
+  }
+  if (!String(result.text).trim()) {
+    return contentFreeOriginalObservation("empty", {
+      format,
+      reasonCode: "empty_original",
+      extractionComplete: true,
+    });
+  }
+  return contentFreeOriginalObservation("native_readable", {
+    format,
+    reasonCode: "provenance_unassessed",
+    textReliable: result.incomplete !== true,
+    extractionComplete: result.incomplete !== true,
+  });
+}
+
+function multiRecordKind(name, buf = null) {
+  const ext = extensionOf(name);
+  if (ext === ".mbox") return "mbox_archive";
+  if (ext === ".zip") return "archive_container";
+  if (!buf || isLikelyBinary(buf)) return null;
+
+  let text;
+  try { text = decodeText(buf); } catch { return null; }
+  try {
+    if (ext === ".txt" && detectWhatsAppExport(text)) return "whatsapp_export";
+    if (ext === ".xml" && detectSmsBackupXml(text)) return "sms_export";
+    if ((ext === ".html" || ext === ".htm") && detectGoogleVoiceTakeout(text)) return "voice_export";
+    if (ext === ".json" && detectFacebookMessengerExport(text)) return "messenger_export";
+  } catch {
+    // A failed shape check proves no multi-record identity. The normal extractor
+    // below still reports the exact readable/refused outcome for this original.
+  }
+  return null;
+}
+
+/**
+ * Read one exact walked local original without OCR and return no document data.
+ *
+ * This is intentionally separate from prepare(): prepare may sessionize an
+ * archive into many stored records and returns private paths/content. A
+ * retrospective assessment cannot safely guess which of those records a legacy
+ * candidate represented, so multi-record sources stop here as an ambiguity.
+ */
+export async function observeLocalOriginal(file) {
+  const format = safeObservationFormat(extensionOf(file?.name));
+  if (file?._assessmentObservation) {
+    return contentFreeOriginalObservation(file._assessmentObservation.state, {
+      format: file._assessmentObservation.format || format,
+      reasonCode: file._assessmentObservation.reason_code,
+      textReliable: file._assessmentObservation.text_reliable,
+      extractionComplete: file._assessmentObservation.extraction_complete,
+      pageCount: file._assessmentObservation.page_count,
+      pageCountAuthoritative: file._assessmentObservation.page_count_authoritative,
+      multiRecord: file._assessmentObservation.multi_record,
+      contentSha256: file._assessmentObservation.original_content_sha256,
+      byteCount: file._assessmentObservation.original_byte_count,
+    });
+  }
+
+  const containerKind = multiRecordKind(file?.name);
+  if (containerKind) {
+    return contentFreeOriginalObservation("unsupported", {
+      format,
+      reasonCode: "unsupported_format",
+      extractionComplete: false,
+      multiRecord: true,
+    });
+  }
+  const sizeLimit = Number.isSafeInteger(file?.sizeLimit)
+    ? file.sizeLimit
+    : fileSizeLimitFor(file?.name, MAX_FILE_BYTES, MAX_ARCHIVE_BYTES);
+  let buf;
+  try {
+    buf = readApprovedLocalFile(file, { maxBytes: sizeLimit });
+  } catch {
+    return contentFreeOriginalObservation("unavailable", {
+      format,
+      reasonCode: "original_unavailable",
+      extractionComplete: false,
+    });
+  }
+  if (!buf.length) {
+    return withOriginalContent(contentFreeOriginalObservation("empty", {
+      format,
+      reasonCode: "empty_original",
+      extractionComplete: true,
+    }), buf);
+  }
+
+  const detectedContainer = multiRecordKind(file?.name, buf);
+  if (detectedContainer) {
+    return withOriginalContent(contentFreeOriginalObservation("unsupported", {
+      format,
+      reasonCode: "unsupported_format",
+      extractionComplete: false,
+      multiRecord: true,
+    }), buf);
+  }
+  if (!canExtract(file?.name)) {
+    return withOriginalContent(contentFreeOriginalObservation("unsupported", {
+      format,
+      reasonCode: "unsupported_format",
+      extractionComplete: false,
+    }), buf);
+  }
+  if (!isBinaryFormat(file.name) && isLikelyBinary(buf)) {
+    return withOriginalContent(contentFreeOriginalObservation("extraction_failed", {
+      format,
+      reasonCode: "extraction_failed",
+      extractionComplete: false,
+    }), buf);
+  }
+
+  let result;
+  try {
+    if (extensionOf(file.name) === ".pdf") {
+      result = await extractPdf(buf, {
+        // Deliberately explicit: this assessment is never an OCR execution path.
+        // It is also one raw-byte observation: a cold-file retry could describe
+        // different bytes than the hash below, so assessment never retries.
+        ocr: null,
+      });
+    } else {
+      result = await extract(buf, file.name);
+    }
+  } catch {
+    // The exact bytes were available and read successfully. A parser failure
+    // is therefore an extraction failure, not evidence that the original was
+    // unavailable.
+    return withOriginalContent(contentFreeOriginalObservation("extraction_failed", {
+      format,
+      reasonCode: "extraction_failed",
+      extractionComplete: false,
+    }), buf);
+  }
+
+  if (typeof result?.text === "string" && result.text.trim()) {
+    const quality = textQuality(result.text);
+    if (!quality.ok) {
+      return withOriginalContent(contentFreeOriginalObservation("extraction_failed", {
+        format,
+        reasonCode: "extraction_failed",
+        extractionComplete: false,
+      }), buf);
+    }
+  }
+  return withOriginalContent(originalObservationFromExtraction(result, { format }), buf);
+}
+
+/** Validate one exact, private source-relative locator without resolving it. */
+export function canonicalLocalAssessmentLocator(value) {
+  if (typeof value !== "string" || !value ||
+      new TextEncoder().encode(value).length > 2_048 ||
+      value !== value.normalize("NFC") ||
+      /[\u0000-\u001f\u007f]/.test(value) || value.includes("\\")) {
+    throw new TypeError("each local assessment target must be one bounded source-relative locator");
+  }
+  const locator = value;
+  if (locator.startsWith("/") || locator.endsWith("/") || locator.includes("//")) {
+    throw new TypeError("local assessment targets must be relative to the approved source root");
+  }
+  const segments = locator.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new TypeError("local assessment targets may not contain empty, dot, or parent segments");
+  }
+  return locator;
+}
+
+/**
+ * Resolve the deliberately tiny first-source pilot scope without walking the
+ * source tree. The reviewed pilot uses a dedicated root containing one direct
+ * file. Listing that one directory is enough to prove the scope has not grown;
+ * no unrelated file is opened or extracted.
+ *
+ * The returned handle is private execution input for prepare(). It contains a
+ * locator and filesystem identities and must never be printed in a public
+ * receipt.
+ */
+export function resolveExactLocalFile(root, {
+  relativeLocator,
+  privatePrefixes = [],
+  maxBytes = MAX_FILE_BYTES,
+  requireDedicatedRoot = true,
+} = {}) {
+  if (typeof root !== "string" || !root || !isAbsolute(root)) {
+    localFileFail("LOCAL_ROOT_NOT_ABSOLUTE", "the exact-file source root must be one absolute folder");
+  }
+  if (!Array.isArray(privatePrefixes) ||
+      privatePrefixes.some((prefix) => typeof prefix !== "string")) {
+    localFileFail("LOCAL_PRIVATE_PREFIX_POLICY_INVALID", "the private path-prefix policy is invalid");
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_FILE_BYTES) {
+    localFileFail("LOCAL_FILE_LIMIT_INVALID", "the exact-file size limit is invalid");
+  }
+
+  const locator = canonicalLocalAssessmentLocator(relativeLocator);
+  const segments = locator.split("/");
+  const loweredPrefixes = privatePrefixes.map((prefix) => prefix.toLowerCase());
+  if (segments.some((segment) =>
+    loweredPrefixes.some((prefix) => segment.toLowerCase().startsWith(prefix)))) {
+    localFileFail("LOCAL_FILE_PRIVATE_PREFIX", "the exact file matches a private path prefix");
+  }
+  if (multiRecordKind(locator) !== null) {
+    localFileFail("LOCAL_FILE_MULTI_RECORD_REFUSED", "the exact-file pilot accepts one native document, not a multi-record container");
+  }
+
+  const rootPath = resolve(root);
+  let rootBefore;
+  try {
+    const info = lstatSync(rootPath, { bigint: true });
+    if (info.isSymbolicLink()) {
+      localFileFail("LOCAL_ROOT_LINK_REFUSED", "the exact-file source root is a symbolic link or junction");
+    }
+    if (!info.isDirectory()) {
+      localFileFail("LOCAL_ROOT_NOT_DIRECTORY", "the exact-file source root is not a directory");
+    }
+    rootBefore = directorySnapshot(info);
+  } catch (error) {
+    if (error instanceof LocalFileSafetyError) throw error;
+    localFileFail("LOCAL_ROOT_METADATA_UNAVAILABLE", "the exact-file source root could not be inspected");
+  }
+
+  let rootDirect;
+  let rootReal;
+  try {
+    rootDirect = directRealpath(rootPath);
+    rootReal = process.platform === "win32" ? nativeRealpath(rootPath) : rootDirect;
+  } catch {
+    localFileFail("LOCAL_ROOT_REALPATH_UNAVAILABLE", "the exact-file source root identity could not be resolved");
+  }
+  if (comparablePath(rootDirect) !== comparablePath(rootPath)) {
+    localFileFail("LOCAL_ROOT_LINK_REFUSED", "the exact-file source root or one of its ancestors is a symbolic link or junction");
+  }
+
+  let entries;
+  try { entries = readdirSync(rootPath, { withFileTypes: true }); }
+  catch { localFileFail("LOCAL_ROOT_LIST_UNAVAILABLE", "the exact-file source root could not be listed"); }
+  if (requireDedicatedRoot !== true) {
+    localFileFail("LOCAL_ROOT_SCOPE_INVALID", "the exact-file pilot requires one dedicated source root");
+  }
+  if (segments.length !== 1 || entries.length !== 1 || entries[0].name !== locator) {
+    localFileFail("LOCAL_ROOT_SCOPE_CHANGED", "the exact-file source root must contain only the one approved direct file");
+  }
+  if (entries[0].isSymbolicLink() || !entries[0].isFile()) {
+    localFileFail("LOCAL_FILE_NOT_REGULAR", "the approved source entry is not one direct regular file");
+  }
+
+  const full = join(rootPath, ...segments);
+  if (!pathIsWithin(rootPath, full) || comparablePath(full) === comparablePath(rootPath)) {
+    localFileFail("LOCAL_FILE_OUTSIDE_ROOT", "the exact file is outside the approved source root");
+  }
+  const approval = approveWalkedFile(full, { rootPath, rootReal });
+  const size = Number(approval.identity.size);
+  if (!Number.isSafeInteger(size) || size < 1) {
+    localFileFail(
+      size === 0 ? "LOCAL_FILE_EMPTY" : "LOCAL_FILE_SIZE_UNREPRESENTABLE",
+      size === 0 ? "the exact-file pilot does not ingest an empty file" : "the exact file size is unavailable",
+    );
+  }
+  if (size > maxBytes) {
+    localFileFail("LOCAL_FILE_TOO_LARGE", "the exact file exceeds the reviewed pilot size bound");
+  }
+
+  let rootAfter;
+  let finalEntries;
+  try {
+    const info = lstatSync(rootPath, { bigint: true });
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      localFileFail("LOCAL_ROOT_IDENTITY_CHANGED", "the exact-file source root changed during validation");
+    }
+    rootAfter = directorySnapshot(info);
+    finalEntries = readdirSync(rootPath, { withFileTypes: true });
+  } catch (error) {
+    if (error instanceof LocalFileSafetyError) throw error;
+    localFileFail("LOCAL_ROOT_IDENTITY_CHANGED", "the exact-file source root changed during validation");
+  }
+  if (!sameDirectoryVersion(rootBefore, rootAfter) || finalEntries.length !== 1 ||
+      finalEntries[0].name !== locator || finalEntries[0].isSymbolicLink() ||
+      !finalEntries[0].isFile() || nativeRealpath(rootPath) !== rootReal) {
+    localFileFail("LOCAL_ROOT_IDENTITY_CHANGED", "the exact-file source root changed during validation");
+  }
+
+  return Object.freeze({
+    full,
+    rel: locator,
+    name: locator,
+    size,
+    sizeLimit: maxBytes,
+    _localApproval: Object.freeze(approval),
+    root_identity: Object.freeze({
+      realpath: rootReal,
+      ...rootAfter,
+    }),
+  });
+}
+
+function localAssessmentMarker(locator, state, reasonCode) {
+  const multiRecord = multiRecordKind(locator) != null;
+  return {
+    rel: locator,
+    name: basename(locator),
+    _assessmentLocator: locator,
+    _assessmentObservation: {
+      state,
+      format: safeObservationFormat(extensionOf(locator)),
+      reason_code: reasonCode,
+      extraction_complete: state === "empty",
+      ...(multiRecord ? { multi_record: true } : {}),
+      ...(state === "empty"
+        ? { original_content_sha256: sha(Buffer.alloc(0)), original_byte_count: 0 }
+        : {}),
+    },
+  };
+}
+
+/**
+ * Resolve one explicit set of one to ten local originals by exact relative-path
+ * equality. A missing target or incomplete walk returns no readable handles,
+ * so a caller cannot accidentally assess a convenient near-match.
+ */
+export function localOriginalsForAssessment(root, {
+  relativeLocators,
+  privatePrefixes = [],
+  maxBytes = MAX_FILE_BYTES,
+  archiveBytes = MAX_ARCHIVE_BYTES,
+} = {}) {
+  if (!Array.isArray(relativeLocators) || relativeLocators.length < 1 ||
+      relativeLocators.length > MAX_LOCAL_ASSESSMENT_ORIGINALS) {
+    throw new TypeError(`local source assessment requires 1 to ${MAX_LOCAL_ASSESSMENT_ORIGINALS} exact relative locators`);
+  }
+  const requested = relativeLocators.map(canonicalLocalAssessmentLocator);
+  if (new Set(requested).size !== requested.length) {
+    throw new TypeError("local source assessment target locators must be unique");
+  }
+
+  const walked = walk(root, { privatePrefixes, maxBytes, archiveBytes });
+  const byLocator = new Map();
+  let unrepresentableLocatorCount = 0;
+  for (const file of walked.files) {
+    let locator;
+    try { locator = canonicalLocalAssessmentLocator(String(file.rel).split(sep).join("/")); }
+    catch {
+      unrepresentableLocatorCount++;
+      continue;
+    }
+    byLocator.set(locator, { ...file, _assessmentLocator: locator });
+  }
+  for (const skipped of walked.skipped) {
+    if (!ORIGINAL_EXTRACTION_STATE_SET.has(skipped.original_state)) continue;
+    let locator;
+    try { locator = canonicalLocalAssessmentLocator(String(skipped.path || "").split(sep).join("/")); }
+    catch {
+      unrepresentableLocatorCount++;
+      continue;
+    }
+    byLocator.set(locator, localAssessmentMarker(
+      locator,
+      skipped.original_state,
+      skipped.original_state === "empty" ? "empty_original" : "original_unavailable",
+    ));
+    if (skipped.original_state === "empty" && skipped[LOCAL_ASSESSMENT_HANDLE]) {
+      byLocator.set(locator, {
+        ...skipped[LOCAL_ASSESSMENT_HANDLE],
+        _assessmentLocator: locator,
+      });
+    }
+  }
+
+  const policyFiles = new Map();
+  for (const skipped of walked.skipped) {
+    if (skipped.adjudication !== "source_policy") continue;
+    let locator;
+    try { locator = canonicalLocalAssessmentLocator(String(skipped.path || "").split(sep).join("/")); }
+    catch {
+      unrepresentableLocatorCount++;
+      continue;
+    }
+    if (skipped.scope === "file") {
+      // The parent directory enumeration observed this exact file before the
+      // policy fence refused its contents. That is enough to preserve an exact
+      // exclusion without claiming anything about the bytes.
+      policyFiles.set(locator, localAssessmentMarker(locator, "unavailable", "source_policy_excluded"));
+    }
+  }
+
+  const traversalGaps = walked.skipped.filter((skipped) =>
+    skipped.coverage_gap !== false && !ORIGINAL_EXTRACTION_STATE_SET.has(skipped.original_state));
+  const traversalComplete = walked.complete === true && traversalGaps.length === 0 &&
+    unrepresentableLocatorCount === 0;
+  const policyMarkerFor = (locator) => {
+    if (policyFiles.has(locator)) return policyFiles.get(locator);
+    // A policy-skipped subtree was not enumerated. Its marker proves only that
+    // the directory boundary was excluded, not that a requested descendant
+    // exists. Descendants therefore remain unresolved and block assessment.
+    return null;
+  };
+
+  const resolved = requested.map((locator) => byLocator.get(locator) || policyMarkerFor(locator));
+  const missingTargetCount = traversalComplete
+    ? resolved.filter((file) => !file).length
+    : null;
+  const targetResolutionComplete = traversalComplete && missingTargetCount === 0;
+  const originals = targetResolutionComplete
+    ? resolved
+    : requested.map((locator) => localAssessmentMarker(
+        locator,
+        "unavailable",
+        policyMarkerFor(locator) ? "source_policy_excluded" : "original_unavailable",
+      ));
+
+  return Object.freeze({
+    originals: Object.freeze(originals),
+    target_count: requested.length,
+    traversal_complete: traversalComplete,
+    traversal_gap_count: traversalGaps.length + unrepresentableLocatorCount,
+    target_resolution_complete: targetResolutionComplete,
+    missing_target_count: missingTargetCount,
+    truncated: false,
+    max_originals: MAX_LOCAL_ASSESSMENT_ORIGINALS,
+  });
 }
 
 /**
@@ -545,10 +1265,20 @@ export function sourceFileFamilyUid(file, sourceName) {
 
 /** Stamp every document a multi-document file produced with its family uid. */
 function declareFamily(envelopes, familyUid) {
-  return envelopes.map((envelope) => ({
-    ...envelope,
-    metadata: { ...(envelope.metadata || {}), family_of: familyUid },
-  }));
+  return envelopes.map((envelope) => {
+    // One raw file produced several independently addressed documents. There
+    // is no authoritative per-result byte binding yet, so a producer must not
+    // let one file receipt look like proof for every `family_of` member.
+    const withoutAmbiguousOriginal = { ...envelope };
+    delete withoutAmbiguousOriginal.source_original_receipt;
+    return restampFirstPartySourceProvenance(withoutAmbiguousOriginal, {
+      // Family declaration changes identity, not extraction facts. Preserve a
+      // producer omission so the shared boundary records unknown/unavailable.
+      textSource: envelope.text_source,
+      textReliable: envelope.text_reliable,
+      metadataPatch: { family_of: familyUid },
+    });
+  });
 }
 
 /**
@@ -807,6 +1537,8 @@ async function prepareMboxArchive(file, { sourceName, scanBytes }) {
       occurred_at: parsed.occurredAt,
       date_source: parsed.occurredAt ? "mbox:date_header" : "none",
       date_reliable: !!parsed.occurredAt,
+      text_source: "native",
+      text_reliable: true,
       uri: key,
       metadata: {
         category: sourceName,
@@ -992,24 +1724,44 @@ export async function prepare(file, { sourceName, ocr = null }) {
   const got = await extract(buf, file.name, {
     reread: () => {
       try {
-        const reread = readApprovedLocalFile(file, { maxBytes: sizeLimit });
-        hash = sha(reread);
-        actualBytes = reread.length;
-        return reread;
+        return readApprovedLocalFile(file, { maxBytes: sizeLimit });
       } catch {
         return null;
       }
+    },
+    // Couple the receipt to the PDF parse that won. The extractor can discard
+    // an empty or failed reread and OCR the first pass instead; merely reading
+    // fresh bytes is therefore not enough to make them authoritative.
+    onRereadAccepted: (reread) => {
+      hash = sha(reread);
+      actualBytes = reread.length;
     },
     // Null on a dry run and whenever OCR is off, so the cheapest command stays
     // the cheapest command and nothing bills the owner without being asked.
     ocr,
   });
+  // Keep the extractor's closed, content-free observation even when the
+  // document itself is refused. Scanned PDFs intentionally return no text,
+  // so dropping this beside the human skip reason erased the authoritative
+  // page count that a read-only OCR plan needs. This object contains no path,
+  // filename, extracted text, or raw parser error.
+  const observation = originalObservationFromExtraction(got, { format: ext });
   if (got.error || got.text == null) {
-    return { hash, skip: { path: file.rel, reason: got.error || "extraction produced nothing" } };
+    return {
+      hash,
+      observation,
+      skip: { path: file.rel, reason: got.error || "extraction produced nothing" },
+    };
   }
 
   const q = textQuality(got.text);
-  if (!q.ok) return { hash, skip: { path: file.rel, reason: q.reason, metrics: q.metrics } };
+  if (!q.ok) {
+    return {
+      hash,
+      observation,
+      skip: { path: file.rel, reason: q.reason, metrics: q.metrics },
+    };
+  }
 
   // A format that extracted something but wants to flag it (a mostly-image PDF,
   // a truncated sheet) is reported alongside the document, not instead of it.
@@ -1017,28 +1769,54 @@ export async function prepare(file, { sourceName, ocr = null }) {
 
   // NOT the file mtime. See ingest/doc-date.mjs for why that is refused outright.
   const dd = documentDate({ filename: file.name, relPath: dirname(file.rel), contentHead: got.text.slice(0, 1200) });
+  const localSourceLocator = file.rel.split(sep).join("/");
+  let originalByteReceipt = null;
+  let originalBindingUnavailableReason = null;
+  try {
+    originalByteReceipt = sourceOriginalReceipt(file, hash, actualBytes);
+  } catch (error) {
+    // macOS commonly exposes decomposed Unicode filenames. Preserve the
+    // existing source_id byte-for-byte so an upgrade cannot fork a document's
+    // identity. Such a row remains explicitly unbound instead of aborting the
+    // entire source run or HMAC-sealing a normalization collision.
+    if (localSourceLocator !== localSourceLocator.normalize("NFC")) {
+      canonicalLocalAssessmentLocator(localSourceLocator.normalize("NFC"));
+      originalBindingUnavailableReason = "source_locator_not_nfc";
+    } else {
+      throw error;
+    }
+  }
 
   return {
     hash,
+    observation,
     envelope: {
       source_type: sourceName,
-      source_id: file.rel.split(sep).join("/"),
+      source_id: localSourceLocator,
+      // The full-admin-authorized local ingester attests to the exact
+      // descriptor bytes used by extraction. The Worker derives the transient
+      // locator from source_id/part_of and never needs a second path copy here.
+      ...(originalByteReceipt ? { source_original_receipt: originalByteReceipt } : {}),
       title: basename(file.name, extensionOf(file.name)) || file.name,
       content: got.text,
       occurred_at: dd.value ? new Date(dd.value).toISOString() : null,
       date_source: dd.source,
       date_reliable: dd.reliable,
-      uri: file.rel.split(sep).join("/"),
+      uri: localSourceLocator,
       // Promoted out of metadata on purpose: these two reach a citation, and a
       // flag that never reaches the reader is not a flag.
       ...(got.provenance
         ? { text_source: got.provenance.text_source, text_reliable: got.provenance.text_reliable }
-        : {}),
+        : { text_source: "native", text_reliable: got.incomplete !== true }),
       metadata: {
         category: sourceName, extracted_as: got.how, bytes: actualBytes,
         ...(note ? { extraction_note: note } : {}),
         ...(got.incomplete === true ? { extraction_incomplete: true } : {}),
         ...(got.provenance ? { ocr: got.provenance } : {}),
+        ...(originalBindingUnavailableReason ? {
+          source_original_binding_status: "unavailable",
+          source_original_binding_reason: originalBindingUnavailableReason,
+        } : {}),
       },
     },
     note,
@@ -1089,7 +1867,15 @@ export async function* batchStream(files, prepareOne, { maxDocs = 50, maxBytes =
     // A remote producer may need the split count before anything is sent so it
     // can reconcile an old document family safely. Let it supply the one-file
     // split rather than doing the same large string slicing twice.
-    const envelopes = r.envelopes || splitOversized(r.envelope);
+    const stampSource = (envelope) => restampFirstPartySourceProvenance(envelope, {
+      // Batching and splitting do not establish a text origin. If a producer
+      // did not assess it, keep the normalized unknown/unavailable receipt.
+      textSource: envelope?.text_source,
+      textReliable: envelope?.text_reliable,
+    });
+    const envelopes = r.envelopes
+      ? r.envelopes.map(stampSource)
+      : splitOversized(stampSource(r.envelope));
     const { envelope: _envelope, envelopes: _envelopes, unchanged: _unchanged, skip: _skip, ...context } = r;
     for (const envelope of envelopes) {
       const n = envelopeBytes(envelope);

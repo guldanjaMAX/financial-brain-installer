@@ -105,12 +105,50 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
 
     const privateHome = join(sandbox, "home");
     mkdirSync(privateHome, { recursive: true });
+    mkdirSync(join(privateHome, "AppData", "Roaming"), { recursive: true });
+    mkdirSync(join(privateHome, "AppData", "Local"), { recursive: true });
+    const standardUserPreload = join(sandbox, "standard-user-preflight.mjs");
+    writeFileSync(standardUserPreload, `
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+
+// Hosted Windows runners belong to the Administrator group. Answer only the
+// installer's exact read-only elevation probe so this packaged fixture proves
+// the supported normal-user path without adding a production bypass.
+const originalSpawnSync = childProcess.spawnSync;
+childProcess.spawnSync = (command, args = [], options = {}) => {
+  const joined = args.map(String).join(" ");
+  if (process.platform === "win32" && /powershell(?:\\.exe)?$/i.test(String(command)) &&
+      joined.includes("BRAIN_STANDARD_USER") && joined.includes("BRAIN_ELEVATED")) {
+    return {
+      pid: 0,
+      output: [null, "BRAIN_STANDARD_USER", ""],
+      stdout: "BRAIN_STANDARD_USER",
+      stderr: "",
+      status: 0,
+      signal: null,
+      error: undefined,
+    };
+  }
+  return originalSpawnSync(command, args, options);
+};
+syncBuiltinESMExports();
+`, "utf8");
     const baseEnvironment = minimalEnvironment({
       HOME: privateHome,
       USERPROFILE: privateHome,
       APPDATA: join(privateHome, "AppData", "Roaming"),
       LOCALAPPDATA: join(privateHome, "AppData", "Local"),
+      // This fixture owns its credential boundary. A developer's saved
+      // Wrangler OAuth session must not turn the no-credential branch into a
+      // real Cloudflare preflight.
+      BRAIN_NO_WRANGLER_LOGIN: "1",
       NO_COLOR: "1",
+      // The fixture needs Wrangler's machine response, not its asynchronous
+      // per-user log. Keeping the logger off also keeps the disposable HOME
+      // quiescent before strict cleanup on macOS.
+      WRANGLER_LOG: "none",
+      NODE_OPTIONS: `--import=${pathToFileURL(standardUserPreload).href}`,
     });
     const manifestPath = join(sandbox, "new-brain", "brain.manifest.json");
 
@@ -139,11 +177,11 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
     const fakeBin = join(sandbox, "fake-bin");
     mkdirSync(fakeBin, { recursive: true });
     if (IS_WIN) {
-      writeFileSync(join(fakeBin, "npx.cmd"), "@echo off\r\necho wrangler 4.127.1\r\n", "utf8");
+      writeFileSync(join(fakeBin, "npx.cmd"), "@echo off\r\necho wrangler 4.131.1\r\n", "utf8");
       writeFileSync(join(fakeBin, "claude.cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo 2.1.63 (Claude Code)& exit /b 0\r\nif \"%1 %2\"==\"auth status\" echo signed in& exit /b 0\r\nexit /b 1\r\n", "utf8");
     } else {
       const npx = join(fakeBin, "npx");
-      writeFileSync(npx, "#!/bin/sh\nprintf '%s\\n' 'wrangler 4.127.1'\n", "utf8");
+      writeFileSync(npx, "#!/bin/sh\nprintf '%s\\n' 'wrangler 4.131.1'\n", "utf8");
       chmodSync(npx, 0o755);
       const claude = join(fakeBin, "claude");
       writeFileSync(claude, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '2.1.63 (Claude Code)'; exit 0; fi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then printf '%s\\n' 'signed in'; exit 0; fi\nexit 1\n", "utf8");
@@ -153,7 +191,7 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
       ...baseEnvironment,
       PATH: [fakeBin, dirname(process.execPath), "/usr/bin", "/bin"].join(IS_WIN ? ";" : ":"),
     };
-    const bootstrap = run(wrapper, ["tools", manifestPath, "--json"], {
+    const bootstrap = run(wrapper, ["tools", manifestPath, "--intent", "first_brain", "--json"], {
       cwd: scratch,
       env: toolEnvironment,
       timeout: IS_WIN ? 300_000 : 90_000,
@@ -161,6 +199,7 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
     assert.equal(bootstrap.status, 0, `${bootstrap.stdout}\n${bootstrap.stderr}`);
     const bootstrapStatus = JSON.parse(bootstrap.stdout);
     assert.equal(bootstrapStatus.issue_code, "BOOTSTRAP_READY_NO_MANIFEST");
+    assert.deepEqual(bootstrapStatus.setup_intent, { value: "first_brain", owner_selected: true });
     assert.equal(bootstrapStatus.release.external_test_kit_required, false);
     assert.equal(bootstrapStatus.manifest.state, "not_created");
     assert.equal(bootstrapStatus.manifest.path, manifestPath);
@@ -182,7 +221,7 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
     });
     const technician = run(bootstrapStatus.cli.command, [
       ...bootstrapStatus.cli.args,
-      "technician", manifestPath, "--json",
+      "technician", manifestPath, "--intent", "first_brain", "--json",
     ], { cwd: scratch, env: normalClientEnvironment });
     assert.equal(technician.status, 0, `${technician.stdout}\n${technician.stderr}`);
     const plan = JSON.parse(technician.stdout);
@@ -191,7 +230,7 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
     assert.deepEqual(plan.cli, bootstrapStatus.cli);
     assert.deepEqual(plan.refresh, {
       command: bootstrapStatus.cli.command,
-      args: [...bootstrapStatus.cli.args, "technician", manifestPath, "--json"],
+      args: [...bootstrapStatus.cli.args, "technician", manifestPath, "--intent", "first_brain", "--json"],
       mutates_external_state: false,
     });
     assert.ok(plan.steps.filter((step) => step.command).every((step) =>
@@ -200,21 +239,71 @@ test("the packed CLI scaffolds a nonexistent manifest before any manifest-accoun
     assert.ok(plan.steps.filter((step) => ["plaid", "google", "quickbooks", "zoom", "imap"].includes(step.id))
       .every((step) => step.command === null));
     assert.equal(plan.steps.find((step) => step.id === "smoke").state, "waiting_for_install_record");
-    assert.deepEqual(plan.steps.find((step) => step.id === "cloudflare").owner_only_command, {
+    assert.deepEqual(plan.steps.find((step) => step.id === "cloudflare").agent_after_owner_approval, {
       command: bootstrapStatus.cli.command,
-      args: [...bootstrapStatus.cli.args, "technician", manifestPath, "--run", "cloudflare"],
-      execution_boundary: "owner_direct_terminal",
+      args: [
+        ...bootstrapStatus.cli.args,
+        "technician", manifestPath, "--intent", "first_brain", "--run", "cloudflare",
+        "--browser-sign-in",
+        "--name", "<person-or-company>",
+        "--slug", "<short-name>",
+        "--cloudflare-account", "<create-or-existing>",
+        "--cloudflare-account-id", "<32-character-account-id>",
+        "--workers-paid-confirmed",
+      ],
+      execution_boundary: "claude_after_explicit_owner_approval",
       mutates_external_state: true,
-      must_run_in_direct_owner_terminal: true,
-      reveals_one_time_link: false,
+      requires_owner_approval: true,
+      reviewed_non_secret_context: [
+        "person or company name",
+        "short Brain name",
+        "new or existing Cloudflare account",
+        "exact Cloudflare account id",
+        "Workers Paid is active on that account",
+      ],
+      owner_keeps_control_of: [
+        "sign-in",
+        "2FA and CAPTCHA",
+        "billing acceptance",
+        "final consent",
+      ],
+      accepts_cloudflare_token: false,
     });
     assert.deepEqual(plan.steps.find((step) => step.id === "passkey").owner_only_command.args,
       [...bootstrapStatus.cli.args, "invite", manifestPath]);
+    assert.ok(plan.steps.filter((step) => step.command).every((step) =>
+      step.command.includes("--intent") && step.command.includes("first_brain")));
     assert.doesNotMatch(JSON.stringify(plan.steps), /(^|[^\w/.-])brain technician\b/i);
     assert.match(JSON.stringify(plan.coverage), /watched-folder scheduling ceremony/i);
     const accountId = "a".repeat(32);
     const preload = join(sandbox, "offline-cloudflare.mjs");
     writeFileSync(preload, `
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+
+// GitHub's Windows image runs the fixture account with Administrator group
+// membership. This preload is test-only and answers only the installer's exact
+// read-only elevation probe, so the packed setup exercises the normal-user
+// branch without adding a production bypass or weakening the gate.
+const originalSpawnSync = childProcess.spawnSync;
+childProcess.spawnSync = (command, args = [], options = {}) => {
+  const joined = args.map(String).join(" ");
+  if (process.platform === "win32" && /powershell(?:\\.exe)?$/i.test(String(command)) &&
+      joined.includes("BRAIN_STANDARD_USER") && joined.includes("BRAIN_ELEVATED")) {
+    return {
+      pid: 0,
+      output: [null, "BRAIN_STANDARD_USER", ""],
+      stdout: "BRAIN_STANDARD_USER",
+      stderr: "",
+      status: 0,
+      signal: null,
+      error: undefined,
+    };
+  }
+  return originalSpawnSync(command, args, options);
+};
+syncBuiltinESMExports();
+
 const accountId = ${JSON.stringify(accountId)};
 const payload = (result, status = 200, success = true, errors = []) =>
   new Response(JSON.stringify({ success, result, errors }), {
@@ -244,6 +333,7 @@ globalThis.fetch = async (input, options = {}) => {
         ...baseEnvironment,
         PATH: toolEnvironment.PATH,
         CLOUDFLARE_API_TOKEN: "fixture-token-for-packed-wrapper",
+        BRAIN_WORKERS_PAID_ACCOUNT_ID: accountId,
         ADMIN_KEY: (["fixture-","admin-ke","y-for-pa","cked-wra","pper-000","1"].join("")),
         NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
       },

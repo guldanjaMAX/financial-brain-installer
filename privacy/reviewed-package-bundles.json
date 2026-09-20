@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "derivation": "package-lock direct bundle integrity archives",
+  "root_package": {
+    "name": "brain-installer",
+    "version": "0.4.8"
+  },
+  "bundles": [
+    {
+      "name": "@e965/xlsx",
+      "version": "0.20.3",
+      "integrity": "sha512-703RN/3OdsRD5mtse2HBX7Um7xwaP9tlswEG6svOtjqokXoX7rJdQj7DyabD2I+xk22RgaIIU+R6BHgkpZGB/w==",
+      "file_count": 26,
+      "total_bytes": 8077540,
+      "path_inventory_sha256": "53185836cad87dcfd5f837aec3f963c8f60bec71d033e9abc6e4edcc9a757ae6",
+      "metadata_inventory_sha256": "85d3d2bef04681cbddb98dcbc7eabf3e392db1285d38da9d14ef81b963d31118",
+      "content_inventory_sha256": "ae56c55df2baba407b4444d7bbbe8b6e785037ba62841b168881d310ee06cc78"
+    },
+    {
+      "name": "fflate",
+      "version": "0.8.3",
+      "integrity": "sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA==",
+      "file_count": 17,
+      "total_bytes": 796742,
+      "path_inventory_sha256": "c3d6227e4036cd1ae1d235726390a00ce8cc0040fc2c4720c5d64e71984c394f",
+      "metadata_inventory_sha256": "b2e0d329e972741a7b4ebf6190f3a0ad18a29b849a7e2c1adf4c66f70e474b9e",
+      "content_inventory_sha256": "00799ed98671550de0002ededc93de05258988b6c7966f2e5f40137eacbe48b9"
+    },
+    {
+      "name": "postal-mime",
+      "version": "3.0.0",
+      "integrity": "sha512-Z4a9ar2Bv3YpK3IXag+Yda30k7bMZfpRuUGyqtHnZ2pjHG8Bl62EhZIk4n1dzv00gfzP9g+94e9kd8+XmjVWLA==",
+      "file_count": 26,
+      "total_bytes": 324889,
+      "path_inventory_sha256": "ee17d725ab2acc584a378ced2714ccce2aa7d737afaabb22610e10e50dff54a4",
+      "metadata_inventory_sha256": "7a4a8ebb3280e9f180acf450bfe97abacae7f6d55631ae9dafdc5fad2526ec58",
+      "content_inventory_sha256": "f1c112289200e8d19049b853e5667eca28f23c0631d489e1dda8006a00395638"
+    },
+    {
+      "name": "unpdf",
+      "version": "1.8.1",
+      "integrity": "sha512-xkURhy2SoGpOIH0a1gLHNkASPIQYonadDJs2AQwPEfUakafeD9EA1WTWWsaR++gfTCXJpV27W7tU1nXuk82UKQ==",
+      "file_count": 157,
+      "total_bytes": 2141399,
+      "path_inventory_sha256": "2ed3e5859b53b4d3b622f1a4f89427069029894ac0a9fdeaa62faad7ab90cadd",
+      "metadata_inventory_sha256": "a188bd2a61526e744d861fd619f3389ef8b555e3cf16203c00a984ebc44c4253",
+      "content_inventory_sha256": "175207799152e09d7c96010bd6ae80414de26e549c31843073c4cf1460fbb829"
+    }
+  ],
+  "inventory_sha256": "0e86bf795f93b456e16b9000efc10a5579ee2ea9c606411f9d50de3e5ecfc08e"
+}

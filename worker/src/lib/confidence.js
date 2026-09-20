@@ -27,6 +27,8 @@
 // refusal sentence verbatim. The answer string stays canonical; trust
 // metadata travels beside it.
 
+import { independentEvidenceSummary } from "./evidence-lineage.js";
+
 const clamp = (value, lo, hi) => Math.max(lo, Math.min(hi, Math.round(value)));
 
 function band(percent) {
@@ -75,6 +77,10 @@ export function computeAnswerConfidence({ approvedDocs = [], gaps = [], degraded
   // second-model evidence gate. That baseline is what the 65 encodes.
   let score = 65;
   basis.push(`evidence gate approved ${approvedDocs.length} citation${approvedDocs.length === 1 ? "" : "s"}`);
+  const citationLineage = independentEvidenceSummary(approvedDocs);
+  if (citationLineage.unknown_documents) {
+    basis.push(`${citationLineage.unknown_documents} citation${citationLineage.unknown_documents === 1 ? " has" : "s have"} unknown lineage and earned no corroboration credit`);
+  }
 
   const authorityRows = approvedDocs
     .map((doc) => ({ doc, authority: doc?.authority }))
@@ -93,15 +99,19 @@ export function computeAnswerConfidence({ approvedDocs = [], gaps = [], degraded
     const highAuthorityDocs = authorityRows.filter(({ authority }) =>
       authority.eligible !== false && authority.authoritative === true && Number(authority.rank) <= 2
     );
-    const distinctHighAuthority = new Set(highAuthorityDocs.map(({ doc }) => doc.ref || doc.title)).size;
+    const independent = independentEvidenceSummary(highAuthorityDocs.map(({ doc }) => doc));
+    const distinctHighAuthority = independent.groups;
     if (distinctHighAuthority >= 3) {
       score += 15;
-      basis.push(`${distinctHighAuthority} independent T1 or T2 documents agree`);
+      basis.push(`${distinctHighAuthority} independent T1 or T2 source families agree`);
     } else if (distinctHighAuthority === 2) {
       score += 10;
-      basis.push("two independent T1 or T2 documents agree");
+      basis.push("two independent T1 or T2 source families agree");
     } else {
       basis.push("no high-authority agreement bonus");
+    }
+    if (independent.known_documents > independent.groups) {
+      basis.push(`${independent.known_documents} high-authority citations resolve to ${independent.groups} derivation ${independent.groups === 1 ? "family" : "families"}`);
     }
 
     const currentClaim = authorityRows.some(({ authority }) => authority.current === true);
@@ -110,18 +120,19 @@ export function computeAnswerConfidence({ approvedDocs = [], gaps = [], degraded
       basis.push("current claim rests only on historical recollection, with no T1 or T2 authority");
     }
   } else {
-    // Legacy comparison adapters do not carry D1 authority metadata. Preserve
-    // their established rubric while making the missing tier visible by its
-    // absence from the basis rather than inventing one.
-    const distinctDocs = new Set(approvedDocs.map((doc) => doc.ref || doc.title)).size;
+    // A legacy comparison adapter can still return and cite a useful document,
+    // but an id or filename cannot prove where it came from. Only an explicit
+    // source-family contract earns corroboration credit.
+    const independent = independentEvidenceSummary(approvedDocs);
+    const distinctDocs = independent.groups;
     if (distinctDocs >= 3) {
       score += 15;
-      basis.push(`${distinctDocs} independent documents agree`);
+      basis.push(`${distinctDocs} independent source families agree`);
     } else if (distinctDocs === 2) {
       score += 10;
-      basis.push("two independent documents agree");
+      basis.push("two independent source families agree");
     } else {
-      basis.push("single supporting document");
+      basis.push(approvedDocs.length === 1 ? "single supporting document" : "independent corroboration is not established");
     }
   }
 

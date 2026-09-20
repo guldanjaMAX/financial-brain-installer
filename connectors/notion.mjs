@@ -139,11 +139,12 @@ export async function syncNotion({
       },
     }));
   }
+  const walkComplete = warnings.length === 0;
   warnings.unshift(
     "Notion search can surface archived pages but does not provide an authoritative tombstone stream for every page removed from the integration's access.",
   );
   return providerSyncResult({
     provider: "notion", documents, deletions, warnings,
-    deletionAuthority: "unavailable", proposedCursor: null,
+    deletionAuthority: "unavailable", proposedCursor: null, walkComplete,
   });
 }

@@ -146,6 +146,10 @@ const read = async (name) => extract(bytes(name), name);
     loaded.envelopes.map((e) => e.occurred_at.slice(0, 10)).join(",") === "2026-06-12,2026-06-15,2026-06-16" &&
     loaded.envelopes.every((e) => e.date_source === "mbox:date_header" && e.date_reliable === true),
     JSON.stringify(loaded.envelopes.map((e) => [e.occurred_at, e.date_source])));
+  check("each decoded mbox message carries explicit native source provenance",
+    loaded.envelopes.every((e) => e.text_source === "native" && e.text_reliable === true &&
+      e.metadata.provenance_receipt?.status === "complete"),
+    JSON.stringify(loaded.envelopes.map((e) => e.metadata.provenance_receipt)));
   check("each document has its own citable identity inside the archive",
     loaded.envelopes.map((e) => e.source_id).join(",") ===
       "mail/archive.mbox#first-message@example.test,mail/archive.mbox#second-message@example.test,mail/archive.mbox#third-message@example.test",

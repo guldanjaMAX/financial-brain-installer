@@ -23,12 +23,45 @@ import { extract } from "../ingest/extract.mjs";
 import "../ingest/formats.mjs";
 import { textQuality } from "../ingest/quality.mjs";
 import { api as driveApi, DriveError } from "./google-drive.mjs";
+import { withFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 export const API = "https://gmail.googleapis.com/gmail/v1";
 export const SOURCE_TYPE = "email";
 export const GMAIL_MAX_PAGES = 2_000;
 export const GMAIL_EXTRACTION_POLICY_VERSION = 1;
 const GMAIL_PAGE_TOKEN_MAX_LENGTH = 8_192;
+export const GMAIL_OPERATIONS = Object.freeze({
+  profile: "gmail_profile_read",
+  history: "gmail_history_list",
+  list: "gmail_message_list",
+  policy: "gmail_policy_read",
+  message: "gmail_message_read",
+});
+
+function gmailOperationError(error, operationClass) {
+  const failure = error && typeof error === "object"
+    ? error
+    : new Error("Gmail operation failed", { cause: error });
+  try {
+    Object.defineProperty(failure, "operationClass", {
+      value: operationClass,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+    return failure;
+  } catch {
+    // Errors are normally extensible. Preserve the original as the cause if a
+    // dependency throws a frozen value, while exposing only a closed operation
+    // class to the receipt builder.
+    const wrapped = new Error(String(failure.message || "Gmail operation failed"), { cause: failure });
+    for (const key of ["code", "status", "reason", "providerReason", "providerStatus", "retryable", "needsReauth"]) {
+      if (failure[key] !== undefined) wrapped[key] = failure[key];
+    }
+    wrapped.operationClass = operationClass;
+    return wrapped;
+  }
+}
 
 /**
  * The default query.
@@ -112,48 +145,56 @@ export async function* listMessages(getAccessToken, {
   maxPages = GMAIL_MAX_PAGES,
   opts = {},
 } = {}) {
-  if (!Number.isInteger(maxPages) || maxPages < 1) throw new TypeError("Gmail maxPages must be a positive integer");
-  let pageToken;
-  let seen = 0;
-  let pages = 0;
-  const requestedPageTokens = new Set();
-  do {
-    if (++pages > maxPages) {
-      throw new DriveError(`Gmail message listing exceeded ${maxPages} pages`, 200, "pageLimit");
-    }
-    if (pageToken) {
-      if (requestedPageTokens.has(pageToken)) {
+  try {
+    if (!Number.isInteger(maxPages) || maxPages < 1) throw new TypeError("Gmail maxPages must be a positive integer");
+    let pageToken;
+    let seen = 0;
+    let pages = 0;
+    const requestedPageTokens = new Set();
+    do {
+      if (++pages > maxPages) {
+        throw new DriveError(`Gmail message listing exceeded ${maxPages} pages`, 200, "pageLimit");
+      }
+      if (pageToken) {
+        if (requestedPageTokens.has(pageToken)) {
+          throw new DriveError("Gmail repeated a message-list page token", 200, "repeatedPageToken");
+        }
+        requestedPageTokens.add(pageToken);
+      }
+      const page = await api(getAccessToken, "/users/me/messages", {
+        search: { q: query, maxResults: Math.min(pageSize, 500), pageToken },
+        ...opts,
+      });
+      if (page.messages != null && !Array.isArray(page.messages)) {
+        throw new DriveError("Gmail returned an invalid message list", 200, "invalidMessageList");
+      }
+      const followingPageToken = nextPageToken(page.nextPageToken, "message-list");
+      if (followingPageToken && requestedPageTokens.has(followingPageToken)) {
         throw new DriveError("Gmail repeated a message-list page token", 200, "repeatedPageToken");
       }
-      requestedPageTokens.add(pageToken);
-    }
-    const page = await api(getAccessToken, "/users/me/messages", {
-      search: { q: query, maxResults: Math.min(pageSize, 500), pageToken },
-      ...opts,
-    });
-    if (page.messages != null && !Array.isArray(page.messages)) {
-      throw new DriveError("Gmail returned an invalid message list", 200, "invalidMessageList");
-    }
-    const followingPageToken = nextPageToken(page.nextPageToken, "message-list");
-    if (followingPageToken && requestedPageTokens.has(followingPageToken)) {
-      throw new DriveError("Gmail repeated a message-list page token", 200, "repeatedPageToken");
-    }
-    for (const m of page.messages || []) {
-      if (seen++ >= max) return;
-      yield requireMessageId(m?.id, "the message list");
-    }
-    pageToken = followingPageToken;
-  } while (pageToken);
+      for (const m of page.messages || []) {
+        if (seen++ >= max) return;
+        yield requireMessageId(m?.id, "the message list");
+      }
+      pageToken = followingPageToken;
+    } while (pageToken);
+  } catch (error) {
+    throw gmailOperationError(error, GMAIL_OPERATIONS.list);
+  }
 }
 
 const fromB64Url = (s) => Buffer.from(String(s).replace(/-/g, "+").replace(/_/g, "/"), "base64");
 
 /** The current history id, saved so the NEXT run only fetches what arrived. */
 export async function currentHistoryId(getAccessToken, opts = {}) {
-  const p = await api(getAccessToken, "/users/me/profile", opts);
-  const marker = String(p?.historyId || "").trim();
-  if (!marker) throw new Error("Gmail profile returned no valid history marker");
-  return marker;
+  try {
+    const p = await api(getAccessToken, "/users/me/profile", opts);
+    const marker = String(p?.historyId || "").trim();
+    if (!marker) throw new Error("Gmail profile returned no valid history marker");
+    return marker;
+  } catch (error) {
+    throw gmailOperationError(error, GMAIL_OPERATIONS.profile);
+  }
 }
 
 /**
@@ -237,10 +278,13 @@ export async function listHistory(getAccessToken, startHistoryId, opts = {}) {
     if (e instanceof DriveError && e.status === 404) {
       return { ids: [], deletedIds: [], expired: true, historyId: null };
     }
-    throw e;
+    throw gmailOperationError(e, GMAIL_OPERATIONS.history);
   }
   if (!terminalHistoryId) {
-    throw new DriveError("Gmail history response returned no valid terminal history marker", 200, "invalidHistoryId");
+    throw gmailOperationError(
+      new DriveError("Gmail history response returned no valid terminal history marker", 200, "invalidHistoryId"),
+      GMAIL_OPERATIONS.history,
+    );
   }
   return {
     ids: [...actions].filter(([, action]) => action === "fetch").map(([id]) => id),
@@ -277,7 +321,7 @@ export async function messagePolicy(getAccessToken, id, opts = {}) {
       ...opts,
     });
   } catch (e) {
-    if (!isPermanentMessageFailure(e)) throw e;
+    if (!isPermanentMessageFailure(e)) throw gmailOperationError(e, GMAIL_OPERATIONS.policy);
     return {
       allowed: false,
       skip: { path: id, id, reason: `could not be fetched: ${e.message.slice(0, 120)}` },
@@ -313,7 +357,7 @@ export async function toEnvelope(
     // Only a message-specific permanent condition is safe to forget. Network,
     // token, auth, quota, server and connector-wide permission failures must
     // escape so the sync runner withholds the Gmail history cursor.
-    if (!isPermanentMessageFailure(e)) throw e;
+    if (!isPermanentMessageFailure(e)) throw gmailOperationError(e, GMAIL_OPERATIONS.message);
     return {
       skip: { path: id, id, reason: `could not be fetched: ${e.message.slice(0, 120)}` },
       source_deleted: true,
@@ -370,7 +414,7 @@ export async function toEnvelope(
   const ts = msg.internalDate ? Number(msg.internalDate) : null;
 
   return {
-    envelope: {
+    envelope: withFirstPartySourceProvenance({
       source_type: sourceName,
       // Bare connector identity. The store adds source_type exactly once;
       // pre-prefixing here created gmail:gmail:<id> and made family deletion
@@ -383,7 +427,7 @@ export async function toEnvelope(
       date_reliable: !!ts,
       uri: `https://mail.google.com/mail/u/0/#all/${id}`,
       metadata: { category: sourceName, extracted_as: "gmail", thread_id: msg.threadId, labels: msg.labelIds },
-    },
+    }, { textSource: "native", textReliable: true }),
     version: String(msg.historyId || id),
   };
 }

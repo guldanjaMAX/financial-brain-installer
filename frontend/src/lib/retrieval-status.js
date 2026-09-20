@@ -62,6 +62,10 @@ const CAUSES = {
     cause: "exact-word search did not answer, so only meaning-based search ran",
     remedy: "Try again. If it keeps happening, ask your installer to check search.",
   },
+  retrieval: {
+    cause: "both exact-word search and meaning-based search failed, so no stored records were searched",
+    remedy: "Try again in a moment. If it keeps happening, ask your installer to check search.",
+  },
 };
 
 const UNKNOWN_REMEDY = "Try again. If it keeps happening, ask your installer to check search.";

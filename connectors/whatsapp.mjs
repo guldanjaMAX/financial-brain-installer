@@ -434,7 +434,11 @@ export async function drainOnce({
     documents_sent: 0,
     documents_would_send: 0,
     sessions_open: 0,
+    started_watermark: state.last_seq,
     watermark: state.last_seq,
+    caught_up: false,
+    first_row_at: null,
+    last_row_at: null,
     drained_marked: 0,
     undrained_remaining: null,
     outbox_writable: null,
@@ -477,7 +481,10 @@ export async function drainOnce({
       const limit = Math.min(pageSize, remaining);
       if (limit <= 0) break;
       const rows = fetchOutboxSince(opened.db, counts.watermark, limit);
-      if (!rows.length) break;
+      if (!rows.length) {
+        counts.caught_up = true;
+        break;
+      }
       counts.pages++;
       counts.rows_seen += rows.length;
       remaining -= rows.length;
@@ -494,6 +501,9 @@ export async function drainOnce({
       const closed = [];
       for (const entry of ordered) {
         if (Number.isFinite(entry.at)) {
+          const at = new Date(entry.at).toISOString();
+          if (!counts.first_row_at || entry.at < Date.parse(counts.first_row_at)) counts.first_row_at = at;
+          if (!counts.last_row_at || entry.at > Date.parse(counts.last_row_at)) counts.last_row_at = at;
           if (entry.at < newestSeenMs) counts.rows_out_of_order++;
           else newestSeenMs = entry.at;
         }
@@ -524,7 +534,10 @@ export async function drainOnce({
 
       // A short page proves the outbox is caught up; a full page means known
       // backlog, so continue immediately rather than sleeping on it.
-      if (rows.length < limit) break;
+      if (rows.length < limit) {
+        counts.caught_up = true;
+        break;
+      }
     }
 
     const stale = finishStaleSessions(sessionizer, { nowMs: now(), maxGapMs });

@@ -36,7 +36,7 @@ in ADR 003; they are not claimed as current connector behavior.
 | iPhone messages, no Mac (Windows too) | **Built, as a one-time history load.** `brain ingest --from iphone-backup` reads an **unencrypted** local iPhone backup and loads the iMessage and SMS history inside it. A point-in-time snapshot, **not** live capture: nothing new arrives afterwards. Runs on Windows and macOS. Never yet run against a backup Apple wrote |
 | Facebook Messenger export | **Built as an export.** Select Messages and JSON in Meta's Download Your Information flow, then ingest the exported `message_*.json` files through Drive or the watched folder. Exact epoch timestamps, stable thread/session identity, rerun idempotency, explicit attachment-only/unavailable counts, and family deletion are fixture-tested. No current real export has been accepted yet; there is no live Facebook API connector. |
 | Zoom | **Built.** `brain connect zoom`: a webhook on your own worker loads each cloud-recording transcript automatically, while bounded reconciliation checks the most recent 30 days for missed events. **Needs a paid (Licensed) Zoom seat** because the free tier cannot cloud record. Not yet run against a real Zoom account |
-| Plaid | **Built behind a field gate.** Owner-only Link, signed webhooks, staged transaction sync, account-to-entity assignment, retry, and provider-confirmed disconnect are wired. No Plaid Sandbox Item or real account has crossed this build yet |
+| Plaid | **Built behind a held field gate. General bank invitations are closed.** Owner-only Link, signed webhooks, staged transaction sync, account-to-entity assignment, retry, and provider-confirmed disconnect are wired. The owner may run `brain connect bank` for their own owner-present pilot: it asks for the Plaid client ID and secret at a hidden prompt only when the Worker lacks them, generates a missing wrapping key, verifies all three secret names, then opens Link. Customer invitations stay closed until the full release-gate journey passes. No Plaid Sandbox Item or real account has crossed this build yet |
 | Slack | **Built behind a field gate.** OAuth, channels, direct conversations, threads, scheduling, and explicit partial deletion truth are scripted-provider tested. No real workspace proof yet |
 | Notion | **Built behind a field gate.** OAuth, page search, properties, recursive blocks, trash reporting, and scheduling are scripted-provider tested. No real workspace proof yet |
 | Microsoft 365, Outlook, SharePoint, OneDrive | **Built behind a field gate.** OAuth, immutable Outlook IDs, delta sync, file extraction, tombstones, and scheduling are scripted-provider tested. No real Entra tenant proof yet |
@@ -148,7 +148,14 @@ It reads your manifest, works out which sources you actually have, runs every on
 
 - **It takes the work from your manifest, not from a list in the code.** If your install does not use WhatsApp, WhatsApp never appears as work. If a new connector is added later and your manifest declares it, it is picked up without anyone editing a list.
 - **One source failing does not stop the others.** A dead Gmail token does not prevent Drive and Calendar from loading. The failure is caught, the sweep carries on, and every failure is listed at the end with what to do about it. This is deliberate: a partial load with an honest list beats an aborted run.
-- **It tells you what is IN and what is NOT**, in four separate lists: what loaded, what was deliberately skipped and why, what is enabled but unavailable, and what failed while running. A skipped or unavailable source is never counted as loaded. If a count is not available it says *unknown*, never zero. If a source loaded in part it says so in those words.
+- **It tells you what this run did and did not load**, in four separate lists:
+  what loaded, what was deliberately skipped and why, what was enabled but
+  unavailable, and what failed while running. A failed or unavailable status
+  means the source was not loaded successfully in this run. It does not prove
+  D1 has no older records from an earlier run. Use the authenticated
+  `brain sources <manifest>` inventory before calling older material absent. If
+  a count is unavailable it says *unknown*, never zero. If a source loaded in
+  part it says so in those words.
 - **Submitted is not accepted.** For iMessage, WhatsApp, and iPhone-backup loads, the report counts only Worker-accepted conversations as present. A conversation refused by the credential gate is named as not indexed and makes that source partial.
 - **It is resumable.** It keeps no progress file of its own. Every source already remembers where it got to, and re-running the command is how an interrupted load finishes. For that same reason it refuses `--reset`: resetting everything at once is almost never what anyone means. Reset one source deliberately with `brain ingest <manifest> --from drive --reset`.
 - **It runs cheap sources first.** Calendar, then messages, then your folders, then Gmail, then Drive, with a one-time iPhone backup last. You see something working in the first minute rather than after forty silent ones.
@@ -176,13 +183,15 @@ Source names are the keys under `corpora` in your manifest, and the obvious shor
 ```
   totals: 4 loaded, 2 skipped, 2 unavailable, 1 failed, of 9 declared
   943 created, 14 updated, 127 unchanged, 7 conversation document(s) sent
-  5 of 9 declared source(s) are NOT in the brain. The lists above say which, and why.
+  5 of 9 declared source(s) did not load in this run. Check authenticated inventory for older stored records.
 ```
 
 If an enabled source failed, was unavailable, or loaded only in part, the
 command exits non-zero **after** printing the whole report. A script cannot
 mistake an incomplete sweep for success, and a person can still read what did
-work. Deliberately disabled and push-only sources remain stated skips.
+work. That status describes this run only. It does not prove older stored
+records are absent. Deliberately disabled and push-only sources remain stated
+skips.
 
 ### Every load has a name, and the name is an undo
 
@@ -268,6 +277,7 @@ What it captures, and what it does not:
 - **Conversations are grouped into bounded sessions** (per thread, per day, split on a six-hour quiet gap) — the same shape WhatsApp and SMS exports produce — so a citation points at a conversation, not one floating text.
 - **Contact names are not resolved.** People you text appear as their raw phone number or email address, not their Contacts-card name. Your own messages carry your name from the manifest.
 - **Tapbacks, reactions and attachment-only messages are skipped and counted** — the run report says how many — so a thread in the brain is thinner than the same thread on your phone, and that difference is stated rather than hidden.
+- **A full run can prove its own history, and says exactly what it proved.** A capture started with `--reset` and no `--limit` walks this Mac's whole message database from its first row to its last, and records that as a completed history sweep. What the claim covers is this Mac's database end to end and nothing wider: messages you deleted, messages that only ever lived on the phone, and attachment-only content sit outside it, which is what the iPhone backup load below is for. Tapbacks and attachment-only rows do not block the claim — they are read, counted and reported — but a row the walk cannot place in time at all does, and that count is named too. **A conversation still in progress is held, not closed early, and the run says so.** Closing it would make the document boundary depend on the minute the sweep ran, so the same messages would land in different documents on the next full run and the earlier tail document would be orphaned. Instead the sweep declares only what it delivered: its date range ends at the newest message inside a closed conversation document, the run report and receipt say how many conversations are still open, and ordinary capture delivers each of those once it has been quiet for six hours or the day turns. Until a full run like that has happened, `brain check` calls every category provisional rather than presenting unproven history as proven.
 
 The load is the named source `imessage`: `brain sources` shows its freshness against the once-a-minute expectation, and `brain forget <manifest> --source imessage` removes every captured conversation. `brain disconnect imessage <manifest>` stops and removes the capture agent, flushes still-open conversations so they remain searchable, and leaves already-captured history in the brain unless you forget it explicitly.
 
@@ -481,11 +491,24 @@ If you are ever unsure whether a source is connected, do not consult this page. 
 node brain.mjs sources <manifest>
 ```
 
-One line per source: what it is, whether it is pending, loading, ready, or errored, how many documents it holds, and when it last took anything in. It is the only answer that cannot be out of date.
+One line per source with the actual concise columns: `name`, `kind`, `zone`,
+`physical`, `readable`, and `freshness`. This is the authenticated current
+overview available to the command. Its source-level counts and freshness still
+do not prove that an exact file arrived, that history is complete, or that the
+item is query-visible.
 
-The same command also cross-checks the registry against the authenticated live
-document store whenever the install's durable admin key is available:
+For the detailed receipt and coverage evidence, use the machine-readable form:
 
 ```
-node brain.mjs sources <manifest>
+node brain.mjs sources <manifest> --json
 ```
+
+Require source-inventory `contract_version: 3`, `kind: source_inventory`,
+`complete: true`, `truncated: false`, `cursor: null`, and `returned` equal to
+`total`. Each row exposes only the reviewed fields: `source_id` and `name`,
+`kind`, `registered`, `zone`, `connector`, `configuration`, `storage`,
+`readability`, `provenance`, `recovery_plan`, `receipt`, `last_failure`, and
+`freshness`. Use `receipt.logical_matches_reported` with
+`storage.logical_documents` for registry-versus-D1 drift, and use the receipt
+and `freshness.coverage` fields for run and history claims. Do not reconstruct
+those claims from the concise terminal columns.

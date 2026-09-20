@@ -34,7 +34,7 @@ async function fresh(options={}){
   try{await route.fulfill({json:response});}catch{}
  });
  await page.goto(new URL('/test/browser/fixtures/owner-upload.html',harness.origin).href);
- await page.getByRole('button',{name:'Company alpha',exact:true}).waitFor();
+ await harness.waitForBrowserBoot(page,page.getByRole('button',{name:'Company alpha',exact:true}),'owner upload fixture');
  await page.waitForFunction(()=>document.querySelector('input[type=file]')?.disabled===false);
  return {page,state};
 }
@@ -104,7 +104,7 @@ try{
  {
   const {page,state}=await fresh();
   await page.locator('input[type=file]').setInputFiles(syntheticFile('alpha'));
-  await page.getByRole('button',{name:'All',exact:true}).click();
+  await page.getByRole('button',{name:'Whole Brain',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('input[type=file]')?.disabled===true);
   await renderSettled(page);
   const wholeBrainCleared=await page.locator('input[type=file]').evaluate(el=>el.files.length===0);

@@ -251,16 +251,30 @@ const lostSourceLease = () => new SourceIngestLockError(
   const partial = completeResult();
   partial.deletion_authority = "unavailable";
   partial.warnings = ["hard deletion is not exposed"];
+  partial.walk_complete = true;
   partial.outcome = ingestionOutcome("partial", { reason: partial.warnings[0] });
   const h = harness({ sync: async () => partial });
   const result = await runProviderConnector(h.options);
-  check("a partial provider window preserves accepted documents but never posts healthy source state",
+  check("a fully enumerated provider window stays ready while its deletion limitation remains explicit",
     result.outcome.kind === "partial" && result.tally.unchanged === 1 &&
-    h.receipts.at(-1).status === "error" && h.receipts.at(-1).walk_complete === false &&
-    h.receipts.at(-1).outcome_kind === "partial");
+    h.receipts.at(-1).status === "ready" && h.receipts.at(-1).walk_complete === true &&
+    h.receipts.at(-1).complete_sweep === false && h.receipts.at(-1).outcome_kind === "partial");
   check("an explicit partial outcome overrides an inconsistent adapter cursor flag",
     partial.cursor_can_advance === true && partial.proposed_cursor.page === "opaque-next" &&
     h.states.length === 0 && result.cursor_advanced === false);
+}
+
+{
+  const partial = completeResult();
+  partial.deletion_authority = "unavailable";
+  partial.warnings = ["one thread exceeded the bounded expansion limit"];
+  partial.walk_complete = false;
+  partial.outcome = ingestionOutcome("partial", { reason: partial.warnings[0] });
+  const h = harness({ sync: async () => partial });
+  await runProviderConnector(h.options);
+  check("a bounded provider walk remains an error and cannot claim source enumeration",
+    h.receipts.at(-1).status === "error" && h.receipts.at(-1).walk_complete === false &&
+      h.receipts.at(-1).complete_sweep === false && h.states.length === 0);
 }
 
 {
@@ -286,6 +300,13 @@ const lostSourceLease = () => new SourceIngestLockError(
     h.receipts.map((receipt) => receipt.status).join(",") === "indexing,error" &&
       h.receipts.at(-1).issue_code === "INGEST_FAILED" &&
       !("error" in h.receipts.at(-1)) && !("detail" in h.receipts.at(-1)));
+  check("a provider delivery failure preserves its completed-walk outcome counts",
+    h.receipts.at(-1).walk_complete === true &&
+      h.receipts.at(-1).complete_sweep === false &&
+      h.receipts.at(-1).docs_refused === 0 &&
+      h.receipts.at(-1).docs_failed === 1 &&
+      h.receipts.at(-1).files_seen === 2,
+    JSON.stringify(h.receipts.at(-1)));
 }
 
 {
@@ -296,6 +317,10 @@ const lostSourceLease = () => new SourceIngestLockError(
   try { await runProviderConnector(h.options); } catch (caught) { error = caught; }
   check("an unconfirmed provider deletion fails the run and withholds the cursor",
     error?.code === "provider_delivery_incomplete" && h.states.length === 0 && h.receipts.at(-1).status === "error");
+  check("an unconfirmed provider deletion keeps traversal distinct from delivery completion",
+    h.receipts.at(-1).walk_complete === true && h.receipts.at(-1).complete_sweep === false &&
+      h.receipts.at(-1).docs_refused === 0 && h.receipts.at(-1).docs_failed === 0,
+    JSON.stringify(h.receipts.at(-1)));
 }
 
 {

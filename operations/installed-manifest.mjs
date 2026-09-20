@@ -22,6 +22,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 const POINTER_SCHEMA_VERSION = 1;
 const MAX_POINTER_BYTES = 8 * 1024;
@@ -258,6 +259,32 @@ export function readInstalledManifest(options = {}) {
   }
 }
 
+/**
+ * Resolve the one manifest explicitly remembered by a completed setup or
+ * update. This is intentionally stricter than a home-folder search: once the
+ * private pointer exists, an unrelated checkout or old test manifest must not
+ * become an alternate install candidate.
+ */
+export function inspectInstalledManifestForPreflight(options = {}) {
+  const path = readInstalledManifest(options);
+  if (!path) return Object.freeze({ status: "none", manifestPath: null });
+
+  let before;
+  try { before = lstatSync(path); } catch {
+    fail("INSTALLED_MANIFEST_TARGET_MISSING", "the saved Brain manifest does not exist");
+  }
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+    fail("INSTALLED_MANIFEST_TARGET_UNSAFE", "the saved Brain manifest must be one regular file, not a link");
+  }
+  assertOwned(before, "INSTALLED_MANIFEST_TARGET_UNSAFE", "the saved Brain manifest");
+  const canonical = join(realpathSync.native(dirname(path)), basename(path));
+  const after = lstatSync(canonical);
+  if (!sameFile(before, after)) {
+    fail("INSTALLED_MANIFEST_TARGET_UNSAFE", "the saved Brain manifest changed while it was checked");
+  }
+  return Object.freeze({ status: "selected", manifestPath: canonical });
+}
+
 export function rememberInstalledManifest(manifestPath, options = {}) {
   const canonical = canonicalManifestPath(manifestPath);
   const directory = prepareStateDirectory(options);
@@ -315,6 +342,28 @@ export function rememberInstalledManifest(manifestPath, options = {}) {
     if (created) {
       try { unlinkSync(temporary); } catch { /* preserve the original failure */ }
     }
+  }
+}
+
+const IS_MAIN = (() => {
+  try { return resolve(process.argv[1] || "") === fileURLToPath(import.meta.url); }
+  catch { return false; }
+})();
+
+if (IS_MAIN && process.argv.slice(2).join(" ") === "--preflight-locator") {
+  try {
+    const result = inspectInstalledManifestForPreflight();
+    if (result.status === "selected") {
+      process.stdout.write(`${result.manifestPath}\n`);
+    } else {
+      process.exitCode = 2;
+    }
+  } catch (error) {
+    const code = error instanceof InstalledManifestError
+      ? error.code
+      : "INSTALLED_MANIFEST_POINTER_UNREADABLE";
+    process.stdout.write(`${code}\n`);
+    process.exitCode = 3;
   }
 }
 

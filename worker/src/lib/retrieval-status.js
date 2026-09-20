@@ -59,12 +59,35 @@ const CAUSES = {
     remedy: "Try again in a moment. Run `brain health` if it keeps happening.",
   },
   fts: {
-    cause: "keyword search is unavailable, so only the semantic index was queried",
+    cause: "keyword search is unavailable, so exact word matching did not run",
     remedy: "Run `brain health` to see which subsystem is down.",
+  },
+  retrieval: {
+    cause: "both keyword search and meaning-based search failed, so no stored records were searched",
+    remedy: "Try again in a moment. Run `brain health` if it keeps happening.",
   },
   "scoped-vector": {
     cause: "exact document authorization was applied in D1, so the unscoped semantic index was deliberately not queried",
     remedy: "Keyword evidence is authoritative for this scoped request. Semantic recall remains intentionally unavailable until Vectorize supports an exact document prefilter.",
+  },
+};
+
+// Preserve the long-standing `degraded` wire values while using the explicit
+// store outcome to distinguish a query failure from an incomplete projection.
+// Only known token/reason pairs select copy, so an arbitrary provider message
+// can never enter an owner-facing response through this path.
+const CAUSES_BY_REASON = {
+  "vector:vector-query-failed": {
+    cause: "meaning-based search failed, so only keyword search completed",
+    remedy: "Try again in a moment. Run `brain health` if it keeps happening.",
+  },
+  "fts:keyword-query-failed": {
+    cause: "keyword search failed, so exact word matching did not run",
+    remedy: "Try again in a moment. Run `brain health` if it keeps happening.",
+  },
+  "retrieval:keyword-and-vector-query-failed": {
+    cause: "both keyword search and meaning-based search failed, so no stored records were searched",
+    remedy: "Try again in a moment. Run `brain health` if it keeps happening.",
   },
 };
 
@@ -84,18 +107,25 @@ function degradedToken(degraded) {
  * this module has never heard of must not fall through to "the brain has
  * nothing", which is precisely the failure being fixed.
  */
-export function degradedCause(degraded) {
+function degradationDetails(degraded, degradedReason = null) {
   const token = degradedToken(degraded);
   if (!token) return null;
-  return CAUSES[token]?.cause ||
+  const reason = typeof degradedReason === "string" ? degradedReason.trim().slice(0, 80) : "";
+  return CAUSES_BY_REASON[`${token}:${reason}`] || CAUSES[token] || null;
+}
+
+export function degradedCause(degraded, degradedReason = null) {
+  const token = degradedToken(degraded);
+  if (!token) return null;
+  return degradationDetails(token, degradedReason)?.cause ||
     `a retrieval subsystem reported "${token}" and did not answer`;
 }
 
 /** What the owner can do about it. */
-export function degradedRemedy(degraded) {
+export function degradedRemedy(degraded, degradedReason = null) {
   const token = degradedToken(degraded);
   if (!token) return null;
-  return CAUSES[token]?.remedy || UNKNOWN_REMEDY;
+  return degradationDetails(token, degradedReason)?.remedy || UNKNOWN_REMEDY;
 }
 
 /**
@@ -106,12 +136,12 @@ export function degradedRemedy(degraded) {
  * `worker/test/degraded-absence.test.mjs` asserts this string does not match
  * it, because a sentence that scores as a refusal will be read as one.
  */
-export function unavailableNotice(degraded) {
+export function unavailableNotice(degraded, degradedReason = null) {
   return [
     "The search could not be completed, so this is not an answer about what your brain holds.",
-    `Cause: ${degradedCause(degraded)}.`,
+    `Cause: ${degradedCause(degraded, degradedReason)}.`,
     "This does not mean your brain is empty on this question.",
-    degradedRemedy(degraded),
+    degradedRemedy(degraded, degradedReason),
   ].join(" ");
 }
 
@@ -134,13 +164,13 @@ export function coverageIncompleteNotice(unavailable = false, candidatesFound = 
  * The gap text is the part an LLM actually acts on, so the prohibition has to
  * be in the gap, not merely implied by a sibling field it may never read.
  */
-export function unavailableGap(degraded) {
+export function unavailableGap(degraded, degradedReason = null) {
   const token = degradedToken(degraded);
   return {
     type: SEARCH_UNAVAILABLE,
     degraded: token,
     detail:
-      `The search could not be completed: ${degradedCause(degraded)}. ` +
+      `The search could not be completed: ${degradedCause(degraded, degradedReason)}. ` +
       "This is a system state, NOT a finding about the corpus. " +
       "Do NOT say or imply that the brain has nothing on this question, and do not answer from your own knowledge instead. " +
       "Say that the search could not be completed, name the cause, and offer to retry.",
@@ -153,7 +183,7 @@ export function unavailableGap(degraded) {
  * One call decides status, gaps and sentence together so no surface can pick up
  * half of it.
  */
-export function emptyRetrievalDisclosure(degraded) {
+export function emptyRetrievalDisclosure(degraded, degradedReason = null) {
   const token = degradedToken(degraded);
   if (!token) {
     return {
@@ -169,9 +199,9 @@ export function emptyRetrievalDisclosure(degraded) {
     unavailable: true,
     status: SEARCH_UNAVAILABLE,
     degraded: token,
-    cause: degradedCause(token),
-    notice: unavailableNotice(token),
-    gaps: [unavailableGap(token)],
+    cause: degradedCause(token, degradedReason),
+    notice: unavailableNotice(token, degradedReason),
+    gaps: [unavailableGap(token, degradedReason)],
   };
 }
 

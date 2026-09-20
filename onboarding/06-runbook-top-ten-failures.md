@@ -52,10 +52,22 @@ node brain.mjs health <manifest>
 And the one that answers "what is actually in there, and is each part current":
 
 ```
-node brain.mjs sources <manifest>
+node brain.mjs sources <manifest> --json
 ```
 
-That prints one line per source with its status (pending, indexing, ready, or error), how many documents it holds, and when it last took anything in. When the durable admin key is available it also cross-checks those counts against what your brain actually holds and flags any gap, because the registry's number is its last receipt and the brain is the authority. **A drift of thousands is the cheapest signal available that a load died halfway.**
+That returns source-inventory `contract_version: 3`, `kind: source_inventory`
+after the CLI has collected every page into one stable snapshot. Require
+`complete: true`, `truncated: false`, `cursor: null`, and `returned` equal to
+`total`. Each source row separates
+`storage.physical_documents`, `storage.logical_documents`,
+`storage.readable_documents`, receipt history, provenance, recovery needs, and
+freshness. A false `receipt.logical_matches_reported` value is the exact signal
+to compare `receipt.reported_logical_documents` with
+`storage.logical_documents`; those are the registry receipt and current D1
+logical count. These are still source-level clues, not proof that any exact file arrived
+or is searchable.
+**A drift of thousands is the cheapest signal available that a load died
+halfway.**
 
 And the one that checks the parts of the install that are not questions and answers at all:
 
@@ -107,10 +119,12 @@ brain setup <manifest>
 brain health <manifest>
 ```
 
-`brain setup` prompts for the Cloudflare token without echo, reuses the
-manifest's verified durable admin key, and applies that durable value to the
-Worker. Keeping the key change inside `brain setup` preserves the local and
-Worker verification as one step.
+`brain setup` reuses this Brain's named owner-approved Cloudflare browser
+profile, reuses the manifest's verified durable admin key, and applies that
+durable value to the Worker. Keeping the key change inside `brain setup`
+preserves the local and Worker verification as one step. If the released CLI
+explicitly offers its recovery-only hidden token path, explain why and use it
+only after the owner chooses that path.
 
 If the remote update fails, the durable value stays as the desired state.
 Rerun `brain setup <manifest>` and it will apply that same durable value again.
@@ -244,10 +258,13 @@ brain setup <manifest>
 brain health <manifest>
 ```
 
-Setup prompts for the Cloudflare token without echo and reuses the durable
-admin key. If that durable copy is missing or is not the intended value, stop
-and use the installer/operator's approved no-history credential launcher with
-`brain secrets`, keeping the admin key out of shell commands and history.
+Setup reuses this Brain's named Cloudflare browser sign-in and the durable admin
+key. The owner completes Cloudflare sign-in, 2FA, account selection, and consent
+if the saved session needs renewal. If that durable key is missing or is not the
+intended value, stop and use the installer/operator's approved no-history
+credential launcher with `brain secrets`, keeping the admin key out of shell
+commands and history. An API token is only for an explicitly selected automation
+or recovery lane.
 
 **Prevention:** deploy with `node brain.mjs deploy`. That is what it is for.
 
@@ -381,7 +398,11 @@ Before raising it, check **why** you hit it. A cap hit on a quiet day is a loop,
 node brain.mjs sources <manifest>
 ```
 
-One line per source. Look at the `last ingest` column. A source that is days behind while the others are current tells you where to look, and a source stuck on `indexing` has stalled mid-load rather than finished.
+One line per source. The columns are `name`, `kind`, `zone`, `physical`,
+`readable`, and `freshness`. A source whose `freshness` is `stale`, `broken`, or
+`never_synced` while the others are `ok` tells you where to look. `indexing`
+means a run is currently open; if it runs too long, the same column changes to
+`broken` rather than asking you to infer a stall from a timestamp.
 
 **Why, most likely first:**
 
@@ -410,7 +431,7 @@ node brain.mjs schedule <manifest> --install
 node brain.mjs sources <manifest>
 ```
 
-**This is the most dangerous failure in this document**, because it is the only one with no error message. A stale brain does not warn you mid-answer. It answers with old information in exactly the same confident voice. **The freshness line is the number to watch every month.**
+**This is the most dangerous failure in this document**, because it is the only one with no error message. A stale brain does not warn you mid-answer. It answers with old information in exactly the same confident voice. **The `freshness` column is the value to watch every month.**
 
 **Who:** you for the re-share, me for the Google publishing step if it is still within the engagement.
 
@@ -428,18 +449,54 @@ node brain.mjs sources <manifest>
 node brain.mjs sources <manifest>
 ```
 
-If the source you expected is missing, or its count is zero, or its status is still `pending`, the file never arrived. That is a loading problem, not a search problem, and no amount of rephrasing the question will fix it.
+The concise columns are `name`, `kind`, `zone`, `physical`, `readable`, and
+`freshness`. If the source is missing or one of those observed states is not
+ready, the source load needs attention. Those source-level clues do not prove
+that this exact file never arrived. A fresh source and a nonzero physical count
+do not prove that it did.
 
 The same command cross-checks the registry against the authenticated live
 document store whenever the install's durable admin key is available:
 
 ```
-node brain.mjs sources <manifest>
+node brain.mjs sources <manifest> --json
 ```
+
+Use only the complete contract-v3 receipt. Its
+`storage.logical_documents`, `storage.physical_documents`,
+`receipt.logical_matches_reported`, `readability`, `provenance`, and
+`freshness` fields are evidence; zero is not proof that a source run occurred.
+
+Choose one approved low-sensitivity item and follow it through this exact chain.
+Stop at the first unproven checkpoint:
+
+1. **Received:** a terminal source receipt names exact accepted, refused,
+   unreadable, failed, and retryable counts for the run.
+2. **Saved:** that same item is represented as the expected
+   logical family in D1, has chunks, and carries the correct source and
+   extraction provenance. This is not proof that an original file or binary was
+   copied or backed up.
+3. **Search ready:** that exact generation has a confirmed Vectorize receipt and
+   no matching outbox work remains.
+4. **Answer checked:** a distinctive phrase from that
+   same item returns through the supported search path with the expected source
+   citation and provenance.
+
+Never substitute a source count, a pending total, a green health response, or a
+different item at a later checkpoint. Rephrasing is useful only after this chain
+proves the item reached the supported query path.
 
 **b. Is it still being processed?** The acceptance suite reports this as "embedding backlog". A backlog is normal for a few minutes after new material lands. A large one means processing is stuck, and the symptom you experience is exactly this: search does not find your document.
 
-**c. Is the file type readable at all?** Images, video, audio, and scanned PDFs with no text layer are not read. There is no text recognition on scanned documents. See `07-ingest-source-matrix.md` for the full list of what is and is not read.
+**c. What is the file's reading state?** A PDF with a native text layer is read
+directly. A scanned PDF with no text layer can be read with OCR, but OCR is off
+by default. Each scanned page uses Workers AI in the owner's Cloudflare account,
+so first show the estimated page count, cost range, time range, and daily spend
+cap. Run OCR only after the owner separately enables and approves it. Mark the
+result as machine-read text, and refuse an unusable reading instead of guessing.
+An uninspected file or failed extraction remains unknown; neither one proves the
+file is a scan. Images, video, and audio still have no general transcription
+path. See `07-ingest-source-matrix.md` for the complete matrix.
 
 **d. Is it in an excluded folder?** Anything you excluded at intake was excluded at the source and was never read.
 
@@ -471,7 +528,11 @@ First look at what changed. This reads and prints, and changes nothing:
 node brain.mjs doctor <manifest> --repair-checksum
 ```
 
-It reads your database, so like `brain setup` and `brain update` it asks for the Cloudflare token at a hidden prompt, or reuses the one this machine already remembers.
+It reads your database, so like `brain setup` and `brain update` it reuses this
+Brain's named Cloudflare browser sign-in. If that protected session needs a
+refresh, the owner approves the official browser prompt. The bounded hidden
+token path appears only when the released CLI offers recovery and the owner
+chooses it.
 
 For every migration that no longer matches, it prints when it was applied, both checksums, the current file's size in lines and bytes, and whether the difference is only line endings. That last line is a proof rather than a guess: it converts the current file to LF and to CRLF and checks each against the recorded checksum. If neither reproduces it, it says `not confirmable as a pure line-ending change` and tells you to review the file by hand, because the bytes that originally ran were never kept, only their checksum was.
 
@@ -606,14 +667,52 @@ A bad import being one command instead of a support call is the reason you can a
 
 ### Cleanup says `review required`
 
-This is an intentional safety stop, not an installer crash. The proposed cleanup
-crossed 100 documents or 10% of what that source had loaded. Nothing in the plan
-was removed, and the source cursor was not advanced.
+This is an intentional safety stop, not an installer crash. It has four
+possible causes, and the owner action depends on which one the message names:
 
-Review the aggregate reason counts in the message. If the change is expected,
-rerun with the exact `--approve-removals <fingerprint>` value it printed. If the
-change is surprising, do not approve it. Check the connection and source policy,
-then rerun so a fresh source comparison produces a new plan.
+1. **The cleanup plan crossed 100 documents or 10% of what the source had
+   loaded.** Nothing in the plan was removed, and the source cursor was not
+   advanced. Review the aggregate reason counts. If the change is expected,
+   rerun with the exact `--approve-removals <fingerprint>` value it printed. If
+   it is surprising, do not approve it. Check the connection and source policy,
+   then rerun so a fresh comparison produces a new plan.
+2. **Drive stopped returning an item.** A bare 404 is never deletion evidence,
+   and Drive's change-feed `removed` flag is not corroboration because access
+   loss can produce it too. The flag may add a dated note, but it cannot shorten
+   the review window. The Brain keeps its last accessible copy. No UID is
+   deleted while its absence is unresolved or its grace window is open. A stale
+   retry marker is checked against Drive again, and a temporary lookup failure
+   stays protected while the completed cursor is saved. Restore sharing
+   if access changed, or wait until the recorded seven-day grace date and run
+   Drive ingestion again. Only the same
+   not-returned result in two distinct runs with Worker-backed timestamps at
+   least seven days apart can create a deletion candidate. The local and server
+   clocks must agree within 24 hours. If a private inventory response has no
+   valid server time, that run warns and keeps syncing, but its absence
+   observation cannot advance this proof. That later approval stop shows the locally
+   saved name and folder, using the Brain's stored document inventory if local
+   ingest state no longer has them. If either label is still missing, the item
+   is listed as `label_unavailable`, remains protected and retained, and cannot
+   enter an approval fingerprint or deletion plan. The completed cursor still
+   advances. Review the displayed labels, then use the exact fingerprint within
+   24 hours only if the owner expects deletion. Nothing is deleted until that
+   exact approval, and the review record clears only after deletion readback.
+3. **Drive found the item under a reviewed folder after the completed walk
+   omitted it.** The message says `present on Drive under a reviewed folder; retained because the completed walk omitted it.` The indexed copy
+   remains protected and no deletion approval is available. This is not an
+   access-denied result. Run Drive ingestion again so a later completed walk can
+   reconcile the inconsistency.
+4. **Drive returned an access-denied 403 during the end-of-run absence check.**
+   The indexed copy remains in place and outside every deletion plan. Restore
+   this credential's access to the file, then rerun Drive ingestion. There is no
+   deletion approval to give for this stop.
+
+When Drive completed the walk and saved its cursor, protected 403, 404,
+temporary, grace-window, clock, and missing-label states warn but exit
+successfully. A non-zero review exit means a matured, labelled candidate needs
+the printed approval now, or the walk itself failed. The private review receipt
+still records protected conditions for `brain diagnose` even when the process
+exit is zero.
 
 **On a watched local folder this most often means the folder was not there.** A
 cloud folder that had not finished syncing, an external drive that was not

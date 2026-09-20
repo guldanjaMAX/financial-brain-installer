@@ -266,13 +266,7 @@
       "FIELD-ARM64"
     ],
     "evidence": [],
-    "testPlatform": "win32",
-    "deferral": {
-      "version": "0.4.6",
-      "blocked_on": "physical_hardware_unavailable",
-      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can ever close it. No ARM64 machine exists on the bench, and 0.4.0 does not claim Windows ARM64 as a supported runtime. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
-      "unproven": "Windows ARM64 owners get no packaged-launch, DPAPI, browser login, interrupted-update or clean-exit proof in 0.4.0. The release note must name Windows x64 as the only claimed Windows runtime."
-    }
+    "testPlatform": "win32"
   },
   {
     "id": "UPDATE-013",
@@ -378,13 +372,7 @@
     "findings": [
       "PLAID-CONFIG"
     ],
-    "evidence": [],
-    "deferral": {
-      "version": "0.4.6",
-      "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
-      "unproven": "Plaid configuration survives install, deploy and update is unproven against a real Worker with a real Item; only the packaged CLI's configuration read-back is exercised."
-    }
+    "evidence": []
   },
   {
     "id": "UPDATE-018",
@@ -403,13 +391,7 @@
     "findings": [
       "PLAID-ACCOUNT-SCOPE"
     ],
-    "evidence": [],
-    "deferral": {
-      "version": "0.4.6",
-      "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
-      "unproven": "Long and case-sensitive account identities, unknown-account refusal, and cross-Item removal isolation are unproven through real D1 routes with real Plaid data."
-    }
+    "evidence": []
   },
   {
     "id": "UPDATE-019",
@@ -428,13 +410,7 @@
     "findings": [
       "PLAID-COMPLETENESS"
     ],
-    "evidence": [],
-    "deferral": {
-      "version": "0.4.6",
-      "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
-      "unproven": "Cursor safety on malformed or repeated pages, partial-history handling, and exact decimal promotion are unproven against a live provider."
-    }
+    "evidence": []
   },
   {
     "id": "UPDATE-020",
@@ -453,13 +429,7 @@
     "findings": [
       "PLAID-DUPLICATE-CONNECTION"
     ],
-    "evidence": [],
-    "deferral": {
-      "version": "0.4.6",
-      "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
-      "unproven": "Same-session replay, concurrent sessions, existing-Item reauthorization and ambiguous same-bank accounts are unproven against a live provider."
-    }
+    "evidence": []
   },
   {
     "id": "UPDATE-021",
@@ -479,13 +449,7 @@
     "findings": [
       "PLAID-SYNC-CUSTODY"
     ],
-    "evidence": [],
-    "deferral": {
-      "version": "0.4.6",
-      "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
-      "unproven": "Scheduler fairness across four or more Items and overlapping cron and manual slices are unproven against live Items."
-    }
+    "evidence": []
   },
   {
     "id": "UPDATE-022",
@@ -505,13 +469,7 @@
     "findings": [
       "PLAID-OWNER-ACCEPTANCE"
     ],
-    "evidence": [],
-    "deferral": {
-      "version": "0.4.6",
-      "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires two real institutions and four real accounts spanning one person and two owned businesses, plus a separately approved production pilot, and its own text excludes API-only Sandbox receipts and CI. Those live accounts and that approval do not exist for this cut. The deferral holds only while general bank invitations stay closed, which is what the Plaid release gate means by held. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
-      "unproven": "No owner may be invited to connect a bank in 0.4.0. General bank invitations stay closed, and the deployed owner journey, webhook delivery, reauthorization and production pilot remain unproven."
-    }
+    "evidence": []
   },
   {
     "id": "UPDATE-023",
@@ -574,13 +532,7 @@
       "PLAID-READY-WINDOW-FRESHNESS",
       "PLAID-REFRESH-DEBT-SCHEDULED-RETRYABLE"
     ],
-    "evidence": [],
-    "deferral": {
-      "version": "0.4.6",
-      "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires a real, live Plaid Item against a real institution with real accounts, and its own text excludes API-only Sandbox receipts and CI. No live Item exists for this cut because general bank invitations remain closed, which is what the Plaid release gate means by held. The deferral holds only while they stay closed. Re-taken for 0.4.3 on 2026-09-08: 0.4.3 changes one branch of Vectorize provisioning and nothing this deferral depends on, so the blocker and the unproven surface are unchanged. Re-taken for 0.4.4 on 2026-09-08: 0.4.4 changes projection activation, the pre-update gate, secret entry and version reporting, none of which this deferral depends on. Re-taken for 0.4.5 on 2026-09-09: 0.4.5 changes only the local folder walk's handling of symbolic links and the source name a path-scoped ingest files under, neither of which this deferral depends on. Re-taken for 0.4.6 on 2026-09-09: 0.4.6 changes only how a large stale projection is rebuilt and what the update says when it finishes short, neither of which this deferral depends on.",
-      "unproven": "That an owner is never told current while a refresh is owed is unproven with a real Item and real webhook history."
-    }
+    "evidence": []
   },
   {
     "id": "UPDATE-026",
@@ -715,10 +667,13 @@
       "recovery"
     ],
     "tests": [
+      "test/update-preview.test.mjs",
+      "test/update-preview-brain-adapter.test.mjs",
+      "test/health-verify-exit.test.mjs",
       "worker/test/pending-short-projection-activates.test.mjs"
     ],
-    "acceptance": "The gate must separate a projection whose work exists and is stuck from one whose work was never created, because the remedy differs and the two look identical on the counts it reads. Prove the runbook asks for the queued count and stops on zero queued against a large shortfall. On 2026-09-08 the gate read GO on a brain in exactly that position and the operator installed over it.",
-    "findings": "The gate compared actual against expected vectors and treated 'less than expected and identical between readings' as a stranded fence, which is one of two opposite situations with that signature. The queued count is the discriminator: a large queue that is not moving means an update can clear it; zero queued against a large shortfall means the bootstrap has to create the work. Runbook updated in the website repository."
+    "acceptance": "The packaged gate must separate a projection whose repair work exists from one whose work was never created or cannot cover the deficit, because the remedy differs and those states can share the same vector counts. Prove every exact runtime, package, manifest, recorded-version, D1, and bare-domain check completes before credential or network access. Then make exactly one authenticated HTTP 200 read from the existing /api/admin/brain/documents contract, with no Cloudflare control-plane request, and bind its same-response Worker version, active D1 writer state, expected and actual counts, queue composition, readiness reason, and verdict into the receipt fingerprint without retaining document rows. Pending work must remain non-ready, and a shortfall is recoverable only when queued upserts cover its full numeric deficit. Delete-only, insufficient-upsert, or zero-queued shortfalls, zero-queue provider visibility pending, excess vectors, paused or mixed generation, and malformed state stop. Every result must remain non-authorizing, report actual credential and network reads, and prove zero Brain writes, control requests, deploys, installs, browser launches, manifest or workspace writes, skill writes, and support-journal writes. On 2026-09-08 the gate read GO on a brain in exactly the zero-queue shortfall position and the operator installed over it.",
+    "findings": "The old gate compared actual against expected vectors and treated 'less than expected and identical between readings' as a stranded fence, which is one of several opposite situations with that signature. Queue composition is the discriminator: queued upserts at least equal to the deficit show durable repair work exists, while zero or insufficient queued upserts mean the observed work cannot restore parity, and a zero-queue accepted-mutation reason can mean provider visibility remains unproven. The current v0.4.8 working tree adds a sealed-runtime preview contract that performs one bounded authenticated aggregate read after all local checks, fingerprints the sanitized queue classification, ignores ambient ADMIN_KEY, and preserves zero mutation, control-plane, deploy, install, browser, workspace, skill, and support effects. The domain is explicitly only the pinned manifest's assertion; this read does not independently prove Cloudflare account or domain ownership, so the field rung must reconcile its target. Pure and adapter fixture tests cover ordering, privacy, malformed and mixed responses, sufficient, insufficient, delete-only, and zero-queue verdicts, exact HTTP 200, and honest boundary counts. UPDATE-036 has only local fixture evidence until the immutable packaged command and deployed field receipt pass review; no website runbook change or live closure is claimed here."
   },
   {
     "id": "UPDATE-037",
@@ -732,8 +687,8 @@
     "tests": [
       "test/hidden-entry-fails-closed.test.mjs"
     ],
-    "acceptance": "A prompt that cannot prove it masked must refuse rather than ask. Prove on a physical Windows host, on both PowerShell 5.1 and PowerShell 7, that no credential is echoed and that the refusal names a route which does mask. A live Cloudflare API token was echoed in full at this prompt on Windows PowerShell 5.1 on 2026-09-08, on a shared screen, and was revoked. Every guard passed while it happened: the stream was a TTY, setRawMode existed, and enabling raw mode returned without throwing.",
-    "findings": "The console accepts the instruction to stop echoing and keeps echoing, which the process cannot detect. Fixed by refusing on win32 unless BRAIN_ALLOW_WINDOWS_ECHO_RISK is set, naming the Read-Host -AsSecureString route in the refusal, and on every platform verifying input.isRaw after setRawMode rather than trusting that the call returned."
+    "acceptance": "A prompt that cannot prove it masked must refuse rather than ask. Prove on a physical Windows host, on both PowerShell 5.1 and PowerShell 7, that no credential is echoed and that the refusal names a supported route which needs no secret entry. A live Cloudflare API token was echoed in full at this prompt on Windows PowerShell 5.1 on 2026-09-08, on a shared screen, and was revoked. Every guard passed while it happened: the stream was a TTY, setRawMode existed, and enabling raw mode returned without throwing.",
+    "findings": "The console accepts the instruction to stop echoing and keeps echoing, which the process cannot detect. The Cloudflare token caller now refuses on Windows and directs fresh setup to browser sign-in, which needs no API token. The Claude technician stops Google, Zoom, and IMAP before any Windows secret prompt or connector launch. This release ships no PowerShell secret-entry bridge. On every platform the shared prompt also verifies input.isRaw after setRawMode rather than trusting that the call returned. Physical PowerShell 5.1 and 7 proof remains open."
   },
   {
     "id": "UPDATE-038",
@@ -804,6 +759,26 @@
     ],
     "acceptance": "An owner upgrading from a version with no credential-scanner fingerprint must be told, before their next ingest, that every previously indexed document will be re-sent, and told to pause any watched folder until one full sweep completes. Prove the warning fires on a state file written without a fingerprint, and that it does not fire on a 0.4.x to 0.4.x upgrade where GATE_VERSION is unchanged.",
     "findings": "credentialScannerFingerprint did not exist at v0.3.5, so a state file written by 0.3.x carries no credential_scanner_fingerprint and scannerPolicyChanged is `undefined !== <hash>`, always true. Every 'this document is unchanged, skip it' branch is guarded on it (brain.mjs around 7046 and 7098), so every document is re-prepared and re-sent. Reported by a client on 2026-09-09: a dry run after upgrading 0.3.5 to 0.4.1 showed 11,217 documents to send and 0 unchanged, on a brain already carrying a 164,000 chunk backlog. Her agent unloaded the watched-folder LaunchAgent to stop the sync roughly doubling the queue, which is the only reason it was caught. Rechecking after a scanner change is correct behaviour; shipping it with no warning is not. GATE_VERSION in worker/src/lib/secret-scan.js has been 5 since v0.4.0, so 0.4.x to 0.4.x does not re-trigger it, but the fingerprint commits only after a complete sweep, so anyone who has not finished one is still in the re-send state.",
+    "evidence": []
+  },
+  {
+    "id": "UPDATE-043",
+    "title": "Legacy reviewed Wrangler runtime carries an affected local image decoder",
+    "status": "local-only",
+    "scopes": [
+      "fresh",
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "test/cloudflare-oauth-session.test.mjs",
+      "test/cloudflare-recovery-adapter.test.mjs",
+      "test/doctor.test.mjs",
+      "test/wrangler-oauth.test.mjs",
+      "test/wrangler-spec-pinned.test.mjs"
+    ],
+    "acceptance": "Remove the affected decoder from every reviewed Wrangler runtime the product can invoke. Pin one patched Wrangler contract across package metadata, doctor, named OAuth profiles, legacy compatibility, locked recovery runtime, tests and owner instructions; prove the exact lock and runtime inventory, both OAuth/config parsers, packed setup, the full test and CI matrix, and renewed field-runtime evidence. Until that candidate is accepted, any narrow field exception must exclude Linux, wrangler dev, local Miniflare Images or cf.image, untrusted HEIF or AVIF, and the legacy wrangler@4.73.0 route.",
+    "findings": "A live npm audit on 2026-09-12 at candidate aa1937a reported three high-severity nodes through the direct development pin wrangler 4.127.1, Miniflare and sharp 0.35.2 under GHSA-rgj7-g3m4-5g8c. The offline audit cache had reported zero and was not current evidence. The selected setup and locked field-runtime pin is now 4.131.1, which resolves patched sharp 0.35.4; the live installed-tree audit is clean and focused OAuth, doctor, runtime, deployment, package and privacy checks pass locally. A second dynamically fetched legacy pin, wrangler@4.73.0, remains in the compatibility path and keeps this incident open. The affected sharp decoder is dynamically loaded only by Miniflare's local Images and cf.image paths; the frozen Monday pilot uses the patched selected path for remote Cloudflare commands on macOS and Windows, no Linux, no wrangler dev or Images binding, no untrusted HEIF or AVIF, and no legacy path. Exact-SHA CI and provider behavior remain unproved.",
     "evidence": []
   }
 ]

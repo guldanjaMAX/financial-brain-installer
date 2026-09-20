@@ -1,9 +1,29 @@
-import { readFileSync, existsSync, lstatSync, realpathSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { basename, dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifiedNpmCliPath } from "../operations/npm-cli-runtime.mjs";
+
+export { verifiedNpmCliPath } from "../operations/npm-cli-runtime.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+
+// Keep ordinary audit regressions bounded at five minutes. The disposable
+// recovery adapter is intentionally heavier: it exercises the exact 6,001-row
+// replay and encrypted provenance artifact fixture. The hardened adapter also
+// revalidates the fail-closed control-plane contracts throughout the proof; an
+// offline profiled run completed in about thirty minutes. Give only that exact
+// proof a reviewed forty-five-minute ceiling so slower hosted runners retain a
+// bounded margin. A lookalike path does not inherit the exception.
+export const DEFAULT_REGRESSION_TIMEOUT_MS = 300_000;
+export const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS = 45 * 60 * 1000;
+const CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION = "test/cloudflare-recovery-adapter.test.mjs";
+
+function regressionTimeoutMs(path) {
+  return path === CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION
+    ? CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS
+    : DEFAULT_REGRESSION_TIMEOUT_MS;
+}
 
 // A RELEASE MAY DECLARE ITS SCOPE. IT MAY NOT DECLARE ITSELF EXEMPT.
 //
@@ -175,22 +195,40 @@ export function releaseAdjudication(cases, version) {
   };
 }
 
+export const SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION = "0.4.8";
+
+/** Prevent the v3 inventory contract from reusing a published or retired candidate identity. */
+export function assertSourceInventoryV3ReleaseVersion(version) {
+  const parse = (value) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value));
+    if (!match) throw new Error("package.json does not name an exact release version");
+    return match.slice(1).map(Number);
+  };
+  const candidate = parse(version);
+  const minimum = parse(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION);
+  for (let index = 0; index < candidate.length; index++) {
+    if (candidate[index] > minimum[index]) return version;
+    if (candidate[index] < minimum[index]) break;
+  }
+  if (candidate.every((part, index) => part === minimum[index])) return version;
+  if (version === "0.4.7") {
+    throw new Error(
+      "source inventory contract v3 cannot reuse retired held candidate identity 0.4.7; " +
+      "that candidate was never public or live, but its identity remains bound to its earlier evidence; " +
+      `the package version must be ${SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION} or newer`,
+    );
+  }
+  throw new Error(
+    `source inventory contract v3 cannot ship under already-live package ${version}; ` +
+    `the package version must be ${SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION} or newer`,
+  );
+}
+
 // Run independently: a failed auth test must not prevent the recovery tests
 // from running. No shell, no output pipes, no inherited success from a later
 // command. A signal, timeout, or spawn error is a failure too.
-export function verifiedNpmCliPath(candidate) {
-  if (typeof candidate !== "string" || !candidate) return null;
-  try {
-    const cli = realpathSync(candidate);
-    const info = lstatSync(cli);
-    if (!info.isFile() || info.isSymbolicLink() || basename(cli) !== "npm-cli.js") return null;
-    const pkg = JSON.parse(readFileSync(resolve(dirname(cli), "..", "package.json"), "utf8"));
-    return pkg.name === "npm" && /^\d+\.\d+\.\d+(?:[-+].*)?$/.test(String(pkg.version || "")) ? cli : null;
-  } catch { return null; }
-}
-
 export function regressionEnvironment(env = process.env) {
-  const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI"];
+  const keys = ["PATH", "HOME", "USERPROFILE", "USERNAME", "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "CI", "NPM_CONFIG_CACHE", "npm_config_cache"];
   const clean = Object.fromEntries(keys.filter((key) => typeof env[key] === "string").map((key) => [key, env[key]]));
   // Packed install tests invoke npm through Node, so a Windows timeout cannot
   // leave a shell's npm grandchild holding the disposable prefix open.
@@ -199,8 +237,8 @@ export function regressionEnvironment(env = process.env) {
   return clean;
 }
 
-export function runRegressions(cases, run = (path) => spawnSync(process.execPath,
-  ["--no-warnings", path], { cwd: root, env: regressionEnvironment(), stdio: "inherit", timeout: 300_000 }), platform = process.platform) {
+export function runRegressions(cases, run = (path, timeout) => spawnSync(process.execPath,
+  ["--no-warnings", path], { cwd: root, env: regressionEnvironment(), stdio: "inherit", timeout }), platform = process.platform) {
   const results = [];
   for (const path of new Set(cases.flatMap((item) => item.tests))) {
     const runnable = cases.some((item) => item.tests.includes(path) && (!item.testPlatform || item.testPlatform === platform));
@@ -209,7 +247,7 @@ export function runRegressions(cases, run = (path) => spawnSync(process.execPath
       console.log(`SKIP audit regression: ${path} requires another host platform`);
       continue;
     }
-    const result = run(path);
+    const result = run(path, regressionTimeoutMs(path));
     results.push({ path, passed: result.status === 0 && !result.error && !result.signal });
     console.log(`${results.at(-1).passed ? "PASS" : "FAIL"} audit regression: ${path}`);
   }
@@ -225,6 +263,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     // already pins to the tag. No flag, no environment override.
     const version = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).version;
     if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error("package.json does not name an exact release version");
+    if (mode === "--release") assertSourceInventoryV3ReleaseVersion(version);
     const cases = assertEvidenceDocuments(assertUndeferrableRegistered(
       validateIncidents(JSON.parse(readFileSync(resolve(root, "docs/update-incidents.json"), "utf8")), undefined, version)));
     if (mode === "--check") console.log("ADVISORY MODE: --check never fails. The release gate is --release.");

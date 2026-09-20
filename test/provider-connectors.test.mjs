@@ -75,7 +75,8 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
     result.qbo_company_fingerprint === companyFingerprint &&
     !JSON.stringify(result).includes("realm-fixture"));
   check("QuickBooks snapshot withholds cursor because deletion truth is unavailable",
-    result.outcome.kind === "partial" && result.cursor_can_advance === false && result.deletion_authority === "unavailable");
+    result.outcome.kind === "partial" && result.cursor_can_advance === false &&
+      result.deletion_authority === "unavailable" && result.walk_complete === true);
 }
 
 {
@@ -142,7 +143,8 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
     result.documents.map((item) => item.source_id).join(",") ===
       "message:C1:1.000000,message:C1:1.500000,message:C1:2.000000");
   check("Slack retains surfaced deletion tombstones while naming the broader gap",
-    result.deletions[0].source_id === "message:C1:0.500000" && result.outcome.kind === "partial");
+    result.deletions[0].source_id === "message:C1:0.500000" && result.outcome.kind === "partial" &&
+      result.walk_complete === true);
 }
 
 {
@@ -166,7 +168,8 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
   check("Notion search uses the current versioned API header", notionVersion === NOTION_API_VERSION && NOTION_API_VERSION === "2026-03-11");
   check("Notion recursively materializes page content and surfaced tombstones",
     result.documents[0].content.includes("Plan body") && result.deletions[0].source_id === "page:gone");
-  check("Notion exposes its incomplete deletion authority", result.outcome.kind === "partial" && !result.cursor_can_advance);
+  check("Notion separates a complete accessible-page walk from incomplete deletion authority",
+    result.outcome.kind === "partial" && !result.cursor_can_advance && result.walk_complete === true);
 }
 
 {
@@ -263,7 +266,7 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
   });
   check("a Dropbox body extraction gap withholds its cursor so the unchanged file can be retried",
     result.outcome.kind === "partial" && result.snapshot_source_ids[0] === "path:/archive.bin" &&
-    result.cursor_can_advance === false);
+    result.cursor_can_advance === false && result.walk_complete === false);
 }
 
 {
@@ -282,7 +285,8 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
   });
   check("HubSpot emits stable object documents and archived tombstones",
     result.documents[0].source_id === "contacts:1" && result.deletions[0].source_id === "contacts:gone");
-  check("HubSpot names permanent-deletion uncertainty", result.outcome.kind === "partial" && result.deletion_authority === "unavailable");
+  check("HubSpot names permanent-deletion uncertainty without hiding its completed object walk",
+    result.outcome.kind === "partial" && result.deletion_authority === "unavailable" && result.walk_complete === true);
 }
 
 console.log(`\nprovider connectors: all ${ran} checks passed`);

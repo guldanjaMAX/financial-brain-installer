@@ -57,6 +57,11 @@ function makeEnv() {
   for (const file of readdirSync(MIGRATIONS).filter((name) => name.endsWith(".sql")).sort()) {
     db.exec(readFileSync(join(MIGRATIONS, file), "utf8"));
   }
+  db.prepare(
+    `INSERT INTO install_state
+       (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
+     VALUES (1,'zones-fixture','0.0.0-test',45,0,'2026-09-11T00:00:00Z','test')`,
+  ).run();
   return { db, env: { DB: d1Facade(db) } };
 }
 
@@ -91,6 +96,7 @@ test("assignZone refuses an unknown source without creating an orphan zone", asy
     (error) => error?.code === "ZONE_SOURCE_NOT_FOUND" && error.message === "source is not registered",
   );
   assert.equal(db.prepare("SELECT count(*) AS n FROM zones").get().n, 0);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM source_events").get().n, 0);
   assert.equal(db.prepare("SELECT zone FROM documents WHERE source = 'missing'").get().zone, null);
   assert.equal(db.prepare("SELECT zone FROM chunks WHERE source = 'missing'").get().zone, null);
 });
@@ -140,10 +146,21 @@ test("assignZone commits registration and source authority atomically", async ()
     projection_repair_required: false,
   });
   assert.equal(db.prepare("SELECT zone FROM sources WHERE name = 'archive'").get().zone, "legal");
+  assert.deepEqual(
+    db.prepare("SELECT event, detail FROM source_events WHERE source_name = 'archive' ORDER BY id").all()
+      .map((row) => ({ ...row })),
+    [{ event: "zone", detail: "zone assignment and bounded projection repair" }],
+    "the source-authoritative zone transaction leaves a durable diagnosis marker",
+  );
   assert.deepEqual(await assignZone(env, { source: "archive", zone: "legal" }), {
     ...assigned,
     projection_repaired: { documents: 0, chunks: 0 },
   }, "repeating a completed assignment is safe and reports no duplicate repair");
+  assert.equal(
+    db.prepare("SELECT count(*) AS n FROM source_events WHERE source_name = 'archive' AND event = 'zone'").get().n,
+    2,
+    "even a same-zone retry brackets any bounded projection repair it may perform",
+  );
 });
 
 test("migration 0033 makes new documents and chunks inherit their source zone", () => {

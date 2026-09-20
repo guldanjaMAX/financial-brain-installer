@@ -92,6 +92,14 @@ test("the consent page hands its script a parseable query, not HTML-escaped text
     const { registered, html } = await consentPage(fixture, { state: "st&ate=1" });
     const q = consentQuery(html);
 
+    assert.match(html, />\s*Approve access\s*</,
+      "the approval control must use platform-neutral language");
+    assert.match(html, /If you need to sign in, approving will open your device's normal passkey\s+window/i,
+      "the owner must be told what may open before choosing approval");
+    assert.match(html, /Answer that system prompt yourself/i);
+    assert.match(html, /biometric data and device\s+PIN stay on your device/i);
+    assert.doesNotMatch(html, /Approve with Face ID/i);
+
     assert.ok(!/&(?:amp|lt|gt|quot|#39);/.test(q),
       `the script's query must not carry HTML entities: ${q}`);
 
@@ -160,6 +168,19 @@ test("Approve completes end to end using only what the page gave the browser", a
     assert.equal(token.token_type, "Bearer");
     assert.match(String(token.access_token || ""), /^[A-Za-z0-9_-]{20,}$/);
     assert.equal(token.scope, "librarian", "the granted profile must be the one the owner was shown");
+  } finally {
+    fixture.close();
+  }
+});
+
+test("a remote connector cannot request the local Owner assistant profile", async () => {
+  const fixture = await createProductFixture();
+  try {
+    const { html } = await consentPage(fixture, { scope: "owner-assistant" });
+    assert.match(html, /requesting the Librarian profile/,
+      "a local machine profile must fail closed before the remote consent page renders");
+    assert.doesNotMatch(html, /requesting the Owner assistant profile/);
+    assert.equal(new URLSearchParams(consentQuery(html)).get("scope"), "librarian");
   } finally {
     fixture.close();
   }

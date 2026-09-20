@@ -251,6 +251,41 @@ function stubOcr({ reply = () => pageText, model = "@cf/google/gemma-4-26b-a4b-i
   check("extract() forwards the provenance instead of dropping it",
     viaExtract.provenance?.text_source === "ocr" && viaExtract.provenance.text_reliable === false,
     JSON.stringify(viaExtract.provenance));
+
+  // A cold-file retry is allowed to return different bytes. When that second
+  // parse still has no text, extractPdf deliberately keeps the first parse and
+  // OCRs its rendered pages. The raw-original receipt must therefore stay on
+  // the first bytes rather than following a reread that did not win.
+  const firstBytes = Buffer.from("first scan bytes");
+  const changedReread = Buffer.from("changed reread bytes");
+  const rereadOcr = stubOcr();
+  let acceptedReread = null;
+  let pass = 0;
+  const retainedFirst = await extractPdf(firstBytes, {
+    reread: async () => changedReread,
+    onRereadAccepted: (bytes) => { acceptedReread = bytes; },
+    ocr: rereadOcr,
+  }, {
+    pdfPassImpl: async (bytes) => {
+      pass++;
+      return {
+        body: "",
+        totalPages: 1,
+        perPage: 0,
+        pageImages: [{
+          page: 1,
+          png_base64: Buffer.from(bytes).equals(firstBytes)
+            ? "first-page-image".repeat(8)
+            : "reread-page-image".repeat(8),
+        }],
+      };
+    },
+  });
+  check("a changed empty PDF reread is parsed but not selected", pass === 2 && acceptedReread === null,
+    JSON.stringify({ pass, acceptedReread: Boolean(acceptedReread) }));
+  check("OCR succeeds against the retained first PDF parse",
+    retainedFirst.provenance?.text_source === "ocr" && rereadOcr.calls.length === 1,
+    JSON.stringify(retainedFirst));
 }
 
 {
@@ -482,12 +517,26 @@ function stubOcr({ reply = () => pageText, model = "@cf/google/gemma-4-26b-a4b-i
   check("documents.text_source exists as a real column, not a JSON key",
     columns.has("text_source") && columns.has("text_reliable"), [...columns].join(","));
 
+  // D1 hands a write back its RETURNING rows, and derives meta.changes from a
+  // total_changes() delta that counts trigger writes too. node:sqlite's run()
+  // reports neither, so a stub built on it cannot carry the ingest finalizer's
+  // RETURNING proof. Execute RETURNING writes with all() and report the same
+  // trigger-inclusive delta D1 does; a row that does not match still comes back
+  // empty, so nothing here can manufacture a commit the database refused.
+  const write = (sql, params) => {
+    if (!/\bRETURNING\b/i.test(sql)) {
+      return { results: [], meta: { changes: Number(sqlite.prepare(sql).run(...params).changes || 0) } };
+    }
+    const before = sqlite.prepare("SELECT total_changes() AS n").get().n;
+    const results = sqlite.prepare(sql).all(...params);
+    return { results, meta: { changes: sqlite.prepare("SELECT total_changes() AS n").get().n - before } };
+  };
   const prepare = (sql) => {
     const shape = (params = []) => ({
       bind: (...next) => shape(next),
       all: async () => ({ results: sqlite.prepare(sql).all(...params) }),
       first: async () => sqlite.prepare(sql).get(...params) ?? null,
-      run: async () => ({ meta: { changes: Number(sqlite.prepare(sql).run(...params).changes || 0) } }),
+      run: async () => write(sql, params),
       _sql: sql,
       _params: params,
     });
@@ -500,7 +549,7 @@ function stubOcr({ reply = () => pageText, model = "@cf/google/gemma-4-26b-a4b-i
       batch: async (statements) => {
         sqlite.exec("BEGIN");
         try {
-          const out = statements.map((s) => ({ meta: { changes: Number(sqlite.prepare(s._sql).run(...s._params).changes || 0) } }));
+          const out = statements.map((s) => write(s._sql, s._params));
           sqlite.exec("COMMIT");
           return out;
         } catch (e) { sqlite.exec("ROLLBACK"); throw e; }
@@ -519,6 +568,7 @@ function stubOcr({ reply = () => pageText, model = "@cf/google/gemma-4-26b-a4b-i
   await store.ingest(env, {
     source_type: "upload", source_id: "notes/plain.md",
     title: "Plain note", content: `A note that arrived with its own text layer. ${longPage(9)}`,
+    text_source: "native", text_reliable: true,
     metadata: { category: "upload" },
   });
 
@@ -549,6 +599,7 @@ function stubOcr({ reply = () => pageText, model = "@cf/google/gemma-4-26b-a4b-i
   await store.ingest(env, {
     source_type: "upload", source_id: "scans/statement.pdf",
     title: "Statement", content: `A rescanned copy that now carries a text layer. ${longPage(2)}`,
+    text_source: "native", text_reliable: true,
     metadata: { category: "upload" },
   });
   check("a document re-read from a real text layer stops being marked as a scan",

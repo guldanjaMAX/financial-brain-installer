@@ -54,7 +54,7 @@ function saveEvidence(evidence) {
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", date: new Date().toUTCString() },
   });
 }
 
@@ -152,9 +152,13 @@ globalThis.fetch = async (input, options = {}) => {
     const evidence = readEvidence();
     evidence.inventoryReads++;
     saveEvidence(evidence);
+    const families = storedFamilyIndexes(evidence).map(familyUid);
     return json({
       source: request.source,
-      families: storedFamilyIndexes(evidence).map(familyUid),
+      families,
+      ...(request.include_labels === true ? {
+        family_details: families.map((uid) => ({ uid, name: null, folder_path: null })),
+      } : {}),
       next_cursor: null,
     });
   }

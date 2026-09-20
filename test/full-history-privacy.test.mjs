@@ -4,17 +4,22 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import {
   baselineFromReport,
   compareBaseline,
+  createHistoryGitEnvironment,
   evaluateStrictRelease,
+  gitFailureDiagnostic,
+  GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES,
+  GIT_HISTORY_TIMEOUT_MS,
   scanRepository,
 } from "../scripts/scan-git-history-privacy.mjs";
 import {
@@ -30,6 +35,22 @@ function gitAt(cwd, args) {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
+    env: {
+      PATH: process.env.PATH || "",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      LC_ALL: "C",
+    },
+  });
+  assert.equal(result.status, 0, result.stderr || `git ${args[0]} failed`);
+  return result.stdout.trim();
+}
+
+function gitAtInput(cwd, args, input) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    input,
     env: {
       PATH: process.env.PATH || "",
       GIT_CONFIG_NOSYSTEM: "1",
@@ -74,6 +95,332 @@ test.before(() => {
 });
 
 test.after(() => rmSync(sandbox, { recursive: true, force: true }));
+
+test("history Git failures are bounded, offline, and never echo partial output", () => {
+  const environment = createHistoryGitEnvironment({
+    PATH: "/fixture/bin",
+    GIT_NO_LAZY_FETCH: "0",
+    GIT_ASKPASS: "/private/credential-helper",
+  });
+  assert.equal(environment.PATH, "/fixture/bin");
+  assert.equal(environment.GIT_NO_LAZY_FETCH, "1");
+  assert.equal(environment.GIT_OPTIONAL_LOCKS, "0");
+  assert.equal(environment.GIT_ASKPASS, undefined);
+
+  const privatePartialOutput = `private/history/path\n${"x".repeat(2 * 1024 * 1024)}`;
+  const timedOut = gitFailureDiagnostic(["rev-list", "--objects"], {
+    status: null,
+    signal: "SIGTERM",
+    error: { code: "ETIMEDOUT" },
+    stdout: privatePartialOutput,
+    stderr: "private/history/error",
+  });
+  assert.equal(timedOut, `git rev-list timed out after ${GIT_HISTORY_TIMEOUT_MS} ms`);
+  assert.equal(timedOut.includes("private/history"), false);
+
+  const overLimit = gitFailureDiagnostic(["rev-list", "--objects"], {
+    status: null,
+    signal: "SIGTERM",
+    error: { code: "ENOBUFS" },
+    stdout: privatePartialOutput,
+    stderr: "private/history/error",
+  });
+  assert.equal(overLimit,
+    `git rev-list exceeded the ${GIT_HISTORY_TEXT_OUTPUT_LIMIT_BYTES}-byte output limit`);
+  assert.equal(overLimit.includes("private/history"), false);
+
+  const exited = gitFailureDiagnostic(["cat-file", "--batch"], {
+    status: 128,
+    stdout: privatePartialOutput,
+    stderr: "private/history/error",
+  });
+  assert.equal(exited, "git cat-file failed with exit status 128");
+  assert.equal(exited.includes("private/history"), false);
+});
+
+test("a partial clone refuses absent history blobs without fetching or naming them", () => {
+  const container = mkdtempSync(join(tmpdir(), "brain-history-partial-"));
+  const repository = join(container, "publisher");
+  const remote = join(container, "origin.git");
+  const partial = join(container, "partial");
+  const privateName = "ZzqPartialHistoryCanary.txt";
+  const privateBody = "ZzqPartialHistoryCanary private historical body\n";
+  try {
+    gitAt(container, ["init", "--bare", remote]);
+    gitAt(remote, ["config", "uploadpack.allowFilter", "true"]);
+    gitAt(container, ["init", "--initial-branch=main", repository]);
+    gitAt(repository, ["config", "user.name", "History Test"]);
+    gitAt(repository, ["config", "user.email", "history-test@example.test"]);
+    writeFileSync(join(repository, privateName), privateBody);
+    gitAt(repository, ["add", privateName]);
+    gitAt(repository, ["commit", "-m", "Add partial-clone history canary"]);
+    rmSync(join(repository, privateName));
+    writeFileSync(join(repository, "README.md"), "current partial-clone tip\n");
+    gitAt(repository, ["add", "-A"]);
+    gitAt(repository, ["commit", "-m", "Remove partial-clone history canary"]);
+    gitAt(repository, ["remote", "add", "origin", remote]);
+    gitAt(repository, ["push", "origin", "main"]);
+
+    const cloned = spawnSync("git", [
+      "clone", "--filter=blob:none", "--no-checkout", "--branch", "main",
+      pathToFileURL(remote).href, partial,
+    ], {
+      encoding: "utf8",
+      env: createHistoryGitEnvironment(process.env),
+    });
+    assert.equal(cloned.status, 0, cloned.stderr || cloned.stdout);
+
+    const missing = spawnSync("git", [
+      "rev-list", "--objects", "--missing=print", "--no-object-names", "HEAD",
+    ], {
+      cwd: partial,
+      encoding: "utf8",
+      env: createHistoryGitEnvironment(process.env),
+    });
+    assert.equal(missing.status, 0, missing.stderr || missing.stdout);
+    assert.match(missing.stdout, /^\?[0-9a-f]{40,64}$/m);
+    assert.equal(missing.stdout.includes(privateName), false);
+
+    const packDirectory = join(partial, ".git", "objects", "pack");
+    const packsBefore = readdirSync(packDirectory).sort();
+    let refusal;
+    try {
+      scanRepository({
+        repo: partial,
+        refPrefixes: [],
+        refs: ["HEAD"],
+        identityIndex: buildIdentityIndex([]),
+      });
+      assert.fail("partial history unexpectedly scanned without its promised blob");
+    } catch (error) {
+      refusal = error;
+    }
+    assert.equal(
+      refusal.message,
+      "full-history privacy scanning requires every selected object to be present locally",
+    );
+    assert.equal(refusal.message.includes(privateName), false);
+    assert.equal(refusal.message.includes(privateBody.trim()), false);
+    assert.deepEqual(readdirSync(packDirectory).sort(), packsBefore,
+      "the refusal must not materialize another promisor pack");
+  } finally {
+    rmSync(container, { recursive: true, force: true });
+  }
+});
+
+test("direct and annotated non-commit refs retain full paths and transitive reachability", () => {
+  const container = mkdtempSync(join(tmpdir(), "brain-history-noncommit-"));
+  const repository = join(container, "work");
+  const pathCanary = "ZzqTreeRefPathCanary";
+  const contentCanary = "ZzqBlobRefContentCanary";
+  try {
+    gitAt(container, ["init", "--initial-branch=main", repository]);
+    gitAt(repository, ["config", "user.name", "History Test"]);
+    gitAt(repository, ["config", "user.email", "history-test@example.test"]);
+
+    const nested = join(repository, "nested");
+    mkdirSync(nested);
+    writeFileSync(join(nested, `${pathCanary}.txt`), "path-only tree ref fixture\n");
+    gitAt(repository, ["add", `nested/${pathCanary}.txt`]);
+    const treeId = gitAt(repository, ["write-tree"]);
+    gitAt(repository, ["update-ref", "refs/tags/direct-tree", treeId]);
+    gitAt(repository, ["tag", "-a", "annotated-tree", treeId, "-m", "tree fixture"]);
+
+    const blobSource = join(repository, "blob-source.txt");
+    writeFileSync(blobSource, `${contentCanary}\n`);
+    const blobId = gitAt(repository, ["hash-object", "-w", "blob-source.txt"]);
+    rmSync(blobSource);
+    gitAt(repository, ["update-ref", "refs/tags/direct-blob", blobId]);
+    gitAt(repository, ["tag", "-a", "annotated-blob", blobId, "-m", "blob fixture"]);
+
+    const report = scanRepository({
+      repo: repository,
+      refPrefixes: [],
+      refs: [
+        "refs/tags/direct-tree",
+        "refs/tags/annotated-tree",
+        "refs/tags/direct-blob",
+        "refs/tags/annotated-blob",
+      ],
+      identityIndex: buildIdentityIndex([
+        compileIdentityRule("tree ref path", "word", false, pathCanary),
+        compileIdentityRule("blob ref content", "word", false, contentCanary),
+      ]),
+    });
+
+    assert.equal(report.inventory.public_ref_count, 4);
+    assert.equal(report.inventory.commit_count, 0);
+    const pathFinding = report.finding_objects.find((finding) =>
+      finding.classifications.some((classification) =>
+        classification.kind === "privacy" && classification.category === "tree ref path"));
+    assert(pathFinding);
+    assert.deepEqual(pathFinding.locations, ["path"]);
+    assert.deepEqual(pathFinding.reachable_from, [
+      "refs/tags/annotated-tree", "refs/tags/direct-tree",
+    ]);
+
+    const contentFinding = report.finding_objects.find((finding) =>
+      finding.classifications.some((classification) =>
+        classification.kind === "privacy" && classification.category === "blob ref content"));
+    assert(contentFinding);
+    assert.deepEqual(contentFinding.locations, ["content"]);
+    assert.deepEqual(contentFinding.reachable_from, [
+      "refs/tags/annotated-blob", "refs/tags/direct-blob",
+    ]);
+    assert.deepEqual(
+      report.affected_public_refs.map((entry) => entry.ref).sort(),
+      [
+        "refs/tags/annotated-blob", "refs/tags/annotated-tree",
+        "refs/tags/direct-blob", "refs/tags/direct-tree",
+      ],
+    );
+
+    const serialized = JSON.stringify(report);
+    assert.equal(serialized.includes(pathCanary), false);
+    assert.equal(serialized.includes(contentCanary), false);
+    assert.equal(serialized.includes("nested/"), false);
+  } finally {
+    rmSync(container, { recursive: true, force: true });
+  }
+});
+
+test("empty-tree and gitlink leaf paths remain findings on reachable tree objects", () => {
+  const container = mkdtempSync(join(tmpdir(), "brain-history-tree-leaves-"));
+  const repository = join(container, "work");
+  const emptyTreeCanary = "ZzqEmptyTreePathCanary";
+  const gitlinkCanary = "ZzqGitlinkPathCanary";
+  try {
+    gitAt(container, ["init", "--initial-branch=main", repository]);
+    gitAt(repository, ["config", "user.name", "History Test"]);
+    gitAt(repository, ["config", "user.email", "history-test@example.test"]);
+    const objectFormat = gitAt(repository, ["rev-parse", "--show-object-format"]);
+    const objectIdLength = objectFormat === "sha256" ? 64 : 40;
+    const emptyTree = gitAtInput(repository, ["mktree"], "");
+    const absentGitlink = "1".repeat(objectIdLength);
+    const rootTree = gitAtInput(repository, ["mktree", "--missing"], [
+      `040000 tree ${emptyTree}\t${emptyTreeCanary}`,
+      `160000 commit ${absentGitlink}\t${gitlinkCanary}`,
+      "",
+    ].join("\n"));
+    gitAt(repository, ["update-ref", "refs/tags/direct-tree-leaves", rootTree]);
+    gitAt(repository, [
+      "tag", "-a", "annotated-tree-leaves", rootTree, "-m", "tree leaf fixtures",
+    ]);
+
+    const report = scanRepository({
+      repo: repository,
+      refPrefixes: [],
+      refs: ["refs/tags/direct-tree-leaves", "refs/tags/annotated-tree-leaves"],
+      identityIndex: buildIdentityIndex([
+        compileIdentityRule("empty tree path", "word", false, emptyTreeCanary),
+        compileIdentityRule("gitlink path", "word", false, gitlinkCanary),
+      ]),
+    });
+
+    const emptyTreeFinding = report.finding_objects.find((finding) =>
+      finding.classifications.some((classification) =>
+        classification.kind === "privacy" && classification.category === "empty tree path"));
+    assert(emptyTreeFinding);
+    assert.equal(emptyTreeFinding.object_type, "tree");
+    assert.deepEqual(emptyTreeFinding.locations, ["path"]);
+    assert.deepEqual(emptyTreeFinding.reachable_from, [
+      "refs/tags/annotated-tree-leaves", "refs/tags/direct-tree-leaves",
+    ]);
+
+    const gitlinkFinding = report.finding_objects.find((finding) =>
+      finding.classifications.some((classification) =>
+        classification.kind === "privacy" && classification.category === "gitlink path"));
+    assert(gitlinkFinding);
+    assert.equal(gitlinkFinding.object_type, "tree");
+    assert.deepEqual(gitlinkFinding.locations, ["path"]);
+    assert.deepEqual(gitlinkFinding.reachable_from, [
+      "refs/tags/annotated-tree-leaves", "refs/tags/direct-tree-leaves",
+    ]);
+    assert.deepEqual(
+      report.affected_public_refs.map((entry) => entry.ref).sort(),
+      ["refs/tags/annotated-tree-leaves", "refs/tags/direct-tree-leaves"],
+    );
+
+    const serialized = JSON.stringify(report);
+    assert.equal(serialized.includes(emptyTreeCanary), false);
+    assert.equal(serialized.includes(gitlinkCanary), false);
+    assert.equal(serialized.includes(absentGitlink), false);
+  } finally {
+    rmSync(container, { recursive: true, force: true });
+  }
+});
+
+test("a partial direct-tree ref refuses missing descendants with object-only diagnostics", () => {
+  const container = mkdtempSync(join(tmpdir(), "brain-history-partial-tree-"));
+  const repository = join(container, "publisher");
+  const remote = join(container, "origin.git");
+  const partial = join(container, "partial");
+  const privateName = "ZzqPartialTreePathCanary.txt";
+  const privateBody = "private direct-tree body\n";
+  try {
+    gitAt(container, ["init", "--bare", remote]);
+    gitAt(remote, ["config", "uploadpack.allowFilter", "true"]);
+    gitAt(container, ["init", "--initial-branch=main", repository]);
+    gitAt(repository, ["config", "user.name", "History Test"]);
+    gitAt(repository, ["config", "user.email", "history-test@example.test"]);
+    const nested = join(repository, "nested");
+    mkdirSync(nested);
+    writeFileSync(join(nested, privateName), privateBody);
+    gitAt(repository, ["add", `nested/${privateName}`]);
+    const treeId = gitAt(repository, ["write-tree"]);
+    gitAt(repository, ["update-ref", "refs/tags/direct-tree", treeId]);
+    gitAt(repository, ["remote", "add", "origin", remote]);
+    gitAt(repository, ["push", "origin", "refs/tags/direct-tree"]);
+
+    gitAt(container, ["init", partial]);
+    gitAt(partial, ["remote", "add", "origin", remote]);
+    gitAt(partial, [
+      "-c", "protocol.file.allow=always", "fetch", "--filter=blob:none", "--no-tags",
+      "origin", "refs/tags/direct-tree:refs/tags/direct-tree",
+    ]);
+
+    const enumerated = spawnSync("git", [
+      "rev-list", "--objects", "--missing=print", "--no-object-names", "--stdin",
+    ], {
+      cwd: partial,
+      encoding: "utf8",
+      input: "refs/tags/direct-tree\n",
+      env: createHistoryGitEnvironment(process.env),
+    });
+    assert.equal(enumerated.status, 0, enumerated.stderr || enumerated.stdout);
+    const lines = enumerated.stdout.trim().split("\n").filter(Boolean);
+    assert(lines.some((line) => /^\?[0-9a-f]{40,64}$/.test(line)));
+    assert(lines.every((line) => /^\??[0-9a-f]{40,64}$/.test(line)));
+    assert.equal(enumerated.stdout.includes(privateName), false);
+    assert.equal(enumerated.stdout.includes(privateBody.trim()), false);
+
+    const packDirectory = join(partial, ".git", "objects", "pack");
+    const packsBefore = readdirSync(packDirectory).sort();
+    let refusal;
+    try {
+      scanRepository({
+        repo: partial,
+        refPrefixes: [],
+        refs: ["refs/tags/direct-tree"],
+        identityIndex: buildIdentityIndex([]),
+      });
+      assert.fail("partial direct-tree history unexpectedly scanned without its blob");
+    } catch (error) {
+      refusal = error;
+    }
+    assert.equal(
+      refusal.message,
+      "full-history privacy scanning requires every selected object to be present locally",
+    );
+    assert.equal(refusal.message.includes(privateName), false);
+    assert.equal(refusal.message.includes(privateBody.trim()), false);
+    assert.doesNotMatch(refusal.message, /[0-9a-f]{40,64}/);
+    assert.deepEqual(readdirSync(packDirectory).sort(), packsBefore,
+      "the refusal must not materialize another promisor pack");
+  } finally {
+    rmSync(container, { recursive: true, force: true });
+  }
+});
 
 test("scans reachable historical blobs after the current tree is clean", () => {
   const identityIndex = buildIdentityIndex([
@@ -163,6 +510,112 @@ test("strict release review never allowlists privacy or revoked credentials", ()
     schema_version: 1,
     approved_candidates: approved,
   }).passes, false);
+  const localFieldResult = evaluateStrictRelease(candidateOnly, {
+    schema_version: 1,
+    approved_candidates: approved,
+  }, { allowStaleDispositions: true });
+  assert.equal(localFieldResult.passes, true);
+  assert.equal(localFieldResult.stale_disposition_count, 1);
+  assert.equal(localFieldResult.stale_dispositions_tolerated, true);
+
+  assert.equal(evaluateStrictRelease(report, {
+    schema_version: 1,
+    approved_candidates: approved,
+  }, { allowStaleDispositions: true }).passes, false,
+  "local field tolerance must not allow privacy or unapproved findings");
+});
+
+test("stale dispositions are tolerated only by the exact local field-preparation invocation", () => {
+  const scanner = join(root, "scripts/scan-git-history-privacy.mjs");
+  const dispositions = join(sandbox, "stale-dispositions.json");
+  writeFileSync(dispositions, `${JSON.stringify({
+    schema_version: 1,
+    approved_candidates: [{
+      object_id: "0".repeat(40),
+      category: "env_assignment",
+      disposition: "synthetic_fixture",
+    }],
+  })}\n`);
+  const baseArgs = [
+    scanner,
+    "--repo", sandbox,
+    "--ref", "HEAD~2",
+    "--require-clean",
+    "--credential-dispositions", dispositions,
+  ];
+
+  const ordinaryStrict = spawnSync(process.execPath, baseArgs, { encoding: "utf8" });
+  assert.equal(ordinaryStrict.status, 1, ordinaryStrict.stdout || ordinaryStrict.stderr);
+  assert.match(ordinaryStrict.stderr, /1 stale credential disposition/);
+
+  const unscopedTolerance = spawnSync(process.execPath, [
+    ...baseArgs,
+    "--allow-stale-dispositions-for-local-field-prep",
+  ], { encoding: "utf8" });
+  assert.equal(unscopedTolerance.status, 1, unscopedTolerance.stdout || unscopedTolerance.stderr);
+  assert.match(unscopedTolerance.stderr, /restricted to exact local HEAD field preparation/);
+
+  const wrongRefTolerance = spawnSync(process.execPath, [
+    ...baseArgs,
+    "--allow-stale-dispositions-for-local-field-prep",
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, BRAIN_FIELD_PREPARE: "1" },
+  });
+  assert.equal(wrongRefTolerance.status, 1, wrongRefTolerance.stdout || wrongRefTolerance.stderr);
+  assert.match(wrongRefTolerance.stderr, /restricted to exact local HEAD field preparation/);
+
+  const remoteTolerance = spawnSync(process.execPath, [
+    scanner,
+    "--repo", sandbox,
+    "--remote", "origin",
+    "--ref", "HEAD",
+    "--require-clean",
+    "--credential-dispositions", dispositions,
+    "--allow-stale-dispositions-for-local-field-prep",
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, BRAIN_FIELD_PREPARE: "1" },
+  });
+  assert.equal(remoteTolerance.status, 1, remoteTolerance.stdout || remoteTolerance.stderr);
+  assert.match(remoteTolerance.stderr, /restricted to exact local HEAD field preparation/);
+
+  const activeFindings = spawnSync(process.execPath, [
+    scanner,
+    "--repo", sandbox,
+    "--ref", "HEAD",
+    "--require-clean",
+    "--credential-dispositions", dispositions,
+    "--allow-stale-dispositions-for-local-field-prep",
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, BRAIN_FIELD_PREPARE: "1" },
+  });
+  assert.equal(activeFindings.status, 1, activeFindings.stdout || activeFindings.stderr);
+  assert.match(activeFindings.stderr, /[1-9][0-9]* blocking object/,
+    "field tolerance must still fail active privacy and unapproved findings");
+
+  const cleanContainer = mkdtempSync(join(tmpdir(), "brain-history-clean-head-"));
+  const cleanCheckout = join(cleanContainer, "work");
+  gitAt(sandbox, ["worktree", "add", "--detach", cleanCheckout, "HEAD~2"]);
+  try {
+    const scopedTolerance = spawnSync(process.execPath, [
+      scanner,
+      "--repo", cleanCheckout,
+      "--ref", "HEAD",
+      "--require-clean",
+      "--credential-dispositions", dispositions,
+      "--allow-stale-dispositions-for-local-field-prep",
+    ], {
+      encoding: "utf8",
+      env: { ...process.env, BRAIN_FIELD_PREPARE: "1" },
+    });
+    assert.equal(scopedTolerance.status, 0, scopedTolerance.stderr || scopedTolerance.stdout);
+    assert.match(scopedTolerance.stdout, /local field-preparation gate found no blocking objects/);
+  } finally {
+    gitAt(sandbox, ["worktree", "remove", "--force", cleanCheckout]);
+    rmSync(cleanContainer, { recursive: true, force: true });
+  }
 });
 
 test("zero-finding policy rejects even a reviewable synthetic candidate", () => {
@@ -253,6 +706,11 @@ test("predecessor incident metadata stays sanitized but is not an active gate", 
     assert.doesNotMatch(scripts[name], /history-baseline|public-refs|credential-dispositions/);
   }
   assert.match(scripts["privacy:history"], /--ref HEAD/);
+  assert.match(scripts["privacy:history:field"], /--ref HEAD/);
+  assert.match(scripts["privacy:history:field"], /--require-clean/);
+  assert.match(scripts["privacy:history:field"], /--allow-stale-dispositions-for-local-field-prep/);
+  assert.doesNotMatch(scripts["privacy:history:field"],
+    /--remote|--baseline|--record-baseline|--require-zero-findings/);
   assert.match(scripts["privacy:history:remote"], /--remote origin/);
   assert.match(scripts["privacy:history:remote"], /--ref HEAD/);
 });

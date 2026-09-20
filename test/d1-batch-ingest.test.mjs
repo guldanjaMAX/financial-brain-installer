@@ -7,6 +7,8 @@ import { splitStatements } from "../brain.mjs";
 import worker from "../worker/src/index.js";
 import { storeFor } from "../worker/src/lib/store.js";
 import { forget, replaceDocumentChunks, upsertChunks } from "../worker/src/lib/store-d1.js";
+import { sourceOriginalResultBindingReadiness } from "../worker/src/lib/source-original-observation.js";
+import { sourceOriginalChunkReceiptHash } from "../worker/src/lib/source-original-chunk.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrationDir = join(here, "..", "migrations", "d1");
@@ -19,27 +21,46 @@ sqlite.prepare(
      (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
    VALUES (1, 'fixture', '0.0.0', 11, 0, '2026-01-01T00:00:00Z', 'test')`
 ).run();
+sqlite.prepare(
+  "INSERT INTO source_original_id_key_state (tenant_id,signing_salt) VALUES ('primary',?)"
+).run("a".repeat(64));
 
 const metrics = {
   remote_calls: 0,
   submitted_statements: 0,
   stats_scans: 0,
+  identity_key_reads: 0,
   max_batch_statements: 0,
   max_statement_binds: 0,
+  triggered_finalizations: 0,
 };
 const control = {
   fail_chunk_doc_uid: null,
   fail_finalize_cas_doc_uid: null,
+  fail_binding_doc_uid: null,
   before_finalize_batch: null,
+  after_finalize_batch: null,
+  alter_finalize_results: null,
 };
 
 function execute(sql, params, mode) {
   metrics.submitted_statements++;
   if (/INSERT INTO corpus_stats/.test(sql)) metrics.stats_scans++;
+  if (/SELECT tenant_id, signing_salt FROM source_original_id_key_state/.test(sql)) {
+    metrics.identity_key_reads++;
+  }
   const statement = sqlite.prepare(sql);
   if (mode === "all") return { results: statement.all(...params) };
   if (mode === "first") return statement.get(...params) ?? null;
-  return statement.run(...params);
+  // D1/Miniflare reports the total_changes delta, including trigger writes.
+  // StatementSync.run().changes alone hid the schema-45 generation trigger.
+  const before = sqlite.prepare("SELECT total_changes() AS n").get().n;
+  const results = statement.all(...params);
+  const changes = sqlite.prepare("SELECT total_changes() AS n").get().n - before;
+  if (/UPDATE documents SET content_hash/.test(sql) && changes > 1) {
+    metrics.triggered_finalizations++;
+  }
+  return { changes, results };
 }
 
 function prepared(sql, params = []) {
@@ -52,7 +73,7 @@ function prepared(sql, params = []) {
     run: async () => {
       metrics.remote_calls++;
       const result = execute(sql, params, "run");
-      return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+      return { success: true, results: result.results, meta: { changes: Number(result.changes || 0) } };
     },
   };
 }
@@ -85,15 +106,28 @@ const DB = {
             statement.params[0] === control.fail_finalize_cas_doc_uid) {
           throw new Error("synthetic final CAS failure");
         }
+        if (control.fail_binding_doc_uid &&
+            /INSERT INTO source_original_result_bindings/.test(statement.sql) &&
+            statement.params[12] === control.fail_binding_doc_uid) {
+          throw new Error("synthetic binding write failure");
+        }
         const readOnly = /^\s*(SELECT|PRAGMA)\b/i.test(statement.sql) ||
           (/^\s*WITH\b/i.test(statement.sql) && !/\b(INSERT|UPDATE|DELETE)\b/i.test(statement.sql));
         if (readOnly) {
           return { success: true, results: execute(statement.sql, statement.params, "all").results };
         }
         const result = execute(statement.sql, statement.params, "run");
-        return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+        return { success: true, results: result.results, meta: { changes: Number(result.changes || 0) } };
       });
       sqlite.exec("COMMIT");
+      if (statements.some((statement) => /UPDATE documents SET content_hash/.test(statement.sql))) {
+        const hook = control.after_finalize_batch;
+        const alter = control.alter_finalize_results;
+        control.after_finalize_batch = null;
+        control.alter_finalize_results = null;
+        hook?.();
+        alter?.(results, statements);
+      }
       return results;
     } catch (error) {
       sqlite.exec("ROLLBACK");
@@ -127,6 +161,16 @@ const envelope = (sourceId, content = "Synthetic ordinary correspondence with no
   metadata: { platform: "synthetic" },
 });
 
+const boundEnvelope = (sourceId, rawHash, content = "Synthetic extracted source-original text.") => ({
+  ...envelope(sourceId, content, "localdocs"),
+  source_original_receipt: {
+    version: 1,
+    locator_kind: "source_relative_path",
+    original_content_sha256: rawHash,
+    original_byte_count: 128,
+  },
+});
+
 // A maximum-size changed batch proves the real schema, FTS triggers, outbox,
 // pending marker, source statistic, and D1 batch result shapes together.
 const fifty = Array.from({ length: 50 }, (_, index) => envelope(`m-${index}`));
@@ -134,6 +178,8 @@ const first = await post(fifty);
 assert.equal(first.created, 50);
 assert.equal(first.failed, 0);
 assert.equal(first.results.length, 50);
+assert.equal(metrics.triggered_finalizations, 50,
+  "every CAS exercised the real schema-45 generation trigger and a D1 change count above one");
 assert.equal(metrics.remote_calls, 53);
 assert.equal(metrics.submitted_statements, 352);
 assert.equal(metrics.stats_scans, 1);
@@ -531,7 +577,7 @@ for (const sourceId of ["race-stale-first", "race-winner-first", "race-mixed"]) 
   };
   const callsBeforeBase = metrics.remote_calls;
   await store.ingest(env, base);
-  assert.equal(metrics.remote_calls - callsBeforeBase, 6);
+  assert.equal(metrics.remote_calls - callsBeforeBase, 7);
   sqlite.prepare("UPDATE corpus_stats SET last_ingest_at = ? WHERE source = ?").run(70_000, source);
   const beforeStats = statsFor(source);
 
@@ -598,4 +644,369 @@ for (const sourceId of ["race-stale-first", "race-winner-first", "race-mixed"]) 
   assertOneUpsert(docUid);
 }
 
-console.log("d1-batch-ingest: real SQLite integration and performance structure passed");
+// A trusted exact-byte receipt becomes an immutable binding only when the
+// corresponding document revision commits. Exact replay is a no-op, while a
+// different raw original with identical extracted text creates a new revision
+// instead of inheriting the older byte claim.
+
+// An explicitly unbound revision must also commit its NULL binding pointer
+// exactly. A concurrent pointer-only mutation cannot be blessed by the CAS.
+{
+  const sourceId = "receipts/unbound-pointer-race.txt";
+  const docUid = `localdocs:${sourceId}`;
+  const staged = await store.ingest(env, envelope(sourceId, undefined, "localdocs"), {
+    deferFinalize: true,
+  });
+  control.before_finalize_batch = () => sqlite.prepare(
+    "UPDATE documents SET source_original_binding_hash=? WHERE doc_uid=?",
+  ).run(`sha256:${"8".repeat(64)}`, docUid);
+  const failed = await store.finalizeIngestBatch(env, [staged.deferred_revision]);
+  assert.equal(failed[0].ok, false);
+  assert.equal(
+    sqlite.prepare("SELECT content_hash FROM documents WHERE doc_uid=?").get(docUid).content_hash,
+    staged.deferred_revision.pending_marker,
+  );
+}
+
+// A bound insert checks the live document's source and provenance digest
+// inside the same transaction. If either changed, the deliberately invalid
+// contract version aborts the complete D1 batch rather than inserting a stale
+// byte receipt after the content CAS.
+{
+  const sourceId = "receipts/provenance-race.txt";
+  const docUid = `localdocs:${sourceId}`;
+  const staged = await store.ingest(env, boundEnvelope(sourceId, "9".repeat(64)), {
+    deferFinalize: true,
+  });
+  control.before_finalize_batch = () => sqlite.prepare(
+    "UPDATE documents SET provenance_receipt_digest=? WHERE doc_uid=?",
+  ).run("7".repeat(64), docUid);
+  const failed = await store.finalizeIngestBatch(env, [staged.deferred_revision]);
+  assert.equal(failed[0].ok, false);
+  assert.equal(
+    sqlite.prepare("SELECT content_hash FROM documents WHERE doc_uid=?").get(docUid).content_hash,
+    staged.deferred_revision.pending_marker,
+  );
+  assert.equal(sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE document_revision_id=?",
+  ).get(staged.deferred_revision.document_revision_id).n, 0);
+}
+
+{
+  const sourceId = "receipts/same-text.pdf";
+  const docUid = `localdocs:${sourceId}`;
+  const rawA = "1".repeat(64);
+  const rawB = "2".repeat(64);
+  const content = "Synthetic identical extracted text from distinct raw originals.";
+
+  const firstBound = await post([boundEnvelope(sourceId, rawA, content)]);
+  assert.equal(firstBound.created, 1, JSON.stringify(firstBound));
+  const firstDocument = plainRow(sqlite.prepare(
+    `SELECT content_hash,document_revision_id,source_original_binding_hash
+       FROM documents WHERE doc_uid=?`
+  ).get(docUid));
+  assert.match(firstDocument.document_revision_id, /^rev-v1:[a-f0-9]{64}$/);
+  assert.match(firstDocument.source_original_binding_hash, /^sha256:[a-f0-9]{64}$/);
+  const firstBinding = plainRow(sqlite.prepare(
+    `SELECT original_id,original_content_sha256,original_byte_count,
+            document_revision_id,document_content_hash,provenance_receipt_digest,binding_hash
+       FROM source_original_result_bindings WHERE binding_hash=?`
+  ).get(firstDocument.source_original_binding_hash));
+  assert.equal(firstBinding.original_content_sha256, rawA);
+  assert.equal(Object.hasOwn(firstBinding, "doc_uid"), false);
+  assert.equal(firstBinding.document_revision_id, firstDocument.document_revision_id);
+  assert.equal(firstBinding.document_content_hash, firstDocument.content_hash);
+  assert.equal(Object.hasOwn(firstBinding, "locator"), false);
+  const firstChunk = plainRow(sqlite.prepare(
+    `SELECT chunk_ix,title,text,bound_document_revision_id,result_chunk_receipt_hash
+       FROM chunks WHERE doc_uid=? ORDER BY chunk_ix LIMIT 1`
+  ).get(docUid));
+  assert.equal(firstChunk.bound_document_revision_id, firstDocument.document_revision_id);
+  assert.equal(firstChunk.result_chunk_receipt_hash, await sourceOriginalChunkReceiptHash({
+    document_revision_id: firstDocument.document_revision_id,
+    chunk_ix: firstChunk.chunk_ix,
+    title: firstChunk.title,
+    text: firstChunk.text,
+  }));
+  const firstReady = await sourceOriginalResultBindingReadiness(env, {
+    source: "localdocs",
+    locator: sourceId,
+    original_content_sha256: rawA,
+    original_byte_count: 128,
+  });
+  assert.equal(firstReady.ready, true);
+  assert.equal(firstReady.document_count, 1);
+  assert.equal(Object.hasOwn(firstReady, "locator"), false);
+
+  const exactReplay = await post([boundEnvelope(sourceId, rawA, content)]);
+  assert.equal(exactReplay.unchanged, 1);
+  assert.deepEqual(plainRow(sqlite.prepare(
+    `SELECT document_revision_id,source_original_binding_hash
+       FROM documents WHERE doc_uid=?`
+  ).get(docUid)), {
+    document_revision_id: firstDocument.document_revision_id,
+    source_original_binding_hash: firstDocument.source_original_binding_hash,
+  });
+  assert.equal(sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE original_id=?"
+  ).get(firstBinding.original_id).n, 1);
+
+  // A schema-43 brain reaches schema 44 with its already-bound chunks
+  // deliberately unreceipted. The first authoritative replay must adopt those
+  // chunks even when the connector omits an unchanged title, and must use the
+  // effective persisted title for both the document and searchable bytes.
+  const chunkReceiptUpdateTrigger = sqlite.prepare(
+    `SELECT sql FROM sqlite_master
+      WHERE type='trigger' AND name='chunks_source_original_receipt_update'`,
+  ).get().sql;
+  sqlite.exec("DROP TRIGGER chunks_source_original_receipt_update");
+  sqlite.prepare(
+    `UPDATE chunks
+        SET bound_document_revision_id=NULL,result_chunk_receipt_hash=NULL
+      WHERE doc_uid=?`,
+  ).run(docUid);
+  sqlite.exec(chunkReceiptUpdateTrigger);
+  const replayWithoutTitle = boundEnvelope(sourceId, rawA, content);
+  delete replayWithoutTitle.title;
+  const adoptedReplay = await post([replayWithoutTitle]);
+  assert.equal(adoptedReplay.updated, 1);
+  const adoptedDocument = plainRow(sqlite.prepare(
+    `SELECT title,document_revision_id FROM documents WHERE doc_uid=?`,
+  ).get(docUid));
+  const adoptedChunk = plainRow(sqlite.prepare(
+    `SELECT chunk_ix,title,text,bound_document_revision_id,result_chunk_receipt_hash
+       FROM chunks WHERE doc_uid=? ORDER BY chunk_ix LIMIT 1`,
+  ).get(docUid));
+  assert.equal(adoptedDocument.title, `Synthetic ${sourceId}`);
+  assert.equal(adoptedChunk.title, adoptedDocument.title);
+  assert.ok(adoptedChunk.text.startsWith(`[${adoptedDocument.title}]\n\n`));
+  assert.equal(adoptedChunk.bound_document_revision_id, adoptedDocument.document_revision_id);
+  assert.equal(adoptedChunk.result_chunk_receipt_hash, await sourceOriginalChunkReceiptHash({
+    document_revision_id: adoptedDocument.document_revision_id,
+    chunk_ix: adoptedChunk.chunk_ix,
+    title: adoptedChunk.title,
+    text: adoptedChunk.text,
+  }));
+  assert.equal((await post([replayWithoutTitle])).unchanged, 1);
+
+  const differentRaw = await post([boundEnvelope(sourceId, rawB, content)]);
+  assert.equal(differentRaw.updated, 1);
+  const secondDocument = plainRow(sqlite.prepare(
+    `SELECT content_hash,document_revision_id,source_original_binding_hash
+       FROM documents WHERE doc_uid=?`
+  ).get(docUid));
+  assert.equal(secondDocument.content_hash, firstDocument.content_hash);
+  assert.notEqual(secondDocument.document_revision_id, firstDocument.document_revision_id);
+  assert.notEqual(secondDocument.source_original_binding_hash, firstDocument.source_original_binding_hash);
+  assert.equal(sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE original_id=?"
+  ).get(firstBinding.original_id).n, 3);
+  assert.equal(sqlite.prepare(
+    "SELECT original_content_sha256 FROM source_original_result_bindings WHERE binding_hash=?"
+  ).get(secondDocument.source_original_binding_hash).original_content_sha256, rawB);
+  assert.equal((await sourceOriginalResultBindingReadiness(env, {
+    source: "localdocs",
+    locator: sourceId,
+    original_content_sha256: rawA,
+    original_byte_count: 128,
+  })).ready, false);
+  assert.equal((await sourceOriginalResultBindingReadiness(env, {
+    source: "localdocs",
+    locator: sourceId,
+    original_content_sha256: rawB,
+    original_byte_count: 128,
+  })).ready, true);
+
+  const explicitUnbound = await post([envelope(sourceId, content, "localdocs")]);
+  assert.equal(explicitUnbound.updated, 1);
+  const unboundDocument = plainRow(sqlite.prepare(
+    `SELECT document_revision_id,source_original_binding_hash
+       FROM documents WHERE doc_uid=?`
+  ).get(docUid));
+  assert.notEqual(unboundDocument.document_revision_id, secondDocument.document_revision_id);
+  assert.equal(unboundDocument.source_original_binding_hash, null);
+  assert.equal((await sourceOriginalResultBindingReadiness(env, {
+    source: "localdocs",
+    locator: sourceId,
+    original_content_sha256: rawB,
+    original_byte_count: 128,
+  })).ready, false);
+  assert.equal((await post([envelope(sourceId, content, "localdocs")])).unchanged, 1);
+  assert.equal(sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE original_id=?"
+  ).get(firstBinding.original_id).n, 3, "unbinding never rewrites immutable history");
+}
+
+// Structural parts from one file bind to the same opaque original id while
+// retaining revision-specific receipt hashes.
+{
+  const root = "receipts/large.pdf";
+  const rawHash = "3".repeat(64);
+  const docs = [1, 2].map((part) => ({
+    ...boundEnvelope(`${root}#part${part}of2`, rawHash, `Synthetic part ${part}.`),
+    metadata: {
+      platform: "synthetic",
+      part,
+      part_count: 2,
+      part_of: root,
+    },
+  }));
+  const result = await post(docs);
+  assert.equal(result.created, 2);
+  const family = sqlite.prepare(
+    `SELECT COUNT(*) AS rows,COUNT(DISTINCT original_id) AS originals,
+            COUNT(DISTINCT binding_hash) AS bindings
+       FROM source_original_result_bindings
+      WHERE source=? AND original_content_sha256=?`
+  ).get("localdocs", rawHash);
+  assert.deepEqual({ ...family }, { rows: 2, originals: 1, bindings: 2 });
+  const readiness = await sourceOriginalResultBindingReadiness(env, {
+    source: "localdocs",
+    locator: root,
+    original_content_sha256: rawHash,
+    original_byte_count: 128,
+  });
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.family_complete, true);
+  assert.equal(readiness.document_count, 2);
+}
+
+// A failure after the content CAS still rolls the whole finalization batch
+// back. No authoritative binding exists while the document remains pending,
+// and the exact deferred receipt can be retried safely.
+{
+  const sourceId = "receipts/atomic-binding.pdf";
+  const docUid = `localdocs:${sourceId}`;
+  const staged = await store.ingest(env, boundEnvelope(sourceId, "4".repeat(64)), {
+    deferFinalize: true,
+  });
+  control.fail_binding_doc_uid = docUid;
+  const failed = await store.finalizeIngestBatch(env, [staged.deferred_revision]);
+  control.fail_binding_doc_uid = null;
+  assert.equal(failed[0].ok, false);
+  assert.match(sqlite.prepare(
+    "SELECT content_hash FROM documents WHERE doc_uid=?"
+  ).get(docUid).content_hash, /^pending:/);
+  assert.equal(sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE document_revision_id=?"
+  ).get(staged.deferred_revision.document_revision_id).n, 0);
+  assert.equal((await store.finalizeIngestBatch(env, [staged.deferred_revision]))[0].ok, true);
+  assert.equal(sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM source_original_result_bindings WHERE document_revision_id=?"
+  ).get(staged.deferred_revision.document_revision_id).n, 1);
+}
+
+// Fifty bound documents are partitioned before the immutable ledger doubles
+// the per-revision finalization statements. No D1 transaction exceeds the
+// established 100-statement slice.
+{
+  const beforeScans = metrics.stats_scans;
+  const beforeKeyReads = metrics.identity_key_reads;
+  const beforeBindings = sqlite.prepare(
+    "SELECT COUNT(*) AS n FROM source_original_result_bindings"
+  ).get().n;
+  const docs = Array.from({ length: 50 }, (_, index) =>
+    boundEnvelope(`receipts/batch-${index}.txt`, String(index + 10).padStart(64, "0")));
+  const result = await post(docs);
+  assert.equal(result.created, 50);
+  assert.equal(result.failed, 0);
+  assert.equal(metrics.stats_scans - beforeScans, 2);
+  assert.equal(metrics.identity_key_reads - beforeKeyReads, 1);
+  assert.ok(metrics.max_batch_statements <= 100);
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS n FROM source_original_result_bindings").get().n - beforeBindings,
+    50,
+  );
+}
+
+// A valid final hash and trigger-inclusive count never replace direct CAS
+// evidence. Missing/foreign RETURNING rows remain ambiguous even if committed.
+// Likewise a same-hash successor between commit and readback is not our head.
+for (const mode of ["single", "batch"]) {
+  for (const fault of ["missing-return", "foreign-return", "revision-drift", "digest-drift", "binding-drift", "deleted-drift"]) {
+    const id = `proof-${mode}-${fault}`;
+    const docUid = `message:${id}`;
+    const input = envelope(id);
+    if (fault.endsWith("return")) {
+      control.alter_finalize_results = (results, statements) => {
+        const index = statements.findIndex((statement) => /UPDATE documents SET content_hash/.test(statement.sql));
+        assert.ok(results[index].meta.changes > 1, "the real generation trigger ran");
+        if (fault === "missing-return") results[index].results = [];
+        else results[index].results[0].document_revision_id = `rev-v1:${"c".repeat(64)}`;
+      };
+    } else {
+      control.after_finalize_batch = () => {
+        const mutation = {
+          "revision-drift": ["document_revision_id", `rev-v1:${"d".repeat(64)}`],
+          "digest-drift": ["provenance_receipt_digest", "d".repeat(64)],
+          "binding-drift": ["source_original_binding_hash", `sha256:${"d".repeat(64)}`],
+          "deleted-drift": ["deleted_at", 1],
+        }[fault];
+        sqlite.prepare(`UPDATE documents SET ${mutation[0]}=? WHERE doc_uid=?`).run(mutation[1], docUid);
+      };
+    }
+    if (mode === "single") {
+      await assert.rejects(store.ingest(env, input), /superseded before commit|could not be verified/, fault);
+    } else {
+      const staged = await store.ingest(env, input, { deferFinalize: true });
+      assert.equal((await store.finalizeIngestBatch(env, [staged.deferred_revision]))[0].ok, false, fault);
+    }
+    assert.match(sqlite.prepare("SELECT content_hash FROM documents WHERE doc_uid=?").get(docUid).content_hash,
+      /^[a-f0-9]{64}$/, "a failed proof must not imply zero accepted writes");
+  }
+}
+
+// Statement 0 -- the corpus_stats upsert -- owns no document. It is proved from
+// its RETURNING row for the same reason the revision CAS is, and an anomaly on
+// it must no longer condemn documents whose own commit is proved. A future
+// trigger on corpus_stats is the schema-45 defect again at 50x the blast radius.
+const statsIndexOf = (statements) =>
+  statements.findIndex((statement) => /INSERT INTO corpus_stats/.test(statement.sql));
+
+for (const anomaly of ["inflated-count", "missing-row", "foreign-row"]) {
+  const ids = ["a", "b", "c"].map((suffix) => `stats-scope-${anomaly}-${suffix}`);
+  const staged = [];
+  for (const id of ids) {
+    staged.push((await store.ingest(env, envelope(id), { deferFinalize: true })).deferred_revision);
+  }
+  let observed = null;
+  control.alter_finalize_results = (results, statements) => {
+    const index = statsIndexOf(statements);
+    observed = { rows: results[index].results.map((row) => row.source), changes: results[index].meta.changes };
+    // Exactly what a new writing trigger on corpus_stats would do, then two
+    // anomalies that defeat the stats proof itself rather than its count.
+    if (anomaly === "inflated-count") results[index].meta.changes = 2;
+    if (anomaly === "missing-row") results[index].results = [];
+    if (anomaly === "foreign-row") results[index].results = [{ source: "drive" }];
+  };
+  const outcomes = await store.finalizeIngestBatch(env, staged);
+  assert.deepEqual(observed, { rows: ["message"], changes: 1 },
+    "the stats upsert returns its own single row, which is what proves it");
+  assert.deepEqual(outcomes, [{ ok: true }, { ok: true }, { ok: true }],
+    `a ${anomaly} on statement 0 condemns none of the three documents that proved their own commit`);
+  for (const id of ids) {
+    assert.match(sqlite.prepare("SELECT content_hash FROM documents WHERE doc_uid=?").get(`message:${id}`).content_hash,
+      /^[a-f0-9]{64}$/);
+  }
+}
+
+// Single ingest keeps the check, because there statement 0 covers exactly its
+// own document. It stays fail-closed on a missing row and trigger-robust on the
+// count -- this is the brain_remember / owner-note path.
+{
+  control.alter_finalize_results = (results, statements) => {
+    results[statsIndexOf(statements)].results = [];
+  };
+  await assert.rejects(store.ingest(env, envelope("stats-scope-single-missing")),
+    /superseded before commit/, "a missing stats row still refuses the single-document commit");
+}
+{
+  control.alter_finalize_results = (results, statements) => {
+    results[statsIndexOf(statements)].meta.changes = 3;
+  };
+  const accepted = await store.ingest(env, envelope("stats-scope-single-inflated"));
+  assert.equal(accepted.action, "created",
+    "a trigger-inflated stats count does not fail a single-document commit that returned its row");
+}
+
+console.log("d1-batch-ingest: real SQLite integration, trigger-aware CAS, statement-0 scope, readback races, and performance structure passed");

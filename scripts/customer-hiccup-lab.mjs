@@ -91,7 +91,7 @@ export const HICCUP_SCENARIOS = Object.freeze([
 ]);
 
 const SAFE_ENV = Object.freeze([
-  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP",
+  "PATH", "HOME", "USER", "USERNAME", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP",
   "LANG", "LC_ALL", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT",
   "LOCALAPPDATA", "APPDATA", "USERPROFILE",
 ]);

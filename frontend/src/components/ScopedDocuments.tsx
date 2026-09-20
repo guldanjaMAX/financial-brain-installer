@@ -48,12 +48,12 @@ export function ScopedDocuments({ principal, onAccessEnded }: {
         <p className="eyebrow">Exact document access</p>
         <h1 className="page-title">Shared documents</h1>
         <p className="page-intro">
-          These are the exact documents the owner shared with this passkey. Other records, businesses, owner controls, and financial screens stay outside this workspace.
+          These are the exact documents the owner shared with this passkey. Other records, entities, owner controls, and financial screens stay outside this workspace.
         </p>
       </header>
       <div className="mt-5 max-w-3xl">
         <TruthNote>
-          Access is owner-only by default. This workspace does not turn a business label into access to every document for that business.
+          Access is owner-only by default. This workspace does not turn an entity label into access to every document for that entity.
         </TruthNote>
         {error && <Attention>{error}</Attention>}
       </div>

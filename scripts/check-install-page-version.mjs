@@ -3,25 +3,77 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  runtimeIdentityArtifactName,
+  verifyRuntimeIdentityArtifact,
+} from './runtime-identity-receipt.mjs';
 export const ENDPOINTS = Object.freeze({
   manifest: 'https://financialbrain.ai/update/manifest.json',
   updateGuide: 'https://financialbrain.ai/update/agent.md',
   installGuide: 'https://financialbrain.ai/install/agent.md',
+  installGuideMacos: 'https://financialbrain.ai/install/agent-macos.md',
   latest: 'https://api.github.com/repos/guldanjaMAX/financial-brain-installer/releases/latest',
 });
 const UPDATE_URL = 'https://financialbrain.ai/update';
 const RELEASE_BASE = 'https://github.com/guldanjaMAX/financial-brain-installer/releases/download';
+const RUNTIME_IDENTITY_SCHEME = 'brain.runtime-payload.sha256.v1';
 const versionPattern = /^\d+\.\d+\.\d+$/;
 const digestPattern = /^[0-9a-f]{64}$/;
+const sourceDigestPattern = /^[0-9a-f]{40}$/;
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
 export function guideFields(text) {
   requireValue(typeof text === 'string' && text.length < 200_000, 'invalid agent guide');
   const fields = {};
-  for (const [, key, value] of text.matchAll(/^([A-Z][A-Z0-9_]*): ([^\r\n]+)\r?$/gm)) {
+  for (const line of text.replace(/\r\n/g, '\n').split('\n')) {
+    const header = line.match(/^[ \t]*([A-Z][A-Z0-9_]*):/);
+    if (!header) continue;
+    const exact = line.match(/^([A-Z][A-Z0-9_]*): ([^\r\n]+)$/);
+    requireValue(exact, `malformed guide field ${header[1]}`);
+    const [, key, value] = exact;
     requireValue(!Object.hasOwn(fields, key), `duplicate guide field ${key}`);
     fields[key] = value.trim();
   }
   return fields;
+}
+
+const SUPERVISED_TARGETS = Object.freeze({
+  windows: 'physical Windows 10 or newer',
+  macos: 'macOS 13 or newer, Apple silicon or Intel',
+});
+
+/**
+ * Validate the executable candidate contract before its artifact URL can be
+ * followed. Both the release-health checker and the install matrix use this
+ * one parser, so a duplicate field or a weakened owner/target/status boundary
+ * cannot be accepted by one surface and rejected by the other.
+ */
+export function validateSupervisedInstallContract(installGuide, { platform = 'windows' } = {}) {
+  const target = SUPERVISED_TARGETS[platform];
+  requireValue(target, 'unsupported supervised install platform');
+  const install = guideFields(installGuide);
+  requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '1' &&
+    install.STATUS === 'supervised field-test candidate' &&
+    install.OWNER_PRESENT === 'required' && install.TARGET === target &&
+    typeof install.SETUP_PAGE === 'string', 'unrecognized supervised install contract');
+  const setup = new URL(install.SETUP_PAGE);
+  requireValue(setup.origin === 'https://financialbrain.ai' && /^\/[a-z0-9-]+$/.test(setup.pathname) &&
+    !setup.search && !setup.hash && !setup.username && !setup.password, 'invalid supervised setup URL');
+  requireValue(versionPattern.test(install.CANDIDATE_VERSION) && /^[0-9a-f]{40}$/.test(install.CANDIDATE_COMMIT) &&
+    digestPattern.test(install.ARTIFACT_SHA256) && /^[1-9]\d*$/.test(install.ARTIFACT_BYTES) &&
+    Number.isSafeInteger(Number(install.ARTIFACT_BYTES)) && Number(install.ARTIFACT_BYTES) <= 100 * 1024 * 1024,
+  'invalid supervised candidate receipt');
+  const expected = `${setup.href}/financial-brain-v${install.CANDIDATE_VERSION}-field-kit-${install.ARTIFACT_SHA256.slice(0, 16)}.zip`;
+  requireValue(install.ARTIFACT_URL === expected, 'supervised candidate URL and receipt disagree');
+  return Object.freeze({
+    platform,
+    guideUrl: platform === 'windows' ? ENDPOINTS.installGuide : ENDPOINTS.installGuideMacos,
+    setupPage: setup.href,
+    artifactUrl: install.ARTIFACT_URL,
+    artifactBytes: Number(install.ARTIFACT_BYTES),
+    artifactSha256: install.ARTIFACT_SHA256,
+    candidateVersion: install.CANDIDATE_VERSION,
+    candidateCommit: install.CANDIDATE_COMMIT,
+  });
 }
 export function validatePublicManifest(value) {
   requireValue(value?.schema_version === 2, 'unsupported update manifest schema');
@@ -30,7 +82,8 @@ export function validatePublicManifest(value) {
   requireValue(Array.isArray(value.changes) && value.changes.every((item) => typeof item === 'string'), 'invalid release notes');
   requireValue(value.proof?.live_client_acceptance === 'required', 'client acceptance boundary is missing');
   if (value.release_state !== 'stable') {
-    requireValue(value.available === false && value.release === null && value.published_at === null && value.installer === null,
+    requireValue(value.available === false && value.release === null && value.published_at === null &&
+      value.installer === null && value.runtime_identity == null,
       'nonstable manifest advertises an executable release');
     requireValue(value.changes.length === 0 && typeof value.held_reason === 'string' && value.held_reason.trim(), 'nonstable hold reason is missing');
     requireValue(value.proof.archive_release_gate === 'not_passed' && value.proof.automated_release_suite === 'pending', 'nonstable manifest overclaims proof');
@@ -43,6 +96,21 @@ export function validatePublicManifest(value) {
   requireValue(value.installer?.url === expectedUrl && digestPattern.test(value.installer?.sha256) &&
     Number.isSafeInteger(value.installer?.bytes) && value.installer.bytes > 0 && value.installer.bytes <= 100 * 1024 * 1024,
   'invalid exact stable package receipt');
+  const expectedRuntimeIdentityUrl =
+    `${RELEASE_BASE}/v${value.release}/${runtimeIdentityArtifactName(value.release)}`;
+  const runtimeIdentity = value.runtime_identity;
+  requireValue(runtimeIdentity && typeof runtimeIdentity === 'object' && !Array.isArray(runtimeIdentity) &&
+    JSON.stringify(Object.keys(runtimeIdentity).sort()) ===
+      JSON.stringify(['bytes', 'identity_scheme', 'package_file_count', 'runtime_payload_sha256',
+        'sha256', 'source_sha', 'url']) &&
+    runtimeIdentity.url === expectedRuntimeIdentityUrl &&
+    digestPattern.test(runtimeIdentity.sha256) &&
+    Number.isSafeInteger(runtimeIdentity.bytes) && runtimeIdentity.bytes > 0 && runtimeIdentity.bytes <= 4096 &&
+    sourceDigestPattern.test(runtimeIdentity.source_sha) &&
+    Number.isSafeInteger(runtimeIdentity.package_file_count) && runtimeIdentity.package_file_count > 0 &&
+    runtimeIdentity.identity_scheme === RUNTIME_IDENTITY_SCHEME &&
+    digestPattern.test(runtimeIdentity.runtime_payload_sha256),
+  'invalid exact stable runtime identity receipt');
   requireValue(value.proof.archive_release_gate === 'passed' && value.proof.automated_release_suite === 'passed', 'stable manifest lacks release proof');
   return value;
 }
@@ -56,43 +124,43 @@ export function validateDoorways({ manifest, updateGuide, installGuide }) {
   requireValue(update.PERMITTED_MODE === permitted, 'update guide permits the wrong operation');
   // The unlisted /install doorway intentionally offers a supervised candidate.
   // Its older exact version must never be replaced with /releases/latest.
-  const install = guideFields(installGuide);
-  requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '1' && install.STATUS === 'supervised field-test candidate' &&
-    install.OWNER_PRESENT === 'required' && install.TARGET === 'physical Windows 10 or newer' &&
-    typeof install.SETUP_PAGE === 'string', 'unrecognized supervised install contract');
-  const setup = new URL(install.SETUP_PAGE);
-  requireValue(setup.origin === 'https://financialbrain.ai' && /^\/[a-z0-9-]+$/.test(setup.pathname) &&
-    !setup.search && !setup.hash && !setup.username && !setup.password, 'invalid supervised setup URL');
-  requireValue(versionPattern.test(install.CANDIDATE_VERSION) && /^[0-9a-f]{40}$/.test(install.CANDIDATE_COMMIT) &&
-    digestPattern.test(install.ARTIFACT_SHA256) && /^[1-9]\d*$/.test(install.ARTIFACT_BYTES) &&
-    Number.isSafeInteger(Number(install.ARTIFACT_BYTES)) && Number(install.ARTIFACT_BYTES) <= 100 * 1024 * 1024,
-  'invalid supervised candidate receipt');
+  const install = validateSupervisedInstallContract(installGuide);
   // The artifact must still be derivable from the setup page, the version and
   // the digest, so it can never be swapped for a moving target like
   // /releases/latest. What changed on 2026-09-08 is the human-readable part of
   // the name: the kit no longer embeds the setup page's own path or a single
   // platform, because one sealed kit carries Windows and macOS and clients other
   // than the person the page was named for now install from it.
-  const expected = `${setup.href}/financial-brain-v${install.CANDIDATE_VERSION}-field-kit-${install.ARTIFACT_SHA256.slice(0, 16)}.zip`;
-  requireValue(install.ARTIFACT_URL === expected, 'supervised candidate URL and receipt disagree');
-  return { state: manifest.release_state, publicRelease: manifest.release, supervisedCandidate: install.CANDIDATE_VERSION };
+  return { state: manifest.release_state, publicRelease: manifest.release, supervisedCandidate: install.candidateVersion };
 }
 export function verifyPublishedMetadata(manifest, release) {
   requireValue(manifest.release_state === 'stable', 'publication verification needs a stable manifest');
   requireValue(release?.tag_name === `v${manifest.release}` && release.draft === false && release.prerelease === false && release.immutable === true,
     'latest release is not the exact immutable stable release');
-  requireValue(Array.isArray(release.assets) && release.assets.length === 2, 'release must contain exactly two package names');
-  const required = new Set([`brain-installer-${manifest.release}.tgz`, 'brain-installer.tgz']);
+  requireValue(Array.isArray(release.assets) && release.assets.length === 3,
+    'release must contain exactly two package names and one runtime identity receipt');
+  const runtimeIdentityName = runtimeIdentityArtifactName(manifest.release);
+  const required = new Set([
+    `brain-installer-${manifest.release}.tgz`,
+    'brain-installer.tgz',
+    runtimeIdentityName,
+  ]);
   for (const asset of release.assets) {
-    requireValue(required.delete(asset.name) && asset.state === 'uploaded' && asset.size === manifest.installer.bytes &&
-      asset.digest === `sha256:${manifest.installer.sha256}`, 'release asset metadata disagrees with the stable receipt');
+    const receipt = asset.name === runtimeIdentityName ? manifest.runtime_identity : manifest.installer;
+    requireValue(required.delete(asset.name) && asset.state === 'uploaded' && asset.size === receipt.bytes &&
+      asset.digest === `sha256:${receipt.sha256}`, 'release asset metadata disagrees with the stable receipt');
   }
   requireValue(required.size === 0, 'required release asset is missing');
 }
-async function publicBytes(url, limit = 200_000) {
-  const response = await fetch(url, { headers: { 'user-agent': 'brain-release-contract-check', 'cache-control': 'no-cache' },
+export async function publicBytes(url, limit = 200_000, { fetchImpl = globalThis.fetch } = {}) {
+  requireValue(Number.isSafeInteger(limit) && limit > 0 && limit <= 100 * 1024 * 1024,
+    'invalid public response byte limit');
+  const response = await fetchImpl(url, { headers: { 'user-agent': 'brain-release-contract-check', 'cache-control': 'no-cache' },
     redirect: url.startsWith(RELEASE_BASE) ? 'follow' : 'error', signal: AbortSignal.timeout(30_000) });
   requireValue(response.ok, `public contract returned HTTP ${response.status}`);
+  const contentLength = response.headers.get('content-length');
+  requireValue(contentLength === null || (/^\d+$/.test(contentLength) && Number(contentLength) <= limit),
+    'public response exceeds its byte limit');
   const chunks = []; let bytes = 0;
   for await (const chunk of response.body) {
     bytes += chunk.length;
@@ -100,6 +168,23 @@ async function publicBytes(url, limit = 200_000) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+
+/** Download one fixed platform guide, validate it, then and only then follow
+ * its immutable, digest-derived, byte-bounded artifact URL. */
+export async function readSupervisedInstallContract({ platform = 'windows', read = publicBytes } = {}) {
+  const guideUrl = platform === 'windows' ? ENDPOINTS.installGuide
+    : platform === 'macos' ? ENDPOINTS.installGuideMacos : null;
+  requireValue(guideUrl, 'unsupported supervised install platform');
+  const guideBytes = Buffer.from(await read(guideUrl, 200_000));
+  requireValue(guideBytes.length < 200_000, 'invalid agent guide');
+  const guide = guideBytes.toString('utf8');
+  const contract = validateSupervisedInstallContract(guide, { platform });
+  const artifact = Buffer.from(await read(contract.artifactUrl, contract.artifactBytes));
+  requireValue(artifact.length === contract.artifactBytes &&
+    createHash('sha256').update(artifact).digest('hex') === contract.artifactSha256,
+  'downloaded supervised artifact differs from the published receipt');
+  return Object.freeze({ ...contract, guide, artifact });
 }
 export async function checkInstallPage({ read = publicBytes, requireStable = false } = {}) {
   const [manifestBytes, updateBytes, installBytes] = await Promise.all([
@@ -113,9 +198,27 @@ export async function checkInstallPage({ read = publicBytes, requireStable = fal
   }
   const release = JSON.parse(String(await read(ENDPOINTS.latest, 2_000_000)));
   verifyPublishedMetadata(manifest, release);
-  const bytes = await read(manifest.installer.url, manifest.installer.bytes);
+  const [bytes, runtimeIdentityBytes] = await Promise.all([
+    read(manifest.installer.url, manifest.installer.bytes),
+    read(manifest.runtime_identity.url, manifest.runtime_identity.bytes),
+  ]);
   requireValue(bytes.length === manifest.installer.bytes && createHash('sha256').update(bytes).digest('hex') === manifest.installer.sha256,
     'downloaded stable archive differs from the published receipt');
+  verifyRuntimeIdentityArtifact({
+    bytes: Buffer.from(runtimeIdentityBytes),
+    artifactSha256: manifest.runtime_identity.sha256,
+    artifactBytes: manifest.runtime_identity.bytes,
+    expected: {
+      sourceSha: manifest.runtime_identity.source_sha,
+      packageFilename: `brain-installer-${manifest.release}.tgz`,
+      packageVersion: manifest.release,
+      packageBytes: manifest.installer.bytes,
+      packageFileCount: manifest.runtime_identity.package_file_count,
+      packageSha256: manifest.installer.sha256,
+      identityScheme: manifest.runtime_identity.identity_scheme,
+      runtimePayloadSha256: manifest.runtime_identity.runtime_payload_sha256,
+    },
+  });
   return { ...result, promotionAllowed: true, artifactVerified: true };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

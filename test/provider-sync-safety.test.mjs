@@ -226,9 +226,9 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
     reason: "authorization authority could not be read",
   });
   check("partial provider results cannot advance a cursor",
-    partial.outcome.kind === "partial" && partial.cursor_can_advance === false);
+    partial.outcome.kind === "partial" && partial.cursor_can_advance === false && partial.walk_complete === true);
   check("unavailable provider results remain distinct from healthy empty",
-    unavailable.outcome.kind === "unavailable" && unavailable.cursor_can_advance === false);
+    unavailable.outcome.kind === "unavailable" && unavailable.cursor_can_advance === false && unavailable.walk_complete === false);
 }
 
 console.log(`\nprovider sync safety: all ${ran} checks passed`);

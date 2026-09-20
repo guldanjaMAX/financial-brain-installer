@@ -706,6 +706,8 @@ test("outage, malformed, and unknown callbacks all leave a clean and honest brow
 
 test("the public callback is quota-bounded without returning provider query detail", async () => {
   const db = freshDb();
+  const originalNow = Date.now;
+  Date.now = () => START_NOW;
   try {
     const env = environment(db);
     const providerDetail = "quota-provider-detail-must-not-survive";
@@ -727,6 +729,7 @@ test("the public callback is quota-bounded without returning provider query deta
     assert.equal(quota.request_count, 30);
     assert.equal(db.prepare("SELECT count(*) AS n FROM quickbooks_oauth_intents").get().n, 0);
   } finally {
+    Date.now = originalNow;
     db.close();
   }
 });

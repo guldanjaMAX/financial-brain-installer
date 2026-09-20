@@ -2,6 +2,7 @@
 
 import { randomToken, sha256Hex } from "./auth-store.js";
 import { ownerActivityStatement } from "./owner-activity.js";
+import { storedProvenanceAssessment } from "./provenance-receipt.js";
 
 export const DOCUMENT_GRANT_MAX_DOCUMENTS = 100;
 const REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
@@ -96,7 +97,10 @@ async function enrollmentCode(env, requestId, grantId) {
   const signature = await crypto.subtle.sign(
     "HMAC", key, new TextEncoder().encode(`document-enrollment\0${requestId}\0${grantId}`),
   );
-  return b64u(new Uint8Array(signature)).slice(0, 32);
+  // The non-secret class prefix is part of the hashed one-time code. The owner
+  // app can therefore choose the document-recipient explanation before opening
+  // WebAuthn, while moving the opaque code to an owner fragment fails closed.
+  return `doc_${b64u(new Uint8Array(signature)).slice(0, 32)}`;
 }
 
 async function inviteReceipt(env, requestId, grantId) {
@@ -448,10 +452,11 @@ export async function listGrantedDocuments(env, principal) {
   }
   try {
     const rows = await env.DB.prepare(
-      `SELECT d.doc_uid document_id, d.title, d.source,
+      `SELECT d.doc_uid document_id, d.source_id, d.title, d.source,
               COALESCE(s.kind, 'unregistered') AS source_kind,
               d.document_date,
-              d.date_source, d.date_reliable, d.text_source, d.text_reliable
+              d.date_source, d.date_reliable, d.text_source, d.text_reliable,
+              d.meta AS authority_meta
        FROM document_access_documents a
        JOIN documents d ON d.doc_uid = a.document_id AND d.entity_slug = a.entity_slug
        LEFT JOIN sources s ON s.name = d.source
@@ -466,17 +471,22 @@ export async function listGrantedDocuments(env, principal) {
         entity_slug: principal.entitySlug,
       },
       scope_rule: "exact_document_ids_only",
-      documents: (rows?.results || []).map((row) => ({
-        document_id: row.document_id,
-        title: row.title || "Untitled document",
-        source: row.source,
-        source_kind: row.source_kind || null,
-        document_date: row.document_date === null ? null : Number(row.document_date),
-        date_source: row.date_source || null,
-        date_reliable: row.date_reliable === 1 || row.date_reliable === true,
-        text_source: row.text_source || "native",
-        text_reliable: row.text_reliable !== 0 && row.text_reliable !== false,
-      })),
+      documents: (rows?.results || []).map((row) => {
+        const provenance = storedProvenanceAssessment({ ...row, doc_uid: row.document_id });
+        return {
+          document_id: row.document_id,
+          title: row.title || "Untitled document",
+          source: row.source,
+          source_kind: row.source_kind || null,
+          document_date: row.document_date === null ? null : Number(row.document_date),
+          date_source: row.date_source || null,
+          date_reliable: row.date_reliable === 1 || row.date_reliable === true,
+          text_source: provenance.text_source,
+          text_reliable: provenance.text_reliable,
+          provenance_status: provenance.provenance_status,
+          provenance_reason: provenance.provenance_reason,
+        };
+      }),
     };
   } catch (error) {
     unavailable(error);

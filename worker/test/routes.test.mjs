@@ -1,6 +1,16 @@
 import worker from "../src/index.js";
-import { filterSql, unsupportedFilters } from "../src/lib/store-d1.js";
+import { DatabaseSync } from "node:sqlite";
+import {
+  D1_QUERY_BIND_LIMIT,
+  filterSql,
+  listSourceFamilies,
+  projectedSourceFamilyName,
+  SOURCE_FAMILY_CURSOR_MAX_BYTES,
+  SOURCE_FAMILY_UID_FILTER_MAX,
+  unsupportedFilters,
+} from "../src/lib/store-d1.js";
 import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
+import { DRIVE_STORED_FAMILY_UID_MAX_BYTES } from "../src/lib/stored-family-identity.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
 let fail = 0, ran = 0;
@@ -17,10 +27,14 @@ const isUnavailableRefusal = (body) =>
 function mkEnv(rows, {
   vectorIds = [],
   vectorThrows = false,
+  keywordThrows = false,
   countRow = null,
   outboxRow = null,
   readinessRow = null,
   sourceRows = [],
+  sourceRegistrationEventThrows = false,
+  unchunkedRows = [],
+  ownedEntity = null,
   extra = {},
 } = {}) {
   const seen = { sql: [], binds: [], vectorQueries: [] };
@@ -32,8 +46,16 @@ function mkEnv(rows, {
         seen.sql.push(sql);
         let bound = [];
         return {
-          bind(...b) { bound = b; seen.binds.push(b); return this; },
+          _sql: sql,
+          _args: [],
+          bind(...b) { bound = b; this._args = b; seen.binds.push(b); return this; },
           all: async () => {
+            if (keywordThrows && /chunks_fts MATCH/.test(sql)) {
+              throw new Error("synthetic keyword query failure");
+            }
+            if (/unchunked-tax-document-candidates/.test(sql)) {
+              return { results: unchunkedRows };
+            }
             if (/SELECT s\.name, s\.kind, s\.zone, s\.status/.test(sql) && /FROM sources s/.test(sql)) {
               return { results: sourceRows };
             }
@@ -46,6 +68,15 @@ function mkEnv(rows, {
             return { results: rows };
           },
           first: async () => {
+            if (/ON CONFLICT\(name\) DO NOTHING[\s\S]*RETURNING name, lower\(trim\(kind\)\) AS kind/.test(sql)) {
+              const existing = sourceRows.find((row) => row.name === bound[0]);
+              return existing ? null : { name: bound[0], kind: bound[1] };
+            }
+            if (/SELECT lower\(trim\(kind\)\) AS kind FROM sources WHERE name=\?1/.test(sql)) {
+              const existing = sourceRows.find((row) => row.name === bound[0]);
+              return existing ? { kind: existing.kind } : null;
+            }
+            if (/FROM fin_entities/.test(sql)) return ownedEntity;
             if (/INSERT INTO sources[\s\S]*RETURNING lower\(trim\(kind\)\) AS kind/.test(sql)) {
               const existing = sourceRows.find((row) => row.name === bound[0]);
               const requested = bound[1] || bound[2];
@@ -79,7 +110,37 @@ function mkEnv(rows, {
           run: async () => ({}),
         };
       },
-      batch: async () => {},
+      batch: async (statements) => {
+        const registrationBatch = Array.isArray(statements) && statements.length === 3 &&
+          /INSERT INTO sources[\s\S]*ON CONFLICT\(name\) DO NOTHING/.test(statements[0]?._sql || "") &&
+          /source_events[\s\S]*'registered'[\s\S]*changes\(\)=1/.test(statements[1]?._sql || "");
+        if (!registrationBatch) return undefined;
+
+        // Model D1 batch atomicity: stage the source insertion, then either
+        // commit both writes or leave the original registry untouched when the
+        // event statement fails.
+        const [source, kind, createdAt] = statements[0]._args;
+        const prior = sourceRows.find((row) => row.name === source) || null;
+        const sourceChanges = prior ? 0 : 1;
+        const stagedRows = sourceRows.map((row) => ({ ...row }));
+        if (!prior) stagedRows.push({ name: source, kind, created_at: createdAt, zone: null });
+        if (sourceRegistrationEventThrows && sourceChanges === 1) {
+          throw new Error("synthetic registered-event write failure");
+        }
+        sourceRows.splice(0, sourceRows.length, ...stagedRows);
+        const eventChanges = sourceChanges;
+        return [
+          { meta: { changes: sourceChanges } },
+          { meta: { changes: eventChanges } },
+          {
+            meta: { changes: 0 },
+            results: [{
+              kind: String((prior || stagedRows.find((row) => row.name === source)).kind).trim().toLowerCase(),
+              registry_event_recorded: eventChanges,
+            }],
+          },
+        ];
+      },
     },
     VECTORIZE: {
       query: async (_embedding, options) => {
@@ -106,6 +167,7 @@ const ROW = {
   chunk_uid: "meeting:123#0", doc_uid: "meeting:123", text: "We agreed to defer the retainer.",
   source: "meeting", source_kind: "zoom", source_id: "123", uri: "meeting://123", title: "Q3 sync", document_date: 1750000000000, client: "Acme", category: "meeting",
   date_reliable: 1, date_source: "fixture:event_date", top_folder: "Clients", platform: "imessage",
+  text_source: "native", text_reliable: 1,
 };
 const call = (env, path) => {
   const url = new URL("https://b.example" + path);
@@ -205,7 +267,36 @@ const call = (env, path) => {
   check("think replaces raw answer-model errors before they reach clients",
     response.status === 200 && body.answer === null &&
       body.answer_error === ANSWER_ERROR_MESSAGES.unavailable &&
+      Array.isArray(body.citations) && body.citations.length === 0 &&
+      Array.isArray(body.results) && body.results.length === 1 &&
       !JSON.stringify(body).includes(rawProviderFailure),
+    JSON.stringify(body).slice(0, 300));
+}
+
+/* A successful provider envelope with no text is still a null answer. The
+   retrieved rows remain useful diagnostics, but none was cited or approved. */
+{
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  let body;
+  try {
+    globalThis.fetch = async () => {
+      providerCalls++;
+      return new Response(JSON.stringify({
+        content: [], model: "claude-fixture", usage: { input_tokens: 1, output_tokens: 0 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const { env } = mkEnv([ROW], {
+      vectorIds: ["meeting:123#0"],
+      extra: { ANTHROPIC_API_KEY: "fixture-key", ANSWER_MODEL: "claude-fixture" },
+    });
+    body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("an empty answer-model response keeps candidates but approves no citations",
+    providerCalls === 1 && body.answer === null && body.citations.length === 0 &&
+      body.results.length === 1 && body.results[0].chunk_uid === "meeting:123#0",
     JSON.stringify(body).slice(0, 300));
 }
 
@@ -290,16 +381,135 @@ const call = (env, path) => {
 {
   const { env } = mkEnv([ROW]);
   check("supported filters are never flagged", unsupportedFilters({ client: "A", top_folder: "Clients", platform: "imessage", from: "2025-01-01" }).length === 0);
+  check("schema-skewed filters are named instead of disappearing",
+    unsupportedFilters({ year: 2025, role: "owner" }).join(",") === "role,year",
+    JSON.stringify(unsupportedFilters({ year: 2025, role: "owner" })));
+}
+
+/* ---- malformed or unknown scope is refused before the first retrieval read ---- */
+{
+  for (const field of ["year", "role"]) {
+    const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+    const route = field === "year" ? "/api/rag/unified" : "/api/rag/think";
+    const response = await call(env, `${route}?q=retainer&${field}=2025`);
+    const body = await response.json();
+    check(`unknown ${field} scope is refused rather than broadened`,
+      response.status === 400 && body.code === "unsupported_retrieval_parameter" &&
+        seen.sql.length === 0 && seen.vectorQueries.length === 0,
+      JSON.stringify({ status: response.status, body, seen }));
+  }
+}
+{
+  for (const [label, path, code] of [
+    ["impossible calendar day", "/api/rag/unified?q=retainer&from=2025-02-30", "invalid_date_filter"],
+    ["ambiguous date", "/api/rag/unified?q=retainer&to=03%2F04%2F2025", "invalid_date_filter"],
+    ["reversed date range", "/api/rag/unified?q=retainer&from=2025-12-31&to=2025-01-01", "reversed_date_range"],
+  ]) {
+    const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+    const response = await call(env, path);
+    const body = await response.json();
+    check(`${label} is refused before retrieval`,
+      response.status === 400 && body.code === code &&
+        seen.sql.length === 0 && seen.vectorQueries.length === 0,
+      JSON.stringify({ status: response.status, body, seen }));
+  }
+}
+{
+  const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  const response = await worker.fetch(new Request("https://b.example/api/rag/unified", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+    body: JSON.stringify({ q: "retainer", client: { name: "Acme" } }),
+  }), env, { waitUntil() {}, passThroughOnException() {} });
+  const body = await response.json();
+  check("schema-skewed filter types are refused rather than ignored",
+    response.status === 400 && body.code === "invalid_retrieval_parameter_type" &&
+      body.parameter === "client" && seen.sql.length === 0 && seen.vectorQueries.length === 0,
+    JSON.stringify({ status: response.status, body, seen }));
+}
+{
+  const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  const response = await worker.fetch(new Request("https://b.example/api/rag/think", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+    body: JSON.stringify({ q: "retainer", client: null }),
+  }), env, { waitUntil() {}, passThroughOnException() {} });
+  const body = await response.json();
+  check("an explicit null scope is refused rather than becoming an unfiltered search",
+    response.status === 400 && body.code === "invalid_filter_value" &&
+      body.parameter === "client" && seen.sql.length === 0 && seen.vectorQueries.length === 0,
+    JSON.stringify({ status: response.status, body, seen }));
 }
 
 /* ---- vector down is a degraded answer, not an empty corpus ---- */
 {
-  const { env } = mkEnv([ROW], { vectorIds: [] });
+  const { env } = mkEnv([ROW], { vectorIds: [], vectorThrows: true });
   const t = await (await call(env, "/api/rag/think?q=retainer")).json();
   check("vector outage surfaces as a gap", (t.gaps || []).some((g) => g.type === "vector_unavailable"), JSON.stringify(t.gaps));
+  check("vector outage names the failed modality rather than inferring from row counts",
+    t.degraded === "vector" && t.degraded_reason === "vector-query-failed", JSON.stringify(t));
+  check("vector query failure does not tell the owner that a healthy provider is merely building",
+    t.gaps?.some((gap) => gap.type === "vector_unavailable" &&
+      /meaning-based search failed/i.test(gap.detail || "") &&
+      !/index is still building/i.test(gap.detail || "")),
+    JSON.stringify(t.gaps));
   check("and results still come back", (t.results || []).length === 1);
   check("Workers AI writes the cited answer without a vendor key", /Cloudflare answer/.test(t.answer || ""), JSON.stringify(t));
   check("and reports the Cloudflare model", String(t.model || "").startsWith("@cf/"), String(t.model));
+}
+
+/* ---- explicit modality outcomes, not empty-list guesses, drive degradation ---- */
+{
+  const { env } = mkEnv([ROW], {
+    keywordThrows: true,
+    vectorIds: [ROW.chunk_uid],
+  });
+  const b = await (await call(env, "/api/rag/unified?q=retainer")).json();
+  check("keyword failure preserves semantic evidence with an exact FTS degradation",
+    b.results?.length === 1 && b.degraded === "fts" && b.degraded_reason === "keyword-query-failed",
+    JSON.stringify(b));
+}
+{
+  const { env } = mkEnv([ROW], {
+    keywordThrows: true,
+    vectorIds: [ROW.chunk_uid],
+  });
+  const b = await (await call(env, "/api/rag/think?q=retainer")).json();
+  check("think explains the recall lost when only keyword search fails",
+    b.results?.length === 1 && b.degraded === "fts" &&
+      b.gaps?.some((gap) => gap.type === "keyword_unavailable" &&
+        /exact names, identifiers, and phrases may be missing/i.test(gap.detail || "")),
+    JSON.stringify(b));
+}
+{
+  const { env } = mkEnv([], { keywordThrows: true, vectorThrows: true });
+  const b = await (await call(env, "/api/rag/think?q=retainer")).json();
+  check("both failed modalities can never become no_results",
+    b.status === "search_unavailable" && b.degraded === "retrieval" &&
+      b.degraded_reason === "keyword-and-vector-query-failed" &&
+      !b.gaps?.some((gap) => gap.type === "no_results"),
+    JSON.stringify(b));
+  check("both-modality failure tells the owner that no stored records were searched",
+    /both keyword search and meaning-based search failed/i.test(b.notice || ""),
+    String(b.notice));
+}
+{
+  const { env } = mkEnv([], { keywordThrows: true, vectorThrows: true });
+  const b = await (await call(env, "/api/rag/unified?q=retainer")).json();
+  check("unified also refuses to format two query failures as no_results",
+    b.status === "search_unavailable" && b.degraded === "retrieval" &&
+      b.degraded_reason === "keyword-and-vector-query-failed" && b.results?.length === 0 &&
+      !b.gaps?.some((gap) => gap.type === "no_results"),
+    JSON.stringify(b));
+}
+{
+  const { env } = mkEnv([], { vectorIds: [] });
+  const b = await (await call(env, "/api/rag/think?q=retainer")).json();
+  check("two successful zero-result modalities remain the honest no-results path",
+    b.degraded === undefined && b.status === undefined &&
+      b.gaps?.some((gap) => gap.type === "no_results") &&
+      !b.gaps?.some((gap) => gap.type === "search_unavailable"),
+    JSON.stringify(b));
 }
 
 /* A partially populated vector index is also degraded. A non-empty semantic
@@ -557,6 +767,7 @@ const call = (env, path) => {
   };
   const { env } = mkEnv([stale, billingOnly], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -587,6 +798,7 @@ const call = (env, path) => {
   });
   const answerEnv = (row, answer) => mkEnv([row], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -697,6 +909,7 @@ const call = (env, path) => {
   };
   const answerEnv = (answer, evidence) => mkEnv([stale, current], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -737,6 +950,7 @@ const call = (env, path) => {
   };
   const { env } = mkEnv([unreliable], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -774,6 +988,7 @@ const call = (env, path) => {
   const gatePrompts = [];
   const { env } = mkEnv([stale, current], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -801,6 +1016,7 @@ const call = (env, path) => {
   let modelCalls = 0;
   const { env } = mkEnv([ROW], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -824,6 +1040,7 @@ const call = (env, path) => {
   const second = { ...ROW, chunk_uid: "meeting:456#0", doc_uid: "meeting:456", source_id: "456", title: "Other record", text: "An unrelated extra claim." };
   const { env } = mkEnv([ROW, second], {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       AI: {
         run: async (model, input) => {
@@ -838,6 +1055,474 @@ const call = (env, path) => {
   const body = await (await call(env, "/api/rag/think?q=What+happened+to+the+retainer%3F")).json();
   check("a partial evidence approval fails closed", isUnavailableRefusal(body), JSON.stringify(body));
   check("the partial approval identifies the citation mismatch", /every citation/.test(body.evidence_gate?.reason || ""), JSON.stringify(body.evidence_gate));
+}
+
+/* D1 prepends `[title]\n\n` to chunk zero. A filename can be stale or wrong,
+   so the deterministic guard must inspect the native body after that exact
+   product-generated prefix instead of letting the filename overrule the
+   taxpayer printed in the return. */
+{
+  const title = "Example Orchard LLC 2023 tax return Form 1065";
+  const wrongSameFormReturn = {
+    ...ROW,
+    chunk_uid: "drive:misnamed-other-entity-return#0",
+    doc_uid: "drive:misnamed-other-entity-return",
+    source_id: "misnamed-other-entity-return",
+    source: "drive",
+    source_kind: "upload",
+    title,
+    client: "Example Orchard LLC",
+    authority_document_head: `[${title}]\n\nTaxpayer: Example Timber Partners. 2023 Form 1065 partnership return.`,
+    text: "Ordinary business income was a negative amount.",
+  };
+  const { env } = mkEnv([wrongSameFormReturn], {
+    vectorIds: [wrongSameFormReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the filename, form, and year match" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("a D1-injected matching filename fails closed without claiming no evidence",
+    isUnavailableRefusal(body),
+    JSON.stringify(body));
+  check("the misnamed same-form return fails the deterministic entity boundary",
+    /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body.evidence_gate));
+}
+
+/* A nearest-neighbor tax hit can carry the right line label and tax year while
+   belonging to a different entity and a different filing. The expected return
+   is present but unreadable, which mirrors the dangerous case where retrieval
+   substitutes a nearby K-1 for an encrypted return. The verifier is
+   deliberately made overconfident here: the deterministic route guard must
+   still refuse the answer. */
+{
+  const wrongK1 = {
+    ...ROW,
+    chunk_uid: "drive:other-entity-k1#0",
+    doc_uid: "drive:other-entity-k1",
+    source_id: "other-entity-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    client: "Example Timber Partners",
+    authority_document_head: "Example Timber Partners. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income (loss) was a negative amount.",
+  };
+  const unreadableReturn = {
+    ...ROW,
+    chunk_uid: "drive:expected-return#0",
+    doc_uid: "drive:expected-return",
+    source_id: "expected-return",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Orchard LLC 2023 Form 1065",
+    client: "Example Orchard LLC",
+    authority_document_head: "Encrypted document. No native tax-return text was extracted.",
+    text: "Encrypted document. No readable tax-return text was extracted.",
+    text_source: "ocr_partial",
+    text_reliable: false,
+  };
+  const { env } = mkEnv([wrongK1, unreadableReturn], {
+    vectorIds: [wrongK1.chunk_uid, unreadableReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label and year match" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("the reproduction includes the expected but unreadable Form 1065",
+    body.results.some((row) => row.title === unreadableReturn.title && row.text_reliable === false),
+    JSON.stringify(body.results));
+  check("a different entity's K-1 cannot answer a named entity's Form 1065 question",
+    body.answer === null &&
+      body.status === "coverage_incomplete" &&
+      body.citations.length === 0 &&
+      body.evidence_gate?.supported === false,
+    JSON.stringify(body));
+  check("the tax refusal identifies the deterministic entity-year-form boundary",
+    /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body.evidence_gate));
+  check("the unreadable expected return blocks a categorical absence claim",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /could not be read reliably/.test(body.notice || "") &&
+      !/documents do not answer/i.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* The owner's ordinary wording used to drop the tax guard entirely because the
+   entity appears before "report on its" rather than immediately before the
+   year. Keep the exact customer phrasing and a zero-chunk expected return so a
+   nearby entity's K-1 can never become the answer. */
+{
+  const brightwoodK1 = {
+    ...ROW,
+    chunk_uid: "drive:brightwood-k1#0",
+    doc_uid: "drive:brightwood-k1",
+    source_id: "brightwood-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Brightwood Holdings 2023 Schedule K-1",
+    client: "Brightwood Holdings",
+    authority_document_head: "Brightwood Holdings. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a positive amount.",
+  };
+  const ocotilloZeroChunk = {
+    doc_uid: "drive:ocotillo-password-protected-1065",
+    source_id: "ocotillo-password-protected-1065",
+    source: "drive",
+    source_kind: "upload",
+    title: "Ocotillo Desert 2023 tax return Form 1065",
+    authority_meta: JSON.stringify({ taxpayer_name: "Ocotillo Desert", tax_year: 2023 }),
+    text_source: "native",
+    text_reliable: true,
+  };
+  const { env } = mkEnv([brightwoodK1], {
+    vectorIds: [brightwoodK1.chunk_uid],
+    unchunkedRows: [ocotilloZeroChunk],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line and year match" }, usage: {} }
+            : { response: "Ocotillo Desert reported a positive ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const ownerQuestion = "What ordinary business income did Ocotillo Desert report on its 2023 Form 1065?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(ownerQuestion)}`)).json();
+  check("the owner's exact tax wording activates the entity-year-form guard",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false,
+    JSON.stringify(body));
+  check("an unreadable Ocotillo 1065 blocks Brightwood's K-1 from answering",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /tax evidence does not match the requested entity, tax year, and form/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify({ gaps: body.gaps, gate: body.evidence_gate }));
+
+  const payQuestion = "How much tax did Ocotillo Desert pay on its 2023 Form 1065?";
+  const payBody = await (await call(env, `/api/rag/think?q=${encodeURIComponent(payQuestion)}`)).json();
+  check("exact tax-paid wording keeps the same entity-year-form evidence guard",
+    payBody.answer === null && payBody.status === "coverage_incomplete" &&
+      payBody.citations.length === 0 && payBody.evidence_gate?.supported === false,
+    JSON.stringify(payBody));
+  check("tax-paid wording cannot use another entity's K-1 as its answer",
+    payBody.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /tax evidence does not match the requested entity, tax year, and form/.test(payBody.evidence_gate?.reason || ""),
+    JSON.stringify({ gaps: payBody.gaps, gate: payBody.evidence_gate }));
+}
+
+/* A return fact request with year and form but no exact entity is tax intent,
+   not permission to search nearby filings. Refuse before retrieval or either
+   answer model so parser uncertainty cannot become a cross-entity answer. */
+{
+  let aiCalls = 0;
+  const { env } = mkEnv([], {
+    extra: {
+      AI: {
+        run: async () => {
+          aiCalls++;
+          throw new Error("an unresolved tax scope must stop before any model call");
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income was reported on the 2023 Form 1065?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("a partial tax scope refuses before retrieval or answer generation",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.results.length === 0 && aiCalls === 0,
+    JSON.stringify({ body, aiCalls }));
+  check("a partial tax scope explains the exact missing boundary",
+    body.gaps.some((gap) => gap.type === "tax_question_scope_unresolved") &&
+      /exact entity, tax year, and form/i.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* Common owner wording must not silently become a corpus-wide income search.
+   Each question is still missing an exact tax boundary, so prove the route
+   returns before D1, Vectorize, embeddings, or either answer model can run. */
+{
+  let aiCalls = 0;
+  const otherEntityK1 = {
+    ...ROW,
+    chunk_uid: "drive:other-entity-k1#0",
+    doc_uid: "drive:other-entity-k1",
+    source_id: "other-entity-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Other Entity 2023 Schedule K-1",
+    client: "Other Entity",
+    authority_document_head: "Other Entity. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a positive amount.",
+  };
+  const { env, seen } = mkEnv([otherEntityK1], {
+    vectorIds: [otherEntityK1.chunk_uid],
+    extra: {
+      AI: {
+        run: async () => {
+          aiCalls++;
+          throw new Error("a partial tax scope must stop before any model call");
+        },
+      },
+    },
+  });
+  const partialTaxQuestions = [
+    "What ordinary business income did Ocotillo Desert report on its 2023 1065?",
+    "How much did Ocotillo Desert owe on Form 1065?",
+    "What ordinary business income did Example Orchard report?",
+    "What ordinary business income did Example Orchard report on its 2023 return?",
+  ];
+  for (const question of partialTaxQuestions) {
+    const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+    check(`partial tax wording refuses without cross-entity retrieval: ${question}`,
+      body.answer === null && body.status === "coverage_incomplete" &&
+        body.citations.length === 0 && body.results.length === 0 &&
+        body.gaps.some((gap) => gap.type === "tax_question_scope_unresolved"),
+      JSON.stringify(body));
+  }
+  check("partial tax wording stops before D1, Vectorize, and every model call",
+    seen.sql.length === 0 && seen.vectorQueries.length === 0 && aiCalls === 0,
+    JSON.stringify({ sqlCalls: seen.sql.length, vectorCalls: seen.vectorQueries.length, aiCalls }));
+}
+
+/* Even correctly scoped OCR is not a trustworthy tax-number source. This
+   isolates that branch from the cross-entity guard above, with both model
+   passes again made deliberately overconfident. */
+{
+  const unreadableExactReturn = {
+    ...ROW,
+    chunk_uid: "drive:unreliable-exact-return#0",
+    doc_uid: "drive:unreliable-exact-return",
+    source_id: "unreliable-exact-return",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Orchard LLC 2023 Form 1065",
+    client: "Example Orchard LLC",
+    authority_document_head: "Example Orchard LLC. 2023 Form 1065.",
+    text: "OCR produced an uncertain ordinary business income amount.",
+    text_source: "ocr_partial",
+    text_reliable: false,
+  };
+  const { env } = mkEnv([unreadableExactReturn], {
+    vectorIds: [unreadableExactReturn.chunk_uid],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the OCR line appears to match" }, usage: {} }
+            : { response: "Example Orchard LLC reported an ordinary business income amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const question = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+  const body = await (await call(env, `/api/rag/think?q=${encodeURIComponent(question)}`)).json();
+  check("an overconfident verifier cannot approve tax figures from unreliable OCR",
+    body.answer === null &&
+      body.status === "coverage_incomplete" &&
+      body.evidence_gate?.supported === false &&
+      /not read from a reliable native text layer/.test(body.evidence_gate?.reason || ""),
+    JSON.stringify(body));
+  check("unreliable exact tax evidence remains a gap rather than becoming absence",
+    body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /Unlock the file or provide a readable copy/.test(body.notice || ""),
+    JSON.stringify({ notice: body.notice, gaps: body.gaps }));
+}
+
+/* A password-protected file can leave a durable documents row but no chunks at
+   all. It therefore cannot be returned by keyword or vector search. The
+   document inventory probe must still find an exact title/metadata candidate,
+   without depending on modern entity_slug or content-hash conventions and
+   without turning that private candidate into a result or citation. */
+const zeroChunkTaxQuestion = "What ordinary business income did Example Orchard LLC's 2023 Form 1065 report?";
+const zeroChunkExpectedReturn = {
+  doc_uid: "drive:legacy-password-protected-return",
+  source_id: "legacy-password-protected-return",
+  source: "drive",
+  source_kind: "upload",
+  title: "Example Orchard LLC 2023 tax return Form 1065",
+  authority_meta: JSON.stringify({
+    taxpayer_name: "Example Orchard LLC",
+    tax_year: 2023,
+  }),
+  text_source: "native",
+  text_reliable: true,
+  // Deliberately no entity_slug, content_hash, chunk_uid, text, or snippet.
+};
+
+{
+  const borrowedK1 = {
+    ...ROW,
+    chunk_uid: "drive:borrowed-k1#0",
+    doc_uid: "drive:borrowed-k1",
+    source_id: "borrowed-k1",
+    source: "drive",
+    source_kind: "upload",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    authority_document_head: "Example Timber Partners. Schedule K-1 (Form 1065), tax year 2023.",
+    text: "Schedule K-1 (Form 1065). Ordinary business income was a negative amount.",
+  };
+  const { env, seen } = mkEnv([borrowedK1], {
+    vectorIds: [borrowedK1.chunk_uid],
+    unchunkedRows: [zeroChunkExpectedReturn],
+    extra: {
+      AI: {
+        run: async (model, input) => {
+          if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+          return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+            ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label matches" }, usage: {} }
+            : { response: "Example Orchard LLC reported a negative amount [1].", usage: {} };
+        },
+      },
+    },
+  });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a zero-chunk expected return blocks an overconfident borrowed K-1 answer",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("the zero-chunk probe is bounded and reads no chunk text",
+    seen.sql.some((sql) => /unchunked-tax-document-candidates/.test(sql) &&
+      /NOT EXISTS \(SELECT 1 FROM chunks c/.test(sql) && /LIMIT \?1/.test(sql)),
+    JSON.stringify(seen.sql));
+  check("the document-only candidate never becomes a public result, citation, or identity receipt",
+    !JSON.stringify(body).includes(zeroChunkExpectedReturn.doc_uid) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.source_id) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.title),
+    JSON.stringify(body));
+}
+
+{
+  const { env } = mkEnv([], { unchunkedRows: [zeroChunkExpectedReturn] });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a zero-chunk exact filing blocks a clean absence when search returns nothing",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.confidence === undefined && body.results.length === 0 &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable") &&
+      /could not be read reliably/.test(body.notice || ""),
+    JSON.stringify(body));
+  check("the zero-result response does not disclose the candidate title or durable identity",
+    !JSON.stringify(body).includes(zeroChunkExpectedReturn.doc_uid) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.source_id) &&
+      !JSON.stringify(body).includes(zeroChunkExpectedReturn.title),
+    JSON.stringify(body));
+}
+
+{
+  const { env, seen } = mkEnv([], {
+    unchunkedRows: [zeroChunkExpectedReturn],
+    ownedEntity: {
+      entity_slug: "example-orchard-llc",
+      legal_name: "Example Orchard LLC",
+      display_label: "Example Orchard LLC",
+      status: "active",
+      relationship: "owned",
+    },
+  });
+  const body = await (await call(
+    env,
+    `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}&entity_slug=example-orchard-llc`,
+  )).json();
+  const inventorySql = seen.sql.find((sql) => /unchunked-tax-document-candidates/.test(sql)) || "";
+  check("an exact business scope still finds a legacy expected return with no entity_slug",
+    body.answer === null && body.citations.length === 0 &&
+      body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("the zero-chunk recovery probe does not depend on the modern entity projection",
+    inventorySql.length > 0 && !/d\.entity_slug\s*=/.test(inventorySql),
+    inventorySql);
+}
+
+{
+  const unrelatedUnchunked = Array.from({ length: 21 }, (_, index) => ({
+    ...zeroChunkExpectedReturn,
+    doc_uid: `drive:unrelated-zero-${index}`,
+    source_id: `unrelated-zero-${index}`,
+    title: `Unrelated encrypted archive ${index}`,
+    authority_meta: "{}",
+  }));
+  const { env } = mkEnv([], { unchunkedRows: unrelatedUnchunked });
+  const body = await (await call(
+    env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+  )).json();
+  check("a truncated zero-chunk inventory fails closed without inventing an exact match",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified") &&
+      !body.gaps.some((gap) => gap.type === "tax_evidence_unreadable"),
+    JSON.stringify(body));
+  check("truncation details remain aggregate and do not leak candidate identities",
+    !JSON.stringify(body).includes("unrelated-zero-") &&
+      !JSON.stringify(body).includes("Unrelated encrypted archive"),
+    JSON.stringify(body));
+}
+
+{
+  const legacyNeighbor = [{
+    ref_key: "legacy-other-entity-k1",
+    source: "drive",
+    title: "Example Timber Partners 2023 Schedule K-1",
+    snippet: "Schedule K-1 (Form 1065). Ordinary business income was a negative amount.",
+    ts: null,
+    rrf_score: 1,
+  }];
+  const originalFetch = globalThis.fetch;
+  let body;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify(legacyNeighbor), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    const { env } = mkEnv([], {
+      extra: {
+        STORAGE: "supabase",
+        SUPABASE_URL: "https://supabase.example.invalid",
+        SUPABASE_SERVICE_ROLE_KEY: "synthetic-service-role",
+        AI: {
+          run: async (model, input) => {
+            if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
+            return String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+              ? { response: { supported: true, complete: true, evidence: [1], reason: "the line label matches" }, usage: {} }
+              : { response: "Example Orchard LLC reported a negative amount [1].", usage: {} };
+          },
+        },
+      },
+    });
+    body = await (await call(
+      env, `/api/rag/think?q=${encodeURIComponent(zeroChunkTaxQuestion)}`,
+    )).json();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  check("the legacy rollback adapter cannot bypass an exact tax scope by omitting authority metadata",
+    body.answer === null && body.status === "coverage_incomplete" &&
+      body.citations.length === 0 && body.evidence_gate?.supported === false &&
+      /tax evidence does not match/.test(body.evidence_gate?.reason || "") &&
+      body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified"),
+    JSON.stringify(body));
 }
 
 /* ---- every material part must be answered or explicitly called unknown ---- */
@@ -871,6 +1556,7 @@ const call = (env, path) => {
     const evidence = rows.map((_, index) => index + 1);
     return mkEnv(rows, {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       BRAIN_OWNER: "Morgan Diaz",
       AI: {
@@ -912,6 +1598,7 @@ const call = (env, path) => {
   }];
   const { env } = mkEnv(rows, {
     vectorIds: [],
+    vectorThrows: true,
     extra: {
       BRAIN_OWNER: "Morgan Diaz",
       AI: {
@@ -988,6 +1675,9 @@ const call = (env, path) => {
       seen.sql.some((sql) => /substr\(family_doc_uid, 1, length\(\?1\) \+ 1\)/.test(sql)),
     JSON.stringify(seen.sql));
   check("the receipt updates freshness and leaves an audit event", seen.sql.some((sql) => /INSERT INTO sources/.test(sql)) && seen.sql.some((sql) => /INSERT INTO source_events/.test(sql)), JSON.stringify(seen.sql));
+  const legacySourceBind = seen.binds.find((values) => values[0] === "drive" && values.length === 5);
+  check("a legacy sweep without measured refused and failed counters cannot advance history completeness",
+    legacySourceBind?.[4] === 0, JSON.stringify(legacySourceBind));
 
   const bad = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
     method: "POST",
@@ -999,7 +1689,7 @@ const call = (env, path) => {
 
 /* ---- one source name cannot be relabelled as another connector kind ---- */
 {
-  const sourceRows = [{ name: "client-mail", kind: "gmail", zone: null }];
+  const sourceRows = [{ name: "client-mail", kind: " GMAIL ", zone: null }];
   const { env, seen } = mkEnv([], { sourceRows });
   const conflict = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
     method: "POST",
@@ -1025,7 +1715,7 @@ const call = (env, path) => {
   check("an omitted kind preserves the source's existing connector identity",
     preserved.status === 200 && preservedBody.kind === "gmail" &&
       !/kind\s*=\s*excluded\.kind/.test(expectationUpdate) &&
-      /WHERE sources\.kind=excluded\.kind/.test(expectationSql || ""),
+      /WHERE lower\(trim\(sources\.kind\)\)=excluded\.kind/.test(expectationSql || ""),
     JSON.stringify({ status: preserved.status, body: preservedBody, sql: expectationSql }));
 }
 
@@ -1106,6 +1796,96 @@ const call = (env, path) => {
   check("an unknown connector lifecycle status is refused", invalid.status === 400, String(invalid.status));
 }
 
+/* ---- Gmail failure evidence is closed, metadata-only, and context-bound ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const safeEvidence = {
+    version: 1,
+    operation_class: "gmail_message_read",
+    http_status: 400,
+    provider_reason: "failed_precondition",
+    checkpoint_readback: "verified",
+    checkpoint_done: 55,
+    checkpoint_skipped: 3,
+    cursor_preservation: "absent_preserved",
+  };
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "gmail", kind: "gmail", status: "error", run_id: "run_gmail_failure_evidence",
+      lane: "sweep", issue_code: "INGEST_FAILED", failure_evidence: safeEvidence,
+      docs_refused: 0, docs_failed: 1,
+      error: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL /private/message-id",
+      detail: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL provider response",
+      provider_message: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL token",
+      refusal_reason: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL refusal path",
+      delete_action: "SYNTHETIC_PRIVATE_FAILURE_SENTINEL",
+    }),
+  }), env, {});
+  const body = await response.json();
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_gmail_failure_evidence" && values.length === 22);
+  let stored = null;
+  try { stored = JSON.parse(runBind?.[21] || "null"); } catch { /* assertion below owns failure */ }
+  check("a Gmail error stores only server-reconstructed closed failure evidence",
+    response.status === 200 && JSON.stringify(body.failure_evidence) === JSON.stringify(safeEvidence) &&
+      JSON.stringify(stored) === JSON.stringify(safeEvidence),
+    JSON.stringify({ status: response.status, body, runBind }));
+  check("raw error, detail, provider message, ids, paths, and tokens never enter durable Gmail failure metadata",
+    !JSON.stringify(seen.binds).includes("SYNTHETIC_PRIVATE_FAILURE_SENTINEL") &&
+      !JSON.stringify(body).includes("SYNTHETIC_PRIVATE_FAILURE_SENTINEL"),
+    JSON.stringify({ body, binds: seen.binds }));
+}
+
+{
+  const valid = {
+    version: 1,
+    operation_class: "gmail_message_read",
+    http_status: 400,
+    provider_reason: "failed_precondition",
+    checkpoint_readback: "verified",
+    checkpoint_done: 12,
+    checkpoint_skipped: 3,
+    cursor_preservation: "present_preserved",
+  };
+  const cases = [
+    ["an extra evidence key", { ...valid, provider_message: "private" }, "error", "gmail"],
+    ["a string HTTP status", { ...valid, http_status: "400" }, "error", "gmail"],
+    ["a raw provider reason", { ...valid, provider_reason: "Precondition check failed." }, "error", "gmail"],
+    ["an unknown operation", { ...valid, operation_class: "gmail_message_private-id" }, "error", "gmail"],
+    ["claimed counts without readback", {
+      ...valid, checkpoint_readback: "unverified", cursor_preservation: "unverified",
+    }, "error", "gmail"],
+    ["failure evidence on a ready receipt", valid, "ready", "gmail"],
+    ["failure evidence on a non-Gmail receipt", valid, "error", "drive"],
+    ["failure evidence without a durable run id", valid, "error", "gmail", true],
+    ["a measured document-operation failure with zero failed documents", valid, "error", "gmail", false,
+      { docs_refused: 0, docs_failed: 0 }],
+  ];
+  const failures = [];
+  for (const [index, [description, evidence, status, kind, omitRunId, counters]] of cases.entries()) {
+    const { env, seen } = mkEnv([]);
+    const runId = `run_invalid_failure_evidence_${index}`;
+    const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify({
+        source: `failure-evidence-${index}`, kind, status,
+        ...(omitRunId ? {} : { run_id: runId }),
+        ...(counters || {}),
+        failure_evidence: evidence,
+      }),
+    }), env, {});
+    if (response.status !== 400 || seen.sql.length !== 0 ||
+        seen.binds.some((values) => values[0] === runId && values.length === 22)) {
+      failures.push({ description, status: response.status, binds: seen.binds });
+    }
+  }
+  check("the Gmail failure-evidence boundary rejects extra fields, raw strings, coercion, and invalid contexts",
+    failures.length === 0, JSON.stringify(failures));
+}
+
 /* ---- a failed sweep can never be recorded as a completed walk ---- */
 {
   const { env, seen } = mkEnv([]);
@@ -1117,14 +1897,276 @@ const call = (env, path) => {
       lane: "sweep", complete_sweep: true, walk_complete: false, error: "walk aborted",
     }),
   }), env, {});
-  const runBind = seen.binds.find((values) => values[0] === "run_failed_sweep" && values.length === 14);
+  const runBind = seen.binds.find((values) => values[0] === "run_failed_sweep" && values.length === 22);
   check("an error receipt cannot turn complete_sweep into walk_complete",
-    response.status === 200 && runBind?.[5] === 0, JSON.stringify(runBind));
+    response.status === 200 && runBind?.[5] === 0 && runBind?.[12] === 0, JSON.stringify(runBind));
+}
+
+/* ---- an inconsistent ready receipt cannot advance durable history proof ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "calendar-inconsistent", kind: "calendar", status: "ready",
+      run_id: "run_inconsistent_sweep", lane: "sweep",
+      complete_sweep: true, walk_complete: false,
+    }),
+  }), env, {});
+  const sourceBind = seen.binds.find((values) =>
+    values[0] === "calendar-inconsistent" && values.length === 5);
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_inconsistent_sweep" && values.length === 22);
+  check("complete_sweep is fail-closed when the same ready receipt did not complete its walk",
+    response.status === 200 && sourceBind?.[4] === 0 && runBind?.[5] === 0 && runBind?.[12] === 0,
+    JSON.stringify({ sourceBind, runBind }));
+}
+
+/* ---- only explicit valid outcome counters become measured telemetry ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "measured-calendar", kind: "calendar", status: "ready",
+      run_id: "run_measured_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 0, docs_failed: 1,
+    }),
+  }), env, {});
+  const sourceBind = seen.binds.find((values) =>
+    values[0] === "measured-calendar" && values.length === 5);
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_measured_sweep" && values.length === 22);
+  check("measured document failures prevent an otherwise complete receipt from advancing history",
+    response.status === 200 && sourceBind?.[4] === 0 && runBind?.[11] === 1 && runBind?.[12] === 1,
+    JSON.stringify({ sourceBind, runBind }));
+
+  const refused = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "refused-calendar", kind: "calendar", status: "ready",
+      run_id: "run_refused_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 1, docs_failed: 0,
+    }),
+  }), env, {});
+  const refusedSourceBind = seen.binds.find((values) =>
+    values[0] === "refused-calendar" && values.length === 5);
+  const refusedRunBind = seen.binds.find((values) =>
+    values[0] === "run_refused_sweep" && values.length === 22);
+  check("measured document refusals prevent an otherwise complete receipt from advancing history",
+    refused.status === 200 && refusedSourceBind?.[4] === 0 &&
+      refusedRunBind?.[10] === 1 && refusedRunBind?.[11] === 0 && refusedRunBind?.[12] === 1,
+    JSON.stringify({ refusedSourceBind, refusedRunBind }));
+
+  const adjudicated = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "adjudicated-drive", kind: "drive", status: "ready",
+      run_id: "run_adjudicated_sweep", lane: "sweep", walk_complete: true,
+      complete_sweep: true, docs_refused: 0, docs_failed: 0,
+      detail: "policy_skipped=2; coverage_gaps=0; adjudicated_skips=3",
+    }),
+  }), env, {});
+  const adjudicatedSourceBind = seen.binds.find((values) =>
+    values[0] === "adjudicated-drive" && values.length === 5);
+  const adjudicatedRunBind = seen.binds.find((values) =>
+    values[0] === "run_adjudicated_sweep" && values.length === 22);
+  check("measured policy and adjudicated skips do not block a zero-refusal completed walk",
+    adjudicated.status === 200 && adjudicatedSourceBind?.[4] === 1 &&
+      adjudicatedRunBind?.[5] === 1 && adjudicatedRunBind?.[10] === 0 &&
+      adjudicatedRunBind?.[11] === 0 && adjudicatedRunBind?.[12] === 1,
+    JSON.stringify({ adjudicatedSourceBind, adjudicatedRunBind }));
+
+  const invalid = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "invalid-count", kind: "calendar", status: "ready",
+      run_id: "run_invalid_count", docs_failed: -1,
+    }),
+  }), env, {});
+  check("invalid receipt counters are refused instead of being coerced to clean zeroes",
+    invalid.status === 400 &&
+      !seen.binds.some((values) => values[0] === "run_invalid_count"), String(invalid.status));
+}
+
+/* ---- the iMessage capture receipt reaches sources.last_complete_sweep_at ---- */
+{
+  const { env, seen } = mkEnv([]);
+  // Exactly the shape brain.mjs cmdIngestImessage posts after an unbounded
+  // --reset walk of a Mac's chat.db: tapback rows are named in the detail and
+  // are NOT counted as refused documents, so this receipt reaches the gate.
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "imessage", kind: "imessage", status: "ready",
+      run_id: "run_imessage_sweep", lane: "manual", walk_complete: true,
+      complete_sweep: true, docs_refused: 0, docs_failed: 0,
+      target_range: { from: "2019-02-03T00:00:00.000Z", through: "2026-09-16T00:00:00.000Z" },
+      detail: "iMessage capture: 4 without text (tapbacks/attachments), 0 unusable; " +
+        "this Mac's local Messages database is swept complete end to end",
+    }),
+  }), env, {});
+  const sourceBind = seen.binds.find((values) => values[0] === "imessage" && values.length === 5);
+  const runBind = seen.binds.find((values) => values[0] === "run_imessage_sweep" && values.length === 22);
+  check("an unbounded iMessage walk advances durable history proof for the imessage source",
+    response.status === 200 && sourceBind?.[4] === 1 &&
+      runBind?.[5] === 1 && runBind?.[10] === 0 && runBind?.[11] === 0 && runBind?.[12] === 1,
+    JSON.stringify({ sourceBind, runBind }));
+
+  // The same connector on an incremental tick: the walk closes, but it
+  // resumed from a watermark, so it claims nothing about history.
+  const incremental = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "imessage-tick", kind: "imessage", status: "ready",
+      run_id: "run_imessage_tick", lane: "manual", walk_complete: true,
+      complete_sweep: false, docs_refused: 0, docs_failed: 0,
+    }),
+  }), env, {});
+  const tickBind = seen.binds.find((values) => values[0] === "imessage-tick" && values.length === 5);
+  check("an incremental iMessage tick still records no completed history sweep",
+    incremental.status === 200 && tickBind?.[4] === 0, JSON.stringify(tickBind));
+}
+
+/* ---- provenance ranges accept only the connector's explicit wire formats ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "range-contract", kind: "calendar", status: "ready",
+      run_id: "run_range_contract", lane: "sweep",
+      docs_refused: 0, docs_failed: 0,
+      confirmed_range: { from: "2026-03-04", through: "2026-03-05T12:34:56.789Z" },
+      target_range: { from: null, through: "2026-03-06" },
+    }),
+  }), env, {});
+  const runBind = seen.binds.find((values) =>
+    values[0] === "run_range_contract" && values.length === 22);
+  check("receipt ranges normalize an exact calendar date and preserve a canonical UTC timestamp",
+    response.status === 200 &&
+      runBind?.[16] === "2026-03-04T00:00:00.000Z" &&
+      runBind?.[17] === "2026-03-05T12:34:56.789Z" &&
+      runBind?.[18] === null && runBind?.[19] === "2026-03-06T00:00:00.000Z",
+    JSON.stringify({ status: response.status, runBind }));
+}
+
+{
+  const invalidRanges = [
+    ["an unknown range key", { from: "2026-03-04", timezone: "UTC" }],
+    ["an ambiguous locale date", { from: "03/04/2026" }],
+    ["a prose date", { from: "March 4, 2026" }],
+    ["an offset timestamp", { from: "2026-03-04T00:00:00-07:00" }],
+    ["a non-canonical UTC timestamp", { from: "2026-03-04T00:00:00Z" }],
+    ["an impossible calendar date", { from: "2026-02-30" }],
+    ["an empty date", { from: "" }],
+    ["a numeric timestamp", { from: 1772582400000 }],
+  ];
+  const failures = [];
+  for (const [index, [description, confirmedRange]] of invalidRanges.entries()) {
+    const { env, seen } = mkEnv([]);
+    const runId = `run_invalid_range_${index}`;
+    const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify({
+        source: "invalid-range", kind: "calendar", status: "ready",
+        run_id: runId, confirmed_range: confirmedRange,
+      }),
+    }), env, {});
+    if (response.status !== 400 || seen.binds.some((values) => values[0] === runId && values.length === 22)) {
+      failures.push({ description, status: response.status, binds: seen.binds });
+    }
+  }
+  check("receipt ranges reject extra fields and ambiguous or non-canonical date values before run evidence is written",
+    failures.length === 0, JSON.stringify(failures));
+}
+
+/* ---- manual source registration stays behind the Worker write barrier ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-notes", kind: "upload" }),
+  }), env, {});
+  const body = await response.json();
+  check("manual source registration goes through the authenticated Worker write barrier",
+    response.status === 200 && body.source === "client-notes" && body.kind === "upload" &&
+      body.registered === true && body.registry_event_recorded === true &&
+      typeof body.operation_id === "string" && body.operation_id.length > 0 &&
+      seen.sql.some((sql) => /source_events[\s\S]*'registered'[\s\S]*changes\(\)=1/.test(sql)),
+    JSON.stringify({ body, sql: seen.sql }));
+}
+{
+  const sourceRows = [];
+  const { env } = mkEnv([], { sourceRows, sourceRegistrationEventThrows: true });
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-notes", kind: "upload" }),
+  }), env, {});
+  check("a registration event failure leaves no committed source row",
+    response.status === 500 && sourceRows.length === 0,
+    JSON.stringify({ status: response.status, sourceRows }));
+}
+{
+  const { env } = mkEnv([], { sourceRows: [{ name: "client-mail", kind: "gmail", zone: null }] });
+  const same = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-mail", kind: "gmail" }),
+  }), env, {});
+  const sameBody = await same.json();
+  check("re-registering the same source identity is an exact no-op receipt",
+    same.status === 200 && sameBody.registered === false && sameBody.kind === "gmail",
+    JSON.stringify(sameBody));
+
+  const conflict = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "client-mail", kind: "upload" }),
+  }), env, {});
+  const conflictBody = await conflict.json();
+  check("manual registration cannot relabel an existing source connector kind",
+    conflict.status === 409 && conflictBody.code === "source_kind_conflict", JSON.stringify(conflictBody));
+}
+{
+  const invalidBodies = [
+    { source: "Drive %", kind: "drive" },
+    { source: "drive", kind: "unsupported" },
+    { source: "drive", kind: "drive", extra: true },
+  ];
+  const statuses = [];
+  for (const body of invalidBodies) {
+    const { env } = mkEnv([]);
+    statuses.push((await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }), env, {})).status);
+  }
+  const wrongBackend = await worker.fetch(new Request("https://b.example/api/admin/brain/source-register", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "drive", kind: "drive" }),
+  }), { ...mkEnv([]).env, STORAGE: "supabase" }, {});
+  check("invalid or non-D1 source registrations fail closed",
+    statuses.every((status) => status === 400) && wrongBackend.status === 400,
+    JSON.stringify({ statuses, wrongBackend: wrongBackend.status }));
 }
 
 /* ---- source schedules configure freshness without pretending an ingest ran ---- */
 {
-  const { env, seen } = mkEnv([]);
+  const { env, seen } = mkEnv([], { sourceRows: [{ name: "drive", kind: "drive", zone: null }] });
   const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
     method: "POST",
     headers: { "X-Admin-Key": "k", "content-type": "application/json" },
@@ -1144,6 +2186,19 @@ const call = (env, path) => {
     seen.sql.some((sql) => /source_events[\s\S]*'schedule'/.test(sql)) &&
       seen.binds.some((binds) => binds.includes("expected_refresh_seconds=86400")),
     JSON.stringify({ sql: seen.sql, binds: seen.binds }));
+}
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "typo-source", expected_refresh_seconds: 86_400 }),
+  }), env, {});
+  const body = await response.json();
+  check("an omitted-kind freshness update cannot create a guessed source identity",
+    response.status === 404 && body.code === "source_not_registered" &&
+      !seen.sql.some((sql) => /INSERT INTO sources|INSERT INTO source_events/.test(sql)),
+    JSON.stringify({ body, sql: seen.sql }));
 }
 {
   const { env, seen } = mkEnv([]);
@@ -1227,31 +2282,49 @@ function mkSourceFamilyEnv(documents, extra = {}) {
             seen.binds.push(binds);
             return {
               all: async () => {
-                const sourceScoped = binds.length === 3;
+                const sourceScoped = /length\(\?1\)/.test(sql);
+                const includeLabels = /AS family_name/.test(sql);
                 const [source, cursor, limit] = sourceScoped
                   ? binds
                   : [null, binds[0], binds[1]];
-                const familyUids = documents
+                const requestedUids = sourceScoped ? new Set(binds.slice(3)) : null;
+                const familyRows = documents
                   .filter((row) => row.deleted_at == null)
                   .map((row) => {
                     try {
                       const metadata = JSON.parse(row.meta || "{}");
                       const familyOf = metadata?.family_of;
                       const partOf = metadata?.part_of;
-                      if (typeof familyOf === "string" && familyOf) return familyOf;
-                      return typeof partOf === "string" && partOf
+                      const family_doc_uid = typeof familyOf === "string" && familyOf
+                        ? familyOf
+                        : typeof partOf === "string" && partOf
                         ? (partOf.startsWith(`${row.source}:`) ? partOf : `${row.source}:${partOf}`)
                         : row.doc_uid;
+                      return {
+                        family_doc_uid,
+                        family_name: projectedSourceFamilyName(row),
+                        folder_path: typeof metadata?.folder === "string" ? metadata.folder : null,
+                      };
                     } catch {
-                      return row.doc_uid;
+                      return { family_doc_uid: row.doc_uid, family_name: row.title || null, folder_path: null };
                     }
                   })
-                  .filter((uid) => source === null || uid.startsWith(`${source}:`));
-                const page = [...new Set(familyUids)]
-                  .sort()
-                  .filter((uid) => uid > cursor)
+                  .filter((row) => (source === null || row.family_doc_uid.startsWith(`${source}:`)) &&
+                    (!requestedUids?.size || requestedUids.has(row.family_doc_uid)));
+                const grouped = new Map();
+                for (const row of familyRows) {
+                  const prior = grouped.get(row.family_doc_uid) || {};
+                  grouped.set(row.family_doc_uid, {
+                    family_doc_uid: row.family_doc_uid,
+                    family_name: [prior.family_name, row.family_name].filter(Boolean).sort().at(-1) || null,
+                    folder_path: [prior.folder_path, row.folder_path].filter(Boolean).sort().at(-1) || null,
+                  });
+                }
+                const page = [...grouped.values()]
+                  .sort((a, b) => a.family_doc_uid.localeCompare(b.family_doc_uid))
+                  .filter((row) => row.family_doc_uid > cursor)
                   .slice(0, limit)
-                  .map((family_doc_uid) => ({ family_doc_uid }));
+                  .map((row) => includeLabels ? row : { family_doc_uid: row.family_doc_uid });
                 return { results: page };
               },
             };
@@ -1264,9 +2337,255 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   return { env, seen };
 }
 
+const labelProjectionParityRows = [
+  { doc_uid: "drive:parity-plain", source: "drive", title: "Plain.pdf", meta: "{}", deleted_at: null },
+  { doc_uid: "drive:parity-canonical", source: "drive", title: "Canonical.pdf (part 1 of 12)", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-leading-zero", source: "drive", title: "Leading.pdf (part 01 of 012)", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-zero", source: "drive", title: "Zero.pdf (part 0 of 12)", meta: '{"part":0,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-negative", source: "drive", title: "Negative.pdf (part -1 of -12)", meta: '{"part":-1,"part_count":-12}', deleted_at: null },
+  { doc_uid: "drive:parity-string", source: "drive", title: "String.pdf (part 1 of 12)", meta: '{"part":"1","part_count":"12"}', deleted_at: null },
+  { doc_uid: "drive:parity-lookalike", source: "drive", title: "Lookalike.pdf (part 1 of 12) copy", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-tab", source: "drive", title: "Tab.pdf (part 1 of 12)\t", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-nbsp", source: "drive", title: "Nbsp.pdf (part 1 of 12)\u00a0", meta: '{"part":1,"part_count":12}', deleted_at: null },
+  { doc_uid: "drive:parity-blank", source: "drive", title: "   ", meta: "{}", deleted_at: null },
+];
+
+{
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE documents (
+      doc_uid TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      title TEXT,
+      meta TEXT,
+      deleted_at INTEGER
+    );
+  `);
+  const insert = database.prepare(
+    "INSERT INTO documents (doc_uid, source, title, meta, deleted_at) VALUES (?, ?, ?, ?, ?)"
+  );
+  for (const row of [
+    ["drive:\t", "drive", "Control cursor", "{}", null],
+    ["drive:a", "drive", "A", "{}", null],
+    ["drive:b#part1of2", "drive", "B 1", '{"part_of":"b"}', null],
+    ["drive:b#part2of2", "drive", "B 2", '{"part_of":"b"}', null],
+    ["drive:deleted", "drive", "Deleted", "{}", 1],
+    ["gmail:a", "gmail", "Gmail A", "{}", null],
+    ["gmail:b#part1of2", "gmail", "Gmail B 1", '{"part_of":"gmail:b"}', null],
+    ["gmail:b#part2of2", "gmail", "Gmail B 2", '{"part_of":"gmail:b"}', null],
+    ...Array.from({ length: 12 }, (_, index) => [
+      `drive:f#part${index + 1}of12`,
+      "drive",
+      `Owner annual report.pdf (part ${index + 1} of 12)`,
+      JSON.stringify({ part_of: "f", part: index + 1, part_count: 12, folder: "Reviewed Root/Annual" }),
+      null,
+    ]),
+    ["drive:w", "drive", "Weird (part 3 of 9)", "{}", null],
+    ["drive:x", "drive", "No suffix", '{"part":3,"part_count":9}', null],
+    ["drive:y", "drive", "String metadata (part 3 of 9)", '{"part":"3","part_count":9}', null],
+    ...labelProjectionParityRows.map((row) => [
+      row.doc_uid, row.source, row.title, row.meta, row.deleted_at,
+    ]),
+  ]) insert.run(...row);
+
+  let maxSqliteBindings = 0;
+  const env = {
+    STORAGE: "d1",
+    ADMIN_KEY: "k",
+    DB: {
+      prepare(sql) {
+        const statement = database.prepare(sql);
+        let bindings = [];
+        return {
+          bind(...values) {
+            bindings = values;
+            maxSqliteBindings = Math.max(maxSqliteBindings, values.length);
+            return this;
+          },
+          async all() {
+            return { results: statement.all(...bindings) };
+          },
+        };
+      },
+    },
+  };
+  const preRewritePage = (source, cursor = "", limit = 1) => {
+    const results = database.prepare(
+      `SELECT family_doc_uid
+         FROM (
+           SELECT DISTINCT CASE
+             WHEN json_valid(meta)
+              AND json_type(meta,'$.family_of') = 'text'
+              AND length(json_extract(meta,'$.family_of')) > 0
+               THEN json_extract(meta,'$.family_of')
+             WHEN json_valid(meta)
+              AND json_type(meta,'$.part_of') = 'text'
+              AND length(json_extract(meta,'$.part_of')) > 0
+               THEN CASE
+                 WHEN substr(json_extract(meta,'$.part_of'), 1, length(source) + 1) = source || ':'
+                   THEN json_extract(meta,'$.part_of')
+                 ELSE source || ':' || json_extract(meta,'$.part_of')
+               END
+             ELSE doc_uid
+           END AS family_doc_uid
+             FROM documents
+            WHERE deleted_at IS NULL
+         )
+        WHERE substr(family_doc_uid, 1, length(?1) + 1) = ?1 || ':'
+          AND family_doc_uid > ?2
+        ORDER BY family_doc_uid ASC
+        LIMIT ?3`
+    ).all(source, cursor, limit + 1);
+    const hasMore = results.length > limit;
+    let pageRows = results.slice(0, limit);
+    let nextCursor = null;
+    if (hasMore) {
+      let resumableIndex = pageRows.length - 1;
+      while (resumableIndex >= 0 &&
+          new TextEncoder().encode(String(pageRows[resumableIndex].family_doc_uid)).length >
+            SOURCE_FAMILY_CURSOR_MAX_BYTES) {
+        resumableIndex--;
+      }
+      if (resumableIndex < 0) {
+        const error = new Error("source-family inventory cannot emit a resumable page boundary");
+        error.code = "unpageable_family_identity";
+        throw error;
+      }
+      pageRows = pageRows.slice(0, resumableIndex + 1);
+      nextCursor = String(pageRows[pageRows.length - 1].family_doc_uid);
+    }
+    const families = pageRows.map((row) => String(row.family_doc_uid));
+    return {
+      source,
+      families,
+      next_cursor: nextCursor,
+    };
+  };
+
+  for (const source of ["drive", "gmail"]) {
+    const first = await listSourceFamilies(env, { source, limit: 1 });
+    const expectedFirst = preRewritePage(source);
+    check(`${source} grouped source-family SQL matches the executed pre-rewrite first page`,
+      JSON.stringify(first) === JSON.stringify(expectedFirst),
+      `${JSON.stringify(first)} ${JSON.stringify(expectedFirst)}`);
+    const second = await listSourceFamilies(env, { source, cursor: first.next_cursor, limit: 1 });
+    const expectedSecond = preRewritePage(source, expectedFirst.next_cursor, 1);
+    check(`${source} grouped source-family SQL matches the executed pre-rewrite cursor page`,
+      JSON.stringify(second) === JSON.stringify(expectedSecond),
+      `${JSON.stringify(second)} ${JSON.stringify(expectedSecond)}`);
+  }
+  const labelled = await listSourceFamilies(env, { source: "drive", limit: 100, includeLabels: true });
+  const details = new Map(labelled.family_details.map((detail) => [detail.uid, detail]));
+  check("the labelled source-family projection executes against real SQLite",
+    details.get("drive:f")?.name === "Owner annual report.pdf" &&
+      details.get("drive:f")?.folder_path === "Reviewed Root/Annual" &&
+      details.get("drive:w")?.name === "Weird (part 3 of 9)" &&
+      details.get("drive:x")?.name === "No suffix" &&
+      details.get("drive:y")?.name === "String metadata (part 3 of 9)",
+    JSON.stringify(labelled));
+  const filteredLabels = await listSourceFamilies(env, {
+    source: "drive",
+    limit: 100,
+    includeLabels: true,
+    uids: ["drive:f"],
+  });
+  check("the real SQLite projection honors the bounded family uid filter",
+    filteredLabels.families.join(",") === "drive:f" &&
+      filteredLabels.family_details?.[0]?.name === "Owner annual report.pdf",
+    JSON.stringify(filteredLabels));
+  const sqliteBoundedUids = ["drive:f", ...Array.from({ length: 96 }, (_, index) =>
+    `drive:not-present-${String(index).padStart(2, "0")}`
+  )];
+  const sqliteBounded = await listSourceFamilies(env, {
+    source: "drive",
+    limit: 1000,
+    includeLabels: true,
+    uids: sqliteBoundedUids,
+  });
+  check("the real SQLite label query accepts 97 uid filters with 100 bindings",
+    maxSqliteBindings === D1_QUERY_BIND_LIMIT && sqliteBounded.families.join(",") === "drive:f",
+    `${maxSqliteBindings} ${JSON.stringify(sqliteBounded)}`);
+  let sqliteOverBound = null;
+  try {
+    await listSourceFamilies(env, {
+      source: "drive",
+      includeLabels: true,
+      uids: [...sqliteBoundedUids, "drive:not-present-97"],
+    });
+  } catch (error) {
+    sqliteOverBound = error;
+  }
+  check("the store refuses 98 uid filters before preparing an over-bound statement",
+    /1 to 97 identities/i.test(String(sqliteOverBound?.message || "")) &&
+      maxSqliteBindings === D1_QUERY_BIND_LIMIT,
+    `${String(sqliteOverBound?.message || sqliteOverBound)} ${maxSqliteBindings}`);
+  const parityUids = labelProjectionParityRows.map((row) => row.doc_uid);
+  const sqliteParity = await listSourceFamilies(env, {
+    source: "drive",
+    limit: 100,
+    includeLabels: true,
+    uids: parityUids,
+  });
+  const { env: fakeParityEnv } = mkSourceFamilyEnv(labelProjectionParityRows);
+  const fakeParity = await listSourceFamilies(fakeParityEnv, {
+    source: "drive",
+    limit: 100,
+    includeLabels: true,
+    uids: parityUids,
+  });
+  const sqliteParityNames = new Map(sqliteParity.family_details.map((row) => [row.uid, row.name]));
+  const fakeParityNames = new Map(fakeParity.family_details.map((row) => [row.uid, row.name]));
+  const expectedParityNames = new Map([
+    ["drive:parity-plain", "Plain.pdf"],
+    ["drive:parity-canonical", "Canonical.pdf"],
+    ["drive:parity-leading-zero", "Leading.pdf (part 01 of 012)"],
+    ["drive:parity-zero", "Zero.pdf"],
+    ["drive:parity-negative", "Negative.pdf"],
+    ["drive:parity-string", "String.pdf (part 1 of 12)"],
+    ["drive:parity-lookalike", "Lookalike.pdf (part 1 of 12) copy"],
+    ["drive:parity-tab", "Tab.pdf (part 1 of 12)"],
+    ["drive:parity-nbsp", "Nbsp.pdf (part 1 of 12)"],
+    ["drive:parity-blank", null],
+  ]);
+  check("the fake and real SQLite label projection have exact title parity",
+    parityUids.every((uid) => sqliteParityNames.get(uid) === expectedParityNames.get(uid) &&
+      fakeParityNames.get(uid) === expectedParityNames.get(uid)),
+    JSON.stringify({ sqlite: [...sqliteParityNames], fake: [...fakeParityNames] }));
+  const controlFirstResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 1 }),
+    },
+  ), env, {});
+  const controlFirst = await controlFirstResponse.json();
+  const controlSecondResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 1, cursor: controlFirst.next_cursor }),
+    },
+  ), env, {});
+  const controlSecond = await controlSecondResponse.json();
+  check("the Worker resumes page two from a bounded raw control-character tail",
+    controlFirstResponse.status === 200 && controlFirst.next_cursor === "drive:\t" &&
+      controlSecondResponse.status === 200 && controlSecond.families.join(",") === "drive:a",
+    `${controlFirstResponse.status} ${JSON.stringify(controlFirst)} ` +
+      `${controlSecondResponse.status} ${JSON.stringify(controlSecond)}`);
+  database.close();
+}
+
 {
   const docs = [
-    { doc_uid: "drive:a", source: "drive", meta: "{}", deleted_at: null },
+    {
+      doc_uid: "drive:a",
+      source: "drive",
+      title: "Owner tax return.txt",
+      meta: '{"folder":"Reviewed Root/Tax"}',
+      deleted_at: null,
+    },
     { doc_uid: "drive:b#part1of2", source: "drive", meta: '{"part_of":"b"}', deleted_at: null },
     { doc_uid: "drive:b#part2of2", source: "drive", meta: '{"part_of":"b"}', deleted_at: null },
     { doc_uid: "drive:c", source: "drive", meta: "{}", deleted_at: 1750000000000 },
@@ -1301,9 +2620,65 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   check("the final reconciliation page has no continuation cursor",
     second.next_cursor === null, JSON.stringify(second));
 
+  const labelledResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 2, include_labels: true }),
+    },
+  ), env, {});
+  const labelled = await labelledResponse.json();
+  check("the private Drive inventory can return the Brain's stored family labels",
+    labelledResponse.status === 200 &&
+      JSON.stringify(labelled.family_details?.[0]) === JSON.stringify({
+        uid: "drive:a",
+        name: "Owner tax return.txt",
+        folder_path: "Reviewed Root/Tax",
+      }), JSON.stringify(labelled));
+
+  const filteredLabelResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 100, include_labels: true, uids: ["drive:a"] }),
+    },
+  ), env, {});
+  const filteredLabel = await filteredLabelResponse.json();
+  check("the private Drive inventory returns labels only for requested family uids",
+    filteredLabelResponse.status === 200 &&
+      filteredLabel.families.join(",") === "drive:a" &&
+      filteredLabel.family_details?.length === 1 &&
+      filteredLabel.family_details[0].uid === "drive:a",
+    JSON.stringify(filteredLabel));
+
+  const splitFamily = Array.from({ length: 12 }, (_, index) => ({
+    doc_uid: `drive:f#part${index + 1}of12`,
+    source: "drive",
+    title: `Owner annual report.pdf (part ${index + 1} of 12)`,
+    meta: JSON.stringify({ part_of: "f", part: index + 1, part_count: 12 }),
+    deleted_at: null,
+  }));
+  const { env: splitEnv } = mkSourceFamilyEnv(splitFamily);
+  const splitLabelResponse = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "drive", limit: 2, include_labels: true }),
+    },
+  ), splitEnv, {});
+  const splitLabel = await splitLabelResponse.json();
+  check("a split family review label uses the base title instead of a part title",
+    splitLabelResponse.status === 200 &&
+      splitLabel.family_details?.[0]?.uid === "drive:f" &&
+      splitLabel.family_details?.[0]?.name === "Owner annual report.pdf",
+    JSON.stringify(splitLabel));
+
   const sql = seen.sql.find((value) => /SELECT family_doc_uid/.test(value)) || "";
   check("D1 collapses structural and declared families before the page limit",
-    /SELECT DISTINCT/.test(sql) && /part_of/.test(sql) && /family_of/.test(sql) && /deleted_at IS NULL/.test(sql), sql);
+    /GROUP BY family_doc_uid/.test(sql) && /part_of/.test(sql) && /family_of/.test(sql) && /deleted_at IS NULL/.test(sql), sql);
   check("D1 filters by the derived family namespace rather than the physical row source",
     /substr\(family_doc_uid, 1, length\(\?1\) \+ 1\) = \?1 \|\| ':'/.test(sql) &&
       !/WHERE source = \?1/.test(sql), sql);
@@ -1349,6 +2724,232 @@ function mkSourceFamilyEnv(documents, extra = {}) {
 }
 
 {
+  const routePage = async (source) => {
+    const database = new DatabaseSync(":memory:");
+    database.exec(`
+      CREATE TABLE documents (
+        doc_uid TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        title TEXT,
+        meta TEXT,
+        deleted_at INTEGER
+      );
+    `);
+    const longUid = `${source}:${"m".repeat(17_000)}`;
+    const insert = database.prepare(
+      "INSERT INTO documents (doc_uid, source, title, meta, deleted_at) VALUES (?, ?, ?, ?, NULL)"
+    );
+    insert.run(`${source}:a`, source, "A", "{}");
+    insert.run(longUid, source, "Long", "{}");
+    insert.run(`${source}:z`, source, "Z", "{}");
+    const env = {
+      STORAGE: "d1",
+      ADMIN_KEY: "k",
+      DB: {
+        prepare(sql) {
+          const statement = database.prepare(sql);
+          let bindings = [];
+          return {
+            bind(...values) { bindings = values; return this; },
+            async all() { return { results: statement.all(...bindings) }; },
+          };
+        },
+      },
+    };
+    const firstResponse = await worker.fetch(new Request(
+      "https://b.example/api/admin/brain/source-families",
+      {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+        body: JSON.stringify({ source, limit: 2 }),
+      },
+    ), env, {});
+    const first = await firstResponse.json();
+    const secondResponse = await worker.fetch(new Request(
+      "https://b.example/api/admin/brain/source-families",
+      {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+        body: JSON.stringify({ source, limit: 2, cursor: first.next_cursor }),
+      },
+    ), env, {});
+    const second = await secondResponse.json();
+    database.close();
+    return { longUid, firstResponse, first, secondResponse, second };
+  };
+
+  for (const source of ["upload", "drive"]) {
+    const result = await routePage(source);
+    const walked = [result.first, result.second].flatMap((page) => page.families || []);
+    check(`${source} route never emits a continuation cursor its next request rejects`,
+      result.firstResponse.status === 200 &&
+        new TextEncoder().encode(result.first.next_cursor || "").length <= 16 * 1024 &&
+        result.secondResponse.status === 200 &&
+        result.second.next_cursor === null &&
+        walked.join(",") === [`${source}:a`, result.longUid, `${source}:z`].join(",") &&
+        new Set(walked).size === walked.length,
+      JSON.stringify({
+        first_status: result.firstResponse.status,
+        next_cursor_bytes: new TextEncoder().encode(result.first.next_cursor || "").length,
+        second_status: result.secondResponse.status,
+        second_code: result.second.code || null,
+      }));
+  }
+
+  const uidWithBytes = (source, first, bytes) => {
+    const prefix = `${source}:`;
+    return `${prefix}${first}${"x".repeat(bytes - prefix.length - 1)}`;
+  };
+  const boundaryCases = [
+    {
+      name: "an exact 16384-byte tail",
+      limit: 2,
+      uids: ["upload:a", uidWithBytes("upload", "m", SOURCE_FAMILY_CURSOR_MAX_BYTES), "upload:z"],
+      status: 200,
+      expectedLength: 2,
+      expectedCursorBytes: SOURCE_FAMILY_CURSOR_MAX_BYTES,
+    },
+    {
+      name: "a 16385-byte tail",
+      limit: 2,
+      uids: ["upload:a", uidWithBytes("upload", "m", SOURCE_FAMILY_CURSOR_MAX_BYTES + 1), "upload:z"],
+      status: 200,
+      expectedLength: 1,
+      expectedCursor: "upload:a",
+    },
+    {
+      name: "a 100000-byte tail",
+      limit: 2,
+      uids: ["upload:a", uidWithBytes("upload", "m", 100_000), "upload:z"],
+      status: 200,
+      expectedLength: 1,
+      expectedCursor: "upload:a",
+    },
+    {
+      name: "an over-long middle row",
+      limit: 3,
+      uids: ["upload:a", uidWithBytes("upload", "m", 17_000), "upload:z", "upload:zz"],
+      status: 200,
+      expectedLength: 3,
+      expectedCursor: "upload:z",
+    },
+    {
+      name: "an over-long first row followed by an in-bound row",
+      limit: 2,
+      uids: [uidWithBytes("upload", "b", 17_000), "upload:z", "upload:zz"],
+      status: 200,
+      expectedLength: 2,
+      expectedCursor: "upload:z",
+    },
+    {
+      name: "one over-long row in a one-row resumable page",
+      limit: 1,
+      uids: [uidWithBytes("upload", "m", 17_000), "upload:z"],
+      status: 409,
+      code: "unpageable_family_identity",
+    },
+    {
+      name: "only over-long rows in a resumable page",
+      limit: 2,
+      uids: [uidWithBytes("upload", "m", 17_000), uidWithBytes("upload", "n", 17_000), "upload:z"],
+      status: 409,
+      code: "unpageable_family_identity",
+    },
+    {
+      name: "an over-long final row",
+      limit: 2,
+      uids: ["upload:a", uidWithBytes("upload", "z", 17_000)],
+      status: 200,
+      expectedLength: 2,
+      expectedCursor: null,
+    },
+  ];
+
+  for (const scenario of boundaryCases) {
+    const rows = scenario.uids.map((uid, index) => ({
+      doc_uid: uid,
+      source: "upload",
+      title: `Boundary ${index}`,
+      meta: JSON.stringify({ folder: "Reviewed Root" }),
+      deleted_at: null,
+    }));
+    const database = new DatabaseSync(":memory:");
+    database.exec(`
+      CREATE TABLE documents (
+        doc_uid TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        title TEXT,
+        meta TEXT,
+        deleted_at INTEGER
+      );
+    `);
+    const insert = database.prepare(
+      "INSERT INTO documents (doc_uid, source, title, meta, deleted_at) VALUES (?, ?, ?, ?, ?)"
+    );
+    for (const row of rows) insert.run(row.doc_uid, row.source, row.title, row.meta, row.deleted_at);
+    const env = {
+      STORAGE: "d1",
+      ADMIN_KEY: "k",
+      DB: {
+        prepare(sql) {
+          const statement = database.prepare(sql);
+          let bindings = [];
+          return {
+            bind(...values) { bindings = values; return this; },
+            async all() { return { results: statement.all(...bindings) }; },
+          };
+        },
+      },
+    };
+    const { env: fakeEnv } = mkSourceFamilyEnv(rows);
+    const captureStore = async (candidateEnv) => {
+      try {
+        return { value: await listSourceFamilies(candidateEnv, {
+          source: "upload",
+          limit: scenario.limit,
+          includeLabels: true,
+        }), code: null };
+      } catch (error) {
+        return { value: null, code: error?.code || null };
+      }
+    };
+    const [real, fake] = await Promise.all([captureStore(env), captureStore(fakeEnv)]);
+    const routeResponse = await worker.fetch(new Request(
+      "https://b.example/api/admin/brain/source-families",
+      {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "upload", limit: scenario.limit, include_labels: true }),
+      },
+    ), env, {});
+    const route = await routeResponse.json();
+    const expectedShape = scenario.status === 409
+      ? real.code === scenario.code && fake.code === scenario.code && route.code === scenario.code
+      : real.code === null && fake.code === null &&
+        JSON.stringify(real.value) === JSON.stringify(fake.value) &&
+        JSON.stringify(route) === JSON.stringify(real.value) &&
+        route.families?.length === scenario.expectedLength &&
+        (scenario.expectedCursorBytes !== undefined || route.next_cursor === scenario.expectedCursor) &&
+        (scenario.expectedCursorBytes === undefined ||
+          new TextEncoder().encode(route.next_cursor).length === scenario.expectedCursorBytes) &&
+        route.family_details?.length === route.families?.length;
+    check(`real SQLite, fake and route agree for ${scenario.name}`,
+      routeResponse.status === scenario.status && expectedShape,
+      JSON.stringify({
+        status: routeResponse.status,
+        route_code: route.code || null,
+        real_code: real.code,
+        fake_code: fake.code,
+        families: route.families?.length,
+        cursor_bytes: typeof route.next_cursor === "string"
+          ? new TextEncoder().encode(route.next_cursor).length
+          : null,
+      }));
+    database.close();
+  }
+}
+
+{
   const { env, seen } = mkSourceFamilyEnv([]);
   const post = (body) => worker.fetch(new Request(
     "https://b.example/api/admin/brain/source-families",
@@ -1364,10 +2965,89 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     post({ source: "drive", limit: 1001 }),
     post({ source: "drive", limit: 2.5 }),
     post({ source: "drive", cursor: "gmail:a" }),
+    post({ source: "drive", include_labels: "yes" }),
+    post({ source: "drive", uids: [] }),
+    post({ source: "drive", uids: ["gmail:a"] }),
     post({ source: "drive", unexpected: true }),
   ]);
   check("source-family reconciliation validates source, limit, cursor and unknown fields",
     responses.every((response) => response.status === 400), responses.map((response) => response.status).join(","));
+  const unknownFieldBody = await responses.at(-1).json();
+  check("source-family unknown-field errors identify the rejected field structurally",
+    unknownFieldBody.code === "unknown_field" && unknownFieldBody.field === "unexpected",
+    JSON.stringify(unknownFieldBody));
+
+  const invalidDriveUids = [
+    "drive:abc\u200bdef",
+    "drive:abc\u200ddef",
+    "drive:abc\u202edef",
+    "drive:abc\u2066def",
+    "drive:abc\u3164def",
+    "drive:abc\ufe0fdef",
+    "drive:abc\ud800def",
+    `drive:${"a".repeat(251)}`,
+  ];
+  const invalidIdentityResponses = await Promise.all(invalidDriveUids.map((uid) => post({
+    source: "drive",
+    include_labels: true,
+    uids: [uid],
+  })));
+  check("the route applies the printable-ASCII Drive identity parity table",
+    invalidIdentityResponses.every((response) => response.status === 400),
+    invalidIdentityResponses.map((response) => response.status).join(","));
+  const maxDriveUid = `drive:${"a".repeat(DRIVE_STORED_FAMILY_UID_MAX_BYTES - "drive:".length)}`;
+  const maxIdentityResponse = await post({
+    source: "drive",
+    include_labels: true,
+    uids: [maxDriveUid],
+  });
+  check("the route accepts a printable 256-byte Drive uid",
+    new TextEncoder().encode(maxDriveUid).length === DRIVE_STORED_FAMILY_UID_MAX_BYTES &&
+      maxIdentityResponse.status === 200,
+    `${new TextEncoder().encode(maxDriveUid).length} ${maxIdentityResponse.status}`);
+
+  const boundedUids = Array.from({ length: SOURCE_FAMILY_UID_FILTER_MAX }, (_, index) =>
+    `drive:bounded-${String(index).padStart(2, "0")}`
+  );
+  const bounded = await post({
+    source: "drive",
+    limit: 1000,
+    include_labels: true,
+    uids: boundedUids,
+  });
+  check("the source-family route accepts 97 uid filters at exactly 100 D1 bindings",
+    bounded.status === 200 && seen.binds.at(-1)?.length === D1_QUERY_BIND_LIMIT,
+    `${bounded.status} ${JSON.stringify(seen.binds.at(-1))}`);
+  const bindsBeforeRefusal = seen.binds.length;
+  const overBound = await post({
+    source: "drive",
+    limit: 1000,
+    include_labels: true,
+    uids: [...boundedUids, "drive:bounded-97"],
+  });
+  check("the source-family route refuses 98 uid filters before D1 prepare",
+    overBound.status === 400 && seen.binds.length === bindsBeforeRefusal,
+    `${overBound.status} ${seen.binds.length - bindsBeforeRefusal}`);
+
+  const oversizedBody = JSON.stringify({
+    source: "drive",
+    limit: 1000,
+    include_labels: true,
+    uids: Array.from({ length: 1000 }, (_, index) =>
+      `drive:${String(index).padStart(4, "0")}-${"a".repeat(40)}`
+    ),
+  });
+  const oversized = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/source-families",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: oversizedBody,
+    },
+  ), env, {});
+  check("the real source-family route enforces its 32 KiB request boundary",
+    new TextEncoder().encode(oversizedBody).length > 32 * 1024 && oversized.status === 413,
+    `${new TextEncoder().encode(oversizedBody).length} ${oversized.status}`);
 
   const legacyGet = await worker.fetch(new Request(
     "https://b.example/api/admin/brain/source-families",
@@ -1401,7 +3081,11 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   }]);
   const documentsResponse = await call(env, "/api/admin/brain/documents");
   const b = await documentsResponse.json();
+  check("documents binds the Worker version to the authenticated readiness receipt",
+    b.version === WORKER_VERSION, JSON.stringify(b));
   check("documents names the backend", b.backend === "d1", JSON.stringify(b));
+  check("documents binds active writer mode to the same receipt as readiness",
+    b.vector_drain_mode === "active", JSON.stringify(b));
   check("documents separates source files from stored split parts",
     b.rows[0]?.documents === 2 && b.rows[0]?.logical_documents === 2 && b.rows[0]?.stored_documents === 3, JSON.stringify(b.rows[0]));
   check("and reports vector backlog", b.vector_backlog && "pending" in b.vector_backlog, JSON.stringify(b.vector_backlog));
@@ -1412,6 +3096,14 @@ function mkSourceFamilyEnv(documents, extra = {}) {
   check("private aggregate inventory responses cannot be cached",
     /no-store/.test(documentsResponse.headers.get("cache-control") || ""),
     documentsResponse.headers.get("cache-control") || "missing");
+
+  const pausedDocuments = await call({ ...env, VECTOR_DRAIN_MODE: "paused-for-upgrade" }, "/api/admin/brain/documents");
+  const pausedBody = await pausedDocuments.json();
+  check("paused documents bind the refusal mode to their own readiness receipt",
+    pausedDocuments.status === 200 && pausedBody.version === WORKER_VERSION &&
+      pausedBody.vector_drain_mode === "paused-for-upgrade" &&
+      pausedBody.vector_readiness && typeof pausedBody.vector_readiness.ready === "boolean",
+    JSON.stringify(pausedBody));
 
   const failedDocuments = await call({
     STORAGE: "d1", ADMIN_KEY: "k",
@@ -1479,7 +3171,11 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         doc_uid: b[0], source: b[1], source_id: b[2], title: b[3],
         uri: b[4], document_date: b[5], date_source: b[6], date_reliable: b[7],
         client: b[8], category: b[9], top_folder: b[10], platform: b[11],
-        content_hash: b[13], meta: b[14],
+        ingested_at: b[12], content_hash: b[13], meta: b[14],
+        text_source: b[21], text_reliable: b[22], entity_slug: b[23],
+        provenance_receipt_version: b[25], provenance_receipt_status: b[26],
+        provenance_receipt_reason: b[27], provenance_receipt_digest: b[28],
+        document_revision_id: b[29], source_original_binding_hash: b[30], deleted_at: null,
       });
       written.push(String(b[2]));
       changes = 1;
@@ -1505,7 +3201,11 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         return row?.source === b[0] && row?.content_hash === marker;
       }) ? 1 : 0;
     }
-    return { changes };
+    if (!changes) return { changes, results: [] };
+    if (/UPDATE documents SET content_hash/.test(sql)) return { changes, results: [{ ...documents.get(b[0]) }] };
+    // The stats upsert is proved from its RETURNING row too.
+    if (/INSERT INTO corpus_stats/.test(sql)) return { changes, results: [{ source: b[0] }] };
+    return { changes, results: [] };
   };
   const env = {
     STORAGE: "d1", ADMIN_KEY: "k",
@@ -1519,7 +3219,7 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
             results: (() => {
               calls.remote++;
               calls.submitted_statements++;
-              return /SELECT doc_uid, content_hash FROM documents/.test(sql)
+              return /SELECT doc_uid,source,content_hash/.test(sql)
                 ? b.map((docUid) => documents.get(docUid)).filter(Boolean)
                 : [];
             })(),
@@ -1529,6 +3229,7 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
             calls.submitted_statements++;
             if (/SELECT content_hash, title/.test(sql)) return documents.get(b[0]) || null;
             if (/SELECT client, category/.test(sql)) return documents.get(b[0]) || null;
+            if (/SELECT doc_uid,source,content_hash/.test(sql)) return documents.get(b[0]) || null;
             return null;
           },
           run: async () => {
@@ -1560,7 +3261,7 @@ function mkBatchEnv({ explodeOn = null, finalizeFailSource = null, failChunkDocU
         )) throw new Error("simulated chunk batch failure");
         return statements.map((statement) => {
           const result = execute(statement.sql, statement.binds);
-          return { success: true, meta: { changes: result.changes } };
+          return { success: true, results: result.results, meta: { changes: result.changes } };
         });
       },
     },
@@ -1625,6 +3326,49 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
     collision.documents.size === 1 && storedCollisionUid?.source === "a" && storedCollisionUid?.source_id === "b:c" &&
       collision.storedTexts.length === 1 && /Second synthetic body/.test(collision.storedTexts[0]),
     JSON.stringify(storedCollisionUid));
+}
+
+/* Lineage is an ingest contract, not an advisory filename convention. A
+   malformed or rootless derived declaration must fail before it can create a
+   false independent source family. */
+{
+  const single = mkBatchEnv();
+  const response = await post(single.env, "/api/admin/brain/ingest", {
+    ...doc("rootless-derived"),
+    metadata: {
+      evidence_lineage: { version: 1, kind: "derived_record", root_ids: [] },
+    },
+  });
+  const receipt = await response.json();
+  check("single ingest rejects a derived record without source-family roots",
+    response.status === 400 && /root_ids/.test(receipt.error || ""), JSON.stringify(receipt));
+  check("invalid single-ingest lineage performs zero D1 calls or writes",
+    single.calls.remote === 0 && single.calls.submitted_statements === 0 &&
+      single.written.length === 0 && single.storedTexts.length === 0 && single.documents.size === 0,
+    JSON.stringify(single.calls));
+
+  const invalid = mkBatchEnv();
+  const invalidDocs = [
+    { ...doc("unknown-lineage-kind"), metadata: {
+      evidence_lineage: { version: 1, kind: "generated", root_ids: ["upload:source"] },
+    } },
+    { ...doc("unversioned-lineage"), metadata: {
+      evidence_lineage: { kind: "source_record", root_ids: [] },
+    } },
+    { ...doc("lineage-extra-field"), metadata: {
+      evidence_lineage: { version: 1, kind: "source_record", root_ids: [], trusted: true },
+    } },
+  ];
+  const batchReceipt = await (await post(invalid.env, "/api/admin/brain/ingest/batch", {
+    docs: invalidDocs,
+  })).json();
+  check("batch ingest rejects malformed lineage per document",
+    batchReceipt.failed === invalidDocs.length &&
+      batchReceipt.results.every((row) => row.status === "failed"), JSON.stringify(batchReceipt));
+  check("an all-invalid lineage batch performs zero D1 calls or writes",
+    invalid.calls.remote === 0 && invalid.calls.submitted_statements === 0 &&
+      invalid.written.length === 0 && invalid.storedTexts.length === 0 && invalid.documents.size === 0,
+    JSON.stringify(invalid.calls));
 }
 
 /* Date trust is optional, but every supplied claim must be type-safe. A true
@@ -1816,19 +3560,15 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
   }
   const rawReceipt = await response.text();
   const rpcBody = rpcCalls[0]?.body || "";
-  const parsedRpc = JSON.parse(rpcBody || "{}");
-  check("legacy Supabase source_subtype is sanitized before its RPC storage boundary",
-    response.status === 200 &&
-      parsedRpc.p_source_subtype.includes("billing thread") &&
-      parsedRpc.p_source_subtype.includes("[REDACTED:sensitive_payment_url]"));
-  check("legacy Supabase RPC input, receipt, and logs never contain the capability token",
-    rpcCalls.length === 1 &&
+  const parsedReceipt = JSON.parse(rawReceipt || "{}");
+  check("legacy Supabase corpus ingest is explicitly refused because provenance parity is unavailable",
+    response.status === 409 && parsedReceipt.code === "provenance_storage_unsupported");
+  check("the Supabase provenance refusal occurs before any RPC and never leaks the capability token",
+    rpcCalls.length === 0 &&
       !rpcBody.includes(paymentToken) && !rpcBody.includes("invoice.stripe.com") &&
       !rawReceipt.includes(paymentToken) && !observedLogs.join("\n").includes(paymentToken));
-  check("legacy Supabase metadata keys and values are sanitized without dropping useful prose",
-    rpcBody.includes("private lookup [REDACTED:sensitive_payment_url]") &&
-      rpcBody.includes("Follow-up context [REDACTED:sensitive_payment_url]") &&
-      parsedRpc.p_content === "Useful billing context remains searchable.");
+  check("the alternate-store refusal claims no write",
+    /nothing was written/.test(parsedReceipt.error || "") && rpcBody === "");
 }
 
 {
@@ -1981,6 +3721,32 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
     JSON.stringify(body));
 }
 
+/* Bound receipts add identity-key, ledger, and exact-readback work. A request
+   that could cross the invocation query cap after a failed preflight must be
+   refused before its first D1 statement. */
+{
+  const { env, written, calls } = mkBatchEnv();
+  const docs = Array.from({ length: 50 }, (_, index) => ({
+    ...doc(`bound-budget-${index}`, "x".repeat(index < 25 ? 4_000 : 5_200)),
+    source_type: `bound${index}`,
+    source_original_receipt: {
+      version: 1,
+      locator_kind: "source_relative_path",
+      original_content_sha256: String(index).padStart(64, "0"),
+      original_byte_count: 1,
+    },
+  }));
+  const response = await post(env, "/api/admin/brain/ingest/batch", { docs });
+  const body = await response.json();
+  check("a worst-case bound batch is refused at the exact conservative estimate",
+    response.status === 413 && body.estimated_statements === 1_051,
+    JSON.stringify(body));
+  check("the bound query-budget refusal occurs before identity or corpus SQL",
+    calls.remote === 0 && calls.submitted_statements === 0 && written.length === 0,
+    JSON.stringify(calls));
+}
+
+
 /* A document missing required fields is reported, not silently skipped. */
 {
   const { env } = mkBatchEnv();
@@ -2123,16 +3889,22 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
   check("two revisions of one identity preserve sequential created-then-updated receipts",
     body.created === 1 && body.updated === 1 && body.results.map((row) => row.status).join(",") === "created,updated", JSON.stringify(body));
   check("duplicate identities finalize sequentially rather than as one delayed group",
-    calls.finalizer_batches === 2 && calls.stats_scans === 2 && calls.remote === 12, JSON.stringify(calls));
+    calls.finalizer_batches === 2 && calls.stats_scans === 2 && calls.remote === 14, JSON.stringify(calls));
   check("the final duplicate revision is committed rather than left pending",
     /^[a-f0-9]{64}$/.test(documents.get("meeting:same")?.content_hash || ""));
 }
 
 /* ================= forget ================= */
 
-function mkForgetEnv({ vectorThrows = false } = {}) {
+function mkForgetEnv({
+  vectorThrows = false,
+  registered = true,
+  registryProof = true,
+  documentIds = ["meeting:1", "meeting:2"],
+} = {}) {
   const sql = [];
   const deleted = [];
+  const state = { registered, eventRecorded: false };
   const env = {
     STORAGE: "d1", ADMIN_KEY: "k",
     VECTORIZE: {
@@ -2144,46 +3916,105 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
       prepare(q) {
         return {
           bind: (...b) => ({
+            _sql: q,
+            _args: b,
             all: async () => ({
               results: /FROM documents WHERE source/.test(q)
-                ? [{ doc_uid: "meeting:1" }, { doc_uid: "meeting:2" }]
+                ? documentIds.map((doc_uid) => ({ doc_uid }))
                 : /FROM chunks WHERE doc_uid/.test(q)
-                  ? [{ chunk_uid: "meeting:1#0" }, { chunk_uid: "meeting:1#1" }, { chunk_uid: "meeting:2#0" }]
+                  ? b.flatMap((docUid) => docUid === "meeting:1"
+                    ? [{ chunk_uid: "meeting:1#0" }, { chunk_uid: "meeting:1#1" }]
+                    : [{ chunk_uid: `${docUid}#0` }])
                   : /FROM vector_outbox/.test(q)
                     ? b.map((chunkUid, index) => ({
                       chunk_uid: chunkUid, vector_id: chunkUid, generation: index + 1,
                     }))
                   : [],
             }),
-            first: async () => null,
+            first: async () => /SELECT name FROM sources WHERE name=\?1/.test(q) && state.registered
+              ? { name: b[0] }
+              : null,
             run: async () => { sql.push(q); return {}; },
           }),
         };
       },
-      batch: async (stmts) => { sql.push("BATCH:" + stmts.length); },
+      batch: async (stmts) => {
+        sql.push("BATCH:" + stmts.length, ...stmts.map((statement) => statement?._sql || ""));
+        const registryFinalization = stmts.some((statement) =>
+          /source_events[\s\S]*'forget'/.test(statement?._sql || ""));
+        if (!registryFinalization) return stmts.map(() => ({ meta: { changes: 1 } }));
+        const changes = state.registered && registryProof ? 1 : 0;
+        if (changes === 1) {
+          state.eventRecorded = true;
+          state.registered = false;
+        }
+        return stmts.map(() => ({ meta: { changes } }));
+      },
     },
   };
-  return { env, sql, deleted };
+  return { env, sql, deleted, state };
 }
 
 {
   const { env, deleted, sql } = mkForgetEnv();
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
   // Irreversible, so it must be asked for explicitly rather than by default.
-  check("forget DRY RUNS unless confirmed", b.dry_run === true, JSON.stringify(b));
+  check("forget DRY RUNS unless confirmed",
+    b.dry_run === true && b.source === "meeting" &&
+      b.would_unregister_source === true && b.source_unregistered === false,
+    JSON.stringify(b));
   check("and reports what it would remove", b.documents === 2 && b.chunks === 3, JSON.stringify(b));
   check("without deleting any vectors", deleted.length === 0);
   check("or touching the database", !sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
 }
 {
-  const { env, deleted, sql } = mkForgetEnv();
+  const { env, deleted, sql, state } = mkForgetEnv();
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true })).json();
-  check("confirm actually deletes", b.dry_run === false && b.documents === 2, JSON.stringify(b));
+  check("confirm actually deletes",
+    b.dry_run === false && b.documents === 2 && b.source === "meeting" &&
+      b.source_unregistered === true && b.registry_event_recorded === true &&
+      typeof b.operation_id === "string" && b.operation_id.length > 0,
+    JSON.stringify(b));
   check("physical vector cleanup is queued for the one leased writer",
     deleted.length === 0 && b.vectors === 0 && b.vector_cleanup_queued === 3,
     JSON.stringify({ body: b, deleted }));
   check("and D1 rows go first, so a crash leaves it unreachable rather than half-visible",
     sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
+  check("whole-source forget records its audit event and unregisters inside the guarded Worker",
+    state.registered === false && state.eventRecorded === true &&
+      sql.some((q) => /source_events[\s\S]*'forget'[\s\S]*NOT EXISTS[\s\S]*FROM documents WHERE source=\?1/.test(q)) &&
+      sql.some((q) => /DELETE FROM sources[\s\S]*NOT EXISTS[\s\S]*FROM documents WHERE source=\?1/.test(q)),
+    JSON.stringify(sql));
+}
+{
+  const { env, state } = mkForgetEnv({ documentIds: [] });
+  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const body = await response.json();
+  check("an empty registered source is still unregistered by the guarded source forget",
+    response.status === 200 && body.documents === 0 && body.source_unregistered === true &&
+      state.registered === false,
+    JSON.stringify(body));
+}
+{
+  const { env, sql } = mkForgetEnv({ registered: false });
+  const response = await post(env, "/api/admin/brain/forget", { source: "typo", confirm: true });
+  const body = await response.json();
+  check("a source typo is refused before any forget mutation",
+    response.status === 404 && body.code === "source_not_registered" &&
+      !sql.some((q) => /BATCH/.test(q)),
+    JSON.stringify({ body, sql }));
+}
+{
+  // Models an ingest that committed after forget enumerated its targets but
+  // before the final registry transaction. Both guarded statements affect zero
+  // rows, so the live source remains addressable and no audit event is forged.
+  const { env, state } = mkForgetEnv({ registryProof: false });
+  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const body = await response.json();
+  check("a concurrent ingest keeps the source registered and prevents a false forget receipt",
+    response.status === 500 && state.registered === true && state.eventRecorded === false &&
+      !body.source_unregistered && !body.registry_event_recorded,
+    JSON.stringify(body));
 }
 {
   const { env } = mkForgetEnv();
@@ -2281,6 +4112,8 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
     ["/api/admin/brain/ingest/batch", { documents: [] }],
     ["/api/admin/brain/source-receipt", { source: "drive", status: "ready" }],
     ["/api/admin/brain/source-expectation", { source: "drive", expected_interval_hours: 24 }],
+    ["/api/admin/brain/source-register", { source: "drive", kind: "drive" }],
+    ["/api/admin/brain/zones", { source: "drive", zone: "private" }],
     ["/api/admin/brain/forget", { source: "drive", confirm: true }],
     ["/api/admin/brain/reindex", { confirm: true }],
   ];
@@ -3041,6 +4874,41 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
     { source_type: "brand-new-source", source_id: "x", content: "hello" });
   check("nor invent a new source, whose documents would be born unzoned",
     unknown.status === 403, String(unknown.status));
+
+  const receipt = {
+    version: 1,
+    locator_kind: "source_relative_path",
+    original_content_sha256: "1".repeat(64),
+    original_byte_count: 7,
+  };
+  const singleReceiptFixture = scopedEnv();
+  const singleReceipt = await post("/api/admin/brain/ingest", {
+    source_type: "books",
+    source_id: "allowed-receipt.txt",
+    content: "fixture",
+    source_original_receipt: receipt,
+  }, singleReceiptFixture);
+  const batchReceiptFixture = scopedEnv();
+  const batchReceipt = await post("/api/admin/brain/ingest/batch", { docs: [{
+    source_type: "books",
+    source_id: "allowed-batch-receipt.txt",
+    content: "fixture",
+    source_original_receipt: receipt,
+  }] }, batchReceiptFixture);
+  check("a scoped file grant cannot mint single or batch raw-byte receipts",
+    singleReceipt.status === 403 && batchReceipt.status === 403,
+    JSON.stringify({ single: singleReceipt.status, batch: batchReceipt.status }));
+  const receiptSql = [singleReceiptFixture, batchReceiptFixture].flatMap((fixture) =>
+    fixture.seen.sql.filter((sql) =>
+      /source_original_id_key_state|source_original_result_bindings|(?:FROM|INTO|UPDATE) documents/.test(sql)));
+  check("receipt authority is refused before identity-key or corpus SQL",
+    receiptSql.length === 0, receiptSql.join("\n"));
+
+  const ordinaryBooks = await post("/api/admin/brain/ingest", {
+    source_type: "books", source_id: "ordinary-allowed", content: "ordinary fixture",
+  });
+  check("the same file grant remains able to submit an ordinary in-zone document",
+    ordinaryBooks.status !== 403, String(ordinaryBooks.status));
 }
 
 
@@ -3083,6 +4951,106 @@ function mkForgetEnv({ vectorThrows = false } = {}) {
     JSON.stringify(diagBody).slice(0, 160));
 }
 
+{
+  const env = {
+    STORAGE: "d1",
+    ADMIN_KEY: "k",
+    DB: { prepare() { throw new Error("D1_ERROR: exceeded CPU time limit"); } },
+  };
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/diagnose", {
+    method: "GET", headers: { "X-Admin-Key": "k" },
+  }), env, { waitUntil() {} });
+  const body = await response.json();
+  check("an unobservable diagnosis is a non-success machine receipt",
+    response.status === 503 && body.complete === false && body.verdict === "incomplete" &&
+      body.totals?.documents === null && body.summary?.unavailable === 19,
+    JSON.stringify(body).slice(0, 260));
+  check("an unobservable diagnosis never invents upgrade guidance",
+    !/brain upgrade|schema older/i.test(JSON.stringify(body)),
+    JSON.stringify(body).slice(0, 260));
+}
+
+/* ---- every evidence and citation number resolves inside the returned results ----
+   The answer model sees up to twelve numbered documents. A caller asking for
+   fewer (acceptance uses limit 5) must still receive every document a
+   citation or evidence receipt can name, or the receipt points past the end
+   of the results array and a strict consumer rejects the whole response. */
+{
+  const rows = Array.from({ length: 7 }, (_, i) => ({
+    ...ROW,
+    chunk_uid: `contract-doc-${i + 1}#0`, doc_uid: `contract-doc-${i + 1}`, source_id: `contract-doc-${i + 1}`,
+    uri: `meeting://contract-doc-${i + 1}`, title: `Contract fixture ${i + 1}`,
+    text: `Retainer fixture passage number ${i + 1}.`,
+  }));
+  const { env } = mkEnv(rows, {
+    vectorIds: rows.map((row) => row.chunk_uid),
+    extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: true, complete: true, evidence: [6], reason: "direct support" }, usage: {} })
+        : ({ response: "The retainer was deferred [6].", usage: {} }) } },
+  });
+  const body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  const count = Array.isArray(body.results) ? body.results.length : 0;
+  const evidence = Array.isArray(body.evidence_gate?.evidence) ? body.evidence_gate.evidence : [];
+  const citations = Array.isArray(body.citations) ? body.citations : [];
+  check("fixture: the model cited document 6 while the caller asked for 5 results",
+    typeof body.answer === "string" && /\[6\]/.test(body.answer) && evidence.includes(6) &&
+      citations.some((citation) => citation.n === 6),
+    JSON.stringify({ answer: body.answer, evidence_gate: body.evidence_gate, citations: citations.map((c) => c.n) }));
+  check("every evidence receipt number resolves to a returned result",
+    evidence.every((n) => Number.isInteger(n) && n >= 1 && n <= count),
+    JSON.stringify({ evidence, results: count }));
+  check("every citation number resolves to the returned result it names",
+    citations.every((citation) => citation.n >= 1 && citation.n <= count &&
+      body.results[citation.n - 1]?.title === citation.title &&
+      body.results[citation.n - 1]?.source === citation.source),
+    JSON.stringify({ citations: citations.map((c) => c.n), results: count }));
+  const { answerResponseContractDiagnostic } = await import("../../acceptance.mjs");
+  const diagnostic = answerResponseContractDiagnostic(body);
+  check("acceptance's think response contract accepts a small-limit cited answer",
+    diagnostic === null, String(diagnostic));
+}
+
+/* ---- a withheld answer's evidence receipt also resolves inside the returned results ----
+   The live failure: limit 5, the verifier rejected the draft but still named
+   document 6 as its evidence, so the Worker withheld the answer (answer null,
+   no citations) while evidence_gate.evidence pointed past five results and
+   acceptance rejected the evidence gate as incompatible. */
+{
+  const rows = Array.from({ length: 7 }, (_, i) => ({
+    ...ROW,
+    chunk_uid: `withheld-doc-${i + 1}#0`, doc_uid: `withheld-doc-${i + 1}`, source_id: `withheld-doc-${i + 1}`,
+    uri: `meeting://withheld-doc-${i + 1}`, title: `Withheld fixture ${i + 1}`,
+    text: `Retainer fixture passage number ${i + 1}.`,
+  }));
+  const { env } = mkEnv(rows, {
+    vectorIds: rows.map((row) => row.chunk_uid),
+    extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: false, complete: true, evidence: [6], reason: "the draft overstates document 6" }, usage: {} })
+        : ({ response: "The retainer was cancelled [6].", usage: {} }) } },
+  });
+  const body = await (await call(env, "/api/rag/think?q=retainer&limit=5")).json();
+  const count = Array.isArray(body.results) ? body.results.length : 0;
+  const evidence = Array.isArray(body.evidence_gate?.evidence) ? body.evidence_gate.evidence : [];
+  check("fixture: the verifier rejected the draft, withheld the answer, and named document 6",
+    body.answer === null && body.evidence_gate?.supported === false &&
+      body.evidence_gate?.complete === true && evidence.includes(6),
+    JSON.stringify({ answer: body.answer, evidence_gate: body.evidence_gate, citations: body.citations }));
+  check("every withheld-answer evidence receipt number resolves to a returned result",
+    evidence.length > 0 && evidence.every((n) => Number.isInteger(n) && n >= 1 && n <= count),
+    JSON.stringify({ evidence, results: count }));
+  check("the withheld answer still returns the sixth document its receipt names",
+    Boolean(body.results?.[5]) && typeof body.results[5] === "object" && typeof body.results[5].chunk_uid === "string",
+    JSON.stringify({ results: count }));
+  const { answerResponseContractDiagnostic } = await import("../../acceptance.mjs");
+  const diagnostic = answerResponseContractDiagnostic(body);
+  check("acceptance's think response contract accepts a small-limit withheld answer",
+    diagnostic === null, String(diagnostic));
+}
+
 console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);
 process.exit(fail ? 1 : 0);
 
@@ -3106,7 +5074,7 @@ process.exit(fail ? 1 : 0);
     Array.isArray(body.confidence?.basis) && body.confidence.basis.some((b) => /^answer is partial/.test(b)) && body.confidence.percent < 75, JSON.stringify(body.confidence));
 }
 
-/* ---- unsupported still produces the verbatim refusal, with its reason beside it ---- */
+/* ---- unsupported generated text stays distinct from a true absence refusal ---- */
 {
   const rows = [{ ...ROW, chunk_uid: "policy:1#0", doc_uid: "policy:1", title: "Other Co handbook", client: null,
     text: "Other Co offers twelve weeks of parental leave." }];
@@ -3116,8 +5084,8 @@ process.exit(fail ? 1 : 0);
       ? ({ response: { supported: false, complete: false, evidence: [], reason: "cites another company's policy" }, usage: {} })
       : ({ response: "You offer twelve weeks of parental leave [1].", usage: {} }) } } });
   const body = await (await call(env, "/api/rag/think?q=What+is+our+parental+leave+policy")).json();
-  check("true absence keeps the verbatim refusal sentence",
-    body.answer === "The documents do not answer the question." && body.citations?.length === 0, JSON.stringify(body));
+  check("unsupported generated text fails closed without claiming no evidence",
+    isUnavailableRefusal(body), JSON.stringify(body));
   check("the refusal reason rides beside the sentence, never inside it",
     /another company/.test(body.evidence_gate?.reason || "") && body.evidence_gate?.partial !== true, JSON.stringify(body.evidence_gate));
 }

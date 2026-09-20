@@ -2,11 +2,70 @@ import assert from "node:assert/strict";
 
 import {
   assertDrainComplete,
+  buildCompletedDrainResult,
+  renderCompletedDrainResult,
   summariseResponseBody,
   validateDrainBusyReceipt,
   validateDrainReceipt,
   validateReindexReceipt,
+  vectorCountMismatchFailure,
 } from "../brain.mjs";
+
+/* A paused update has a different command surface from an active Brain.
+ * Preserve the useful active reindex remedy, but never send a paused operator
+ * to an endpoint that the verified write barrier refuses. */
+const activeMismatchGuidance = vectorCountMismatchFailure(10, 4);
+assert.match(activeMismatchGuidance, /brain diagnose <manifest>.*brain reindex <manifest> --yes/s);
+
+const pausedMismatchGuidance = vectorCountMismatchFailure(10, 4, {
+  pausedForUpgrade: true,
+});
+assert.match(pausedMismatchGuidance, /paused.*brain update <manifest>/s);
+assert.match(pausedMismatchGuidance, /Read-only evidence.*brain diagnose <manifest>/s);
+assert.doesNotMatch(pausedMismatchGuidance, /\n\s*brain reindex <manifest>/);
+
+const stoppedUpdateGuidance = vectorCountMismatchFailure(10, 4, {
+  pausedForUpgrade: true,
+  updateStalled: true,
+});
+assert.match(stoppedUpdateGuidance, /already stopped the paused bootstrap.*report this update failure/s);
+assert.doesNotMatch(stoppedUpdateGuidance, /Run `brain update/);
+
+const pausedExcessGuidance = vectorCountMismatchFailure(10, 13, {
+  pausedForUpgrade: true,
+  updateStalled: true,
+});
+assert.match(pausedExcessGuidance, /provider-only excess vectors.*reviewed recovery.*clean index/s);
+assert.doesNotMatch(pausedExcessGuidance, /\n\s*brain reindex <manifest>/);
+
+const healthyNoopResult = buildCompletedDrainResult({
+  drained: 0,
+  submitted: 0,
+  remaining: 0,
+  expectedVectors: 66,
+  actualVectors: 66,
+});
+assert.deepEqual(healthyNoopResult, {
+  drained: 0,
+  submitted: 0,
+  remaining: 0,
+  confirmed_this_run: 0,
+  expected_vectors: 66,
+  actual_vectors: 66,
+  vector_ready: true,
+});
+assert.equal(
+  renderCompletedDrainResult(healthyNoopResult),
+  "vector index is query-ready (66 total query-visible vector(s); 0 newly confirmed this run)",
+);
+assert.equal(
+  renderCompletedDrainResult(buildCompletedDrainResult({
+    drained: 0,
+    submitted: 0,
+    remaining: 0,
+  })),
+  "vector index is query-ready (total query-visible vector count unavailable; 0 newly confirmed this run)",
+);
 
 assert.deepEqual(validateDrainBusyReceipt({
   busy: true, remaining: 7, retry_after_seconds: 3,

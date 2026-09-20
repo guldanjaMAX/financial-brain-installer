@@ -165,6 +165,8 @@ try {
     check(`${relativeFixture} stamps one fully qualified family_of`,
       family === `custodian_export:${file.rel}` &&
       result.envelopes.every((envelope) => envelope.metadata?.family_of === family));
+    check(`${relativeFixture} does not misapply one raw-file receipt to many result documents`,
+      result.envelopes.every((envelope) => envelope.source_original_receipt === undefined));
   }
 } finally {
   rmSync(sandbox, { recursive: true, force: true });

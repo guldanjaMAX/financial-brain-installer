@@ -21,6 +21,16 @@ const SECTION_LABELS: Record<string, string> = {
   unsorted_spending: "uncategorized spending",
 };
 
+export function reconciliationSaveFailure(error: unknown): { message: string; refreshRequired: boolean } {
+  const failure = ownerError(error);
+  return failure.status === 409
+    ? {
+      message: "The records changed before this ruling was saved. Nothing was changed. Refresh the current records below, review both figures again, and then decide.",
+      refreshRequired: true,
+    }
+    : { message: failure.message, refreshRequired: false };
+}
+
 /** The owner review queue. It is intentionally read-only until an owner-session
  *  write contract exists. A disabled upload control would imply the path is
  *  nearly available; this page says what is true instead. */
@@ -66,6 +76,7 @@ export function AddReview() {
         <h1 className="page-title">Add &amp; Review</h1>
         <p className="page-intro">
           See records that need a better copy, a human answer, or a decision before they can support a financial answer.
+          To settle conflicting figures, open Conflicting records, review each figure's source and date, choose the one you accept, and select Record ruling. The other figure stays visible.
         </p>
       </header>
 
@@ -201,7 +212,7 @@ function ConflictReview({ snapshot, entities, scope, onSaved }: {
             {scope === item.entity_slug ? (
               <ReconciliationApproval item={item} scope={scope} onSaved={onSaved} />
             ) : (
-              <NextStep>Select this business above to record a ruling.</NextStep>
+              <NextStep>Select this financial entity above to record a ruling.</NextStep>
             )}
           </span>
           <Chip state={item.ruled_claim_uid ? "WORKING" : "NEEDS"} />
@@ -221,6 +232,7 @@ function ReconciliationApproval({ item, scope, onSaved }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [refreshRequired, setRefreshRequired] = useState(false);
   const requests = useActionRequests("approval");
 
   async function save() {
@@ -237,6 +249,7 @@ function ReconciliationApproval({ item, scope, onSaved }: {
     setBusy(true);
     setError(null);
     setMessage(null);
+    setRefreshRequired(false);
     try {
       const receipt = await api<OwnerWriteReceipt>("/api/owner/approvals", {
         request_id: id,
@@ -247,7 +260,9 @@ function ReconciliationApproval({ item, scope, onSaved }: {
       setMessage(receipt.replayed ? "This exact ruling was already recorded." : "Ruling recorded beside both claims. It is not marked in use yet.");
       onSaved();
     } catch (next) {
-      setError(ownerError(next).message);
+      const failure = reconciliationSaveFailure(next);
+      setError(failure.message);
+      setRefreshRequired(failure.refreshRequired);
     } finally {
       setBusy(false);
     }
@@ -265,7 +280,23 @@ function ReconciliationApproval({ item, scope, onSaved }: {
       </label>
       {error && <div className="mt-2"><Attention>{error}</Attention></div>}
       {message && <p className="mt-2 text-[12.5px] text-ink-soft">{message}</p>}
-      <button onClick={save} disabled={busy || !claim} className="mt-2 rounded-lg bg-accent text-white px-3 py-2 text-[13px] disabled:opacity-50">{busy ? "Recording" : item.ruled_claim_uid ? "Record a new ruling" : "Record ruling"}</button>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {refreshRequired && (
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              setRefreshRequired(false);
+              onSaved();
+            }}
+            disabled={busy}
+            className="rounded-lg border border-line-strong bg-card px-3 py-2 text-[13px] font-semibold text-ink disabled:opacity-50"
+          >
+            Refresh current records
+          </button>
+        )}
+        <button onClick={save} disabled={busy || !claim || refreshRequired} className="rounded-lg bg-accent text-white px-3 py-2 text-[13px] disabled:opacity-50">{busy ? "Recording" : item.ruled_claim_uid ? "Record a new ruling" : "Record ruling"}</button>
+      </div>
     </div>
   );
 }
@@ -289,7 +320,7 @@ function DecisionReview({ snapshot, entities, scope, onSaved }: {
             <span className="block text-[13px] text-ink-soft mt-0.5">{entityLabel(entities, item.entity_slug)}</span>
             {scope === item.entity_slug ? (
               <ExceptionApproval item={item} scope={scope} onSaved={onSaved} />
-            ) : <NextStep>Select this business above to resolve the exception.</NextStep>}
+            ) : <NextStep>Select this financial entity above to resolve the exception.</NextStep>}
           </span>
           <Chip state="NEEDS" />
         </Row>

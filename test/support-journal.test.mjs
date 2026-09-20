@@ -117,9 +117,19 @@ try {
   assert.doesNotMatch(moduleSource, /\bfetch\s*\(/, "support journal has no network call path");
   assert.doesNotMatch(moduleSource, /process\.(?:argv|env)/, "support journal never reads arguments or environment");
   assert.doesNotMatch(moduleSource.slice(0, 500), /telemetry/i);
+  assert.doesNotMatch(
+    moduleSource,
+    /sameReadableFileIdentity/,
+    "retention never treats size and mtime alone as proof that bytes stayed stable",
+  );
+  assert.match(
+    moduleSource,
+    /before = restrictWindowsSupportPath\([\s\S]*?sameFileIdentity\(before, opened\)[\s\S]*?sameFileIdentity\(opened, afterRead\)[\s\S]*?sameFileIdentity\(afterRead, current\)/,
+    "immutable reads establish a post-ACL baseline and preserve full identity through path readback",
+  );
 
   const publicCommands = [
-    "setup", "ask", "doctor", "whatsnew", "verify", "provision", "deploy", "secrets",
+    "setup", "ask", "assistant-repair", "provenance-repair", "doctor", "whatsnew", "verify", "provision", "deploy", "secrets", "financial-picture",
     "health", "test", "mcp-config", "migrate", "ingest", "connect", "status",
     "sources", "forget", "drain", "reindex", "diagnose", "eval", "upgrade",
     "rollback", "schedule", "support",
@@ -175,6 +185,13 @@ try {
     argv: [malicious],
     env: { SECRET: malicious },
     path: malicious,
+    root: malicious,
+    locator: malicious,
+    retrievalQuery: malicious,
+    originalContentSha256: malicious,
+    documentIds: [maliciousUuid],
+    sealedPlanId: maliciousUuid,
+    privatePlanId: maliciousUuid,
     url: malicious,
     remoteId: maliciousUuid,
     content: malicious,
@@ -198,6 +215,12 @@ try {
     error_code: "EXTRACTION_FAILED",
     fingerprint: productRelativeFingerprint("ingest/run.mjs#extract-document"),
   });
+  for (const privateField of [
+    "root", "locator", "retrievalQuery", "originalContentSha256",
+    "documentIds", "sealedPlanId", "privatePlanId",
+  ]) {
+    assert.equal(Object.hasOwn(previewed, privateField), false, `${privateField} crossed the journal boundary`);
+  }
 
   const recorded = recordSupportEvent(eventInput, options(root));
   assert.deepEqual(recorded, previewed);

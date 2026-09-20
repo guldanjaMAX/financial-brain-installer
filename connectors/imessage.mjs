@@ -56,6 +56,8 @@ import { dirname, join } from "node:path";
 import {
   MESSAGE_SESSION_DEFAULTS,
   MessageSessionizer,
+  messageRowDisposition,
+  messageThreadKey,
   sessionEnvelope,
 } from "../ingest/message-session.mjs";
 
@@ -457,7 +459,19 @@ export async function captureOnce({
     documents_sent: 0,
     documents_would_send: 0,
     sessions_open: 0,
+    started_watermark: state.last_rowid,
     watermark: state.last_rowid,
+    caught_up: false,
+    first_row_at: null,
+    last_row_at: null,
+    // What this pass READ is never what it DELIVERED. A conversation stays in
+    // local state until it goes quiet for maxGapMs or the day turns, so on a
+    // Mac in daily use the newest rows above are routinely still unsent. These
+    // two bound the messages a caller may claim are searchable now: everything
+    // strictly older than the earliest message of any still-open session was
+    // sent, because rows arrive chronologically and no held row precedes it.
+    first_delivered_at: null,
+    delivered_through: null,
     dry_run: dryRun,
   };
 
@@ -470,6 +484,26 @@ export async function captureOnce({
     await sendEnvelopes(envelopes);
     counts.documents_sent += envelopes.length;
   };
+  // Delivery bookkeeping for the two counts above. `pushedThrough` is the
+  // newest message this pass handed to the sessionizer; `sessionOpenedAfter`
+  // remembers, per open session, what had been delivered before it began.
+  let pushedThrough = null;
+  const sessionOpenedAfter = new Map();
+  const settleDeliveredRange = () => {
+    let earliestOpen = null;
+    let deliveredThrough = pushedThrough;
+    for (const [key, session] of sessionizer.active) {
+      if (earliestOpen && !(Date.parse(session.first_ts) < Date.parse(earliestOpen))) continue;
+      earliestOpen = session.first_ts;
+      const before = sessionOpenedAfter.get(key) ?? null;
+      // Strictly before, so a message sharing an instant with a held one can
+      // never be inside the claim.
+      deliveredThrough = before && Date.parse(before) < Date.parse(session.first_ts) ? before : null;
+    }
+    counts.delivered_through = deliveredThrough;
+    if (!deliveredThrough) counts.first_delivered_at = null;
+  };
+
   const persist = () => {
     if (dryRun) return;
     saveCaptureState(statePath, {
@@ -495,7 +529,10 @@ export async function captureOnce({
       const limit = Math.min(pageSize, remaining);
       if (limit <= 0) break;
       const rows = fetchMessagesSince(opened.db, counts.watermark, limit);
-      if (!rows.length) break;
+      if (!rows.length) {
+        counts.caught_up = true;
+        break;
+      }
       counts.pages++;
       counts.rows_seen += rows.length;
       remaining -= rows.length;
@@ -505,6 +542,10 @@ export async function captureOnce({
       for (const raw of rows) {
         pageMaxRowid = Math.max(pageMaxRowid, Number(raw.rowid) || 0);
         const row = rowToSessionRow(raw);
+        if (row.ts) {
+          if (!counts.first_row_at || Date.parse(row.ts) < Date.parse(counts.first_row_at)) counts.first_row_at = row.ts;
+          if (!counts.last_row_at || Date.parse(row.ts) > Date.parse(counts.last_row_at)) counts.last_row_at = row.ts;
+        }
         if (!row.id) { counts.rows_skipped.no_guid++; continue; }
         if (!row.ts) { counts.rows_skipped.no_timestamp++; continue; }
         if (!row.body) {
@@ -514,8 +555,34 @@ export async function captureOnce({
           counts.rows_skipped.no_text++;
           continue;
         }
+        // The sessionizer, not this loop, decides what becomes a document, and
+        // it drops a row whose whole text is a media marker ("[image]",
+        // "[audio]", "[video]") — an attachment-only row that arrived with a
+        // placeholder body rather than with no body at all. Ask its own
+        // classifier BEFORE pushing: counting such a row as delivered moved
+        // `pushedThrough`, and with it delivered_through and the receipt's
+        // target_range.through, onto a message that was never sent and can
+        // never be searched. It belongs in the same attachment bucket as the
+        // bodyless rows above.
+        if (messageRowDisposition(row) !== "represented") {
+          counts.rows_skipped.no_text++;
+          continue;
+        }
         counts.rows_pushed++;
+        // The newest message delivered before this session opened, recorded as
+        // it opens because only then is "before" still known. A session
+        // restored from a previous pass's snapshot gets no entry, and reports
+        // no delivered bound rather than a guessed one.
+        const key = messageThreadKey(row);
+        const deliveredBefore = pushedThrough;
         closed.push(...sessionizer.push(row));
+        if (sessionizer.active.get(key)?.first_id === row.id) {
+          sessionOpenedAfter.set(key, deliveredBefore);
+        }
+        if (!counts.first_delivered_at || Date.parse(row.ts) < Date.parse(counts.first_delivered_at)) {
+          counts.first_delivered_at = row.ts;
+        }
+        if (!pushedThrough || Date.parse(row.ts) > Date.parse(pushedThrough)) pushedThrough = row.ts;
       }
 
       // Documents first, then the watermark+snapshot pair, atomically. A kill
@@ -528,12 +595,16 @@ export async function captureOnce({
 
       // A short page proves the scan is caught up; a full page means known
       // backlog, so continue immediately rather than sleeping on it.
-      if (rows.length < limit) break;
+      if (rows.length < limit) {
+        counts.caught_up = true;
+        break;
+      }
     }
 
     const stale = finishStaleSessions(sessionizer, { nowMs: now(), maxGapMs });
     await dispatch(stale);
     counts.sessions_open = sessionizer.active.size;
+    settleDeliveredRange();
     persist();
     return counts;
   } finally {

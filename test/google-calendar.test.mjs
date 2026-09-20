@@ -33,6 +33,7 @@ import {
   syncCalendar,
   syncAll,
   ingestEnvelopes,
+  CalendarApiError,
   GoogleAuthError,
 } from "../connectors/google-calendar.mjs";
 
@@ -265,7 +266,8 @@ section("request parameters");
   const cfg = normalizeConfig({ fullSyncSince: "2025-01-01T00:00:00Z" });
 
   const full = buildListParams({ config: cfg });
-  check("full sync sends timeMin when a window is configured", full.get("timeMin") === "2025-01-01T00:00:00Z");
+  check("full sync canonicalizes and sends an explicit UTC timeMin",
+    full.get("timeMin") === "2025-01-01T00:00:00.000Z", full.get("timeMin"));
   check("full sync pins showDeleted=true", full.get("showDeleted") === "true");
   check("full sync defaults singleEvents=false", full.get("singleEvents") === "false");
   check("full sync sends the eventTypes allowlist", full.getAll("eventTypes").join(",") === "default,focusTime,fromGmail,outOfOffice", full.getAll("eventTypes").join(","));
@@ -279,6 +281,13 @@ section("request parameters");
 
   const paged = buildListParams({ syncToken: "SYNC_TOKEN_A", pageToken: "PAGE2", config: cfg });
   check("pageToken rides alongside syncToken", paged.get("pageToken") === "PAGE2" && paged.get("syncToken") === "SYNC_TOKEN_A");
+
+  for (const invalid of ["01/02/2025", "January 2, 2025", "2025-02-30T00:00:00Z", "2025-01-01T00:00:00-07:00"]) {
+    let error = null;
+    try { normalizeConfig({ fullSyncSince: invalid }); } catch (caught) { error = caught; }
+    check(`fullSyncSince rejects ambiguous or non-UTC evidence: ${invalid}`,
+      error instanceof CalendarApiError && /explicit UTC timestamp/.test(error.message), error?.message || "no error");
+  }
 }
 
 section("parameter fingerprint");
@@ -625,6 +634,8 @@ section("scenario: first sync (full, two pages)");
   check("1 event skipped as empty", r.skipped.length === 1, JSON.stringify(r.skipped));
   check("no deletions on a clean first sync", r.deletions.length === 0);
   check("the sync token was stored", r.state.sync_token === "SYNC_TOKEN_A", r.state.sync_token);
+  check("a terminal sync token marks the full walk as an authoritative snapshot",
+    r.authoritative_snapshot === true, JSON.stringify(r));
   check("the fingerprint was stored beside it", r.state.param_fingerprint === paramFingerprint(normalizeConfig({}), CAL));
   check("last_synced_at was recorded", typeof r.state.last_synced_at === "string" && r.state.last_synced_at.endsWith("Z"));
   check("full_syncs counter advanced", r.state.full_syncs === 1);
@@ -927,6 +938,8 @@ section("scenario: 410 GONE where the resync earns no new token");
   check("mode flipped to full", r.mode === "full", r.mode);
   check("the dead token is NOT re-armed", r.state.sync_token !== "DEAD_TOKEN", String(r.state.sync_token));
   check("the token is cleared to null", r.state.sync_token === null, String(r.state.sync_token));
+  check("a full walk without a replacement token is not an authoritative snapshot",
+    r.authoritative_snapshot === false, JSON.stringify(r));
   check("the warning explains the clearing", /cleared/i.test(r.warning || ""), r.warning || "(none)");
 }
 

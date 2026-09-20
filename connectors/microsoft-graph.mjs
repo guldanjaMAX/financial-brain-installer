@@ -214,6 +214,8 @@ export async function syncMicrosoftGraph({
           size: Number(item.size || 0),
           ...extracted.provenance,
         },
+        textSource: extracted.provenance.text_source,
+        textReliable: extracted.provenance.text_reliable,
       }));
     }
     deletions.push(...page.deletions.filter((item) => item?.id).map((item) => ({

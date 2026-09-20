@@ -20,7 +20,9 @@ const DAILY = 86400;
 /* ---- it warns when a source we CAN refresh has gone unread ---- */
 {
   const g = await coverageGaps(mk([{ name: "drive", kind: "drive", last_ingest_at: daysAgo(40), expected_refresh_seconds: DAILY }]), { now: NOW });
-  check("an overdue connector produces a gap", g.length === 1 && g[0].type === "coverage_stale", JSON.stringify(g));
+  check("an overdue connector exposes both stale updates and unproven history",
+    g.length === 2 && g[0].type === "coverage_stale" && g[1].type === "history_unproven",
+    JSON.stringify(g));
   check("and says how long it has been", g[0].days_since_ingest === 40, JSON.stringify(g[0]));
   check("and says material added since is invisible, not merely old",
     /not in the brain/.test(g[0].detail) && /would not show up as a missing answer/.test(g[0].detail), g[0].detail);
@@ -88,8 +90,51 @@ const DAILY = 86400;
     /paused for a safety review/i.test(f.sources[0]?.reason || ""), JSON.stringify(f.sources[0]));
   const g = await coverageGaps(mk(rows), { now: NOW });
   check("a source awaiting review reports that review instead of inventing a broken sync",
-    g.length === 1 && g[0].type === "sync_review" && /paused for safety review/i.test(g[0].detail || ""),
+    g.length === 2 && g[0].type === "sync_review" && g[1].type === "history_unproven" &&
+      /paused for safety review/i.test(g[0].detail || ""),
     JSON.stringify(g));
+}
+
+/* ---- operational failures cannot hide a separate historical coverage gap ---- */
+{
+  const g = await coverageGaps(mk([{
+    name: "gmail", kind: "gmail", status: "error", document_count: 57552,
+    last_ingest_at: daysAgo(9), expected_refresh_seconds: DAILY,
+    last_complete_sweep_at: null,
+  }, {
+    name: "drive", kind: "drive", status: "ready", document_count: 24000,
+    last_ingest_at: daysAgo(40), expected_refresh_seconds: DAILY,
+    last_complete_sweep_at: null,
+  }]), { now: NOW });
+  const types = (source) => g.filter((gap) => gap.source === source).map((gap) => gap.type);
+  check("a broken source still reports its unproven history",
+    types("gmail").join(",") === "sync_broken,coverage_stale,history_unproven", JSON.stringify(g));
+  check("a stale source still reports its unproven history",
+    types("drive").join(",") === "coverage_stale,history_unproven", JSON.stringify(g));
+  check("every source gap carries a direct owner remedy",
+    g.every((gap) => typeof gap.remedy === "string" && gap.remedy.length > 0 && / Next: /.test(gap.detail)),
+    JSON.stringify(g));
+}
+
+/* ---- bounded connectors explain their permanent history limitations honestly ---- */
+{
+  const g = await coverageGaps(mk([{
+    name: "slack", kind: "slack", status: "ready", document_count: 12,
+    last_ingest_at: daysAgo(0.1), expected_refresh_seconds: null,
+    last_complete_sweep_at: null,
+  }, {
+    name: "whatsapp", kind: "whatsapp", status: "ready", document_count: 12,
+    last_ingest_at: daysAgo(0.1), expected_refresh_seconds: null,
+    last_complete_sweep_at: null,
+  }]), { now: NOW });
+  const by = Object.fromEntries(g.map((gap) => [gap.source, gap]));
+  check("Slack's remedy declares inaccessible-history limits",
+    /inaccessible conversations remain an explicit connector limitation/i.test(by.slack?.remedy || ""),
+    JSON.stringify(by.slack));
+  check("WhatsApp's remedy asks for an export instead of promising all-time coverage",
+    /owner-provided export/i.test(by.whatsapp?.remedy || "") &&
+      !/complete all-time|all-time complete/i.test(by.whatsapp?.remedy || ""),
+    JSON.stringify(by.whatsapp));
 }
 
 /* ---- a live run is distinct from a crashed or stuck run ---- */
@@ -234,6 +279,200 @@ const DAILY = 86400;
   try { f = await freshnessReport(broken, { now: NOW }); } catch (e) { threw2 = e.message; }
   check("and the report degrades rather than throwing", threw2 === null && f?.unavailable === true,
     threw2 ? `it threw: ${threw2}` : JSON.stringify(f));
+}
+
+/* ---- only known compatibility gaps may fall back to the legacy run query ---- */
+{
+  const sourceRows = [{
+    name: "drive", kind: "drive", status: "ready", registered: 1,
+    document_count: 2, last_ingest_at: daysAgo(0.1),
+    last_complete_sweep_at: null, expected_refresh_seconds: null,
+  }];
+  const db = {
+    DB: {
+      prepare(sql) {
+        if (/SELECT inventory\.\*/.test(sql)) {
+          return { all: async () => ({ results: sourceRows }) };
+        }
+        if (/docs_refused/.test(sql) && /FROM sync_runs sr/.test(sql)) {
+          throw new Error("D1 transport timeout");
+        }
+        throw new Error("unexpected SQL");
+      },
+    },
+  };
+  let error = null;
+  try { await freshnessReport(db, { now: NOW }); } catch (caught) { error = caught; }
+  check("a non-schema latest-run failure is not hidden by the compatibility fallback",
+    /D1 transport timeout/.test(error?.message || ""), error?.message || "no error");
+}
+{
+  const sourceRows = [{
+    name: "drive", kind: "drive", status: "ready", registered: 1,
+    document_count: 2, last_ingest_at: daysAgo(0.1),
+    last_complete_sweep_at: null, expected_refresh_seconds: null,
+  }];
+  let legacyRead = false;
+  const db = {
+    DB: {
+      prepare(sql) {
+        if (/SELECT inventory\.\*/.test(sql)) {
+          return { all: async () => ({ results: sourceRows }) };
+        }
+        if (/docs_refused/.test(sql) && /FROM sync_runs sr/.test(sql)) {
+          throw new Error("no such column: sr.docs_refused");
+        }
+        if (/ROW_NUMBER\(\) OVER \(PARTITION BY source/.test(sql)) {
+          legacyRead = true;
+          return { all: async () => ({ results: [{
+            source: "drive", files_seen: 2, docs_added: 2, docs_updated: 0,
+            docs_unchanged: 0, walk_complete: 1, finished_at: daysAgo(0.1),
+          }] }) };
+        }
+        throw new Error("unexpected SQL");
+      },
+    },
+  };
+  const f = await freshnessReport(db, { now: NOW });
+  check("a known missing coverage column uses the legacy read without inventing new telemetry",
+    legacyRead && f.sources[0]?.coverage?.counts?.accepted === 2 &&
+      f.sources[0]?.coverage?.counts?.refused === null &&
+      f.sources[0]?.coverage?.confirmed_range?.from === null,
+    JSON.stringify(f));
+}
+
+/* ---- latest Gmail failure evidence remains closed across schema versions ---- */
+const GMAIL_FAILURE_EVIDENCE_FIXTURE = {
+  version: 1,
+  operation_class: "gmail_message_read",
+  http_status: 400,
+  provider_reason: "failed_precondition",
+  checkpoint_readback: "verified",
+  checkpoint_done: 55,
+  checkpoint_skipped: 3,
+  cursor_preservation: "absent_preserved",
+};
+{
+  const sourceRows = [{
+    name: "gmail", kind: "gmail", status: "error", registered: 1,
+    document_count: 55, last_ingest_at: daysAgo(0.1),
+    last_complete_sweep_at: null, expected_refresh_seconds: DAILY,
+  }];
+  const db = {
+    DB: {
+      prepare(sql) {
+        if (/SELECT inventory\.\*/.test(sql)) return { all: async () => ({ results: sourceRows }) };
+        if (/failure_evidence/.test(sql) && /FROM sync_runs sr/.test(sql)) {
+          return { all: async () => ({ results: [{
+            source: "gmail", error: "INGEST_FAILED", finished_at: daysAgo(0.1),
+            docs_refused: 0, docs_failed: 1, metrics_version: 1,
+            failure_evidence: JSON.stringify(GMAIL_FAILURE_EVIDENCE_FIXTURE),
+          }] }) };
+        }
+        throw new Error("unexpected SQL");
+      },
+    },
+  };
+  const f = await freshnessReport(db, { now: NOW });
+  check("authenticated freshness exposes only the revalidated latest Gmail failure evidence",
+    JSON.stringify(f.sources[0]?.last_failure) === JSON.stringify(GMAIL_FAILURE_EVIDENCE_FIXTURE), JSON.stringify(f));
+}
+
+{
+  const sourceRows = [{
+    name: "gmail", kind: "gmail", status: "error", registered: 1,
+    document_count: 55, last_ingest_at: daysAgo(0.1), expected_refresh_seconds: DAILY,
+  }];
+  const db = {
+    DB: {
+      prepare(sql) {
+        if (/SELECT inventory\.\*/.test(sql)) return { all: async () => ({ results: sourceRows }) };
+        if (/failure_evidence/.test(sql) && /FROM sync_runs sr/.test(sql)) {
+          return { all: async () => ({ results: [{
+            source: "gmail", error: "INGEST_FAILED", docs_refused: 0,
+            docs_failed: 0, metrics_version: 1,
+            failure_evidence: JSON.stringify(GMAIL_FAILURE_EVIDENCE_FIXTURE),
+          }] }) };
+        }
+        throw new Error("unexpected SQL");
+      },
+    },
+  };
+  const f = await freshnessReport(db, { now: NOW });
+  check("freshness suppresses a measured document failure that contradicts a zero failed count",
+    f.sources[0]?.last_failure === null, JSON.stringify(f));
+}
+
+{
+  const sourceRows = [{
+    name: "gmail", kind: "gmail", status: "error", registered: 1,
+    document_count: 2, last_ingest_at: daysAgo(0.1),
+    last_complete_sweep_at: null, expected_refresh_seconds: DAILY,
+  }];
+  let schema38Read = false;
+  const db = {
+    DB: {
+      prepare(sql) {
+        if (/SELECT inventory\.\*/.test(sql)) return { all: async () => ({ results: sourceRows }) };
+        if (/failure_evidence/.test(sql) && /FROM sync_runs sr/.test(sql)) {
+          throw new Error("no such column: sr.failure_evidence");
+        }
+        if (/docs_refused/.test(sql) && /FROM sync_runs sr/.test(sql)) {
+          schema38Read = true;
+          return { all: async () => ({ results: [{
+            source: "gmail", error: "INGEST_FAILED", files_seen: 2,
+            walk_complete: 1, finished_at: daysAgo(0.1),
+            docs_added: 1, docs_updated: 0, docs_unchanged: 1,
+            docs_refused: 0, docs_failed: 0, metrics_version: 1,
+          }] }) };
+        }
+        throw new Error("unexpected SQL");
+      },
+    },
+  };
+  const f = await freshnessReport(db, { now: NOW });
+  check("a missing 0040 column falls back only one schema level and preserves schema-38 coverage",
+    schema38Read && f.sources[0]?.last_failure === null &&
+      f.sources[0]?.coverage?.counts?.accepted === 2 &&
+      f.sources[0]?.coverage?.counts?.refused === 0,
+    JSON.stringify(f));
+}
+
+/* ---- counters and claimed ranges must come from the same latest receipt ---- */
+{
+  const sourceRows = [{
+    name: "drive", kind: "drive", status: "ready", registered: 1,
+    document_count: 2, last_ingest_at: daysAgo(0.1),
+    last_complete_sweep_at: null, expected_refresh_seconds: null,
+  }];
+  let joinedAnOlderRange = false;
+  const db = {
+    DB: {
+      prepare(sql) {
+        if (/SELECT inventory\.\*/.test(sql)) {
+          return { all: async () => ({ results: sourceRows }) };
+        }
+        if (/docs_refused/.test(sql) && /FROM sync_runs sr/.test(sql)) {
+          joinedAnOlderRange = /ranged\s+AS|JOIN\s+ranged/i.test(sql);
+          return { all: async () => ({ results: [{
+            source: "drive", files_seen: 2, docs_added: 0, docs_updated: 0,
+            docs_unchanged: 2, docs_refused: 0, docs_failed: 0,
+            metrics_version: 1, walk_complete: 1, finished_at: daysAgo(0.1),
+            // The newest receipt has no range. The fake exposes the older range
+            // only if the query performs the unsafe cross-receipt join.
+            confirmed_from: joinedAnOlderRange ? daysAgo(30) : null,
+            confirmed_through: joinedAnOlderRange ? daysAgo(20) : null,
+          }] }) };
+        }
+        throw new Error("unexpected SQL");
+      },
+    },
+  };
+  const f = await freshnessReport(db, { now: NOW });
+  check("freshness never pairs the latest clean counters with an older run's range",
+    !joinedAnOlderRange && f.sources[0]?.coverage?.confirmed_range?.from === null &&
+      f.sources[0]?.coverage?.confirmed_range?.through === null,
+    JSON.stringify(f));
 }
 
 /* ---- the report distinguishes what we can fix from what we cannot ---- */

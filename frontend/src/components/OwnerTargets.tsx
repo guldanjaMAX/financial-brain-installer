@@ -154,8 +154,10 @@ function ScopedOwnerTargets({ scope, activeLabel }: { scope: string | null; acti
 
   if (!scope) {
     return (
-      <Section title="Your targets" blurb="Targets belong to one business and never blend figures across entities.">
-        <Note>Select one business above to see or set its targets.</Note>
+      <Section title="Your targets" blurb="Targets belong to one financial entity and never blend figures across entities.">
+        <Attention>
+          Choose one part of your finances above to unlock its targets. Financial Brain will not guess a selection or combine targets across entities.
+        </Attention>
       </Section>
     );
   }

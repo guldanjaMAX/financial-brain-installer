@@ -3,8 +3,8 @@
 //
 // WHY THIS FILE EXISTS. Every release published through v0.3.6 ships exactly 22
 // migrations. Both brains in the field are therefore at schema 22 with a
-// POPULATED database, and migrations 0023..0035 have never been applied to a
-// real one. test/migrations.test.mjs only PARSES the migration SQL and asserts
+// POPULATED database, and migrations 0023 through the current head have never
+// been applied to a real one. test/migrations.test.mjs only PARSES the migration SQL and asserts
 // that indexes and columns appear in the file text; nothing applied them to
 // rows that already exist. That was the gap.
 //
@@ -13,7 +13,8 @@
 //
 //   FIELD-HEALTHY  a v0.2.0 install whose health check passes. Schema 22, live
 //                  documents, chunks, an FTS index, financial rows, drifted
-//                  corpus_stats. It must cross 22 -> 35 without losing a row.
+//                  corpus_stats. It must cross 22 -> current head without
+//                  losing a row.
 //   FIELD-STRANDED the same schema prefix, but PAUSED for an upgrade with one
 //                  chunk queued by ordinary ingest in the seconds before the
 //                  pause landed, and a projection fence left over from an
@@ -27,7 +28,8 @@
 //  * The walk is driven by the REAL `cmdMigrate`, not a local copy of its
 //    loop, so its checksum guard, its pending filter, its writer-quiescence
 //    refusal and its install_state upsert are all under test.
-//  * Block 3 is a negative control. Every one of 0023..0035 is neutered in
+//  * Block 3 is a negative control. Every migration after the shipped schema
+//    22 prefix is neutered in
 //    turn -- its statements are swallowed while the ledger row is still
 //    written, which is exactly "the migration silently did nothing" -- and the
 //    same assertion battery must fail for each. A rehearsal that still passes
@@ -327,23 +329,57 @@ function snapshotRows(db, tables = null) {
 // lands and the pure new-table files (0023, 0024, 0025, 0027, 0030, 0031, 0032)
 // are not silently untested.
 function declarationsOf(sql) {
-  const objects = [];
+  const objects = new Map();
   const columns = [];
-  const text = sql.split("\n").filter((line) => !line.trim().startsWith("--")).join("\n");
-  const objectRe = /CREATE\s+(?:VIRTUAL\s+)?(TABLE|INDEX|TRIGGER|VIEW)\s+(?:UNIQUE\s+)?(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/gi;
-  const uniqueIndexRe = /CREATE\s+UNIQUE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/gi;
-  const alterRe = /ALTER\s+TABLE\s+([A-Za-z0-9_]+)\s+ADD\s+COLUMN\s+([A-Za-z0-9_]+)/gi;
-  for (const m of text.matchAll(objectRe)) objects.push({ kind: m[1].toLowerCase(), name: m[2] });
-  for (const m of text.matchAll(uniqueIndexRe)) objects.push({ kind: "index", name: m[1] });
-  for (const m of text.matchAll(alterRe)) columns.push({ table: m[1], column: m[2] });
-  const seen = new Set();
+  for (const statement of splitStatements(sql)) {
+    const created = statement.match(
+      /^\s*CREATE\s+(?:UNIQUE\s+)?(?:VIRTUAL\s+)?(TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/i,
+    );
+    if (created) {
+      const value = { kind: created[1].toLowerCase(), name: created[2] };
+      objects.set(`${value.kind}:${value.name}`, value);
+      continue;
+    }
+    const dropped = statement.match(
+      /^\s*DROP\s+(TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_]+)/i,
+    );
+    if (dropped) {
+      // Temporary guards are tested at the independent statement boundaries,
+      // but they are not part of the migration's final declared inventory.
+      objects.delete(`${dropped[1].toLowerCase()}:${dropped[2]}`);
+      continue;
+    }
+    const altered = statement.match(
+      /^\s*ALTER\s+TABLE\s+([A-Za-z0-9_]+)\s+ADD\s+COLUMN\s+([A-Za-z0-9_]+)/i,
+    );
+    if (altered) columns.push({ table: altered[1], column: altered[2] });
+  }
   return {
-    objects: objects.filter((o) => (seen.has(o.kind + o.name) ? false : seen.add(o.kind + o.name))),
+    objects: [...objects.values()],
     columns,
   };
 }
 
-const DECLARED = new Map(PENDING.map((m) => [m.version, declarationsOf(m.sql)]));
+const finalDeclaredObjects = new Set();
+for (const migration of PENDING) {
+  for (const statement of splitStatements(migration.sql)) {
+    const created = statement.match(
+      /^\s*CREATE\s+(?:UNIQUE\s+)?(?:VIRTUAL\s+)?(?:TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)/i,
+    );
+    if (created) finalDeclaredObjects.add(created[1]);
+    const dropped = statement.match(
+      /^\s*DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_]+)/i,
+    );
+    if (dropped) finalDeclaredObjects.delete(dropped[1]);
+  }
+}
+const DECLARED = new Map(PENDING.map((m) => {
+  const declarations = declarationsOf(m.sql);
+  return [m.version, {
+    ...declarations,
+    objects: declarations.objects.filter((object) => finalDeclaredObjects.has(object.name)),
+  }];
+}));
 
 check("every pending migration declares something this file can look for",
   [...DECLARED.values()].every((d) => d.objects.length + d.columns.length > 0),
@@ -547,7 +583,7 @@ function baselineOf(db) {
 }
 
 /* ===================================================================== 1 ==
- * FIELD-HEALTHY: a passing v0.2.0 brain crosses 22 -> 35.
+ * FIELD-HEALTHY: a passing v0.2.0 brain crosses schema 22 to the current head.
  * ======================================================================== */
 {
   const db = buildFieldBrain();
@@ -586,7 +622,7 @@ function baselineOf(db) {
   // A second run must be a no-op, because a re-run is what an operator does
   // after any interrupted upgrade.
   const again = await migrate(db);
-  check("re-running the walk applies nothing and leaves the ledger at 35",
+  check(`re-running the walk applies nothing and leaves the ledger at ${HEAD_MAX}`,
     again.applied === 0 && again.schemaVersion === HEAD_MAX &&
       db.prepare("SELECT count(*) AS n FROM schema_migrations").get().n === HEAD_MAX,
     JSON.stringify(again));
@@ -744,10 +780,10 @@ const projectionOf = (db) => probe(() => db.prepare(
 
   await migrate(db);
   const migrated = projectionOf(db);
-  // cmdMigrate's ON CONFLICT touches client_slug, schema_version and
-  // gate_version only. Widening it would reset a mid-recovery fence on every
-  // upgrade and re-create this failure by hand.
-  check("the 22 -> 35 walk leaves the stranded projection fence byte-identical",
+  // cmdMigrate's ON CONFLICT advances the independent retrieval generation in
+  // addition to client/schema/gate identity. It still leaves the Vectorize
+  // bootstrap fields untouched, preserving the mid-recovery fence.
+  check(`the 22 -> ${HEAD_MAX} walk leaves the stranded projection fence byte-identical`,
     migrated.status === before.status && migrated.epoch === before.epoch &&
       migrated.cursor === before.cursor && migrated.high_water === before.high_water &&
       migrated.protocol === before.protocol && Number(migrated.base) === Number(before.base) &&
@@ -825,18 +861,38 @@ const projectionOf = (db) => probe(() => db.prepare(
 }
 
 /* ===================================================================== 3 ==
- * NEGATIVE CONTROL. If 0023..0035 silently did nothing, this file must FAIL.
+ * NEGATIVE CONTROL. If every pending migration silently did nothing, this
+ * file must FAIL.
  * ======================================================================== */
 
 // "Did nothing" is modelled honestly: the real cmdMigrate runs, the ledger row
-// is still written and install_state still moves to 35, but the neutered file's
+// is still written and install_state still moves to the derived current head,
+// but the neutered file's
 // own statements are swallowed on the way to the database. That is exactly the
 // state a migration that ran and had no effect would leave behind, and it is
 // the state a ledger-only assertion cannot see.
+const STATEMENT_OWNERS = new Map();
+for (const migration of PENDING) {
+  for (const statement of splitStatements(migration.sql)) {
+    const text = statement.trim();
+    const owners = STATEMENT_OWNERS.get(text) || new Set();
+    owners.add(migration.version);
+    STATEMENT_OWNERS.set(text, owners);
+  }
+}
+
 function statementsOf(versions) {
   const set = new Set();
   for (const migration of PENDING.filter((m) => versions.has(m.version))) {
-    for (const statement of splitStatements(migration.sql)) set.add(statement.trim());
+    for (const statement of splitStatements(migration.sql)) {
+      const text = statement.trim();
+      const owners = STATEMENT_OWNERS.get(text);
+      // A shared idempotent guard is not uniquely owned by either migration.
+      // Swallow it only when every migration that contains it is being
+      // neutered; otherwise a single-file mutation would also alter a later
+      // migration and falsely attribute that failure to the selected file.
+      if ([...owners].every((version) => versions.has(version))) set.add(text);
+    }
   }
   return set;
 }
@@ -853,24 +909,34 @@ function statementsOf(versions) {
       seen.set(text, migration.version);
     }
   }
-  check("no statement text is shared between pending migrations, so single-migration neutering is exact",
-    collisions.length === 0, JSON.stringify(collisions));
+  const unsafeCollisions = [...STATEMENT_OWNERS.entries()]
+    .filter(([, owners]) => owners.size > 1)
+    .map(([text]) => text)
+    .filter((text) => !/^DROP\s+(?:TABLE|INDEX|TRIGGER|VIEW)\s+IF\s+EXISTS\b/i.test(text));
+  check("shared migration statements are only idempotent drop guards and single-migration neutering stays exact",
+    unsafeCollisions.length === 0, JSON.stringify({ collisions, unsafeCollisions }));
 }
 
 // Neutering a migration that a later one builds on makes the WALK itself throw
-// (0029 alters a table 0026 creates). That is a load-bearing signal too, so it
-// is recorded as a failed battery item rather than crashing the file.
+// (0029 alters a table 0026 creates). That is a load-bearing signal too. Keep
+// the read-only state battery as well: a late post-migration finalizer can fail
+// after the ledger reaches the head, and the negative control must still prove
+// that the schema itself is absent rather than treating that finalizer as the
+// only failure.
 async function walkSwallowing(swallow) {
   const db = buildFieldBrain();
   try {
     const baseline = baselineOf(db);
+    let walkError = null;
     try {
       await migrate(db, { swallow });
     } catch (error) {
-      return [{ name: "the walk itself could not complete", ok: false,
-        detail: String(error?.message || error).slice(0, 200) }];
+      walkError = { name: "the walk itself could not complete", ok: false,
+        detail: String(error?.message || error).slice(0, 200) };
     }
-    return evaluate(db, baseline);
+    const results = evaluate(db, baseline);
+    if (walkError) results.push(walkError);
+    return results;
   } finally { db.close(); }
 }
 
@@ -895,12 +961,17 @@ function statementsMatching(predicate) {
   check(`negative control: with all ${all.size} pending migrations neutered, the battery FAILS`,
     failed.length > 0,
     `${failed.length}/${results.length} failed`);
-  // The walk still reports success and the ledger still reads 35, which is the
-  // whole reason a ledger-only check is not evidence.
-  check("and it fails on real state, not on the ledger: schema_migrations still reads 35",
-    results.find((r) => r.name.includes("contiguous"))?.ok === true &&
-      results.find((r) => r.name.includes("records schema"))?.ok === true,
-    JSON.stringify(results.filter((r) => /contiguous|records schema/.test(r.name))));
+  // Older heads can still report success and advance the ledger even when all
+  // migration statements were swallowed. The current head adds a post-migration
+  // key finalizer, so a missing map table instead stops the walk before it can
+  // make that false claim. Both outcomes prove that ledger rows alone are not
+  // accepted as real state.
+  const ledgerChecks = results.filter((r) => /contiguous|records schema/.test(r.name));
+  const finalizerRefusal = results.find((r) => r.name === "the walk itself could not complete");
+  check("and it fails on real state instead of trusting the migration ledger alone",
+    (ledgerChecks.length === 2 && ledgerChecks.every((r) => r.ok)) ||
+      /owner_financial_map_key_state|source_original_retrieval_generation/.test(finalizerRefusal?.detail || ""),
+    JSON.stringify(finalizerRefusal || ledgerChecks));
 
   const silent = [];
   const howItBreaks = {};

@@ -14,7 +14,11 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { declaredUploadSourceFor } from "../brain.mjs";
+import {
+  declaredUploadSourceFor,
+  localReceiptCoverage,
+  localWalkRemovalCandidates,
+} from "../brain.mjs";
 
 /* ---------------- 1. a link must not refuse the whole walk ---------------- */
 
@@ -51,8 +55,39 @@ if (linked) {
     "and marked as a subtree skip, because its children were never enumerated and " +
       "must be shielded from counting as removals"
   );
+  assert.equal(linkSkip.adjudication, "preserve_external_subtree");
+  assert.equal(linkSkip.coverage_gap, false);
 }
 console.log("PASS  a junction is skipped without refusing the documents beside it");
+
+const adjudicated = localWalkRemovalCandidates([
+  { path: "Private Client", adjudication: "source_policy" },
+  { path: "empty.md", adjudication: "empty_content" },
+  { path: "linked", subtree: true, adjudication: "preserve_external_subtree" },
+], ["Private Client/old.md", "empty.md", "linked/old.md", "keep.md"], "/");
+assert.deepEqual(adjudicated.policy, ["Private Client/old.md"]);
+assert.deepEqual(adjudicated.intentional, ["empty.md"]);
+console.log("PASS  private and empty source truth retract stale rows while a junction preserves its subtree");
+
+const localCoverage = localReceiptCoverage({ refused: 2 }, [
+  { path: "Private Client", adjudication: "source_policy", coverage_gap: false },
+  { path: "empty.md", adjudication: "empty_content", coverage_gap: false },
+  { path: "linked", adjudication: "preserve_external_subtree", coverage_gap: false },
+  { path: "unsupported.bin", reason: "no extractor" },
+  { path: "oversized.pdf", reason: "over safe size" },
+  { path: "unreadable.txt", reason: "read failed", coverage_gap: true },
+]);
+assert.deepEqual(localCoverage, {
+  coverageGaps: 3,
+  adjudicatedSkips: 3,
+  docsRefused: 5,
+});
+assert.deepEqual(localReceiptCoverage({}, [
+  { adjudication: "source_policy", coverage_gap: false },
+  { adjudication: "empty_content", coverage_gap: false },
+  { adjudication: "preserve_external_subtree", coverage_gap: false },
+]), { coverageGaps: 0, adjudicatedSkips: 3, docsRefused: 0 });
+console.log("PASS  local receipts count only Worker refusals and unresolved coverage gaps as refused");
 
 /* ---------------- 2. the declared source wins over "upload" ---------------- */
 

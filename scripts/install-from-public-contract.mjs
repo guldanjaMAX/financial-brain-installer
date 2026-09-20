@@ -22,43 +22,56 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  buildNpmCliInvocation,
+  buildWindowsBatchInvocation,
+  buildWindowsNpmPowerShellInvocation,
+  installedBrainPath,
+  npmInstallEnvironment,
+  parsePublicInstallCommand,
+  publicInstallArgumentsFromGuide,
+  publicContractChildEnvironment,
+  resolveNpmCliPath,
+  resolveWindowsNpmCommandPath,
+  resolveWindowsPowerShellPath,
+} from "../operations/npm-cli-runtime.mjs";
+import { readSupervisedInstallContract } from "./check-install-page-version.mjs";
 
 const workdir = resolve(process.argv[2] || "./install-contract-run");
 const guideArg = process.argv.includes("--guide")
   ? process.argv[process.argv.indexOf("--guide") + 1] : "windows";
+if (!["macos", "windows"].includes(guideArg)) {
+  console.error("FAIL  --guide must be macos or windows");
+  process.exit(1);
+}
 const GUIDE = guideArg === "macos"
   ? "https://financialbrain.ai/install/agent-macos.md"
   : "https://financialbrain.ai/install/agent.md";
+const FIELD_GUIDE = guideArg === "macos" ? "MACOS-FIELD-TEST.md" : "WINDOWS-FIELD-TEST.md";
+const PUBLIC_NPM_HELPER = fileURLToPath(new URL("./invoke-public-npm-install.ps1", import.meta.url));
 
 const die = (m) => { console.error(`FAIL  ${m}`); process.exit(1); };
 const ok = (m) => console.log(`PASS  ${m}`);
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
-async function get(url, asText = false) {
-  const r = await fetch(url, { headers: { "user-agent": "brain-install-matrix", "cache-control": "no-cache" } });
-  if (!r.ok) die(`${url} returned ${r.status}`);
-  return asText ? r.text() : Buffer.from(await r.arrayBuffer());
-}
-
-const guide = await get(GUIDE, true);
-// The contract's own header block. Parsed, never assumed: a missing field is a
-// failure, because the client's agent would be reading the same absent line.
-const field = (name) => {
-  const m = guide.match(new RegExp(`^${name}:\\s*(.+)$`, "m"));
-  if (!m) die(`the public install contract has no ${name}`);
-  return m[1].trim();
-};
-const artifactUrl = field("ARTIFACT_URL");
-const artifactBytes = Number(field("ARTIFACT_BYTES"));
-const artifactSha = field("ARTIFACT_SHA256");
-const version = field("CANDIDATE_VERSION");
-const commit = field("CANDIDATE_COMMIT");
+// Use the same strict parser as the live install/update doorway checker. It
+// validates owner presence, exact platform target/status, unique fields, the
+// full commit, and a digest-derived bounded artifact URL before downloading it.
+const publicContract = await readSupervisedInstallContract({ platform: guideArg });
+const {
+  artifactBytes,
+  artifactSha256: artifactSha,
+  candidateVersion: version,
+  candidateCommit: commit,
+  artifact: zip,
+} = publicContract;
 ok(`contract read from ${GUIDE}`);
 console.log(`      version ${version}  commit ${commit.slice(0, 7)}  ${artifactBytes} bytes`);
 
-const zip = await get(artifactUrl);
+if (publicContract.guideUrl !== GUIDE) die("strict contract reader selected the wrong platform guide");
 if (zip.length !== artifactBytes) die(`ZIP is ${zip.length} bytes, contract says ${artifactBytes}`);
 ok("the published ZIP is the byte count the contract states");
 if (sha256(zip) !== artifactSha) die(`ZIP sha256 ${sha256(zip)} != contract ${artifactSha}`);
@@ -67,7 +80,11 @@ ok("the published ZIP is the sha256 the contract states");
 mkdirSync(workdir, { recursive: true });
 const zipPath = join(workdir, "kit.zip");
 writeFileSync(zipPath, zip);
-execFileSync("unzip", ["-q", "-o", zipPath, "-d", workdir], { stdio: "inherit" });
+const childEnvironment = publicContractChildEnvironment();
+execFileSync("unzip", ["-q", "-o", zipPath, "-d", workdir], {
+  stdio: "inherit",
+  env: childEnvironment,
+});
 const root = join(workdir, readdirSync(workdir).find((n) => statSync(join(workdir, n)).isDirectory()));
 ok(`extracted to ${root.replace(workdir, "<workdir>")}`);
 
@@ -89,8 +106,10 @@ ok("the packaged archive is the version the contract declares");
 // person is told to read and compare against. Checked here because this is the
 // only place that sees the PUBLISHED kit rather than the repo's idea of it.
 const human = tgz.length.toLocaleString("en-US");
+const fieldGuides = new Map();
 for (const doc of ["WINDOWS-FIELD-TEST.md", "MACOS-FIELD-TEST.md"]) {
   const text = readFileSync(join(root, doc), "utf8");
+  fieldGuides.set(doc, text);
   const stated = [...text.matchAll(/[0-9]{1,3}(?:,[0-9]{3})+/g)].map((m) => m[0]);
   const wrong = stated.filter((s) => s !== human);
   if (wrong.length) die(`${doc} states a byte count that is not this package: ${wrong.join(", ")}`);
@@ -115,17 +134,64 @@ ok("the macOS guide pins the same commit as the public contract");
 // The install itself, into a prefix that is thrown away with the runner.
 const prefix = join(workdir, "prefix");
 mkdirSync(prefix, { recursive: true });
-// npm on Windows is npm.cmd. execFileSync does not apply PATHEXT, so the bare
-// name is ENOENT there and nowhere else: this passed on three runners and failed
-// only on the one the client actually uses. Exactly the Windows-only class this
-// job exists to catch, found on its first real run, in the job itself.
-const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-execFileSync(npmCmd, ["install", "--prefix", prefix, "--no-audit", "--no-fund", tgzPath],
-  { stdio: "inherit", env: { ...process.env, npm_config_yes: "true" } });
+const selectedFieldGuide = fieldGuides.get(FIELD_GUIDE);
+const parsedInstall = parsePublicInstallCommand(selectedFieldGuide, {
+  guide: guideArg,
+  archiveName: declaredName,
+});
+const installArguments = publicInstallArgumentsFromGuide(selectedFieldGuide, {
+  guide: guideArg,
+  archiveName: declaredName,
+  prefix,
+  archive: tgzPath,
+});
+ok(`${FIELD_GUIDE} carries the exact reviewed npm install command`);
+// On Windows, prove the guide's real surface: fixed PowerShell resolves the
+// parsed npm.cmd through PATH, verifies it belongs to setup-node's runtime, and
+// enters the batch shim with array-preserved arguments. Other hosts keep the
+// direct verified npm CLI path; a macOS runner cannot manufacture Windows proof.
+const npmCli = resolveNpmCliPath();
+if (process.platform === "win32") {
+  const contractDirectory = mkdtempSync(join(workdir, "npm-command-"));
+  const contractPath = join(contractDirectory, "install.json");
+  const npmInstall = buildWindowsNpmPowerShellInvocation({
+    executable: parsedInstall.executable,
+    args: installArguments,
+    expectedCommand: resolveWindowsNpmCommandPath(),
+    contractPath,
+    helperPath: PUBLIC_NPM_HELPER,
+    powershellPath: resolveWindowsPowerShellPath(),
+  });
+  writeFileSync(contractPath, `${npmInstall.contract}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  execFileSync(npmInstall.command, npmInstall.args, {
+    cwd: workdir,
+    stdio: "inherit",
+    shell: npmInstall.shell,
+    env: npmInstallEnvironment(),
+  });
+} else {
+  const npmInstall = buildNpmCliInvocation(npmCli, installArguments);
+  execFileSync(npmInstall.command, npmInstall.args,
+    { cwd: workdir, stdio: "inherit", shell: npmInstall.shell, env: npmInstallEnvironment() });
+}
 ok("the packaged archive installs into a clean prefix");
 
-const bin = join(prefix, "node_modules", ".bin", process.platform === "win32" ? "brain.cmd" : "brain");
-const readback = execFileSync(bin, ["--version"], { encoding: "utf8" }).trim();
+const bin = installedBrainPath(prefix);
+const runBrain = (args, options) => {
+  if (process.platform !== "win32") return execFileSync(bin, args, { ...options, env: childEnvironment });
+  const command = buildWindowsBatchInvocation(
+    childEnvironment.COMSPEC || "C:\\Windows\\System32\\cmd.exe",
+    bin,
+    args,
+  );
+  return execFileSync(command.command, command.args, {
+    ...options,
+    env: childEnvironment,
+    shell: command.shell,
+    windowsVerbatimArguments: command.windowsVerbatimArguments,
+  });
+};
+const readback = runBrain(["--version"], { encoding: "utf8" }).trim();
 if (readback !== version) die(`the installed CLI reports ${readback}, the contract declares ${version}`);
 ok(`the installed CLI reports ${readback}, matching the contract`);
 
@@ -136,7 +202,7 @@ ok(`the installed CLI reports ${readback}, matching the contract`);
 // contract ci.yml's "doctor reports rather than crashing" step enforces.
 let doctorOut = "";
 try {
-  doctorOut = execFileSync(bin, ["doctor"], { encoding: "utf8", stdio: "pipe" });
+  doctorOut = runBrain(["doctor"], { encoding: "utf8", stdio: "pipe" });
 } catch (e) {
   doctorOut = `${e.stdout || ""}${e.stderr || ""}`;
 }

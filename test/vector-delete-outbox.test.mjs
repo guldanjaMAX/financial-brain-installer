@@ -15,6 +15,8 @@ import {
   acquireDrainLease,
   DRAIN_D1_QUERY_BUDGET,
   drainBatchQueryUpperBound,
+  recordSubmittedMutationChunkRemapSql,
+  recordSubmittedMutationOutboxReceiptSql,
   releaseDrainLease,
   renewDrainLease,
   replaceDocumentChunks,
@@ -72,6 +74,20 @@ function makeEnv({
     return { mutationId };
   };
   const d1Queries = { submitted: 0, maxBinds: 0 };
+  // D1 hands a write back its RETURNING rows, and derives meta.changes from a
+  // total_changes() delta that counts trigger writes too. node:sqlite's run()
+  // reports neither, so a stub built on it cannot carry the ingest finalizer's
+  // RETURNING proof. Execute RETURNING writes with all() and report the same
+  // trigger-inclusive delta D1 does; a row that does not match still comes back
+  // empty, so nothing here can manufacture a commit the database refused.
+  const write = (sql, params) => {
+    if (!/\bRETURNING\b/i.test(sql)) {
+      return { results: [], meta: { changes: Number(db.prepare(sql).run(...params).changes || 0) } };
+    }
+    const before = db.prepare("SELECT total_changes() AS n").get().n;
+    const results = db.prepare(sql).all(...params);
+    return { results, meta: { changes: db.prepare("SELECT total_changes() AS n").get().n - before } };
+  };
   const prepare = (sql) => {
     const shape = (params = []) => ({
       bind: (...next) => shape(next),
@@ -96,8 +112,7 @@ function makeEnv({
       run: async () => {
         d1Queries.submitted++;
         d1Queries.maxBinds = Math.max(d1Queries.maxBinds, params.length);
-        const result = db.prepare(sql).run(...params);
-        return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+        return { success: true, ...write(sql, params) };
       },
       _sql: sql,
       _params: params,
@@ -131,12 +146,12 @@ function makeEnv({
                 /UPDATE chunks AS c SET vector_id/.test(statement._sql)) {
               return { success: true, results: [], meta: { changes: 0 } };
             }
-            const result = db.prepare(statement._sql).run(...statement._params);
+            const result = write(statement._sql, statement._params);
             const changes = Number.isSafeInteger(acceleratedVectorIdReportedChanges) &&
                 /UPDATE chunks AS c SET vector_id/.test(statement._sql)
               ? acceleratedVectorIdReportedChanges
-              : Number(result.changes || 0);
-            return { success: true, results: [], meta: { changes } };
+              : result.meta.changes;
+            return { success: true, results: result.results, meta: { changes } };
           });
           db.exec("COMMIT");
           return results;
@@ -222,6 +237,33 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   ).run(receipt.mutationId, submittedAt);
   return receipt.mutationId;
 };
+
+/* The shipped schema must drive both set receipts from json_each into keyed
+   row lookups. A corpus-sized target scan would multiply this work by every
+   stored chunk before touching the at-most-100-row receipt. */
+{
+  const { db } = makeEnv();
+  const mapping = JSON.stringify([
+    { u: "drive:query-plan#0", v: "vector:query-plan", g: 1, o: "upsert" },
+  ]);
+  const remapPlan = db.prepare(
+    `EXPLAIN QUERY PLAN ${recordSubmittedMutationChunkRemapSql}`,
+  ).all(mapping).map((row) => row.detail);
+  const receiptPlan = db.prepare(
+    `EXPLAIN QUERY PLAN ${recordSubmittedMutationOutboxReceiptSql}`,
+  ).all(mapping, "mutation-query-plan", 1).map((row) => row.detail);
+  const combined = [...remapPlan, ...receiptPlan].join("\n");
+  check("set-based mutation receipts never scan chunks or vector_outbox",
+    !/\bSCAN (?:c|chunks|o|vector_outbox)\b/u.test(combined) &&
+      remapPlan.some((detail) => /SEARCH c USING INTEGER PRIMARY KEY/u.test(detail)) &&
+      remapPlan.some((detail) =>
+        /SEARCH o USING INDEX sqlite_autoindex_vector_outbox_1/u.test(detail)) &&
+      receiptPlan.some((detail) => /SEARCH o USING INTEGER PRIMARY KEY/u.test(detail)) &&
+      receiptPlan.some((detail) =>
+        /SEARCH target USING INDEX sqlite_autoindex_vector_outbox_1/u.test(detail)),
+    combined);
+  db.close();
+}
 
 /* Confirmation readback is provider-paged independently from the D1 drain
    batch. Recombining pages must retain exact-generation upserts, absent
@@ -454,7 +496,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   let failRemap = true;
   env.DB.batch = async (statements) => {
     if (failRemap && statements.some((statement) =>
-      /UPDATE chunks SET vector_id/.test(statement._sql || ""))) {
+      /UPDATE chunks(?: AS c)? SET vector_id/.test(statement._sql || ""))) {
       failRemap = false;
       throw new Error("synthetic durable remap failure");
     }
@@ -477,6 +519,120 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
       db.prepare("SELECT count(*) n FROM vector_outbox").get().n === 0 &&
       db.prepare("SELECT vector_id FROM chunks WHERE chunk_uid=?").get(chunkUid).vector_id.startsWith("h:"),
     JSON.stringify({ message: firstError?.message, retryable, recovered }));
+}
+
+/* A provider acceptance is not durable unless every requested row appears in
+   the exact receipt readback. One skipped target must fail the whole batch. */
+{
+  const { env, db, upserted } = makeEnv();
+  insertDocument(db, "drive:short-receipt");
+  insertChunk(db, "drive:short-receipt#0", "drive:short-receipt", 0);
+  db.prepare(
+    `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+     VALUES ('drive:short-receipt#0', 'drive:short-receipt#0', 'upsert', 103)`,
+  ).run();
+  db.exec(`CREATE TRIGGER skip_one_submission_receipt
+    BEFORE UPDATE OF submitted_mutation_id ON vector_outbox
+    WHEN NEW.chunk_uid='drive:short-receipt#0' AND NEW.submitted_mutation_id IS NOT NULL
+    BEGIN SELECT RAISE(IGNORE); END`);
+  let error = null;
+  try {
+    await drainOutbox(env, { embed: async () => [0.14] });
+  } catch (caught) {
+    error = caught;
+  }
+  const retained = db.prepare(
+    `SELECT o.submitted_mutation_id, o.attempts, s.failure_code,
+            s.next_attempt_at, s.last_attempt_at, s.quarantined_at
+       FROM vector_outbox o
+       LEFT JOIN vector_outbox_retry_state s
+         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+      WHERE o.chunk_uid='drive:short-receipt#0'`,
+  ).get();
+  let repeatedError = null;
+  try {
+    await drainOutbox(env, { embed: async () => [0.15] });
+  } catch (caught) {
+    repeatedError = caught;
+  }
+  const repeated = db.prepare(
+    `SELECT o.submitted_mutation_id, o.attempts, s.attempts AS retry_attempts,
+            s.failure_code, s.next_attempt_at, s.last_attempt_at, s.quarantined_at
+       FROM vector_outbox o
+       LEFT JOIN vector_outbox_retry_state s
+         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+      WHERE o.chunk_uid='drive:short-receipt#0'`,
+  ).get();
+  check("any short mutation receipt readback fails closed",
+    error?.code === "receipt_write_incomplete" && error?.vectorReceiptWriteIncomplete === true &&
+      /row receipts were ambiguous/u.test(error?.message || "") &&
+      retained?.submitted_mutation_id === null && retained?.attempts === 1 &&
+      retained?.failure_code === "receipt_write_incomplete" &&
+      retained?.next_attempt_at === retained?.last_attempt_at && retained?.quarantined_at === null,
+    JSON.stringify({ message: error?.message, code: error?.code, retained }));
+  check("repeated receipt shortfalls stay immediately retryable without climbing the provider ladder",
+    repeatedError?.code === "receipt_write_incomplete" && upserted.length === 2 &&
+      repeated?.submitted_mutation_id === null && repeated?.attempts === 1 &&
+      repeated?.retry_attempts === 1 && repeated?.failure_code === "receipt_write_incomplete" &&
+      repeated?.next_attempt_at === repeated?.last_attempt_at && repeated?.quarantined_at === null,
+    JSON.stringify({ message: repeatedError?.message, upserts: upserted.length, repeated }));
+}
+
+/* Delete acceptance has the same two-phase durability boundary as upsert.
+   A provider-accepted delete with a short D1 receipt must stay queued as an
+   immediately retryable receipt failure, not be mislabeled as provider loss. */
+{
+  const { env, db, deleted } = makeEnv();
+  db.prepare(
+    `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+     VALUES ('delete:short-receipt', 'vector:short-receipt', 'delete', 104)`,
+  ).run();
+  db.exec(`CREATE TRIGGER skip_one_delete_submission_receipt
+    BEFORE UPDATE OF submitted_mutation_id ON vector_outbox
+    WHEN NEW.chunk_uid='delete:short-receipt' AND NEW.submitted_mutation_id IS NOT NULL
+    BEGIN SELECT RAISE(IGNORE); END`);
+  let error = null;
+  try {
+    await drainOutbox(env, { embed: async () => [0.16] });
+  } catch (caught) {
+    error = caught;
+  }
+  const retained = db.prepare(
+    `SELECT o.submitted_mutation_id, o.attempts, s.failure_code,
+            s.next_attempt_at, s.last_attempt_at, s.quarantined_at
+       FROM vector_outbox o
+       LEFT JOIN vector_outbox_retry_state s
+         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+      WHERE o.chunk_uid='delete:short-receipt'`,
+  ).get();
+  const deletesAfterFirst = deleted.length;
+  let repeatedError = null;
+  try {
+    await drainOutbox(env, { embed: async () => [0.17] });
+  } catch (caught) {
+    repeatedError = caught;
+  }
+  const repeated = db.prepare(
+    `SELECT o.submitted_mutation_id, o.attempts, s.attempts AS retry_attempts,
+            s.failure_code, s.next_attempt_at, s.last_attempt_at, s.quarantined_at
+       FROM vector_outbox o
+       LEFT JOIN vector_outbox_retry_state s
+         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+      WHERE o.chunk_uid='delete:short-receipt'`,
+  ).get();
+  check("an accepted delete with a short receipt is classified as receipt-write incomplete",
+    error?.code === "receipt_write_incomplete" && error?.vectorReceiptWriteIncomplete === true &&
+      error?.vectorDeleteFailed === false && /row receipts were ambiguous/u.test(error?.message || "") &&
+      deletesAfterFirst === 1 && retained?.submitted_mutation_id === null && retained?.attempts === 1 &&
+      retained?.failure_code === "receipt_write_incomplete" &&
+      retained?.next_attempt_at === retained?.last_attempt_at && retained?.quarantined_at === null,
+    JSON.stringify({ message: error?.message, code: error?.code, retained, deletes: deleted.length }));
+  check("repeated delete receipt shortfalls stay immediately retryable",
+    repeatedError?.code === "receipt_write_incomplete" && deleted.length === 2 &&
+      repeated?.submitted_mutation_id === null && repeated?.attempts === 1 &&
+      repeated?.retry_attempts === 1 && repeated?.failure_code === "receipt_write_incomplete" &&
+      repeated?.next_attempt_at === repeated?.last_attempt_at && repeated?.quarantined_at === null,
+    JSON.stringify({ message: repeatedError?.message, repeated }));
 }
 
 /* A processed receipt with an old same-id generation is not success. This is
@@ -544,6 +700,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   const drained = await drainOutbox(env, {
     embed: async () => [0.7],
     maxBatches: 10,
+    batchSize: 1,
   });
   const after = await vectorReadiness(env);
   const state = db.prepare(
@@ -932,6 +1089,35 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
 /* maxBatches is only a latency preference. The internal statement budget is
    the hard stop, including legacy long-id remaps and the lease release. */
 {
+  const { env, db, d1Queries } = makeEnv({ autoProcessVectorMutations: false });
+  for (let i = 0; i < 400; i++) {
+    const uid = `lazy-delete:${String(i).padStart(4, "0")}`;
+    db.prepare(
+      `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+       VALUES (?, ?, 'delete', ?)`,
+    ).run(uid, uid, i);
+  }
+  const before = d1Queries.submitted;
+  const result = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    batchSize: 100,
+  });
+  const submittedState = db.prepare(
+    `SELECT count(*) AS n, count(DISTINCT submitted_mutation_id) AS mutations
+       FROM vector_outbox WHERE submitted_mutation_id IS NOT NULL`,
+  ).get();
+  const queries = d1Queries.submitted - before;
+  check("one lazy-confirmation invocation submits two fully reserved provider batches before waiting",
+    result.submitted === 200 && result.waiting === 200 && result.drained === 0 &&
+      submittedState.n === 200 && submittedState.mutations === 2,
+    JSON.stringify({ result, submittedState }));
+  check("the reserved in-flight window remains inside the D1 query budget",
+    queries < DRAIN_D1_QUERY_BUDGET,
+    JSON.stringify({ queries, budget: DRAIN_D1_QUERY_BUDGET }));
+}
+
+{
   const { env, db, d1Queries } = makeEnv();
   const count = 300;
   for (let i = 0; i < count; i++) {
@@ -961,18 +1147,76 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     `SELECT vector_drain_lease_owner owner, vector_drain_lease_expires_at expires
      FROM install_state WHERE id = 1`
   ).get();
-  check("the documented worst-case batch statement bound includes hashed-id remaps",
-    drainBatchQueryUpperBound(100) === 212);
-  check("a ten-batch request stops before the internal D1 query budget",
-    drained.drained === 200 && drained.remaining === 400 &&
-      // 421 before the drain proved the retry-state schema and swept its
-      // orphans; those are the two statements DRAIN_RETRY_STATE_QUERIES
-      // reserves, so the pin moves with them rather than being loosened.
-      submitted === 423 && submitted < DRAIN_D1_QUERY_BUDGET,
+  check("the batch reservation includes the per-row confirmation worst case",
+    drainBatchQueryUpperBound(100) === 312);
+  check("the default query budget stops before an unreserved third batch",
+    drained.drained === 0 && drained.submitted === 200 &&
+      drained.waiting === 200 && drained.remaining === 600 &&
+      submitted <= 8 + (2 * drainBatchQueryUpperBound(100)) &&
+      submitted < DRAIN_D1_QUERY_BUDGET,
     JSON.stringify({ drained, submitted, budget: DRAIN_D1_QUERY_BUDGET }));
-  check("query-budget exhaustion never strands the exclusive drain lease",
+  check("the bounded invocation never strands the exclusive drain lease",
     leaseState.owner === null && leaseState.expires === null,
     JSON.stringify(leaseState));
+}
+
+{
+  const { env, db, d1Queries } = makeEnv();
+  const count = 100;
+  for (let i = 0; i < count; i++) {
+    const docUid = `drive:refused-budget-${String(i).padStart(3, "0")}`;
+    const chunkUid = `${docUid}#0`;
+    insertDocument(db, docUid);
+    insertChunk(db, chunkUid, docUid, 0);
+    db.prepare(
+      `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+       VALUES (?, ?, 'upsert', ?)`,
+    ).run(chunkUid, chunkUid, i);
+  }
+  markAllOutboxSubmitted(env, db);
+  const before = d1Queries.submitted;
+  const queryBudget = 8 + drainBatchQueryUpperBound(count);
+  const result = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    batchSize: count,
+    d1QueryBudget: queryBudget,
+  });
+  const queries = d1Queries.submitted - before;
+  const retryState = db.prepare(
+    `SELECT count(*) AS n
+       FROM vector_outbox_retry_state
+      WHERE attempts=1 AND failure_code='visibility_mismatch'`,
+  ).get();
+  check("a fully refused confirmation slice stays within its reserved D1 budget",
+    result.failed === count && result.remaining === count && retryState.n === count &&
+      queries <= queryBudget && queries <= 8 + drainBatchQueryUpperBound(count),
+    JSON.stringify({ result, retryState, queries, queryBudget }));
+}
+
+{
+  const { env, db } = makeEnv({ autoProcessVectorMutations: false });
+  for (let i = 0; i < 300; i++) {
+    const uid = `small-budget-delete:${String(i).padStart(4, "0")}`;
+    db.prepare(
+      `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+       VALUES (?, ?, 'delete', ?)`,
+    ).run(uid, uid, i);
+  }
+  const result = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    batchSize: 100,
+    d1QueryBudget: 8 + drainBatchQueryUpperBound(100),
+  });
+  const submitted = db.prepare(
+    `SELECT count(*) AS n FROM vector_outbox
+      WHERE submitted_mutation_id IS NOT NULL`,
+  ).get().n;
+  check("an exact one-batch D1 query budget fires the reservation guard after one batch",
+    result.submitted === 100 && result.waiting === 100 &&
+      result.remaining === 300 && submitted === 100,
+    JSON.stringify({ result, submitted }));
 }
 
 {
@@ -1062,13 +1306,19 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
 
   // The old write lands only after the newer invocation has been refused.
   releaseOldUpsert();
-  const firstDrain = await firstDrainPromise;
+  let firstError = null;
+  try {
+    await firstDrainPromise;
+  } catch (error) {
+    firstError = error;
+  }
   const requeued = db.prepare(
     "SELECT queued_at, generation FROM vector_outbox WHERE chunk_uid = 'drive:generation-race#0'"
   ).get();
   check("the old write cannot clear its same-millisecond replacement",
-    firstDrain.remaining === 1 && requeued?.queued_at === 1234 && requeued.generation > firstGeneration,
-    JSON.stringify({ firstDrain, firstGeneration, requeued }));
+    /row receipts were ambiguous/u.test(firstError?.message || "") &&
+      requeued?.queued_at === 1234 && requeued.generation > firstGeneration,
+    JSON.stringify({ message: firstError?.message, firstGeneration, requeued }));
 
   const secondDrain = await drainFully(env, {
     embed: async (text) => [text === "current replacement text" ? 2 : 1],
@@ -1119,11 +1369,16 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     JSON.stringify({ forgotten, queuedDelete, deleted }));
 
   releaseOldWrite();
-  const oldDrain = await oldDrainPromise;
+  let oldDrainError = null;
+  try {
+    await oldDrainPromise;
+  } catch (error) {
+    oldDrainError = error;
+  }
   check("an old Vectorize write cannot acknowledge the newer forget generation",
-    upserted.length === 1 && oldDrain.remaining === 1 &&
+    upserted.length === 1 && /row receipts were ambiguous/u.test(oldDrainError?.message || "") &&
       db.prepare("SELECT op FROM vector_outbox WHERE chunk_uid = 'drive:forget-overlap#0'").get()?.op === "delete",
-    JSON.stringify({ oldDrain, upserted: upserted.length }));
+    JSON.stringify({ message: oldDrainError?.message, upserted: upserted.length }));
 
   const cleanup = await drainFully(env, { embed: async () => [2] });
   check("the next exclusive drain physically removes the stale landed vector",
