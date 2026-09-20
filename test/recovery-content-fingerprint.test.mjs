@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { skipSymlinkTest } from "./helpers/symlink-probe.mjs";
 
 import {
   RecoveryContentFingerprintError,
@@ -127,11 +128,10 @@ test("capture refuses a pre-existing output before transport and supports fixed 
   assert.ok(prefix.every((byte) => byte === 0));
 });
 
-test("symlink, hard-link, and non-private exports fail closed", (t) => {
+test("hard-link and non-private exports fail closed", (t) => {
   const root = fixture(t);
   const direct = join(root, "direct.sql");
   const alias = join(root, "alias.sql");
-  const symlink = join(root, "symlink.sql");
   writeFileSync(direct, "synthetic\n", { mode: 0o600 });
   linkSync(direct, alias);
   assert.throws(
@@ -140,11 +140,6 @@ test("symlink, hard-link, and non-private exports fail closed", (t) => {
       error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
   );
   unlinkSync(alias);
-  symlinkSync(direct, symlink);
-  assert.throws(
-    () => hashNormalizedRecoveryDataExport(Buffer.from("prefix"), symlink, 1024),
-    (error) => error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
-  );
   if (process.platform !== "win32") {
     mkdirSync(join(root, "private"), { mode: 0o700 });
     chmodSync(direct, 0o644);
@@ -153,4 +148,17 @@ test("symlink, hard-link, and non-private exports fail closed", (t) => {
       (error) => error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
     );
   }
+});
+
+test("symlink export fails closed", (t) => {
+  if (skipSymlinkTest(t)) return;
+  const root = fixture(t);
+  const direct = join(root, "direct.sql");
+  const symlink = join(root, "symlink.sql");
+  writeFileSync(direct, "synthetic\n", { mode: 0o600 });
+  symlinkSync(direct, symlink);
+  assert.throws(
+    () => hashNormalizedRecoveryDataExport(Buffer.from("prefix"), symlink, 1024),
+    (error) => error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
+  );
 });

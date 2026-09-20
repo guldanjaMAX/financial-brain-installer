@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { skipSymlinkTest } from "./helpers/symlink-probe.mjs";
 
 import {
   UPDATE_PREVIEW_LIMITS,
@@ -140,6 +141,7 @@ function mockWindowsNodeShims(target = MOCK_BIN_TARGET) {
 
 function bundledBinFixture(t, platform) {
   const temporary = nativeRealpath(mkdtempSync(join(nativeRealpath(tmpdir()), "brain-shim-fixture-")));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
   const root = join(temporary, "runtime");
   const dependencyRoot = join(root, "node_modules", "@scope", "tool");
   const binDirectory = join(root, "node_modules", ".bin");
@@ -165,7 +167,6 @@ function bundledBinFixture(t, platform) {
     writeFileSync(join(binDirectory, "tool.cmd"), shims.cmd);
     writeFileSync(join(binDirectory, "tool.ps1"), shims.powershell);
   }
-  t.after(() => rmSync(temporary, { recursive: true, force: true }));
   const allowlist = [
     "package.json",
     "node_modules/@scope/tool/package.json",
@@ -639,6 +640,7 @@ test("mocked Windows generated shim contract refuses drift, omission, links, and
     );
   });
   await t.test("linked plain shim", (t) => {
+    if (skipSymlinkTest(t)) return;
     const fixture = bundledBinFixture(t, "win32");
     rmSync(join(fixture.binDirectory, "tool"));
     symlinkSync("../@scope/tool/bin/tool.mjs", join(fixture.binDirectory, "tool"));
@@ -759,6 +761,7 @@ test("runtime platform selector is closed", (t) => {
 });
 
 test("generated shim contract is rebuilt and rechecked on the second complete pass", (t) => {
+  if (skipSymlinkTest(t)) return;
   const fixture = bundledBinFixture(t, "posix");
   assert.throws(
     () => verifyUpdateRuntimePayload({
@@ -777,6 +780,7 @@ test("generated shim contract is rebuilt and rechecked on the second complete pa
 
 test("generated shim metadata and count bounds fail closed", async (t) => {
   await t.test("undeclared generated entry is not inferred", (t) => {
+    if (skipSymlinkTest(t)) return;
     const fixture = bundledBinFixture(t, "posix");
     const dependencyManifest = join(
       fixture.root, "node_modules", "@scope", "tool", "package.json",
@@ -797,6 +801,7 @@ test("generated shim metadata and count bounds fail closed", async (t) => {
     );
   });
   await t.test("more generated declarations than the fixed bound", (t) => {
+    if (skipSymlinkTest(t)) return;
     const fixture = bundledBinFixture(t, "posix");
     const dependencyManifest = join(
       fixture.root, "node_modules", "@scope", "tool", "package.json",
@@ -852,6 +857,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
       expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"));
   });
   await t.test("symlink", (t) => {
+    if (skipSymlinkTest(t)) return;
     const fixture = runtimeFixture(t);
     rmSync(join(fixture.root, "empty.txt"));
     symlinkSync("brain.mjs", join(fixture.root, "empty.txt"));
@@ -866,6 +872,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
       expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"));
   });
   await t.test("symlinked root", (t) => {
+    if (skipSymlinkTest(t)) return;
     const fixture = runtimeFixture(t);
     const linkedRoot = join(dirname(fixture.root), "linked-runtime");
     symlinkSync(fixture.root, linkedRoot, "dir");

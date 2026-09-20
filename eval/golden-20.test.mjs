@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { skipSymlinkTest } from "../test/helpers/symlink-probe.mjs";
 
 import {
   GOLDEN_20_PLAN, GOLDEN_20_TARGET, remainingPlan, runGolden20Session,
@@ -200,7 +201,8 @@ test("a live refusal check failure never aborts the session", async () => {
   assert.equal(summary.complete, true);
 });
 
-test("writeGoldenPrivate refuses a symlinked destination", () => {
+test("writeGoldenPrivate refuses a symlinked destination", (t) => {
+  if (skipSymlinkTest(t)) return;
   const target = join(sandbox, "real.json");
   writeFileSync(target, "{}\n");
   const link = join(sandbox, "link.golden.json");

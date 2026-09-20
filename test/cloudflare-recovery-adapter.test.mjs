@@ -137,6 +137,7 @@ import { ZOOM_CREDENTIAL_ENV } from "../connectors/zoom.mjs";
 import Worker from "../worker/src/index.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET, encryptAccessReference } from "../worker/src/lib/bank-feed.js";
 import { resolveNpmCacheContentRoot } from "../scripts/field-prepare.mjs";
+import { printSymlinkSkip } from "./helpers/symlink-probe.mjs";
 import {
   createTestDisposableRecoveryK0Capability,
 } from "./helpers/disposable-recovery-k0-capability.mjs";
@@ -7593,14 +7594,16 @@ try {
     (error) => error.code === "RECOVERY_TARGET_NOT_DISPOSABLE",
   );
 
-  const unsafeWrapper = join(sandbox, "unsafe-wrapper-link");
-  symlinkSync(wrapperPath, unsafeWrapper);
-  assert.throws(
-    () => previewCloudflareRecoveryFieldGate({ ...baseConfig, wranglerWrapperPath: unsafeWrapper }, {
-      platform: "darwin",
-    }),
-    (error) => error.code === "RECOVERY_WRANGLER_WRAPPER_UNSAFE",
-  );
+  if (!printSymlinkSkip("recovery field gate rejects a symlinked Wrangler wrapper")) {
+    const unsafeWrapper = join(sandbox, "unsafe-wrapper-link");
+    symlinkSync(wrapperPath, unsafeWrapper);
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate({ ...baseConfig, wranglerWrapperPath: unsafeWrapper }, {
+        platform: "darwin",
+      }),
+      (error) => error.code === "RECOVERY_WRANGLER_WRAPPER_UNSAFE",
+    );
+  }
 
   if (process.platform !== "win32" && existsSync("/usr/bin/sqlite3")) {
     const localArtifact = join(sandbox, ".brain-recovery-local-verifier.sql");

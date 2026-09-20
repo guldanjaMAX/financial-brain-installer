@@ -8,6 +8,7 @@ import {
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { printSymlinkSkip } from "./helpers/symlink-probe.mjs";
 import {
   PROVIDER_LOOPBACK_BIND_ADDRESS,
   ProviderOAuthError,
@@ -350,13 +351,15 @@ if (process.platform !== "win32") {
     const linkedHome = join(folder, "linked");
     mkdirSync(join(realHome, ".brain"), { recursive: true, mode: 0o700 });
     mkdirSync(linkedHome, { mode: 0o700 });
-    symlinkSync(join(realHome, ".brain"), join(linkedHome, ".brain"));
-    assert.throws(
-      () => providerRefreshLockPath("quickbooks", {
-        backend: "file", platform: process.platform, home: linkedHome,
-      }),
-      (error) => error instanceof ProviderOAuthError && error.code === "credential_lock_unsafe",
-    );
+    if (!printSymlinkSkip("QuickBooks lock root rejects a symlink")) {
+      symlinkSync(join(realHome, ".brain"), join(linkedHome, ".brain"));
+      assert.throws(
+        () => providerRefreshLockPath("quickbooks", {
+          backend: "file", platform: process.platform, home: linkedHome,
+        }),
+        (error) => error instanceof ProviderOAuthError && error.code === "credential_lock_unsafe",
+      );
+    }
 
     const ownerHome = join(folder, "owner");
     mkdirSync(join(ownerHome, ".brain"), { recursive: true, mode: 0o700 });
@@ -369,7 +372,7 @@ if (process.platform !== "win32") {
       }),
       (error) => error instanceof ProviderOAuthError && error.code === "credential_lock_unsafe",
     );
-    check("QuickBooks lock roots reject permissive mode, symlink, and wrong-owner boundaries", true);
+    check("QuickBooks lock roots reject permissive mode and wrong-owner boundaries", true);
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }

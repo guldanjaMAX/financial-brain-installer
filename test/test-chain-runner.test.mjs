@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -21,6 +23,7 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const FIXTURE = "test/fixtures/test-chain-runner";
 const LEGACY_CHAIN_SHA256 = "5010400357220154be0d3b9bef514ca0cdaa61099ed46347f33ec239a4a52493";
 const quietLogger = { error() {} };
+const quietOutput = { stdout: { write() {} }, stderr: { write() {} } };
 const command = (name) => `node ${FIXTURE}/${name}.mjs`;
 const sandbox = mkdtempSync(join(tmpdir(), "brain-test-chain-runner-"));
 const logPath = join(sandbox, "order.log");
@@ -56,11 +59,11 @@ try {
   }
 
   resetLog();
-  const ordered = runTestCommands({
+  const ordered = await runTestCommands({
     commands: [command("first"), command("second")],
     cwd: ROOT,
     env,
-    stdio: "ignore",
+    output: quietOutput,
     logger: quietLogger,
   });
   assert.equal(ordered.ok, true);
@@ -68,11 +71,11 @@ try {
   assert.deepEqual(readOrder(), ["first", "second"]);
 
   resetLog();
-  const failed = runTestCommands({
+  const failed = await runTestCommands({
     commands: [command("first"), command("fail-seven"), command("never")],
     cwd: ROOT,
     env,
-    stdio: "ignore",
+    output: quietOutput,
     logger: quietLogger,
   });
   assert.equal(failed.ok, false);
@@ -84,12 +87,12 @@ try {
 
   resetLog();
   const continuedMessages = [];
-  const continued = runTestCommands({
+  const continued = await runTestCommands({
     commands: [command("fail-seven"), command("signal-term"), command("second")],
     continueOnFailure: true,
     cwd: ROOT,
     env,
-    stdio: "ignore",
+    output: quietOutput,
     logger: { error(message) { continuedMessages.push(message); } },
   });
   assert.equal(continued.ok, false);
@@ -115,11 +118,11 @@ try {
   );
 
   resetLog();
-  const signaled = runTestCommands({
+  const signaled = await runTestCommands({
     commands: [command("signal-term"), command("never")],
     cwd: ROOT,
     env,
-    stdio: "ignore",
+    output: quietOutput,
     logger: quietLogger,
   });
   assert.equal(signaled.ok, false);
@@ -145,6 +148,27 @@ try {
   assert.match(output.stderr, /test-chain-runner second stderr/);
   assert.deepEqual(readOrder(), ["first", "second"]);
 
+  resetLog();
+  const streamedOutput = [];
+  const streamed = await runTestCommands({
+    commands: [command("first"), command("skip-reason"), command("fail-seven"), command("second")],
+    continueOnFailure: true,
+    cwd: ROOT,
+    env,
+    output: {
+      stdout: { write(chunk) { streamedOutput.push(String(chunk)); } },
+      stderr: { write(chunk) { streamedOutput.push(String(chunk)); } },
+    },
+    logger: quietLogger,
+  });
+  assert.equal(streamed.attempted, 4);
+  assert.equal(streamed.failures.length, 1);
+  assert.equal(streamed.failures[0].code, 7);
+  assert.equal(streamed.symlinkSkips, 1, "the CLI runner must count the actual child skip line");
+  assert.deepEqual(readOrder(), ["first", "skip-reason", "fail-seven", "second"]);
+  assert.match(streamedOutput.join(""), /test-chain-runner first stdout/);
+  assert.match(streamedOutput.join(""), /host cannot create file symlinks \(SeCreateSymbolicLinkPrivilege\); assertions did not run/);
+
   assert.deepEqual(parseRunnerOptions([]), { continueOnFailure: false });
   assert.deepEqual(parseRunnerOptions(["--continue-on-failure"]), { continueOnFailure: true });
   for (const args of [["--unknown"], ["--continue-on-failure", "--continue-on-failure"], ["positional"]]) {
@@ -165,15 +189,24 @@ try {
   const syntheticNpmExecPath = join(ROOT, "test", "fixtures", "synthetic-npm-cli.js");
   const inheritedEnv = { TEST_CHAIN_SENTINEL: "inherited" };
   let npmInvocation;
-  const nestedNpm = runTestCommands({
+  const nestedNpm = await runTestCommands({
     commands: ["npm run test:eval"],
     cwd: ROOT,
     env: inheritedEnv,
     npmExecPath: syntheticNpmExecPath,
-    spawnSyncImpl(executable, args, options) {
+    spawnImpl(executable, args, options) {
       npmInvocation = { executable, args, options };
-      return { status: 0, signal: null, error: null };
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("close", 0, null);
+      });
+      return child;
     },
+    output: quietOutput,
     logger: quietLogger,
   });
   assert.equal(nestedNpm.ok, true);
@@ -181,17 +214,23 @@ try {
   assert.deepEqual(npmInvocation.args, [syntheticNpmExecPath, "run", "test:eval"]);
   assert.equal(npmInvocation.options.cwd, ROOT);
   assert.equal(npmInvocation.options.env, inheritedEnv);
-  assert.equal(npmInvocation.options.stdio, "inherit");
+  assert.deepEqual(npmInvocation.options.stdio, ["inherit", "pipe", "pipe"]);
   assert.equal(npmInvocation.options.shell, false);
-  assert.throws(
-    () => runTestCommands({
+  await assert.rejects(
+    runTestCommands({
       commands: ["npm run test:eval"],
       npmExecPath: "",
-      spawnSyncImpl() { throw new Error("must not spawn"); },
+      spawnImpl() { throw new Error("must not spawn"); },
       logger: quietLogger,
     }),
     /npm_execpath is required/,
   );
+
+  // Pin the CLI entry point to the same exported function exercised above.
+  const runnerSource = readFileSync(join(ROOT, "scripts", "run-test-chain.mjs"), "utf8");
+  assert.match(runnerSource,
+    /async function runFromCli\(\)\s*\{\s*try\s*\{\s*const options = parseRunnerOptions\(process\.argv\.slice\(2\)\);\s*const result = await runTestCommands\(/u,
+    "npm test must call the exported runner that the counting test exercises");
 
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
   assert.equal(pkg.scripts.test, "node scripts/run-test-chain.mjs");

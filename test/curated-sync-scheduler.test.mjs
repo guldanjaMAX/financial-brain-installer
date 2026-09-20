@@ -22,6 +22,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { printSymlinkSkip } from "./helpers/symlink-probe.mjs";
 
 import {
   assertInheritedCuratedSchedulerLock,
@@ -642,21 +643,22 @@ try {
   const lockTarget = join(sandbox, "must-not-be-changed.txt");
   writeFileSync(lockTarget, "safe\n", { mode: 0o600 });
   unlinkSync(plan.lockPath);
-  symlinkSync(lockTarget, plan.lockPath);
-  let unsafeSpawned = 0;
-  assert.throws(
-    () => runScheduledCuratedSync(planPath, {
-      ...common,
-      expectedConfigHash: plan.configHash,
-      spawn: () => { unsafeSpawned++; return { status: 0 }; },
-      rotateLogs: () => {},
-    }),
-    /lock is not a private regular file/,
-  );
-  assert.equal(unsafeSpawned, 0);
-  assert.equal(readFileSync(lockTarget, "utf8"), "safe\n");
-
-  unlinkSync(plan.lockPath);
+  if (!printSymlinkSkip("curated sync rejects a symlinked lock")) {
+    symlinkSync(lockTarget, plan.lockPath);
+    let unsafeSpawned = 0;
+    assert.throws(
+      () => runScheduledCuratedSync(planPath, {
+        ...common,
+        expectedConfigHash: plan.configHash,
+        spawn: () => { unsafeSpawned++; return { status: 0 }; },
+        rotateLogs: () => {},
+      }),
+      /lock is not a private regular file/,
+    );
+    assert.equal(unsafeSpawned, 0);
+    assert.equal(readFileSync(lockTarget, "utf8"), "safe\n");
+    unlinkSync(plan.lockPath);
+  }
   linkSync(lockTarget, plan.lockPath);
   let hardLinkSpawned = 0;
   assert.throws(
@@ -672,7 +674,7 @@ try {
   assert.equal(readFileSync(lockTarget, "utf8"), "safe\n");
   unlinkSync(plan.lockPath);
 
-  if (process.platform === "darwin") {
+  if (process.platform === "darwin" && !printSymlinkSkip("curated scheduler retains an opened lock across a symlink swap")) {
     // Replace the checked path after opening but before lockf. The native lock
     // must stay on the inherited descriptor and never follow this new link.
     let originalLockInode;

@@ -5,6 +5,7 @@ import { extractPdf, pdfPassIsolated } from "../ingest/formats.mjs";
 import { linkSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, readdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { printSymlinkSkip } from "./helpers/symlink-probe.mjs";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 240))); if (!c) fail++; };
@@ -113,11 +114,13 @@ const one = (rel) => walk(root, {}).files.find((f) => f.rel.split(/[\\/]/).join(
   const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-outside-")));
   try {
     writeFileSync(join(outsideRoot, "outside.txt"), "outside");
-    symlinkSync(join(outsideRoot, "outside.txt"), join(exactRoot, "first.txt"));
-    let linked = false;
-    try { resolveExactLocalFile(exactRoot, { relativeLocator: "first.txt" }); }
-    catch (error) { linked = ["LOCAL_FILE_NOT_REGULAR", "LOCAL_FILE_LINK_REFUSED"].includes(error?.code); }
-    check("exact-file pilot refuses a linked target before reading it", linked);
+    if (!printSymlinkSkip("exact-file pilot refuses a linked target before reading it")) {
+      symlinkSync(join(outsideRoot, "outside.txt"), join(exactRoot, "first.txt"));
+      let linked = false;
+      try { resolveExactLocalFile(exactRoot, { relativeLocator: "first.txt" }); }
+      catch (error) { linked = ["LOCAL_FILE_NOT_REGULAR", "LOCAL_FILE_LINK_REFUSED"].includes(error?.code); }
+      check("exact-file pilot refuses a linked target before reading it", linked);
+    }
   } finally {
     rmSync(exactRoot, { recursive: true, force: true });
     rmSync(outsideRoot, { recursive: true, force: true });

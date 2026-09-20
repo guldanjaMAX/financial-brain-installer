@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { skipSymlinkTest } from "./helpers/symlink-probe.mjs";
 
 import {
   cmdMachineContinuity,
@@ -455,7 +456,8 @@ test("CLI requires the explicit read-only JSON shape before inspecting anything"
   assert.equal(remoteCalls, 0);
 });
 
-test("an npm-style global symlink runs the current package CLI without writing locally", async () => {
+test("an npm-style global symlink runs the current package CLI without writing locally", async (t) => {
+  if (skipSymlinkTest(t)) return;
   const sandbox = mkdtempSync(join(tmpdir(), "brain-machine-wrapper-"));
   try {
     const manifestPath = join(sandbox, "brain.manifest.json");

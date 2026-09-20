@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -476,46 +476,74 @@ function failureLabel(failure) {
   return `exit ${failure.code}`;
 }
 
-export function runTestCommands({
+const SYMLINK_SKIP_REASON = "host cannot create file symlinks (SeCreateSymbolicLinkPrivilege)";
+
+function countSymlinkSkips(output) {
+  return String(output ?? "").split(/\r?\n/).filter((line) =>
+    line.includes(SYMLINK_SKIP_REASON)
+    && line.includes("assertions did not run")
+  ).length;
+}
+
+function runStreamingChild(invocation, { cwd, env, output, spawnImpl }) {
+  return new Promise((complete) => {
+    let error = null;
+    let symlinkSkips = 0;
+    const child = spawnImpl(invocation.executable, invocation.args, {
+      cwd, env, stdio: ["inherit", "pipe", "pipe"], shell: false, windowsHide: true,
+    });
+    for (const [source, destination] of [
+      [child.stdout, output.stdout], [child.stderr, output.stderr],
+    ]) {
+      let pending = "";
+      source.on("data", (chunk) => {
+        const data = chunk.toString("utf8");
+        destination.write(data);
+        pending += data;
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop();
+        symlinkSkips += countSymlinkSkips(lines.join("\n"));
+      });
+      source.on("end", () => { symlinkSkips += countSymlinkSkips(pending); });
+    }
+    child.once("error", (caught) => { error = caught; });
+    child.once("close", (status, signal) => complete({ status, signal, error, symlinkSkips }));
+  });
+}
+
+export async function runTestCommands({
   commands = TEST_COMMANDS,
   continueOnFailure = false,
   cwd = ROOT,
   env = process.env,
   nodeExecutable = process.execPath,
   npmExecPath = process.env.npm_execpath,
-  spawnSyncImpl = spawnSync,
-  stdio = "inherit",
+  spawnImpl = spawn,
+  output = { stdout: process.stdout, stderr: process.stderr },
   logger = console,
 } = {}) {
   if (!Array.isArray(commands) || commands.length === 0) {
     throw new TypeError("the test command graph must be a nonempty array");
   }
-
   const failures = [];
   let attempted = 0;
+  let symlinkSkips = 0;
   for (const [index, command] of commands.entries()) {
-    const parsed = parseTestCommand(command);
-    const invocation = invocationFor(parsed, { nodeExecutable, npmExecPath });
-    const child = spawnSyncImpl(invocation.executable, invocation.args, {
-      cwd,
-      env,
-      stdio,
-      shell: false,
-      windowsHide: true,
-    });
+    const invocation = invocationFor(parseTestCommand(command), { nodeExecutable, npmExecPath });
+    const child = await runStreamingChild(invocation, { cwd, env, output, spawnImpl });
     attempted += 1;
+    symlinkSkips += child.symlinkSkips;
     const failure = failedExecution(command, index, child);
     if (!failure) continue;
-
     failures.push(failure);
     logger.error(`test ${index + 1}/${commands.length} failed (${failureLabel(failure)}): ${command}`);
     if (!continueOnFailure) break;
   }
-
   return Object.freeze({
     ok: failures.length === 0,
     attempted,
     total: commands.length,
+    symlinkSkips,
     failures: Object.freeze(failures),
   });
 }
@@ -542,13 +570,14 @@ export function isolatedTestEnvironment(env = process.env) {
   return Object.freeze({ ...env, BRAIN_NO_WRANGLER_LOGIN: "1" });
 }
 
-function runFromCli() {
+async function runFromCli() {
   try {
     const options = parseRunnerOptions(process.argv.slice(2));
-    const result = runTestCommands({
+    const result = await runTestCommands({
       ...options,
       env: isolatedTestEnvironment(),
     });
+    console.log(`skipped by reason: ${SYMLINK_SKIP_REASON}: ${result.symlinkSkips}`);
     if (result.ok) {
       console.log(`test chain complete: ${result.attempted}/${result.total} commands passed`);
       return;
