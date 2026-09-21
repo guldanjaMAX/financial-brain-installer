@@ -44,7 +44,8 @@ No untrusted field value enters those five fixed diagnostics. The guide parser's
 separate malformed-field and duplicate-field diagnostics may name a
 page-controlled field key whose characters are restricted to `[A-Z][A-Z0-9_]*`
 but whose length has no independent bound within the 200,000-character guide
-limit.
+limit. Every operational validator caller must state its platform; the
+validator has no implicit Windows platform default.
 Setup-page URL parsing is caught and translated to the fixed
 `invalid supervised setup URL` refusal before URL policy validation.
 
@@ -59,6 +60,7 @@ cross-link requirement.
   without disclosing its value.
 - The Windows guide is rejected as a macOS contract and the macOS guide is
   rejected as a Windows contract with a `TARGET` diagnostic.
+- Omitting the validator platform is rejected as an unsupported caller platform.
 - A malformed setup page no longer escapes as a raw URL parser exception.
 - Cross-link and update-contract ownership remain unresolved rather than being
   silently decided by a release-unblocking change.
@@ -76,26 +78,45 @@ dump the parsed field map. The separate malformed-URL fixture proves that a
 present malformed setup-page value is not echoed.
 
 The test guard recursively inspects own property names and own data-property
-values, plus message, stack, cause, input, code, raw bytes from `ArrayBuffer`
-views, and element-wise character-code representations for every numeric and
-bigint typed-array constructor exercised by the fixture table, including a
-cross-realm `Uint16Array`. It also inspects `util.inspect` output and fails closed
-when inspection throws. `DataView` has no element-width sequence and is inspected
-only as raw bytes. This does not claim to detect values exposed only through an
-inherited `toString` or an otherwise-unselected own accessor. The harness also
-recognizes a 5,000-character uppercase-and-underscore marker in both key-bearing
-parser diagnostics. Those diagnostics intentionally disclose the page-controlled
-field name and remain outside the five value-free field diagnostics; field-name
+values, plus message, stack, cause, input, code, raw bytes from values for which
+`ArrayBuffer.isView` is true, and element-wise character-code representations
+for every numeric and bigint typed-array constructor exercised by the fixture
+table. The fixtures include a `DataView`, whose raw bytes are checked but which
+has no element sequence, and a cross-realm `Uint16Array`, whose raw bytes and
+elements are checked through realm-agnostic view detection. A directly supplied
+`ArrayBuffer` is decoded only when it belongs to this realm. A cross-realm
+`ArrayBuffer` object is not decoded and remains outside the proved surface. The
+guard also inspects `util.inspect` output and fails closed when inspection
+throws. This does not claim to detect values exposed only through an inherited
+`toString` or an otherwise-unselected own accessor. The harness also recognizes
+a 5,000-character uppercase-and-underscore marker in both key-bearing parser
+diagnostics. Those diagnostics intentionally disclose the page-controlled field
+name and remain outside the five value-free field diagnostics; field-name
 characters are restricted to `[A-Z][A-Z0-9_]*`, with no independent length bound
 inside the guide-size limit.
 
 The Windows and macOS supervised-guide resources have one operational selector:
-the module-local platform table. Validation, the bounded contract reader, and
-the release-health check's fixed Windows guide fetch all use that table. Tests
-exercise both bounded-reader fetch paths, bind the release-health fetch to the
-same Windows entry, and tie each returned guide URL to the URL actually passed
-to the reader. A separate dependency-free module carries literal expected URLs;
-it is an independent oracle, not another resource selector.
+the module-local platform table, which owns both guide URL literals. The general
+`ENDPOINTS` object has no install-guide property, so release health cannot spell
+a parallel direct guide selection through that object. Validation, the bounded
+contract reader, and the release-health check's fixed Windows guide fetch all
+use the platform table. Every operational validator call states its platform;
+a negative test proves omission is rejected. Tests exercise both bounded-reader
+fetch paths, assert the install-guide properties remain
+absent from `ENDPOINTS`, bind the release-health fetch to the same Windows entry,
+and tie each returned guide URL to the URL actually passed to the reader.
+
+The only independently pinned endpoint values in this decision are the Windows
+and macOS supervised-install guide URLs. The manifest, update-guide, and
+latest-release values in `ENDPOINTS` are operational constants exercised by the
+checker, but the tests derive those request destinations from the same constants;
+this suite does not independently pin them and this decision does not claim
+protection against repointing them. A separate module with no static or dynamic
+imports carries the two literal expected guide URLs. A source regression test
+enforces that import boundary, while direct behavior tests require exact
+per-platform equality and reject the other platform's guide URL, a same-path
+different origin, a different scheme, a same-origin wrong path, and URL suffixes.
+The oracle is an independent pin, not another resource selector.
 
 The public install runner first asks the bounded reader to download and validate
 both the guide and its artifact. It then compares the returned fetched-guide URL
@@ -103,8 +124,12 @@ with that independent oracle before creating the work directory, extracting the
 archive, installing the package, or executing its CLI. A mismatch therefore
 prevents extraction, installation, and execution. The comparison semantics are
 tested directly through the oracle module; a narrow source assertion proves the
-top-level runner invokes it in that sequence. No decision or proof relies on
-whether the module-local platform table is frozen.
+top-level runner invokes it in that sequence. A no-network child-process fixture
+runs the actual runner with a wrong-platform guide and synthetic zero-byte
+artifact, then proves the runner emits the fixed mismatch refusal without
+creating its work directory or invoking a command. Changing only that mismatch
+branch from `die(...)` to `ok(...)` therefore fails the test. No decision or
+proof relies on whether the module-local platform table is frozen.
 
 Commit `f9e7aaf` introduced `Object.hasOwn` and its regression cases, changing
 prototype property names from the misleading `TARGET` failure to the

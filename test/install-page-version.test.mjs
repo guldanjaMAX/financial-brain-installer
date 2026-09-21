@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inspect } from 'node:util';
 import { runInNewContext } from 'node:vm';
 import {
@@ -22,6 +27,8 @@ import {
   createRuntimeIdentityReceipt,
   runtimeIdentityReceiptBytes,
 } from '../scripts/runtime-identity-receipt.mjs';
+const WINDOWS_INSTALL_GUIDE_URL = expectedSupervisedGuideUrl('windows');
+const MACOS_INSTALL_GUIDE_URL = expectedSupervisedGuideUrl('macos');
 const bytes = Buffer.from('synthetic reviewed package fixture\n');
 const sha = createHash('sha256').update(bytes).digest('hex');
 const runtimePayloadSha = 'c'.repeat(64);
@@ -167,11 +174,12 @@ function assertGuardFailure(run, reason, message) {
 }
 
 test('supervised install contract version 2 is the one accepted contract', () => {
-  assert.equal(validateSupervisedInstallContract(installGuide).candidateCommit, commit);
+  assert.equal(validateSupervisedInstallContract(installGuide, { platform: 'windows' }).candidateCommit, commit);
   for (const version of ['1', '3']) {
     assertMessage(
       () => validateSupervisedInstallContract(
         installGuide.replace('AGENT_INSTALL_CONTRACT_VERSION: 2', `AGENT_INSTALL_CONTRACT_VERSION: ${version}`),
+        { platform: 'windows' },
       ),
       'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION',
     );
@@ -206,6 +214,13 @@ test('the exact-message and surface guards reject a collapsed diagnostic or leak
       /private-untrusted-value/,
     ),
     'unsafe-error-surface',
+  );
+});
+
+test('supervised install validation requires the caller to state its platform', () => {
+  assertMessage(
+    () => validateSupervisedInstallContract(installGuide),
+    'unsupported supervised install platform',
   );
 });
 
@@ -265,6 +280,14 @@ test('the leak guard inspects covered error surfaces and runner rendering', () =
     'unsafe-error-surface',
     'cross-realm Uint16Array',
   );
+  const dataViewBytes = Uint8Array.from(marker, (character) => character.charCodeAt(0));
+  const dataView = new Error(message);
+  dataView.payload = new DataView(dataViewBytes.buffer, dataViewBytes.byteOffset, dataViewBytes.byteLength);
+  assertGuardFailure(
+    () => assertMessage(() => { throw dataView; }, message, new RegExp(marker)),
+    'unsafe-error-surface',
+    'DataView raw bytes',
+  );
 });
 
 test('the leak guard fails closed when an error surface cannot be inspected', () => {
@@ -287,10 +310,23 @@ test('the leak guard fails closed when an error surface cannot be inspected', ()
 test('the supplied published field lines validate unchanged on their own platforms', () => {
   const windows = validateSupervisedInstallContract(publishedWindowsFieldLines, { platform: 'windows' });
   const macos = validateSupervisedInstallContract(publishedMacosFieldLines, { platform: 'macos' });
-  assert.equal(windows.guideUrl, ENDPOINTS.installGuide);
-  assert.equal(macos.guideUrl, ENDPOINTS.installGuideMacos);
+  assert.equal(windows.guideUrl, WINDOWS_INSTALL_GUIDE_URL);
+  assert.equal(macos.guideUrl, MACOS_INSTALL_GUIDE_URL);
   assert.equal(windows.candidateVersion, '0.4.6');
   assert.equal(macos.candidateVersion, '0.4.6');
+});
+
+test('install guide URLs exist only in the supervised platform selector', () => {
+  assert.equal(Object.hasOwn(ENDPOINTS, 'installGuide'), false);
+  assert.equal(Object.hasOwn(ENDPOINTS, 'installGuideMacos'), false);
+  assert.equal(
+    validateSupervisedInstallContract(installGuide, { platform: 'windows' }).guideUrl,
+    WINDOWS_INSTALL_GUIDE_URL,
+  );
+  assert.equal(
+    validateSupervisedInstallContract(macosInstallGuide, { platform: 'macos' }).guideUrl,
+    MACOS_INSTALL_GUIDE_URL,
+  );
 });
 
 test('prototype property names are unsupported caller platforms', () => {
@@ -314,7 +350,7 @@ test('every supervised install boundary names only its bounded field', () => {
   ];
   for (const [field, guideText] of mutations) {
     assertMessage(
-      () => validateSupervisedInstallContract(guideText),
+      () => validateSupervisedInstallContract(guideText, { platform: 'windows' }),
       `unrecognized supervised install contract: ${field}`,
       /private-untrusted-value/,
     );
@@ -339,7 +375,7 @@ test('a malformed setup page has a named value-free refusal', () => {
   const untrusted = 'private-untrusted-setup-value';
   const malformed = installGuide.replace('https://financialbrain.ai/operator', untrusted);
   assertMessage(
-    () => validateSupervisedInstallContract(malformed),
+    () => validateSupervisedInstallContract(malformed, { platform: 'windows' }),
     'invalid supervised setup URL',
     new RegExp(untrusted),
   );
@@ -369,7 +405,7 @@ const release = () => ({ tag_name: 'v9.8.7', draft: false, prerelease: false, im
   })) });
 function reader(manifest, overrides = {}) {
   const values = { [ENDPOINTS.manifest]: Buffer.from(JSON.stringify(manifest)), [ENDPOINTS.updateGuide]: Buffer.from(guide(manifest.release_state)),
-    [ENDPOINTS.installGuide]: Buffer.from(installGuide), [ENDPOINTS.latest]: Buffer.from(JSON.stringify(release())),
+    [WINDOWS_INSTALL_GUIDE_URL]: Buffer.from(installGuide), [ENDPOINTS.latest]: Buffer.from(JSON.stringify(release())),
     ...(manifest.installer ? { [manifest.installer.url]: bytes } : {}),
     ...(manifest.runtime_identity ? { [manifest.runtime_identity.url]: runtimeBytes } : {}),
     ...overrides };
@@ -378,18 +414,34 @@ function reader(manifest, overrides = {}) {
 }
 test('the independent supervised-guide oracle pins both public guide URLs', () => {
   const cases = [
-    ['windows', 'https://financialbrain.ai/install/agent.md', ENDPOINTS.installGuide],
-    ['macos', 'https://financialbrain.ai/install/agent-macos.md', ENDPOINTS.installGuideMacos],
+    ['windows', 'https://financialbrain.ai/install/agent.md', 'https://financialbrain.ai/install/agent-macos.md'],
+    ['macos', 'https://financialbrain.ai/install/agent-macos.md', 'https://financialbrain.ai/install/agent.md'],
   ];
-  for (const [platform, literalUrl, configuredUrl] of cases) {
+  for (const [platform, literalUrl, otherPlatformUrl] of cases) {
     assert.equal(expectedSupervisedGuideUrl(platform), literalUrl, platform);
     assert.equal(matchesExpectedSupervisedGuideUrl(platform, literalUrl), true, platform);
-    assert.equal(matchesExpectedSupervisedGuideUrl(platform, 'https://attacker.invalid/install/agent.md'), false,
-      platform);
-    assert.equal(configuredUrl, literalUrl, `${platform} endpoint pin`);
+    for (const confusedUrl of [
+      otherPlatformUrl,
+      literalUrl.replace('financialbrain.ai', 'attacker.invalid'),
+      literalUrl.replace('https:', 'http:'),
+      `${literalUrl}/extra`,
+      `${literalUrl}?candidate=other`,
+      `${literalUrl}#other`,
+      'https://financialbrain.ai/install/not-the-guide.md',
+    ]) {
+      assert.equal(matchesExpectedSupervisedGuideUrl(platform, confusedUrl), false,
+        `${platform} must reject ${confusedUrl}`);
+    }
   }
   assert.equal(expectedSupervisedGuideUrl('constructor'), null);
   assert.equal(matchesExpectedSupervisedGuideUrl('constructor', 'https://financialbrain.ai/install/agent.md'), false);
+  const oracleSource = readFileSync(
+    new URL('../scripts/supervised-install-guide-oracle.mjs', import.meta.url),
+    'utf8',
+  );
+  assert.doesNotMatch(oracleSource, /^\s*import(?:\s|["'{*])/m, 'oracle must have no static imports');
+  assert.doesNotMatch(oracleSource, /\bimport\s*\(/, 'oracle must have no dynamic imports');
+  assert.doesNotMatch(oracleSource, /\bENDPOINTS\b/, 'oracle must not derive its pins from ENDPOINTS');
 });
 test('release health fetches the Windows install guide selected by the shared platform table', async () => {
   const io = reader(held());
@@ -487,9 +539,9 @@ test('duplicate fields, missing owner, swapped candidate URL, or update permissi
   assert.throws(() => validateDoorways({ manifest: held(), installGuide, updateGuide: guide('held').replace('read-only-diagnosis', 'guided-update-after-release-and-owner-checks') }), /wrong operation/);
 });
 test('the reusable supervised-install parser refuses one defect at a time before an artifact can be selected', async () => {
-  assert.equal(validateSupervisedInstallContract(installGuide).candidateCommit, commit);
+  assert.equal(validateSupervisedInstallContract(installGuide, { platform: 'windows' }).candidateCommit, commit);
   assert.equal(validateSupervisedInstallContract(macosInstallGuide, { platform: 'macos' }).guideUrl,
-    ENDPOINTS.installGuideMacos);
+    MACOS_INSTALL_GUIDE_URL);
   const mutations = [
     ['duplicate status', installGuide.replace('STATUS: supervised field-test candidate',
       'STATUS: supervised field-test candidate\nSTATUS: supervised field-test candidate')],
@@ -508,20 +560,20 @@ test('the reusable supervised-install parser refuses one defect at a time before
       readSupervisedInstallContract({
         read: async (url, limit) => {
           calls.push({ url, limit });
-          if (url === ENDPOINTS.installGuide) return Buffer.from(badGuide);
+          if (url === WINDOWS_INSTALL_GUIDE_URL) return Buffer.from(badGuide);
           throw new Error('artifact download must not start');
         },
       }),
       undefined,
       label,
     );
-    assert.deepEqual(calls, [{ url: ENDPOINTS.installGuide, limit: 200_000 }], label);
+    assert.deepEqual(calls, [{ url: WINDOWS_INSTALL_GUIDE_URL, limit: 200_000 }], label);
   }
 });
 test('each platform reader fetches its selected guide and only its validated bounded artifact', async () => {
   for (const { platform, guideUrl, guide } of [
-    { platform: 'windows', guideUrl: ENDPOINTS.installGuide, guide: installGuide },
-    { platform: 'macos', guideUrl: ENDPOINTS.installGuideMacos, guide: macosInstallGuide },
+    { platform: 'windows', guideUrl: WINDOWS_INSTALL_GUIDE_URL, guide: installGuide },
+    { platform: 'macos', guideUrl: MACOS_INSTALL_GUIDE_URL, guide: macosInstallGuide },
   ]) {
     const calls = [];
     const artifactUrl = validateSupervisedInstallContract(guide, { platform }).artifactUrl;
@@ -544,7 +596,6 @@ test('each platform reader fetches its selected guide and only its validated bou
 });
 
 test('the public install runner uses the independent platform oracle before extraction', async () => {
-  const { readFileSync } = await import('node:fs');
   const source = readFileSync(new URL('../scripts/install-from-public-contract.mjs', import.meta.url), 'utf8');
   assert.match(source,
     /import \{ matchesExpectedSupervisedGuideUrl \} from "\.\/supervised-install-guide-oracle\.mjs";/);
@@ -557,6 +608,78 @@ test('the public install runner uses the independent platform oracle before extr
   const writeAt = source.indexOf('mkdirSync(workdir, { recursive: true });');
   assert.ok(downloadAt >= 0 && oracleAt > downloadAt && writeAt > oracleAt,
     'guide oracle must run after both downloads and before filesystem extraction or execution');
+});
+
+test('a runner guide mismatch stops before filesystem or command execution', () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'brain-runner-guide-mismatch-'));
+  const bootstrapPath = join(fixtureRoot, 'bootstrap.mjs');
+  const hooksPath = join(fixtureRoot, 'hooks.mjs');
+  const workdir = join(fixtureRoot, 'runner-workdir');
+  const executionMarker = join(fixtureRoot, 'exec-was-called.txt');
+  const runnerUrl = new URL('../scripts/install-from-public-contract.mjs', import.meta.url).href;
+  const runnerPath = fileURLToPath(runnerUrl);
+  const emptySha256 = createHash('sha256').update(Buffer.alloc(0)).digest('hex');
+  const contractSource = `
+    export async function readSupervisedInstallContract() {
+      return Object.freeze({
+        guideUrl: 'https://financialbrain.ai/install/agent-macos.md',
+        artifactBytes: 0,
+        artifactSha256: '${emptySha256}',
+        candidateVersion: '9.8.6',
+        candidateCommit: '${'a'.repeat(40)}',
+        artifact: Buffer.alloc(0),
+      });
+    }
+  `;
+  const childProcessSource = `
+    import { writeFileSync } from 'node:fs';
+    export function execFileSync() {
+      writeFileSync(${JSON.stringify(executionMarker)}, 'called');
+      throw new Error('synthetic command execution boundary');
+    }
+  `;
+  const hooksSource = `
+    const runnerUrl = ${JSON.stringify(runnerUrl)};
+    const contractSource = ${JSON.stringify(contractSource)};
+    const childProcessSource = ${JSON.stringify(childProcessSource)};
+    export async function resolve(specifier, context, nextResolve) {
+      if (context.parentURL === runnerUrl && specifier === './check-install-page-version.mjs') {
+        return { url: 'd9f:contract', shortCircuit: true };
+      }
+      if (context.parentURL === runnerUrl && specifier === 'node:child_process') {
+        return { url: 'd9f:child-process', shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    }
+    export async function load(url, context, nextLoad) {
+      if (url === 'd9f:contract') {
+        return { format: 'module', source: contractSource, shortCircuit: true };
+      }
+      if (url === 'd9f:child-process') {
+        return { format: 'module', source: childProcessSource, shortCircuit: true };
+      }
+      return nextLoad(url, context);
+    }
+  `;
+  writeFileSync(hooksPath, hooksSource);
+  writeFileSync(bootstrapPath, `
+    import { register } from 'node:module';
+    register(new URL('./hooks.mjs', import.meta.url), import.meta.url);
+  `);
+  try {
+    const result = spawnSync(process.execPath, [
+      '--import', pathToFileURL(bootstrapPath).href,
+      runnerPath,
+      workdir,
+      '--guide', 'windows',
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stderr, /FAIL  strict contract reader selected the wrong platform guide/);
+    assert.equal(existsSync(workdir), false, 'mismatch must stop before creating the work directory');
+    assert.equal(existsSync(executionMarker), false, 'mismatch must stop before invoking a command');
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 });
 test('the public byte reader stops a response as soon as its declared or streamed body exceeds the cap', async () => {
   const oversized = async () => new Response(Buffer.alloc(9), { status: 200 });
@@ -579,7 +702,6 @@ test('transport and unreadable metadata fail closed', async () => {
 // the predecessor repo deliberately, as a source that must be REFUSED, so this
 // reads the expected-asset host out of the worker rather than trusting a comment.
 test('every module that names the release repository names the same one', async () => {
-  const { readFileSync } = await import('node:fs');
   const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
   // Matches both github.com/OWNER/REPO and api.github.com/repos/OWNER/REPO.
   const hosts = (text) => [...text.matchAll(/github\.com\/(?:repos\/)?([A-Za-z0-9-]+\/[A-Za-z0-9-]+)/g)].map((m) => m[1]);

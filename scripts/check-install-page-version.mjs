@@ -10,8 +10,6 @@ import {
 export const ENDPOINTS = Object.freeze({
   manifest: 'https://financialbrain.ai/update/manifest.json',
   updateGuide: 'https://financialbrain.ai/update/agent.md',
-  installGuide: 'https://financialbrain.ai/install/agent.md',
-  installGuideMacos: 'https://financialbrain.ai/install/agent-macos.md',
   latest: 'https://api.github.com/repos/guldanjaMAX/financial-brain-installer/releases/latest',
 });
 const UPDATE_URL = 'https://financialbrain.ai/update';
@@ -40,11 +38,11 @@ export function guideFields(text) {
 const SUPERVISED_PLATFORMS = Object.freeze({
   windows: Object.freeze({
     target: 'physical Windows 10 or newer',
-    guideUrl: ENDPOINTS.installGuide,
+    guideUrl: 'https://financialbrain.ai/install/agent.md',
   }),
   macos: Object.freeze({
     target: 'macOS 13 or newer, Apple silicon or Intel',
-    guideUrl: ENDPOINTS.installGuideMacos,
+    guideUrl: 'https://financialbrain.ai/install/agent-macos.md',
   }),
 });
 
@@ -64,7 +62,7 @@ function supervisedPlatform(platform, { exactString = false } = {}) {
  * one parser, so a duplicate field or a weakened owner/target/status boundary
  * cannot be accepted by one surface and rejected by the other.
  */
-export function validateSupervisedInstallContract(installGuide, { platform = 'windows' } = {}) {
+export function validateSupervisedInstallContract(installGuide, { platform } = {}) {
   const { target, guideUrl } = supervisedPlatform(platform);
   const install = guideFields(installGuide);
   requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '2',
