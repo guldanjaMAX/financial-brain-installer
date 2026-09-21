@@ -48,8 +48,9 @@ const SUPERVISED_TARGETS = Object.freeze({
  * cannot be accepted by one surface and rejected by the other.
  */
 export function validateSupervisedInstallContract(installGuide, { platform = 'windows' } = {}) {
+  requireValue(Object.hasOwn(SUPERVISED_TARGETS, platform),
+    'unsupported supervised install platform');
   const target = SUPERVISED_TARGETS[platform];
-  requireValue(target, 'unsupported supervised install platform');
   const install = guideFields(installGuide);
   requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '2',
     'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION');

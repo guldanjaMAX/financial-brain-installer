@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
+import { inspect } from 'node:util';
 import {
   checkInstallPage,
   ENDPOINTS,
@@ -45,33 +46,190 @@ CANDIDATE_COMMIT: ${commit}
 const macosInstallGuide = installGuide
   .replace('TARGET: physical Windows 10 or newer', 'TARGET: macOS 13 or newer, Apple silicon or Intel');
 
+// These are the published field lines as read on 2026-09-21, not byte-for-byte
+// captures. The public reader extracts text, and this validator deliberately
+// parses only NAME: value lines while ignoring all other page content.
+const publishedWindowsFieldLines = `AGENT_INSTALL_CONTRACT_VERSION: 2
+STATUS: supervised field-test candidate
+TARGET: physical Windows 10 or newer
+OWNER_PRESENT: required
+SETUP_PAGE: https://financialbrain.ai/kit
+ARTIFACT_URL: https://financialbrain.ai/kit/financial-brain-v0.4.6-field-kit-f6d48781ca11e8e8.zip
+ARTIFACT_BYTES: 5550455
+ARTIFACT_SHA256: f6d48781ca11e8e8f677c74bd72f5444d7e1047ba3fd180733db358a143bb9c5
+CANDIDATE_VERSION: 0.4.6
+CANDIDATE_COMMIT: c4b44bd411a6bb901ceb652f1a6b694765782165
+MACOS_RUNBOOK: https://financialbrain.ai/install/agent-macos.md
+EXISTING_BRAIN_RUNBOOK: https://financialbrain.ai/install/agent-update.md
+`;
+const publishedMacosFieldLines = `AGENT_INSTALL_CONTRACT_VERSION: 2
+STATUS: supervised field-test candidate
+TARGET: macOS 13 or newer, Apple silicon or Intel
+OWNER_PRESENT: required
+SETUP_PAGE: https://financialbrain.ai/kit
+ARTIFACT_URL: https://financialbrain.ai/kit/financial-brain-v0.4.6-field-kit-f6d48781ca11e8e8.zip
+ARTIFACT_BYTES: 5550455
+ARTIFACT_SHA256: f6d48781ca11e8e8f677c74bd72f5444d7e1047ba3fd180733db358a143bb9c5
+PACKAGE: brain-installer-0.4.6.tgz
+PACKAGE_BYTES: 5545076
+PACKAGE_SHA256: 3e8afa545daac704220509336812dd9c2786c4a6b6a07ef2089a618c29cce920
+MACOS_GUIDE: MACOS-FIELD-TEST.md (inside the archive)
+MACOS_GUIDE_SHA256: 6db7f1b605e0cb75fd42712f71a9a10aecc90718c9082c96dc024a0380a2317f
+SMOKE_DOCUMENT: package/CHANGELOG.md
+SMOKE_DOCUMENT_SHA256: ed6d7049e59ca6beaf51c06bd4738a8c1fdc461282c7073eb661c5c8f46fcc00
+CANDIDATE_VERSION: 0.4.6
+CANDIDATE_COMMIT: c4b44bd411a6bb901ceb652f1a6b694765782165
+WINDOWS_RUNBOOK: https://financialbrain.ai/install/agent.md
+EXISTING_BRAIN_RUNBOOK: https://financialbrain.ai/install/agent-update.md
+`;
+
+const contractFailure = (reason) => { throw new Error(`safe-error-contract:${reason}`); };
+
+function errorSurface(error) {
+  const parts = [];
+  const seen = new WeakSet();
+  const append = (value) => {
+    if (value === null || value === undefined) return;
+    if (typeof value === 'string') { parts.push(value); return; }
+    if (typeof value === 'symbol' || typeof value === 'bigint' || typeof value === 'number' ||
+        typeof value === 'boolean') {
+      parts.push(String(value));
+      return;
+    }
+    if (typeof value === 'function') {
+      parts.push(Function.prototype.toString.call(value));
+      return;
+    }
+    if (ArrayBuffer.isView(value)) {
+      parts.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('utf8'));
+      return;
+    }
+    if (value instanceof ArrayBuffer) {
+      parts.push(Buffer.from(value).toString('utf8'));
+      return;
+    }
+    if (typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+    for (const key of Reflect.ownKeys(value)) {
+      parts.push(String(key));
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor && Object.hasOwn(descriptor, 'value')) append(descriptor.value);
+    }
+  };
+  try {
+    append(error);
+    for (const key of ['message', 'stack', 'cause', 'input', 'code']) append(error?.[key]);
+    // Node's runner renders thrown values through a util.inspect-like surface.
+    parts.push(inspect(error, { depth: null, getters: false, showHidden: true }));
+  } catch {
+    contractFailure('uninspectable-surface');
+  }
+  return parts.join('\n');
+}
+
+function surfaceMatches(surface, forbidden) {
+  if (typeof forbidden === 'string') return surface.includes(forbidden);
+  const flags = forbidden.flags.replace(/[gy]/g, '');
+  return new RegExp(forbidden.source, flags).test(surface);
+}
+
 function assertMessage(run, message, forbidden = null) {
-  assert.throws(run, (error) => {
-    assert.equal(error.message, message);
-    if (forbidden) assert.doesNotMatch(error.message, forbidden);
-    return true;
-  });
+  let error;
+  try {
+    run();
+  } catch (caught) {
+    error = caught;
+  }
+  if (!error) contractFailure('did-not-throw');
+  if (error.message !== message) contractFailure('message-mismatch');
+  if (forbidden && surfaceMatches(errorSurface(error), forbidden)) {
+    contractFailure('unsafe-error-surface');
+  }
+}
+
+function assertGuardFailure(run, reason) {
+  assert.throws(run, (error) => error?.message === `safe-error-contract:${reason}`);
 }
 
 test('supervised install contract version 2 is the one accepted contract', () => {
   assert.equal(validateSupervisedInstallContract(installGuide).candidateCommit, commit);
-  assertMessage(
-    () => validateSupervisedInstallContract(
-      installGuide.replace('AGENT_INSTALL_CONTRACT_VERSION: 2', 'AGENT_INSTALL_CONTRACT_VERSION: 3'),
-    ),
-    'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION',
-  );
+  for (const version of ['1', '3']) {
+    assertMessage(
+      () => validateSupervisedInstallContract(
+        installGuide.replace('AGENT_INSTALL_CONTRACT_VERSION: 2', `AGENT_INSTALL_CONTRACT_VERSION: ${version}`),
+      ),
+      'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION',
+    );
+  }
 });
 
 test('wrong-platform guides name only the TARGET field in both directions', () => {
-  assert.throws(
+  assertMessage(
     () => validateSupervisedInstallContract(macosInstallGuide, { platform: 'windows' }),
-    /unrecognized supervised install contract: TARGET/,
+    'unrecognized supervised install contract: TARGET',
   );
-  assert.throws(
+  assertMessage(
     () => validateSupervisedInstallContract(installGuide, { platform: 'macos' }),
-    /unrecognized supervised install contract: TARGET/,
+    'unrecognized supervised install contract: TARGET',
   );
+});
+
+test('the exact-message guard rejects a collapsed or value-appended diagnostic', () => {
+  assertGuardFailure(
+    () => assertMessage(
+      () => { throw new Error('unrecognized supervised install contract: TARGET'); },
+      'unrecognized supervised install contract: STATUS',
+    ),
+    'message-mismatch',
+  );
+  assertGuardFailure(
+    () => assertMessage(
+      () => { throw new Error('unrecognized supervised install contract: TARGET private-untrusted-value'); },
+      'unrecognized supervised install contract: TARGET',
+      /private-untrusted-value/,
+    ),
+    'message-mismatch',
+  );
+});
+
+test('the leak guard inspects every error surface a runner can print', () => {
+  const message = 'invalid supervised setup URL';
+  const marker = 'private-untrusted-error-surface';
+  const errors = [];
+  errors.push(new Error(message, { cause: new TypeError(`URL rejected ${marker}`) }));
+  errors.push(Object.assign(new Error(message), { input: marker }));
+  errors.push(Object.assign(new Error(message), { code: marker }));
+  const stacked = new Error(message); stacked.stack = `Error: ${message}\n    at ${marker}`; errors.push(stacked);
+  const nested = new Error(message); nested.details = { value: marker }; errors.push(nested);
+  const hidden = new Error(message); Object.defineProperty(hidden, 'detail', { value: marker }); errors.push(hidden);
+  const buffered = new Error(message); buffered.payload = Buffer.from(marker); errors.push(buffered);
+  const inspected = new Error(message);
+  inspected[inspect.custom] = () => `runner rendering ${marker}`;
+  errors.push(inspected);
+  for (const error of errors) {
+    assertGuardFailure(
+      () => assertMessage(() => { throw error; }, message, new RegExp(marker)),
+      'unsafe-error-surface',
+    );
+  }
+});
+
+test('the supplied published field lines validate unchanged on their own platforms', () => {
+  const windows = validateSupervisedInstallContract(publishedWindowsFieldLines, { platform: 'windows' });
+  const macos = validateSupervisedInstallContract(publishedMacosFieldLines, { platform: 'macos' });
+  assert.equal(windows.guideUrl, ENDPOINTS.installGuide);
+  assert.equal(macos.guideUrl, ENDPOINTS.installGuideMacos);
+  assert.equal(windows.candidateVersion, '0.4.6');
+  assert.equal(macos.candidateVersion, '0.4.6');
+});
+
+test('prototype property names are unsupported caller platforms', () => {
+  for (const platform of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf']) {
+    assertMessage(
+      () => validateSupervisedInstallContract(installGuide, { platform }),
+      'unsupported supervised install platform',
+    );
+  }
 });
 
 test('every supervised install boundary names only its bounded field', () => {

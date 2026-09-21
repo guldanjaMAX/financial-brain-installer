@@ -39,9 +39,14 @@ runtime error.
 The shared supervised-install validator accepts exactly
 `AGENT_INSTALL_CONTRACT_VERSION: 2`. It retains the existing version, status,
 owner-presence, platform-target, and setup-page checks in their existing order,
-but each failure names only its compile-time field name. No untrusted field value
-enters an error message. Setup-page URL parsing is caught and translated to the
-fixed `invalid supervised setup URL` refusal before URL policy validation.
+but each of those five boundary failures names only its compile-time field name.
+No untrusted field value enters those five fixed diagnostics. The guide parser's
+separate malformed-field and duplicate-field diagnostics may name a
+page-controlled field key whose characters are restricted to `[A-Z][A-Z0-9_]*`
+but whose length has no independent bound within the 200,000-character guide
+limit.
+Setup-page URL parsing is caught and translated to the fixed
+`invalid supervised setup URL` refusal before URL policy validation.
 
 This decision adds no field requirement, endpoint, fetch, MCP contract, or
 cross-link requirement.
@@ -50,8 +55,8 @@ cross-link requirement.
 
 - Both published version-2 platform contracts can pass the shared validator.
 - Version 1 and every future undeclared version remain rejected.
-- Hosted logs identify which bounded contract field failed without disclosing
-  its value.
+- Hosted logs identify which of the five formerly joined contract fields failed
+  without disclosing its value.
 - The Windows guide is rejected as a macOS contract and the macOS guide is
   rejected as a Windows contract with a `TARGET` diagnostic.
 - A malformed setup page no longer escapes as a raw URL parser exception.
@@ -60,10 +65,13 @@ cross-link requirement.
 
 ## Verification
 
-`test/install-page-version.test.mjs` proves that version 2 passes, version 3
-fails with the version field name, both cross-platform swaps fail with the
-target field name, every existing boundary has its own value-free message, and
-a malformed setup page receives a fixed refusal. `test/package-privacy.test.mjs`
+`test/install-page-version.test.mjs` proves that version 2 passes while versions
+1 and 3 fail with the version field name, both supplied published field sets
+pass on their own platform, both cross-platform swaps fail with the exact target
+field message, the five formerly joined contract-field boundaries have their
+own value-free messages, the full printable error surface stays value-free, and
+a malformed setup page receives a fixed refusal. Prototype property names are
+also rejected as unsupported caller platforms. `test/package-privacy.test.mjs`
 continues to review the packaged validator and this decision record.
 
 ## Revisit when
