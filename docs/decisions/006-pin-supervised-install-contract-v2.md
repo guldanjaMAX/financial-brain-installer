@@ -76,9 +76,12 @@ dump the parsed field map. The separate malformed-URL fixture proves that a
 present malformed setup-page value is not echoed.
 
 The test guard recursively inspects own property names and own data-property
-values, plus message, stack, cause, input, code, byte-oriented views,
-`Uint16Array` code units, and `util.inspect` output; it fails closed when that
-inspection throws. This does not claim to detect values exposed only through an
+values, plus message, stack, cause, input, code, raw bytes from `ArrayBuffer`
+views, and element-wise character-code representations for every numeric and
+bigint typed-array constructor exercised by the fixture table, including a
+cross-realm `Uint16Array`. It also inspects `util.inspect` output and fails closed
+when inspection throws. `DataView` has no element-width sequence and is inspected
+only as raw bytes. This does not claim to detect values exposed only through an
 inherited `toString` or an otherwise-unselected own accessor. The harness also
 recognizes a 5,000-character uppercase-and-underscore marker in both key-bearing
 parser diagnostics. Those diagnostics intentionally disclose the page-controlled
@@ -86,18 +89,29 @@ field name and remain outside the five value-free field diagnostics; field-name
 characters are restricted to `[A-Z][A-Z0-9_]*`, with no independent length bound
 inside the guide-size limit.
 
-The Windows and macOS guide resources are selected from one module-local
-platform table for validation and fetching. Tests exercise both fetch paths and
-tie the returned guide URL to the URL actually passed to the reader. The public
-install runner reports that returned URL and independently compares it with its
-platform-specific expected URL. No decision or proof relies on whether the
-module-local table is frozen.
+The Windows and macOS supervised-guide resources have one operational selector:
+the module-local platform table. Validation, the bounded contract reader, and
+the release-health check's fixed Windows guide fetch all use that table. Tests
+exercise both bounded-reader fetch paths, bind the release-health fetch to the
+same Windows entry, and tie each returned guide URL to the URL actually passed
+to the reader. A separate dependency-free module carries literal expected URLs;
+it is an independent oracle, not another resource selector.
+
+The public install runner first asks the bounded reader to download and validate
+both the guide and its artifact. It then compares the returned fetched-guide URL
+with that independent oracle before creating the work directory, extracting the
+archive, installing the package, or executing its CLI. A mismatch therefore
+prevents extraction, installation, and execution. The comparison semantics are
+tested directly through the oracle module; a narrow source assertion proves the
+top-level runner invokes it in that sequence. No decision or proof relies on
+whether the module-local platform table is frozen.
 
 Commit `f9e7aaf` introduced `Object.hasOwn` and its regression cases, changing
 prototype property names from the misleading `TARGET` failure to the
 unsupported-caller-platform diagnostic; commit `148e7a2` did not change that
 behavior. `test/package-privacy.test.mjs` continues to review the packaged
-validator and this decision record.
+validator and decision record and explicitly reviews the shipped independent
+oracle module.
 
 ## Revisit when
 

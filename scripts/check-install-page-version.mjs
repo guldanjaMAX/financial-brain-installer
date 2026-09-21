@@ -17,6 +17,7 @@ export const ENDPOINTS = Object.freeze({
 const UPDATE_URL = 'https://financialbrain.ai/update';
 const RELEASE_BASE = 'https://github.com/guldanjaMAX/financial-brain-installer/releases/download';
 const RUNTIME_IDENTITY_SCHEME = 'brain.runtime-payload.sha256.v1';
+const RELEASE_HEALTH_PLATFORM = 'windows';
 const versionPattern = /^\d+\.\d+\.\d+$/;
 const digestPattern = /^[0-9a-f]{64}$/;
 const sourceDigestPattern = /^[0-9a-f]{40}$/;
@@ -149,7 +150,7 @@ export function validateDoorways({ manifest, updateGuide, installGuide }) {
   requireValue(update.PERMITTED_MODE === permitted, 'update guide permits the wrong operation');
   // The unlisted /install doorway intentionally offers a supervised candidate.
   // Its older exact version must never be replaced with /releases/latest.
-  const install = validateSupervisedInstallContract(installGuide);
+  const install = validateSupervisedInstallContract(installGuide, { platform: RELEASE_HEALTH_PLATFORM });
   // The artifact must still be derivable from the setup page, the version and
   // the digest, so it can never be swapped for a moving target like
   // /releases/latest. What changed on 2026-09-08 is the human-readable part of
@@ -212,8 +213,9 @@ export async function readSupervisedInstallContract({ platform = 'windows', read
   return Object.freeze({ ...contract, guideUrl, guide, artifact });
 }
 export async function checkInstallPage({ read = publicBytes, requireStable = false } = {}) {
+  const { guideUrl: installGuideUrl } = supervisedPlatform(RELEASE_HEALTH_PLATFORM, { exactString: true });
   const [manifestBytes, updateBytes, installBytes] = await Promise.all([
-    read(ENDPOINTS.manifest), read(ENDPOINTS.updateGuide), read(ENDPOINTS.installGuide),
+    read(ENDPOINTS.manifest), read(ENDPOINTS.updateGuide), read(installGuideUrl),
   ]);
   const manifest = JSON.parse(String(manifestBytes));
   const result = validateDoorways({ manifest, updateGuide: String(updateBytes), installGuide: String(installBytes) });

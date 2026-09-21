@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { inspect } from 'node:util';
+import { runInNewContext } from 'node:vm';
 import {
   checkInstallPage,
   ENDPOINTS,
@@ -13,6 +14,10 @@ import {
   validateSupervisedInstallContract,
   verifyPublishedMetadata,
 } from '../scripts/check-install-page-version.mjs';
+import {
+  expectedSupervisedGuideUrl,
+  matchesExpectedSupervisedGuideUrl,
+} from '../scripts/supervised-install-guide-oracle.mjs';
 import {
   createRuntimeIdentityReceipt,
   runtimeIdentityReceiptBytes,
@@ -100,11 +105,18 @@ function errorSurface(error) {
       parts.push(Function.prototype.toString.call(value));
       return;
     }
-    if (value instanceof Uint16Array) {
-      parts.push(Array.from(value, (codeUnit) => String.fromCharCode(codeUnit)).join(''));
-    }
     if (ArrayBuffer.isView(value)) {
       parts.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('utf8'));
+      const bytesPerElement = Number(value.BYTES_PER_ELEMENT);
+      const elementCount = Number(value.length);
+      if ([1, 2, 4, 8].includes(bytesPerElement) && Number.isSafeInteger(elementCount) && elementCount >= 0) {
+        parts.push(Array.from(value, (element) => {
+          const codePoint = Number(element);
+          return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+            ? String.fromCodePoint(codePoint)
+            : '\uFFFD';
+        }).join(''));
+      }
       return;
     }
     if (value instanceof ArrayBuffer) {
@@ -150,8 +162,8 @@ function assertMessage(run, message, forbidden = null) {
   }
 }
 
-function assertGuardFailure(run, reason) {
-  assert.throws(run, (error) => error?.message === `safe-error-contract:${reason}`);
+function assertGuardFailure(run, reason, message) {
+  assert.throws(run, (error) => error?.message === `safe-error-contract:${reason}`, message);
 }
 
 test('supervised install contract version 2 is the one accepted contract', () => {
@@ -208,9 +220,6 @@ test('the leak guard inspects covered error surfaces and runner rendering', () =
   const nested = new Error(message); nested.details = { value: marker }; errors.push(nested);
   const hidden = new Error(message); Object.defineProperty(hidden, 'detail', { value: marker }); errors.push(hidden);
   const buffered = new Error(message); buffered.payload = Buffer.from(marker); errors.push(buffered);
-  const wide = new Error(message);
-  wide.payload = Uint16Array.from(marker, (character) => character.charCodeAt(0));
-  errors.push(wide);
   const inspected = new Error(message);
   inspected[inspect.custom] = () => `runner rendering ${marker}`;
   errors.push(inspected);
@@ -220,6 +229,42 @@ test('the leak guard inspects covered error surfaces and runner rendering', () =
       'unsafe-error-surface',
     );
   }
+  const typedArrayTypes = [
+    ['Uint8Array', Uint8Array, false],
+    ['Uint8ClampedArray', Uint8ClampedArray, false],
+    ['Int8Array', Int8Array, false],
+    ['Uint16Array', Uint16Array, false],
+    ['Int16Array', Int16Array, false],
+    ['Uint32Array', Uint32Array, false],
+    ['Int32Array', Int32Array, false],
+    ['Float32Array', Float32Array, false],
+    ['Float64Array', Float64Array, false],
+    ['BigInt64Array', BigInt64Array, true],
+    ['BigUint64Array', BigUint64Array, true],
+  ];
+  if (typeof Float16Array === 'function') typedArrayTypes.push(['Float16Array', Float16Array, false]);
+  for (const [name, TypedArray, usesBigInt] of typedArrayTypes) {
+    const encoded = TypedArray.from(marker, (character) => usesBigInt
+      ? BigInt(character.charCodeAt(0))
+      : character.charCodeAt(0));
+    const error = new Error(message);
+    error.payload = encoded;
+    assertGuardFailure(
+      () => assertMessage(() => { throw error; }, message, new RegExp(marker)),
+      'unsafe-error-surface',
+      name,
+    );
+  }
+  const crossRealm = new Error(message);
+  crossRealm.payload = runInNewContext(
+    'Uint16Array.from(marker, (character) => character.charCodeAt(0))',
+    { marker },
+  );
+  assertGuardFailure(
+    () => assertMessage(() => { throw crossRealm; }, message, new RegExp(marker)),
+    'unsafe-error-surface',
+    'cross-realm Uint16Array',
+  );
 });
 
 test('the leak guard fails closed when an error surface cannot be inspected', () => {
@@ -331,6 +376,30 @@ function reader(manifest, overrides = {}) {
   const calls = [];
   return { calls, read: async (url) => { calls.push(url); assert.ok(Object.hasOwn(values, url), 'unexpected request'); return values[url]; } };
 }
+test('the independent supervised-guide oracle pins both public guide URLs', () => {
+  const cases = [
+    ['windows', 'https://financialbrain.ai/install/agent.md', ENDPOINTS.installGuide],
+    ['macos', 'https://financialbrain.ai/install/agent-macos.md', ENDPOINTS.installGuideMacos],
+  ];
+  for (const [platform, literalUrl, configuredUrl] of cases) {
+    assert.equal(expectedSupervisedGuideUrl(platform), literalUrl, platform);
+    assert.equal(matchesExpectedSupervisedGuideUrl(platform, literalUrl), true, platform);
+    assert.equal(matchesExpectedSupervisedGuideUrl(platform, 'https://attacker.invalid/install/agent.md'), false,
+      platform);
+    assert.equal(configuredUrl, literalUrl, `${platform} endpoint pin`);
+  }
+  assert.equal(expectedSupervisedGuideUrl('constructor'), null);
+  assert.equal(matchesExpectedSupervisedGuideUrl('constructor', 'https://financialbrain.ai/install/agent.md'), false);
+});
+test('release health fetches the Windows install guide selected by the shared platform table', async () => {
+  const io = reader(held());
+  await checkInstallPage(io);
+  assert.deepEqual(io.calls, [
+    ENDPOINTS.manifest,
+    ENDPOINTS.updateGuide,
+    'https://financialbrain.ai/install/agent.md',
+  ]);
+});
 for (const state of ['held', 'candidate']) test(`${state} is healthy but never a promotion or artifact proof`, async () => {
   const io = reader(held(state));
   assert.deepEqual(await checkInstallPage(io), { state, publicRelease: null, supervisedCandidate: '9.8.6', promotionAllowed: false, artifactVerified: false });
@@ -474,13 +543,20 @@ test('each platform reader fetches its selected guide and only its validated bou
   }
 });
 
-test('the public install runner reports the fetched guide and checks its independent platform oracle', async () => {
+test('the public install runner uses the independent platform oracle before extraction', async () => {
   const { readFileSync } = await import('node:fs');
   const source = readFileSync(new URL('../scripts/install-from-public-contract.mjs', import.meta.url), 'utf8');
-  assert.match(source, /ok\(`contract read from \$\{publicContract\.guideUrl\}`\);/);
-  assert.doesNotMatch(source, /ok\(`contract read from \$\{GUIDE\}`\);/);
   assert.match(source,
-    /if \(publicContract\.guideUrl !== GUIDE\) die\("strict contract reader selected the wrong platform guide"\);/);
+    /import \{ matchesExpectedSupervisedGuideUrl \} from "\.\/supervised-install-guide-oracle\.mjs";/);
+  assert.doesNotMatch(source, /\bENDPOINTS\b/);
+  assert.match(source, /ok\(`contract read from \$\{publicContract\.guideUrl\}`\);/);
+  const downloadAt = source.indexOf('const publicContract = await readSupervisedInstallContract({ platform: guideArg });');
+  const oracleAt = source.indexOf(
+    'if (!matchesExpectedSupervisedGuideUrl(guideArg, publicContract.guideUrl))',
+  );
+  const writeAt = source.indexOf('mkdirSync(workdir, { recursive: true });');
+  assert.ok(downloadAt >= 0 && oracleAt > downloadAt && writeAt > oracleAt,
+    'guide oracle must run after both downloads and before filesystem extraction or execution');
 });
 test('the public byte reader stops a response as soon as its declared or streamed body exceeds the cap', async () => {
   const oversized = async () => new Response(Buffer.alloc(9), { status: 200 });
