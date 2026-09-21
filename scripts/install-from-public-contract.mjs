@@ -68,7 +68,7 @@ const {
   candidateCommit: commit,
   artifact: zip,
 } = publicContract;
-ok(`contract read from ${GUIDE}`);
+ok(`contract read from ${publicContract.guideUrl}`);
 console.log(`      version ${version}  commit ${commit.slice(0, 7)}  ${artifactBytes} bytes`);
 
 if (publicContract.guideUrl !== GUIDE) die("strict contract reader selected the wrong platform guide");

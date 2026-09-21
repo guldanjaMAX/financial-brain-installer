@@ -47,6 +47,16 @@ const SUPERVISED_PLATFORMS = Object.freeze({
   }),
 });
 
+function supervisedPlatform(platform, { exactString = false } = {}) {
+  // The reader's former strict-equality ternary accepted only primitive strings;
+  // the validator already used Object.hasOwn and retains that caller contract.
+  requireValue(
+    (!exactString || typeof platform === 'string') && Object.hasOwn(SUPERVISED_PLATFORMS, platform),
+    'unsupported supervised install platform',
+  );
+  return SUPERVISED_PLATFORMS[platform];
+}
+
 /**
  * Validate the executable candidate contract before its artifact URL can be
  * followed. Both the release-health checker and the install matrix use this
@@ -54,9 +64,7 @@ const SUPERVISED_PLATFORMS = Object.freeze({
  * cannot be accepted by one surface and rejected by the other.
  */
 export function validateSupervisedInstallContract(installGuide, { platform = 'windows' } = {}) {
-  requireValue(Object.hasOwn(SUPERVISED_PLATFORMS, platform),
-    'unsupported supervised install platform');
-  const { target, guideUrl } = SUPERVISED_PLATFORMS[platform];
+  const { target, guideUrl } = supervisedPlatform(platform);
   const install = guideFields(installGuide);
   requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '2',
     'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION');
@@ -190,9 +198,7 @@ export async function publicBytes(url, limit = 200_000, { fetchImpl = globalThis
 /** Download one fixed platform guide, validate it, then and only then follow
  * its immutable, digest-derived, byte-bounded artifact URL. */
 export async function readSupervisedInstallContract({ platform = 'windows', read = publicBytes } = {}) {
-  const guideUrl = platform === 'windows' ? ENDPOINTS.installGuide
-    : platform === 'macos' ? ENDPOINTS.installGuideMacos : null;
-  requireValue(guideUrl, 'unsupported supervised install platform');
+  const { guideUrl } = supervisedPlatform(platform, { exactString: true });
   const guideBytes = Buffer.from(await read(guideUrl, 200_000));
   requireValue(guideBytes.length < 200_000, 'invalid agent guide');
   const guide = guideBytes.toString('utf8');
@@ -201,7 +207,9 @@ export async function readSupervisedInstallContract({ platform = 'windows', read
   requireValue(artifact.length === contract.artifactBytes &&
     createHash('sha256').update(artifact).digest('hex') === contract.artifactSha256,
   'downloaded supervised artifact differs from the published receipt');
-  return Object.freeze({ ...contract, guide, artifact });
+  // Return the same local URL passed to read(), so callers can independently
+  // compare the fetched platform resource with their expected public guide.
+  return Object.freeze({ ...contract, guideUrl, guide, artifact });
 }
 export async function checkInstallPage({ read = publicBytes, requireStable = false } = {}) {
   const [manifestBytes, updateBytes, installBytes] = await Promise.all([

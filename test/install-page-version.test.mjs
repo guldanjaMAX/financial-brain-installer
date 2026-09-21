@@ -100,6 +100,9 @@ function errorSurface(error) {
       parts.push(Function.prototype.toString.call(value));
       return;
     }
+    if (value instanceof Uint16Array) {
+      parts.push(Array.from(value, (codeUnit) => String.fromCharCode(codeUnit)).join(''));
+    }
     if (ArrayBuffer.isView(value)) {
       parts.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('utf8'));
       return;
@@ -205,6 +208,9 @@ test('the leak guard inspects covered error surfaces and runner rendering', () =
   const nested = new Error(message); nested.details = { value: marker }; errors.push(nested);
   const hidden = new Error(message); Object.defineProperty(hidden, 'detail', { value: marker }); errors.push(hidden);
   const buffered = new Error(message); buffered.payload = Buffer.from(marker); errors.push(buffered);
+  const wide = new Error(message);
+  wide.payload = Uint16Array.from(marker, (character) => character.charCodeAt(0));
+  errors.push(wide);
   const inspected = new Error(message);
   inspected[inspect.custom] = () => `runner rendering ${marker}`;
   errors.push(inspected);
@@ -266,6 +272,20 @@ test('every supervised install boundary names only its bounded field', () => {
       () => validateSupervisedInstallContract(guideText),
       `unrecognized supervised install contract: ${field}`,
       /private-untrusted-value/,
+    );
+  }
+});
+
+test('the leak guard recognizes uppercase field-name payloads in parser diagnostics', () => {
+  const marker = `PRIVATE_${'X'.repeat(4_992)}`;
+  assert.equal(marker.length, 5_000);
+  for (const [text, message] of [
+    [`${marker}:\n`, `malformed guide field ${marker}`],
+    [`${marker}: one\n${marker}: two\n`, `duplicate guide field ${marker}`],
+  ]) {
+    assertGuardFailure(
+      () => assertMessage(() => guideFields(text), message, marker),
+      'unsafe-error-surface',
     );
   }
 });
@@ -429,21 +449,38 @@ test('the reusable supervised-install parser refuses one defect at a time before
     assert.deepEqual(calls, [{ url: ENDPOINTS.installGuide, limit: 200_000 }], label);
   }
 });
-test('the supervised-install reader follows only the validated digest-derived URL with exact byte bounds', async () => {
-  const calls = [];
-  const result = await readSupervisedInstallContract({
-    read: async (url, limit) => {
-      calls.push({ url, limit });
-      if (url === ENDPOINTS.installGuide) return Buffer.from(installGuide);
-      if (url === validateSupervisedInstallContract(installGuide).artifactUrl) return bytes;
-      throw new Error('unexpected URL');
-    },
-  });
-  assert.deepEqual(calls, [
-    { url: ENDPOINTS.installGuide, limit: 200_000 },
-    { url: result.artifactUrl, limit: bytes.length },
-  ]);
-  assert.deepEqual(result.artifact, bytes);
+test('each platform reader fetches its selected guide and only its validated bounded artifact', async () => {
+  for (const { platform, guideUrl, guide } of [
+    { platform: 'windows', guideUrl: ENDPOINTS.installGuide, guide: installGuide },
+    { platform: 'macos', guideUrl: ENDPOINTS.installGuideMacos, guide: macosInstallGuide },
+  ]) {
+    const calls = [];
+    const artifactUrl = validateSupervisedInstallContract(guide, { platform }).artifactUrl;
+    const result = await readSupervisedInstallContract({
+      platform,
+      read: async (url, limit) => {
+        calls.push({ url, limit });
+        if (calls.length === 1) return Buffer.from(guide);
+        if (url === artifactUrl) return bytes;
+        throw new Error('unexpected URL');
+      },
+    });
+    assert.deepEqual(calls, [
+      { url: guideUrl, limit: 200_000 },
+      { url: result.artifactUrl, limit: bytes.length },
+    ], platform);
+    assert.equal(result.guideUrl, calls[0].url, platform);
+    assert.deepEqual(result.artifact, bytes, platform);
+  }
+});
+
+test('the public install runner reports the fetched guide and checks its independent platform oracle', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../scripts/install-from-public-contract.mjs', import.meta.url), 'utf8');
+  assert.match(source, /ok\(`contract read from \$\{publicContract\.guideUrl\}`\);/);
+  assert.doesNotMatch(source, /ok\(`contract read from \$\{GUIDE\}`\);/);
+  assert.match(source,
+    /if \(publicContract\.guideUrl !== GUIDE\) die\("strict contract reader selected the wrong platform guide"\);/);
 });
 test('the public byte reader stops a response as soon as its declared or streamed body exceeds the cap', async () => {
   const oversized = async () => new Response(Buffer.alloc(9), { status: 200 });

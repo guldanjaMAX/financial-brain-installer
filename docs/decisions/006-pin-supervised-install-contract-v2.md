@@ -68,19 +68,36 @@ cross-link requirement.
 `test/install-page-version.test.mjs` proves that version 2 passes while versions
 1 and 3 fail with the version field name, both supplied published field sets
 pass on their own platform, and both synthetic cross-platform swaps fail with
-the exact target-field message. All five formerly joined contract-field
-boundaries retain exact field-only messages, and each case carries a forbidden
-value that is checked against the guard's inspected surfaces. The test guard
-recursively inspects own property names and own data-property values, plus
-message, stack, cause, input, code, byte-oriented views and `util.inspect`
-output; it fails closed
-when that inspection throws. This does not claim to detect values exposed only
-through an inherited `toString`, an otherwise-unselected own accessor, or a
-`Uint16Array`-encoded payload when no renderer on this path prints them. A
-malformed setup page receives a fixed refusal. Prototype property names were
-already refused; they now receive the unsupported-caller-platform diagnostic
-instead of the misleading `TARGET` diagnostic. `test/package-privacy.test.mjs`
-continues to review the packaged validator and this decision record.
+the exact target-field message. For `AGENT_INSTALL_CONTRACT_VERSION`, `STATUS`,
+`OWNER_PRESENT`, and `TARGET`, the forbidden marker is the failing field's own
+value. The `SETUP_PAGE` presence fixture necessarily omits `SETUP_PAGE`; its
+marker is in another parsed field, so it proves only that the failure does not
+dump the parsed field map. The separate malformed-URL fixture proves that a
+present malformed setup-page value is not echoed.
+
+The test guard recursively inspects own property names and own data-property
+values, plus message, stack, cause, input, code, byte-oriented views,
+`Uint16Array` code units, and `util.inspect` output; it fails closed when that
+inspection throws. This does not claim to detect values exposed only through an
+inherited `toString` or an otherwise-unselected own accessor. The harness also
+recognizes a 5,000-character uppercase-and-underscore marker in both key-bearing
+parser diagnostics. Those diagnostics intentionally disclose the page-controlled
+field name and remain outside the five value-free field diagnostics; field-name
+characters are restricted to `[A-Z][A-Z0-9_]*`, with no independent length bound
+inside the guide-size limit.
+
+The Windows and macOS guide resources are selected from one module-local
+platform table for validation and fetching. Tests exercise both fetch paths and
+tie the returned guide URL to the URL actually passed to the reader. The public
+install runner reports that returned URL and independently compares it with its
+platform-specific expected URL. No decision or proof relies on whether the
+module-local table is frozen.
+
+Commit `f9e7aaf` introduced `Object.hasOwn` and its regression cases, changing
+prototype property names from the misleading `TARGET` failure to the
+unsupported-caller-platform diagnostic; commit `148e7a2` did not change that
+behavior. `test/package-privacy.test.mjs` continues to review the packaged
+validator and this decision record.
 
 ## Revisit when
 
