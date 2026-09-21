@@ -228,7 +228,10 @@ test('transport and unreadable metadata fail closed', async () => {
 
 // Execute the real import-time runner. Only the public contract and external
 // commands are synthetic; source-text checks cannot prove a refusal happens.
-function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false }) {
+function runSyntheticKit({
+  rootCount, declaredName = null, staleWorkdir = false,
+  rootMode = 'directory', archiveMode = 'file', receiptMode = 'file',
+}) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'brain-kit-containment-'));
   const workdir = join(fixtureRoot, 'runner-workdir');
   const executionMarker = join(fixtureRoot, 'install-command-ran.txt');
@@ -248,9 +251,12 @@ function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false 
     }
   `;
   const childProcessSource = `
-    import { mkdirSync, writeFileSync } from 'node:fs';
+    import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
     import { join } from 'node:path';
-    const fixture = ${JSON.stringify({ rootCount, declaredName, workdir, executionMarker, archiveBase64, sha })};
+    const fixture = ${JSON.stringify({
+      rootCount, declaredName, workdir, fixtureRoot, executionMarker, archiveBase64, sha,
+      rootMode, archiveMode, receiptMode,
+    })};
     export function execFileSync(command, args) {
       if (command !== 'unzip') {
         writeFileSync(fixture.executionMarker, 'called');
@@ -259,13 +265,32 @@ function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false 
       const extractionDir = args[4];
       for (let index = 0; index < fixture.rootCount; index++) {
         const root = join(extractionDir, index === 0 ? 'kit' : 'extra-' + index);
-        mkdirSync(root, { recursive: true });
+        if (index === 0 && fixture.rootMode !== 'directory') {
+          const target = join(fixture.fixtureRoot,
+            fixture.rootMode === 'broken-link' ? 'missing-root' : 'outside-root');
+          if (fixture.rootMode !== 'broken-link') mkdirSync(target, { recursive: true });
+          symlinkSync(target, root, process.platform === 'win32' ? 'junction' : 'dir');
+        } else {
+          mkdirSync(root, { recursive: true });
+        }
         if (index === 0) {
+          if (fixture.rootMode === 'broken-link') continue;
           const archive = Buffer.from(fixture.archiveBase64, 'base64');
-          writeFileSync(join(root, 'brain-installer-9.8.6.tgz'), archive);
+          if (fixture.archiveMode === 'outside-link') {
+            const outside = join(fixture.fixtureRoot, 'outside-archive');
+            mkdirSync(outside, { recursive: true });
+            symlinkSync(outside, join(root, 'brain-installer-9.8.6.tgz'),
+              process.platform === 'win32' ? 'junction' : 'dir');
+          } else if (fixture.archiveMode === 'file') {
+            writeFileSync(join(root, 'brain-installer-9.8.6.tgz'), archive);
+          }
           writeFileSync(join(extractionDir, 'brain-installer-9.8.6.tgz'), archive);
           if (fixture.declaredName !== null) {
-            writeFileSync(join(root, 'SHA256SUMS.txt'), fixture.sha + '  ' + fixture.declaredName + '\\n');
+            if (fixture.receiptMode === 'directory') {
+              mkdirSync(join(root, 'SHA256SUMS.txt'));
+            } else if (fixture.receiptMode === 'file') {
+              writeFileSync(join(root, 'SHA256SUMS.txt'), fixture.sha + '  ' + fixture.declaredName + '\\n');
+            }
           }
         }
       }
@@ -346,6 +371,49 @@ test('one extracted root and a safe archive name reach the existing guide checks
   assert.match(result.stdout, /PASS  brain-installer-9\.8\.6\.tgz matches the kit's own SHA256SUMS\.txt/);
   assert.match(result.stderr, /WINDOWS-FIELD-TEST\.md/,
     'the synthetic kit intentionally omits downstream guide documents');
+});
+
+test('the public runner refuses a root junction resolving outside extraction', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', rootMode: 'outside-link',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit extraction root resolves outside its extraction directory(?:\r?\n|$)/);
+});
+
+test('the public runner refuses a safe archive name resolving outside its root', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', archiveMode: 'outside-link',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit archive resolves outside the extracted root(?:\r?\n|$)/);
+});
+
+test('the public runner refuses a missing archive without a filesystem stack', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', archiveMode: 'missing',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit archive is missing or unreadable(?:\r?\n|$)/);
+  assert.doesNotMatch(result.stderr, /ENOENT|ERR_INVALID_ARG_TYPE/);
+});
+
+for (const receiptMode of ['missing', 'directory']) {
+  test(`the public runner refuses a ${receiptMode} SHA256SUMS.txt without a filesystem stack`, () => {
+    const result = runSyntheticKit({
+      rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', receiptMode,
+    });
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stderr, /FAIL  kit SHA256SUMS.txt is missing or unreadable(?:\r?\n|$)/);
+    assert.doesNotMatch(result.stderr, /ENOENT|EISDIR/);
+  });
+}
+
+test('the public runner refuses a broken root link without a filesystem stack', () => {
+  const result = runSyntheticKit({ rootCount: 1, rootMode: 'broken-link' });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit ZIP extraction entry is missing or unreadable(?:\r?\n|$)/);
+  assert.doesNotMatch(result.stderr, /ENOENT/);
 });
 
 // One release repository, asserted across every module that names one.
