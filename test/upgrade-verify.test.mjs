@@ -34,6 +34,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { printSymlinkSkip } from "./helpers/symlink-probe.mjs";
 import {
   ACCELERATED_BOOTSTRAP_MAX_MS,
   ACCELERATED_BOOTSTRAP_MAX_ROUNDS,
@@ -1770,20 +1771,22 @@ const bootstrapCompletion = () => ({
   try {
     const manifestPath = join(sandbox, "brain.manifest.json");
     writeFileSync(manifestPath, JSON.stringify(manifestFixture()));
-    const symlinkPath = join(sandbox, "linked.manifest.json");
-    symlinkSync(manifestPath, symlinkPath);
     let remoteReads = 0;
-    let symlinkError = null;
-    try {
-      await cmdUpgrade(symlinkPath, {
-        resolveAccount: async () => { remoteReads++; return { id: "fixture-account" }; },
-      });
-    } catch (caught) { symlinkError = caught; }
-    check(
-      "a symlink manifest is refused before any Cloudflare access",
-      /regular file, not a link/.test(symlinkError?.message || "") && remoteReads === 0,
-      symlinkError?.message,
-    );
+    if (!printSymlinkSkip("upgrade rejects a symlink manifest before Cloudflare access")) {
+      const symlinkPath = join(sandbox, "linked.manifest.json");
+      symlinkSync(manifestPath, symlinkPath);
+      let symlinkError = null;
+      try {
+        await cmdUpgrade(symlinkPath, {
+          resolveAccount: async () => { remoteReads++; return { id: "fixture-account" }; },
+        });
+      } catch (caught) { symlinkError = caught; }
+      check(
+        "a symlink manifest is refused before any Cloudflare access",
+        /regular file, not a link/.test(symlinkError?.message || "") && remoteReads === 0,
+        symlinkError?.message,
+      );
+    }
 
     const hardlinkPath = join(sandbox, "hardlinked.manifest.json");
     linkSync(manifestPath, hardlinkPath);

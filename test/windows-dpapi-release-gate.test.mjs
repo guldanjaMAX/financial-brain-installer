@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { skipSymlinkTest } from "./helpers/symlink-probe.mjs";
 
 const gate = readFileSync(new URL("../scripts/windows-dpapi-release-gate.mjs", import.meta.url), "utf8");
 // CRLF on a Windows checkout would break the exact step slice below.
@@ -56,7 +57,7 @@ test("the Windows release gate uses the production probe for exactly 25 fresh ro
   );
 });
 
-test("the bridge refuses a changed, hard-linked, or symlinked helper before reading input", () => {
+test("the bridge refuses a changed, hard-linked, or symlinked helper before reading input", async (t) => {
   const sandbox = realpathSync(mkdtempSync(join(tmpdir(), "brain-dpapi-bridge-contract-")));
   try {
     const childSystemRoot = process.platform === "win32"
@@ -97,13 +98,16 @@ test("the bridge refuses a changed, hard-linked, or symlinked helper before read
     assert.match(linked.stderr, /BRAIN_DPAPI_STAGE:helper_validation/);
 
     rmSync(hardlink);
-    const target = join(sandbox, "real-helper.exe");
-    writeFileSync(target, "symlink target bytes", "utf8");
-    rmSync(helper);
-    symlinkSync(target, helper, "file");
-    const symlinked = run(helper, createHash("sha256").update(readFileSync(target)).digest("hex"));
-    assert.notEqual(symlinked.status, 0);
-    assert.match(symlinked.stderr, /BRAIN_DPAPI_STAGE:helper_validation/);
+    await t.test("symlinked helper is refused", (symlinkTest) => {
+      if (skipSymlinkTest(symlinkTest)) return;
+      const target = join(sandbox, "real-helper.exe");
+      writeFileSync(target, "symlink target bytes", "utf8");
+      rmSync(helper);
+      symlinkSync(target, helper, "file");
+      const symlinked = run(helper, createHash("sha256").update(readFileSync(target)).digest("hex"));
+      assert.notEqual(symlinked.status, 0);
+      assert.match(symlinked.stderr, /BRAIN_DPAPI_STAGE:helper_validation/);
+    });
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
