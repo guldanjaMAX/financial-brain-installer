@@ -733,6 +733,7 @@ const expected = [
   "scripts/build-worker-bank-export.mjs",
   "scripts/build-worker-upload-extract.mjs",
   "scripts/field-prepare.mjs",
+  "scripts/lib/readback-secret-scan.mjs",
   "scripts/operational-fault-lab.mjs",
   "scripts/privacy-identity.mjs",
   "scripts/recovery-bank-safety-lab.mjs",
