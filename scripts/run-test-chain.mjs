@@ -114,6 +114,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/package-bundle-verifier.test.mjs",
   "node --test test/runtime-identity-receipt.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
+  "node --test worker/test/undated-corpus-regime.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -188,6 +189,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/technician-setup.test.mjs",
   "node test/onboarding-sandbox.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
+  "node --test worker/test/undated-corpus-regime.test.mjs",
   "node test/cloudflare-token-store.test.mjs",
   "node test/drain-throughput.test.mjs",
   "node --no-warnings test/vector-fence-recovery.test.mjs",
