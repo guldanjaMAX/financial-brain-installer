@@ -51,11 +51,21 @@ export function validateSupervisedInstallContract(installGuide, { platform = 'wi
   const target = SUPERVISED_TARGETS[platform];
   requireValue(target, 'unsupported supervised install platform');
   const install = guideFields(installGuide);
-  requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '1' &&
-    install.STATUS === 'supervised field-test candidate' &&
-    install.OWNER_PRESENT === 'required' && install.TARGET === target &&
-    typeof install.SETUP_PAGE === 'string', 'unrecognized supervised install contract');
-  const setup = new URL(install.SETUP_PAGE);
+  requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '2',
+    'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION');
+  requireValue(install.STATUS === 'supervised field-test candidate',
+    'unrecognized supervised install contract: STATUS');
+  requireValue(install.OWNER_PRESENT === 'required',
+    'unrecognized supervised install contract: OWNER_PRESENT');
+  requireValue(install.TARGET === target,
+    'unrecognized supervised install contract: TARGET');
+  requireValue(typeof install.SETUP_PAGE === 'string',
+    'unrecognized supervised install contract: SETUP_PAGE');
+  let setup = null;
+  try {
+    setup = new URL(install.SETUP_PAGE);
+  } catch {}
+  requireValue(setup, 'invalid supervised setup URL');
   requireValue(setup.origin === 'https://financialbrain.ai' && /^\/[a-z0-9-]+$/.test(setup.pathname) &&
     !setup.search && !setup.hash && !setup.username && !setup.password, 'invalid supervised setup URL');
   requireValue(versionPattern.test(install.CANDIDATE_VERSION) && /^[0-9a-f]{40}$/.test(install.CANDIDATE_COMMIT) &&

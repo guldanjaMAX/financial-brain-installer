@@ -31,7 +31,7 @@ const runtimeBytes = runtimeIdentityReceiptBytes(createRuntimeIdentityReceipt({
 }));
 const runtimeSha = createHash('sha256').update(runtimeBytes).digest('hex');
 const commit = createHash('sha1').update('synthetic candidate commit').digest('hex');
-const installGuide = `AGENT_INSTALL_CONTRACT_VERSION: 1
+const installGuide = `AGENT_INSTALL_CONTRACT_VERSION: 2
 STATUS: supervised field-test candidate
 TARGET: physical Windows 10 or newer
 OWNER_PRESENT: required
@@ -44,6 +44,61 @@ CANDIDATE_COMMIT: ${commit}
 `;
 const macosInstallGuide = installGuide
   .replace('TARGET: physical Windows 10 or newer', 'TARGET: macOS 13 or newer, Apple silicon or Intel');
+
+function assertMessage(run, message, forbidden = null) {
+  assert.throws(run, (error) => {
+    assert.equal(error.message, message);
+    if (forbidden) assert.doesNotMatch(error.message, forbidden);
+    return true;
+  });
+}
+
+test('supervised install contract version 2 is the one accepted contract', () => {
+  assert.equal(validateSupervisedInstallContract(installGuide).candidateCommit, commit);
+  assertMessage(
+    () => validateSupervisedInstallContract(
+      installGuide.replace('AGENT_INSTALL_CONTRACT_VERSION: 2', 'AGENT_INSTALL_CONTRACT_VERSION: 3'),
+    ),
+    'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION',
+  );
+});
+
+test('wrong-platform guides name only the TARGET field in both directions', () => {
+  assert.throws(
+    () => validateSupervisedInstallContract(macosInstallGuide, { platform: 'windows' }),
+    /unrecognized supervised install contract: TARGET/,
+  );
+  assert.throws(
+    () => validateSupervisedInstallContract(installGuide, { platform: 'macos' }),
+    /unrecognized supervised install contract: TARGET/,
+  );
+});
+
+test('every supervised install boundary names only its bounded field', () => {
+  const mutations = [
+    ['STATUS', installGuide.replace('STATUS: supervised field-test candidate', 'STATUS: private-untrusted-value')],
+    ['OWNER_PRESENT', installGuide.replace('OWNER_PRESENT: required', 'OWNER_PRESENT: private-untrusted-value')],
+    ['TARGET', installGuide.replace('TARGET: physical Windows 10 or newer', 'TARGET: private-untrusted-value')],
+    ['SETUP_PAGE', installGuide.replace(/^SETUP_PAGE:.*\n/m, '')],
+  ];
+  for (const [field, guideText] of mutations) {
+    assertMessage(
+      () => validateSupervisedInstallContract(guideText),
+      `unrecognized supervised install contract: ${field}`,
+      /private-untrusted-value/,
+    );
+  }
+});
+
+test('a malformed setup page has a named value-free refusal', () => {
+  const untrusted = 'private-untrusted-setup-value';
+  const malformed = installGuide.replace('https://financialbrain.ai/operator', untrusted);
+  assertMessage(
+    () => validateSupervisedInstallContract(malformed),
+    'invalid supervised setup URL',
+    new RegExp(untrusted),
+  );
+});
 const held = (state = 'held') => ({ schema_version: 2, release_state: state, available: false, release: null, published_at: null,
   update_url: 'https://financialbrain.ai/update', installer: null, changes: [], held_reason: 'Synthetic field evidence pending.',
   proof: { archive_release_gate: 'not_passed', automated_release_suite: 'pending', live_client_acceptance: 'required' } });
