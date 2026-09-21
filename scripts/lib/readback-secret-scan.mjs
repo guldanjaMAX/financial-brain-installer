@@ -134,12 +134,7 @@ export function scanReadbackOutput(text) {
       const masked = runMask(match[0]);
       const sharedLabels = sharedLabelsForRun(line, match.index, LONG_RUN.lastIndex, masked, scanned);
       // An already reported label suppresses only its own exact occurrence.
-      // Provider-family exclusions take precedence when one value also matches
-      // an approved fallback label.
       if ([...sharedLabels].some((label) => READBACK_LABELS.has(label))) continue;
-      if ([...sharedLabels].some((label) => (
-        !READBACK_LABELS.has(label) && !FALLBACK_LABELS.has(label)
-      ))) continue;
       const sharedFallback = [...sharedLabels].some((label) => FALLBACK_LABELS.has(label));
       if (!sharedFallback) {
         const urlContext = urlResourceContext(line, match.index, LONG_RUN.lastIndex);

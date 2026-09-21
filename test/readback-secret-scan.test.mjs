@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { scannerMask, scanReadbackOutput } from "../scripts/lib/readback-secret-scan.mjs";
 import { scan as scanCredentialShapes } from "../worker/src/lib/secret-scan.js";
@@ -175,9 +176,11 @@ test("findings use one-based source line numbers", () => {
   assert.equal(scanReadbackOutput(`safe text\nAuthorization: Bearer ${secret}`)[0].line, 2);
 });
 
-test("unselected provider-specific scanner findings do not return as generic findings", () => {
+test("a provider-specific value reaches the masked generic detector", () => {
   const providerShape = "sk_live_" + randomBytes(12).toString("hex");
-  assert.deepEqual(scanReadbackOutput(providerShape), []);
+  const findings = scanReadbackOutput(providerShape);
+  assert.deepEqual(findings, [{ line: 1, kind: "long_token", masked: runMaskForTest(providerShape) }]);
+  assertMaskedOnly(findings, providerShape);
 });
 
 test("fallback evidence cannot transfer to a clean artifact with the same mask", () => {
@@ -191,13 +194,15 @@ test("fallback evidence cannot transfer to a clean artifact with the same mask",
   }]);
 });
 
-test("provider exclusion takes precedence when one value also has fallback evidence", () => {
+test("provider and fallback evidence together still yield a masked generic finding", () => {
   const providerShape = "sk_live_" + inventedHex("provider-fallback-overlap", 24);
   const input = `postgres://owner:${providerShape}@db.invalid`;
   const shared = scanCredentialShapes(input);
   assert.ok(shared.labels.includes("connection_string"));
   assert.ok(shared.labels.includes("stripe_secret_key"));
-  assert.deepEqual(scanReadbackOutput(input), []);
+  const findings = scanReadbackOutput(input);
+  assert.deepEqual(findings, [{ line: 1, kind: "long_token", masked: runMaskForTest(providerShape) }]);
+  assertMaskedOnly(findings, providerShape, input);
 });
 
 test("connection-string context cannot transfer password evidence to a clean username", () => {
@@ -286,6 +291,25 @@ for (const fixture of discardedSharedFixtures) {
     assertMaskedOnly(findings, fixture.value, input);
   });
 }
+
+test("readback labels cover every shared structural and generic scanner label", () => {
+  const sharedSource = readFileSync(new URL("../worker/src/lib/secret-scan.js", import.meta.url), "utf8");
+  const readbackSource = readFileSync(new URL("../scripts/lib/readback-secret-scan.mjs", import.meta.url), "utf8");
+  const between = (source, start, end) => {
+    const startAt = source.indexOf(start);
+    const endAt = source.indexOf(end, startAt + start.length);
+    assert.ok(startAt >= 0 && endAt > startAt, `expected scanner section ${start}`);
+    return source.slice(startAt, endAt);
+  };
+  const sharedRules = between(sharedSource, "const STRUCTURAL = [", "const ALL_RULES =");
+  const readbackRules = between(readbackSource, "const READBACK_LABELS =", "const LONG_RUN =");
+  const sharedLabels = [...sharedRules.matchAll(/\blabel:\s*"([^"]+)"/g)].map((match) => match[1]);
+  const readbackLabels = [...readbackRules.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(sharedLabels.length > 0 && readbackLabels.length > 0, "scanner labels must be readable");
+  assert.equal(new Set(sharedLabels).size, sharedLabels.length, "shared structural/generic labels must be distinct");
+  assert.equal(new Set(readbackLabels).size, readbackLabels.length, "readback label sets must not overlap");
+  assert.deepEqual([...readbackLabels].sort(), [...sharedLabels].sort());
+});
 
 function runMaskForTest(value) {
   return `${value.slice(0, 4)}:${value.length}`;
