@@ -67,11 +67,19 @@ cross-link requirement.
 
 `test/install-page-version.test.mjs` proves that version 2 passes while versions
 1 and 3 fail with the version field name, both supplied published field sets
-pass on their own platform, both cross-platform swaps fail with the exact target
-field message, the five formerly joined contract-field boundaries have their
-own value-free messages, the full printable error surface stays value-free, and
-a malformed setup page receives a fixed refusal. Prototype property names are
-also rejected as unsupported caller platforms. `test/package-privacy.test.mjs`
+pass on their own platform, and both synthetic cross-platform swaps fail with
+the exact target-field message. All five formerly joined contract-field
+boundaries retain exact field-only messages, and each case carries a forbidden
+value that is checked against the guard's inspected surfaces. The test guard
+recursively inspects own property names and own data-property values, plus
+message, stack, cause, input, code, byte-oriented views and `util.inspect`
+output; it fails closed
+when that inspection throws. This does not claim to detect values exposed only
+through an inherited `toString`, an otherwise-unselected own accessor, or a
+`Uint16Array`-encoded payload when no renderer on this path prints them. A
+malformed setup page receives a fixed refusal. Prototype property names were
+already refused; they now receive the unsupported-caller-platform diagnostic
+instead of the misleading `TARGET` diagnostic. `test/package-privacy.test.mjs`
 continues to review the packaged validator and this decision record.
 
 ## Revisit when

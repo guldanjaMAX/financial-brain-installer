@@ -174,7 +174,7 @@ test('wrong-platform guides name only the TARGET field in both directions', () =
   );
 });
 
-test('the exact-message guard rejects a collapsed or value-appended diagnostic', () => {
+test('the exact-message and surface guards reject a collapsed diagnostic or leaked value', () => {
   assertGuardFailure(
     () => assertMessage(
       () => { throw new Error('unrecognized supervised install contract: TARGET'); },
@@ -182,17 +182,19 @@ test('the exact-message guard rejects a collapsed or value-appended diagnostic',
     ),
     'message-mismatch',
   );
+  const leaked = new Error('unrecognized supervised install contract: TARGET');
+  leaked.input = 'private-untrusted-value';
   assertGuardFailure(
     () => assertMessage(
-      () => { throw new Error('unrecognized supervised install contract: TARGET private-untrusted-value'); },
+      () => { throw leaked; },
       'unrecognized supervised install contract: TARGET',
       /private-untrusted-value/,
     ),
-    'message-mismatch',
+    'unsafe-error-surface',
   );
 });
 
-test('the leak guard inspects every error surface a runner can print', () => {
+test('the leak guard inspects covered error surfaces and runner rendering', () => {
   const message = 'invalid supervised setup URL';
   const marker = 'private-untrusted-error-surface';
   const errors = [];
@@ -210,6 +212,23 @@ test('the leak guard inspects every error surface a runner can print', () => {
     assertGuardFailure(
       () => assertMessage(() => { throw error; }, message, new RegExp(marker)),
       'unsafe-error-surface',
+    );
+  }
+});
+
+test('the leak guard fails closed when an error surface cannot be inspected', () => {
+  const message = 'invalid supervised setup URL';
+  const throwingStack = new Error(message);
+  Object.defineProperty(throwingStack, 'stack', {
+    configurable: true,
+    get() { throw new Error('synthetic stack refusal'); },
+  });
+  const throwingRenderer = new Error(message);
+  throwingRenderer[inspect.custom] = () => { throw new Error('synthetic renderer refusal'); };
+  for (const error of [throwingStack, throwingRenderer]) {
+    assertGuardFailure(
+      () => assertMessage(() => { throw error; }, message, /private-untrusted-value/),
+      'uninspectable-surface',
     );
   }
 });
@@ -234,10 +253,13 @@ test('prototype property names are unsupported caller platforms', () => {
 
 test('every supervised install boundary names only its bounded field', () => {
   const mutations = [
+    ['AGENT_INSTALL_CONTRACT_VERSION', installGuide.replace(
+      'AGENT_INSTALL_CONTRACT_VERSION: 2', 'AGENT_INSTALL_CONTRACT_VERSION: private-untrusted-value')],
     ['STATUS', installGuide.replace('STATUS: supervised field-test candidate', 'STATUS: private-untrusted-value')],
     ['OWNER_PRESENT', installGuide.replace('OWNER_PRESENT: required', 'OWNER_PRESENT: private-untrusted-value')],
     ['TARGET', installGuide.replace('TARGET: physical Windows 10 or newer', 'TARGET: private-untrusted-value')],
-    ['SETUP_PAGE', installGuide.replace(/^SETUP_PAGE:.*\n/m, '')],
+    ['SETUP_PAGE', installGuide.replace(
+      /^SETUP_PAGE:.*\n/m, 'UNTRUSTED_CONTEXT: private-untrusted-value\n')],
   ];
   for (const [field, guideText] of mutations) {
     assertMessage(

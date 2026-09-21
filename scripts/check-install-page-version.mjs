@@ -36,9 +36,15 @@ export function guideFields(text) {
   return fields;
 }
 
-const SUPERVISED_TARGETS = Object.freeze({
-  windows: 'physical Windows 10 or newer',
-  macos: 'macOS 13 or newer, Apple silicon or Intel',
+const SUPERVISED_PLATFORMS = Object.freeze({
+  windows: Object.freeze({
+    target: 'physical Windows 10 or newer',
+    guideUrl: ENDPOINTS.installGuide,
+  }),
+  macos: Object.freeze({
+    target: 'macOS 13 or newer, Apple silicon or Intel',
+    guideUrl: ENDPOINTS.installGuideMacos,
+  }),
 });
 
 /**
@@ -48,9 +54,9 @@ const SUPERVISED_TARGETS = Object.freeze({
  * cannot be accepted by one surface and rejected by the other.
  */
 export function validateSupervisedInstallContract(installGuide, { platform = 'windows' } = {}) {
-  requireValue(Object.hasOwn(SUPERVISED_TARGETS, platform),
+  requireValue(Object.hasOwn(SUPERVISED_PLATFORMS, platform),
     'unsupported supervised install platform');
-  const target = SUPERVISED_TARGETS[platform];
+  const { target, guideUrl } = SUPERVISED_PLATFORMS[platform];
   const install = guideFields(installGuide);
   requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '2',
     'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION');
@@ -77,7 +83,7 @@ export function validateSupervisedInstallContract(installGuide, { platform = 'wi
   requireValue(install.ARTIFACT_URL === expected, 'supervised candidate URL and receipt disagree');
   return Object.freeze({
     platform,
-    guideUrl: platform === 'windows' ? ENDPOINTS.installGuide : ENDPOINTS.installGuideMacos,
+    guideUrl,
     setupPage: setup.href,
     artifactUrl: install.ARTIFACT_URL,
     artifactBytes: Number(install.ARTIFACT_BYTES),
