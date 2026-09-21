@@ -1,6 +1,16 @@
 import { scan as scanCredentialShapes } from "../../worker/src/lib/secret-scan.js";
 
 const READBACK_LABELS = new Set(["env_assignment", "private_key_header", "bearer_literal"]);
+const FALLBACK_LABELS = new Set([
+  "connection_string",
+  "url_query_secret",
+  "service_account_private_key",
+  "cloudflare_token_classic",
+  "cloudflare_global_key",
+  "plaid_secret",
+  "azure_storage_key",
+  "possible_bare_token_40",
+]);
 const LONG_RUN = /[A-Za-z0-9._-]{24,}/gu;
 const SCANNER_PREVIEW = /^(?:(.{4})\.\.\.|\*+)\[len=(\d+)\]$/u;
 const URL_VALUE = /https?:\/\/[^\s"'`<>{}\[\]()]+/giu;
@@ -50,6 +60,36 @@ function versionedArtifactFilename(value) {
   return VERSIONED_ARTIFACT_FILENAME.test(value);
 }
 
+function findingKey(finding) {
+  return `${finding.label}\u0000${finding.preview}`;
+}
+
+// The shared scanner intentionally returns masks rather than source spans. To
+// bind its evidence to one LONG_RUN, replace only that occurrence and compare
+// finding multisets. A same-length alphanumeric sentinel preserves surrounding
+// grammar when the run is context, while a different prefix changes a finding
+// that actually captured the run.
+function sharedLabelsForRun(line, start, end, candidateMask, originalFindings) {
+  const length = end - start;
+  const currentPrefix = line.slice(start, start + 4);
+  const sentinelPrefix = currentPrefix === "N0tA" ? "Q1uB" : "N0tA";
+  const replacement = (sentinelPrefix + "0".repeat(length)).slice(0, length);
+  const withoutRun = line.slice(0, start) + replacement + line.slice(end);
+  const remaining = new Map();
+  for (const finding of scanCredentialShapes(withoutRun).findings) {
+    const key = findingKey(finding);
+    remaining.set(key, (remaining.get(key) ?? 0) + 1);
+  }
+  const removedLabels = new Set();
+  for (const finding of originalFindings) {
+    const key = findingKey(finding);
+    const count = remaining.get(key) ?? 0;
+    if (count > 0) remaining.set(key, count - 1);
+    else if (scannerMask(finding.preview) === candidateMask) removedLabels.add(finding.label);
+  }
+  return removedLabels;
+}
+
 // The run alphabet excludes path separators. Inspect the whole surrounding
 // value so a long directory or filename segment is not mistaken for a token.
 function pathShapedContext(line, start, end) {
@@ -82,13 +122,9 @@ export function scanReadbackOutput(text) {
   const findings = [];
   for (const [index, line] of text.split(/\r?\n/u).entries()) {
     const scanned = scanCredentialShapes(line).findings;
-    const recognized = new Set(scanned.map((finding) => {
-      const match = SCANNER_PREVIEW.exec(finding.preview);
-      return match?.[1] ? `${match[1]}:${match[2]}` : null;
-    }));
+    const reported = scanned.filter((finding) => READBACK_LABELS.has(finding.label));
 
-    for (const finding of scanned) {
-      if (!READBACK_LABELS.has(finding.label)) continue;
+    for (const finding of reported) {
       findings.push({ line: index + 1, kind: finding.label, masked: scannerMask(finding.preview) });
     }
 
@@ -96,14 +132,22 @@ export function scanReadbackOutput(text) {
     let match;
     while ((match = LONG_RUN.exec(line)) !== null) {
       const masked = runMask(match[0]);
-      // Other shared-scanner labels are intentionally out of scope, including
-      // when their value also meets this generic length rule.
-      if (recognized.has(masked)) continue;
-      const urlContext = urlResourceContext(line, match.index, LONG_RUN.lastIndex);
-      if (urlContext) {
-        if (!urlContext.inResource || versionedArtifactFilename(match[0]) || !credentialShapedRun(match[0])) continue;
-      } else if (pathShapedContext(line, match.index, LONG_RUN.lastIndex)) {
-        continue;
+      const sharedLabels = sharedLabelsForRun(line, match.index, LONG_RUN.lastIndex, masked, scanned);
+      // An already reported label suppresses only its own exact occurrence.
+      // Provider-family exclusions take precedence when one value also matches
+      // an approved fallback label.
+      if ([...sharedLabels].some((label) => READBACK_LABELS.has(label))) continue;
+      if ([...sharedLabels].some((label) => (
+        !READBACK_LABELS.has(label) && !FALLBACK_LABELS.has(label)
+      ))) continue;
+      const sharedFallback = [...sharedLabels].some((label) => FALLBACK_LABELS.has(label));
+      if (!sharedFallback) {
+        const urlContext = urlResourceContext(line, match.index, LONG_RUN.lastIndex);
+        if (urlContext) {
+          if (!urlContext.inResource || versionedArtifactFilename(match[0]) || !credentialShapedRun(match[0])) continue;
+        } else if (pathShapedContext(line, match.index, LONG_RUN.lastIndex)) {
+          continue;
+        }
       }
       findings.push({ line: index + 1, kind: "long_token", masked });
     }
