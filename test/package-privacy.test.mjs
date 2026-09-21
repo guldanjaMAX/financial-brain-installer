@@ -737,6 +737,7 @@ const expected = [
   "scripts/privacy-identity.mjs",
   "scripts/recovery-bank-safety-lab.mjs",
   "scripts/scan-git-history-privacy.mjs",
+  "scripts/scan-privacy-positions.mjs",
   "scripts/windows-dpapi-release-gate.mjs",
   "worker/build-src/lib/upload-extract.js",
   "worker/src/lib/agent-action-receipts.js",

@@ -104,18 +104,41 @@ export function buildIdentityIndex(rules = IDENTITY_RULES) {
 
 export const IDENTITY_INDEX = buildIdentityIndex();
 
-// The scanner returns categories only. It never returns, logs, or stores the
-// matched text, which keeps a failure report from repeating the incident.
-export function scanIdentityText(text, index = IDENTITY_INDEX) {
+// Map positions in normalized text back to source columns. Only position
+// diagnostics need this; ordinary category scans keep their existing path.
+function normalizedSourceOffsets(text) {
+  const offsets = [];
+  const words = [...String(text).matchAll(/[A-Za-z0-9]+/g)];
+  let previousEnd = 0;
+  for (const word of words) {
+    if (offsets.length) offsets.push(previousEnd);
+    for (let index = 0; index < word[0].length; index++) offsets.push(word.index + index);
+    previousEnd = word.index + word[0].length;
+  }
+  return offsets;
+}
+
+// The public scanner returns categories only. Its optional private callback
+// reports positions and the matched row digest to the position formatter,
+// never the matched text or a changed public finding shape.
+export function scanIdentityText(text, index = IDENTITY_INDEX, onMatch = null) {
   const found = new Map();
   const normal = normalizeIdentityText(text);
   if (!normal) return [];
-  const add = (candidate) => {
+  const sourceOffsets = onMatch ? normalizedSourceOffsets(text) : null;
+  const add = (candidate, digest, normalStart) => {
     for (const finding of candidate || []) {
       found.set(`${finding.kind}:${finding.label}`, finding);
+      if (onMatch) onMatch({ finding, digest, column: sourceOffsets[normalStart] + 1 });
     }
   };
   const words = normal.split(" ");
+  const wordStarts = [];
+  let wordOffset = 0;
+  for (const word of words) {
+    wordStarts.push(wordOffset);
+    wordOffset += word.length + 1;
+  }
   for (let start = 0; start < words.length; start++) {
     for (const size of index.wordSizes) {
       if (start + size > words.length) break;
@@ -123,7 +146,8 @@ export function scanIdentityText(text, index = IDENTITY_INDEX) {
       const folded = phrase.toLowerCase();
       for (const candidate of folded === phrase ? [phrase] : [phrase, folded]) {
         if (!index.wordPrefilter.has(fnv1a(candidate))) continue;
-        add(index.wordDigests.get(sha256(candidate)));
+        const digest = sha256(candidate);
+        add(index.wordDigests.get(digest), digest, wordStarts[start]);
       }
     }
   }
@@ -133,7 +157,8 @@ export function scanIdentityText(text, index = IDENTITY_INDEX) {
       for (let start = 0; start + length <= lower.length; start++) {
         const window = lower.slice(start, start + length);
         if (!index.anyPrefilter.has(fnv1a(window))) continue;
-        add(index.anyDigests.get(sha256(window)));
+        const digest = sha256(window);
+        add(index.anyDigests.get(digest), digest, start);
       }
     }
   }
@@ -151,6 +176,31 @@ export function locateIdentityLines(text, index, findings) {
     }
   });
   return located;
+}
+
+/** Locate the existing category findings without disclosing matched text. */
+export function locateIdentityPositions(text, index, findings, { hashPrefixLength = 8 } = {}) {
+  if (!Number.isInteger(hashPrefixLength) || hashPrefixLength < 4 || hashPrefixLength > 16) {
+    throw new Error("hash prefix length must be an integer from 4 through 16");
+  }
+  const wanted = new Set(findings.map((finding) => `${finding.kind}:${finding.label}`));
+  const lines = String(text).split(/\r?\n/);
+  const located = locateIdentityLines(text, index, findings);
+  const eligible = new Set([...located.values()].flat());
+  const positions = [];
+  const seen = new Set();
+  for (const lineNumber of eligible) {
+    scanIdentityText(lines[lineNumber - 1], index, ({ finding, digest, column }) => {
+      if (!wanted.has(`${finding.kind}:${finding.label}`)) return;
+      const hashPrefix = digest.slice(0, hashPrefixLength);
+      const key = `${lineNumber}:${column}:${hashPrefix}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      positions.push({ line: lineNumber, column, hashPrefix });
+    });
+  }
+  return positions.sort((a, b) => a.line - b.line || a.column - b.column ||
+    a.hashPrefix.localeCompare(b.hashPrefix));
 }
 
 export function safeIdentifier(value, prefix = "redacted") {
