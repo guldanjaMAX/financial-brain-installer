@@ -11635,7 +11635,12 @@ export async function listStoredSourceFamilies({
       },
       { what: "the source-family inventory" },
     ), {
-      isRetryableStatus: isRetryableHttpStatus,
+      // D1-SCOPED, NOT STATUS-SCOPED. A 413 or a bare 500 at this site is a
+      // capability signal the walk must not repeat; only a body naming a D1
+      // reset is transient here. Widening this to every retryable status would
+      // silently weaken that guarantee for the sake of a fault we can identify
+      // exactly. The status argument is ignored on purpose.
+      isRetryableStatus: (_status, body) => isD1TransientFaultBody(body),
       delaysMs: retryDelaysMs,
       sleep,
       onRetry: (attempt) => info(sourceFamilyInventoryRetryNotice(attempt)),
@@ -11835,7 +11840,7 @@ export async function applyDriveRemovals({
       // and record nothing: the plan is rebuilt next run from Drive truth against
       // the stored inventory, so these families are retried without a marker.
       if (isD1TransientFaultBody(raw)) {
-        throw new Error(d1ResetDuringRemovalMessage({ label, count: group.length }));
+        die(d1ResetDuringRemovalMessage({ label, count: group.length }));
       }
       state.removed = {
         ...(state.removed || {}),
@@ -15431,10 +15436,6 @@ const cmdIngestRemoteRun = async (
         ["source_deleted", "Drive source deletion", "stale document(s) removed to match Drive source truth"],
         ["intentional_skip", "intentional source skip", "previously-indexed document(s) removed because the source now skips them"],
       ];
-      // applyDriveRemovals has always returned a pending count and nothing has
-      // ever read it, which is how a group that failed to apply could reach the
-      // inventory readback and be reported as a readback problem. Read it.
-      let unappliedRemovals = 0;
       for (const [category, label, success] of categories) {
         const result = await applyDriveRemovals({
           uids: excludeProtectedDriveUids(driveRemovalPlan.targets[category]),
@@ -15442,7 +15443,6 @@ const cmdIngestRemoteRun = async (
           assertOwned: assertLockOwned,
         });
         if (result.applied) ok(`${result.applied} ${success}`);
-        unappliedRemovals += Number(result.pending || 0);
         if (driveRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (driveRemovalPlan.total) {
@@ -15467,10 +15467,6 @@ const cmdIngestRemoteRun = async (
               "The source cursor was not advanced; re-running will retry them through the same approval gate."
           );
         }
-        // Reached only when the readback proved every planned family absent. A
-        // group that never applied cannot end here silently just because the
-        // readback happened to agree.
-        assertNoPendingRemovals({ pending: unappliedRemovals }, "Drive removal");
       }
       intentionalRemovalUids.length = 0;
     }

@@ -11,6 +11,10 @@ import {
   sourceFamilyInventoryRetryNotice,
   SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS,
 } from "../operations/source-family-inventory-retry.mjs";
+import { isD1TransientFaultBody } from "../operations/d1-transient-fault.mjs";
+import { listStoredSourceFamilies } from "../brain.mjs";
+
+const PRODUCTION_D1_RESET = "D1_ERROR: D1 DB exceeded its CPU time limit and was reset.";
 
 // The CLI's own rule, passed in rather than restated in the module under test.
 const isRetryableStatus = (status) => new Set([408, 425, 429]).has(Number(status)) || Number(status) >= 500;
@@ -121,5 +125,151 @@ await assert.rejects(async () => requestSourceFamilyPageWithRetry(async () => re
   /sleep must be a function/);
 await assert.rejects(async () => requestSourceFamilyPageWithRetry(async () => reply(200), { isRetryableStatus, onRetry: 1 }),
   /retry reporter must be a function/);
+
+
+// ---------------------------------------------------------------------------
+// The predicate receives the BODY as well as the status, because at this site
+// the status alone cannot decide.
+// ---------------------------------------------------------------------------
+
+{
+  const seen = [];
+  let calls = 0;
+  await requestSourceFamilyPageWithRetry(
+    async () => { calls += 1; return reply(calls === 1 ? 500 : 200, calls === 1 ? "first-body" : "{}"); },
+    {
+      isRetryableStatus: (status, body) => { seen.push([status, body]); return status === 500; },
+      delaysMs: [1],
+      sleep: async () => {},
+    },
+  );
+  assert.deepEqual(seen[0], [500, "first-body"],
+    "the predicate must see the status AND the body it has to classify");
+  assert.equal(calls, 2);
+}
+
+// A D1-scoped predicate, which is what the CLI passes at this site.
+const d1Only = (_status, body) => isD1TransientFaultBody(body);
+{
+  let calls = 0;
+  const page = await requestSourceFamilyPageWithRetry(
+    async () => { calls += 1; return reply(500, JSON.stringify({ error: PRODUCTION_D1_RESET })); },
+    { isRetryableStatus: d1Only, delaysMs: [1, 2, 3], sleep: async () => {} },
+  );
+  assert.equal(calls, 4, "a 500 carrying a D1 reset must use the bounded retry");
+  assert.equal(page.exhausted, true);
+}
+for (const [status, body, why] of [
+  [500, '{"error":"fixture refusal"}', "a bare 500 here is a capability signal, not a D1 reset"],
+  [413, '{"error":"fixture refusal"}', "413 is a capability signal"],
+  [429, '{"error":"fixture refusal"}', "429 keeps its one-call behaviour under a D1-scoped rule"],
+  [400, '{"error":"fixture refusal"}', "400 is the compatibility ladder's signal"],
+]) {
+  let calls = 0;
+  await requestSourceFamilyPageWithRetry(
+    async () => { calls += 1; return reply(status, body); },
+    { isRetryableStatus: d1Only, delaysMs: [1, 2, 3], sleep: async () => {} },
+  );
+  assert.equal(calls, 1, `HTTP ${status}: ${why}`);
+}
+
+// B4d: a bad delay schedule is an UNBOUNDED REQUEST LOOP, not a throw, so it is
+// checked like every other option rather than being the one that is not.
+for (const bad of ["1000", 1000, [1000, -1], [1000, "soon"], [Number.NaN], [Infinity], null]) {
+  await assert.rejects(
+    async () => requestSourceFamilyPageWithRetry(async () => reply(200), {
+      isRetryableStatus: d1Only, delaysMs: bad,
+    }),
+    /retry delays must be an array of non-negative numbers/,
+    `a delay schedule of ${JSON.stringify(bad)} must be refused`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SITE 1 end to end. listStoredSourceFamilies uses globalThis.fetch, not an
+// injected fetchImpl, so this monkeypatches it the way drive-removal-guard does.
+// ---------------------------------------------------------------------------
+
+{
+  const originalFetch = globalThis.fetch;
+  try {
+    // A 500 carrying the verbatim production string is retried, and the message
+    // after the bound is exhausted is the same one the walk always raised.
+    let d1Calls = 0;
+    const slept = [];
+    globalThis.fetch = async () => {
+      d1Calls += 1;
+      return new Response(JSON.stringify({ error: PRODUCTION_D1_RESET }), {
+        status: 500, headers: { "content-type": "application/json" },
+      });
+    };
+    await assert.rejects(
+      listStoredSourceFamilies({
+        base: "https://fixture.invalid",
+        adminKey: "fixture-admin",
+        source: "drive",
+        retryDelaysMs: [1, 2, 3],
+        sleep: async (ms) => { slept.push(ms); },
+      }),
+      /not accepted \(500\)/i,
+      "the exhausted message must be the one the walk always raised",
+    );
+    assert.equal(d1Calls, 4, "a D1 reset at SITE 1 must use the bounded retry");
+    assert.deepEqual(slept, [1, 2, 3]);
+
+    // The same status WITHOUT a D1 body is a capability signal and is not retried.
+    let bareCalls = 0;
+    globalThis.fetch = async () => {
+      bareCalls += 1;
+      return new Response(JSON.stringify({ error: "fixture refusal" }), {
+        status: 500, headers: { "content-type": "application/json" },
+      });
+    };
+    await assert.rejects(
+      listStoredSourceFamilies({
+        base: "https://fixture.invalid",
+        adminKey: "fixture-admin",
+        source: "drive",
+        retryDelaysMs: [1, 2, 3],
+        sleep: async () => {},
+      }),
+      /not accepted \(500\)/i,
+    );
+    assert.equal(bareCalls, 1, "a bare 500 must keep its capability-signal behaviour");
+
+    // Retrying happens INSIDE the page: the same cursor is re-requested, so the
+    // repeated-cursor guard must not fire and page one must not be re-read.
+    let pageOne = 0;
+    let pageTwo = 0;
+    globalThis.fetch = async (_input, options = {}) => {
+      const body = JSON.parse(String(options.body || "{}"));
+      if (!body.cursor) {
+        pageOne += 1;
+        return new Response(JSON.stringify({
+          source: "drive", families: ["drive:a"], next_cursor: "drive:a",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      pageTwo += 1;
+      return new Response(JSON.stringify({ error: PRODUCTION_D1_RESET }), {
+        status: 500, headers: { "content-type": "application/json" },
+      });
+    };
+    await assert.rejects(
+      listStoredSourceFamilies({
+        base: "https://fixture.invalid",
+        adminKey: "fixture-admin",
+        source: "drive",
+        retryDelaysMs: [1, 2],
+        sleep: async () => {},
+      }),
+      /not accepted \(500\)/i,
+      "never the repeated-cursor error: a retried page does not re-enter the walk",
+    );
+    assert.equal(pageOne, 1, "a retried page two restarted the inventory walk");
+    assert.equal(pageTwo, 3, "page two must be retried in place");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
 
 console.log("source-family inventory retry: a transient page is repeated in place, a capability signal is not");

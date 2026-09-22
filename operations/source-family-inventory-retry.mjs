@@ -32,11 +32,17 @@ export function sourceFamilyInventoryRetryNotice({ status, retry, maxRetries, de
 }
 
 /**
- * Run one exact inventory page request, repeating only a transient status.
+ * Run one exact inventory page request, repeating only a transient failure.
  *
  * Returns the last response together with the body text already read, because a
  * response body can only be read once and the caller needs the same bytes to
  * classify compatibility, build its error message, and parse the page.
+ *
+ * The predicate receives BOTH the status and the body, because at this site the
+ * status alone cannot decide: a 413 or a bare 500 here is a capability signal
+ * that must not be repeated, while a 500 carrying a D1 reset must be. The status
+ * parameter stays in the signature even for a caller whose rule ignores it, so
+ * this helper remains usable by one that does not.
  */
 export async function requestSourceFamilyPageWithRetry(request, {
   isRetryableStatus,
@@ -50,12 +56,18 @@ export async function requestSourceFamilyPageWithRetry(request, {
   }
   if (typeof sleep !== "function") throw new TypeError("inventory page sleep must be a function");
   if (typeof onRetry !== "function") throw new TypeError("inventory page retry reporter must be a function");
+  // Checked like the others. A bad schedule here is not an immediate throw but an
+  // unbounded request loop, which is the worse failure of the two.
+  if (!Array.isArray(delaysMs) ||
+      delaysMs.some((ms) => !Number.isFinite(Number(ms)) || Number(ms) < 0)) {
+    throw new TypeError("inventory page retry delays must be an array of non-negative numbers");
+  }
 
   let retries = 0;
   for (;;) {
     const res = await request();
     const raw = await res.text();
-    if (res.ok || !isRetryableStatus(res.status) || retries >= delaysMs.length) {
+    if (res.ok || !isRetryableStatus(res.status, raw) || retries >= delaysMs.length) {
       return Object.freeze({ res, raw, retries, exhausted: !res.ok && retries >= delaysMs.length });
     }
     const delayMs = delaysMs[retries];

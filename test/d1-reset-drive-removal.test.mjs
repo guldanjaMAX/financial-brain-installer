@@ -47,6 +47,18 @@ function run(responder, { uids = UIDS } = {}) {
     assert.match(error.message, /source cursor was not advanced/i);
     assert.doesNotMatch(error.message, /readback/i,
       "the fault must be named where it happened, not blamed on the inventory readback");
+    // The client cannot know what the server did. A reset can land mid-batch, so
+    // claiming nothing was removed asserts a server fact this side cannot observe.
+    assert.match(error.message, /could not be confirmed as removed/i,
+      "the message must claim only what this side can observe");
+    assert.doesNotMatch(error.message, /Nothing in this group was removed/i,
+      "a mid-batch reset can leave part of the group deleted");
+    assert.match(error.message, /some of this group may already be gone/i,
+      "the operator must be told the group may be partly applied");
+    // A named, anticipated, transient condition must NOT land in the
+    // unexpected-error frame, which tells the operator it is a bug in the installer.
+    assert.equal(error.constructor.name, "Fatal",
+      "an anticipated transient condition must route as an expected failure");
     return true;
   });
   assert.deepEqual(attempt.state.removed, undefined,

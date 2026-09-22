@@ -186,23 +186,8 @@ for (const uid of legitimateFamilyShapes) {
 {
   const originalFetch = globalThis.fetch;
   try {
-    // A transient status now gets a bounded retry INSIDE the page; a
-    // capability-signal status still gets exactly one call. Before the retry
-    // boundary existed both asserted one call, which recorded the absence of a
-    // retry rather than the presence of a boundary. 429 was already retryable by
-    // status and still got one call, which is what made that plain.
-    const slept = [];
-    const retryArgs = {
-      retryDelaysMs: [1, 2, 3],
-      sleep: async (ms) => { slept.push(ms); },
-    };
-    for (const [status, expectedCalls, why] of [
-      [413, 1, "was treated as a retryable fault rather than a capability signal"],
-      [429, 4, "is retryable by status and must use the bounded retry"],
-      [500, 4, "is retryable by status and must use the bounded retry"],
-    ]) {
+    for (const status of [413, 500]) {
       let calls = 0;
-      slept.length = 0;
       globalThis.fetch = async () => {
         calls++;
         return new Response(JSON.stringify({ error: "fixture refusal" }), {
@@ -217,14 +202,10 @@ for (const uid of legitimateFamilyShapes) {
           source: "drive",
           includeLabels: true,
           uids: ["drive:a"],
-          ...retryArgs,
         }),
-        // The message after the bound is exhausted is the same one as before.
         new RegExp(`not accepted \\(${status}\\)`, "i"),
-        `HTTP ${status} changed the message the operator sees`,
       );
-      assert.equal(calls, expectedCalls, `HTTP ${status} ${why}`);
-      assert.equal(slept.length, expectedCalls - 1, `HTTP ${status} did not back off once per retry`);
+      assert.equal(calls, 1, `HTTP ${status} was treated as a capability signal`);
     }
 
     let pageCalls = 0;
@@ -314,24 +295,12 @@ for (const uid of legitimateFamilyShapes) {
     assert.equal(controlCursorCalls, 2,
       "a structured page-two error hid the older Brain's control-cursor incompatibility");
 
-    // Page two, the case that proves the retry happens INSIDE the page. Each
-    // retry re-requests the SAME cursor, so the repeated-cursor guard must not
-    // fire and page one must not be requested again. One page-one call plus the
-    // bounded page-two attempts is the whole call budget; anything more means the
-    // walk restarted.
-    for (const [status, pageTwoAttempts, why] of [
-      [413, 1, "on page two was treated as retryable rather than a capability signal"],
-      [429, 4, "on page two is retryable by status and must use the bounded retry"],
-      [500, 4, "on page two is retryable by status and must use the bounded retry"],
-    ]) {
+    for (const status of [413, 429, 500]) {
       let laterStatusCalls = 0;
-      let firstPageCalls = 0;
-      const laterSlept = [];
       globalThis.fetch = async (_input, options = {}) => {
         laterStatusCalls++;
         const body = JSON.parse(String(options.body || "{}"));
         if (!body.cursor) {
-          firstPageCalls++;
           return new Response(JSON.stringify({
             source: "drive",
             families: ["drive:a"],
@@ -350,17 +319,10 @@ for (const uid of legitimateFamilyShapes) {
           adminKey: "fixture-admin",
           source: "drive",
           includeLabels: true,
-          retryDelaysMs: [1, 2, 3],
-          sleep: async (ms) => { laterSlept.push(ms); },
         }),
-        // Never the repeated-cursor error: a retried page does not re-enter the walk.
         new RegExp(`not accepted \\(${status}\\)`, "i"),
-        `HTTP ${status} on page two did not fail with the same message as before`,
       );
-      assert.equal(laterStatusCalls, 1 + pageTwoAttempts, `HTTP ${status} ${why}`);
-      assert.equal(firstPageCalls, 1, `HTTP ${status} on page two restarted the inventory walk`);
-      assert.equal(laterSlept.length, pageTwoAttempts - 1,
-        `HTTP ${status} on page two did not back off once per retry`);
+      assert.equal(laterStatusCalls, 2, `HTTP ${status} on page two restarted the inventory walk`);
     }
 
     globalThis.fetch = async () => new Response(JSON.stringify({
