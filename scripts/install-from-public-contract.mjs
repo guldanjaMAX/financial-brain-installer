@@ -21,7 +21,7 @@
  *   usage: node scripts/install-from-public-contract.mjs <workdir> [--guide macos|windows]
  */
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,7 @@ import {
   resolveNpmCliPath,
   resolveWindowsNpmCommandPath,
   resolveWindowsPowerShellPath,
+  windowsNpmPowerShellFailureClassifier,
 } from "../operations/npm-cli-runtime.mjs";
 import { readSupervisedInstallContract } from "./check-install-page-version.mjs";
 import { matchesExpectedSupervisedGuideUrl } from "./supervised-install-guide-oracle.mjs";
@@ -197,12 +198,35 @@ if (process.platform === "win32") {
     powershellPath: resolveWindowsPowerShellPath(),
   });
   writeFileSync(contractPath, `${npmInstall.contract}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  execFileSync(npmInstall.command, npmInstall.args, {
+  const child = spawn(npmInstall.command, npmInstall.args, {
     cwd: workdir,
-    stdio: "inherit",
+    stdio: ["inherit", "inherit", "pipe"],
     shell: npmInstall.shell,
     env: npmInstallEnvironment(),
   });
+  // Forward every stderr byte as it arrives; the classifier keeps only the
+  // overlap it derives from its own patterns and decides once, at close, so a
+  // marker split across chunks can neither be missed nor latch a verdict the
+  // joined text refuses. stdout stays directly inherited, so the Actions
+  // transcript remains live. Every failure code, including the ordinary one,
+  // comes from the classifier rather than from a literal restated here.
+  const failure = windowsNpmPowerShellFailureClassifier();
+  child.stderr.on("data", (chunk) => {
+    if (!process.stderr.write(chunk)) {
+      child.stderr.pause();
+      process.stderr.once("drain", () => child.stderr.resume());
+    }
+    failure.observe(chunk.toString("utf8"));
+  });
+  const installStatus = await new Promise((resolveStatus, rejectStatus) => {
+    child.once("error", rejectStatus);
+    child.once("close", (code, signal) => resolveStatus({ code, signal }));
+  });
+  if (installStatus.code !== 0) {
+    const failureKind = failure.classify();
+    await new Promise((flushed) => process.stderr.write(`FAIL  ${failureKind}\n`, flushed));
+    process.exit(1);
+  }
 } else {
   const npmInstall = buildNpmCliInvocation(npmCli, installArguments);
   execFileSync(npmInstall.command, npmInstall.args,

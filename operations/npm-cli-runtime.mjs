@@ -366,11 +366,111 @@ export function buildWindowsNpmPowerShellInvocation({
   return Object.freeze({
     command: powershell,
     args: Object.freeze([
-      "-NoLogo", "-NoProfile", "-NonInteractive", "-File", helper, contractPath,
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, contractPath,
     ]),
     shell: false,
     contract,
   });
+}
+
+// The two markers a failed launch can carry, and the structural property that
+// separates a policy block from an unrelated fault.
+//
+// UnauthorizedAccess alone cannot mean "policy block". PowerShell reports a
+// DENIED FILE WRITE by naming the failing operation in the very field a
+// Restricted policy uses, and each spelling buries the token inside a longer
+// error id. All four measured on this host, PowerShell 5.1 on Windows 11:
+//   policy block   FullyQualifiedErrorId : UnauthorizedAccess
+//   WriteAllText   FullyQualifiedErrorId : UnauthorizedAccessException
+//   Set-Content    FullyQualifiedErrorId : GetContentWriterUnauthorizedAccessError,Microsoft...
+//   Remove-Item    FullyQualifiedErrorId : RemoveFileSystemItemUnAuthorizedAccess,Microsoft...
+// So anchoring on FullyQualifiedErrorId does not separate them, and neither
+// does excluding a list of suffixes: Remove-Item's id ENDS at the token (spelled
+// UnAuthorized, which a case-insensitive match still finds) and is terminated by
+// a comma, so a trailing-only test reads it as a policy block. What actually
+// marks the policy block is that its error id IS the token, standing alone.
+// Require an identifier boundary on BOTH sides and enumerate nothing.
+//
+// This matters because a denied write can only happen AFTER the helper launched,
+// which is exactly when a policy block is impossible. Diagnosing one sends the
+// operator to change their execution policy while the real fault is a
+// permissions failure on the install prefix.
+const PUBLIC_NPM_REFUSAL_MARKER = "PUBLIC_NPM_REFUSED";
+const POWERSHELL_POLICY_MARKER = "UnauthorizedAccess";
+const IDENTIFIER_CHARACTER = /[A-Za-z0-9_]/;
+// One character on each side is all it takes to prove the token stands alone.
+const POWERSHELL_POLICY_BOUNDARY = 1;
+
+// How much already-relayed stderr a streaming caller must retain so a marker and
+// the boundary on each side of it land in one contiguous view, even when the
+// stream arrives one byte at a time. Derived from the patterns: the widest window
+// any rule needs, less the one character that completes it. Widening a marker or
+// a boundary raises this automatically.
+export const WINDOWS_NPM_STDERR_OVERLAP = Math.max(
+  PUBLIC_NPM_REFUSAL_MARKER.length,
+  POWERSHELL_POLICY_BOUNDARY + POWERSHELL_POLICY_MARKER.length + POWERSHELL_POLICY_BOUNDARY,
+) - 1;
+
+/**
+ * Classify a failed helper launch without echoing its stderr or contract, and
+ * without holding the stream.
+ *
+ * Deciding per chunk latches. The caller's failure kind only ever upgrades, so
+ * a chunk ending at "...UnauthorizedAccess" followed by one beginning
+ * "Exception" would fix the verdict at powershell_execution_policy_blocked and
+ * the joined text could never take it back. So an occurrence is decided only
+ * once its trailing context is actually known, or once the stream closes, where
+ * end of text really is end of text. The relay is unaffected: chunks are still
+ * forwarded as they arrive, and only the verdict waits.
+ */
+export function windowsNpmPowerShellFailureClassifier() {
+  // A single non-identifier character stands in for the start of the stream, so
+  // the start of text reads as a boundary and index 0 never has to be judged.
+  let carry = "\n";
+  let refused = false;
+  let policyBlocked = false;
+  const scan = (text, closed) => {
+    if (text.includes(PUBLIC_NPM_REFUSAL_MARKER)) refused = true;
+    // Built from the marker rather than restating it, so the pattern and the
+    // overlap derived from its length cannot drift apart.
+    for (const match of text.matchAll(new RegExp(POWERSHELL_POLICY_MARKER, "gi"))) {
+      const at = match.index;
+      const from = at + match[0].length;
+      // At index 0 the preceding character has been dropped, and the occurrence
+      // was already decided while that character was still visible: the retained
+      // overlap is wide enough to hold the marker plus both boundaries.
+      if (at === 0) continue;
+      if (IDENTIFIER_CHARACTER.test(text[at - 1])) continue;
+      const following = text.slice(from, from + POWERSHELL_POLICY_BOUNDARY);
+      // An occurrence whose trailing boundary has not arrived yet stays
+      // undecided: it survives in the retained overlap and is looked at again.
+      if (!closed && following.length < POWERSHELL_POLICY_BOUNDARY) continue;
+      if (IDENTIFIER_CHARACTER.test(following)) continue;
+      policyBlocked = true;
+    }
+  };
+  return {
+    /** Observe one relayed stderr chunk. Retains only the derived overlap. */
+    observe(chunk) {
+      const text = carry + String(chunk ?? "");
+      scan(text, false);
+      carry = text.slice(-WINDOWS_NPM_STDERR_OVERLAP);
+    },
+    /** Decide once, at close, over text no later chunk can contradict. */
+    classify() {
+      scan(carry, true);
+      if (refused) return "public_npm_contract_refused";
+      if (policyBlocked) return "powershell_execution_policy_blocked";
+      return "windows_npm_launch_failed";
+    },
+  };
+}
+
+/** Classify a complete captured stderr exactly as the streaming caller does. */
+export function classifyWindowsNpmPowerShellFailure(stderr) {
+  const classifier = windowsNpmPowerShellFailureClassifier();
+  classifier.observe(String(stderr || ""));
+  return classifier.classify();
 }
 
 export function installedBrainPath(prefix, platform = process.platform) {
