@@ -29,7 +29,6 @@ import {
   buildNpmCliInvocation,
   buildWindowsBatchInvocation,
   buildWindowsNpmPowerShellInvocation,
-  classifyWindowsNpmPowerShellFailure,
   installedBrainPath,
   npmInstallEnvironment,
   parsePublicInstallCommand,
@@ -38,6 +37,7 @@ import {
   resolveNpmCliPath,
   resolveWindowsNpmCommandPath,
   resolveWindowsPowerShellPath,
+  windowsNpmPowerShellFailureClassifier,
 } from "../operations/npm-cli-runtime.mjs";
 import { readSupervisedInstallContract } from "./check-install-page-version.mjs";
 import { matchesExpectedSupervisedGuideUrl } from "./supervised-install-guide-oracle.mjs";
@@ -182,29 +182,26 @@ if (process.platform === "win32") {
     shell: npmInstall.shell,
     env: npmInstallEnvironment(),
   });
-  // Forward every stderr byte as it arrives; keep only enough trailing text
-  // to recognize diagnostic markers split across stream chunks. stdout stays
-  // directly inherited, so the Actions transcript remains live.
-  let stderrTail = "";
-  let failureKind = "windows_npm_launch_failed";
+  // Forward every stderr byte as it arrives; the classifier keeps only the
+  // overlap it derives from its own patterns and decides once, at close, so a
+  // marker split across chunks can neither be missed nor latch a verdict the
+  // joined text refuses. stdout stays directly inherited, so the Actions
+  // transcript remains live. Every failure code, including the ordinary one,
+  // comes from the classifier rather than from a literal restated here.
+  const failure = windowsNpmPowerShellFailureClassifier();
   child.stderr.on("data", (chunk) => {
     if (!process.stderr.write(chunk)) {
       child.stderr.pause();
       process.stderr.once("drain", () => child.stderr.resume());
     }
-    const sample = stderrTail + chunk.toString("utf8");
-    const observed = classifyWindowsNpmPowerShellFailure(sample);
-    if (observed === "public_npm_contract_refused" ||
-        (observed === "powershell_execution_policy_blocked" && failureKind !== "public_npm_contract_refused")) {
-      failureKind = observed;
-    }
-    stderrTail = sample.slice(-32);
+    failure.observe(chunk.toString("utf8"));
   });
   const installStatus = await new Promise((resolveStatus, rejectStatus) => {
     child.once("error", rejectStatus);
     child.once("close", (code, signal) => resolveStatus({ code, signal }));
   });
   if (installStatus.code !== 0) {
+    const failureKind = failure.classify();
     await new Promise((flushed) => process.stderr.write(`FAIL  ${failureKind}\n`, flushed));
     process.exit(1);
   }

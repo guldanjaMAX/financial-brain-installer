@@ -373,12 +373,86 @@ export function buildWindowsNpmPowerShellInvocation({
   });
 }
 
-/** Classify a failed helper launch without echoing its stderr or contract. */
+// The two markers a failed launch can carry, and the one piece of trailing
+// context that tells them apart from an unrelated fault.
+//
+// UnauthorizedAccess alone cannot mean "policy block". PowerShell reports a
+// DENIED FILE WRITE by naming the .NET exception type in the same field a
+// Restricted policy uses, measured on a real Windows 11 host:
+//   policy block:  + FullyQualifiedErrorId : UnauthorizedAccess
+//   denied write:  + FullyQualifiedErrorId : UnauthorizedAccessException
+// so anchoring on FullyQualifiedErrorId does NOT separate them; only the
+// absence of the Exception suffix does. A denied write can only happen after
+// the helper launched, which is exactly when a policy block is impossible, and
+// telling an operator to change their execution policy sends them away from a
+// permissions fault on the install prefix.
+const PUBLIC_NPM_REFUSAL_MARKER = "PUBLIC_NPM_REFUSED";
+const POWERSHELL_POLICY_MARKER = "UnauthorizedAccess";
+const DOTNET_EXCEPTION_SUFFIX = "Exception";
+
+// How much already-relayed stderr a streaming caller must retain so that every
+// marker, and the trailing context the policy rule inspects, lands in one
+// contiguous view even when the stream arrives one byte at a time. Derived from
+// the patterns themselves: the longest pattern, less the one character that
+// completes it. A longer marker raises this automatically.
+export const WINDOWS_NPM_STDERR_OVERLAP = Math.max(
+  PUBLIC_NPM_REFUSAL_MARKER.length,
+  POWERSHELL_POLICY_MARKER.length + DOTNET_EXCEPTION_SUFFIX.length,
+) - 1;
+
+/**
+ * Classify a failed helper launch without echoing its stderr or contract, and
+ * without holding the stream.
+ *
+ * Deciding per chunk latches. The caller's failure kind only ever upgrades, so
+ * a chunk ending at "...UnauthorizedAccess" followed by one beginning
+ * "Exception" would fix the verdict at powershell_execution_policy_blocked and
+ * the joined text could never take it back. So an occurrence is decided only
+ * once its trailing context is actually known, or once the stream closes, where
+ * end of text really is end of text. The relay is unaffected: chunks are still
+ * forwarded as they arrive, and only the verdict waits.
+ */
+export function windowsNpmPowerShellFailureClassifier() {
+  let carry = "";
+  let refused = false;
+  let policyBlocked = false;
+  const dotnetSuffix = DOTNET_EXCEPTION_SUFFIX.toLowerCase();
+  const scan = (text, closed) => {
+    if (text.includes(PUBLIC_NPM_REFUSAL_MARKER)) refused = true;
+    // Built from the marker rather than restating it, so the pattern and the
+    // overlap derived from its length cannot drift apart.
+    for (const match of text.matchAll(new RegExp(POWERSHELL_POLICY_MARKER, "gi"))) {
+      const from = match.index + match[0].length;
+      const after = text.slice(from, from + DOTNET_EXCEPTION_SUFFIX.length);
+      // An occurrence whose trailing context has not arrived yet stays undecided:
+      // it survives in the retained overlap and is looked at again.
+      if (!closed && after.length < DOTNET_EXCEPTION_SUFFIX.length) continue;
+      if (after.toLowerCase() === dotnetSuffix) continue;
+      policyBlocked = true;
+    }
+  };
+  return {
+    /** Observe one relayed stderr chunk. Retains only the derived overlap. */
+    observe(chunk) {
+      const text = carry + String(chunk ?? "");
+      scan(text, false);
+      carry = text.slice(-WINDOWS_NPM_STDERR_OVERLAP);
+    },
+    /** Decide once, at close, over text no later chunk can contradict. */
+    classify() {
+      scan(carry, true);
+      if (refused) return "public_npm_contract_refused";
+      if (policyBlocked) return "powershell_execution_policy_blocked";
+      return "windows_npm_launch_failed";
+    },
+  };
+}
+
+/** Classify a complete captured stderr exactly as the streaming caller does. */
 export function classifyWindowsNpmPowerShellFailure(stderr) {
-  const output = String(stderr || "");
-  if (output.includes("PUBLIC_NPM_REFUSED")) return "public_npm_contract_refused";
-  if (/UnauthorizedAccess/i.test(output)) return "powershell_execution_policy_blocked";
-  return "windows_npm_launch_failed";
+  const classifier = windowsNpmPowerShellFailureClassifier();
+  classifier.observe(String(stderr || ""));
+  return classifier.classify();
 }
 
 export function installedBrainPath(prefix, platform = process.platform) {

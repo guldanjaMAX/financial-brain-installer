@@ -32,6 +32,8 @@ import {
   resolveWindowsNpmCommandPath,
   resolveWindowsPowerShellPath,
   verifiedNpmCliPath,
+  WINDOWS_NPM_STDERR_OVERLAP,
+  windowsNpmPowerShellFailureClassifier,
 } from "../operations/npm-cli-runtime.mjs";
 
 const powershellHelper = fileURLToPath(new URL("../scripts/invoke-public-npm-install.ps1", import.meta.url));
@@ -322,6 +324,33 @@ test("the Windows PowerShell bridge accepts only the parsed npm.cmd contract and
     });
     assert.deepEqual(JSON.parse(invocation.contract).arguments, args);
     assert.equal(invocation.shell, false);
+
+    // E1: the execution-policy flag must be the SAME value every other shipped
+    // PowerShell launch site uses, not merely some override. This is a field
+    // difference, not pedantry: RemoteSigned BLOCKS a .ps1 that carries a
+    // Mark-of-the-Web, which is exactly how a helper extracted from a downloaded
+    // kit arrives, so the install would fail on the machines this fix exists for.
+    // The expected value is READ OUT OF the three sites rather than restated, so
+    // this cannot drift away from them silently.
+    const policySites = ["connectors/google-auth.mjs", "doctor.mjs", "operations/admin-key-file.mjs"];
+    const sitePolicies = [...new Set(policySites.flatMap((file) => [
+      ...readFileSync(new URL(`../${file}`, import.meta.url), "utf8")
+        .matchAll(/"-ExecutionPolicy",\s*"([A-Za-z]+)"/g),
+    ].map((match) => match[1])))];
+    assert.deepEqual(sitePolicies, ["Bypass"],
+      `-ExecutionPolicy must have one agreed value across ${policySites.join(", ")}; found ${sitePolicies.join(", ")}`);
+    const [expectedPolicy] = sitePolicies;
+    const policyAt = invocation.args.indexOf("-ExecutionPolicy");
+    assert.ok(policyAt >= 0, "the Windows npm bridge must pass an -ExecutionPolicy flag");
+    assert.equal(invocation.args[policyAt + 1], expectedPolicy,
+      `-ExecutionPolicy must be "${expectedPolicy}", the value ${policySites.join(", ")} already use; ` +
+      `the bridge passes "${invocation.args[policyAt + 1]}". RemoteSigned in particular blocks a .ps1 ` +
+      "carrying a Mark-of-the-Web, which is how a kit-extracted helper arrives");
+    assert.deepEqual([...invocation.args], [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", expectedPolicy, "-File",
+      realpathSync(powershellHelper), contractPath,
+    ], "the Windows npm bridge argument vector is fixed, flag and value included");
+
     assert.throws(() => buildWindowsNpmPowerShellInvocation({
       executable: "npm",
       args,
@@ -482,6 +511,69 @@ test("a pre-helper execution-policy block is distinct from a helper contract ref
     "PUBLIC_NPM_REFUSED contract_unreadable; UnauthorizedAccess",
   ), "public_npm_contract_refused", "a helper refusal wins even if its own diagnostics mention access");
   assert.equal(classifyWindowsNpmPowerShellFailure("unrecognized failure"), "windows_npm_launch_failed");
+  assert.equal(classifyWindowsNpmPowerShellFailure(""), "windows_npm_launch_failed",
+    "the classifier's default is the code the caller derives its ordinary-failure diagnosis from");
+
+  // A denied file write is NOT a policy block. Both shapes below were measured on
+  // a real Windows 11 host: the first by invoking powershell.exe with
+  // -ExecutionPolicy Restricted -File, the second by a denied
+  // [System.IO.File]::WriteAllText. Only the path was shortened.
+  //
+  // PowerShell names the .NET exception type in the SAME field a Restricted
+  // policy uses, so anchoring on FullyQualifiedErrorId does not separate them.
+  // It also hard-wraps long lines WITHOUT indenting the continuation, so joining
+  // indented continuations cannot repair a wrap; it only joins real detail lines.
+  const restrictedPolicyStderr = [
+    "File C:\\kit\\invoke-public-npm-install.ps1 cannot be loaded because running scripts is disabled on ",
+    "this system. For more information, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.",
+    "    + CategoryInfo          : SecurityError: (:) [], ParentContainsErrorRecordException",
+    "    + FullyQualifiedErrorId : UnauthorizedAccess",
+    "",
+  ].join("\r\n");
+  const deniedWriteStderr = [
+    'Exception calling "WriteAllText" with "2" argument(s): "Access to the path ',
+    "'C:\\Users\\owner\\AppData\\Local\\FinancialBrain\\brain.cmd' is denied.\"",
+    "    + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException",
+    "    + FullyQualifiedErrorId : UnauthorizedAccessException",
+    "",
+  ].join("\r\n");
+  assert.equal(classifyWindowsNpmPowerShellFailure(restrictedPolicyStderr),
+    "powershell_execution_policy_blocked");
+  assert.equal(classifyWindowsNpmPowerShellFailure(deniedWriteStderr), "windows_npm_launch_failed",
+    "System.UnauthorizedAccessException is a DENIED WRITE after the helper launched, when a policy " +
+    "block is impossible; diagnosing it as one sends the operator away from the real fault");
+
+  // The verdict must not depend on where the stream happened to break. Every
+  // single split, plus one character at a time, must agree with the joined text.
+  const streamed = (chunks) => {
+    const classifier = windowsNpmPowerShellFailureClassifier();
+    for (const chunk of chunks) classifier.observe(chunk);
+    return classifier.classify();
+  };
+  const everyChunking = (text) => [...new Set([
+    ...Array.from({ length: text.length + 1 },
+      (_unused, at) => streamed([text.slice(0, at), text.slice(at)])),
+    streamed([...text]),
+  ])];
+  assert.deepEqual(everyChunking(deniedWriteStderr), ["windows_npm_launch_failed"],
+    "a chunk boundary inside UnauthorizedAccessException must not latch a policy block that the " +
+    "joined text refuses, and the caller's failure kind never downgrades");
+  assert.deepEqual(everyChunking(restrictedPolicyStderr), ["powershell_execution_policy_blocked"],
+    "a policy-block marker split across chunks must still be detected");
+  assert.deepEqual(everyChunking("PUBLIC_NPM_REFUSED npm_path_mismatch\r\n"),
+    ["public_npm_contract_refused"], "a refusal marker split across chunks must still be detected");
+  assert.deepEqual(everyChunking(`${deniedWriteStderr}${restrictedPolicyStderr}`),
+    ["powershell_execution_policy_blocked"]);
+  assert.deepEqual(everyChunking("npm error code E404\r\nnpm error 404 Not Found\r\n"),
+    ["windows_npm_launch_failed"]);
+  assert.equal(streamed(["npm error System.UnauthorizedAccess", "Exception: Access is denied."]),
+    "windows_npm_launch_failed", "the worst split is exactly at the end of the marker");
+
+  // The retained overlap must be DERIVED from the longest pattern the classifier
+  // inspects, so a longer marker cannot silently outgrow a literal.
+  assert.ok(WINDOWS_NPM_STDERR_OVERLAP >= "UnauthorizedAccess".length + "Exception".length - 1,
+    `the retained stderr overlap is ${WINDOWS_NPM_STDERR_OVERLAP}, too short for the longest pattern ` +
+    "the classifier inspects; a marker arriving one byte at a time would be missed");
 });
 
 test("the public install caller prints a sanitized diagnosis after preserving the helper's stderr", {
@@ -549,20 +641,56 @@ test("the public install caller prints a sanitized diagnosis after preserving th
 
     // Only these two fixture responses are available. Any attempted network
     // request, including an unexpected install source, fails the child.
+    //
+    // A staged helper launch. The runner, its relay and its classifier are all
+    // real; only node:child_process.spawn is synthetic, so stderr can be
+    // delivered at chosen chunk boundaries. This is the same loader-hook
+    // technique the containment suite uses, and it is the only way to drive the
+    // caller's third failure code, which no reachable fixture produces: the
+    // shipped helper ends with `exit $LASTEXITCODE`, so a bad tarball, a full
+    // disk or a permissions fault all land there with neither marker on stderr.
+    const syntheticChildProcess = [
+      "import { EventEmitter } from 'node:events';",
+      "import { Readable } from 'node:stream';",
+      "export { execFileSync } from 'node:child_process';",
+      "export function spawn() {",
+      "  const child = new EventEmitter();",
+      "  const chunks = JSON.parse(process.env.BRAIN_TEST_SPAWN_STDERR)",
+      "    .map((text) => Buffer.from(text, 'utf8'));",
+      "  child.stderr = Readable.from(chunks);",
+      "  child.stderr.once('end', () => child.emit('close', 1, null));",
+      "  return child;",
+      "}",
+      "",
+    ].join("\n");
     const preloadPath = join(sandbox, "offline-public-contract.mjs");
     writeFileSync(preloadPath, [
       'import { readFileSync } from "node:fs";',
       'import { registerHooks } from "node:module";',
-      'registerHooks({ load(url, context, nextLoad) {',
-      '  const result = nextLoad(url, context);',
-      '  if (process.env.BRAIN_TEST_REMOVE_POLICY_FLAG === "1" && url.endsWith("/operations/npm-cli-runtime.mjs")) {',
-      '    const source = String(result.source);',
-      '    const flag = \'"-ExecutionPolicy", "Bypass", \';',
-      '    if (!source.includes(flag)) throw new Error("policy flag mutation target missing");',
-      '    return { ...result, source: source.replace(flag, "") };',
-      '  }',
-      '  return result;',
-      '} });',
+      `const SYNTHETIC_CHILD_PROCESS = ${JSON.stringify(syntheticChildProcess)};`,
+      'const SYNTHETIC_CHILD_PROCESS_URL = "brain-test:child-process";',
+      'registerHooks({',
+      '  resolve(specifier, context, nextResolve) {',
+      '    if (process.env.BRAIN_TEST_SPAWN_STDERR && specifier === "node:child_process" &&',
+      '        String(context.parentURL || "").endsWith("/install-from-public-contract.mjs")) {',
+      '      return { url: SYNTHETIC_CHILD_PROCESS_URL, shortCircuit: true };',
+      '    }',
+      '    return nextResolve(specifier, context);',
+      '  },',
+      '  load(url, context, nextLoad) {',
+      '    if (url === SYNTHETIC_CHILD_PROCESS_URL) {',
+      '      return { format: "module", source: SYNTHETIC_CHILD_PROCESS, shortCircuit: true };',
+      '    }',
+      '    const result = nextLoad(url, context);',
+      '    if (process.env.BRAIN_TEST_REMOVE_POLICY_FLAG === "1" && url.endsWith("/operations/npm-cli-runtime.mjs")) {',
+      '      const source = String(result.source);',
+      '      const flag = \'"-ExecutionPolicy", "Bypass", \';',
+      '      if (!source.includes(flag)) throw new Error("policy flag mutation target missing");',
+      '      return { ...result, source: source.replace(flag, "") };',
+      '    }',
+      '    return result;',
+      '  },',
+      '});',
       'globalThis.fetch = async (url) => {',
       '  if (url === "https://financialbrain.ai/install/agent.md")',
       '    return new Response(readFileSync(process.env.BRAIN_TEST_GUIDE_PATH));',
@@ -583,7 +711,7 @@ test("the public install caller prints a sanitized diagnosis after preserving th
     ].find((directory) => existsSync(join(directory, "unzip.exe")));
     assert.ok(unzipDirectory, "the Windows install caller requires an unzip executable");
     const caller = fileURLToPath(new URL("../scripts/install-from-public-contract.mjs", import.meta.url));
-    const runCaller = (mode) => spawnSync(process.execPath, [
+    const runCaller = (mode, stderrChunks = null) => spawnSync(process.execPath, [
       "--import", pathToFileURL(preloadPath).href, caller, join(sandbox, `run-${mode}`), "--guide", "windows",
     ], {
       cwd: dirname(caller),
@@ -603,6 +731,7 @@ test("the public install caller prints a sanitized diagnosis after preserving th
         BRAIN_TEST_ZIP_PATH: zipPath,
         BRAIN_TEST_ARTIFACT_URL: artifactUrl,
         BRAIN_TEST_REMOVE_POLICY_FLAG: mode === "policy-block" ? "1" : "0",
+        BRAIN_TEST_SPAWN_STDERR: stderrChunks === null ? "" : JSON.stringify(stderrChunks),
       },
     });
 
@@ -622,6 +751,44 @@ test("the public install caller prints a sanitized diagnosis after preserving th
     assert.ok(helperRefusal.stderr.indexOf("PUBLIC_NPM_REFUSED") <
       helperRefusal.stderr.indexOf("FAIL  public_npm_contract_refused"),
     "the original helper stderr must precede the additive diagnosis");
+
+    // The third code, at the caller. Every ordinary install failure lands here,
+    // and nothing proved it: a one-token edit to the classifier's default would
+    // turn every bad tarball, full disk and permissions fault into a false
+    // "execution policy blocked" with a green suite.
+    const stagedFailure = (label, chunks) => {
+      const result = runCaller(`staged-${label}`, chunks);
+      assert.equal(result.status, 1, `${label}: ${result.stderr || result.stdout}`);
+      assert.match(result.stdout, /PASS  WINDOWS-FIELD-TEST\.md carries the exact reviewed npm install command/,
+        `${label}: the staged child must be reached only after every real contract check passes`);
+      assert.doesNotMatch(result.stdout, /PASS  the packaged archive installs into a clean prefix/,
+        `${label}: a staged non-zero exit must not be reported as a successful install`);
+      const diagnosis = result.stderr.match(/FAIL  ([a-z_]+)\n$/);
+      assert.ok(diagnosis, `${label}: the caller must end with exactly one FAIL line: ${result.stderr}`);
+      assert.equal(result.stderr.slice(0, -diagnosis[0].length), chunks.join(""),
+        `${label}: every relayed stderr byte must precede the additive diagnosis, unchanged`);
+      return diagnosis[1];
+    };
+    const deniedWriteHalves = [
+      "npm error path C:\\Users\\owner\\AppData\\Local\\FinancialBrain\r\nnpm error System.UnauthorizedAccess",
+      "Exception: Access to the path is denied.\r\n",
+    ];
+    assert.equal(stagedFailure("ordinary", [
+      "npm error code E404\r\n", "npm error 404 Not Found - GET https://registry.invalid/brain-installer\r\n",
+    ]), "windows_npm_launch_failed",
+    "a non-zero exit carrying neither marker is an ordinary npm failure, and the caller must say so");
+    assert.equal(stagedFailure("denied-write-split", deniedWriteHalves), "windows_npm_launch_failed",
+      "a chunk boundary at the end of UnauthorizedAccess must not latch a policy block: the operator " +
+      "would be sent to change their execution policy while the real fault is a denied write");
+    assert.equal(stagedFailure("denied-write-bytewise", [...deniedWriteHalves.join("")]),
+      "windows_npm_launch_failed", "the same holds when stderr arrives one byte at a time");
+    assert.equal(stagedFailure("policy-split", [
+      "File C:\\kit\\invoke-public-npm-install.ps1 cannot be loaded.\r\n",
+      "    + FullyQualifiedErrorId : Unauthorized", "Access\r\n",
+    ]), "powershell_execution_policy_blocked",
+    "a policy-block marker split across chunks must still be detected");
+    assert.equal(stagedFailure("refusal-split", ["PUBLIC_NPM_REF", "USED contract_shape\r\n"]),
+      "public_npm_contract_refused", "a refusal marker split across chunks must still be detected");
 
     if (policyCommand("Get-ExecutionPolicy") !== "Restricted") {
       const prior = policyCommand("Get-ExecutionPolicy -Scope CurrentUser");

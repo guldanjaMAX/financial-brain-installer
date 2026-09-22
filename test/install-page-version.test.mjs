@@ -631,12 +631,21 @@ test('a runner guide mismatch stops before filesystem or command execution', () 
       });
     }
   `;
+  // A loader-hook stub is an ALLOWLIST of the module surface the runner imports.
+  // An ESM named import is resolved at LINK time, so an export missing here kills
+  // the runner before any of its own guards run, and every containment proof in
+  // this file turns into a link error that still looks like a refusal. ADDING AN
+  // IMPORT TO THE RUNNER IS A FIXTURE CHANGE: mirror it in both stubs.
+  // spawn must mark and throw exactly as execFileSync does, so that asserting the
+  // marker is absent means "no command ran", not "no execFileSync ran".
   const childProcessSource = `
     import { writeFileSync } from 'node:fs';
-    export function execFileSync() {
+    function refuseExecution() {
       writeFileSync(${JSON.stringify(executionMarker)}, 'called');
       throw new Error('synthetic command execution boundary');
     }
+    export function execFileSync() { return refuseExecution(); }
+    export function spawn() { return refuseExecution(); }
   `;
   const hooksSource = `
     const runnerUrl = ${JSON.stringify(runnerUrl)};
@@ -713,10 +722,18 @@ function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false 
       };
     }
   `;
+  // Same allowlist rule as the guide-mismatch stub above: this module must export
+  // every name the runner imports from node:child_process, or the runner dies at
+  // link time and proves nothing. spawn needs no 'unzip' case, because nothing may
+  // reach it; it marks and throws exactly as the non-unzip execFileSync branch does.
   const childProcessSource = `
     import { mkdirSync, writeFileSync } from 'node:fs';
     import { join } from 'node:path';
     const fixture = ${JSON.stringify({ rootCount, declaredName, workdir, executionMarker, archiveBase64, sha })};
+    export function spawn() {
+      writeFileSync(fixture.executionMarker, 'called');
+      throw new Error('synthetic install command must not run');
+    }
     export function execFileSync(command, args) {
       if (command !== 'unzip') {
         writeFileSync(fixture.executionMarker, 'called');
