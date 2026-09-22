@@ -58,3 +58,20 @@ export function isD1TransientFaultBody(raw) {
   if (!D1_FAULT_MARKER.test(text)) return false;
   return D1_TRANSIENT_FAULT_REASONS.some((reason) => reason.test(text));
 }
+
+/**
+ * Name a D1 reset where it happened, during a bounded removal group.
+ *
+ * Without this the fault is swallowed and the run continues to an inventory
+ * readback that finds the families still stored, so the operator is shown a
+ * message about the readback for a fault that happened three steps earlier and
+ * is never told that the database reset.
+ */
+export function d1ResetDuringRemovalMessage({ label, count }) {
+  return (
+    `${count} ${label}(s) could not be removed: the brain's database hit a temporary ` +
+    "Cloudflare D1 limit and reset while the request was running.\n" +
+    "      Nothing in this group was removed, and nothing was recorded as removed.\n" +
+    "      The source cursor was not advanced. Re-running the same sync retries exactly these families."
+  );
+}

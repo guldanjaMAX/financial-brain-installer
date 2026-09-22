@@ -231,7 +231,7 @@ import {
   zoneAssignmentRecoveredNotice,
   zoneAssignmentRetryNotice,
 } from "./operations/zone-assignment-retry.mjs";
-import { isD1TransientFaultBody } from "./operations/d1-transient-fault.mjs";
+import { d1ResetDuringRemovalMessage, isD1TransientFaultBody } from "./operations/d1-transient-fault.mjs";
 import {
   requestSourceFamilyPageWithRetry,
   sourceFamilyInventoryRetryNotice,
@@ -11813,6 +11813,7 @@ export async function applyDriveRemovals({
     // deletion to record in the former owner's state.
     assertOwned?.();
     let out;
+    let raw = "";
     try {
       const res = await http(`${base}/api/admin/brain/forget`, {
         method: "POST",
@@ -11824,8 +11825,18 @@ export async function applyDriveRemovals({
           confirm: true,
         }),
       }, { fetchImpl });
-      out = await parseForgetResponse(res);
-    } catch {
+      raw = await res.text();
+      out = parseForgetResponseBody(res, raw);
+    } catch (error) {
+      // A D1 reset is not a completed removal, and recording one is how this hid.
+      // Swallowing it writes a marker for every family in the group, lets the run
+      // continue, and hands the operator the inventory readback's message for a
+      // fault that happened three steps earlier. Name it here, where it happened,
+      // and record nothing: the plan is rebuilt next run from Drive truth against
+      // the stored inventory, so these families are retried without a marker.
+      if (isD1TransientFaultBody(raw)) {
+        throw new Error(d1ResetDuringRemovalMessage({ label, count: group.length }));
+      }
       state.removed = {
         ...(state.removed || {}),
         ...Object.fromEntries(group.map((uid) => [uid, new Date().toISOString()])),
@@ -15420,6 +15431,10 @@ const cmdIngestRemoteRun = async (
         ["source_deleted", "Drive source deletion", "stale document(s) removed to match Drive source truth"],
         ["intentional_skip", "intentional source skip", "previously-indexed document(s) removed because the source now skips them"],
       ];
+      // applyDriveRemovals has always returned a pending count and nothing has
+      // ever read it, which is how a group that failed to apply could reach the
+      // inventory readback and be reported as a readback problem. Read it.
+      let unappliedRemovals = 0;
       for (const [category, label, success] of categories) {
         const result = await applyDriveRemovals({
           uids: excludeProtectedDriveUids(driveRemovalPlan.targets[category]),
@@ -15427,6 +15442,7 @@ const cmdIngestRemoteRun = async (
           assertOwned: assertLockOwned,
         });
         if (result.applied) ok(`${result.applied} ${success}`);
+        unappliedRemovals += Number(result.pending || 0);
         if (driveRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (driveRemovalPlan.total) {
@@ -15451,6 +15467,10 @@ const cmdIngestRemoteRun = async (
               "The source cursor was not advanced; re-running will retry them through the same approval gate."
           );
         }
+        // Reached only when the readback proved every planned family absent. A
+        // group that never applied cannot end here silently just because the
+        // readback happened to agree.
+        assertNoPendingRemovals({ pending: unappliedRemovals }, "Drive removal");
       }
       intentionalRemovalUids.length = 0;
     }
