@@ -21,7 +21,7 @@
  *   usage: node scripts/install-from-public-contract.mjs <workdir> [--guide macos|windows]
  */
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +29,7 @@ import {
   buildNpmCliInvocation,
   buildWindowsBatchInvocation,
   buildWindowsNpmPowerShellInvocation,
+  classifyWindowsNpmPowerShellFailure,
   installedBrainPath,
   npmInstallEnvironment,
   parsePublicInstallCommand,
@@ -175,12 +176,38 @@ if (process.platform === "win32") {
     powershellPath: resolveWindowsPowerShellPath(),
   });
   writeFileSync(contractPath, `${npmInstall.contract}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  execFileSync(npmInstall.command, npmInstall.args, {
+  const child = spawn(npmInstall.command, npmInstall.args, {
     cwd: workdir,
-    stdio: "inherit",
+    stdio: ["inherit", "inherit", "pipe"],
     shell: npmInstall.shell,
     env: npmInstallEnvironment(),
   });
+  // Forward every stderr byte as it arrives; keep only enough trailing text
+  // to recognize diagnostic markers split across stream chunks. stdout stays
+  // directly inherited, so the Actions transcript remains live.
+  let stderrTail = "";
+  let failureKind = "windows_npm_launch_failed";
+  child.stderr.on("data", (chunk) => {
+    if (!process.stderr.write(chunk)) {
+      child.stderr.pause();
+      process.stderr.once("drain", () => child.stderr.resume());
+    }
+    const sample = stderrTail + chunk.toString("utf8");
+    const observed = classifyWindowsNpmPowerShellFailure(sample);
+    if (observed === "public_npm_contract_refused" ||
+        (observed === "powershell_execution_policy_blocked" && failureKind !== "public_npm_contract_refused")) {
+      failureKind = observed;
+    }
+    stderrTail = sample.slice(-32);
+  });
+  const installStatus = await new Promise((resolveStatus, rejectStatus) => {
+    child.once("error", rejectStatus);
+    child.once("close", (code, signal) => resolveStatus({ code, signal }));
+  });
+  if (installStatus.code !== 0) {
+    await new Promise((flushed) => process.stderr.write(`FAIL  ${failureKind}\n`, flushed));
+    process.exit(1);
+  }
 } else {
   const npmInstall = buildNpmCliInvocation(npmCli, installArguments);
   execFileSync(npmInstall.command, npmInstall.args,

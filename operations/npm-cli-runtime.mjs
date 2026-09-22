@@ -366,11 +366,19 @@ export function buildWindowsNpmPowerShellInvocation({
   return Object.freeze({
     command: powershell,
     args: Object.freeze([
-      "-NoLogo", "-NoProfile", "-NonInteractive", "-File", helper, contractPath,
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, contractPath,
     ]),
     shell: false,
     contract,
   });
+}
+
+/** Classify a failed helper launch without echoing its stderr or contract. */
+export function classifyWindowsNpmPowerShellFailure(stderr) {
+  const output = String(stderr || "");
+  if (output.includes("PUBLIC_NPM_REFUSED")) return "public_npm_contract_refused";
+  if (/UnauthorizedAccess/i.test(output)) return "powershell_execution_policy_blocked";
+  return "windows_npm_launch_failed";
 }
 
 export function installedBrainPath(prefix, platform = process.platform) {

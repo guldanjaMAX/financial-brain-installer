@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -11,12 +14,14 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { strToU8, zipSync } from "fflate";
 
 import {
   buildNpmCliInvocation,
   buildWindowsBatchInvocation,
   buildWindowsNpmPowerShellInvocation,
+  classifyWindowsNpmPowerShellFailure,
   installedBrainPath,
   nodeRuntimeNpmCliPaths,
   npmInstallEnvironment,
@@ -395,10 +400,18 @@ test("the Windows runner resolves its default npm and executes a temporary .cmd 
   }
 });
 
-test("the Windows public install bridge enters npm.cmd through PowerShell PATH and preserves spaced arguments", {
+test("the Windows public install bridge runs under Restricted policy and preserves spaced arguments", {
   skip: process.platform !== "win32",
 }, () => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain npm powershell "));
+  const powershellPath = resolveWindowsPowerShellPath();
+  const policyCommand = (command) => execFileSync(powershellPath,
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+      encoding: "utf8",
+      env: npmInstallEnvironment(),
+      shell: false,
+    }).trim();
+  let restoreCurrentUserPolicy = null;
   try {
     const runtime = join(sandbox, "runtime with spaces");
     const node = join(runtime, "node.exe");
@@ -428,9 +441,18 @@ test("the Windows public install bridge enters npm.cmd through PowerShell PATH a
       expectedCommand: resolveWindowsNpmCommandPath({ nodeExecutable: node, platform: "win32" }),
       contractPath,
       helperPath: powershellHelper,
-      powershellPath: resolveWindowsPowerShellPath(),
+      powershellPath,
     });
     writeFileSync(contractPath, invocation.contract, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const effectivePolicy = policyCommand("Get-ExecutionPolicy");
+    if (effectivePolicy !== "Restricted") {
+      const prior = policyCommand("Get-ExecutionPolicy -Scope CurrentUser");
+      assert.match(prior, /^(?:Undefined|Restricted|AllSigned|RemoteSigned|Unrestricted|Bypass|Default)$/);
+      restoreCurrentUserPolicy = prior;
+      policyCommand("Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Restricted -Force");
+    }
+    assert.equal(policyCommand("Get-ExecutionPolicy"), "Restricted",
+      "the installed helper must be tested against a real CurrentUser Restricted policy");
     const environment = npmInstallEnvironment({
       ...process.env,
       PATH: `${runtime};${process.env.PATH || ""}`,
@@ -442,6 +464,184 @@ test("the Windows public install bridge enters npm.cmd through PowerShell PATH a
     }).trim();
     assert.deepEqual(JSON.parse(output), args);
   } finally {
+    if (restoreCurrentUserPolicy !== null) {
+      policyCommand(`Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy ${restoreCurrentUserPolicy} -Force`);
+    }
+    rmSync(sandbox, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a pre-helper execution-policy block is distinct from a helper contract refusal", () => {
+  assert.equal(classifyWindowsNpmPowerShellFailure(
+    "File could not be loaded. FullyQualifiedErrorId : UnauthorizedAccess",
+  ), "powershell_execution_policy_blocked");
+  assert.equal(classifyWindowsNpmPowerShellFailure(
+    "PUBLIC_NPM_REFUSED package_identity_unverified",
+  ), "public_npm_contract_refused");
+  assert.equal(classifyWindowsNpmPowerShellFailure(
+    "PUBLIC_NPM_REFUSED contract_unreadable; UnauthorizedAccess",
+  ), "public_npm_contract_refused", "a helper refusal wins even if its own diagnostics mention access");
+  assert.equal(classifyWindowsNpmPowerShellFailure("unrecognized failure"), "windows_npm_launch_failed");
+});
+
+test("the public install caller prints a sanitized diagnosis after preserving the helper's stderr", {
+  skip: process.platform !== "win32",
+}, () => {
+  const sandbox = mkdtempSync(join(tmpdir(), "brain public caller "));
+  const powershellPath = resolveWindowsPowerShellPath();
+  const policyCommand = (command) => execFileSync(powershellPath,
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+      encoding: "utf8", env: npmInstallEnvironment(), shell: false,
+    }).trim();
+  let restoreCurrentUserPolicy = null;
+  try {
+    const version = "9.8.7";
+    const candidateCommit = "a".repeat(40);
+    const tgzName = `brain-installer-${version}.tgz`;
+    const packageRoot = join(sandbox, "package");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
+      name: "brain-installer", version, type: "module", bin: { brain: "bin/brain.mjs" },
+    }));
+    writeFileSync(join(packageRoot, "bin", "brain.mjs"), [
+      "#!/usr/bin/env node",
+      'if (process.argv[2] === "--version") console.log("9.8.7");',
+      'else if (process.argv[2] === "doctor") { console.log("Node checked"); process.exitCode = 1; }',
+      "",
+    ].join("\n"));
+    const tgzPath = join(sandbox, tgzName);
+    execFileSync("tar.exe", ["-czf", tgzName, "-C", sandbox, "package"], {
+      cwd: sandbox,
+      shell: false,
+    });
+    const tgz = readFileSync(tgzPath);
+    const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    const humanBytes = tgz.length.toLocaleString("en-US");
+    const root = "synthetic-field-kit";
+    const zip = Buffer.from(zipSync({
+      [`${root}/${tgzName}`]: tgz,
+      [`${root}/SHA256SUMS.txt`]: strToU8(`${digest(tgz)}  ${tgzName}\n`),
+      [`${root}/WINDOWS-FIELD-TEST.md`]: strToU8(`${windowsGuide}\nPackage bytes: ${tgz.length}\n`),
+      [`${root}/MACOS-FIELD-TEST.md`]: strToU8(
+        `${macosGuide}\nCANDIDATE_COMMIT: ${candidateCommit}\nPackage bytes: ${tgz.length}\n`,
+      ),
+      [`${root}/RELEASE-CANDIDATE-RECEIPT.md`]: strToU8(
+        `commit ${candidateCommit.slice(0, 7)}; ${humanBytes} bytes; sha256 ${digest(tgz)}\n`,
+      ),
+    }));
+    const zipPath = join(sandbox, "fixture-kit.zip");
+    const guidePath = join(sandbox, "fixture-guide.md");
+    writeFileSync(zipPath, zip);
+    const artifactUrl = `https://financialbrain.ai/install/financial-brain-v${version}-field-kit-${digest(zip).slice(0, 16)}.zip`;
+    writeFileSync(guidePath, [
+      "AGENT_INSTALL_CONTRACT_VERSION: 2",
+      "STATUS: supervised field-test candidate",
+      "OWNER_PRESENT: required",
+      "TARGET: physical Windows 10 or newer",
+      "SETUP_PAGE: https://financialbrain.ai/install",
+      `CANDIDATE_VERSION: ${version}`,
+      `CANDIDATE_COMMIT: ${candidateCommit}`,
+      `ARTIFACT_SHA256: ${digest(zip)}`,
+      `ARTIFACT_BYTES: ${zip.length}`,
+      `ARTIFACT_URL: ${artifactUrl}`,
+      "",
+    ].join("\n"));
+
+    // Only these two fixture responses are available. Any attempted network
+    // request, including an unexpected install source, fails the child.
+    const preloadPath = join(sandbox, "offline-public-contract.mjs");
+    writeFileSync(preloadPath, [
+      'import { readFileSync } from "node:fs";',
+      'import { registerHooks } from "node:module";',
+      'registerHooks({ load(url, context, nextLoad) {',
+      '  const result = nextLoad(url, context);',
+      '  if (process.env.BRAIN_TEST_REMOVE_POLICY_FLAG === "1" && url.endsWith("/operations/npm-cli-runtime.mjs")) {',
+      '    const source = String(result.source);',
+      '    const flag = \'"-ExecutionPolicy", "Bypass", \';',
+      '    if (!source.includes(flag)) throw new Error("policy flag mutation target missing");',
+      '    return { ...result, source: source.replace(flag, "") };',
+      '  }',
+      '  return result;',
+      '} });',
+      'globalThis.fetch = async (url) => {',
+      '  if (url === "https://financialbrain.ai/install/agent.md")',
+      '    return new Response(readFileSync(process.env.BRAIN_TEST_GUIDE_PATH));',
+      '  if (url === process.env.BRAIN_TEST_ARTIFACT_URL)',
+      '    return new Response(readFileSync(process.env.BRAIN_TEST_ZIP_PATH));',
+      '  throw new Error("offline fixture refused an unexpected fetch");',
+      '};',
+      "",
+    ].join("\n"));
+    const fakeNpmDirectory = join(sandbox, "wrong npm");
+    mkdirSync(fakeNpmDirectory);
+    writeFileSync(join(fakeNpmDirectory, "npm.cmd"), "@echo off\r\nexit /b 9\r\n");
+    const localAppData = join(sandbox, "localappdata");
+    mkdirSync(localAppData);
+    const unzipDirectory = [
+      ...(process.env.PATH || process.env.Path || "").split(";"),
+      join(process.env.ProgramFiles || "C:\\Program Files", "Git", "usr", "bin"),
+    ].find((directory) => existsSync(join(directory, "unzip.exe")));
+    assert.ok(unzipDirectory, "the Windows install caller requires an unzip executable");
+    const caller = fileURLToPath(new URL("../scripts/install-from-public-contract.mjs", import.meta.url));
+    const runCaller = (mode) => spawnSync(process.execPath, [
+      "--import", pathToFileURL(preloadPath).href, caller, join(sandbox, `run-${mode}`), "--guide", "windows",
+    ], {
+      cwd: dirname(caller),
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 5_000_000,
+      shell: false,
+      env: {
+        ...process.env,
+        LOCALAPPDATA: localAppData,
+        PATH: [
+          ...(mode === "helper-refusal" ? [fakeNpmDirectory] : []),
+          unzipDirectory,
+          process.env.PATH || process.env.Path || "",
+        ].join(";"),
+        BRAIN_TEST_GUIDE_PATH: guidePath,
+        BRAIN_TEST_ZIP_PATH: zipPath,
+        BRAIN_TEST_ARTIFACT_URL: artifactUrl,
+        BRAIN_TEST_REMOVE_POLICY_FLAG: mode === "policy-block" ? "1" : "0",
+      },
+    });
+
+    const success = runCaller("success");
+    assert.equal(success.status, 0, `success: ${success.stderr}`);
+    assert.match(success.stdout, /PASS  the packaged archive installs into a clean prefix/);
+    assert.match(success.stdout, /install contract: every published claim verified on win32/);
+    assert.doesNotMatch(success.stderr, /FAIL  (?:powershell_execution_policy_blocked|public_npm_contract_refused)/);
+
+    const helperRefusal = runCaller("helper-refusal");
+    assert.equal(helperRefusal.status, 1);
+    assert.match(helperRefusal.stderr, /PUBLIC_NPM_REFUSED npm_path_mismatch/);
+    assert.match(helperRefusal.stderr, /FAIL  public_npm_contract_refused/);
+    assert.equal(helperRefusal.stderr.replace(/FAIL  public_npm_contract_refused\n$/, ""),
+      "PUBLIC_NPM_REFUSED npm_path_mismatch\r\n",
+      "the caller must forward the helper's original stderr bytes before adding its own line");
+    assert.ok(helperRefusal.stderr.indexOf("PUBLIC_NPM_REFUSED") <
+      helperRefusal.stderr.indexOf("FAIL  public_npm_contract_refused"),
+    "the original helper stderr must precede the additive diagnosis");
+
+    if (policyCommand("Get-ExecutionPolicy") !== "Restricted") {
+      const prior = policyCommand("Get-ExecutionPolicy -Scope CurrentUser");
+      assert.match(prior, /^(?:Undefined|Restricted|AllSigned|RemoteSigned|Unrestricted|Bypass|Default)$/);
+      restoreCurrentUserPolicy = prior;
+      policyCommand("Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Restricted -Force");
+    }
+    assert.equal(policyCommand("Get-ExecutionPolicy"), "Restricted");
+    const policyBlock = runCaller("policy-block");
+    assert.equal(policyBlock.status, 1);
+    assert.match(policyBlock.stderr, /UnauthorizedAccess/);
+    assert.doesNotMatch(policyBlock.stderr, /PUBLIC_NPM_REFUSED/);
+    assert.match(policyBlock.stderr, /FAIL  powershell_execution_policy_blocked/);
+    assert.ok(policyBlock.stderr.indexOf("UnauthorizedAccess") <
+      policyBlock.stderr.indexOf("FAIL  powershell_execution_policy_blocked"),
+    "the original PowerShell stderr must precede the additive diagnosis");
+  } finally {
+    if (restoreCurrentUserPolicy !== null) {
+      policyCommand(`Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy ${restoreCurrentUserPolicy} -Force`);
+    }
     rmSync(sandbox, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
