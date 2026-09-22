@@ -514,15 +514,20 @@ test("a pre-helper execution-policy block is distinct from a helper contract ref
   assert.equal(classifyWindowsNpmPowerShellFailure(""), "windows_npm_launch_failed",
     "the classifier's default is the code the caller derives its ordinary-failure diagnosis from");
 
-  // A denied file write is NOT a policy block. Both shapes below were measured on
-  // a real Windows 11 host: the first by invoking powershell.exe with
-  // -ExecutionPolicy Restricted -File, the second by a denied
-  // [System.IO.File]::WriteAllText. Only the path was shortened.
+  // A denied file write is NOT a policy block. Every shape below was measured on
+  // a real Windows 11 host, PowerShell 5.1: the first by invoking powershell.exe
+  // with -ExecutionPolicy Restricted -File, the rest by denying a write three
+  // different ways against C:\Windows\System32. Only paths were shortened.
   //
-  // PowerShell names the .NET exception type in the SAME field a Restricted
-  // policy uses, so anchoring on FullyQualifiedErrorId does not separate them.
-  // It also hard-wraps long lines WITHOUT indenting the continuation, so joining
-  // indented continuations cannot repair a wrap; it only joins real detail lines.
+  // PowerShell names the failing operation in the SAME field a Restricted policy
+  // uses, so anchoring on FullyQualifiedErrorId does not separate them. Excluding
+  // a list of suffixes does not either: Remove-Item's error id ENDS at the token,
+  // spelled UnAuthorized, and is terminated by a comma. What marks a real policy
+  // block is that its error id IS the token, standing alone, which is why the
+  // classifier requires an identifier boundary on both sides and enumerates
+  // nothing. PowerShell also hard-wraps long lines WITHOUT indenting the
+  // continuation, so joining indented continuations cannot repair a wrap; it only
+  // joins real detail lines.
   const restrictedPolicyStderr = [
     "File C:\\kit\\invoke-public-npm-install.ps1 cannot be loaded because running scripts is disabled on ",
     "this system. For more information, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.",
@@ -537,6 +542,35 @@ test("a pre-helper execution-policy block is distinct from a helper contract ref
     "    + FullyQualifiedErrorId : UnauthorizedAccessException",
     "",
   ].join("\r\n");
+  // Set-Content buries the token mid-identifier, so a trailing-context rule alone
+  // would reject it, but a FullyQualifiedErrorId anchor would not.
+  const deniedSetContentStderr = [
+    "Set-Content : Access to the path 'C:\\Windows\\System32\\fb-probe.txt' is denied.",
+    "At line:1 char:1",
+    "+ Set-Content -Path \"C:\\Windows\\System32\\fb-probe.txt\" -Value \"x\" -Error ...",
+    "    + CategoryInfo          : PermissionDenied: (:) [Set-Content], UnauthorizedAccessException",
+    "    + FullyQualifiedErrorId : GetContentWriterUnauthorizedAccessError,Microsoft.PowerShell.Commands.SetContentCommand",
+    "",
+  ].join("\r\n");
+  // Remove-Item is the one that forces a boundary on BOTH sides: its error id ends
+  // AT the token and is terminated by a comma, so the trailing character is not an
+  // identifier character and a trailing-only rule reads it as a policy block. Only
+  // the preceding "m" distinguishes it.
+  const deniedRemoveItemStderr = [
+    "Remove-Item : Cannot remove item C:\\Windows\\System32\\drivers\\etc\\hosts: Access to the path is denied.",
+    "At line:1 char:1",
+    "+ Remove-Item -Path \"C:\\Windows\\System32\\drivers\\etc\\hosts\" -ErrorAct ...",
+    "    + CategoryInfo          : PermissionDenied: (C:\\Windows\\System32\\drivers\\etc\\hosts:FileInfo) [Remove-Item], UnauthorizedAccessException",
+    "    + FullyQualifiedErrorId : RemoveFileSystemItemUnAuthorizedAccess,Microsoft.PowerShell.Commands.RemoveItemCommand",
+    "",
+  ].join("\r\n");
+  assert.equal(classifyWindowsNpmPowerShellFailure(deniedSetContentStderr),
+    "windows_npm_launch_failed",
+    "GetContentWriterUnauthorizedAccessError is a denied write, not an execution-policy block");
+  assert.equal(classifyWindowsNpmPowerShellFailure(deniedRemoveItemStderr),
+    "windows_npm_launch_failed",
+    "RemoveFileSystemItemUnAuthorizedAccess ends at the token and is terminated by a comma; only the " +
+    "identifier character in front of it distinguishes it from a real policy block");
   assert.equal(classifyWindowsNpmPowerShellFailure(restrictedPolicyStderr),
     "powershell_execution_policy_blocked");
   assert.equal(classifyWindowsNpmPowerShellFailure(deniedWriteStderr), "windows_npm_launch_failed",
@@ -562,18 +596,29 @@ test("a pre-helper execution-policy block is distinct from a helper contract ref
     "a policy-block marker split across chunks must still be detected");
   assert.deepEqual(everyChunking("PUBLIC_NPM_REFUSED npm_path_mismatch\r\n"),
     ["public_npm_contract_refused"], "a refusal marker split across chunks must still be detected");
+  assert.deepEqual(everyChunking(deniedSetContentStderr), ["windows_npm_launch_failed"],
+    "the Set-Content spelling of a denied write must not classify as a policy block at any boundary");
+  assert.deepEqual(everyChunking(deniedRemoveItemStderr), ["windows_npm_launch_failed"],
+    "nor the Remove-Item spelling, whose error id ends at the token");
   assert.deepEqual(everyChunking(`${deniedWriteStderr}${restrictedPolicyStderr}`),
     ["powershell_execution_policy_blocked"]);
+  assert.deepEqual(everyChunking(`${restrictedPolicyStderr}${deniedRemoveItemStderr}`),
+    ["powershell_execution_policy_blocked"],
+    "a real policy block is not undone by a denied write arriving after it");
   assert.deepEqual(everyChunking("npm error code E404\r\nnpm error 404 Not Found\r\n"),
     ["windows_npm_launch_failed"]);
   assert.equal(streamed(["npm error System.UnauthorizedAccess", "Exception: Access is denied."]),
     "windows_npm_launch_failed", "the worst split is exactly at the end of the marker");
+  assert.equal(streamed(["...RemoveFileSystemItemUnAuthorizedAccess", ",Microsoft.PowerShell.Commands"]),
+    "windows_npm_launch_failed",
+    "splitting at the end of the marker must not hide the identifier character in front of it");
 
-  // The retained overlap must be DERIVED from the longest pattern the classifier
-  // inspects, so a longer marker cannot silently outgrow a literal.
-  assert.ok(WINDOWS_NPM_STDERR_OVERLAP >= "UnauthorizedAccess".length + "Exception".length - 1,
-    `the retained stderr overlap is ${WINDOWS_NPM_STDERR_OVERLAP}, too short for the longest pattern ` +
-    "the classifier inspects; a marker arriving one byte at a time would be missed");
+  // The retained overlap must be DERIVED from what the rules need, so a wider
+  // marker or boundary cannot silently outgrow a literal. Proving the marker
+  // stands alone takes one boundary character on EACH side of it.
+  assert.ok(WINDOWS_NPM_STDERR_OVERLAP >= 1 + "UnauthorizedAccess".length + 1 - 1,
+    `the retained stderr overlap is ${WINDOWS_NPM_STDERR_OVERLAP}; proving the marker stands alone needs ` +
+    "one identifier boundary on each side of it, so a marker arriving one byte at a time would be missed");
 });
 
 test("the public install caller prints a sanitized diagnosis after preserving the helper's stderr", {

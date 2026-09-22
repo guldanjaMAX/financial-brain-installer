@@ -373,31 +373,42 @@ export function buildWindowsNpmPowerShellInvocation({
   });
 }
 
-// The two markers a failed launch can carry, and the one piece of trailing
-// context that tells them apart from an unrelated fault.
+// The two markers a failed launch can carry, and the structural property that
+// separates a policy block from an unrelated fault.
 //
 // UnauthorizedAccess alone cannot mean "policy block". PowerShell reports a
-// DENIED FILE WRITE by naming the .NET exception type in the same field a
-// Restricted policy uses, measured on a real Windows 11 host:
-//   policy block:  + FullyQualifiedErrorId : UnauthorizedAccess
-//   denied write:  + FullyQualifiedErrorId : UnauthorizedAccessException
-// so anchoring on FullyQualifiedErrorId does NOT separate them; only the
-// absence of the Exception suffix does. A denied write can only happen after
-// the helper launched, which is exactly when a policy block is impossible, and
-// telling an operator to change their execution policy sends them away from a
-// permissions fault on the install prefix.
+// DENIED FILE WRITE by naming the failing operation in the very field a
+// Restricted policy uses, and each spelling buries the token inside a longer
+// error id. All four measured on this host, PowerShell 5.1 on Windows 11:
+//   policy block   FullyQualifiedErrorId : UnauthorizedAccess
+//   WriteAllText   FullyQualifiedErrorId : UnauthorizedAccessException
+//   Set-Content    FullyQualifiedErrorId : GetContentWriterUnauthorizedAccessError,Microsoft...
+//   Remove-Item    FullyQualifiedErrorId : RemoveFileSystemItemUnAuthorizedAccess,Microsoft...
+// So anchoring on FullyQualifiedErrorId does not separate them, and neither
+// does excluding a list of suffixes: Remove-Item's id ENDS at the token (spelled
+// UnAuthorized, which a case-insensitive match still finds) and is terminated by
+// a comma, so a trailing-only test reads it as a policy block. What actually
+// marks the policy block is that its error id IS the token, standing alone.
+// Require an identifier boundary on BOTH sides and enumerate nothing.
+//
+// This matters because a denied write can only happen AFTER the helper launched,
+// which is exactly when a policy block is impossible. Diagnosing one sends the
+// operator to change their execution policy while the real fault is a
+// permissions failure on the install prefix.
 const PUBLIC_NPM_REFUSAL_MARKER = "PUBLIC_NPM_REFUSED";
 const POWERSHELL_POLICY_MARKER = "UnauthorizedAccess";
-const DOTNET_EXCEPTION_SUFFIX = "Exception";
+const IDENTIFIER_CHARACTER = /[A-Za-z0-9_]/;
+// One character on each side is all it takes to prove the token stands alone.
+const POWERSHELL_POLICY_BOUNDARY = 1;
 
-// How much already-relayed stderr a streaming caller must retain so that every
-// marker, and the trailing context the policy rule inspects, lands in one
-// contiguous view even when the stream arrives one byte at a time. Derived from
-// the patterns themselves: the longest pattern, less the one character that
-// completes it. A longer marker raises this automatically.
+// How much already-relayed stderr a streaming caller must retain so a marker and
+// the boundary on each side of it land in one contiguous view, even when the
+// stream arrives one byte at a time. Derived from the patterns: the widest window
+// any rule needs, less the one character that completes it. Widening a marker or
+// a boundary raises this automatically.
 export const WINDOWS_NPM_STDERR_OVERLAP = Math.max(
   PUBLIC_NPM_REFUSAL_MARKER.length,
-  POWERSHELL_POLICY_MARKER.length + DOTNET_EXCEPTION_SUFFIX.length,
+  POWERSHELL_POLICY_BOUNDARY + POWERSHELL_POLICY_MARKER.length + POWERSHELL_POLICY_BOUNDARY,
 ) - 1;
 
 /**
@@ -413,21 +424,28 @@ export const WINDOWS_NPM_STDERR_OVERLAP = Math.max(
  * forwarded as they arrive, and only the verdict waits.
  */
 export function windowsNpmPowerShellFailureClassifier() {
-  let carry = "";
+  // A single non-identifier character stands in for the start of the stream, so
+  // the start of text reads as a boundary and index 0 never has to be judged.
+  let carry = "\n";
   let refused = false;
   let policyBlocked = false;
-  const dotnetSuffix = DOTNET_EXCEPTION_SUFFIX.toLowerCase();
   const scan = (text, closed) => {
     if (text.includes(PUBLIC_NPM_REFUSAL_MARKER)) refused = true;
     // Built from the marker rather than restating it, so the pattern and the
     // overlap derived from its length cannot drift apart.
     for (const match of text.matchAll(new RegExp(POWERSHELL_POLICY_MARKER, "gi"))) {
-      const from = match.index + match[0].length;
-      const after = text.slice(from, from + DOTNET_EXCEPTION_SUFFIX.length);
-      // An occurrence whose trailing context has not arrived yet stays undecided:
-      // it survives in the retained overlap and is looked at again.
-      if (!closed && after.length < DOTNET_EXCEPTION_SUFFIX.length) continue;
-      if (after.toLowerCase() === dotnetSuffix) continue;
+      const at = match.index;
+      const from = at + match[0].length;
+      // At index 0 the preceding character has been dropped, and the occurrence
+      // was already decided while that character was still visible: the retained
+      // overlap is wide enough to hold the marker plus both boundaries.
+      if (at === 0) continue;
+      if (IDENTIFIER_CHARACTER.test(text[at - 1])) continue;
+      const following = text.slice(from, from + POWERSHELL_POLICY_BOUNDARY);
+      // An occurrence whose trailing boundary has not arrived yet stays
+      // undecided: it survives in the retained overlap and is looked at again.
+      if (!closed && following.length < POWERSHELL_POLICY_BOUNDARY) continue;
+      if (IDENTIFIER_CHARACTER.test(following)) continue;
       policyBlocked = true;
     }
   };
