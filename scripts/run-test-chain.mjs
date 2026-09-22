@@ -14,6 +14,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
   "node --no-warnings test/d1-transient-fault.test.mjs",
+  "node --no-warnings test/source-family-inventory-retry.test.mjs",
   "node --test test/readback-secret-scan.test.mjs",
   "node --test test/cross-platform-field-test-registration.test.mjs",
   "node --test test/disposable-recovery-seeder.test.mjs",
@@ -180,6 +181,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/field-rehearsal.test.mjs",
   "node test/provision-guards.test.mjs",
   "node test/drive-removal-guard.test.mjs",
+  "node --no-warnings test/source-family-inventory-retry.test.mjs",
   "node --no-warnings test/d1-transient-fault.test.mjs",
   "node --no-warnings test/family-reconciliation.test.mjs",
   "node --no-warnings test/ingestion-contract.test.mjs",

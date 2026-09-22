@@ -233,6 +233,11 @@ import {
 } from "./operations/zone-assignment-retry.mjs";
 import { isD1TransientFaultBody } from "./operations/d1-transient-fault.mjs";
 import {
+  requestSourceFamilyPageWithRetry,
+  sourceFamilyInventoryRetryNotice,
+  SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS,
+} from "./operations/source-family-inventory-retry.mjs";
+import {
   bootstrapManifestObservation,
   bootstrapStatusFilePath,
   buildBootstrapStatus,
@@ -11575,6 +11580,8 @@ export async function listStoredSourceFamilies({
   includeServerObservedAt = false,
   includeLabels = false,
   uids = null,
+  retryDelaysMs = SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   const normalizedSource = assertSourceName(source);
   if (uids !== null && (!Array.isArray(uids) || uids.length < 1 ||
@@ -11605,22 +11612,36 @@ export async function listStoredSourceFamilies({
   for (;;) {
     if (seenCursors.has(cursor)) throw new Error("source-family inventory repeated a cursor");
     seenCursors.add(cursor);
-    const res = await http(`${base}/api/admin/brain/source-families`, {
-      method: "POST",
-      redirect: "error",
-      headers: {
-        "X-Admin-Key": adminKey,
-        "Content-Type": "application/json",
+    // Retry a transient status for THIS page only. The cursor does not change
+    // across attempts, so the repeated-cursor guard above is never re-entered and
+    // the walk is never restarted or widened. A 400 is not retried here: it is the
+    // compatibility ladder's signal, and repeating it cannot change the answer.
+    const page = await requestSourceFamilyPageWithRetry(() => http(
+      `${base}/api/admin/brain/source-families`,
+      {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          "X-Admin-Key": adminKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          source: normalizedSource,
+          limit: 1000,
+          ...(requestLabels ? { include_labels: true } : {}),
+          ...(requestUids ? { uids: requestUids } : {}),
+          ...(cursor ? { cursor } : {}),
+        }),
       },
-      body: JSON.stringify({
-        source: normalizedSource,
-        limit: 1000,
-        ...(requestLabels ? { include_labels: true } : {}),
-        ...(requestUids ? { uids: requestUids } : {}),
-        ...(cursor ? { cursor } : {}),
-      }),
-    }, { what: "the source-family inventory" });
-    const raw = await res.text();
+      { what: "the source-family inventory" },
+    ), {
+      isRetryableStatus: isRetryableHttpStatus,
+      delaysMs: retryDelaysMs,
+      sleep,
+      onRetry: (attempt) => info(sourceFamilyInventoryRetryNotice(attempt)),
+    });
+    const res = page.res;
+    const raw = page.raw;
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
     if (cursor === "" && requestLabels && res.status === 400 &&

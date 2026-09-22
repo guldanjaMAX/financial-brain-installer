@@ -723,6 +723,9 @@ const expected = [
   "operations/cloudflare-oauth-session.mjs",
   "operations/command-display.mjs",
   "operations/zone-assignment-retry.mjs",
+  // Bounded retry for one inventory page. Takes only an injected request,
+  // sleep and status predicate, with no filesystem or credential inputs.
+  "operations/source-family-inventory-retry.mjs",
   // Response-shape classifier for a Cloudflare D1 reset. Takes only a
   // response body, with no filesystem, credential, network, or instance inputs.
   "operations/d1-transient-fault.mjs",
