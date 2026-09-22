@@ -424,6 +424,7 @@ const expected = [
   "docs/decisions/003-staged-source-onboarding.md",
   "docs/decisions/004-version-scoped-release-scope.md",
   "docs/decisions/005-phased-disposable-deployment-proof.md",
+  "docs/decisions/006-pin-supervised-install-contract-v2.md",
   "docs/decisions/README.md",
   "doctor.mjs",
   "eval/brain-client.mjs",
@@ -651,6 +652,9 @@ const expected = [
   "worker/src/lib/version.js",
   // Release-line scripts, now shipped because scripts/ is in package files.
   "scripts/check-install-page-version.mjs",
+  // Dependency-free literal oracle for the two public supervised-install guides.
+  // It performs no I/O and carries only reviewed public URLs, no credential or owner data.
+  "scripts/supervised-install-guide-oracle.mjs",
   "scripts/customer-hiccup-lab.mjs",
   "scripts/onboarding-sandbox.mjs",
   "scripts/teardown-test-brain.mjs",

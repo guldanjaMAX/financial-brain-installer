@@ -26,8 +26,10 @@ jobs:
         include:
           - os: macos-latest    # Apple silicon, the path most clients are on
             guide: macos
-          - os: macos-13        # Intel, older Macs
-            guide: macos
+          # macos-13 (Intel) removed 2026-09-21: it never executed in 17
+          # consecutive runs, cancelled every time at the 24-hour queue
+          # ceiling with no runner ever picked up. That is 24 hours of queue
+          # burn per run for zero evidence, not a passing platform leg.
           - os: ubuntu-latest   # the cheapest canary
             guide: macos
           - os: windows-latest  # the PowerShell and npm.cmd path

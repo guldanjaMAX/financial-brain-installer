@@ -39,6 +39,7 @@ import {
   resolveWindowsPowerShellPath,
 } from "../operations/npm-cli-runtime.mjs";
 import { readSupervisedInstallContract } from "./check-install-page-version.mjs";
+import { matchesExpectedSupervisedGuideUrl } from "./supervised-install-guide-oracle.mjs";
 
 const workdir = resolve(process.argv[2] || "./install-contract-run");
 const guideArg = process.argv.includes("--guide")
@@ -47,9 +48,6 @@ if (!["macos", "windows"].includes(guideArg)) {
   console.error("FAIL  --guide must be macos or windows");
   process.exit(1);
 }
-const GUIDE = guideArg === "macos"
-  ? "https://financialbrain.ai/install/agent-macos.md"
-  : "https://financialbrain.ai/install/agent.md";
 const FIELD_GUIDE = guideArg === "macos" ? "MACOS-FIELD-TEST.md" : "WINDOWS-FIELD-TEST.md";
 const PUBLIC_NPM_HELPER = fileURLToPath(new URL("./invoke-public-npm-install.ps1", import.meta.url));
 
@@ -68,10 +66,12 @@ const {
   candidateCommit: commit,
   artifact: zip,
 } = publicContract;
-ok(`contract read from ${GUIDE}`);
+ok(`contract read from ${publicContract.guideUrl}`);
 console.log(`      version ${version}  commit ${commit.slice(0, 7)}  ${artifactBytes} bytes`);
 
-if (publicContract.guideUrl !== GUIDE) die("strict contract reader selected the wrong platform guide");
+if (!matchesExpectedSupervisedGuideUrl(guideArg, publicContract.guideUrl)) {
+  die("strict contract reader selected the wrong platform guide");
+}
 if (zip.length !== artifactBytes) die(`ZIP is ${zip.length} bytes, contract says ${artifactBytes}`);
 ok("the published ZIP is the byte count the contract states");
 if (sha256(zip) !== artifactSha) die(`ZIP sha256 ${sha256(zip)} != contract ${artifactSha}`);

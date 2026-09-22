@@ -104,14 +104,20 @@ checks.
 | Runner | What it proves |
 |---|---|
 | macos-latest (Apple Silicon) | The Mac path most clients are on |
-| macos-13 (Intel) | Older Macs |
 | windows-latest | The Windows npm.cmd contract, generated brain.cmd execution, and x64 hosted runtime |
 | ubuntu-latest | The Linux path and the cheapest canary |
 
+macos-13 (Intel, older Macs) was removed 2026-09-21. It never executed in 17
+consecutive runs; GitHub cancelled it every time at the 24-hour hosted-runner
+queue ceiling with no runner ever picked up. It produced 24 hours of queue
+time per run and zero evidence, so its presence in the matrix was not Intel
+coverage, it was a nightly no-op. Intel-Mac coverage is currently absent and
+open as its own item rather than implied by a leg that never ran.
+
 The Actions log is the command transcript, and the downloaded public Markdown
 guides and receipts are retained as artifacts. `release.yml` calls this reusable
-workflow and cannot publish unless all four jobs pass. Manual and scheduled runs
-exercise the same workflow.
+workflow and cannot publish unless all three jobs pass. Manual and scheduled
+runs exercise the same workflow.
 
 This gate does **not** run `brain setup`, provision a Worker, D1 database, or
 Vectorize index, query a deployed Brain, open a browser, or exercise a physical
@@ -390,10 +396,10 @@ non-technical owner act on this message without calling us?**
 
 | # | Injection | Verdict |
 |---|---|---|
-| BT-1 | Invalid `CLOUDFLARE_API_TOKEN`, `brain verify` | **CALL US** — see F-10 |
-| BT-2 | Invalid token, `brain doctor` on the released v0.1.19 | **CALL US** — fixed on main |
-| BT-3 | Valid token, wrong `account_id` in the manifest | **ACT ON IT** — model message |
-| BT-4 | SIGINT mid-provision, then plain re-run | **ACT ON IT** — recovers, 47s |
+| BT-1 | Invalid `CLOUDFLARE_API_TOKEN`, `brain verify` | **CALL US**, see F-10 |
+| BT-2 | Invalid token, `brain doctor` on the released v0.1.19 | **CALL US**, fixed on main |
+| BT-3 | Valid token, wrong `account_id` in the manifest | **ACT ON IT**, model message |
+| BT-4 | SIGINT mid-provision, then plain re-run | **ACT ON IT**, recovers, 47s |
 | BT-5 | Network loss mid-run | not run; needs a controlled network shim |
 
 ### BT-2, the released version, is the case the fix was written for

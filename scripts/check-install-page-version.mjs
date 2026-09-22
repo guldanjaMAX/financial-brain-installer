@@ -10,13 +10,12 @@ import {
 export const ENDPOINTS = Object.freeze({
   manifest: 'https://financialbrain.ai/update/manifest.json',
   updateGuide: 'https://financialbrain.ai/update/agent.md',
-  installGuide: 'https://financialbrain.ai/install/agent.md',
-  installGuideMacos: 'https://financialbrain.ai/install/agent-macos.md',
   latest: 'https://api.github.com/repos/guldanjaMAX/financial-brain-installer/releases/latest',
 });
 const UPDATE_URL = 'https://financialbrain.ai/update';
 const RELEASE_BASE = 'https://github.com/guldanjaMAX/financial-brain-installer/releases/download';
 const RUNTIME_IDENTITY_SCHEME = 'brain.runtime-payload.sha256.v1';
+const RELEASE_HEALTH_PLATFORM = 'windows';
 const versionPattern = /^\d+\.\d+\.\d+$/;
 const digestPattern = /^[0-9a-f]{64}$/;
 const sourceDigestPattern = /^[0-9a-f]{40}$/;
@@ -36,10 +35,26 @@ export function guideFields(text) {
   return fields;
 }
 
-const SUPERVISED_TARGETS = Object.freeze({
-  windows: 'physical Windows 10 or newer',
-  macos: 'macOS 13 or newer, Apple silicon or Intel',
+const SUPERVISED_PLATFORMS = Object.freeze({
+  windows: Object.freeze({
+    target: 'physical Windows 10 or newer',
+    guideUrl: 'https://financialbrain.ai/install/agent.md',
+  }),
+  macos: Object.freeze({
+    target: 'macOS 13 or newer, Apple silicon or Intel',
+    guideUrl: 'https://financialbrain.ai/install/agent-macos.md',
+  }),
 });
+
+function supervisedPlatform(platform, { exactString = false } = {}) {
+  // The reader's former strict-equality ternary accepted only primitive strings;
+  // the validator already used Object.hasOwn and retains that caller contract.
+  requireValue(
+    (!exactString || typeof platform === 'string') && Object.hasOwn(SUPERVISED_PLATFORMS, platform),
+    'unsupported supervised install platform',
+  );
+  return SUPERVISED_PLATFORMS[platform];
+}
 
 /**
  * Validate the executable candidate contract before its artifact URL can be
@@ -47,15 +62,24 @@ const SUPERVISED_TARGETS = Object.freeze({
  * one parser, so a duplicate field or a weakened owner/target/status boundary
  * cannot be accepted by one surface and rejected by the other.
  */
-export function validateSupervisedInstallContract(installGuide, { platform = 'windows' } = {}) {
-  const target = SUPERVISED_TARGETS[platform];
-  requireValue(target, 'unsupported supervised install platform');
+export function validateSupervisedInstallContract(installGuide, { platform } = {}) {
+  const { target, guideUrl } = supervisedPlatform(platform);
   const install = guideFields(installGuide);
-  requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '1' &&
-    install.STATUS === 'supervised field-test candidate' &&
-    install.OWNER_PRESENT === 'required' && install.TARGET === target &&
-    typeof install.SETUP_PAGE === 'string', 'unrecognized supervised install contract');
-  const setup = new URL(install.SETUP_PAGE);
+  requireValue(install.AGENT_INSTALL_CONTRACT_VERSION === '2',
+    'unrecognized supervised install contract: AGENT_INSTALL_CONTRACT_VERSION');
+  requireValue(install.STATUS === 'supervised field-test candidate',
+    'unrecognized supervised install contract: STATUS');
+  requireValue(install.OWNER_PRESENT === 'required',
+    'unrecognized supervised install contract: OWNER_PRESENT');
+  requireValue(install.TARGET === target,
+    'unrecognized supervised install contract: TARGET');
+  requireValue(typeof install.SETUP_PAGE === 'string',
+    'unrecognized supervised install contract: SETUP_PAGE');
+  let setup = null;
+  try {
+    setup = new URL(install.SETUP_PAGE);
+  } catch {}
+  requireValue(setup, 'invalid supervised setup URL');
   requireValue(setup.origin === 'https://financialbrain.ai' && /^\/[a-z0-9-]+$/.test(setup.pathname) &&
     !setup.search && !setup.hash && !setup.username && !setup.password, 'invalid supervised setup URL');
   requireValue(versionPattern.test(install.CANDIDATE_VERSION) && /^[0-9a-f]{40}$/.test(install.CANDIDATE_COMMIT) &&
@@ -66,7 +90,7 @@ export function validateSupervisedInstallContract(installGuide, { platform = 'wi
   requireValue(install.ARTIFACT_URL === expected, 'supervised candidate URL and receipt disagree');
   return Object.freeze({
     platform,
-    guideUrl: platform === 'windows' ? ENDPOINTS.installGuide : ENDPOINTS.installGuideMacos,
+    guideUrl,
     setupPage: setup.href,
     artifactUrl: install.ARTIFACT_URL,
     artifactBytes: Number(install.ARTIFACT_BYTES),
@@ -124,7 +148,7 @@ export function validateDoorways({ manifest, updateGuide, installGuide }) {
   requireValue(update.PERMITTED_MODE === permitted, 'update guide permits the wrong operation');
   // The unlisted /install doorway intentionally offers a supervised candidate.
   // Its older exact version must never be replaced with /releases/latest.
-  const install = validateSupervisedInstallContract(installGuide);
+  const install = validateSupervisedInstallContract(installGuide, { platform: RELEASE_HEALTH_PLATFORM });
   // The artifact must still be derivable from the setup page, the version and
   // the digest, so it can never be swapped for a moving target like
   // /releases/latest. What changed on 2026-09-08 is the human-readable part of
@@ -173,9 +197,7 @@ export async function publicBytes(url, limit = 200_000, { fetchImpl = globalThis
 /** Download one fixed platform guide, validate it, then and only then follow
  * its immutable, digest-derived, byte-bounded artifact URL. */
 export async function readSupervisedInstallContract({ platform = 'windows', read = publicBytes } = {}) {
-  const guideUrl = platform === 'windows' ? ENDPOINTS.installGuide
-    : platform === 'macos' ? ENDPOINTS.installGuideMacos : null;
-  requireValue(guideUrl, 'unsupported supervised install platform');
+  const { guideUrl } = supervisedPlatform(platform, { exactString: true });
   const guideBytes = Buffer.from(await read(guideUrl, 200_000));
   requireValue(guideBytes.length < 200_000, 'invalid agent guide');
   const guide = guideBytes.toString('utf8');
@@ -184,11 +206,14 @@ export async function readSupervisedInstallContract({ platform = 'windows', read
   requireValue(artifact.length === contract.artifactBytes &&
     createHash('sha256').update(artifact).digest('hex') === contract.artifactSha256,
   'downloaded supervised artifact differs from the published receipt');
-  return Object.freeze({ ...contract, guide, artifact });
+  // Return the same local URL passed to read(), so callers can independently
+  // compare the fetched platform resource with their expected public guide.
+  return Object.freeze({ ...contract, guideUrl, guide, artifact });
 }
 export async function checkInstallPage({ read = publicBytes, requireStable = false } = {}) {
+  const { guideUrl: installGuideUrl } = supervisedPlatform(RELEASE_HEALTH_PLATFORM, { exactString: true });
   const [manifestBytes, updateBytes, installBytes] = await Promise.all([
-    read(ENDPOINTS.manifest), read(ENDPOINTS.updateGuide), read(ENDPOINTS.installGuide),
+    read(ENDPOINTS.manifest), read(ENDPOINTS.updateGuide), read(installGuideUrl),
   ]);
   const manifest = JSON.parse(String(manifestBytes));
   const result = validateDoorways({ manifest, updateGuide: String(updateBytes), installGuide: String(installBytes) });

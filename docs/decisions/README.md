@@ -13,3 +13,4 @@ code it governs.
 - [003: Make source onboarding useful before historical backfill completes](003-staged-source-onboarding.md)
 - [004: Scope the incident release gate to the version being cut](004-version-scoped-release-scope.md)
 - [005: Split disposable deployment proof across causal approval phases](005-phased-disposable-deployment-proof.md)
+- [006: Pin supervised install validation to contract version 2](006-pin-supervised-install-contract-v2.md)
