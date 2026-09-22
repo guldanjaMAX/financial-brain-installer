@@ -22,8 +22,8 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildNpmCliInvocation,
@@ -54,6 +54,12 @@ const PUBLIC_NPM_HELPER = fileURLToPath(new URL("./invoke-public-npm-install.ps1
 const die = (m) => { console.error(`FAIL  ${m}`); process.exit(1); };
 const ok = (m) => console.log(`PASS  ${m}`);
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+const existingPath = (path, message) => {
+  try { return realpathSync(path); } catch { die(message); }
+};
+const readKitFile = (path, encoding, message) => {
+  try { return readFileSync(path, encoding); } catch { die(message); }
+};
 
 // Use the same strict parser as the live install/update doorway checker. It
 // validates owner presence, exact platform target/status, unique fields, the
@@ -88,23 +94,37 @@ execFileSync("unzip", ["-q", "-o", zipPath, "-d", extractionDir], {
   stdio: "inherit",
   env: childEnvironment,
 });
-const extractedDirectories = readdirSync(extractionDir)
-  .filter((name) => statSync(join(extractionDir, name)).isDirectory());
+const extractedEntries = (() => {
+  try { return readdirSync(extractionDir); } catch { die("kit ZIP extraction directory is missing or unreadable"); }
+})();
+const extractedDirectories = extractedEntries.filter((name) => {
+  try { return statSync(join(extractionDir, name)).isDirectory(); }
+  catch { die("kit ZIP extraction entry is missing or unreadable"); }
+});
 if (extractedDirectories.length !== 1) {
   die(`kit ZIP must extract exactly one top-level directory (found ${extractedDirectories.length})`);
 }
 const root = join(extractionDir, extractedDirectories[0]);
+const resolvedExtractionDir = existingPath(extractionDir, "kit ZIP extraction directory is missing or unreadable");
+const resolvedRoot = existingPath(root, "kit ZIP extraction entry is missing or unreadable");
+if (!resolvedRoot.startsWith(resolvedExtractionDir + sep)) {
+  die("kit extraction root resolves outside its extraction directory");
+}
 ok(`extracted to ${root.replace(workdir, "<workdir>")}`);
 
 // Step 5: the inner archive against the kit's own receipt, not against ours.
-const sums = readFileSync(join(root, "SHA256SUMS.txt"), "utf8").trim();
+const sums = readKitFile(join(root, "SHA256SUMS.txt"), "utf8", "kit SHA256SUMS.txt is missing or unreadable").trim();
 const [declaredSha, declaredName] = sums.split(/\s+/);
 if (!declaredName || declaredName === "." || declaredName === ".." ||
     /[\\/\x00-\x1f\x7f]/.test(declaredName) || /^[A-Za-z]:/.test(declaredName)) {
   die("SHA256SUMS.txt archive filename must be one safe path segment");
 }
 const tgzPath = join(root, declaredName);
-const tgz = readFileSync(tgzPath);
+const resolvedArchive = existingPath(tgzPath, "kit archive is missing or unreadable");
+if (!resolvedArchive.startsWith(resolvedRoot + sep)) {
+  die("kit archive resolves outside the extracted root");
+}
+const tgz = readKitFile(resolvedArchive, undefined, "kit archive is missing or unreadable");
 if (sha256(tgz) !== declaredSha) die(`${declaredName} does not match the kit's own SHA256SUMS.txt`);
 ok(`${declaredName} matches the kit's own SHA256SUMS.txt`);
 if (!declaredName.includes(version)) die(`the kit ships ${declaredName} but the contract declares ${version}`);
@@ -120,7 +140,7 @@ ok("the packaged archive is the version the contract declares");
 const human = tgz.length.toLocaleString("en-US");
 const fieldGuides = new Map();
 for (const doc of ["WINDOWS-FIELD-TEST.md", "MACOS-FIELD-TEST.md"]) {
-  const text = readFileSync(join(root, doc), "utf8");
+  const text = readKitFile(join(root, doc), "utf8", `kit ${doc} is missing or unreadable`);
   fieldGuides.set(doc, text);
   const stated = [...text.matchAll(/[0-9]{1,3}(?:,[0-9]{3})+/g)].map((m) => m[0]);
   const wrong = stated.filter((s) => s !== human);
@@ -129,7 +149,8 @@ for (const doc of ["WINDOWS-FIELD-TEST.md", "MACOS-FIELD-TEST.md"]) {
 }
 ok("both field guides state this package's byte count and no other");
 
-const receipt = readFileSync(join(root, "RELEASE-CANDIDATE-RECEIPT.md"), "utf8");
+const receipt = readKitFile(join(root, "RELEASE-CANDIDATE-RECEIPT.md"), "utf8",
+  "kit RELEASE-CANDIDATE-RECEIPT.md is missing or unreadable");
 if (!receipt.includes(commit.slice(0, 7))) {
   die(`the receipt does not name the contract's commit ${commit.slice(0, 7)}`);
 }
@@ -137,7 +158,8 @@ if (!receipt.includes(human)) die(`the receipt does not state this package's ${h
 if (!receipt.includes(declaredSha)) die("the receipt does not state this package's sha256");
 ok("the receipt names this package's commit, byte count and digest");
 
-const macGuide = readFileSync(join(root, "MACOS-FIELD-TEST.md"), "utf8");
+const macGuide = readKitFile(join(root, "MACOS-FIELD-TEST.md"), "utf8",
+  "kit MACOS-FIELD-TEST.md is missing or unreadable");
 if (!macGuide.includes(`CANDIDATE_COMMIT: ${commit}`)) {
   die("the macOS guide pins a different commit than the public contract");
 }

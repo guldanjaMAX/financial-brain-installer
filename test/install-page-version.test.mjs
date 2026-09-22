@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import test from 'node:test';
@@ -694,7 +694,11 @@ test('transport and unreadable metadata fail closed', async () => {
 
 // Execute the real import-time runner. Only the public contract and external
 // commands are synthetic; source-text checks cannot prove a refusal happens.
-function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false }) {
+function runSyntheticKit({
+  rootCount, declaredName = null, staleWorkdir = false,
+  rootMode = 'directory', archiveMode = 'file', receiptMode = 'file',
+  workdirMode = 'directory', documentsMode = 'none', failSecondMacRead = false,
+}) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'brain-kit-containment-'));
   const workdir = join(fixtureRoot, 'runner-workdir');
   const executionMarker = join(fixtureRoot, 'install-command-ran.txt');
@@ -714,9 +718,12 @@ function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false 
     }
   `;
   const childProcessSource = `
-    import { mkdirSync, writeFileSync } from 'node:fs';
+    import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
     import { join } from 'node:path';
-    const fixture = ${JSON.stringify({ rootCount, declaredName, workdir, executionMarker, archiveBase64, sha })};
+    const fixture = ${JSON.stringify({
+      rootCount, declaredName, workdir, fixtureRoot, executionMarker, archiveBase64, sha, commit,
+      rootMode, archiveMode, receiptMode, documentsMode,
+    })};
     export function execFileSync(command, args) {
       if (command !== 'unzip') {
         writeFileSync(fixture.executionMarker, 'called');
@@ -725,13 +732,54 @@ function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false 
       const extractionDir = args[4];
       for (let index = 0; index < fixture.rootCount; index++) {
         const root = join(extractionDir, index === 0 ? 'kit' : 'extra-' + index);
-        mkdirSync(root, { recursive: true });
+        if (index === 0 && fixture.rootMode !== 'directory') {
+          const target = fixture.rootMode === 'sibling-prefix'
+            ? extractionDir + '-evil'
+            : join(fixture.fixtureRoot,
+              fixture.rootMode === 'broken-link' ? 'missing-root' : 'outside-root');
+          if (fixture.rootMode !== 'broken-link') mkdirSync(target, { recursive: true });
+          symlinkSync(target, root, process.platform === 'win32' ? 'junction' : 'dir');
+        } else {
+          mkdirSync(root, { recursive: true });
+        }
         if (index === 0) {
+          if (fixture.rootMode === 'broken-link') continue;
           const archive = Buffer.from(fixture.archiveBase64, 'base64');
-          writeFileSync(join(root, 'brain-installer-9.8.6.tgz'), archive);
+          if (fixture.archiveMode === 'outside-link' || fixture.archiveMode === 'sibling-prefix') {
+            const outside = fixture.archiveMode === 'sibling-prefix'
+              ? root + '-evil' : join(fixture.fixtureRoot, 'outside-archive');
+            if (fixture.archiveMode !== 'sibling-prefix') mkdirSync(outside, { recursive: true });
+            symlinkSync(outside, join(root, 'brain-installer-9.8.6.tgz'),
+              process.platform === 'win32' ? 'junction' : 'dir');
+          } else if (fixture.archiveMode === 'outside-file-link') {
+            const outside = join(fixture.fixtureRoot, 'outside-archive.tgz');
+            writeFileSync(outside, archive);
+            symlinkSync(outside, join(root, 'brain-installer-9.8.6.tgz'), 'file');
+          } else if (fixture.archiveMode === 'file') {
+            writeFileSync(join(root, 'brain-installer-9.8.6.tgz'), archive);
+          }
           writeFileSync(join(extractionDir, 'brain-installer-9.8.6.tgz'), archive);
           if (fixture.declaredName !== null) {
-            writeFileSync(join(root, 'SHA256SUMS.txt'), fixture.sha + '  ' + fixture.declaredName + '\\n');
+            if (fixture.receiptMode === 'directory') {
+              mkdirSync(join(root, 'SHA256SUMS.txt'));
+            } else if (fixture.receiptMode === 'file') {
+              writeFileSync(join(root, 'SHA256SUMS.txt'), fixture.sha + '  ' + fixture.declaredName + '\\n');
+            }
+          }
+          if (fixture.documentsMode !== 'none') {
+            const size = String(archive.length);
+            const fieldText = 'Package size ' + size + ' bytes\\n';
+            if (fixture.documentsMode !== 'missing-windows-guide') {
+              writeFileSync(join(root, 'WINDOWS-FIELD-TEST.md'), fieldText);
+            }
+            if (fixture.documentsMode !== 'missing-macos-guide') {
+              writeFileSync(join(root, 'MACOS-FIELD-TEST.md'),
+                fieldText + 'CANDIDATE_COMMIT: ' + fixture.commit + '\\n');
+            }
+            if (fixture.documentsMode !== 'missing-receipt') {
+              writeFileSync(join(root, 'RELEASE-CANDIDATE-RECEIPT.md'),
+                fixture.commit.slice(0, 7) + ' ' + size + ' ' + fixture.sha + '\\n');
+            }
           }
         }
       }
@@ -759,10 +807,40 @@ function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false 
   `;
   writeFileSync(hooksPath, hooksSource);
   writeFileSync(bootstrapPath, `
-    import { register } from 'node:module';
+    import fs from 'node:fs';
+    import { join } from 'node:path';
+    import { register, syncBuiltinESMExports } from 'node:module';
+    if (${JSON.stringify(archiveMode === 'sibling-prefix')}) {
+      const originalReaddir = fs.readdirSync;
+      fs.readdirSync = (...args) => {
+        const entries = originalReaddir(...args);
+        if (String(args[0]).includes('kit-extract-') && entries.includes('kit')) {
+          fs.mkdirSync(join(args[0], 'kit-evil'));
+        }
+        return entries;
+      };
+    }
+    if (${JSON.stringify(failSecondMacRead)}) {
+      const originalRead = fs.readFileSync;
+      let macReads = 0;
+      fs.readFileSync = (...args) => {
+        if (String(args[0]).endsWith('MACOS-FIELD-TEST.md') && ++macReads === 2) {
+          const error = new Error('synthetic second-read refusal');
+          error.code = 'ENOENT';
+          throw error;
+        }
+        return originalRead(...args);
+      };
+    }
+    syncBuiltinESMExports();
     register(new URL('./hooks.mjs', import.meta.url), import.meta.url);
   `);
   try {
+    if (workdirMode === 'linked') {
+      const physicalWorkdir = join(fixtureRoot, 'physical-workdir');
+      mkdirSync(physicalWorkdir);
+      symlinkSync(physicalWorkdir, workdir, process.platform === 'win32' ? 'junction' : 'dir');
+    }
     if (staleWorkdir) mkdirSync(join(workdir, 'old-kit'), { recursive: true });
     const result = spawnSync(process.execPath, [
       '--import', pathToFileURL(bootstrapPath).href, runnerPath, workdir, '--guide', 'windows',
@@ -810,8 +888,110 @@ test('one extracted root and a safe archive name reach the existing guide checks
   const result = runSyntheticKit({ rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz' });
   assert.equal(result.status, 1, result.stderr || result.stdout);
   assert.match(result.stdout, /PASS  brain-installer-9\.8\.6\.tgz matches the kit's own SHA256SUMS\.txt/);
-  assert.match(result.stderr, /WINDOWS-FIELD-TEST\.md/,
-    'the synthetic kit intentionally omits downstream guide documents');
+  assert.match(result.stderr, /FAIL  kit WINDOWS-FIELD-TEST\.md is missing or unreadable(?:\r?\n|$)/);
+});
+
+test('a legitimate kit under a linked workdir reaches the guide checks', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', workdirMode: 'linked',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /PASS  brain-installer-9\.8\.6\.tgz matches the kit's own SHA256SUMS\.txt/);
+  assert.match(result.stderr, /FAIL  kit WINDOWS-FIELD-TEST\.md is missing or unreadable(?:\r?\n|$)/);
+});
+
+test('the public runner refuses a root resolving to a sibling prefix', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', rootMode: 'sibling-prefix',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit extraction root resolves outside its extraction directory(?:\r?\n|$)/);
+});
+
+test('the public runner refuses an archive resolving to a sibling prefix', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', archiveMode: 'sibling-prefix',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit archive resolves outside the extracted root(?:\r?\n|$)/);
+});
+
+test('the public runner refuses a readable archive file linked outside the root on POSIX',
+  { skip: process.platform === 'win32' ? 'Windows without Developer Mode cannot create a file symlink' : false }, () => {
+    const result = runSyntheticKit({
+      rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', archiveMode: 'outside-file-link',
+    });
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stderr, /FAIL  kit archive resolves outside the extracted root(?:\r?\n|$)/);
+  });
+
+for (const [documentsMode, document] of [
+  ['missing-windows-guide', 'WINDOWS-FIELD-TEST.md'],
+  ['missing-macos-guide', 'MACOS-FIELD-TEST.md'],
+  ['missing-receipt', 'RELEASE-CANDIDATE-RECEIPT.md'],
+]) {
+  test(`the public runner refuses a missing ${document} without a filesystem stack`, () => {
+    const result = runSyntheticKit({
+      rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', documentsMode,
+    });
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stderr, new RegExp(`FAIL  kit ${document.replace('.', '\\.')} is missing or unreadable(?:\\r?\\n|$)`));
+    assert.doesNotMatch(result.stderr, /ENOENT|EISDIR|at file:/);
+  });
+}
+
+test('the public runner refuses a macOS guide lost between its two reads', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz',
+    documentsMode: 'complete', failSecondMacRead: true,
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /PASS  the receipt names this package's commit, byte count and digest/);
+  assert.match(result.stderr, /FAIL  kit MACOS-FIELD-TEST\.md is missing or unreadable(?:\r?\n|$)/);
+  assert.doesNotMatch(result.stderr, /ENOENT|EISDIR|at file:/);
+});
+
+test('the public runner refuses a root junction resolving outside extraction', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', rootMode: 'outside-link',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit extraction root resolves outside its extraction directory(?:\r?\n|$)/);
+});
+
+test('the public runner refuses a safe archive name resolving outside its root', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', archiveMode: 'outside-link',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit archive resolves outside the extracted root(?:\r?\n|$)/);
+});
+
+test('the public runner refuses a missing archive without a filesystem stack', () => {
+  const result = runSyntheticKit({
+    rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', archiveMode: 'missing',
+  });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit archive is missing or unreadable(?:\r?\n|$)/);
+  assert.doesNotMatch(result.stderr, /ENOENT|ERR_INVALID_ARG_TYPE/);
+});
+
+for (const receiptMode of ['missing', 'directory']) {
+  test(`the public runner refuses a ${receiptMode} SHA256SUMS.txt without a filesystem stack`, () => {
+    const result = runSyntheticKit({
+      rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz', receiptMode,
+    });
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stderr, /FAIL  kit SHA256SUMS.txt is missing or unreadable(?:\r?\n|$)/);
+    assert.doesNotMatch(result.stderr, /ENOENT|EISDIR/);
+  });
+}
+
+test('the public runner refuses a broken root link without a filesystem stack', () => {
+  const result = runSyntheticKit({ rootCount: 1, rootMode: 'broken-link' });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit ZIP extraction entry is missing or unreadable(?:\r?\n|$)/);
+  assert.doesNotMatch(result.stderr, /ENOENT/);
 });
 
 // One release repository, asserted across every module that names one.
