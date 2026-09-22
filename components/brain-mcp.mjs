@@ -318,6 +318,12 @@ async function runTool(name, args = {}) {
         // consumer, which is the opposite of citing your source.
         confidence: cannotSupportAbsence ? undefined : d.confidence ?? undefined,
         evidence_gate: d.evidence_gate ?? undefined,
+        // "Which of my entities are still open?" has a structural answer the
+        // documents cannot give. When the worker attached it, carry it: without
+        // this the consumer sees only the refusal and reports an absence about
+        // records the brain has an unconfirmed candidate list for. It never
+        // asserts a status — every row stays a possible mention.
+        map_guidance: d.map_guidance ?? undefined,
       };
       // A refusal is not absence. When the worker refused, carry the raw rows
       // so the consumer can say what WAS found instead of "nothing".

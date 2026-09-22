@@ -112,7 +112,11 @@ import {
 } from "./lib/source-original-observation.js";
 import {
   handleOwnerFinancialMap, OWNER_FINANCIAL_MAP_PATH_PREFIX, OWNER_FINANCIAL_MAP_APP_PATH_PREFIX,
+  readOwnerFinancialMapState,
 } from "./lib/owner-financial-map.js";
+import {
+  financialMapGuidance, hasFinancialMapStatusIntent,
+} from "./lib/financial-map-question.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -773,6 +777,71 @@ async function taxDocumentCoverageForRead(env, {
   }
 }
 
+/**
+ * "Which of my entities are still open?" — read the owner's financial map
+ * state beside retrieval, so a refusal can say why the question cannot be
+ * answered yet and what the single step is that fixes it.
+ *
+ * Three guards, in order. When any one of them does not pass, the response is
+ * byte for byte what it is today, because the field is simply absent:
+ *
+ *   1. The question has to be about the owner's own entities or accounts and
+ *      their status. The detector is deterministic, offline, and written to
+ *      stay silent when unsure.
+ *   2. The caller has to be the whole owner. A zone-scoped grant, a read-only
+ *      proxy key, a document grant, or a question narrowed to one entity sees
+ *      a narrowed corpus on purpose, and the complete candidate inventory
+ *      would widen that scope through the back door.
+ *   3. The read has to succeed. A map that could not be read is not a map that
+ *      is not set up, and only one of those licenses this guidance.
+ *
+ * WHY WHOLE-OWNER GATING IS THE RIGHT LINE HERE, and not a narrower or wider
+ * one. The candidate inventory is the complete list of the owner's structured
+ * entities and accounts. It is not zone-scoped, entity-scoped or
+ * document-scoped content, so there is no correct way to narrow it for a
+ * narrowed caller: a zone-scoped bookkeeper asking this question should get
+ * today's refusal, not a partial list they cannot interpret and did not earn.
+ * Guard 2 therefore refuses rather than filters.
+ *
+ * ONE COUPLING TO REMEMBER. The remote MCP connector builds handleMcp's
+ * `think` dependency (search this file for `think: async (body)`) by calling
+ * handleThink with NO access or scope arguments, so every OAuth grant profile
+ * reaching `ask` is already treated as the whole owner on this route — which
+ * is what makes guard 2 pass there regardless of profile. That is pre-existing
+ * whole-corpus behaviour for `ask`, and entity labels are strictly less than
+ * the cited document snippets `ask` already returns. But if a narrowed remote
+ * profile is ever introduced, that dependency and this guard have to be
+ * revisited TOGETHER: tightening one without the other either silently breaks
+ * the feature or silently widens it. Named rather than cited by line, because
+ * a line number in a comment rots on the next edit above it.
+ */
+function financialMapStateFor(env, question, {
+  access, grantScope, scopePrincipalKind, entityScope,
+}) {
+  if (!hasFinancialMapStatusIntent(question)) return Promise.resolve(null);
+  // scopeIsUnrestricted, not a hand-rolled `scope.all === true`: an
+  // all-minus-medical grant has `all: true` and is still restricted, and
+  // grants.js deliberately keeps that decision in one helper so a new call
+  // site cannot re-decide it wrongly. It answers true for a null scope, so the
+  // null is refused first.
+  //
+  // This line is DEFENCE IN DEPTH, not the load-bearing one: every capability
+  // grant also has kind "grant", so the next line already refuses it today.
+  // The order is deliberate anyway — if a future refactor ever produces an
+  // "owner" principal carrying a narrowed scope, this catches it, and the test
+  // below cannot reach that state to prove it.
+  if (access || !grantScope || !scopeIsUnrestricted(grantScope)) return Promise.resolve(null);
+  if (scopePrincipalKind !== "owner") return Promise.resolve(null);
+  if (entityScope?.applied === true) return Promise.resolve(null);
+  // Started here and awaited at the response, so it runs alongside retrieval
+  // rather than after it. The catch is attached at creation: a map read that
+  // rejects must never surface as an unhandled rejection or as a failed
+  // question, and the caller can await this promise more than once. The STATE
+  // is resolved here and the guidance is shaped at the response, because its
+  // wording depends on the evidence gate's verdict, which is not known yet.
+  return readOwnerFinancialMapState(env).catch(() => null);
+}
+
 async function handleThink(
   env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner",
 ) {
@@ -805,6 +874,10 @@ async function handleThink(
     });
   }
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit")) || 8, 1), 20);
+
+  const mapState = financialMapStateFor(env, q, {
+    access, grantScope, scopePrincipalKind, entityScope,
+  });
 
   const {
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
@@ -887,6 +960,12 @@ async function handleThink(
         ? undefined
         : refusalConfidence({ gaps, degraded, resultCount: 0 }),
       evidence_authority: evidenceAuthority || undefined,
+      // Present only for an owner asking which of their own entities or
+      // accounts are open, on a map that is not established or has gone stale.
+      // JSON.stringify drops the key otherwise, so every other response is
+      // byte for byte what it was. Nothing was answered on this path, so the
+      // guidance takes its unsupported wording and its candidate list.
+      map_guidance: financialMapGuidance(await mapState) || undefined,
     });
   }
 
@@ -1366,6 +1445,15 @@ async function handleThink(
     confidence,
     evidence_authority: approvedDocs.length ? strongestEvidenceAuthority(approvedDocs) || undefined : undefined,
     citations: approvedDocs.map(citationForDocument),
+    // Present only for an owner asking which of their own entities or accounts
+    // are open, on a map that is not established or has gone stale. It never
+    // changes `answer`, `evidence_gate` or `confidence`: the refusal above is
+    // exactly as honest as it was, and this says why it cannot be answered yet.
+    // When the gate DID support an answer the wording understates instead of
+    // contradicting it, and no candidate list rides beside a cited answer.
+    map_guidance: financialMapGuidance(await mapState, {
+      answerSupported: evidenceGate?.supported === true,
+    }) || undefined,
     // Every document numbered for the answer model stays in the response, so
     // each citation and evidence receipt number resolves to a returned result
     // even when the caller asked for fewer than the model was shown.

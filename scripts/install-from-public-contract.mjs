@@ -80,17 +80,29 @@ ok("the published ZIP is the sha256 the contract states");
 mkdirSync(workdir, { recursive: true });
 const zipPath = join(workdir, "kit.zip");
 writeFileSync(zipPath, zip);
+// A reused work directory may hold an older kit. Count roots from this ZIP's
+// fresh extraction alone, never from unrelated directories beside it.
+const extractionDir = mkdtempSync(join(workdir, "kit-extract-"));
 const childEnvironment = publicContractChildEnvironment();
-execFileSync("unzip", ["-q", "-o", zipPath, "-d", workdir], {
+execFileSync("unzip", ["-q", "-o", zipPath, "-d", extractionDir], {
   stdio: "inherit",
   env: childEnvironment,
 });
-const root = join(workdir, readdirSync(workdir).find((n) => statSync(join(workdir, n)).isDirectory()));
+const extractedDirectories = readdirSync(extractionDir)
+  .filter((name) => statSync(join(extractionDir, name)).isDirectory());
+if (extractedDirectories.length !== 1) {
+  die(`kit ZIP must extract exactly one top-level directory (found ${extractedDirectories.length})`);
+}
+const root = join(extractionDir, extractedDirectories[0]);
 ok(`extracted to ${root.replace(workdir, "<workdir>")}`);
 
 // Step 5: the inner archive against the kit's own receipt, not against ours.
 const sums = readFileSync(join(root, "SHA256SUMS.txt"), "utf8").trim();
 const [declaredSha, declaredName] = sums.split(/\s+/);
+if (!declaredName || declaredName === "." || declaredName === ".." ||
+    /[\\/\x00-\x1f\x7f]/.test(declaredName) || /^[A-Za-z]:/.test(declaredName)) {
+  die("SHA256SUMS.txt archive filename must be one safe path segment");
+}
 const tgzPath = join(root, declaredName);
 const tgz = readFileSync(tgzPath);
 if (sha256(tgz) !== declaredSha) die(`${declaredName} does not match the kit's own SHA256SUMS.txt`);

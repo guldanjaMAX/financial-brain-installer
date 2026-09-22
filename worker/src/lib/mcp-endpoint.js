@@ -27,6 +27,10 @@ import { confidenceLine } from "./confidence.js";
 // a consumer that has to defend itself, and this is the remote one.
 import { answerText, confidenceText, unavailableSearch } from "./answer-render.js";
 import { COVERAGE_INCOMPLETE } from "./retrieval-status.js";
+// A refusal about the owner's own entities is only honest with the reason
+// beside it. financial-map-question.js owns the wording so no renderer can
+// drop the "possible mention" flag that makes a candidate a candidate.
+import { financialMapGuidanceLines } from "./financial-map-question.js";
 // The same contract the local MCP server enforces. Two surfaces writing to one
 // brain under two standards is how a record quietly becomes untrustworthy.
 import {
@@ -190,15 +194,33 @@ async function runAsk(deps, args) {
   if (thought.answer === null && thought.answer_error) {
     return toolError(`the brain could not answer: ${thought.answer_error}`);
   }
+  // A question about which of the owner's entities or accounts are open, on a
+  // brain whose financial map is not set up, ends in a refusal that is honest
+  // and useless. The guidance goes ABOVE the refusal: the refusal stays exactly
+  // what it was, and this says why the brain cannot answer it yet, what it has
+  // seen without confirming, and the one step that fixes it.
+  const guidance = financialMapGuidanceLines(thought.map_guidance);
+  const withGuidance = (rest) => text([...(guidance.length ? [...guidance, ""] : []), ...rest].join("\n"));
+
   // An incomplete search reaching a client's phone as "the documents do not
   // answer the question" is the worst error this product can make: a confident
   // absence claim about their own records. It is likeliest on install day,
   // while the index is still projecting and they are asking their first
   // questions from the Claude app.
+  //
+  // The guidance rides above that notice rather than instead of it, and both
+  // sentences stay true. It is derived from the owner's MAP state, not from
+  // the search, so a half-built index does not make it provisional; and it
+  // never claims the records lack anything — it says the map is not set up,
+  // which is why the brain cannot answer, and names the one step. The notice
+  // below it is unchanged, so the absence claim remains impossible. Install
+  // day is precisely when an owner asks this question and when this path is
+  // the one they hit.
   if (unavailableSearch(thought)) {
-    return text([answerText(thought), "", confidenceText(thought)].join("\n"));
+    return withGuidance([answerText(thought), "", confidenceText(thought)]);
   }
-  const lines = [answerText(thought)];
+  const lines = guidance.length ? [...guidance, ""] : [];
+  lines.push(answerText(thought));
   const trust = confidenceLine(thought.confidence, {
     refused: /^The documents do not answer/i.test(thought.answer || ""),
   });

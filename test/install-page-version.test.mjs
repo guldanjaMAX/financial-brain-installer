@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inspect } from 'node:util';
@@ -690,6 +690,128 @@ test('the public byte reader stops a response as soon as its declared or streame
 test('transport and unreadable metadata fail closed', async () => {
   await assert.rejects(checkInstallPage({ read: async () => { throw new Error('synthetic unavailable'); } }), /unavailable/);
   await assert.rejects(checkInstallPage(reader(held(), { [ENDPOINTS.manifest]: Buffer.from('not json') })));
+});
+
+// Execute the real import-time runner. Only the public contract and external
+// commands are synthetic; source-text checks cannot prove a refusal happens.
+function runSyntheticKit({ rootCount, declaredName = null, staleWorkdir = false }) {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'brain-kit-containment-'));
+  const workdir = join(fixtureRoot, 'runner-workdir');
+  const executionMarker = join(fixtureRoot, 'install-command-ran.txt');
+  const runnerUrl = new URL('../scripts/install-from-public-contract.mjs', import.meta.url).href;
+  const runnerPath = fileURLToPath(runnerUrl);
+  const bootstrapPath = join(fixtureRoot, 'bootstrap.mjs');
+  const hooksPath = join(fixtureRoot, 'hooks.mjs');
+  const archiveBase64 = bytes.toString('base64');
+  const contractSource = `
+    export async function readSupervisedInstallContract() {
+      return {
+        guideUrl: 'https://financialbrain.ai/install/agent.md',
+        artifactBytes: ${bytes.length}, artifactSha256: ${JSON.stringify(sha)},
+        candidateVersion: '9.8.6', candidateCommit: ${JSON.stringify(commit)},
+        artifact: Buffer.from(${JSON.stringify(archiveBase64)}, 'base64'),
+      };
+    }
+  `;
+  const childProcessSource = `
+    import { mkdirSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    const fixture = ${JSON.stringify({ rootCount, declaredName, workdir, executionMarker, archiveBase64, sha })};
+    export function execFileSync(command, args) {
+      if (command !== 'unzip') {
+        writeFileSync(fixture.executionMarker, 'called');
+        throw new Error('synthetic install command must not run');
+      }
+      const extractionDir = args[4];
+      for (let index = 0; index < fixture.rootCount; index++) {
+        const root = join(extractionDir, index === 0 ? 'kit' : 'extra-' + index);
+        mkdirSync(root, { recursive: true });
+        if (index === 0) {
+          const archive = Buffer.from(fixture.archiveBase64, 'base64');
+          writeFileSync(join(root, 'brain-installer-9.8.6.tgz'), archive);
+          writeFileSync(join(extractionDir, 'brain-installer-9.8.6.tgz'), archive);
+          if (fixture.declaredName !== null) {
+            writeFileSync(join(root, 'SHA256SUMS.txt'), fixture.sha + '  ' + fixture.declaredName + '\\n');
+          }
+        }
+      }
+      return Buffer.alloc(0);
+    }
+  `;
+  const hooksSource = `
+    const runnerUrl = ${JSON.stringify(runnerUrl)};
+    const contractSource = ${JSON.stringify(contractSource)};
+    const childProcessSource = ${JSON.stringify(childProcessSource)};
+    export async function resolve(specifier, context, nextResolve) {
+      if (context.parentURL === runnerUrl && specifier === './check-install-page-version.mjs') {
+        return { url: 'd10:contract', shortCircuit: true };
+      }
+      if (context.parentURL === runnerUrl && specifier === 'node:child_process') {
+        return { url: 'd10:child-process', shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    }
+    export async function load(url, context, nextLoad) {
+      if (url === 'd10:contract') return { format: 'module', source: contractSource, shortCircuit: true };
+      if (url === 'd10:child-process') return { format: 'module', source: childProcessSource, shortCircuit: true };
+      return nextLoad(url, context);
+    }
+  `;
+  writeFileSync(hooksPath, hooksSource);
+  writeFileSync(bootstrapPath, `
+    import { register } from 'node:module';
+    register(new URL('./hooks.mjs', import.meta.url), import.meta.url);
+  `);
+  try {
+    if (staleWorkdir) mkdirSync(join(workdir, 'old-kit'), { recursive: true });
+    const result = spawnSync(process.execPath, [
+      '--import', pathToFileURL(bootstrapPath).href, runnerPath, workdir, '--guide', 'windows',
+    ], { encoding: 'utf8' });
+    assert.equal(existsSync(executionMarker), false, 'no install command may run');
+    assert.equal(existsSync(join(workdir, 'prefix')), false, 'no install prefix may be created');
+    return result;
+  } finally {
+    assert.ok(resolve(fixtureRoot).startsWith(`${resolve(tmpdir())}${sep}`));
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+for (const [label, declaredName] of [
+  ['parent traversal', '../brain-installer-9.8.6.tgz'],
+  ['Windows parent traversal', '..\\brain-installer-9.8.6.tgz'],
+  ['parent component alone', '..'],
+  ['absolute POSIX path', '/brain-installer-9.8.6.tgz'],
+  ['drive-relative path', 'C:brain-installer-9.8.6.tgz'],
+  ['absolute Windows path', 'C:\\brain-installer-9.8.6.tgz'],
+  ['empty filename', ''],
+]) {
+  test(`the public runner refuses SHA256SUMS.txt ${label} before installation`, () => {
+    const result = runSyntheticKit({ rootCount: 1, declaredName });
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stderr, /FAIL  SHA256SUMS\.txt archive filename must be one safe path segment(?:\r?\n|$)/);
+  });
+}
+
+for (const rootCount of [0, 2]) {
+  test(`the public runner refuses ${rootCount} extracted directories before installation`, () => {
+    const result = runSyntheticKit({ rootCount, declaredName: 'brain-installer-9.8.6.tgz' });
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stderr, new RegExp(`FAIL  kit ZIP must extract exactly one top-level directory \\(found ${rootCount}\\)(?:\\r?\\n|$)`));
+  });
+}
+
+test('the public runner ignores a stale work directory when the ZIP extracts no root', () => {
+  const result = runSyntheticKit({ rootCount: 0, staleWorkdir: true });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /FAIL  kit ZIP must extract exactly one top-level directory \(found 0\)(?:\r?\n|$)/);
+});
+
+test('one extracted root and a safe archive name reach the existing guide checks', () => {
+  const result = runSyntheticKit({ rootCount: 1, declaredName: 'brain-installer-9.8.6.tgz' });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /PASS  brain-installer-9\.8\.6\.tgz matches the kit's own SHA256SUMS\.txt/);
+  assert.match(result.stderr, /WINDOWS-FIELD-TEST\.md/,
+    'the synthetic kit intentionally omits downstream guide documents');
 });
 
 // One release repository, asserted across every module that names one.

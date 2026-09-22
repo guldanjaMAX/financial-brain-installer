@@ -13,6 +13,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/readback-secret-scan.test.mjs",
   "node --test test/cross-platform-field-test-registration.test.mjs",
   "node --test test/disposable-recovery-seeder.test.mjs",
   "node --test test/disposable-recovery-deployment-receipt.test.mjs",
@@ -95,6 +96,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/zone-assignment-retry.test.mjs",
   "node --no-warnings test/source-failure-evidence.test.mjs",
   "node --no-warnings --test test/owner-financial-map-migration.test.mjs worker/test/owner-financial-map.test.mjs",
+  "node --no-warnings --test worker/test/financial-map-question.test.mjs",
   "node --no-warnings --test test/source-original-observation-migration.test.mjs",
   "node --no-warnings --test test/source-original-result-binding-migration.test.mjs",
   "node --no-warnings --test test/source-original-result-family-migration.test.mjs",
@@ -118,6 +120,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
   "node test/test-chain-runner.test.mjs",
+  "node --test test/readback-secret-scan.test.mjs",
   "node --test test/cross-platform-field-test-registration.test.mjs",
   "node --test test/disposable-recovery-seeder.test.mjs",
   "node --test test/disposable-recovery-deployment-receipt.test.mjs",
@@ -378,6 +381,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --test test/setup-browser-sign-in.test.mjs",
   "node --no-warnings test/source-failure-evidence.test.mjs",
   "node --no-warnings --test test/owner-financial-map-migration.test.mjs worker/test/owner-financial-map.test.mjs",
+  "node --no-warnings --test worker/test/financial-map-question.test.mjs",
   "node --no-warnings --test test/source-original-observation-migration.test.mjs",
   "node --no-warnings --test test/source-original-result-binding-migration.test.mjs",
   "node --no-warnings --test test/source-original-result-family-migration.test.mjs",
