@@ -25,12 +25,17 @@ import {
   readSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
+import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,6 +50,7 @@ import {
   cmdUpdate,
   cmdUpgrade as cmdUpgradeWithRealQuiescence,
   commitManifestVersion,
+  pinUpdateManifest,
   compareSemver,
   documentsReceiptVerdict,
   healthProbeVerdict,
@@ -217,6 +223,41 @@ const manifestFixture = (version = "0.1.9") => ({
   },
   retrieval: { answer_model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", rerank: false },
 });
+
+const touchOnlyManifestTime = (path) => {
+  const before = lstatSync(path);
+  utimesSync(path, new Date(before.atimeMs), new Date(before.mtimeMs + 120_000));
+  const after = lstatSync(path);
+  return {
+    changed: before.mtimeMs !== after.mtimeMs,
+    sameIdentity: before.dev === after.dev && before.ino === after.ino &&
+      before.uid === after.uid && before.gid === after.gid &&
+      before.mode === after.mode && before.size === after.size &&
+      before.nlink === after.nlink,
+  };
+};
+
+const legacyUpgradeOptions = (overrides = {}) => {
+  let d1Version = null;
+  return {
+    resolveAccount: async () => ({ id: "fixture-account" }),
+    d1Query: async (_account, _database, sql) => {
+      if (/sqlite_master/i.test(sql)) return { results: [] };
+      if (/UPDATE install_state/i.test(sql)) d1Version = RUNNING_VERSION;
+      if (/SELECT product_version FROM install_state/i.test(sql)) {
+        return { results: [{ product_version: d1Version }] };
+      }
+      return { results: [] };
+    },
+    cf: async () => ({ bookmark: "metadata-fixture-bookmark" }),
+    cmdMigrate: async () => {},
+    cmdDeploy: async () => {},
+    reconcileWorkerProviderSecrets: async () => {},
+    cmdHealth: async () => {},
+    cmdTest: async () => {},
+    ...overrides,
+  };
+};
 
 const bootstrapReceipt = (overrides = {}) => ({
   protocol: "bootstrap-v2",
@@ -1630,6 +1671,181 @@ const bootstrapCompletion = () => ({
   }
 }
 
+/* ---- sync metadata changes between stages do not masquerade as tampering ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-upgrade-metadata-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    const originalBytes = JSON.stringify(manifestFixture());
+    writeFileSync(manifestPath, originalBytes);
+    let touch = null;
+    let error = null;
+    try {
+      await cmdUpgrade(manifestPath, legacyUpgradeOptions({
+        cmdMigrate: async (executionPath) => {
+          check("a private execution copy, not the original, runs migration",
+            executionPath !== manifestPath);
+          touch = touchOnlyManifestTime(manifestPath);
+          check("the simulated sync touched only original-manifest timestamps",
+            touch.changed && touch.sameIdentity && readFileSync(manifestPath, "utf8") === originalBytes,
+            JSON.stringify(touch));
+        },
+      }));
+    } catch (caught) { error = caught; }
+    check("a timestamp-only touch between upgrade stages still reaches verified commit",
+      touch?.changed && !error &&
+        JSON.parse(readFileSync(manifestPath, "utf8")).brain.version === RUNNING_VERSION,
+      error?.message);
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- a sync touch inside the atomic version commit's pre-rename window is safe ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-commit-metadata-")));
+  const originalFsync = fs.fsyncSync;
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify(manifestFixture()));
+    let touch = null;
+    fs.fsyncSync = (...args) => {
+      if (!touch) touch = touchOnlyManifestTime(manifestPath);
+      return originalFsync(...args);
+    };
+    syncBuiltinESMExports();
+    let error = null;
+    try { commitManifestVersion(manifestPath, RUNNING_VERSION); }
+    catch (caught) { error = caught; }
+    check("a timestamp-only touch after the commit pin but before rename allows the commit",
+      touch?.changed && touch.sameIdentity && !error &&
+        JSON.parse(readFileSync(manifestPath, "utf8")).brain.version === RUNNING_VERSION,
+      error?.message);
+  } finally {
+    fs.fsyncSync = originalFsync;
+    syncBuiltinESMExports();
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- persistent content, inode, and mode changes remain separate refusals ---- */
+for (const tamper of [
+  {
+    name: "content edit",
+    mutate: (path, bytes) => {
+      writeFileSync(path, bytes.replace('"0.1.9"', '"0.1.8"'));
+      return readFileSync(path, "utf8") !== bytes;
+    },
+  },
+  {
+    name: "byte-identical inode swap",
+    mutate: (path, bytes) => {
+      const before = lstatSync(path);
+      const replacement = join(dirname(path), "replacement.manifest.json");
+      writeFileSync(replacement, bytes);
+      unlinkSync(path);
+      renameSync(replacement, path);
+      const after = lstatSync(path);
+      return readFileSync(path, "utf8") === bytes && before.size === after.size &&
+        before.mode === after.mode && (before.dev !== after.dev || before.ino !== after.ino);
+    },
+  },
+  {
+    name: "permission change",
+    mutate: (path, bytes) => {
+      const before = lstatSync(path);
+      chmodSync(path, 0o444);
+      const after = lstatSync(path);
+      return readFileSync(path, "utf8") === bytes && before.mode !== after.mode;
+    },
+  },
+]) {
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-upgrade-tamper-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    const originalBytes = JSON.stringify(manifestFixture());
+    writeFileSync(manifestPath, originalBytes);
+    let observedMutation = false;
+    let accountChecks = 0;
+    let d1Reads = 0;
+    let error = null;
+    try {
+      await cmdUpgrade(manifestPath, legacyUpgradeOptions({
+        resolveAccount: async () => {
+          accountChecks++;
+          if (accountChecks === 1) observedMutation = tamper.mutate(manifestPath, originalBytes);
+          return { id: "fixture-account" };
+        },
+        d1Query: async () => { d1Reads++; return { results: [] }; },
+      }));
+    } catch (caught) { error = caught; }
+    check(`a ${tamper.name} is refused before D1 work`,
+      observedMutation && /update manifest changed during account preflight/.test(error?.message || "") &&
+        d1Reads === 0,
+      error?.message);
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- each individual pin remains strict during both open and read ---- */
+for (const boundary of ["open", "read"]) {
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-pin-time-")));
+  const method = boundary === "open" ? "openSync" : "readFileSync";
+  const originalMethod = fs[method];
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify(manifestFixture()));
+    let touch = null;
+    fs[method] = (...args) => {
+      if (!touch && (boundary === "open"
+        ? args[0] === manifestPath
+        : typeof args[0] === "number")) {
+        touch = touchOnlyManifestTime(manifestPath);
+      }
+      return originalMethod(...args);
+    };
+    syncBuiltinESMExports();
+    let error = null;
+    try { pinUpdateManifest(manifestPath); }
+    catch (caught) { error = caught; }
+    check(`one pin refuses a timestamp change between ${boundary === "open" ? "stat and open" : "open and read"}`,
+      touch?.changed && touch.sameIdentity &&
+        /update manifest changed while it was being (opened|read)/.test(error?.message || ""),
+      error?.message);
+  } finally {
+    fs[method] = originalMethod;
+    syncBuiltinESMExports();
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- the private execution copy still refuses a real mid-stage edit ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-execution-tamper-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    const originalBytes = JSON.stringify(manifestFixture());
+    writeFileSync(manifestPath, originalBytes);
+    let editedCopy = false;
+    let error = null;
+    try {
+      await cmdUpgrade(manifestPath, legacyUpgradeOptions({
+        cmdMigrate: async (executionPath) => {
+          editedCopy = executionPath !== manifestPath;
+          writeFileSync(executionPath, JSON.stringify(manifestFixture("0.1.8")));
+        },
+      }));
+    } catch (caught) { error = caught; }
+    check("a changed execution copy stops the upgrade without changing the original",
+      editedCopy && /update manifest changed during migration/.test(error?.message || "") &&
+        readFileSync(manifestPath, "utf8") === originalBytes,
+      error?.message);
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
 /* ---- the credential gate is proven by its exact structured contract ---- */
 {
   const refusal = {
@@ -1771,19 +1987,28 @@ const bootstrapCompletion = () => ({
     const manifestPath = join(sandbox, "brain.manifest.json");
     writeFileSync(manifestPath, JSON.stringify(manifestFixture()));
     const symlinkPath = join(sandbox, "linked.manifest.json");
-    symlinkSync(manifestPath, symlinkPath);
     let remoteReads = 0;
-    let symlinkError = null;
+    let symlinkAvailable = true;
     try {
-      await cmdUpgrade(symlinkPath, {
-        resolveAccount: async () => { remoteReads++; return { id: "fixture-account" }; },
-      });
-    } catch (caught) { symlinkError = caught; }
-    check(
-      "a symlink manifest is refused before any Cloudflare access",
-      /regular file, not a link/.test(symlinkError?.message || "") && remoteReads === 0,
-      symlinkError?.message,
-    );
+      symlinkSync(manifestPath, symlinkPath);
+    } catch (caught) {
+      if (process.platform !== "win32" || caught?.code !== "EPERM") throw caught;
+      symlinkAvailable = false;
+      console.log("SKIP  symlink manifest rejection (symlink creation denied on this host: EPERM)");
+    }
+    if (symlinkAvailable) {
+      let symlinkError = null;
+      try {
+        await cmdUpgrade(symlinkPath, {
+          resolveAccount: async () => { remoteReads++; return { id: "fixture-account" }; },
+        });
+      } catch (caught) { symlinkError = caught; }
+      check(
+        "a symlink manifest is refused before any Cloudflare access",
+        /regular file, not a link/.test(symlinkError?.message || "") && remoteReads === 0,
+        symlinkError?.message,
+      );
+    }
 
     const hardlinkPath = join(sandbox, "hardlinked.manifest.json");
     linkSync(manifestPath, hardlinkPath);
