@@ -723,6 +723,9 @@ const expected = [
   "operations/cloudflare-oauth-session.mjs",
   "operations/command-display.mjs",
   "operations/zone-assignment-retry.mjs",
+  // Response-shape classifier for a Cloudflare D1 reset. Takes only a
+  // response body, with no filesystem, credential, network, or instance inputs.
+  "operations/d1-transient-fault.mjs",
   "operations/off-provider-backup.mjs",
   "operations/plaid-sandbox-runner.mjs",
   "operations/provider-scheduler.mjs",

@@ -231,6 +231,7 @@ import {
   zoneAssignmentRecoveredNotice,
   zoneAssignmentRetryNotice,
 } from "./operations/zone-assignment-retry.mjs";
+import { isD1TransientFaultBody } from "./operations/d1-transient-fault.mjs";
 import {
   bootstrapManifestObservation,
   bootstrapStatusFilePath,
@@ -11874,7 +11875,13 @@ export async function reconcileDocumentFamilies({
         try {
           return parseForgetResponseBody(res, raw);
         } catch (error) {
-          if (isRetryableHttpStatus(res.status)) error.retryable = true;
+          // A D1 reset reaches here as a 400, because the forget route's families
+          // sub-branch maps every exception to that status
+          // (worker/src/index.js:3224-3228). The status cannot say the fault is
+          // transient and 400 must not become generally retryable, so the body is
+          // the only thing left that can tell them apart. `raw` is the complete
+          // untruncated response, so no plumbing is needed to reach it.
+          if (isRetryableHttpStatus(res.status) || isD1TransientFaultBody(raw)) error.retryable = true;
           throw error;
         }
       }, {
