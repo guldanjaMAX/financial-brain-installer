@@ -674,6 +674,62 @@ test("lineage is metadata-backed, title-blind and fail-closed", async () => {
   }), /required/);
 });
 
+test("Gmail authority follows the recorded artifact, lineage, and carried-tier ladder", () => {
+  const reliable = {
+    source: "gmail", text_source: "native", text_reliable: 1,
+    date_reliable: 1, document_date: "2026-03-04",
+  };
+  const lineage = (kind) => JSON.stringify({
+    evidence_lineage: { version: 1, kind, root_ids: ["gmail:msg-1"] },
+  });
+  const cases = [
+    {
+      id: "A", row: { title: "Master Services Agreement.pdf", authority_meta: lineage("source_record") },
+      tier: "T1", authoritative: true, reason: /direct source artifact \(Agreement\)/,
+    },
+    {
+      id: "B", row: { title: "Q3 Invoice.pdf", authority_meta: lineage("source_record") },
+      tier: "T2", authoritative: true, reason: /prepared from primary records \(Invoice\)/,
+    },
+    {
+      id: "C", row: { title: "Project update", authority_meta: lineage("derived_record") },
+      tier: "T2", authoritative: true, reason: /prepared from 1 recorded source family/,
+    },
+    {
+      id: "D", row: {
+        title: "Project update", top_folder: "Contracts", authority_meta: lineage("source_record"),
+      },
+      tier: "T1", authoritative: true, reason: /direct source artifact \(Contracts\)/,
+    },
+    {
+      id: "E", row: { title: "Project update" },
+      tier: "T3", authoritative: false, reason: /^gmail, written at the time$/,
+    },
+    {
+      id: "F", row: {
+        title: "Project update",
+        authority: {
+          tier: "T1", rank: 1, name: "primary", says: "the authority itself",
+          reason: "a caller asserted this",
+        },
+      },
+      tier: "T1", authoritative: true, reason: /^a caller asserted this$/,
+    },
+  ];
+
+  const observed = cases.map(({ id, row }) => ({
+    id, ...authorityFor({ ...reliable, ...row }, { current: true }),
+  }));
+  assert.deepEqual(
+    observed.map(({ id, tier, authoritative }) => ({ id, tier, authoritative })),
+    cases.map(({ id, tier, authoritative }) => ({ id, tier, authoritative })),
+    "every row of the ladder must retain its tier and claim authority",
+  );
+  for (const [index, { id, reason }] of cases.entries()) {
+    assert.match(observed[index].reason, reason, `${id}: reason distinguishes the ladder route`);
+  }
+});
+
 test("operative-value matching respects numeric and phone boundaries", () => {
   assert.equal(answerUsesOperativeValue("The amount is $100.", { value: "$100" }), true);
   assert.equal(answerUsesOperativeValue("The amount is $1000.", { value: "$100" }), false);
