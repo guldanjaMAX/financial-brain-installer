@@ -4382,7 +4382,7 @@ function revalidateUpdateManifest(pin, stage) {
   }
   if (
     current.fingerprint !== pin.fingerprint ||
-    !sameUpgradeManifestStat(pin.stat, current.stat)
+    !sameOpenedFile(pin.stat, current.stat)
   ) {
     throw new Error(`the update manifest changed during ${stage}; no later stage was run`);
   }
