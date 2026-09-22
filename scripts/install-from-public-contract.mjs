@@ -140,7 +140,7 @@ ok("the packaged archive is the version the contract declares");
 const human = tgz.length.toLocaleString("en-US");
 const fieldGuides = new Map();
 for (const doc of ["WINDOWS-FIELD-TEST.md", "MACOS-FIELD-TEST.md"]) {
-  const text = readFileSync(join(root, doc), "utf8");
+  const text = readKitFile(join(root, doc), "utf8", `kit ${doc} is missing or unreadable`);
   fieldGuides.set(doc, text);
   const stated = [...text.matchAll(/[0-9]{1,3}(?:,[0-9]{3})+/g)].map((m) => m[0]);
   const wrong = stated.filter((s) => s !== human);
@@ -149,7 +149,8 @@ for (const doc of ["WINDOWS-FIELD-TEST.md", "MACOS-FIELD-TEST.md"]) {
 }
 ok("both field guides state this package's byte count and no other");
 
-const receipt = readFileSync(join(root, "RELEASE-CANDIDATE-RECEIPT.md"), "utf8");
+const receipt = readKitFile(join(root, "RELEASE-CANDIDATE-RECEIPT.md"), "utf8",
+  "kit RELEASE-CANDIDATE-RECEIPT.md is missing or unreadable");
 if (!receipt.includes(commit.slice(0, 7))) {
   die(`the receipt does not name the contract's commit ${commit.slice(0, 7)}`);
 }
@@ -157,7 +158,8 @@ if (!receipt.includes(human)) die(`the receipt does not state this package's ${h
 if (!receipt.includes(declaredSha)) die("the receipt does not state this package's sha256");
 ok("the receipt names this package's commit, byte count and digest");
 
-const macGuide = readFileSync(join(root, "MACOS-FIELD-TEST.md"), "utf8");
+const macGuide = readKitFile(join(root, "MACOS-FIELD-TEST.md"), "utf8",
+  "kit MACOS-FIELD-TEST.md is missing or unreadable");
 if (!macGuide.includes(`CANDIDATE_COMMIT: ${commit}`)) {
   die("the macOS guide pins a different commit than the public contract");
 }
