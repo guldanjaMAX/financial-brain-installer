@@ -20,7 +20,12 @@ asset publication.
   folder, client, category, platform or date) is re-embedded exactly as
   before, and so is any file whose earlier vectors were not yet confirmed. To
   check: after re-sending an unchanged folder, `brain health <manifest>`
-  reports no vector operations waiting.
+  reports no vector operations waiting. One thing a re-send no longer does:
+  vectors written before one of the Brain's search filters existed stay
+  unfilterable on that filter, because an identical re-send leaves them in
+  place. The full re-embed used to repair that as a side effect. `brain
+  reindex <manifest>` is the repair; it only matters for a Brain set up
+  before that filter existed.
 
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
