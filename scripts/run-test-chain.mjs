@@ -120,6 +120,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/runtime-identity-receipt.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
   "node --no-warnings --test test/setup-secrets-write-timeout.test.mjs",
+  "node --no-warnings --test test/local-folder-removal-label.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -288,6 +289,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/drive-scheduler.test.mjs",
   "node test/imessage-scheduler.test.mjs",
   "node test/folder-scheduler.test.mjs",
+  "node --no-warnings --test test/local-folder-removal-label.test.mjs",
   "node test/whatsapp-daemon.test.mjs",
   "node test/zoom-connect.test.mjs",
   "node test/zoom-cli.test.mjs",

@@ -11388,7 +11388,10 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     ],
     intentionalCandidates: [...intentionalRemovalKeys].map((key) => `${sourceName}:${key}`),
   });
-  assertDriveRemovalPlanSafe(localRemovalPlan, localRemovalApproval);
+  // A local synced folder is not Google Drive. The review-required message
+  // this throws on an oversized plan used to say "Drive cleanup" regardless
+  // of source, which misnames the thing an owner is being asked to approve.
+  assertDriveRemovalPlanSafe(localRemovalPlan, localRemovalApproval, { sourceLabel: "Folder" });
   if (localRemovalPlan.total) {
     const percent = (localRemovalPlan.ratio * 100).toFixed(1);
     const disposition = localRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
