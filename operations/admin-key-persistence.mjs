@@ -11,7 +11,7 @@
 import { spawnSync } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import {
@@ -74,8 +74,11 @@ export function macKeychainUsable(options = {}) {
   if (!home) return false;
   const exists = options.exists ?? existsSync;
   const readdir = options.readdir ?? readdirSync;
-  const keychainsDir = join(home, "Library", "Keychains");
-  if (exists(join(keychainsDir, "login.keychain-db"))) return true;
+  // macOS paths on purpose: this check only means anything for darwin, and a
+  // darwin shape simulated on another host (tests, Windows CI) must still build
+  // "/Users/.../Library/Keychains", not a backslash path the host would produce.
+  const keychainsDir = posix.join(home, "Library", "Keychains");
+  if (exists(posix.join(keychainsDir, "login.keychain-db"))) return true;
   try {
     return readdir(keychainsDir).some((name) => name.endsWith(".keychain-db"));
   } catch {
