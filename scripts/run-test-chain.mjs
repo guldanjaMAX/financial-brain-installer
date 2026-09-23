@@ -121,6 +121,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/windows-onboarding-kit.test.mjs",
   "node --no-warnings --test test/setup-secrets-write-timeout.test.mjs",
   "node --no-warnings --test test/local-folder-removal-label.test.mjs",
+  "node --no-warnings --test test/ocr-skip-reason-values.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -279,6 +280,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/source-ingest-lock.test.mjs",
   "node test/formats-extra.test.mjs",
   "node --no-warnings test/ocr.test.mjs",
+  "node --no-warnings --test test/ocr-skip-reason-values.test.mjs",
   "node test/bank-export.test.mjs",
   "node --no-warnings test/bank-import-path.test.mjs",
   "node test/load-all.test.mjs",
