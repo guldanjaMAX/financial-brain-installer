@@ -1303,9 +1303,10 @@ const call = (env, path) => {
     JSON.stringify({ sqlCalls: seen.sql.length, vectorCalls: seen.vectorQueries.length, aiCalls }));
 }
 
-/* Even correctly scoped OCR is not a trustworthy tax-number source. This
-   isolates that branch from the cross-entity guard above, with both model
-   passes again made deliberately overconfident. */
+/* Even correctly scoped, a PARTIAL OCR read is not a trustworthy tax-number
+   source. (A complete read is, labelled as a scan; see
+   scanned-evidence.test.mjs.) This isolates that branch from the cross-entity
+   guard above, with both model passes again made deliberately overconfident. */
 {
   const unreadableExactReturn = {
     ...ROW,

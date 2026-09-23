@@ -146,6 +146,7 @@ export type EvidenceAuthority = {
   current?: boolean;
   owner_confirmed?: boolean;
   operative?: boolean;
+  scanned?: boolean;
 };
 export type Citation = {
   n: number;
@@ -158,8 +159,11 @@ export type Citation = {
   date_reliable?: boolean;
   text_source?: string;
   text_reliable?: boolean;
+  // A complete OCR read of a scanned copy. Present only when true.
+  scanned?: boolean;
   authority?: EvidenceAuthority | null;
 };
+export type AnswerGap = { type?: string; detail?: string; count?: number; total?: number };
 export type Confidence = { percent: number; band: string; basis: string[] };
 export type EntityScopeEcho = { entity_slug: string | null; applied: boolean };
 export type EvidenceGate = {
@@ -168,6 +172,8 @@ export type EvidenceGate = {
   partial?: boolean;
   reason?: string;
   error?: string;
+  // Approved citation numbers whose text is a complete OCR read of a scan.
+  scanned_evidence?: number[];
 };
 export type Answer = {
   answer: string | null;
@@ -178,8 +184,9 @@ export type Answer = {
   degraded?: string;
   notice?: string;
   results?: unknown[];
+  gaps?: AnswerGap[];
   confidence?: Confidence;
-  evidence_authority?: Pick<EvidenceAuthority, "tier" | "name" | "reason" | "claim">;
+  evidence_authority?: Pick<EvidenceAuthority, "tier" | "name" | "reason" | "claim" | "scanned">;
   citations?: Citation[];
   evidence_gate?: EvidenceGate;
   entity_scope?: EntityScopeEcho;

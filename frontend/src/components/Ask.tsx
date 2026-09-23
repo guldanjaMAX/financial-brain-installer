@@ -3,7 +3,10 @@ import { ApiError, api, type Answer, type Citation, type GrantPrincipal } from "
 // Shared with the Worker: the rule that an incomplete search must never render
 // as an absence is a product rule, not a rendering detail, so both surfaces
 // derive it from one module instead of each writing their own.
-import { answerText, confidenceText, unavailableSearch } from "../lib/answer-render.js";
+import {
+  SCANNED_CITATION_MARK, answerText, citationIsScanned, confidenceText, scannedEvidenceNotice,
+  unavailableSearch,
+} from "../lib/answer-render.js";
 import { Attention, TruthNote } from "./ui";
 import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
 import { scopedAnswerLabel } from "../lib/owner";
@@ -62,6 +65,11 @@ export function citationMeta(citation: Citation): string {
   return parts.join(" · ");
 }
 
+/** The citation title, marked when its text is a complete OCR read of a scan. */
+export function citationTitle(citation: Citation): string {
+  return citationIsScanned(citation) ? `${citation.title} ${SCANNED_CITATION_MARK}` : citation.title;
+}
+
 export function CitationSources({ citations }: { citations: Citation[] }) {
   return (
     <div className="mt-4 pt-4 border-t border-line">
@@ -73,7 +81,7 @@ export function CitationSources({ citations }: { citations: Citation[] }) {
           const meta = citationMeta(citation);
           return (
             <li key={citation.n} className="text-[13.5px] text-ink-soft leading-snug">
-              <span className="text-accent font-medium">[{citation.n}]</span> {citation.title}
+              <span className="text-accent font-medium">[{citation.n}]</span> {citationTitle(citation)}
               {meta && <span className="block pl-7 text-[12.5px] opacity-75">{meta}</span>}
             </li>
           );
@@ -93,6 +101,13 @@ export function evidenceGateNote(answer: Answer): string | null {
   if (answer.evidence_gate?.partial) return `What the records did not cover: ${punctuated}`;
   if (answer.evidence_gate?.supported === false) return `Why no answer was shown: ${punctuated}`;
   return `Why this answer was shown: ${punctuated}`;
+}
+
+/** An answer that rests on a scanned copy says so beside it, in fixed words. */
+export function ScannedEvidenceNote({ answer }: { answer: Answer }) {
+  const note = scannedEvidenceNotice(answer);
+  if (!note) return null;
+  return <div className="mt-4"><TruthNote>{note}</TruthNote></div>;
 }
 
 export function EvidenceGateReason({ answer }: { answer: Answer }) {
@@ -222,6 +237,7 @@ export function Ask() {
             </div>
           )}
           <p className="whitespace-pre-wrap leading-relaxed">{answerText(answer)}</p>
+          <ScannedEvidenceNote answer={answer} />
           <EvidenceGateReason answer={answer} />
           <Trust answer={answer} />
           {!!answer.citations?.length && <CitationSources citations={answer.citations} />}
@@ -328,6 +344,7 @@ export function ScopedAsk({ principal, onAccessEnded }: {
               Exact shared documents only
             </p>
             <p className="whitespace-pre-wrap leading-relaxed">{answerText(answer)}</p>
+            <ScannedEvidenceNote answer={answer} />
             <EvidenceGateReason answer={answer} />
             <Trust answer={answer} />
             {!!answer.citations?.length && <CitationSources citations={answer.citations} />}

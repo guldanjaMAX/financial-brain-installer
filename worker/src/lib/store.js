@@ -32,6 +32,7 @@ import { embedText, supabaseRpc } from "./supabase.js";
 import { sanitizeEnvelope, sanitizeSensitiveLinks } from "./secret-scan.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { parseCanonicalEvidenceDate } from "./query-intent.js";
+import { evidenceTextBasis } from "./evidence-authority.js";
 import {
   attachEvidenceLineage, evidenceLineageFor, evidenceLineageRootIds,
 } from "./evidence-lineage.js";
@@ -791,6 +792,10 @@ const d1Backend = {
           text_reliable: x.text_reliable === undefined || x.text_reliable === null
             ? false
             : x.text_reliable === true || x.text_reliable === 1 || x.text_reliable === "1",
+          // A complete OCR read counts as evidence at query time and carries
+          // this flag into every response. The stored text trust above is
+          // what ingest recorded and is not rewritten.
+          ...(evidenceTextBasis(x) === "ocr" ? { scanned: true } : {}),
           // Query-time, claim-specific authority is derived from the durable D1
           // row. It is additive public metadata, kept beside date and text
           // provenance so a citation never presents a tier without its reason.

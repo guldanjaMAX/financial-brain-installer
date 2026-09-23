@@ -81,6 +81,55 @@ export function answerText(r) {
   return r.answer || (r.answer_error ? safeAnswerErrorText(r.answer_error) : "The documents do not answer the question.");
 }
 
+/**
+ * Evidence read by OCR from a scanned copy.
+ *
+ * A complete OCR read can be the proof behind an answer. When it is, the
+ * Worker adds one `scanned_evidence` gap and flags each such citation
+ * `scanned: true`. Every surface then states this sentence and marks the
+ * citation from these constants, never from a model's prose.
+ */
+export const SCANNED_EVIDENCE_GAP_TYPE = "scanned_evidence";
+export const SCANNED_ANSWER_NOTICE =
+  "Part of this answer comes from a scanned document read by OCR. Check the original for exact figures.";
+export const SCANNED_RESULTS_NOTICE =
+  "Some of these results come from a scanned document read by OCR. Check the original for exact figures.";
+export const SCANNED_CITATION_MARK = "(scanned)";
+
+/** The gap an answer, or a ranked result list, carries when a scan is part of its evidence. */
+export function scannedEvidenceGap(rows, { results = false } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const count = list.filter((row) => row?.scanned === true).length;
+  if (!count) return null;
+  return {
+    type: SCANNED_EVIDENCE_GAP_TYPE,
+    count,
+    total: list.length,
+    detail: results ? SCANNED_RESULTS_NOTICE : SCANNED_ANSWER_NOTICE,
+  };
+}
+
+/**
+ * Is this citation a complete OCR read? The flag is the contract. The
+ * `text_source` fallback keeps a newer surface honest against an older Worker
+ * that sends no flag. A partial read is never marked; it keeps its own
+ * "may be incomplete" label, exactly as before.
+ */
+export function citationIsScanned(citation) {
+  return citation?.scanned === true || citation?.text_source === "ocr";
+}
+
+/** The sentence to show beside a displayed answer that rests on a scan, or null. */
+export function scannedEvidenceNotice(r) {
+  if (!r || typeof r !== "object" || unavailableSearch(r)) return null;
+  const answer = typeof r.answer === "string" ? r.answer.trim() : "";
+  if (!answer || /^The documents do not answer/i.test(answer)) return null;
+  const gapped = (Array.isArray(r.gaps) ? r.gaps : [])
+    .some((gap) => gap?.type === SCANNED_EVIDENCE_GAP_TYPE);
+  const cited = (Array.isArray(r.citations) ? r.citations : []).some(citationIsScanned);
+  return gapped || cited ? SCANNED_ANSWER_NOTICE : null;
+}
+
 export function confidenceText(r) {
   if (r.status === COVERAGE_INCOMPLETE) {
     return "Source coverage is incomplete. This result is provisional.";

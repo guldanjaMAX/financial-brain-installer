@@ -120,6 +120,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/runtime-identity-receipt.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
+  // A complete OCR read can support an answer and is always labelled scanned.
+  "node --no-warnings --test worker/test/scanned-evidence.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -294,6 +296,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node worker/test/worker.test.mjs",
   "node worker/test/confidence.test.mjs",
   "node --test worker/test/evidence-authority.test.mjs",
+  "node --no-warnings --test worker/test/scanned-evidence.test.mjs",
   "node --test worker/test/webauthn.test.mjs worker/test/sessions.test.mjs worker/test/owner-auth.test.mjs worker/test/grants.test.mjs worker/test/document-access.test.mjs worker/test/owner-actions.test.mjs worker/test/connector.test.mjs worker/test/app-page.test.mjs worker/test/zones.test.mjs",
   "node worker/test/store.test.mjs",
   "node worker/test/store-d1.test.mjs",
