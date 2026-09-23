@@ -2692,8 +2692,37 @@ export async function cmdSecrets(manifestPath, options = {}) {
   // a short timeout around the read or write that follow: only a person can
   // answer that one.
   if (adminKeyPlan.backend === "keychain") {
-    const keychainUsable = options.macKeychainUsable ?? macKeychainUsable;
-    if (!keychainUsable({ platform: persistenceOptions.platform })) {
+    // This probe exists only to catch a throwaway HOME with no login
+    // keychain before the real `security` child process the read or write
+    // below launches (through processRunner() in admin-key-persistence.mjs)
+    // hangs against it -- see setup-secrets-write-timeout.test.mjs for the
+    // rehearsal that found it. Exactly one of those two operations runs
+    // below: persistAdminKeyDurably when explicitAdminKey is set (a rotation
+    // or `brain setup` handing over a freshly generated key), otherwise
+    // readAdminKeyDurably (a standalone `brain secrets` reusing the existing
+    // durable value). When a caller has substituted THAT operation --
+    // directly via options.persistAdminKeyDurably / options.readAdminKeyDurably,
+    // or one level down via persistenceOptions.runChild, which both real
+    // implementations use in place of spawnSync -- no real child process is
+    // ever going to run, so the real ~/Library/Keychains this default probe
+    // would inspect is not what actually gets touched. Probing it anyway
+    // dies for a keychain access that was never going to happen -- exactly
+    // what broke Linux CI, where a simulated-darwin test injects its own
+    // keychain operations and there is no real ~/Library/Keychains at all.
+    // An explicit options.macKeychainUsable override is the caller's
+    // deliberate, literal answer instead, and always runs regardless.
+    const realChildWillRun = !persistenceOptions.runChild && (
+      explicitAdminKey ? !options.persistAdminKeyDurably : !options.readAdminKeyDurably
+    );
+    let keychainUsable;
+    if (options.macKeychainUsable) {
+      keychainUsable = options.macKeychainUsable({ platform: persistenceOptions.platform });
+    } else if (!realChildWillRun) {
+      keychainUsable = true;
+    } else {
+      keychainUsable = macKeychainUsable({ platform: persistenceOptions.platform });
+    }
+    if (!keychainUsable) {
       die(
         "no usable macOS Keychain was found for this account (no login keychain under\n" +
           "  ~/Library/Keychains). Reading or writing the declared keychain:// admin key would wait\n" +
