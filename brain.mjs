@@ -296,6 +296,7 @@ import {
 import { readWranglerOAuthToken, refreshWranglerSession, WRANGLER_SPEC } from "./operations/wrangler-oauth.mjs";
 import {
   adminKeyPersistencePlan,
+  macKeychainUsable,
   parseAdminKeySecretReference,
   persistAdminKeyDurably,
   readAdminKeyDurably,
@@ -2464,17 +2465,94 @@ export function optionalWorkerSecretNames(m) {
   ]);
 }
 
+// A stalled Worker-secret write has no natural end the way the metadata-index
+// wait above does: that loop polls a value that eventually appears, but a
+// blocked Cloudflare API call never retries and never gives up on its own. On
+// CLI 0.4.1, `brain setup` sat at 0% CPU for over nine minutes with no output
+// right after "generated an admin key for this brain" -- the very next thing
+// it does is write that key to the Worker over the network
+// (FINDING-SETUP-HANG-2026-09-23.md). Every other long step in this CLI
+// narrates the wait and gives up eventually; this bounds cmdSecrets' writes
+// the same way.
+const SECRETS_WRITE_TIMEOUT_MS = 90_000;
+const SECRETS_WRITE_WAIT_INTERVAL_MS = 15_000;
+
+/** Thrown by withSecretsWriteTimeout when a bounded call never settles. */
+class SecretsWriteTimeoutError extends Error {
+  constructor(label, timeoutMs) {
+    super(`${label} did not respond within ${Math.round(timeoutMs / 1000)}s`);
+    this.name = "SecretsWriteTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Bound one network call cmdSecrets makes while writing or reconciling
+ * Worker secrets, printing the same "still waiting for ... This is normal."
+ * line the metadata-index wait above uses. This cannot cancel an already
+ * -blocked socket -- Node gives no portable way to do that through an
+ * injected transport -- it only stops cmdSecrets from waiting on it forever
+ * and reports honestly that nothing is known to have changed.
+ */
+async function withSecretsWriteTimeout(operation, label, {
+  timeoutMs = SECRETS_WRITE_TIMEOUT_MS,
+  waitEveryMs = SECRETS_WRITE_WAIT_INTERVAL_MS,
+  log = ok,
+} = {}) {
+  return new Promise((resolveCall, rejectCall) => {
+    let settled = false;
+    let waited = 0;
+    const ticker = waitEveryMs > 0 && waitEveryMs < timeoutMs
+      ? setInterval(() => {
+          if (settled) return;
+          waited += waitEveryMs;
+          if (waited < timeoutMs) {
+            log(`still waiting for ${label} (${Math.round(waited / 1000)}s). This is normal.`);
+          }
+        }, waitEveryMs)
+      : null;
+    const giveUp = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (ticker) clearInterval(ticker);
+      rejectCall(new SecretsWriteTimeoutError(label, timeoutMs));
+    }, timeoutMs);
+    Promise.resolve().then(operation).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        if (ticker) clearInterval(ticker);
+        clearTimeout(giveUp);
+        resolveCall(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        if (ticker) clearInterval(ticker);
+        clearTimeout(giveUp);
+        rejectCall(error);
+      },
+    );
+  });
+}
+
 async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
   required = [],
+  timeoutMs = SECRETS_WRITE_TIMEOUT_MS,
+  waitEveryMs = SECRETS_WRITE_WAIT_INTERVAL_MS,
 } = {}) {
   const path = `/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`;
+  const bound = { timeoutMs, waitEveryMs };
   let current;
   try {
-    current = await cf(path);
-  } catch {
+    current = await withSecretsWriteTimeout(() => cf(path), "the Worker's secret list", bound);
+  } catch (error) {
+    const timedOut = error instanceof SecretsWriteTimeoutError;
     die(
-      "the Worker's existing secret names could not be inspected, so provider-secret reconciliation stopped.\n" +
-        "  Nothing was removed. Fix Workers Scripts access and rerun `brain secrets`."
+      (timedOut
+        ? `${error.message}, so provider-secret reconciliation stopped.`
+        : "the Worker's existing secret names could not be inspected, so provider-secret reconciliation stopped.") +
+        "\n  Nothing was removed. Fix Workers Scripts access and rerun `brain secrets`."
     );
   }
   if (!Array.isArray(current) || current.some((binding) =>
@@ -2499,10 +2577,15 @@ async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
 
   for (const name of unwanted) {
     try {
-      await cf(`${path}/${encodeURIComponent(name)}`, { method: "DELETE" });
-    } catch {
+      await withSecretsWriteTimeout(
+        () => cf(`${path}/${encodeURIComponent(name)}`, { method: "DELETE" }),
+        `the ${name} secret removal`,
+        bound,
+      );
+    } catch (error) {
+      const timedOut = error instanceof SecretsWriteTimeoutError;
       die(
-        `the unexpected Worker secret ${name} could not be removed. ` +
+        (timedOut ? `${error.message}. ` : `the unexpected Worker secret ${name} could not be removed. `) +
           "Rerun `brain secrets`; no unrecognized secret names were touched."
       );
     }
@@ -2510,10 +2593,11 @@ async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
 
   let verified;
   try {
-    verified = await cf(path);
-  } catch {
+    verified = await withSecretsWriteTimeout(() => cf(path), "the Worker's secret list after cleanup", bound);
+  } catch (error) {
+    const timedOut = error instanceof SecretsWriteTimeoutError;
     die(
-      "the provider-secret cleanup could not be read back from Cloudflare. " +
+      (timedOut ? `${error.message}. ` : "the provider-secret cleanup could not be read back from Cloudflare. ") +
         "Rerun `brain secrets` before treating this install as reconciled."
     );
   }
@@ -2558,6 +2642,12 @@ export async function cmdSecrets(manifestPath, options = {}) {
   // it is set, any UI proxy has to carry the admin key, which can drain.
   const needed = ["ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY"];
   const optional = optionalWorkerSecretNames(m);
+  // Injectable so a test can prove the timeout path in milliseconds rather
+  // than actually waiting 90 seconds for a stubbed transport to give up.
+  const secretsWriteTimeout = {
+    timeoutMs: options.secretsWriteTimeoutMs ?? SECRETS_WRITE_TIMEOUT_MS,
+    waitEveryMs: options.secretsWriteWaitIntervalMs ?? SECRETS_WRITE_WAIT_INTERVAL_MS,
+  };
   const explicitAdminKey = Object.hasOwn(options, "explicitAdminKey")
     ? options.explicitAdminKey
     : (process.env.ADMIN_KEY || null);
@@ -2582,6 +2672,34 @@ export async function cmdSecrets(manifestPath, options = {}) {
     }
   } catch (error) {
     die(`ADMIN_KEY durable-storage preflight failed: ${String(error?.message || error)}`);
+  }
+
+  // A throwaway or freshly created account can have no login keychain at
+  // all. Under that account `security add-generic-password` has nothing to
+  // add the item to and can wait indefinitely instead of failing, with no
+  // prompt for the write helper's pseudo-tty to answer -- a silent hang at
+  // 0% CPU, not a slow success. Check for a usable keychain BEFORE either
+  // read or write touches it, and fail fast and actionably instead of
+  // finding out nine minutes later. A keychain that does exist may still
+  // show a real, human "Allow this?" prompt, which is why nothing here adds
+  // a short timeout around the read or write that follow: only a person can
+  // answer that one.
+  if (adminKeyPlan.backend === "keychain") {
+    const keychainUsable = options.macKeychainUsable ?? macKeychainUsable;
+    if (!keychainUsable({ platform: persistenceOptions.platform })) {
+      die(
+        "no usable macOS Keychain was found for this account (no login keychain under\n" +
+          "  ~/Library/Keychains). Reading or writing the declared keychain:// admin key would wait\n" +
+          "  on a keychain that cannot answer rather than fail cleanly, so nothing was attempted.\n" +
+          "  Sign in to a real macOS user session that has a login keychain, or remove\n" +
+          "  operations.admin_key_secret from the manifest to use the file-backed default instead,\n" +
+          "  which stores the admin key adjacent to the manifest."
+      );
+    }
+    info(
+      "reading and writing this Brain's admin key through the macOS Keychain. " +
+        "If macOS shows a permission prompt, click Allow."
+    );
   }
 
   if (explicitAdminKey) {
@@ -2626,6 +2744,8 @@ export async function cmdSecrets(manifestPath, options = {}) {
     required: m.corpora?.bank_feed?.enabled === true
       ? HELD_BANK_FEED_SECRET_NAMES
       : [],
+    timeoutMs: secretsWriteTimeout.timeoutMs,
+    waitEveryMs: secretsWriteTimeout.waitEveryMs,
   });
 
   // A crash between staging and replacement can leave the key module's exact
@@ -2673,11 +2793,28 @@ export async function cmdSecrets(manifestPath, options = {}) {
           ? deriveSessionSigningKey(adminKey)
           : process.env[name];
     try {
-      await cf(`/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`, {
-        method: "PUT",
-        body: { name, text: value, type: "secret_text" },
-      });
+      await withSecretsWriteTimeout(
+        () => cf(`/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`, {
+          method: "PUT",
+          body: { name, text: value, type: "secret_text" },
+        }),
+        `the ${name} secret write`,
+        secretsWriteTimeout,
+      );
     } catch (e) {
+      // A definitive Cloudflare error (handled below) at least tells us the
+      // write did not happen. A timeout tells us nothing either way, so it
+      // always stops the command rather than falling into the name-specific
+      // warn-and-continue branches below, which exist for errors Cloudflare
+      // actually returned.
+      if (e instanceof SecretsWriteTimeoutError) {
+        die(
+          `${e.message}.\n` +
+            "  Nothing was half-written: a Cloudflare secret write either lands or it does not, and the\n" +
+            "  durable ADMIN_KEY on disk is unchanged either way. Re-running `brain setup <manifest>`\n" +
+            "  (or `brain secrets <manifest>` directly) resumes safely from here."
+        );
+      }
       // A secret is set ON a script, so the script has to exist. The raw 404
       // says "This Worker does not exist on your account", which sends people
       // looking at their account rather than at the order they ran things in.
