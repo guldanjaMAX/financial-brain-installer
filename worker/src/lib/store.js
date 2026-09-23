@@ -950,6 +950,25 @@ const d1Backend = {
     const effectiveTitle = persisted.title;
     const header = effectiveTitle ? `[${effectiveTitle}]` : "";
     const pieces = chunkText(content, { header, ...geometry });
+
+    // Only an identical-content revision can find its chunks already stored:
+    // the hash covers the text and the chunk geometry. Measured 2026-09-23,
+    // this is the provenance backfill that re-sent every older-CLI document and
+    // re-embedded identical text for days. The rewrite below still runs in
+    // full: new revision id, binding, receipt columns and chunk receipt hashes.
+    // This flag only lets store-d1 keep a chunk that is already projected with
+    // byte-identical text, vector id and metadata, and skip queuing its upsert.
+    //
+    // A pending marker for the SAME hash also qualifies. It means a revision of
+    // this exact content was interrupted, for example by a D1 reset before its
+    // batch finalized. Without it, retrying that batch re-embeds every document
+    // in it. It is safe for the same reason a stale `prior` is: this is only a
+    // shape choice. store-d1 decides per chunk against the live rows inside the
+    // write transaction, and whatever the interrupted revision rewrote carries
+    // its own queued upsert, which disqualifies that chunk from being skipped.
+    const priorContentHash = typeof prior?.content_hash === "string" ? prior.content_hash : "";
+    const reuseProjectedVectors = priorContentHash === hash ||
+      priorContentHash.startsWith(`pending:${hash}:`);
     const baseChunks = pieces.map((text, i) => ({
       chunk_uid: `${docUid}#${i}`,
       doc_uid: docUid,
@@ -976,6 +995,7 @@ const d1Backend = {
         docUid,
         chunks: baseChunks,
         expectedContentHash: pendingHash,
+        reuseProjectedVectors,
       });
     } else {
       // Larger documents cannot fit their chunk and outbox statements under
@@ -985,7 +1005,10 @@ const d1Backend = {
 
       // Replace rather than merge. A shorter revision must not leave the tail
       // of the previous version behind, answering from text that is gone.
-      await d1.replaceDocumentChunks(env, docUid, { expectedContentHash: pendingHash });
+      await d1.replaceDocumentChunks(env, docUid, {
+        expectedContentHash: pendingHash,
+        retainProjectedChunks: reuseProjectedVectors ? baseChunks : null,
+      });
 
       // Use the merged document row for chunks too. Otherwise the document
       // could preserve a migrated `medical` category while its replacement
@@ -1004,7 +1027,10 @@ const d1Backend = {
         top_folder: merged.top_folder || null,
         platform: merged.platform || null,
       }));
-      w = await d1.upsertChunks(env, chunks, { expectedContentHash: pendingHash });
+      w = await d1.upsertChunks(env, chunks, {
+        expectedContentHash: pendingHash,
+        reuseProjectedVectors,
+      });
     }
 
     const out = {

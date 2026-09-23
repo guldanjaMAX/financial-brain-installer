@@ -1004,18 +1004,183 @@ export async function search(env, {
 }
 
 /**
+ * Identical-content revisions reuse vectors that are already projected.
+ *
+ * WHY THIS EXISTS. Measured live on 2026-09-23: documents loaded by an older
+ * CLI carry no source-original binding, so the first 0.4.8 re-send rewrites
+ * every one of them even though its content_hash is identical (store.js,
+ * d1RevisionUnchanged). That rewrite deleted and re-inserted every chunk and
+ * queued one outbox upsert per chunk, so the drain re-embedded byte-identical
+ * text at 50 to 100 chunks a minute: about 350,000 chunks and 3.5 to 5 days for
+ * one owner, 1.15 million chunks and about 11 days for another, with every
+ * answer flagged degraded for the whole window. The D1 rewrite is still wanted,
+ * because it is the provenance backfill. The re-embedding is not.
+ *
+ * WHY SKIPPING IS SAFE. The drain sends Vectorize three things per chunk: the
+ * embedding of chunks.text, which already carries the "[title]" header; the id
+ * vectorIdFor(chunk_uid); and vectorMetadataFor(), which is source, client,
+ * category, top_folder, platform and document_date plus outbox_generation. None
+ * of those depends on the document revision, the source-original binding,
+ * text_source or the provenance receipt. outbox_generation is read back only to
+ * confirm a live outbox row, and search hydrates every hit from D1 with
+ * returnMetadata "none". So a chunk whose text, vector id and filter columns are
+ * byte-identical, and which has no outbox row, is already exactly what a
+ * re-embed would produce. "No outbox row means projected" is the same fact
+ * markProjectionVerifiedIfExact relies on to mark the whole projection
+ * verified, so this adds no new trust assumption. There is also no per-revision
+ * projection record to update: the result-family seal asks only for a verified
+ * projection, an empty queue and count parity, all of which an unqueued
+ * identical rewrite leaves exactly as they were.
+ *
+ * WHY THE ROW IS KEPT RATHER THAN RE-INSERTED. The skip decision needs the old
+ * row to compare against. And on the resumable large-document path, deleting
+ * an identical row without queuing its delete would leave an orphan vector if
+ * the request died before re-inserting it. So an identical, projected row is
+ * retained and updated in place with its new revision receipt. Every other row
+ * keeps today's path exactly: queue a delete, delete, re-insert, queue upsert.
+ */
+
+// The retention predicate compares each stored row with ONE title, source and
+// document date, and derives chunk identity from chunk_ix. That is exact only
+// for the shape store.js builds: one document, chunk_uid "<doc_uid>#<ix>",
+// indexes 0..n-1 in order, and a shared title, source and date. Any other
+// caller shape keeps today's full rewrite rather than guessing.
+function projectedChunkShape(docUid, chunks) {
+  if (typeof docUid !== "string" || !docUid || !Array.isArray(chunks) || !chunks.length) return null;
+  const [head] = chunks;
+  if (typeof head?.source !== "string" || !head.source) return null;
+  const sameShape = chunks.every((chunk, index) =>
+    chunk?.doc_uid === docUid && chunk.chunk_ix === index &&
+    chunk.chunk_uid === `${docUid}#${index}` &&
+    (chunk.title ?? null) === (head.title ?? null) &&
+    chunk.source === head.source &&
+    (chunk.document_date ?? null) === (head.document_date ?? null));
+  if (!sameShape) return null;
+  return {
+    chunkCount: chunks.length,
+    title: head.title ?? null,
+    source: head.source,
+    documentDate: head.document_date ?? null,
+  };
+}
+
+// True for a stored `chunks` row that an identical-content revision may keep in
+// place: it is one of the incoming chunk ids, every stored field the rewrite
+// would otherwise change except the text and the receipt already matches, its
+// vector id already has the shape vectorIdFor produces, and nothing is queued
+// for it. The text is compared per chunk by the write-phase statement below,
+// which is the only authority that may skip an upsert. This predicate only
+// decides which rows survive to be compared, so a row it keeps wrongly is
+// re-queued, never stranded. `filterSource` mirrors how each path writes the
+// four filter columns: the atomic stage copies documents.* verbatim, while the
+// resumable path binds `merged.x || null`, which NULLIF reproduces for TEXT.
+function retainedProjectedChunkSql({ marker, count, title, source, documentDate, filterSource }) {
+  const filter = (column) => filterSource === "verbatim" ? `owner.${column}` : `NULLIF(owner.${column}, '')`;
+  return `(EXISTS (
+       SELECT 1 FROM documents AS owner
+        WHERE owner.doc_uid = chunks.doc_uid
+          AND owner.content_hash = ${marker}
+          AND owner.deleted_at IS NULL
+          AND chunks.chunk_ix < ${count}
+          AND chunks.chunk_uid = chunks.doc_uid || '#' || chunks.chunk_ix
+          AND chunks.title IS ${title}
+          AND chunks.source IS ${source}
+          AND chunks.document_date IS ${documentDate}
+          AND chunks.client IS ${filter("client")}
+          AND chunks.category IS ${filter("category")}
+          AND chunks.top_folder IS ${filter("top_folder")}
+          AND chunks.platform IS ${filter("platform")}
+          AND ((length(CAST(chunks.chunk_uid AS BLOB)) <= ${VECTOR_ID_MAX_BYTES}
+                AND chunks.vector_id = chunks.chunk_uid)
+            OR (length(CAST(chunks.chunk_uid AS BLOB)) > ${VECTOR_ID_MAX_BYTES}
+                AND substr(chunks.vector_id, 1, 2) = 'h:' AND length(chunks.vector_id) = 62)))
+     AND NOT EXISTS (
+       SELECT 1 FROM vector_outbox AS queued WHERE queued.chunk_uid = chunks.chunk_uid))`;
+}
+
+// The one decision that may skip an upsert. It runs immediately BEFORE the
+// chunk write, inside the same transaction, and compares the stored row with
+// exactly the values that write is about to store: the embedded text, the
+// vector id, and every field vectorMetadataFor projects. It also requires that
+// nothing is queued for the chunk, because a queued row means Vectorize may not
+// hold the stored bytes yet. Any difference, a missing row, or a stale marker
+// makes it false, and the statement queues the upsert exactly as before.
+function unchangedProjectionSql({ chunkUid, vectorId, docUid, marker, chunkIx, text, source, documentDate, filters }) {
+  return `(EXISTS (
+       SELECT 1 FROM chunks AS stored
+         JOIN documents AS owner ON owner.doc_uid = stored.doc_uid
+        WHERE stored.chunk_uid = ${chunkUid}
+          AND stored.doc_uid = ${docUid}
+          AND stored.chunk_ix = ${chunkIx}
+          AND owner.content_hash = ${marker}
+          AND owner.deleted_at IS NULL
+          AND stored.text = ${text}
+          AND stored.source IS ${source}
+          AND stored.document_date IS ${documentDate}
+          AND stored.vector_id IS ${vectorId}
+          AND stored.client IS ${filters.client}
+          AND stored.category IS ${filters.category}
+          AND stored.top_folder IS ${filters.top_folder}
+          AND stored.platform IS ${filters.platform})
+     AND NOT EXISTS (
+       SELECT 1 FROM vector_outbox AS queued WHERE queued.chunk_uid = ${chunkUid}))`;
+}
+
+// Parameters: ?1 chunk_uid, ?2 vector_id, ?3 queued_at, ?4 doc_uid, ?5 marker.
+// The remaining parameters belong to the caller's unchanged-projection clause.
+// RETURNING is the receipt: see provedNoOutboxWrite.
+const reusableProjectionOutboxSql = (unchangedClause) =>
+  `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+   SELECT ?1,?2,'upsert',?3
+   WHERE EXISTS (
+     SELECT 1 FROM documents WHERE doc_uid = ?4 AND content_hash = ?5
+   )
+     AND NOT ${unchangedClause}
+   ON CONFLICT(chunk_uid) DO UPDATE SET
+     vector_id=excluded.vector_id, op='upsert', queued_at=?3,
+     attempts=0, last_error=NULL
+   RETURNING chunk_uid`;
+
+// A retained row is UPDATEd by the chunk upsert instead of being re-inserted,
+// so chunks_ai never runs for it. Naming `source` in the conflict update fires
+// chunks_zone_source_au, which re-derives the row's zone from sources exactly
+// as chunks_ai does for an inserted row. The value itself is unchanged.
+const REUSED_CHUNK_ZONE_REFRESH = ",\n             source = excluded.source";
+
+// An empty RETURNING set is the only receipt that proves a conditional upsert
+// was skipped. Anything else, including a malformed result, is reported as
+// queued, so the ingest receipt can overstate pending vector work but never
+// hide it. RETURNING, not meta.changes: D1 derives meta.changes from a
+// total_changes() delta, and when this statement opens its savepoint FTS5
+// flushes the index terms the previous chunk write left pending, so a skipped
+// upsert reported a positive count under D1's semantics on this branch (4, for
+// a statement that queued nothing). The revision CAS is proved the same way.
+const provedNoOutboxWrite = (result) =>
+  Array.isArray(result?.results) && result.results.length === 0;
+
+/**
  * Write a chunk to both systems, D1 first, via the outbox.
  *
  * Order matters and is not arbitrary. D1 is the system of record: a chunk that
  * exists in D1 without a vector is findable by keyword and repairable. A vector
  * with no D1 row is an orphan that returns an id pointing at nothing.
+ *
+ * `reuseProjectedVectors` is set only by an identical-content revision (see
+ * the block above). It needs the pending-marker guard and the exact chunk shape
+ * store.js builds; without either it is ignored and every chunk is queued.
  */
-export async function upsertChunks(env, chunks, { expectedContentHash = null } = {}) {
+export async function upsertChunks(env, chunks, {
+  expectedContentHash = null,
+  reuseProjectedVectors = false,
+} = {}) {
   if (!chunks.length) return { written: 0, queued: 0 };
   const now = Date.now();
   const guarded = typeof expectedContentHash === "string" && expectedContentHash.length > 0;
+  const reuse = reuseProjectedVectors === true && guarded &&
+    projectedChunkShape(chunks[0]?.doc_uid, chunks) !== null;
 
   const stmts = [];
+  const conditionalOutbox = new Set();
   for (const c of chunks) {
     // Computed at write time so a search hit can be resolved back to its chunk
     // even when the id had to be hashed to fit Vectorize's 64-byte ceiling.
@@ -1044,7 +1209,7 @@ export async function upsertChunks(env, chunks, { expectedContentHash = null } =
              top_folder = excluded.top_folder, platform = excluded.platform,
              vector_id = excluded.vector_id,
              bound_document_revision_id = excluded.bound_document_revision_id,
-             result_chunk_receipt_hash = excluded.result_chunk_receipt_hash`
+             result_chunk_receipt_hash = excluded.result_chunk_receipt_hash${reuse ? REUSED_CHUNK_ZONE_REFRESH : ""}`
         : `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id,
                                bound_document_revision_id,result_chunk_receipt_hash)
            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
@@ -1063,6 +1228,27 @@ export async function upsertChunks(env, chunks, { expectedContentHash = null } =
       boundRevisionId, chunkReceiptHash,
       ...(guarded ? [expectedContentHash] : [])
     );
+
+    if (reuse) {
+      // The decision reads the stored row, so it must run before the chunk
+      // write replaces it. Both statements sit in the same 100-statement slice
+      // (pairs never straddle one), so the pair commits or rolls back together.
+      // It binds exactly the values the chunk write binds, including
+      // `merged.x || null` for the filters, so "unchanged" means unchanged.
+      const outboxStatement = env.DB.prepare(reusableProjectionOutboxSql(unchangedProjectionSql({
+        chunkUid: "?1", vectorId: "?2", docUid: "?4", marker: "?5", chunkIx: "?6",
+        text: "?7", source: "?8", documentDate: "?9",
+        filters: { client: "?10", category: "?11", top_folder: "?12", platform: "?13" },
+      }))).bind(
+        c.chunk_uid, c.vector_id, now, c.doc_uid, expectedContentHash, c.chunk_ix,
+        c.text, c.source, c.document_date ?? null,
+        c.client ?? null, c.category ?? null, c.top_folder ?? null, c.platform ?? null,
+      );
+      conditionalOutbox.add(stmts.length);
+      stmts.push(outboxStatement);
+      stmts.push(chunkStatement);
+      continue;
+    }
     stmts.push(chunkStatement);
 
     const outboxStatement = env.DB.prepare(
@@ -1089,10 +1275,15 @@ export async function upsertChunks(env, chunks, { expectedContentHash = null } =
   // A split document can still contain more than 50 chunks. Keep each internal
   // transaction in a conservative 100-statement slice; the pending marker makes
   // an interrupted later slice recoverable on ordinary retry.
+  let skipped = 0;
   for (let start = 0; start < stmts.length; start += D1_TRANSACTION_SLICE_STATEMENTS) {
-    await env.DB.batch(stmts.slice(start, start + D1_TRANSACTION_SLICE_STATEMENTS));
+    const results = await env.DB.batch(stmts.slice(start, start + D1_TRANSACTION_SLICE_STATEMENTS));
+    if (!reuse) continue;
+    for (let offset = 0; offset < D1_TRANSACTION_SLICE_STATEMENTS; offset++) {
+      if (conditionalOutbox.has(start + offset) && provedNoOutboxWrite(results?.[offset])) skipped++;
+    }
   }
-  return { written: chunks.length, queued: chunks.length };
+  return { written: chunks.length, queued: chunks.length - skipped };
 }
 
 /**
@@ -1115,6 +1306,50 @@ export function canStageDocumentRevision(chunkCount) {
 const hasVerifiedWrite = (result) =>
   Number.isSafeInteger(result?.meta?.changes) && result.meta.changes > 0;
 
+// The delete half of an identical-content revision. It is today's pair (queue a
+// Vectorize delete for each stored chunk, then remove the rows) except that rows
+// retainedProjectedChunkSql accepts are neither queued nor removed. Both
+// statements evaluate the same predicate inside one D1 transaction, so they
+// cannot disagree about a row: every removed row has its delete queued first,
+// and the delete statement's own queue rows make its non-retained rows fail the
+// predicate's "nothing queued" clause when the DELETE runs.
+function retainingRevisionDeleteStatements(env, {
+  docUid, expectedContentHash, queuedAt, shape, filterSource,
+}) {
+  return [
+    env.DB.prepare(
+      `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
+       SELECT chunk_uid, COALESCE(vector_id, chunk_uid), 'delete', ?2, 0, NULL
+       FROM chunks
+       WHERE doc_uid = ?1
+         AND EXISTS (
+           SELECT 1 FROM documents WHERE doc_uid = ?1 AND content_hash = ?3
+         )
+         AND NOT ${retainedProjectedChunkSql({
+           marker: "?3", count: "?4", title: "?5", source: "?6", documentDate: "?7", filterSource,
+         })}
+       ON CONFLICT(chunk_uid) DO UPDATE SET
+         vector_id=excluded.vector_id, op='delete', queued_at=excluded.queued_at,
+         attempts=0, last_error=NULL`
+    ).bind(
+      docUid, queuedAt, expectedContentHash,
+      shape.chunkCount, shape.title, shape.source, shape.documentDate,
+    ),
+    env.DB.prepare(
+      `DELETE FROM chunks WHERE doc_uid = ?1
+       AND EXISTS (
+         SELECT 1 FROM documents WHERE doc_uid = ?1 AND content_hash = ?2
+       )
+       AND NOT ${retainedProjectedChunkSql({
+         marker: "?2", count: "?3", title: "?4", source: "?5", documentDate: "?6", filterSource,
+       })}`
+    ).bind(
+      docUid, expectedContentHash,
+      shape.chunkCount, shape.title, shape.source, shape.documentDate,
+    ),
+  ];
+}
+
 /**
  * Atomically stage one document revision under its unique pending marker.
  *
@@ -1122,12 +1357,17 @@ const hasVerifiedWrite = (result) =>
  * documents into one transaction would save more round trips, but one poison
  * row would then roll back unrelated documents and destroy the batch route's
  * per-document failure-isolation contract.
+ *
+ * `reuseProjectedVectors` is set only by an identical-content revision; see
+ * the block above upsertChunks. It keeps the statement count and the single
+ * transaction exactly as they are, so the 48-chunk staging bound is unchanged.
  */
 export async function stageDocumentRevision(env, {
   documentStatement,
   docUid,
   chunks,
   expectedContentHash,
+  reuseProjectedVectors = false,
 }) {
   if (!documentStatement || typeof docUid !== "string" || !docUid ||
       typeof expectedContentHash !== "string" || !expectedContentHash ||
@@ -1136,7 +1376,14 @@ export async function stageDocumentRevision(env, {
   }
 
   const queuedAt = Date.now();
-  const statements = [
+  const shape = reuseProjectedVectors === true ? projectedChunkShape(docUid, chunks) : null;
+  const statements = shape ? [
+    documentStatement,
+    // The atomic stage copies documents.* into each chunk verbatim.
+    ...retainingRevisionDeleteStatements(env, {
+      docUid, expectedContentHash, queuedAt, shape, filterSource: "verbatim",
+    }),
+  ] : [
     documentStatement,
     env.DB.prepare(
       `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
@@ -1159,6 +1406,7 @@ export async function stageDocumentRevision(env, {
   ];
 
   const requiredWriteIndexes = [0];
+  const conditionalOutboxIndexes = [];
   for (const chunk of chunks) {
     chunk.vector_id = await vectorIdFor(chunk.chunk_uid);
     const boundRevisionId = chunk.bound_document_revision_id ?? null;
@@ -1170,8 +1418,7 @@ export async function stageDocumentRevision(env, {
           title: chunk.title ?? null,
           text: chunk.text,
         });
-    requiredWriteIndexes.push(statements.length);
-    statements.push(env.DB.prepare(
+    const chunkStatement = env.DB.prepare(
       `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, document_date, client, category, top_folder, platform, vector_id,
                            bound_document_revision_id,result_chunk_receipt_hash)
        SELECT ?1,?2,?3,?4,?5,?6,?7,
@@ -1185,13 +1432,38 @@ export async function stageDocumentRevision(env, {
          top_folder = excluded.top_folder, platform = excluded.platform,
          vector_id = excluded.vector_id,
          bound_document_revision_id = excluded.bound_document_revision_id,
-         result_chunk_receipt_hash = excluded.result_chunk_receipt_hash`
+         result_chunk_receipt_hash = excluded.result_chunk_receipt_hash${shape ? REUSED_CHUNK_ZONE_REFRESH : ""}`
     ).bind(
       chunk.chunk_uid, chunk.doc_uid, chunk.chunk_ix, chunk.text, chunk.source,
       chunk.title ?? null, chunk.document_date ?? null, chunk.vector_id,
       boundRevisionId, chunkReceiptHash,
       expectedContentHash
-    ));
+    );
+
+    if (shape) {
+      // Decide before the chunk write replaces the stored row. The chunk write
+      // copies documents.* into the filter columns, so compare against the same
+      // document row. A skipped upsert changes zero rows, which is why it is
+      // not a required write: the chunk write right after it, guarded by the
+      // same marker inside the same transaction, still proves ownership.
+      conditionalOutboxIndexes.push(statements.length);
+      statements.push(env.DB.prepare(reusableProjectionOutboxSql(unchangedProjectionSql({
+        chunkUid: "?1", vectorId: "?2", docUid: "?4", marker: "?5", chunkIx: "?6",
+        text: "?7", source: "?8", documentDate: "?9",
+        filters: {
+          client: "owner.client", category: "owner.category",
+          top_folder: "owner.top_folder", platform: "owner.platform",
+        },
+      }))).bind(
+        chunk.chunk_uid, chunk.vector_id, queuedAt, chunk.doc_uid, expectedContentHash,
+        chunk.chunk_ix, chunk.text, chunk.source, chunk.document_date ?? null,
+      ));
+      requiredWriteIndexes.push(statements.length);
+      statements.push(chunkStatement);
+      continue;
+    }
+    requiredWriteIndexes.push(statements.length);
+    statements.push(chunkStatement);
 
     requiredWriteIndexes.push(statements.length);
     statements.push(env.DB.prepare(
@@ -1217,17 +1489,36 @@ export async function stageDocumentRevision(env, {
     throw new Error("atomic D1 staging could not verify revision ownership");
   }
 
-  return { written: chunks.length, queued: chunks.length };
+  const skipped = conditionalOutboxIndexes
+    .filter((index) => provedNoOutboxWrite(results[index])).length;
+  return { written: chunks.length, queued: chunks.length - skipped };
 }
 
 /**
  * Queue every current vector for a document and remove its D1 chunks in one D1
  * transaction. A following upsert for a retained chunk uid changes that queue
  * row back to `upsert`; chunks removed by a shorter revision remain `delete`.
+ *
+ * `retainProjectedChunks` is the incoming chunk list of an identical-content
+ * revision (see the block above upsertChunks). Stored rows that are already
+ * projected with the same fields are kept for the following upsertChunks call
+ * to compare and update in place, so this resumable path never deletes a row
+ * whose delete it did not queue. It needs the pending-marker guard.
  */
-export async function replaceDocumentChunks(env, docUid, { expectedContentHash = null } = {}) {
+export async function replaceDocumentChunks(env, docUid, {
+  expectedContentHash = null,
+  retainProjectedChunks = null,
+} = {}) {
   const now = Date.now();
   const guarded = typeof expectedContentHash === "string" && expectedContentHash.length > 0;
+  const shape = guarded && retainProjectedChunks ? projectedChunkShape(docUid, retainProjectedChunks) : null;
+  if (shape) {
+    // The resumable path binds `merged.x || null` into each chunk's filters.
+    await env.DB.batch(retainingRevisionDeleteStatements(env, {
+      docUid, expectedContentHash, queuedAt: now, shape, filterSource: "merged",
+    }));
+    return;
+  }
   await env.DB.batch([
     env.DB.prepare(
       guarded

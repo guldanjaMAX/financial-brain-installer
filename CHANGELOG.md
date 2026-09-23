@@ -10,6 +10,18 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Re-sending unchanged files no longer rebuilds their meaning-based search.**
+  When a newer kit re-sends a file whose text has not changed, for example to
+  add the exact-byte provenance an older kit never recorded, the Brain still
+  writes the new provenance and receipts but keeps the search vectors it has
+  already confirmed for that text. Before, a Brain loaded by an older kit
+  re-embedded every such file, which on a large corpus kept answers marked as
+  still building for days. Anything the search index can see (the text, title,
+  folder, client, category, platform or date) is re-embedded exactly as
+  before, and so is any file whose earlier vectors were not yet confirmed. To
+  check: after re-sending an unchanged folder, `brain health <manifest>`
+  reports no vector operations waiting.
+
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
   then returns names and folders only for those IDs in requests capped at 97
