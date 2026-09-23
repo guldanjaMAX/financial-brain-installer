@@ -116,6 +116,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/package-bundle-verifier.test.mjs",
   "node --test test/runtime-identity-receipt.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
+  "node --test test/mcp-moved-brain.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -252,6 +253,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/session-signing-key.test.mjs",
   "node test/mcp-apply.test.mjs",
   "node test/mcp-rotation.test.mjs",
+  "node --test test/mcp-moved-brain.test.mjs",
   "node test/health-verify-exit.test.mjs",
   "node test/drain-exit.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
