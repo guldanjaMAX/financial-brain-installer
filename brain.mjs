@@ -2493,6 +2493,13 @@ class SecretsWriteTimeoutError extends Error {
  * -blocked socket -- Node gives no portable way to do that through an
  * injected transport -- it only stops cmdSecrets from waiting on it forever
  * and reports honestly that nothing is known to have changed.
+ *
+ * There is no AbortSignal: when the timer wins, the underlying call keeps
+ * running and can still land after this has already rejected and the CLI has
+ * told the operator it timed out. That is safe to leave unresolved because a
+ * Worker secret write is idempotent -- putting the same name and value again
+ * leaves the same end state -- so re-running `brain secrets`/`brain setup`
+ * is always the correct recovery, whichever write lands last.
  */
 async function withSecretsWriteTimeout(operation, label, {
   timeoutMs = SECRETS_WRITE_TIMEOUT_MS,
