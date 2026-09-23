@@ -231,6 +231,12 @@ import {
   zoneAssignmentRecoveredNotice,
   zoneAssignmentRetryNotice,
 } from "./operations/zone-assignment-retry.mjs";
+import { d1ResetDuringRemovalMessage, isD1TransientFaultBody } from "./operations/d1-transient-fault.mjs";
+import {
+  requestSourceFamilyPageWithRetry,
+  sourceFamilyInventoryRetryNotice,
+  SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS,
+} from "./operations/source-family-inventory-retry.mjs";
 import {
   bootstrapManifestObservation,
   bootstrapStatusFilePath,
@@ -11581,6 +11587,8 @@ export async function listStoredSourceFamilies({
   includeServerObservedAt = false,
   includeLabels = false,
   uids = null,
+  retryDelaysMs = SOURCE_FAMILY_INVENTORY_RETRY_DELAYS_MS,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   const normalizedSource = assertSourceName(source);
   if (uids !== null && (!Array.isArray(uids) || uids.length < 1 ||
@@ -11611,22 +11619,41 @@ export async function listStoredSourceFamilies({
   for (;;) {
     if (seenCursors.has(cursor)) throw new Error("source-family inventory repeated a cursor");
     seenCursors.add(cursor);
-    const res = await http(`${base}/api/admin/brain/source-families`, {
-      method: "POST",
-      redirect: "error",
-      headers: {
-        "X-Admin-Key": adminKey,
-        "Content-Type": "application/json",
+    // Retry a transient status for THIS page only. The cursor does not change
+    // across attempts, so the repeated-cursor guard above is never re-entered and
+    // the walk is never restarted or widened. A 400 is not retried here: it is the
+    // compatibility ladder's signal, and repeating it cannot change the answer.
+    const page = await requestSourceFamilyPageWithRetry(() => http(
+      `${base}/api/admin/brain/source-families`,
+      {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          "X-Admin-Key": adminKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          source: normalizedSource,
+          limit: 1000,
+          ...(requestLabels ? { include_labels: true } : {}),
+          ...(requestUids ? { uids: requestUids } : {}),
+          ...(cursor ? { cursor } : {}),
+        }),
       },
-      body: JSON.stringify({
-        source: normalizedSource,
-        limit: 1000,
-        ...(requestLabels ? { include_labels: true } : {}),
-        ...(requestUids ? { uids: requestUids } : {}),
-        ...(cursor ? { cursor } : {}),
-      }),
-    }, { what: "the source-family inventory" });
-    const raw = await res.text();
+      { what: "the source-family inventory" },
+    ), {
+      // D1-SCOPED, NOT STATUS-SCOPED. A 413 or a bare 500 at this site is a
+      // capability signal the walk must not repeat; only a body naming a D1
+      // reset is transient here. Widening this to every retryable status would
+      // silently weaken that guarantee for the sake of a fault we can identify
+      // exactly. The status argument is ignored on purpose.
+      isRetryableStatus: (_status, body) => isD1TransientFaultBody(body),
+      delaysMs: retryDelaysMs,
+      sleep,
+      onRetry: (attempt) => info(sourceFamilyInventoryRetryNotice(attempt)),
+    });
+    const res = page.res;
+    const raw = page.raw;
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
     if (cursor === "" && requestLabels && res.status === 400 &&
@@ -11798,6 +11825,7 @@ export async function applyDriveRemovals({
     // deletion to record in the former owner's state.
     assertOwned?.();
     let out;
+    let raw = "";
     try {
       const res = await http(`${base}/api/admin/brain/forget`, {
         method: "POST",
@@ -11809,8 +11837,18 @@ export async function applyDriveRemovals({
           confirm: true,
         }),
       }, { fetchImpl });
-      out = await parseForgetResponse(res);
-    } catch {
+      raw = await res.text();
+      out = parseForgetResponseBody(res, raw);
+    } catch (error) {
+      // A D1 reset is not a completed removal, and recording one is how this hid.
+      // Swallowing it writes a marker for every family in the group, lets the run
+      // continue, and hands the operator the inventory readback's message for a
+      // fault that happened three steps earlier. Name it here, where it happened,
+      // and record nothing: the plan is rebuilt next run from Drive truth against
+      // the stored inventory, so these families are retried without a marker.
+      if (isD1TransientFaultBody(raw)) {
+        die(d1ResetDuringRemovalMessage({ label, count: group.length }));
+      }
       state.removed = {
         ...(state.removed || {}),
         ...Object.fromEntries(group.map((uid) => [uid, new Date().toISOString()])),
@@ -11881,7 +11919,13 @@ export async function reconcileDocumentFamilies({
         try {
           return parseForgetResponseBody(res, raw);
         } catch (error) {
-          if (isRetryableHttpStatus(res.status)) error.retryable = true;
+          // A D1 reset reaches here as a 400, because the forget route's families
+          // sub-branch maps every exception to that status
+          // (worker/src/index.js:3224-3228). The status cannot say the fault is
+          // transient and 400 must not become generally retryable, so the body is
+          // the only thing left that can tell them apart. `raw` is the complete
+          // untruncated response, so no plumbing is needed to reach it.
+          if (isRetryableHttpStatus(res.status) || isD1TransientFaultBody(raw)) error.retryable = true;
           throw error;
         }
       }, {
