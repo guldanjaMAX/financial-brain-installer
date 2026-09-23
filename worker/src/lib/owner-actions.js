@@ -6,6 +6,11 @@
  * scoped session is therefore refused even when it can read the same screen.
  * Every mutation is request-idempotent and every owner-facing history row is
  * appended only after the underlying state change succeeds.
+ *
+ * A document's corpus_doc_uid binding is checked against the corpus at write
+ * time, but that binding can still dangle later if the corpus document is
+ * forgotten, so readers must treat a missing corpus row as a broken binding,
+ * not as absence.
  */
 
 import { jsonResponse, privateNoStore } from "./core.js";
@@ -518,6 +523,22 @@ async function documentCreate(env, body) {
     const scope = await validateOwnedEntityScope(env, entity.value);
     if (!scope.ok) return scope.response;
   }
+  if (corpusDocUid !== null) {
+    // documents has no tenant column (one brain per client; see 0004_corpus.sql),
+    // so this mirrors the readers' own join exactly: financial-picture.js's
+    // document_corpus_reference_missing metric and tax-qbo-reconciliation.js's
+    // storedFinancialDocument() both resolve corpus_doc_uid as documents.doc_uid,
+    // a live row being doc_uid match AND deleted_at IS NULL.
+    let corpusRow;
+    try {
+      corpusRow = await env.DB.prepare(
+        `SELECT 1 FROM documents WHERE doc_uid=?1 AND deleted_at IS NULL LIMIT 1`,
+      ).bind(corpusDocUid).first();
+    } catch {
+      return unavailable("document_create_unavailable");
+    }
+    if (!corpusRow) return invalid("corpus_document_not_found", "corpus_doc_uid");
+  }
 
   const at = new Date().toISOString();
   const eventId = activityId(requestId, "document_registered");
@@ -560,6 +581,19 @@ async function documentCreate(env, body) {
       }),
     ]);
   } catch {
+    // Resolve an ambiguous concurrent finish without guessing. An exact same
+    // request replays; another request winning the fin_doc_uid returns a conflict.
+    try {
+      const concurrentReplay = await replayFor(env, {
+        requestId, actionType: "document_create", requestHash,
+      });
+      if (concurrentReplay) return concurrentReplay;
+      const concurrentDocument = await env.DB.prepare(
+        `SELECT id FROM fin_documents
+          WHERE tenant_id=?1 AND fin_doc_uid=?2 AND superseded_by_id IS NULL LIMIT 1`,
+      ).bind(OWNER_TENANT, finDocUid).first();
+      if (concurrentDocument) return conflict("document_already_exists");
+    } catch { /* return the bounded failure below */ }
     return unavailable("document_create_unavailable");
   }
   return respond(response, 201);
