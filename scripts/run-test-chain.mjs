@@ -119,6 +119,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/package-bundle-verifier.test.mjs",
   "node --test test/runtime-identity-receipt.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
+  "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -304,6 +305,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node worker/test/secret-scan.test.mjs",
   "node worker/test/provider-routing.test.mjs",
   "node worker/test/spend-cap.test.mjs",
+  "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --no-warnings worker/test/fin-d1.test.mjs",
   "node --no-warnings worker/test/fin-routes.test.mjs",
   "node --no-warnings worker/test/financial-picture.test.mjs",
