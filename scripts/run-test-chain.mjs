@@ -123,6 +123,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/local-folder-removal-label.test.mjs",
   "node --no-warnings --test test/ocr-skip-reason-values.test.mjs",
   "node --no-warnings --test test/local-folder-dry-run-missing-file-gate.test.mjs",
+  "node --test test/mcp-moved-brain.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -263,6 +264,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/session-signing-key.test.mjs",
   "node test/mcp-apply.test.mjs",
   "node test/mcp-rotation.test.mjs",
+  "node --test test/mcp-moved-brain.test.mjs",
   "node test/health-verify-exit.test.mjs",
   "node test/drain-exit.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",

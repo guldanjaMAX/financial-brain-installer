@@ -6597,6 +6597,9 @@ function localMcpRepairItem(scope, desired, options = {}) {
   }
 
   const action = before.entry ? "update installer-owned entry" : "add Owner assistant entry";
+  const relocatedFrom = before.entry
+    ? mcpRegistrationRelocatedManifest(before.entry, desired)
+    : null;
   const directoryChange = directorySnapshot.exists ? [] : [{
     path: directorySnapshot.path,
     action: "create private assistant config directory",
@@ -6608,7 +6611,11 @@ function localMcpRepairItem(scope, desired, options = {}) {
   return {
     scope,
     status: "repairable",
-    detail: `${label}'s entry is ${before.entry ? "an older installer-owned locator" : "missing"}. Only this named setting would change.`,
+    detail: !before.entry
+      ? `${label}'s entry is missing. Only this named setting would change.`
+      : relocatedFrom
+        ? `${label}'s entry still points at this brain's previous location, ${relocatedFrom}. Only this named setting would change.`
+        : `${label}'s entry is an older installer-owned locator. Only this named setting would change.`,
     destinations,
     write_set: destinations,
     rollback: "The reconciler snapshots a safe prior locator or absence, changes only this named entry, and restores it if exact readback fails.",
@@ -19204,6 +19211,41 @@ function sameStringMap(left, right) {
     leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
 }
 
+/** Compare two locator paths the way every installer-written field is compared. */
+function sameInstallerPath(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const a = resolve(left);
+  const b = resolve(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/**
+ * Normalize an installer-written environment whose manifest locator has moved.
+ *
+ * A brain folder that is moved or copied keeps every part of its identity and
+ * changes only where its manifest sits. The identity is the brain URL and the
+ * slug, which every caller compares separately, together with this installer's
+ * own runtime path. BRAIN_MANIFEST is an address, so a registration differing
+ * only there is this brain reporting a new address, not an unrelated server
+ * competing for the same name.
+ *
+ * Whether the previous path still resolves is deliberately never consulted.
+ * Copying a folder leaves the original perfectly readable, so an existence test
+ * would accept the move and refuse the copy while both are the same owner and
+ * the same brain.
+ *
+ * Returns the environment to compare against `desired`, with the relocated
+ * manifest normalized back, or null when the manifest did not move.
+ */
+function relocatedInstallerEnv(actualEnv, desired) {
+  const previous = actualEnv?.BRAIN_MANIFEST;
+  const current = desired?.env?.BRAIN_MANIFEST;
+  if (typeof previous !== "string" || !previous || !isAbsolute(previous)) return null;
+  if (typeof current !== "string" || !current) return null;
+  if (sameInstallerPath(previous, current)) return null;
+  return { ...actualEnv, BRAIN_MANIFEST: current };
+}
+
 function normalizedRegistration(entry, name = null) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
   const transport = entry.transport && typeof entry.transport === "object"
@@ -19355,12 +19397,7 @@ export function mcpRegistrationIsExact(entry, desired) {
 /** Refuse to replace an unrelated MCP server that happens to share the slug. */
 export function mcpRegistrationIsInstallerOwned(entry, desired) {
   const actual = normalizedRegistration(entry, desired.name);
-  const samePath = (left, right) => {
-    if (typeof left !== "string" || typeof right !== "string") return false;
-    const a = resolve(left);
-    const b = resolve(right);
-    return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
-  };
+  const samePath = sameInstallerPath;
   const sameManifest = typeof actual?.env?.BRAIN_MANIFEST === "string" &&
     samePath(actual.env.BRAIN_MANIFEST, desired.env.BRAIN_MANIFEST);
   const transitionName = CLAUDE_LEGACY_KEY_NAMES.find((key) =>
@@ -19386,11 +19423,23 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
         [transitionName]: actual.env[transitionName],
       }))
   );
-  const manifestOwned = sameManifest && (
+  // A moved or copied brain folder keeps its URL, its slug and this installer's
+  // own runtime, and changes only where the manifest sits. That is this brain at
+  // a new address rather than somebody else's server holding the same name, so
+  // it is reconciled instead of refused. The legacy literal-key shapes are
+  // deliberately excluded here: a retired credential and a moved locator are two
+  // migrations at once, and such an entry keeps its narrower handling.
+  const relocatedEnv = relocatedInstallerEnv(actual?.env, desired);
+  const relocatedOwned = Boolean(relocatedEnv) && (
+    sameStringMap(relocatedEnv, desired.env) ||
+    (!Object.hasOwn(actual?.env || {}, "BRAIN_AGENT_PROFILE") &&
+      sameStringMap(relocatedEnv, oldLocatorEnv))
+  );
+  const manifestOwned = relocatedOwned || (sameManifest && (
     sameStringMap(actual.env, desired.env) ||
     oldLocatorOwned ||
     transitionOwned
-  );
+  ));
   const exactLegacyTarget = transitionName &&
     !Object.hasOwn(actual?.env || {}, "BRAIN_MANIFEST") &&
     envKeys.length === 3 &&
@@ -19421,6 +19470,21 @@ export function mcpRegistrationIsInstallerOwned(entry, desired) {
     actual.env.BRAIN_NAME === desired.name &&
     actual.env.BRAIN_URL === desired.env.BRAIN_URL &&
     Boolean(manifestOwned || exactLegacyTarget);
+}
+
+/**
+ * The manifest path an installer-owned registration still points at, when this
+ * brain's folder has moved or been copied since that registration was written.
+ *
+ * Returns null when the registration is not this installer's to replace, or
+ * when the locator did not move, so a caller can report the move in one line
+ * without repeating the ownership decision.
+ */
+export function mcpRegistrationRelocatedManifest(entry, desired) {
+  if (!entry || !mcpRegistrationIsInstallerOwned(entry, desired)) return null;
+  const previous = normalizedRegistration(entry, desired.name)?.env?.BRAIN_MANIFEST;
+  if (typeof previous !== "string" || !previous) return null;
+  return sameInstallerPath(previous, desired.env.BRAIN_MANIFEST) ? null : previous;
 }
 
 /**
@@ -20204,8 +20268,14 @@ function safeLocatorMigrationSnapshot(before, desired, options, format) {
   }
   const actual = normalizedRegistration(before.entry, desired.name);
   const { BRAIN_AGENT_PROFILE: _profile, ...oldLocatorEnv } = desired.env;
+  // A relocated locator is this owner's own previous entry at a new address, so
+  // it stays eligible for snapshot and rollback. Without this the reconciler
+  // would have no restore point for exactly the entry it is allowed to replace.
+  const relocatedEnv = relocatedInstallerEnv(actual?.env, desired);
   const safeLocatorEnv = sameStringMap(actual?.env, desired.env) ||
-    sameStringMap(actual?.env, oldLocatorEnv);
+    sameStringMap(actual?.env, oldLocatorEnv) ||
+    (Boolean(relocatedEnv) && (sameStringMap(relocatedEnv, desired.env) ||
+      sameStringMap(relocatedEnv, oldLocatorEnv)));
   if (!actual || actual.enabled === false ||
       !safeLocatorEnv ||
       CLAUDE_LEGACY_KEY_NAMES.some((key) => Object.hasOwn(actual.env, key)) ||
@@ -20383,9 +20453,33 @@ function failedAgentReconciliation(reason, snapshot) {
   return { status: "failed", reason, previousPreserved };
 }
 
+/**
+ * Attach what the operator needs to act on the outcome.
+ *
+ * The configuration path names the file that actually holds a colliding entry,
+ * and the previous locator is read from the pre-change snapshot so a completed
+ * move can name both addresses.
+ */
+function withReconciliationContext(before, desired, result) {
+  const annotated = { ...result, configPath: before?.path ?? null };
+  if (["verified", "updated", "added"].includes(result?.status)) {
+    const relocatedFrom = mcpRegistrationRelocatedManifest(before?.entry, desired);
+    if (relocatedFrom) annotated.relocatedFrom = relocatedFrom;
+  }
+  return annotated;
+}
+
 function reconcileClaudeRegistration(desired, options) {
-  const runner = options.runCommand;
   const before = readClaudeRegistration(desired, options);
+  return withReconciliationContext(
+    before,
+    desired,
+    reconcileClaudeRegistrationFrom(before, desired, options),
+  );
+}
+
+function reconcileClaudeRegistrationFrom(before, desired, options) {
+  const runner = options.runCommand;
   if (!before.entry && options.existingOnly) return { status: "skipped" };
   if (before.entry && mcpRegistrationIsExact(before.entry, desired)) return { status: "verified" };
   if (before.entry && !mcpRegistrationIsInstallerOwned(before.entry, desired)) {
@@ -20538,6 +20632,14 @@ function codexAddArgs(desired) {
 
 function reconcileCodexRegistration(desired, options) {
   const before = readCodexRegistration(desired, options);
+  return withReconciliationContext(
+    before,
+    desired,
+    reconcileCodexRegistrationFrom(before, desired, options),
+  );
+}
+
+function reconcileCodexRegistrationFrom(before, desired, options) {
   if (!before.entry && options.existingOnly) return { status: "skipped" };
   if (before.entry && mcpRegistrationIsExact(before.entry, desired)) {
     const visible = verifyCodexRegistrationRedacted(desired, options);
@@ -20598,6 +20700,60 @@ function rotationDescriptorForRegistration(desired, entry) {
     ...desired,
     env: Object.freeze(env),
   });
+}
+
+/**
+ * One sentence per distinguishable reconciliation outcome.
+ *
+ * All five reasons were already computed and then thrown away, so an owner read
+ * the same generic warning whether another product held the name, a removal
+ * failed, or the local configuration could not be read safely. Those are
+ * different problems with different next steps.
+ */
+const AGENT_RECONCILIATION_REASONS = Object.freeze({
+  "name-collision": "another MCP server already holds this name and was not written by this installer, so it was left exactly as it was.",
+  "remove-failed": "the previous entry could not be removed, so nothing was replaced.",
+  "verification-mismatch": "the entry did not read back exactly as it was written, so it was not accepted.",
+  "registration-absent": "the entry was not there when it was read back, so nothing is registered under this name.",
+  "unsafe-config": "the local configuration could not be read and written safely, so no setting was changed.",
+});
+
+function agentReconciliationReason(result) {
+  return AGENT_RECONCILIATION_REASONS[result?.reason] ||
+    "the registration was not reported ready.";
+}
+
+/**
+ * What to do from the state the owner is actually in.
+ *
+ * brain mcp-config without --apply prints the configuration and changes
+ * nothing, so it is the one instruction here that does not re-enter the
+ * reconciler that just refused. Rerunning setup, or the same command with
+ * --apply, would arrive back at this warning unchanged.
+ */
+function agentReconciliationRemedy(desired, manifestPath, result) {
+  const lines = ["No literal credential was written."];
+  if (result?.reason === "name-collision") {
+    lines.push(result.configPath
+      ? `The entry holding that name is in ${result.configPath}.`
+      : "That entry is in the assistant's own configuration file.");
+    lines.push(`Rename or remove that "${desired.name}" entry yourself first. Nothing here will overwrite an entry it did not write.`);
+  } else if (result?.previousPreserved) {
+    lines.push("The previous entry was restored to exactly the bytes it had before this attempt.");
+  }
+  // info() renders a leading "brain" into the real interpreter invocation, so
+  // the command goes on its own line and its path is quoted the same way every
+  // other copyable command in this CLI is. An unquoted path with a space in it
+  // is not a remedy.
+  lines.push("To connect by hand instead, run this and paste what it prints into the assistant. It changes nothing on its own:");
+  lines.push(`brain mcp-config ${commandPath(displayPath(manifestPath))}`);
+  return lines;
+}
+
+/** Name both addresses when a moved folder is what made the update necessary. */
+function reportRelocatedBrainFolder(label, desired, result) {
+  if (!result?.relocatedFrom) return;
+  info(`${label}: the brain folder moved. This registration now reads ${desired.env.BRAIN_MANIFEST}, not ${result.relocatedFrom}.`);
 }
 
 /**
@@ -20784,14 +20940,16 @@ export async function wireAgents(m, manifestPath, options = {}) {
         : ownerAssistantMigrationOnly
           ? `Claude Code: existing "${desired.name}" registration upgraded and verified with Owner assistant access`
           : `Claude Code: "${desired.name}" registered with Owner assistant access`);
+      reportRelocatedBrainFolder("Claude Code", desired, result);
       wired.push("Claude Code");
     } else if (result.status === "skipped") {
       skipped.push("Claude Code");
     } else {
       warn(
-        `Claude Code's "${desired.name}" registration could not be reconciled safely. ` +
-          "No literal credential was written; rerun setup or use brain mcp-config."
+        `Claude Code's "${desired.name}" registration could not be reconciled safely: ` +
+          agentReconciliationReason(result)
       );
+      for (const line of agentReconciliationRemedy(desired, manifestPath, result)) info(line);
       failures.push("Claude Code");
     }
   }
@@ -20804,14 +20962,16 @@ export async function wireAgents(m, manifestPath, options = {}) {
         : ownerAssistantMigrationOnly
           ? `Codex: existing "${desired.name}" registration upgraded and verified with Owner assistant access`
           : `Codex: "${desired.name}" registered with Owner assistant access`);
+      reportRelocatedBrainFolder("Codex", desired, result);
       wired.push("Codex");
     } else if (result.status === "skipped") {
       skipped.push("Codex");
     } else {
       warn(
-        `Codex's "${desired.name}" registration could not be verified exactly. ` +
-          "No literal credential was written; rerun setup or use brain mcp-config."
+        `Codex's "${desired.name}" registration could not be reconciled safely: ` +
+          agentReconciliationReason(result)
       );
+      for (const line of agentReconciliationRemedy(desired, manifestPath, result)) info(line);
       failures.push("Codex");
     }
   }
