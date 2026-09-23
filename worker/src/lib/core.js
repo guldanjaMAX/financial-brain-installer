@@ -377,11 +377,7 @@ export async function callLLM(env, { model, system, messages, max_tokens, label,
         temperature: 0,
       });
       const rawResponse = data?.response;
-      let text = typeof rawResponse === "string"
-        ? rawResponse.trim()
-        : rawResponse && typeof rawResponse === "object"
-          ? JSON.stringify(rawResponse)
-          : "";
+      let text = typeof rawResponse === "string" ? rawResponse.trim() : "";
       // Not every Workers AI model replies in the same shape, and reading only
       // `response` silently discarded a correct answer from some of them.
       // Measured live against the REST API on 2026-09-23, page by page, against
@@ -394,7 +390,7 @@ export async function callLLM(env, { model, system, messages, max_tokens, label,
       // not: it answers ONLY in `choices[0].message.content`, with no
       // `response` field at all, so a perfect transcription was thrown away as
       // "no answer text" and every scanned page came back a 502. This fallback
-      // reads that shape too, once `response` has nothing to offer.
+      // reads that shape too, once `response` offers no text.
       if (!text) {
         const content = data?.choices?.[0]?.message?.content;
         if (typeof content === "string") {
@@ -406,6 +402,15 @@ export async function callLLM(env, { model, system, messages, max_tokens, label,
             .join("")
             .trim();
         }
+      }
+      // A structured (object) `response` is serialized only when neither a
+      // `response` string nor `choices` produced text. Serializing it first put
+      // a truthy but useless string in front of a real chat-completions
+      // answer: the defect this fallback fixes, one layer down (raised in
+      // review, 2026-09-23). With no `choices` text the object is serialized
+      // exactly as before.
+      if (!text && rawResponse && typeof rawResponse === "object") {
+        text = JSON.stringify(rawResponse);
       }
       if (!text) throw new Error("Workers AI returned no answer text");
       const inTok = data?.usage?.prompt_tokens || data?.usage?.input_tokens || 0;

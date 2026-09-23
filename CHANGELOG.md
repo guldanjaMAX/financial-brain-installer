@@ -534,8 +534,9 @@ asset publication.
   perfectly was thrown away as "no answer text" and the page came back
   unreadable. It now reads `response` when that carries text and otherwise
   reads the transcription out of `choices`, so either reply shape is
-  understood. To check: with OCR enabled, a scanned page read by the default
-  model is indexed instead of refused.
+  understood. This changes how the reply is read, not which model OCR uses:
+  the default OCR model is unchanged. To check: with OCR enabled, a scanned
+  page read by the default model is indexed instead of refused.
 
 ## 0.4.6
 

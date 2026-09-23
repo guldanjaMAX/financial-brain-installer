@@ -4,8 +4,17 @@
  * `@cf/google/gemma-4-26b-a4b-it`, does not use that field. It answers in the
  * OpenAI chat-completions shape, `choices[0].message.content`, so a perfect
  * transcription was thrown away as "Workers AI returned no answer text" and
- * every scanned page came back a 502. Proven live on 2026-09-23 against a real
- * scanned page: see FINDING-OCR-BROKEN-IN-048-AND-THE-SWITCH-2026-09-23.md.
+ * every scanned page came back a 502. Measured live on 2026-09-23 against the
+ * Workers AI REST API, with one real scanned page sent to each model:
+ *
+ *   model                                  response        choices
+ *   google/gemma-4-26b-a4b-it (OCR default) absent          transcription
+ *   meta/llama-4-scout-17b-16e-instruct    transcription   transcription
+ *   mistralai/mistral-small-3.1-24b-instr. transcription   transcription
+ *   meta/llama-3.3-70b-instruct-fp8-fast   answer          (absent)
+ *
+ * This changes how a reply is READ, not which model OCR uses: the default OCR
+ * model is unchanged.
  *
  * This file pins the reply shapes actually measured that day, so the same
  * defect cannot come back quietly on a future default-model change:
@@ -55,6 +64,22 @@ test("when both response and choices are present (llama-4-scout, mistral-small s
   }));
   assert.equal(result.content[0].text, "the response field",
     "the existing response branch is untouched; choices is a fallback, not a replacement");
+});
+
+test("a structured (object) response does not stand in front of a real choices transcription", async () => {
+  const result = await call(async () => ({
+    response: { status: "ok", tokens: 42 },
+    choices: [{ message: { content: "INVOICE 4471 - AMOUNT DUE 812.00" } }],
+    usage: {},
+  }));
+  assert.equal(result.content[0].text, "INVOICE 4471 - AMOUNT DUE 812.00",
+    "a stringified envelope must not beat a real answer: the same defect as the choices fallback, one layer down");
+});
+
+test("a structured (object) response with no choices text is still serialized exactly as before", async () => {
+  const envelope = { answer: "structured", items: [1, 2] };
+  const result = await call(async () => ({ response: envelope, usage: {} }));
+  assert.equal(result.content[0].text, JSON.stringify(envelope));
 });
 
 test("response-only reply (the answer model's own shape) still works exactly as before", async () => {
