@@ -122,6 +122,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/setup-secrets-write-timeout.test.mjs",
   "node --no-warnings --test test/local-folder-removal-label.test.mjs",
   "node --no-warnings --test test/ocr-skip-reason-values.test.mjs",
+  "node --no-warnings --test test/local-folder-dry-run-missing-file-gate.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -292,6 +293,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/imessage-scheduler.test.mjs",
   "node test/folder-scheduler.test.mjs",
   "node --no-warnings --test test/local-folder-removal-label.test.mjs",
+  "node --no-warnings --test test/local-folder-dry-run-missing-file-gate.test.mjs",
   "node test/whatsapp-daemon.test.mjs",
   "node test/zoom-connect.test.mjs",
   "node test/zoom-cli.test.mjs",

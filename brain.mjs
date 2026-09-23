@@ -11040,11 +11040,25 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const missingScannerKeys = [...previouslyKnownKeys].filter(
     (key) => !candidateLocalKeys.has(key) && !adjudicatedRemovalSet.has(key)
   );
-  if (!dry && scannerPolicyChanged && missingScannerKeys.length) {
-    die(
-      `${missingScannerKeys.length} previously-indexed file(s) are not present under this folder, so the current scanner cannot recheck them safely.\n` +
-        "      Nothing was removed. Use the original source folder, or forget this source explicitly before replacing it."
-    );
+  if (scannerPolicyChanged && missingScannerKeys.length) {
+    // A dry run previews rather than acts, but it must preview the actual
+    // outcome. This gate used to be skipped outright under --dry-run, so the
+    // one command an owner reaches for to see what WOULD happen said nothing
+    // about the abort a real run would hit here -- the preview and reality
+    // disagreed. Warn instead of dying: a dry run still must not demand
+    // credentials or touch anything.
+    if (dry) {
+      warn(
+        `WARNING: ${missingScannerKeys.length} previously-indexed file(s) are not present under this folder, so the current scanner could not recheck them safely.\n` +
+          "      A real run (without --dry-run) would stop here. Nothing was removed by this dry run.\n" +
+          "      Use the original source folder, or forget this source explicitly before replacing it."
+      );
+    } else {
+      die(
+        `${missingScannerKeys.length} previously-indexed file(s) are not present under this folder, so the current scanner cannot recheck them safely.\n` +
+          "      Nothing was removed. Use the original source folder, or forget this source explicitly before replacing it."
+      );
+    }
   }
   const limitedLocalKeys = new Set(limited.map((file) => String(file.rel).split(sep).join("/")));
   const limitedMissesPrior = [...previouslyKnownKeys].some(
