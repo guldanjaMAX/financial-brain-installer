@@ -124,6 +124,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/local-folder-removal-label.test.mjs",
   "node --no-warnings --test test/ocr-skip-reason-values.test.mjs",
   "node --no-warnings --test test/local-folder-dry-run-missing-file-gate.test.mjs",
+  "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
@@ -316,6 +317,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node worker/test/secret-scan.test.mjs",
   "node worker/test/provider-routing.test.mjs",
   "node worker/test/spend-cap.test.mjs",
+  "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --no-warnings worker/test/fin-d1.test.mjs",
   "node --no-warnings worker/test/fin-routes.test.mjs",
   "node --no-warnings worker/test/financial-picture.test.mjs",
