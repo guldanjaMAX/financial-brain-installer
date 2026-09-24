@@ -218,6 +218,35 @@ const unified = async (env, q = "the") => {
     JSON.stringify({ a: body.answer, c: body.citations }));
 }
 
+/* ---- the notice must not send an assistant back to a manual `brain drain`
+   loop while the index is simply still projecting.
+
+   A looped `brain drain` measured 31/min against 61/min sustained idle,
+   because it competes for the server's own drain lease instead of helping
+   it. The old remedy read "Try again once `brain drain` reports the
+   projection complete", which pointed the reader at `brain drain` as though
+   running it would confirm or hasten completion; it does neither. This is
+   the sibling fix to the vector_unavailable gap in handleThink pinned by
+   worker/test/routes.test.mjs -- that test pins the populated-results gap
+   text in index.js, this one pins the zero-result notice built by
+   worker/src/lib/retrieval-status.js, which is what an owner's assistant
+   actually reads when a degraded search returns nothing. */
+{
+  const notice = unavailableNotice("vector");
+  check("the assistant-facing notice says the index finishes on its own",
+    /on its own/i.test(notice), notice);
+  check("the assistant-facing notice says a manual `brain drain` does not speed it up",
+    /brain drain.*does not speed it up/i.test(notice), notice);
+  check("the old guidance that `brain drain` reports the projection complete is gone",
+    !/reports the projection complete/i.test(notice), notice);
+
+  const { body } = await think(mkEnv({ projectionReady: false }));
+  check("the live /think notice carries the same fixed wording, not just the helper in isolation",
+    /does not speed it up/i.test(body.notice || "") &&
+      !/reports the projection complete/i.test(body.notice || ""),
+    String(body.notice));
+}
+
 /* ---- the same protection when the embedder, not the index, is the fault ---- */
 {
   const { body } = await think(mkEnv({ embeds: false }));

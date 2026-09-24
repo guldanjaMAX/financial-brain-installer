@@ -550,6 +550,51 @@ const call = (env, path) => {
     JSON.stringify(think.gaps));
 }
 
+/* The "not yet ready" gap must tell the reader the build finishes on its own
+   in the background, and that running `brain drain` by hand does not speed
+   it up -- a looped `brain drain` measured 31/min against 61/min sustained
+   idle, because it takes over the server's own drain lease instead of
+   helping it. The old wording pointed the reader at `brain drain` as though
+   running it would confirm or hasten completion; it does neither. */
+{
+  const newer = {
+    ...ROW,
+    chunk_uid: "message:new-context-2#0",
+    doc_uid: "message:new-context-2",
+    source_id: "new-context-2",
+    text: "Newly accepted context not visible in Vectorize yet.",
+  };
+  const { env } = mkEnv([ROW, newer], {
+    vectorIds: ["meeting:123#0"],
+    outboxRow: { n: 1, oldest: 100, upserts: 1, deletes: 0, submitted: 1 },
+    readinessRow: {
+      schema_version: 12,
+      mutation_id: "fixture-partial-projection-2",
+      mutation_submitted_at: 100,
+      projection_status: "pending",
+      bootstrap_epoch: 0,
+      bootstrap_cursor: null,
+      bootstrap_high_water: null,
+      expected_vectors: 2,
+      pending: 1,
+      submitted: 1,
+      oldest_queued_at: 100,
+    },
+  });
+  const think = await (await call(env, "/api/rag/think?q=context&limit=5")).json();
+  const gap = (think.gaps || []).find((g) => g.type === "vector_unavailable");
+  check("the not-yet-ready gap says the index still builds in the background and finishes on its own",
+    /still building in the background/i.test(gap?.detail || "") &&
+      /finishes on its own/i.test(gap?.detail || ""),
+    JSON.stringify(gap));
+  check("the not-yet-ready gap says a manual `brain drain` does not speed it up",
+    /brain drain.*does not speed it up/i.test(gap?.detail || ""),
+    JSON.stringify(gap));
+  check("the not-yet-ready gap no longer tells the reader `brain drain` confirms completion",
+    !/confirms the complete projection/i.test(gap?.detail || ""),
+    JSON.stringify(gap));
+}
+
 {
   const generations = [];
   const { env } = mkEnv([ROW], {
