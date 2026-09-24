@@ -63,7 +63,7 @@ the same packaging caution as private evaluation data.
 | D1 schema | `migrations/d1/` | Append-only schema and data migrations |
 | Extraction | `ingest/` | File walking, format extraction, quality checks, dates, splitting, batching, resume state |
 | Google sources | `connectors/google-auth.mjs`, `google-drive.mjs`, `gmail.mjs`, `google-calendar.mjs` | OAuth storage and source-specific listing, cursor, export, and envelope logic |
-| Local operations | `operations/` | Admin-key persistence, Claude owner-workspace guidance, and macOS unattended scheduling (Drive, iMessage capture, watched folder) |
+| Local operations | `operations/` | Admin-key persistence, Claude owner-workspace guidance, macOS LaunchAgents, and Windows Task Scheduler entries |
 | MCP | `components/brain-mcp.mjs`, `brain-mcp-runtime.mjs` | Tool surface and runtime resolution of the current durable admin key |
 | Acceptance and eval | `acceptance.mjs`, `eval/`, `report*.mjs` | Install checks, retrieval measurement, regression comparison, owner-facing reports |
 | Migration | `migration/` | One-time Supabase corpus and message-session import |
@@ -385,10 +385,11 @@ without exposing source identifiers.
 | Source | Current path |
 |---|---|
 | Local folders, including an Obsidian vault | Built through `--path`; Obsidian is file ingest, not a separate connector |
-| Google Drive | Built, resumable, incremental, deletion-aware, and schedulable on macOS |
-| Gmail | Built with cursor safety; full real-account production validation remains a field gate |
-| Google Calendar | Built and wired through `brain ingest --from calendar`; row and receipt namespaces match, and event failure, refusal, or pending cancellation cleanup withholds the Google sync token; real-account validation remains a field gate |
-| Local watched folder | Built through the ordinary resumable folder ingest path and schedulable on macOS; multi-cycle field proof remains open |
+| Google Drive | Built, resumable, incremental, deletion-aware, and schedulable on macOS and Windows |
+| Gmail | Built with cursor safety and packaged macOS and Windows scheduling; full real-account production validation remains a field gate |
+| Google Calendar | Built and wired through `brain ingest --from calendar`, with packaged macOS and Windows scheduling; row and receipt namespaces match, and event failure, refusal, or pending cancellation cleanup withholds the Google sync token; real-account validation remains a field gate |
+| IMAP | Built read-only with UIDVALIDITY and watermark cursor safety plus packaged macOS and Windows scheduling; real-account validation remains a field gate |
+| Local watched folder | Built through the ordinary resumable folder ingest path and schedulable on macOS and Windows; multi-cycle field proof remains open |
 | iMessage | Built for incremental local capture on macOS; real-user database and long-lived scheduler proof remain field gates |
 | WhatsApp | Safe per-chat export ingest is built. Unofficial paired-device live capture is opt-in, violates WhatsApp's Terms of Service, and is not real-account proven. Meta's official WhatsApp Business Platform connector is not built. |
 | SMS and Google Voice exports | Built as sessionized file imports; real export samples remain acceptance gates |
@@ -408,7 +409,19 @@ OAuth from its chosen store, takes an owner-only lock, and rotates owner-only
 logs after the lock-holding ingest exits. The iMessage capture lane and the
 watched local folder lane are the same machinery with a different connector
 spec, so all three share that hardening rather than each re-deriving it.
-Windows and Linux do not yet have an equivalent unattended source scheduler.
+Gmail, Calendar, and IMAP add connector-specific specs to the same hardened
+scheduler machinery. Their schedules are configured under
+`operations.source_crons`, and their installed definitions contain only the
+declared credential-store selector, never the credential. Windows uses one
+current-user, least-privilege Task Scheduler entry per Brain and lane for
+Drive, watched-folder, Gmail, Calendar, IMAP, and supported provider refreshes. It uses
+the same effective cron as the macOS specification when one `schtasks` entry
+can represent it exactly, and refuses with manual guidance otherwise.
+The refusal prints the exact one-time `brain.cmd` invocation and says that the
+cadence needs a separate manual trigger setup; it never prints an approximate
+`schtasks /Create` command.
+Linux does not yet have an equivalent unattended source scheduler. The
+iMessage and other Mac-only capture daemons remain LaunchAgent-only.
 
 ## D1, FTS5, Vectorize, and the outbox
 

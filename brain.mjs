@@ -415,6 +415,7 @@ const SUPPORT_REMOTE_COMMANDS = new Set([
 export const PROVIDER_CONNECTOR_IDS = Object.freeze([
   "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot",
 ]);
+export const SCHEDULED_SOURCE_IDS = Object.freeze(["gmail", "calendar", "imap"]);
 let currentSupportCommand = "";
 
 export function supportSourceForCommand(command = "") {
@@ -22487,78 +22488,244 @@ async function cmdScheduleFolder(m, manifestPath, action) {
 
 /** Install, inspect, or remove the standard per-client Drive scheduler. */
 /**
- * The scheduler is a macOS LaunchAgent. On any other platform the honest
- * answer is a plain limitation plus the recipe the owner can use instead; a
- * Windows owner used to get "unexpected error, this is a bug in the installer"
- * here and concluded the whole system was Apple-only (2026-09-03).
+ * macOS uses LaunchAgents and Windows dispatches to Task Scheduler below. On
+ * every other platform the honest answer is a plain limitation plus a manual
+ * recipe; unsupported platforms must never fall through as an installer bug.
  */
 export function schedulePlatformLimitation(
   platform = process.platform,
   manifestPath = "<manifest>",
-  { provider = null } = {},
+  { provider = null, source = null } = {},
 ) {
   if (platform === "darwin") return null;
-  const name = platform === "win32" ? "Windows" : platform;
+  if (platform === "win32") return null;
+  const name = platform;
   const providerId = PROVIDER_CONNECTOR_IDS.includes(String(provider || "").toLowerCase())
     ? String(provider).toLowerCase()
     : null;
-  const refreshName = providerId ? `${providerId} refresh` : "automatic refresh";
-  const manualCommand = providerId
-    ? `brain ingest "${manifestPath}" --from ${providerId}`
+  const sourceId = SCHEDULED_SOURCE_IDS.includes(String(source || "").toLowerCase())
+    ? String(source).toLowerCase()
+    : null;
+  const refreshName = providerId || sourceId ? `${providerId || sourceId} refresh` : "automatic refresh";
+  const manualCommand = providerId || sourceId
+    ? `brain ingest "${manifestPath}" --from ${providerId || sourceId}`
     : `brain load "${manifestPath}" --only drive,calendar,upload`;
   const lines = [
     `${refreshName} is not scheduled by the installer on ${name} yet; the brain itself, the install, the update and the checkup all work here.`,
     "      Everything loads when you run it. To make it unattended, create one scheduled task that runs the refresh every hour.",
   ];
-  if (platform === "win32") {
-    const q = '\\"'; // an escaped quote inside schtasks' /TR string
-    const taskName = providerId ? `Financial Brain ${providerId} refresh` : "Financial Brain refresh";
-    const scheduledCommand = providerId
-      ? `${q}${q}<path to brain.cmd>${q} ingest ${q}${manifestPath}${q} --from ${providerId}${q}`
-      : `${q}${q}<path to brain.cmd>${q} load ${q}${manifestPath}${q} --only drive,calendar,upload${q}`;
-    lines.push(
-      "      Find the command first:   where.exe brain",
-      `      Then (fill in both paths): schtasks /Create /F /SC HOURLY /TN "${taskName}" /TR "cmd /c ${scheduledCommand}"`,
-      `      Run it once by hand first:  ${manualCommand}`,
-    );
-  } else {
-    lines.push(`      For example with cron:     0 * * * * ${manualCommand}`);
-  }
+  lines.push(`      For example with cron:     0 * * * * ${manualCommand}`);
   lines.push(
     "      Confirm the next run with `brain sources <manifest> --json`: require `contract_version: 3` and verify that the named source's `receipt.last_successful_run_at` advanced.",
   );
   return lines.join("\n");
 }
 
+/**
+ * Internal Task Scheduler entrypoint. The registered cmd.exe action reaches
+ * this boundary first; only the child below receives the ordinary ingest argv,
+ * under the scheduler module's minimal credential-free environment.
+ */
+export async function cmdWindowsScheduledIngest(manifestPath, options = {}) {
+  if ((options.platform ?? process.platform) !== "win32") {
+    die("windows-scheduled-ingest is available only to the installed Windows Task Scheduler entry");
+  }
+  if (!manifestPath) die("the Windows scheduled ingest entry needs its manifest path");
+  const flags = options.flags ?? parseFlags(process.argv.slice(4));
+  assertKnownFlags(flags, ["from", "path", "source", "scheduled-run"], "windows-scheduled-ingest");
+  const from = flags.from ? String(flags.from) : null;
+  const folder = typeof flags.path === "string" && flags.path.length > 0;
+  if (folder === Boolean(from) || (folder && !flags.source)) {
+    die("the Windows scheduled ingest entry needs exactly one reviewed --from lane or --path/--source folder lane");
+  }
+  const sourceLane = from && SCHEDULED_SOURCE_IDS.includes(from) ? from : null;
+  const provider = from && from !== "drive" && !sourceLane ? from : null;
+  if (provider && !PROVIDER_CONNECTOR_IDS.includes(provider)) {
+    die(`the Windows scheduled ingest provider must be one of ${PROVIDER_CONNECTOR_IDS.join(", ")}`);
+  }
+  const expectedChildArguments = folder
+    ? ["ingest", manifestPath, "--path", String(flags.path), "--source", assertSourceName(flags.source)]
+    : sourceLane
+      ? ["ingest", manifestPath, "--from", from, "--source", assertSourceName(flags.source), "--scheduled-run"]
+      : ["ingest", manifestPath, "--from", from];
+  const scheduler = options.scheduler ?? await import("./operations/windows-task-scheduler.mjs");
+  const result = scheduler.runWindowsScheduledIngest(manifestPath, {
+    ...(options.schedulerOptions || {}),
+    folder,
+    provider,
+    source: sourceLane,
+    expectedChildArguments,
+  });
+  const status = Number.isInteger(result?.status) ? result.status : 1;
+  (options.setExitCode ?? ((code) => { process.exitCode = code; }))(status);
+  return result;
+}
+
 export async function cmdSchedule(manifestPath, options = {}) {
   if (!manifestPath) {
-    die("usage: brain schedule <manifest> [--install|--status|--remove] [--folder|--provider <provider>]");
+    die("usage: brain schedule <manifest> [--install|--status|--remove] [--folder|--provider <provider>|--source <gmail|calendar|imap>]");
   }
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
-  assertKnownFlags(flags, ["install", "status", "remove", "folder", "provider"], "brain schedule");
+  assertKnownFlags(flags, ["install", "status", "remove", "folder", "provider", "source"], "brain schedule");
   const requested = ["install", "status", "remove"].filter((name) => flags[name]);
   if (requested.length > 1) {
     die("choose only one of --install, --status, or --remove");
   }
   const action = requested[0] || "status";
-  if (flags.folder && flags.provider) {
-    die("choose only one scheduler lane: --folder or --provider <provider>");
+  if ([Boolean(flags.folder), Boolean(flags.provider), Boolean(flags.source)].filter(Boolean).length > 1) {
+    die("choose only one scheduler lane: --folder, --provider <provider>, or --source <source>");
   }
   const provider = flags.provider ? String(flags.provider).trim().toLowerCase() : null;
   if (provider && !PROVIDER_CONNECTOR_IDS.includes(provider)) {
     die(`--provider must be one of ${PROVIDER_CONNECTOR_IDS.join(", ")}`);
   }
+  const scheduledSource = flags.source ? String(flags.source).trim().toLowerCase() : null;
+  if (scheduledSource && !SCHEDULED_SOURCE_IDS.includes(scheduledSource)) {
+    die(`--source must be one of ${SCHEDULED_SOURCE_IDS.join(", ")}`);
+  }
   const limitation = schedulePlatformLimitation(
     options.platform ?? process.platform,
     manifestPath,
-    { provider },
+    { provider, source: scheduledSource },
   );
-  if (limitation) die(limitation);
+  const platform = options.platform ?? process.platform;
+  if (limitation && platform !== "win32") die(limitation);
   const { m } = loadManifest(manifestPath);
+  if (platform === "win32") {
+    const scheduler = options.windowsScheduler ?? await import("./operations/windows-task-scheduler.mjs");
+    const resolveAdminKeyImpl = options.resolveAdminKey ?? resolveAdminKey;
+    const resolveBaseUrlImpl = options.resolveBaseUrl ?? resolveBaseUrl;
+    const postSourceExpectationImpl = options.postSourceExpectation ?? postSourceExpectation;
+    const schedulerOptions = {
+      ...(options.schedulerOptions || {}),
+      folder: Boolean(flags.folder),
+      provider,
+      source: scheduledSource,
+      manifest: m,
+      action,
+    };
+    let plan;
+    try {
+      plan = scheduler.buildWindowsSchedulerPlan
+        ? scheduler.buildWindowsSchedulerPlan(manifestPath, schedulerOptions)
+        : null;
+    } catch (error) {
+      die(error?.message || error);
+    }
+    const source = flags.folder
+      ? String(m?.corpora?.local_folder?.source || "documents")
+      : provider
+        ? assertSourceName(m?.corpora?.[provider]?.source || provider)
+        : scheduledSource
+          ? assertSourceName(m?.corpora?.[scheduledSource]?.source || scheduledSource)
+        : "drive";
+    const kind = flags.folder ? "upload" : provider || scheduledSource || "drive";
+    let dataPlane = null;
+    if (action === "install") {
+      const adminKey = resolveAdminKeyImpl(manifestPath);
+      if (!adminKey) die(`no admin key found, so the ${source} schedule cannot be reflected in source freshness.`);
+      dataPlane = { base: await resolveBaseUrlImpl(m, null), adminKey };
+    }
+    let result;
+    try {
+      const callOptions = plan ? { ...schedulerOptions, plan } : schedulerOptions;
+      result = action === "install"
+        ? scheduler.installWindowsScheduler(manifestPath, callOptions)
+        : action === "remove"
+          ? scheduler.removeWindowsScheduler(manifestPath, callOptions)
+          : scheduler.statusWindowsScheduler(manifestPath, callOptions);
+    } catch (error) {
+      die(error?.message || error);
+    }
+    if (action === "install") {
+      await postSourceExpectationImpl(dataPlane.base, dataPlane.adminKey, {
+        source, kind, expected_refresh_seconds: result.expectedRefreshSeconds,
+      });
+      ok(`${source} refresh installed for ${result.cron}`);
+      ok(`${source} freshness expectation set to ${result.expectedRefreshSeconds} seconds`);
+      info(`Task Scheduler name: ${result.taskName}`);
+      return result;
+    }
+    if (action === "remove") {
+      ok(result.removed ? `${source} refresh removed` : `${source} refresh was not installed`);
+      try {
+        const adminKey = resolveAdminKeyImpl(manifestPath);
+        if (!adminKey) throw new Error("no admin key is available");
+        const base = await resolveBaseUrlImpl(m, null);
+        await postSourceExpectationImpl(base, adminKey, { source, kind, expected_refresh_seconds: null });
+        ok(`${source} freshness expectation cleared`);
+      } catch (error) {
+        warn(`the local task is absent, but its remote freshness expectation could not be cleared: ${String(error?.message || error).slice(0, 160)}`);
+      }
+      return result;
+    }
+    if (result.installed) ok(`${source} refresh is installed for ${result.cron}`);
+    else warn(`${source} refresh is not installed on this Windows PC`);
+    if (result.output) info(result.output);
+    return result;
+  }
   // The watched local folder is a second lane on the same command, because it
   // is the same question ("what refreshes itself on this Mac") asked about a
   // different source.
   if (flags.folder) return cmdScheduleFolder(m, manifestPath, action);
+  if (scheduledSource) {
+    const source = assertSourceName(m?.corpora?.[scheduledSource]?.source || scheduledSource);
+    const resolveAdminKeyImpl = options.resolveAdminKey ?? resolveAdminKey;
+    const resolveBaseUrlImpl = options.resolveBaseUrl ?? resolveBaseUrl;
+    const postSourceExpectationImpl = options.postSourceExpectation ?? postSourceExpectation;
+    let dataPlane = null;
+    if (action === "install") {
+      const adminKey = resolveAdminKeyImpl(manifestPath);
+      if (!adminKey) die(`no admin key found, so the ${scheduledSource} schedule cannot be reflected in source freshness.`);
+      dataPlane = { base: await resolveBaseUrlImpl(m, null), adminKey };
+    }
+    const scheduler = options.sourceScheduler ?? await import("./operations/source-scheduler.mjs");
+    const schedulerOptions = options.schedulerOptions || {};
+    const result = action === "install"
+      ? scheduler.installSourceScheduler(scheduledSource, manifestPath, schedulerOptions)
+      : action === "remove"
+        ? scheduler.removeSourceScheduler(scheduledSource, manifestPath, schedulerOptions)
+        : scheduler.statusSourceScheduler(scheduledSource, manifestPath, schedulerOptions);
+    for (const warning of result.warnings || []) warn(warning);
+    if (action === "install") {
+      await postSourceExpectationImpl(dataPlane.base, dataPlane.adminKey, {
+        source, kind: scheduledSource, expected_refresh_seconds: result.expectedRefreshSeconds,
+      });
+      ok(`${scheduledSource} refresh installed for ${result.cron}`);
+      ok(`${source} freshness expectation set to ${result.expectedRefreshSeconds} seconds`);
+      info(`definition: ${result.plistPath}`);
+      info(`logs: ${result.stdoutPath} and ${result.stderrPath}`);
+      return result;
+    }
+    if (action === "remove") {
+      ok(result.removed || result.loaded
+        ? `${scheduledSource} refresh removed`
+        : `${scheduledSource} refresh was not installed`);
+      try {
+        const adminKey = resolveAdminKeyImpl(manifestPath);
+        if (!adminKey) throw new Error("no admin key is available");
+        const base = await resolveBaseUrlImpl(m, null);
+        await postSourceExpectationImpl(base, adminKey, {
+          source, kind: scheduledSource, expected_refresh_seconds: null,
+        });
+        ok(`${source} freshness expectation cleared`);
+      } catch (error) {
+        warn(`the ${scheduledSource} scheduler is removed, but its remote freshness expectation could not be cleared: ${String(error?.message || error).slice(0, 160)}`);
+      }
+      return result;
+    }
+    if (!result.installed) warn(`${scheduledSource} refresh is not installed on this Mac`);
+    else if (!result.loaded) warn(`${scheduledSource} refresh has a definition but is not loaded by launchd`);
+    else if (result.definitionDrift) warn(`the installed ${scheduledSource} refresh does not match the current manifest; reinstall it`);
+    else ok(`${scheduledSource} refresh is installed for ${result.cron}`);
+    if (result.running) info(`a ${scheduledSource} ingest is running as pid ${result.pid}`);
+    else if (result.lastRunSucceeded === false) warn(`the last scheduled run failed with exit code ${result.lastExitCode}`);
+    else if (result.lastRunSucceeded === true) ok(`the last scheduled run succeeded (${result.runs ?? 0} run(s) recorded)`);
+    if (result.scheduleError) warn(result.scheduleError);
+    info(`stdout: ${result.stdoutPath}`);
+    info(`stderr: ${result.stderrPath}`);
+    return result;
+  }
   if (provider) {
     const source = assertSourceName(m?.corpora?.[provider]?.source || provider);
     const resolveAdminKeyImpl = options.resolveAdminKey ?? resolveAdminKey;
@@ -26953,6 +27120,7 @@ const commands = {
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
   schedule: cmdSchedule,
+  "windows-scheduled-ingest": cmdWindowsScheduledIngest,
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
   technician: cmdTechnicianInteractive,
@@ -26980,6 +27148,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "ingest-file-apply",
   "assistant-repair",
   "ocr-preflight",
+  "windows-scheduled-ingest",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
@@ -27114,11 +27283,13 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain provenance-repair <manifest> --source <name> --target <relative-file> --apply --approve <id>
                                            apply only the freshly approved schema-45 one-target plan,
                                            then verify its exact cited result family and accepted resolution
-    brain schedule   <manifest> --install  install unattended Drive refresh on macOS
+    brain schedule   <manifest> --install  install unattended Drive refresh on macOS or Windows
     brain schedule   <manifest> --install --folder  install unattended refresh of the watched
-                                           local folder declared in corpora.local_folder (macOS)
+                                           local folder declared in corpora.local_folder (macOS or Windows)
     brain schedule   <manifest> --install --provider <id>  install unattended refresh for a
-                                           connected OAuth provider (macOS)
+                                           connected OAuth provider (macOS or Windows)
+    brain schedule   <manifest> --install --source <id>  install unattended refresh for a
+                                           connected Gmail, Calendar, or IMAP source
     brain support    [--preview|--export <file>]  inspect private local issue notes
     brain support    --explain <issue-code>       plain-language recovery for a typed issue
 
@@ -27145,6 +27316,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain schedule   <manifest> --remove   remove it and preserve its logs
     brain schedule   <manifest> --folder   inspect (or --install/--remove) the watched folder lane
     brain schedule   <manifest> --provider <id>  inspect (or --install/--remove) that provider lane
+    brain schedule   <manifest> --source <id>  inspect (or --install/--remove) Gmail, Calendar,
+                                           or IMAP
     brain disconnect imessage <manifest>   stop live capture, flush open sessions, remove the agent
     brain disconnect whatsapp <manifest>   stop the capture daemon and its drain, flush, remove both agents
     brain disconnect zoom     <manifest>   remove the Zoom secrets so the webhook refuses deliveries
