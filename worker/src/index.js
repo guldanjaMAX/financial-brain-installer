@@ -3168,11 +3168,18 @@ export default {
           return jsonResponse({ error: "cleanup planning needs access to the whole corpus. Ask the owner to run it." }, 403);
         }
         const body = await request.json().catch(() => ({}));
-        return privateNoStore(jsonResponse(await prepareCleanupPlan(env, {
+        const plan = await prepareCleanupPlan(env, {
           rule: body.rule,
           limit: body.limit,
           includeSampleTitles: body.include_sample_titles === true,
-        })));
+        });
+        const preview = await applyCleanupPlan(env, { plan, confirm: false });
+        return privateNoStore(jsonResponse({
+          ...plan,
+          approval_required: true,
+          dry_run: preview.dry_run,
+          before: preview.before,
+        }));
       }
       if (path === "/api/admin/brain/cleanup/apply" && request.method === "POST") {
         if (backendOf(env) !== D1) return jsonResponse({ error: "cleanup applies to the d1 backend only" }, 400);

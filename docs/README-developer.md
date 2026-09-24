@@ -1327,6 +1327,33 @@ All responses are private and `no-store`. The handler issues D1 `SELECT`
 statements only and does not touch passkeys, source receipts, sync cursors,
 credential storage, OCR, or the corpus.
 
+Cleanup evidence is a second private Optimize read. `POST
+/api/admin/brain/cleanup/report` returns one bounded page and an opaque keyset
+cursor. It uses the existing content-hash, document-primary-key, chunk-document,
+and supersession indexes. The six finding shapes always include count,
+estimated vector and text-byte savings, owner loss, and a plain-language rule.
+Near duplicates and heavy records are candidates, not removal authority. Titles
+are absent unless `include_sample_titles:true` is requested.
+
+`POST /api/admin/brain/cleanup/plan` builds one exact rule plan. `POST
+/api/admin/brain/cleanup/apply` first rebuilds it, proves the existing forget
+dry run, and requires `confirm:true` plus the exact current SHA-256 fingerprint.
+Any target, content hash, chunk count, or selected rule drift refuses with
+`cleanup_plan_changed`. Exact duplicates collapse only inside the same source,
+date, folder, client, and category boundary. The canonical row receives each
+location reference before aliases enter the reviewed D1-first forget path.
+Retrieval exposes only the four citation-safe location fields. Both endpoints
+refuse while a source is indexing, an update pause is active, or the vector
+drain lease is live.
+
+Future-load exclusions are local manifest changes, not Worker state. `brain
+optimize-cleanup --source-exclusion <Drive path> --json` previews only the
+`corpora.google_drive.exclude_paths` change. Apply needs that separate
+fingerprint, writes atomically, and performs exact readback. Cleanup receipts
+include documents, chunks/vectors, duplicates, and D1 bytes before and after.
+The D1 forget contract still has no restore command, so `undo.supported` is
+false and the owner guidance names source reload as the recovery path.
+
 Optimize also reads `POST /api/admin/brain/financial-map/read`. Migration 0041
 starts with no map history and never promotes existing structured rows by
 backfill. The response calls those rows possible mentions, exposes current,

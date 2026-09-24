@@ -40,7 +40,7 @@ export const CLEANUP_DOCUMENT_PAGE_SQL = `
 export const CLEANUP_CHUNK_PAGE_SQL = `
   /* optimize-cleanup: quality page */
   SELECT c.doc_uid, c.chunk_ix, c.text
-    FROM chunks c INDEXED BY idx_chunks_doc
+    FROM chunks c INDEXED BY sqlite_autoindex_chunks_2
    WHERE c.doc_uid > ?1 OR (c.doc_uid = ?1 AND c.chunk_ix > ?2)
    ORDER BY c.doc_uid, c.chunk_ix
    LIMIT ?3`;

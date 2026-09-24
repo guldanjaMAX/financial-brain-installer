@@ -447,6 +447,24 @@ remaps, cleanup, failure bookkeeping, and final depth. `maxBatches` is a latency
 preference, not permission to cross that budget; a drain stops cleanly with
 remaining work queued and always reserves its lease-release query.
 
+Optimize cleanup is a bounded caller of that same forget path, not a second
+deletion implementation. Its audit advances keyset cursors over the live
+content-hash index, document primary key, chunk-to-document index, and memory
+supersession keys. Every statement has a fixed row limit. One plan contains at
+most 200 indexed duplicate rows or 50 explicitly selected candidates, so a
+large Brain progresses as resumable, rate-limited pages instead of one D1 CPU
+spike. The activity guard refuses audit or apply while a source is indexing,
+the update write barrier is active, or the vector drain lease is live.
+
+An exact-duplicate plan groups only rows with the same content hash and the
+same source, document date, folder, client, and category boundaries. It writes
+the aliases' citation-safe source locations into the retained document's
+metadata before invoking `forget`. Search projects that closed location list
+without exposing arbitrary metadata. Plan fingerprints bind the rule, exact
+targets, content hashes, chunk counts, and estimated text bytes. Apply rebuilds
+the plan and proves the ordinary forget dry run before it accepts the exact
+owner-approved fingerprint.
+
 Vectorize V2 accepts a mutation before that mutation is query-visible. A drain
 therefore has two durable phases. First it records the provider mutation ID on
 the exact outbox generation and on the singleton projection fence, leaving the

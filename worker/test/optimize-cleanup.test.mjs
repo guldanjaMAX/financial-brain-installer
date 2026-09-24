@@ -5,6 +5,7 @@ import { createProductFixture } from "./product-contract-fixture.mjs";
 import { storeFor } from "../src/lib/store.js";
 import {
   CLEANUP_CONTENT_PAGE_SQL,
+  CLEANUP_CHUNK_PAGE_SQL,
   CLEANUP_DOCUMENT_PAGE_SQL,
   applyCleanupPlan,
   cleanupAuditPage,
@@ -183,14 +184,50 @@ test("cleanup pages use bounded indexed reads on a large fixture", async (t) => 
     `EXPLAIN QUERY PLAN ${CLEANUP_DOCUMENT_PAGE_SQL}`,
     "", 101,
   ).map((row) => row.detail).join("\n");
+  const chunkPlan = fixture.rows(
+    `EXPLAIN QUERY PLAN ${CLEANUP_CHUNK_PAGE_SQL}`,
+    "", -1, 101,
+  ).map((row) => row.detail).join("\n");
   assert.match(contentPlan, /idx_documents_live_content_hash/i);
   assert.doesNotMatch(contentPlan, /USE TEMP B-TREE/i);
   assert.match(documentPlan, /sqlite_autoindex_documents_1|COVERING INDEX/i);
   assert.match(documentPlan, /idx_chunks_doc/i);
+  assert.match(chunkPlan, /sqlite_autoindex_chunks_2/i);
+  assert.doesNotMatch(chunkPlan, /USE TEMP B-TREE/i);
 
   const page = await cleanupAuditPage(fixture.env, { limit: 100, now: NOW });
   assert.ok(page.reads.every((read) => read.rows <= 101));
   assert.equal(page.resume.complete, false);
+});
+
+test("one duplicate approval batch stays bounded even when one family is much larger", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(fixture.close);
+  seedSource(fixture);
+  fixture.raw(
+    `WITH RECURSIVE n(value) AS (
+       VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 500
+     )
+     INSERT INTO documents
+       (doc_uid, source, source_id, title, ingested_at, content_hash, meta, top_folder)
+     SELECT printf('drive-reviewed:duplicate-%04d', value), 'drive-reviewed',
+            printf('duplicate-%04d', value), 'Synthetic duplicate', ?,
+            'one-large-family', '{}', 'Reviewed'
+       FROM n`,
+    NOW,
+  );
+  fixture.raw(
+    `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, title, top_folder)
+     SELECT doc_uid || '#0', doc_uid, 0, 'Synthetic useful content', source, title, top_folder
+       FROM documents`,
+  );
+
+  const plan = await prepareCleanupPlan(fixture.env, {
+    rule: { kind: "exact_duplicates" }, limit: 200, now: NOW,
+  });
+  assert.equal(plan.counts.documents, 199);
+  assert.equal(plan.counts.chunks, 199);
+  assert.equal(plan.groups.length, 1);
 });
 
 test("cleanup admin routes are private, title-redacted by default, and dry-run before approval", async (t) => {
@@ -218,6 +255,8 @@ test("cleanup admin routes are private, title-redacted by default, and dry-run b
   assert.equal(planResponse.status, 200);
   const plan = await planResponse.json();
   assert.doesNotMatch(JSON.stringify(plan), /Private synthetic title/);
+  assert.equal(plan.approval_required, true);
+  assert.equal(plan.dry_run.documents, 1);
   const previewResponse = await fixture.post("/api/admin/brain/cleanup/apply", {
     plan, confirm: false,
   }, headers);
