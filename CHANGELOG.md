@@ -544,6 +544,17 @@ asset publication.
   report is incomplete and does not publish partial counts as proof that
   everything is fine.
 
+- **OCR no longer discards a correct transcription from the default model.**
+  The Workers AI model OCR uses by default answers in the OpenAI
+  chat-completions shape, `choices[0].message.content`, and has no `response`
+  field at all. The Brain read only `response`, so a page that model read
+  perfectly was thrown away as "no answer text" and the page came back
+  unreadable. It now reads `response` when that carries text and otherwise
+  reads the transcription out of `choices`, so either reply shape is
+  understood. This changes how the reply is read, not which model OCR uses:
+  the default OCR model is unchanged. To check: with OCR enabled, a scanned
+  page read by the default model is indexed instead of refused.
+
 ## 0.4.6
 
 Candidate only. This version has not been released.
