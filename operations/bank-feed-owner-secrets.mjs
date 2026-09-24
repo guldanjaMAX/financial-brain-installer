@@ -138,7 +138,7 @@ export async function validatePlaidApplicationKeys({
   if (code === "INVALID_API_KEYS") {
     throw new Error(
       `Plaid rejected this client_id and secret for the ${environment} environment. The likely cause: ` +
-        "the secret is for a different Plaid environment (sandbox, development or production). " +
+        "the secret is for a different Plaid environment (sandbox or production). " +
         `Copy the ${environment} secret from the owner's Plaid dashboard (Developers, Keys) and run the ` +
         "same command again. Nothing was written.",
     );

@@ -148,7 +148,7 @@ test("a pair from another Plaid environment is refused at the prompt and nothing
       initial, answers: [CLIENT_ID, WRONG_SECRET],
     });
     assert.match(run.message, /Plaid rejected this client_id and secret for the sandbox environment/);
-    assert.match(run.message, /the secret is for a different Plaid environment \(sandbox, development or production\)/);
+    assert.match(run.message, /the secret is for a different Plaid environment \(sandbox or production\)/);
     assert.match(run.message, /Nothing was written/);
     assert.deepEqual(run.worker.writes, [], "not even a first-time wrapping key is written");
     assert.equal(run.opened.length, 0, "the browser does not open on a refused pair");
