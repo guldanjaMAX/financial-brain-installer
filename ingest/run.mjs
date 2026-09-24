@@ -479,7 +479,10 @@ const localFileSafetyCode = (error) => error instanceof LocalFileSafetyError
   ? String(error.code || "LOCAL_FILE_UNAVAILABLE").toLowerCase()
   : "local_file_unavailable";
 
-export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, archiveBytes = MAX_ARCHIVE_BYTES } = {}) {
+export function walk(root, {
+  privatePrefixes = [], maxBytes = MAX_FILE_BYTES, archiveBytes = MAX_ARCHIVE_BYTES,
+  reportJunk = false,
+} = {}) {
   const files = [];
   const skipped = [];
   let complete = true;
@@ -551,7 +554,19 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
         continue;
       }
       if (e.isDirectory()) {
-        if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) {
+          if (reportJunk && SKIP_DIRS.has(e.name)) {
+            skipped.push({
+              path: rel,
+              reason: "build, cache, or filesystem bookkeeping folder is excluded",
+              coverage_gap: false,
+              adjudication: "preview_likely_junk",
+              reason_code: "likely_junk_build_or_cache",
+              scope: "subtree",
+            });
+          }
+          continue;
+        }
         if (isPrivate(rel)) {
           skipped.push({
             path: rel,
@@ -573,7 +588,19 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
       // metadata, and every extractor fails on it. Counting those as errors
       // would bury the real failures in noise.
       if (e.name.startsWith("._")) continue;
-      if (JUNK_FILES.has(e.name.toLowerCase())) continue;
+      if (JUNK_FILES.has(e.name.toLowerCase())) {
+        if (reportJunk) {
+          skipped.push({
+            path: rel,
+            reason: "filesystem thumbnail or bookkeeping file is excluded",
+            coverage_gap: false,
+            adjudication: "preview_likely_junk",
+            reason_code: "likely_junk_thumbnail_or_bookkeeping",
+            scope: "file",
+          });
+        }
+        continue;
+      }
       if (isPrivate(rel)) {
         skipped.push({
           path: rel,

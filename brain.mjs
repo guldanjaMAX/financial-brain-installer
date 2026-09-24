@@ -106,6 +106,10 @@ async function ingestOcrLib() {
   return await import("./ingest/ocr.mjs");
 }
 
+async function loadPreviewLib() {
+  return await import("./ingest/load-preview.mjs");
+}
+
 /**
  * The one-target provenance executor imports the real extraction stack. Keep it
  * lazy for the same reason as ingestLib(): `brain doctor` must still be able to
@@ -7181,6 +7185,7 @@ export const VALUE_FLAGS = new Set([
   "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
   "corpus-contract", "approve-removals", "only", "skip",
+  "preview-report", "vectors-per-minute",
   "approve", "target",
   "can", "zones", "exclude-zones", "until", "as", "subject",
   // brain import bank. `--file` with no value must die saying so rather than
@@ -10980,6 +10985,15 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     saveState: persistState,
     removedSinceLastRun,
   } = await (options.ingestLib ?? ingestLib)();
+  if (flags["preview-report"] && !dry) {
+    die("--preview-report is read-only output and requires --dry-run. Nothing was sent or written.");
+  }
+  const requestedVectorRate = flags["vectors-per-minute"] == null
+    ? undefined
+    : Number(flags["vectors-per-minute"]);
+  if (requestedVectorRate !== undefined && (!Number.isFinite(requestedVectorRate) || requestedVectorRate <= 0)) {
+    die("--vectors-per-minute must be a positive measured rate.");
+  }
   const saveState = (path, value) => {
     assertLockOwned?.();
     return persistState(path, value);
@@ -11079,7 +11093,10 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
 
   const privatePrefixes = m.safety?.private_path_prefixes || [];
   info(`walking ${root}`);
-  const { files, skipped: walkSkips, complete: walkComplete } = walk(root, { privatePrefixes });
+  const { files, skipped: walkSkips, complete: walkComplete } = walk(root, {
+    privatePrefixes,
+    reportJunk: dry,
+  });
   info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
   if (privatePrefixes.length) {
     info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
@@ -11096,6 +11113,15 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   if (flags.limit) warn(`--limit ${flags.limit}: only the first ${limited.length} file(s) will be considered`);
 
   const skips = [...walkSkips];
+  let loadPreview = null;
+  let renderLoadPreviewSummary = null;
+  let writeLoadPreviewDetail = null;
+  if (dry) {
+    ({ createLoadPreview: loadPreview, renderLoadPreviewSummary, writeLoadPreviewDetail } = await loadPreviewLib());
+    loadPreview = loadPreview({ source: sourceName, vectorsPerMinute: requestedVectorRate });
+    for (const file of limited) loadPreview.observeCandidate(file);
+    for (const skip of walkSkips) loadPreview.observeWalkSkip(skip);
+  }
   const notes = [];
   const adjudicatedRemovals = localWalkRemovalCandidates(walkSkips, previouslyKnownKeys);
   const privateRemovalKeys = adjudicatedRemovals.policy;
@@ -11186,6 +11212,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // phase threw away every minute of extraction. Peak memory here is one batch.
   const prepareOne = async (f) => {
     const r = await prepare(f, { sourceName, ocr: ocrCallback, qualityPolicy });
+    loadPreview?.observePrepared(f, r);
     if (r.note) notes.push({ path: f.rel, note: r.note });
     if (r.messageExport) messageExportsSeen.add(r.messageExport);
 
@@ -11299,12 +11326,10 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   if (flags["dry-run"]) {
     // A dry run streams too, so it exercises the same code path rather than a
     // parallel one that could quietly diverge.
-    const preview = [];
     for await (const group of batchStream(limited, prepareOne, {
       onSkip: (sk) => skips.push(sk),
       onProgress: (n) => { if (n % 250 === 0) process.stdout.write(`\r  scanned ${n}/${limited.length}...   `); },
     })) {
-      for (const item of group) if (preview.length < 5) preview.push(item);
       scanned += group.length;
     }
     process.stdout.write("\r");
@@ -11320,17 +11345,22 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     reportNotes(notes);
     console.log("");
     ok("dry run, nothing was sent");
-    await reportSkips(skips);
-    if (preview.length) {
-      console.log(`\n  first few that WOULD be sent:`);
-      for (const r of preview) {
-        const d = r.envelope.occurred_at ? r.envelope.occurred_at.slice(0, 10) : "no date";
-        console.log(`    ${r.rel}  (${d}, ${r.envelope.content.length} chars)`);
-      }
+    const loadReport = loadPreview.finish();
+    console.log(`\n${renderLoadPreviewSummary(loadReport.summary)}`);
+    if (flags["preview-report"]) {
+      const detailPath = resolve(String(flags["preview-report"]));
+      writeLoadPreviewDetail(detailPath, loadReport);
+      info(`private file-level preview written to ${detailPath}`);
     }
     // dry_run is stated on the returned shape rather than left to be inferred
     // from a zero, so a sweep reporting this leg can never call a preview a load.
-    return { dry_run: true, would_send: scanned, unchanged, skipped: skips.length };
+    return {
+      dry_run: true,
+      would_send: scanned,
+      unchanged,
+      skipped: skips.length,
+      load_preview: loadReport.summary,
+    };
   }
 
   // Routine ingest is a data-plane operation. Once setup has saved the live
@@ -15057,6 +15087,27 @@ const cmdIngestRemoteRun = async (
   const rejectedFamilyParts = new Map();
   const intentionalRemovalUids = [];
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+  let remoteLoadPreview = null;
+  let renderRemoteLoadPreviewSummary = null;
+  let writeRemoteLoadPreviewDetail = null;
+  if (flags["preview-report"] && !dry) {
+    die("--preview-report is read-only output and requires --dry-run. Nothing was sent or written.");
+  }
+  const requestedVectorRate = flags["vectors-per-minute"] == null
+    ? undefined
+    : Number(flags["vectors-per-minute"]);
+  if (requestedVectorRate !== undefined && (!Number.isFinite(requestedVectorRate) || requestedVectorRate <= 0)) {
+    die("--vectors-per-minute must be a positive measured rate.");
+  }
+  if (dry && !assistantJson && ["drive", "gmail"].includes(which)) {
+    const previewModule = await loadPreviewLib();
+    remoteLoadPreview = previewModule.createLoadPreview({
+      source: sourceName,
+      vectorsPerMinute: requestedVectorRate,
+    });
+    renderRemoteLoadPreviewSummary = previewModule.renderLoadPreviewSummary;
+    writeRemoteLoadPreviewDetail = previewModule.writeLoadPreviewDetail;
+  }
 
   const addTally = (part) => {
     for (const key of Object.keys(tally)) tally[key] += Number(part?.[key] || 0);
@@ -15516,7 +15567,21 @@ const cmdIngestRemoteRun = async (
       };
     };
 
-    for await (const group of batchStream(files.slice(0, limit), prepareDrive, {
+    const previewDrive = async (file) => {
+      const folder = pathOf(file);
+      const observed = {
+        rel: [folder, file.name || file.id].filter(Boolean).join("/"),
+        name: file.name || file.id,
+        size: Number(file.size || 0),
+        type: file.mimeType || "drive-item",
+        folder: folder || "(root)",
+      };
+      remoteLoadPreview?.observeCandidate(observed);
+      const result = await prepareDrive(file);
+      remoteLoadPreview?.observePrepared(observed, result);
+      return result;
+    };
+    for await (const group of batchStream(files.slice(0, limit), previewDrive, {
       onSkip: (skip) => skips.push(skip),
     })) {
       await consumeGroup(group);
@@ -15912,7 +15977,27 @@ const cmdIngestRemoteRun = async (
         },
       };
     };
-    for await (const group of batchStream(fetched, prepareGmail, {
+    const previewGmail = async (item) => {
+      const labels = Array.isArray(item?.fetched?.envelope?.metadata?.labels)
+        ? item.fetched.envelope.metadata.labels
+        : [];
+      const category = labels.find((label) => /^CATEGORY_/i.test(label)) ||
+        labels.find((label) => ["INBOX", "SENT"].includes(String(label).toUpperCase())) ||
+        "other";
+      const content = String(item?.fetched?.envelope?.content || "");
+      const observed = {
+        rel: String(item.id),
+        name: String(item.id),
+        size: Buffer.byteLength(content, "utf8"),
+        type: "message/rfc822",
+        folder: String(category).toLowerCase(),
+      };
+      remoteLoadPreview?.observeCandidate(observed);
+      const result = await prepareGmail(item);
+      remoteLoadPreview?.observePrepared(observed, result);
+      return result;
+    };
+    for await (const group of batchStream(fetched, previewGmail, {
       onSkip: (skip) => skips.push(skip),
     })) {
       await consumeGroup(group);
@@ -16449,8 +16534,24 @@ const cmdIngestRemoteRun = async (
 
   if (dry) {
     ok("dry run, nothing was sent");
-    await reportSkips(skips);
-    return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length };
+    const loadReport = remoteLoadPreview?.finish() || null;
+    if (loadReport) {
+      console.log(`\n${renderRemoteLoadPreviewSummary(loadReport.summary)}`);
+      if (flags["preview-report"]) {
+        const detailPath = resolve(String(flags["preview-report"]));
+        writeRemoteLoadPreviewDetail(detailPath, loadReport);
+        info(`private file-level preview written to ${detailPath}`);
+      }
+    } else {
+      await reportSkips(skips);
+    }
+    return {
+      dry_run: true,
+      would_send: prepared,
+      unchanged,
+      skipped: skips.length,
+      ...(loadReport ? { load_preview: loadReport.summary } : {}),
+    };
   }
 
   // Every batch landed, so it is now safe to say "we have everything up to
@@ -27181,7 +27282,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            Dropbox or HubSpot OAuth connection
     brain support    --clear --yes         clear private local issue notes
 
-  brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
+  brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. Local
+  folder dry-run adds an aggregate load preview; --preview-report <file> writes
+  the private file-level list with owner-only permissions and refuses overwrite.
+  --vectors-per-minute <n> replaces the reference measured rate in its ETA. It is
   resumable: re-run the same command to continue an interrupted load. A large
   Drive, Gmail, or IMAP cleanup stops first and prints the exact
   --approve-removals fingerprint.

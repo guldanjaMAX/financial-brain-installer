@@ -491,6 +491,16 @@ Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
 exact-plan acknowledgement `--approve-removals <fingerprint>` when a Drive,
 Gmail, IMAP, or local-folder cleanup exceeds its routine safety limits.
 
+Local-folder, Drive, and Gmail dry runs now print an aggregate load preview:
+type or MIME/category, size and top-folder weight, named quality refusals,
+same-source normalized-text duplicates, likely junk classes, and estimated
+chunks/vectors and time. `--vectors-per-minute <n>` supplies a measured rate
+for that Brain. `--preview-report <file>` is the only file-level output; it is
+created owner-only and never overwrites an existing file. Dry-run does not
+contact the Brain, so already-loaded and cross-source hash matches remain
+explicitly unobservable until the read-only inventory contract gains that
+aggregate comparison.
+
 ---
 
 ## Using it: Claude Code and Codex
