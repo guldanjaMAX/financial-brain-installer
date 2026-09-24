@@ -1855,7 +1855,14 @@ export async function prepare(file, { sourceName, ocr = null }) {
  * Streaming fixes both: peak memory is one batch, progress is continuous
  * instead of a long silence, and an interrupt costs at most one batch.
  */
-export async function* batchStream(files, prepareOne, { maxDocs = 50, maxBytes = 900_000, maxStatements = 810, onSkip, onProgress } = {}) {
+export async function* batchStream(files, prepareOne, {
+  maxDocs = 50,
+  maxBytes = 900_000,
+  maxStatements = 810,
+  onSkip,
+  onProgress,
+  onPrepareError,
+} = {}) {
   let cur = [];
   let bytes = 0;
   let statements = 0;
@@ -1866,7 +1873,18 @@ export async function* batchStream(files, prepareOne, { maxDocs = 50, maxBytes =
   // or Gmail id, while the local walker keeps using the exact same path.
   for await (const f of files) {
     scanned++;
-    const r = await prepareOne(f);
+    let r;
+    try {
+      r = await prepareOne(f);
+    } catch (error) {
+      // Isolation is opt-in. Remote cursor paths and callers with no explicit
+      // per-file recovery contract retain the historical fail-closed behavior.
+      // The handler must positively claim the error; returning anything else
+      // preserves the original exception and its safety semantics.
+      if (!onPrepareError || await onPrepareError(error, f) !== true) throw error;
+      if (onProgress) onProgress(scanned, f);
+      continue;
+    }
     if (onProgress) onProgress(scanned, f);
     if (!r) continue;
     if (r.skip) {

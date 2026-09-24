@@ -7714,8 +7714,9 @@ export function localWalkRemovalCandidates(walkSkips = [], previouslyKnownKeys =
  * refused coverage, as are envelopes the Worker itself refused.
  */
 export function localReceiptCoverage(tally = {}, skips = []) {
-  const coverageGaps = (skips || []).filter((skip) => skip?.coverage_gap !== false).length;
-  const adjudicatedSkips = (skips || []).length - coverageGaps;
+  const nonFailures = (skips || []).filter((skip) => skip?.failed !== true);
+  const coverageGaps = nonFailures.filter((skip) => skip?.coverage_gap !== false).length;
+  const adjudicatedSkips = nonFailures.length - coverageGaps;
   const workerRefused = Math.max(0, Number(tally?.refused || 0));
   return {
     coverageGaps,
@@ -11051,6 +11052,9 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     );
   }
   const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const sendPreparedBatches = options.sendBatches ?? sendBatches;
+  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
+  const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const recordSourceReceipt = (receipt) => {
     assertLockOwned?.();
     return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
@@ -11214,6 +11218,26 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   let unchanged = 0;
   let split = 0;
   let scanned = 0;
+  const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+
+  const isolatePreparationError = (error, file) => {
+    // Command gates and lease loss protect the whole operation. They are not a
+    // bad document and must retain their original fail-closed behavior.
+    if (error instanceof Fatal || error instanceof SourceIngestLockError ||
+        error?.code === "source_ingest_lock_lost") return false;
+    assertLockOwned?.();
+    const stateKey = String(file?.rel || file?.name || "unnamed document").split(sep).join("/");
+    const reason = "file preparation failed unexpectedly; it was left for retry";
+    recordLocalSkippedDocumentState(state, {
+      stateKey,
+      nativePath: file?.rel,
+      reason,
+    });
+    if (!dry) saveState(statePath, state);
+    skips.push({ path: safeIngestDisplay(file?.rel, file?.name), reason, failed: true });
+    tally.failed++;
+    return true;
+  };
 
   // One file at a time, sent as each batch fills. Building the whole corpus
   // first cost 584MB of live strings for 250 files, so a real folder OOMs with
@@ -11344,6 +11368,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     const preview = [];
     for await (const group of batchStream(limited, prepareOne, {
       onSkip: (sk) => skips.push(sk),
+      onPrepareError: isolatePreparationError,
       onProgress: (n) => { if (n % 250 === 0) process.stdout.write(`\r  scanned ${n}/${limited.length}...   `); },
     })) {
       for (const item of group) if (preview.length < 5) preview.push(item);
@@ -11358,7 +11383,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       uids: vanishedRemovalKeys.map((key) => `${sourceName}:${key}`),
       base, adminKey, state, dryRun: true, label: "Drive deletion",
     });
-    info(`${scanned} document(s) would be sent; ${unchanged} unchanged; ${skips.length} skipped`);
+    info(`${scanned} document(s) would be sent; ${unchanged} unchanged; ${skips.length} not indexed; ${tally.failed} failed`);
     reportNotes(notes);
     console.log("");
     ok("dry run, nothing was sent");
@@ -11372,7 +11397,8 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     }
     // dry_run is stated on the returned shape rather than left to be inferred
     // from a zero, so a sweep reporting this leg can never call a preview a load.
-    return { dry_run: true, would_send: scanned, unchanged, skipped: skips.length };
+    assertNoIngestFailures(tally, { noun: "file" });
+    return { dry_run: true, would_send: scanned, unchanged, skipped: skips.length, failed: 0 };
   }
 
   // Routine ingest is a data-plane operation. Once setup has saved the live
@@ -11381,7 +11407,6 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const sourceRunId = `sync_${randomBytes(16).toString("hex")}`;
   const sourceRunStartedAt = new Date().toISOString();
   let sourceRunClosed = false;
-  const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
   await recordSourceReceipt({
     source: sourceName,
     kind: "upload",
@@ -11406,6 +11431,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   let batchNo = 0;
   for await (const group of batchStream(limited, prepareOne, {
     onSkip: (sk) => skips.push(sk),
+    onPrepareError: isolatePreparationError,
     onProgress: (n) => {
       scanned = n;
       if (n % 100 === 0) process.stdout.write(`\r  scanned ${n}/${limited.length}, sent ${tally.created + tally.updated}   `);
@@ -11415,7 +11441,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     for (const item of group) if (item.familyPlan) familyPlans.set(item.familyPlan.stateKey, item.familyPlan);
     let t;
     try {
-      t = await sendBatches({
+      t = await sendPreparedBatches({
         base, adminKey, groups: [group], state, statePath, skips, quiet: true,
         saveState, assertOwned: assertLockOwned,
         onResult: (item, result) => {
@@ -11456,7 +11482,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       (plan) => ({ base_doc_uid: plan.base_doc_uid, keep_doc_uids: plan.keep_doc_uids }),
     );
     if (reconciliation.length) {
-      await reconcileDocumentFamilies({
+      await reconcilePreparedFamilies({
         families: reconciliation,
         base,
         adminKey,
@@ -11501,7 +11527,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // a family that exists in D1. This matters most for the unattended folder
   // lane, where a missing File Provider mount can otherwise look like the
   // owner deleted everything.
-  const storedLocalFamilies = await listStoredSourceFamilies({
+  const storedLocalFamilies = await listPreparedSourceFamilies({
     base, adminKey, source: sourceName,
   });
   const localRemovalPlan = buildDriveRemovalPlan({
@@ -11557,7 +11583,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // retry marker and fail the run instead of recording a clean source.
   const plannedLocalTargets = [...new Set([...localTruthTargets, ...vanishedTargets])];
   if (plannedLocalTargets.length) {
-    const afterLocalRemoval = await listStoredSourceFamilies({
+    const afterLocalRemoval = await listPreparedSourceFamilies({
       base, adminKey, source: sourceName,
     });
     const stillStored = plannedLocalTargets.filter((uid) => afterLocalRemoval.has(uid));
@@ -11640,7 +11666,8 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   });
   sourceRunClosed = true;
 
-  const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
+  const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged` +
+    (tally.failed ? `, ${tally.failed} failed` : "");
   if (tally.failed || localRetryableOcrSkips) info(summary);
   else ok(summary);
   if (tally.refused) warn(`${tally.refused} file(s) refused for carrying live credentials. They were NOT indexed.`);
@@ -11664,7 +11691,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   await reportSkips(skips);
 
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
-  assertNoIngestFailures(tally);
+  assertNoIngestFailures(tally, { noun: "file" });
   await reportBacklog(manifestPath);
   // Returned only so a caller that ran this as one leg of a wider sweep can
   // report a real count instead of "unknown". Reached only after

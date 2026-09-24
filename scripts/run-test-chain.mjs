@@ -292,6 +292,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/doc-date.test.mjs",
   "node test/quality.test.mjs",
   "node test/ingest-run.test.mjs",
+  "node --test test/local-ingest-isolation.test.mjs",
   "node --no-warnings test/ingest-prefetch.test.mjs",
   "node --no-warnings test/source-ingest-lock.test.mjs",
   "node test/formats-extra.test.mjs",
