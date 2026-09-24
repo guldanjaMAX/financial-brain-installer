@@ -11,7 +11,6 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,6 +41,7 @@ import {
   verifyUpdateRuntimePayload,
 } from "../operations/update-preview.mjs";
 import { inspectNpmArchiveBytes } from "../operations/package-bundle-verifier.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -49,6 +49,15 @@ const MODULE_PATH = join(HERE, "..", "operations", "update-preview.mjs");
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const nativeRealpath = realpathSync.native || realpathSync;
+
+function createLinkFixture(t, target, path, type) {
+  return createTestSymlink({
+    target,
+    path,
+    type,
+    onSkip: (reason) => t.skip(reason),
+  }).created;
+}
 
 function expectCode(code) {
   return (error) => error instanceof UpdatePreviewError && error.code === code &&
@@ -158,7 +167,7 @@ function bundledBinFixture(t, platform) {
   writeFileSync(join(dependencyRoot, "bin", "tool.mjs"),
     "#!/usr/bin/env node\nconsole.log('fixture');\n");
   if (platform === "posix") {
-    symlinkSync(MOCK_BIN_TARGET, join(binDirectory, "tool"));
+    if (!createLinkFixture(t, MOCK_BIN_TARGET, join(binDirectory, "tool"), "file")) return null;
   } else {
     const shims = mockWindowsNodeShims();
     writeFileSync(join(binDirectory, "tool"), shims.plain);
@@ -494,6 +503,7 @@ test("POSIX bundled executable shim is exact and excluded from archive-derived i
   skip: process.platform === "win32",
 }, (t) => {
   const fixture = bundledBinFixture(t, "posix");
+  if (!fixture) return;
   const proof = verifyUpdateRuntimePayload({
     root: fixture.root,
     allowlist: fixture.allowlist,
@@ -513,8 +523,14 @@ test("POSIX generated shim contract refuses wrong, external, regular, and extra 
 }, async (t) => {
   await t.test("wrong allowlisted target", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     rmSync(join(fixture.binDirectory, "tool"));
-    symlinkSync("../@scope/tool/package.json", join(fixture.binDirectory, "tool"));
+    if (!createLinkFixture(
+      t,
+      "../@scope/tool/package.json",
+      join(fixture.binDirectory, "tool"),
+      "file",
+    )) return;
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         root: fixture.root, allowlist: fixture.allowlist, platform: "posix",
@@ -524,8 +540,11 @@ test("POSIX generated shim contract refuses wrong, external, regular, and extra 
   });
   await t.test("external target", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     rmSync(join(fixture.binDirectory, "tool"));
-    symlinkSync("../../../../outside", join(fixture.binDirectory, "tool"));
+    if (!createLinkFixture(t, "../../../../outside", join(fixture.binDirectory, "tool"), "file")) {
+      return;
+    }
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         root: fixture.root, allowlist: fixture.allowlist, platform: "posix",
@@ -535,6 +554,7 @@ test("POSIX generated shim contract refuses wrong, external, regular, and extra 
   });
   await t.test("regular file substitution", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     rmSync(join(fixture.binDirectory, "tool"));
     writeFileSync(join(fixture.binDirectory, "tool"), MOCK_BIN_TARGET);
     assert.throws(
@@ -546,7 +566,10 @@ test("POSIX generated shim contract refuses wrong, external, regular, and extra 
   });
   await t.test("extra generated link", (t) => {
     const fixture = bundledBinFixture(t, "posix");
-    symlinkSync(MOCK_BIN_TARGET, join(fixture.binDirectory, "tool-extra"));
+    if (!fixture) return;
+    if (!createLinkFixture(t, MOCK_BIN_TARGET, join(fixture.binDirectory, "tool-extra"), "file")) {
+      return;
+    }
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         root: fixture.root, allowlist: fixture.allowlist, platform: "posix",
@@ -641,7 +664,12 @@ test("mocked Windows generated shim contract refuses drift, omission, links, and
   await t.test("linked plain shim", (t) => {
     const fixture = bundledBinFixture(t, "win32");
     rmSync(join(fixture.binDirectory, "tool"));
-    symlinkSync("../@scope/tool/bin/tool.mjs", join(fixture.binDirectory, "tool"));
+    if (!createLinkFixture(
+      t,
+      "../@scope/tool/bin/tool.mjs",
+      join(fixture.binDirectory, "tool"),
+      "file",
+    )) return;
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         root: fixture.root, allowlist: fixture.allowlist, platform: "win32",
@@ -760,24 +788,36 @@ test("runtime platform selector is closed", (t) => {
 
 test("generated shim contract is rebuilt and rechecked on the second complete pass", (t) => {
   const fixture = bundledBinFixture(t, "posix");
-  assert.throws(
-    () => verifyUpdateRuntimePayload({
+  if (!fixture) return;
+  let linkCreated = true;
+  let thrown;
+  try {
+    verifyUpdateRuntimePayload({
       root: fixture.root,
       allowlist: fixture.allowlist,
       expectedRuntimeSha256: fixture.expectedRuntimeSha256,
       platform: "posix",
       betweenPasses() {
         rmSync(join(fixture.binDirectory, "tool"));
-        symlinkSync("../@scope/tool/package.json", join(fixture.binDirectory, "tool"));
+        linkCreated = createLinkFixture(
+          t,
+          "../@scope/tool/package.json",
+          join(fixture.binDirectory, "tool"),
+          "file",
+        );
       },
-    }),
-    expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"),
-  );
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  if (!linkCreated) return;
+  assert.ok(expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID")(thrown));
 });
 
 test("generated shim metadata and count bounds fail closed", async (t) => {
   await t.test("undeclared generated entry is not inferred", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     const dependencyManifest = join(
       fixture.root, "node_modules", "@scope", "tool", "package.json",
     );
@@ -798,6 +838,7 @@ test("generated shim metadata and count bounds fail closed", async (t) => {
   });
   await t.test("more generated declarations than the fixed bound", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     const dependencyManifest = join(
       fixture.root, "node_modules", "@scope", "tool", "package.json",
     );
@@ -854,7 +895,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
   await t.test("symlink", (t) => {
     const fixture = runtimeFixture(t);
     rmSync(join(fixture.root, "empty.txt"));
-    symlinkSync("brain.mjs", join(fixture.root, "empty.txt"));
+    if (!createLinkFixture(t, "brain.mjs", join(fixture.root, "empty.txt"), "file")) return;
     assert.throws(() => inventoryUpdateRuntimePayload(fixture),
       expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"));
   });
@@ -868,7 +909,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
   await t.test("symlinked root", (t) => {
     const fixture = runtimeFixture(t);
     const linkedRoot = join(dirname(fixture.root), "linked-runtime");
-    symlinkSync(fixture.root, linkedRoot, "dir");
+    if (!createLinkFixture(t, fixture.root, linkedRoot, "dir")) return;
     assert.throws(
       () => inventoryUpdateRuntimePayload({ ...fixture, root: linkedRoot }),
       expectCode("UPDATE_PREVIEW_RUNTIME_ROOT_INVALID"),
