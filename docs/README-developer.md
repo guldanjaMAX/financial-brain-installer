@@ -923,8 +923,9 @@ Windows accepts an exact one-entry translation for hourly schedules at minute
 M, every N hours when N divides 24, daily schedules, and weekly schedules on
 one or more numeric weekdays. Any other valid five-field cron is refused before
 `schtasks /Create`; the CLI says that nothing was scheduled and prints a
-filled-in manual recipe. Linux still fails with a platform-specific explanation
-rather than pretending the manifest schedule took effect.
+filled-in one-time `brain.cmd` invocation plus a note that the cadence needs a
+separate manual trigger setup. Linux still fails with a platform-specific
+explanation rather than pretending the manifest schedule took effect.
 
 Scheduler stdout and stderr remain private mode `0600`. At install, after each
 lock-owning ingest child exits, and at removal, each stream is cut back to a
@@ -934,7 +935,7 @@ exceed that cap until it exits, so stale-run monitoring still matters. Rotation
 refuses links, hard links, foreign-owned files, and paths outside the per-user
 `.brain` runtime.
 
-### Unattended watched-folder refresh on macOS
+### Unattended watched-folder refresh on macOS and Windows
 
 The third consumer of the same generalized scheduler, after Drive and iMessage.
 `operations/folder-scheduler.mjs` supplies only a `SCHEDULER_SPEC`; every piece
@@ -957,7 +958,7 @@ read, interrupted run resumes. The folder and source name are bound into the
 config hash, so an installed agent cannot be repointed at another tree by
 editing the manifest afterwards.
 
-`validateExtras` refuses a relative path (launchd's working directory is not the
+`validateExtras` refuses a relative path (a scheduled process's working directory is not the
 client's shell), a folder that does not currently exist (a schedule pointing at
 nothing loads nothing and reports success forever), and a source name outside
 `^[a-z0-9][a-z0-9_-]*$` (the name is the deletion scope). Status and remove stay

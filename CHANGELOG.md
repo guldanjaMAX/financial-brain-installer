@@ -18,9 +18,11 @@ asset publication.
   The task follows the manifest's effective five-field cron when one Windows
   entry can express it exactly: hourly at a chosen minute, every N hours when N
   divides 24, daily, or weekly on chosen days. Other valid cron shapes stop
-  before creating anything and print a filled-in manual recipe. To check: query
-  the printed task name with `schtasks /Query /FO LIST /V`, trigger it once,
-  confirm the source receipt advanced, then remove it with `brain schedule`.
+  before creating anything and print the filled one-time `brain.cmd` invocation
+  plus a note that this cadence needs a separate manual trigger setup. To check:
+  read the printed task's XML back with `schtasks /Query /XML`, verify the exact
+  action and trigger, run it once, confirm the source receipt advanced, then
+  remove it with `brain schedule`.
 
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to

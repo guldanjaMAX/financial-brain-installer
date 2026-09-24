@@ -5,8 +5,13 @@ import {
   DRIVE_SCHEDULER_SPEC,
   cronToCalendarIntervals,
   expectedRefreshSecondsForCron,
+  safeIngestEnvironment,
 } from "./drive-scheduler.mjs";
 import { FOLDER_SCHEDULER_SPEC } from "./folder-scheduler.mjs";
+import {
+  isWindowsBatchValueSafe,
+  publicContractChildEnvironment,
+} from "./npm-cli-runtime.mjs";
 import { createProviderSchedulerSpec } from "./provider-scheduler.mjs";
 
 const WEEKDAYS = Object.freeze(["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]);
@@ -82,7 +87,11 @@ export function cronToSchtasks(expression, cronLabels) {
 function windowsAbsolute(path, options) {
   const value = String(path || "");
   if (!value || value === "undefined") throw new Error("LOCALAPPDATA is required to locate the installed brain.cmd");
-  if (/["\u0000-\u001f]/u.test(value)) throw new Error("Windows scheduler paths cannot contain quotes or control characters");
+  if (!isWindowsBatchValueSafe(value)) {
+    const error = new Error("Windows scheduler paths cannot contain cmd.exe metacharacters or control characters");
+    error.code = "WINDOWS_SCHEDULE_PATH_REFUSED";
+    throw error;
+  }
   if (win32.isAbsolute(value)) return win32.normalize(value);
   const cwd = options.windowsCwd || process.cwd();
   if (!win32.isAbsolute(cwd)) {
@@ -91,14 +100,39 @@ function windowsAbsolute(path, options) {
   return win32.resolve(cwd, value);
 }
 
+function quotedBatchPath(value) {
+  if (!isWindowsBatchValueSafe(value) || !win32.isAbsolute(value)) {
+    const error = new Error("Windows scheduler paths must be absolute and cannot contain cmd.exe metacharacters or control characters");
+    error.code = "WINDOWS_SCHEDULE_PATH_REFUSED";
+    throw error;
+  }
+  return `"${value}"`;
+}
+
 function taskCommand(brainPath, childArguments) {
-  const rendered = childArguments.map((argument) => {
+  const runnerArguments = ["windows-scheduled-ingest", ...childArguments.slice(1)];
+  const rendered = runnerArguments.map((argument, index) => {
     const value = String(argument);
-    return /\s/.test(value) ? `\\"${value}\\"` : value;
+    if (!isWindowsBatchValueSafe(value)) {
+      const error = new Error("Windows scheduler arguments cannot contain cmd.exe metacharacters or control characters");
+      error.code = "WINDOWS_SCHEDULE_PATH_REFUSED";
+      throw error;
+    }
+    const isPath = index === 1 || runnerArguments[index - 1] === "--path";
+    return isPath ? quotedBatchPath(value) : value;
   });
-  // cmd.exe requires the outer escaped quote in addition to the executable's
-  // quotes. Keeping this shape matches the long-standing manual recipe.
-  return `cmd /c \\"\\"${brainPath}\\" ${rendered.join(" ")}\\"`;
+  // spawnSync passes this exact /TR value to schtasks. These are cmd.exe's
+  // real quotes, not backslash escapes copied from an interactive shell.
+  return `cmd.exe /d /s /c "${quotedBatchPath(brainPath)} ${rendered.join(" ")}"`;
+}
+
+function oneTimeBrainCommand(brainPath, childArguments) {
+  const rendered = childArguments.map((argument, index) => {
+    const value = String(argument);
+    const isPath = index === 1 || childArguments[index - 1] === "--path";
+    return isPath ? quotedBatchPath(value) : value;
+  });
+  return `${quotedBatchPath(brainPath)} ${rendered.join(" ")}`;
 }
 
 function printableArgument(value) {
@@ -138,7 +172,9 @@ export function buildWindowsSchedulerPlan(manifestPath, options = {}) {
     : null;
   const brainPath = installing ? win32.join(localAppData, "FinancialBrain", "brain.cmd") : null;
   const taskName = `com.brain-installer.${slug}.${spec.kind}`;
-  const childArguments = installing ? spec.childArgumentsOf(reference) : [];
+  const childArguments = installing ? spec.childArgumentsOf(reference).map((argument, index, args) =>
+    index === 1 || args[index - 1] === "--path" ? windowsAbsolute(argument, options) : String(argument)
+  ) : [];
   const runCommand = installing ? taskCommand(brainPath, childArguments) : null;
   const createArgs = installing && scheduleArgs
     ? ["/Create", "/F", ...scheduleArgs, "/RL", "LIMITED", "/TN", taskName, "/TR", runCommand]
@@ -157,18 +193,47 @@ export function buildWindowsSchedulerPlan(manifestPath, options = {}) {
   };
   if (installing && !scheduleArgs) {
     const supported = "hourly at minute M, every N hours when N divides 24, daily at HH:MM, or weekly on named day(s) at HH:MM";
-    const manualPlan = {
-      ...plan,
-      createArgs: ["/Create", "/F", "/SC", "HOURLY", "/RL", "LIMITED", "/TN", taskName, "/TR", runCommand],
-    };
     const error = new Error(
       `nothing was scheduled. Windows cannot represent the cron "${cron}" exactly with one task. ` +
-      `Supported schedules are ${supported}.\n      Manual recipe: ${renderWindowsTaskRecipe(manualPlan)}`
+      `Supported schedules are ${supported}.\n` +
+      `      Run once: ${oneTimeBrainCommand(brainPath, childArguments)}\n` +
+      "      This cadence needs a manual trigger setup; no approximate Task Scheduler command was created."
     );
     error.code = "WINDOWS_SCHEDULE_UNREPRESENTABLE";
     throw error;
   }
   return plan;
+}
+
+export function safeWindowsScheduledEnvironment(environment = process.env) {
+  return Object.freeze({
+    ...publicContractChildEnvironment(environment),
+    ...safeIngestEnvironment(environment),
+  });
+}
+
+/** Start the ordinary ingest command only after replacing the inherited task environment. */
+export function runWindowsScheduledIngest(manifestPath, options = {}) {
+  const plan = options.plan || buildWindowsSchedulerPlan(manifestPath, options);
+  if (options.expectedChildArguments &&
+      JSON.stringify(options.expectedChildArguments) !== JSON.stringify(plan.childArguments)) {
+    const error = new Error("the scheduled ingest action no longer matches this manifest; reinstall the task");
+    error.code = "WINDOWS_SCHEDULE_CONFIG_CHANGED";
+    throw error;
+  }
+  const brainCliPath = windowsAbsolute(options.brainCliPath || process.argv[1], options);
+  const nodePath = windowsAbsolute(options.nodePath || process.execPath, options);
+  const run = options.ingestRunner || spawnSync;
+  const result = run(nodePath, [brainCliPath, ...plan.childArguments], {
+    cwd: win32.dirname(plan.manifestPath),
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false,
+    stdio: ["ignore", "inherit", "inherit"],
+    env: safeWindowsScheduledEnvironment(options.environment || process.env),
+  });
+  if (result?.error) throw result.error;
+  return { ...plan, status: Number.isInteger(result?.status) ? result.status : 1 };
 }
 
 function runSchtasks(args, options) {
@@ -181,6 +246,7 @@ function runSchtasks(args, options) {
   return run(options.schtasksPath || "schtasks.exe", args, {
     encoding: "utf8",
     windowsHide: true,
+    shell: false,
     env: environment,
   });
 }
