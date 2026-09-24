@@ -10,6 +10,18 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Moving a Brain folder no longer strands it at the old path.** The installer
+  records a native macOS bookmark plus a private marker for the Brain home and
+  each declared local source. A uniquely identified move is adopted before an
+  ingest can mistake the old path for deleted documents. The installed
+  manifest pointer, existing assistant registration, and installed macOS jobs
+  are regenerated with a backup; copied folders refuse until you choose one
+  with `brain relocate --to <folder>`. `brain doctor` reports the tracked
+  folder state. Offloaded iCloud files request a bounded download and remain
+  protected from removal if their bytes are still unavailable. To check: rename
+  a synthetic source and confirm the next dry run reports the move, sends no
+  unchanged file, and plans no removal.
+
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to
   add the exact-byte provenance an older kit never recorded, the Brain still

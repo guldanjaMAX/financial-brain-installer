@@ -313,8 +313,20 @@ import {
 } from "./operations/drive-removal-plan.mjs";
 import {
   discoverInstalledManifest,
+  readInstalledManifest,
   rememberInstalledManifest,
 } from "./operations/installed-manifest.mjs";
+import {
+  FolderIdentityError,
+  completeManifestReferenceRepair,
+  formatFolderMove,
+  oldPathOwnerFileWarnings,
+  pendingManifestReferenceRepair,
+  reconcileTrackedFolders,
+  relocateTrackedFolder,
+  resolveTrackedManifestPath,
+  writeManifestRelocationBackup,
+} from "./operations/folder-identity.mjs";
 import {
   auditMachineContinuity,
   manifestHasProvisionedResourceBindings,
@@ -1247,11 +1259,34 @@ async function cfOnce(path, { method = "GET", body, raw } = {}) {
   return json.result;
 }
 
+let cliFolderTrackingActive = false;
+let lastFolderReconciliation = null;
+
+function manifestIsProductSource(path) {
+  const productRelative = relative(HERE, resolve(path));
+  return Boolean(productRelative && !productRelative.startsWith(`..${sep}`) && productRelative !== "..");
+}
+
 function loadManifest(path) {
   if (!path) die("usage: brain <command> <manifest.json>");
   try {
-    return { path, m: JSON.parse(readFileSync(path, "utf-8")) };
+    const absolute = resolve(path);
+    const m = JSON.parse(readFileSync(absolute, "utf-8"));
+    if (cliFolderTrackingActive) {
+      lastFolderReconciliation = reconcileTrackedFolders(absolute, m);
+      for (const change of lastFolderReconciliation.changes) {
+        info(formatFolderMove(change));
+        for (const ownerPath of oldPathOwnerFileWarnings({
+          brainHome: dirname(absolute),
+          oldPath: change.oldPath,
+        })) {
+          warn(`this owner file still names the old path and was not edited: ${ownerPath}`);
+        }
+      }
+    }
+    return { path: absolute, m };
   } catch (e) {
+    if (e instanceof FolderIdentityError) die(e.message);
     die(`could not read manifest at ${path}: ${e.message}`);
   }
 }
@@ -10771,6 +10806,35 @@ async function cmdOcrPreflightInteractive(manifestPath) {
 async function cmdIngest(manifestPath) {
   const { m } = loadManifest(manifestPath);
   const flags = parseFlags(process.argv.slice(4));
+  const loadedMove = lastFolderReconciliation?.changes?.find((change) =>
+    change.role.startsWith("source:") && resolve(String(flags.path || "")) === resolve(change.oldPath));
+  if (loadedMove) flags.path = loadedMove.newPath;
+  if (flags.path && flags.path !== true && !manifestIsProductSource(manifestPath)) {
+    const requestedRoot = resolve(String(flags.path));
+    const localFolder = m?.corpora?.local_folder;
+    const configuredLocalSource = localFolder?.enabled === true && localFolder.path &&
+      resolve(String(localFolder.path)) === requestedRoot
+      ? String(localFolder.source || "documents")
+      : null;
+    const trackedSourceName = flags.source === true || !flags.source
+      ? configuredLocalSource || declaredUploadSourceFor(m, requestedRoot) || "upload"
+      : String(flags.source);
+    try {
+      lastFolderReconciliation = reconcileTrackedFolders(resolve(manifestPath), m, {
+        additionalSources: [{
+          path: requestedRoot,
+          source: trackedSourceName,
+        }],
+      });
+      for (const change of lastFolderReconciliation.changes) info(formatFolderMove(change));
+    } catch (error) {
+      if (error instanceof FolderIdentityError) die(error.message);
+      throw error;
+    }
+  }
+  const movedSource = lastFolderReconciliation?.changes?.find((change) =>
+    change.role.startsWith("source:") && resolve(String(flags.path || "")) === resolve(change.oldPath));
+  if (movedSource) flags.path = movedSource.newPath;
   // Remote sources reuse everything below the envelope: splitting, batching,
   // the credential gate, resume state and the skip report. Only the producer
   // differs. Calendar is the one exception: its connector already carries
@@ -11057,7 +11121,11 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
 
   const privatePrefixes = m.safety?.private_path_prefixes || [];
   info(`walking ${root}`);
-  const { files, skipped: walkSkips, complete: walkComplete } = walk(root, { privatePrefixes });
+  const { files, skipped: walkSkips, complete: walkComplete } = walk(root, {
+    privatePrefixes,
+    ...(options.hydrateDataless ? { hydrateDataless: options.hydrateDataless } : {}),
+    ...(options.datalessOptions ? { datalessOptions: options.datalessOptions } : {}),
+  });
   info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
   if (privatePrefixes.length) {
     info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
@@ -11163,7 +11231,12 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // a raw V8 abort no handler can catch, and an interrupt during that silent
   // phase threw away every minute of extraction. Peak memory here is one batch.
   const prepareOne = async (f) => {
-    const r = await prepare(f, { sourceName, ocr: ocrCallback });
+    const r = await prepare(f, {
+      sourceName,
+      ocr: ocrCallback,
+      ...(options.hydrateDataless ? { hydrateDataless: options.hydrateDataless } : {}),
+      ...(options.datalessOptions ? { datalessOptions: options.datalessOptions } : {}),
+    });
     if (r.note) notes.push({ path: f.rel, note: r.note });
     if (r.messageExport) messageExportsSeen.add(r.messageExport);
 
@@ -18217,14 +18290,37 @@ export async function cmdDoctor(manifestPath, options = {}) {
   let accountId;
   let cloudflareAuthProfile;
   let existingBrain = false;
+  let folderCheck = null;
   if (manifestPath && existsSync(manifestPath)) {
     try {
       const manifest = loadManifest(manifestPath).m;
+      const folderStatuses = lastFolderReconciliation?.statuses || [];
+      if (folderStatuses.length) {
+        folderCheck = {
+          name: "folders",
+          status: D_OK,
+          detail: folderStatuses.map((item) =>
+            `${item.role} ${item.status === "moved" ? "moved and adopted" : "found"}`).join("; "),
+        };
+      }
       const cloudflare = manifest?.infrastructure?.cloudflare;
       accountId = cloudflare?.account_id;
       cloudflareAuthProfile = cloudflare?.auth_profile;
       existingBrain = manifestHasProvisionedResourceBindings(manifest);
-    } catch { /* doctor must work without a valid manifest */ }
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (/Brain Source folder|Brain folder|folder has the identity/i.test(message)) {
+        folderCheck = {
+          name: "folders",
+          status: D_FAIL,
+          detail: message.replace(/\s+/g, " ").slice(0, 500),
+          fix: /brain relocate/.test(message)
+            ? message
+            : "Run brain relocate <manifest> --to <folder> after choosing the one matching folder.",
+        };
+      }
+      // doctor must still run its machine checks without a valid manifest
+    }
   }
 
   say(`\n  ${c.bold("brain doctor")}${accountId ? c.dim(`  account ${accountId}`) : ""}\n`);
@@ -18256,6 +18352,11 @@ export async function cmdDoctor(manifestPath, options = {}) {
       accountId,
       onStorageError: (error) => warn(String(error?.message || error)),
     });
+  if (folderCheck) {
+    checks.push(folderCheck);
+    const mark = folderCheck.status === D_OK ? c.green("ok  ") : c.red("FAIL");
+    console.log(`  ${mark}  ${folderCheck.name.padEnd(18)}  ${folderCheck.detail}`);
+  }
 
   // An install-state check, not a machine-readiness check: only meaningful
   // once a manifest names a real, presumably-deployed brain.
@@ -19148,6 +19249,16 @@ export async function cmdSetup(manifestPath, options = {}) {
   try {
     const rememberManifest = options.rememberInstalledManifest ?? rememberInstalledManifest;
     rememberManifest(target, options.installedManifestOptions || {});
+    // The adjacent identity record was created on first manifest use. Only a
+    // completed setup owns the global installed-manifest locator needed to find
+    // that record after the Brain home itself moves.
+    if (IS_MAIN || options.writeFolderLocator === true) {
+      reconcileTrackedFolders(target, m, {
+        ...(options.folderIdentityOptions || {}),
+        ...(options.installedManifestOptions || {}),
+        writeLocator: true,
+      });
+    }
   } catch (error) {
     closePrompts();
     die(
@@ -21399,6 +21510,146 @@ export async function cmdWhatsnew(manifestPath, {
   console.log("");
 }
 
+function cliManifestPosition(command) {
+  if (["connect", "disconnect", "import"].includes(command)) return 4;
+  return 3;
+}
+
+export async function refreshInstalledManifestSchedulers(manifestPath, options = {}) {
+  if ((options.platform ?? process.platform) !== "darwin") return [];
+  const schedulerOptions = options.schedulerOptions || {};
+  const receipts = [];
+  const refresh = (label, scheduler, statusName, installName, args = []) => {
+    const observed = scheduler[statusName](...args, manifestPath, schedulerOptions);
+    if (!observed?.installed) return;
+    const installed = scheduler[installName](...args, manifestPath, schedulerOptions);
+    receipts.push({ label, plistPath: installed.plistPath });
+  };
+  const drive = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
+  refresh("Drive", drive, "statusDriveScheduler", "installDriveScheduler");
+  const folder = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
+  refresh("watched folder", folder, "statusFolderScheduler", "installFolderScheduler");
+  const imessage = options.imessageScheduler ?? await import("./operations/imessage-scheduler.mjs");
+  refresh("iMessage", imessage, "statusImessageScheduler", "installImessageScheduler");
+  const provider = options.providerScheduler ?? await import("./operations/provider-scheduler.mjs");
+  for (const providerId of PROVIDER_CONNECTOR_IDS) {
+    const observed = provider.statusProviderScheduler(providerId, manifestPath, schedulerOptions);
+    if (!observed?.installed) continue;
+    const installed = provider.installProviderScheduler(providerId, manifestPath, schedulerOptions);
+    receipts.push({ label: providerId, plistPath: installed.plistPath });
+  }
+  return receipts;
+}
+
+/** Regenerate only references this product owns after its manifest home moves. */
+export async function regenerateMovedManifestReferences({ oldManifestPath, manifestPath }, options = {}) {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const backup = (options.writeBackup ?? writeManifestRelocationBackup)(manifestPath, oldManifestPath, options.folderOptions);
+  const receipts = { backup, pointer: false, mcp: null, schedulers: [] };
+  const readPointer = options.readInstalledManifest ?? readInstalledManifest;
+  const rememberPointer = options.rememberInstalledManifest ?? rememberInstalledManifest;
+  let remembered = null;
+  try { remembered = readPointer(options.installedManifestOptions || {}); } catch { /* a missing pointer is not this move */ }
+  const comparableLocalPath = (value) => {
+    const absolute = resolve(value);
+    return (options.platform ?? process.platform) === "darwin"
+      ? absolute.replace(/^\/private(?=\/(?:var|tmp)(?:\/|$))/, "")
+      : absolute;
+  };
+  if (remembered && comparableLocalPath(remembered) === comparableLocalPath(oldManifestPath)) {
+    rememberPointer(manifestPath, { ...(options.installedManifestOptions || {}), repairUnsafePointer: true });
+    receipts.pointer = true;
+  }
+  const reconcileAgents = options.wireAgents ?? wireAgents;
+  receipts.mcp = await reconcileAgents(manifest, manifestPath, {
+    existingOnly: true,
+    ...(options.wireOptions || {}),
+  });
+  if (receipts.mcp?.failures?.length) {
+    throw new Error(`the moved Brain folder could not safely update ${receipts.mcp.failures.join(", ")}`);
+  }
+  receipts.schedulers = await (options.refreshSchedulers ?? refreshInstalledManifestSchedulers)(
+    manifestPath,
+    options.schedulerRefreshOptions || {},
+  );
+  (options.completeManifestReferenceRepair ?? completeManifestReferenceRepair)(
+    manifestPath,
+    options.folderOptions || {},
+  );
+  return receipts;
+}
+
+async function prepareCliFolderTracking(command, originalManifestPath) {
+  cliFolderTrackingActive = false;
+  if (command === "relocate") return originalManifestPath;
+  const position = cliManifestPosition(command);
+  let selected = originalManifestPath && !String(originalManifestPath).startsWith("--")
+    ? resolve(originalManifestPath)
+    : null;
+  let selectedFromPointer = false;
+  // A flag in the manifest position belongs to the command parser. Do not do
+  // pointer discovery first: unknown recovery flags must be refused promptly,
+  // before any manifest, credential, or host-tool work.
+  if (!selected && !originalManifestPath && ["doctor", "update", "whatsnew"].includes(command)) {
+    try {
+      selected = readInstalledManifest();
+      selectedFromPointer = Boolean(selected);
+    } catch { /* the command owns its ordinary missing-pointer UX */ }
+  }
+  if (!selected) return originalManifestPath;
+  let resolution;
+  try {
+    resolution = resolveTrackedManifestPath(selected);
+  } catch (error) {
+    if (error instanceof FolderIdentityError) die(error.message);
+    throw error;
+  }
+  const nextManifestPath = resolution.path || selected;
+  const pending = resolution.status === "moved" || selectedFromPointer
+    ? pendingManifestReferenceRepair(nextManifestPath)
+    : null;
+  if (resolution.status === "moved" || pending) {
+    const oldManifestPath = resolution.status === "moved"
+      ? selected
+      : pending.old_manifest_path;
+    await regenerateMovedManifestReferences({ oldManifestPath, manifestPath: nextManifestPath });
+    for (const change of resolution.changes || []) {
+      info(formatFolderMove(change));
+      for (const ownerPath of oldPathOwnerFileWarnings({
+        brainHome: dirname(nextManifestPath),
+        oldPath: change.oldPath,
+      })) {
+        warn(`this owner file still names the old path and was not edited: ${ownerPath}`);
+      }
+    }
+    process.argv[position] = nextManifestPath;
+  }
+  if (manifestIsProductSource(nextManifestPath)) {
+    // Shipped templates and test fixtures are product source, never an owner
+    // instance. Do not put private runtime markers into the installed package.
+    return nextManifestPath;
+  }
+  if (command === "doctor") {
+    cliFolderTrackingActive = true;
+    return nextManifestPath;
+  }
+  try {
+    const manifest = JSON.parse(readFileSync(nextManifestPath, "utf8"));
+    lastFolderReconciliation = reconcileTrackedFolders(nextManifestPath, manifest);
+    for (const change of lastFolderReconciliation.changes) {
+      info(formatFolderMove(change));
+      for (const ownerPath of oldPathOwnerFileWarnings({
+        brainHome: dirname(nextManifestPath),
+        oldPath: change.oldPath,
+      })) warn(`this owner file still names the old path and was not edited: ${ownerPath}`);
+    }
+  } catch (error) {
+    if (error instanceof FolderIdentityError) die(error.message);
+    // The command's own manifest loader retains its established parse error.
+  }
+  return nextManifestPath;
+}
+
 /* ---------------------------------------------------------------- main */
 
 // Only run the CLI when this file IS the program. Without this guard, importing
@@ -21419,7 +21670,9 @@ const IS_MAIN = (() => {
   }
 })();
 
-const [, , cmd, manifestPath] = process.argv;
+const [, , cmd] = process.argv;
+const initialManifestPath = process.argv[cliManifestPosition(cmd)];
+let manifestPath = initialManifestPath;
 const cliBoundaryCommand = classifyCliCredentialBoundary(cmd, process.argv.slice(3));
 currentSupportCommand = cliBoundaryCommand;
 /**
@@ -25601,6 +25854,13 @@ export async function cmdUpdate(manifestPath, options = {}) {
         );
       }
     }
+    if (IS_MAIN || options.writeFolderLocator === true) {
+      reconcileTrackedFolders(pin.target, JSON.parse(readFileSync(pin.target, "utf8")), {
+        ...(options.folderIdentityOptions || {}),
+        ...(options.installedManifestOptions || {}),
+        writeLocator: true,
+      });
+    }
     if (reconcileOwnerAgents) {
       try {
         updatedManifest = loadManifest(pin.target).m;
@@ -25691,6 +25951,42 @@ async function dispatchRollback(manifestPath) {
     die("usage: brain rollback <manifest> <bookmark> [--yes]");
   }
   return cmdRollbackInteractive(manifestPath, bookmark, { confirmed: flags.yes === true });
+}
+
+export async function cmdRelocate(manifestPath, options = {}) {
+  const hasExplicitManifest = Boolean(manifestPath && !String(manifestPath).startsWith("--"));
+  const flags = options.flags ?? parseFlags(process.argv.slice(hasExplicitManifest ? 4 : 3));
+  assertKnownFlags(flags, ["to", "role"], "brain relocate");
+  if (!flags.to || flags.to === true) {
+    die("usage: brain relocate [manifest] --to <folder> [--role <tracked-role>]");
+  }
+  let selected = hasExplicitManifest ? resolve(manifestPath) : null;
+  if (!selected) {
+    try { selected = readInstalledManifest(options.installedManifestOptions || {}); } catch (error) {
+      if (!(error instanceof FolderIdentityError)) throw error;
+    }
+  }
+  if (!selected) die("no installed Brain manifest is remembered; name its previous full path before --to");
+  let result;
+  try {
+    result = relocateTrackedFolder({
+      manifestPath: selected,
+      to: String(flags.to),
+      role: flags.role && flags.role !== true ? String(flags.role) : null,
+    }, options.folderOptions || {});
+  } catch (error) {
+    if (error instanceof FolderIdentityError) die(error.message);
+    throw error;
+  }
+  const manifestMove = result.changes?.find((change) => change.role === "manifest-home");
+  if (manifestMove) {
+    await (options.regenerateMovedManifestReferences ?? regenerateMovedManifestReferences)({
+      oldManifestPath: selected,
+      manifestPath: result.path,
+    }, options.referenceOptions || {});
+  }
+  for (const change of result.changes || []) info(formatFolderMove(change));
+  return result;
 }
 
 /** Every option `brain doctor` reads. Anything else is a typo or a flag from a
@@ -26952,6 +27248,7 @@ const commands = {
   }),
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
+  relocate: cmdRelocate,
   schedule: cmdSchedule,
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
@@ -27025,6 +27322,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            Brain, local connectors, schedules, checkpoints,
                                            technician skill, and Claude Code/Codex MCP wiring
     brain doctor     [manifest]            check this machine has everything it needs
+    brain relocate   [manifest] --to <folder>  choose one proven moved Brain or source folder
     brain tools      [manifest] --intent <choice>
                                            prepare local tools, preserve first/existing/new-computer/
                                            resume/unsure routing, and write bootstrap status
@@ -27210,7 +27508,10 @@ if (IS_MAIN) {
 
   // Wrapped so a client who signed in with `wrangler login` never has to mint
   // or paste a token. Scoped to this one invocation.
-  runCliCommandWithCredentialBoundary(cliBoundaryCommand, () => commands[cmd](manifestPath)).catch((e) => {
+  runCliCommandWithCredentialBoundary(cliBoundaryCommand, async () => {
+    manifestPath = await prepareCliFolderTracking(cmd, manifestPath);
+    return commands[cmd](manifestPath);
+  }).catch((e) => {
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a

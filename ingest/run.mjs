@@ -26,6 +26,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep, basename, dirname } from "node:path";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { extract, canExtract, extensionOf, isBinaryFormat } from "./extract.mjs";
 import {
   MAX_DOC_CHARS, batches, envelopeBytes, estimatedStatements, splitOversized,
@@ -71,7 +72,10 @@ const SKIP_DIRS = new Set([
 ]);
 
 /** Filesystem bookkeeping, never content. */
-const JUNK_FILES = new Set(["thumbs.db", "desktop.ini", "icon\r", ".ds_store", "$recycle.bin"]);
+const JUNK_FILES = new Set([
+  "thumbs.db", "desktop.ini", "icon\r", ".ds_store", "$recycle.bin",
+  ".financial-brain-folder.json",
+]);
 
 /** A single file larger than this is a database or a media asset, not a document. */
 export const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -479,7 +483,57 @@ const localFileSafetyCode = (error) => error instanceof LocalFileSafetyError
   ? String(error.code || "LOCAL_FILE_UNAVAILABLE").toLowerCase()
   : "local_file_unavailable";
 
-export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, archiveBytes = MAX_ARCHIVE_BYTES } = {}) {
+function syncPause(milliseconds) {
+  const lock = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(lock, 0, 0, milliseconds);
+}
+
+export function macDatalessStatus(path, options = {}) {
+  if ((options.platform ?? process.platform) !== "darwin") return false;
+  const spawn = options.spawnSync ?? spawnSync;
+  const result = spawn("/usr/bin/stat", ["-f", "%Sf", path], {
+    encoding: "utf8",
+    timeout: 5_000,
+    env: { PATH: "/usr/bin:/bin" },
+  });
+  return result.status === 0 && /(?:^|,)dataless(?:,|$)/i.test(String(result.stdout || "").trim());
+}
+
+/** Ask macOS to hydrate one offloaded file without ever creating a stand-in. */
+export function hydrateDatalessFile(path, options = {}) {
+  const isDataless = options.isDataless ?? macDatalessStatus;
+  if (!isDataless(path, options)) return { dataless: false, downloadRequested: false, available: true };
+  const spawn = options.spawnSync ?? spawnSync;
+  const request = options.requestDownload ?? ((target) => spawn("/usr/bin/brctl", ["download", target], {
+    encoding: "utf8",
+    timeout: 10_000,
+    env: { PATH: "/usr/bin:/bin" },
+  }));
+  const requested = request(path);
+  const accepted = requested === true || requested?.status === 0;
+  const waitMs = Math.max(0, Math.min(Number(options.waitMs ?? 30_000), 60_000));
+  const intervalMs = Math.max(10, Math.min(Number(options.intervalMs ?? 250), 2_000));
+  const pause = options.pause ?? syncPause;
+  let waited = 0;
+  while (accepted && waited < waitMs && isDataless(path, options)) {
+    pause(Math.min(intervalMs, waitMs - waited));
+    waited += intervalMs;
+  }
+  return {
+    dataless: true,
+    downloadRequested: accepted,
+    available: !isDataless(path, options),
+    waitedMs: Math.min(waited, waitMs),
+  };
+}
+
+export function walk(root, {
+  privatePrefixes = [],
+  maxBytes = MAX_FILE_BYTES,
+  archiveBytes = MAX_ARCHIVE_BYTES,
+  hydrateDataless = hydrateDatalessFile,
+  datalessOptions = {},
+} = {}) {
   const files = [];
   const skipped = [];
   let complete = true;
@@ -601,7 +655,42 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
         complete = false;
         continue;
       }
-      const size = Number(approval.identity.size);
+      let size = Number(approval.identity.size);
+      // An offloaded iCloud item can look empty before its bytes are local.
+      // Probe zero-byte entries before empty-content adjudication. A test seam
+      // may request the same probe for a nonzero synthetic stat.
+      if (size === 0 || datalessOptions.probeEveryFile === true) {
+        const hydration = hydrateDataless(full, datalessOptions);
+        if (hydration?.dataless && !hydration.available) {
+          skipped.push({
+            path: rel,
+            reason: "iCloud file is offloaded and its download did not finish in the bounded wait",
+            coverage_gap: false,
+            adjudication: "preserve_dataless_file",
+            reason_code: "icloud_dataless_download_pending",
+            scope: "file",
+            original_state: "unavailable",
+            download_requested: hydration.downloadRequested === true,
+          });
+          continue;
+        }
+        if (hydration?.dataless && hydration.available) {
+          try {
+            approval = approveWalkedFile(full, rootApproval);
+            size = Number(approval.identity.size);
+          } catch (error) {
+            skipped.push({
+              path: rel,
+              reason: localFileSafetyReason(error),
+              reason_code: localFileSafetyCode(error),
+              scope: "file",
+              original_state: "unavailable",
+            });
+            complete = false;
+            continue;
+          }
+        }
+      }
       if (!Number.isSafeInteger(size) || size < 0) {
         skipped.push({
           path: rel,
@@ -1639,7 +1728,12 @@ export function removedSinceLastRun(knownKeys, present) {
 /**
  * Read one file and turn it into an ingest envelope, or into a reasoned skip.
  */
-export async function prepare(file, { sourceName, ocr = null }) {
+export async function prepare(file, {
+  sourceName,
+  ocr = null,
+  hydrateDataless = hydrateDatalessFile,
+  datalessOptions = {},
+}) {
   const ext = extensionOf(file.name);
 
   // Local mbox archives are admitted independently of their total size. The
@@ -1664,7 +1758,31 @@ export async function prepare(file, { sourceName, ocr = null }) {
   try {
     buf = readApprovedLocalFile(file, { maxBytes: sizeLimit });
   } catch (e) {
-    return { skip: { path: file.rel, reason: localFileSafetyReason(e) } };
+    const hydration = hydrateDataless(file.full, datalessOptions);
+    if (hydration?.dataless && !hydration.available) {
+      return {
+        skip: {
+          path: file.rel,
+          reason: "iCloud file is offloaded and its download did not finish in the bounded wait",
+          coverage_gap: false,
+          adjudication: "preserve_dataless_file",
+          reason_code: "icloud_dataless_download_pending",
+          download_requested: hydration.downloadRequested === true,
+        },
+      };
+    }
+    if (hydration?.dataless && hydration.available) {
+      try {
+        const rootApproval = approveLocalRoot(dirname(file.full));
+        const refreshed = approveWalkedFile(file.full, rootApproval);
+        file = { ...file, _localApproval: refreshed, size: Number(refreshed.identity.size) };
+        buf = readApprovedLocalFile(file, { maxBytes: sizeLimit });
+      } catch (retryError) {
+        return { skip: { path: file.rel, reason: localFileSafetyReason(retryError) } };
+      }
+    } else {
+      return { skip: { path: file.rel, reason: localFileSafetyReason(e) } };
+    }
   }
   let hash = sha(buf);
   let actualBytes = buf.length;

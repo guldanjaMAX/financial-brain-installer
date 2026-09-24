@@ -165,6 +165,11 @@ It reads your manifest, works out which sources you actually have, runs every on
 - It does not connect anything. If a source is switched on in your manifest but not yet authorized on this machine, it is skipped with the exact command that would connect it. Connecting is a decision, not something a load should do on your behalf.
 - It does not load Zoom, ever, and this is not a gap. Zoom **pushes**: a finished cloud recording calls your brain's own webhook and the transcript loads itself. There is nothing for a sweep to fetch, so it says so rather than printing a reassuring line for work it did not do.
 - It does not reach anything your manifest does not name. Folders on your machine are read only if you list them under `corpora.upload.folders`.
+- Declared local folders carry a private product marker and native identity
+  where available, so a unique rename or move is adopted before source-removal
+  comparison. Copies refuse until the owner chooses one with `brain relocate`.
+  The marker is never indexed. An offloaded iCloud file remains protected while
+  its bounded download is pending.
 - It does not make a source work that is not built. A corpus your manifest declares that this version has no loader for is reported as exactly that, out loud.
 
 **Options.**

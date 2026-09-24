@@ -13,6 +13,11 @@ import {
   readAdminKeyDurably,
 } from "../operations/admin-key-persistence.mjs";
 import { fetchBrainWithAdminKey } from "./brain-http.mjs";
+import {
+  FolderIdentityError,
+  reconcileTrackedFolders,
+  resolveTrackedManifestPath,
+} from "../operations/folder-identity.mjs";
 
 const DURABLE_CREDENTIAL_ERROR =
   "the durable brain credential could not be read and verified. Run `brain secrets <manifest>` and restart the AI tool if this continues.";
@@ -24,8 +29,12 @@ function durableCredential(manifestPath, options) {
     if (typeof manifestPath !== "string" || !manifestPath || !isAbsolute(manifestPath)) {
       throw new Error("invalid manifest locator");
     }
+    const resolveManifest = options.resolveTrackedManifestPath ?? resolveTrackedManifestPath;
+    const resolvedManifestPath = resolveManifest(manifestPath, options.folderIdentityOptions || {}).path;
     const read = options.readFile ?? readFileSync;
-    const manifest = JSON.parse(read(manifestPath, "utf8"));
+    const manifest = JSON.parse(read(resolvedManifestPath, "utf8"));
+    const reconcileFolders = options.reconcileTrackedFolders ?? reconcileTrackedFolders;
+    reconcileFolders(resolvedManifestPath, manifest, options.folderIdentityOptions || {});
     const platform = options.platform ?? process.platform;
     const durableOptions = {
       ...(options.durableOptions || {}),
@@ -36,11 +45,12 @@ function durableCredential(manifestPath, options) {
     };
     const makePlan = options.adminKeyPersistencePlan ?? adminKeyPersistencePlan;
     const readDurable = options.readAdminKeyDurably ?? readAdminKeyDurably;
-    const plan = makePlan(manifestPath, manifest, durableOptions);
+    const plan = makePlan(resolvedManifestPath, manifest, durableOptions);
     const value = readDurable(plan, durableOptions);
     if (!value) throw new Error("missing durable credential");
     return value;
-  } catch {
+  } catch (error) {
+    if (error instanceof FolderIdentityError) throw new Error(error.message);
     // Never relay parser, filesystem, PowerShell, Keychain, path, or secret
     // detail through MCP output. The installer has the actionable diagnostics.
     throw new Error(DURABLE_CREDENTIAL_ERROR);

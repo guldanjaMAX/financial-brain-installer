@@ -852,6 +852,26 @@ so statements, confirmations, and reminders are not silently missed.
 The local-folder guard matters because a folder that failed to mount looks
 exactly like a client who deleted everything in it.
 
+The Brain now identifies local folders independently of their path. On macOS it
+keeps a system bookmark, and on every platform it keeps a hidden
+`.financial-brain-folder.json` marker that is never indexed. If the Brain home
+or a declared local source is renamed or moved, the next command adopts one
+uniquely matching folder before ingest compares source truth. A copied folder
+is deliberately ambiguous and changes nothing. Choose the intended copy with:
+
+```bash
+brain relocate ./brain.manifest.json --to "/the/folder/to/keep"
+```
+
+`brain doctor <manifest>` reports the `folders` check. It says whether every
+tracked folder is found or was moved and adopted. If no matching folder exists,
+the command states that nothing was deleted and tells you to put it back or use
+`brain relocate`. Existing files outside the product's own pointer, assistant
+registration, and scheduler definitions are warned about but never edited.
+An iCloud file carrying the macOS `dataless` flag is asked to download with a
+bounded wait. If it is still offloaded, it is reported and protected from
+removal; the Brain never writes a placeholder over it.
+
 Ask directly in the terminal, even if you do not have Claude Code or Codex:
 
 ```bash
