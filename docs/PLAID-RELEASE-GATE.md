@@ -91,6 +91,10 @@ Each one was missed or misread in a sandbox rehearsal.
    itself when none exists. Every account needs an owner choice before its
    transactions enter the ledger, and `/api/bank-feed/status` lists a
    connection waiting on those choices under `needs_attention` with the count.
+   An account the Brain cannot store exactly (an unsupported or unofficial-only
+   currency, or an unsafe balance magnitude) is held instead: it gets no owner
+   choice, stays out of every total, and is listed under `needs_attention` in
+   `held_accounts` with its reason code while the bank's other accounts sync.
 8. **Disconnect lives in the owner app.** It is not on the connect page. In the
    Brain app, go to Access > Banks > Disconnect. Saved history stays.
 

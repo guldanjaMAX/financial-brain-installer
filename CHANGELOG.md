@@ -22,6 +22,19 @@ asset publication.
   To check: a connection that previously showed "cannot be represented
   exactly" now loads its accounts.
 
+- **One unsupported account no longer stops the rest of its bank.** An
+  account in a currency the Brain cannot store exactly (for example a peso
+  account beside dollar accounts, or one reported only in an unofficial
+  currency), or with an impossibly large balance, used to put the whole bank
+  connection into error. That one account is now held: it is left out of every
+  total and never asks for an owner choice, its transactions are kept aside
+  with the bank's exact figures rather than dropped, and every other account at
+  that bank keeps syncing. `/api/bank-feed/status` lists the connection under
+  needs attention with the held account, its reason, and how many of its
+  transactions are kept aside. A bank where every account is unsupported still
+  stops with its reason, as before. To check: a mixed-currency bank loads its
+  supported accounts and names the held one in status.
+
 - **A mistyped Plaid key can be corrected.** `brain connect bank <manifest>
   --replace-keys` asks for both Plaid keys again at the same hidden prompt and
   leaves the wrapping key untouched. Every typed pair, including the first
