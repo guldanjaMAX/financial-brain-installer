@@ -20,6 +20,10 @@ import {
   captureDirectD1ContentFingerprint,
   hashNormalizedRecoveryDataExport,
 } from "../operations/recovery-content-fingerprint.mjs";
+import {
+  SYMLINK_PRIVILEGE_UNAVAILABLE_REASON,
+  createTestSymlink,
+} from "./helpers/symlink-capability.mjs";
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "brain-content-fingerprint-"));
@@ -27,6 +31,76 @@ function fixture(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return realpathSync(root);
 }
+
+test("shared symlink fixture capability skips only missing privilege", () => {
+  const calls = [];
+  const skipped = [];
+  const created = createTestSymlink({
+    target: "target",
+    path: "link",
+    type: "file",
+    symlink(target, path, type) {
+      calls.push({ target, path, type });
+    },
+    onSkip: (reason) => skipped.push(reason),
+  });
+  assert.deepEqual(created, { created: true, type: "file" });
+  assert.deepEqual(calls, [{ target: "target", path: "link", type: "file" }]);
+  assert.deepEqual(skipped, []);
+
+  const unavailable = createTestSymlink({
+    target: "target",
+    path: "link",
+    type: "file",
+    symlink() {
+      const error = new Error("privilege not held");
+      error.code = "EPERM";
+      throw error;
+    },
+    onSkip: (reason) => skipped.push(reason),
+  });
+  assert.deepEqual(unavailable, { created: false, type: null });
+  assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+
+  const directoryAttempts = [];
+  const junction = createTestSymlink({
+    target: "target-directory",
+    path: "linked-directory",
+    type: "dir",
+    platform: "win32",
+    symlink(target, path, type) {
+      directoryAttempts.push({ target, path, type });
+      if (type === "dir") {
+        const error = new Error("privilege not held");
+        error.code = "EACCES";
+        throw error;
+      }
+    },
+    onSkip: (reason) => skipped.push(reason),
+  });
+  assert.deepEqual(junction, { created: true, type: "junction" });
+  assert.deepEqual(directoryAttempts, [
+    { target: "target-directory", path: "linked-directory", type: "dir" },
+    { target: "target-directory", path: "linked-directory", type: "junction" },
+  ]);
+  assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+
+  assert.throws(
+    () => createTestSymlink({
+      target: "target",
+      path: "link",
+      type: "file",
+      symlink() {
+        const error = new Error("unexpected fixture failure");
+        error.code = "EINVAL";
+        throw error;
+      },
+      onSkip: (reason) => skipped.push(reason),
+    }),
+    (error) => error?.code === "EINVAL",
+  );
+  assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+});
 
 test("normalized recovery fingerprint hashes the prefix and exact export bytes", (t) => {
   const root = fixture(t);
