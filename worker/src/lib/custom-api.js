@@ -1,0 +1,846 @@
+/**
+ * Declarative, Worker-hosted JSON API source.
+ *
+ * The manifest is compiled into the CUSTOM_API_CONFIG plain-text binding. The
+ * bearer value remains a separately named Worker secret and is looked up only
+ * for the duration of a pull. Provider response bodies and raw errors never
+ * enter logs or lifecycle receipts.
+ */
+
+import { scan as scanSecrets } from "./secret-scan.js";
+import { restampFirstPartySourceProvenance } from "./provenance-receipt.js";
+import { backendOf, D1, storeFor } from "./store.js";
+
+const SAFE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const SAFE_SECRET_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
+const RESERVED_SECRET_NAME = /^(?:(?:ADMIN_KEY|AI|DB|VECTORIZE|R2|CUSTOM_API_CONFIG)$|(?:BRAIN|BANK|GOOGLE|ZOOM|PROVIDER)_)/;
+const SAFE_FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const ALLOWED_CONFIG_KEYS = new Set([
+  "_comment", "enabled", "display_name", "source", "base_url", "token_secret",
+  "cadence_seconds", "timeout_ms", "max_response_bytes", "max_rows",
+  "max_pages", "retries", "endpoints",
+]);
+const ALLOWED_ENDPOINT_KEYS = new Set([
+  "name", "path", "row_key", "legacy_row_key", "document",
+]);
+const ALLOWED_DOCUMENT_KEYS = new Set([
+  "group_by", "title_template", "body_template", "aggregates", "formats",
+]);
+const ALLOWED_AGGREGATES = new Set(["sum", "min", "max"]);
+const ALLOWED_FORMATS = new Set(["currency", "number", "integer", "text"]);
+const ALLOWED_ENVELOPE_KEYS = new Set(["data", "next", "next_page", "pagination", "has_more"]);
+const ALLOWED_PAGINATION_KEYS = new Set(["next"]);
+
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024;
+const DEFAULT_MAX_ROWS = 500;
+const DEFAULT_MAX_PAGES = 20;
+const DEFAULT_RETRIES = 3;
+
+const isPlainObject = (value) => value !== null && typeof value === "object" &&
+  !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+
+function unexpectedKey(value, allowed) {
+  return Object.keys(value).find((key) => !allowed.has(key));
+}
+
+function boundedInteger(value, fallback, min, max, label) {
+  const candidate = value === undefined ? fallback : value;
+  if (!Number.isSafeInteger(candidate) || candidate < min || candidate > max) {
+    throw new TypeError(`${label} must be an integer from ${min} through ${max}`);
+  }
+  return candidate;
+}
+
+function fieldList(value, label, { allowEmpty = false } = {}) {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0) ||
+      value.some((field) => typeof field !== "string" || !SAFE_FIELD.test(field)) ||
+      new Set(value).size !== value.length) {
+    throw new TypeError(`${label} must be ${allowEmpty ? "a" : "a non-empty"} unique field-name array`);
+  }
+  return [...value];
+}
+
+function safeTemplate(value, label) {
+  if (typeof value !== "string" || !value.trim() || value.length > 8_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) {
+    throw new TypeError(`${label} must be non-empty plain text of at most 8000 characters`);
+  }
+  return value;
+}
+
+function normalizeDocument(value, label) {
+  if (!isPlainObject(value)) throw new TypeError(`${label} must be an object`);
+  const extra = unexpectedKey(value, ALLOWED_DOCUMENT_KEYS);
+  if (extra) throw new TypeError(`${label}.${extra} is not supported`);
+  const aggregates = value.aggregates ?? {};
+  const formats = value.formats ?? {};
+  if (!isPlainObject(aggregates) || Object.entries(aggregates).some(([field, operation]) =>
+    !SAFE_FIELD.test(field) || !ALLOWED_AGGREGATES.has(operation))) {
+    throw new TypeError(`${label}.aggregates contains an unsupported field or operation`);
+  }
+  if (!isPlainObject(formats) || Object.entries(formats).some(([field, format]) =>
+    !SAFE_FIELD.test(field) || !ALLOWED_FORMATS.has(format))) {
+    throw new TypeError(`${label}.formats contains an unsupported field or format`);
+  }
+  return Object.freeze({
+    group_by: fieldList(value.group_by ?? [], `${label}.group_by`, { allowEmpty: true }),
+    title_template: safeTemplate(value.title_template, `${label}.title_template`),
+    body_template: safeTemplate(value.body_template, `${label}.body_template`),
+    aggregates: Object.freeze({ ...aggregates }),
+    formats: Object.freeze({ ...formats }),
+  });
+}
+
+export function validateCustomApiConfig(value) {
+  if (!isPlainObject(value)) throw new TypeError("custom_api must be an object");
+  const extra = unexpectedKey(value, ALLOWED_CONFIG_KEYS);
+  if (extra) throw new TypeError(`custom_api.${extra} is not supported`);
+  if (value.enabled !== true) throw new TypeError("custom_api.enabled must be true");
+  const source = String(value.source || "");
+  if (!SAFE_NAME.test(source)) throw new TypeError("custom_api.source is invalid");
+  const tokenSecret = String(value.token_secret || "");
+  if (!SAFE_SECRET_NAME.test(tokenSecret) || RESERVED_SECRET_NAME.test(tokenSecret)) {
+    throw new TypeError("custom_api.token_secret must name a dedicated uppercase Worker secret");
+  }
+  let base;
+  try {
+    base = new URL(String(value.base_url || ""));
+  } catch {
+    throw new TypeError("custom_api.base_url must be an HTTPS URL");
+  }
+  if (base.protocol !== "https:" || base.username || base.password || base.port || base.search || base.hash) {
+    throw new TypeError("custom_api.base_url must be one HTTPS origin and path with no credentials, port, query, or fragment");
+  }
+  base.pathname = base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`;
+  if (!Array.isArray(value.endpoints) || value.endpoints.length < 1 || value.endpoints.length > 20) {
+    throw new TypeError("custom_api.endpoints must contain 1 through 20 endpoints");
+  }
+  const endpointNames = new Set();
+  const endpoints = value.endpoints.map((endpoint, index) => {
+    const label = `custom_api.endpoints[${index}]`;
+    if (!isPlainObject(endpoint)) throw new TypeError(`${label} must be an object`);
+    const endpointExtra = unexpectedKey(endpoint, ALLOWED_ENDPOINT_KEYS);
+    if (endpointExtra) throw new TypeError(`${label}.${endpointExtra} is not supported`);
+    const name = String(endpoint.name || "");
+    if (!SAFE_NAME.test(name) || endpointNames.has(name)) throw new TypeError(`${label}.name is invalid or duplicated`);
+    endpointNames.add(name);
+    const path = String(endpoint.path || "");
+    if (!/^\/[A-Za-z0-9][A-Za-z0-9/_-]*$/.test(path) || path.includes("..") || path.includes("//")) {
+      throw new TypeError(`${label}.path must be one absolute-looking path with no query or traversal`);
+    }
+    return Object.freeze({
+      name,
+      path,
+      row_key: fieldList(endpoint.row_key, `${label}.row_key`),
+      legacy_row_key: endpoint.legacy_row_key == null
+        ? null
+        : fieldList(endpoint.legacy_row_key, `${label}.legacy_row_key`),
+      document: normalizeDocument(endpoint.document, `${label}.document`),
+    });
+  });
+  return Object.freeze({
+    enabled: true,
+    display_name: String(value.display_name || "custom business API").replace(/\s+/g, " ").trim().slice(0, 80) || "custom business API",
+    source,
+    base_url: base.href,
+    token_secret: tokenSecret,
+    cadence_seconds: boundedInteger(value.cadence_seconds, 86400, 3600, 31 * 86400, "custom_api.cadence_seconds"),
+    timeout_ms: boundedInteger(value.timeout_ms, DEFAULT_TIMEOUT_MS, 250, 30_000, "custom_api.timeout_ms"),
+    max_response_bytes: boundedInteger(value.max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES, 1024, 2 * 1024 * 1024, "custom_api.max_response_bytes"),
+    max_rows: boundedInteger(value.max_rows, DEFAULT_MAX_ROWS, 1, 2_000, "custom_api.max_rows"),
+    max_pages: boundedInteger(value.max_pages, DEFAULT_MAX_PAGES, 1, 100, "custom_api.max_pages"),
+    retries: boundedInteger(value.retries, DEFAULT_RETRIES, 1, 5, "custom_api.retries"),
+    endpoints: Object.freeze(endpoints),
+  });
+}
+
+export class CustomApiError extends Error {
+  constructor(code, message, { endpoint = null, status = null, retryable = false } = {}) {
+    super(message);
+    this.name = "CustomApiError";
+    this.code = code;
+    this.endpoint = endpoint;
+    this.status = status;
+    this.retryable = retryable;
+  }
+}
+
+export function customApiOwnerMessage(code, displayName = "store dashboard") {
+  const name = String(displayName || "store dashboard").replace(/\s+/g, " ").trim().slice(0, 80) || "store dashboard";
+  if (code === "AUTH_REQUIRED") return `The ${name} refused the key. Ask its developer to check it.`;
+  if (code === "RATE_LIMITED") return `The ${name} asked the Brain to wait. It will try again on the next scheduled pull.`;
+  if (code === "REMOTE_UNAVAILABLE" || code === "NETWORK_UNREACHABLE") return `The ${name} could not be reached. The saved data was left unchanged.`;
+  if (code === "RESPONSE_TOO_LARGE") return `The ${name} returned more data than this source allows in one response. Ask its developer to add paging or narrow the endpoint.`;
+  if (code === "REDIRECT_REFUSED") return `The ${name} tried to send the Brain to another address. The pull was refused before following it.`;
+  if (code === "PERSISTENCE_VERIFY_FAILED") return `The Brain could not verify the saved ${name} update. The source remains marked for installer review.`;
+  if (code === "CONFIG_INVALID") return `The ${name} setup is not valid. Ask the installer to review its manifest mapping.`;
+  return `The ${name} returned data the Brain could not safely understand. The saved data was left unchanged.`;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function sha256(value) {
+  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function endpointUrl(config, endpoint) {
+  return new URL(endpoint.path.replace(/^\//, ""), config.base_url);
+}
+
+function assertAllowedUrl(url, config, endpoint) {
+  const base = new URL(config.base_url);
+  if (url.protocol !== "https:" || url.origin !== base.origin || !url.pathname.startsWith(base.pathname) ||
+      url.username || url.password || url.hash) {
+    throw new CustomApiError("REDIRECT_REFUSED", "custom API paging left the configured HTTPS boundary", { endpoint: endpoint.name });
+  }
+}
+
+async function boundedJson(response, config, endpoint) {
+  const length = Number(response.headers.get("content-length"));
+  if (Number.isFinite(length) && length > config.max_response_bytes) {
+    throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API response exceeded its configured byte limit", { endpoint: endpoint.name });
+  }
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (!contentType.includes("application/json")) {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API response was not JSON", { endpoint: endpoint.name });
+  }
+  if (!response.body?.getReader) {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API response could not be read safely", { endpoint: endpoint.name });
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > config.max_response_bytes) {
+        await reader.cancel().catch(() => {});
+        throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API response exceeded its configured byte limit", { endpoint: endpoint.name });
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return { value: JSON.parse(new TextDecoder().decode(bytes)), bytes };
+  } catch {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API returned malformed JSON", { endpoint: endpoint.name });
+  }
+}
+
+function pageShape(value, currentUrl, config, endpoint) {
+  if (Array.isArray(value)) return { rows: value, next: null };
+  if (!isPlainObject(value)) {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API response was neither an array nor a data envelope", { endpoint: endpoint.name });
+  }
+  const extra = unexpectedKey(value, ALLOWED_ENVELOPE_KEYS);
+  if (extra || !Array.isArray(value.data)) {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API data envelope was not recognized", { endpoint: endpoint.name });
+  }
+  if (value.pagination !== undefined && (!isPlainObject(value.pagination) || unexpectedKey(value.pagination, ALLOWED_PAGINATION_KEYS))) {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API pagination envelope was not recognized", { endpoint: endpoint.name });
+  }
+  if (value.has_more !== undefined && typeof value.has_more !== "boolean") {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API has_more value was not boolean", { endpoint: endpoint.name });
+  }
+  const candidates = [value.next, value.next_page, value.pagination?.next]
+    .filter((candidate) => candidate !== undefined && candidate !== null && candidate !== false && candidate !== "");
+  if (candidates.length > 1) {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API response supplied conflicting paging values", { endpoint: endpoint.name });
+  }
+  if (value.has_more === true && candidates.length === 0) {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API said more data exists without a next page", { endpoint: endpoint.name });
+  }
+  if (candidates.length === 0) return { rows: value.data, next: null };
+  const candidate = candidates[0];
+  let next;
+  if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0) {
+    next = new URL(currentUrl.href);
+    next.searchParams.set("page", String(candidate));
+  } else if (typeof candidate === "string" && candidate.length <= 2_000) {
+    next = new URL(candidate, currentUrl);
+  } else {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API next page was not recognized", { endpoint: endpoint.name });
+  }
+  assertAllowedUrl(next, config, endpoint);
+  return { rows: value.data, next };
+}
+
+function normalizeRow(value, endpoint, token) {
+  if (!isPlainObject(value) || Object.keys(value).length === 0 || Object.keys(value).length > 100) {
+    throw new CustomApiError("INVALID_RESPONSE", "custom API row was not a bounded object", { endpoint: endpoint.name });
+  }
+  const row = {};
+  for (const [field, item] of Object.entries(value)) {
+    if (!SAFE_FIELD.test(field) || !["string", "number", "boolean"].includes(typeof item) ||
+        (typeof item === "number" && !Number.isFinite(item)) ||
+        (typeof item === "string" && (item.length > 8_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(item)))) {
+      throw new CustomApiError("INVALID_RESPONSE", "custom API row contained an unsupported field or value", { endpoint: endpoint.name });
+    }
+    row[field] = item;
+  }
+  const serialized = canonicalJson(row);
+  if ((token && serialized.includes(token)) || scanSecrets(serialized).shouldRefuse) {
+    throw new CustomApiError("SECRET_IN_RESPONSE", "custom API response was held by the credential scanner", { endpoint: endpoint.name });
+  }
+  return row;
+}
+
+function hasKeyFields(row, fields) {
+  return fields.every((field) => Object.hasOwn(row, field) && row[field] !== "" && row[field] !== null);
+}
+
+function rowIdentity(row, endpoint) {
+  const fields = hasKeyFields(row, endpoint.row_key)
+    ? endpoint.row_key
+    : endpoint.legacy_row_key && hasKeyFields(row, endpoint.legacy_row_key)
+      ? endpoint.legacy_row_key
+      : null;
+  if (!fields) {
+    throw new CustomApiError("INVALID_ROW_KEY", "custom API row did not contain its declared identity", { endpoint: endpoint.name });
+  }
+  return fields.map((field) => `${field}=${JSON.stringify(row[field])}`).join("|");
+}
+
+async function fetchPage(url, config, endpoint, token, { fetchImpl, sleep }) {
+  for (let attempt = 1; attempt <= config.retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.timeout_ms);
+    let response;
+    try {
+      response = await fetchImpl(url.href, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        redirect: "manual",
+        signal: controller.signal,
+      });
+    } catch {
+      clearTimeout(timer);
+      if (attempt < config.retries) {
+        await sleep(250 * (2 ** (attempt - 1)));
+        continue;
+      }
+      throw new CustomApiError("NETWORK_UNREACHABLE", "custom API request did not complete", { endpoint: endpoint.name, retryable: true });
+    }
+    if (response.status >= 300 && response.status < 400) {
+      clearTimeout(timer);
+      await response.body?.cancel().catch(() => {});
+      throw new CustomApiError("REDIRECT_REFUSED", "custom API redirect was refused", { endpoint: endpoint.name, status: response.status });
+    }
+    if (response.status === 401 || response.status === 403) {
+      clearTimeout(timer);
+      await response.body?.cancel().catch(() => {});
+      throw new CustomApiError("AUTH_REQUIRED", "custom API refused its bearer credential", { endpoint: endpoint.name, status: response.status });
+    }
+    if (response.status === 429 || response.status >= 500) {
+      clearTimeout(timer);
+      if (attempt < config.retries) {
+        await response.body?.cancel().catch(() => {});
+        await sleep(250 * (2 ** (attempt - 1)));
+        continue;
+      }
+      throw new CustomApiError(response.status === 429 ? "RATE_LIMITED" : "REMOTE_UNAVAILABLE", "custom API remained unavailable after bounded retries", {
+        endpoint: endpoint.name, status: response.status, retryable: true,
+      });
+    }
+    if (!response.ok) {
+      clearTimeout(timer);
+      await response.body?.cancel().catch(() => {});
+      throw new CustomApiError("INVALID_RESPONSE", "custom API returned an unsupported status", { endpoint: endpoint.name, status: response.status });
+    }
+    try {
+      return await boundedJson(response, config, endpoint);
+    } catch (error) {
+      if (error instanceof CustomApiError) throw error;
+      if (attempt < config.retries) {
+        await sleep(250 * (2 ** (attempt - 1)));
+        continue;
+      }
+      throw new CustomApiError("NETWORK_UNREACHABLE", "custom API response did not complete", { endpoint: endpoint.name, retryable: true });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new CustomApiError("REMOTE_UNAVAILABLE", "custom API retry loop ended unexpectedly", { endpoint: endpoint.name });
+}
+
+async function fetchEndpoint(config, endpoint, token, dependencies) {
+  let url = endpointUrl(config, endpoint);
+  const visited = new Set();
+  const rows = [];
+  const responseDigests = [];
+  let responseBytes = 0;
+  while (url) {
+    assertAllowedUrl(url, config, endpoint);
+    if (visited.has(url.href) || visited.size >= config.max_pages) {
+      throw new CustomApiError("INVALID_RESPONSE", "custom API paging repeated or exceeded its limit", { endpoint: endpoint.name });
+    }
+    visited.add(url.href);
+    const page = await fetchPage(url, config, endpoint, token, dependencies);
+    responseBytes += page.bytes.byteLength;
+    if (responseBytes > config.max_response_bytes) {
+      throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API endpoint exceeded its configured byte limit across pages", { endpoint: endpoint.name });
+    }
+    responseDigests.push(await sha256(page.bytes));
+    const shaped = pageShape(page.value, url, config, endpoint);
+    for (const value of shaped.rows) {
+      if (rows.length >= config.max_rows) {
+        throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API returned too many rows", { endpoint: endpoint.name });
+      }
+      rows.push(normalizeRow(value, endpoint, token));
+    }
+    url = shaped.next;
+  }
+  const identities = new Set();
+  const keyed = [];
+  for (const row of rows) {
+    const key = rowIdentity(row, endpoint);
+    if (identities.has(key)) {
+      throw new CustomApiError("DUPLICATE_ROW_KEY", "custom API returned the same row identity more than once", { endpoint: endpoint.name });
+    }
+    identities.add(key);
+    keyed.push({ row_key: key, row, row_hash: await sha256(canonicalJson(row)) });
+  }
+  return { rows: keyed, response_hash: await sha256(responseDigests.join(":")), pages: visited.size };
+}
+
+function formatValue(value, format = "text") {
+  if (value === null || value === undefined) return "";
+  if (format === "currency") {
+    const number = Number(value);
+    return Number.isFinite(number)
+      ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(number)
+      : String(value);
+  }
+  if (format === "number") {
+    const number = Number(value);
+    return Number.isFinite(number) ? new Intl.NumberFormat("en-US").format(number) : String(value);
+  }
+  if (format === "integer") {
+    const number = Number(value);
+    return Number.isFinite(number) ? new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(number) : String(value);
+  }
+  return String(value);
+}
+
+function markdownTable(rows, formats) {
+  const fields = [...new Set(rows.flatMap((item) => Object.keys(item.row)))].sort();
+  const header = `| ${fields.join(" | ")} |`;
+  const divider = `| ${fields.map(() => "---").join(" | ")} |`;
+  const body = rows.map((item) => `| ${fields.map((field) =>
+    formatValue(item.row[field], formats[field]).replaceAll("|", "\\|").replace(/\s+/g, " ").trim()
+  ).join(" | ")} |`);
+  return [header, divider, ...body].join("\n");
+}
+
+function aggregate(rows, field, operation) {
+  const numbers = rows.map((item) => Number(item.row[field])).filter(Number.isFinite);
+  if (!numbers.length) return null;
+  if (operation === "sum") return numbers.reduce((sum, value) => sum + value, 0);
+  if (operation === "min") return Math.min(...numbers);
+  return Math.max(...numbers);
+}
+
+function renderTemplate(template, context) {
+  return template.replace(/\{\{([a-zA-Z0-9_.]+)\}\}/g, (_match, path) => {
+    const value = path.split(".").reduce((current, key) => current?.[key], context);
+    if (value === undefined || value === null) {
+      throw new CustomApiError("CONFIG_INVALID", `custom API document template references unavailable ${path}`);
+    }
+    return String(value);
+  });
+}
+
+function buildDocuments(config, endpoint, rows, fetchedAt, responseHash) {
+  const groups = new Map();
+  for (const item of rows) {
+    const values = endpoint.document.group_by.map((field) => item.row[field]);
+    if (values.some((value) => value === undefined || value === null || value === "")) {
+      throw new CustomApiError("INVALID_RESPONSE", "custom API row cannot be grouped by the declared document fields", { endpoint: endpoint.name });
+    }
+    const key = canonicalJson(values);
+    if (!groups.has(key)) groups.set(key, { values, rows: [] });
+    groups.get(key).rows.push(item);
+  }
+  if (rows.length === 0 && endpoint.document.group_by.length === 0) {
+    groups.set("[]", { values: [], rows: [] });
+  }
+  const fetchedDate = fetchedAt.slice(0, 10);
+  return [...groups.values()].map((group) => {
+    group.rows.sort((a, b) => a.row_key.localeCompare(b.row_key));
+    const context = { fetched_date: fetchedDate, row_count: group.rows.length, sum: {}, min: {}, max: {} };
+    endpoint.document.group_by.forEach((field, index) => { context[field] = group.values[index]; });
+    for (const [field, operation] of Object.entries(endpoint.document.aggregates)) {
+      context[operation][field] = formatValue(aggregate(group.rows, field, operation), endpoint.document.formats[field]);
+    }
+    context.rows_table = markdownTable(group.rows, endpoint.document.formats);
+    const title = renderTemplate(endpoint.document.title_template, context);
+    const content = renderTemplate(endpoint.document.body_template, context);
+    const sourceIdParts = endpoint.document.group_by.length ? group.values : [fetchedDate];
+    const sourceId = `${endpoint.name}:${sourceIdParts.map(String).join(":")}`;
+    const metadata = {
+      connector: "custom_api",
+      endpoint: endpoint.path,
+      fetched_at: fetchedAt,
+      response_hash: responseHash,
+      row_keys: group.rows.map((item) => item.row_key),
+    };
+    const envelope = {
+      source_type: config.source,
+      source_id: sourceId,
+      title,
+      content,
+      occurred_at: endpoint.document.group_by.includes("period")
+        ? String(context.period)
+        : fetchedDate,
+      date_source: endpoint.document.group_by.includes("period")
+        ? "custom_api:period"
+        : "custom_api:fetched_date",
+      date_reliable: true,
+      text_source: "native",
+      text_reliable: true,
+      metadata,
+    };
+    if (scanSecrets(canonicalJson(envelope)).shouldRefuse) {
+      throw new CustomApiError("SECRET_IN_RESPONSE", "custom API document was held by the credential scanner", { endpoint: endpoint.name });
+    }
+    return { ...envelope, _custom_api_changed: group.rows.some((item) => item.action === "created" || item.action === "updated") };
+  });
+}
+
+function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
+  const prior = new Map((priorRows || []).map((item) => [String(item.row_key), item]));
+  const rowChanges = fetched.rows.map((item) => ({
+    ...item,
+    prior_hash: prior.get(item.row_key)?.row_hash || null,
+    prior_revision: Number(prior.get(item.row_key)?.revision || 0),
+    action: !prior.has(item.row_key)
+      ? "created"
+      : prior.get(item.row_key).row_hash === item.row_hash
+        ? "unchanged"
+        : "updated",
+  }));
+  const present = new Set(rowChanges.map((item) => item.row_key));
+  const retained = [...prior.values()]
+    .filter((item) => !present.has(String(item.row_key)) && isPlainObject(item.row))
+    .map((item) => ({ row_key: String(item.row_key), row_hash: String(item.row_hash), row: item.row, action: "retained" }));
+  const documents = buildDocuments(config, endpoint, [...rowChanges, ...retained], fetchedAt, fetched.response_hash)
+    .filter((document) => document._custom_api_changed)
+    .map(({ _custom_api_changed, ...document }) => document);
+  return { rowChanges, retained, documents };
+}
+
+export async function runCustomApiPull(rawConfig, {
+  token,
+  fetchImpl = fetch,
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now = () => new Date(),
+  persistence,
+  dryRun = false,
+  logger = { info() {}, warn() {} },
+} = {}) {
+  const config = validateCustomApiConfig(rawConfig);
+  if (typeof token !== "string" || !token || token.length > 2_048) {
+    throw new CustomApiError("AUTH_REQUIRED", "custom API Worker secret is missing");
+  }
+  if (!persistence || typeof persistence.loadRows !== "function" || typeof persistence.persist !== "function") {
+    throw new TypeError("custom API pull needs persistence loadRows and persist functions");
+  }
+  const fetchedAt = now().toISOString();
+  const total = { created: 0, updated: 0, unchanged: 0 };
+  let documents = 0;
+  let retained = 0;
+  for (const endpoint of config.endpoints) {
+    logger.info(`custom API: fetching ${endpoint.name}`);
+    const fetched = await fetchEndpoint(config, endpoint, token, { fetchImpl, sleep });
+    const prior = await persistence.loadRows({ source: config.source, endpoint: endpoint.name });
+    const plan = planEndpoint(config, endpoint, fetched, prior, fetchedAt);
+    for (const row of plan.rowChanges) total[row.action]++;
+    documents += plan.documents.length;
+    retained += plan.retained.length;
+    if (!dryRun) {
+      await persistence.persist({
+        source: config.source,
+        endpoint: endpoint.name,
+        rowChanges: plan.rowChanges,
+        documentChanges: plan.documents,
+        fetchedAt,
+        responseHash: fetched.response_hash,
+      });
+    }
+  }
+  return Object.freeze({
+    status: "completed",
+    dry_run: dryRun,
+    source: config.source,
+    endpoints: config.endpoints.length,
+    rows: Object.freeze(total),
+    documents,
+    retained_missing_rows: retained,
+    fetched_at: fetchedAt,
+  });
+}
+
+function chunked(values, size) {
+  const groups = [];
+  for (let index = 0; index < values.length; index += size) groups.push(values.slice(index, index + size));
+  return groups;
+}
+
+/** D1 adapter kept here so scheduled and manual runs share the exact writer. */
+export function customApiD1Persistence(env) {
+  return {
+    async loadRows({ source, endpoint }) {
+      const result = await env.DB.prepare(
+        `SELECT row_key,row_hash,row_json,revision
+           FROM custom_api_rows WHERE source=?1 AND endpoint=?2`
+      ).bind(source, endpoint).all();
+      return (result?.results || []).map((row) => {
+        let parsed = null;
+        try { parsed = JSON.parse(row.row_json); } catch { parsed = null; }
+        return {
+          row_key: String(row.row_key),
+          row_hash: String(row.row_hash),
+          row: isPlainObject(parsed) ? parsed : null,
+          revision: Number(row.revision || 0),
+        };
+      });
+    },
+
+    async persist({ source, endpoint, rowChanges, documentChanges, fetchedAt, responseHash }) {
+      // Searchable prose lands through the same D1 document writer and vector
+      // outbox as every other first-party source. Only changed groups reach it.
+      for (const document of documentChanges) {
+        const envelope = restampFirstPartySourceProvenance(document, {
+          textSource: "native",
+          textReliable: true,
+          sourceType: source,
+        });
+        await storeFor(env).ingest(env, envelope);
+      }
+
+      const changed = rowChanges.filter((row) => row.action !== "unchanged");
+      const statements = [];
+      for (const row of changed) {
+        const nextRevision = Number(row.prior_revision || 0) + 1;
+        statements.push(env.DB.prepare(
+          `INSERT INTO custom_api_rows
+             (source,endpoint,row_key,row_hash,row_json,revision,first_seen_at,updated_at)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?7)
+           ON CONFLICT(source,endpoint,row_key) DO UPDATE SET
+             row_hash=excluded.row_hash,row_json=excluded.row_json,
+             revision=custom_api_rows.revision+1,updated_at=excluded.updated_at`
+        ).bind(source, endpoint, row.row_key, row.row_hash, canonicalJson(row.row), nextRevision, fetchedAt));
+        if (row.action === "updated") {
+          statements.push(env.DB.prepare(
+            `INSERT INTO custom_api_row_revisions
+               (source,endpoint,row_key,revision,prior_hash,new_hash,revised_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)`
+          ).bind(source, endpoint, row.row_key, nextRevision, row.prior_hash, row.row_hash, fetchedAt));
+        }
+      }
+      const runId = crypto.randomUUID();
+      statements.push(env.DB.prepare(
+        `INSERT INTO custom_api_fetches
+           (run_id,source,endpoint,fetched_at,response_hash,rows_seen,rows_created,rows_updated,rows_unchanged)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)`
+      ).bind(
+        runId, source, endpoint, fetchedAt, responseHash, rowChanges.length,
+        rowChanges.filter((row) => row.action === "created").length,
+        rowChanges.filter((row) => row.action === "updated").length,
+        rowChanges.filter((row) => row.action === "unchanged").length,
+      ));
+      for (const batch of chunked(statements, 80)) await env.DB.batch(batch);
+
+      // A returned batch is not proof that the exact current rows landed. Read
+      // every changed identity and the endpoint receipt back before the source
+      // can advance to ready.
+      for (const batch of chunked(changed, 80)) {
+        const receipts = await env.DB.batch(batch.map((row) => env.DB.prepare(
+          `SELECT row_hash,revision FROM custom_api_rows
+            WHERE source=?1 AND endpoint=?2 AND row_key=?3`
+        ).bind(source, endpoint, row.row_key)));
+        receipts.forEach((receipt, index) => {
+          const stored = receipt?.results?.[0];
+          const expected = batch[index];
+          const expectedRevision = Number(expected.prior_revision || 0) + 1;
+          if (stored?.row_hash !== expected.row_hash || Number(stored?.revision) !== expectedRevision) {
+            throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API row write did not read back exactly", { endpoint });
+          }
+        });
+      }
+      const fetchReceipt = await env.DB.prepare(
+        "SELECT response_hash FROM custom_api_fetches WHERE run_id=?1"
+      ).bind(runId).first();
+      if (fetchReceipt?.response_hash !== responseHash) {
+        throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API fetch receipt did not read back exactly", { endpoint });
+      }
+    },
+  };
+}
+
+function configFromEnv(env) {
+  if (!env.CUSTOM_API_CONFIG) return null;
+  let parsed;
+  try { parsed = JSON.parse(env.CUSTOM_API_CONFIG); } catch {
+    throw new CustomApiError("CONFIG_INVALID", "custom API Worker configuration is not valid JSON");
+  }
+  return validateCustomApiConfig(parsed);
+}
+
+async function setSourceState(env, config, state, { at, message = null } = {}) {
+  if (state === "indexing") {
+    const existing = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1").bind(config.source).first();
+    if (existing && String(existing.kind).trim().toLowerCase() !== "custom_api") {
+      throw new CustomApiError("CONFIG_INVALID", "custom API source name is already owned by another source kind");
+    }
+    await env.DB.prepare(
+      `INSERT INTO sources (name,kind,status,created_at,expected_refresh_seconds,stale_reason)
+       VALUES (?1,'custom_api','indexing',?2,?3,NULL)
+       ON CONFLICT(name) DO UPDATE SET status='indexing',expected_refresh_seconds=?3,stale_reason=NULL
+       WHERE lower(trim(sources.kind))='custom_api'`
+    ).bind(config.source, at, config.cadence_seconds).run();
+    const claimed = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1").bind(config.source).first();
+    if (String(claimed?.kind || "").trim().toLowerCase() !== "custom_api") {
+      throw new CustomApiError("CONFIG_INVALID", "custom API source identity could not be read back");
+    }
+    await env.DB.prepare(
+      "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'ingest',?2,'custom API pull started')"
+    ).bind(config.source, at).run();
+    return;
+  }
+  const count = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM documents WHERE source=?1 AND deleted_at IS NULL"
+  ).bind(config.source).first();
+  if (state === "ready") {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE sources SET status='ready',last_ingest_at=?2,document_count=?3,
+           expected_refresh_seconds=?4,stale_reason=NULL WHERE name=?1 AND kind='custom_api'`
+      ).bind(config.source, at, Number(count?.n || 0), config.cadence_seconds),
+      env.DB.prepare(
+        "INSERT INTO source_events (source_name,event,at,documents,detail) VALUES (?1,'ingest',?2,?3,'custom API pull completed')"
+      ).bind(config.source, at, Number(count?.n || 0)),
+    ]);
+    return;
+  }
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE sources SET status='error',expected_refresh_seconds=?2,stale_reason=?3
+       WHERE name=?1 AND kind='custom_api'`
+    ).bind(config.source, config.cadence_seconds, message),
+    env.DB.prepare(
+      "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'error',?2,?3)"
+    ).bind(config.source, at, message),
+  ]);
+}
+
+async function acquireRunLease(env, config, { at, scheduled }) {
+  const nowMs = Date.parse(at);
+  const token = crypto.randomUUID();
+  const leaseMs = Math.min(15 * 60_000, Math.max(60_000, config.timeout_ms * config.endpoints.length * config.retries + 30_000));
+  const row = await env.DB.prepare(
+    `INSERT INTO custom_api_schedule_state (source,last_success_at,lease_token,lease_expires_at)
+     VALUES (?1,NULL,?2,?3)
+     ON CONFLICT(source) DO UPDATE SET lease_token=?2,lease_expires_at=?3
+       WHERE custom_api_schedule_state.lease_expires_at IS NULL
+          OR custom_api_schedule_state.lease_expires_at<=?4
+     RETURNING last_success_at,lease_token`
+  ).bind(config.source, token, nowMs + leaseMs, nowMs).first();
+  if (row?.lease_token !== token) {
+    throw new CustomApiError("RUN_BUSY", "another custom API pull already owns the run lease", { retryable: true });
+  }
+  if (scheduled && Number.isFinite(Date.parse(row.last_success_at)) &&
+      nowMs - Date.parse(row.last_success_at) < config.cadence_seconds * 1000) {
+    await env.DB.prepare(
+      "UPDATE custom_api_schedule_state SET lease_token=NULL,lease_expires_at=NULL WHERE source=?1 AND lease_token=?2"
+    ).bind(config.source, token).run();
+    return { token: null, due: false };
+  }
+  return { token, due: true };
+}
+
+async function releaseRunLease(env, config, token, { successAt = null } = {}) {
+  if (!token) return;
+  await env.DB.prepare(
+    `UPDATE custom_api_schedule_state
+        SET last_success_at=COALESCE(?3,last_success_at),lease_token=NULL,lease_expires_at=NULL
+      WHERE source=?1 AND lease_token=?2`
+  ).bind(config.source, token, successAt).run();
+}
+
+/** Shared scheduled/manual Worker entry point. */
+export async function runCustomApiWorker(env, options = {}) {
+  if (backendOf(env) !== D1) {
+    throw new CustomApiError("CONFIG_INVALID", "custom API sources require the D1 backend");
+  }
+  const config = configFromEnv(env);
+  if (!config) return { status: "disabled", dry_run: options.dryRun === true };
+  const token = env[config.token_secret];
+  const at = (options.now ?? (() => new Date()))().toISOString();
+  let lease = null;
+  let sourceStarted = false;
+  if (options.dryRun !== true) {
+    lease = await acquireRunLease(env, config, { at, scheduled: options.scheduled === true });
+    if (!lease.due) return { status: "not_due", dry_run: false };
+    await setSourceState(env, config, "indexing", { at });
+    sourceStarted = true;
+  }
+  try {
+    const result = await runCustomApiPull(config, {
+      token,
+      fetchImpl: options.fetchImpl ?? fetch,
+      sleep: options.sleep,
+      now: options.now,
+      dryRun: options.dryRun === true,
+      persistence: options.persistence ?? customApiD1Persistence(env),
+      logger: options.logger,
+    });
+    if (options.dryRun !== true) {
+      await setSourceState(env, config, "ready", { at: result.fetched_at });
+      await releaseRunLease(env, config, lease.token, { successAt: result.fetched_at });
+    }
+    return result;
+  } catch (error) {
+    const safe = error instanceof CustomApiError
+      ? error
+      : new CustomApiError("INTERNAL_ERROR", "custom API pull failed internally");
+    if (options.dryRun !== true && sourceStarted) {
+      await setSourceState(env, config, "error", {
+        at,
+        message: customApiOwnerMessage(safe.code, config.display_name),
+      }).catch(() => {});
+    }
+    if (options.dryRun !== true) await releaseRunLease(env, config, lease?.token).catch(() => {});
+    throw safe;
+  }
+}
+
+export function customApiWorkerBinding(manifest) {
+  const raw = manifest?.corpora?.custom_api;
+  if (!raw || raw.enabled !== true) return null;
+  return {
+    type: "plain_text",
+    name: "CUSTOM_API_CONFIG",
+    text: JSON.stringify(validateCustomApiConfig(raw)),
+  };
+}
+
+export const CUSTOM_API_RUN_PATH = "/api/admin/brain/custom-api";

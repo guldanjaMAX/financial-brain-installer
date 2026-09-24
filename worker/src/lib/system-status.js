@@ -52,6 +52,7 @@ const SOURCE_LABELS = {
   hubspot: "HubSpot",
   quickbooks: "QuickBooks Online",
   plaid: "Banking transactions",
+  custom_api: "Custom business API",
 };
 
 /** Kinds are a small closed set and make a better fallback than a slug. */
@@ -75,6 +76,7 @@ const KIND_LABELS = {
   hubspot: "HubSpot",
   quickbooks: "QuickBooks Online",
   plaid: "Banking transactions",
+  custom_api: "Custom business API",
 };
 
 const COVERAGE_STATES = Object.freeze({

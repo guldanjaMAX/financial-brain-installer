@@ -849,7 +849,7 @@ export function supportSystemProjection(status) {
   const kindAllowlist = new Set([
     "upload", "drive", "message", "email", "gmail", "imap", "calendar",
     "imessage", "whatsapp", "iphone-backup", "zoom", "plaid", "quickbooks",
-    "slack", "notion", "microsoft", "dropbox", "box", "hubspot",
+    "slack", "notion", "microsoft", "dropbox", "box", "hubspot", "custom_api",
   ]);
   const coverageStates = {
     starter_context: new Set(["preparing", "ready", "degraded"]),
@@ -896,7 +896,7 @@ export function supportSystemProjection(status) {
         label: [
         "Files you uploaded", "Google Drive", "Messages", "Email", "Calendar",
         "Meeting recordings", "QuickBooks Online", "Slack", "Notion",
-        "Microsoft 365", "Dropbox", "Box", "HubSpot", "Banking transactions", "Another source",
+        "Microsoft 365", "Dropbox", "Box", "HubSpot", "Banking transactions", "Custom business API", "Another source",
       ].includes(source.label) ? source.label : "Another source",
         kind: kindAllowlist.has(source.kind) ? source.kind : "other",
         state: stateAllowlist.has(source.state) ? source.state : "unknown",

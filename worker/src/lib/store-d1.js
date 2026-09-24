@@ -100,6 +100,7 @@ const HISTORICAL_SOURCE_LABELS = Object.freeze({
   hubspot: "HubSpot",
   quickbooks: "QuickBooks Online",
   plaid: "Plaid",
+  custom_api: "custom business API",
   upload: "uploaded file",
   "iphone-backup": "iPhone backup",
   "owner-notes": "conversational owner notes",
@@ -3460,10 +3461,10 @@ export async function diagnose(env, {
  */
 const INDEXING_STUCK_MS = 6 * 60 * 60 * 1000;
 const SOURCE_REVIEW_ISSUE_CODE = "SAFETY_REVIEW_REQUIRED";
-const AUTOMATABLE_SOURCE_KINDS = new Set(["drive", "gmail", "calendar"]);
+const AUTOMATABLE_SOURCE_KINDS = new Set(["drive", "gmail", "calendar", "custom_api"]);
 const REFRESHABLE_SOURCE_KINDS = new Set([
   "drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom",
-  "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid",
+  "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid", "custom_api",
 ]);
 
 function sourceOwnerRemedy(source, concern = "refresh") {
@@ -3483,6 +3484,7 @@ function sourceOwnerRemedy(source, concern = "refresh") {
     quickbooks: "Reconnect the intended QuickBooks company if access has expired, then capture every intended entity type. Deleted records remain an explicit connector limitation.",
     zoom: "Reconnect Zoom if access has expired, then run a full Zoom sync with no --limit.",
     plaid: "Reconnect the intended financial institutions, resolve any account that needs attention, then run the bank sync again.",
+    custom_api: "Check the custom API key and endpoint contract, then run the custom API pull again.",
     upload: `Re-run the whole folder for source "${source?.name}" with no --limit, then resolve every unreadable or unsupported file it reports.`,
     "iphone-backup": "Create a current, readable iPhone backup and load that whole snapshot again with no --limit. Load important attachment-only content separately when a message row has no searchable text.",
   }[kind];

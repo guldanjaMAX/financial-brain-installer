@@ -122,6 +122,9 @@ import {
   readExactDocumentReport,
   readExactSourceForgetPreview,
 } from "./lib/documents-summary.js";
+import {
+  CUSTOM_API_RUN_PATH, customApiOwnerMessage, runCustomApiWorker,
+} from "./lib/custom-api.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -1937,7 +1940,7 @@ const SOURCE_KINDS = new Set([
   // refresh expectation, and `brain sources` should never present it as a
   // live capture that has gone stale.
   "iphone-backup",
-  "upload",
+  "upload", "custom_api",
 ]);
 
 function receiptTimeMs(value, fallback = Date.now()) {
@@ -2616,6 +2619,7 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   "/api/admin/brain/source-receipt",
   "/api/admin/brain/source-expectation",
   "/api/admin/brain/source-register",
+  CUSTOM_API_RUN_PATH,
   "/api/admin/brain/zones",
   "/api/admin/brain/forget",
   "/api/admin/brain/reindex",
@@ -3125,6 +3129,33 @@ export default {
       if (path === "/api/admin/brain/source-register" && request.method === "POST") {
         return await handleSourceRegistration(env, request);
       }
+      if (path === CUSTOM_API_RUN_PATH && request.method === "POST") {
+        let body;
+        try { body = await request.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+        if (!body || typeof body !== "object" || Array.isArray(body) ||
+            Object.keys(body).some((key) => key !== "dry_run") ||
+            (body.dry_run !== undefined && typeof body.dry_run !== "boolean")) {
+          return jsonResponse({ error: "custom API run accepts only dry_run" }, 400);
+        }
+        try {
+          return privateNoStore(jsonResponse(await runCustomApiWorker(env, { dryRun: body.dry_run === true })));
+        } catch (error) {
+          const code = typeof error?.code === "string" ? error.code : "INTERNAL_ERROR";
+          const configuredName = (() => {
+            try { return JSON.parse(env.CUSTOM_API_CONFIG || "{}").display_name; } catch { return null; }
+          })();
+          const status = code === "AUTH_REQUIRED" ? 401
+            : code === "RATE_LIMITED" ? 429
+              : code === "RUN_BUSY" ? 409
+                : code === "REMOTE_UNAVAILABLE" || code === "NETWORK_UNREACHABLE" ? 503
+                  : 422;
+          return privateNoStore(jsonResponse({
+            error: customApiOwnerMessage(code, configuredName),
+            code,
+            retryable: error?.retryable === true,
+          }, status));
+        }
+      }
       if (path === "/api/admin/brain/source-families" && request.method === "POST") {
         return await handleSourceFamilies(env, request);
       }
@@ -3508,6 +3539,15 @@ export default {
           const synced = Number(result?.sync?.ran || 0);
           const revoked = Number(result?.revocations?.ran || 0);
           if (synced || revoked) console.log(`plaid maintenance: ${synced} synced, ${revoked} revocations`);
+        })
+        : Promise.resolve(),
+      env.CUSTOM_API_CONFIG
+        ? runCustomApiWorker(env, { scheduled: true }).then((result) => {
+          if (result?.status === "completed") {
+            console.log(`custom API: completed ${result.endpoints} endpoint(s)`);
+          }
+        }).catch((error) => {
+          console.warn(`custom API: scheduled pull failed (${String(error?.code || "INTERNAL_ERROR")})`);
         })
         : Promise.resolve(),
     ]));
