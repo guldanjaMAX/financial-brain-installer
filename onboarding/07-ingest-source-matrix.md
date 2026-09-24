@@ -25,6 +25,7 @@ in ADR 003; they are not claimed as current connector behavior.
 |---|---|
 | Google Drive | **Built.** One real unbounded walk has partial real-data proof; the full add, edit, resume, delete, and scheduler lifecycle is not yet accepted |
 | Direct upload and API push | **Built.** Live-service smoke proof exists with a synthetic corpus; no authorized real-document receipt is accepted yet |
+| A custom read-only business API | **Built, locally proven only.** The owner's Worker pulls declared HTTPS JSON endpoints on its existing cron, stores exact rows plus readable documents, and exposes freshness. The bearer key is entered hidden and stored only as a Worker secret. This server-managed source is stated as a skip in `brain load`; preview or run it with `brain custom-api`. No provider endpoint or deployed Brain has crossed this build, and the structured rows do not feed the financial ledger or map yet |
 | A watched folder on your own machine | **Built, Mac-only for the schedule.** Name one folder in your manifest and it reloads itself on a schedule: new files load, edited files reload, deleted files are removed. This is what makes "drop it in a folder you already ingest" true for a folder that is not inside Google Drive. On Windows and Linux the same load runs by hand. Real multi-tick sleep, wake, and deletion behavior is not yet field-proven |
 | Gmail | Built: `brain connect google --scopes gmail`, then `brain ingest --from gmail`. Incremental via historyId; bulk mail excluded by default. Not yet run against a real mailbox |
 | Any other mailbox, over IMAP (Yahoo, Fastmail, iCloud, a host) | Built: `brain connect imap`, then `brain ingest --from imap`. Read-only, so nothing is marked read. Inbox and Sent by default; Junk, Trash and Drafts skipped; **an Archive folder is NOT read**, and a folder whose role cannot be identified is not read either. Every folder is named in the run with the true reason it was or was not read. Incremental via UIDVALIDITY plus a per-folder UID watermark. Bulk mail is filtered locally on headers, which is weaker than Gmail's. **Never yet run against a real mailbox** |
@@ -164,6 +165,10 @@ It reads your manifest, works out which sources you actually have, runs every on
 
 - It does not connect anything. If a source is switched on in your manifest but not yet authorized on this machine, it is skipped with the exact command that would connect it. Connecting is a decision, not something a load should do on your behalf.
 - It does not load Zoom, ever, and this is not a gap. Zoom **pushes**: a finished cloud recording calls your brain's own webhook and the transcript loads itself. There is nothing for a sweep to fetch, so it says so rather than printing a reassuring line for work it did not do.
+- It does not pull a custom business API from the laptop. That source runs
+  inside the owner's Worker on its own cadence. The load report states the
+  skip, and `brain custom-api <manifest> --dry-run` remains the first-pull
+  preview.
 - It does not reach anything your manifest does not name. Folders on your machine are read only if you list them under `corpora.upload.folders`.
 - It does not make a source work that is not built. A corpus your manifest declares that this version has no loader for is reported as exactly that, out loud.
 

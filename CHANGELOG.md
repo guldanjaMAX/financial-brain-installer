@@ -23,6 +23,16 @@ asset publication.
   `brain health <manifest>`, then `brain report <manifest>` when you want the
   complete counts.
 
+- **A read-only business dashboard can refresh without leaving a laptop on.**
+  An operator can declare bounded HTTPS JSON endpoints in the manifest, store
+  the bearer key through one hidden prompt, and let the owner's Worker pull the
+  source daily. Exact rows, corrections, readable summaries, provenance, and
+  freshness remain visible; missing rows are retained instead of silently
+  deleted. To check: preview the first pull with `brain custom-api <manifest>
+  --dry-run`, then confirm the named source and its refresh time in `brain
+  sources <manifest>`. This build has local mock proof only and has not contacted
+  a provider endpoint.
+
 - **One finely reported balance no longer blocks a whole bank.** A bank can
   report more decimal places than its currency has, such as a retirement
   balance of 23631.9805 dollars. That single value used to stop every account
