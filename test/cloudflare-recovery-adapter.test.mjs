@@ -2989,22 +2989,20 @@ try {
     artifactDirectory,
     ".brain-recovery-test-bootstrap-interruption-v1.json",
   );
-  if (process.platform !== "win32") {
-    const linkedControl = createTestSymlink({
-      target: join(artifactDirectory, "missing-control-target"),
-      path: ordinaryCheckpointPath,
-      type: "file",
-      onSkip: (reason) => console.log(`SKIP  dangling live-control link # ${reason}`),
-    });
-    if (linkedControl.created) {
-      assert.throws(
-        () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "darwin" }),
-        (error) => error.code ===
-          "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
-        "a dangling live-control symlink is present, never absent",
-      );
-      unlinkSync(ordinaryCheckpointPath);
-    }
+  const linkedControl = createTestSymlink({
+    target: join(artifactDirectory, "missing-control-target"),
+    path: ordinaryCheckpointPath,
+    type: "file",
+    onSkip: (reason) => console.log(`SKIP  dangling live-control link # ${reason}`),
+  });
+  if (linkedControl.created) {
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "darwin" }),
+      (error) => error.code ===
+        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
+      "a dangling live-control symlink is present, never absent",
+    );
+    unlinkSync(ordinaryCheckpointPath);
   }
   const ordinaryControlHarness = providerHarness();
   const ordinaryControlGate = createCloudflareRecoveryFieldGateAdapters(

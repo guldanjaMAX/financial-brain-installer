@@ -11,7 +11,6 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
-  rmdirSync,
   symlinkSync,
   unlinkSync,
   utimesSync,
@@ -1063,18 +1062,30 @@ if (process.platform !== "win32") {
     check("a permissive live lock directory fails closed", (lstatSync(permissive.path).mode & 0o077) !== 0);
     chmodSync(permissive.path, 0o700);
     permissive.release();
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+}
 
+{
+  const f = fixture();
+  try {
     const path = sourceIngestLockPath({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home });
     const target = join(f.root, "unsafe-target");
     mkdirSync(target, { mode: 0o700 });
-    symlinkSync(target, path, "dir");
-    assert.throws(
-      () => acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
-      (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
-    );
-    check("a symbolic-link lock path fails closed", lstatSync(path).isSymbolicLink());
-    unlinkSync(path);
-    rmdirSync(target);
+    const linked = createTestSymlink({
+      target,
+      path,
+      type: "dir",
+      onSkip: skipLinkCase("a linked lock path fails closed"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("a linked lock path fails closed", true);
+    }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
