@@ -1,73 +1,176 @@
-# Custom business API setup
+# Custom business API install-night checklist
 
-Use this when an owner has a read-only JSON API that should refresh inside the
-owner's Brain without a laptop. This path has local mock proof only. A real API
-and deployed Brain remain separate field gates.
+Use this owner-present checklist to connect the read-only store dashboard during
+an install call. Budget 15 minutes after the Brain itself is deployed. This path
+has local mock proof only. The real API and deployed Brain remain separate field
+gates until this checklist succeeds.
 
-## Before install day
+The feed returns a full snapshot on every call. Query parameters do not narrow
+it. The Brain calls the exact `/sales`, `/inventory`, and `/costs` paths, upserts
+rows by their declared keys, retains rows that disappear upstream, and runs the
+same pull daily in the owner's Worker. The laptop does not need to stay on.
 
-Ask the API developer for the HTTPS base URL, endpoint paths, paging shape, row
-identity fields, and the name you will use for the bearer-token Worker secret.
-Do not ask them to put the bearer value in a manifest, ticket, log, command, or
-chat. Decide the readable document grouping and wording with the owner.
+## 0:00 to 0:04: add and deploy the manifest block
 
-Copy `corpora.custom_api` from `templates/brain.manifest.json` into the instance
-manifest and review every field:
+Copy this block into `corpora` in the instance manifest. Replace only the
+placeholder HTTPS base URL and, if needed, the dedicated Worker secret name.
+The bearer value never belongs in this file.
 
-- `base_url` is the one allowed HTTPS origin and path prefix.
-- `token_secret` is an uppercase Worker-secret name, never the value.
-- each endpoint declares `path`, `row_key`, and its readable `document` template.
-- `legacy_row_key` is optional and is used only when older rows omit newer key
-  fields.
-- `cadence_seconds` defaults to one day. Size, row, page, time, and retry limits
-  are explicit and bounded.
-
-Set `enabled` to `true` only after that review. Deploy the reviewed manifest so
-the Worker receives the declarative configuration. The deployment contains the
-secret name but not its value.
-
-## Owner-present key ceremony
-
-Run this from an interactive terminal while the owner or authorized developer
-is present:
-
-```text
-brain connect custom-api <manifest>
+```json
+"custom_api": {
+  "enabled": true,
+  "display_name": "store dashboard",
+  "source": "store-dashboard",
+  "base_url": "https://dashboard.example.invalid/api/",
+  "token_secret": "STORE_DASHBOARD_TOKEN",
+  "cadence_seconds": 86400,
+  "timeout_ms": 30000,
+  "max_response_bytes": 5242880,
+  "max_rows": 2000,
+  "max_pages": 20,
+  "retries": 3,
+  "endpoints": [
+    {
+      "name": "sales",
+      "path": "/sales",
+      "row_key": ["store", "period", "revenue_stream"],
+      "legacy_row_key": ["store", "period"],
+      "document": {
+        "group_by": ["store", "period"],
+        "title_template": "{{store}}, {{period}} sales",
+        "body_template": "{{store}}, {{period}}: net sales {{sum.net_sales}} across {{row_count}} recorded streams. {{missing.revenue_stream}}\n\n{{rows_table}}",
+        "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
+        "formats": { "net_sales": "currency" },
+        "fields": ["store", "period", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
+        "expected_values": { "revenue_stream": ["live_animal", "supplies", "services", "other"] }
+      }
+    },
+    {
+      "name": "inventory",
+      "path": "/inventory",
+      "row_key": ["store", "breed"],
+      "document": {
+        "group_by": [],
+        "title_template": "Inventory snapshot {{fetched_date}}",
+        "body_template": "Inventory snapshot for {{fetched_date}}.\n\n{{rows_table}}",
+        "fields": ["store", "breed", "count"]
+      }
+    },
+    {
+      "name": "costs",
+      "path": "/costs",
+      "row_key": ["store", "breed"],
+      "document": {
+        "group_by": [],
+        "title_template": "Cost table {{fetched_date}}",
+        "body_template": "Average costs received through {{fetched_date}}.\n\n{{rows_table}}",
+        "formats": { "avg_cost": "currency" },
+        "fields": ["store", "breed", "avg_cost", "received"]
+      }
+    }
+  ]
+}
 ```
 
-The command prompts for the bearer key without echoing it, writes exactly the
-manifest-declared Worker secret, reads back the secret name, and registers the
-source's freshness expectation. It never accepts the value as a flag or an
-environment variable. Use `--replace-key` only for an intentional rotation.
+Deploy the already reviewed manifest through the install workflow. Do not add a
+trailing slash to any endpoint path. A `308` response means the path is not the
+canonical path and the pull stops with a configuration error.
 
-## Preview, run, and hand off
+## 0:04 to 0:07: connect the bearer key privately
 
-Preview before the first write:
+Turn screen sharing **off** before this step. The owner or authorized developer
+enters the bearer key into the hidden terminal prompt. Never paste it into chat,
+the manifest, a command argument, a ticket, or a support log.
 
-```text
-brain custom-api <manifest> --dry-run
+Windows: open PowerShell from the Start menu, then paste:
+
+```powershell
+& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" connect custom-api "$HOME\Financial Brain\brain.manifest.json"
 ```
 
-Confirm the endpoint count, new or corrected row counts, readable document
-count, and any retained missing rows. The preview calls the API but changes no
-Brain data. When the plan is expected, run:
+macOS: open Terminal, then paste:
 
-```text
-brain custom-api <manifest>
-brain sources <manifest>
+```bash
+"$HOME/.financial-brain/bin/brain" connect custom-api "$HOME/Financial Brain/brain.manifest.json"
 ```
 
-Confirm the named source is ready, has the expected daily freshness window, and
-that sample owner questions return the readable documents with endpoint, fetch
-time, and response-hash provenance. The Worker's existing cron checks the
-source every minute but fetches only when its D1 cadence gate is due.
+Wait for confirmation that the declared secret name was written and read back.
+Turn screen sharing on again only after the hidden prompt and command complete.
 
-If the dashboard refuses the key, replace it only after its developer confirms
-the correct credential. If the response is malformed, too large, unexpectedly
-redirected, or outside the declared host, leave the saved data unchanged and
-fix the API contract or limits before rerunning. Never paste a provider response
-or key into support material.
+## 0:07 to 0:10: preview the live feed without saving
 
-The exact structured rows are reserved for a later reviewed financial-map
-adapter. This setup does not post anything to the ledger and does not infer
-deletions when an upstream row disappears.
+Windows PowerShell:
+
+```powershell
+& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" custom-api "$HOME\Financial Brain\brain.manifest.json" --dry-run
+```
+
+macOS Terminal:
+
+```bash
+"$HOME/.financial-brain/bin/brain" custom-api "$HOME/Financial Brain/brain.manifest.json" --dry-run
+```
+
+The preview must print one line for each endpoint with its returned row count,
+the number of readable documents it would write, and the number of refused
+rows. It makes the three feed requests but persists nothing. Stop if any line
+is missing, a row is refused unexpectedly, or the dashboard refuses the key.
+
+## 0:10 to 0:12: perform the first pull now
+
+Do not wait for tomorrow's cron. Run the same command without `--dry-run`.
+
+Windows PowerShell:
+
+```powershell
+& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" custom-api "$HOME\Financial Brain\brain.manifest.json"
+```
+
+macOS Terminal:
+
+```bash
+"$HOME/.financial-brain/bin/brain" custom-api "$HOME/Financial Brain/brain.manifest.json"
+```
+
+Confirm all three endpoint lines, the readable-document count, any refused-row
+count, and the printed time for the next daily pull. A missing revenue stream is
+reported as not recorded, never as zero. A null store is retained as
+`unassigned`. Unknown provider fields remain in the structured row but stay out
+of the readable document unless the manifest lists them in `fields`.
+
+## 0:12 to 0:15: prove the owner experience
+
+Ask one owner question that requires the new source:
+
+> What were net sales by store last month?
+
+Confirm the answer cites the new readable sales documents and does not invent
+zero sales for an absent stream. This is the install-night owner check, not a
+general accuracy certification.
+
+## Tomorrow: prove the Worker ran without the laptop
+
+After the printed next-pull time has passed, check source freshness.
+
+Windows PowerShell:
+
+```powershell
+& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" sources "$HOME\Financial Brain\brain.manifest.json"
+```
+
+macOS Terminal:
+
+```bash
+"$HOME/.financial-brain/bin/brain" sources "$HOME/Financial Brain/brain.manifest.json"
+```
+
+The `store-dashboard` source must be ready and show a successful ingest after
+the install-night pull, inside its one-day freshness window. An unchanged full
+response may write zero documents; the fresh successful pull is still visible.
+If freshness did not advance, leave the saved rows unchanged and inspect the
+named source error. A `401` means the dashboard refused the key. A `308` means
+the manifest endpoint path is not canonical. Never paste the provider response
+or bearer key into support material.
+
+The structured rows are reserved for a later reviewed financial-map adapter.
+This setup does not post anything to the ledger.

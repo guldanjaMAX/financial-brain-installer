@@ -28,10 +28,13 @@ asset publication.
   the bearer key through one hidden prompt, and let the owner's Worker pull the
   source daily. Exact rows, corrections, readable summaries, provenance, and
   freshness remain visible; missing rows are retained instead of silently
-  deleted. To check: preview the first pull with `brain custom-api <manifest>
-  --dry-run`, then confirm the named source and its refresh time in `brain
-  sources <manifest>`. This build has local mock proof only and has not contacted
-  a provider endpoint.
+  deleted. The preview now names every endpoint's row, readable-document, and
+  refused-row counts. It handles negative sales and units, null stores, partial
+  months, and absent revenue streams without turning missing data into zero.
+  To check: preview the first pull with `brain custom-api <manifest> --dry-run`,
+  run the first pull immediately, then confirm the named source and its refresh
+  time in `brain sources <manifest>`. This build has local mock proof only and
+  has not contacted a provider endpoint.
 
 - **One finely reported balance no longer blocks a whole bank.** A bank can
   report more decimal places than its currency has, such as a retirement

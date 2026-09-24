@@ -168,7 +168,8 @@ It reads your manifest, works out which sources you actually have, runs every on
 - It does not pull a custom business API from the laptop. That source runs
   inside the owner's Worker on its own cadence. The load report states the
   skip, and `brain custom-api <manifest> --dry-run` remains the first-pull
-  preview.
+  preview. That preview prints each endpoint's returned rows, readable documents
+  it would write, and refused rows without persisting the pull.
 - It does not reach anything your manifest does not name. Folders on your machine are read only if you list them under `corpora.upload.folders`.
 - It does not make a source work that is not built. A corpus your manifest declares that this version has no loader for is reported as exactly that, out loud.
 

@@ -1257,8 +1257,10 @@ Read this before scoping an engagement.
   and Airtable still have no native API connector; use a reviewed export or a
   watched folder where suitable.
 - **The custom business API source is locally proven only.** Its declarative
-  Worker path, strict HTTPS boundary, paging, retries, D1 row history, freshness,
-  and hidden secret ceremony have local mock and SQLite coverage. No provider
+  Worker path, strict HTTPS boundary, full-snapshot body-hash skip, row-level
+  refusal counts, retries, D1 row history, freshness, and hidden secret ceremony
+  have local mock and SQLite coverage. The public store-dashboard defaults allow
+  a 30-second request, 5 MiB response, and 2,000 rows per endpoint. No provider
   endpoint or deployed Brain has crossed this build. Exact rows are deliberately
   not financial ledger or map entries yet.
 - **No official WhatsApp Business Platform connector.** Safe WhatsApp chat
