@@ -35,9 +35,13 @@ import { arch as operatingSystemArch } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { gunzipSync } from "node:zlib";
+import {
+  REVIEWED_WRANGLER_PACKAGE_NAME,
+  REVIEWED_WRANGLER_VERSION,
+} from "./wrangler-runtime-contract.mjs";
 
-export const LOCKED_WRANGLER_PACKAGE = "wrangler";
-export const LOCKED_WRANGLER_VERSION = "4.131.1";
+export const LOCKED_WRANGLER_PACKAGE = REVIEWED_WRANGLER_PACKAGE_NAME;
+export const LOCKED_WRANGLER_VERSION = REVIEWED_WRANGLER_VERSION;
 export const LOCKED_WRANGLER_RUNTIME_DIRECTORY = "wrangler-runtime-v1";
 export const LOCKED_WRANGLER_ENTRYPOINT = "node_modules/wrangler/bin/wrangler.js";
 export const LOCKED_WRANGLER_RESOLUTION_GUARD = "resolution-guard.cjs";
