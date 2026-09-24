@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Financial Brain Machine Prep"
+    Manufacturer="Financial Brain"
+    Version="0.1.0"
+    UpgradeCode="A49C8F6E-AD20-4C23-89B7-0E2A5B63C02D"
+    Scope="perMachine"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <SummaryInformation Description="Prepares the local tools used before a guided Financial Brain setup" />
+    <MediaTemplate EmbedCab="yes" />
+    <MajorUpgrade DowngradeErrorMessage="A newer Financial Brain Machine Prep is already installed." />
+    <Launch
+      Condition="Installed OR VersionNT64 &gt;= 1000"
+      Message="Windows 10 or newer is required. No machine preparation was started." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Financial Brain Machine Prep">
+        <Component Id="MachinePrepScripts" Guid="2A7B7F2E-02E5-4D01-8498-06E7ED27347E">
+          <File Id="PrepWindowsScript" Source="..\..\prep-windows.ps1" Name="prep-windows.ps1" KeyPath="yes" />
+          <File Id="RunMachinePrepScript" Source="run-machine-prep.ps1" Name="run-machine-prep.ps1" />
+          <File Id="UninstallNotes" Source="UNINSTALL.txt" Name="UNINSTALL.txt" />
+        </Component>
+        <Directory Id="HANDOFFFOLDER" Name="handoff">
+          <Component Id="ClaudeHandoff" Guid="790C6E7B-59DD-4CF0-BE88-944C25580963">
+            <File Id="ClaudeHandoffScript" Source="..\..\handoff\handoff-windows.ps1" Name="handoff-windows.ps1" KeyPath="yes" />
+            <File Id="ClaudeHandoffMessage" Source="..\..\handoff\message-windows.txt" Name="message-windows.txt" />
+            <File Id="ClaudeHandoffUrl" Source="handoff-windows.url" Name="handoff-windows.url" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Complete" Title="Financial Brain Machine Prep" Level="1">
+      <ComponentRef Id="MachinePrepScripts" />
+      <ComponentRef Id="ClaudeHandoff" />
+    </Feature>
+
+    <!-- Windows Installer owns the one UAC prompt. The real prep is still
+         impersonated as the signed-in user, preserving L's per-user contract. -->
+    <CustomAction
+      Id="RunMachinePrep"
+      Directory="INSTALLFOLDER"
+      ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[#RunMachinePrepScript]&quot;"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="RunMachinePrep" After="InstallFiles" Condition="NOT Installed" />
+    </InstallExecuteSequence>
+    <ActionText
+      Action="RunMachinePrep"
+      Description="Preparing Node.js, Git, Claude Code, Codex, and Financial Brain tools..."
+      Template="This can take 8 to 20 minutes. Progress is also written to the support log." />
+  </Package>
+</Wix>

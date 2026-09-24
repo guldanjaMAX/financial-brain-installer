@@ -1,0 +1,10 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <OutputName>FinancialBrainMachinePrep-unsigned</OutputName>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+  </PropertyGroup>
+  <Target Name="GenerateClaudeHandoffUrl" BeforeTargets="BeforeBuild">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)\..\..\handoff\render-url.mjs&quot; &quot;$(MSBuildProjectDirectory)\..\..\handoff\message-windows.txt&quot; &gt; &quot;$(MSBuildProjectDirectory)\handoff-windows.url&quot;" />
+  </Target>
+</Project>

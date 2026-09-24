@@ -17,18 +17,18 @@ if (-not $url.StartsWith("claude://code/new?q=", [StringComparison]::Ordinal)) {
 Write-Output "HANDOFF_DECISION_REACHED=1"
 if ($env:MACHINE_PREP_HANDOFF_TEST_MODE -eq "desktop") {
   Write-Output "HANDOFF_DESKTOP_URL=$url"
-  exit 0
+  return
 }
 if ($env:MACHINE_PREP_HANDOFF_TEST_MODE -eq "fallback") {
   Write-Output "HANDOFF_FALLBACK_CLI=1"
-  exit 0
+  return
 }
 
 $handler = Get-Item -LiteralPath "Registry::HKEY_CLASSES_ROOT\claude\shell\open\command" -ErrorAction SilentlyContinue
 if ($handler) {
   Start-Process $url
   Write-Output "HANDOFF_DESKTOP_OPENED=1"
-  exit 0
+  return
 }
 
 Write-Output "HANDOFF_FALLBACK_CLI=1"

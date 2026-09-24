@@ -8,6 +8,7 @@ import test from "node:test";
 const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
 const MAC_INSTALLER = join(ROOT, "machine-prep", "installers", "macos");
+const WINDOWS_INSTALLER = join(ROOT, "machine-prep", "installers", "windows");
 
 function read(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8").replaceAll("\r\n", "\n");
@@ -143,4 +144,66 @@ test("macOS native tools build the reviewed unsigned package contents", { skip: 
   } finally {
     rmSync(output, { recursive: true, force: true });
   }
+});
+
+test("Windows MSI is per-machine, Windows 10+, one-prompt plumbing with process-only policy bypass", () => {
+  const project = read("machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj");
+  const wix = read("machine-prep/installers/windows/Package.wxs");
+  assert.match(project, /WixToolset\.Sdk\/7\.0\.0/);
+  assert.match(wix, /Scope="perMachine"/);
+  assert.match(wix, /VersionNT64 &gt;= 1000/);
+  assert.match(wix, /macOS 13\.5 and Windows 10 are the supported minimums|Windows 10 or newer is required/);
+  assert.match(wix, /ExecutionPolicy Bypass/);
+  assert.match(wix, /Impersonate="yes"/);
+  assert.match(wix, /prep-windows\.ps1/);
+  assert.match(wix, /run-machine-prep\.ps1/);
+  assert.match(wix, /message-windows\.txt/);
+  assert.match(wix, /handoff-windows\.url/);
+  assert.doesNotMatch(wix, /Set-ExecutionPolicy|MSIX/);
+});
+
+test("Windows wrapper has an unsupported-OS decision gate, shareable log, real prep, and Claude handoff", () => {
+  const wrapper = read("machine-prep/installers/windows/run-machine-prep.ps1");
+  assert.match(wrapper, /OS_DECISION_REACHED=1/);
+  assert.match(wrapper, /REFUSED Windows 10 or newer is required/);
+  assert.match(wrapper, /prep-windows\.ps1/);
+  assert.match(wrapper, /Invoke-EmbeddedPowerShell \$prep @\("--real"\)/);
+  assert.match(wrapper, /installer\.log/);
+  assert.match(wrapper, /handoff-windows\.ps1/);
+  assert.doesNotMatch(wrapper, /Set-ExecutionPolicy/);
+});
+
+test("Windows package project names every reviewed payload file", () => {
+  const expected = [
+    "FinancialBrainMachinePrep.wixproj",
+    "Package.wxs",
+    "run-machine-prep.ps1",
+    "UNINSTALL.txt",
+  ];
+  for (const name of expected) {
+    assert.equal(existsSync(join(WINDOWS_INSTALLER, name)), true, `missing ${name}`);
+  }
+});
+
+test("Windows wrapper refuses an unsupported release before prep", { skip: process.platform !== "win32" }, () => {
+  const powerShell = process.env.SystemRoot
+    ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    : "powershell.exe";
+  const result = spawnSync(powerShell, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"),
+  ], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      MACHINE_PREP_OS_VERSION_OVERRIDE: "6.3",
+      MACHINE_PREP_INSTALLER_TEST_MODE: "1",
+    },
+    encoding: "utf8",
+  });
+  const out = `${result.stdout}${result.stderr}`.replaceAll("\r\n", "\n");
+  assert.equal(result.status, 2, out);
+  assert.match(out, /OS_DECISION_REACHED=1/);
+  assert.match(out, /REFUSED Windows 10 or newer is required/);
+  assert.doesNotMatch(out, /INSTALLER_TEST_GATE_REACHED|INSTALLER_PROGRESS/);
 });

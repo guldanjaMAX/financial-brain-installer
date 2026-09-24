@@ -1,0 +1,10 @@
+Financial Brain Machine Prep - Windows uninstall notes
+
+The MSI shell is separate from the user-owned tools it prepares.
+
+1. Open Settings > Apps > Installed apps.
+2. Select Financial Brain Machine Prep, then Uninstall. Windows may ask for administrator approval once.
+3. The metadata-only support log remains at %LOCALAPPDATA%\FinancialBrainMachinePrep\installer.log until you delete it.
+4. Node.js, Git, Claude Code, Codex, and any later Financial Brain installation remain in their documented per-user or vendor-managed locations. They are deliberately not removed with the MSI shell because other work may use them.
+
+No uninstall step removes source documents, manifests, credentials, or a Brain. Those require their own reviewed owner workflow.
