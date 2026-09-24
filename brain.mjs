@@ -653,10 +653,15 @@ function renewWranglerSessionToken() {
   return true;
 }
 
-function namedProfileReauthorizationFailure() {
+function namedProfileReauthorizationFailure({ retried = false } = {}) {
   const error = new Fatal(
-    "this Brain's Cloudflare browser sign-in expired before the operation could be authorized.\n" +
-      "      The rejected operation was not repeated. Rerun the same command in an interactive\n" +
+    (retried
+      ? "this Brain's Cloudflare browser sign-in changed, but both attempts were rejected.\n" +
+        "      The operation was tried once more after the credential changed, then stopped. " +
+        "No further retry was made.\n"
+      : "this Brain's Cloudflare browser sign-in expired before the operation could be authorized.\n" +
+        "      The rejected operation was not repeated. ") +
+      "Rerun the same command in an interactive\n" +
       "      terminal and authorize the browser sign-in again when prompted.",
   );
   error.code = "AUTH_REQUIRED";
@@ -1326,7 +1331,7 @@ async function cf(path, options = {}) {
         return await cfOnce(path, options);
       } catch (retryError) {
         if (holder?.source === "wrangler-oauth" && isExpiredSessionRejection(retryError)) {
-          throw namedProfileReauthorizationFailure();
+          throw namedProfileReauthorizationFailure({ retried: true });
         }
         throw retryError;
       }
@@ -1649,6 +1654,11 @@ export function runCloudflareWranglerCommand(args, {
       result = invoke();
       if (result.ok) return { ok: true, out: result.out, status: 0 };
       if (!authRejected(result)) return { ok: false, out: result.out, status: 1 };
+      return {
+        ok: false,
+        out: namedProfileReauthorizationFailure({ retried: true }).message,
+        status: 1,
+      };
     }
     return { ok: false, out: namedProfileReauthorizationFailure().message, status: 1 };
   }
