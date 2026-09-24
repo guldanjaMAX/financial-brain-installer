@@ -862,7 +862,8 @@ function validReconnectPlan(plan) {
       typeof account.accountSlug === "string" && account.accountSlug &&
       typeof account.entitySlug === "string" && account.entitySlug &&
       typeof account.accountRef === "string" && account.accountRef &&
-      typeof account.priorIdentityLocator === "string" && account.priorIdentityLocator))) return false;
+      (account.priorIdentityLocator === null ||
+        (typeof account.priorIdentityLocator === "string" && account.priorIdentityLocator))))) return false;
   return new Set(plan.accounts.map((account) => account.providerAccountId)).size === plan.accounts.length &&
     new Set(plan.accounts.map((account) => account.accountSlug)).size === plan.accounts.length;
 }
@@ -870,29 +871,37 @@ function validReconnectPlan(plan) {
 function transactionMatch(prior, staged) {
   const sameMoney = Number(prior.amount_minor) === Number(staged.amount_minor) &&
     prior.direction === staged.direction && prior.currency === staged.iso_currency_code;
-  const sameDescription = normalizedIdentityText(prior.description) === normalizedIdentityText(staged.description) &&
-    normalizedIdentityText(prior.payee) === normalizedIdentityText(staged.merchant_name);
-  if (!sameMoney || !sameDescription || prior.account_slug !== staged.account_slug) return false;
+  const priorName = normalizedIdentityText(prior.description);
+  const stagedName = normalizedIdentityText(staged.description);
+  const priorMerchant = normalizedIdentityText(prior.payee);
+  const stagedMerchant = normalizedIdentityText(staged.merchant_name);
+  const sameStableLabel = (priorName && priorName === stagedName) ||
+    (priorMerchant && stagedMerchant && priorMerchant === stagedMerchant);
+  if (!sameMoney || !sameStableLabel || prior.account_slug !== staged.account_slug) return false;
   if (Number(prior.pending) === Number(staged.pending) && prior.posted_on === staged.posted_on) return true;
-  return Number(prior.pending) === 1 && Number(staged.pending) === 0 &&
-    typeof staged.pending_transaction_id === "string" && staged.pending_transaction_id &&
-    staged.pending_transaction_id === prior.external_id;
+  // A replacement Item may change both Plaid ids and omit the pending link.
+  // Stable money, account and description fields may reconcile that transition
+  // only when the caller proves this is the sole candidate.
+  return Number(prior.pending) === 1 && Number(staged.pending) === 0;
 }
 
 async function plaidReconnectPlan(env, { tenantId, itemRef }) {
   const links = (await env.DB.prepare(
-    `SELECT receipt_json FROM plaid_link_operations
+    `SELECT session_ref,receipt_json FROM plaid_link_operations
       WHERE tenant_id=? AND item_ref=? AND state='completed' ORDER BY completed_at DESC LIMIT 2`,
   ).bind(tenantId, itemRef).all())?.results || [];
   const plans = [];
   for (const link of links) {
     let receipt;
     try { receipt = JSON.parse(link.receipt_json || "null"); } catch { return { reviewRequired: true }; }
-    if (receipt?._reconnect_plan) plans.push(receipt._reconnect_plan);
+    if (receipt?._reconnect_plan) plans.push({
+      plan: receipt._reconnect_plan,
+      sessionRef: link.session_ref,
+    });
   }
   if (plans.length === 0) return null;
-  if (plans.length !== 1 || !validReconnectPlan(plans[0])) return { reviewRequired: true };
-  return { reviewRequired: false, plan: plans[0] };
+  if (plans.length !== 1 || !validReconnectPlan(plans[0].plan)) return { reviewRequired: true };
+  return { reviewRequired: false, plan: plans[0].plan, sessionRef: plans[0].sessionRef };
 }
 
 async function plaidReconnectReconciliation(env, { tenantId, itemRef, windowRef, stamp }, reconnectState = null) {
@@ -967,12 +976,20 @@ async function plaidReconnectReconciliation(env, { tenantId, itemRef, windowRef,
     }
     const accountHasPriorHistory = prior.some((old) => old.account_slug === row.account_slug);
     // A posted date after confirmed revocation cannot already exist in this
-    // retained feed. Everything at or before that boundary remains ambiguous.
+    // retained feed after exact stable fields have ruled out every retained
+    // pending row. Everything at or before that boundary remains ambiguous.
     if (accountHasPriorHistory && (!row.posted_on || row.posted_on <= removedDate)) {
       return { reviewRequired: true };
     }
   }
-  return { reviewRequired: false, plan, priorFeed, matches, stamp };
+  return {
+    reviewRequired: false,
+    plan,
+    priorFeed,
+    matches,
+    stamp,
+    linkSessionRef: state.sessionRef,
+  };
 }
 
 function transactionStageRows(accountMappings, page) {
@@ -1164,7 +1181,8 @@ function reconnectPromotionStatements(env, tenantId, itemRef, reconnect) {
          (tenant_id,item_ref,provider_account_id,account_ref,entity_slug,
           discovered_at,last_seen_at,assigned_at,updated_at)
        SELECT ?1,?2,json_extract(value,'$.providerAccountId'),json_extract(value,'$.accountRef'),
-              json_extract(value,'$.entitySlug'),?3,?3,?3,?3 FROM json_each(?4)`,
+              json_extract(value,'$.entitySlug'),?3,?3,?3,?3 FROM json_each(?4) WHERE 1
+       ON CONFLICT(tenant_id,item_ref,provider_account_id) DO NOTHING`,
     ).bind(tenantId, itemRef, reconnect.stamp, planJson),
   ];
   statements.push(...reconnect.matches.map((match) => env.DB.prepare(
@@ -1202,7 +1220,9 @@ function reconnectPromotionStatements(env, tenantId, itemRef, reconnect) {
              ON a.provider_account_id=json_extract(m.value,'$.providerAccountId')
             WHERE a.tenant_id=?1 AND a.item_ref=?6
               AND a.account_ref=json_extract(m.value,'$.accountRef')
-              AND a.entity_slug=json_extract(m.value,'$.entitySlug'))=json_array_length(?4)
+              AND a.entity_slug=json_extract(m.value,'$.entitySlug')
+              AND a.discovered_at=?7 AND a.last_seen_at=?7
+              AND a.assigned_at=?7 AND a.updated_at=?7)=json_array_length(?4)
           AND NOT EXISTS (SELECT 1 FROM fin_transactions WHERE tenant_id=?1 AND source_feed=?2
             AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?4)))
           AND NOT EXISTS (SELECT 1 FROM fin_balance_snapshots WHERE tenant_id=?1 AND source_feed=?2
@@ -1214,7 +1234,27 @@ function reconnectPromotionStatements(env, tenantId, itemRef, reconnect) {
            WHERE f.tenant_id=?1 AND f.source_feed=?5 AND f.removed_at IS NULL
              AND f.superseded_by_id IS NULL)=json_array_length(?3)
         THEN 1 ELSE json_extract('plaid reconnect history readback failed','$') END AS reconnect_history_guard`,
-    ).bind(tenantId, reconnect.priorFeed, JSON.stringify(reconnect.matches), planJson, sourceFeed, itemRef),
+    ).bind(tenantId, reconnect.priorFeed, JSON.stringify(reconnect.matches), planJson,
+      sourceFeed, itemRef, reconnect.stamp),
+    // The private plan is single-use authority. Consume it in the same fenced
+    // batch as the ledger move, then prove the exact completed Link row no
+    // longer carries that authority before the batch can commit.
+    env.DB.prepare(
+      `UPDATE plaid_link_operations
+          SET receipt_json=json_set(json_remove(receipt_json,'$._reconnect_plan'),
+                '$.reconnect_review_pending',json('false')),
+              updated_at=?1
+        WHERE tenant_id=?2 AND session_ref=?3 AND item_ref=?4 AND state='completed'
+          AND json_extract(receipt_json,'$._reconnect_plan')=json(?5)`,
+    ).bind(reconnect.stamp, tenantId, reconnect.linkSessionRef, itemRef, JSON.stringify(reconnect.plan)),
+    env.DB.prepare(
+      `SELECT CASE WHEN
+          (SELECT COUNT(*) FROM plaid_link_operations
+            WHERE tenant_id=?1 AND session_ref=?2 AND item_ref=?3 AND state='completed'
+              AND json_type(receipt_json,'$._reconnect_plan') IS NULL
+              AND json_extract(receipt_json,'$.reconnect_review_pending')=0)=1
+        THEN 1 ELSE json_extract('plaid reconnect plan consumption failed','$') END AS reconnect_plan_guard`,
+    ).bind(tenantId, reconnect.linkSessionRef, itemRef),
   );
   return statements;
 }

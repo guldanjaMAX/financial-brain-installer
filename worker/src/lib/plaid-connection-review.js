@@ -32,6 +32,8 @@ function plaidIdentity(locator) {
  * Link metadata is an ambiguity signal, never general merge authority. A live
  * match always refuses. A complete, unambiguous match against one removed Item
  * becomes a narrow reattach plan that the caller applies only after exchange.
+ * A legacy removed ledger row with no identity locator may use the same private
+ * plan only to reach staged review; authoritative reconciliation cannot promote it.
  * Plaid recommends this review before the one-time public-token exchange:
  * https://plaid.com/docs/link/duplicate-items/
  *
@@ -122,22 +124,28 @@ export async function assertPlaidConnectionDistinct(env, {
       if (matches.length === 1) {
         const [prior] = matches;
         const identity = plaidIdentity(prior.source_locator);
+        const legacyIdentityMissing = prior.source_locator === null;
         if (typeof prior.account_slug !== "string" || !prior.account_slug ||
             typeof prior.entity_slug !== "string" || !prior.entity_slug ||
-            !identity || !account.type || !account.subtype || !account.accountKind ||
+            !account.type || !account.subtype || !account.accountKind ||
             normalizedText(prior.label) !== account.name ||
             normalizedText(prior.mask) !== account.mask ||
-            normalizedText(prior.account_kind) !== account.accountKind ||
-            identity.type !== account.type || identity.subtype !== account.subtype ||
+            normalizedText(prior.account_kind) !== account.accountKind) review();
+        // Rows promoted before the identity locator existed may enter the
+        // replacement staging flow, but the missing proof is carried forward
+        // so reconciliation must hold every staged dollar for owner review.
+        // A malformed non-null locator is corruption, not a legacy row.
+        if (!legacyIdentityMissing && (!identity || identity.type !== account.type ||
+            identity.subtype !== account.subtype ||
             (identity.persistentAccountId && account.persistentAccountId &&
-              identity.persistentAccountId !== account.persistentAccountId)) review();
+              identity.persistentAccountId !== account.persistentAccountId))) review();
         reattach.push({
           priorItemRef: item.item_ref,
           priorProviderAccountId: prior.provider_account_id,
           providerAccountId: account.id,
           accountSlug: prior.account_slug,
           entitySlug: prior.entity_slug,
-          priorIdentityLocator: prior.source_locator,
+          priorIdentityLocator: legacyIdentityMissing ? null : prior.source_locator,
         });
       }
     }

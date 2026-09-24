@@ -408,19 +408,24 @@ is retained. A later Link exchange still refuses any match against a live Item.
 When one removed Item has a complete, unambiguous account match in the same
 Plaid environment and institution, the normalized account name, mask, type,
 and subtype must also match. A saved persistent account identity is compared
-when the client supplies it before exchange. Missing required client identity
-or a conflict refuses the reattach before exchange. An accepted exchange
-records a private candidate plan but does not copy an owner assignment or move
-an account or history row. The
+when the client supplies it before exchange. Missing required current-client
+identity or a conflict refuses the reattach before exchange. A legacy removed
+ledger account without the later source locator may stage a replacement, but it
+cannot reattach automatically: the first authoritative window enters the same
+owner review flow without adding ledger money. An accepted exchange records a
+private candidate plan but does not copy an owner assignment or move an account
+or history row. The
 fresh cursor window stays staged until the authoritative replacement account
 identity and every retained transaction match are exact and unambiguous on the
-mapped account and stable money, date, merchant or name, and pending-to-posted
-fields. A matched row is reidentified in place even when the new Item reports a
-different transaction ID. An identity conflict, ambiguous pair, or potentially
-historical unmatched row holds the whole window for owner review without
-advancing the cursor or changing live totals. Only that reviewed reconciliation
-copies the retained owner assignment and moves the account and history to the
-replacement feed inside the promotion batch.
+mapped account and stable money and merchant or name fields. A unique retained
+pending row is reidentified in place when it becomes posted even if the new
+Item reports a different transaction ID, omits the pending link, or changes the
+posted date. An identity conflict, ambiguous pair, or potentially historical
+unmatched row holds the whole window for owner review without advancing the
+cursor or changing live totals. Only that reviewed reconciliation copies the
+retained owner assignment and moves the account and history to the replacement
+feed. The same guarded promotion batch consumes and exactly reads back its
+single-use private plan, so later windows resume ordinary incremental refresh.
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
 credentials. It resolves the declared durable admin key at runtime, uses Google
