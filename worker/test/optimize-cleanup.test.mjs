@@ -313,7 +313,7 @@ test("a duplicate family crossing the page boundary remains visible and planning
   assert.equal(plan.resume.complete, true);
 });
 
-test("location projection returns every bounded reference and drops undeclared metadata", () => {
+test("cleanup plans retain every bounded reference and drop undeclared metadata", () => {
   const refs = Array.from({ length: 60 }, (_, index) => ({
     source: "drive-reviewed",
     source_id: `location-${index}`,
@@ -330,26 +330,91 @@ test("location projection returns every bounded reference and drops undeclared m
   }), []);
 });
 
-test("retrieval exposes every preserved location beyond the old fifty-reference cap", async (t) => {
+test("retrieval never projects cleanup locations across owner, document, or zone scope", async (t) => {
   const fixture = await createProductFixture();
   t.after(fixture.close);
   seedSource(fixture);
-  const refs = Array.from({ length: 60 }, (_, index) => ({
-    source: "drive-reviewed",
-    source_id: `retrieval-location-${index}`,
-    title: `Synthetic retrieval title ${index}`,
-    uri: `https://invalid.example/retrieval-location-${index}`,
-  }));
+  seedSource(fixture, "drive-hidden");
+  fixture.raw("UPDATE sources SET zone='books' WHERE name='drive-reviewed'");
+  fixture.raw("UPDATE sources SET zone='medical' WHERE name='drive-hidden'");
+  const refs = [{
+    source: "drive-hidden",
+    source_id: "foreign-location",
+    title: "Foreign synthetic title",
+    uri: "https://invalid.example/foreign-location",
+  }];
   seedDocument(fixture, {
-    uid: "drive-reviewed:location-authority",
-    hash: "location-authority-hash",
+    uid: "drive-reviewed:allowed",
+    sourceId: "allowed",
+    entitySlug: "entity-one",
+    hash: "allowed-hash",
     meta: { cleanup_location_references: refs },
   });
-
-  const search = await storeFor(fixture.env).search(fixture.env, {
-    query: "Useful synthetic content", limit: 5,
+  seedDocument(fixture, {
+    uid: "drive-hidden:foreign",
+    source: "drive-hidden",
+    sourceId: "foreign-location",
+    entitySlug: "entity-two",
+    hash: "foreign-hash",
   });
-  assert.equal(search.results[0].location_references.length, 60);
+  fixture.raw(
+    `INSERT INTO document_access_grants
+       (grant_id, subject_label, entity_slug, created_at, created_by,
+        create_request_id, request_fingerprint)
+     VALUES ('dg_fixture', 'Synthetic reader', 'entity-one', ?, 'owner',
+             'request_fixture', ?)`,
+    NOW, "a".repeat(64),
+  );
+  fixture.raw(
+    `INSERT INTO document_access_documents
+       (grant_id, document_id, entity_slug, granted_at)
+     VALUES ('dg_fixture', 'drive-reviewed:allowed', 'entity-one', ?)`,
+    NOW,
+  );
+
+  const assertNoProjection = (search, label, { scoped = false } = {}) => {
+    const allowed = search.results.find((result) => result.source_id === "allowed");
+    assert.ok(allowed, `${label} must reach the allowed retrieval result`);
+    assert.equal(Object.hasOwn(allowed, "location_references"), false);
+    assert.doesNotMatch(JSON.stringify(allowed), /foreign-location|Foreign synthetic title/);
+    if (scoped) {
+      assert.doesNotMatch(JSON.stringify(search), /foreign-location|Foreign synthetic title/);
+    }
+  };
+
+  const ownerSearch = await storeFor(fixture.env).search(fixture.env, {
+    query: "Useful synthetic content", limit: 5, scope: { all: true },
+  });
+  assertNoProjection(ownerSearch, "owner search");
+
+  const exactStart = fixture.seen.sql.length;
+  const exactSearch = await storeFor(fixture.env).search(fixture.env, {
+    query: "Useful synthetic content",
+    limit: 5,
+    access: { kind: "grant", grantId: "dg_fixture", entitySlug: "entity-one" },
+    scope: { all: true },
+  });
+  assertNoProjection(exactSearch, "exact-document search", { scoped: true });
+  assert.ok(fixture.seen.sql.slice(exactStart)
+    .some((sql) => /document_access_documents/.test(sql)),
+  "the exact-document grant decision point must be reached");
+  assert.ok(fixture.seen.binds.slice(exactStart)
+    .some((binds) => binds.includes("dg_fixture")),
+  "the exact grant id must be bound at the retrieval decision point");
+
+  const zoneStart = fixture.seen.sql.length;
+  const zoneSearch = await storeFor(fixture.env).search(fixture.env, {
+    query: "Useful synthetic content",
+    limit: 5,
+    scope: { all: false, zones: ["books"], exclude: [] },
+  });
+  assertNoProjection(zoneSearch, "zone search", { scoped: true });
+  assert.ok(fixture.seen.sql.slice(zoneStart)
+    .some((sql) => /SELECT name FROM sources WHERE zone IN/.test(sql)),
+  "the source-zone decision point must be reached");
+  assert.ok(fixture.seen.binds.slice(zoneStart)
+    .some((binds) => binds.includes("books")),
+  "the allowed zone must be bound at the retrieval decision point");
 });
 
 test("cleanup plan closes legacy location metadata before the private JSON response", async (t) => {
@@ -372,7 +437,45 @@ test("cleanup plan closes legacy location metadata before the private JSON respo
   }, { "X-Admin-Key": "fixture-admin-key" });
   assert.equal(response.status, 200);
   const body = await response.json();
+  assert.deepEqual(body.targets, ["drive-reviewed:legacy-b"],
+    "the private route must reach a nonempty duplicate plan");
+  const preserved = body.groups[0].references.find(
+    (reference) => reference.source_id === "legacy-location",
+  );
+  assert.deepEqual(preserved, {
+    source: "drive-reviewed",
+    source_id: "legacy-location",
+    title: null,
+    uri: "https://invalid.example/legacy-location",
+  }, "the valid legacy reference must survive with its title redacted");
   assert.doesNotMatch(JSON.stringify(body), /token_like|must-not-cross|Legacy synthetic title/);
+});
+
+test("worker errors expose codes only for allowlisted cleanup failures", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(fixture.close);
+
+  const internal = new Error("synthetic database failure");
+  internal.code = "database_internal_detail";
+  fixture.env.DB = { prepare() { throw internal; } };
+  const ordinaryResponse = await fixture.worker.fetch(new Request(
+    "https://brain.invalid/api/admin/brain/documents",
+    { headers: { "X-Admin-Key": "fixture-admin-key" } },
+  ), fixture.env, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(ordinaryResponse.status, 500);
+  assert.deepEqual(await ordinaryResponse.json(), { error: "synthetic database failure" },
+    "a non-cleanup route must not expose an internal error code");
+
+  const unknownCleanup = new Error("synthetic cleanup dependency failure");
+  unknownCleanup.code = "cleanup_database_internal";
+  fixture.env.DB = { prepare() { throw unknownCleanup; } };
+  const cleanupResponse = await fixture.post("/api/admin/brain/cleanup/report", {}, {
+    "X-Admin-Key": "fixture-admin-key",
+  });
+  assert.equal(cleanupResponse.status, 500,
+    "an unknown cleanup-prefixed code must not control the HTTP status");
+  assert.deepEqual(await cleanupResponse.json(), { error: "synthetic cleanup dependency failure" },
+    "a cleanup route must expose only explicitly reviewed cleanup codes");
 });
 
 test("confirmed cleanup is fail-closed until atomic guarded removal exists", async (t) => {

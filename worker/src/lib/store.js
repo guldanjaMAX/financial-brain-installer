@@ -795,9 +795,6 @@ const d1Backend = {
           // row. It is additive public metadata, kept beside date and text
           // provenance so a citation never presents a tier without its reason.
           authority: x.authority || null,
-          ...(Array.isArray(x.location_references) && x.location_references.length
-            ? { location_references: x.location_references }
-            : {}),
           // Closed, server-verified origin for conversational owner notes. No
           // arbitrary document metadata crosses this public boundary.
           ...(x.write_provenance ? { write_provenance: x.write_provenance } : {}),

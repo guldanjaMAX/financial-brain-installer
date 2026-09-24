@@ -25,7 +25,7 @@ function boundedString(value, limit, { required = false } = {}) {
   return value;
 }
 
-/** Project one private value onto the exact citation-safe wire shape. */
+/** Project one private value onto the closed cleanup-plan preview shape. */
 export function cleanupLocationReference(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const source = boundedString(value.source, FIELD_LIMITS.source, { required: true });
@@ -36,12 +36,12 @@ export function cleanupLocationReference(value) {
   return { source, source_id: sourceId, title, uri };
 }
 
-/** Only citation-safe location fields are allowed out of private document metadata. */
+/** Only these fields may leave metadata inside the private cleanup plan. */
 export function cleanupLocationReferences(value) {
   const refs = objectFromJson(value).cleanup_location_references;
   // A malformed or oversized legacy collection is not partially disclosed.
-  // Cleanup itself refuses to create one, so every stored cleanup reference is
-  // returned and citations never lose locations behind an undocumented cap.
+  // Removal is disabled, so these references are plan evidence only and are
+  // never projected into search results, citations, or the model prompt.
   if (!Array.isArray(refs) || refs.length > MAX_CLEANUP_LOCATION_REFERENCES) return [];
   return refs.flatMap((item) => {
     const projected = cleanupLocationReference(item);

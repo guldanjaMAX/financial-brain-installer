@@ -52,7 +52,6 @@ import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { probeStalledVectorFence } from "./vector-fence-probe.js";
 import { publicOwnerNoteProvenance } from "./owner-note-contract.js";
-import { cleanupLocationReferences } from "./cleanup-location-references.js";
 import {
   storedProvenanceAssessment,
   storedProvenanceMarkerAssessment,
@@ -974,9 +973,6 @@ export async function search(env, {
     // search response contract or a stable source identifier for clients.
     const authority = authorityFor(row, { query, current: hasExplicitCurrentIntent(query) });
     const lineage = evidenceLineageFor(row, { trustedSourceRecord: authority.owner_confirmed === true });
-    const locationReferences = cleanupLocationReferences(
-      row.authority_meta ?? row._authority_meta,
-    );
     const {
       content_hash: _internalContentHash,
       authority_meta: _internalAuthorityMeta,
@@ -994,7 +990,6 @@ export async function search(env, {
       authority,
       lineage: lineage.lineage,
       ...(writeProvenance ? { write_provenance: writeProvenance } : {}),
-      ...(locationReferences.length ? { location_references: locationReferences } : {}),
     }, lineage));
   }
   await annotateLineageFamilyTokens(documents);

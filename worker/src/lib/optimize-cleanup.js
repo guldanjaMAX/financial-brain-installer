@@ -684,6 +684,3 @@ export async function applyCleanupPlan(env, {
     "Cleanup removal is unavailable until exact boundary checks, location preservation, and deletion are one atomic guarded mutation.",
   );
 }
-
-/** Return a new manifest object; persistence remains an explicit local CLI step. */
-export { cleanupLocationReferences } from "./cleanup-location-references.js";

@@ -294,7 +294,6 @@ function citationCandidateForResult(result, index) {
     authority: result.authority || null,
     lineage: result.lineage || evidenceLineageFor(result).lineage,
     _lineage_root_ids: evidenceLineageRootIds(result),
-    location_references: Array.isArray(result.location_references) ? result.location_references : [],
     ref: result.ref_key || result.drive_file_id || null,
     snippet: (result.snippet || "").replace(/\s+/g, " ").slice(0, 900),
   };
@@ -313,9 +312,6 @@ function citationForDocument(document) {
     text_source: document.text_source, text_reliable: document.text_reliable,
     authority: document.authority,
     lineage: document.lineage,
-    ...(document.location_references?.length
-      ? { location_references: document.location_references }
-      : {}),
   };
 }
 
@@ -1041,10 +1037,7 @@ async function handleThink(
       const operative = d.authority?.operative_section
         ? `OPERATIVE FOR THIS QUESTION: ${d.authority.operative_section.name} = ${d.authority.operative_section.value} as of ${d.authority.operative_section.as_of}. Values listed under Supersedes are historical, not current.`
         : null;
-      const locations = d.location_references?.length
-        ? `also stored at ${d.location_references.map((item) => `${item.source}:${item.source_id}`).join("; ")}`
-        : null;
-      const meta = [d.source, d.client ? `client: ${d.client}` : null, date, read, authority, lineage, operative, locations]
+      const meta = [d.source, d.client ? `client: ${d.client}` : null, date, read, authority, lineage, operative]
         .filter(Boolean)
         .join(", ");
       return `[${d.n}] (${meta}) ${d.title}\n${d.snippet}`;
@@ -2626,6 +2619,22 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   BANK_IMPORT_PATH,
 ]);
 
+// Cleanup errors are a private route contract, not a general exception shape.
+// Keep both the response code and status closed so provider, database, and
+// library errors cannot expose their internal identifiers through this catch.
+const CLEANUP_ERROR_STATUS = new Map([
+  ["cleanup_activity_unavailable", 409],
+  ["cleanup_apply_unavailable", 409],
+  ["cleanup_cursor_invalid", 409],
+  ["cleanup_drain_active", 423],
+  ["cleanup_fingerprint_not_approved", 409],
+  ["cleanup_ingest_active", 423],
+  ["cleanup_plan_changed", 409],
+  ["cleanup_plan_invalid", 409],
+  ["cleanup_rule_not_plannable", 409],
+  ["cleanup_update_active", 423],
+]);
+
 function upgradePauseHolds(env) {
   return env.VECTOR_DRAIN_MODE === "paused-for-upgrade";
 }
@@ -3418,13 +3427,16 @@ export default {
       }
       return jsonResponse({ error: "not found" }, 404);
     } catch (e) {
-      const cleanupStatus = String(e?.code || "").startsWith("cleanup_")
-        ? (String(e.code).endsWith("_active") ? 423 : 409)
-        : 500;
-      const response = jsonResponse({ error: e.message, ...(e?.code ? { code: e.code } : {}) }, cleanupStatus);
+      const cleanupRoute = path.startsWith("/api/admin/brain/cleanup/");
+      const cleanupCode = cleanupRoute ? String(e?.code || "") : "";
+      const cleanupStatus = CLEANUP_ERROR_STATUS.get(cleanupCode);
+      const response = jsonResponse({
+        error: e.message,
+        ...(cleanupStatus !== undefined ? { code: cleanupCode } : {}),
+      }, cleanupStatus ?? 500);
       if (path === "/api/admin/brain/source-families" ||
           path === "/api/admin/brain/documents" ||
-          path.startsWith("/api/admin/brain/cleanup/")) {
+          cleanupRoute) {
         return privateNoStore(response);
       }
       return response;

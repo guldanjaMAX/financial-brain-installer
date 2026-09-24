@@ -276,8 +276,8 @@ Optimize includes a paged, read-only cleanup audit. It reports exact
 duplicates, near-duplicate candidates, retroactive readability failures,
 content outside an explicitly declared source scope, unusually heavy
 candidates, and stored predecessor records. Every finding includes a count,
-estimated projected-vector and text-character savings, what removal would lose, and a
-plain-language rule. Titles are returned only when the owner asks for samples.
+estimated projected-vector and text-character savings, what removal would lose,
+and a plain-language rule. Titles are returned only when the owner asks for samples.
 
 The audit and plan never remove content. After the report, an owner may choose
 one rule and review its exact dry-run plan and fingerprint. Duplicate planning
@@ -289,6 +289,10 @@ readback, and deletion are not yet one atomic guarded mutation. An approved
 Drive path rule can still receive a second, separately fingerprinted
 manifest-setting approval so later loads do not add the excluded path again. See
 `docs/HOW-OPTIMIZE-CLEANS-UP-A-BRAIN.md`.
+
+Source-location references exist only inside the private cleanup plan preview.
+They are not persisted by cleanup and never appear in search results, citations,
+or the answer model prompt.
 
 The Owner Financial Map is the denominator for later financial-completeness
 work. Immediately after that opening decision, whether the goal was asked or

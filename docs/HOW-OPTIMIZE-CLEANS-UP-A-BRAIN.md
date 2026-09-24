@@ -36,6 +36,11 @@ nothing. Duplicate equivalence includes source, entity, client, category,
 top folder, platform, and date. Chunk metadata must prove the same boundaries,
 and a document grant or an unprovable boundary refuses collapse.
 
+The private plan may show bounded source-location references so the owner can
+review what a future guarded removal would have to preserve. Those references
+are not written to document metadata and never enter search results, citations,
+or the answer model prompt.
+
 Confirmed removal is currently unavailable. Even this fully approved form
 rebuilds the plan and then fails closed without changing a document:
 
