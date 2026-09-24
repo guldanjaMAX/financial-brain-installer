@@ -12,6 +12,7 @@ import {
   runPlaidFeedSlice,
   syncPlaidItem,
 } from "../src/lib/plaid-bank-feed.js";
+import { assignPlaidAccountEntity } from "../src/lib/plaid-account-entities.js";
 
 const encoder = new TextEncoder();
 
@@ -255,6 +256,113 @@ class MultiEntityPlaidFake extends PlaidSandboxFake {
     });
   }
 }
+
+async function connectAndStagePlaidItem(fixture, provider, stamp, sessionRef) {
+  const fetchImpl = provider.fetch.bind(provider);
+  const link = await createPlaidLinkToken(fixture.env, {
+    url: "https://brain.invalid/app/connect/bank",
+    sessionRef,
+    fetchImpl,
+    now: stamp,
+  });
+  await completePlaidLink(fixture.env, {
+    sessionRef: link.session_ref,
+    publicToken: "public-sandbox-once",
+    institutionRef: "fixture-institution",
+    institutionLabel: "Synthetic Bank",
+    accounts: [{ id: "account-1", name: "Synthetic checking", mask: "1234" }],
+    fetchImpl,
+    now: stamp,
+  });
+  const staged = await syncPlaidItem(fixture.env, "item-sandbox-1", { fetchImpl, now: stamp });
+  assert.equal(staged.status, "assignment_required", "the staged-account decision point must be reached");
+  return { fetchImpl, staged };
+}
+
+test("disconnecting before account assignment atomically clears the Item staging window", async () => {
+  const fixture = await createProductFixture({
+    env: {
+      BANK_FEED_PROVIDER: "plaid",
+      BANK_FEED_ENV: "sandbox",
+      BANK_FEED_CLIENT_ID: "fixture-client-id",
+      BANK_FEED_SECRET: "fixture-secret",
+      BANK_FEED_WRAPPING_KEY_V2: `v2.${"A".repeat(43)}`,
+      BRAIN_NAME: "Sandbox Brain",
+    },
+  });
+  const provider = new PlaidSandboxFake();
+  provider.removeAvailable = true;
+  const stamp = "2026-08-30T13:00:00.000Z";
+  try {
+    const { fetchImpl } = await connectAndStagePlaidItem(
+      fixture, provider, stamp, "disconnect-before-assignment-0001",
+    );
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM plaid_sync_windows").n, 1);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM plaid_sync_stage_accounts").n, 1);
+    assert.ok(fixture.first("SELECT COUNT(*) AS n FROM plaid_sync_stage_transactions").n > 0);
+
+    const disconnected = await disconnectPlaidItem(
+      fixture.env, "item-sandbox-1", { fetchImpl, now: stamp },
+    );
+    assert.equal(disconnected.revocation_state, "confirmed");
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM plaid_sync_windows").n, 0);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM plaid_sync_stage_accounts").n, 0);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM plaid_sync_stage_transactions").n, 0);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 0);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("disconnecting after promotion keeps the ledger accounts, balances, and transactions", async () => {
+  const fixture = await createProductFixture({
+    env: {
+      BANK_FEED_PROVIDER: "plaid",
+      BANK_FEED_ENV: "sandbox",
+      BANK_FEED_CLIENT_ID: "fixture-client-id",
+      BANK_FEED_SECRET: "fixture-secret",
+      BANK_FEED_WRAPPING_KEY_V2: `v2.${"A".repeat(43)}`,
+      BRAIN_NAME: "Sandbox Brain",
+    },
+  });
+  const provider = new PlaidSandboxFake();
+  provider.removeAvailable = true;
+  const stamp = "2026-08-30T13:00:00.000Z";
+  try {
+    seedOwnedEntity(fixture, "fixture-company", "Fixture Company");
+    const { fetchImpl } = await connectAndStagePlaidItem(
+      fixture, provider, stamp, "disconnect-after-promotion-0001",
+    );
+    const accountRef = fixture.first(
+      "SELECT account_ref FROM plaid_account_entity_assignments WHERE item_ref='item-sandbox-1'",
+    ).account_ref;
+    await assignPlaidAccountEntity(fixture.env, {
+      request_id: "disconnect-ledger-assignment-0001",
+      account_ref: accountRef,
+      entity_slug: "fixture-company",
+    }, { now: stamp });
+    await syncPlaidItem(fixture.env, "item-sandbox-1", { fetchImpl, now: stamp });
+    const before = {
+      accounts: fixture.first("SELECT COUNT(*) AS n FROM fin_accounts").n,
+      balances: fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n,
+      transactions: fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n,
+    };
+    assert.ok(before.accounts > 0 && before.balances > 0 && before.transactions > 0,
+      "the promoted-ledger decision point must be reached");
+
+    const disconnected = await disconnectPlaidItem(
+      fixture.env, "item-sandbox-1", { fetchImpl, now: stamp },
+    );
+    assert.equal(disconnected.revocation_state, "confirmed");
+    assert.deepEqual({
+      accounts: fixture.first("SELECT COUNT(*) AS n FROM fin_accounts").n,
+      balances: fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n,
+      transactions: fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n,
+    }, before);
+  } finally {
+    fixture.close();
+  }
+});
 
 test("bank connect navigation accepts the owner cookie while every API still requires the app header", async () => {
   const fixture = await createProductFixture({

@@ -1610,6 +1610,23 @@ export async function handlePlaidWebhook(env, request, { fetchImpl = fetch, now 
   return new Response("accepted", { status: 200 });
 }
 
+function plaidStagingCleanupStatements(env, tenantId, itemRef) {
+  const window = "SELECT window_ref FROM plaid_sync_windows WHERE tenant_id=? AND item_ref=?";
+  return [
+    env.DB.prepare(
+      `DELETE FROM plaid_sync_stage_transactions
+        WHERE tenant_id=? AND window_ref IN (${window})`,
+    ).bind(tenantId, tenantId, itemRef),
+    env.DB.prepare(
+      `DELETE FROM plaid_sync_stage_accounts
+        WHERE tenant_id=? AND window_ref IN (${window})`,
+    ).bind(tenantId, tenantId, itemRef),
+    env.DB.prepare(
+      "DELETE FROM plaid_sync_windows WHERE tenant_id=? AND item_ref=?",
+    ).bind(tenantId, itemRef),
+  ];
+}
+
 export async function drainPlaidRevocations(env, {
   maxItems = 3,
   fetchImpl = fetch,
@@ -1674,6 +1691,7 @@ export async function drainPlaidRevocations(env, {
     const transition = plaidRevocationTransition({ state: "pending", providerResult });
     if (transition.eraseAccessToken) {
       await env.DB.batch([
+        ...plaidStagingCleanupStatements(env, tenantId, row.item_ref),
         env.DB.prepare(
           `UPDATE bank_feed_items SET status='removed',status_detail='The account holder disconnected this bank.',
               removed_at=?,access_ciphertext='REMOVED0000000000000000',access_iv='REMOVED000000000'
@@ -1714,6 +1732,7 @@ export async function disconnectPlaidItem(env, itemRef, {
   const item = await itemRow(env, tenantId, itemRef);
   if (!item) return { ok: false, reason: "that connection is not on this brain" };
   await env.DB.batch([
+    ...plaidStagingCleanupStatements(env, tenantId, itemRef),
     env.DB.prepare(
       `INSERT INTO plaid_revocation_outbox
          (tenant_id,item_ref,state,outcome_state,attempts,next_attempt_at,requested_at,updated_at)
