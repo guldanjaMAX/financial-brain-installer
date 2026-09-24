@@ -1035,6 +1035,11 @@ the CLI refuses before authorizing document deletion.
   <gmail|calendar|imap>`. The same install, status, and remove flow works with a
   per-user LaunchAgent on macOS and a current-user Task Scheduler entry on
   Windows. Linux still needs a separately configured scheduler.
+- **Installed is not the same as proven.** Schedule status stays yellow after
+  installation, stays yellow after the first unattended success, and turns
+  green only after the Brain has stored a second distinct successful run. The
+  proof is server-side, so a local task definition alone cannot claim that the
+  source is actually refreshing.
 - **WhatsApp exports are the safer path.** The separate live paired-device
   connector is unofficial, violates WhatsApp's Terms of Service, and may lead
   to an account restriction or ban. Business automation should use Meta's

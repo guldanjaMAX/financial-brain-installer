@@ -46,7 +46,7 @@ try {
   check("installed scheduler argv retains the provider across a later run",
     plan.programArguments.slice(0, 4).join("|").includes("provider-scheduler.mjs|slack|run"));
   check("scheduled child invokes the ordinary provider ingest command",
-    plan.spec.childArgumentsOf(plan).join(" ") === `ingest ${plan.path} --from slack`);
+    plan.spec.childArgumentsOf(plan).join(" ") === `ingest ${plan.path} --from slack --scheduled-run`);
   const env = plan.spec.childEnvironmentOf(plan, {
     HOME: folder,
     BRAIN_SLACK_TOKEN_STORE: "keychain",

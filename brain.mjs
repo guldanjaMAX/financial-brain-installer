@@ -10769,6 +10769,17 @@ async function cmdOcrPreflightInteractive(manifestPath) {
  * step. Nothing is ever skipped silently; the run ends with a breakdown by
  * reason, and those reasons are kept in the state file.
  */
+export function scheduledSourceReceiptPoster(postReceipt, flags = {}) {
+  if (typeof postReceipt !== "function") throw new TypeError("a source receipt poster is required");
+  if (flags["scheduled-run"] !== true) return postReceipt;
+  return (base, adminKey, receipt, ...rest) => postReceipt(
+    base,
+    adminKey,
+    { ...receipt, scheduled_run: true },
+    ...rest,
+  );
+}
+
 async function cmdIngest(manifestPath) {
   const { m } = loadManifest(manifestPath);
   const flags = parseFlags(process.argv.slice(4));
@@ -10994,7 +11005,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       "do not paste the key into a shell command."
     );
   }
-  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const postReceipt = scheduledSourceReceiptPoster(options.postSourceReceipt ?? postSourceReceipt, flags);
   const recordSourceReceipt = (receipt) => {
     assertLockOwned?.();
     return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
@@ -12397,7 +12408,7 @@ async function cmdIngestCalendarRun(
       ? options.loadGoogleTokensReadOnly ?? loadTokensReadOnly
       : options.loadGoogleTokens ?? loadTokens,
   });
-  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const postReceipt = scheduledSourceReceiptPoster(options.postSourceReceipt ?? postSourceReceipt, flags);
   const recordSourceReceipt = (receipt) => {
     assertLockOwned?.();
     return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
@@ -12747,7 +12758,7 @@ export async function cmdIngestImessage(m, manifestPath, flags, options = {}) {
     );
   }
 
-  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const postReceipt = scheduledSourceReceiptPoster(options.postSourceReceipt ?? postSourceReceipt, flags);
   const sendBatch = options.requestIngestBatch ?? requestIngestBatch;
   const statePath = join(dirname(resolve(manifestPath)), `.brain-ingest-${sourceName}.json`);
 
@@ -12994,7 +13005,7 @@ export async function cmdIngestWhatsapp(m, manifestPath, flags, options = {}) {
     );
   }
 
-  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const postReceipt = scheduledSourceReceiptPoster(options.postSourceReceipt ?? postSourceReceipt, flags);
   const sendBatch = options.requestIngestBatch ?? requestIngestBatch;
   const statePath = join(dirname(resolve(manifestPath)), `.brain-ingest-${sourceName}.json`);
 
@@ -13223,7 +13234,7 @@ export async function cmdIngestIphoneBackup(m, manifestPath, flags, options = {}
     );
   }
 
-  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const postReceipt = scheduledSourceReceiptPoster(options.postSourceReceipt ?? postSourceReceipt, flags);
   const sendBatch = options.requestIngestBatch ?? requestIngestBatch;
 
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
@@ -14520,7 +14531,7 @@ const cmdIngestRemoteRun = async (
   const base = dry ? null : await resolveBase(m, acct);
   const adminKey = dry ? null : resolveKey(manifestPath);
   if (!adminKey && !dry) die("no admin key found: not in the environment, and no .brain-admin-key file next to the manifest.");
-  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const postReceipt = scheduledSourceReceiptPoster(options.postSourceReceipt ?? postSourceReceipt, flags);
   const recordSourceReceipt = (receipt) => {
     assertLockOwned?.();
     return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
@@ -22422,7 +22433,47 @@ async function cmdSupport() {
  * vocabulary because the folder they are watching happens to live outside
  * Google Drive.
  */
-async function cmdScheduleFolder(m, manifestPath, action) {
+export async function readSourceScheduleProof(m, manifestPath, source, options = {}) {
+  if (options.readScheduleProof) return options.readScheduleProof({ manifest: m, manifestPath, source });
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const adminKey = resolveKey(manifestPath);
+  if (!adminKey) return { state: "proof_unavailable" };
+  try {
+    const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, null);
+    const request = options.http ?? http;
+    const response = await request(
+      `${base}/api/admin/brain/freshness`,
+      { headers: { "X-Admin-Key": adminKey } },
+      { timeoutMs: 30_000, what: "the schedule proof check" },
+    );
+    if (!response.ok) return { state: "proof_unavailable" };
+    const report = await response.json();
+    return report?.sources?.find((entry) => entry.name === source)?.schedule || { state: "waiting_first" };
+  } catch {
+    return { state: "proof_unavailable" };
+  }
+}
+
+export function installedScheduleMessage(label, result, proof, platform = process.platform) {
+  if (!result.installed) {
+    return { level: "warning", text: `${label} refresh is not installed on this ${platform === "win32" ? "Windows PC" : "Mac"}` };
+  }
+  if (proof?.state === "proven") {
+    return { level: "ok", text: `${label} refresh is scheduled and proven by two unattended runs` };
+  } else if (proof?.state === "waiting_second") {
+    return { level: "warning", text: `${label} refresh is installed, waiting for its second unattended run` };
+  } else if (proof?.state === "proof_unavailable") {
+    return { level: "warning", text: `${label} refresh is installed, but the Brain could not verify its unattended runs` };
+  }
+  return { level: "warning", text: `${label} refresh is installed, waiting for its first unattended run` };
+}
+
+function reportInstalledSchedule(label, result, proof, platform = process.platform) {
+  const message = installedScheduleMessage(label, result, proof, platform);
+  (message.level === "ok" ? ok : warn)(message.text);
+}
+
+async function cmdScheduleFolder(m, manifestPath, action, options = {}) {
   const source = String(m?.corpora?.local_folder?.source || "documents");
   let dataPlane = null;
   if (action === "install") {
@@ -22472,10 +22523,10 @@ async function cmdScheduleFolder(m, manifestPath, action) {
     return result;
   }
 
-  if (!result.installed) warn("watched folder refresh is not installed on this Mac");
-  else if (!result.loaded) warn("watched folder refresh has a definition but is not loaded by launchd");
+  const proof = await readSourceScheduleProof(m, manifestPath, source, options);
+  if (result.installed && !result.loaded) warn("watched folder refresh has a definition but is not loaded by launchd");
   else if (result.definitionDrift) warn("the installed watched folder refresh does not match the current manifest; reinstall it");
-  else ok(`watched folder refresh is installed for ${result.cron}`);
+  else reportInstalledSchedule("watched folder", result, proof);
   if (result.folderPath) info(`folder: ${result.folderPath}`);
   if (result.running) info(`a folder ingest is running as pid ${result.pid}`);
   else if (result.lastRunSucceeded === false) warn(`the last scheduled run failed with exit code ${result.lastExitCode}`);
@@ -22544,10 +22595,10 @@ export async function cmdWindowsScheduledIngest(manifestPath, options = {}) {
     die(`the Windows scheduled ingest provider must be one of ${PROVIDER_CONNECTOR_IDS.join(", ")}`);
   }
   const expectedChildArguments = folder
-    ? ["ingest", manifestPath, "--path", String(flags.path), "--source", assertSourceName(flags.source)]
+    ? ["ingest", manifestPath, "--path", String(flags.path), "--source", assertSourceName(flags.source), "--scheduled-run"]
     : sourceLane
       ? ["ingest", manifestPath, "--from", from, "--source", assertSourceName(flags.source), "--scheduled-run"]
-      : ["ingest", manifestPath, "--from", from];
+      : ["ingest", manifestPath, "--from", from, "--scheduled-run"];
   const scheduler = options.scheduler ?? await import("./operations/windows-task-scheduler.mjs");
   const result = scheduler.runWindowsScheduledIngest(manifestPath, {
     ...(options.schedulerOptions || {}),
@@ -22659,15 +22710,15 @@ export async function cmdSchedule(manifestPath, options = {}) {
       }
       return result;
     }
-    if (result.installed) ok(`${source} refresh is installed for ${result.cron}`);
-    else warn(`${source} refresh is not installed on this Windows PC`);
+    const proof = await readSourceScheduleProof(m, manifestPath, source, options);
+    reportInstalledSchedule(source, result, proof, platform);
     if (result.output) info(result.output);
     return result;
   }
   // The watched local folder is a second lane on the same command, because it
   // is the same question ("what refreshes itself on this Mac") asked about a
   // different source.
-  if (flags.folder) return cmdScheduleFolder(m, manifestPath, action);
+  if (flags.folder) return cmdScheduleFolder(m, manifestPath, action, options);
   if (scheduledSource) {
     const source = assertSourceName(m?.corpora?.[scheduledSource]?.source || scheduledSource);
     const resolveAdminKeyImpl = options.resolveAdminKey ?? resolveAdminKey;
@@ -22714,10 +22765,10 @@ export async function cmdSchedule(manifestPath, options = {}) {
       }
       return result;
     }
-    if (!result.installed) warn(`${scheduledSource} refresh is not installed on this Mac`);
-    else if (!result.loaded) warn(`${scheduledSource} refresh has a definition but is not loaded by launchd`);
+    const proof = await readSourceScheduleProof(m, manifestPath, source, options);
+    if (result.installed && !result.loaded) warn(`${scheduledSource} refresh has a definition but is not loaded by launchd`);
     else if (result.definitionDrift) warn(`the installed ${scheduledSource} refresh does not match the current manifest; reinstall it`);
-    else ok(`${scheduledSource} refresh is installed for ${result.cron}`);
+    else reportInstalledSchedule(scheduledSource, result, proof);
     if (result.running) info(`a ${scheduledSource} ingest is running as pid ${result.pid}`);
     else if (result.lastRunSucceeded === false) warn(`the last scheduled run failed with exit code ${result.lastExitCode}`);
     else if (result.lastRunSucceeded === true) ok(`the last scheduled run succeeded (${result.runs ?? 0} run(s) recorded)`);
@@ -22777,10 +22828,10 @@ export async function cmdSchedule(manifestPath, options = {}) {
       return result;
     }
 
-    if (!result.installed) warn(`${provider} refresh is not installed on this Mac`);
-    else if (!result.loaded) warn(`${provider} refresh has a definition but is not loaded by launchd`);
+    const proof = await readSourceScheduleProof(m, manifestPath, source, options);
+    if (result.installed && !result.loaded) warn(`${provider} refresh has a definition but is not loaded by launchd`);
     else if (result.definitionDrift) warn(`the installed ${provider} refresh does not match the current manifest; reinstall it`);
-    else ok(`${provider} refresh is installed for ${result.cron}`);
+    else reportInstalledSchedule(provider, result, proof);
     if (result.running) info(`a ${provider} ingest is running as pid ${result.pid}`);
     else if (result.lastRunSucceeded === false) warn(`the last scheduled run failed with exit code ${result.lastExitCode}`);
     else if (result.lastRunSucceeded === true) ok(`the last scheduled run succeeded (${result.runs ?? 0} run(s) recorded)`);
@@ -22837,10 +22888,10 @@ export async function cmdSchedule(manifestPath, options = {}) {
     return result;
   }
 
-  if (!result.installed) warn("Drive refresh is not installed on this Mac");
-  else if (!result.loaded) warn("Drive refresh has a definition but is not loaded by launchd");
+  const proof = await readSourceScheduleProof(m, manifestPath, "drive", options);
+  if (result.installed && !result.loaded) warn("Drive refresh has a definition but is not loaded by launchd");
   else if (result.definitionDrift) warn("the installed Drive refresh does not match the current manifest; reinstall it");
-  else ok(`Drive refresh is installed for ${result.cron}`);
+  else reportInstalledSchedule("Drive", result, proof);
   if (result.running) info(`a Drive sync is running as pid ${result.pid}`);
   else if (result.lastRunSucceeded === false) warn(`the last scheduled run failed with exit code ${result.lastExitCode}`);
   else if (result.lastRunSucceeded === true) ok(`the last scheduled run succeeded (${result.runs ?? 0} run(s) recorded)`);
@@ -26110,7 +26161,7 @@ async function cmdIngestProviderRun(
       sendBatch: options.requestIngestBatch ?? requestIngestBatch,
       removeDocuments: options.applyDriveRemovals ?? applyDriveRemovals,
       listStoredFamilies: options.listStoredSourceFamilies ?? listStoredSourceFamilies,
-      postReceipt: options.postSourceReceipt ?? postSourceReceipt,
+      postReceipt: scheduledSourceReceiptPoster(options.postSourceReceipt ?? postSourceReceipt, flags),
       base,
       adminKey,
       assertOwned: assertLockOwned,

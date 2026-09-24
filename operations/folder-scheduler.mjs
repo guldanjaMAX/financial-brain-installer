@@ -130,7 +130,7 @@ export const FOLDER_SCHEDULER_SPEC = Object.freeze({
   // tick cannot be pointed at a different tree by editing the manifest after
   // the agent was installed.
   childArgumentsOf: (plan) => [
-    "ingest", plan.path, "--path", plan.folderPath, "--source", plan.folderSource,
+    "ingest", plan.path, "--path", plan.folderPath, "--source", plan.folderSource, "--scheduled-run",
   ],
   childEnvironmentOf: (plan, environment) => safeIngestEnvironment(environment),
   configChangedError:

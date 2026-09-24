@@ -232,7 +232,7 @@ try {
       child.command === "/usr/bin/lockf" && JSON.stringify(child.args) === JSON.stringify([
         "-k", "-s", "-t", "0", result.lockPath,
         resolve("/opt/node/bin/node"), resolve("/opt/brain installer/brain.mjs"),
-        "ingest", manifestPath, "--from", "imessage",
+        "ingest", manifestPath, "--from", "imessage", "--scheduled-run",
       ]), JSON.stringify(child?.args));
     check("the tick's child environment is scrubbed of every credential",
       CLOUDFLARE_CREDENTIAL_ENV.every((name) => child.options.env[name] === undefined) &&

@@ -204,7 +204,7 @@ try {
       JSON.stringify(plan.programArguments));
     check("the child that runner spawns is the real CLI verb, so the credential gate applies to it too",
       JSON.stringify(WHATSAPP_DRAIN_SCHEDULER_SPEC.childArgumentsOf(plan)) ===
-      JSON.stringify(["ingest", manifestPath, "--from", "whatsapp"]),
+      JSON.stringify(["ingest", manifestPath, "--from", "whatsapp", "--scheduled-run"]),
       JSON.stringify(WHATSAPP_DRAIN_SCHEDULER_SPEC.childArgumentsOf(plan)));
     check("the manifest cron knob overrides the built-in default",
       buildWhatsappDrainSchedulerPlan(

@@ -943,6 +943,15 @@ installed definition never contains a password, token, admin key, or deployment
 credential. Each scheduled child enters the ordinary ingest command with the
 source name bound from its manifest configuration.
 
+`brain schedule --status` deliberately does not call a locally installed task
+"scheduled." Installation writes a server-side expectation and starts a new
+proof window. Each successful scheduler child posts the ordinary source receipt
+with an internal unattended-run marker and a run ID. The Worker stores that run
+once even when a response retry repeats the receipt. Status remains "installed,
+waiting for its first unattended run," then "waiting for its second unattended
+run." Only the second distinct stored success produces green "scheduled and
+proven" wording.
+
 Scheduler stdout and stderr remain private mode `0600`. At install, after each
 lock-owning ingest child exits, and at removal, each stream is cut back to a
 5 MiB tail with two exact retained history files. A lock-contention skip does

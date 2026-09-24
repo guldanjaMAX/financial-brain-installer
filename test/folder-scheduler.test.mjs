@@ -272,7 +272,7 @@ try {
       child.command === "/usr/bin/lockf" && JSON.stringify(child.args) === JSON.stringify([
         "-k", "-s", "-t", "0", result.lockPath,
         resolve("/opt/node/bin/node"), resolve("/opt/brain installer/brain.mjs"),
-        "ingest", manifestPath, "--path", watched, "--source", "documents",
+        "ingest", manifestPath, "--path", watched, "--source", "documents", "--scheduled-run",
       ]), JSON.stringify(child?.args));
     check("the tick's child environment is scrubbed of every credential",
       CLOUDFLARE_CREDENTIAL_ENV.every((name) => child.options.env[name] === undefined) &&
@@ -448,7 +448,7 @@ try {
     check("and the plan is approved BEFORE anything is removed",
       assertIndex > planIndex && applyIndex > assertIndex, JSON.stringify({ planIndex, assertIndex, applyIndex }));
     check("the folder lane's tick argv is the documented ingest command",
-      /"ingest", plan\.path, "--path", plan\.folderPath, "--source", plan\.folderSource/
+      /"ingest", plan\.path, "--path", plan\.folderPath, "--source", plan\.folderSource, "--scheduled-run"/
         .test(readFileSync(new URL("../operations/folder-scheduler.mjs", import.meta.url), "utf8")));
   }
 } finally {

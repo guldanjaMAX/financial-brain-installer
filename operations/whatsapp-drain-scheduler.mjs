@@ -85,7 +85,7 @@ export const WHATSAPP_DRAIN_SCHEDULER_SPEC = Object.freeze({
     drain_cron: reference.cron,
     admin_key_secret: reference.manifest?.operations?.admin_key_secret || null,
   }),
-  childArgumentsOf: (plan) => ["ingest", plan.path, "--from", "whatsapp"],
+  childArgumentsOf: (plan) => ["ingest", plan.path, "--from", "whatsapp", "--scheduled-run"],
   childEnvironmentOf: (plan, environment) => safeIngestEnvironment(environment),
   configChangedError:
     "the manifest's scheduled WhatsApp configuration changed after this LaunchAgent was installed; reinstall the scheduler before it may read credentials",

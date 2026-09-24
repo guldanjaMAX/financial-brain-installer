@@ -347,7 +347,7 @@ export const DRIVE_SCHEDULER_SPEC = Object.freeze({
     admin_key_secret: reference.manifest?.operations?.admin_key_secret || null,
     google_token_store: reference.googleTokenStore,
   }),
-  childArgumentsOf: (plan) => ["ingest", plan.path, "--from", "drive"],
+  childArgumentsOf: (plan) => ["ingest", plan.path, "--from", "drive", "--scheduled-run"],
   childEnvironmentOf: (plan, environment) => {
     const child = safeIngestEnvironment(environment);
     if (plan.googleTokenStore === "auto") delete child.BRAIN_GOOGLE_TOKEN_STORE;

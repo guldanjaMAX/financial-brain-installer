@@ -85,7 +85,7 @@ export function createProviderSchedulerSpec(provider) {
       token_store: reference.tokenStore,
       source_configuration: reference.sourceConfiguration,
     }),
-    childArgumentsOf: (plan) => ["ingest", plan.path, "--from", key],
+    childArgumentsOf: (plan) => ["ingest", plan.path, "--from", key, "--scheduled-run"],
     childEnvironmentOf: (plan, environment) => {
       const child = safeIngestEnvironment(environment);
       if (plan.tokenStore === "auto") delete child[tokenEnv];

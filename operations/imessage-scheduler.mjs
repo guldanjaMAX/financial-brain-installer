@@ -78,7 +78,7 @@ export const IMESSAGE_SCHEDULER_SPEC = Object.freeze({
     capture_cron: reference.cron,
     admin_key_secret: reference.manifest?.operations?.admin_key_secret || null,
   }),
-  childArgumentsOf: (plan) => ["ingest", plan.path, "--from", "imessage"],
+  childArgumentsOf: (plan) => ["ingest", plan.path, "--from", "imessage", "--scheduled-run"],
   childEnvironmentOf: (plan, environment) => safeIngestEnvironment(environment),
   configChangedError:
     "the manifest's scheduled iMessage configuration changed after this LaunchAgent was installed; reinstall the scheduler before it may read credentials",

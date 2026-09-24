@@ -18,6 +18,12 @@ asset publication.
   credential-store selector, while credentials remain outside the installed
   schedule definition.
 
+- **A schedule is green only after it has actually run twice.** Installation
+  now starts a server-side proof window. The first successful unattended run is
+  recorded but still shown as waiting. A second distinct successful run proves
+  the schedule. Retrying one receipt cannot count twice, and a local task
+  definition alone never produces green status.
+
 - **Windows can now keep Drive, watched folders, and supported providers up to
   date without an open terminal.** `brain schedule` creates one stable
   current-user Task Scheduler entry per Brain and source lane, using the

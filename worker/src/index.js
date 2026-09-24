@@ -2034,6 +2034,12 @@ async function handleSourceReceipt(env, request) {
   if (runId && !/^[A-Za-z0-9_-]{1,128}$/.test(runId)) {
     return jsonResponse({ error: "run_id must contain only letters, numbers, underscores, or hyphens" }, 400);
   }
+  if (body?.scheduled_run !== undefined && typeof body.scheduled_run !== "boolean") {
+    return jsonResponse({ error: "scheduled_run must be a boolean" }, 400);
+  }
+  if (body?.scheduled_run === true && (status !== "ready" || !runId)) {
+    return jsonResponse({ error: "scheduled_run requires a ready receipt with run_id" }, 400);
+  }
   const invalidCountField = invalidReceiptCountField(body);
   if (invalidCountField) {
     return jsonResponse({ error: `${invalidCountField} must be a non-negative safe integer` }, 400);
@@ -2190,6 +2196,17 @@ async function handleSourceReceipt(env, request) {
   }
 
   if (runId) {
+    if (status === "ready" && body?.scheduled_run === true) {
+      // The run id is the idempotency key. Insert before the sync_runs upsert so
+      // a lost-response retry cannot count the same unattended completion twice.
+      statements.push(env.DB.prepare(
+        `INSERT INTO source_events (source_name,event,at,detail)
+         SELECT ?1,'schedule_run',?2,?3
+          WHERE NOT EXISTS (
+            SELECT 1 FROM sync_runs WHERE run_id=?4 AND finished_at IS NOT NULL
+          )`
+      ).bind(source, completedAt, `run_id=${runId}`, runId));
+    }
     statements.push(env.DB.prepare(
       `INSERT INTO sync_runs
          (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
@@ -2317,8 +2334,8 @@ async function handleSourceExpectation(env, request) {
        WHERE lower(trim(sources.kind))=excluded.kind`
     ).bind(source, kind, at, expected),
     env.DB.prepare(
-      "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'schedule',?2,?3)"
-    ).bind(source, at, detail),
+      "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,?2,?3,?4)"
+    ).bind(source, expected === null ? "schedule_remove" : "schedule_install", at, detail),
   ]);
 
   return jsonResponse({ source, kind, expected_refresh_seconds: expected });

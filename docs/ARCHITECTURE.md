@@ -423,6 +423,15 @@ cadence needs a separate manual trigger setup; it never prints an approximate
 Linux does not yet have an equivalent unattended source scheduler. The
 iMessage and other Mac-only capture daemons remain LaunchAgent-only.
 
+Schedule installation records `schedule_install` in `source_events`; removal
+records `schedule_remove`. Every packaged scheduler adds the internal
+`--scheduled-run` marker to the ordinary ingest command. A successful ready
+receipt with that marker records one `schedule_run` event only when its run ID
+has not already completed. The freshness projection counts those durable events
+after the latest install. Zero is waiting for the first run, one is waiting for
+the second, and two or more is proven. Local scheduler state never supplies
+that proof by itself.
+
 ## D1, FTS5, Vectorize, and the outbox
 
 D1 is authoritative for documents, chunks, source metadata, freshness,

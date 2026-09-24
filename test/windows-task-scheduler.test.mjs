@@ -53,19 +53,19 @@ assert.deepEqual(providerPlan.createArgs, [
   "/Create", "/F", "/SC", "HOURLY", "/MO", "2", "/ST", "00:45",
   "/RL", "LIMITED",
   "/TN", "com.brain-installer.fixture-brain.slack-ingest",
-  "/TR", String.raw`cmd.exe /d /s /c ""C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --from slack"`,
+  "/TR", String.raw`cmd.exe /d /s /c ""C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --from slack --scheduled-run"`,
 ]);
 
 const drivePlan = buildWindowsSchedulerPlan(manifestPath, options());
 assert.equal(drivePlan.taskName, "com.brain-installer.fixture-brain.drive-ingest");
-assert.deepEqual(drivePlan.childArguments, ["ingest", manifestPath, "--from", "drive"]);
+assert.deepEqual(drivePlan.childArguments, ["ingest", manifestPath, "--from", "drive", "--scheduled-run"]);
 
 const folderPlan = buildWindowsSchedulerPlan(manifestPath, options({ folder: true, validateExtras: false }));
 assert.deepEqual(folderPlan.createArgs, [
   "/Create", "/F", "/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI", "/ST", "06:30",
   "/RL", "LIMITED",
   "/TN", "com.brain-installer.fixture-brain.folder-ingest",
-  "/TR", String.raw`cmd.exe /d /s /c ""C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --path "C:\Source Files" --source documents"`,
+  "/TR", String.raw`cmd.exe /d /s /c ""C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --path "C:\Source Files" --source documents --scheduled-run"`,
 ]);
 
 const unsafeCmdCharacters = ["&", "|", "<", ">", "^", "%", "!", "\""];
@@ -158,7 +158,7 @@ await brain.cmdWindowsScheduledIngest(manifestPath, {
 assert.equal(entrypointCalls.length, 1, "the dedicated entrypoint reached its scrubbed runner");
 assert.equal(entrypointCalls[0].runOptions.provider, "slack");
 assert.deepEqual(entrypointCalls[0].runOptions.expectedChildArguments,
-  ["ingest", manifestPath, "--from", "slack"]);
+  ["ingest", manifestPath, "--from", "slack", "--scheduled-run"]);
 assert.deepEqual(entrypointExitCodes, [0]);
 let wranglerBoundaryCalls = 0;
 await brain.runCliCommandWithCredentialBoundary("windows-scheduled-ingest", () => "ran", {

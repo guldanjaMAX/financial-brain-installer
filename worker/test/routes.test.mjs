@@ -1732,6 +1732,40 @@ const zeroChunkExpectedReturn = {
   check("an unsafe source receipt name is refused", bad.status === 400, String(bad.status));
 }
 
+/* ---- unattended completions create idempotent server-side schedule proof ---- */
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({
+      source: "gmail", kind: "gmail", status: "ready", run_id: "scheduled-fixture-1",
+      scheduled_run: true,
+    }),
+  }), env, {});
+  const proofSql = seen.sql.find((sql) => /'schedule_run'/.test(sql));
+  check("a ready unattended receipt records one durable schedule-run event",
+    response.status === 200 && /NOT EXISTS[\s\S]*sync_runs[\s\S]*finished_at IS NOT NULL/.test(proofSql || ""),
+    JSON.stringify({ status: response.status, sql: seen.sql }));
+  const proofBind = seen.binds.find((values) => values.includes("run_id=scheduled-fixture-1"));
+  check("the schedule proof is bound to the same run id used for idempotency",
+    proofBind?.[3] === "scheduled-fixture-1", JSON.stringify(seen.binds));
+}
+
+{
+  const { env, seen } = mkEnv([]);
+  const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
+    method: "POST",
+    headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+    body: JSON.stringify({ source: "gmail", kind: "gmail", status: "ready", scheduled_run: "yes" }),
+  }), env, {});
+  const body = await response.json();
+  check("an invalid scheduled-run claim reaches validation and writes nothing",
+    response.status === 400 && body.error === "scheduled_run must be a boolean" &&
+      !seen.sql.some((sql) => /INSERT INTO source_events|INSERT INTO sync_runs/.test(sql)),
+    JSON.stringify({ status: response.status, body, sql: seen.sql }));
+}
+
 /* ---- one source name cannot be relabelled as another connector kind ---- */
 {
   const sourceRows = [{ name: "client-mail", kind: " GMAIL ", zone: null }];
@@ -2228,7 +2262,8 @@ const zeroChunkExpectedReturn = {
     /expected_refresh_seconds=excluded\.expected_refresh_seconds/.test(conflict) &&
       !/\bstatus\s*=|last_ingest_at\s*=/.test(conflict), upsert);
   check("expectation changes leave a source event",
-    seen.sql.some((sql) => /source_events[\s\S]*'schedule'/.test(sql)) &&
+    seen.sql.some((sql) => /source_events/.test(sql)) &&
+      seen.binds.some((binds) => binds.includes("schedule_install")) &&
       seen.binds.some((binds) => binds.includes("expected_refresh_seconds=86400")),
     JSON.stringify({ sql: seen.sql, binds: seen.binds }));
 }

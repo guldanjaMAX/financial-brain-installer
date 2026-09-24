@@ -3615,6 +3615,7 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
     return { sources: [], unavailable: true };
   }
   const latestRuns = new Map();
+  const scheduleProof = new Map();
   try {
     let result;
     const currentRunSql =
@@ -3674,6 +3675,36 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
     // view. Coverage falls back to unknown instead of breaking the whole read.
     if (!missingSyncRunsTable(error)) throw error;
   }
+  try {
+    const proofSql =
+      `WITH last_config AS (
+         SELECT source_name,
+                MAX(CASE WHEN event='schedule_install' THEN at END) AS installed_at,
+                MAX(CASE WHEN event='schedule_remove' THEN at END) AS removed_at
+           FROM source_events
+          WHERE event IN ('schedule_install','schedule_remove')
+          GROUP BY source_name
+       )
+       SELECT config.source_name AS source, config.installed_at,
+              COUNT(run.rowid) AS successful_runs,
+              MIN(run.at) AS first_run_at,
+              MAX(run.at) AS last_run_at
+         FROM last_config config
+         LEFT JOIN source_events run
+           ON run.source_name=config.source_name
+          AND run.event='schedule_run'
+          AND run.at>=config.installed_at
+        WHERE config.installed_at IS NOT NULL
+          AND (config.removed_at IS NULL OR config.installed_at>config.removed_at)
+        GROUP BY config.source_name, config.installed_at`;
+    const result = await env.DB.prepare(proofSql).all();
+    for (const row of result?.results || []) {
+      if (typeof row?.source === "string" && row.source) scheduleProof.set(row.source, row);
+    }
+  } catch {
+    // A partially migrated install may have no source event table yet. The
+    // schedule remains unproven instead of turning green from local state.
+  }
   // Kinds we can refresh without the client's machine being on.
   return {
     sources: rows.map((s) => {
@@ -3710,8 +3741,32 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         automatable,
       };
       const latestRun = latestRuns.get(s.name) || null;
+      const proof = scheduleProof.get(s.name) || null;
+      const successfulRuns = Math.max(0, Number(proof?.successful_runs) || 0);
+      const lastScheduledRunAt = proof?.last_run_at || null;
+      const lastScheduledRunMs = timestampMs(lastScheduledRunAt);
+      const scheduleState = !expected
+        ? "not_installed"
+        : successfulRuns === 0
+          ? "waiting_first"
+          : successfulRuns === 1
+            ? "waiting_second"
+            : "proven";
       return {
         ...report,
+        schedule: {
+          state: scheduleState,
+          installed: Boolean(expected),
+          installed_at: proof?.installed_at || null,
+          successful_runs: successfulRuns,
+          first_run_at: proof?.first_run_at || null,
+          second_run_observed: successfulRuns >= 2,
+          second_run_at: successfulRuns >= 2 ? lastScheduledRunAt : null,
+          last_run_at: lastScheduledRunAt,
+          next_run_at: expected && Number.isFinite(lastScheduledRunMs)
+            ? new Date(lastScheduledRunMs + expected * 1000).toISOString()
+            : null,
+        },
         last_failure: latestRun?.error
           ? parseStoredSourceFailureEvidence(latestRun.failure_evidence, {
               status: "error",
