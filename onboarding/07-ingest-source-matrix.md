@@ -351,7 +351,7 @@ The load is the named source `iphone-backup` (or whatever you pass to `--source`
 
 ### A watched folder on your own machine
 
-**Built. The schedule is Mac-only; the load itself runs anywhere.**
+**Built. The schedule supports macOS and Windows; the load itself runs anywhere.**
 
 Several parts of this document tell you to drop a file into "a folder you already ingest": a WhatsApp export, an SMS backup, a Google Voice takeout, a saved meeting transcript, a mail archive. That sentence used to be true only if the folder happened to live inside Google Drive, because Drive was the only source that refreshed itself. Anywhere else, "already ingest" quietly meant "remember to run a command by hand, forever" — and the day you stop, your brain stops matching your world while still answering confidently from what it has.
 

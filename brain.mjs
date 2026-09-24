@@ -23188,6 +23188,42 @@ export function schedulePlatformLimitation(
   return lines.join("\n");
 }
 
+/**
+ * Internal Task Scheduler entrypoint. The registered cmd.exe action reaches
+ * this boundary first; only the child below receives the ordinary ingest argv,
+ * under the scheduler module's minimal credential-free environment.
+ */
+export async function cmdWindowsScheduledIngest(manifestPath, options = {}) {
+  if ((options.platform ?? process.platform) !== "win32") {
+    die("windows-scheduled-ingest is available only to the installed Windows Task Scheduler entry");
+  }
+  if (!manifestPath) die("the Windows scheduled ingest entry needs its manifest path");
+  const flags = options.flags ?? parseFlags(process.argv.slice(4));
+  assertKnownFlags(flags, ["from", "path", "source"], "windows-scheduled-ingest");
+  const from = flags.from ? String(flags.from) : null;
+  const folder = typeof flags.path === "string" && flags.path.length > 0;
+  if (folder === Boolean(from) || (folder && !flags.source)) {
+    die("the Windows scheduled ingest entry needs exactly one reviewed --from lane or --path/--source folder lane");
+  }
+  const provider = from && from !== "drive" ? from : null;
+  if (provider && !PROVIDER_CONNECTOR_IDS.includes(provider)) {
+    die(`the Windows scheduled ingest provider must be one of ${PROVIDER_CONNECTOR_IDS.join(", ")}`);
+  }
+  const expectedChildArguments = folder
+    ? ["ingest", manifestPath, "--path", String(flags.path), "--source", assertSourceName(flags.source)]
+    : ["ingest", manifestPath, "--from", from];
+  const scheduler = options.scheduler ?? await import("./operations/windows-task-scheduler.mjs");
+  const result = scheduler.runWindowsScheduledIngest(manifestPath, {
+    ...(options.schedulerOptions || {}),
+    folder,
+    provider,
+    expectedChildArguments,
+  });
+  const status = Number.isInteger(result?.status) ? result.status : 1;
+  (options.setExitCode ?? ((code) => { process.exitCode = code; }))(status);
+  return result;
+}
+
 export async function cmdSchedule(manifestPath, options = {}) {
   if (!manifestPath) {
     die("usage: brain schedule <manifest> [--install|--status|--remove] [--folder|--provider <provider>]");
@@ -27783,6 +27819,7 @@ const commands = {
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
   schedule: cmdSchedule,
+  "windows-scheduled-ingest": cmdWindowsScheduledIngest,
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
   technician: cmdTechnicianInteractive,
@@ -27811,6 +27848,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "assistant-repair",
   "ocr-preflight",
   "custom-api",
+  "windows-scheduled-ingest",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {

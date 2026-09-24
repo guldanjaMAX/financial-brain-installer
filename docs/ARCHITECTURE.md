@@ -459,7 +459,7 @@ without exposing source identifiers.
 | Source | Current path |
 |---|---|
 | Local folders, including an Obsidian vault | Built through `--path`; Obsidian is file ingest, not a separate connector |
-| Google Drive | Built, resumable, incremental, deletion-aware, and schedulable on macOS |
+| Google Drive | Built, resumable, incremental, deletion-aware, and schedulable on macOS and Windows |
 | Gmail | Built with cursor safety; full real-account production validation remains a field gate |
 | Google Calendar | Built and wired through `brain ingest --from calendar`; row and receipt namespaces match, and event failure, refusal, or pending cancellation cleanup withholds the Google sync token; real-account validation remains a field gate |
 | Local watched folder | Built through the ordinary resumable folder ingest path and schedulable on macOS and Windows; multi-cycle field proof remains open |
@@ -486,7 +486,10 @@ spec, so all three share that hardening rather than each re-deriving it.
 Windows uses one current-user, least-privilege Task Scheduler entry per Brain
 and lane for Drive, watched-folder, and supported provider refreshes. It uses
 the same effective cron as the macOS specification when one `schtasks` entry
-can represent it exactly, and refuses with a filled manual recipe otherwise.
+can represent it exactly, and refuses with manual guidance otherwise.
+The refusal prints the exact one-time `brain.cmd` invocation and says that the
+cadence needs a separate manual trigger setup; it never prints an approximate
+`schtasks /Create` command.
 Linux does not yet have an equivalent unattended source scheduler. The
 iMessage and other Mac-only capture daemons remain LaunchAgent-only.
 

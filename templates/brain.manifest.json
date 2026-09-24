@@ -320,7 +320,7 @@
     },
     "local_folder": {
       "_comment": [
-        "A folder on this Mac that reloads itself on a schedule, so 'export it",
+        "A folder on this Mac or Windows PC that reloads itself on a schedule, so 'export it",
         "into this folder and forget about it' is actually true for a folder",
         "that is not inside Google Drive. Point it at wherever the client drops",
         "things: a WhatsApp or SMS export, a saved .vtt meeting transcript, a",
@@ -414,16 +414,19 @@
   },
   "operations": {
     "_ingest_cron_comment": [
-      "On macOS this installs as a per-user LaunchAgent and runs Google Drive",
+      "On macOS this installs as a per-user LaunchAgent. On Windows it installs",
+      "a current-user, least-privilege Task Scheduler entry when one task can",
+      "represent the cron exactly. Both run Google Drive",
       "normally incrementally, with periodic and policy-triggered full comparisons.",
-      "The plist contains no credentials. Calendar times use",
-      "the Mac's local timezone, which the installer compares with client.timezone.",
+      "The installed schedule definition contains no credentials. Calendar times use",
+      "the computer's local timezone, which the installer compares with client.timezone.",
       "Standard brain setup fills admin_key_secret with a deterministic, non-secret",
       "macOS Keychain locator before generating a key. An existing legacy adjacent",
       ".brain-admin-key is preserved. Windows uses a DPAPI-protected adjacent file;",
       "Linux uses an owner-only adjacent file. Never put the key itself here.",
       "brain secrets updates and verifies that declared durable location.",
-      "google_token_store persists auto, keychain or file for unattended runs."
+      "google_token_store persists auto, keychain or file for unattended runs.",
+      "folder_ingest_cron and provider_crons use the same macOS or Windows scheduler boundary."
     ],
     "ingest_cron": "0 9 * * *",
     "folder_ingest_cron": "0 * * * *",
