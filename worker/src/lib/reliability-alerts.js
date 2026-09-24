@@ -1,6 +1,6 @@
 import { freshnessReport, vectorRetrySummary } from "./store-d1.js";
 
-const SOURCE_ATTENTION_STATES = new Set(["stale", "broken", "never_synced"]);
+const SOURCE_ATTENTION_STATES = new Set(["stale", "missed", "broken", "never_synced"]);
 
 /**
  * Owner-safe operational alerts.

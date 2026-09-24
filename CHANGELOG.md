@@ -24,6 +24,12 @@ asset publication.
   the schedule. Retrying one receipt cannot count twice, and a local task
   definition alone never produces green status.
 
+- **The Brain now detects missed source refreshes itself.** A cheap Worker cron
+  read checks expected cadence against the last unattended success. More than
+  one cadence plus grace marks the source missed in status and answer gaps,
+  without counting the corpus or replacing a stronger connector error. An
+  aggregate owner webhook is available but makes no request unless configured.
+
 - **Windows can now keep Drive, watched folders, and supported providers up to
   date without an open terminal.** `brain schedule` creates one stable
   current-user Task Scheduler entry per Brain and source lane, using the

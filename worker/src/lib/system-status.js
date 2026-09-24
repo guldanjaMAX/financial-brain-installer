@@ -282,6 +282,14 @@ export async function ownerSystemStatus(env, deps) {
       days_since_ingest: s.days_since_ingest ?? null,
       reason: s.reason ?? null,
       automatable: !!s.automatable,
+      schedule: s.schedule && typeof s.schedule === "object" ? {
+        state: s.schedule.state ?? null,
+        installed: s.schedule.installed === true,
+        first_run_at: ownerDate(s.schedule.first_run_at),
+        second_run_observed: s.schedule.second_run_observed === true,
+        next_run_at: ownerDate(s.schedule.next_run_at),
+        last_run_at: ownerDate(s.schedule.last_run_at),
+      } : null,
       coverage: ownerCoverageFor(s, vectors),
       ...(zonesAvailable ? { access_zone: ownerAccessZone(s) } : {}),
     }));

@@ -432,6 +432,22 @@ after the latest install. Zero is waiting for the first run, one is waiting for
 the second, and two or more is proven. Local scheduler state never supplies
 that proof by itself.
 
+The Worker cron runs `runMissedSourceWatchdog` alongside existing bounded
+maintenance. It performs one source-registry read ordered by the source primary
+key. Correlated latest-install and latest-success lookups use the existing
+`source_events(source_name, at)` index. It never counts corpus rows. A schedule
+is missed only after its expected cadence plus a bounded grace window. The cron
+sets the closed `SCHEDULE_MISSED` reason without overwriting an existing
+connector error or safety review; the next successful source receipt clears it.
+Freshness, owner status, reliability alerts, and think coverage gaps all expose
+the missed state with a plain recovery action.
+
+`SOURCE_ALERT_WEBHOOK_URL` is an optional Worker variable for an external email
+bridge or owner-notes automation. It is unset by default. A newly missed episode
+sends one aggregate event with a count, the status route, and a next action. The
+payload contains no source name, document identity, content, path, credential,
+or raw error. Delivery failure is logged only as a generic maintenance warning.
+
 ## D1, FTS5, Vectorize, and the outbox
 
 D1 is authoritative for documents, chunks, source metadata, freshness,

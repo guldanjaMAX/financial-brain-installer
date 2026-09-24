@@ -782,6 +782,7 @@ const expected = [
   // no ledger value: it carries candidate labels and the possible-mention
   // state only, and every string in it is fixed product copy.
   "worker/src/lib/financial-map-question.js",
+  "worker/src/lib/missed-source-runs.js",
   "worker/src/lib/support-access.js",
   "worker/src/lib/tax-qbo-reconciliation.js",
   "worker/src/lib/update-status.js",

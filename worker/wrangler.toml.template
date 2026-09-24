@@ -20,6 +20,8 @@ CREDENTIAL_SCANNER = "on"
 # "image_field" if the model rejects that shape.
 OCR_ENABLED = "0"
 OCR_MODEL = "@cf/google/gemma-4-26b-a4b-it"
+# Optional aggregate-only owner alert hook. Leave unset to make no request.
+# SOURCE_ALERT_WEBHOOK_URL = "https://alerts.example.invalid/brain-source-status"
 
 [ai]
 binding = "AI"

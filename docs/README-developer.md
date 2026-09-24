@@ -952,6 +952,15 @@ waiting for its first unattended run," then "waiting for its second unattended
 run." Only the second distinct stored success produces green "scheduled and
 proven" wording.
 
+Missed-run detection is inside the Worker, so it still runs when the owner
+machine has stopped launching its local task. `worker/src/lib/missed-source-runs.js`
+uses one bounded registry query and indexed `source_events` lookups. It marks a
+source missed after one full cadence plus 10 percent grace, with a minimum five
+minutes and maximum one hour. The optional `SOURCE_ALERT_WEBHOOK_URL` Worker
+variable can point at an email bridge or notes automation. Leave it unset for no
+outbound request. The hook sends aggregate status only and deliberately carries
+no source identity or content.
+
 Scheduler stdout and stderr remain private mode `0600`. At install, after each
 lock-owning ingest child exits, and at removal, each stream is cut back to a
 5 MiB tail with two exact retained history files. A lock-contention skip does

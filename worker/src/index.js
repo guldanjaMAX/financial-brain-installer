@@ -33,6 +33,7 @@ import {
   AGENT_DELETION_PATH_PREFIX, createAgentDeletionPreview, handleAgentDeletion,
 } from "./lib/agent-action-receipts.js";
 import { ownerReliabilityAlerts } from "./lib/reliability-alerts.js";
+import { runMissedSourceWatchdog } from "./lib/missed-source-runs.js";
 import {
   cleanupQuickBooksOAuthIntents,
   handleQuickBooksOAuthRoute,
@@ -3446,6 +3447,16 @@ export default {
           if (synced || revoked) console.log(`plaid maintenance: ${synced} synced, ${revoked} revocations`);
         })
         : Promise.resolve(),
+      runMissedSourceWatchdog(env).then((result) => {
+        if (result.newly_missed) {
+          console.warn(`source schedules: ${result.newly_missed} newly missed`);
+        }
+        if (result.alert?.attempted && !result.alert.delivered) {
+          console.warn("source schedules: configured owner alert could not be delivered");
+        }
+      }).catch(() => {
+        console.warn("source schedules: missed-run check failed");
+      }),
     ]));
   },
 };

@@ -1040,6 +1040,11 @@ the CLI refuses before authorizing document deletion.
   green only after the Brain has stored a second distinct successful run. The
   proof is server-side, so a local task definition alone cannot claim that the
   source is actually refreshing.
+- **The Brain notices a missed refresh.** Its Worker cron checks only the small
+  source registry and indexed schedule events. When a source goes more than one
+  expected cadence plus grace without a successful unattended run, status and
+  answers call it missed and give one next action. An optional aggregate webhook
+  can notify an owner system; it is off unless explicitly configured.
 - **WhatsApp exports are the safer path.** The separate live paired-device
   connector is unofficial, violates WhatsApp's Terms of Service, and may lead
   to an account restriction or ban. Business automation should use Meta's

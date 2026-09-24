@@ -63,6 +63,20 @@ const DAILY = 86400;
 /* ---- connector-reported failure is broken immediately, schedule or not ---- */
 {
   const rows = [{
+    name: "gmail", kind: "gmail", status: "ready", last_ingest_at: daysAgo(2),
+    stale_reason: "SCHEDULE_MISSED", expected_refresh_seconds: DAILY,
+  }];
+  const f = await freshnessReport(mk(rows), { now: NOW });
+  check("the Worker watchdog exposes a missed source on the cheap freshness route",
+    f.sources[0]?.state === "missed" && f.sources[0]?.schedule?.state === "missed",
+    JSON.stringify(f.sources[0]));
+  const g = await coverageGaps(mk(rows), { now: NOW });
+  check("think coverage gaps name the missed schedule and one plain next action",
+    g.some((gap) => gap.type === "schedule_missed" && / Next: /.test(gap.detail)), JSON.stringify(g));
+}
+
+{
+  const rows = [{
     name: "drive", kind: "drive", status: "error", last_ingest_at: daysAgo(0.1),
     stale_reason: null, expected_refresh_seconds: null,
   }];

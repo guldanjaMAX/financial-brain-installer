@@ -13,6 +13,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node test/missed-source-runs.test.mjs",
   "node test/schedule-proof.test.mjs",
   "node test/source-scheduler.test.mjs",
   "node test/windows-task-scheduler.test.mjs",

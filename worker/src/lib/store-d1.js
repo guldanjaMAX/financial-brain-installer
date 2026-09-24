@@ -3344,6 +3344,7 @@ export async function diagnose(env, {
  */
 const INDEXING_STUCK_MS = 6 * 60 * 60 * 1000;
 const SOURCE_REVIEW_ISSUE_CODE = "SAFETY_REVIEW_REQUIRED";
+const SOURCE_MISSED_REASON = "SCHEDULE_MISSED";
 const AUTOMATABLE_SOURCE_KINDS = new Set(["drive", "gmail", "calendar"]);
 const REFRESHABLE_SOURCE_KINDS = new Set([
   "drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom",
@@ -3426,6 +3427,13 @@ function operationalFreshness(s, now) {
     return {
       state: "review",
       reason: sourceReceiptOwnerMessage(SOURCE_REVIEW_ISSUE_CODE),
+      indexingMs,
+    };
+  }
+  if (String(s.stale_reason || "").trim().toUpperCase() === SOURCE_MISSED_REASON) {
+    return {
+      state: "missed",
+      reason: "the source missed its expected unattended refresh",
       indexingMs,
     };
   }
@@ -3528,6 +3536,14 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
         source: s.name,
         days_since_ingest: days,
         detail: `The ${historicalSourceLabel(s.kind)} source is paused for safety review: ${operational.reason}. Its coverage is not complete until the owner resolves that review.`,
+      }));
+    }
+    if (operational.state === "missed") {
+      gaps.push(gapWithRemedy(s, "refresh", {
+        type: "schedule_missed",
+        source: s.name,
+        days_since_ingest: days,
+        detail: `The ${historicalSourceLabel(s.kind)} source missed its expected unattended refresh. New material may be absent from the Brain.`,
       }));
     }
 
@@ -3745,7 +3761,9 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       const successfulRuns = Math.max(0, Number(proof?.successful_runs) || 0);
       const lastScheduledRunAt = proof?.last_run_at || null;
       const lastScheduledRunMs = timestampMs(lastScheduledRunAt);
-      const scheduleState = !expected
+      const scheduleState = operational.state === "missed"
+        ? "missed"
+        : !expected
         ? "not_installed"
         : successfulRuns === 0
           ? "waiting_first"
