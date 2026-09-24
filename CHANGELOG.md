@@ -10,6 +10,15 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Older Cloudflare browser sessions no longer select an older Wrangler.**
+  The legacy session reader now refreshes through the same reviewed Wrangler
+  4.131.1 package as setup, doctor, named browser profiles, and recovery. Its
+  locked dependency tree resolves Sharp 0.35.4, not the affected older image
+  decoder. After installing this candidate, run the same supported `brain
+  setup <manifest>` or `brain update <manifest>` command. If the saved legacy
+  sign-in needs renewal, the CLI names the exact safe command: `npx
+  wrangler@4.131.1 login`, then the original Brain command can be re-run.
+
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to
   add the exact-byte provenance an older kit never recorded, the Brain still
