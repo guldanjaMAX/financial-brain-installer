@@ -113,7 +113,7 @@ The default retention is 30 days. Optional AES-256-GCM encryption uses a
 separate Keychain key selected by `operations.backup.encryption_key_secret`.
 The key value never belongs in the manifest or a command. See
 [If something goes wrong](docs/RECOVERY.md#if-something-goes-wrong) before
-using `brain undo-last` or `brain restore`.
+using `brain rewind-last` or `brain restore`.
 
 ---
 

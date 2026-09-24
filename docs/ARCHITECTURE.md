@@ -153,8 +153,14 @@ durable corpus history and Vectorize remains derived. Every mutating CLI lane
 shares one local lifecycle lock and first publishes an owner restore point.
 Restore resolves an RFC3339 time to a D1 bookmark, binds the current and target
 bookmarks, manifest hash, aggregate counts, and deterministic replacement index
-to one approval fingerprint, and refuses active mutation. After exact approval
-it takes a second restore point, runs the existing writer pause and D1 restore,
+to one approval fingerprint, including the complete newer source-run loss
+inventory, and refuses active mutation. After exact approval it takes a second
+restore point, acquires a bounded durable exclusion row that update honors,
+deploys and verifies the exact paused Worker mode, and re-reads active sync and
+update runs plus the in-flight vector writer ledger. It refuses unless two
+quiet polling reads and the final post-pause read all prove quiescence, and it
+rebuilds the approved plan from the post-pause corpus and loss inventory before
+the D1 mutation. Only then does it run the D1 restore,
 requires the returned undo bookmark, creates and binds a clean Vectorize index,
 then uses the paused bootstrap to reproject every D1 chunk. It returns active
 only after chunk and vector counts match and the outbox is empty. The old index

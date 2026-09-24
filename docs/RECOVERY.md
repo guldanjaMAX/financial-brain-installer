@@ -27,20 +27,23 @@ The backup folder does not contain source files or an admin key. Put
 put it inside a folder the Brain ingests. Keep the admin key in the owner's
 password manager under the recovery-card entry.
 
-### Undo the last protected change
+### Rewind to the last protected change
 
 First preview:
 
 ```bash
-brain undo-last /full/path/to/brain.manifest.json
+brain rewind-last /full/path/to/brain.manifest.json
 ```
 
-The preview prints the operation boundary, current counts, effects, and an
-approval fingerprint. It changes nothing. Review it with the owner. If it is
-the right boundary, repeat the command with the exact fingerprint:
+This is a whole-database rewind, not a scoped undo. The preview prints the
+operation boundary, current counts, and the exact newer source-change inventory
+that would also be erased, grouped by source with counts and earliest time. The
+inventory is bound into the approval fingerprint. It changes nothing. Review
+the complete loss list with the owner. If it is the right boundary, repeat the
+command with the exact fingerprint:
 
 ```bash
-brain undo-last /full/path/to/brain.manifest.json --approve <fingerprint>
+brain rewind-last /full/path/to/brain.manifest.json --approve <fingerprint>
 ```
 
 This restores all D1 writes after that recorded operation boundary. It is not a

@@ -75,6 +75,25 @@ test("a plaintext admin-key value in the manifest is refused before any snapshot
   assert.equal(existsSync(backupRoot), false);
 });
 
+test("every manifest secret field must be a locator before a backup directory is published", async () => {
+  const { manifestPath, backupRoot } = fixture();
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.operations.alert_webhook_secret = "plain-webhook-value";
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  await assert.rejects(createOwnerBackup(manifestPath), /alert_webhook_secret.*locator/i);
+  assert.equal(existsSync(backupRoot), false, "no backup root was published after the secret-field decision");
+});
+
+test("credential-shaped resume state is refused before a backup directory is published", async () => {
+  const { manifestPath, backupRoot, root } = fixture();
+  writeFileSync(join(root, ".brain-ingest-drive.json"), JSON.stringify({
+    checkpoint: "safe",
+    access_token: `ghp_${"a".repeat(36)}`,
+  }));
+  await assert.rejects(createOwnerBackup(manifestPath), /credential-like material/i);
+  assert.equal(existsSync(backupRoot), false, "the scanner decision was reached before publication");
+});
+
 test("retention removes only complete owned backups older than the configured window", async () => {
   const { manifestPath, backupRoot } = fixture();
   const old = await createOwnerBackup(manifestPath, {
@@ -171,7 +190,7 @@ test("daily backup scheduler needs no Brain domain or admin key", () => {
   assert.deepEqual(plan.spec.childArgumentsOf(plan), ["backup", plan.path, "--scheduled"]);
 });
 
-test("undo selection ignores a newer scheduled snapshot and finds the last protected mutation", async () => {
+test("rewind selection ignores a newer scheduled snapshot and finds the last protected mutation", async () => {
   const { manifestPath } = fixture();
   const mutation = await createOwnerBackup(manifestPath, {
     now: () => new Date("2026-09-24T10:00:00.000Z"),

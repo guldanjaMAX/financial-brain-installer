@@ -2,7 +2,7 @@
 import { existsSync as defaultExistsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { renderCopyableCommand } from './command-display.mjs';
-const COMMAND = /\bbrain(?=\s+(?:init|setup|ask|financial-picture|machine-continuity|ocr-preflight|doctor|whatsnew|verify|provision|deploy|secrets|health|test|mcp-config|assistant-repair|provenance-assess|provenance-repair|migrate|ingest|ingest-file|import|load|connect|disconnect|status|sources|forget|drain|reindex|diagnose|check|eval|grant|grants|zone|invite|devices|token|update|upgrade|rollback|backup|restore|undo-last|schedule|support|tools|technician|--version)\b)/g;
+const COMMAND = /\bbrain(?=\s+(?:init|setup|ask|financial-picture|machine-continuity|ocr-preflight|doctor|whatsnew|verify|provision|deploy|secrets|health|test|mcp-config|assistant-repair|provenance-assess|provenance-repair|migrate|ingest|ingest-file|import|load|connect|disconnect|status|sources|forget|drain|reindex|diagnose|check|eval|grant|grants|zone|invite|devices|token|update|upgrade|rollback|backup|restore|rewind-last|undo-last|schedule|support|tools|technician|--version)\b)/g;
 /**
  * The shim npm writes for this package on Windows.
  *

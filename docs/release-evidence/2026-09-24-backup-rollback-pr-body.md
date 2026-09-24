@@ -6,9 +6,11 @@
   optional AES-256-GCM encryption, daily macOS scheduling, and bounded retention
 - take automatic restore points before confirmed ingest, load, removal, update,
   upgrade, legacy rollback, and owner restore operations
-- add fingerprinted `brain restore --to <time>` and `brain undo-last` previews
-  that restore D1, bind a clean Vectorize index, rebuild from D1, and accept only
-  exact projection proof
+- add fingerprinted `brain restore --to <time>` and honestly named
+  `brain rewind-last` previews that bind the complete newer source-run loss
+  inventory, restore D1, bind a clean Vectorize index, rebuild from D1, and
+  accept only exact projection proof; the misleading `undo-last` spelling now
+  refuses without mutation
 - reset later local ingest state after D1 restore, only after its automatic
   snapshot exists, so the next source run cannot trust a future cursor
 - add the owner recovery page, recovery card, failure inventory, and disposable
@@ -16,10 +18,15 @@
 
 ## Safety properties
 
-- backups make no Brain or Cloudflare request and never copy the admin key
-- plaintext admin-key-shaped manifest state and non-ingest sidecars are refused
+- backups make no Brain or Cloudflare request, require protected-store locators
+  in every credential-bearing manifest field, and scan every copied byte with
+  the product credential scanner before creating the backup root
 - previews do not mutate; execution requires the exact fresh plan fingerprint
-- active ingest or update state refuses restore before the first mutation
+- restore acquires a bounded durable exclusion lease, verifies the paused
+  Worker mode, re-reads active ingest/update runs and the in-flight writer
+  ledger after the pause, and refuses unless quiescence is positively proven
+- the approved plan is rebuilt from post-pause corpus counts and the complete
+  loss inventory; any drift refuses before the D1 restore call
 - a non-404 Vectorize inspection error cannot become index creation
 - the old Vectorize index is retained, and final success requires chunks equal
   vectors with an empty outbox
@@ -27,10 +34,11 @@
 
 ## Verification
 
-- owner backup and restore: 19/19 passed
+- owner backup and restore: 26/26 passed
+- Worker routes: 417/417 passed
 - CLI errors: 100/100 passed
 - drive scheduler: 79/79 passed
-- upgrade verification: 246/246 passed
+- upgrade verification: 247/247 passed
 - CLI guidance, support journal, and schedule-platform checks passed
 - package privacy: 594 reviewed package files and 911 candidate paths passed
 - local history field-preparation scan passed at exact `HEAD`; seven existing

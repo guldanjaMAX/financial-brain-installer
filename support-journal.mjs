@@ -64,6 +64,7 @@ export const SUPPORT_COMMANDS = Object.freeze([
   "provenance-repair",
   "reindex",
   "restore",
+  "rewind-last",
   "rollback",
   "schedule",
   "secrets",

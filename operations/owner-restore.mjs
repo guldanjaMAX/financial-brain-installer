@@ -19,6 +19,25 @@ function count(value, name) {
   return number;
 }
 
+function normalizeLossInventory(value, targetTime) {
+  const sourceRows = Array.isArray(value?.sources) ? value.sources : [];
+  const sources = sourceRows.map((row) => ({
+    source: String(row?.source || ""),
+    runs: count(row?.runs ?? 0, "loss-inventory runs"),
+    documents_added: count(row?.documents_added ?? 0, "loss-inventory added documents"),
+    documents_updated: count(row?.documents_updated ?? 0, "loss-inventory updated documents"),
+    documents_removed: count(row?.documents_removed ?? 0, "loss-inventory removed documents"),
+    since: normalizeRestoreTime(row?.since),
+  })).sort((left, right) => left.source.localeCompare(right.source));
+  if (sources.some((row) => !row.source)) throw new TypeError("loss-inventory sources need exact names");
+  return Object.freeze({
+    complete: value?.complete === true,
+    since: normalizeRestoreTime(value?.since || targetTime),
+    sources: Object.freeze(sources),
+    updates: count(value?.updates ?? 0, "loss-inventory updates"),
+  });
+}
+
 export function normalizeRestoreTime(value) {
   const text = String(value || "");
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(text)) {
@@ -42,6 +61,7 @@ export function buildOwnerRestorePlan({
   currentBookmark,
   before,
   operation = "restore",
+  lossInventory = null,
 }) {
   if (!/^[a-f0-9]{64}$/.test(String(manifestFingerprint || ""))) {
     throw new TypeError("restore planning needs the exact manifest fingerprint");
@@ -70,6 +90,7 @@ export function buildOwnerRestorePlan({
     current_index_sha256: sha256(String(infrastructure.vectorize_index)),
     replacement_index: replacementIndexName(infrastructure.vectorize_index, `${manifestFingerprint}:${normalizedTime}`),
     before: snapshot,
+    loss_inventory: normalizeLossInventory(lossInventory, normalizedTime),
     effects: {
       d1_restore: true,
       replacement_vector_index: true,
@@ -111,6 +132,7 @@ export async function executeOwnerRestore(request, dependencies) {
     currentBookmark: observed.currentBookmark,
     before: observed.before,
     operation: request.operation || "restore",
+    lossInventory: observed.lossInventory,
   });
   if (plan.before.active_ingests > 0) throw new Error("restore refused because an ingest is running");
   if (plan.before.active_updates > 0) throw new Error("restore refused because an update is running");
@@ -118,10 +140,19 @@ export async function executeOwnerRestore(request, dependencies) {
   if (request.approval !== plan.approval_fingerprint) {
     throw new Error("restore approval no longer matches the current state; preview again");
   }
-  for (const name of ["createRestorePoint", "restoreD1", "resetLocalState", "rebuildProjection", "readAfter", "writeReceipt"]) {
+  if (plan.loss_inventory.complete !== true) {
+    throw new Error("restore refused because the post-target loss inventory is incomplete; preview again");
+  }
+  for (const name of ["createRestorePoint", "proveQuiescence", "restoreD1", "resetLocalState", "rebuildProjection", "readAfter", "writeReceipt"]) {
     if (typeof dependencies[name] !== "function") throw new TypeError(`restore execution needs ${name}`);
   }
   await dependencies.createRestorePoint({ plan, pinned });
+  const quiescence = await dependencies.proveQuiescence({ plan, pinned });
+  if (quiescence?.proven !== true || count(quiescence?.active_ingests ?? 0, "post-pause active ingests") !== 0 ||
+      count(quiescence?.active_updates ?? 0, "post-pause active updates") !== 0 ||
+      count(quiescence?.in_flight_writers ?? 0, "post-pause in-flight writers") !== 0) {
+    throw new Error("restore refused because post-pause quiescence was not proven");
+  }
   const restoreResult = await dependencies.restoreD1({ plan, pinned });
   if (!restoreResult?.previousBookmark) {
     throw new Error("D1 restore did not return the pre-restore bookmark; recovery stopped");

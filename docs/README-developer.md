@@ -947,7 +947,7 @@ need a Brain domain or admin key. Other platforms receive the exact daily
 
 Confirmed ingest, load, removal, update, upgrade, and legacy rollback commands
 share one local lifecycle lock and create a restore point before the risky path
-starts. Dry runs and previews do neither. `brain undo-last` selects only the
+starts. Dry runs and previews do neither. `brain rewind-last` selects only the
 newest pre-ingest, pre-load, pre-forget, or pre-update point, so a newer daily or
 manual backup cannot hide the operation boundary.
 
@@ -966,10 +966,12 @@ has preserved it. The next source run must therefore make a full comparison
 against restored D1 truth. The old Vectorize index is retained for operator
 review.
 
-The restore API overwrites D1 in place. `undo-last` is scoped to one recorded
-CLI operation boundary, not to selected rows. Its preview must disclose that
-every D1 write after the recorded timestamp is in scope. External writers must
-remain stopped for the complete preview and execution window.
+The restore API overwrites D1 in place. `rewind-last` is deliberately named as
+a whole-database rewind, not a selected-row undo. Its preview binds the exact
+newer source-run counts and earliest time by source into the approval
+fingerprint, and discloses that every D1 write after the recorded timestamp is
+in scope. External writers must remain stopped for the complete preview and
+execution window. The removed `undo-last` spelling refuses without mutation.
 
 ### Unattended watched-folder refresh on macOS
 

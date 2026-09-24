@@ -936,8 +936,9 @@
           "description": "NOT YET WIRED. No report email is sent today."
         },
         "alert_webhook_secret": {
-          "type": "string",
-          "description": "NOT YET WIRED. No alert webhook is called today."
+          "type": ["string", "null"],
+          "pattern": "^(?:keychain://[^/]+/.+|secret://[A-Z][A-Z0-9_]*)$",
+          "description": "NOT YET WIRED. No alert webhook is called today. If retained in an owner backup, this must be a protected-store locator, never a literal webhook credential."
         },
         "whatsapp_drain_cron": {
           "type": "string",

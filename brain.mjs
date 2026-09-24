@@ -209,6 +209,7 @@ import {
   writeOwnerRestoreReceipt,
 } from "./operations/owner-backup.mjs";
 import {
+  buildOwnerRestorePlan,
   executeOwnerRestore,
   normalizeRestoreTime,
 } from "./operations/owner-restore.mjs";
@@ -421,7 +422,7 @@ const die = (s) => {
 
 const SUPPORT_REMOTE_COMMANDS = new Set([
   "check", "deploy", "diagnose", "drain", "health", "migrate", "provision",
-  "reindex", "restore", "rollback", "secrets", "undo-last", "update", "upgrade", "verify",
+  "reindex", "restore", "rewind-last", "rollback", "secrets", "update", "upgrade", "verify",
 ]);
 export const PROVIDER_CONNECTOR_IDS = Object.freeze([
   "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot",
@@ -5541,7 +5542,12 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     if (tableResponse.results.length > 0) {
       let stateResponse;
       try {
-        stateResponse = await queryDatabase(accountId, dbId, "SELECT * FROM install_state WHERE id = 1");
+        stateResponse = await queryDatabase(accountId, dbId,
+          `SELECT *,
+                  (SELECT COUNT(*) FROM upgrade_runs
+                    WHERE status = 'restore_lease' AND finished_at IS NULL
+                      AND CAST(json_extract(detail, '$.expires_at') AS INTEGER) > ?) AS active_restore_leases
+             FROM install_state WHERE id = 1`, [Date.now()]);
       } catch (error) {
         die("update stopped because D1 install state could not be read. Nothing was changed.\n" +
           databaseReadFailureDetail(error));
@@ -5556,6 +5562,15 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     }
     if (before && initialManifest.client?.slug && before.client_slug && before.client_slug !== initialManifest.client.slug) {
       die("update stopped because this D1 database belongs to a different brain. Nothing was changed.");
+    }
+    if (before) {
+      const activeRestoreLeases = Number(before.active_restore_leases ?? 0);
+      if (!Number.isSafeInteger(activeRestoreLeases) || activeRestoreLeases < 0) {
+        die("update stopped because the durable restore exclusion lease was ambiguous. Nothing was changed.");
+      }
+      if (activeRestoreLeases > 0) {
+        die("update stopped because a restore holds the durable exclusion lease. Nothing was changed.");
+      }
     }
 
     // The version being upgraded TO is the code in the client's hands right now.
@@ -5692,7 +5707,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           }));
         if (cutover?.proven !== true) {
           warn(`the safety pause elapsed but quiescence was NOT verified (${cutover?.reason || "unknown"}).`);
-          warn("continuing to the migration with an unverified writer state; if it fails, treat an unconfirmed vector batch as the first suspect.");
+          warn("continuing to the migration with an unverified legacy writer state after the full fixed grace.");
         }
         await runStage("migration", () => migrate(executionPin.target, {
           vectorDrainQuiesced: cutover?.proven === true,
@@ -5842,13 +5857,9 @@ function printRollbackPreview({ bookmark, databaseId }) {
   return { confirmed: false, restored: false, databaseId, bookmark };
 }
 
-export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
-  const preflight = rollbackLocalPreflight(manifestPath, bookmarkArg);
-  if (options.confirmed !== true) return printRollbackPreview(preflight);
-
-  const { bookmark, pin, m, databaseId: dbId, declaredAccountId } = preflight;
+async function prepareRollbackQuiescence(preflight, options = {}) {
+  const { pin, m, databaseId: dbId, declaredAccountId } = preflight;
   const resolveRollbackAccount = options.resolveAccount ?? resolveAccount;
-  const callCloudflare = options.cf ?? cf;
   const queryDatabase = options.d1Query ?? d1Query;
   const deployRollbackWorker = options.cmdDeploy ?? cmdDeploy;
   const verifyRollbackHealth = options.cmdHealth ?? cmdHealth;
@@ -5859,36 +5870,123 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
     die("rollback stopped because the token account does not match the pinned manifest.");
   }
   revalidateUpdateManifest(pin, "rollback preflight");
+  const leaseToken = randomBytes(16).toString("hex");
+  const leaseStartedAt = new Date().toISOString();
+  const leaseExpiresAt = Date.now() + 30 * 60_000;
+  const acquireRestoreLease = options.acquireRestoreLease ?? (async () => {
+    await queryDatabase(acct.id, dbId,
+      `INSERT INTO upgrade_runs
+         (started_at, finished_at, from_version, to_version, status, d1_bookmark, detail)
+       SELECT ?,NULL,NULL,NULL,'restore_lease',?,?
+        WHERE NOT EXISTS (SELECT 1 FROM sync_runs WHERE finished_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM upgrade_runs
+                           WHERE (finished_at IS NULL OR status = 'running')
+                             AND status <> 'restore_lease')
+          AND NOT EXISTS (SELECT 1 FROM upgrade_runs
+                           WHERE status = 'restore_lease' AND finished_at IS NULL
+                             AND CAST(json_extract(detail, '$.expires_at') AS INTEGER) > ?)`,
+      [leaseStartedAt, preflight.bookmark, JSON.stringify({ owner: leaseToken, expires_at: leaseExpiresAt }), Date.now()]);
+    const receipt = await queryDatabase(acct.id, dbId,
+      `SELECT
+         (SELECT COUNT(*) FROM upgrade_runs
+           WHERE status = 'restore_lease' AND finished_at IS NULL
+             AND CAST(json_extract(detail, '$.expires_at') AS INTEGER) > ?) AS active_leases,
+         (SELECT COUNT(*) FROM upgrade_runs
+           WHERE status = 'restore_lease' AND finished_at IS NULL
+             AND json_extract(detail, '$.owner') = ?) AS owned`,
+      [Date.now(), leaseToken]);
+    const row = receipt?.results?.[0];
+    return Number(row?.active_leases) === 1 && Number(row?.owned) === 1;
+  });
+  if (await acquireRestoreLease() !== true) {
+    die("restore stopped because the durable restore exclusion lease could not be acquired. Nothing was restored.");
+  }
+  const usesD1VectorOutbox = (m.infrastructure?.cloudflare?.storage || "d1") === "d1";
+  if (!usesD1VectorOutbox) {
+    return { proven: true, active_ingests: 0, active_updates: 0, in_flight_writers: 0, account: acct };
+  }
+  await deployRollbackWorker(pin.target, {
+    persistDomain: false,
+    pauseVectorDrainForUpgrade: true,
+  });
+  revalidateUpdateManifest(pin, "rollback paused vector-drain deployment");
+  await verifyRollbackHealth(pin.target, {
+    expectVersion: PRODUCT_VERSION,
+    expectDrainMode: "paused-for-upgrade",
+    reachOnly: true,
+  });
+  revalidateUpdateManifest(pin, "rollback paused vector-drain health verification");
+
+  const readWriterState = async () => {
+    const response = await queryDatabase(acct.id, dbId,
+      `SELECT vector_drain_lease_owner AS owner,
+              vector_drain_lease_expires_at AS expires_at,
+              (SELECT COUNT(*) FROM vector_outbox
+                WHERE submitted_mutation_id IS NOT NULL) AS vector_in_flight,
+              (SELECT COUNT(*) FROM sync_runs
+                WHERE finished_at IS NULL) AS active_ingests,
+              (SELECT COUNT(*) FROM upgrade_runs
+                WHERE (finished_at IS NULL OR status = 'running')
+                  AND status <> 'restore_lease') AS active_updates
+         FROM install_state WHERE id = 1`);
+    if (!response || !Array.isArray(response.results) || response.results.length !== 1) {
+      throw new Error("the in-flight writer ledger was unreadable");
+    }
+    const row = response.results[0];
+    const expires = Number(row.expires_at || 0);
+    const activeIngests = Number(row.active_ingests);
+    const activeUpdates = Number(row.active_updates);
+    const vectorInFlight = Number(row.vector_in_flight);
+    if (![activeIngests, activeUpdates, vectorInFlight].every(Number.isSafeInteger)) {
+      throw new Error("the in-flight writer ledger was invalid");
+    }
+    return {
+      leaseFree: row.owner === null || row.owner === undefined || row.owner === "" ||
+        (Number.isFinite(expires) && expires > 0 && expires < Date.now()),
+      inFlight: activeIngests + activeUpdates + vectorInFlight,
+      active_ingests: activeIngests,
+      active_updates: activeUpdates,
+      in_flight_writers: vectorInFlight,
+    };
+  };
+  const cutover = await waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
+    nextStep: "the D1 restore",
+    probe: readWriterState,
+  });
+  if (cutover?.proven !== true) {
+    die(`restore stopped because quiescence was not proven (${cutover?.reason || "unknown"}). The Worker remains paused and D1 was not restored.`);
+  }
+  // Re-read after the pause. The proof used to enter this branch is not reused
+  // as the mutation authorization because a writer could change immediately
+  // after the second quiet polling read.
+  const final = await readWriterState();
+  const proven = final.leaseFree === true && final.active_ingests === 0 &&
+    final.active_updates === 0 && final.in_flight_writers === 0;
+  if (!proven) {
+    die("restore stopped because the post-pause writer ledger was not quiet. The Worker remains paused and D1 was not restored.");
+  }
+  return { ...final, proven: true, account: acct, restore_lease_owner: leaseToken };
+}
+
+export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
+  const preflight = rollbackLocalPreflight(manifestPath, bookmarkArg);
+  if (options.confirmed !== true) return printRollbackPreview(preflight);
+
+  const { bookmark, pin, m, databaseId: dbId, declaredAccountId } = preflight;
+  const callCloudflare = options.cf ?? cf;
+  const queryDatabase = options.d1Query ?? d1Query;
+  const prepared = options.quiescenceReceipt ?? await prepareRollbackQuiescence(preflight, options);
+  if (prepared?.proven !== true || prepared.active_ingests !== 0 || prepared.active_updates !== 0 ||
+      prepared.in_flight_writers !== 0 || !prepared.account?.id) {
+    die("rollback stopped because the supplied quiescence receipt was not exact. D1 was not restored.");
+  }
+  const acct = prepared.account;
 
   warn("restoring this D1 bookmark is DESTRUCTIVE: everything written since is lost.");
   warn("this restores D1 only. Vectorize must be rebuilt before semantic retrieval is trustworthy.");
   info(`database ${dbId}, bookmark ${bookmark}`);
   const usesD1VectorOutbox = (m.infrastructure?.cloudflare?.storage || "d1") === "d1";
-  if (usesD1VectorOutbox) {
-    // Time travel restores the lease and mutation-fence rows too. Quiesce every
-    // old writer before restoring them, or an already-started mutation can land
-    // after the restore with no surviving receipt. Keep the Worker paused until
-    // the restored corpus has been durably marked for a new bootstrap epoch.
-    await deployRollbackWorker(pin.target, {
-      persistDomain: false,
-      pauseVectorDrainForUpgrade: true,
-    });
-    revalidateUpdateManifest(pin, "rollback paused vector-drain deployment");
-    await verifyRollbackHealth(pin.target, {
-      expectVersion: PRODUCT_VERSION,
-      expectDrainMode: "paused-for-upgrade",
-      reachOnly: true,
-    });
-    revalidateUpdateManifest(pin, "rollback paused vector-drain health verification");
-    const rollbackCutover = await waitForVectorDrainCutover(waitForVectorDrainQuiescence, {
-      nextStep: "the D1 restore",
-    });
-    if (rollbackCutover?.proven !== true) {
-      warn(`the safety pause elapsed but quiescence was NOT verified (${rollbackCutover?.reason || "unknown"}).`);
-      warn("continuing to the D1 restore with an unverified writer state; a mutation started before the restore can land after it with no surviving receipt.");
-    }
-    revalidateUpdateManifest(pin, "rollback vector-drain quiescence");
-  }
+  revalidateUpdateManifest(pin, "rollback vector-drain quiescence");
   const restoreResponse = await callCloudflare(`/accounts/${acct.id}/d1/database/${dbId}/time_travel/restore?bookmark=${encodeURIComponent(bookmark)}`, {
     method: "POST",
   });
@@ -6207,8 +6305,30 @@ async function observeOwnerRestore(manifestPath, manifest, targetTime, options =
             (SELECT COUNT(*) FROM chunks) AS chunks,
             (SELECT COUNT(*) FROM sync_runs WHERE finished_at IS NULL) AS active_ingests,
             (SELECT COUNT(*) FROM upgrade_runs
-              WHERE finished_at IS NULL OR status = 'running') AS active_updates`);
+              WHERE (finished_at IS NULL OR status = 'running')
+                AND status <> 'restore_lease') AS active_updates`);
   const row = aggregate?.results?.[0];
+  const targetMs = Date.parse(targetTime);
+  const lossBySource = await queryDatabase(account.id, databaseId,
+    `SELECT source,
+            COUNT(*) AS runs,
+            COALESCE(SUM(docs_added), 0) AS documents_added,
+            COALESCE(SUM(docs_updated), 0) AS documents_updated,
+            COALESCE(SUM(CASE WHEN delete_action IN ('applied','forced')
+                              THEN proposed_deletes ELSE 0 END), 0) AS documents_removed,
+            MIN(started_at) AS since_ms
+       FROM sync_runs
+      WHERE started_at > ?
+      GROUP BY source
+      ORDER BY source`, [targetMs]);
+  const laterUpdates = await queryDatabase(account.id, databaseId,
+    `SELECT COUNT(*) AS updates
+       FROM upgrade_runs
+      WHERE started_at > ? AND status <> 'restore_lease'`, [targetTime]);
+  if (!Array.isArray(lossBySource?.results) || !Array.isArray(laterUpdates?.results) ||
+      laterUpdates.results.length !== 1) {
+    throw new Error("the post-target loss inventory could not be proven complete");
+  }
   const vectorName = manifest.infrastructure.cloudflare.vectorize_index;
   const vector = await callCloudflare(`/accounts/${account.id}/vectorize/v2/indexes/${encodeURIComponent(vectorName)}`);
   return {
@@ -6223,12 +6343,26 @@ async function observeOwnerRestore(manifestPath, manifest, targetTime, options =
       active_ingests: Number(row?.active_ingests),
       active_updates: Number(row?.active_updates),
     },
+    lossInventory: {
+      complete: true,
+      since: targetTime,
+      sources: lossBySource.results.map((entry) => ({
+        source: String(entry?.source || ""),
+        runs: Number(entry?.runs),
+        documents_added: Number(entry?.documents_added),
+        documents_updated: Number(entry?.documents_updated),
+        documents_removed: Number(entry?.documents_removed),
+        since: new Date(Number(entry?.since_ms)).toISOString(),
+      })),
+      updates: Number(laterUpdates.results[0]?.updates),
+    },
   };
 }
 
 export async function cmdRestore(manifestPath, request, options = {}) {
   let restorePoint = null;
   let observation = null;
+  let quiescenceReceipt = null;
   const dependencies = {
     loadPinnedManifest: () => {
       const pin = pinUpdateManifest(manifestPath);
@@ -6246,12 +6380,39 @@ export async function cmdRestore(manifestPath, request, options = {}) {
       });
       info(`automatic pre-restore point saved (${restorePoint.restorePoint.timestamp})`);
     },
+    proveQuiescence: async ({ plan }) => {
+      const preflight = rollbackLocalPreflight(manifestPath, plan.target_bookmark);
+      quiescenceReceipt = await prepareRollbackQuiescence(preflight, {
+        ...(options.rollbackOptions || options),
+        requirePreviousBookmark: true,
+      });
+      const postPause = await observeOwnerRestore(manifestPath, preflight.m, plan.target_time, options);
+      const rebound = buildOwnerRestorePlan({
+        manifestFingerprint: plan.manifest_fingerprint,
+        manifest: preflight.m,
+        targetTime: plan.target_time,
+        targetBookmark: postPause.targetBookmark,
+        // Acquiring the approved durable lease is itself one D1 mutation, so
+        // its bookmark cannot equal the preview bookmark. Rebind every
+        // owner-visible corpus and loss field while keeping the approved
+        // pre-lease bookmark as the expected control mutation.
+        currentBookmark: plan.current_bookmark,
+        before: postPause.before,
+        operation: plan.operation,
+        lossInventory: postPause.lossInventory,
+      });
+      if (rebound.approval_fingerprint !== plan.approval_fingerprint) {
+        throw new Error("restore approval no longer matches the post-pause state; preview again");
+      }
+      return quiescenceReceipt;
+    },
     restoreD1: async ({ plan }) => {
       const result = await cmdRollback(manifestPath, plan.target_bookmark, {
         confirmed: true,
         markUpgradeRolledBack: false,
         requirePreviousBookmark: true,
         ...(options.rollbackOptions || {}),
+        quiescenceReceipt,
       });
       return { previousBookmark: result.previousBookmark, restoredBookmark: result.restoredBookmark };
     },
@@ -6287,6 +6448,15 @@ export async function cmdRestore(manifestPath, request, options = {}) {
     warn("restore preview only: nothing was changed.");
     info(`target ${result.plan.target_time}`);
     info(`${result.plan.before.documents} document(s), ${result.plan.before.chunks} chunk(s), ${result.plan.before.vectors} vector(s) now`);
+    warn("This is a whole-database rewind, not a scoped reversal. Every listed later change will also be erased.");
+    if (result.plan.loss_inventory.sources.length === 0) {
+      info(`newer source changes since ${result.plan.loss_inventory.since}: none recorded`);
+    } else {
+      for (const source of result.plan.loss_inventory.sources) {
+        info(`newer source changes: ${source.source}: ${source.runs} run(s), ${source.documents_added} added, ${source.documents_updated} updated, ${source.documents_removed} removed, since ${source.since}`);
+      }
+    }
+    info(`newer update runs: ${result.plan.loss_inventory.updates}`);
     warn("D1 will be restored in place, a clean Vectorize index will be created, and the old index will be retained.");
     info(`approval fingerprint: ${result.plan.approval_fingerprint}`);
     info("Re-run the same command with --approve <fingerprint> after owner review.");
@@ -6313,24 +6483,24 @@ async function dispatchRestore(manifestPath) {
     })));
 }
 
-async function dispatchUndoLast(manifestPath) {
+async function dispatchRewindLast(manifestPath) {
   const flags = parseFlags(process.argv.slice(4));
-  assertKnownFlags(flags, ["approve"], "brain undo-last");
+  assertKnownFlags(flags, ["approve"], "brain rewind-last");
   if (flags.approve !== undefined && (typeof flags.approve !== "string" || !/^[a-f0-9]{64}$/.test(flags.approve))) {
-    die("--approve needs the exact lowercase 64-character fingerprint printed by the undo preview");
+    die("--approve needs the exact lowercase 64-character fingerprint printed by the rewind preview");
   }
   const point = latestOwnerRestorePoint(manifestPath, {
     reasons: ["pre-ingest", "pre-load", "pre-forget", "pre-update"],
   });
-  if (!point) die("there is no owner restore point to undo. Nothing was changed.");
+  if (!point) die("there is no owner restore point to rewind to. Nothing was changed.");
   const targetTime = point.receipt.restore_point?.timestamp;
   if (!targetTime) die("the newest owner backup has no valid restore time. Nothing was changed.");
-  info(`undo target: the last recorded ${point.receipt.reason || "mutation"} restore point at ${targetTime}`);
+  info(`rewind target: the last recorded ${point.receipt.reason || "mutation"} restore point at ${targetTime}`);
   return withOwnerMutationLock(manifestPath, () =>
     withManifestCloudflareControl(manifestPath, () => cmdRestore(manifestPath, {
       targetTime,
       approval: flags.approve || null,
-      operation: "undo-last",
+      operation: "rewind-last",
     })));
 }
 
@@ -27347,7 +27517,8 @@ const commands = {
     : dispatchRollback(path),
   backup: cmdBackup,
   restore: dispatchRestore,
-  "undo-last": dispatchUndoLast,
+  "rewind-last": dispatchRewindLast,
+  "undo-last": () => die("`brain undo-last` was removed because it rewound the whole database rather than one operation. Use `brain rewind-last <manifest>` to preview the full later-change inventory. Nothing was changed."),
   schedule: cmdSchedule,
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
@@ -27544,8 +27715,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain rollback   <manifest> <bookmark> preview D1-only restore (--yes performs it)
     brain restore    <manifest> --to <RFC3339-time>  preview an in-place D1 restore plus clean
                                            Vectorize rebuild; apply only with --approve <fingerprint>
-    brain undo-last  <manifest>            preview return to the newest automatic restore point;
-                                           apply only with --approve <fingerprint>
+    brain rewind-last <manifest>           preview a whole-database rewind to the newest automatic
+                                           restore point; apply only with --approve <fingerprint>
     brain schedule   <manifest>            inspect unattended Drive refresh
     brain schedule   <manifest> --remove   remove it and preserve its logs
     brain schedule   <manifest> --folder   inspect (or --install/--remove) the watched folder lane

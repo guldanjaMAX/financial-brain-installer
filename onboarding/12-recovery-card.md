@@ -40,7 +40,7 @@ is saved outside the Brain computer and can be found without the installer.
 
 1. Stop ingest, update, removal, and restore commands.
 2. Keep the exact manifest and newest receipts.
-3. Preview `brain undo-last` for the most recent protected operation, or preview
+3. Preview `brain rewind-last` for the most recent protected operation, or preview
    `brain restore --to <RFC3339-time>` for an older point.
 4. Have the owner review the fresh fingerprint before any restore.
 5. If the computer is lost, recover the manifest and password-manager item

@@ -26,6 +26,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { encryptRecoveryArtifact } from "./recovery-artifact-crypto.mjs";
+import { scan } from "../worker/src/lib/secret-scan.js";
 
 const CONTRACT_VERSION = 1;
 const ENTRY_RE = /^backup-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z)-([a-f0-9]{16})$/;
@@ -116,13 +117,41 @@ function readManifest(manifestPath) {
     source.bytes.fill(0);
     throw new Error(`the backup manifest is invalid JSON: ${error.message}`);
   }
-  const adminKeyReference = manifest?.operations?.admin_key_secret;
-  if (adminKeyReference !== undefined && adminKeyReference !== null &&
-      (typeof adminKeyReference !== "string" || !/^keychain:\/\/[^/]+\/.+$/.test(adminKeyReference))) {
+  try {
+    assertManifestCredentialLocators(manifest);
+    assertBackupBytesSafe(source.bytes, "manifest");
+  } catch (error) {
     source.bytes.fill(0);
-    throw new Error("the manifest's admin-key field is not a protected-store locator; refusing to copy it");
+    throw error;
   }
   return { source, manifest };
+}
+
+const SECRET_FIELD_RE = /(?:^|_)(?:secret|password|passphrase|token|credential|api_key|admin_key|private_key|access_key|signing_key|wrapping_key)$/i;
+const PROTECTED_LOCATOR_RE = /^(?:keychain:\/\/[^/]+\/.+|secret:\/\/[A-Z][A-Z0-9_]*)$/;
+
+function assertManifestCredentialLocators(manifest) {
+  const seen = new Set();
+  const visit = (value, path = []) => {
+    if (!value || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    for (const [key, item] of Object.entries(value)) {
+      const next = [...path, key];
+      if (SECRET_FIELD_RE.test(key) && item !== null && item !== undefined &&
+          (typeof item !== "string" || !PROTECTED_LOCATOR_RE.test(item))) {
+        throw new Error(`the manifest's ${next.join(".")} field is not a protected-store locator; refusing to copy it`);
+      }
+      visit(item, next);
+    }
+  };
+  visit(manifest);
+}
+
+function assertBackupBytesSafe(bytes, label) {
+  const result = scan(bytes.toString("utf8"));
+  if (result.shouldRefuse) {
+    throw new Error(`${label} contains credential-like material; refusing to publish an owner backup`);
+  }
 }
 
 export function ownerBackupConfiguration(manifestPath, manifest) {
@@ -176,27 +205,33 @@ export async function createOwnerBackup(manifestPath, options = {}) {
   const { source: manifestSource, manifest } = readManifest(manifestPath);
   const manifestDirectory = dirname(manifestSource.absolute);
   const configuration = ownerBackupConfiguration(manifestSource.absolute, manifest);
-  const root = assertPrivateDirectory(configuration.directory, { create: true });
   const timestamp = exactUtc((options.now ?? (() => new Date()))());
   const nonce = nonceValue(options.nonce);
   const entryName = `backup-${timestamp.replaceAll(":", "-")}-${nonce}`;
-  const partial = join(root, `.${entryName}.partial`);
-  const destination = join(root, entryName);
-  if (existsSync(partial) || existsSync(destination)) {
-    manifestSource.bytes.fill(0);
-    throw new Error("the owner backup destination already exists");
-  }
-  mkdirSync(partial, { mode: 0o700 });
+  let partial = null;
+  let destination = null;
   const created = [];
-  const inputs = [];
+  const inputs = [{ name: "brain.manifest.json", ...manifestSource }];
   try {
-    inputs.push({ name: "brain.manifest.json", ...manifestSource });
     const listed = (options.listStateFiles ?? defaultStateFiles)(manifestSource.absolute);
     if (!Array.isArray(listed)) throw new Error("the backup state-file inventory is invalid");
     for (const candidate of listed) {
       const safe = safeBackupInput(candidate, manifestDirectory);
-      inputs.push({ name: safe.name, ...stablePrivateFile(safe.absolute) });
+      const input = { name: safe.name, ...stablePrivateFile(safe.absolute) };
+      inputs.push(input);
+      assertBackupBytesSafe(input.bytes, "a resumable state file");
     }
+
+    // Validate every byte before even creating the configured backup root. A
+    // refusal must not leave a directory that can be mistaken for a published
+    // recovery point.
+    const root = assertPrivateDirectory(configuration.directory, { create: true });
+    partial = join(root, `.${entryName}.partial`);
+    destination = join(root, entryName);
+    if (existsSync(partial) || existsSync(destination)) {
+      throw new Error("the owner backup destination already exists");
+    }
+    mkdirSync(partial, { mode: 0o700 });
 
     const contents = inputs.map((input) => ({
       name: input.name,
@@ -275,7 +310,9 @@ export async function createOwnerBackup(manifestPath, options = {}) {
     for (const path of created.reverse()) {
       try { unlinkSync(path); } catch { /* preserve the primary failure */ }
     }
-    try { rmdirSync(partial); } catch { /* a surprising residue is retained for review */ }
+    if (partial) {
+      try { rmdirSync(partial); } catch { /* a surprising residue is retained for review */ }
+    }
     throw error;
   } finally {
     for (const input of inputs) input.bytes.fill(0);

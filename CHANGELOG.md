@@ -14,12 +14,12 @@ asset publication.
   `brain backup` keeps the manifest and resumable source state in an owner-held
   folder, records a D1 restore time, and never copies the admin key. A daily
   macOS schedule and retention are available. Risky ingest, removal, update,
-  and rollback commands take a restore point first. `brain undo-last` previews
+  and rollback commands take a restore point first. `brain rewind-last` previews
   the newest protected operation boundary, while `brain restore --to <time>`
   binds the exact plan to an approval fingerprint, restores D1, rebuilds a new
   Vectorize index from D1, and accepts success only after the counts and empty
   outbox prove the semantic projection. To check: run `brain backup <manifest>`
-  and confirm its receipt says `admin_key_included: false`; preview undo or
+  and confirm its receipt says `admin_key_included: false`; preview rewind or
   restore and confirm nothing changes before the printed fingerprint is
   approved.
 

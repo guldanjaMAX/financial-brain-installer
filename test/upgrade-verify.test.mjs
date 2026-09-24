@@ -59,6 +59,7 @@ import {
   validateAcceleratedBootstrapCompletion,
   validateAcceleratedBootstrapProgress,
   validateAcceleratedBootstrapReceipt,
+  VECTOR_DRAIN_CUTOVER_POLL_MS,
   VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS,
   waitForVectorDrainCutover,
 } from "../brain.mjs";
@@ -1086,7 +1087,7 @@ const bootstrapCompletion = () => ({
       },
       d1Query: async (_account, _database, sql) => {
         if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
-        if (/SELECT \* FROM install_state/i.test(sql)) {
+        if (/SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
           events.push("state");
           return { results: [{ client_slug: "fixture", product_version: d1Version }] };
         }
@@ -1257,7 +1258,7 @@ const bootstrapCompletion = () => ({
       resolveAccount: async () => ({ id: "fixture-account" }),
       d1Query: async (_account, _database, sql) => {
         if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
-        if (/SELECT \* FROM install_state/i.test(sql)) {
+        if (/SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
           events.push("state");
           return { results: [{ client_slug: "fixture", product_version: d1Version }] };
         }
@@ -1312,7 +1313,7 @@ const bootstrapCompletion = () => ({
         resolveAccount: async () => ({ id: "fixture-account" }),
         d1Query: async (_account, _database, sql) => {
           if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
-          if (/SELECT \* FROM install_state/i.test(sql)) {
+          if (/SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
             return { results: [{ client_slug: "fixture", product_version: "0.1.9" }] };
           }
           return { results: [] };
@@ -1346,7 +1347,7 @@ const bootstrapCompletion = () => ({
         resolveAccount: async () => ({ id: "fixture-account" }),
         d1Query: async (_a, _d, sql) => {
           if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
-          if (/^SELECT \* FROM install_state/i.test(sql)) {
+          if (/^SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
             return { results: [{ client_slug: "fixture", product_version: "0.1.9" }] };
           }
           mutations.push(`d1:${sql.slice(0, 12)}`);
@@ -1360,6 +1361,42 @@ const bootstrapCompletion = () => ({
     check("a missing bookmark aborts before every mutation",
       /required D1 restore bookmark/.test(error?.message || "") && mutations.length === 0,
       `${error?.message}; ${mutations.join(",")}`);
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/* ---- a durable restore lease excludes update before its safety snapshot ---- */
+{
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-upgrade-restore-lease-")));
+  try {
+    const manifestPath = join(sandbox, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify(manifestFixture()));
+    let stateReads = 0;
+    let remoteMutations = 0;
+    let error = null;
+    try {
+      await cmdUpgrade(manifestPath, {
+        resolveAccount: async () => ({ id: "fixture-account" }),
+        d1Query: async (_account, _database, sql) => {
+          if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
+          if (/SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
+            stateReads += 1;
+            return { results: [{
+              client_slug: "fixture", product_version: "0.1.9", active_restore_leases: 1,
+            }] };
+          }
+          remoteMutations += 1;
+          return { results: [] };
+        },
+        cf: async () => { remoteMutations += 1; return {}; },
+        cmdMigrate: async () => { remoteMutations += 1; },
+        cmdDeploy: async () => { remoteMutations += 1; },
+      });
+    } catch (caught) { error = caught; }
+    check("a durable restore lease reaches update's exclusion decision and blocks every mutation",
+      stateReads === 1 && remoteMutations === 0 && /restore holds the durable exclusion lease/i.test(error?.message || ""),
+      `${error?.message}; state=${stateReads}; mutations=${remoteMutations}`);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
@@ -1380,7 +1417,7 @@ const bootstrapCompletion = () => ({
         d1Query: async (_a, _d, sql) => {
           if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
           if (/UPDATE install_state/i.test(sql)) versionWrites++;
-          if (/SELECT \* FROM install_state/i.test(sql)) {
+          if (/SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
             return { results: [{ client_slug: "fixture", product_version: "0.1.9" }] };
           }
           return { results: [] };
@@ -1444,7 +1481,7 @@ const bootstrapCompletion = () => ({
         resolveAccount: async () => ({ id: "fixture-account" }),
         d1Query: async (_account, _database, sql) => {
           if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
-          if (/SELECT \* FROM install_state/i.test(sql)) {
+          if (/SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
             return { results: [{ client_slug: "fixture", product_version: "0.1.9" }] };
           }
           if (/UPDATE install_state/i.test(sql)) versionWrites++;
@@ -2041,7 +2078,7 @@ for (const boundary of ["open", "read"]) {
         resolveAccount: async () => ({ id: "fixture-account" }),
         d1Query: async (_account, _database, sql) => {
           if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
-          if (/SELECT \* FROM install_state/i.test(sql)) {
+          if (/SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
             return { results: [{ client_slug: "fixture", product_version: "0.1.9" }] };
           }
           return { results: [] };
@@ -2078,7 +2115,7 @@ for (const boundary of ["open", "read"]) {
         resolveAccount: async () => ({ id: resolvedAccount }),
         d1Query: async (_account, _database, sql) => {
           if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
-          if (/SELECT \* FROM install_state/i.test(sql)) {
+          if (/SELECT \*,?[\s\S]*FROM install_state/i.test(sql)) {
             return { results: [{ client_slug: "fixture", product_version: "0.1.9" }] };
           }
           return { results: [] };
@@ -2171,10 +2208,11 @@ for (const boundary of ["open", "read"]) {
             options.expectDrainMode === "paused-for-upgrade",
           JSON.stringify(options));
       },
+      acquireRestoreLease: async () => true,
       waitForVectorDrainQuiescence: async (milliseconds) => {
         actions.push("quiesce");
-        check("rollback waits one full old-writer window before D1 time travel",
-          milliseconds === VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS, String(milliseconds));
+        check("rollback polls the proven writer ledger before D1 time travel",
+          milliseconds === VECTOR_DRAIN_CUTOVER_POLL_MS, String(milliseconds));
       },
       cf: async (path, request) => {
         actions.push("restore");
@@ -2186,6 +2224,9 @@ for (const boundary of ["open", "read"]) {
         );
       },
       d1Query: async (_account, _database, sql) => {
+        if (/vector_drain_lease_owner AS owner/.test(sql)) {
+          return { results: [{ owner: null, expires_at: null, vector_in_flight: 0, active_ingests: 0, active_updates: 0 }] };
+        }
         if (/SELECT schema_version FROM install_state/.test(sql)) {
           actions.push("schema");
           return { results: [{ schema_version: 13 }] };
@@ -2249,10 +2290,14 @@ for (const boundary of ["open", "read"]) {
       resolveAccount: async () => ({ id: "fixture-account" }),
       cmdDeploy: async () => {},
       cmdHealth: async () => {},
+      acquireRestoreLease: async () => true,
       waitForVectorDrainQuiescence: async () => {},
       cf: async () => {},
       d1Query: async (_account, _database, sql) => {
         schema12Sql.push(sql);
+        if (/vector_drain_lease_owner AS owner/.test(sql)) {
+          return { results: [{ owner: null, expires_at: null, vector_in_flight: 0, active_ingests: 0, active_updates: 0 }] };
+        }
         if (/SELECT schema_version FROM install_state/.test(sql)) {
           return { results: [{ schema_version: 12 }] };
         }
@@ -2292,9 +2337,13 @@ for (const boundary of ["open", "read"]) {
         cmdHealth: async (_path, options) => {
           prefixActions.push(`health:${options.expectDrainMode}`);
         },
+        acquireRestoreLease: async () => true,
         waitForVectorDrainQuiescence: async () => { prefixActions.push("quiesce"); },
         cf: async () => { prefixActions.push("restore-prefix"); },
         d1Query: async (_account, _database, sql) => {
+          if (/vector_drain_lease_owner AS owner/.test(sql)) {
+            return { results: [{ owner: null, expires_at: null, vector_in_flight: 0, active_ingests: 0, active_updates: 0 }] };
+          }
           prefixActions.push("schema-prefix-read");
           if (/SELECT schema_version FROM install_state/.test(sql)) {
             return { results: [{ schema_version: 11 }] };

@@ -1589,6 +1589,14 @@ async function handleIngest(env, request, scope = { all: true }, {
     }, 409);
   }
 
+  if (await restoreExclusionLeaseHolds(env)) {
+    return jsonResponse({
+      error: "brain corpus writes are paused for an owner-approved restore",
+      code: "restore_exclusion_lease",
+      paused: true,
+    }, 503);
+  }
+
   let expectedOwnerNoteHash = null;
   let ownerNoteWrite = null;
   if (ownerNoteChannel) {
@@ -1840,6 +1848,14 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
         detail: "Send fewer or smaller documents in each call. Nothing was written.",
       }, 413);
     }
+  }
+
+  if (eligible.length > 0 && await restoreExclusionLeaseHolds(env)) {
+    return jsonResponse({
+      error: "brain corpus writes are paused for an owner-approved restore",
+      code: "restore_exclusion_lease",
+      paused: true,
+    }, 503);
   }
 
   // Most full-corpus safety rescans are unchanged. Read every unique prior row
@@ -2622,6 +2638,24 @@ function upgradePauseHolds(env) {
 function corpusWritesPaused(env, path, method) {
   return upgradePauseHolds(env) &&
     method === "POST" && PAUSED_CORPUS_MUTATION_PATHS.has(path);
+}
+
+async function restoreExclusionLeaseHolds(env) {
+  if (backendOf(env) !== D1) return false;
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n
+       FROM upgrade_runs
+      WHERE status = 'restore_lease' AND finished_at IS NULL
+        AND CAST(json_extract(detail, '$.expires_at') AS INTEGER) > ?`
+  ).bind(Date.now()).first();
+  // SELECT COUNT always returns one numeric row on D1. Minimal offline store
+  // fakes predating this read can return null; they model no durable lease.
+  if (row == null || row.n === undefined) return false;
+  const active = Number(row?.n);
+  if (!Number.isSafeInteger(active) || active < 0) {
+    throw new Error("the durable restore exclusion lease is unreadable");
+  }
+  return active > 0;
 }
 
 // The MCP connector reaches the corpus through callbacks rather than through

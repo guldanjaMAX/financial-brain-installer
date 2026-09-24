@@ -3814,17 +3814,17 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
     first.created === 50 && first.results.length === 50 && first.results.every((row) => row.doc_uid), JSON.stringify(first).slice(0, 200));
   check("50 small documents recompute source statistics once, not 50 times",
     calls.stats_scans === 1 && calls.finalizer_batches === 1, JSON.stringify(calls));
-  check("the atomic per-document stage cuts a 50-document batch to 53 D1 calls",
-    calls.remote === 53 && calls.remote < legacyCalls, `${calls.remote} vs ${legacyCalls}`);
-  check("the same request submits 352 paid D1 statements, not 53 queries",
-    calls.submitted_statements === 352, JSON.stringify(calls));
+  check("the atomic per-document stage plus one exclusion read uses 54 D1 calls",
+    calls.remote === 54 && calls.remote < legacyCalls, `${calls.remote} vs ${legacyCalls}`);
+  check("the same request submits 352 write statements plus one exclusion read",
+    calls.submitted_statements === 353, JSON.stringify(calls));
 
   const beforeRetry = { ...calls };
   const retry = await (await post(env, "/api/admin/brain/ingest/batch", { docs })).json();
   check("a committed batch is idempotent on retry",
     retry.unchanged === 50 && retry.created === 0 && retry.failed === 0, JSON.stringify(retry).slice(0, 200));
   check("unchanged retries perform only identity reads and no corpus scan",
-    calls.remote - beforeRetry.remote === 1 && calls.stats_scans === beforeRetry.stats_scans,
+    calls.remote - beforeRetry.remote === 2 && calls.stats_scans === beforeRetry.stats_scans,
     JSON.stringify({ beforeRetry, after: calls }));
 }
 
@@ -3934,7 +3934,7 @@ const doc = (id, content = "some ordinary meeting content about the retainer") =
   check("two revisions of one identity preserve sequential created-then-updated receipts",
     body.created === 1 && body.updated === 1 && body.results.map((row) => row.status).join(",") === "created,updated", JSON.stringify(body));
   check("duplicate identities finalize sequentially rather than as one delayed group",
-    calls.finalizer_batches === 2 && calls.stats_scans === 2 && calls.remote === 14, JSON.stringify(calls));
+    calls.finalizer_batches === 2 && calls.stats_scans === 2 && calls.remote === 15, JSON.stringify(calls));
   check("the final duplicate revision is committed rather than left pending",
     /^[a-f0-9]{64}$/.test(documents.get("meeting:same")?.content_hash || ""));
 }
@@ -4200,6 +4200,19 @@ function mkForgetEnv({
   await scheduledPromise;
   check("paused requests and scheduled drains perform zero mutation D1, AI, or Vectorize calls",
     forbiddenCalls === 0, String(forbiddenCalls));
+}
+
+{
+  const held = mkEnv([], { countRow: { n: 1 } });
+  const response = await post(held.env, "/api/admin/brain/ingest", {
+    source_type: "drive", source_id: "lease-probe", content: "fixture",
+  });
+  const receipt = await response.json();
+  check("the durable restore exclusion lease reaches the ingest decision and blocks storage",
+    response.status === 503 && receipt.code === "restore_exclusion_lease" &&
+      held.seen.sql.some((sql) => /status = 'restore_lease'/.test(sql)) &&
+      !held.seen.sql.some((sql) => /INSERT INTO documents/.test(sql)),
+    JSON.stringify({ status: response.status, receipt }));
 }
 
 /* The one paused-mode write exception is the authenticated schema-13 bootstrap
