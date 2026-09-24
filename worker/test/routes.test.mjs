@@ -1349,9 +1349,10 @@ const call = (env, path) => {
 }
 
 /* Even correctly scoped, a PARTIAL OCR read is not a trustworthy tax-number
-   source. (A complete read is, labelled as a scan; see
-   scanned-evidence.test.mjs.) This isolates that branch from the cross-entity
-   guard above, with both model passes again made deliberately overconfident. */
+   source. (A complete read with no unreadable page and no unreadable mark in
+   the cited chunk is, labelled as a scan; see scanned-evidence.test.mjs.) This
+   isolates that branch from the cross-entity guard above, with both model
+   passes again made deliberately overconfident. */
 {
   const unreadableExactReturn = {
     ...ROW,

@@ -195,6 +195,21 @@ describe("scanned evidence", () => {
     expect(html).toBe("");
   });
 
+  it("leaves an OCR citation the Worker did not flag with only its OCR label", () => {
+    // A complete read whose cited passage the model marked illegible, or one
+    // stored with no OCR receipt: findable and citable, never proof, and not
+    // marked as if it were.
+    const unflagged = { n: 1, title: "Marked scan", source: "drive", text_source: "ocr", text_reliable: false };
+    expect(citationTitle(unflagged)).toBe("Marked scan");
+    expect(citationMeta(unflagged)).toBe("Google Drive · OCR text, verify key details");
+    const html = renderToStaticMarkup(<ScannedEvidenceNote answer={{
+      answer: "The fee is recorded [1].",
+      citations: [unflagged],
+      gaps: [],
+    }} />);
+    expect(html).toBe("");
+  });
+
   it("carries no scanned notice on a refusal or a provisional result", () => {
     for (const answer of [
       { answer: "The documents do not answer the question.", citations: [], gaps: [] },

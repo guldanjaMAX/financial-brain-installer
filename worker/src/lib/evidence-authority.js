@@ -64,17 +64,108 @@ const STATUS_LANGUAGE = /\b(active|inactive|current(?:ly)?|still|remains?|contin
 const trueValue = (value) => value === true || value === 1 || value === "1";
 
 /**
+ * The marks OCR leaves in stored text where it could not read something.
+ *
+ * `[[UNREADABLE]]` is the sentinel ingest/ocr.mjs tells the model to write in
+ * place of an illegible word, number or region (UNREADABLE_SENTINEL there; a
+ * test pins the two together). A page keeps its "read" status with these marks
+ * inside it as long as a dozen legible characters remain, so a complete read
+ * measures page coverage, not that every figure on the page was legible. The
+ * match tolerates case and inner spaces: a model that writes the sentinel
+ * loosely is still flagging an illegible region. The second form is the marker
+ * ingest writes for a whole page it could not read.
+ */
+export const OCR_UNREADABLE_MARK = "[[UNREADABLE]]";
+const UNREADABLE_TEXT = /\[\[\s*unreadable\s*\]\]|\[\[page \d+: could not be read/i;
+
+/** True when this text carries a mark of something OCR could not read. */
+export function hasUnreadableMark(text) {
+  return typeof text === "string" && UNREADABLE_TEXT.test(text);
+}
+
+/**
+ * Internal to retrieval, never public: set on a row whose evidence text is a
+ * bounded excerpt of a chunk that itself carries an unreadable mark, so the
+ * rule below judges the whole chunk and not only the excerpt a reader sees.
+ */
+export const UNREADABLE_SOURCE_CHUNK = "_unreadable_source_chunk";
+
+// Every alias a D1 projection uses for the stored document metadata. A row
+// with any of them present (even as an explicit null) is a stored row whose
+// OCR receipt can be judged directly.
+const METADATA_PROJECTIONS = ["authority_meta", "_authority_meta", "meta", "metadata"];
+const pageCount = (value) => Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * Does the OCR receipt ingest stored with this document (`metadata.ocr`, the
+ * provenance ingest/ocr.mjs assembleOcr() returns) show a complete read with no
+ * unreadable page? Every page has to be accounted for as read or blank.
+ *
+ * A read stopped by the configured page limit is stored as `ocr_partial` with
+ * fewer pages judged than `pages_total`, and fails here on both counts.
+ * `pages_omitted` is deliberately not consulted: D1 merges metadata as a JSON
+ * merge patch, so a later complete read of the same file leaves an earlier
+ * run's value behind while rewriting every count checked below.
+ *
+ * `confidence` and `mean_digit_ratio` are not gates. Confidence is page
+ * coverage docked for marks anywhere in the document; the marks that matter
+ * are the ones in the passage an answer relies on, which the caller checks.
+ */
+export function completeOcrRead(metadata) {
+  const ocr = metadata?.ocr;
+  if (!ocr || typeof ocr !== "object" || Array.isArray(ocr)) return false;
+  const pages = Array.isArray(ocr.per_page) ? ocr.per_page : null;
+  return ocr.text_source === "ocr" &&
+    ocr.pages_unreadable === 0 &&
+    pageCount(ocr.pages_total) && pageCount(ocr.pages_read) && pageCount(ocr.pages_blank) &&
+    ocr.pages_read > 0 &&
+    ocr.pages_read + ocr.pages_blank === ocr.pages_total &&
+    pages !== null && pages.length === ocr.pages_total &&
+    pages.every((page) => page?.status === "read" || page?.status === "blank");
+}
+
+/**
+ * Can this OCR'd row be the proof behind an answer? Both must hold:
+ *
+ *   1. the document's stored OCR receipt shows a complete read with zero
+ *      unreadable pages (completeOcrRead), and
+ *   2. the text being relied on, the retrieved chunk, carries no unreadable
+ *      mark. A bounded excerpt is judged by the whole chunk it came from.
+ *
+ * Retrieval judges the stored row, with its metadata projected. The public row
+ * it returns has that metadata stripped, so the verdict travels with it as
+ * `scanned: true`, set only by retrieval, and every later reader (a citation,
+ * the tax and current-status checks, `brain check`) honours it. The passage is
+ * re-checked each time, so a flagged row can never vouch for marked text.
+ */
+function ocrReadIsEvidence(row) {
+  if (hasUnreadableMark(row?.text) || hasUnreadableMark(row?.snippet) ||
+      row?.[UNREADABLE_SOURCE_CHUNK] === true) return false;
+  if (METADATA_PROJECTIONS.some((key) => Object.hasOwn(row || {}, key))) {
+    return completeOcrRead(jsonObject(
+      row.authority_meta ?? row._authority_meta ?? row.meta ?? row.metadata,
+    ));
+  }
+  return row?.scanned === true;
+}
+
+/**
  * What a row's text may stand on as evidence, decided at query time from the
  * extraction provenance D1 already stores. Nothing is re-ingested or
- * re-stamped, so a document OCR'd by an earlier version qualifies as it is.
+ * re-stamped, so a document OCR'd by an earlier version is judged by the
+ * receipt it already carries.
  *
  *   "native"  a text layer the ingest itself marked reliable. Unchanged.
- *   "ocr"     a COMPLETE OCR read of a scanned copy: every attempted page came
- *             back readable. It counts as evidence, and every surface that
- *             shows an answer resting on it says it came from a scanned copy.
- *   null      everything else. `ocr_partial` means at least one page could not
- *             be read, so the evidence may lack exactly the part that matters;
- *             `unknown` and any unrecognised value prove nothing.
+ *   "ocr"     a scanned copy that OCR read completely, with no unreadable page,
+ *             whose relied-on passage carries no unreadable mark
+ *             (ocrReadIsEvidence). It counts as evidence, and every surface
+ *             that shows an answer resting on it says it came from a scan.
+ *   null      everything else, exactly as before OCR could count at all: an
+ *             `ocr` read failing either condition, a read with no stored OCR
+ *             receipt, `ocr_partial` (at least one page could not be read, so
+ *             the evidence may lack exactly the part that matters), `unknown`,
+ *             and any unrecognised value. Such text stays findable and
+ *             citable; it is not proof.
  *
  * The stored `text_reliable` stays what ingest recorded, false for every OCR
  * read. This decides evidence eligibility only and rewrites no provenance.
@@ -87,7 +178,7 @@ export function evidenceTextBasis(row) {
       : trueValue(row.text_reliable);
     return reliable ? "native" : null;
   }
-  return source === "ocr" ? "ocr" : null;
+  return source === "ocr" && ocrReadIsEvidence(row) ? "ocr" : null;
 }
 
 /** Carried by every authority reason whose text basis is a complete OCR read. */
@@ -338,10 +429,11 @@ const transactionalEvidence = (row) => {
  *
  * `authoritative` is intentionally stricter than `tier`: reliable text is
  * required, and a current claim also requires a reliable date. Reliable text
- * is a native text layer or a complete OCR read of a scan. A scan-based
- * authority always says so, in `scanned: true` and in its reason, so no
- * surface can show its tier without the fact that it was read off a picture.
- * A partial OCR read still never counts.
+ * is a native text layer, or a scan OCR read completely with no unreadable
+ * page whose relied-on passage has no unreadable mark (evidenceTextBasis). A
+ * scan-based authority always says so, in `scanned: true` and in its reason,
+ * so no surface can show its tier without the fact that it was read off a
+ * picture. Any other OCR read, partial or not, still never counts.
  */
 export function authorityFor(row = {}, {
   query = "", claimText = "", current = false, claim = null,

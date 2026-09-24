@@ -1021,15 +1021,27 @@ async function handleThink(
     });
   }
   const docs = results.slice(0, 12).map(citationCandidateForResult);
-  // Readable means the same text basis evidence authority uses: a reliable
-  // native layer or a complete OCR read. A partial read stays unreadable.
-  const unreadableRequestedTaxEvidence = taxDocumentCoverage.unreadable || docs.some((doc) =>
+  const requestedTaxFiling = (doc) =>
     doc.authority?.tax_scope?.applicable === true &&
     (doc.authority.tax_scope.matched === true ||
-      doc.authority.tax_scope.title_candidate_matched === true) &&
-    evidenceTextBasis(doc) === null
+      doc.authority.tax_scope.title_candidate_matched === true);
+  // Readable means the same text basis evidence authority uses: a reliable
+  // native layer, or a scan OCR read completely with no unreadable page whose
+  // passage has no unreadable mark. Every other OCR read stays unreadable.
+  const unreadableRequestedTaxEvidence = taxDocumentCoverage.unreadable || docs.some((doc) =>
+    requestedTaxFiling(doc) && evidenceTextBasis(doc) === null
+  );
+  // A scan of the requested filing that does count as evidence can carry a
+  // labelled answer. If it ends in no answer, the owner still gets the
+  // "found, but not readable enough to rely on" disclosure (after the model
+  // pass, below), exactly as for any other scan.
+  const scannedRequestedTaxEvidence = docs.some((doc) =>
+    requestedTaxFiling(doc) && doc.scanned === true
   );
   if (unreadableRequestedTaxEvidence) documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
+  // Counted from the end, so a tax gap settled after the model pass lands
+  // exactly where it would have landed here.
+  const documentTaxGapTail = gaps.length;
   if (documentTaxGap) gaps.unshift(documentTaxGap);
 
   const renderDocs = (items) => items
@@ -1039,11 +1051,12 @@ async function handleThink(
         : null;
       // The answering model is told when a passage was read off a picture, so
       // it can hedge a figure it was handed rather than repeat it as printed.
-      // A complete read can carry the answer, so the model is also told to say
-      // that it is relying on a scanned copy. A partial read keeps its warning.
+      // A scan that counts as evidence can carry the answer, so the model is
+      // also told to say that it is relying on a scanned copy. Every other OCR
+      // read, partial or not, keeps the warning it always had.
       const read = d.scanned === true
         ? SCANNED_PROMPT_LABEL
-        : d.text_source === "ocr_partial"
+        : d.text_source === "ocr" || d.text_source === "ocr_partial"
           ? "READ BY OCR FROM A SCAN, may be misread"
           : null;
       const authority = d.authority
@@ -1421,6 +1434,22 @@ async function handleThink(
     }
   }
 
+  // A scan of the requested tax filing that did not end in an approved answer,
+  // whether the model declared no evidence or the evidence gate refused the
+  // draft, carries the same gap, and on a refusal the same notice, as a scan
+  // that could not count at all: the filing was found but its scanned text
+  // could not be relied on, which is not proof the filing omits the answer.
+  const answeredFromEvidence = !answerError && Boolean(answer) &&
+    answer !== unsupportedAnswer && approvedDocs.length > 0;
+  let scannedTaxEvidenceNotRelied = false;
+  if (scannedRequestedTaxEvidence && !answeredFromEvidence &&
+      documentTaxGap !== TAX_EVIDENCE_UNREADABLE_GAP) {
+    const replacing = documentTaxGap ? 1 : 0;
+    gaps.splice(gaps.length - documentTaxGapTail - replacing, replacing, TAX_EVIDENCE_UNREADABLE_GAP);
+    documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
+    scannedTaxEvidenceNotRelied = true;
+  }
+
   // Trust metadata beside the answer, never inside it: the refusal sentence
   // is a verbatim contract (worker tests and the eval refusal scorer both pin
   // it), so the confidence rubric travels as its own field.
@@ -1460,7 +1489,8 @@ async function handleThink(
       : answerValidationBlocksAbsence
         ? SEARCH_UNAVAILABLE
         : undefined),
-    notice: refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence && unreadableRequestedTaxEvidence
+    notice: refusalSearchDisclosure?.notice || (taxDocumentCoverageBlocksAbsence &&
+        (unreadableRequestedTaxEvidence || scannedTaxEvidenceNotRelied)
       ? TAX_EVIDENCE_UNREADABLE_NOTICE
       : taxDocumentCoverageBlocksAbsence
         ? TAX_DOCUMENT_INVENTORY_NOTICE

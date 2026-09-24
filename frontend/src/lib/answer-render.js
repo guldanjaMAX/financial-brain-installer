@@ -74,9 +74,13 @@ export const SCANNED_ANSWER_NOTICE =
   "Part of this answer comes from a scanned document read by OCR. Check the original for exact figures.";
 export const SCANNED_CITATION_MARK = "(scanned)";
 
-/** A complete OCR read. A partial read keeps its own "may be incomplete" label. */
+/**
+ * A scan the Worker accepted as evidence; only the Worker sets the flag. Every
+ * other OCR citation keeps its own "verify key details" or "may be incomplete"
+ * label.
+ */
 export function citationIsScanned(citation) {
-  return citation?.scanned === true || citation?.text_source === "ocr";
+  return citation?.scanned === true;
 }
 
 /** The sentence to show beside a displayed answer that rests on a scan, or null. */

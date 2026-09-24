@@ -84,7 +84,8 @@ export function answerText(r) {
 /**
  * Evidence read by OCR from a scanned copy.
  *
- * A complete OCR read can be the proof behind an answer. When it is, the
+ * A scan OCR read completely, with no unreadable page and no unreadable mark in
+ * the passage relied on, can be the proof behind an answer. When it is, the
  * Worker adds one `scanned_evidence` gap and flags each such citation
  * `scanned: true`. Every surface then states this sentence and marks the
  * citation from these constants, never from a model's prose.
@@ -110,13 +111,15 @@ export function scannedEvidenceGap(rows, { results = false } = {}) {
 }
 
 /**
- * Is this citation a complete OCR read? The flag is the contract. The
- * `text_source` fallback keeps a newer surface honest against an older Worker
- * that sends no flag. A partial read is never marked; it keeps its own
- * "may be incomplete" label, exactly as before.
+ * Is this citation a scan the Worker accepted as evidence? The flag is the
+ * contract, and only the Worker sets it: `text_source` "ocr" alone no longer
+ * says a scan counted, because a complete read can still have an unreadable
+ * mark in the passage cited. Every other OCR citation, and every citation
+ * from an older Worker that never sends the flag, keeps its own OCR label
+ * ("OCR text, verify key details" or "may be incomplete"), exactly as before.
  */
 export function citationIsScanned(citation) {
-  return citation?.scanned === true || citation?.text_source === "ocr";
+  return citation?.scanned === true;
 }
 
 /** The sentence to show beside a displayed answer that rests on a scan, or null. */

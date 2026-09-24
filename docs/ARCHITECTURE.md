@@ -527,10 +527,19 @@ Every result and citation carries its source identity plus date and extraction
 provenance. The owner app, CLI, remote MCP tools, and verification report keep
 uncertain dates and OCR warnings beside the citation so stored trust metadata
 cannot disappear at the final reading surface.
-A complete OCR read (`text_source` `ocr`) counts as reliable evidence at query
-time and a partial read does not. Each row and citation resting on a complete
-read carries `scanned: true`, and an answer that uses one carries a
-`scanned_evidence` gap whose fixed sentence every one of those surfaces shows.
+An OCR read counts as reliable evidence at query time only when both hold: the
+OCR receipt ingest stored in the document's `metadata.ocr` shows a complete
+read with zero unreadable pages, and the retrieved chunk carries no
+`[[UNREADABLE]]` mark (a bounded excerpt is judged by the whole chunk it was
+cut from). Page coverage alone is not enough, because a page stays "read"
+with marked illegible regions inside it. D1 retrieval judges the receipt while
+the metadata is on the row and returns its verdict as `scanned: true`; every
+later reader honours that flag and re-checks the passage. Every other OCR
+read, including `ocr_partial` and a scan with no receipt, stays citable but is
+never proof. An answer resting on a counted scan carries a `scanned_evidence`
+gap whose fixed sentence every one of those surfaces shows. A requested tax
+filing held only as a scan that ends in no answer keeps the
+`tax_evidence_unreadable` gap and notice.
 Ingest accepts `occurred_at` only as `YYYY-MM-DD` or an RFC 3339 instant and
 rejects ambiguous or impossible dates before any write. Calendar citations keep
 the event's local day, while a persisted RFC 3339 start with an explicit offset

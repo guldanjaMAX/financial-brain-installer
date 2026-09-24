@@ -792,9 +792,12 @@ const d1Backend = {
           text_reliable: x.text_reliable === undefined || x.text_reliable === null
             ? false
             : x.text_reliable === true || x.text_reliable === 1 || x.text_reliable === "1",
-          // A complete OCR read counts as evidence at query time and carries
-          // this flag into every response. The stored text trust above is
-          // what ingest recorded and is not rewritten.
+          // A scan that counts as evidence at query time (a complete OCR read
+          // with no unreadable page, and no unreadable mark in this passage)
+          // carries this flag into every response. The D1 search judged the
+          // stored OCR receipt and passed its verdict here; this re-checks the
+          // passage. The stored text trust above is what ingest recorded and
+          // is not rewritten.
           ...(evidenceTextBasis(x) === "ocr" ? { scanned: true } : {}),
           // Query-time, claim-specific authority is derived from the durable D1
           // row. It is additive public metadata, kept beside date and text

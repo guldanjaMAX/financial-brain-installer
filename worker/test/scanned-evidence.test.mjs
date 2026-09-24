@@ -1,5 +1,5 @@
 /**
- * A complete OCR read of a scanned copy can be the proof behind an answer, and
+ * A scanned copy that OCR read cleanly can be the proof behind an answer, and
  * every answer that uses one says so without leaving that to a model.
  *
  * Before this change an OCR'd document could be found and cited but could
@@ -7,35 +7,57 @@
  * a native text layer, so a question only a scan could answer ended in "The
  * search found candidate records, but they did not support an answer."
  *
- * The rule is decided in the Worker at query time from the stored
- * `text_source`, so a document OCR'd by any earlier version qualifies without
- * re-ingest:
+ * "Complete" in ingest measures page COVERAGE, not accuracy: a page keeps its
+ * "read" status with `[[UNREADABLE]]` marks inside it as long as a dozen
+ * legible characters remain. So a scan counts only when BOTH hold:
  *
- *   native + text_reliable   unchanged, byte for byte
- *   ocr (a complete read)    counts, is flagged `scanned: true`, and is labelled
- *   ocr_partial, unknown     still excluded, exactly as before
+ *   1. the OCR receipt ingest stored with the document (`metadata.ocr`) shows a
+ *      complete read with zero unreadable pages, and
+ *   2. the chunk being relied on carries no unreadable mark.
+ *
+ * The rule is decided in the Worker at query time from what D1 already
+ * stores, so a document OCR'd by any earlier version is judged by its own
+ * receipt without re-ingest:
+ *
+ *   native + text_reliable       unchanged, byte for byte
+ *   ocr passing both conditions  counts, is flagged `scanned: true`, and is labelled
+ *   any other ocr read           still excluded, byte for byte as on main
+ *   ocr_partial, unknown         still excluded, exactly as before
+ *
+ * A scan of a requested tax filing that ends in no answer, including a clean
+ * one the model found nothing in, still gets main's "found, but its text
+ * could not be read reliably" disclosure rather than a plain refusal.
  *
  * "Unchanged" is measured, not asserted: the native, partial and unknown
  * responses, and both model prompts that produced them, are pinned by SHA-256
- * digests captured on main 5351d09 before the change. Every name here is
- * synthetic.
+ * digests captured on main 5351d09 before the change; every excluded OCR read
+ * added with the receipt rule is pinned the same way against main 01f94a6.
+ * Every name here is synthetic.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import worker from "../src/index.js";
 import { authorityFor, ownerConfirmedRecord } from "../src/lib/evidence-authority.js";
+// Namespace import: the receipt helpers are new, and a control run of this
+// file against a build without them must still load and fail test by test.
+import * as evidenceAuthority from "../src/lib/evidence-authority.js";
 import { handleMcp } from "../src/lib/mcp-endpoint.js";
+import { storeFor } from "../src/lib/store.js";
+import { withFirstPartySourceProvenance } from "../src/lib/provenance-receipt.js";
 import * as appRender from "../../frontend/src/lib/answer-render.js";
-import { OCR_BANNER, pageMarker } from "../../ingest/ocr.mjs";
-import { cmdAsk } from "../../brain.mjs";
+import {
+  BLANK_SENTINEL, OCR_BANNER, UNREADABLE_SENTINEL, assembleOcr, pageMarker, unreadablePageMarker,
+} from "../../ingest/ocr.mjs";
+import { cmdAsk, splitStatements } from "../../brain.mjs";
 import { renderReportHtml } from "../../report-html.mjs";
 
 // Spelled out rather than imported, so an edit to a product constant cannot
@@ -60,9 +82,11 @@ const digest = (text) => createHash("sha256").update(String(text), "utf8").diges
 /**
  * The metadata a receipt-writing ingest stores. The D1 read path exposes a
  * row's text source only when this receipt validates against the same row, and
- * treats every other row as `unknown`, native or not.
+ * treats every other row as `unknown`, native or not. An OCR read also stores
+ * its OCR receipt under `ocr`, exactly as ingest/run.mjs and the Drive
+ * connector do.
  */
-function storedMeta(row) {
+function storedMeta(row, { ocr = null } = {}) {
   const recorded = row.text_source !== "unknown";
   return JSON.stringify({
     evidence_lineage: { version: 1, kind: "source_record", root_ids: [] },
@@ -72,7 +96,24 @@ function storedMeta(row) {
       reason: recorded ? "lineage_and_text_recorded" : "text_provenance_unavailable",
       root_ids: [`${row.source}:${row.source_id}`],
     },
+    ...(ocr ? { ocr } : {}),
   });
+}
+
+/**
+ * The OCR receipt ingest stores as `metadata.ocr` for these pages: the real
+ * assembleOcr() provenance, never a hand-written copy of its shape. A page is
+ * its model output, or `{ error }` for a page that could not be read.
+ */
+function ocrReceipt(pages) {
+  const verdict = assembleOcr(
+    pages.map((page, index) => (typeof page === "string"
+      ? { page: index + 1, text: page }
+      : { page: index + 1, ...page })),
+    { totalPages: pages.length, model: "fixture-ocr-model" },
+  );
+  assert.equal(verdict.ok, true, JSON.stringify(verdict));
+  return verdict.provenance;
 }
 
 const TEXT_STATES = Object.freeze({
@@ -88,14 +129,35 @@ const storedText = (textSource, body) => textSource === "ocr" || textSource === 
   ? `${OCR_BANNER}\n\n${pageMarker(1)}\n${body}`
   : body;
 
-function contractRow(state) {
+const CONTRACT_PAGE = [
+  "The service contract between Example Orchard LLC and Harbor Storage remains active and renews each August.",
+  "The monthly storage fee is $1,240.",
+].join("\n");
+// The same page with one region the model marked illegible. It keeps enough
+// legible text to stay "read", so ingest records a COMPLETE read with zero
+// unreadable pages: only the passage itself shows what could not be read.
+const MARKED_CONTRACT_PAGE = [
+  "The service contract between Example Orchard LLC and Harbor Storage remains active and renews each August.",
+  "The monthly storage fee is $1,240. The late fee is [[UNREADABLE]] per month.",
+].join("\n");
+// Long enough that a read with a second, unreadable or blank, page still
+// clears the characters-per-page floor ingest holds every read to.
+const LONG_CONTRACT_PAGE = `${CONTRACT_PAGE}\n${
+  "Every unit is inspected each quarter and the report is filed with this contract. ".repeat(2).trim()}`;
+
+/**
+ * A stored contract chunk. An `ocr` row carries the complete-read receipt
+ * ingest writes for its page unless the test passes another receipt, or null
+ * for a scan stored with no OCR receipt at all.
+ */
+function contractRow(state, { id = state, page = CONTRACT_PAGE, receipt } = {}) {
   const { text_source, text_reliable } = TEXT_STATES[state];
   const row = {
-    chunk_uid: `drive:storage-contract-${state}#0`,
-    doc_uid: `drive:storage-contract-${state}`,
+    chunk_uid: `drive:storage-contract-${id}#0`,
+    doc_uid: `drive:storage-contract-${id}`,
     source: "drive",
     source_kind: "drive",
-    source_id: `storage-contract-${state}`,
+    source_id: `storage-contract-${id}`,
     title: "Harbor Storage service contract",
     client: "Harbor Storage",
     category: "contract",
@@ -104,29 +166,30 @@ function contractRow(state) {
     date_reliable: 1,
     text_source,
     text_reliable,
-    text: storedText(text_source, [
-      "The service contract between Example Orchard LLC and Harbor Storage remains active and renews each August.",
-      "The monthly storage fee is $1,240.",
-    ].join("\n")),
+    text: storedText(text_source, page),
   };
-  return { ...row, authority_meta: storedMeta(row) };
+  const ocr = receipt !== undefined ? receipt : state === "ocr" ? ocrReceipt([page]) : null;
+  return { ...row, authority_meta: storedMeta(row, { ocr }) };
 }
 
 const TAX_TITLE = "Example Orchard LLC 2023 tax return Form 1065";
-function taxReturnRow(state) {
+const TAX_PAGE = [
+  "Taxpayer: Example Orchard LLC",
+  "Form 1065 U.S. Return of Partnership Income, tax year 2023",
+  "Ordinary business income (loss): $48,210",
+].join("\n");
+// The figure asked about is legible; another line on the same page is not.
+const MARKED_TAX_PAGE = `${TAX_PAGE}\nGuaranteed payments to partners: $[[UNREADABLE]]`;
+
+function taxReturnRow(state, { id = state, page = TAX_PAGE, receipt } = {}) {
   const { text_source, text_reliable } = TEXT_STATES[state];
-  const page = [
-    "Taxpayer: Example Orchard LLC",
-    "Form 1065 U.S. Return of Partnership Income, tax year 2023",
-    "Ordinary business income (loss): $48,210",
-  ].join("\n");
   const chunk = `[${TAX_TITLE}]\n\n${storedText(text_source, page)}`;
   const row = {
-    chunk_uid: `drive:orchard-1065-${state}#0`,
-    doc_uid: `drive:orchard-1065-${state}`,
+    chunk_uid: `drive:orchard-1065-${id}#0`,
+    doc_uid: `drive:orchard-1065-${id}`,
     source: "drive",
     source_kind: "drive",
-    source_id: `orchard-1065-${state}`,
+    source_id: `orchard-1065-${id}`,
     title: TAX_TITLE,
     client: "Example Orchard LLC",
     category: "tax",
@@ -138,8 +201,23 @@ function taxReturnRow(state) {
     authority_document_head: chunk,
     text: chunk,
   };
-  return { ...row, authority_meta: storedMeta(row) };
+  const ocr = receipt !== undefined ? receipt : state === "ocr" ? ocrReceipt([page]) : null;
+  return { ...row, authority_meta: storedMeta(row, { ocr }) };
 }
+
+// Three scans the stored column calls a complete read (`text_source` ocr) that
+// still cannot be proof, each failing one half of the rule.
+const markedContract = () => contractRow("ocr", { id: "ocr-marked", page: MARKED_CONTRACT_PAGE });
+// Current ingest stores any read with an unreadable page as ocr_partial, so
+// this row, whose column says otherwise, can only come from a receipt and a
+// column that disagree. The receipt is still the real one ingest writes.
+const unreadablePageContract = () => contractRow("ocr", {
+  id: "ocr-unreadable-page",
+  page: LONG_CONTRACT_PAGE,
+  receipt: ocrReceipt([LONG_CONTRACT_PAGE, { error: "the model returned nothing for this page" }]),
+});
+// The shape of an owner-uploaded image: OCR text with no OCR receipt at all.
+const receiptlessContract = () => contractRow("ocr", { id: "ocr-no-receipt", receipt: null });
 
 // A registered source whose history is not yet proven complete: the ordinary
 // state of a young Brain, and the one that turns a refusal into the
@@ -164,7 +242,9 @@ const Q_SEARCH = "Harbor Storage service contract";
  * Both model passes are deliberately overconfident, so every refusal below is
  * the deterministic evidence rule and never a model's judgement.
  */
-function brainEnv({ rows, coverageRows = [], answer = "", evidence = [1], prompts = [] } = {}) {
+function brainEnv({
+  rows, coverageRows = [], answer = "", evidence = [1], verdict = null, prompts = [],
+} = {}) {
   return {
     STORAGE: "d1",
     ADMIN_KEY: "k",
@@ -209,7 +289,7 @@ function brainEnv({ rows, coverageRows = [], answer = "", evidence = [1], prompt
         if (/verify a proposed answer/.test(system)) {
           prompts.push({ pass: "verifier", system, text: user });
           return {
-            response: { supported: true, complete: true, evidence, reason: "the cited record states it" },
+            response: verdict || { supported: true, complete: true, evidence, reason: "the cited record states it" },
             usage: {},
           };
         }
@@ -732,4 +812,511 @@ test("the owner app uses the same notice and citation mark", () => {
   assert.equal(appRender.scannedEvidenceNotice({
     answer: A_GENERAL, citations: [{ n: 1, title: "Native", text_source: "native" }], gaps: [],
   }), null);
+});
+
+/* ------------------------ the stored OCR receipt and the relied-on passage */
+
+const REFUSAL = "The documents do not answer the question.";
+const TAX_UNREADABLE_NOTICE =
+  "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete.";
+const PAGE_UNREADABLE = { error: "the model returned nothing for this page" };
+
+// SHA-256 digests captured on main 01f94a6, before the receipt rule, from the
+// same fixtures: every OCR read that does not count must behave exactly as
+// main treats all OCR text.
+const MAIN = Object.freeze({
+  markedStatus: {
+    response: "c5dda39801467fb84a2093a3b96f9927d5907956363756b7fc3680781996cd2d",
+    prompts: {
+      answer: "9bd7ef9c2a28f714748d3c8c687d1669bdd9b88345610ca97b54f540db451a7a",
+      verifier: "24119bb489f7520e4f40e8de9985a8a6105189639b6e2fdf84d18bf64bb88d6b",
+    },
+  },
+  unreadablePageStatus: {
+    response: "bc8326f33c3f1584e1900739284a2808faeae80028ff212a3d0e6af0b328dc09",
+    prompts: {
+      answer: "1b0bc8ef57034bcaba155098dea332ea6f4316fc88cae38ac0f402345f791208",
+      verifier: "d04842df0ae5fe78ae80432ff43ff179d8a535aa87fd6d777c3acefc7b732d01",
+    },
+  },
+  receiptlessStatus: {
+    response: "df40c9652263e95ff3b44cb3916feb131a3068884c711ff4f8eb51cfacf04979",
+    prompts: {
+      answer: "ed9471553eb26ff601b43f52bf5cde313cf7a81615b93c850f3ba3d1a1ed560f",
+      verifier: "64317c857977dce5cee0ef308508f734c66881fcf7d148495f634c46921f644d",
+    },
+  },
+  markedTax: {
+    response: "cc80ee5edbe6fd26bdf54d8a966fc1e7058534a3cc7e4d5a0a01a02652b273f9",
+    prompts: {
+      answer: "05e2a34a907b203f09e894f73a825b75ba552c450847f357e26fc1c51100cd75",
+      verifier: "0300e2f3ac2e4839d90ff904ad3d0416b5024d4bf9de68d8b97dfcfd2b806c1a",
+    },
+  },
+  markedUnified: "78414adf19b0fa6dd48c083bb1d5a9f776aaa47b1fb38c9454851b06da137c14",
+  markedGeneral: "6db28f02fca77a46b961336eb5a583abf329a95d9ed4ce6ac871595fe4b949e8",
+  markedGeneralMcpAsk: "cbd9101e5c4d2939a370561b3c51f0c1ff956cdaefe66d0bc8bf7fd0b46bc54e",
+  markedGeneralCli: "f1dcbfd8537957b2a6152ff4247d64463ff2a5de3eb6d19e19b995c233575b8c",
+  scannedTaxModelRefusal: "194443c7bcd688031cf6e88c356dd43c0d46737ac11e37474c382ca980435b97",
+  scannedTaxGateRefusal: "7b6c75a8a33c7f2d40b6c80aaa79b55b1a03aaf71a6f3dbd666dc47bd183c572",
+});
+
+/** The fields that carry a refusal's disclosure, in response order. */
+const disclosureOf = (body) => JSON.stringify({
+  status: body.status ?? null,
+  notice: body.notice ?? null,
+  answer: body.answer ?? null,
+  evidence_gate: body.evidence_gate ?? null,
+  gaps: body.gaps ?? null,
+  confidence: body.confidence ?? null,
+  evidence_authority: body.evidence_authority ?? null,
+  citations: body.citations ?? null,
+});
+
+test("the Worker's unreadable mark is the sentinel ingest tells the model to write", () => {
+  assert.equal(evidenceAuthority.OCR_UNREADABLE_MARK, UNREADABLE_SENTINEL);
+  const marked = evidenceAuthority.hasUnreadableMark;
+  assert.equal(typeof marked, "function");
+  for (const text of [
+    UNREADABLE_SENTINEL,
+    `Total due: $4${UNREADABLE_SENTINEL}0`,
+    "the late fee is [[unreadable]]",
+    "[[ UNREADABLE ]]",
+    unreadablePageMarker(2, "the model returned nothing for this page"),
+  ]) {
+    assert.equal(marked(text), true, text);
+  }
+  for (const text of [OCR_BANNER, pageMarker(1), BLANK_SENTINEL, CONTRACT_PAGE, "", null, undefined, 42]) {
+    assert.equal(marked(text), false, String(text));
+  }
+});
+
+test("a stored OCR receipt counts only as a complete read with no unreadable page", () => {
+  const complete = evidenceAuthority.completeOcrRead;
+  assert.equal(typeof complete, "function");
+  const clean = ocrReceipt([CONTRACT_PAGE]);
+  assert.equal(complete({ ocr: clean }), true);
+
+  // Coverage, not legibility: a page with a marked region is still a complete
+  // read with zero unreadable pages. Only the passage check can catch it.
+  const marked = ocrReceipt([MARKED_CONTRACT_PAGE]);
+  assert.equal(marked.text_source, "ocr");
+  assert.equal(marked.pages_unreadable, 0);
+  assert.equal(marked.per_page[0].unreadable_marks, 1);
+  assert.ok(marked.confidence < 1, "the mark docks confidence, which is not a gate");
+  assert.equal(complete({ ocr: marked }), true);
+
+  // A blank page is not a failure.
+  assert.equal(complete({ ocr: ocrReceipt([LONG_CONTRACT_PAGE, BLANK_SENTINEL]) }), true);
+
+  const withUnreadablePage = ocrReceipt([LONG_CONTRACT_PAGE, PAGE_UNREADABLE]);
+  assert.equal(withUnreadablePage.pages_unreadable, 1);
+  assert.equal(complete({ ocr: withUnreadablePage }), false);
+  assert.equal(complete({ ocr: { ...clean, pages_unreadable: 1 } }), false,
+    "an unreadable page decides even when everything else claims a complete read");
+
+  // A read stopped at the configured page limit (ingest/formats.mjs ocrPdf).
+  const capped = { ...clean, text_source: "ocr_partial", pages_total: 3, pages_omitted: 2 };
+  assert.equal(complete({ ocr: capped }), false);
+  assert.equal(complete({ ocr: { ...clean, pages_total: 3 } }), false, "every page must be accounted for");
+  // D1 merges metadata as a JSON merge patch, so a later complete read of the
+  // same file leaves an earlier run's pages_omitted behind; the counts decide.
+  assert.equal(complete({ ocr: { ...clean, pages_omitted: 2 } }), true);
+
+  for (const receipt of [
+    { ...clean, pages_unreadable: undefined },
+    { ...clean, pages_unreadable: "0" },
+    { ...clean, text_source: "ocr_partial" },
+    { ...clean, per_page: undefined },
+    { ...clean, per_page: [] },
+    { ...clean, per_page: [{ ...clean.per_page[0], status: "unreadable" }] },
+    { ...clean, pages_read: 0, pages_blank: 1 },
+  ]) {
+    assert.equal(complete({ ocr: receipt }), false, JSON.stringify(receipt));
+  }
+  for (const metadata of [null, undefined, {}, { ocr: null }, { ocr: [] }, { ocr: "complete" }]) {
+    assert.equal(complete(metadata), false, JSON.stringify(metadata));
+  }
+});
+
+test("a public row carries retrieval's verdict as scanned: true, and its passage is checked again", async () => {
+  // A row exactly as retrieval returns it, stored metadata stripped: what a
+  // citation, the tax and current-status checks, and `brain check` re-read.
+  const { body } = await unified({ rows: [contractRow("ocr")] }, Q_SEARCH);
+  const publicRow = body.results[0];
+  assert.equal(Object.hasOwn(publicRow, "authority_meta"), false);
+  assert.equal(publicRow.scanned, true);
+  const options = { query: Q_STATUS, claimText: A_STATUS, current: true };
+
+  const flagged = authorityFor(publicRow, options);
+  assert.equal(flagged.authoritative, true);
+  assert.equal(flagged.scanned, true);
+
+  const { scanned: _verdict, ...unflaggedRow } = publicRow;
+  const unflagged = authorityFor(unflaggedRow, options);
+  assert.equal(unflagged.authoritative, false, "an ocr row without retrieval's verdict is not proof");
+  assert.equal(Object.hasOwn(unflagged, "scanned"), false);
+
+  const markedPassage = authorityFor({ ...publicRow, snippet: storedText("ocr", MARKED_CONTRACT_PAGE) }, options);
+  assert.equal(markedPassage.authoritative, false, "a flag never vouches for a marked passage");
+
+  // A stored row is judged by its own receipt, whatever flag it carries.
+  assert.equal(authorityFor({ ...receiptlessContract(), scanned: true }, options).authoritative, false);
+  assert.equal(authorityFor({ ...markedContract(), scanned: true }, options).authoritative, false);
+});
+
+test("a scanned row that cannot count carries main's excluded authority, byte for byte", () => {
+  const options = { query: Q_STATUS, claimText: A_STATUS, current: true };
+  const excluded = {
+    tier: "T1",
+    rank: 1,
+    name: "primary",
+    reason: "a recorded direct source artifact (contract); its text was not obtained from a reliable native text layer",
+    claim: "transaction_status",
+    eligible: true,
+    authoritative: false,
+    current: true,
+    owner_confirmed: false,
+    operative: false,
+  };
+  assert.deepEqual(authorityFor(markedContract(), options), excluded);
+  assert.deepEqual(authorityFor(unreadablePageContract(), options), excluded);
+  assert.deepEqual(authorityFor(receiptlessContract(), options), excluded);
+});
+
+/** Main's refusal for a current-status question, pinned to main's own bytes. */
+async function assertRefusedLikeMain(row, pinned, what) {
+  const prompts = [];
+  const { text, body } = await think({
+    rows: [row], coverageRows: HISTORY_UNPROVEN, answer: A_STATUS, prompts,
+  }, Q_STATUS);
+  assert.equal(body.answer, null, `${what}: ${JSON.stringify(body.evidence_gate)}`);
+  assert.equal(body.status, "coverage_incomplete");
+  assert.ok(String(body.notice).startsWith(COVERAGE_REFUSAL), String(body.notice));
+  assert.equal(body.evidence_gate?.reason, "non-authoritative current-status evidence requires an exact as-of date");
+  assertNoScannedTrace(text);
+  const answerPrompt = prompts.find((prompt) => prompt.pass === "answer")?.text || "";
+  assert.ok(answerPrompt.includes(PARTIAL_PROMPT_LABEL), "the model gets main's OCR warning");
+  assert.equal(answerPrompt.includes(SCANNED_PROMPT_LABEL), false);
+  assert.equal(digest(text), pinned.response, `${what} /think response bytes`);
+  assert.deepEqual(promptDigests(prompts), pinned.prompts, "both model prompts are byte-identical to main");
+}
+
+test("a scan whose cited chunk carries an unreadable mark is not proof, byte for byte as on main", async () => {
+  const row = markedContract();
+  // The decision point: the stored receipt passes, so only the passage decides.
+  const receipt = JSON.parse(row.authority_meta).ocr;
+  assert.equal(receipt.text_source, "ocr");
+  assert.equal(receipt.pages_unreadable, 0);
+  assert.ok(row.text.includes("[[UNREADABLE]]"));
+  await assertRefusedLikeMain(row, MAIN.markedStatus, "marked chunk");
+});
+
+test("a document whose receipt records an unreadable page is not proof, byte for byte as on main", async () => {
+  const row = unreadablePageContract();
+  // The decision point: the passage is clean, so only the receipt decides.
+  assert.equal(row.text.includes("[[UNREADABLE]]"), false);
+  assert.equal(JSON.parse(row.authority_meta).ocr.pages_unreadable, 1);
+  await assertRefusedLikeMain(row, MAIN.unreadablePageStatus, "unreadable page");
+});
+
+test("a scan stored with no OCR receipt is not proof, byte for byte as on main", async () => {
+  const row = receiptlessContract();
+  assert.equal(row.text.includes("[[UNREADABLE]]"), false);
+  assert.equal(Object.hasOwn(JSON.parse(row.authority_meta), "ocr"), false);
+  await assertRefusedLikeMain(row, MAIN.receiptlessStatus, "no receipt");
+});
+
+test("a scanned filing whose cited chunk carries an unreadable mark is unreadable tax evidence, byte for byte as on main", async () => {
+  const row = taxReturnRow("ocr", { id: "ocr-marked", page: MARKED_TAX_PAGE });
+  assert.equal(JSON.parse(row.authority_meta).ocr.pages_unreadable, 0);
+  assert.ok(row.text.includes("[[UNREADABLE]]"));
+  const prompts = [];
+  const { text, body } = await think({ rows: [row], answer: A_TAX, prompts }, Q_TAX);
+  assert.equal(body.answer, null);
+  assert.equal(body.status, "coverage_incomplete");
+  assert.equal(body.evidence_gate?.reason, TAX_UNREADABLE_REASON);
+  assert.equal(body.gaps[0]?.type, "tax_evidence_unreadable");
+  assert.equal(body.notice, TAX_UNREADABLE_NOTICE);
+  assertNoScannedTrace(text);
+  assert.equal(digest(text), MAIN.markedTax.response, "marked tax /think response bytes");
+  assert.deepEqual(promptDigests(prompts), MAIN.markedTax.prompts, "both model prompts are byte-identical to main");
+});
+
+test("a clean scan of the filing that the model finds nothing in still gets the found-but-unreadable disclosure", async () => {
+  const { body } = await think({ rows: [taxReturnRow("ocr")], answer: REFUSAL }, Q_TAX);
+  // The scan did count as readable, so this refusal is the model's verdict.
+  assert.equal(body.results[0]?.scanned, true);
+  assert.equal(body.evidence_gate?.reason, "answer model found no direct support");
+  assert.equal(body.answer, null, `not a plain refusal: ${JSON.stringify({ answer: body.answer, notice: body.notice })}`);
+  assert.equal(body.status, "coverage_incomplete");
+  assert.equal(body.notice, TAX_UNREADABLE_NOTICE);
+  assert.equal(body.gaps[0]?.type, "tax_evidence_unreadable");
+  assert.equal(scannedGapOf(body), undefined, "a refusal rests on nothing");
+  assert.equal(body.confidence, undefined, "an unproven absence carries no refusal confidence");
+  assert.equal(digest(disclosureOf(body)), MAIN.scannedTaxModelRefusal, "the disclosure is main's, field for field");
+});
+
+test("a clean scan of the filing whose draft the evidence gate refuses gets the same disclosure", async () => {
+  const { body } = await think({
+    rows: [taxReturnRow("ocr")],
+    answer: A_TAX,
+    verdict: { supported: false, complete: false, evidence: [], reason: "the cited line does not state that figure" },
+  }, Q_TAX);
+  assert.equal(body.results[0]?.scanned, true);
+  assert.equal(body.evidence_gate?.supported, false);
+  assert.equal(body.answer, null);
+  assert.equal(body.status, "coverage_incomplete", `not the generic evidence-check notice: ${body.notice}`);
+  assert.equal(body.notice, TAX_UNREADABLE_NOTICE);
+  assert.equal(body.gaps[0]?.type, "tax_evidence_unreadable");
+  assert.equal(scannedGapOf(body), undefined);
+  assert.equal(digest(disclosureOf(body)), MAIN.scannedTaxGateRefusal, "the disclosure is main's, field for field");
+});
+
+test("ranked search treats a scan with a marked chunk exactly as main", async () => {
+  const { text, body } = await unified({ rows: [markedContract()] }, Q_SEARCH);
+  assert.equal(body.results[0]?.text_source, "ocr");
+  assertNoScannedTrace(text);
+  assert.equal(Object.hasOwn(body, "gaps"), false, "a healthy search with no counted scan has no gaps field");
+  assert.equal(digest(text), MAIN.markedUnified, "marked /unified response bytes");
+});
+
+function reportFor(body) {
+  return renderReportHtml({
+    manifest: { client: { display_name: "Example Orchard LLC" } },
+    acceptance: {
+      counts: { pass: 1, fail: 0, warn: 0, skip: 0 }, passed: true, stoppedAtTier: null,
+      results: [{ tier: 1, name: "health responds", status: "pass", detail: "fixture" }],
+    },
+    seedAnswers: [{
+      question: Q_GENERAL,
+      answer: body.answer,
+      citations: body.citations,
+      gaps: body.gaps,
+      resultCount: body.results.length,
+    }],
+    expectedToFail: [],
+    corpus: { rows: [] },
+    base: "https://fixture.example",
+    generatedAt: new Date("2026-09-01T00:00:00Z"),
+  });
+}
+
+test("an answer citing a scan that is not proof keeps main's OCR label on every surface", async () => {
+  const { text, body } = await think({ rows: [markedContract()], answer: A_GENERAL }, Q_GENERAL);
+  // A general claim needs no authority, so main answers this too, from the
+  // scan as a citation and never as proof.
+  assert.equal(body.answer, A_GENERAL);
+  assert.equal(body.citations[0]?.text_source, "ocr");
+  assertNoScannedTrace(text);
+  assert.equal(digest(text), MAIN.markedGeneral, "the /think response is byte for byte main's");
+
+  const mcp = (await mcpCall("ask", { question: Q_GENERAL }, { think: async () => body })).content[0].text;
+  assert.equal(mcp.includes("(scanned)"), false);
+  assert.equal(mcp.includes(ANSWER_NOTICE), false);
+  assert.match(mcp, /OCR text, verify key details/);
+  assert.equal(digest(mcp), MAIN.markedGeneralMcpAsk, "the remote MCP ask text is byte for byte main's");
+
+  const printed = await askCli(body);
+  assert.equal(printed.includes("(scanned)"), false);
+  assert.equal(printed.includes(ANSWER_NOTICE), false);
+  assert.match(printed, /OCR text, verify key details/);
+  assert.equal(digest(printed), MAIN.markedGeneralCli, "brain ask output is byte for byte main's");
+
+  const html = reportFor(body);
+  assert.equal(html.includes("(scanned)"), false);
+  assert.equal(html.includes(ANSWER_NOTICE), false);
+  assert.ok(html.includes("OCR text, verify key details"));
+
+  assert.equal(appRender.citationIsScanned(body.citations[0]), false);
+  assert.equal(appRender.scannedEvidenceNotice(body), null);
+
+  const local = await localMcpThink(body);
+  assert.equal(local.note, undefined, "the local MCP server adds no scanned relay note");
+  assert.equal(Object.hasOwn(local.citations[0], "scanned"), false);
+});
+
+/* ------------------- end to end: real ingest, real SQL, real retrieval */
+
+const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "migrations", "d1");
+
+/**
+ * The Worker store over node:sqlite with every shipped D1 migration applied,
+ * built the way test/ocr.test.mjs builds it. D1 hands a RETURNING write its
+ * rows and counts trigger writes in meta.changes; this does the same.
+ */
+function sqliteStore(extra = {}) {
+  const sqlite = new DatabaseSync(":memory:");
+  for (const file of readdirSync(MIGRATIONS).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
+    for (const statement of splitStatements(readFileSync(join(MIGRATIONS, file), "utf-8"))) sqlite.exec(statement);
+  }
+  sqlite.exec(
+    `INSERT INTO install_state (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
+     VALUES (1, 'scanned-evidence-fixture', '0.0.0', 17, 0, '2026-01-01T00:00:00Z', 'test')`,
+  );
+  const write = (sql, params) => {
+    if (!/\bRETURNING\b/i.test(sql)) {
+      return { results: [], meta: { changes: Number(sqlite.prepare(sql).run(...params).changes || 0) } };
+    }
+    const before = sqlite.prepare("SELECT total_changes() AS n").get().n;
+    const results = sqlite.prepare(sql).all(...params);
+    return { results, meta: { changes: sqlite.prepare("SELECT total_changes() AS n").get().n - before } };
+  };
+  const prepare = (sql) => {
+    const shape = (params = []) => ({
+      bind: (...next) => shape(next),
+      all: async () => ({ results: sqlite.prepare(sql).all(...params) }),
+      first: async () => sqlite.prepare(sql).get(...params) ?? null,
+      run: async () => write(sql, params),
+      _sql: sql,
+      _params: params,
+    });
+    return shape();
+  };
+  const env = {
+    STORAGE: "d1",
+    DB: {
+      prepare,
+      batch: async (statements) => {
+        sqlite.exec("BEGIN");
+        try {
+          const out = statements.map((statement) => write(statement._sql, statement._params));
+          sqlite.exec("COMMIT");
+          return out;
+        } catch (error) {
+          sqlite.exec("ROLLBACK");
+          throw error;
+        }
+      },
+    },
+    ...extra,
+  };
+  return { sqlite, env, store: storeFor(env) };
+}
+
+/**
+ * The envelope a connector sends for an OCR'd file: the real assembleOcr()
+ * text and provenance, promoted and stored the way connectors/google-drive.mjs
+ * does it, with the receipt under metadata.ocr.
+ */
+function scannedEnvelope(sourceId, pages, { title = "Harbor Storage service contract", receipt = true } = {}) {
+  const verdict = assembleOcr(
+    pages.map((page, index) => (typeof page === "string"
+      ? { page: index + 1, text: page }
+      : { page: index + 1, ...page })),
+    { totalPages: pages.length, model: "fixture-ocr-model" },
+  );
+  assert.equal(verdict.ok, true, JSON.stringify(verdict));
+  const { text_source: textSource, text_reliable: textReliable } = verdict.provenance;
+  return withFirstPartySourceProvenance({
+    source_type: "drive",
+    source_id: sourceId,
+    title,
+    content: verdict.text,
+    text_source: textSource,
+    text_reliable: textReliable,
+    metadata: {
+      extracted_as: "pdf",
+      extraction_note: verdict.note,
+      ...(receipt ? { ocr: verdict.provenance } : {}),
+    },
+  }, { textSource, textReliable });
+}
+
+test("end to end: the receipt ingest writes reaches retrieval, and only a clean passage counts", async () => {
+  const { sqlite, store, env } = sqliteStore();
+  await store.ingest(env, scannedEnvelope("scan-clean", [CONTRACT_PAGE]));
+  await store.ingest(env, scannedEnvelope("scan-marked", [MARKED_CONTRACT_PAGE]));
+  await store.ingest(env, scannedEnvelope("scan-unreadable-page", [LONG_CONTRACT_PAGE, PAGE_UNREADABLE]));
+  // Distinct bytes: retrieval collapses identical copies from one source.
+  await store.ingest(env, scannedEnvelope("scan-no-receipt", [`${CONTRACT_PAGE}\nFiled copy.`], { receipt: false }));
+  await store.ingest(env, withFirstPartySourceProvenance({
+    source_type: "drive", source_id: "native-copy", title: "Harbor Storage service contract",
+    content: CONTRACT_PAGE, text_source: "native", text_reliable: true, metadata: { extracted_as: "pdf" },
+  }, { textSource: "native", textReliable: true }));
+
+  // The field names this rule reads are the ones ingest actually stored.
+  const stored = Object.fromEntries(sqlite.prepare("SELECT source_id, text_source, meta FROM documents").all()
+    .map((row) => [row.source_id, { text_source: row.text_source, ocr: JSON.parse(row.meta).ocr }]));
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(stored).map(([id, row]) => [id, [row.text_source, row.ocr?.pages_unreadable]])),
+    {
+      "scan-clean": ["ocr", 0],
+      "scan-marked": ["ocr", 0],
+      "scan-unreadable-page": ["ocr_partial", 1],
+      "scan-no-receipt": ["ocr", undefined],
+      "native-copy": ["native", undefined],
+    },
+  );
+  assert.equal(stored["scan-marked"].ocr.per_page[0].unreadable_marks, 1);
+
+  const found = await store.search(env, { query: "Harbor Storage monthly storage fee", limit: 10 });
+  const byRef = Object.fromEntries(found.results.map((row) => [row.ref_key, row]));
+  assert.deepEqual(Object.keys(byRef).sort(),
+    ["native-copy", "scan-clean", "scan-marked", "scan-no-receipt", "scan-unreadable-page"]);
+
+  const clean = byRef["scan-clean"];
+  assert.equal(clean.text_source, "ocr");
+  assert.equal(clean.scanned, true, "a clean scan is flagged from its stored receipt");
+  assert.equal(clean.authority?.scanned, true);
+  assert.equal(clean.authority?.authoritative, true);
+
+  assert.ok(byRef["scan-marked"].snippet.includes("[[UNREADABLE]]"));
+  for (const ref of ["scan-marked", "scan-unreadable-page", "scan-no-receipt"]) {
+    assert.equal(Object.hasOwn(byRef[ref], "scanned"), false, `${ref} is not flagged`);
+    assert.equal(Object.hasOwn(byRef[ref].authority || {}, "scanned"), false, `${ref} authority is not a scan basis`);
+    assert.equal(byRef[ref].authority?.authoritative, false, `${ref} is not proof`);
+  }
+  assert.equal(byRef["native-copy"].authority?.authoritative, true);
+  assert.equal(Object.hasOwn(byRef["native-copy"], "scanned"), false);
+  for (const row of found.results) {
+    assert.equal(Object.hasOwn(row, evidenceAuthority.UNREADABLE_SOURCE_CHUNK || "_unreadable_source_chunk"), false,
+      "no internal field reaches the public row");
+  }
+});
+
+test("end to end: an excerpt cut from a marked chunk is judged by the whole chunk", async () => {
+  // Two chunks per document. Keyword search finds the fee in chunk 0; the
+  // semantic index returns chunk 1, and retrieval shows a bounded excerpt of
+  // each. In the marked copy the mark sits in chunk 1 beyond its excerpt.
+  // Sized with the real chunker: two 900-character chunks, the fee in chunk
+  // 0, and the mark 651 characters into chunk 1, past its 400-character
+  // excerpt. The query words appear in chunk 1 only through its title header.
+  const clauses = (tag, count) => Array.from({ length: count }, (_, index) =>
+    `Clause ${tag}${index + 1} covers inspection access and insurance for each unit.`).join(" ");
+  const pageOne = `The monthly storage fee is $1,240, due on the first day of each month. ${clauses("a", 6)}`;
+  const pageTwo = (mark) => `${clauses("b", 13)} Signed copy retained by the operator${mark}.`;
+  const vectorIds = [];
+  const { sqlite, store, env } = sqliteStore({
+    CHUNK_SIZE: "900",
+    CHUNK_OVERLAP: "0",
+    AI: { run: async () => ({ data: [[0.1, 0.2, 0.3]] }) },
+    VECTORIZE: {
+      query: async () => ({ matches: vectorIds.map((id) => ({ id, score: 0.9 })) }),
+      describe: async () => ({ vectorCount: 0, processedUpToMutation: null }),
+    },
+  });
+  await store.ingest(env, scannedEnvelope("composed-clean", [pageOne, pageTwo("")]));
+  await store.ingest(env, scannedEnvelope("composed-marked", [pageOne, pageTwo(" [[UNREADABLE]]")]));
+  vectorIds.push("drive:composed-clean#1", "drive:composed-marked#1");
+
+  const chunks = Object.fromEntries(sqlite.prepare("SELECT chunk_uid, text FROM chunks").all()
+    .map((row) => [row.chunk_uid, row.text]));
+  assert.equal(Object.keys(chunks).filter((id) => id.startsWith("drive:composed-marked#")).length, 2);
+  assert.equal(chunks["drive:composed-marked#0"].includes("[[UNREADABLE]]"), false);
+  assert.ok(chunks["drive:composed-marked#1"].includes("[[UNREADABLE]]"));
+  assert.ok(chunks["drive:composed-marked#0"].includes("monthly storage fee"));
+
+  const found = await store.search(env, { query: "monthly storage fee", limit: 10 });
+  const byRef = Object.fromEntries(found.results.map((row) => [row.ref_key, row]));
+  for (const ref of ["composed-clean", "composed-marked"]) {
+    // The decision point: both documents were composed from two excerpts, and
+    // the mark is not in what a reader sees.
+    assert.match(byRef[ref]?.snippet || "", /Semantic excerpt from the same document/, ref);
+    assert.equal(byRef[ref].snippet.includes("[[UNREADABLE]]"), false, ref);
+  }
+  assert.equal(byRef["composed-clean"].scanned, true, "composition alone does not cost a clean scan its flag");
+  assert.equal(Object.hasOwn(byRef["composed-marked"], "scanned"), false,
+    "the mark in the whole chunk counts even though the excerpt hides it");
+  assert.equal(byRef["composed-marked"].authority?.authoritative, false);
 });

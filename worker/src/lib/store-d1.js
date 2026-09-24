@@ -34,7 +34,9 @@
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, parseCanonicalEvidenceDate,
 } from "./query-intent.js";
-import { authorityFor } from "./evidence-authority.js";
+import {
+  UNREADABLE_SOURCE_CHUNK, authorityFor, hasUnreadableMark,
+} from "./evidence-authority.js";
 import {
   annotateLineageFamilyTokens, attachEvidenceLineage, evidenceLineageFor,
 } from "./evidence-lineage.js";
@@ -309,7 +311,16 @@ function boundedEvidencePart(value, query) {
 function composeDocumentEvidence(vectorRow, keywordRow, query) {
   if (!keywordRow) return vectorRow;
   if (!vectorRow) return keywordRow;
+  const composed = composeBoundedEvidence(vectorRow, keywordRow, query);
+  // The excerpts are bounded for the reader. Whether a scan's text can be the
+  // proof behind an answer is judged on the whole chunks they were cut from,
+  // so an illegible region just outside the excerpt still counts against it.
+  return hasUnreadableMark(keywordRow.text) || hasUnreadableMark(vectorRow.text)
+    ? { ...composed, [UNREADABLE_SOURCE_CHUNK]: true }
+    : composed;
+}
 
+function composeBoundedEvidence(vectorRow, keywordRow, query) {
   const keywordText = boundedEvidencePart(keywordRow.text, query);
   const vectorText = boundedEvidencePart(vectorRow.text, query);
   if (!keywordText) return { ...keywordRow, text: vectorText };
@@ -979,6 +990,10 @@ export async function search(env, {
       _authority_meta: _internalLegacyAuthorityMeta,
       authority_document_head: _internalAuthorityDocumentHead,
       _authority_document_head: _internalLegacyAuthorityDocumentHead,
+      [UNREADABLE_SOURCE_CHUNK]: _internalUnreadableSourceChunk,
+      // Only the verdict below may flag a row as a scan that counts as
+      // evidence; nothing carried on the stored row can.
+      scanned: _unverifiedScanned,
       ...publicRow
     } = row;
     const writeProvenance = publicOwnerNoteProvenance(
@@ -987,6 +1002,9 @@ export async function search(env, {
     );
     documents.push(attachEvidenceLineage({
       ...publicRow,
+      // The stored OCR receipt is judged here, while it is still on the row.
+      // The public row loses it, so the verdict travels as this flag.
+      ...(authority.scanned === true ? { scanned: true } : {}),
       authority,
       lineage: lineage.lineage,
       ...(writeProvenance ? { write_provenance: writeProvenance } : {}),

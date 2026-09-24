@@ -10,11 +10,17 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
-- **A scan that OCR read completely can now answer a question, and the answer
+- **A scan that OCR read cleanly can now answer a question, and the answer
   always says it came from a scanned copy.** It carries the note "Part of this
   answer comes from a scanned document read by OCR. Check the original for
-  exact figures." and marks the source "(scanned)". A scan with any page OCR
-  could not read still cannot support an answer.
+  exact figures." and marks the source "(scanned)". A scan counts only when
+  the OCR record stored with it shows every page was read, with none
+  unreadable, and the passage the answer relies on has no spot OCR marked as
+  illegible. Any other scan can still be found and cited, exactly as before,
+  but it cannot be the proof behind an answer. When the tax filing you asked
+  about is found as a scan and no answer comes from it, you still see "The
+  requested tax filing was found, but its text could not be read reliably",
+  never a plain "the documents do not answer the question".
 
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
