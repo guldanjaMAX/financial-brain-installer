@@ -6,20 +6,26 @@
  * the owner's Worker. Nothing is read from the environment, a flag, the
  * manifest, or a file, and nothing but secret NAMES is ever reported back.
  *
- * Three invariants are enforced here rather than trusted to the caller:
+ * Four invariants are enforced here rather than trusted to the caller:
  *
  * - An ambient bank value is refused before any Cloudflare read. The same
  *   refusal `brain secrets` makes: a value in a shell is a value in history.
  * - An existing BANK_FEED_WRAPPING_KEY_V2 is never replaced. Disabling the feed
  *   deletes the provider pair but deliberately keeps the wrapping key, because
  *   retained encrypted access references can only be recovered with it. A
- *   re-enable that regenerated it would silently orphan them.
+ *   re-enable that regenerated it would silently orphan them. `--replace-keys`
+ *   touches only the provider pair for the same reason.
+ * - A typed pair is proven against the manifest's Plaid environment with one
+ *   harmless authenticated read before anything is written. Field evidence:
+ *   two operators pasted a secret from the wrong environment, the write
+ *   "succeeded", and the failure surfaced only as a Link error in the browser.
  * - Success is the re-listed Worker inventory, not the PUT responses.
  */
 import {
   BANK_ACCESS_WRAPPING_KEY_SECRET,
   generateBankAccessWrappingKey,
 } from "./bank-access-wrapping-key.mjs";
+import { PLAID_PROFILE } from "../worker/src/lib/bank-feed-profiles.js";
 
 export const BANK_FEED_PROVIDER_SECRET_NAMES = Object.freeze([
   "BANK_FEED_CLIENT_ID",
@@ -31,10 +37,17 @@ export const BANK_FEED_OWNER_SECRET_NAMES = Object.freeze([
   BANK_ACCESS_WRAPPING_KEY_SECRET,
 ]);
 
-const PROMPTS = Object.freeze({
-  BANK_FEED_CLIENT_ID: "  Plaid client_id for this environment (hidden): ",
-  BANK_FEED_SECRET: "  Plaid secret for this environment (hidden): ",
+const PROMPT_LABELS = Object.freeze({
+  BANK_FEED_CLIENT_ID: "client_id",
+  BANK_FEED_SECRET: "secret",
 });
+
+const VALIDATION_TIMEOUT_MS = 20_000;
+
+function promptFor(name, environment) {
+  const scope = environment ? `the ${environment} environment` : "this environment";
+  return `  Plaid ${PROMPT_LABELS[name]} for ${scope} (hidden): `;
+}
 
 function namesFromInventory(inventory) {
   if (!Array.isArray(inventory) || inventory.some((name) => typeof name !== "string")) {
@@ -57,18 +70,95 @@ function normalizeProviderValue(name, raw) {
 }
 
 /**
+ * Prove one typed client_id and secret against a Plaid environment.
+ *
+ * `/institutions/get` with count 1 is an authenticated read of public directory
+ * data. It creates no Item, touches no bank, and moves no money, so it is safe
+ * to call at the prompt. Plaid answers INVALID_API_KEYS when the pair does not
+ * belong to the environment it was sent to, which is the mistake this exists
+ * to stop before the Worker is changed. No value is ever echoed: messages are
+ * built only from the environment name and Plaid's bounded error code.
+ */
+export async function validatePlaidApplicationKeys({
+  environment,
+  clientId,
+  secret,
+  countryCodes = ["US"],
+  fetchImpl = fetch,
+  timeoutMs = VALIDATION_TIMEOUT_MS,
+} = {}) {
+  const apiBase = Object.hasOwn(PLAID_PROFILE.apiBases, String(environment))
+    ? PLAID_PROFILE.apiBases[environment]
+    : null;
+  if (!apiBase) {
+    throw new Error(
+      "corpora.bank_feed.environment must be sandbox or production before Plaid keys can be checked. " +
+        "No bank secret was written.",
+    );
+  }
+  const countries = Array.isArray(countryCodes) &&
+    countryCodes.length > 0 && countryCodes.every((code) => /^[A-Z]{2}$/.test(String(code)))
+    ? countryCodes.map(String)
+    : ["US"];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetchImpl(`${apiBase}/institutions/get`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: clientId, secret, count: 1, offset: 0, country_codes: countries,
+      }),
+      redirect: "error",
+      signal: controller.signal,
+    });
+  } catch {
+    throw new Error(
+      `Plaid could not be reached to check these keys for the ${environment} environment, so nothing ` +
+        "was written. Check this computer's internet connection and run the same command again.",
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  let body = null;
+  try { body = await response.json(); } catch { body = null; }
+  if (response.ok && Array.isArray(body?.institutions)) return Object.freeze({ environment, accepted: true });
+  const code = typeof body?.error_code === "string" ? body.error_code.replace(/[^A-Z0-9_]/g, "").slice(0, 60) : "";
+  if (code === "INVALID_API_KEYS") {
+    throw new Error(
+      `Plaid rejected this client_id and secret for the ${environment} environment. The likely cause: ` +
+        "the secret is for a different Plaid environment (sandbox, development or production). " +
+        `Copy the ${environment} secret from the owner's Plaid dashboard (Developers, Keys) and run the ` +
+        "same command again. Nothing was written.",
+    );
+  }
+  throw new Error(
+    `Plaid did not confirm these keys for the ${environment} environment ` +
+      `(${code ? `reference code ${code}` : `HTTP ${Number(response.status) || "unknown"}`}). Nothing was written. ` +
+      "Run the same command again, and check both keys on the Plaid dashboard if it repeats.",
+  );
+}
+
+/**
  * Make sure all three bank secret names exist on the Worker, prompting the
- * owner only for what is actually missing.
+ * owner only for what is actually missing, or for the whole Plaid pair when
+ * `replaceKeys` is set.
  *
  * `listSecretNames()` resolves to the Worker's secret names (read-only).
  * `putSecret(name, text)` writes one secret_text binding.
  * `readSecret(prompt)` reads one hidden value from the owner's terminal.
+ * `validateKeys({ clientId, secret })` proves the typed pair with the provider
+ * and throws a plain refusal; it is required whenever a pair is typed.
  */
 export async function ensureBankFeedWorkerSecrets({
   env = {},
   listSecretNames,
   putSecret,
   readSecret,
+  validateKeys,
+  environment = null,
+  replaceKeys = false,
   generateWrappingKey = generateBankAccessWrappingKey,
   report = () => {},
 } = {}) {
@@ -85,25 +175,45 @@ export async function ensureBankFeedWorkerSecrets({
 
   const present = namesFromInventory(await listSecretNames());
   const absent = BANK_FEED_OWNER_SECRET_NAMES.filter((name) => !present.has(name));
-  if (!absent.length) {
-    return Object.freeze({ written: Object.freeze([]), names: BANK_FEED_OWNER_SECRET_NAMES });
+  if (replaceKeys === true && !present.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+    throw new Error(
+      `--replace-keys changes only the Plaid client_id and secret, and this Worker has no ` +
+        `${BANK_ACCESS_WRAPPING_KEY_SECRET} yet. Run \`brain connect bank <manifest>\` without ` +
+        "--replace-keys to finish the first setup. Nothing was prompted or written.",
+    );
+  }
+  if (replaceKeys !== true && !absent.length) {
+    return Object.freeze({ written: Object.freeze([]), names: BANK_FEED_OWNER_SECRET_NAMES, replaced: false });
   }
 
   // The client ID and secret are one pair from one Plaid environment. If either
   // is missing, ask for both so a stale half can never be paired with a new one.
-  const needsProvider = BANK_FEED_PROVIDER_SECRET_NAMES.some((name) => !present.has(name));
-  const needsWrappingKey = !present.has(BANK_ACCESS_WRAPPING_KEY_SECRET);
+  const needsProvider = replaceKeys === true ||
+    BANK_FEED_PROVIDER_SECRET_NAMES.some((name) => !present.has(name));
+  const needsWrappingKey = replaceKeys !== true && !present.has(BANK_ACCESS_WRAPPING_KEY_SECRET);
   const writes = [];
   if (needsProvider) {
-    report(`missing on the Worker: ${absent.join(", ")}. Enter the Plaid keys from the owner's own dashboard.`);
+    report(replaceKeys === true
+      ? `replacing ${BANK_FEED_PROVIDER_SECRET_NAMES.join(" and ")} on the Worker. Enter both Plaid keys ` +
+        `from the owner's own dashboard${environment ? ` for the ${environment} environment` : ""}. ` +
+        `${BANK_ACCESS_WRAPPING_KEY_SECRET} is kept as it is.`
+      : `missing on the Worker: ${absent.join(", ")}. Enter the Plaid keys from the owner's own dashboard` +
+        `${environment ? ` for the ${environment} environment` : ""}.`);
+    const pair = [];
     for (const name of BANK_FEED_PROVIDER_SECRET_NAMES) {
-      writes.push([name, normalizeProviderValue(name, await readSecret(PROMPTS[name]))]);
+      pair.push([name, normalizeProviderValue(name, await readSecret(promptFor(name, environment)))]);
     }
-    if (writes[0][1] === writes[1][1]) {
+    if (pair[0][1] === pair[1][1]) {
       throw new Error(
         "the Plaid client_id and secret were entered as the same value. No bank secret was written.",
       );
     }
+    if (typeof validateKeys !== "function") {
+      throw new Error("the Plaid keys cannot be checked before they are saved. No bank secret was written.");
+    }
+    // Refusals here are already plain sentences that repeat no typed value.
+    await validateKeys({ clientId: pair[0][1], secret: pair[1][1] });
+    writes.push(...pair);
   }
   if (needsWrappingKey) writes.push([BANK_ACCESS_WRAPPING_KEY_SECRET, generateWrappingKey()]);
 
@@ -116,7 +226,9 @@ export async function ensureBankFeedWorkerSecrets({
       throw new Error(
         `the Worker secret ${name} could not be written` +
           (leaked ? "." : `: ${reason.slice(0, 200)}`) +
-          " Rerun `brain connect bank`; it rechecks the Worker and asks only for what is still missing.",
+          (replaceKeys === true
+            ? " Rerun `brain connect bank <manifest> --replace-keys` to enter both Plaid keys again."
+            : " Rerun `brain connect bank`; it rechecks the Worker and asks only for what is still missing."),
       );
     }
   }
@@ -130,5 +242,5 @@ export async function ensureBankFeedWorkerSecrets({
     );
   }
   const written = Object.freeze(writes.map(([name]) => name));
-  return Object.freeze({ written, names: BANK_FEED_OWNER_SECRET_NAMES });
+  return Object.freeze({ written, names: BANK_FEED_OWNER_SECRET_NAMES, replaced: replaceKeys === true });
 }

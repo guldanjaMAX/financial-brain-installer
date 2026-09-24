@@ -589,6 +589,8 @@ export type FinUnsortedSpending = {
   outflow_minor: number;
   counted_lines: number;
   unreadable_lines: number;
+  /** Counted lines rounded from a finer bank decimal. Absent on older Brains. */
+  rounded_lines?: number;
 };
 
 export type FinDeadline = {
@@ -644,6 +646,8 @@ export type FinCash = {
     amount_minor: number;
     currency: string;
     as_of: string;
+    /** Rounded from a finer bank decimal, so not exact. Absent on older Brains. */
+    minor_rounded?: boolean;
   }>;
   missing: Array<{
     account_slug: string;
@@ -657,6 +661,8 @@ export type FinCash = {
   }>;
   accounts_covered: number;
   accounts_considered: number;
+  /** How many summed balances were rounded. Absent on older Brains. */
+  rounded_accounts?: number;
   complete: boolean;
 };
 

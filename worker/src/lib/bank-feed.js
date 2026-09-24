@@ -270,8 +270,26 @@ export function redactFeedText(text) {
 /** A message safe to show a person, derived from any thrown thing. */
 export function safeFeedError(error) {
   if (error instanceof FeedConfigError) return error.message;
+  if (bankFeedRefusalReason(error) === "invalid_api_keys") {
+    return "Plaid did not accept the keys saved on this Brain for its Plaid environment (INVALID_API_KEYS). " +
+      "Re-enter both keys with brain connect bank <manifest> --replace-keys";
+  }
   const code = error?.code ? ` (${String(error.code).slice(0, 60)})` : "";
   return `the bank feed could not be reached${code}: ${redactFeedText(error?.message)}`;
+}
+
+/**
+ * The two provider refusals an owner or installer can fix themselves, named by
+ * a fixed reason. Plaid answers INVALID_API_KEYS when the client_id and secret
+ * do not belong to the environment being called, and INVALID_FIELD naming the
+ * redirect URI when the page address is not on the dashboard's allowed list.
+ * Only the reason leaves this function, never provider text.
+ */
+export function bankFeedRefusalReason(error) {
+  const code = String(error?.code || "");
+  if (code === "INVALID_API_KEYS") return "invalid_api_keys";
+  if (code === "INVALID_FIELD" && /redirect/i.test(String(error?.message || ""))) return "redirect_uri_not_allowed";
+  return null;
 }
 
 /** Owner-facing recovery must preserve a provider's no-retry boundary. */
@@ -280,6 +298,18 @@ export function bankFeedOwnerErrorMessage(data, status) {
   if (data?.outcome_unknown === true && data?.retry_safe === false) {
     const base = "The provider may have accepted this one-time step, but its result could not be confirmed. Keep this page open and ask a technician to review this connection before starting another one or retrying.";
     return code ? `${base} Reference code: ${code}.` : base;
+  }
+  // Both refusals below happen before Plaid opens, so nothing was connected or
+  // changed, and repeating the same click cannot succeed until the cause is fixed.
+  if (code === "INVALID_API_KEYS" || data?.reason === "invalid_api_keys") {
+    const environment = data && typeof data.environment === "string" ? `${data.environment} ` : "";
+    const base = `Plaid did not accept the keys saved on this Brain for its ${environment}environment, so the connection could not start. Nothing was changed. The keys probably belong to a different Plaid environment. From a terminal, re-enter both keys with: brain connect bank <your manifest file> --replace-keys. Then return to this page.`;
+    return `${base} Reference code: ${code || "INVALID_API_KEYS"}.`;
+  }
+  if (data?.reason === "redirect_uri_not_allowed") {
+    const address = data && typeof data.redirect_uri === "string" ? data.redirect_uri : "this page's address";
+    const base = `This page's address is not on the Allowed redirect URIs list in your Plaid dashboard, so Plaid would not open. Nothing was changed. In the Plaid dashboard for this environment, add exactly ${address} under Developers, API, Allowed redirect URIs. Then select Connect a bank again.`;
+    return `${base} Reference code: ${code || "INVALID_FIELD"}.`;
   }
   const messages = {
     session_required: "Your sign-in has ended. Return to your Brain, sign in, and open this page again.",
@@ -1323,8 +1353,12 @@ export async function disconnectItem(env, itemRef, { fetchImpl = fetch, now = nu
  * The page carries no admin key and never asks for one. Its authorisation is
  * the owner's passkey session, which is the same thing `/app` uses.
  */
-export function connectPageHtml(config) {
+export function connectPageHtml(config, { ownerEntityCount = null } = {}) {
   const sdk = config.linkSdkUrl;
+  // A new Brain has no owner yet, so every account choice would be an empty
+  // list and the only remedy would sit inside a collapsed section. Open it.
+  // The page script repeats this decision whenever the owner list is read.
+  const addOwnerOpen = ownerEntityCount === 0 ? " open" : "";
   const sdkOrigin = sdk ? new URL(sdk).origin : null;
   const apiOrigin = config.apiBase ? new URL(config.apiBase).origin : null;
   const connectOrigins = [...new Set([apiOrigin, sdkOrigin].filter(Boolean))];
@@ -1349,7 +1383,7 @@ h1{font-size:1.5rem;margin-bottom:.5rem}h2{font-size:1.15rem;margin:0 0 .4rem}p{
 <h1>Connect a bank account</h1>
 <p>Sign in through ${config.provider === "plaid" ? "Plaid" : "your bank connection provider"} or your bank's secure screen. Financial Brain does not receive your bank
 password or security codes. This connection reads your accounts and transactions. It cannot move money.</p>
-<p class="note">Environment: ${config.environment}. You can disconnect at any time, and your history stays.</p>
+<p class="note">Environment: ${config.environment}. To disconnect a bank later, open your Brain, go to Access, and choose Disconnect under Banks. Disconnecting is not done on this page, and your saved history stays.</p>
 <div class="actions"><button id="start">Connect a bank</button><a href="/app">Back to your Brain</a></div>
 <p id="status" role="status" aria-live="polite"></p>
 <section class="panel" aria-labelledby="connections-heading">
@@ -1361,7 +1395,7 @@ password or security codes. This connection reads your accounts and transactions
   <h2 id="accounts-heading">Choose where each account belongs</h2>
   <p class="note">Your bank may return personal and business accounts together. Choose the person, household, or business that owns each account. Transactions stay waiting until every account has a choice.</p>
   <p class="note">Each account belongs to one choice. If you use one account for both personal and business spending, those transactions are not automatically split between them.</p>
-  <details>
+  <details id="entity-details"${addOwnerOpen}>
     <summary>Add a person, household, or business</summary>
     <p class="note">If a choice is missing, add its name here. You can assign an account to it as soon as it is saved.</p>
     <form id="entity-create">
@@ -1386,6 +1420,7 @@ const appHeaders = { "Content-Type": "application/json", "X-Brain-App": "1" };
 const say = (text, bad) => { const target = el("status"); target.textContent = String(text || ""); target.className = bad ? "err" : "ok"; };
 const accountSay = (text, bad) => { const target = el("account-status"); target.textContent = String(text || ""); target.className = bad ? "err" : "note"; };
 const errorMessage = ${bankFeedOwnerErrorMessage.toString()};
+const NO_OWNER_LINE = "Add an owner first. Choose who each account belongs to.";
 async function requestJson(path, init) {
   const r = await fetch(path, { credentials: "same-origin", ...init, headers: appHeaders });
   const d = await r.json().catch(() => ({}));
@@ -1485,6 +1520,10 @@ function renderAccounts(accounts, entities) {
     const institution = account.institution_label ? account.institution_label + ". " : "";
     if (account.assignment && account.assignment.state === "assigned") {
       card.append(make("p", institution + "Assigned to " + (account.assignment.entity_label || "the selected owner") + "."));
+    } else if (entities.length === 0) {
+      // An empty list with a disabled button is a dead end. Point to the one
+      // thing that unblocks every account instead.
+      card.append(make("p", institution + NO_OWNER_LINE, "note"));
     } else {
       card.append(make("p", institution + "Choose who owns this account."));
       const row = make("div", null, "assign");
@@ -1519,13 +1558,15 @@ async function loadAccounts(options) {
     const data = values[0];
     const entities = values[1];
     if (!Array.isArray(data.accounts)) throw new Error("The account list is unavailable. Nothing is being shown as empty.");
+    if (entities.length === 0) el("entity-details").open = true;
     renderAccounts(data.accounts, entities);
     if (data.accounts.length === 0) {
       accountSay("No accounts have arrived yet. If you just connected, wait a moment and check again.");
     } else if (data.summary && data.summary.assignment_required > 0) {
       accountSay(data.summary.assignment_required + (data.summary.assignment_required === 1
         ? " account needs an owner choice before its transactions can load."
-        : " accounts need owner choices before their transactions can load."));
+        : " accounts need owner choices before their transactions can load.") +
+        (entities.length === 0 ? " " + NO_OWNER_LINE : ""));
     } else if (data.state === "current") {
       accountSay("Every account is assigned and current.");
     } else {
@@ -1693,7 +1734,20 @@ export async function handleBankFeed(env, request, url, path, ctx) {
           status: 401, headers: { "Content-Type": "text/plain; charset=utf-8" },
         });
       }
-      const { html, csp } = connectPageHtml(bankFeedConfig(env));
+      // Only the count is read, and an unreadable count leaves the section in
+      // its default state; the page script corrects it once the list loads.
+      let ownerEntityCount = null;
+      try {
+        const owners = await env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM fin_entities
+            WHERE tenant_id=? AND superseded_by_id IS NULL AND status='active' AND relationship='owned'`,
+        ).bind(tenantReference(env).tenantId).first();
+        const count = Number(owners?.n);
+        ownerEntityCount = Number.isSafeInteger(count) && count >= 0 ? count : null;
+      } catch {
+        ownerEntityCount = null;
+      }
+      const { html, csp } = connectPageHtml(bankFeedConfig(env), { ownerEntityCount });
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
@@ -1873,9 +1927,17 @@ export async function handleBankFeed(env, request, url, path, ctx) {
     // One exit for every failure, so no path out of this module can carry a
     // provider payload or a credential into a response.
     const outcomeUnknown = error?.outcome_unknown === true;
+    const reason = bankFeedRefusalReason(error);
+    let environment = null;
+    try { environment = bankFeedConfig(env).environment; } catch { environment = null; }
     const body = {
       error: safeFeedError(error),
       ...(error?.code ? { code: String(error.code).slice(0, 80) } : {}),
+      // The page names the exact fix. The redirect URI is the one this Brain
+      // sends with every Link request, never text copied from the provider.
+      ...(reason ? { reason } : {}),
+      ...(reason === "redirect_uri_not_allowed" ? { redirect_uri: redirectUriFor(url.href) } : {}),
+      ...(reason === "invalid_api_keys" && environment ? { environment } : {}),
       ...(outcomeUnknown ? {
         outcome_unknown: true,
         retry_safe: false,

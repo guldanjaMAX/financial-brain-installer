@@ -10,6 +10,46 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **One finely reported balance no longer blocks a whole bank.** A bank can
+  report more decimal places than its currency has, such as a retirement
+  balance of 23631.9805 dollars. That single value used to stop every account
+  at the institution from loading. The Brain now keeps the exact figure,
+  stores it rounded half-even to the currency's smallest unit, and marks it.
+  Cash totals and uncategorized spending say when they include a rounded
+  figure, so it never reads as exact. Values that are not numbers, currencies
+  the Brain does not support, and impossibly large amounts are still refused.
+  To check: a connection that previously showed "cannot be represented
+  exactly" now loads its accounts.
+
+- **A mistyped Plaid key can be corrected.** `brain connect bank <manifest>
+  --replace-keys` asks for both Plaid keys again at the same hidden prompt and
+  leaves the wrapping key untouched. Every typed pair, including the first
+  one, is now checked with one harmless Plaid read in this Brain's environment
+  before it is saved. A secret from a different Plaid environment is refused
+  at the prompt, and nothing is written. To check: a wrong secret is refused
+  with a message naming the environment, and the Worker's keys are unchanged.
+
+- **Bank connection errors say what to fix.** When Plaid refuses to start
+  because the keys belong to another environment, the connect page says to
+  re-enter them with `--replace-keys`. When the page address is missing from
+  the Plaid dashboard's Allowed redirect URIs list, it names the exact address
+  to add. The reference code stays in the message.
+
+- **The first bank connection no longer dead-ends.** On a Brain with no person,
+  household, or business yet, the connect page opens "Add a person,
+  household, or business" by itself and tells you to add an owner first
+  instead of showing empty choices. The page now also says that disconnecting
+  happens in the Brain app under Access, then Banks.
+
+- **Bank status tells the truth.** A connection waiting on account owner
+  choices is listed under needs attention with the number of accounts, and a
+  stale earlier error is cleared once the bank reads succeed. History progress
+  counters are now filled in for Plaid connections, and fetched history that is
+  waiting for choices is shown separately. `brain doctor` no longer asks for a
+  Plaid webhook registration, because the Brain sends its webhook with every
+  connection request. The return address must still be on the Plaid dashboard's
+  allowed list.
+
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
   then returns names and folders only for those IDs in requests capped at 97
