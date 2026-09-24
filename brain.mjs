@@ -8169,10 +8169,11 @@ async function reportFreshness(m, acct, manifestPath) {
 }
 
 class SourceInventoryClientError extends Error {
-  constructor(code, message) {
+  constructor(code, message, { retryable = false } = {}) {
     super(message);
     this.name = "SourceInventoryClientError";
     this.code = code;
+    this.retryable = retryable;
   }
 }
 
@@ -8375,6 +8376,7 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250 } =
         response.status === 401 || response.status === 403
           ? "the Brain did not accept this computer's saved owner credential. Run `brain setup <manifest>` to repair it; do not paste a key into the command."
           : `the Brain could not provide a source inventory (HTTP ${response.status}; ${knownCode})`,
+        { retryable: response.status === 404 || isRetryableHttpStatus(response.status) },
       );
     }
     const page = validateSourceInventoryPage(body);
@@ -8424,6 +8426,23 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250 } =
     cursor = page.cursor;
   }
   throw new SourceInventoryClientError("inventory_page_limit", "the source inventory exceeded its safe pagination bound");
+}
+
+/**
+ * A freshly deployed Worker can accept a source write before its next read is
+ * consistently routable. Only the inventory read is repeated; the preceding
+ * write receipt is never replayed through this boundary.
+ */
+async function collectSourceInventoryWithReadinessRetry(requestPage, options = {}) {
+  const sleep = options.sourceInventorySleep ??
+    ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+  return retryTransient(() => collectSourceInventoryPages(requestPage), {
+    attempts: 4,
+    delayMs: 250,
+    maxDelayMs: 1_000,
+    sleep,
+    shouldRetry: (error) => error?.retryable === true || error?.code === "inventory_snapshot_changed",
+  });
 }
 
 /** Collect every opaque recovery candidate for exactly one source snapshot. */
@@ -8656,6 +8675,8 @@ export async function cmdSources(manifestPath, options = {}) {
       throw new SourceInventoryClientError("invalid_options", "--cursor and --limit are available here only with --json --recovery");
     }
     const sourceRegistryWrite = Boolean(flags.add) || flags.refresh !== undefined;
+    let writeAccepted = false;
+    const acceptedChanges = [];
     if (json && sourceRegistryWrite) {
       throw new SourceInventoryClientError(
         "read_only_json_required",
@@ -8683,6 +8704,8 @@ export async function cmdSources(manifestPath, options = {}) {
         source: name,
         kind: String(kind),
       }, managedSourceRequest);
+      writeAccepted = true;
+      acceptedChanges.push({ operation: "register", source: name, kind: String(kind) });
       if (registration.registered) ok(`registered source "${name}" (kind ${kind})`);
       else info(`source "${name}" is already registered, leaving it alone`);
     }
@@ -8701,6 +8724,8 @@ export async function cmdSources(manifestPath, options = {}) {
         source: name,
         expected_refresh_seconds: seconds[spec],
       }, managedSourceRequest);
+      writeAccepted = true;
+      acceptedChanges.push({ operation: "refresh", source: name, schedule: spec });
       if (seconds[spec] === null) ok(`"${name}" will no longer be reported as stale`);
       else ok(`"${name}" is expected to refresh ${spec}; it will be reported stale past 1.5x that`);
     }
@@ -8743,7 +8768,22 @@ export async function cmdSources(manifestPath, options = {}) {
       return preview;
     }
 
-    const inventory = await collectSourceInventoryPages(requestPage);
+    let inventory;
+    try {
+      inventory = await collectSourceInventoryWithReadinessRetry(requestPage, options);
+    } catch (error) {
+      if (!writeAccepted) throw error;
+      warn(
+        "the source change was accepted, but the complete inventory is still becoming available. " +
+        "The write was not repeated. Run `brain sources <manifest>` to read it back."
+      );
+      return {
+        kind: "source_inventory_pending",
+        write_accepted: true,
+        inventory_pending: true,
+        changes: acceptedChanges,
+      };
+    }
     if (json) {
       if (!options.silent) console.log(JSON.stringify(inventory, null, 2));
       return inventory;
