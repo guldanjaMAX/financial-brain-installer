@@ -290,6 +290,9 @@ import {
   unavailableNotice,
 } from "./worker/src/lib/retrieval-status.js";
 import {
+  SCANNED_CITATION_MARK, citationIsScanned, scannedEvidenceNotice,
+} from "./worker/src/lib/answer-render.js";
+import {
   LOCAL_OWNER_AGENT_PROFILE,
   profileHas,
 } from "./worker/src/lib/agent-authority.js";
@@ -3500,6 +3503,10 @@ export async function cmdAsk(manifestPath, options = {}) {
       ? body.answer.trim()
       : "The documents do not answer the question.";
   console.log(`\n${answer}\n`);
+  // An answer resting on a scanned copy says so in fixed words beside it,
+  // rather than trusting the answer text to have mentioned it.
+  const scanned = scannedEvidenceNotice(body);
+  if (scanned) console.log(`  ${scanned}\n`);
   // Trust metadata is a separate line by design: the answer string is a
   // verbatim contract (the refusal scorer reads every clause of it), so the
   // rubric score rides beside it rather than inside it. There is no rubric for
@@ -3542,7 +3549,8 @@ export async function cmdAsk(manifestPath, options = {}) {
       if (citation?.ref) {
         provenance.push(`reference ${source}:${String(citation.ref).replace(/\s+/g, " ").slice(0, 160)}`);
       }
-      console.log(`  ${number} ${title} (${provenance.join("; ")})`);
+      const mark = citationIsScanned(citation) ? ` ${SCANNED_CITATION_MARK}` : "";
+      console.log(`  ${number} ${title}${mark} (${provenance.join("; ")})`);
     }
     console.log("");
   }

@@ -25,7 +25,10 @@ import { confidenceLine } from "./confidence.js";
 // The same rule the owner's app obeys: a search that did not complete must
 // never be reported as an absence. retrieval-status.js names an MCP server as
 // a consumer that has to defend itself, and this is the remote one.
-import { answerText, confidenceText, unavailableSearch } from "./answer-render.js";
+import {
+  SCANNED_CITATION_MARK, answerText, citationIsScanned, confidenceText, scannedEvidenceNotice,
+  unavailableSearch,
+} from "./answer-render.js";
 import { COVERAGE_INCOMPLETE } from "./retrieval-status.js";
 // A refusal about the owner's own entities is only honest with the reason
 // beside it. financial-map-question.js owns the wording so no renderer can
@@ -221,6 +224,10 @@ async function runAsk(deps, args) {
   }
   const lines = guidance.length ? [...guidance, ""] : [];
   lines.push(answerText(thought));
+  // An answer resting on a scan says so in fixed words, never left to the
+  // consuming model to notice from a citation's metadata.
+  const scanned = scannedEvidenceNotice(thought);
+  if (scanned) lines.push("", scanned);
   const trust = confidenceLine(thought.confidence, {
     refused: /^The documents do not answer/i.test(thought.answer || ""),
   });
@@ -230,7 +237,8 @@ async function runAsk(deps, args) {
     lines.push("", "Sources:");
     for (const citation of citations) {
       const provenance = citationProvenance(citation);
-      lines.push(`[${citation.n}] ${citation.title}${provenance.length ? ` · ${provenance.join(" · ")}` : ""}`);
+      const mark = citationIsScanned(citation) ? ` ${SCANNED_CITATION_MARK}` : "";
+      lines.push(`[${citation.n}] ${citation.title}${mark}${provenance.length ? ` · ${provenance.join(" · ")}` : ""}`);
     }
   }
   return text(lines.join("\n"));
@@ -252,6 +260,7 @@ async function runSearch(deps, args, origin) {
     date_reliable: typeof r.date_reliable === "boolean" ? r.date_reliable : null,
     text_source: r.text_source || "unknown",
     text_reliable: r.text_reliable === true || r.text_reliable === 1,
+    ...(r.scanned === true ? { scanned: true } : {}),
     lineage: r.lineage || null,
   }));
   // An empty result list is indistinguishable from "your corpus has nothing"

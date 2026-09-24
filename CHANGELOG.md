@@ -10,6 +10,12 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **A scan that OCR read completely can now answer a question, and the answer
+  always says it came from a scanned copy.** It carries the note "Part of this
+  answer comes from a scanned document read by OCR. Check the original for
+  exact figures." and marks the source "(scanned)". A scan with any page OCR
+  could not read still cannot support an answer.
+
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
   then returns names and folders only for those IDs in requests capped at 97

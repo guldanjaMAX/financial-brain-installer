@@ -6,8 +6,8 @@ import {
 } from "../lib/answer-render.js";
 import { unavailableNotice } from "../lib/retrieval-status.js";
 import {
-  CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE,
-  citationMeta, evidenceGateNote,
+  CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE, ScannedEvidenceNote,
+  citationMeta, citationTitle, evidenceGateNote,
 } from "./Ask";
 
 describe("answer messages", () => {
@@ -147,5 +147,60 @@ describe("citation provenance", () => {
         reason: "malformed",
       },
     })).toBe("");
+  });
+});
+
+describe("scanned evidence", () => {
+  // Spelled out so a change to the shared constant cannot rewrite this check.
+  const NOTICE =
+    "Part of this answer comes from a scanned document read by OCR. Check the original for exact figures.";
+  const scanned = {
+    n: 1,
+    title: "Storage contract scan",
+    source: "drive",
+    text_source: "ocr",
+    text_reliable: false,
+    scanned: true,
+  };
+  const answered: Answer = {
+    answer: "The monthly storage fee is $1,240 [1].",
+    citations: [scanned],
+    gaps: [{ type: "scanned_evidence", count: 1, total: 1, detail: NOTICE }],
+    evidence_gate: { supported: true, complete: true },
+  };
+
+  it("states the fixed scanned-copy notice beside an answer that rests on a scan", () => {
+    const html = renderToStaticMarkup(<ScannedEvidenceNote answer={answered} />);
+    expect(html).toContain(NOTICE);
+  });
+
+  it("marks the scanned citation and keeps its OCR provenance", () => {
+    expect(citationTitle(scanned)).toBe("Storage contract scan (scanned)");
+    expect(citationMeta(scanned)).toBe("Google Drive · OCR text, verify key details");
+    const html = renderToStaticMarkup(<CitationSources citations={[scanned]} />);
+    expect(html).toContain("Storage contract scan (scanned)");
+  });
+
+  it("says nothing about scans for native text or a partial read", () => {
+    const native = { n: 1, title: "Native contract", source: "drive", text_source: "native", text_reliable: true };
+    const partial = { n: 2, title: "Half-read scan", source: "drive", text_source: "ocr_partial", text_reliable: false };
+    expect(citationTitle(native)).toBe("Native contract");
+    expect(citationTitle(partial)).toBe("Half-read scan");
+    expect(citationMeta(partial)).toBe("Google Drive · OCR text may be incomplete");
+    const html = renderToStaticMarkup(<ScannedEvidenceNote answer={{
+      answer: "The fee is recorded [1] [2].",
+      citations: [native, partial],
+      gaps: [],
+    }} />);
+    expect(html).toBe("");
+  });
+
+  it("carries no scanned notice on a refusal or a provisional result", () => {
+    for (const answer of [
+      { answer: "The documents do not answer the question.", citations: [], gaps: [] },
+      { answer: null, status: "coverage_incomplete", notice: "provisional", citations: [scanned], gaps: [] },
+    ] as Answer[]) {
+      expect(renderToStaticMarkup(<ScannedEvidenceNote answer={answer} />)).toBe("");
+    }
   });
 });

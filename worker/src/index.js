@@ -63,7 +63,7 @@ import {
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
-  documentMatchesOperativeClaim, documentUsesOperativeValue,
+  documentMatchesOperativeClaim, documentUsesOperativeValue, evidenceTextBasis,
 } from "./lib/evidence-authority.js";
 import {
   taxEvidenceScope, taxQuestionScope, taxQuestionScopeAssessment,
@@ -79,7 +79,7 @@ import {
 import {
   COVERAGE_INCOMPLETE, SEARCH_UNAVAILABLE, coverageIncompleteNotice, emptyRetrievalDisclosure,
 } from "./lib/retrieval-status.js";
-import { answerGenerationError } from "./lib/answer-render.js";
+import { answerGenerationError, scannedEvidenceGap } from "./lib/answer-render.js";
 import {
   handleOwnerAuth, handleAdminInvite, handleAdminDevices, handleAdminGrants, handleZones,
   ownerSessionPrincipal,
@@ -270,6 +270,7 @@ function strongestEvidenceAuthority(results) {
     name: strongest.name,
     reason: strongest.reason,
     claim: strongest.claim,
+    ...(strongest.scanned === true ? { scanned: true } : {}),
   } : null;
 }
 
@@ -287,6 +288,8 @@ function citationCandidateForResult(result, index) {
     date_source: result.date_source || null,
     text_source: result.text_source || "unknown",
     text_reliable: result.text_reliable === true,
+    // A complete OCR read counts as evidence, and is never shown unlabelled.
+    ...(evidenceTextBasis(result) === "ocr" ? { scanned: true } : {}),
     current_authoritative: result.current_authoritative === true,
     authority: result.authority || null,
     lineage: result.lineage || evidenceLineageFor(result).lineage,
@@ -307,6 +310,7 @@ function citationForDocument(document) {
     // a text layer. Preserve the exact public answer-path projection here so a
     // result-family proof exercises the same citation contract.
     text_source: document.text_source, text_reliable: document.text_reliable,
+    ...(document.scanned === true ? { scanned: true } : {}),
     authority: document.authority,
     lineage: document.lineage,
   };
@@ -667,7 +671,7 @@ async function handleUnified(
   // Keep both conditions on the raw route so its UI, MCP, and check consumers
   // do not have to infer corpus coverage from a result count.
   const disclosure = emptyRetrievalDisclosure(degraded, degradedReason);
-  const searchTruth = (rows) => {
+  const searchState = (rows) => {
     if (rows.length === 0 && disclosure.unavailable) {
       return {
         status: disclosure.status,
@@ -683,6 +687,13 @@ async function handleUnified(
       };
     }
     return {};
+  };
+  // Results that include a complete OCR read say so beside them. With none,
+  // the field stays exactly as it was, absent on a healthy search.
+  const searchTruth = (rows) => {
+    const truth = searchState(rows);
+    const scanned = scannedEvidenceGap(rows, { results: true });
+    return scanned ? { ...truth, gaps: [...(truth.gaps || []), scanned] } : truth;
   };
 
   if (degraded === "fts") {
@@ -741,6 +752,10 @@ const TAX_QUESTION_SCOPE_UNRESOLVED_GAP = Object.freeze({
 });
 const TAX_EVIDENCE_UNREADABLE_NOTICE = "The requested tax filing was found, but its text could not be read reliably. This is not proof that the filing omits the answer. Unlock the file or provide a readable copy before treating the result as complete.";
 const TAX_DOCUMENT_INVENTORY_NOTICE = "The requested tax filing could not be checked against the complete document inventory. This is not proof that the filing is absent or omits the answer. Finish document extraction or use an exact business scope before treating the result as complete.";
+// How a complete OCR read is introduced to both model passes. It carries no
+// comma because the evidence metadata around it is comma-separated.
+const SCANNED_PROMPT_LABEL =
+  "SCANNED COPY READ BY OCR (every page read): if you rely on it say the fact comes from a scanned copy; figures may be misread";
 const ANSWER_VALIDATION_UNAVAILABLE_NOTICE = "The search could not be completed safely because the generated answer did not pass the evidence check. This is not proof that your brain has nothing on this question. Review the evidence-check reason or try again.";
 
 async function taxDocumentCoverageForRead(env, {
@@ -1006,11 +1021,13 @@ async function handleThink(
     });
   }
   const docs = results.slice(0, 12).map(citationCandidateForResult);
+  // Readable means the same text basis evidence authority uses: a reliable
+  // native layer or a complete OCR read. A partial read stays unreadable.
   const unreadableRequestedTaxEvidence = taxDocumentCoverage.unreadable || docs.some((doc) =>
     doc.authority?.tax_scope?.applicable === true &&
     (doc.authority.tax_scope.matched === true ||
       doc.authority.tax_scope.title_candidate_matched === true) &&
-    (doc.text_source !== "native" || doc.text_reliable !== true)
+    evidenceTextBasis(doc) === null
   );
   if (unreadableRequestedTaxEvidence) documentTaxGap = TAX_EVIDENCE_UNREADABLE_GAP;
   if (documentTaxGap) gaps.unshift(documentTaxGap);
@@ -1022,9 +1039,13 @@ async function handleThink(
         : null;
       // The answering model is told when a passage was read off a picture, so
       // it can hedge a figure it was handed rather than repeat it as printed.
-      const read = d.text_source === "ocr" || d.text_source === "ocr_partial"
-        ? "READ BY OCR FROM A SCAN, may be misread"
-        : null;
+      // A complete read can carry the answer, so the model is also told to say
+      // that it is relying on a scanned copy. A partial read keeps its warning.
+      const read = d.scanned === true
+        ? SCANNED_PROMPT_LABEL
+        : d.text_source === "ocr_partial"
+          ? "READ BY OCR FROM A SCAN, may be misread"
+          : null;
       const authority = d.authority
         ? `authority ${d.authority.tier} ${d.authority.name}: ${d.authority.reason}`
         : "authority unavailable";
@@ -1246,7 +1267,7 @@ async function handleThink(
           }
           const unreadableTaxEvidence = allowedDocs.some((doc) =>
             doc.authority?.tax_scope?.matched === true &&
-            (doc.text_source !== "native" || doc.text_reliable !== true)
+            evidenceTextBasis(doc) === null
           );
           if (evidenceGate.supported && unreadableTaxEvidence) {
             evidenceGate.supported = false;
@@ -1386,6 +1407,17 @@ async function handleThink(
           evidenceGate = { supported: false, complete: false, error: "verification unavailable" };
         }
       }
+    }
+  }
+
+  // Deterministic, not left to the model: an answer that rests on a complete
+  // OCR read says so beside it, and the evidence gate records which approved
+  // citation was a scan. A refusal rests on nothing, so it carries neither.
+  const scannedApproved = approvedDocs.filter((doc) => doc.scanned === true);
+  if (scannedApproved.length && answer && answer !== unsupportedAnswer) {
+    gaps.unshift(scannedEvidenceGap(approvedDocs));
+    if (evidenceGate?.supported === true) {
+      evidenceGate.scanned_evidence = scannedApproved.map((doc) => doc.n);
     }
   }
 

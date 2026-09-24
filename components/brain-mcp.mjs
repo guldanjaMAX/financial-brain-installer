@@ -43,6 +43,7 @@ import {
   COVERAGE_INCOMPLETE, coverageIncompleteNotice, retrievalUnavailable,
   SEARCH_UNAVAILABLE, unavailableGap, unavailableNotice,
 } from "../worker/src/lib/retrieval-status.js";
+import { scannedEvidenceNotice } from "../worker/src/lib/answer-render.js";
 import {
   LOCAL_OWNER_AGENT_PROFILE, normalizeAgentProfile, profileDescription, profileHas,
 } from "../worker/src/lib/agent-authority.js";
@@ -341,6 +342,7 @@ async function runTool(name, args = {}) {
           date_reliable: r.date_reliable === true,
           text_source: r.text_source || "unknown",
           text_reliable: r.text_reliable === true || r.text_reliable === 1,
+          ...(r.scanned === true ? { scanned: true } : {}),
           lineage: r.lineage ?? null,
           snippet: String(r.snippet ?? "").slice(0, 700),
         }));
@@ -374,6 +376,15 @@ async function runTool(name, args = {}) {
       } else if (out.evidence_gate?.partial === true) {
         out.note =
           "This answer is PARTIAL. Every sentence in it passed the evidence gate; the part the documents do not cover is named at the end. Relay both.";
+      }
+      // An answer that rests on a complete OCR read is relayed as one. The
+      // citation carries scanned: true and the gaps carry the same sentence.
+      const scanned = scannedEvidenceNotice(d);
+      if (scanned) {
+        out.note = [
+          `${scanned} When you relay this answer, say which cited source is a scanned copy (its citation carries scanned: true).`,
+          out.note,
+        ].filter(Boolean).join(" ");
       }
       return out;
     }
@@ -419,6 +430,7 @@ async function runTool(name, args = {}) {
           date_reliable: r.date_reliable === true,
           text_source: r.text_source || "unknown",
           text_reliable: r.text_reliable === true || r.text_reliable === 1,
+          ...(r.scanned === true ? { scanned: true } : {}),
           lineage: r.lineage ?? null,
           snippet: String(r.snippet ?? "").slice(0, 900),
         })),

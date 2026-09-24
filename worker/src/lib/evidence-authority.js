@@ -62,13 +62,40 @@ const EXPLICIT_RELATIONSHIP_CLAIM = /\b(client|customer|engagement|relationship|
 const STATUS_LANGUAGE = /\b(active|inactive|current(?:ly)?|still|remains?|continues?|continuing|ongoing|stopped|ended|terminated|cancelled|canceled|ceased|churned|closed|left|no longer|renewed|retained|working together)\b|\b(?:is|are)\s+(?:still\s+)?(?:an?\s+)?(?:client|customer|member|patient|employee|tenant|vendor|partner)\b/i;
 
 const trueValue = (value) => value === true || value === 1 || value === "1";
-const reliableText = (row) => {
+
+/**
+ * What a row's text may stand on as evidence, decided at query time from the
+ * extraction provenance D1 already stores. Nothing is re-ingested or
+ * re-stamped, so a document OCR'd by an earlier version qualifies as it is.
+ *
+ *   "native"  a text layer the ingest itself marked reliable. Unchanged.
+ *   "ocr"     a COMPLETE OCR read of a scanned copy: every attempted page came
+ *             back readable. It counts as evidence, and every surface that
+ *             shows an answer resting on it says it came from a scanned copy.
+ *   null      everything else. `ocr_partial` means at least one page could not
+ *             be read, so the evidence may lack exactly the part that matters;
+ *             `unknown` and any unrecognised value prove nothing.
+ *
+ * The stored `text_reliable` stays what ingest recorded, false for every OCR
+ * read. This decides evidence eligibility only and rewrites no provenance.
+ */
+export function evidenceTextBasis(row) {
   const source = String(row?.text_source || "unknown").toLowerCase();
-  const reliable = row?.text_reliable === undefined || row?.text_reliable === null
-    ? false
-    : trueValue(row.text_reliable);
-  return source === "native" && reliable;
-};
+  if (source === "native") {
+    const reliable = row?.text_reliable === undefined || row?.text_reliable === null
+      ? false
+      : trueValue(row.text_reliable);
+    return reliable ? "native" : null;
+  }
+  return source === "ocr" ? "ocr" : null;
+}
+
+/** Carried by every authority reason whose text basis is a complete OCR read. */
+export const SCANNED_TEXT_REASON = "its text was read by OCR from a scanned copy";
+
+// An owner confirmation is a record the Worker writes as native text. No OCR
+// read can be one, so this check keeps the native-only rule.
+const reliableNativeText = (row) => evidenceTextBasis(row) === "native";
 const evidenceTime = (row) => {
   const raw = row?.document_date ?? row?.ts;
   if (typeof raw === "number") {
@@ -140,7 +167,7 @@ export function ownerConfirmedRecord(row = {}) {
     titleMatch && titleMatch[1] === idMatch?.[1] &&
     day === idMatch?.[1] &&
     row.date_source === "owner_confirmation" && reliableDate(row) &&
-    reliableText(row) &&
+    reliableNativeText(row) &&
     metadata?.authority === "T1" && metadata?.operative === true &&
     subjectIdentityMatches
   );
@@ -310,9 +337,11 @@ const transactionalEvidence = (row) => {
  * Return the effective authority of one document for one claim.
  *
  * `authoritative` is intentionally stricter than `tier`: reliable text is
- * required, and a current claim also requires a reliable date. This lets the
- * UI show that a scan is a primary artifact while refusing to treat its OCR as
- * unquestioned current evidence.
+ * required, and a current claim also requires a reliable date. Reliable text
+ * is a native text layer or a complete OCR read of a scan. A scan-based
+ * authority always says so, in `scanned: true` and in its reason, so no
+ * surface can show its tier without the fact that it was read off a picture.
+ * A partial OCR read still never counts.
  */
 export function authorityFor(row = {}, {
   query = "", claimText = "", current = false, claim = null,
@@ -325,12 +354,19 @@ export function authorityFor(row = {}, {
   const ownerSectionMismatch = owner.valid && !operativeSection;
   const taxScope = taxEvidenceScope(row, query);
   const taxScopeBlocked = taxScope?.matched === false;
-  const textIsReliable = reliableText(row);
+  const textBasis = evidenceTextBasis(row);
+  const textIsReliable = textBasis !== null;
+  const scanned = textBasis === "ocr";
   const dateIsReliable = !current || reliableDate(row);
   const eligible = !relationshipBlocked && !ownerSectionMismatch && !taxScopeBlocked;
   const authoritative = eligible && base.rank <= TIERS.T2.rank && textIsReliable && dateIsReliable;
 
-  let reason = base.reason;
+  // A carried authority (brain check re-reads the Worker's own) already names
+  // the scan; say it once.
+  const readReason = scanned && !String(base.reason).includes(SCANNED_TEXT_REASON)
+    ? `${base.reason}; ${SCANNED_TEXT_REASON}`
+    : base.reason;
+  let reason = readReason;
   if (relationshipBlocked) {
     reason = `${String(row.source || "this financial record")} can establish its account or transaction state, not a relationship`;
   } else if (ownerSectionMismatch) {
@@ -340,7 +376,7 @@ export function authorityFor(row = {}, {
   } else if (!textIsReliable) {
     reason = `${base.reason}; its text was not obtained from a reliable native text layer`;
   } else if (!dateIsReliable) {
-    reason = `${base.reason}; it has no reliable as-of date for a current claim`;
+    reason = `${readReason}; it has no reliable as-of date for a current claim`;
   } else if (operativeSection) {
     reason = `owner-confirmed operative ${operativeSection.name} as of ${operativeSection.as_of}`;
   }
@@ -356,6 +392,9 @@ export function authorityFor(row = {}, {
     current: Boolean(current),
     owner_confirmed: owner.valid,
     operative: Boolean(operativeSection),
+    // Absent, not false, for every other basis: native responses stay byte
+    // for byte what they were.
+    ...(scanned ? { scanned: true } : {}),
     ...(taxScope ? { tax_scope: taxScope } : {}),
     ...(operativeSection ? { operative_section: operativeSection } : {}),
   };

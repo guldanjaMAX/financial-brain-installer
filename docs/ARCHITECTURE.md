@@ -527,6 +527,10 @@ Every result and citation carries its source identity plus date and extraction
 provenance. The owner app, CLI, remote MCP tools, and verification report keep
 uncertain dates and OCR warnings beside the citation so stored trust metadata
 cannot disappear at the final reading surface.
+A complete OCR read (`text_source` `ocr`) counts as reliable evidence at query
+time and a partial read does not. Each row and citation resting on a complete
+read carries `scanned: true`, and an answer that uses one carries a
+`scanned_evidence` gap whose fixed sentence every one of those surfaces shows.
 Ingest accepts `occurred_at` only as `YYYY-MM-DD` or an RFC 3339 instant and
 rejects ambiguous or impossible dates before any write. Calendar citations keep
 the event's local day, while a persisted RFC 3339 start with an explicit offset

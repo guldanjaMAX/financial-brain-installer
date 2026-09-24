@@ -65,6 +65,31 @@ export function answerText(r) {
   return r.answer || (r.answer_error ? safeAnswerErrorText(r.answer_error) : "The documents do not answer the question.");
 }
 
+/**
+ * Evidence read by OCR from a scanned copy. The same fixed words as the
+ * Worker's answer-render.js, so the page never depends on a model to say it.
+ */
+export const SCANNED_EVIDENCE_GAP_TYPE = "scanned_evidence";
+export const SCANNED_ANSWER_NOTICE =
+  "Part of this answer comes from a scanned document read by OCR. Check the original for exact figures.";
+export const SCANNED_CITATION_MARK = "(scanned)";
+
+/** A complete OCR read. A partial read keeps its own "may be incomplete" label. */
+export function citationIsScanned(citation) {
+  return citation?.scanned === true || citation?.text_source === "ocr";
+}
+
+/** The sentence to show beside a displayed answer that rests on a scan, or null. */
+export function scannedEvidenceNotice(r) {
+  if (!r || typeof r !== "object" || unavailableSearch(r)) return null;
+  const answer = typeof r.answer === "string" ? r.answer.trim() : "";
+  if (!answer || /^The documents do not answer/i.test(answer)) return null;
+  const gapped = (Array.isArray(r.gaps) ? r.gaps : [])
+    .some((gap) => gap?.type === SCANNED_EVIDENCE_GAP_TYPE);
+  const cited = (Array.isArray(r.citations) ? r.citations : []).some(citationIsScanned);
+  return gapped || cited ? SCANNED_ANSWER_NOTICE : null;
+}
+
 export function confidenceText(r) {
   if (r.status === COVERAGE_INCOMPLETE) {
     return "Source coverage is incomplete. This result is provisional.";

@@ -46,6 +46,9 @@ import {
   corpusReportCounts,
   sourceReceiptSummary,
 } from "./report.mjs";
+import {
+  SCANNED_CITATION_MARK, citationIsScanned, scannedEvidenceNotice,
+} from "./worker/src/lib/answer-render.js";
 
 /* ------------------------------------------------------------- escaping */
 
@@ -469,7 +472,7 @@ function renderCitations(citations) {
       const ref = c.ref ? `<span class="cite-ref">${h(c.ref)}</span>` : "";
       return (
         `<li><span class="cite-n">${h(c.n)}</span>` +
-        `<span class="cite-body"><span class="cite-title">${h(c.title || "untitled")}</span>` +
+        `<span class="cite-body"><span class="cite-title">${h(`${c.title || "untitled"}${citationIsScanned(c) ? ` ${SCANNED_CITATION_MARK}` : ""}`)}</span>` +
         (meta ? `<span class="cite-meta">${h(meta)}</span>` : "") +
         ref +
         `</span></li>`
@@ -501,10 +504,12 @@ function renderQuestionCard(seed, index) {
   } else if (kind === "unknown") {
     body = `<p class="muted">The response did not carry enough search-status evidence to classify this as a completed no-match.</p>`;
   } else {
+    const scanned = scannedEvidenceNotice(seed);
     body = renderAnswerBody(seed.answer) +
       (kind === "answered_degraded"
         ? `<p class="headsup">${h(seed.notice || "Part of search was degraded. Read the cited answer as partial, not complete coverage.")}</p>`
-        : "");
+        : "") +
+      (scanned ? `<p class="headsup">${h(scanned)}</p>` : "");
   }
 
   return (
@@ -655,6 +660,7 @@ const GAP_TITLES = {
   // Not the same thing as "nothing matched", and the report must not let a
   // reader collapse the two.
   search_unavailable: "The search could not be completed",
+  scanned_evidence: "An answer rests on a scanned copy",
 };
 const gapTitle = (type) => GAP_TITLES[type] || "Worth knowing";
 

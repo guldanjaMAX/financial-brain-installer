@@ -127,6 +127,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/fin-documents-writer-agreement.test.mjs",
   "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
+  // A complete OCR read can support an answer and is always labelled scanned.
+  "node --no-warnings --test worker/test/scanned-evidence.test.mjs",
   "node --no-warnings --test worker/test/owner-document-create.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
@@ -307,6 +309,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node worker/test/worker.test.mjs",
   "node worker/test/confidence.test.mjs",
   "node --test worker/test/evidence-authority.test.mjs",
+  "node --no-warnings --test worker/test/scanned-evidence.test.mjs",
   "node --test worker/test/webauthn.test.mjs worker/test/sessions.test.mjs worker/test/owner-auth.test.mjs worker/test/grants.test.mjs worker/test/document-access.test.mjs worker/test/owner-actions.test.mjs worker/test/connector.test.mjs worker/test/app-page.test.mjs worker/test/zones.test.mjs",
   "node worker/test/store.test.mjs",
   "node worker/test/store-d1.test.mjs",
