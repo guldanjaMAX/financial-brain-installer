@@ -11163,7 +11163,15 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // a raw V8 abort no handler can catch, and an interrupt during that silent
   // phase threw away every minute of extraction. Peak memory here is one batch.
   const prepareOne = async (f) => {
-    const r = await prepare(f, { sourceName, ocr: ocrCallback });
+    const localKey = String(f.rel).split(sep).join("/");
+    const r = await prepare(f, {
+      sourceName,
+      ocr: ocrCallback,
+      // Only a byte-identical revision accepted under this scanner policy may
+      // bypass extraction and the credential scan. prepare() still performs the
+      // complete safety-checked read and SHA-256 comparison first.
+      knownContentHash: scannerPolicyChanged ? null : state.done[localKey],
+    });
     if (r.note) notes.push({ path: f.rel, note: r.note });
     if (r.messageExport) messageExportsSeen.add(r.messageExport);
 

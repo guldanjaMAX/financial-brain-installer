@@ -62,6 +62,27 @@ put("docs/report.pdf", "%PDF-1.4 not really");
 /* ---- prepare: every rejection carries a legible reason ---- */
 const one = (rel) => walk(root, {}).files.find((f) => f.rel.split(/[\\/]/).join("/") === rel);
 
+/* ---- unchanged local bytes stop before extraction and credential scanning ---- */
+{
+  let extractionCalls = 0;
+  register(".unchanged-probe", (buf) => {
+    extractionCalls++;
+    return buf.toString("utf8");
+  }, "unchanged-probe");
+  put("notes/stable.unchanged-probe",
+    "Stable local content has enough ordinary words to pass extraction quality without containing private data.");
+  const file = one("notes/stable.unchanged-probe");
+  const initial = await prepare(file, { sourceName: "docs" });
+  const repeated = await prepare(file, {
+    sourceName: "docs",
+    knownContentHash: initial.hash,
+  });
+  check("a hash-proven unchanged file returns before running its extractor again",
+    extractionCalls === 1 && repeated.unchanged === true && repeated.hash === initial.hash &&
+      !Object.hasOwn(repeated, "envelope") && !Object.hasOwn(repeated, "skip"),
+    JSON.stringify({ extractionCalls, repeated }));
+}
+
 /* ---- exact one-file pilot resolution: no recursive walk ---- */
 {
   const exactRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-")));

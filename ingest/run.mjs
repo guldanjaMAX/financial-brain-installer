@@ -1639,7 +1639,7 @@ export function removedSinceLastRun(knownKeys, present) {
 /**
  * Read one file and turn it into an ingest envelope, or into a reasoned skip.
  */
-export async function prepare(file, { sourceName, ocr = null }) {
+export async function prepare(file, { sourceName, ocr = null, knownContentHash = null }) {
   const ext = extensionOf(file.name);
 
   // Local mbox archives are admitted independently of their total size. The
@@ -1668,6 +1668,17 @@ export async function prepare(file, { sourceName, ocr = null }) {
   }
   let hash = sha(buf);
   let actualBytes = buf.length;
+
+  // Resume identity is the hash of the exact approved bytes, not size or mtime.
+  // Once those bytes match a revision already accepted under the current
+  // credential-scanner policy, extraction and scanning cannot change the
+  // outcome. Stop here so a scheduled pass does not repeatedly parse every
+  // unchanged PDF, Office archive, and message export. The caller deliberately
+  // withholds knownContentHash after a scanner-policy change, preserving the
+  // mandatory full rescan.
+  if (typeof knownContentHash === "string" && knownContentHash === hash) {
+    return { hash, unchanged: true };
+  }
 
   // Content-sniffed, not extension-alone: most files with these extensions
   // are not a message export, and the ordinary extractor below is exactly
