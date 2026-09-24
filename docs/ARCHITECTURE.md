@@ -405,12 +405,22 @@ without exposing source identifiers.
 Plaid disconnect removes the Item's unpromoted staging rows and sync window in
 the same D1 batch that makes the connection inactive. Promoted ledger history
 is retained. A later Link exchange still refuses any match against a live Item.
-When one removed Item has a complete, unambiguous same-institution account
-match, the exchange batch reuses those ledger account rows, carries forward the
-owner assignments, moves their ledger history to the new feed scope, marks the
-removed Item as superseded, and starts the new Item with its own cursor. The
-batch contains a transaction-local exact guard, so a partial reattach rolls
-back instead of creating a second money path.
+When one removed Item has a complete, unambiguous account match in the same
+Plaid environment and institution, the normalized account name, mask, type,
+and subtype must also match. A saved persistent account identity is compared
+when the client supplies it before exchange. Missing required client identity
+or a conflict refuses the reattach before exchange. An accepted exchange
+records a private candidate plan but does not copy an owner assignment or move
+an account or history row. The
+fresh cursor window stays staged until the authoritative replacement account
+identity and every retained transaction match are exact and unambiguous on the
+mapped account and stable money, date, merchant or name, and pending-to-posted
+fields. A matched row is reidentified in place even when the new Item reports a
+different transaction ID. An identity conflict, ambiguous pair, or potentially
+historical unmatched row holds the whole window for owner review without
+advancing the cursor or changing live totals. Only that reviewed reconciliation
+copies the retained owner assignment and moves the account and history to the
+replacement feed inside the promotion batch.
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
 credentials. It resolves the declared durable admin key at runtime, uses Google

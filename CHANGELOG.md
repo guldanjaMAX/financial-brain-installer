@@ -40,12 +40,16 @@ asset publication.
   attempt starts a new Link operation on the next click, and a safe failure
   without a provider code now keeps its redacted reason and a stable reference
   code. Disconnect removes staged account and transaction details that never
-  reached the ledger while preserving saved ledger history. Reconnecting the
-  same removed bank reuses its existing ledger accounts, owner assignments,
-  balances, and transactions under a new cursor instead of counting another
-  copy. A match against a live connection is still refused for review. To
-  check: disconnect a test bank after history is saved, reconnect it, and
-  confirm the account and prior transaction counts do not increase.
+  reached the ledger while preserving saved ledger history. A removed account
+  is reattached only when its environment, institution, normalized name, mask,
+  type, and subtype match exactly. Replacement history stays staged while the
+  Brain reconciles it against retained transactions. An exact, unambiguous
+  date, amount, merchant or name, and pending-to-posted match reuses the saved
+  row even when Plaid changes its transaction ID. Anything uncertain stays held
+  for review instead of being added to live totals. A match against a live
+  connection is still refused for review. To check: reconnect a synthetic bank
+  with one changed transaction ID and confirm that underlying transaction still
+  has one live row; an ambiguous pair must remain staged.
 
 - **The first bank connection no longer dead-ends.** On a Brain with no person,
   household, or business yet, the connect page opens "Add a person,

@@ -191,13 +191,25 @@ function accountIdentityError(code = "plaid_account_identity_conflict") {
 }
 
 /** Preserve exact historical mappings; new identities use a case-sensitive digest. */
-async function resolveAccountMappings(env, { tenantId, itemRef, accounts }) {
+async function resolveAccountMappings(env, { tenantId, itemRef, accounts, reconnectPlan = null }) {
   if (!Array.isArray(accounts) || accounts.length === 0 || accounts.length > 250) {
     throw accountIdentityError();
   }
   const ids = accounts.map(account => account.providerAccountId);
   if (ids.some(id => typeof id !== "string" || !id) || new Set(ids).size !== ids.length) {
     throw accountIdentityError();
+  }
+  if (reconnectPlan) {
+    if (!validReconnectPlan(reconnectPlan) || reconnectPlan.accounts.length !== ids.length) {
+      throw accountIdentityError();
+    }
+    const mappings = ids.map((providerAccountId) => {
+      const matches = reconnectPlan.accounts.filter((account) => account.providerAccountId === providerAccountId);
+      if (matches.length !== 1) throw accountIdentityError();
+      return { providerAccountId, accountSlug: matches[0].accountSlug };
+    });
+    if (new Set(mappings.map((row) => row.accountSlug)).size !== mappings.length) throw accountIdentityError();
+    return mappings;
   }
   const candidates = await Promise.all(ids.map(async providerAccountId => ({
     providerAccountId,
@@ -352,7 +364,15 @@ async function linkRow(env, tenantId, sessionRef) {
   ).bind(tenantId, sessionRef).first();
 }
 
+function publicLinkReceipt(value) {
+  const receipt = typeof value === "string" ? JSON.parse(value) : value;
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return receipt;
+  const { _reconnect_plan: ignored, ...publicReceipt } = receipt;
+  return publicReceipt;
+}
+
 function linkDecisionRow(row) {
+  const receipt = row.receipt_json ? publicLinkReceipt(row.receipt_json) : null;
   return {
     requestFingerprint: row.request_fingerprint,
     state: row.state,
@@ -361,7 +381,7 @@ function linkDecisionRow(row) {
       ciphertext: row.link_ciphertext,
       iv: row.link_iv,
       keyVersion: row.link_key_version,
-    } : (row.receipt_json ? JSON.parse(row.receipt_json) : null),
+    } : receipt,
   };
 }
 
@@ -381,7 +401,7 @@ async function plaidReconnectStatements(env, {
   review,
   stamp,
 }) {
-  if (review?.action !== "reattach") return [];
+  if (review?.action !== "reattach") return { statements: [], plan: null };
   if (review.priorItemRef === newItemRef) {
     throw Object.assign(new Error("Plaid returned the disconnected Item identity for a new connection"), {
       code: "PLAID_RECONNECT_IDENTITY_CONFLICT",
@@ -394,67 +414,51 @@ async function plaidReconnectStatements(env, {
   const mappingJson = JSON.stringify(mappings);
   const oldFeed = feedScopeKey(review.priorItemRef);
   const newFeed = feedScopeKey(newItemRef);
-  const mappedSlugs = "SELECT json_extract(value,'$.accountSlug') FROM json_each(?)";
   const mappedSlugsFirst = "SELECT json_extract(value,'$.accountSlug') FROM json_each(?1)";
-  return [
-    env.DB.prepare(
-      `UPDATE fin_accounts AS f
-          SET source_feed=?1,
-              external_ref=(SELECT json_extract(value,'$.providerAccountId') FROM json_each(?2)
-                WHERE json_extract(value,'$.accountSlug')=f.account_slug)
-        WHERE f.tenant_id=?3 AND f.source_feed=?4 AND f.superseded_by_id IS NULL
-          AND f.account_slug IN (${mappedSlugs})`,
-    ).bind(newFeed, mappingJson, tenantId, oldFeed, mappingJson),
-    env.DB.prepare(
-      `UPDATE fin_transactions SET source_feed=?
-        WHERE tenant_id=? AND source_feed=? AND account_slug IN (${mappedSlugs})`,
-    ).bind(newFeed, tenantId, oldFeed, mappingJson),
-    env.DB.prepare(
-      `UPDATE fin_balance_snapshots SET source_feed=?
-        WHERE tenant_id=? AND source_feed=? AND account_slug IN (${mappedSlugs})`,
-    ).bind(newFeed, tenantId, oldFeed, mappingJson),
-    env.DB.prepare(
-      `UPDATE fin_account_coverage SET source_feed=?
-        WHERE tenant_id=? AND source_feed=? AND account_slug IN (${mappedSlugs})`,
-    ).bind(newFeed, tenantId, oldFeed, mappingJson),
-    env.DB.prepare(
-      `INSERT INTO plaid_account_entity_assignments
-         (tenant_id,item_ref,provider_account_id,account_ref,entity_slug,
-          discovered_at,last_seen_at,assigned_at,updated_at)
-       SELECT ?,?,json_extract(value,'$.providerAccountId'),json_extract(value,'$.accountRef'),
-              json_extract(value,'$.entitySlug'),?,?,?,?
-         FROM json_each(?)`,
-    ).bind(tenantId, newItemRef, stamp, stamp, stamp, stamp, mappingJson),
+  const statements = [
     env.DB.prepare(
       `UPDATE bank_feed_items
           SET status='removed',
-              status_detail='This disconnected bank was superseded by a reconnect. Its saved ledger accounts continue under the newer connection.'
+              status_detail='A replacement connection is staged. Saved accounts and history stay on this connection until reconciliation succeeds.'
         WHERE tenant_id=? AND item_ref=? AND removed_at IS NOT NULL`,
     ).bind(tenantId, review.priorItemRef),
-    // This guard executes inside the same D1 batch as the rebind. Any missing,
-    // ambiguous, or partially moved account aborts the whole transaction.
+    // Exchange records only the candidate plan. It must not copy an owner
+    // assignment or move any ledger row before authoritative sync identity and
+    // transaction history are reconciled.
     env.DB.prepare(
       `SELECT CASE WHEN
           (SELECT COUNT(*) FROM fin_accounts f JOIN json_each(?1) m
              ON f.account_slug=json_extract(m.value,'$.accountSlug')
-            WHERE f.tenant_id=?2 AND f.source_feed=?3 AND f.external_ref=json_extract(m.value,'$.providerAccountId')
+            WHERE f.tenant_id=?2 AND f.source_feed=?5 AND f.external_ref=json_extract(m.value,'$.priorProviderAccountId')
               AND f.entity_slug=json_extract(m.value,'$.entitySlug') AND f.superseded_by_id IS NULL)=json_array_length(?1)
-          AND (SELECT COUNT(*) FROM plaid_account_entity_assignments a JOIN json_each(?1) m
-             ON a.provider_account_id=json_extract(m.value,'$.providerAccountId')
-            WHERE a.tenant_id=?2 AND a.item_ref=?4 AND a.account_ref=json_extract(m.value,'$.accountRef')
-              AND a.entity_slug=json_extract(m.value,'$.entitySlug'))=json_array_length(?1)
+          AND NOT EXISTS (SELECT 1 FROM plaid_account_entity_assignments
+            WHERE tenant_id=?2 AND item_ref=?4)
           AND NOT EXISTS (SELECT 1 FROM fin_transactions
-            WHERE tenant_id=?2 AND source_feed=?5 AND account_slug IN (${mappedSlugsFirst}))
+            WHERE tenant_id=?2 AND source_feed=?3 AND account_slug IN (${mappedSlugsFirst}))
           AND NOT EXISTS (SELECT 1 FROM fin_balance_snapshots
-            WHERE tenant_id=?2 AND source_feed=?5 AND account_slug IN (${mappedSlugsFirst}))
+            WHERE tenant_id=?2 AND source_feed=?3 AND account_slug IN (${mappedSlugsFirst}))
           AND NOT EXISTS (SELECT 1 FROM fin_account_coverage
-            WHERE tenant_id=?2 AND source_feed=?5 AND account_slug IN (${mappedSlugsFirst}))
+            WHERE tenant_id=?2 AND source_feed=?3 AND account_slug IN (${mappedSlugsFirst}))
           AND EXISTS (SELECT 1 FROM bank_feed_items
             WHERE tenant_id=?2 AND item_ref=?6 AND removed_at IS NOT NULL AND status='removed'
-              AND status_detail LIKE '%superseded by a reconnect%')
+              AND status_detail LIKE '%replacement connection is staged%')
         THEN 1 ELSE json_extract('plaid reconnect readback failed','$') END AS reconnect_guard`,
     ).bind(mappingJson, tenantId, newFeed, newItemRef, oldFeed, review.priorItemRef),
   ];
+  return {
+    statements,
+    plan: {
+      priorItemRef: review.priorItemRef,
+      accounts: mappings.map((row) => ({
+        priorProviderAccountId: row.priorProviderAccountId,
+        providerAccountId: row.providerAccountId,
+        accountSlug: row.accountSlug,
+        entitySlug: row.entitySlug,
+        accountRef: row.accountRef,
+        priorIdentityLocator: row.priorIdentityLocator,
+      })),
+    },
+  };
 }
 
 export async function createPlaidLinkToken(env, {
@@ -636,7 +640,7 @@ export async function completePlaidLink(env, {
   if (row.public_token_fingerprint && row.public_token_fingerprint !== requestFingerprint) {
     throw new Error("Plaid Link completion does not match this session");
   }
-  if (row.state === "completed" && row.receipt_json) return JSON.parse(row.receipt_json);
+  if (row.state === "completed" && row.receipt_json) return publicLinkReceipt(row.receipt_json);
   if (!["link_ready", "link_completed", "exchange_started"].includes(row.state)) {
     throw new Error("Plaid Link has not completed its reviewed session");
   }
@@ -677,7 +681,16 @@ export async function completePlaidLink(env, {
   // Unknown provider outcomes below deliberately keep the claim held.
   let connectionReview;
   try {
-    connectionReview = await assertPlaidConnectionDistinct(env, { tenantId, institutionRef, accounts });
+    connectionReview = await assertPlaidConnectionDistinct(env, {
+      tenantId,
+      institutionRef,
+      environment: config.environment,
+      accounts: Array.isArray(accounts) ? accounts.map((account) => ({
+        ...account,
+        accountKind: accountKindFor(account?.type, account?.subtype),
+        persistentAccountId: account?.persistentAccountId || account?.persistent_account_id || null,
+      })) : accounts,
+    });
   } catch (error) {
     await env.DB.prepare(
       `UPDATE plaid_link_operations SET state='link_ready',updated_at=?
@@ -714,7 +727,7 @@ export async function completePlaidLink(env, {
   }
   if (!exchanged.item_id || !exchanged.access_token) throw new Error("Plaid returned no usable Item");
   const sealed = await encryptAccessReference(env, exchanged.access_token);
-  const reconnectStatements = await plaidReconnectStatements(env, {
+  const reconnect = await plaidReconnectStatements(env, {
     tenantId,
     newItemRef: exchanged.item_id,
     review: connectionReview,
@@ -726,7 +739,7 @@ export async function completePlaidLink(env, {
     environment: config.environment,
     ...(connectionReview?.action === "reattach" ? {
       reconnected: true,
-      ledger_accounts_reattached: connectionReview.accounts.length,
+      reconnect_review_pending: true,
     } : {}),
     history: {
       state: "queued",
@@ -735,6 +748,7 @@ export async function completePlaidLink(env, {
       requested_days: BACKFILL_DAYS,
     },
   };
+  const storedReceipt = reconnect.plan ? { ...receipt, _reconnect_plan: reconnect.plan } : receipt;
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO bank_feed_items
@@ -748,7 +762,7 @@ export async function completePlaidLink(env, {
          key_version=excluded.key_version,status='connected',status_detail=NULL,removed_at=NULL`,
     ).bind(tenantId, exchanged.item_id, institutionRef, institutionLabel, sealed.ciphertext,
       sealed.iv, sealed.keyVersion, config.environment, stamp),
-    ...reconnectStatements,
+    ...reconnect.statements,
     env.DB.prepare(
       `INSERT INTO bank_feed_backfill (tenant_id,item_ref,requested_days,state,queued_at)
        VALUES (?,?,?,'queued',?)
@@ -765,7 +779,7 @@ export async function completePlaidLink(env, {
           SET state='completed',item_ref=?,receipt_json=?,link_ciphertext=NULL,link_iv=NULL,
               link_key_version=NULL,completed_at=?,updated_at=?
         WHERE tenant_id=? AND session_ref=?`,
-    ).bind(exchanged.item_id, JSON.stringify(receipt), stamp, stamp, tenantId, sessionRef),
+    ).bind(exchanged.item_id, JSON.stringify(storedReceipt), stamp, stamp, tenantId, sessionRef),
   ]);
   return receipt;
 }
@@ -778,6 +792,7 @@ function stagedAccount(account, observedAt) {
   const available = providerMinorUnits(normalized.availableBalance, currency);
   return {
     ...normalized,
+    identityLocator: plaidAccountIdentityLocator(normalized),
     accountKind: kind,
     balanceRole: balanceRoleFor(kind),
     currency,
@@ -786,11 +801,178 @@ function stagedAccount(account, observedAt) {
     availableBalanceMinor: available.minor,
     provenance: {
       ...normalized.provenance,
+      accountType: normalized.type,
+      accountSubtype: normalized.subtype,
+      identityLocator: plaidAccountIdentityLocator(normalized),
       observedAt,
       ...(current.rounded ? { current_balance_minor_rounded: true } : {}),
       ...(available.rounded ? { available_balance_minor_rounded: true } : {}),
     },
   };
+}
+
+function plaidAccountIdentityLocator({ type, subtype, persistentAccountId }) {
+  // The provider locator is already the ledger's connector-specific identity
+  // slot. Keeping the reviewed type/subtype and optional Plaid persistent id
+  // here lets a later Item prove the same account without changing the schema.
+  const segment = (value) => encodeURIComponent(value || "-");
+  return `plaid/account-identity/${segment(String(type || "").trim().toLowerCase())}/` +
+    `${segment(String(subtype || "").trim().toLowerCase())}/${segment(persistentAccountId)}`;
+}
+
+function parsePlaidAccountIdentityLocator(locator) {
+  const prefix = "plaid/account-identity/";
+  if (typeof locator !== "string" || !locator.startsWith(prefix)) return null;
+  const parts = locator.slice(prefix.length).split("/");
+  if (parts.length !== 3) return null;
+  try {
+    const [type, subtype, persistentAccountId] = parts.map((part) => decodeURIComponent(part));
+    if (!type || type === "-" || !subtype || subtype === "-") return null;
+    return { type, subtype, persistentAccountId: persistentAccountId === "-" ? null : persistentAccountId };
+  } catch {
+    return null;
+  }
+}
+
+function normalizedIdentityText(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function reconnectReviewResult(itemRef, receipt = {}) {
+  return {
+    ...receipt,
+    item_ref: itemRef,
+    promoted: false,
+    ok: false,
+    partial: true,
+    status: "review_required",
+    review_required: true,
+    code: "plaid_reconnect_transaction_review_required",
+    cursor_advanced: false,
+  };
+}
+
+function validReconnectPlan(plan) {
+  if (!(plan && typeof plan === "object" && !Array.isArray(plan) &&
+    typeof plan.priorItemRef === "string" && plan.priorItemRef &&
+    Array.isArray(plan.accounts) && plan.accounts.length > 0 && plan.accounts.length <= 250 &&
+    plan.accounts.every((account) => account && typeof account === "object" &&
+      typeof account.priorProviderAccountId === "string" && account.priorProviderAccountId &&
+      typeof account.providerAccountId === "string" && account.providerAccountId &&
+      typeof account.accountSlug === "string" && account.accountSlug &&
+      typeof account.entitySlug === "string" && account.entitySlug &&
+      typeof account.accountRef === "string" && account.accountRef &&
+      typeof account.priorIdentityLocator === "string" && account.priorIdentityLocator))) return false;
+  return new Set(plan.accounts.map((account) => account.providerAccountId)).size === plan.accounts.length &&
+    new Set(plan.accounts.map((account) => account.accountSlug)).size === plan.accounts.length;
+}
+
+function transactionMatch(prior, staged) {
+  const sameMoney = Number(prior.amount_minor) === Number(staged.amount_minor) &&
+    prior.direction === staged.direction && prior.currency === staged.iso_currency_code;
+  const sameDescription = normalizedIdentityText(prior.description) === normalizedIdentityText(staged.description) &&
+    normalizedIdentityText(prior.payee) === normalizedIdentityText(staged.merchant_name);
+  if (!sameMoney || !sameDescription || prior.account_slug !== staged.account_slug) return false;
+  if (Number(prior.pending) === Number(staged.pending) && prior.posted_on === staged.posted_on) return true;
+  return Number(prior.pending) === 1 && Number(staged.pending) === 0 &&
+    typeof staged.pending_transaction_id === "string" && staged.pending_transaction_id &&
+    staged.pending_transaction_id === prior.external_id;
+}
+
+async function plaidReconnectPlan(env, { tenantId, itemRef }) {
+  const links = (await env.DB.prepare(
+    `SELECT receipt_json FROM plaid_link_operations
+      WHERE tenant_id=? AND item_ref=? AND state='completed' ORDER BY completed_at DESC LIMIT 2`,
+  ).bind(tenantId, itemRef).all())?.results || [];
+  const plans = [];
+  for (const link of links) {
+    let receipt;
+    try { receipt = JSON.parse(link.receipt_json || "null"); } catch { return { reviewRequired: true }; }
+    if (receipt?._reconnect_plan) plans.push(receipt._reconnect_plan);
+  }
+  if (plans.length === 0) return null;
+  if (plans.length !== 1 || !validReconnectPlan(plans[0])) return { reviewRequired: true };
+  return { reviewRequired: false, plan: plans[0] };
+}
+
+async function plaidReconnectReconciliation(env, { tenantId, itemRef, windowRef, stamp }, reconnectState = null) {
+  const state = reconnectState || await plaidReconnectPlan(env, { tenantId, itemRef });
+  if (!state) return null;
+  if (state.reviewRequired) return state;
+  const plan = state.plan;
+  const priorItem = await env.DB.prepare(
+    `SELECT removed_at,environment,institution_ref FROM bank_feed_items
+      WHERE tenant_id=? AND item_ref=? AND removed_at IS NOT NULL`,
+  ).bind(tenantId, plan.priorItemRef).first();
+  const currentItem = await env.DB.prepare(
+    "SELECT environment,institution_ref FROM bank_feed_items WHERE tenant_id=? AND item_ref=? AND removed_at IS NULL",
+  ).bind(tenantId, itemRef).first();
+  if (!priorItem?.removed_at || !currentItem || priorItem.environment !== currentItem.environment ||
+      priorItem.institution_ref !== currentItem.institution_ref) return { reviewRequired: true };
+
+  const planJson = JSON.stringify(plan.accounts);
+  const accounts = (await env.DB.prepare(
+    `SELECT s.provider_account_id,s.name,s.mask,s.account_type,s.account_subtype,s.account_kind,
+            s.provenance_json,f.account_slug,f.label,f.mask AS prior_mask,f.account_kind AS prior_account_kind,
+            f.source_locator AS prior_identity_locator
+       FROM plaid_sync_stage_accounts s
+       JOIN json_each(?3) m ON s.provider_account_id=json_extract(m.value,'$.providerAccountId')
+       JOIN fin_accounts f ON f.tenant_id=s.tenant_id
+        AND f.account_slug=json_extract(m.value,'$.accountSlug') AND f.superseded_by_id IS NULL
+      WHERE s.tenant_id=?1 AND s.window_ref=?2 ORDER BY s.provider_account_id`,
+  ).bind(tenantId, windowRef, planJson).all())?.results || [];
+  if (accounts.length !== plan.accounts.length) return { reviewRequired: true };
+  for (const account of accounts) {
+    let provenance;
+    try { provenance = JSON.parse(account.provenance_json || "null"); } catch { return { reviewRequired: true }; }
+    const priorIdentity = parsePlaidAccountIdentityLocator(account.prior_identity_locator);
+    const currentIdentity = parsePlaidAccountIdentityLocator(provenance?.identityLocator);
+    if (!priorIdentity || !currentIdentity ||
+        normalizedIdentityText(account.label) !== normalizedIdentityText(account.name) ||
+        normalizedIdentityText(account.prior_mask) !== normalizedIdentityText(account.mask) ||
+        account.prior_account_kind !== account.account_kind ||
+        priorIdentity.type !== currentIdentity.type || priorIdentity.subtype !== currentIdentity.subtype ||
+        (priorIdentity.persistentAccountId &&
+          priorIdentity.persistentAccountId !== currentIdentity.persistentAccountId)) {
+      return { reviewRequired: true };
+    }
+  }
+
+  const priorFeed = feedScopeKey(plan.priorItemRef);
+  const prior = (await env.DB.prepare(
+    `SELECT txn_uid,account_slug,posted_on,amount_minor,direction,currency,description,payee,pending,external_id
+       FROM fin_transactions WHERE tenant_id=?1 AND source_feed=?2 AND superseded_by_id IS NULL
+        AND removed_at IS NULL
+        AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?3))`,
+  ).bind(tenantId, priorFeed, planJson).all())?.results || [];
+  const staged = (await env.DB.prepare(
+    `SELECT provider_transaction_id,pending_transaction_id,account_slug,posted_on,amount_minor,direction,
+            iso_currency_code,description,merchant_name,pending
+       FROM plaid_sync_stage_transactions
+      WHERE tenant_id=? AND window_ref=? AND operation IN ('added','modified')
+      ORDER BY provider_transaction_id`,
+  ).bind(tenantId, windowRef).all())?.results || [];
+  const used = new Set();
+  const matches = [];
+  const removedDate = String(priorItem.removed_at).slice(0, 10);
+  for (const row of staged) {
+    const candidates = prior.filter((old) => transactionMatch(old, row));
+    if (candidates.length > 1) return { reviewRequired: true };
+    if (candidates.length === 1) {
+      const [old] = candidates;
+      if (used.has(old.txn_uid)) return { reviewRequired: true };
+      used.add(old.txn_uid);
+      matches.push({ priorTxnUid: old.txn_uid, providerTransactionId: row.provider_transaction_id });
+      continue;
+    }
+    const accountHasPriorHistory = prior.some((old) => old.account_slug === row.account_slug);
+    // A posted date after confirmed revocation cannot already exist in this
+    // retained feed. Everything at or before that boundary remains ambiguous.
+    if (accountHasPriorHistory && (!row.posted_on || row.posted_on <= removedDate)) {
+      return { reviewRequired: true };
+    }
+  }
+  return { reviewRequired: false, plan, priorFeed, matches, stamp };
 }
 
 function transactionStageRows(accountMappings, page) {
@@ -964,6 +1146,79 @@ async function restoreReadyWindowAssignmentInventory(env, { tenantId, itemRef, w
   });
 }
 
+function reconnectPromotionStatements(env, tenantId, itemRef, reconnect) {
+  if (!reconnect?.plan) return [];
+  const sourceFeed = feedScopeKey(itemRef);
+  const planJson = JSON.stringify(reconnect.plan.accounts);
+  const statements = [
+    env.DB.prepare(
+      `UPDATE fin_accounts AS f
+          SET source_feed=?1,
+              external_ref=(SELECT json_extract(value,'$.providerAccountId') FROM json_each(?2)
+                WHERE json_extract(value,'$.accountSlug')=f.account_slug)
+        WHERE f.tenant_id=?3 AND f.source_feed=?4 AND f.superseded_by_id IS NULL
+          AND f.account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?2))`,
+    ).bind(sourceFeed, planJson, tenantId, reconnect.priorFeed),
+    env.DB.prepare(
+      `INSERT INTO plaid_account_entity_assignments
+         (tenant_id,item_ref,provider_account_id,account_ref,entity_slug,
+          discovered_at,last_seen_at,assigned_at,updated_at)
+       SELECT ?1,?2,json_extract(value,'$.providerAccountId'),json_extract(value,'$.accountRef'),
+              json_extract(value,'$.entitySlug'),?3,?3,?3,?3 FROM json_each(?4)`,
+    ).bind(tenantId, itemRef, reconnect.stamp, planJson),
+  ];
+  statements.push(...reconnect.matches.map((match) => env.DB.prepare(
+    `UPDATE fin_transactions
+        SET txn_uid=('plaid:'||?1),external_id=?1,
+            source_locator=('plaid/transactions/'||?1),source_feed=?2
+      WHERE tenant_id=?3 AND txn_uid=?4 AND source_feed=?5
+        AND removed_at IS NULL AND superseded_by_id IS NULL`,
+  ).bind(match.providerTransactionId, sourceFeed, tenantId, match.priorTxnUid, reconnect.priorFeed)));
+  statements.push(
+    env.DB.prepare(
+      `UPDATE fin_transactions SET source_feed=?1
+        WHERE tenant_id=?2 AND source_feed=?3
+          AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?4))`,
+    ).bind(sourceFeed, tenantId, reconnect.priorFeed, planJson),
+    env.DB.prepare(
+      `UPDATE fin_balance_snapshots SET source_feed=?1
+        WHERE tenant_id=?2 AND source_feed=?3
+          AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?4))`,
+    ).bind(sourceFeed, tenantId, reconnect.priorFeed, planJson),
+    env.DB.prepare(
+      `UPDATE fin_account_coverage SET source_feed=?1
+        WHERE tenant_id=?2 AND source_feed=?3
+          AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?4))`,
+    ).bind(sourceFeed, tenantId, reconnect.priorFeed, planJson),
+    env.DB.prepare(
+      `SELECT CASE WHEN
+          (SELECT COUNT(*) FROM fin_accounts f JOIN json_each(?4) m
+             ON f.account_slug=json_extract(m.value,'$.accountSlug')
+            WHERE f.tenant_id=?1 AND f.source_feed=?5
+              AND f.external_ref=json_extract(m.value,'$.providerAccountId')
+              AND f.entity_slug=json_extract(m.value,'$.entitySlug')
+              AND f.superseded_by_id IS NULL)=json_array_length(?4)
+          AND (SELECT COUNT(*) FROM plaid_account_entity_assignments a JOIN json_each(?4) m
+             ON a.provider_account_id=json_extract(m.value,'$.providerAccountId')
+            WHERE a.tenant_id=?1 AND a.item_ref=?6
+              AND a.account_ref=json_extract(m.value,'$.accountRef')
+              AND a.entity_slug=json_extract(m.value,'$.entitySlug'))=json_array_length(?4)
+          AND NOT EXISTS (SELECT 1 FROM fin_transactions WHERE tenant_id=?1 AND source_feed=?2
+            AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?4)))
+          AND NOT EXISTS (SELECT 1 FROM fin_balance_snapshots WHERE tenant_id=?1 AND source_feed=?2
+            AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?4)))
+          AND NOT EXISTS (SELECT 1 FROM fin_account_coverage WHERE tenant_id=?1 AND source_feed=?2
+            AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?4)))
+          AND (SELECT COUNT(*) FROM fin_transactions f JOIN json_each(?3) m
+            ON f.txn_uid=('plaid:'||json_extract(m.value,'$.providerTransactionId'))
+           WHERE f.tenant_id=?1 AND f.source_feed=?5 AND f.removed_at IS NULL
+             AND f.superseded_by_id IS NULL)=json_array_length(?3)
+        THEN 1 ELSE json_extract('plaid reconnect history readback failed','$') END AS reconnect_history_guard`,
+    ).bind(tenantId, reconnect.priorFeed, JSON.stringify(reconnect.matches), planJson, sourceFeed, itemRef),
+  );
+  return statements;
+}
+
 function promotionStatements(env, {
   tenantId,
   itemRef,
@@ -974,6 +1229,7 @@ function promotionStatements(env, {
   accountMappings,
   observedAt,
   resumedSnapshot = false,
+  reconnect = null,
 }) {
   const sourceFeed = feedScopeKey(itemRef);
   const interval = Math.min(Math.max(Number(env.BANK_FEED_RECONCILE_MINUTES) || DEFAULT_RECONCILE_MINUTES, 15), 1440);
@@ -987,6 +1243,7 @@ function promotionStatements(env, {
   const pendingItem = pendingFor("?1", "?2");
   const pendingStage = pendingFor("s.tenant_id", "(SELECT w.item_ref FROM plaid_sync_windows w WHERE w.tenant_id=s.tenant_id AND w.window_ref=s.window_ref)");
   return [
+    ...reconnectPromotionStatements(env, tenantId, itemRef, reconnect),
     // Old Workers persisted lossy slugs in ready/staging payloads. Re-resolve
     // from exact Item/account authority before use, without moving ledger rows.
     env.DB.prepare(
@@ -1063,10 +1320,11 @@ function promotionStatements(env, {
     env.DB.prepare(
       `INSERT INTO fin_accounts
          (tenant_id,account_slug,entity_slug,label,account_kind,balance_role,mask,currency,
-          feed_mode,external_ref,provenance,source_feed,basis_state,recorded_at,
+          feed_mode,external_ref,provenance,source_locator,source_feed,basis_state,recorded_at,
           source_iso_currency_code,source_unofficial_currency_code)
        SELECT s.tenant_id,s.account_slug,a.entity_slug,s.name,s.account_kind,s.balance_role,s.mask,s.currency,
-              'live',s.provider_account_id,'feed',?,'confirmed',?,s.iso_currency_code,s.unofficial_currency_code
+              'live',s.provider_account_id,'feed',json_extract(s.provenance_json,'$.identityLocator'),
+              ?,'confirmed',?,s.iso_currency_code,s.unofficial_currency_code
          FROM plaid_sync_stage_accounts s
          JOIN plaid_account_entity_assignments a
            ON a.tenant_id=s.tenant_id AND a.item_ref=? AND a.provider_account_id=s.provider_account_id
@@ -1080,7 +1338,8 @@ function promotionStatements(env, {
          mask=excluded.mask,currency=excluded.currency,feed_mode='live',external_ref=excluded.external_ref,
          source_iso_currency_code=excluded.source_iso_currency_code,
          source_unofficial_currency_code=excluded.source_unofficial_currency_code,
-         provenance='feed',source_feed=excluded.source_feed,basis_state='confirmed',recorded_at=excluded.recorded_at`,
+         provenance='feed',source_locator=excluded.source_locator,source_feed=excluded.source_feed,
+         basis_state='confirmed',recorded_at=excluded.recorded_at`,
     ).bind(sourceFeed, stamp, itemRef, tenantId, windowRef),
     env.DB.prepare(
       `SELECT CASE WHEN NOT EXISTS (
@@ -1282,14 +1541,20 @@ function assignmentBlockedResult(itemRef, readiness, receipt = {}) {
 
 async function promotePlaidWindow(env, details, receipt = {}) {
   const staged = (await env.DB.prepare(
-    `SELECT s.provider_account_id AS providerAccountId,s.currency,s.iso_currency_code,
+    `SELECT s.provider_account_id AS providerAccountId,s.name,s.mask,s.account_type,s.account_subtype,
+            s.account_kind,s.currency,s.iso_currency_code,
             s.current_balance_decimal,s.available_balance_decimal,s.current_balance_minor,
             s.available_balance_minor,s.provenance_json,w.started_at
        FROM plaid_sync_stage_accounts s JOIN plaid_sync_windows w
          ON w.tenant_id=s.tenant_id AND w.window_ref=s.window_ref
       WHERE s.tenant_id=? AND s.window_ref=? ORDER BY s.provider_account_id`,
   ).bind(details.tenantId, details.windowRef).all())?.results;
-  const identities = await resolveAccountMappings(env, { ...details, accounts: staged });
+  const reconnectState = await plaidReconnectPlan(env, details);
+  const identities = await resolveAccountMappings(env, {
+    ...details,
+    accounts: staged,
+    reconnectPlan: reconnectState && !reconnectState.reviewRequired ? reconnectState.plan : null,
+  });
   const accountMappings = await validateStagedMoney(env, details, staged, identities);
   const unmatched = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM plaid_sync_stage_transactions t
@@ -1299,20 +1564,30 @@ async function promotePlaidWindow(env, details, receipt = {}) {
             AND s.provider_account_id=t.provider_account_id)`,
   ).bind(details.tenantId, details.windowRef).first();
   if (!unmatched || Number(unmatched.n) !== 0) throw accountIdentityError("plaid_transaction_account_unreviewed");
-  const readiness = await plaidAccountAssignmentReadiness(env, details);
+  const reconnect = await plaidReconnectReconciliation(env, details, reconnectState);
+  if (reconnect?.reviewRequired) return reconnectReviewResult(details.itemRef, receipt);
+  // A reconnect copies the already reviewed owner assignment only inside the
+  // promotion batch below. Its transaction-local assignment guard rechecks the
+  // owner entity after that copy, so the preflight must not require the row to
+  // exist early and weaken the quarantine boundary.
+  const readiness = reconnect
+    ? { ready: true, state: "assigned", code: null }
+    : await plaidAccountAssignmentReadiness(env, details);
   if (!readiness.ready) return assignmentBlockedResult(details.itemRef, readiness, receipt);
   // Window start is a conservative observation bound even for ready rows from
   // older Workers whose updated_at was overwritten by a later history webhook.
   const observedAt = balanceObservation(staged[0]?.started_at, details.stamp);
   let promotion;
   try {
-    const result = await runPlaidSyncBatch(env, details.lease, promotionStatements(env, { ...details, accountMappings, observedAt }));
+    const result = await runPlaidSyncBatch(env, details.lease,
+      promotionStatements(env, { ...details, accountMappings, observedAt, reconnect }));
     promotion = result.at(-1)?.results?.[0];
     if (!promotion || !["refresh_pending", "scheduled", "history_pending"].includes(promotion.reason)) {
       throw new Error("The committed bank refresh receipt could not be verified");
     }
   } catch (error) {
     if (error instanceof PlaidSyncLeaseError) throw error;
+    if (reconnect) return reconnectReviewResult(details.itemRef, receipt);
     // If authority changed between the read and the transactional guard, report
     // the new owner action instead of turning it into a generic provider error.
     const after = await plaidAccountAssignmentReadiness(env, details);
@@ -1347,16 +1622,17 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     // An owner may finish assignment after our readiness read while this lease
     // is held. Preserve that newer due-now wakeup instead of delaying it again.
     const dueAt = new Date(Date.parse(stamp) + 5 * 60_000).toISOString();
+    const reconnectReview = receipt.code === "plaid_reconnect_transaction_review_required";
     const statements = [env.DB.prepare(
-      `INSERT INTO plaid_reconciliation
+       `INSERT INTO plaid_reconciliation
          (tenant_id,item_ref,reason,state,due_at,attempts,last_error_code,updated_at)
-       VALUES (?,?,'assignment_wait','pending',?,0,?,?)
+       VALUES (?,?,CASE WHEN ? THEN 'reconnect_review' ELSE 'assignment_wait' END,'pending',?,0,?,?)
        ON CONFLICT(tenant_id,item_ref) DO UPDATE SET
          reason=excluded.reason,state='pending',due_at=excluded.due_at,
          last_error_code=excluded.last_error_code,updated_at=excluded.updated_at
        WHERE NOT (plaid_reconciliation.reason='owner_assignment'
          AND plaid_reconciliation.updated_at>=excluded.updated_at)`,
-    ).bind(tenantId, itemRef, dueAt, receipt.code || null, stamp)];
+    ).bind(tenantId, itemRef, reconnectReview ? 1 : 0, dueAt, receipt.code || null, stamp)];
     // Every provider read of this window succeeded, so an earlier failure on
     // the connection is no longer the truth. The owner's choice is the only
     // thing left, and the connection says so instead of keeping a stale error.
@@ -1366,6 +1642,13 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
         `UPDATE bank_feed_items SET status='connected',status_detail=?,last_error_at=NULL
           WHERE tenant_id=? AND item_ref=? AND removed_at IS NULL AND status IN ('connected','error')`,
       ).bind(plaidAssignmentWaitDetail(remaining), tenantId, itemRef));
+    } else if (reconnectReview) {
+      statements.push(env.DB.prepare(
+        `UPDATE bank_feed_items SET status='connected',
+            status_detail='Replacement history is held for review before any retained money is reused or added.',
+            last_error_at=NULL
+          WHERE tenant_id=? AND item_ref=? AND removed_at IS NULL AND status IN ('connected','error')`,
+      ).bind(tenantId, itemRef));
     }
     await runPlaidSyncBatch(env, lease, statements);
     return receipt;
@@ -1378,14 +1661,17 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
       keyVersion: item.key_version,
     });
     const window = await syncWindowRow(env, tenantId, itemRef, stamp, lease);
+    const reconnectState = await plaidReconnectPlan(env, { tenantId, itemRef });
     if (window.state === "ready") {
-      await restoreReadyWindowAssignmentInventory(env, {
-        tenantId,
-        itemRef,
-        windowRef: window.window_ref,
-        stamp,
-        lease,
-      });
+      if (!reconnectState) {
+        await restoreReadyWindowAssignmentInventory(env, {
+          tenantId,
+          itemRef,
+          windowRef: window.window_ref,
+          stamp,
+          lease,
+        });
+      }
       const promoted = await promotePlaidWindow(env, {
         tenantId,
         itemRef,
@@ -1433,13 +1719,20 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     await renewPlaidSyncLease(env, lease);
     const normalizedAccounts = (Array.isArray(accountPayload.accounts) ? accountPayload.accounts : [])
       .map(account => stagedAccount(account, stamp));
-    const mappings = await resolveAccountMappings(env, { tenantId, itemRef, accounts: normalizedAccounts });
+    const mappings = await resolveAccountMappings(env, {
+      tenantId,
+      itemRef,
+      accounts: normalizedAccounts,
+      reconnectPlan: reconnectState && !reconnectState.reviewRequired ? reconnectState.plan : null,
+    });
     const accountMappings = new Map(mappings.map(row => [row.providerAccountId, row.accountSlug]));
     const accounts = normalizedAccounts.map(account => ({ ...account, accountSlug: accountMappings.get(account.providerAccountId) }));
-    await discoverPlaidAccountAssignments(env, {
-      tenantId, itemRef, accounts, at: stamp,
-      runBatch: statements => runPlaidSyncBatch(env, lease, statements),
-    });
+    if (!reconnectState) {
+      await discoverPlaidAccountAssignments(env, {
+        tenantId, itemRef, accounts, at: stamp,
+        runBatch: statements => runPlaidSyncBatch(env, lease, statements),
+      });
+    }
     const result = await stagePlaidSyncWindow({
       originalCursor: window.original_cursor || null,
       originalHistoryState: window.provider_history_state,

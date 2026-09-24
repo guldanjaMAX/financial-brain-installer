@@ -307,7 +307,7 @@ test("once an owner exists, the section starts closed and every account offers t
   } finally { fixture.close(); }
 });
 
-test("the connect page says where disconnecting actually happens", async () => {
+test("the connect page states the disconnect location and reconnect review boundary", async () => {
   const fixture = await createProductFixture({ env: ENV });
   try {
     const html = await pageHtml(fixture);
@@ -315,7 +315,8 @@ test("the connect page says where disconnecting actually happens", async () => {
     assert.match(html, /To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect\./);
     assert.match(html, /Disconnecting removes the bank connection and any bank data still waiting for an owner choice\./);
     assert.match(html, /Ledger history already saved stays\./);
-    assert.match(html, /matching saved accounts resume in place instead of being added again\./);
+    assert.match(html, /A reconnect resumes only an exact saved account match\./);
+    assert.match(html, /Replacement history stays waiting until each retained transaction is matched without ambiguity\./);
   } finally { fixture.close(); }
 });
 

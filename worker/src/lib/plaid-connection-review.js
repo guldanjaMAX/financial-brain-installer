@@ -6,6 +6,28 @@ function review() {
     "This bank may already be connected. Review the saved connection before adding another copy.", 409);
 }
 
+function normalizedText(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function plaidIdentity(locator) {
+  const prefix = "plaid/account-identity/";
+  if (typeof locator !== "string" || !locator.startsWith(prefix)) return null;
+  const parts = locator.slice(prefix.length).split("/");
+  if (parts.length !== 3) return null;
+  try {
+    const [type, subtype, persistentAccountId] = parts.map((part) => decodeURIComponent(part));
+    if (!type || type === "-" || !subtype || subtype === "-") return null;
+    return {
+      type: normalizedText(type),
+      subtype: normalizedText(subtype),
+      persistentAccountId: persistentAccountId === "-" ? null : persistentAccountId,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Link metadata is an ambiguity signal, never general merge authority. A live
  * match always refuses. A complete, unambiguous match against one removed Item
@@ -16,9 +38,14 @@ function review() {
  * Caller holds the tenant's new-connection exchange claim. This closes the
  * gap where two sessions both inspect an empty inventory and then exchange.
  */
-export async function assertPlaidConnectionDistinct(env, { tenantId, institutionRef, accounts }) {
+export async function assertPlaidConnectionDistinct(env, {
+  tenantId,
+  institutionRef,
+  environment,
+  accounts,
+}) {
   const items = (await env.DB.prepare(
-    `SELECT item_ref,institution_ref,status,removed_at
+    `SELECT item_ref,institution_ref,environment,status,removed_at
        FROM bank_feed_items WHERE tenant_id=? LIMIT 251`,
   ).bind(tenantId).all())?.results;
   if (!Array.isArray(items) || items.length > 250) review();
@@ -33,17 +60,32 @@ export async function assertPlaidConnectionDistinct(env, { tenantId, institution
         typeof account.id !== "string" || !account.id || account.id.length > 256 ||
         typeof account.name !== "string" || !account.name.trim() || account.name.length > 512 ||
         typeof account.mask !== "string" || !/^[A-Za-z0-9*]{2,4}$/.test(account.mask)) review();
-    return { id: account.id, mask: account.mask.toLowerCase() };
+    const type = normalizedText(account.type);
+    const subtype = normalizedText(account.subtype);
+    const accountKind = normalizedText(account.accountKind);
+    return {
+      id: account.id,
+      name: normalizedText(account.name),
+      mask: account.mask.toLowerCase(),
+      type,
+      subtype,
+      accountKind,
+      persistentAccountId: typeof account.persistentAccountId === "string" && account.persistentAccountId
+        ? account.persistentAccountId
+        : null,
+    };
   });
   const reattach = [];
   const removedLedgerCounts = new Map();
   for (const item of relevant) {
     const saved = (await env.DB.prepare(
-      `SELECT external_ref AS provider_account_id,mask,account_slug,entity_slug,'ledger' AS source_kind
+      `SELECT external_ref AS provider_account_id,mask,label,account_kind,source_locator,
+              account_slug,entity_slug,'ledger' AS source_kind
          FROM fin_accounts
         WHERE tenant_id=? AND source_feed=? AND superseded_by_id IS NULL
        UNION ALL
-       SELECT s.provider_account_id,s.mask,NULL AS account_slug,NULL AS entity_slug,'staged' AS source_kind
+       SELECT s.provider_account_id,s.mask,s.name AS label,s.account_kind,NULL AS source_locator,
+              NULL AS account_slug,NULL AS entity_slug,'staged' AS source_kind
          FROM plaid_sync_stage_accounts s
         JOIN plaid_sync_windows w ON w.tenant_id=s.tenant_id AND w.window_ref=s.window_ref
         WHERE s.tenant_id=? AND w.item_ref=? LIMIT 501`,
@@ -63,6 +105,7 @@ export async function assertPlaidConnectionDistinct(env, { tenantId, institution
     if (!removed && saved.some((prior) => incoming.some((account) =>
       account.id === prior.provider_account_id || account.mask === prior.mask.toLowerCase()))) review();
     if (!removed) continue;
+    if (item.environment !== environment) review();
 
     const ledger = saved.filter((prior) => prior.source_kind === "ledger");
     removedLedgerCounts.set(item.item_ref, new Set(ledger.map((prior) => prior.account_slug)).size);
@@ -78,14 +121,23 @@ export async function assertPlaidConnectionDistinct(env, { tenantId, institution
       if (matches.length > 1) review();
       if (matches.length === 1) {
         const [prior] = matches;
+        const identity = plaidIdentity(prior.source_locator);
         if (typeof prior.account_slug !== "string" || !prior.account_slug ||
-            typeof prior.entity_slug !== "string" || !prior.entity_slug) review();
+            typeof prior.entity_slug !== "string" || !prior.entity_slug ||
+            !identity || !account.type || !account.subtype || !account.accountKind ||
+            normalizedText(prior.label) !== account.name ||
+            normalizedText(prior.mask) !== account.mask ||
+            normalizedText(prior.account_kind) !== account.accountKind ||
+            identity.type !== account.type || identity.subtype !== account.subtype ||
+            (identity.persistentAccountId && account.persistentAccountId &&
+              identity.persistentAccountId !== account.persistentAccountId)) review();
         reattach.push({
           priorItemRef: item.item_ref,
           priorProviderAccountId: prior.provider_account_id,
           providerAccountId: account.id,
           accountSlug: prior.account_slug,
           entitySlug: prior.entity_slug,
+          priorIdentityLocator: prior.source_locator,
         });
       }
     }

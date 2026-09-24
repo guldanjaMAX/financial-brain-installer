@@ -16,12 +16,25 @@ const config = {
   BANK_FEED_WRAPPING_KEY_V2: `v2.${"A".repeat(43)}`,
 };
 const json = (data) => new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } });
-function savedAccount(f, { item = "existing-item", institution = "synthetic-bank", name = "Operating", mask = "1234", removed = false } = {}) {
+function savedAccount(f, {
+  item = "existing-item",
+  institution = "synthetic-bank",
+  name = "Operating",
+  mask = "1234",
+  accountKind = "checking",
+  persistentAccountId = null,
+  environment = "sandbox",
+  removed = false,
+} = {}) {
   f.raw(`INSERT INTO bank_feed_items (tenant_id,item_ref,institution_ref,access_ciphertext,access_iv,key_version,environment,status,connected_at,removed_at)
-    VALUES ('primary',?,?, 'c2VhbGVkY2lwaGVydGV4dA==','AAAAAAAAAAAAAAAA',2,'sandbox','connected','2026-09-01',?)`, item, institution, removed ? "2026-09-02" : null);
-  f.raw(`INSERT INTO fin_accounts (tenant_id,account_slug,entity_slug,institution,label,account_kind,balance_role,mask,feed_mode,external_ref,provenance,source_feed,basis_state,recorded_at)
-    VALUES ('primary',?,'primary','Synthetic Bank',?,'checking','asset',?,'live',?,'feed',?,'confirmed','2026-09-01')`,
-  `ledger-${item}`, name, mask, `account-${item}`, `bank-feed:${item}`);
+    VALUES ('primary',?,?, 'c2VhbGVkY2lwaGVydGV4dA==','AAAAAAAAAAAAAAAA',2,?,'connected','2026-09-01',?)`,
+  item, institution, environment, removed ? "2026-09-02" : null);
+  f.raw(`INSERT INTO fin_accounts (tenant_id,account_slug,entity_slug,institution,label,account_kind,balance_role,mask,feed_mode,external_ref,provenance,source_locator,source_feed,basis_state,recorded_at)
+    VALUES ('primary',?,'primary','Synthetic Bank',?,?,?,?,'live',?,'feed',?,?,'confirmed','2026-09-01')`,
+  `ledger-${item}`, name, accountKind, ["card", "loan", "line_of_credit"].includes(accountKind) ? "liability" : "asset",
+  mask, `account-${item}`,
+  `plaid/account-identity/depository/checking/${encodeURIComponent(persistentAccountId || "-")}`,
+  `bank-feed:${item}`);
 }
 async function session(f, ref, extra = {}) {
   return createPlaidLinkToken(f.env, { url: "https://brain.invalid/app/connect/bank", sessionRef: ref,
@@ -51,6 +64,7 @@ test("disconnect then reconnect resumes the same ledger accounts without duplica
     if (path === "/accounts/get") {
       return json({ accounts: [{
         account_id: "replacement-account",
+        persistent_account_id: "persistent-ledger-account",
         name: "Synthetic checking",
         mask: "1234",
         type: "depository",
@@ -63,7 +77,7 @@ test("disconnect then reconnect resumes the same ledger accounts without duplica
       return json({
         added: [
           {
-            transaction_id: "shared-transaction",
+            transaction_id: "replacement-transaction",
             account_id: "replacement-account",
             amount: "10.00",
             iso_currency_code: "USD",
@@ -97,19 +111,20 @@ test("disconnect then reconnect resumes the same ledger accounts without duplica
       (tenant_id,item_ref,institution_ref,institution_label,access_ciphertext,access_iv,key_version,
        environment,cursor,status,connected_at)
       VALUES ('primary',?,'synthetic-bank','Synthetic Bank',?,?,?,'sandbox','old-cursor','connected',?)`,
-    oldItem, sealed.ciphertext, sealed.iv, sealed.keyVersion, stamp);
+    oldItem, sealed.ciphertext, sealed.iv, sealed.keyVersion, "2026-09-01T00:00:00.000Z");
     f.raw(`INSERT INTO fin_accounts
       (tenant_id,account_slug,entity_slug,institution,label,account_kind,balance_role,mask,currency,
-       feed_mode,external_ref,provenance,source_feed,basis_state,recorded_at)
+       feed_mode,external_ref,provenance,source_locator,source_feed,basis_state,recorded_at)
       VALUES ('primary',?,'fixture-household','Synthetic Bank','Synthetic checking','checking','asset','1234','USD',
-              'live','removed-account','feed',?,'confirmed',?)`, accountSlug, oldFeed, stamp);
+              'live','removed-account','feed','plaid/account-identity/depository/checking/persistent-ledger-account',?,'confirmed',?)`,
+    accountSlug, oldFeed, stamp);
     f.raw(`INSERT INTO fin_transactions
       (tenant_id,txn_uid,account_slug,posted_on,amount_minor,direction,raw_amount_minor,
        raw_sign_convention,currency,description,pending,external_id,provenance,source_locator,
        source_feed,basis_state,recorded_at)
-      VALUES ('primary','plaid:shared-transaction',?,'2026-09-20',1000,'outflow',1000,
+      VALUES ('primary','plaid:prior-transaction',?,'2026-09-20',1000,'outflow',1000,
               'feed_positive_amount_is_outflow','USD','Existing fixture transaction',0,
-              'shared-transaction','feed','plaid/transactions/shared-transaction',?,'confirmed',?)`,
+              'prior-transaction','feed','plaid/transactions/prior-transaction',?,'confirmed',?)`,
     accountSlug, oldFeed, stamp);
     f.raw(`INSERT INTO fin_balance_snapshots
       (tenant_id,account_slug,as_of_date,current_minor,available_minor,currency,provenance,
@@ -122,7 +137,10 @@ test("disconnect then reconnect resumes the same ledger accounts without duplica
     oldItem, `acct_${"1".repeat(32)}`, stamp, stamp, stamp, stamp);
     const originalAccountId = f.first("SELECT id FROM fin_accounts WHERE account_slug=?", accountSlug).id;
 
-    const disconnected = await disconnectPlaidItem(f.env, oldItem, { fetchImpl, now: stamp });
+    const disconnected = await disconnectPlaidItem(f.env, oldItem, {
+      fetchImpl,
+      now: "2026-09-22T15:00:00.000Z",
+    });
     assert.equal(disconnected.revocation_state, "confirmed");
     assert.ok(calls.includes("/item/remove"), "the disconnect decision point must be reached");
 
@@ -137,12 +155,45 @@ test("disconnect then reconnect resumes the same ledger accounts without duplica
       publicToken: "replacement-public-token",
       institutionRef: "synthetic-bank",
       institutionLabel: "Synthetic Bank",
-      accounts: [{ id: "replacement-account", name: "Synthetic checking", mask: "1234" }],
+      accounts: [{
+        id: "replacement-account", name: "Synthetic checking", mask: "1234",
+        type: "depository", subtype: "checking",
+      }],
       fetchImpl,
       now: stamp,
     });
     assert.equal(reconnected.item_ref, newItem);
     assert.equal(reconnected.reconnected, true);
+    assert.equal(Object.hasOwn(reconnected, "_reconnect_plan"), false);
+    const replayed = await completePlaidLink(f.env, {
+      sessionRef: link.session_ref,
+      publicToken: "replacement-public-token",
+      fetchImpl: async () => { throw new Error("a completed exchange must replay its public receipt"); },
+      now: stamp,
+    });
+    assert.equal(replayed.reconnected, true);
+    assert.equal(Object.hasOwn(replayed, "_reconnect_plan"), false,
+      "the private ledger mapping must not enter the owner-visible durable receipt");
+    assert.deepEqual({ ...f.first(
+      "SELECT id,account_slug,entity_slug,external_ref,source_feed FROM fin_accounts",
+    ) }, {
+      id: originalAccountId,
+      account_slug: accountSlug,
+      entity_slug: "fixture-household",
+      external_ref: "removed-account",
+      source_feed: oldFeed,
+    });
+    assert.equal(f.first(
+      "SELECT COUNT(*) AS n FROM plaid_account_entity_assignments WHERE item_ref=?", newItem,
+    ).n, 0, "exchange must not copy the owner assignment before authoritative history reconciliation");
+    assert.match(f.first("SELECT status_detail FROM bank_feed_items WHERE item_ref=?", oldItem).status_detail,
+      /replacement connection is staged/);
+
+    const synced = await syncPlaidItem(f.env, newItem, { fetchImpl, now: stamp });
+    assert.equal(synced.ok, true, JSON.stringify(synced));
+    assert.equal(f.first("SELECT cursor FROM bank_feed_items WHERE item_ref=?", newItem).cursor,
+      "replacement-cursor");
+    assert.equal(f.first("SELECT COUNT(*) AS n FROM fin_accounts").n, 1);
     assert.deepEqual({ ...f.first(
       "SELECT id,account_slug,entity_slug,external_ref,source_feed FROM fin_accounts",
     ) }, {
@@ -155,24 +206,207 @@ test("disconnect then reconnect resumes the same ledger accounts without duplica
     assert.equal(f.first(
       "SELECT entity_slug FROM plaid_account_entity_assignments WHERE item_ref=?", newItem,
     ).entity_slug, "fixture-household");
-    assert.match(f.first("SELECT status_detail FROM bank_feed_items WHERE item_ref=?", oldItem).status_detail,
-      /superseded by a reconnect/);
-
-    const synced = await syncPlaidItem(f.env, newItem, { fetchImpl, now: stamp });
-    assert.equal(synced.ok, true);
-    assert.equal(f.first("SELECT cursor FROM bank_feed_items WHERE item_ref=?", newItem).cursor,
-      "replacement-cursor");
-    assert.equal(f.first("SELECT COUNT(*) AS n FROM fin_accounts").n, 1);
+    assert.equal(f.first("SELECT source_locator FROM fin_accounts").source_locator,
+      "plaid/account-identity/depository/checking/persistent-ledger-account");
     assert.equal(f.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 2);
     assert.equal(f.first(
-      "SELECT COUNT(*) AS n FROM fin_transactions WHERE txn_uid='plaid:shared-transaction'",
+      "SELECT COUNT(*) AS n FROM fin_transactions WHERE txn_uid='plaid:replacement-transaction'",
     ).n, 1);
+    assert.equal(f.first(
+      "SELECT COUNT(*) AS n FROM fin_transactions WHERE txn_uid='plaid:prior-transaction'",
+    ).n, 0, "the retained row must be reused even when the replacement Item changes its transaction id");
     assert.equal(f.first(
       "SELECT COUNT(*) AS n FROM fin_transactions WHERE account_slug=? AND source_feed=?",
       accountSlug, newFeed,
     ).n, 2);
     assert.equal(f.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots WHERE account_slug=?", accountSlug).n, 1);
   } finally { f.close(); }
+});
+
+test("ambiguous replacement history stays staged for owner review", async () => {
+  const f = await createProductFixture({ env: config });
+  const oldItem = "ambiguous-removed-item";
+  const newItem = "ambiguous-replacement-item";
+  const stamp = "2026-09-24T16:00:00.000Z";
+  let syncReads = 0;
+  const fetchImpl = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/item/public_token/exchange") {
+      return json({ item_id: newItem, access_token: "replacement-access" });
+    }
+    if (path === "/accounts/get") {
+      return json({ accounts: [{
+        account_id: "replacement-account", name: "Operating", mask: "1234",
+        type: "depository", subtype: "checking",
+        balances: { current: "100.00", available: "100.00", iso_currency_code: "USD" },
+      }] });
+    }
+    if (path === "/transactions/sync") {
+      syncReads += 1;
+      return json({
+        added: [{
+          transaction_id: "replacement-ambiguous", account_id: "replacement-account",
+          amount: "10.00", iso_currency_code: "USD", date: "2026-09-20",
+          pending: false, name: "Repeated fixture transaction",
+        }],
+        modified: [], removed: [], next_cursor: "held-cursor", has_more: false,
+        transactions_update_status: "HISTORICAL_UPDATE_COMPLETE",
+      });
+    }
+    throw new Error(`unexpected Plaid path ${path}`);
+  };
+  try {
+    seedOwnedEntity(f, "fixture-owner", "Fixture Owner");
+    savedAccount(f, { item: oldItem, removed: true });
+    f.raw("UPDATE fin_accounts SET entity_slug='fixture-owner' WHERE source_feed=?", `bank-feed:${oldItem}`);
+    for (const suffix of ["one", "two"]) {
+      f.raw(`INSERT INTO fin_transactions
+        (tenant_id,txn_uid,account_slug,posted_on,amount_minor,direction,raw_amount_minor,
+         raw_sign_convention,currency,description,pending,external_id,provenance,source_locator,
+         source_feed,basis_state,recorded_at)
+        VALUES ('primary',?,'ledger-ambiguous-removed-item','2026-09-20',1000,'outflow',1000,
+                'feed_positive_amount_is_outflow','USD','Repeated fixture transaction',0,?,
+                'feed',?,?,'confirmed',?)`,
+      `plaid:prior-${suffix}`, `prior-${suffix}`, `plaid/transactions/prior-${suffix}`,
+      `bank-feed:${oldItem}`, stamp);
+    }
+    await session(f, "ambiguous-session-0001", { now: stamp });
+    await completePlaidLink(f.env, {
+      sessionRef: "ambiguous-session-0001", publicToken: "synthetic-public",
+      institutionRef: "synthetic-bank", institutionLabel: "Synthetic Bank",
+      accounts: [{
+        id: "replacement-account", name: "Operating", mask: "1234",
+        type: "depository", subtype: "checking",
+      }],
+      fetchImpl, now: stamp,
+    });
+    const result = await syncPlaidItem(f.env, newItem, { fetchImpl, now: stamp });
+    assert.equal(syncReads, 1, "the replacement history decision point must read the staged provider window");
+    assert.equal(result.code, "plaid_reconnect_transaction_review_required");
+    assert.equal(result.cursor_advanced, false);
+    assert.equal(f.first(
+      "SELECT COUNT(*) AS n FROM plaid_sync_stage_transactions WHERE provider_transaction_id='replacement-ambiguous'",
+    ).n, 1, "the ambiguous replacement row must remain staged");
+    assert.equal(f.first("SELECT COUNT(*) AS n FROM fin_transactions WHERE removed_at IS NULL").n, 2);
+    assert.equal(f.first("SELECT cursor FROM bank_feed_items WHERE item_ref=?", newItem).cursor, null);
+    assert.equal(f.first(
+      "SELECT source_feed FROM fin_accounts WHERE account_slug='ledger-ambiguous-removed-item'",
+    ).source_feed, `bank-feed:${oldItem}`);
+    assert.equal(f.first(
+      "SELECT COUNT(*) AS n FROM plaid_account_entity_assignments WHERE item_ref=?", newItem,
+    ).n, 0, "an ambiguous history window must not copy the retained owner assignment");
+  } finally { f.close(); }
+});
+
+test("authoritative persistent identity conflict quarantines the replacement Item", async () => {
+  const f = await createProductFixture({ env: config });
+  const oldItem = "persistent-removed-item";
+  const newItem = "persistent-replacement-item";
+  const stamp = "2026-09-24T17:00:00.000Z";
+  let exchanges = 0;
+  let syncReads = 0;
+  const fetchImpl = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/item/public_token/exchange") {
+      exchanges += 1;
+      return json({ item_id: newItem, access_token: "replacement-access" });
+    }
+    if (path === "/accounts/get") {
+      return json({ accounts: [{
+        account_id: "replacement-account", persistent_account_id: "stable-account-two",
+        name: "Operating", mask: "1234", type: "depository", subtype: "checking",
+        balances: { current: "100.00", available: "100.00", iso_currency_code: "USD" },
+      }] });
+    }
+    if (path === "/transactions/sync") {
+      syncReads += 1;
+      return json({
+        added: [], modified: [], removed: [], next_cursor: "held-persistent-cursor", has_more: false,
+        transactions_update_status: "HISTORICAL_UPDATE_COMPLETE",
+      });
+    }
+    throw new Error(`unexpected Plaid path ${path}`);
+  };
+  try {
+    seedOwnedEntity(f, "fixture-owner", "Fixture Owner");
+    savedAccount(f, { item: oldItem, removed: true, persistentAccountId: "stable-account-one" });
+    f.raw("UPDATE fin_accounts SET entity_slug='fixture-owner' WHERE source_feed=?", `bank-feed:${oldItem}`);
+    await session(f, "persistent-session-0001", { now: stamp });
+    await completePlaidLink(f.env, {
+      sessionRef: "persistent-session-0001", publicToken: "synthetic-public",
+      institutionRef: "synthetic-bank", institutionLabel: "Synthetic Bank",
+      accounts: [{
+        id: "replacement-account", name: "Operating", mask: "1234",
+        type: "depository", subtype: "checking",
+      }],
+      fetchImpl, now: stamp,
+    });
+    const result = await syncPlaidItem(f.env, newItem, { fetchImpl, now: stamp });
+    assert.equal(exchanges, 1, "the authoritative post-exchange identity decision must be reached");
+    assert.equal(syncReads, 1, "the replacement window must be staged before quarantine");
+    assert.equal(result.code, "plaid_reconnect_transaction_review_required");
+    assert.equal(f.first("SELECT COUNT(*) AS n FROM plaid_sync_stage_accounts WHERE window_ref IS NOT NULL").n, 1);
+    assert.equal(f.first("SELECT source_feed FROM fin_accounts WHERE account_slug=?", `ledger-${oldItem}`).source_feed,
+      `bank-feed:${oldItem}`);
+    assert.equal(f.first(
+      "SELECT COUNT(*) AS n FROM plaid_account_entity_assignments WHERE item_ref=?", newItem,
+    ).n, 0);
+    assert.equal(f.first("SELECT cursor FROM bank_feed_items WHERE item_ref=?", newItem).cursor, null);
+  } finally { f.close(); }
+});
+
+test("reattach refuses cross-environment and conflicting account identities before exchange", async () => {
+  const cases = [
+    {
+      label: "cross-environment",
+      saved: { environment: "production" },
+      incoming: { id: "replacement-account", name: "Operating", mask: "1234", type: "depository", subtype: "checking" },
+    },
+    {
+      label: "different-name",
+      saved: {},
+      incoming: { id: "replacement-account", name: "Reserve", mask: "1234", type: "depository", subtype: "checking" },
+    },
+    {
+      label: "different-type",
+      saved: {},
+      incoming: { id: "replacement-account", name: "Operating", mask: "1234", type: "credit", subtype: "credit card" },
+    },
+    {
+      label: "different-persistent-id",
+      saved: { persistentAccountId: "stable-account-one" },
+      incoming: {
+        id: "replacement-account", name: "Operating", mask: "1234", type: "depository", subtype: "checking",
+        persistentAccountId: "stable-account-two",
+      },
+    },
+  ];
+  for (const variant of cases) {
+    const f = await createProductFixture({ env: config });
+    let exchanges = 0;
+    try {
+      savedAccount(f, { ...variant.saved, removed: true });
+      const before = { ...f.first(
+        "SELECT entity_slug,external_ref,source_feed FROM fin_accounts WHERE account_slug='ledger-existing-item'",
+      ) };
+      await session(f, `identity-${variant.label}-0001`);
+      await assert.rejects(completePlaidLink(f.env, {
+        sessionRef: `identity-${variant.label}-0001`, publicToken: "synthetic-public",
+        institutionRef: "synthetic-bank", accounts: [variant.incoming],
+        fetchImpl: async () => {
+          exchanges += 1;
+          return json({ item_id: "replacement-item", access_token: "replacement-access" });
+        },
+      }), { code: "plaid_duplicate_connection_review" }, variant.label);
+      assert.equal(exchanges, 0, `${variant.label}: refusal must occur before provider exchange`);
+      assert.deepEqual({ ...f.first(
+        "SELECT entity_slug,external_ref,source_feed FROM fin_accounts WHERE account_slug='ledger-existing-item'",
+      ) }, before, `${variant.label}: refusal must not rewrite ledger ownership or feed identity`);
+      assert.equal(f.first(
+        "SELECT state FROM plaid_link_operations WHERE session_ref=?", `identity-${variant.label}-0001`,
+      ).state, "link_ready", `${variant.label}: the pre-exchange decision point must release the claim`);
+    } finally { f.close(); }
+  }
 });
 
 test("a removed connection with only a partial account match still refuses before exchange", async () => {

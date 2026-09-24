@@ -322,6 +322,7 @@ export function bankFeedOwnerErrorMessage(data, status) {
     entity_not_owned: "That business is not owner-controlled, so the account was not assigned to it.",
     request_id_conflict: "This saved retry belongs to a different choice. Refresh the page and try again.",
     plaid_duplicate_connection_review: "This bank may already be connected. Check the saved connections below and use Repair connection if you need to sign in again. We have not added another copy. If these are separate accounts, their overlap needs review first.",
+    plaid_reconnect_transaction_review_required: "Replacement history is waiting for review because the Brain could not prove one exact match. Nothing uncertain was added to live totals.",
     plaid_connection_in_progress: "Another bank connection is still finishing. Check its result before starting another connection. Your saved accounts are unchanged.",
     plaid_link_handoff_rejected: "That connection link is no longer usable. Your existing accounts are unchanged. Select Connect a bank to start again.",
     BANK_WRITES_PAUSED: "Your Brain is finishing a verified update. Your bank connections and saved choices are safe. Please return to this step after the update finishes.",
@@ -1387,12 +1388,12 @@ h1{font-size:1.5rem;margin-bottom:.5rem}h2{font-size:1.15rem;margin:0 0 .4rem}p{
 <h1>Connect a bank account</h1>
 <p>Sign in through ${config.provider === "plaid" ? "Plaid" : "your bank connection provider"} or your bank's secure screen. Financial Brain does not receive your bank
 password or security codes. This connection reads your accounts and transactions. It cannot move money.</p>
-<p class="note">Environment: ${config.environment}. To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect. Disconnecting removes the bank connection and any bank data still waiting for an owner choice. Ledger history already saved stays. If you reconnect the same bank later, matching saved accounts resume in place instead of being added again.</p>
+<p class="note">Environment: ${config.environment}. To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect. Disconnecting removes the bank connection and any bank data still waiting for an owner choice. Ledger history already saved stays. A reconnect resumes only an exact saved account match. Replacement history stays waiting until each retained transaction is matched without ambiguity.</p>
 <div class="actions"><button id="start">Connect a bank</button><a href="/app">Back to your Brain</a></div>
 <p id="status" role="status" aria-live="polite"></p>
 <section class="panel" aria-labelledby="connections-heading">
   <h2 id="connections-heading">Your saved connections</h2>
-  <p class="note">If a live bank needs sign-in, use Repair connection. After a disconnect, use Connect a bank; matching saved accounts resume without another copy. Use Connect a bank for a different bank or truly separate accounts.</p>
+  <p class="note">If a live bank needs sign-in, use Repair connection. After a disconnect, use Connect a bank. Exact saved account and transaction matches resume in place; anything uncertain waits for review. Use Connect a bank for a different bank or truly separate accounts.</p>
   <div id="connections" aria-live="polite">Checking saved connections…</div>
 </section>
 <section class="panel" aria-labelledby="accounts-heading">
@@ -1649,6 +1650,7 @@ async function start(existing) {
           institution_label: meta && meta.institution && meta.institution.name,
           accounts: meta && Array.isArray(meta.accounts) ? meta.accounts.map((account) => ({
             id: account.id, name: account.name, mask: account.mask, type: account.type, subtype: account.subtype,
+            persistent_account_id: account.persistent_account_id || null,
           })) : null,
         });
         try {
