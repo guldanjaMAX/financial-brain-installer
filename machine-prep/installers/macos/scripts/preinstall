@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -eu
+
+MINIMUM_VERSION="13.5"
+CURRENT_VERSION="${MACHINE_PREP_OS_VERSION_OVERRIDE:-$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)}"
+printf 'OS_DECISION_REACHED=1 current=%s minimum=%s\n' "${CURRENT_VERSION:-unknown}" "$MINIMUM_VERSION"
+
+major=${CURRENT_VERSION%%.*}
+rest=${CURRENT_VERSION#*.}
+minor=${rest%%.*}
+case "$major:$minor" in
+  *[!0-9:]*|:|*:)
+    printf 'REFUSED unable to determine the macOS version\n' >&2
+    exit 2
+    ;;
+esac
+
+if [ "$major" -lt 13 ] || { [ "$major" -eq 13 ] && [ "$minor" -lt 5 ]; }; then
+  printf 'REFUSED macOS 13.5 or newer is required; no machine preparation started\n' >&2
+  exit 2
+fi
+
+printf 'OS_SUPPORTED=1\n'
