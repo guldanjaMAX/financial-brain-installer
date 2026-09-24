@@ -501,6 +501,13 @@ contact the Brain, so already-loaded and cross-source hash matches remain
 explicitly unobservable until the read-only inventory contract gains that
 aggregate comparison.
 
+After a load, `brain load-report <manifest>` combines authenticated latest-run
+source counters, the indexed exact-document duplicate diagnostic, and local
+checkpoint refusal reasons without emitting paths or message identifiers.
+`--json` returns the same aggregate contract. A legacy run without measured
+refused/failed counters stays unknown, and large-corpus chunk outliers remain
+unobservable when the bounded diagnostic declines that scan.
+
 ---
 
 ## Using it: Claude Code and Codex

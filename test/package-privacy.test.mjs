@@ -448,6 +448,7 @@ const expected = [
   "ingest/ics.mjs",
   "ingest/formats.mjs",
   "ingest/load-preview.mjs",
+  "ingest/load-report.mjs",
   "ingest/mbox.mjs",
   "ingest/ocr.mjs",
   "ingest/outcome.mjs",

@@ -426,7 +426,7 @@ export function supportSourceForCommand(command = "") {
   if (command === "ocr-preflight" || command === "provenance-assess" ||
       command === "ingest-file-preview") return "local";
   if (command === "update-preview" || command === "ingest-file-apply") return "brain-data-plane";
-  if (["financial-picture", "machine-continuity"].includes(command)) return "brain-data-plane";
+  if (["financial-picture", "machine-continuity", "load-report"].includes(command)) return "brain-data-plane";
   if (command === "ingest") {
     const index = process.argv.indexOf("--from");
     const remote = index >= 0 ? process.argv[index + 1] : null;
@@ -22012,18 +22012,23 @@ async function cmdEval(manifestPath) {
   return assertEvalSucceeded(r);
 }
 
-async function cmdDiagnose(manifestPath) {
+async function readDiagnosis(manifestPath, options = {}) {
+  if (options.diagnosis) return options.diagnosis;
   const { m } = loadManifest(manifestPath);
   // Cloudflare is OPTIONAL here, deliberately. This command talks to the worker
   // over plain HTTPS with the admin key, so it must keep working after our token
   // is revoked at handoff. A command that proves the brain works, but only while
   // we still hold a key to the client's account, proves the wrong thing.
-  const acct = m.brain?.domain ? null : await resolveAccount(m);
-  const base = await resolveBaseUrl(m, acct);
-  const adminKey = resolveAdminKey(manifestPath);
+  const resolveAcct = options.resolveAccount ?? resolveAccount;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const request = options.http ?? http;
+  const acct = m.brain?.domain ? null : await resolveAcct(m);
+  const base = await resolveBase(m, acct);
+  const adminKey = resolveKey(manifestPath);
   if (!adminKey) die("no durable admin key was found. Repair it with `brain setup <manifest>` or `brain secrets <manifest>`.");
 
-  const res = await http(`${base}/api/admin/brain/diagnose`, { headers: { "X-Admin-Key": adminKey } },
+  const res = await request(`${base}/api/admin/brain/diagnose`, { headers: { "X-Admin-Key": adminKey } },
     { timeoutMs: 120_000, what: "the diagnostic" });
   const raw = await res.text();
   let r = null;
@@ -22036,9 +22041,49 @@ async function cmdDiagnose(manifestPath) {
   if (!res.ok) die(`diagnose failed (${res.status}): ${raw.slice(0, 200)}`);
   if (!receipt.ok) die(`diagnose returned HTTP success without a trustworthy receipt: ${receipt.reason}.`);
 
+  return r;
+}
+
+export async function cmdDiagnose(manifestPath, options = {}) {
+  const r = await readDiagnosis(manifestPath, options);
+
   renderDiagnosis(r);
   renderMalformedDriveIdentities(readMalformedDriveIdentities(manifestPath));
   return r;
+}
+
+function localCheckpointSkips(manifestPath, sources) {
+  const result = {};
+  for (const source of sources || []) {
+    const name = String(source?.name || source?.source_id || "");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) continue;
+    const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: name });
+    try {
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      result[name] = state?.skipped && typeof state.skipped === "object" ? state.skipped : {};
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      result[name] = {};
+    }
+  }
+  return result;
+}
+
+export async function cmdLoadReport(manifestPath, options = {}) {
+  const flags = options.flags ?? parseFlags(process.argv.slice(4));
+  assertKnownFlags(flags, ["json"], "brain load-report");
+  if (flags.json !== undefined && flags.json !== true) die("--json does not take a value");
+  const inventory = options.inventory ?? await cmdSources(manifestPath, {
+    ...(options.sourceOptions || {}),
+    flags: { json: true },
+    silent: true,
+  });
+  const diagnosis = await readDiagnosis(manifestPath, options.diagnosisOptions || options);
+  const checkpointSkips = options.checkpointSkips ?? localCheckpointSkips(manifestPath, inventory.sources);
+  const { buildLoadQualityReport, renderLoadQualityReport } = await import("./ingest/load-report.mjs");
+  const report = buildLoadQualityReport({ inventory, diagnosis, checkpointSkips });
+  console.log(flags.json ? JSON.stringify(report, null, 2) : renderLoadQualityReport(report));
+  return report;
 }
 
 export function readMalformedDriveIdentities(manifestPath) {
@@ -27060,6 +27105,7 @@ const commands = {
   }),
   import: cmdImport,
   load: cmdLoad,
+  "load-report": cmdLoadReport,
   connect: cmdConnect,
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
@@ -27100,6 +27146,7 @@ const versionRequested = VERSION_ARGUMENTS.has(cmd);
 // same decision the installed CLI uses.
 const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "sources",
+  "load-report",
   "financial-picture",
   "machine-continuity",
   "provenance-assess",
@@ -27198,12 +27245,18 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end
+    brain load-report <manifest>           read-only after-load quality totals from indexed source
+                                           receipts, duplicate diagnostics, and local skip reasons;
+                                           --json returns the same aggregate contract
     brain ocr-preflight <manifest> --path <dir> --json
                                            read-only aggregate scanned-PDF plan: affected and
                                            cap-eligible pages, priced-model estimate, daily cap,
                                            shared-budget and local file-provider unknowns; no OCR,
                                            app HTTP/key-store, Brain, or local-state write
     brain ingest     <manifest> --path <dir>  load a folder into the brain
+                                           add --dry-run for an aggregate load preview;
+                                           --preview-report <file> writes private file-level detail;
+                                           --vectors-per-minute <measured rate> refines the ETA
     brain ingest-file <manifest> --source <id> --file <direct-name> --expect-runtime-sha256 <64hex> --json
                                            read-only Windows x64 preview of exactly one direct
                                            native-text file in its dedicated manifest source root
