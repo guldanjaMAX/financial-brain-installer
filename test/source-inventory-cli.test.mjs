@@ -531,7 +531,7 @@ test("shipped source guidance uses v3 JSON or the actual concise human columns",
   assert.match(shippedGuidance, /source-inventory `contract_version: 3`/i);
   assert.match(shippedGuidance, /`receipt\.logical_matches_reported`.*`storage\.logical_documents`/is);
 
-  const scheduler = schedulePlatformLimitation("win32", String.raw`C:\Users\owner\brain.manifest.json`);
+  const scheduler = schedulePlatformLimitation("linux", "/home/owner/brain.manifest.json");
   assert.match(scheduler, /brain sources <manifest> --json.*`contract_version: 3`.*receipt\.last_successful_run_at/is);
   assert.doesNotMatch(scheduler, /last-ingest time moving|`last ingest` column/i);
 });
