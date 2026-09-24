@@ -10,8 +10,8 @@
 
 import { spawnSync } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
-import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
+import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import {
@@ -52,6 +52,38 @@ export function keychainChildEnvironment(environment = process.env) {
     if (typeof value === "string" && value) clean[name] = value;
   }
   return clean;
+}
+
+/**
+ * Whether this account has a usable macOS Keychain at all.
+ *
+ * A throwaway or freshly created HOME with no login keychain is not a
+ * transient failure worth retrying: `security add-generic-password` run
+ * under such a HOME can block waiting on a keychain that does not exist,
+ * with no prompt the write helper's pseudo-tty is watching for and nothing
+ * to time out cleanly against. A plain file check catches that case before
+ * any child process starts, instead of after one hangs.
+ *
+ * Not darwin: trivially true, since a keychain locator is refused for every
+ * other platform in adminKeyPersistencePlan before this would ever run.
+ */
+export function macKeychainUsable(options = {}) {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "darwin") return true;
+  const home = options.home ?? process.env.HOME;
+  if (!home) return false;
+  const exists = options.exists ?? existsSync;
+  const readdir = options.readdir ?? readdirSync;
+  // macOS paths on purpose: this check only means anything for darwin, and a
+  // darwin shape simulated on another host (tests, Windows CI) must still build
+  // "/Users/.../Library/Keychains", not a backslash path the host would produce.
+  const keychainsDir = posix.join(home, "Library", "Keychains");
+  if (exists(posix.join(keychainsDir, "login.keychain-db"))) return true;
+  try {
+    return readdir(keychainsDir).some((name) => name.endsWith(".keychain-db"));
+  } catch {
+    return false;
+  }
 }
 
 /** Parse the non-secret Keychain locator allowed in operations.admin_key_secret. */
