@@ -356,6 +356,23 @@ empty index.
 
 `brain ingest` walks a folder, extracts text, and sends it in batches.
 
+Folder identity lives in `operations/folder-identity.mjs`. Paths are locators,
+not identity: the module records a macOS NSURL bookmark when available, an NTFS
+file ID on Windows when available, and a portable hidden marker for every
+manifest home and declared local root. Resolution checks the saved path with
+one stat, then tries the native identity and a bounded marker search. A unique
+match is adopted; zero matches fail loudly; multiple matching markers refuse
+until `brain relocate --to` selects one. The marker and identity state are
+product bookkeeping and are excluded from ingest.
+
+Manifest-home adoption refreshes only product-owned references: the private
+installed-manifest pointer, an existing entry for this Brain in assistant MCP
+configuration, and already-installed LaunchAgents. Each underlying reconciler
+retains its exact readback and rollback contract. The relocation layer also
+writes a private manifest backup and scans only the Brain folder plus
+`~/.claude/scheduled-tasks/*/SKILL.md` for owner files that still contain the old
+path. It warns and never edits those files.
+
 **Resumable by design.** Progress is keyed by content hash and saved after every
 batch, so re-running the same command continues an interrupted load rather than
 restarting it. That is the normal way a large import finishes, not a recovery

@@ -796,6 +796,7 @@ const expected = [
   "operations/drive-removal-plan.mjs",
   "operations/drive-scheduler.mjs",
   "operations/folder-scheduler.mjs",
+  "operations/folder-identity.mjs",
   "operations/imessage-scheduler.mjs",
   "operations/whatsapp-daemon.mjs",
   "operations/whatsapp-drain-scheduler.mjs",
@@ -911,6 +912,9 @@ const dependencyMismatch = SCAN_ONLY ? [] : [...reviewedBundles].filter(([name, 
   !files.includes(`node_modules/${name}/package.json`)
 );
 const requiredGitIgnored = [
+  ".financial-brain-folder.json",
+  ".brain-folder-identities.json",
+  ".brain-folder-relocation-backup.json",
   ".brain-admin-key",
   ".brain-admin-key.tmp-deadbeef",
   ".brain-curated-sync-plan.json",

@@ -305,6 +305,23 @@ resumable. A failure stays retryable. Drive policy changes and periodic full
 sweeps compare source truth with stored families so excluded, deleted, moved,
 or no-longer-accessible files can be removed safely.
 
+Local folder identity is separate from the path stored in the manifest.
+`operations/folder-identity.mjs` keeps owner-private product state, a native
+bookmark or file identity where the operating system supports it, and one
+portable `.financial-brain-folder.json` marker inside each tracked root. The
+fast path is one stat per saved path. Missing paths resolve through the native
+identity and then a depth- and directory-bounded marker search across approved
+user roots, never the whole disk. Exactly one identity match may update a path;
+copies refuse and missing identities fail without creating removal evidence.
+Local document IDs and `.brain-ingest-<source>.json` keys remain relative to the
+source root, so adopting the same tree changes neither document identity nor
+content hash.
+
+On macOS a file with the `dataless` flag is not deletion evidence. The local
+walker requests `brctl download` and waits for a fixed bound. If hydration does
+not finish, the existing relative key remains protected, the skip reason is
+explicit, and no placeholder is created.
+
 Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
 owner lease keyed to the canonical adjacent source-state path. The lease is
 acquired before credential or network access, checked before every document or
