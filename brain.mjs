@@ -10572,6 +10572,32 @@ async function cmdForget(manifestPath) {
 
 
 const OCR_PREFLIGHT_PDF_NAME = /\.pdf$/iu;
+const OCR_PREFLIGHT_FILE_CONCURRENCY = 2;
+
+async function mapOrderedBounded(items, fn, concurrency) {
+  const values = Array.from(items || []);
+  if (!values.length) return [];
+  const results = new Array(values.length);
+  const width = Math.min(values.length, Math.max(1, Math.floor(Number(concurrency) || 1)));
+  let next = 0;
+  let stopped = false;
+  let firstError = null;
+  const workers = Array.from({ length: width }, async () => {
+    while (!stopped) {
+      const index = next++;
+      if (index >= values.length) return;
+      try {
+        results[index] = await fn(values[index], index);
+      } catch (error) {
+        stopped = true;
+        firstError ??= error;
+      }
+    }
+  });
+  await Promise.all(workers);
+  if (firstError) throw firstError;
+  return results;
+}
 
 function ocrPreflightFail(code) {
   throw new JsonFatal(ocrPreflightFailureReceipt(code));
@@ -10690,28 +10716,30 @@ export async function cmdOcrPreflight(manifestPath, options = {}) {
     .filter((file) => OCR_PREFLIGHT_PDF_NAME.test(String(file?.name || "")))
     .sort((left, right) => String(left?.rel || left?.name || "")
       .localeCompare(String(right?.rel || right?.name || "")));
-  for (const file of pdfFiles) {
+  // PDF inspection runs in an isolated child process. Keep two in flight so
+  // one parser can use another core without multiplying the largest-file memory
+  // bound across the machine. Results stay in sorted source order, which keeps
+  // the plan fingerprint deterministic regardless of completion order.
+  const preparedFiles = await mapOrderedBounded(pdfFiles, async (file) => {
     try {
       const prepared = await localIngest.prepare(file, {
         sourceName: "ocr-preflight",
         ocr: null,
       });
-      // Missing structured evidence is deliberately an invalid observation,
-      // not a reason to recover state from the private path or human error.
-      observations.push(prepared?.observation ?? null);
-      fileBindings.push({
-        locator: String(file?.rel || file?.name || ""),
-        content_sha256: /^[a-f0-9]{64}$/u.test(String(prepared?.hash || "")) ? prepared.hash : null,
-        observation: prepared?.observation ?? null,
-      });
+      return { file, prepared };
     } catch {
-      observations.push(null);
-      fileBindings.push({
-        locator: String(file?.rel || file?.name || ""),
-        content_sha256: null,
-        observation: null,
-      });
+      return { file, prepared: null };
     }
+  }, OCR_PREFLIGHT_FILE_CONCURRENCY);
+  for (const { file, prepared } of preparedFiles) {
+    // Missing structured evidence is deliberately an invalid observation,
+    // not a reason to recover state from the private path or human error.
+    observations.push(prepared?.observation ?? null);
+    fileBindings.push({
+      locator: String(file?.rel || file?.name || ""),
+      content_sha256: /^[a-f0-9]{64}$/u.test(String(prepared?.hash || "")) ? prepared.hash : null,
+      observation: prepared?.observation ?? null,
+    });
   }
 
   let receipt;

@@ -550,6 +550,53 @@ test("the plan fingerprint changes with the exact OCR model and pricing basis", 
   }
 });
 
+test("OCR preflight parses two PDFs at a time while preserving deterministic file order", async () => {
+  const sourceRoot = mkdtempSync(join(tmpdir(), "brain-ocr-bounded-parallel-"));
+  const manifestPath = join(sourceRoot, "outside-source-manifest.json");
+  const files = Array.from({ length: 6 }, (_, index) => ({
+    name: `synthetic-${String(index).padStart(2, "0")}.pdf`,
+    rel: `synthetic-${String(index).padStart(2, "0")}.pdf`,
+  }));
+  const run = async (reverseDelays) => {
+    let active = 0;
+    let maxActive = 0;
+    const completionOrder = [];
+    const receipt = await cmdOcrPreflight(manifestPath, {
+      flags: { path: sourceRoot, json: true },
+      readManifest: () => ({ safety: { ocr: { enabled: false, max_pages_per_document: 40 } } }),
+      ingestLib: async () => ({
+        walk: () => ({ complete: true, files: [...files].reverse(), skipped: [] }),
+        prepare: async (file) => {
+          active++;
+          maxActive = Math.max(maxActive, active);
+          const index = Number.parseInt(file.name.match(/(\d+)\.pdf$/u)?.[1] || "0", 10);
+          const delay = reverseDelays ? index : files.length - index;
+          await new Promise((resolve) => setTimeout(resolve, delay * 4));
+          active--;
+          completionOrder.push(file.rel);
+          return { hash: String(index).padStart(64, "0"), observation: scan(index + 1) };
+        },
+      }),
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    });
+    return { receipt, maxActive, completionOrder };
+  };
+  try {
+    const slowFirst = await run(false);
+    const fastFirst = await run(true);
+    assert.equal(slowFirst.maxActive, 2);
+    assert.equal(fastFirst.maxActive, 2);
+    assert.notDeepEqual(slowFirst.completionOrder, fastFirst.completionOrder,
+      "the probe must actually complete extraction in different orders");
+    assert.equal(slowFirst.receipt.plan_fingerprint, fastFirst.receipt.plan_fingerprint,
+      "completion order must not change the plan fingerprint");
+    assert.deepEqual(slowFirst.receipt.pages, fastFirst.receipt.pages);
+  } finally {
+    rmSync(sourceRoot, { recursive: true, force: true });
+  }
+});
+
 test("prepare retains the structured scan observation while its private skip stays separate", async () => {
   const root = mkdtempSync(join(tmpdir(), "brain-ocr-observation-"));
   const name = "private-record.ocrplanfixture";
