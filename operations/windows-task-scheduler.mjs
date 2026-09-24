@@ -173,6 +173,7 @@ export function buildWindowsSchedulerPlan(manifestPath, options = {}) {
     ? windowsAbsolute(options.localAppData || options.environment?.LOCALAPPDATA, options)
     : null;
   const brainPath = installing ? win32.join(localAppData, "FinancialBrain", "brain.cmd") : null;
+  const localTimeZone = options.localTimeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || null;
   const taskName = `com.brain-installer.${slug}.${spec.kind}`;
   const childArguments = installing ? spec.childArgumentsOf(reference).map((argument, index, args) =>
     index === 1 || args[index - 1] === "--path" ? windowsAbsolute(argument, options) : String(argument)
@@ -184,6 +185,7 @@ export function buildWindowsSchedulerPlan(manifestPath, options = {}) {
   const plan = {
     cron,
     expectedRefreshSeconds: installing ? expectedRefreshSecondsForCron(cron, spec.cronLabels) : null,
+    localTimeZone,
     manifestPath: reference.path,
     brainPath,
     taskName,

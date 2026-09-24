@@ -1039,7 +1039,8 @@ the CLI refuses before authorizing document deletion.
   installation, stays yellow after the first unattended success, and turns
   green only after the Brain has stored a second distinct successful run. The
   proof is server-side, so a local task definition alone cannot claim that the
-  source is actually refreshing.
+  source is actually refreshing. The reported next run comes from the declared
+  cron in the scheduler machine's timezone, not from the freshness grace period.
 - **The Brain notices a missed refresh.** Its Worker cron checks only the small
   source registry and indexed schedule events. When a source goes more than one
   expected cadence plus grace without a successful unattended run, status and

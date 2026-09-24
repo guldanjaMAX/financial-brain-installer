@@ -424,13 +424,17 @@ Linux does not yet have an equivalent unattended source scheduler. The
 iMessage and other Mac-only capture daemons remain LaunchAgent-only.
 
 Schedule installation records `schedule_install` in `source_events`; removal
-records `schedule_remove`. Every packaged scheduler adds the internal
-`--scheduled-run` marker to the ordinary ingest command. A successful ready
-receipt with that marker records one `schedule_run` event only when its run ID
-has not already completed. The freshness projection counts those durable events
-after the latest install. Zero is waiting for the first run, one is waiting for
-the second, and two or more is proven. Local scheduler state never supplies
-that proof by itself.
+records `schedule_remove`. The install event carries the five-field cron and the
+scheduler machine's IANA timezone, while `expected_refresh_seconds` remains the
+longest allowed freshness gap. Every packaged scheduler adds the internal
+`--scheduled-run` command flag, but the receipt adapter applies the durable
+marker only to its terminal `ready` receipt. Opening `indexing` and terminal
+`error` receipts remain unmarked. A successful ready receipt with that marker
+records one `schedule_run` event only when its run ID has not already completed.
+The freshness projection counts those durable events after the latest install
+and derives `next_run_at` from the cron and current time. Zero runs is waiting
+for the first run, one is waiting for the second, and two or more is proven.
+Local scheduler state never supplies that proof by itself.
 
 The Worker cron runs `runMissedSourceWatchdog` alongside existing bounded
 maintenance. It performs one source-registry read ordered by the source primary

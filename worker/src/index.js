@@ -101,6 +101,7 @@ import {
   isSourceKindConflict, normalizeSourceFailureEvidence, normalizeSourceReceiptIssueCode,
   resolveSourceKind, sourceReceiptOwnerMessage,
 } from "./lib/source-receipt.js";
+import { nextCronFiring } from "./lib/cron-schedule.js";
 import {
   beginOwnerNoteWrite, completeOwnerNoteWrite, failOwnerNoteWrite, OwnerNoteLifecycleError,
 } from "./lib/owner-notes.js";
@@ -2292,6 +2293,28 @@ async function handleSourceExpectation(env, request) {
   if (expected !== null && (!Number.isSafeInteger(expected) || expected < 60)) {
     return jsonResponse({ error: "expected_refresh_seconds must be null or an integer at least 60" }, 400);
   }
+  const scheduleCron = body?.schedule_cron;
+  const scheduleTimezone = body?.schedule_timezone;
+  const hasScheduleCron = scheduleCron !== undefined;
+  const hasScheduleTimezone = scheduleTimezone !== undefined;
+  if (hasScheduleCron !== hasScheduleTimezone || (expected === null && hasScheduleCron)) {
+    return jsonResponse({
+      error: "schedule_cron and schedule_timezone are required together for an installed schedule",
+    }, 400);
+  }
+  if (hasScheduleCron) {
+    if (typeof scheduleCron !== "string" || scheduleCron.length > 128 ||
+        typeof scheduleTimezone !== "string" || scheduleTimezone.length > 128) {
+      return jsonResponse({ error: "schedule metadata is invalid" }, 400);
+    }
+    try {
+      if (!nextCronFiring(scheduleCron, { afterMs: Date.now(), timeZone: scheduleTimezone })) {
+        return jsonResponse({ error: "schedule metadata has no next firing" }, 400);
+      }
+    } catch (error) {
+      return jsonResponse({ error: error.message }, 400);
+    }
+  }
 
   let kind;
   if (!kindWasProvided) {
@@ -2325,7 +2348,13 @@ async function handleSourceExpectation(env, request) {
   const at = new Date().toISOString();
   const detail = expected === null
     ? "expected_refresh_seconds=off"
-    : `expected_refresh_seconds=${expected}`;
+    : hasScheduleCron
+      ? JSON.stringify({
+          expected_refresh_seconds: expected,
+          schedule_cron: scheduleCron,
+          schedule_timezone: scheduleTimezone,
+        })
+      : `expected_refresh_seconds=${expected}`;
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO sources (name,kind,status,created_at,expected_refresh_seconds)
@@ -2339,7 +2368,15 @@ async function handleSourceExpectation(env, request) {
     ).bind(source, expected === null ? "schedule_remove" : "schedule_install", at, detail),
   ]);
 
-  return jsonResponse({ source, kind, expected_refresh_seconds: expected });
+  return jsonResponse({
+    source,
+    kind,
+    expected_refresh_seconds: expected,
+    ...(hasScheduleCron ? {
+      schedule_cron: scheduleCron,
+      schedule_timezone: scheduleTimezone,
+    } : {}),
+  });
 }
 
 /** Register one source through the same paused-write barrier as every ingest. */

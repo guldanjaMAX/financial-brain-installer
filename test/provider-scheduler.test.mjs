@@ -71,6 +71,7 @@ try {
         scheduleCalls.push(["install", ...args]);
         return {
           cron: "15 */2 * * *", expectedRefreshSeconds: 7_200,
+          localTimeZone: "UTC",
           plistPath: "/fixture/provider.plist", stdoutPath: "/fixture/out", stderrPath: "/fixture/err",
           warnings: [],
         };
@@ -91,6 +92,7 @@ try {
       expectationCalls[0][1] === "fixture-admin-key" &&
       JSON.stringify(expectationCalls[0][2]) === JSON.stringify({
         source: "client-chat", kind: "slack", expected_refresh_seconds: 7_200,
+        schedule_cron: "15 */2 * * *", schedule_timezone: "UTC",
       }),
     JSON.stringify(expectationCalls));
   check("--provider is a required-value flag, so a bare spelling cannot select a scheduler accidentally",

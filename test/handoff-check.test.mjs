@@ -40,21 +40,27 @@ const manifest = {
     writeFileSync(manifestPath, JSON.stringify(manifest));
     let output = "";
     let exitCode = null;
+    let remoteReads = 0;
+    let scheduleReads = 0;
     const result = await cmdHandoffCheck(manifestPath, {
       flags: { json: true },
-      readFreshness: async () => ({ sources: [{
-        name: "mail", kind: "gmail", source_status: "ready", state: "ok", reason: null,
-        schedule: {
-          state: "waiting_second", installed: true, first_run_at: "2026-09-24T17:05:00.000Z",
-          second_run_observed: false, next_run_at: "2026-09-24T18:05:00.000Z",
-        },
-      }] }),
-      scheduleStatus: async () => ({ installed: true, last_error: null }),
+      readFreshness: async () => {
+        remoteReads++;
+        return { sources: [{
+          name: "mail", kind: "gmail", source_status: "ready", state: "ok", reason: null,
+          schedule: {
+            state: "waiting_second", installed: true, first_run_at: "2026-09-24T17:05:00.000Z",
+            second_run_observed: false, next_run_at: "2026-09-24T18:05:00.000Z",
+          },
+        }] };
+      },
+      scheduleStatus: async () => { scheduleReads++; return { installed: true, last_error: null }; },
       write: (value) => { output += value; },
       setExitCode: (value) => { exitCode = value; },
     });
     check("the public handoff-check command is read-only, machine-readable, and nonzero until complete",
-      result.complete === false && JSON.parse(output).complete === false && exitCode === 2);
+      result.complete === false && JSON.parse(output).complete === false && exitCode === 2 &&
+        remoteReads === 1 && scheduleReads === 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

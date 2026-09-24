@@ -946,8 +946,10 @@ source name bound from its manifest configuration.
 `brain schedule --status` deliberately does not call a locally installed task
 "scheduled." Installation writes a server-side expectation and starts a new
 proof window. Each successful scheduler child posts the ordinary source receipt
-with an internal unattended-run marker and a run ID. The Worker stores that run
-once even when a response retry repeats the receipt. Status remains "installed,
+and only its terminal `ready` receipt carries the internal unattended-run marker
+and run ID. Opening `indexing` and terminal `error` receipts remain ordinary
+lifecycle receipts. The Worker stores a successful run once even when a response
+retry repeats the terminal receipt. Status remains "installed,
 waiting for its first unattended run," then "waiting for its second unattended
 run." Only the second distinct stored success produces green "scheduled and
 proven" wording.
@@ -969,7 +971,11 @@ read-only: it reads `/api/admin/brain/freshness` once and inspects machine-local
 schedule definitions. Each in-scope row reports `connected`,
 `schedule_installed`, `first_run`, `second_run_observed`, `next_run`, and
 `last_error`. Exit code 0 means every row is green; exit code 2 means handoff is
-not ready.
+not ready. A new scheduler install records its five-field cron and the scheduler
+machine's IANA timezone in the server-side schedule event. `next_run` is the next
+actual cron firing after the read time, including weekday gaps. Older or manual
+expectations without that metadata report an unknown next run instead of adding
+the watchdog's longest allowed gap to the previous run.
 
 An enabled source is in scope by default. If the owner chooses not to finish it
 on install day, add its exact source name to

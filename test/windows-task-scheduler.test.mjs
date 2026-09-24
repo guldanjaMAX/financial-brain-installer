@@ -161,11 +161,19 @@ assert.deepEqual(entrypointCalls[0].runOptions.expectedChildArguments,
   ["ingest", manifestPath, "--from", "slack", "--scheduled-run"]);
 assert.deepEqual(entrypointExitCodes, [0]);
 let wranglerBoundaryCalls = 0;
-await brain.runCliCommandWithCredentialBoundary("windows-scheduled-ingest", () => "ran", {
+let scheduledRunnerCalls = 0;
+const scheduledBoundaryResult = await brain.runCliCommandWithCredentialBoundary("windows-scheduled-ingest", () => {
+  scheduledRunnerCalls++;
+  return "ran";
+}, {
   withWranglerSession() { wranglerBoundaryCalls++; throw new Error("must not load Wrangler credentials"); },
 });
 assert.equal(wranglerBoundaryCalls, 0,
   "the scheduled entrypoint does not cross the ambient Wrangler credential boundary");
+assert.equal(scheduledRunnerCalls, 1,
+  "the scheduled entrypoint reached the supplied runner without Wrangler credentials");
+assert.equal(scheduledBoundaryResult, "ran",
+  "the scheduled credential boundary returns the supplied runner's result");
 
 const calls = [];
 const processRunner = (command, args, runOptions) => {

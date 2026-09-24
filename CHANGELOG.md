@@ -22,7 +22,9 @@ asset publication.
   now starts a server-side proof window. The first successful unattended run is
   recorded but still shown as waiting. A second distinct successful run proves
   the schedule. Retrying one receipt cannot count twice, and a local task
-  definition alone never produces green status.
+  definition alone never produces green status. Opening and failed receipts no
+  longer carry the success marker, and the displayed next run now comes from the
+  actual cron in the scheduler machine's timezone.
 
 - **The Brain now detects missed source refreshes itself.** A cheap Worker cron
   read checks expected cadence against the last unattended success. More than

@@ -98,6 +98,7 @@ try {
         return {
           cron: "5 * * * *",
           expectedRefreshSeconds: 3_600,
+          localTimeZone: "UTC",
           plistPath: "/fixture/gmail.plist",
           stdoutPath: "/fixture/out",
           stderrPath: "/fixture/err",
@@ -112,6 +113,7 @@ try {
   check("source install records cadence against the configured source name",
     expectationCalls.length === 1 && JSON.stringify(expectationCalls[0][2]) === JSON.stringify({
       source: "mail", kind: "gmail", expected_refresh_seconds: 3_600,
+      schedule_cron: "5 * * * *", schedule_timezone: "UTC",
     }));
 
   let invalidCalls = 0;

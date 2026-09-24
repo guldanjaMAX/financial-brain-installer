@@ -617,13 +617,26 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
     /not accepted \(503\).*paused for a verified upgrade/is.test(pausedRegistration || ""),
     pausedRegistration);
 
+  let expectationRequest = null;
   const expectation = await postSourceExpectation("https://brain.example", "admin-only", {
     source: "drive", kind: "drive", expected_refresh_seconds: 86_400,
-  }, async () => new Response(JSON.stringify({
-    source: "drive", kind: "drive", expected_refresh_seconds: 86_400,
-  }), { status: 200 }));
+    schedule_cron: "30 7 * * *", schedule_timezone: "America/Phoenix",
+  }, async (_url, init) => {
+    expectationRequest = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      source: "drive", kind: "drive", expected_refresh_seconds: 86_400,
+      schedule_cron: "30 7 * * *", schedule_timezone: "America/Phoenix",
+    }), { status: 200 });
+  });
   check("the scheduler can set its exact source freshness expectation",
-    expectation.expected_refresh_seconds === 86_400, JSON.stringify(expectation));
+    expectation.expected_refresh_seconds === 86_400 &&
+      expectation.schedule_cron === "30 7 * * *" &&
+      expectation.schedule_timezone === "America/Phoenix" &&
+      JSON.stringify(expectationRequest) === JSON.stringify({
+        source: "drive", kind: "drive", expected_refresh_seconds: 86_400,
+        schedule_cron: "30 7 * * *", schedule_timezone: "America/Phoenix",
+      }),
+    JSON.stringify({ expectation, expectationRequest }));
   const wrongExpectation = await throws(() => postSourceExpectation("https://brain.example", "admin-only", {
     source: "drive", kind: "drive", expected_refresh_seconds: null,
   }, async () => new Response(JSON.stringify({

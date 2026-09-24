@@ -71,6 +71,7 @@ import {
   scanChunkPages,
 } from "./diagnose-scan.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
+import { nextCronFiring, scheduleMetadataFromDetail } from "./cron-schedule.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
@@ -3693,15 +3694,19 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
   }
   try {
     const proofSql =
-      `WITH last_config AS (
-         SELECT source_name,
-                MAX(CASE WHEN event='schedule_install' THEN at END) AS installed_at,
-                MAX(CASE WHEN event='schedule_remove' THEN at END) AS removed_at
+      `WITH ranked_config AS (
+         SELECT source_name,event,at,detail,
+                ROW_NUMBER() OVER (PARTITION BY source_name ORDER BY at DESC,id DESC) AS config_rank
            FROM source_events
           WHERE event IN ('schedule_install','schedule_remove')
-          GROUP BY source_name
+       ),
+       last_config AS (
+         SELECT source_name,at AS installed_at,detail AS schedule_detail
+           FROM ranked_config
+          WHERE config_rank=1 AND event='schedule_install'
        )
        SELECT config.source_name AS source, config.installed_at,
+              config.schedule_detail,
               COUNT(run.rowid) AS successful_runs,
               MIN(run.at) AS first_run_at,
               MAX(run.at) AS last_run_at
@@ -3711,8 +3716,7 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
           AND run.event='schedule_run'
           AND run.at>=config.installed_at
         WHERE config.installed_at IS NOT NULL
-          AND (config.removed_at IS NULL OR config.installed_at>config.removed_at)
-        GROUP BY config.source_name, config.installed_at`;
+        GROUP BY config.source_name, config.installed_at, config.schedule_detail`;
     const result = await env.DB.prepare(proofSql).all();
     for (const row of result?.results || []) {
       if (typeof row?.source === "string" && row.source) scheduleProof.set(row.source, row);
@@ -3760,7 +3764,18 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       const proof = scheduleProof.get(s.name) || null;
       const successfulRuns = Math.max(0, Number(proof?.successful_runs) || 0);
       const lastScheduledRunAt = proof?.last_run_at || null;
-      const lastScheduledRunMs = timestampMs(lastScheduledRunAt);
+      const scheduleMetadata = scheduleMetadataFromDetail(proof?.schedule_detail);
+      let nextRunAt = null;
+      if (expected && scheduleMetadata) {
+        try {
+          nextRunAt = nextCronFiring(scheduleMetadata.cron, {
+            afterMs: now,
+            timeZone: scheduleMetadata.timeZone,
+          });
+        } catch {
+          // Legacy or damaged metadata cannot support an exact next-run claim.
+        }
+      }
       const scheduleState = operational.state === "missed"
         ? "missed"
         : !expected
@@ -3781,9 +3796,7 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
           second_run_observed: successfulRuns >= 2,
           second_run_at: successfulRuns >= 2 ? lastScheduledRunAt : null,
           last_run_at: lastScheduledRunAt,
-          next_run_at: expected && Number.isFinite(lastScheduledRunMs)
-            ? new Date(lastScheduledRunMs + expected * 1000).toISOString()
-            : null,
+          next_run_at: nextRunAt,
         },
         last_failure: latestRun?.error
           ? parseStoredSourceFailureEvidence(latestRun.failure_evidence, {

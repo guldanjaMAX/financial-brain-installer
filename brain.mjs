@@ -10772,12 +10772,16 @@ async function cmdOcrPreflightInteractive(manifestPath) {
 export function scheduledSourceReceiptPoster(postReceipt, flags = {}) {
   if (typeof postReceipt !== "function") throw new TypeError("a source receipt poster is required");
   if (flags["scheduled-run"] !== true) return postReceipt;
-  return (base, adminKey, receipt, ...rest) => postReceipt(
-    base,
-    adminKey,
-    { ...receipt, scheduled_run: true },
-    ...rest,
-  );
+  return (base, adminKey, receipt, ...rest) => {
+    const terminalReady = String(receipt?.status || "").trim().toLowerCase() === "ready" &&
+      typeof receipt?.run_id === "string" && receipt.run_id.length > 0;
+    return postReceipt(
+      base,
+      adminKey,
+      terminalReady ? { ...receipt, scheduled_run: true } : receipt,
+      ...rest,
+    );
+  };
 }
 
 async function cmdIngest(manifestPath) {
@@ -12273,6 +12277,8 @@ export async function postSourceExpectation(base, adminKey, {
   source,
   kind = null,
   expected_refresh_seconds,
+  schedule_cron,
+  schedule_timezone,
 }, request = http) {
   const normalizedSource = assertSourceName(source);
   const normalizedKind = typeof kind === "string" && kind.trim()
@@ -12285,18 +12291,36 @@ export async function postSourceExpectation(base, adminKey, {
       source: normalizedSource,
       ...(normalizedKind ? { kind: normalizedKind } : {}),
       expected_refresh_seconds,
+      ...(schedule_cron !== undefined ? { schedule_cron } : {}),
+      ...(schedule_timezone !== undefined ? { schedule_timezone } : {}),
     }),
   }, { timeoutMs: 30_000, what: "the source freshness expectation" });
   const raw = await res.text();
   let body = null;
   try { body = JSON.parse(raw); } catch { /* checked below */ }
   if (!res.ok || !body || body.source !== normalizedSource ||
-      body.expected_refresh_seconds !== expected_refresh_seconds) {
+      body.expected_refresh_seconds !== expected_refresh_seconds ||
+      body.schedule_cron !== schedule_cron || body.schedule_timezone !== schedule_timezone) {
     throw new Error(
       `source freshness expectation was not accepted (${res.status}): ${body?.error || raw.slice(0, 160) || "invalid response"}`
     );
   }
   return body;
+}
+
+function installedScheduleExpectation(result) {
+  const scheduleCron = String(result?.cron || "");
+  const scheduleTimezone = String(
+    result?.localTimeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+  );
+  if (!scheduleCron || !scheduleTimezone) {
+    throw new TypeError("an installed schedule must report its cron and machine timezone");
+  }
+  return {
+    expected_refresh_seconds: result.expectedRefreshSeconds,
+    schedule_cron: scheduleCron,
+    schedule_timezone: scheduleTimezone,
+  };
 }
 
 
@@ -17023,7 +17047,7 @@ export async function cmdConnectImessage(manifestPath, flags = {}, options = {})
   for (const warning of installed.warnings || []) warn(warning);
   const postExpectation = options.postSourceExpectation ?? postSourceExpectation;
   await postExpectation(base, adminKey, {
-    source: "imessage", kind: "imessage", expected_refresh_seconds: installed.expectedRefreshSeconds,
+    source: "imessage", kind: "imessage", ...installedScheduleExpectation(installed),
   });
   ok(`iMessage capture installed for ${installed.cron} (a new message appears within about a minute)`);
   ok(`freshness expectation set to ${installed.expectedRefreshSeconds} seconds`);
@@ -17164,7 +17188,7 @@ export async function cmdConnectWhatsapp(manifestPath, flags = {}, options = {})
   for (const warning of installed.warnings || []) warn(warning);
   const postExpectation = options.postSourceExpectation ?? postSourceExpectation;
   await postExpectation(base, adminKey, {
-    source: "whatsapp", kind: "whatsapp", expected_refresh_seconds: installed.expectedRefreshSeconds,
+    source: "whatsapp", kind: "whatsapp", ...installedScheduleExpectation(installed),
   });
   ok(`WhatsApp drain installed for ${installed.cron} (a new message appears within about a minute)`);
   ok(`freshness expectation set to ${installed.expectedRefreshSeconds} seconds`);
@@ -22498,7 +22522,7 @@ async function cmdScheduleFolder(m, manifestPath, action, options = {}) {
   for (const warning of result.warnings || []) warn(warning);
   if (action === "install") {
     await postSourceExpectation(dataPlane.base, dataPlane.adminKey, {
-      source, kind: "upload", expected_refresh_seconds: result.expectedRefreshSeconds,
+      source, kind: "upload", ...installedScheduleExpectation(result),
     });
     ok(`watched folder refresh installed for ${result.cron}`);
     info(`folder: ${result.folderPath}`);
@@ -22690,7 +22714,7 @@ export async function cmdSchedule(manifestPath, options = {}) {
     }
     if (action === "install") {
       await postSourceExpectationImpl(dataPlane.base, dataPlane.adminKey, {
-        source, kind, expected_refresh_seconds: result.expectedRefreshSeconds,
+        source, kind, ...installedScheduleExpectation(result),
       });
       ok(`${source} refresh installed for ${result.cron}`);
       ok(`${source} freshness expectation set to ${result.expectedRefreshSeconds} seconds`);
@@ -22740,7 +22764,7 @@ export async function cmdSchedule(manifestPath, options = {}) {
     for (const warning of result.warnings || []) warn(warning);
     if (action === "install") {
       await postSourceExpectationImpl(dataPlane.base, dataPlane.adminKey, {
-        source, kind: scheduledSource, expected_refresh_seconds: result.expectedRefreshSeconds,
+        source, kind: scheduledSource, ...installedScheduleExpectation(result),
       });
       ok(`${scheduledSource} refresh installed for ${result.cron}`);
       ok(`${source} freshness expectation set to ${result.expectedRefreshSeconds} seconds`);
@@ -22801,7 +22825,7 @@ export async function cmdSchedule(manifestPath, options = {}) {
     for (const warning of result.warnings || []) warn(warning);
     if (action === "install") {
       await postSourceExpectationImpl(dataPlane.base, dataPlane.adminKey, {
-        source, kind: provider, expected_refresh_seconds: result.expectedRefreshSeconds,
+        source, kind: provider, ...installedScheduleExpectation(result),
       });
       ok(`${provider} refresh installed for ${result.cron}`);
       ok(`${source} freshness expectation set to ${result.expectedRefreshSeconds} seconds`);
@@ -22863,7 +22887,7 @@ export async function cmdSchedule(manifestPath, options = {}) {
   for (const warning of result.warnings || []) warn(warning);
   if (action === "install") {
     await postSourceExpectation(dataPlane.base, dataPlane.adminKey, {
-      source: "drive", kind: "drive", expected_refresh_seconds: result.expectedRefreshSeconds,
+      source: "drive", kind: "drive", ...installedScheduleExpectation(result),
     });
     ok(`Drive refresh installed for ${result.cron}`);
     ok(`Drive freshness expectation set to ${result.expectedRefreshSeconds} seconds`);

@@ -1,5 +1,6 @@
 import worker from "../src/index.js";
 import { DatabaseSync } from "node:sqlite";
+import { scheduledSourceReceiptPoster } from "../../brain.mjs";
 import {
   D1_QUERY_BIND_LIMIT,
   filterSql,
@@ -21,6 +22,72 @@ const isUnavailableRefusal = (body) =>
   body?.confidence === undefined &&
   body?.evidence_gate?.supported === false &&
   /search could not be completed/i.test(body?.notice || "");
+
+function sourceReceiptSqliteEnv() {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE sources (
+      name TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+      created_at TEXT NOT NULL, last_ingest_at TEXT, document_count INTEGER NOT NULL DEFAULT 0,
+      last_complete_sweep_at TEXT, stale_reason TEXT
+    );
+    CREATE TABLE source_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT NOT NULL,
+      event TEXT NOT NULL, at TEXT NOT NULL, documents INTEGER, detail TEXT
+    );
+    CREATE TABLE documents (
+      doc_uid TEXT PRIMARY KEY, source TEXT NOT NULL, meta TEXT, deleted_at INTEGER
+    );
+    CREATE TABLE sync_runs (
+      run_id TEXT PRIMARY KEY, source TEXT NOT NULL, lane TEXT NOT NULL,
+      started_at INTEGER NOT NULL, finished_at INTEGER, walk_complete INTEGER NOT NULL DEFAULT 0,
+      files_seen INTEGER NOT NULL DEFAULT 0, docs_added INTEGER NOT NULL DEFAULT 0,
+      docs_updated INTEGER NOT NULL DEFAULT 0, docs_unchanged INTEGER NOT NULL DEFAULT 0,
+      docs_refused INTEGER NOT NULL DEFAULT 0, docs_failed INTEGER NOT NULL DEFAULT 0,
+      metrics_version INTEGER NOT NULL DEFAULT 0, proposed_deletes INTEGER NOT NULL DEFAULT 0,
+      delete_action TEXT, refusal_reason TEXT, confirmed_from TEXT, confirmed_through TEXT,
+      target_from TEXT, target_through TEXT, error TEXT, failure_evidence TEXT
+    );
+  `);
+  const prepare = (sql) => {
+    const shape = (bindings = []) => ({
+      _sql: sql,
+      _bindings: bindings,
+      bind: (...next) => shape(next),
+      all: async () => ({ results: database.prepare(sql).all(...bindings) }),
+      first: async () => database.prepare(sql).get(...bindings) ?? null,
+      run: async () => {
+        const result = database.prepare(sql).run(...bindings);
+        return { meta: { changes: Number(result.changes || 0) } };
+      },
+    });
+    return shape();
+  };
+  return {
+    database,
+    env: {
+      STORAGE: "d1",
+      ADMIN_KEY: "k",
+      DB: {
+        prepare,
+        async batch(statements) {
+          database.exec("BEGIN");
+          try {
+            const results = statements.map((statement) => {
+              const result = database.prepare(statement._sql).run(...statement._bindings);
+              return { meta: { changes: Number(result.changes || 0) } };
+            });
+            database.exec("COMMIT");
+            return results;
+          } catch (error) {
+            database.exec("ROLLBACK");
+            throw error;
+          }
+        },
+      },
+    },
+  };
+}
 
 /* A D1 env that records what SQL it was asked to run, so a filter that never
    reached the database is a visible failure rather than a silent one. */
@@ -1734,6 +1801,79 @@ const zeroChunkExpectedReturn = {
 
 /* ---- unattended completions create idempotent server-side schedule proof ---- */
 {
+  const { database, env } = sourceReceiptSqliteEnv();
+  try {
+    const routePoster = scheduledSourceReceiptPoster(async (_base, _key, receipt) => worker.fetch(
+      new Request("https://b.example/api/admin/brain/source-receipt", {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+        body: JSON.stringify(receipt),
+      }), env, {},
+    ), { "scheduled-run": true });
+    const opening = await routePoster("https://b.example", "k", {
+      source: "gmail", kind: "gmail", status: "indexing", lane: "incremental",
+      started_at: "2026-09-24T17:00:00.000Z",
+    });
+    const openingBody = await opening.json();
+    const terminalReceipt = {
+      source: "gmail", kind: "gmail", status: "ready", lane: "incremental",
+      run_id: openingBody.run_id, started_at: openingBody.started_at,
+      completed_at: "2026-09-24T17:05:00.000Z",
+    };
+    const terminal = await routePoster("https://b.example", "k", terminalReceipt);
+    const retry = await routePoster("https://b.example", "k", terminalReceipt);
+    const source = database.prepare("SELECT status FROM sources WHERE name='gmail'").get();
+    const openingWrite = database.prepare(
+      "SELECT COUNT(*) AS n FROM source_events WHERE source_name='gmail' AND detail LIKE 'status=indexing %'"
+    ).get();
+    const proof = database.prepare(
+      "SELECT COUNT(*) AS n FROM source_events WHERE source_name='gmail' AND event='schedule_run'"
+    ).get();
+    check("the scheduled wrapper's opening and terminal receipts pass through the real Worker route",
+      opening.status === 200 && terminal.status === 200 && retry.status === 200 &&
+        source?.status === "ready" && openingWrite?.n === 1 && proof?.n === 1,
+      JSON.stringify({
+        opening: opening.status, terminal: terminal.status, retry: retry.status,
+        source, openingWrite, proof,
+      }));
+  } finally {
+    database.close();
+  }
+}
+
+{
+  const { database, env } = sourceReceiptSqliteEnv();
+  try {
+    const routePoster = scheduledSourceReceiptPoster(async (_base, _key, receipt) => worker.fetch(
+      new Request("https://b.example/api/admin/brain/source-receipt", {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+        body: JSON.stringify(receipt),
+      }), env, {},
+    ), { "scheduled-run": true });
+    const opening = await routePoster("https://b.example", "k", {
+      source: "gmail", kind: "gmail", status: "indexing", lane: "incremental",
+      started_at: "2026-09-24T17:00:00.000Z",
+    });
+    const openingBody = await opening.json();
+    const terminal = await routePoster("https://b.example", "k", {
+      source: "gmail", kind: "gmail", status: "error", lane: "incremental",
+      run_id: openingBody.run_id, started_at: openingBody.started_at,
+      completed_at: "2026-09-24T17:05:00.000Z", issue_code: "unavailable",
+    });
+    const proof = database.prepare(
+      "SELECT COUNT(*) AS n FROM source_events WHERE source_name='gmail' AND event='schedule_run'"
+    ).get();
+    const source = database.prepare("SELECT status FROM sources WHERE name='gmail'").get();
+    check("the scheduled wrapper's terminal error reaches the real route without recording schedule success",
+      opening.status === 200 && terminal.status === 200 && source?.status === "error" && proof?.n === 0,
+      JSON.stringify({ opening: opening.status, terminal: terminal.status, source, proof }));
+  } finally {
+    database.close();
+  }
+}
+
+{
   const { env, seen } = mkEnv([]);
   const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {
     method: "POST",
@@ -2249,12 +2389,18 @@ const zeroChunkExpectedReturn = {
   const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
     method: "POST",
     headers: { "X-Admin-Key": "k", "content-type": "application/json" },
-    body: JSON.stringify({ source: "drive", expected_refresh_seconds: 86_400 }),
+    body: JSON.stringify({
+      source: "drive",
+      expected_refresh_seconds: 86_400,
+      schedule_cron: "30 7 * * *",
+      schedule_timezone: "America/Phoenix",
+    }),
   }), env, {});
   const body = await response.json();
   check("a schedule can set its source freshness expectation through the data plane",
     response.status === 200 && JSON.stringify(body) === JSON.stringify({
       source: "drive", kind: "drive", expected_refresh_seconds: 86_400,
+      schedule_cron: "30 7 * * *", schedule_timezone: "America/Phoenix",
     }), JSON.stringify(body));
   const upsert = seen.sql.find((sql) => /INSERT INTO sources[\s\S]*expected_refresh_seconds/.test(sql));
   const conflict = upsert?.split(/ON CONFLICT\(name\) DO UPDATE SET/i)[1] || "";
@@ -2262,9 +2408,18 @@ const zeroChunkExpectedReturn = {
     /expected_refresh_seconds=excluded\.expected_refresh_seconds/.test(conflict) &&
       !/\bstatus\s*=|last_ingest_at\s*=/.test(conflict), upsert);
   check("expectation changes leave a source event",
-    seen.sql.some((sql) => /source_events/.test(sql)) &&
+      seen.sql.some((sql) => /source_events/.test(sql)) &&
       seen.binds.some((binds) => binds.includes("schedule_install")) &&
-      seen.binds.some((binds) => binds.includes("expected_refresh_seconds=86400")),
+      seen.binds.some((binds) => binds.some((value) => {
+        try {
+          const detail = JSON.parse(value);
+          return detail.expected_refresh_seconds === 86_400 &&
+            detail.schedule_cron === "30 7 * * *" &&
+            detail.schedule_timezone === "America/Phoenix";
+        } catch {
+          return false;
+        }
+      })),
     JSON.stringify({ sql: seen.sql, binds: seen.binds }));
 }
 {
@@ -2310,6 +2465,19 @@ const zeroChunkExpectedReturn = {
     { source: "drive", expected_refresh_seconds: 59 },
     { source: "drive", expected_refresh_seconds: 60.5 },
     { source: "drive", expected_refresh_seconds: "86400" },
+    { source: "drive", expected_refresh_seconds: 86_400, schedule_cron: "0 9 * * *" },
+    {
+      source: "drive", expected_refresh_seconds: 86_400,
+      schedule_cron: "not a cron", schedule_timezone: "UTC",
+    },
+    {
+      source: "drive", expected_refresh_seconds: 86_400,
+      schedule_cron: "0 9 * * *", schedule_timezone: "Mars/Olympus",
+    },
+    {
+      source: "drive", kind: "drive", expected_refresh_seconds: null,
+      schedule_cron: "0 9 * * *", schedule_timezone: "UTC",
+    },
     { source: "Drive %", expected_refresh_seconds: 86_400 },
     { source: "drive", kind: "supabase", expected_refresh_seconds: 86_400 },
   ];

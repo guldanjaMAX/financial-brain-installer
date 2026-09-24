@@ -41,9 +41,12 @@ function fixture(scheduleRows) {
   const post = scheduledSourceReceiptPoster((_base, _key, receipt) => receipts.push(receipt), {
     "scheduled-run": true,
   });
+  post("https://fixture.invalid", "fixture-key", { source: "mail", status: "indexing" });
+  post("https://fixture.invalid", "fixture-key", { source: "mail", status: "error", run_id: "run-1" });
   post("https://fixture.invalid", "fixture-key", { source: "mail", status: "ready", run_id: "run-1" });
-  check("the scheduled CLI path labels its ordinary source receipt as unattended",
-    receipts.length === 1 && receipts[0].scheduled_run === true);
+  check("the scheduled CLI path labels only its terminal ready receipt as unattended",
+    receipts.length === 3 && receipts[0].scheduled_run === undefined &&
+      receipts[1].scheduled_run === undefined && receipts[2].scheduled_run === true);
 }
 
 {
@@ -63,12 +66,20 @@ function fixture(scheduleRows) {
   const waiting = fixture([{
     source: "mail", installed_at: "2026-09-24T16:00:00.000Z",
     successful_runs: 0, first_run_at: null, last_run_at: null,
+    schedule_detail: JSON.stringify({
+      expected_refresh_seconds: 3_600,
+      schedule_cron: "5 * * * *",
+      schedule_timezone: "UTC",
+    }),
   }]);
   const report = await freshnessReport(waiting.env, { now: NOW });
   check("an installed schedule is not green before an unattended run",
     report.sources[0]?.schedule?.state === "waiting_first" &&
       report.sources[0]?.state !== "scheduled", JSON.stringify(report));
   check("the schedule decision reached the durable proof read", waiting.scheduleReads === 1);
+  check("an installed schedule exposes its next cron firing before the first run",
+    report.sources[0]?.schedule?.next_run_at === "2026-09-24T18:05:00.000Z",
+    JSON.stringify(report));
 }
 
 {
@@ -89,6 +100,11 @@ function fixture(scheduleRows) {
     source: "mail", installed_at: "2026-09-24T15:00:00.000Z",
     successful_runs: 2, first_run_at: "2026-09-24T16:05:00.000Z",
     last_run_at: "2026-09-24T17:05:00.000Z",
+    schedule_detail: JSON.stringify({
+      expected_refresh_seconds: 3_600,
+      schedule_cron: "5 * * * *",
+      schedule_timezone: "UTC",
+    }),
   }]);
   const report = await freshnessReport(twice.env, { now: NOW });
   check("the second durable unattended success proves the schedule",
@@ -96,9 +112,55 @@ function fixture(scheduleRows) {
       report.sources[0]?.schedule?.second_run_observed === true &&
       report.sources[0]?.schedule?.successful_runs === 2,
     JSON.stringify(report));
-  check("next run is derived from the last durable scheduled success and cadence",
+  check("next run is derived from the actual next cron firing",
     report.sources[0]?.schedule?.next_run_at === "2026-09-24T18:05:00.000Z",
     JSON.stringify(report));
+}
+
+for (const scenario of [
+  {
+    name: "hourly",
+    cron: "5 * * * *",
+    timeZone: "UTC",
+    now: "2026-09-24T18:06:00.000Z",
+    next: "2026-09-24T19:05:00.000Z",
+  },
+  {
+    name: "every-N-hours",
+    cron: "15 */4 * * *",
+    timeZone: "UTC",
+    now: "2026-09-24T18:06:00.000Z",
+    next: "2026-09-24T20:15:00.000Z",
+  },
+  {
+    name: "daily in the scheduler machine timezone",
+    cron: "30 7 * * *",
+    timeZone: "America/Phoenix",
+    now: "2026-09-24T15:00:00.000Z",
+    next: "2026-09-25T14:30:00.000Z",
+  },
+  {
+    name: "weekday across the weekend",
+    cron: "0 9 * * 1-5",
+    timeZone: "UTC",
+    now: "2026-09-25T10:00:00.000Z",
+    next: "2026-09-28T09:00:00.000Z",
+  },
+]) {
+  const schedule = fixture([{
+    source: "mail", installed_at: "2026-09-24T15:00:00.000Z",
+    successful_runs: 1, first_run_at: "2026-09-24T17:05:00.000Z",
+    last_run_at: "2026-09-24T17:05:00.000Z",
+    schedule_detail: JSON.stringify({
+      expected_refresh_seconds: 3_600,
+      schedule_cron: scenario.cron,
+      schedule_timezone: scenario.timeZone,
+    }),
+  }]);
+  const report = await freshnessReport(schedule.env, { now: Date.parse(scenario.now) });
+  check(`${scenario.name} reports the next declared cron firing`,
+    report.sources[0]?.schedule?.next_run_at === scenario.next,
+    JSON.stringify(report.sources[0]?.schedule));
 }
 
 console.log(`\nschedule proof: all ${ran} checks passed`);
