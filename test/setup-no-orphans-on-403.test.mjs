@@ -35,8 +35,10 @@ const ACCOUNT_ID = "a".repeat(32);
 const AUTH_PROFILE = `financial-brain-${"b".repeat(24)}`;
 const SLUG = "acme";
 const SCRIPT_NAME = "acme-brain";
-const SUBDOMAIN_LABEL = "acme-cf";
+const ACCOUNT_DISPLAY_NAME = "display-fixture";
+const SUBDOMAIN_LABEL = "exact-fixture-subdomain";
 const CANDIDATE_DOMAIN = `${SCRIPT_NAME}.${SUBDOMAIN_LABEL}.workers.dev`;
+const DISPLAY_NAME_DOMAIN = `${SCRIPT_NAME}.${ACCOUNT_DISPLAY_NAME}.workers.dev`;
 
 const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-setup-403-")));
 after(() => rmSync(sandbox, { recursive: true, force: true }));
@@ -83,13 +85,14 @@ function healthResponse(body, { status = 200 } = {}) {
  */
 function harness({ subdomainRead, health = null }) {
   const calls = [];
+  const healthHosts = [];
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(String(input));
     const path = url.pathname;
     const method = init.method || "GET";
     calls.push(`${method} ${path}`);
     if (path === "/client/v4/accounts" && method === "GET") {
-      return apiResponse([{ id: ACCOUNT_ID, name: SUBDOMAIN_LABEL }]);
+      return apiResponse([{ id: ACCOUNT_ID, name: ACCOUNT_DISPLAY_NAME }]);
     }
     if (path.endsWith(`/workers/scripts/${SCRIPT_NAME}`) && method === "PUT") {
       return apiResponse({});
@@ -106,6 +109,7 @@ function harness({ subdomainRead, health = null }) {
       return apiResponse([]);
     }
     if (path === "/health") {
+      healthHosts.push(url.hostname);
       if (health === "healthy") return healthResponse({ brain: SLUG, version: VERSION });
       if (health === "wrong-brain") return healthResponse({ brain: "someone-else", version: VERSION });
       if (health === "down") throw new Error("fetch failed: connection refused (fixture)");
@@ -113,10 +117,10 @@ function harness({ subdomainRead, health = null }) {
     }
     throw new Error(`offline fixture has no response for ${method} ${path}`);
   };
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, healthHosts };
 }
 
-async function withFixture(fetchImpl, run) {
+async function withFixture(fetchImpl, run, { workersSubdomain = SUBDOMAIN_LABEL } = {}) {
   const priorFetch = globalThis.fetch;
   const priorToken = process.env.CLOUDFLARE_API_TOKEN;
   try {
@@ -131,8 +135,13 @@ async function withFixture(fetchImpl, run) {
       withOAuthSession: async ({ action }) => action({
         token: Buffer.from("named-profile-fixture-token"),
         profile: AUTH_PROFILE,
-        account: { id: ACCOUNT_ID, name: SUBDOMAIN_LABEL },
-        preflight: { status: "ready", checks: ["account", "workers", "workers_subdomain", "d1", "vectorize", "workers_ai"] },
+        account: { id: ACCOUNT_ID, name: ACCOUNT_DISPLAY_NAME },
+        preflight: {
+          status: "ready",
+          account: { id: ACCOUNT_ID, name: ACCOUNT_DISPLAY_NAME },
+          checks: ["account", "workers", "workers_subdomain", "d1", "vectorize", "workers_ai"],
+          ...(workersSubdomain ? { workersSubdomain } : {}),
+        },
       }),
     });
   } finally {
@@ -142,33 +151,55 @@ async function withFixture(fetchImpl, run) {
   }
 }
 
-test("the named-profile lane derives and probes the account-label URL before the subdomain API read", async () => {
+test("the named-profile lane probes and persists only the exact preflight subdomain", async () => {
   const target = writeManifest();
-  const { fetchImpl, calls } = harness({ subdomainRead: "denied", health: "healthy" });
+  const { fetchImpl, calls, healthHosts } = harness({ subdomainRead: "denied", health: "healthy" });
   await withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} }));
   const saved = JSON.parse(readFileSync(target, "utf8"));
   assert.equal(saved.brain?.domain, CANDIDATE_DOMAIN);
-  assert.ok(calls.includes("GET /health"), "the candidate must be verified live, not merely assumed");
+  assert.deepEqual(healthHosts, [CANDIDATE_DOMAIN],
+    "only the hostname derived from the authenticated preflight subdomain may be probed");
+  assert.ok(!healthHosts.includes(DISPLAY_NAME_DOMAIN),
+    "the account display name must never become a workers.dev hostname");
   assert.ok(!calls.includes(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
-    "a verified derived URL is primary and must not need the expiring control-plane read");
+    "the carried authenticated receipt must avoid a second control-plane read");
 });
 
-test("the named-profile lane falls back to the subdomain API only after the derived URL fails identity", async () => {
+test("a lane without a preflight receipt reads, probes, and persists the exact fallback subdomain", async () => {
   const target = writeManifest();
-  const { fetchImpl, calls } = harness({ subdomainRead: "ok", health: "wrong-brain" });
-  await withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} }));
+  const { fetchImpl, calls, healthHosts } = harness({ subdomainRead: "ok", health: "healthy" });
+  await withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} }), {
+    workersSubdomain: null,
+  });
   const saved = JSON.parse(readFileSync(target, "utf8"));
   assert.equal(saved.brain?.domain, CANDIDATE_DOMAIN);
-  assert.ok(calls.indexOf("GET /health") <
-    calls.indexOf(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
-  "the public proof must run before the control-plane fallback");
+  assert.ok(calls.includes(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
+    "the no-receipt lane must reach the authenticated fallback decision point");
+  assert.deepEqual(healthHosts, [CANDIDATE_DOMAIN]);
+});
+
+test("an exact preflight hostname that fails identity is neither persisted nor replaced by a fallback read", async () => {
+  const target = writeManifest();
+  const { fetchImpl, calls, healthHosts } = harness({ subdomainRead: "ok", health: "wrong-brain" });
+  await assert.rejects(
+    () => withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} })),
+    /exact account hostname was not confirmed as this brain/i,
+  );
+  assert.deepEqual(healthHosts, [CANDIDATE_DOMAIN],
+    "the refusal decision must be reached through the exact authenticated hostname");
+  assert.ok(!calls.includes(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
+    "a carried receipt must not be replaced after its exact hostname fails identity");
+  const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(saved.brain?.domain, undefined);
 });
 
 test("the named-profile lane gives only an owner action after both URL proof and API fallback fail", async () => {
   const target = writeManifest();
-  const { fetchImpl } = harness({ subdomainRead: "denied", health: "down" });
+  const { fetchImpl, calls, healthHosts } = harness({ subdomainRead: "denied", health: "down" });
   await assert.rejects(
-    () => withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} })),
+    () => withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} }), {
+      workersSubdomain: null,
+    }),
     (error) => {
       assert.match(error.message, /confirm the brain's public address/);
       assert.match(error.message, /sign in again/i, "the message must name an action the owner can take");
@@ -180,6 +211,10 @@ test("the named-profile lane gives only an owner action after both URL proof and
       return true;
     },
   );
+  assert.ok(calls.includes(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
+    "the refusal must follow an attempted authenticated fallback read");
+  assert.deepEqual(healthHosts, [],
+    "without an exact subdomain receipt, no guessed hostname may be probed");
   const saved = JSON.parse(readFileSync(target, "utf8"));
   assert.equal(saved.brain?.domain, undefined);
 });
